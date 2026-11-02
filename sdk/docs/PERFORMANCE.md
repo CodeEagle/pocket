@@ -59,9 +59,9 @@ cd ../demo/js
 bun run profile:macos
 ```
 
-## 尚未实施的结构优化
+## 后续结构优化与历史基准
 
-native 的早期 needs_frame/visual epoch、二进制 frame/resource ABI、减少 DrawList 全量比较与 clone 仍可研究。但本次 native 实测开销远低于一帧预算，没有为追求名义“优化”改变定时器、Promise、输入和动画语义。后续应针对可复现的低 FPS 场景，测出占用后再改。
+当前实现已落地 PFB1 二进制 frame/resource ABI，数值 DrawOps 与像素数据不再走完整帧 JSON；Dart 仍会复制借用 buffer 并解码，并非端到端零拷贝。上文 full/delta 表为当时 JSON 路径的历史测量，不能作为当前 PFB1 的基准。native 的早期 needs_frame/visual epoch、减少 DrawList 全量比较与 clone 仍可研究。后续应针对可复现的低 FPS 场景测出占用，不通过跳过定时器、Promise、输入和动画语义换取名义 FPS。
 
 模拟器 debug 与真机 profile/release 必须分开记录；这轮没有 iOS 真机性能结论。
 
