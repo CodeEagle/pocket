@@ -228,6 +228,24 @@ final class PocketHost {
 
   void revokeCapabilities(Iterable<String> capabilities) {
     _revoked.addAll(capabilities);
+    final availability = _availability;
+    if (availability != null) {
+      final revokedSet = capabilities.toSet();
+      final newGranted = Set<String>.from(availability.granted)
+        ..removeAll(revokedSet);
+      final newMissingRequired = Set<String>.from(availability.missingRequired)
+        ..addAll(revokedSet.where(availability.required.contains));
+      final newUnavailableOptional =
+          Set<String>.from(availability.unavailableOptional)
+            ..addAll(revokedSet.where(availability.optional.contains));
+      _availability = PocketCapabilityAvailability(
+        required: availability.required,
+        optional: availability.optional,
+        granted: Set<String>.unmodifiable(newGranted),
+        missingRequired: Set<String>.unmodifiable(newMissingRequired),
+        unavailableOptional: Set<String>.unmodifiable(newUnavailableOptional),
+      );
+    }
     for (final streamId in _activeStreams.toList(growable: false)) {
       // The bridge owns stream lifecycle; a cancellation packet is enough to
       // close the remote side even when a provider is being torn down.
@@ -239,8 +257,35 @@ final class PocketHost {
     }
   }
 
-  void restoreCapabilities(Iterable<String> capabilities) =>
-      _revoked.removeAll(capabilities);
+  void restoreCapabilities(Iterable<String> capabilities) {
+    _revoked.removeAll(capabilities);
+    final availability = _availability;
+    if (availability != null) {
+      final toRestore = capabilities.where(
+        (c) =>
+            (availability.required.contains(c) ||
+                availability.optional.contains(c)) &&
+            _isProviderAvailable(c),
+      ).toSet();
+      if (toRestore.isNotEmpty) {
+        final newGranted = Set<String>.from(availability.granted)
+          ..addAll(toRestore);
+        final newMissingRequired =
+            Set<String>.from(availability.missingRequired)
+              ..removeAll(toRestore);
+        final newUnavailableOptional =
+            Set<String>.from(availability.unavailableOptional)
+              ..removeAll(toRestore);
+        _availability = PocketCapabilityAvailability(
+          required: availability.required,
+          optional: availability.optional,
+          granted: Set<String>.unmodifiable(newGranted),
+          missingRequired: Set<String>.unmodifiable(newMissingRequired),
+          unavailableOptional: Set<String>.unmodifiable(newUnavailableOptional),
+        );
+      }
+    }
+  }
 
   Future<void> handle(PocketEvent event) async {
     if (_disposed) return;

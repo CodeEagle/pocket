@@ -267,7 +267,48 @@ export function Tabs(props: { items: readonly TabItem[]; active: string; onChang
  * only value authority; it never paints a keyboard or keeps a second text
  * buffer.
  */
-type TextInputParams = Record<string, unknown>;
+export interface TextInputParams {
+  id?: string | number;
+  editingSession?: string;
+  revision?: number;
+  jsRevision?: number;
+  text?: string;
+  selectionBase?: number;
+  selectionExtent?: number;
+  composingBase?: number;
+  composingExtent?: number;
+  force?: boolean;
+  source?: string;
+  [key: string]: unknown;
+}
+
+export function parseTextInputParams(params: TextInputParams): {
+  id?: string;
+  editingSession?: string;
+  revision?: number;
+  jsRevision?: number;
+  text?: string;
+  selectionBase?: number;
+  selectionExtent?: number;
+  composingBase?: number;
+  composingExtent?: number;
+} {
+  return {
+    id: params.id === undefined || params.id === null ? undefined : String(params.id),
+    editingSession: typeof params.editingSession === "string" ? params.editingSession : undefined,
+    revision: typeof params.revision === "number" && Number.isFinite(params.revision)
+      ? Math.trunc(params.revision)
+      : undefined,
+    jsRevision: typeof params.jsRevision === "number" && Number.isFinite(params.jsRevision)
+      ? Math.trunc(params.jsRevision)
+      : undefined,
+    text: typeof params.text === "string" ? params.text : undefined,
+    selectionBase: finiteNumber(params.selectionBase),
+    selectionExtent: finiteNumber(params.selectionExtent),
+    composingBase: finiteNumber(params.composingBase),
+    composingExtent: finiteNumber(params.composingExtent),
+  };
+}
 
 interface TextInputRect {
   x: number;
@@ -282,6 +323,7 @@ interface TextInputSession {
   node: () => NodeMirror | undefined;
   visualRect: () => TextInputRect | undefined;
   close: () => void;
+  accepts: (params: TextInputParams) => boolean;
   onEdit: (params: TextInputParams) => void;
   onSubmit: (params: TextInputParams) => void;
   onClosed: (params: TextInputParams) => void;
@@ -408,6 +450,10 @@ function offsetFrom(value: unknown, fallback: number, length: number): number {
   return Math.max(0, Math.min(length, Math.trunc(number)));
 }
 
+export function getActiveTextInputSession(): TextInputSession | undefined {
+  return activeTextInput;
+}
+
 /** Deliver Flutter's edit/submit/close notifications to the mounted shell. */
 export function deliverTextInputEvent(method: string, params: TextInputParams): boolean {
   if (
@@ -419,8 +465,10 @@ export function deliverTextInputEvent(method: string, params: TextInputParams): 
   ) return false;
   const session = activeTextInput;
   if (!session) return false;
-  const eventId = params.id === undefined || params.id === null ? undefined : String(params.id);
+  const parsed = parseTextInputParams(params);
+  const eventId = parsed.id;
   if (eventId === undefined || eventId !== session.id || !session.isOpen()) return false;
+  if (!session.accepts(params)) return false;
   switch (method) {
     case "textInput.edit":
       session.onEdit(params);
@@ -446,6 +494,10 @@ export function InputField(props: {
   const [isFocused, setIsFocused] = createSignal(false);
   let node: NodeMirror | undefined;
   let opened = false;
+  let openGeneration = 0;
+  let editingSession = "";
+  let lastNativeRevision = 0;
+  let jsRevision = 0;
   let lastObservedText = props.value();
   let selectionBase = lastObservedText.length;
   let selectionExtent = lastObservedText.length;
@@ -528,8 +580,15 @@ export function InputField(props: {
   const sendUpdate = (text: string): void => {
     const rect = visualRect();
     if (!rect) return;
+    jsRevision += 1;
     const sent = emitTextInput("textInput.update", {
       id,
+      editingSession,
+      revision: lastNativeRevision,
+      jsRevision,
+      // A changed controlled prop is an intentional JS command, not an echo.
+      force: true,
+      source: "js",
       rect,
       text,
       selectionBase,
@@ -574,7 +633,7 @@ export function InputField(props: {
     // A layout-only update deliberately omits text and selection metadata.
     // Flutter keeps the current controller value/caret/composing range while
     // moving/resizing its overlay after viewport or keyboard changes.
-    if (emitTextInput("textInput.update", { id, rect })) {
+    if (emitTextInput("textInput.update", { id, editingSession, revision: lastNativeRevision, jsRevision, rect })) {
       lastRect = rect;
       textLayoutDirty = false;
     }
@@ -589,6 +648,9 @@ export function InputField(props: {
     const text = props.value();
     const wasOpened = opened;
     if (!wasOpened) {
+      editingSession = `${id}:${++openGeneration}`;
+      lastNativeRevision = 0;
+      jsRevision += 1;
       selectionBase = text.length;
       selectionExtent = text.length;
       composingBase = -1;
@@ -603,6 +665,9 @@ export function InputField(props: {
     const method = wasOpened ? "textInput.update" : "textInput.open";
     const sent = emitTextInput(method, {
       id,
+      editingSession,
+      revision: lastNativeRevision,
+      jsRevision,
       rect,
       text,
       selectionBase,
@@ -629,7 +694,7 @@ export function InputField(props: {
     opened = false;
     setIsFocused(false);
     lastRect = undefined;
-    emitTextInput("textInput.close", { id });
+    emitTextInput("textInput.close", { id, editingSession, revision: lastNativeRevision, jsRevision });
   };
 
   const session: TextInputSession = {
@@ -638,23 +703,53 @@ export function InputField(props: {
     node: () => node,
     visualRect,
     close,
+    accepts: (params) => {
+      // Old hosts without the additive fields remain compatible. Current
+      // hosts echo the editing session and monotonically increasing revision.
+      if (params.editingSession !== undefined && params.editingSession !== editingSession) return false;
+      const parsed = parseTextInputParams(params);
+      // A native echo captured before a newer controlled JS command cannot
+      // overwrite that explicit replacement, even if its native revision grew.
+      if (parsed.jsRevision !== undefined && parsed.jsRevision < jsRevision) return false;
+      if (parsed.revision !== undefined && parsed.revision < lastNativeRevision) return false;
+      return true;
+    },
     onEdit: (params) => {
-      const text = typeof params.text === "string" ? params.text : props.value();
+      const parsed = parseTextInputParams(params);
+      if (parsed.revision !== undefined) {
+        if (parsed.revision <= lastNativeRevision) return;
+        lastNativeRevision = parsed.revision;
+      }
+      const text = parsed.text !== undefined ? parsed.text : props.value();
       updateOffsets(params, text);
-      if (typeof params.text === "string") applyIncomingText(text);
+      if (parsed.text !== undefined) applyIncomingText(text);
     },
     onSubmit: (params) => {
-      const text = typeof params.text === "string" ? params.text : props.value();
-      updateOffsets(params, text);
-      if (typeof params.text === "string") applyIncomingText(text);
+      const parsed = parseTextInputParams(params);
+      let text: string;
+      if (parsed.revision !== undefined && parsed.revision < lastNativeRevision) {
+        text = props.value();
+      } else {
+        if (parsed.revision !== undefined) lastNativeRevision = parsed.revision;
+        text = parsed.text !== undefined ? parsed.text : props.value();
+        updateOffsets(params, text);
+        if (parsed.text !== undefined) applyIncomingText(text);
+      }
       opened = false;
       setIsFocused(false);
       props.onSubmit?.(text);
     },
     onClosed: (params) => {
-      const text = typeof params.text === "string" ? params.text : props.value();
-      updateOffsets(params, text);
-      if (typeof params.text === "string") applyIncomingText(text);
+      const parsed = parseTextInputParams(params);
+      let text: string;
+      if (parsed.revision !== undefined && parsed.revision < lastNativeRevision) {
+        text = props.value();
+      } else {
+        if (parsed.revision !== undefined) lastNativeRevision = parsed.revision;
+        text = parsed.text !== undefined ? parsed.text : props.value();
+        updateOffsets(params, text);
+        if (parsed.text !== undefined) applyIncomingText(text);
+      }
       opened = false;
       setIsFocused(false);
     },

@@ -9,11 +9,21 @@ function temporaryWorkspace(): string {
   return mkdtempSync(join(tmpdir(), "pocket-editor-service-"));
 }
 
-async function request(server: ReturnType<typeof Bun.serve>, path: string, init?: RequestInit): Promise<{ response: Response; value: any }> {
+async function unauthenticatedRequest(server: ReturnType<typeof Bun.serve>, path: string, init?: RequestInit): Promise<{ response: Response; value: any }> {
   const response = await fetch(`http://${server.hostname}:${server.port}${path}`, init);
   const contentType = response.headers.get("content-type") || "";
   const value = contentType.includes("application/json") ? await response.json() : await response.arrayBuffer();
   return { response, value };
+}
+
+async function request(server: ReturnType<typeof Bun.serve>, path: string, init?: RequestInit): Promise<{ response: Response; value: any }> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const mutatingMethods = new Set(["POST", "PUT", "DELETE", "PATCH"]);
+  const headers = new Headers(init?.headers);
+  if (mutatingMethods.has(method) && !headers.has("x-pocket-editor") && !headers.has("x-pocket-csrf")) {
+    headers.set("x-pocket-editor", "1");
+  }
+  return unauthenticatedRequest(server, path, { ...init, headers });
 }
 
 test("editor service creates, edits, builds, and publishes a signed qjbc project", async () => {
@@ -110,7 +120,11 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     });
     expect(invalidSource.response.status).toBe(400);
 
-    const build = await request(server, "/api/projects/fixture-app/build", { method: "POST", body: "{}" });
+    const build = await request(server, "/api/projects/fixture-app/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     expect(build.response.status).toBe(202);
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const status = await request(server, "/api/projects/fixture-app/status");
@@ -126,7 +140,11 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     expect(artifact.response.status).toBe(200);
     expect(new Uint8Array(artifact.value)).toEqual(new Uint8Array([0x51, 0x4a, 0x42, 0x43, 1, 2, 3]));
 
-    const published = await request(server, "/api/projects/fixture-app/publish", { method: "POST", body: "{}" });
+    const published = await request(server, "/api/projects/fixture-app/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     expect(published.response.status).toBe(200);
     expect(published.value.status.publish.runtimeAbi).toBe("fixture-abi-v1");
     expect(published.value.manifestUrl).toContain("/updates/fixture-app/latest.json");
@@ -205,7 +223,11 @@ test("editor can attach to an external SDK project without copying guest source"
     const edited = await request(server, "/api/projects/external-app/files/app.tsx", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "export const edited = true;\n" }) });
     expect(edited.response.status).toBe(200);
     expect(existsSync(join(project, "editor-state.json"))).toBe(false);
-    const build = await request(server, "/api/projects/external-app/build", { method: "POST", body: "{}" });
+    const build = await request(server, "/api/projects/external-app/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     expect(build.response.status).toBe(202);
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const status = await request(server, "/api/projects/external-app/status");
@@ -232,7 +254,7 @@ test("editor enforces security boundaries against CSRF, Host header poisoning, a
   const server = await startEditor({ port: 0, workspace });
   try {
     // 1. Cross-origin Origin: https://evil.example POST is rejected with 403
-    const crossOrigin = await request(server, "/api/projects", {
+    const crossOrigin = await unauthenticatedRequest(server, "/api/projects", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -241,6 +263,15 @@ test("editor enforces security boundaries against CSRF, Host header poisoning, a
       body: JSON.stringify({ id: "evil-app" }),
     });
     expect(crossOrigin.response.status).toBe(403);
+
+    // 1b. Missing CSRF / editor credentials on mutating route is rejected with 403
+    const unauthenticatedJson = await unauthenticatedRequest(server, "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "unauth-app" }),
+    });
+    expect(unauthenticatedJson.response.status).toBe(403);
+    expect(unauthenticatedJson.value.error).toContain("missing CSRF token or editor credential");
 
     // 2. Content-Type: text/plain POST to /api/projects is rejected with 415
     const plainText = await request(server, "/api/projects", {
@@ -320,6 +351,129 @@ test("editor enforces security boundaries against CSRF, Host header poisoning, a
     const status = await request(server, "/api/projects/sec-app/status");
     expect(status.value.error).toBeDefined();
     expect(status.value.error).toContain("symbolic links are not allowed");
+
+    // 5. Host port mismatch is rejected with 403
+    const hostMismatch = await request(server, "/api/projects", {
+      method: "POST",
+      headers: {
+        host: `127.0.0.1:${server.port + 1}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ id: "host-mismatch" }),
+    });
+    expect(hostMismatch.response.status).toBe(403);
+
+    // 6. Sec-Fetch-Site: cross-site is rejected with 403
+    const crossSite = await request(server, "/api/projects", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "cross-site",
+      },
+      body: JSON.stringify({ id: "cross-site-app" }),
+    });
+    expect(crossSite.response.status).toBe(403);
+
+    // 7. Sec-Fetch-Mode: navigate / no-cors is rejected with 403
+    const navMode = await request(server, "/api/projects", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-mode": "navigate",
+      },
+      body: JSON.stringify({ id: "nav-app" }),
+    });
+    expect(navMode.response.status).toBe(403);
+
+    // 8. Build / publish reject non-JSON content-type with 415
+    const plainBuild = await request(server, "/api/projects/sec-app/build", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "{}",
+    });
+    expect(plainBuild.response.status).toBe(415);
+
+    // 9. Cross-port Origin multipart form upload to /api/projects/sec-app/assets is rejected with 403 and does not write file
+    const evilForm = new FormData();
+    evilForm.append("file", new File([new TextEncoder().encode("bad-asset")], "evil.png", { type: "image/png" }));
+    const crossPortAsset = await unauthenticatedRequest(server, "/api/projects/sec-app/assets", {
+      method: "POST",
+      headers: {
+        origin: "http://127.0.0.1:64890",
+      },
+      body: evilForm,
+    });
+    expect(crossPortAsset.response.status).toBe(403);
+    expect(existsSync(join(projectDir, "assets/evil.png"))).toBe(false);
+
+    // 10. Multipart form upload without x-pocket-csrf / csrfToken / x-pocket-editor is rejected with 403
+    const noCsrfForm = new FormData();
+    noCsrfForm.append("file", new File([new TextEncoder().encode("nocsrf")], "nocsrf.png", { type: "image/png" }));
+    const noCsrfAsset = await unauthenticatedRequest(server, "/api/projects/sec-app/assets", {
+      method: "POST",
+      body: noCsrfForm,
+    });
+    expect(noCsrfAsset.response.status).toBe(403);
+    expect(existsSync(join(projectDir, "assets/nocsrf.png"))).toBe(false);
+
+    // 11. Multipart form upload with x-pocket-csrf: health.csrfToken (or x-pocket-editor: 1) and same-port Origin succeeds with 200
+    const health = await request(server, "/health");
+    expect(health.response.status).toBe(200);
+    expect(typeof health.value.csrfToken).toBe("string");
+    const serverCsrf = health.value.csrfToken;
+
+    const validCsrfForm = new FormData();
+    validCsrfForm.append("file", new File([new TextEncoder().encode("valid-csrf")], "valid-csrf.png", { type: "image/png" }));
+    const validCsrfAsset = await request(server, "/api/projects/sec-app/assets", {
+      method: "POST",
+      headers: {
+        origin: `http://127.0.0.1:${server.port}`,
+        "x-pocket-csrf": serverCsrf,
+      },
+      body: validCsrfForm,
+    });
+    expect(validCsrfAsset.response.status).toBe(200);
+    expect(existsSync(join(projectDir, "assets/valid-csrf.png"))).toBe(true);
+
+    const validEditorHeaderForm = new FormData();
+    validEditorHeaderForm.append("file", new File([new TextEncoder().encode("valid-editor")], "valid-editor.png", { type: "image/png" }));
+    const validEditorAsset = await request(server, "/api/projects/sec-app/assets", {
+      method: "POST",
+      headers: {
+        origin: `http://127.0.0.1:${server.port}`,
+        "x-pocket-editor": "1",
+      },
+      body: validEditorHeaderForm,
+    });
+    expect(validEditorAsset.response.status).toBe(200);
+    expect(existsSync(join(projectDir, "assets/valid-editor.png"))).toBe(true);
+
+    const validFormBodyCsrf = new FormData();
+    validFormBodyCsrf.append("csrfToken", serverCsrf);
+    validFormBodyCsrf.append("file", new File([new TextEncoder().encode("valid-body")], "valid-body.png", { type: "image/png" }));
+    const validBodyAsset = await unauthenticatedRequest(server, "/api/projects/sec-app/assets", {
+      method: "POST",
+      headers: {
+        origin: `http://127.0.0.1:${server.port}`,
+      },
+      body: validFormBodyCsrf,
+    });
+    expect(validBodyAsset.response.status).toBe(200);
+    expect(existsSync(join(projectDir, "assets/valid-body.png"))).toBe(true);
+
+    // 12. Symlink in updates/victim -> external directory containing latest.json returns 400 and does NOT return external contents
+    const victimDir = temporaryWorkspace();
+    try {
+      writeFileSync(join(victimDir, "latest.json"), JSON.stringify({ secret: "victim-secret-content" }));
+      const victimSymlink = join(workspace, "updates/victim");
+      symlinkSync(victimDir, victimSymlink);
+
+      const victimResp = await request(server, "/updates/victim/latest.json");
+      expect(victimResp.response.status).toBe(400);
+      expect(victimResp.value).not.toEqual({ secret: "victim-secret-content" });
+    } finally {
+      rmSync(victimDir, { recursive: true, force: true });
+    }
   } finally {
     server.stop(true);
     rmSync(workspace, { recursive: true, force: true });

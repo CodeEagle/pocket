@@ -9,8 +9,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_services/pocket_services.dart';
 
-import 'package:pocket_hardware/pocket_hardware.dart';
-
 import 'pocket_config.dart';
 import 'package_info_plugin.dart';
 import 'performance_history.dart';
@@ -35,7 +33,6 @@ final class PocketSession extends ChangeNotifier {
     'updates.check',
     'updates.apply',
     'updates.rollback',
-    if (config.enableHardware) ...HardwareCapabilities.all,
     ...config.additionalCapabilities,
   };
 
@@ -48,6 +45,8 @@ final class PocketSession extends ChangeNotifier {
   PocketPluginManager? _plugins;
   PocketGuestManifest _embeddedManifest = const PocketGuestManifest();
   Map<String, dynamic> _metadata = {};
+  int _embeddedBuild = 0;
+  String _embeddedVersion = 'embedded';
   PocketCancellationToken? _download;
   bool ready = false;
   bool _disposed = false;
@@ -85,10 +84,13 @@ final class PocketSession extends ChangeNotifier {
     final manifestSource = await rootBundle.loadString(config.manifestAsset);
     _embeddedManifest = PocketGuestManifest.fromJsonString(manifestSource);
     final manifestJson = jsonDecode(manifestSource);
-    final manifestBuild =
-        manifestJson is Map ? (manifestJson['build'] as num?)?.toInt() : null;
+    final manifestBuild = manifestJson is Map
+        ? (manifestJson['build'] as num?)?.toInt()
+        : null;
     final embeddedBuild =
         (_metadata['build'] as num?)?.toInt() ?? manifestBuild ?? 0;
+    _embeddedBuild = embeddedBuild;
+    _embeddedVersion = _metadata['version'] as String? ?? 'embedded';
     final updateConfig = config.updates;
     if (updateConfig != null && updateConfig.configured) {
       final directory = await getApplicationSupportDirectory();
@@ -152,9 +154,8 @@ final class PocketSession extends ChangeNotifier {
         ? 'refractive'
         : 'frosted',
     'hostSurfaces': ['glass', 'platformTexture'],
-    'version': active?.version ?? 'embedded',
-    'build':
-        active?.build ?? ((_metadata['build'] as num?)?.toInt() ?? 0),
+    'version': active?.version ?? _embeddedVersion,
+    'build': active?.build ?? _embeddedBuild,
     'source': active == null ? 'embedded' : 'verified-cache',
     'entryBytes':
         active?.package.manifest.payload.entry.size ??
@@ -164,11 +165,16 @@ final class PocketSession extends ChangeNotifier {
   Future<Map<String, dynamic>> status() async => {
     'configured': _updates != null,
     'stage': stage,
-    'activeVersion': active?.version ?? 'embedded',
-    'activeBuild': active?.build ?? 0,
+    'activeVersion': active?.version ?? _embeddedVersion,
+    'activeBuild': active?.build ?? _embeddedBuild,
     'availableVersion': _candidate?.version,
     'versions': [
-      {'version': 'embedded', 'build': 0, 'active': active == null},
+      {
+        'version': _embeddedVersion,
+        'build': _embeddedBuild,
+        'source': 'embedded',
+        'active': active == null,
+      },
       if (_updates != null)
         for (final version in await _updates!.listVersions()) version.toJson(),
     ],
@@ -185,11 +191,6 @@ final class PocketSession extends ChangeNotifier {
     if (_disposed) return;
     final providers = <PocketPlugin>[
       PackageInfoPlugin(),
-      if (config.enableHardware)
-        HardwarePlugin(
-          onTextureRegistered: controller.authorizePlatformTexture,
-          onTextureReleased: controller.revokePlatformTexture,
-        ),
       for (final factory in config.pluginFactories) factory(controller),
     ];
     final registry = PocketHostRegistry();

@@ -12,9 +12,17 @@ let currentFile = "app.tsx";
 let projectFiles = [];
 let polling = null;
 let dirty = false;
+let csrfToken = "";
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { ...(options.body ? { "content-type": "application/json" } : {}), ...(options.headers || {}) } });
+  const isForm = typeof FormData !== "undefined" && options.body instanceof FormData;
+  const headers = {
+    ...(options.body && !isForm ? { "content-type": "application/json" } : {}),
+    "x-pocket-editor": "1",
+    ...(csrfToken ? { "x-pocket-csrf": csrfToken } : {}),
+    ...(options.headers || {}),
+  };
+  const response = await fetch(path, { ...options, headers });
   const type = response.headers.get("content-type") || "";
   const value = type.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) throw new Error(value?.error || value || `${response.status} ${response.statusText}`);
@@ -185,6 +193,12 @@ async function selectProject(id) {
 }
 
 async function loadProjects(preferred) {
+  try {
+    const health = await api("/health");
+    if (health?.csrfToken) csrfToken = health.csrfToken;
+  } catch {
+    // Keep startup resilient
+  }
   projects = await api("/api/projects");
   renderProjects();
   const id = preferred || currentId || projects[0]?.id;

@@ -42,6 +42,7 @@ final class PocketHardwareManager: NSObject,
   private var cameraTexture: PocketHardwareTexture?
   private var textureId: Int64?
   private var pendingPhotoResult: FlutterResult?
+  private var photoCaptureGeneration: UInt64 = 0
   private var activeBiometricContext: LAContext?
 
   private let bleQueue = DispatchQueue(
@@ -424,6 +425,7 @@ final class PocketHardwareManager: NSObject,
       self.videoOutput = nil
       self.photoOutput = nil
       self.cameraDevice = nil
+      self.photoCaptureGeneration &+= 1
       if let pending = self.pendingPhotoResult {
         self.pendingPhotoResult = nil
         self.main {
@@ -447,10 +449,6 @@ final class PocketHardwareManager: NSObject,
   /// the Dart plugin context and can deliver stale callbacks to a new guest.
   private func disposeSession(result: @escaping FlutterResult) {
     main {
-      if let callback = self.pendingPhotoResult {
-        self.pendingPhotoResult = nil
-        callback(self.error(code: "plugin_revoked", message: "hardware session disposed"))
-      }
       if let callback = self.pendingPermissionResult {
         self.pendingPermissionResult = nil
         callback(self.error(code: "plugin_revoked", message: "hardware session disposed"))
@@ -491,6 +489,13 @@ final class PocketHardwareManager: NSObject,
         self.connectionTimeouts.removeAll()
       }
       self.cameraQueue.async {
+        self.photoCaptureGeneration &+= 1
+        if let callback = self.pendingPhotoResult {
+          self.pendingPhotoResult = nil
+          self.main {
+            callback(self.error(code: "plugin_revoked", message: "hardware session disposed"))
+          }
+        }
         if let session = self.captureSession, session.isRunning { session.stopRunning() }
         if let session = self.captureSession {
           if let input = self.cameraInput { session.removeInput(input) }
@@ -549,6 +554,7 @@ final class PocketHardwareManager: NSObject,
 
   private func capturePhoto(result: @escaping FlutterResult) {
     cameraQueue.async {
+      self.photoCaptureGeneration &+= 1
       guard let output = self.photoOutput, let device = self.cameraDevice else {
         self.main { result(self.error(code: "hardware_not_ready", message: "camera preview is not running")) }
         return
@@ -566,6 +572,7 @@ final class PocketHardwareManager: NSObject,
 
   func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
     cameraQueue.async {
+      let generation = self.photoCaptureGeneration
       guard let callback = self.pendingPhotoResult else { return }
       self.pendingPhotoResult = nil
       if let error = error {
@@ -583,6 +590,7 @@ final class PocketHardwareManager: NSObject,
         let file = directory.appendingPathComponent(name)
         try data.write(to: file, options: .atomic)
         self.saveToPhotosIfAuthorized(file: file) { albumSaved, albumError in
+          guard self.photoCaptureGeneration == generation else { return }
           var response: [String: Any] = [
             "ok": true,
             "realHardwareCamera": true,
@@ -597,6 +605,7 @@ final class PocketHardwareManager: NSObject,
           self.main { callback(response) }
         }
       } catch {
+        guard self.photoCaptureGeneration == generation else { return }
         self.main { callback(self.error(code: "hardware_storage_error", message: error.localizedDescription)) }
       }
     }

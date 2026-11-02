@@ -13,6 +13,7 @@ import 'package:video_player/video_player.dart';
 import 'pocket_assets.dart';
 import 'pocket_display.dart';
 import 'pocket_display_geometry.dart';
+import 'pocket_duplex.dart';
 import 'pocket_model.dart';
 import 'pocket_package.dart';
 import 'pocket_performance.dart';
@@ -23,6 +24,7 @@ part 'pocket_view_painter.dart';
 part 'pocket_surface.dart';
 
 typedef PocketEventCallback = void Function(PocketEvent event);
+typedef PocketDuplexEventCallback = void Function(PocketDuplexEvent event);
 
 /// Optional test seam for delaying a native texture decode.
 ///
@@ -40,8 +42,11 @@ typedef PocketImageResourceDecoder =
 /// [PocketView.onEvent].
 final class PocketViewController {
   PocketRuntime? _runtime;
+  PocketDuplexChannel? _duplexChannel;
   final Set<int> _platformTextures = <int>{};
   VoidCallback? _surfacesChanged;
+  final Set<PocketDuplexEventCallback> _duplexListeners =
+      <PocketDuplexEventCallback>{};
 
   /// Only trusted, compiled host providers can authorize a platform texture.
   /// A downloaded guest cannot render an arbitrary Flutter texture handle.
@@ -60,9 +65,32 @@ final class PocketViewController {
   /// exposes bytecode admission. Hosts can include this in runtime.info.
   String? get runtimeAbi => _runtime?.actualAbi;
 
+  /// The lock-free binary channel attached to the current guest generation.
+  ///
+  /// The channel is owned by [PocketView] and is closed before the runtime is
+  /// reloaded or disposed. Hosts may use it for scalar capability messages,
+  /// but must not retain it across a guest generation change.
+  PocketDuplexChannel? get duplexChannel => _duplexChannel;
+
+  void addDuplexListener(PocketDuplexEventCallback listener) {
+    _duplexListeners.add(listener);
+  }
+
+  void removeDuplexListener(PocketDuplexEventCallback listener) {
+    _duplexListeners.remove(listener);
+  }
+
   VoidCallback? _onMessageSent;
 
   bool send({required String method, Map<String, dynamic> params = const {}}) {
+    return _sendEvent(method: method, params: params);
+  }
+
+  bool _sendEvent({
+    required String method,
+    Map<String, dynamic> params = const {},
+    bool wake = true,
+  }) {
     final runtime = _runtime;
     if (runtime == null) return false;
     runtime.send(<String, dynamic>{
@@ -71,7 +99,7 @@ final class PocketViewController {
       'name': method,
       'payload': params,
     });
-    _onMessageSent?.call();
+    if (wake) _onMessageSent?.call();
     return true;
   }
 
@@ -91,8 +119,10 @@ final class PocketViewController {
     PocketRuntime runtime,
     VoidCallback surfacesChanged, {
     VoidCallback? onMessageSent,
+    PocketDuplexChannel? duplexChannel,
   }) {
     _runtime = runtime;
+    _duplexChannel = duplexChannel;
     _surfacesChanged = surfacesChanged;
     _onMessageSent = onMessageSent;
   }
@@ -100,9 +130,33 @@ final class PocketViewController {
   void _detach(PocketRuntime runtime) {
     if (identical(_runtime, runtime)) {
       _runtime = null;
+      _duplexChannel = null;
       _platformTextures.clear();
       _surfacesChanged = null;
       _onMessageSent = null;
+    }
+  }
+
+  void _clearDuplexChannel(PocketDuplexChannel channel) {
+    if (identical(_duplexChannel, channel)) _duplexChannel = null;
+  }
+
+  void _dispatchDuplexEvent(PocketDuplexEvent event) {
+    for (final listener in List<PocketDuplexEventCallback>.of(
+      _duplexListeners,
+    )) {
+      try {
+        listener(event);
+      } catch (error, stackTrace) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'pocket_flutter',
+            context: ErrorDescription('while delivering a duplex event'),
+          ),
+        );
+      }
     }
   }
 }
@@ -122,7 +176,7 @@ class PocketView extends StatefulWidget {
     this.tickHz = 60,
     this.fontFamilyFallback = const <String>[],
     this.onBeforeFrame,
-    this.jsAsset = 'assets/app.js',
+    String? jsAsset,
     this.bytecodeAsset,
     this.bytecodeMetadataAsset = 'assets/app.bytecode.json',
     this.bytecodeBytes,
@@ -136,10 +190,13 @@ class PocketView extends StatefulWidget {
     this.imageResourceDecoder,
     this.onReady,
     this.onEvent,
+    this.onDuplexEvent,
+    this.enableDuplexPointerInput = true,
     this.onError,
     this.onPerformanceSample,
     this.showDebugFps = true,
-  });
+  }) : jsAsset = jsAsset ?? 'assets/app.js',
+       _jsAssetWasExplicit = jsAsset != null;
 
   final PocketRuntime? runtime;
 
@@ -173,7 +230,11 @@ class PocketView extends StatefulWidget {
   /// Hosts can flush transport batches here without creating a second ticker.
   final VoidCallback? onBeforeFrame;
 
+  /// Legacy source entry used only for an explicit source/debug host. When
+  /// the default value is left untouched and no package/source override is
+  /// supplied, [PocketView] loads `assets/app.qjbc` + `assets/app.pak`.
   final String jsAsset;
+  final bool _jsAssetWasExplicit;
 
   /// Optional real QuickJS bytecode entry. When set, [jsAsset]/[jsSource]
   /// are ignored and no source fallback is attempted.
@@ -224,6 +285,14 @@ class PocketView extends StatefulWidget {
   final PocketImageResourceDecoder? imageResourceDecoder;
   final ValueChanged<PocketViewController>? onReady;
   final PocketEventCallback? onEvent;
+  final PocketDuplexEventCallback? onDuplexEvent;
+
+  /// Routes pointer records through the ABI v2 numeric channel. The native
+  /// owner translates the reserved pointer record into the canonical
+  /// `input.pointer` path, so existing guests do not need a second JS handler.
+  /// Set this to false only for hosts that intentionally reserve the duplex
+  /// endpoint for another input producer.
+  final bool enableDuplexPointerInput;
   final ValueChanged<Object>? onError;
 
   /// Receives one immutable renderer performance sample approximately every
@@ -253,14 +322,33 @@ class _PocketViewState extends State<PocketView>
   static final PocketDisplayGeometrySource _defaultDisplayGeometry =
       PocketDisplayGeometryChannel();
   static const int _maxPointerSlots = 8;
+  static const int _duplexPointerMessageType = 1;
+  static const int _duplexPointerDown = 1;
+  static const int _duplexPointerMove = 2;
+  static const int _duplexPointerUp = 3;
+  static const int _duplexPointerCancel = 4;
   // Keep the retained-layer count bounded while limiting a text/label update
   // to a small contiguous draw block. Video ops still force a boundary so
   // painter blocks never cross a texture in the original op order.
   static const int _canvasBlockSize = 32;
+  // A stopped ticker must still wake periodically: a guest can have a
+  // QuickJS timer or deferred animation whose next deadline is not visible in
+  // the DrawList. The bounded wake keeps the idle path cheap while preventing
+  // those timers from being stranded indefinitely.
+  static const Duration _idleWakeInterval = Duration(milliseconds: 100);
+  static const String _defaultSourceAsset = 'assets/app.js';
+  static const String _defaultBytecodeAsset = 'assets/app.qjbc';
+  static const String _defaultBytecodeMetadataAsset =
+      'assets/app.bytecode.json';
+  static const String _defaultPakAsset = 'assets/app.pak';
 
   late final PocketViewController _controller =
       widget.controller ?? PocketViewController();
   PocketRuntime? _runtime;
+  PocketDuplexChannel? _duplexChannel;
+  Timer? _idleWakeTimer;
+  Duration? _idleStartedAt;
+  bool _resumedFromIdle = false;
   PocketFrame _frame = PocketFrame.empty();
   PocketSurfaceFrame? _auxiliaryFrame;
   final Map<String, ui.Image> _images = <String, ui.Image>{};
@@ -282,6 +370,8 @@ class _PocketViewState extends State<PocketView>
   // wire range. Keep them only as map keys; the native bridge receives a
   // bounded, reusable slot in [0, _maxPointerSlots).
   final Map<int, int> _pointerSlots = <int, int>{};
+  final List<Map<String, dynamic>> _pendingPointerJson =
+      <Map<String, dynamic>>[];
   final Map<int, Offset> _outsideTextInputPointerOrigins = <int, Offset>{};
   final Map<int, Offset> _textInputTapRegionDowns = <int, Offset>{};
   // Regions declared by the guest for its own pan gestures. They are logical
@@ -292,6 +382,14 @@ class _PocketViewState extends State<PocketView>
       <_PocketGestureRegion>[];
   final Map<String, bool> _videoDesiredPlayback = <String, bool>{};
   String? _textInputId;
+  String? _textInputEditingSession;
+  int _textInputRevision = 0;
+  // Guest-controlled value commands have their own revision stream. Keep the
+  // latest accepted JS revision separate from the native IME edit revision:
+  // a delayed JS prop update must not replay an older value after a newer JS
+  // command, while a native edit must still be echoed with the latest JS
+  // revision acknowledged by this Flutter editor.
+  int _textInputJsRevision = 0;
   Rect? _textInputRect;
   TextEditingController? _textInputController;
   FocusNode? _textInputFocusNode;
@@ -320,17 +418,24 @@ class _PocketViewState extends State<PocketView>
   FocusNode? _scheduledTextInputBlurNode;
   String? _scheduledOutsideTextInputId;
   Ticker? _ticker;
-  Duration? _lastTick;
+  // Ticker.elapsed is relative to the current Ticker instance and resets when
+  // an idle ticker is restarted. Flutter's frame timestamp is monotonic for
+  // the scheduler, including frames produced while this view's ticker is
+  // stopped, so it is the correct clock for both native guest time and FPS
+  // accounting. Lifecycle pauses explicitly clear the baseline below.
+  Duration? _lastSchedulerTimestamp;
   int _idleTicks = 0;
   bool _isDisposed = false;
   double _firstFrameDeltaMs = 1000.0 / 60.0;
 
   void _wakeTicker() {
     _idleTicks = 0;
+    _idleWakeTimer?.cancel();
+    _idleWakeTimer = null;
     if (_isDisposed || _lifecyclePaused || !mounted || _runtime == null) return;
     final ticker = _ticker;
     if (ticker != null && !ticker.isActive) {
-      _lastTick = null;
+      if (_idleStartedAt != null) _resumedFromIdle = true;
       ticker.start();
     }
   }
@@ -418,7 +523,14 @@ class _PocketViewState extends State<PocketView>
         oldWidget.showDebugFps || oldWidget.onPerformanceSample != null;
     final isCollecting =
         widget.showDebugFps || widget.onPerformanceSample != null;
-    if (wasCollecting != isCollecting) _resetPerformanceWindow();
+    if (wasCollecting != isCollecting) {
+      _resetPerformanceWindow();
+      // The performance window is intentionally restarted when collection is
+      // toggled. Do not let an idle interval from the previous window be
+      // consumed by the first sample in the new window.
+      _resumedFromIdle = false;
+      _idleStartedAt = null;
+    }
   }
 
   @override
@@ -576,26 +688,47 @@ class _PocketViewState extends State<PocketView>
           auxiliaryViewport.height,
         );
       }
+      final implicitBytecode =
+          widget.bytecodeAsset == null &&
+          widget.bytecodeBytes == null &&
+          widget.packageSource == null &&
+          widget.jsSource == null &&
+          widget.pakAsset == null &&
+          widget.pakBytes == null &&
+          widget.bytecodeMetadataAsset == _defaultBytecodeMetadataAsset &&
+          !widget._jsAssetWasExplicit &&
+          widget.jsAsset == _defaultSourceAsset;
       final bytecodeMode =
-          widget.bytecodeAsset != null || widget.bytecodeBytes != null;
+          implicitBytecode ||
+          widget.bytecodeAsset != null ||
+          widget.bytecodeBytes != null;
       final source = bytecodeMode
           ? ''
           : widget.jsSource ??
                 (widget.packageSource == null
                     ? await rootBundle.loadString(widget.jsAsset)
                     : '');
-      final first = await _loadPreparedPackage(runtime, source);
+      final first = implicitBytecode
+          ? await _loadBytecodeAssets(
+              runtime,
+              bytecodeAsset: _defaultBytecodeAsset,
+              metadataAsset: _defaultBytecodeMetadataAsset,
+              pakAsset: _defaultPakAsset,
+            )
+          : await _loadPreparedPackage(runtime, source);
       if (!mounted) {
         _detachRuntime(fallback: runtime);
         return;
       }
       _runtime = runtime;
+      _duplexChannel = _openDuplexChannel(runtime);
       _controller._attach(
         runtime,
         () {
           if (mounted) setState(() {});
         },
         onMessageSent: _wakeTicker,
+        duplexChannel: _duplexChannel,
       );
       final visualFirst = _visualFrame(first);
       _frame = visualFirst;
@@ -683,41 +816,65 @@ class _PocketViewState extends State<PocketView>
           'bytecode metadata asset is required; source fallback is disabled',
         );
       }
-      final metadata = PocketBytecodeMetadata.fromJsonString(metadataSource);
-      if (metadata.entryFormat != 'quickjs-bytecode' ||
-          metadata.kind != 'script' ||
-          metadata.formatVersion != 1 ||
-          metadata.bindingGeneration <= 0 ||
-          metadata.tickHz != widget.tickHz ||
-          metadata.bytecodeBytes != bytes.length) {
-        throw const PocketRuntimeException(
-          'bytecode metadata does not match host entry',
-        );
-      }
-      final actualAbi = runtime.actualAbi;
-      if (actualAbi != null && actualAbi != metadata.runtimeAbi) {
-        throw PocketRuntimeException(
-          'bytecode runtimeAbi mismatch: package=${metadata.runtimeAbi} host=$actualAbi',
-        );
-      }
-      final pak =
-          widget.pakBytes ??
-          (widget.pakAsset == null ? null : await _loadPak(widget.pakAsset!));
-      if (pak == null) {
-        throw const PocketRuntimeException(
-          'bytecode loading requires a PAK asset',
-        );
-      }
-      return runtime.loadBytecode(
+      return _loadBytecodePayload(
+        runtime,
         bytes,
-        pak,
-        expectedRuntimeAbi: metadata.runtimeAbi,
+        metadataSource,
+        widget.pakBytes ??
+            (widget.pakAsset == null ? null : await _loadPak(widget.pakAsset!)),
       );
     }
     final pak =
         widget.pakBytes ??
         (widget.pakAsset == null ? null : await _loadPak(widget.pakAsset!));
     return pak == null ? runtime.eval(source) : runtime.load(source, pak);
+  }
+
+  Future<PocketFrame> _loadBytecodeAssets(
+    PocketRuntime runtime, {
+    required String bytecodeAsset,
+    required String metadataAsset,
+    required String pakAsset,
+  }) async {
+    final bytes = await _loadBinaryAsset(bytecodeAsset);
+    final metadataSource = await rootBundle.loadString(metadataAsset);
+    final pak = await _loadPak(pakAsset);
+    return _loadBytecodePayload(runtime, bytes, metadataSource, pak);
+  }
+
+  PocketFrame _loadBytecodePayload(
+    PocketRuntime runtime,
+    Uint8List bytes,
+    String metadataSource,
+    Uint8List? pak,
+  ) {
+    if (pak == null) {
+      throw const PocketRuntimeException(
+        'bytecode loading requires a PAK asset',
+      );
+    }
+    final metadata = PocketBytecodeMetadata.fromJsonString(metadataSource);
+    if (metadata.entryFormat != 'quickjs-bytecode' ||
+        metadata.kind != 'script' ||
+        metadata.formatVersion != 1 ||
+        metadata.bindingGeneration <= 0 ||
+        metadata.tickHz != widget.tickHz ||
+        metadata.bytecodeBytes != bytes.length) {
+      throw const PocketRuntimeException(
+        'bytecode metadata does not match host entry',
+      );
+    }
+    final actualAbi = runtime.actualAbi;
+    if (actualAbi != null && actualAbi != metadata.runtimeAbi) {
+      throw PocketRuntimeException(
+        'bytecode runtimeAbi mismatch: package=${metadata.runtimeAbi} host=$actualAbi',
+      );
+    }
+    return runtime.loadBytecode(
+      bytes,
+      pak,
+      expectedRuntimeAbi: metadata.runtimeAbi,
+    );
   }
 
   Future<Uint8List> _loadPak(String asset) async {
@@ -745,6 +902,78 @@ class _PocketViewState extends State<PocketView>
     return 60;
   }
 
+  PocketDuplexChannel? _openDuplexChannel(PocketRuntime runtime) {
+    if (runtime is! PocketBinaryDuplexRuntime) return null;
+    try {
+      return PocketDuplexChannel.fromRuntime(
+        runtime as PocketBinaryDuplexRuntime,
+      );
+    } on UnsupportedError {
+      // Older native libraries do not expose ABI v2. The JSON bridge remains
+      // the compatibility path for those hosts.
+      return null;
+    } on StateError {
+      // A host may have explicitly claimed the endpoint for another
+      // embedding. Do not fail guest startup merely because the optional
+      // transport is unavailable.
+      return null;
+    }
+  }
+
+  void _drainDuplexEvents() {
+    final channel = _duplexChannel;
+    if (channel == null || channel.isClosed) return;
+    try {
+      final events = channel.drainFromPocketJs();
+      if (events.isEmpty) return;
+      for (final event in events) {
+        _controller._dispatchDuplexEvent(event);
+        final callback = widget.onDuplexEvent;
+        if (callback != null) {
+          try {
+            callback(event);
+          } catch (error, stackTrace) {
+            FlutterError.reportError(
+              FlutterErrorDetails(
+                exception: error,
+                stack: stackTrace,
+                library: 'pocket_flutter',
+                context: ErrorDescription(
+                  'while delivering PocketView.onDuplexEvent',
+                ),
+              ),
+            );
+          }
+        }
+      }
+    } catch (error) {
+      // A stale endpoint can race a reload/dispose. Close it and keep the
+      // regular JSON frame path alive; endpoint errors must not tear down the
+      // guest that owns the view.
+      channel.close();
+      _duplexChannel = null;
+      _controller._clearDuplexChannel(channel);
+      if (mounted)
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            library: 'pocket_flutter',
+            context: ErrorDescription('while draining Pocket duplex events'),
+          ),
+        );
+    }
+  }
+
+  void _scheduleIdleWake() {
+    _idleWakeTimer?.cancel();
+    _idleStartedAt = _lastSchedulerTimestamp;
+    _resumedFromIdle = false;
+    _idleWakeTimer = Timer(_idleWakeInterval, () {
+      _idleWakeTimer = null;
+      _wakeTicker();
+    });
+  }
+
   bool get _performanceCollectionEnabled =>
       widget.showDebugFps || widget.onPerformanceSample != null;
 
@@ -766,27 +995,41 @@ class _PocketViewState extends State<PocketView>
   }
 
   void _recordPerformanceTick(Duration elapsed, Duration nativeDuration) {
+    final clockElapsed = elapsed;
     if (_performanceWindowStart == null) {
-      // Ticker time starts after runtime loading, so startup evaluation and
-      // the initial frame are intentionally excluded from this window.
-      _performanceWindowStart = elapsed;
-      _performanceLastTick = elapsed;
+      // This baseline is created after runtime loading, so startup
+      // evaluation and the initial frame are intentionally excluded.
+      _performanceWindowStart = clockElapsed;
+      _performanceLastTick = clockElapsed;
       return;
     }
     final previous = _performanceLastTick;
     if (previous == null) return;
-    final gapMs = math
+    var gapMs = math
         .max(
           0.0,
-          (elapsed - previous).inMicroseconds /
+          (clockElapsed - previous).inMicroseconds /
               Duration.microsecondsPerSecond *
               1000.0,
         )
         .toDouble();
+    if (_resumedFromIdle) {
+      // Idle sleep is intentional and must not be reported as a dropped
+      // display frame. Keep the active performance window continuous by
+      // removing the sleep interval from its elapsed denominator.
+      final idleStarted = _idleStartedAt;
+      if (idleStarted != null && _performanceWindowStart != null) {
+        _performanceWindowStart =
+            _performanceWindowStart! + (clockElapsed - idleStarted);
+      }
+      _resumedFromIdle = false;
+      _idleStartedAt = null;
+      gapMs = 0;
+    }
     _performanceMaxGapMs = math.max(_performanceMaxGapMs, gapMs).toDouble();
     final frameBudgetMs = 1000.0 / _refreshHz;
     if (gapMs > frameBudgetMs * 1.5) _performanceSlowFrames++;
-    _performanceLastTick = elapsed;
+    _performanceLastTick = clockElapsed;
     _performanceFrames++;
     _performanceNativeDurationsMs.add(
       nativeDuration.inMicroseconds / Duration.microsecondsPerSecond * 1000.0,
@@ -794,7 +1037,7 @@ class _PocketViewState extends State<PocketView>
 
     final start = _performanceWindowStart!;
     final durationMs =
-        (elapsed - start).inMicroseconds /
+        (clockElapsed - start).inMicroseconds /
         Duration.microsecondsPerSecond *
         1000.0;
     if (durationMs < 1000 || _performanceFrames == 0) return;
@@ -839,26 +1082,27 @@ class _PocketViewState extends State<PocketView>
     // Keep only the current one-second window; the host owns persistent
     // history. Preserve the elapsed baseline so a long first gap in the next
     // window remains visible instead of being discarded at this boundary.
-    _performanceWindowStart = elapsed;
-    _performanceLastTick = elapsed;
+    _performanceWindowStart = clockElapsed;
+    _performanceLastTick = clockElapsed;
     _performanceFrames = 0;
     _performanceMaxGapMs = 0;
     _performanceSlowFrames = 0;
     _performanceNativeDurationsMs.clear();
   }
 
-  void _onTick(Duration elapsed) {
+  void _onTick(Duration _) {
     final runtime = _runtime;
     if (runtime == null || !mounted) return;
-    final previous = _lastTick;
-    _lastTick = elapsed;
+    final clockElapsed = SchedulerBinding.instance.currentSystemFrameTimeStamp;
+    final previous = _lastSchedulerTimestamp;
+    _lastSchedulerTimestamp = clockElapsed;
     // Preserve the scheduler's fractional delta.  Truncating a 16.667ms
     // display interval to 16ms slowly starves a fixed 60/120Hz native clock;
     // pocketFrameDeltaAt keeps the old integer seam for injected tests but
     // forwards the precise value through the real FFI ABI.
     final delta = previous == null
         ? _firstFrameDeltaMs
-        : (elapsed - previous).inMicroseconds /
+        : (clockElapsed - previous).inMicroseconds /
               Duration.microsecondsPerSecond *
               1000.0;
     try {
@@ -880,15 +1124,18 @@ class _PocketViewState extends State<PocketView>
       if (next != null) {
         _idleTicks = 0;
         if (stopwatch != null) {
-          _recordPerformanceTick(elapsed, stopwatch.elapsed);
+          _recordPerformanceTick(clockElapsed, stopwatch.elapsed);
         }
         _applyFrame(next);
       } else {
         _idleTicks++;
         if (_idleTicks >= 6) {
           _ticker?.stop();
+          _scheduleIdleWake();
         }
       }
+      _drainDuplexEvents();
+      _flushPendingPointerJson();
     } catch (error) {
       _failRuntime(error);
     }
@@ -1909,16 +2156,65 @@ class _PocketViewState extends State<PocketView>
     return id.isEmpty ? null : id;
   }
 
+  String? _textInputEditingSessionFromParams(Map<String, dynamic> params) {
+    final rawSession = params['editingSession'];
+    if (rawSession == null) return null;
+    final session = '$rawSession';
+    return session.isEmpty ? null : session;
+  }
+
+  int? _textInputRevisionFromParams(
+    Map<String, dynamic> params, {
+    String key = 'revision',
+  }) {
+    final rawRevision = params[key];
+    if (rawRevision is! num || !rawRevision.isFinite) return null;
+    return rawRevision.toInt().clamp(0, 0x7fffffff);
+  }
+
+  int? _textInputJsRevisionFromParams(Map<String, dynamic> params) {
+    return _textInputRevisionFromParams(params, key: 'jsRevision');
+  }
+
+  bool _textInputHasValueFields(Map<String, dynamic> params) {
+    return params.containsKey('text') ||
+        params.containsKey('selectionBase') ||
+        params.containsKey('selectionExtent') ||
+        params.containsKey('composingBase') ||
+        params.containsKey('composingExtent');
+  }
+
+  Map<String, dynamic> _textInputNativePayload(Map<String, dynamic> payload) {
+    final next = Map<String, dynamic>.from(payload)
+      ..['revision'] = _textInputRevision
+      ..['jsRevision'] = _textInputJsRevision
+      ..['source'] = 'native';
+    final session = _textInputEditingSession;
+    if (session != null) next['editingSession'] = session;
+    return next;
+  }
+
   bool _isCurrentTextInput(Map<String, dynamic> params) {
     final currentId = _textInputId;
     final eventId = _textInputEventId(params);
-    return currentId != null && eventId != null && eventId == currentId;
+    if (currentId == null || eventId == null || eventId != currentId) {
+      return false;
+    }
+    final currentSession = _textInputEditingSession;
+    // Once a guest supplies an editing epoch, a late event from a previous
+    // overlay with the same id must not touch the active Flutter controller.
+    // Legacy guests that never supplied a token remain compatible.
+    return currentSession == null ||
+        _textInputEditingSessionFromParams(params) == currentSession;
   }
 
   void _sendTextInputDismiss(String id, String reason) {
     _controller.send(
       method: 'textInput.dismiss',
-      params: <String, dynamic>{'id': id, 'reason': reason},
+      params: _textInputNativePayload(<String, dynamic>{
+        'id': id,
+        'reason': reason,
+      }),
     );
   }
 
@@ -1962,6 +2258,15 @@ class _PocketViewState extends State<PocketView>
     final rect = _textInputRectFromParams(params);
     if (id == null || rect == null) return;
 
+    final incomingSession = _textInputEditingSessionFromParams(params);
+    if (_textInputId == id &&
+        _textInputEditingSession != null &&
+        incomingSession != _textInputEditingSession) {
+      // A delayed open from an earlier guest generation is indistinguishable
+      // by id alone. Ignore it until the active session has been closed.
+      return;
+    }
+
     if (_textInputId != null) {
       _dismissTextInput(reason: 'replaced', rebuild: false);
     }
@@ -1975,6 +2280,12 @@ class _PocketViewState extends State<PocketView>
     controller.addListener(_onTextInputChanged);
     focusNode.addListener(_onTextInputFocusChanged);
     _textInputId = id;
+    _textInputEditingSession = incomingSession;
+    _textInputRevision =
+        _textInputRevisionFromParams(params) ??
+        _textInputRevisionFromParams(params, key: 'observedRevision') ??
+        0;
+    _textInputJsRevision = _textInputJsRevisionFromParams(params) ?? 0;
     _textInputRect = rect;
     _textInputController = controller;
     _textInputFocusNode = focusNode;
@@ -2009,12 +2320,56 @@ class _PocketViewState extends State<PocketView>
     if (!_isCurrentTextInput(params)) return;
     final controller = _textInputController;
     if (controller == null) return;
+    final incomingRevision = _textInputRevisionFromParams(params);
+    final incomingJsRevision = _textInputJsRevisionFromParams(params);
+    final source = params['source'];
+    // `programmatic` is the legacy explicit override. The JS component now
+    // uses `source: 'js', force: true` for the same operation so a delayed
+    // native IME echo cannot overwrite a newer JS-controlled value.
+    final isJsCommand =
+        source == 'programmatic' || (source == 'js' && params['force'] == true);
+    final hasValueFields = _textInputHasValueFields(params);
+    final staleNativeValue =
+        incomingRevision != null &&
+        incomingRevision < _textInputRevision &&
+        !isJsCommand;
+    // Rect-only updates deliberately remain applicable even when they arrive
+    // out of order. Only a stale command carrying text/selection/composing
+    // data is stripped; its geometry and visual metadata still flow through.
+    final staleJsValue =
+        hasValueFields &&
+        incomingJsRevision != null &&
+        incomingJsRevision < _textInputJsRevision;
+    final staleValue = staleNativeValue || staleJsValue;
+    final valueParams = staleValue
+        ? (Map<String, dynamic>.from(params)
+            ..remove('text')
+            ..remove('selectionBase')
+            ..remove('selectionExtent')
+            ..remove('composingBase')
+            ..remove('composingExtent'))
+        : params;
     final state = _PocketTextInputState.fromJson(
-      params,
+      valueParams,
       fallback: controller.value,
       isOpen: false,
     );
     _syncTextController(controller, state);
+    if (incomingRevision != null &&
+        (isJsCommand || incomingRevision >= _textInputRevision)) {
+      _textInputRevision = math.max(_textInputRevision, incomingRevision);
+    }
+    if (incomingJsRevision != null &&
+        (!staleJsValue || incomingJsRevision >= _textInputJsRevision)) {
+      _textInputJsRevision = math.max(_textInputJsRevision, incomingJsRevision);
+    }
+    final observedRevision = _textInputRevisionFromParams(
+      params,
+      key: 'observedRevision',
+    );
+    if (observedRevision != null) {
+      _textInputRevision = math.max(_textInputRevision, observedRevision);
+    }
     var metadataChanged = _updateTextInputAppearance(params);
     if (params.containsKey('keyboardType') || params.containsKey('inputType')) {
       _textInputKeyboardType = _textInputKeyboardTypeFromParams(
@@ -2073,16 +2428,17 @@ class _PocketViewState extends State<PocketView>
     final controller = _textInputController;
     if (id == null || controller == null) return;
     final value = controller.value;
+    _textInputRevision++;
     _controller.send(
       method: 'textInput.edit',
-      params: <String, dynamic>{
+      params: _textInputNativePayload(<String, dynamic>{
         'id': id,
         'text': value.text,
         'selectionBase': value.selection.baseOffset,
         'selectionExtent': value.selection.extentOffset,
         'composingBase': value.composing.start,
         'composingExtent': value.composing.end,
-      },
+      }),
     );
   }
 
@@ -2093,7 +2449,7 @@ class _PocketViewState extends State<PocketView>
     final value = controller.value;
     _controller.send(
       method: 'textInput.submit',
-      params: <String, dynamic>{
+      params: _textInputNativePayload(<String, dynamic>{
         'id': id,
         'text': value.text,
         'selectionBase': value.selection.baseOffset,
@@ -2101,7 +2457,7 @@ class _PocketViewState extends State<PocketView>
         'composingBase': value.composing.start,
         'composingExtent': value.composing.end,
         'action': _textInputActionName(_textInputAction),
-      },
+      }),
     );
     final focusNode = _textInputFocusNode;
     // EditableText is still servicing TextInputClient.performAction when
@@ -2165,6 +2521,9 @@ class _PocketViewState extends State<PocketView>
     _textInputTapRegionDowns.clear();
     _scheduledOutsideTextInputId = null;
     _textInputId = null;
+    _textInputEditingSession = null;
+    _textInputRevision = 0;
+    _textInputJsRevision = 0;
     _textInputRect = null;
     _textInputController = null;
     _textInputFocusNode = null;
@@ -2213,7 +2572,9 @@ class _PocketViewState extends State<PocketView>
         _updateTextInput(event.params);
       case 'textInput.close':
         final id = _textInputEventId(event.params);
-        if (id != null) _closeTextInput(id: id);
+        if (id != null && _isCurrentTextInput(event.params)) {
+          _closeTextInput(id: id);
+        }
     }
   }
 
@@ -2249,6 +2610,29 @@ class _PocketViewState extends State<PocketView>
         _wakeTicker();
       }
       widget.onEvent?.call(event);
+    }
+  }
+
+  void _flushPendingPointerJson() {
+    if (_pendingPointerJson.isEmpty) return;
+    final pending = List<Map<String, dynamic>>.of(_pendingPointerJson);
+    _pendingPointerJson.clear();
+    for (var index = 0; index < pending.length; index++) {
+      final params = pending[index];
+      try {
+        if (_controller._sendEvent(
+          method: 'input.pointer',
+          params: params,
+          wake: false,
+        )) {
+          continue;
+        }
+      } catch (_) {
+        // Preserve the event below so a transient bridge failure cannot
+        // reorder a later pointer edge.
+      }
+      _pendingPointerJson.addAll(pending.sublist(index));
+      break;
     }
   }
 
@@ -2346,13 +2730,68 @@ class _PocketViewState extends State<PocketView>
       'y': y,
     };
     if (surface != 0) params['surface'] = surface;
-    final sent = _controller.send(
-      // Native owns one pointer queue for all surfaces. The surface selector
-      // stays in the canonical pointer payload so down/up edges share the
-      // same slot and hit-test path on primary and auxiliary outputs.
-      method: 'input.pointer',
-      params: params,
-    );
+    var sent = false;
+    var deferredToJson = false;
+    final duplex = _duplexChannel;
+    if (widget.enableDuplexPointerInput && _pendingPointerJson.isNotEmpty) {
+      deferredToJson = true;
+    }
+    if (widget.enableDuplexPointerInput &&
+        duplex != null &&
+        !duplex.isClosed &&
+        // Once one edge falls back because the ring is full, keep the rest of
+        // that contact in the same FIFO until the next frame flushes it. A
+        // later edge must never overtake the deferred predecessor.
+        _pendingPointerJson.isEmpty) {
+      final flags = switch (outgoingPhase) {
+        'down' => _duplexPointerDown,
+        'move' => _duplexPointerMove,
+        'up' => _duplexPointerUp,
+        'cancel' => _duplexPointerCancel,
+        _ => 0,
+      };
+      if (flags != 0) {
+        // targetId carries the native pointer slot. The surface is encoded in
+        // the high bit of flags so primary/auxiliary contacts retain one
+        // canonical slot namespace without allocating a JSON envelope.
+        final transportFlags = surface == 0 ? flags : flags | 0x0100;
+        try {
+          sent = duplex.pushToPocketJs(
+            msgType: _duplexPointerMessageType,
+            flags: transportFlags,
+            targetId: slot,
+            arg0: x,
+            arg1: y,
+          );
+        } catch (_) {
+          // A closed endpoint falls back immediately. A live endpoint only
+          // returns false when full, which is deferred until after the next
+          // frame drains ingress so JSON cannot overtake an older duplex edge.
+          if (!duplex.isClosed) deferredToJson = true;
+          if (duplex.isClosed) {
+            _duplexChannel = null;
+            _controller._clearDuplexChannel(duplex);
+          }
+          sent = false;
+        }
+        if (!sent && !duplex.isClosed) deferredToJson = true;
+      }
+    }
+    if (!sent) {
+      if (deferredToJson) {
+        _pendingPointerJson.add(params);
+        sent = true;
+      } else {
+        sent = _controller.send(
+          // Native owns one pointer queue for all surfaces. The surface
+          // selector stays in the canonical pointer payload so down/up edges
+          // share the same slot and hit-test path on primary and auxiliary
+          // outputs.
+          method: 'input.pointer',
+          params: params,
+        );
+      }
+    }
     if (outgoingPhase == 'down') {
       if (sent) {
         _pointerSlots[id] = slot;
@@ -2434,9 +2873,14 @@ class _PocketViewState extends State<PocketView>
     _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_stopDisplayGeometry());
+    _idleWakeTimer?.cancel();
+    _idleWakeTimer = null;
+    _idleStartedAt = null;
+    _resumedFromIdle = false;
     _ticker?.dispose();
     _ticker = null;
     _pointerSlots.clear();
+    _pendingPointerJson.clear();
     _outsideTextInputPointerOrigins.clear();
     _textInputTapRegionDowns.clear();
     _guestGestureRegions.clear();
@@ -2479,6 +2923,11 @@ class _PocketViewState extends State<PocketView>
     if (_lifecyclePaused) return;
     _lifecyclePaused = true;
     _ticker?.stop();
+    _lastSchedulerTimestamp = null;
+    _idleWakeTimer?.cancel();
+    _idleWakeTimer = null;
+    _idleStartedAt = null;
+    _resumedFromIdle = false;
     _resetPerformanceWindow();
     for (final entry in _videos.entries) {
       _videoDesiredPlayback[entry.key] ??= entry.value.value.isPlaying;
@@ -2500,7 +2949,7 @@ class _PocketViewState extends State<PocketView>
     _lifecyclePaused = false;
     final runtime = _runtime;
     if (runtime != null && mounted) {
-      _lastTick = null;
+      _lastSchedulerTimestamp = null;
       _refreshHz = _readRefreshRate();
       _firstFrameDeltaMs = 1000.0 / _refreshHz;
       _resetPerformanceWindow();
@@ -2521,6 +2970,7 @@ class _PocketViewState extends State<PocketView>
   void _failRuntime(Object error) {
     _ticker?.stop();
     _pointerSlots.clear();
+    _pendingPointerJson.clear();
     _dismissTextInput(reason: 'runtime.dispose', rebuild: false);
     _detachRuntime();
     if (!mounted) return;
@@ -2538,6 +2988,10 @@ class _PocketViewState extends State<PocketView>
         : fallback != null && widget.runtime == null;
     _runtime = null;
     _ownsRuntime = false;
+    _pendingPointerJson.clear();
+    final duplex = _duplexChannel;
+    _duplexChannel = null;
+    duplex?.close();
     if (runtime == null) return;
     _controller._detach(runtime);
     if (shouldDispose) runtime.dispose();
@@ -2943,6 +3397,40 @@ class _PocketViewState extends State<PocketView>
                   Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height),
                 );
           if (!visible.isEmpty) {
+            final radius =
+                _surfaceNumber(
+                  op.parameters,
+                  'radius',
+                  0,
+                  0,
+                  math.min(op.width, op.height) / 2,
+                ) *
+                math.min(scaleX, scaleY);
+            // Apply the rounded mask in the surface's original bounds.
+            // The visible rectangle is only a viewport clip: applying the
+            // RRect after intersecting it would manufacture new rounded
+            // corners whenever a scrolling surface is partially visible.
+            final roundedChild = radius > 0
+                ? ClipRRect(
+                    clipBehavior: Clip.antiAlias,
+                    borderRadius: BorderRadius.circular(radius),
+                    child: child,
+                  )
+                : child;
+            final surfaceStack = Stack(
+              children: [
+                Positioned(
+                  left: (op.x - visible.left) * scaleX,
+                  top: (op.y - visible.top) * scaleY,
+                  width: op.width * scaleX,
+                  height: op.height * scaleY,
+                  child: roundedChild,
+                ),
+              ],
+            );
+            // This clip is intentionally rectangular. The rounded mask is
+            // already attached to the full-size positioned child above.
+            final clippedSurface = ClipRect(child: surfaceStack);
             sceneChildren.add(
               Positioned(
                 key: ValueKey('surface-${op.id}'),
@@ -2950,21 +3438,7 @@ class _PocketViewState extends State<PocketView>
                 top: visible.top * scaleY,
                 width: visible.width * scaleX,
                 height: visible.height * scaleY,
-                child: IgnorePointer(
-                  child: ClipRect(
-                    child: Stack(
-                      children: [
-                        Positioned(
-                          left: (op.x - visible.left) * scaleX,
-                          top: (op.y - visible.top) * scaleY,
-                          width: op.width * scaleX,
-                          height: op.height * scaleY,
-                          child: child,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+                child: IgnorePointer(child: clippedSurface),
               ),
             );
           }
@@ -3268,7 +3742,8 @@ final class _PocketTextInputState {
               ? TextRange(start: composingBase, end: composingExtent)
               : TextRange.empty
         : (effectiveFallback.composing.start >= 0 &&
-              effectiveFallback.composing.end >= effectiveFallback.composing.start &&
+              effectiveFallback.composing.end >=
+                  effectiveFallback.composing.start &&
               effectiveFallback.composing.end <= text.length)
         ? effectiveFallback.composing
         : TextRange.empty;
@@ -3287,7 +3762,8 @@ final class _PocketTextInputState {
       );
     }
 
-    final hasExplicitTextOrSelection = isOpen ||
+    final hasExplicitTextOrSelection =
+        isOpen ||
         params.containsKey('text') ||
         params.containsKey('selectionBase') ||
         params.containsKey('selectionExtent') ||

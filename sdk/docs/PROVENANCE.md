@@ -10,7 +10,7 @@
 - `native/src/bytecode.rs`、`pocketjs_bytecode` CLI 和 `guest-rquickjs-bytecode.patch` 是本次新增，复用 Cargo.lock 固定的 rquickjs 0.12.2 / QuickJS 序列化 API。
 - `native/src/lib.rs` 的 `pocket.registerSurface`、`packages/pocket_flutter/lib/src/pocket_model.dart` 的 `PocketHostSurfaceOp`、`pocket_view.dart`/`pocket_surface.dart` 的 surface stack 是本仓库的 `SURFACE_QUAD` bridge；provider allow-list 是 `glass` 和 `platformTexture`，不是任意 compositor。`pocket_surface.dart` 的 `liquid_glass.frag` shader 在支持路径提供折射，其他路径保持明确磨砂 fallback。
 - `editor/server.ts`、`editor/client/`、`editor/test/editor_live_probe.ts` 复用旧 PocketJSKit editor 的本地 project/build/publish 工作流（详细来源见 [EDITOR_REUSE.md](EDITOR_REUSE.md)），改为当前 guest scaffold + qjbc/PAK + `scripts/package_update.ts`。多文件 GET/PUT 有路径、symlink、构建/密钥/二进制保护；`app.js` 只作诊断，不成为 runtime 回退来源。
-- PocketJSKit 原工程完整源码快照、清单、摘要和许可已按清理前约定归档到 `migrations/pocket_flutter_poc-source-20261102.tar.gz` 与同名 JSON，入口和清理状态见 `migrations/README.md`。当前构建和运行不依赖旧绝对路径、symlink 或待删除的原目录。
+- 历史迁移归档曾位于 migrations，已在审计清理提交中删除；当前仓库不再提供该快照。可参考保留的父工程 pocketjs_flutter_demo（排除 pocket_host）。当前构建和运行不依赖该外部参考源码。
 - 保留原 MIT LICENSE。缓存、编译产物、签名私钥和用户业务项目不属于源码交付。
 - 工具链基线：Flutter 3.35.7 / Dart 3.9.2，Rust 1.93.1；Bun 使用上游 lockfile 安装编译器依赖。
 

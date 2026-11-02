@@ -454,6 +454,39 @@ assert.ok(editedFrame, "textInput.edit did not update the JS draft");
 assert.equal(frameEvents(editedFrame, "textInput.update").length, 0, "native text echo caused a redundant textInput.update");
 assert.match(textOf(inputFrames.at(-1)!), /native submitted/, "textInput.submit did not update the JS draft");
 
+// A delayed native echo must not overwrite a newer draft, and a packet from
+// a previous editing session must not close or mutate the current editor.
+const editingSession = openEvent.payload?.editingSession;
+assert.equal(typeof editingSession, "string", "open packet must identify its editing generation");
+const revisionFrames = framesOf(runProbe([
+  ...bootstrap(),
+  event("input.pointer", { phase: "down", id: 0, ...inputPoint }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "up", id: 0, ...inputPoint }),
+  { op: "frame", deltaMs: 16 },
+  event("textInput.edit", { id: "guest-text-input-1", editingSession, revision: 1, text: "ab" }),
+  { op: "frame", deltaMs: 16 },
+  event("textInput.edit", { id: "guest-text-input-1", editingSession, revision: 2, text: "abc" }),
+  { op: "frame", deltaMs: 16 },
+  event("textInput.edit", { id: "guest-text-input-1", editingSession, revision: 1, text: "ab" }),
+  { op: "frame", deltaMs: 16 },
+  event("textInput.closed", { id: "guest-text-input-1", editingSession: "previous-session", revision: 99, text: "stale" }),
+  { op: "frame", deltaMs: 16 },
+  event("demo.setText", { value: "JS replacement" }),
+  { op: "frame", deltaMs: 16 },
+  event("textInput.edit", { id: "guest-text-input-1", editingSession, revision: 3, jsRevision: 0, text: "old native" }),
+  { op: "frame", deltaMs: 16 },
+  { op: "quit" },
+]));
+assert.match(textOf(revisionFrames[6]!), /Draft: abc/, "old same-ID edit overwrote the newer draft");
+assert.match(textOf(revisionFrames[7]!), /Draft: abc/, "previous editing generation overwrote the draft");
+assert.match(textOf(revisionFrames.at(-1)!), /Draft: JS replacement/, "native echo before the JS replacement overwrote its controlled value");
+const replacement = revisionFrames.at(-2)!;
+assert.match(textOf(replacement), /Draft: JS replacement/, "explicit JS controlled value was blocked");
+assert.ok(frameEvents(replacement, "textInput.update").some((packet) =>
+  packet.payload?.text === "JS replacement" && packet.payload?.source === "js" && packet.payload?.force === true && packet.payload?.revision === 2,
+), "JS replacement must use explicit programmatic update with latest observed revision");
+
 // A keyboard resize changes the guest viewport while the real Flutter text
 // field remains active. Layout ABI coordinates intentionally exclude paint
 // transforms, so the guest must send a rect-only update using its translated

@@ -245,31 +245,49 @@ final class PocketUpdateCoordinator {
     );
     final signed = await _fetchManifest(token, onProgress);
     await verifier.verify(signed);
-    final currentGood = await _store.lastGood(verifier: verifier) ??
-        await _store.active(verifier: verifier);
+    final currentGood = await _store.lastGood(verifier: verifier);
+    final currentActive = await _store.active(verifier: verifier);
     final floorBuild = math.max(
       minimumBuild,
-      currentGood?.manifest.payload.build ?? 0,
+      math.max(
+        currentGood?.manifest.payload.build ?? 0,
+        currentActive?.manifest.payload.build ?? 0,
+      ),
     );
+    final establishedIdsAtFloor = <String>{
+      if (currentGood != null &&
+          currentGood.manifest.payload.build == floorBuild)
+        currentGood.versionId,
+      if (currentActive != null &&
+          currentActive.manifest.payload.build == floorBuild)
+        currentActive.versionId,
+    };
+    final hasBaseline =
+        minimumBuild > 0 || currentGood != null || currentActive != null;
     final manifestVersionId = pocketVersionId(signed.payload);
-    if (!allowDowngrade) {
+    if (!allowDowngrade && hasBaseline) {
       if (signed.payload.build < floorBuild ||
           (signed.payload.build == floorBuild &&
-              currentGood != null &&
-              manifestVersionId != currentGood.versionId)) {
+              (establishedIdsAtFloor.isEmpty ||
+                  !establishedIdsAtFloor.every(
+                    (id) => id == manifestVersionId,
+                  )))) {
         throw PocketPackageFormatException(
           'Refusing downgrade or replay: package build ${signed.payload.build} is not newer than current build $floorBuild',
         );
       }
     }
-    final current = await _store.active(verifier: verifier);
-    if (current != null &&
-        current.manifest.payload.contentHash == signed.payload.contentHash) {
+    if (currentActive != null &&
+        currentActive.manifest.payload.contentHash ==
+            signed.payload.contentHash) {
       _report(
         onProgress,
         const PocketUpdateProgress(stage: PocketUpdateStage.loading),
       );
-      return PocketPreparedPackage(package: current, needsActivation: false);
+      return PocketPreparedPackage(
+        package: currentActive,
+        needsActivation: false,
+      );
     }
     final files = signed.payload.files;
     final total = files.fold<int>(0, (sum, file) => sum + file.size);
@@ -351,7 +369,12 @@ final class PocketUpdateCoordinator {
   }
 
   Future<void> commitHealthy(PocketPreparedPackage prepared) =>
-      _store.commitHealthy(prepared.package, verifier: verifier);
+      _store.commitHealthy(
+        prepared.package,
+        verifier: verifier,
+        minimumBuild: minimumBuild,
+        allowDowngrade: allowDowngrade,
+      );
   Future<void> activate(PocketPreparedPackage prepared) =>
       commitHealthy(prepared);
 

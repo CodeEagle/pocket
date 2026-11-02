@@ -1,8 +1,12 @@
 {
   "$schema": "https://pocketjs.dev/schema/pocket-guest-manifest.json",
   "protocolVersion": 1,
+  "version": "0.1.0",
+  "build": 1,
   "capabilities": {
-    "requires": ["text.glyphs.baked"],
+    "requires": [
+      "text.glyphs.baked"
+    ],
     "optional": [
       "runtime.info",
       "runtime.performance",

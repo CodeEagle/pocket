@@ -95,3 +95,26 @@ mount(() => <MobileButton label="Symlink package" onPress={() => {}} />);
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test("build_guest carries editor release identity into bytecode metadata", async () => {
+  const project = mkdtempSync(join(tmpdir(), "pocket-build-release-identity-"));
+  const output = join(project, "out");
+  writeFileSync(join(project, "app.tsx"), "export default function App(){ return <text value='release'/>; }\n");
+  writeFileSync(join(project, "pocket.json"), JSON.stringify({ version: "2.4.0", app: { entry: "app.tsx" } }));
+  writeFileSync(join(project, "editor.json"), JSON.stringify({ version: "2.4.0", build: 42 }));
+  writeFileSync(join(project, "manifest.json"), JSON.stringify({ capabilities: { requires: [] } }));
+  const result = await buildGuest({ projectRoot: project, outDir: output });
+  const metadata = JSON.parse(readFileSync(result.metadata, "utf8")) as Record<string, unknown>;
+  expect(metadata.version).toBe("2.4.0");
+  expect(metadata.build).toBe(42);
+});
+
+test("build_guest rejects an invalid explicit release build instead of falling back", async () => {
+  const project = mkdtempSync(join(tmpdir(), "pocket-build-invalid-release-"));
+  const output = join(project, "out");
+  writeFileSync(join(project, "app.tsx"), "export default function App(){ return <text value='invalid'/>; }\n");
+  writeFileSync(join(project, "pocket.json"), JSON.stringify({ version: "2.4.0", app: { entry: "app.tsx" } }));
+  writeFileSync(join(project, "editor.json"), JSON.stringify({ version: "2.4.0", build: 42 }));
+  writeFileSync(join(project, "manifest.json"), JSON.stringify({ version: "2.4.0", build: 0, capabilities: { requires: [] } }));
+  await expect(buildGuest({ projectRoot: project, outDir: output })).rejects.toThrow(/release build must be a positive safe integer/);
+});

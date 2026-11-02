@@ -4,14 +4,12 @@
  * Provenance:
  * `pocketjs_flutter_demo/mini_apps/syslib/pocket_syslib_graphics.js`.
  *
- * These functions only calculate deterministic draw-command data. They do not
- * create a Scene, talk to FFI, allocate a native surface, or claim that a
- * 3D/physics runtime is present. Callers may feed the returned commands into
- * an existing Pocket draw-list surface when one is available.
+ * Only reusable SVG specifications are exported. Legacy line/arc command
+ * producers were removed because the current renderer has no consumer for
+ * those commands. This module does not claim a 3D or particle renderer.
  */
 
 export const POCKET_GRAPHICS_VERSION = "0.1.0";
-export const MAX_PARTICLE_COUNT = 4096;
 
 export interface SvgIconSpec {
   readonly svgXml: string;
@@ -62,139 +60,3 @@ export const POCKET_SVG_ICON_SPECS: Readonly<Record<string, SvgIconSpec>> = Obje
     colorArgb: 0xff0284c7,
   }),
 });
-
-export type GraphicsColor = number;
-
-export interface DrawLineCommand {
-  readonly op: "line";
-  readonly x1: number;
-  readonly y1: number;
-  readonly x2: number;
-  readonly y2: number;
-  readonly strokeW: number;
-  readonly color: GraphicsColor;
-}
-
-export interface DrawArcCommand {
-  readonly op: "arc";
-  readonly x: number;
-  readonly y: number;
-  readonly r: number;
-  readonly color: GraphicsColor;
-}
-
-export type GraphicsDrawCommand = DrawLineCommand | DrawArcCommand;
-
-export interface MechaEntity {
-  readonly slot: number;
-  readonly entityId: number;
-  readonly tx: number;
-  readonly ty: number;
-  readonly tz: number;
-  readonly rx: number;
-  readonly ry: number;
-  readonly rz: number;
-  readonly rw: number;
-}
-
-export interface MechaFrame {
-  readonly entities: readonly MechaEntity[];
-  readonly drawCommands: readonly GraphicsDrawCommand[];
-}
-
-function finite(value: number, fallback: number): number {
-  return Number.isFinite(value) ? value : fallback;
-}
-
-function pitchScale(touchPitchDeg: number): number {
-  return Math.max(0.45, Math.min(1.55, 1.0 + finite(touchPitchDeg, 0) * 0.008));
-}
-
-/**
- * Calculates the old demo's six-node orbit and wireframe overlay.
- *
- * The `3d` in the compatibility name describes the output's transform fields;
- * this is a CPU math helper, not a 3D renderer or physics implementation.
- */
-export function compute3dMechaFrame(
-  animTimeSec: number,
-  touchYawDeg = 0.0,
-  touchPitchDeg = 0.0,
-): MechaFrame {
-  const time = finite(animTimeSec, 0);
-  const yawOffset = (finite(touchYawDeg, 0) * Math.PI) / 180.0;
-  const scale = pitchScale(touchPitchDeg);
-  const entities: MechaEntity[] = [];
-  const drawCommands: GraphicsDrawCommand[] = [];
-  const cx = 185.0;
-  const cy = 92.0;
-
-  for (let i = 0; i < 6; i += 1) {
-    const angle = time * 1.6 + yawOffset + i * (Math.PI / 3.0);
-    entities.push({
-      slot: i,
-      entityId: 100 + i,
-      tx: Math.cos(angle) * 2.5,
-      ty: Math.sin(time * 2.0 + i) * 0.8 * scale,
-      tz: Math.sin(angle) * 2.5,
-      rx: 0.0,
-      ry: Math.sin(angle * 0.5),
-      rz: 0.0,
-      rw: Math.cos(angle * 0.5),
-    });
-
-    const firstAngle = time * 1.5 + yawOffset + i * (Math.PI / 3.0);
-    const nextAngle = time * 1.5 + yawOffset + ((i + 1) % 6) * (Math.PI / 3.0);
-    const x1 = cx + Math.cos(firstAngle) * 72.0;
-    const y1 = cy + Math.sin(firstAngle) * 44.0 * scale;
-    const x2 = cx + Math.cos(nextAngle) * 72.0;
-    const y2 = cy + Math.sin(nextAngle) * 44.0 * scale;
-    drawCommands.push({
-      op: "line",
-      x1,
-      y1,
-      x2,
-      y2,
-      strokeW: 2.4,
-      color: 0xff38bdf8,
-    });
-    drawCommands.push({
-      op: "arc",
-      x: x1,
-      y: y1,
-      r: 6.8,
-      color: i % 2 === 0 ? 0xff22c55e : 0xffa855f7,
-    });
-  }
-
-  return { entities, drawCommands };
-}
-
-/**
- * Calculates the old demo's deterministic 2D particle commands.
- *
- * The result can be serialized into an existing draw-list surface. It does
- * not itself schedule frames or imply a native particle engine.
- */
-export function compute2dParticleFrame(
-  animTimeSec: number,
-  particleCount = 28,
-  touchYawDeg = 0.0,
-  touchPitchDeg = 0.0,
-): readonly DrawArcCommand[] {
-  const time = finite(animTimeSec, 0);
-  const yawOffset = (finite(touchYawDeg, 0) * Math.PI) / 180.0;
-  const scale = pitchScale(touchPitchDeg);
-  const count = Math.max(0, Math.min(MAX_PARTICLE_COUNT, Math.floor(finite(particleCount, 0))));
-  const drawCommands: DrawArcCommand[] = [];
-
-  for (let i = 0; i < count; i += 1) {
-    const phase = time * 1.8 + yawOffset + i * 0.45;
-    const x = 28.0 + ((i * 29) % 310) + Math.sin(phase) * 16.0;
-    const y = 30.0 + ((i * 19) % 120) + Math.cos(phase * 1.2) * 12.0 * scale;
-    const r = 4.0 + (i % 5) * 1.8;
-    const color = i % 3 === 0 ? 0xff38bdf8 : i % 3 === 1 ? 0xffa855f7 : 0xff22c55e;
-    drawCommands.push({ op: "arc", x, y, r, color });
-  }
-  return drawCommands;
-}

@@ -489,6 +489,87 @@ class PocketFrame {
     );
   }
 
+  /// Decodes the compact native frame ABI (PFB1). The format is deliberately
+  /// typed: draw geometry and image pixels never pass through JSON maps or
+  /// decimal byte arrays. Bridge events keep a small JSON payload because
+  /// their schema is intentionally open-ended.
+  factory PocketFrame.fromBinary(Uint8List source) {
+    final reader = _PocketBinaryReader(source);
+    if (reader.u32() != 0x31424650) {
+      throw const FormatException('Invalid Pocket binary frame magic');
+    }
+    final version = reader.u16();
+    reader.u16(); // flags reserved for future ABI revisions.
+    if (version != 1) {
+      throw FormatException(
+        'Unsupported Pocket binary frame version: $version',
+      );
+    }
+    reader.u64(); // native frame sequence is diagnostic only on the Dart side.
+    final width = reader.f32();
+    final height = reader.f32();
+    final ops = _binaryOps(reader, reader.count('ops'));
+    final events = <PocketEvent>[];
+    final eventCount = reader.count('events');
+    for (var index = 0; index < eventCount; index++) {
+      final payload = reader.bytes('event');
+      final decoded = jsonDecode(utf8.decode(payload));
+      if (decoded is! Map) {
+        throw const FormatException('Pocket binary event must be an object');
+      }
+      events.add(PocketEvent.fromJson(Map<String, dynamic>.from(decoded)));
+    }
+    final resources = <PocketImageResource>[];
+    final resourceCount = reader.count('resources');
+    for (var index = 0; index < resourceCount; index++) {
+      final asset = reader.string('resource asset');
+      final revision = reader.u64();
+      final resourceWidth = reader.u32();
+      final resourceHeight = reader.u32();
+      final psm = reader.u32();
+      final linear = reader.u8() != 0;
+      final pixels = reader.bytes('resource pixels');
+      final palette = reader.u8() == 0
+          ? null
+          : reader.bytes('resource palette');
+      resources.add(
+        PocketImageResource(
+          asset: asset,
+          revision: revision,
+          width: resourceWidth,
+          height: resourceHeight,
+          psm: psm,
+          linear: linear,
+          pixels: pixels,
+          palette: palette,
+        ),
+      );
+    }
+    final releasedResources = <String>[];
+    final releasedCount = reader.count('released resources');
+    for (var index = 0; index < releasedCount; index++) {
+      releasedResources.add(reader.string('released resource'));
+    }
+    PocketSurfaceFrame? auxiliary;
+    if (reader.u8() != 0) {
+      auxiliary = PocketSurfaceFrame(
+        width: reader.f32(),
+        height: reader.f32(),
+        ops: _binaryOps(reader, reader.count('auxiliary ops')),
+      );
+    }
+    reader.finish();
+    return PocketFrame(
+      width: width,
+      height: height,
+      ops: ops,
+      events: List<PocketEvent>.unmodifiable(events),
+      resources: List<PocketImageResource>.unmodifiable(resources),
+      releasedResources: List<String>.unmodifiable(releasedResources),
+      auxiliary: auxiliary,
+    );
+  }
+
   final double width;
   final double height;
   final List<PocketOp> ops;
@@ -496,6 +577,266 @@ class PocketFrame {
   final List<PocketImageResource> resources;
   final List<String> releasedResources;
   final PocketSurfaceFrame? auxiliary;
+}
+
+List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count) {
+  final result = <PocketOp>[];
+  for (var index = 0; index < count; index++) {
+    final type = reader.u8();
+    final x = reader.f32();
+    final y = reader.f32();
+    final width = reader.f32();
+    final height = reader.f32();
+    final clip = PocketClip(
+      x: reader.f32(),
+      y: reader.f32(),
+      width: reader.f32(),
+      height: reader.f32(),
+    );
+    switch (type) {
+      case 0:
+        result.add(
+          PocketRectOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            color: reader.u32(),
+            clip: clip,
+          ),
+        );
+      case 1:
+        result.add(
+          PocketRoundedOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            color: reader.u32(),
+            radius: reader.f32(),
+            clip: clip,
+          ),
+        );
+      case 2:
+        result.add(
+          PocketGradientOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            fromColor: reader.u32(),
+            toColor: reader.u32(),
+            direction: reader.u32(),
+            clip: clip,
+          ),
+        );
+      case 3:
+        result.add(
+          PocketTriangleOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            points: List<PocketPoint>.generate(
+              3,
+              (_) => PocketPoint(x: reader.f32(), y: reader.f32()),
+              growable: false,
+            ),
+            colors: List<int>.generate(3, (_) => reader.u32(), growable: false),
+            clip: clip,
+          ),
+        );
+      case 4:
+        result.add(
+          PocketTextureTriangleOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            asset: reader.string('texture triangle asset'),
+            color: reader.u32(),
+            points: List<PocketPoint>.generate(
+              3,
+              (_) => PocketPoint(x: reader.f32(), y: reader.f32()),
+              growable: false,
+            ),
+            uvs: List<double>.generate(6, (_) => reader.f32(), growable: false),
+            clip: clip,
+          ),
+        );
+      case 5:
+        final text = reader.string('text');
+        final size = reader.f32();
+        final color = reader.u32();
+        final fontSlot = reader.u8() == 0 ? null : reader.u8();
+        result.add(
+          PocketTextOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            text: text,
+            size: size,
+            color: color,
+            fontSlot: fontSlot,
+            clip: clip,
+          ),
+        );
+      case 6:
+        final asset = reader.string('image asset');
+        final uv = reader.u8() == 0
+            ? null
+            : List<double>.generate(4, (_) => reader.f32(), growable: false);
+        final tint = reader.u8() == 0 ? null : reader.u32();
+        result.add(
+          PocketImageOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            asset: asset,
+            uv: uv,
+            tint: tint,
+            clip: clip,
+          ),
+        );
+      case 7:
+        final id = reader.string('surface id');
+        final descriptor = reader.string('surface descriptor');
+        final decoded = jsonDecode(descriptor);
+        if (decoded is! Map || decoded['parameters'] is! Map) {
+          throw const FormatException('Invalid binary host surface descriptor');
+        }
+        result.add(
+          PocketHostSurfaceOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            clip: clip,
+            id: id,
+            kind: '${decoded['kind']}',
+            parameters: Map<String, dynamic>.from(decoded['parameters'] as Map),
+          ),
+        );
+      case 8:
+        final id = reader.string('video id');
+        final asset = reader.string('video asset');
+        final fit = switch (reader.u8()) {
+          1 => 'contain',
+          2 => 'fill',
+          _ => 'cover',
+        };
+        final autoplay = reader.u8() != 0;
+        result.add(
+          PocketVideoOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            id: id,
+            asset: asset,
+            autoplay: autoplay,
+            fit: fit,
+            clip: clip,
+          ),
+        );
+      default:
+        throw FormatException('Unknown Pocket binary operation type: $type');
+    }
+  }
+  return List<PocketOp>.unmodifiable(result);
+}
+
+final class _PocketBinaryReader {
+  _PocketBinaryReader(this.data);
+
+  final Uint8List data;
+  var offset = 0;
+
+  int get remaining => data.length - offset;
+
+  void _require(int length, String field) {
+    if (length < 0 || length > remaining) {
+      throw FormatException(
+        'Pocket binary frame truncated while reading $field',
+      );
+    }
+  }
+
+  int u8() {
+    _require(1, 'u8');
+    return data[offset++];
+  }
+
+  int u16() {
+    _require(2, 'u16');
+    final value = ByteData.sublistView(
+      data,
+      offset,
+      offset + 2,
+    ).getUint16(0, Endian.little);
+    offset += 2;
+    return value;
+  }
+
+  int u32() {
+    _require(4, 'u32');
+    final value = ByteData.sublistView(
+      data,
+      offset,
+      offset + 4,
+    ).getUint32(0, Endian.little);
+    offset += 4;
+    return value;
+  }
+
+  int u64() {
+    _require(8, 'u64');
+    final value = ByteData.sublistView(
+      data,
+      offset,
+      offset + 8,
+    ).getUint64(0, Endian.little);
+    offset += 8;
+    return value;
+  }
+
+  double f32() {
+    _require(4, 'f32');
+    final value = ByteData.sublistView(
+      data,
+      offset,
+      offset + 4,
+    ).getFloat32(0, Endian.little);
+    offset += 4;
+    if (!value.isFinite)
+      throw const FormatException('Pocket binary float is not finite');
+    return value;
+  }
+
+  int count(String field) {
+    final value = u32();
+    if (value > 1 << 20)
+      throw FormatException('Pocket binary $field count is too large');
+    return value;
+  }
+
+  Uint8List bytes(String field) {
+    final length = u32();
+    _require(length, field);
+    final result = Uint8List.fromList(data.sublist(offset, offset + length));
+    offset += length;
+    return result;
+  }
+
+  String string(String field) => utf8.decode(bytes(field));
+
+  void finish() {
+    if (offset != data.length) {
+      throw const FormatException('Pocket binary frame has trailing bytes');
+    }
+  }
 }
 
 List<PocketOp> _opsFromJson(Object? rawOps) {

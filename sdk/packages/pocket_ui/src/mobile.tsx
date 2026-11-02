@@ -351,6 +351,14 @@ const surfaceGlobal = globalThis as typeof globalThis & { pocket?: SurfaceBridge
 let nextGlassSurface = 1;
 let nextTextureSurface = 1;
 
+const DEFAULT_PLATFORM_TEXTURE_RADIUS = 12;
+const MAX_PLATFORM_TEXTURE_RADIUS = 200;
+
+function platformTextureRadius(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_PLATFORM_TEXTURE_RADIUS;
+  return Math.max(0, Math.min(MAX_PLATFORM_TEXTURE_RADIUS, value));
+}
+
 export function GlassSurface(props: {
   children?: JSX.Element;
   shape?: GlassShape;
@@ -438,6 +446,8 @@ export function PlatformTextureSurface(props: {
   sourceWidth: number;
   sourceHeight: number;
   fit?: "cover" | "contain";
+  /** Rounded-xl by default; pass zero for a deliberately square surface. */
+  radius?: number;
   /** Native camera transform metadata; zero/false keeps legacy textures unchanged. */
   rotationDegrees?: number;
   mirrorX?: boolean;
@@ -451,15 +461,19 @@ export function PlatformTextureSurface(props: {
     sourceWidth: props.sourceWidth,
     sourceHeight: props.sourceHeight,
     fit: props.fit ?? "cover",
+    radius: platformTextureRadius(props.radius),
     rotationDegrees: props.rotationDegrees ?? 0,
     mirrorX: props.mirrorX ?? false,
   });
   const register = (): void => {
     const registerSurface = surfaceGlobal.pocket?.registerSurface;
-    if (typeof registerSurface !== "function") return;
+    if (typeof registerSurface !== "function") {
+      setRegistered(false);
+      return;
+    }
     try {
-      registerSurface(id, "platformTexture", payload());
-      setRegistered(true);
+      const ok = registerSurface(id, "platformTexture", payload()) !== false;
+      setRegistered(ok);
     } catch {
       setRegistered(false);
     }
@@ -473,6 +487,7 @@ export function PlatformTextureSurface(props: {
     void props.sourceWidth;
     void props.sourceHeight;
     void props.fit;
+    void props.radius;
     void props.rotationDegrees;
     void props.mirrorX;
     if (mounted && registered()) register();
@@ -481,10 +496,10 @@ export function PlatformTextureSurface(props: {
   return (
     <Show
       when={registered()}
-      fallback={<View class={props.class ?? "flex-col items-center justify-center rounded-xl bg-slate-200"}><Text class="text-xs text-slate-600">Texture provider unavailable</Text></View>}
+      fallback={<View class={props.class ?? "flex-col items-center justify-center rounded-xl bg-slate-200"} style={{ radius: platformTextureRadius(props.radius) }}><Text class="text-xs text-slate-600">Texture provider unavailable</Text></View>}
     >
-      <View class={props.class ?? "relative overflow-hidden rounded-xl"}>
-        <CompositorSurface package={id} class="absolute inset-0" />
+      <View class={props.class ?? "relative overflow-hidden rounded-xl"} style={{ radius: platformTextureRadius(props.radius) }}>
+        <CompositorSurface package={id} class="absolute inset-0" style={{ radius: platformTextureRadius(props.radius) }} />
       </View>
     </Show>
   );

@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
+import 'package:path/path.dart' as path;
 import 'package:pocket_services/pocket_services.dart';
 import 'package:test/test.dart';
 
@@ -326,6 +327,327 @@ void main() {
       await activeFile.writeAsString('foo/bar\n');
       expect(await store.readPointerId('active'), isNull);
     });
+
+    test(
+      '5. lastGood=1, active=3: coordinator.prepare() rejects build=2 and build=3 (different versionId)',
+      () async {
+        final store = PocketPackageStore(tempDir);
+        final scoped = store.scoped('test.app');
+        final transport = _MemoryTransport(<String, List<int>>{});
+        final manifestUri = Uri.parse('http://127.0.0.1:39123/latest.json');
+
+        final entry1 = <int>[1, 1, 1];
+        final pak1 = <int>[1, 1, 2];
+        final signed1 = await makeSignedManifest(
+          build: 1,
+          version: '1.0.1',
+          entryBytes: entry1,
+          pakBytes: pak1,
+        );
+
+        final entry3 = <int>[3, 3, 3];
+        final pak3 = <int>[3, 3, 4];
+        final signed3 = await makeSignedManifest(
+          build: 3,
+          version: '1.0.3',
+          entryBytes: entry3,
+          pakBytes: pak3,
+        );
+
+        final coordinator = PocketUpdateCoordinator(
+          manifestUri: manifestUri,
+          appId: 'test.app',
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          store: store,
+          transport: transport,
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+        );
+
+        // Prepare and commit build 1 so lastGood=1, active=1
+        final hashEntry1 = _sha256(entry1);
+        final hashPak1 = _sha256(pak1);
+        transport.responses[manifestUri.toString()] = signed1.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry1').toString()] =
+            entry1;
+        transport.responses[manifestUri.resolve('blobs/$hashPak1').toString()] =
+            pak1;
+
+        final prepared1 = await coordinator.prepare();
+        await coordinator.commitHealthy(prepared1);
+
+        // Prepare build 3 and activate directly so active=3, lastGood remains 1
+        final hashEntry3 = _sha256(entry3);
+        final hashPak3 = _sha256(pak3);
+        transport.responses[manifestUri.toString()] = signed3.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry3').toString()] =
+            entry3;
+        transport.responses[manifestUri.resolve('blobs/$hashPak3').toString()] =
+            pak3;
+
+        final prepared3 = await coordinator.prepare();
+        await scoped.activate(prepared3.package);
+
+        final good = await scoped.lastGood(verifier: coordinator.verifier);
+        final act = await scoped.active(verifier: coordinator.verifier);
+        expect(good?.manifest.payload.build, 1);
+        expect(act?.manifest.payload.build, 3);
+
+        // Candidate with build=2 must be rejected
+        final entry2 = <int>[2, 2, 2];
+        final pak2 = <int>[2, 2, 3];
+        final signed2 = await makeSignedManifest(
+          build: 2,
+          version: '1.0.2',
+          entryBytes: entry2,
+          pakBytes: pak2,
+        );
+        final hashEntry2 = _sha256(entry2);
+        final hashPak2 = _sha256(pak2);
+        transport.responses[manifestUri.toString()] = signed2.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry2').toString()] =
+            entry2;
+        transport.responses[manifestUri.resolve('blobs/$hashPak2').toString()] =
+            pak2;
+
+        await expectLater(
+          coordinator.prepare(),
+          throwsA(
+            isA<PocketPackageFormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('Refusing downgrade or replay: package build 2 is not newer than current build 3'),
+            ),
+          ),
+        );
+
+        // Candidate with build=3 but different versionId
+        final entry3Alt = <int>[3, 3, 3, 99];
+        final pak3Alt = <int>[3, 3, 4, 99];
+        final signed3Alt = await makeSignedManifest(
+          build: 3,
+          version: '1.0.3-alt',
+          entryBytes: entry3Alt,
+          pakBytes: pak3Alt,
+        );
+        final hashEntry3Alt = _sha256(entry3Alt);
+        final hashPak3Alt = _sha256(pak3Alt);
+        transport.responses[manifestUri.toString()] = signed3Alt.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry3Alt').toString()] =
+            entry3Alt;
+        transport.responses[manifestUri.resolve('blobs/$hashPak3Alt').toString()] =
+            pak3Alt;
+
+        await expectLater(
+          coordinator.prepare(),
+          throwsA(
+            isA<PocketPackageFormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('Refusing downgrade or replay: package build 3 is not newer than current build 3'),
+            ),
+          ),
+        );
+      },
+    );
+
+    test(
+      '6. minimumBuild=10 on an empty store: coordinator.prepare() rejects build=10',
+      () async {
+        final store = PocketPackageStore(tempDir);
+        final transport = _MemoryTransport(<String, List<int>>{});
+        final manifestUri = Uri.parse('http://127.0.0.1:39123/latest.json');
+
+        final entry10 = <int>[10, 10, 10];
+        final pak10 = <int>[10, 10, 11];
+        final signed10 = await makeSignedManifest(
+          build: 10,
+          version: '1.0.10',
+          entryBytes: entry10,
+          pakBytes: pak10,
+        );
+
+        final hashEntry10 = _sha256(entry10);
+        final hashPak10 = _sha256(pak10);
+        transport.responses[manifestUri.toString()] = signed10.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry10').toString()] =
+            entry10;
+        transport.responses[manifestUri.resolve('blobs/$hashPak10').toString()] =
+            pak10;
+
+        final coordinator = PocketUpdateCoordinator(
+          manifestUri: manifestUri,
+          appId: 'test.app',
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          store: store,
+          transport: transport,
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+          minimumBuild: 10,
+        );
+
+        await expectLater(
+          coordinator.prepare(),
+          throwsA(
+            isA<PocketPackageFormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('Refusing downgrade or replay: package build 10 is not newer than current build 10'),
+            ),
+          ),
+        );
+      },
+    );
+
+    test(
+      '7. Out-of-order commit of prepared candidates rejects older candidate and preserves lastGood',
+      () async {
+        final store = PocketPackageStore(tempDir);
+        final transport = _MemoryTransport(<String, List<int>>{});
+        final manifestUri = Uri.parse('http://127.0.0.1:39123/latest.json');
+
+        final entry2 = <int>[2, 2, 2];
+        final pak2 = <int>[2, 2, 3];
+        final signed2 = await makeSignedManifest(
+          build: 2,
+          version: '1.0.2',
+          entryBytes: entry2,
+          pakBytes: pak2,
+        );
+
+        final entry3 = <int>[3, 3, 3];
+        final pak3 = <int>[3, 3, 4];
+        final signed3 = await makeSignedManifest(
+          build: 3,
+          version: '1.0.3',
+          entryBytes: entry3,
+          pakBytes: pak3,
+        );
+
+        final coordinator = PocketUpdateCoordinator(
+          manifestUri: manifestUri,
+          appId: 'test.app',
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          store: store,
+          transport: transport,
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+        );
+
+        // Serve build 2 and prepare
+        final hashEntry2 = _sha256(entry2);
+        final hashPak2 = _sha256(pak2);
+        transport.responses[manifestUri.toString()] = signed2.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry2').toString()] =
+            entry2;
+        transport.responses[manifestUri.resolve('blobs/$hashPak2').toString()] =
+            pak2;
+
+        final prepared2 = await coordinator.prepare();
+
+        // Serve build 3 and prepare
+        final hashEntry3 = _sha256(entry3);
+        final hashPak3 = _sha256(pak3);
+        transport.responses[manifestUri.toString()] = signed3.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry3').toString()] =
+            entry3;
+        transport.responses[manifestUri.resolve('blobs/$hashPak3').toString()] =
+            pak3;
+
+        final prepared3 = await coordinator.prepare();
+
+        // Commit healthy build 3 first
+        await coordinator.commitHealthy(prepared3);
+        var active = await coordinator.lastGood();
+        expect(active?.build, 3);
+
+        // Now attempt out-of-order commit of prepared build 2
+        await expectLater(
+          coordinator.commitHealthy(prepared2),
+          throwsA(
+            isA<PocketPackageFormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('Refusing downgrade or replay: package build 2 is not newer than current build 3'),
+            ),
+          ),
+        );
+
+        // Verify lastGood remains build 3
+        active = await coordinator.lastGood();
+        expect(active?.build, 3);
+      },
+    );
+
+    test(
+      '8. store.fallbackFor("../sentinel-outside-versions") throws unsafe-token and preserves sentinel directory',
+      () async {
+        final store = PocketPackageStore(tempDir).scoped('test.app');
+        await store.initialize();
+
+        // Create sentinel directory outside versions
+        final sentinelDir = Directory(
+          path.join(tempDir.path, 'apps', 'test.app', 'sentinel-outside-versions'),
+        );
+        await sentinelDir.create(recursive: true);
+        final sentinelFile = File(path.join(sentinelDir.path, 'data.txt'));
+        await sentinelFile.writeAsString('safe-data');
+
+        final verifier = PocketManifestVerifier(
+          trustedKeys: const {},
+          appId: 'test.app',
+        );
+
+        await expectLater(
+          store.fallbackFor(
+            '../sentinel-outside-versions',
+            verifier: verifier,
+          ),
+          throwsA(
+            isA<PocketPackageException>().having(
+              (e) => e.code,
+              'code',
+              'unsafe-token',
+            ),
+          ),
+        );
+
+        // Verify directory and file were not deleted
+        expect(await sentinelDir.exists(), isTrue);
+        expect(await sentinelFile.exists(), isTrue);
+        expect(await sentinelFile.readAsString(), 'safe-data');
+      },
+    );
+
+    test(
+      '9. store.readPointerId("../outside") throws unsafe-token',
+      () async {
+        final store = PocketPackageStore(tempDir).scoped('test.app');
+        await store.initialize();
+
+        await expectLater(
+          store.readPointerId('../outside'),
+          throwsA(
+            isA<PocketPackageException>().having(
+              (e) => e.code,
+              'code',
+              'unsafe-token',
+            ),
+          ),
+        );
+
+        await expectLater(
+          store.readPointerId('unknownPointer'),
+          throwsA(
+            isA<PocketPackageException>().having(
+              (e) => e.code,
+              'code',
+              'unsafe-token',
+            ),
+          ),
+        );
+      },
+    );
   });
 }
 

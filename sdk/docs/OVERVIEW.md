@@ -43,7 +43,7 @@ sdk/
 ├── scripts/                  # 上游准备、guest 构建、native 构建、签包和检查
 ├── editor/                   # 本地源码编辑、编译、签名发布服务
 ├── docs/                     # API、来源、验证、性能和迁移记录
-└── migrations/               # 旧实现源归档和迁移清单
+└── docs/                     # 来源、接入与验证记录（历史迁移归档已删除）
 ```
 
 `.cache/`、`.pocket-build/`、`native/target/`、Pods 和 Flutter build 都是生成内容，

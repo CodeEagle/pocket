@@ -37,6 +37,60 @@ export type BuildGuestResult = {
   tickHz: number;
 };
 
+type GuestReleaseIdentity = {
+  version?: string;
+  build?: number;
+};
+
+function readJsonObject(path: string): Record<string, unknown> | undefined {
+  if (!existsSync(path)) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`build_guest: invalid JSON in ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`build_guest: ${path} must contain a JSON object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Resolve release identity from the project's single release configuration.
+ *
+ * Older projects kept capabilities in manifest.json while editor.json (or
+ * pocket.json) owned the release version/build.  The bytecode metadata must
+ * still carry that identity: PocketSession cannot safely enforce an OTA floor
+ * when it sees the default build 0.  A manifest value wins so an explicitly
+ * pinned guest artifact remains reproducible; editor/pocket are fallbacks for
+ * existing projects created before the fields were copied into the manifest.
+ */
+function releaseIdentity(projectRoot: string, manifest?: Record<string, unknown>): GuestReleaseIdentity {
+  const editor = readJsonObject(join(projectRoot, "editor.json"));
+  const pocket = readJsonObject(join(projectRoot, "pocket.json"));
+  // Select one authoritative object instead of silently mixing a version from
+  // one file with a build from another. A manifest that explicitly carries a
+  // release field is an intentional artifact pin and therefore wins over the
+  // editor/project configuration.
+  const source = [manifest, editor, pocket].find((value) =>
+    value !== undefined && (Object.hasOwn(value, "version") || Object.hasOwn(value, "build")),
+  );
+  if (!source) return {};
+  const hasVersion = Object.hasOwn(source, "version");
+  const hasBuild = Object.hasOwn(source, "build");
+  if (hasVersion && (typeof source.version !== "string" || source.version.length === 0)) {
+    throw new Error("build_guest: release version must be a non-empty string");
+  }
+  if (hasBuild && (!Number.isSafeInteger(source.build) || Number(source.build) < 1)) {
+    throw new Error("build_guest: release build must be a positive safe integer");
+  }
+  return {
+    ...(hasVersion ? { version: source.version as string } : {}),
+    ...(hasBuild ? { build: source.build as number } : {}),
+  };
+}
+
 function projectEntry(projectRoot: string, requested?: string): string {
   let entry = requested;
   if (!entry) {
@@ -399,37 +453,37 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     if (compilerPak !== pak) copyFileSync(compilerPak, pak);
     const bytecode = join(output, "app.qjbc");
     const metadata = join(output, "app.bytecode.json");
-    runOrThrow(["cargo", "run", "--locked", "--manifest-path", join(root, "native/Cargo.toml"), "--bin", "pocketjs_bytecode", "--", "--input", source, "--output", bytecode, "--metadata", metadata, "--kind", "script", "--binding-generation", "12", "--tick-hz", String(tickHz)], root, options.log);
+    // Do not duplicate the ABI generation here. pocketjs_bytecode defaults to
+    // pocket_spec::BINDING_GENERATION, the same contract consumed by the
+    // runtime, so a generation bump cannot leave the build script stale.
+    runOrThrow(["cargo", "run", "--locked", "--manifest-path", join(root, "native/Cargo.toml"), "--bin", "pocketjs_bytecode", "--", "--input", source, "--output", bytecode, "--metadata", metadata, "--kind", "script", "--tick-hz", String(tickHz)], root, options.log);
     if (!existsSync(bytecode) || !existsSync(metadata)) throw new Error("QuickJS compiler did not produce app.qjbc and app.bytecode.json");
     const guestManifest = join(projectRoot, "manifest.json");
-    if (existsSync(guestManifest)) {
-      try {
-        const manifestObj = JSON.parse(readFileSync(guestManifest, "utf8")) as Record<string, unknown>;
-        const metadataObj = JSON.parse(readFileSync(metadata, "utf8")) as Record<string, unknown>;
-        let modified = false;
-        if (typeof manifestObj.version !== "undefined") {
-          metadataObj.version = manifestObj.version;
-          modified = true;
-        }
-        if (typeof manifestObj.build !== "undefined") {
-          metadataObj.build = manifestObj.build;
-          modified = true;
-        }
-        if (modified) {
-          writeFileSync(metadata, `${JSON.stringify(metadataObj, null, 2)}\n`);
-        }
-      } catch {
-        // Ignore if manifest.json is invalid JSON
-      }
+    const manifestObj = readJsonObject(guestManifest);
+    const identity = releaseIdentity(projectRoot, manifestObj);
+    const metadataObj = readJsonObject(metadata) ?? {};
+    let metadataModified = false;
+    if (identity.version !== undefined && metadataObj.version !== identity.version) {
+      metadataObj.version = identity.version;
+      metadataModified = true;
     }
+    if (identity.build !== undefined && metadataObj.build !== identity.build) {
+      metadataObj.build = identity.build;
+      metadataModified = true;
+    }
+    if (metadataModified) writeFileSync(metadata, `${JSON.stringify(metadataObj, null, 2)}\n`);
     const assets = options.copyAssetsTo ? resolve(options.copyAssetsTo) : undefined;
     if (assets) {
       mkdirSync(assets, { recursive: true });
       copyFileSync(bytecode, join(assets, "app.qjbc"));
       copyFileSync(metadata, join(assets, "app.bytecode.json"));
-      const manifest = join(projectRoot, "manifest.json");
-      if (!existsSync(manifest)) throw new Error(`build_guest: missing guest manifest: ${manifest}`);
-      copyFileSync(manifest, join(assets, "guest-manifest.json"));
+      if (!manifestObj) throw new Error(`build_guest: missing or invalid guest manifest: ${guestManifest}`);
+      // Keep the copied manifest self-describing for package/update tools while
+      // leaving the consumer's source manifest untouched.
+      const outputManifest = { ...manifestObj } as Record<string, unknown>;
+      if (identity.version !== undefined) outputManifest.version = identity.version;
+      if (identity.build !== undefined) outputManifest.build = identity.build;
+      writeFileSync(join(assets, "guest-manifest.json"), `${JSON.stringify(outputManifest, null, 2)}\n`);
       copyFileSync(pak, join(assets, "app.pak"));
     }
     if (options.keepSource) {

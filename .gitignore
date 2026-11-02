@@ -12,6 +12,7 @@
 **/.symlinks/
 **/target/
 **/Frameworks/*.a
+**/Frameworks/*.xcframework/
 **/Frameworks/*.dylib
 **/jniLibs/**/*.so
 .DS_Store
@@ -20,3 +21,5 @@
 .fvm/
 
 .pocket-updates/
+
+**/.kotlin/

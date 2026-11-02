@@ -63,6 +63,17 @@ abstract interface class PocketBinaryDuplexRuntime {
 final class PocketDuplexChannel {
   static const int ringCapacity = 256;
   static const int messageByteSize = PocketDuplexEndpoint.messageByteSize;
+
+  /// Reserved host-system record. The native runtime adapts this record to
+  /// the canonical `input.pointer` event/GuestFrame path. Other application
+  /// records should use a different message type; type 1 with a phase flag
+  /// is not available for arbitrary guest-defined messages.
+  static const int pointerMessageType = 1;
+  static const int pointerDownFlag = 1;
+  static const int pointerMoveFlag = 2;
+  static const int pointerUpFlag = 3;
+  static const int pointerCancelFlag = 4;
+  static const int pointerAuxiliaryFlag = 0x0100;
   static const double _maxFloat32 = 3.4028234663852886e38;
 
   PocketDuplexChannel._({

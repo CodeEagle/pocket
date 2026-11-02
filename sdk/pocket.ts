@@ -12,8 +12,9 @@
  *   bun pocket.ts editor <directory> [--port=8790]
  */
 
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -386,39 +387,60 @@ function prepareFlutterDependencies(flutterDirectory: string, required: boolean)
   return true;
 }
 
-type NativePlatform = "ios-sim" | "ios" | "macos";
+type NativePlatform = "ios-sim" | "ios" | "macos" | "android";
 
-function newestMtimeMs(targetPath: string): number {
-  if (!existsSync(targetPath)) return 0;
-  const stat = statSync(targetPath);
-  if (!stat.isDirectory()) return stat.mtimeMs;
-  let newest = stat.mtimeMs;
-  for (const entry of readdirSync(targetPath, { withFileTypes: true })) {
-    const full = join(targetPath, entry.name);
-    if (entry.isDirectory()) {
-      newest = Math.max(newest, newestMtimeMs(full));
-    } else {
-      try {
-        newest = Math.max(newest, statSync(full).mtimeMs);
-      } catch {}
+function nativeInputFingerprint(sdk: string): string {
+  const inputs = [
+    join(sdk, "native/src"),
+    join(sdk, "native/Cargo.toml"),
+    join(sdk, "native/Cargo.lock"),
+    join(sdk, "native/patches"),
+    join(sdk, "scripts/build_native.sh"),
+    join(sdk, "scripts/prepare_upstream.py"),
+    join(sdk, ".cache/pocketjs/.pocketjs-revision"),
+    join(sdk, ".cache/pocketjs/Cargo.lock"),
+    join(sdk, ".cache/pocketjs/bun.lock"),
+    join(sdk, ".cache/pocketjs/package.json"),
+  ];
+  const files: string[] = [];
+  const collect = (path: string): void => {
+    if (!existsSync(path)) return;
+    const info = lstatSync(path);
+    if (info.isSymbolicLink()) return;
+    if (!info.isDirectory()) {
+      files.push(path);
+      return;
     }
+    for (const entry of readdirSync(path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      collect(join(path, entry.name));
+    }
+  };
+  for (const input of inputs) collect(input);
+  const hash = createHash("sha256");
+  for (const file of files.sort()) {
+    hash.update(relative(sdk, file));
+    hash.update("\0");
+    hash.update(readFileSync(file));
+    hash.update("\0");
   }
-  return newest;
+  return hash.digest("hex");
 }
 
 function prepareNative(sdk: string, platform: NativePlatform): void {
   const packageRoot = join(sdk, "packages/pocket_flutter");
   const archive = platform === "macos"
     ? join(packageRoot, "macos/Frameworks/libpocket_flutter.a")
-    : join(packageRoot, "ios/Frameworks/libpocket_flutter.a");
-  const stampPath = join(sdk, ".pocket-build/sdk-native/current.json");
+    : platform === "android"
+      ? join(packageRoot, "android/src/main/jniLibs/arm64-v8a/libpocket_flutter.so")
+      : join(packageRoot, "ios/Frameworks/PocketFlutter.xcframework");
+  // Keep a stamp per target. A shared current.json lets an iOS simulator
+  // build race a device/Android build and incorrectly satisfy the other
+  // consumer's cache check.
+  const stampPath = join(sdk, `.pocket-build/sdk-native/${platform}.json`);
   let stamp: JsonObject | undefined;
   try { stamp = readJson(stampPath); } catch { stamp = undefined; }
-  const nativeSrc = join(sdk, "native/src");
-  const nativeCargo = join(sdk, "native/Cargo.toml");
-  const newestSrcMtime = Math.max(newestMtimeMs(nativeSrc), newestMtimeMs(nativeCargo));
-  const archiveMtime = existsSync(archive) ? statSync(archive).mtimeMs : 0;
-  if (stamp?.platform === platform && existsSync(archive) && newestSrcMtime <= archiveMtime) {
+  const fingerprint = nativeInputFingerprint(sdk);
+  if (stamp?.platform === platform && stamp?.fingerprint === fingerprint && existsSync(archive)) {
     console.log(`pocket: native ${platform} archive already prepared: ${archive}`);
     return;
   }
@@ -428,7 +450,7 @@ function prepareNative(sdk: string, platform: NativePlatform): void {
   const result = spawnSync("bash", [script, platform], { cwd: sdk, stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0 || !existsSync(archive)) fail(`native ${platform} build did not produce ${archive}`);
-  writeJson(stampPath, { platform, archive, generatedAt: new Date().toISOString() });
+  writeJson(stampPath, { platform, archive, fingerprint, generatedAt: new Date().toISOString() });
 }
 
 function scaffoldTest(flutterDirectory: string, appId: string): void {
@@ -469,12 +491,18 @@ function createFlutterHost(project: string, sdk: string, appId: string, hardware
   // canonical roots or a generated /tmp project points at /private/Volumes.
   const sdkPackage = sdk;
   const sdkPath = relative(realpathSync(flutterDirectory), realpathSync(sdkPackage)).replaceAll("\\", "/") || ".";
-  writeFileSync(join(flutterDirectory, "pubspec.yaml"), `name: ${name}\ndescription: PocketJS Flutter host generated by the local SDK.\npublish_to: none\nversion: 0.1.0+1\n\nenvironment:\n  sdk: ^3.9.2\n  flutter: '>=3.35.0'\n\ndependencies:\n  flutter:\n    sdk: flutter\n  pocket_sdk:\n    path: ${sdkPath}\n\ndev_dependencies:\n  flutter_lints: ^5.0.0\n  flutter_test:\n    sdk: flutter\n\nflutter:\n  uses-material-design: true\n  assets:\n    - assets/app.qjbc\n    - assets/app.bytecode.json\n    - assets/guest-manifest.json\n    - assets/app.pak\n`);
+  const hardwarePath = relative(realpathSync(flutterDirectory), realpathSync(join(sdk, "packages/pocket_hardware"))).replaceAll("\\", "/");
+  const hardwareDependency = hardware ? `\n  pocket_hardware:\n    path: ${hardwarePath}` : "";
+  writeFileSync(join(flutterDirectory, "pubspec.yaml"), `name: ${name}\ndescription: PocketJS Flutter host generated by the local SDK.\npublish_to: none\nversion: 0.1.0+1\n\nenvironment:\n  sdk: ^3.9.2\n  flutter: '>=3.35.0'\n\ndependencies:\n  flutter:\n    sdk: flutter\n  pocket_sdk:\n    path: ${sdkPath}${hardwareDependency}\n\ndev_dependencies:\n  flutter_lints: ^5.0.0\n  flutter_test:\n    sdk: flutter\n\nflutter:\n  uses-material-design: true\n  assets:\n    - assets/app.qjbc\n    - assets/app.bytecode.json\n    - assets/guest-manifest.json\n    - assets/app.pak\n`);
   mkdirSync(join(flutterDirectory, "assets"), { recursive: true });
+  const hardwareImport = hardware ? "import 'package:pocket_hardware/pocket_hardware.dart';\n" : "";
   const hardwareConfig = hardware
-    ? "enableHardware: true,\n    allowedPermissions: HardwarePermissions.all,\n  "
+    ? "pluginFactories: [createHardwarePlugin],\n    allowedPermissions: HardwarePermissions.all,\n    "
     : "";
-  writeFileSync(join(flutterDirectory, "lib/main.dart"), `import 'package:flutter/material.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  WidgetsFlutterBinding.ensureInitialized();\n  runApp(PocketApp(config: PocketAppConfig(\n    appId: '${appId.replaceAll("'", "\\'")}',\n    ${hardwareConfig})));\n}\n`);
+  const hardwareFactory = hardware
+    ? "\nPocketPlugin createHardwarePlugin(PocketViewController controller) => HardwarePlugin(\n  onTextureRegistered: controller.authorizePlatformTexture,\n  onTextureReleased: controller.revokePlatformTexture,\n);\n"
+    : "";
+  writeFileSync(join(flutterDirectory, "lib/main.dart"), `${hardwareImport}import 'package:flutter/material.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  WidgetsFlutterBinding.ensureInitialized();\n  runApp(PocketApp(config: PocketAppConfig(\n    appId: '${appId.replaceAll("'", "\\'")}',\n    ${hardwareConfig})));\n}\n${hardwareFactory}`);
   scaffoldTest(flutterDirectory, appId);
   // `flutter create --no-pub` does not materialize ios/Podfile. Resolve the
   // generated local SDK dependency once so the iOS policy can be applied to
@@ -510,12 +538,15 @@ export async function initProject(directory: string, options: { sdkRoot?: string
     name,
     title: name,
     version,
+    build: 1,
     engine: { capabilities: { requires: ["text.glyphs.baked"], enhances: [] } },
     app: { entry: "app.tsx", output: "app", framework: "solid" },
   });
   writeJson(join(project, "manifest.json"), {
     $schema: "https://pocketjs.dev/schema/pocket-guest-manifest.json",
     protocolVersion: 1,
+    version,
+    build: 1,
     capabilities: { requires: ["text.glyphs.baked"], optional: hardware ? hardwareCapabilities : [] },
     permissions: { optional: hardware ? hardwarePermissions : [] },
   });
@@ -542,12 +573,14 @@ function projectConfig(project: string): { appId: string; version: string; build
   const pocket = readJson(join(project, "pocket.json"));
   const appId = typeof editor.appId === "string" ? editor.appId : pocket.id;
   const version = typeof editor.version === "string" ? editor.version : pocket.version;
-  const build = typeof editor.build === "number" ? editor.build : 1;
+  const build = typeof editor.build === "number"
+    ? editor.build
+    : (typeof pocket.build === "number" ? pocket.build : 1);
   const tickHz = typeof editor.tickHz === "number" ? editor.tickHz : 60;
   const hardware = editor.hardware === true;
   if (typeof appId !== "string" || !appIdPattern.test(appId)) fail(`unsafe appId in ${project}`);
   if (typeof version !== "string" || !versionPattern.test(version)) fail(`unsafe version in ${project}`);
-  if (!Number.isSafeInteger(build) || build < 0) fail(`unsafe build in ${project}`);
+  if (!Number.isSafeInteger(build) || build < 1) fail(`unsafe build in ${project}`);
   if (!Number.isInteger(tickHz) || tickHz < 1 || tickHz > 120) fail(`unsafe tickHz in ${project}`);
   return { appId, version, build, tickHz, hardware };
 }
@@ -613,7 +646,7 @@ async function runEditor(directory: string, options: { port?: number; workspace?
 }
 
 function usage(): never {
-  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos]\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR]");
+  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR]");
   process.exit(1);
 }
 
@@ -637,7 +670,7 @@ if (import.meta.main) {
       const sdk = takeFlag(args, "sdk-root");
       const platformValue = takeFlag(args, "platform");
       const platform = platformValue as NativePlatform | undefined;
-      if (platform !== undefined && platform !== "ios-sim" && platform !== "ios" && platform !== "macos") fail("--platform must be ios-sim, ios, or macos");
+      if (platform !== undefined && platform !== "ios-sim" && platform !== "ios" && platform !== "macos" && platform !== "android") fail("--platform must be ios-sim, ios, macos, or android");
       ensureNoArgs(args);
       await buildProject(directory, { outDir: out, sdkRoot: sdk, platform });
     } else if (command === "editor") {

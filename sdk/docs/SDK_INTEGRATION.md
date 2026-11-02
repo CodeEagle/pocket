@@ -22,7 +22,7 @@ bun /Volumes/ORICO/Development/Github/pocket/sdk/pocket.ts init /path/to/my-pock
 - `flutter/pubspec.yaml` 的本地 `pocket_sdk` 路径依赖，以及四个运行期 asset；
 - iOS 15.0 deployment target 和 Apple Silicon `arm64` 架构设置（Flutter 可用时会同时执行 `flutter pub get`，因此 Podfile 已物化）。
 
-`--hardware` 是显式选择：它把 `enableHardware: true`、硬件权限/能力的 optional
+`--hardware` 是显式选择：它添加独立 `pocket_hardware` 依赖、显式 plugin factory、硬件权限/能力的 optional
 manifest、iOS usage-description 和 Android `AndroidManifest.xml` 权限声明写入脚手架；
 Android 工程的 `minSdk` 同时至少为 API 24（`pocket_flutter` 的 Android renderer
 要求）；当前 `build_native.sh android` 只产出 `arm64-v8a`，不宣称 x86/x86_64 或
@@ -93,10 +93,31 @@ bytecode metadata 和 guest manifest；字节码 ABI 不匹配时拒绝启动，
 | `appId` | 应用身份，也是更新存储和性能历史的命名空间。 |
 | `bytecodeAsset` / `pakAsset` / `metadataAsset` / `manifestAsset` | 默认分别为 `assets/app.qjbc`、`assets/app.pak`、`assets/app.bytecode.json`、`assets/guest-manifest.json`，可按项目调整。 |
 | `updates` | `PocketUpdateConfig` 签名更新源；客户端只放 Ed25519 公钥。 |
-| `enableHardware`、`allowedPermissions` | 是否注册已编译硬件 provider，以及宿主允许的权限集合；guest manifest 只能进一步收窄。 |
+| `allowedPermissions` | 宿主允许的权限集合；guest manifest 只能进一步收窄。硬件通过独立包和 pluginFactories 显式注册。 |
 | `pluginFactories` | `PocketPlugin Function(PocketViewController)` 列表；每次验证通过的 guest generation 都创建新的插件实例。 |
 | `additionalCapabilities` | 宿主明确增加的 capability 名称。 |
 | `showFps` | 显示 FPS 诊断标签并采集有界性能窗口。 |
+
+可选硬件由消费工程显式依赖 `pocket_hardware`；核心 `pocket_sdk` 不依赖或导出该插件。
+移除原 `enableHardware` 开关，统一使用已有插件工厂，避免两套注册状态：
+
+```dart
+import 'package:pocket_hardware/pocket_hardware.dart';
+
+PocketPlugin hardwareProvider(PocketViewController controller) => HardwarePlugin(
+  onTextureRegistered: controller.authorizePlatformTexture,
+  onTextureReleased: controller.revokePlatformTexture,
+);
+
+const config = PocketAppConfig(
+  appId: 'com.example.camera',
+  pluginFactories: [hardwareProvider],
+  allowedPermissions: {HardwarePermissions.camera},
+);
+```
+
+底层绘制/运行时诊断接口从 `package:pocket_flutter/pocket_flutter.dart` 显式导入；
+核心入口只导出应用集成与插件契约，不再全量透传底层内部类型。
 
 直接管理运行期（例如已有路由/生命周期系统）时使用 `PocketSession`：
 
@@ -245,8 +266,9 @@ bun /Volumes/ORICO/Development/Github/pocket/sdk/pocket.ts build . --sdk-root /V
 ```
 
 命令复用 `scripts/build_native.sh`，并在 SDK 的被忽略目录
-`.pocket-build/sdk-native/current.json` 记录平台和 archive。simulator/device
-不会静默共用错误的 archive；首次 clean checkout 需要对应的 Xcode/Rust 工具链。
+`.pocket-build/sdk-native/<platform>.json` 记录平台、输入指纹和 archive。
+simulator/device/Android 不会静默共用错误的 archive；首次 clean checkout
+需要对应的 Xcode/Rust 工具链。
 `--platform` 只准备库，不启动设备。
 
 ## Pocket Studio（外部工程）

@@ -64,7 +64,7 @@ Native 执行真实 guest，PocketJS 产生布局和 DrawList，Dart 解码为 `
 
 ### 2.4 插件与更新
 
-JS 通过 `demo/js/host.ts` 发出带 requestId 的 `host.request`；`sdk/lib/src/pocket_session.dart` 转交服务注册表，校验声明能力与宿主授权后调用 handler，将结构化结果送回 JS。SDK 默认接入 `package_info_plus` 和 `pocket_hardware` 的 `HardwarePlugin`；后者覆盖相机/照片、BLE、传感器、生物识别、位置和天气的结构化请求，并拒绝 unsupported/timeout/late result。`demo/test/hardware_plugin_test.dart` 直接验证公开 provider package，真实 iOS MethodChannel 场景由 Demo 集成测试覆盖。
+JS 通过 `demo/js/host.ts` 发出带 requestId 的 `host.request`；`sdk/lib/src/pocket_session.dart` 转交服务注册表，校验声明能力与宿主授权后调用 handler，将结构化结果送回 JS。SDK 默认接入 `package_info_plus`；Showcase 显式依赖并通过 pluginFactories 注册 `pocket_hardware` 的 `HardwarePlugin`，后者覆盖相机/照片、BLE、传感器、生物识别、位置和天气的结构化请求，并拒绝 unsupported/timeout/late result。`demo/test/hardware_plugin_test.dart` 直接验证公开 provider package，真实 iOS MethodChannel 场景由 Demo 集成测试覆盖。
 
 更新经过检查 manifest、验签、ABI/摘要校验、下载缓存、启动候选包、健康确认、晋升健康版本；失败则恢复可用版本。切包会替换 runtime，并对 renderer/host request 回调做 generation 隔离，丢弃旧会话响应；`PocketSession.onError` 会取消延迟挂载/健康 timer，`dispose` 也会取消 timer，避免旧候选覆盖回退。它不下载或热替换 Flutter 原生插件二进制。
 
@@ -362,7 +362,7 @@ iOS 真机和模拟器构建目前复制到同一个插件静态库位置；切�
 | `mini_apps/syslib/pocket_syslib_flutter_ui.js` | Scaffold/Card/Material button 等 JS VDOM 工厂 | 旧输出交给 Dart hydration；可借鉴 API/组合需求，不直接接入另一套 renderer |
 | `lib/core/real_hardware_bridge.dart` | 旧 Demo 的真实 iOS MethodChannel 入口：相机、照片、BLE、传感器、生物识别、GPS/天气；异常或非 iOS 分支大量返回模拟数据 | **有价值但需拆分复用**：当前 Android provider 已按同一 Dart channel 合约实现，仍须追踪原生 handler、权限和错误；不能保留“异常时返回授权成功/模拟拍照成功”的语义；本轮未验收实体设备功能 |
 | `mini_apps/weather_forecast_app.js`、`app_login/main.js`、`app_nav/main.js` | 天气/登录/共享状态/BLE 路由场景，有的只返回 action 描述 | 当前无这些完整业务页；可作为扩展示例，不等于每页实现都可直接执行 |
-| `mini_apps/syslib/pocket_syslib_graphics.js` | `compute3dMechaFrame`、`compute2dParticleFrame` 和 SVG 描述 | 纯计算可保留作未来场景；需要真实 surface/能力后再接 UI |
+| `mini_apps/syslib/pocket_syslib_graphics.js` | SVG 描述 | 保留实际图标规格；删除无消费端的 line/arc 数学命令，避免宣称已集成 3D/粒子渲染 |
 | `native/pocket_runtime_multi.c` | 固定内存节点、scene handle/transform buffer、固定插件响应、模拟 permission/video 帧推进、duplex echo | 有意排除模拟 runtime；不当作真实 Scene/Rapier/视频解码/设备服务迁入 |
 | `tools/compile_pocket_syslib_aot.py` | 生成 PJCA 源码封装与预构建 VDOM，并写入 Dart runner | 有意排除；当前使用真实 QuickJS qjbc，不能混淆两种“AOT” |
 | `mini_apps/syslib/pocket_syslib_ota.js` | semver、ABI gate 和版本管理概念；部分 SHA 校验仅检查字符串长度 | 可借用纯版本逻辑；当前真实签名/摘要/缓存/回滚继续以 services 为准 |
@@ -418,13 +418,13 @@ Kit 的底层是本工程主要来源。**不能说“绘制没继承”，也�
 
 - `PocketSession.initialize` 在缓存包能力协商失败时清空 `active`、标记 `_resetCacheOnHealth` 并重新配置 embedded；`onError`/`dispose` 取消挂载/健康 timer，`generation` 隔离旧回调。`integration_test/update_lifecycle_test.dart` 覆盖候选切换、坏包恢复和重启健康缓存。
 - `PocketPluginManager.activate` 在每轮激活前撤销未激活 provider；required permission/activate 失败会撤销 host capabilities、调用 provider `deactivate` 并整体回收，`packages/pocket_services/test/` 有拒绝、撤销与迟到响应覆盖。
-- 原先“只接 package_info”的审计描述已过时：`PocketSession._configureBridge` 同时注册 SDK `PackageInfoPlugin` 与 `pocket_hardware` 的 `HardwarePlugin`；硬件真实设备结果仍由 root 验证。
+- 原先“只接 package_info”的审计描述已过时：`PocketSession._configureBridge` 注册 SDK `PackageInfoPlugin` 与消费工程显式配置的 pluginFactories；Showcase 工厂注册 `HardwarePlugin`；硬件真实设备结果仍由 root 验证。
 
 | 缺口 | 当前证据/影响 | 后续验收方向 |
 | --- | --- | --- |
 | 版本与信任策略不完整 | `packages/pocket_services/lib/src/pocket_update.dart`、`pocket_package.dart` 已验签/ABI/hash，但未提供版本单调性、manifest 过期/replay 策略、密钥轮换 | 显式区分用户回滚与自动降级，测试过期 manifest/旧签名/key 撤销 |
 | 持久化的崩溃窗口 | package store 的 `_writeAtomic`/`_copyAtomic` 为删除旧目标再 rename，不是严格无缝替换 | 注入进程终止/磁盘错误，验证指针与 last-good 恢复 |
-| 权限接入未产品化 | `PocketSession` 可按配置声明 `HardwarePermissions.all`，插件 activation 本身不预申请 OS 权限；guest 显式调用 request 时才走 MethodChannel，拒绝 UI/产品文案仍不完整 | 在真实 iOS/Android hardware 验证中覆盖授权、拒绝、撤销和下一 session 清理 |
+| 权限接入未产品化 | 消费工程的硬件工厂可配合 `allowedPermissions` 声明宿主权限，插件 activation 本身不预申请 OS 权限；guest 显式调用 request 时才走 MethodChannel，拒绝 UI/产品文案仍不完整 | 在真实 iOS/Android hardware 验证中覆盖授权、拒绝、撤销和下一 session 清理 |
 | stream 未在 Demo 实接 | 有 stream 协议与预算，但 `PocketSession` 尚无 stream provider | 迁入一个真实订阅能力并测试取消、背压、切包与撤销 |
 | 内存预算不是隔离 | 插件 `memoryMb` 目前是描述元数据，不是独立进程/内存限额 | 对外契约据实描述；需要隔离时单独设计并验证 |
 | 服务 API 可绕开正常准入路径 | store 的公开 `activate()` 不独立强制 verifier；当前正常 `PocketSession` 使用已验证 coordinator | 收窄或明确低层 API 前置条件，测试所有激活入口 |

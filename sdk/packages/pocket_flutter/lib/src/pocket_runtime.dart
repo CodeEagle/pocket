@@ -10,9 +10,10 @@ import 'pocket_model.dart';
 
 /// The narrow ABI shared by the Flutter side and the PocketJS host library.
 ///
-/// The native implementation owns the QuickJS/PocketJS instance and keeps the
-/// most recent JSON frame in a buffer. Dart copies every returned string before
-/// calling into native again; no native pointer is retained by this class.
+/// The native implementation owns the QuickJS/PocketJS instance. Legacy
+/// runtimes expose a JSON frame; current runtimes additionally expose a
+/// compact borrowed binary frame ABI. Dart copies either result before making
+/// another native call, so no native pointer is retained by this class.
 abstract interface class PocketRuntime {
   PocketFrame eval(String source);
 
@@ -254,6 +255,18 @@ typedef _LoadBytecodeFilesDart =
     );
 typedef _FrameNative = Pointer<Utf8> Function(Pointer<Void>, Double deltaMs);
 typedef _FrameDart = Pointer<Utf8> Function(Pointer<Void>, double deltaMs);
+typedef _FrameBinaryNative =
+    Pointer<Uint8> Function(
+      Pointer<Void>,
+      Double deltaMs,
+      Pointer<Uint64> outByteLength,
+    );
+typedef _FrameBinaryDart =
+    Pointer<Uint8> Function(
+      Pointer<Void>,
+      double deltaMs,
+      Pointer<Uint64> outByteLength,
+    );
 typedef _EnableAuxiliaryNative =
     Int32 Function(Pointer<Void>, Double width, Double height);
 typedef _EnableAuxiliaryDart =
@@ -332,6 +345,8 @@ final class FfiPocketRuntime
   final _FrameDart _frame;
   _FrameDart? _frameDelta;
   bool _frameDeltaLookedUp = false;
+  _FrameBinaryDart? _frameDeltaBinary;
+  bool _frameDeltaBinaryLookedUp = false;
   _EnableAuxiliaryDart? _enableAuxiliary;
   _ResizeViewportDart? _resizeViewport;
   bool _resizeViewportLookedUp = false;
@@ -431,6 +446,10 @@ final class FfiPocketRuntime
   }
 
   static DynamicLibrary _openLibrary() {
+    final override = Platform.environment['POCKET_NATIVE_LIBRARY'];
+    if (override != null && override.isNotEmpty) {
+      return DynamicLibrary.open(override);
+    }
     if (Platform.isAndroid) return DynamicLibrary.open('libpocket_flutter.so');
     if (Platform.isIOS) return DynamicLibrary.process();
     if (Platform.isMacOS) return DynamicLibrary.process();
@@ -646,6 +665,38 @@ final class FfiPocketRuntime
   /// legacy full-frame call for this runtime instance.
   PocketFrame? frameDeltaAt(double deltaMilliseconds) {
     _checkAlive();
+    final binary = _lookupFrameDeltaBinary();
+    if (binary != null) {
+      final length = calloc<Uint64>();
+      try {
+        length.value = 0;
+        final pointer = binary(
+          _handle,
+          deltaMilliseconds.clamp(0.0, 1000.0).toDouble(),
+          length,
+        );
+        if (pointer.address == 0 || length.value == 0) {
+          final error = lastError;
+          if (error != null && error.isNotEmpty) {
+            throw PocketRuntimeException(error);
+          }
+          return null;
+        }
+        final byteLength = length.value;
+        if (byteLength > 64 * 1024 * 1024) {
+          throw const PocketRuntimeException(
+            'pocket_frame_delta_binary returned an oversized frame',
+          );
+        }
+        // The native pointer is borrowed until the next FFI call. Copy it
+        // before parsing so model construction never observes mutable native
+        // storage and no native allocation crosses the Dart boundary.
+        final bytes = Uint8List.fromList(pointer.asTypedList(byteLength));
+        return PocketFrame.fromBinary(bytes);
+      } finally {
+        calloc.free(length);
+      }
+    }
     final frameDelta = _lookupFrameDelta();
     if (frameDelta == null) return frameAt(deltaMilliseconds);
     final pointer = frameDelta(
@@ -662,6 +713,21 @@ final class FfiPocketRuntime
     }
     if (json == '{"unchanged":true}') return null;
     return PocketFrame.fromJson(json);
+  }
+
+  _FrameBinaryDart? _lookupFrameDeltaBinary() {
+    if (_frameDeltaBinaryLookedUp) return _frameDeltaBinary;
+    _frameDeltaBinaryLookedUp = true;
+    try {
+      _frameDeltaBinary = _library
+          .lookupFunction<_FrameBinaryNative, _FrameBinaryDart>(
+            'pocket_frame_delta_binary',
+          );
+    } on Object {
+      // Older native libraries continue through the JSON delta ABI.
+      _frameDeltaBinary = null;
+    }
+    return _frameDeltaBinary;
   }
 
   _FrameDart? _lookupFrameDelta() {

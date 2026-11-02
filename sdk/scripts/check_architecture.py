@@ -50,6 +50,12 @@ for base in [SDKROOT / "lib", SDKROOT / "packages/pocket_flutter", SDKROOT / "na
         if path.name in legacy_names:
             errors.append(f"non-minimal module: {path.relative_to(REPOROOT)}")
 
+# Native hardware is an explicit consumer dependency, never a core transitive one.
+if re.search(r"^  pocket_hardware:", (SDKROOT / "pubspec.yaml").read_text(), re.M):
+    errors.append("core SDK must not statically depend on optional hardware")
+if "package:pocket_hardware/" in (SDKROOT / "lib/pocket_sdk.dart").read_text():
+    errors.append("core SDK must not re-export optional hardware")
+
 sdk_production = [SDKROOT / "lib", SDKROOT / "packages"]
 source_roots = [*sdk_production, SDKROOT / "native/src", SDKROOT / "scripts", DEMO_JS, DEMOROOT / "lib"]
 source_suffixes = {".dart", ".ts", ".tsx", ".rs"}

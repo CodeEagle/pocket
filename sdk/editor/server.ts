@@ -9,6 +9,7 @@
  */
 
 import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import {
   cp,
   mkdir,
@@ -287,6 +288,74 @@ function safeProjectFile(projectDir: string, relativePath: string, options: Safe
         throw err;
       }
     }
+  }
+
+  return resolved;
+}
+
+function safeArtifactFile(rootDir: string, relativePath: string): string {
+  const normalized = relativePath.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  if (!normalized || normalized.startsWith("/") || normalized.includes("\0") || segments.some((part) => !part || part === "." || part === "..")) {
+    const err = new Error("invalid artifact path");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
+  }
+  let resolved: string;
+  try {
+    resolved = safeChild(rootDir, normalized);
+  } catch {
+    const err = new Error("artifact path escapes workspace");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
+  }
+  if (!existsSync(rootDir)) {
+    const err = new Error("artifact directory does not exist");
+    (err as unknown as { status: number }).status = 404;
+    throw err;
+  }
+  if (lstatSync(rootDir).isSymbolicLink()) {
+    const err = new Error("symbolic links are not allowed");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
+  }
+  const rootReal = realpathSync(rootDir);
+
+  let currentPath = resolve(rootDir);
+  for (const segment of segments) {
+    const nextPath = join(currentPath, segment);
+    let entry: ReturnType<typeof lstatSync>;
+    try {
+      entry = lstatSync(nextPath);
+    } catch {
+      const err = new Error("artifact not found");
+      (err as unknown as { status: number }).status = 404;
+      throw err;
+    }
+    if (entry.isSymbolicLink()) {
+      const err = new Error(`symbolic links are not allowed: ${segment}`);
+      (err as unknown as { status: number }).status = 400;
+      throw err;
+    }
+    if (!existsSync(nextPath)) {
+      const err = new Error("artifact not found");
+      (err as unknown as { status: number }).status = 404;
+      throw err;
+    }
+    const realNext = realpathSync(nextPath);
+    if (!isInside(rootReal, realNext)) {
+      const err = new Error("artifact path escapes workspace through a symlink");
+      (err as unknown as { status: number }).status = 400;
+      throw err;
+    }
+    currentPath = nextPath;
+  }
+
+  const finalEntry = lstatSync(resolved);
+  if (!finalEntry.isFile()) {
+    const err = new Error("artifact is not a regular file");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
   }
 
   return resolved;
@@ -629,7 +698,14 @@ async function readArtifact(workspace: Workspace, id: string, file: string, stat
   const name = basename(file);
   const allowed = new Set(["app.js", "app.qjbc", "app.bytecode.json", "app.pak", "guest-manifest.json", "build.json"]);
   if (!allowed.has(name)) return undefined;
-  const path = join(workspace.builds, id, String(state.builtRevision), name);
+  let path: string;
+  try {
+    path = safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${name}`);
+  } catch (error) {
+    const status = (error as unknown as { status?: number })?.status;
+    if (status === 404) return undefined;
+    throw error;
+  }
   try { return new Uint8Array(await readFile(path)); } catch { return undefined; }
 }
 
@@ -711,39 +787,89 @@ function contentType(path: string): string {
   }
 }
 
-function validateRequestSecurity(req: Request, url: URL): Response | null {
+function validateRequestSecurity(req: Request, url: URL, serverPort: number, csrfToken: string): Response | null {
   const allowedHostnames = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
   const hostHeader = req.headers.get("host");
   if (!hostHeader) {
     return failure("forbidden: missing Host header", 403);
   }
-  let hostName: string;
+  let dummyUrl: URL;
   try {
-    const dummyUrl = new URL(`http://${hostHeader}`);
-    hostName = dummyUrl.hostname;
+    dummyUrl = new URL(`http://${hostHeader}`);
   } catch {
     return failure("forbidden: invalid Host header", 403);
   }
-  if (!allowedHostnames.has(hostName)) {
+  if (!allowedHostnames.has(dummyUrl.hostname)) {
     return failure("forbidden: host not allowed", 403);
+  }
+  if (dummyUrl.port !== "") {
+    if (Number(dummyUrl.port) !== serverPort) {
+      return failure("forbidden: host port mismatch", 403);
+    }
   }
 
   const method = req.method.toUpperCase();
   const mutatingMethods = new Set(["POST", "PUT", "DELETE", "PATCH"]);
   if (mutatingMethods.has(method)) {
+    const secFetchSite = req.headers.get("sec-fetch-site");
+    if (secFetchSite && secFetchSite !== "same-origin" && secFetchSite !== "none") {
+      return failure("forbidden: cross-origin fetch-site not allowed", 403);
+    }
+
+    const secFetchMode = req.headers.get("sec-fetch-mode");
+    if (secFetchMode && (secFetchMode === "navigate" || secFetchMode === "no-cors")) {
+      return failure("forbidden: browser navigation/no-cors write not allowed", 403);
+    }
+
     const originHeader = req.headers.get("origin");
-    if (originHeader) {
-      let originHostname: string;
+    if (originHeader !== null) {
+      if (originHeader === "null") {
+        return failure("forbidden: null Origin not allowed", 403);
+      }
+      let originUrl: URL;
       try {
-        const originUrl = new URL(originHeader);
-        originHostname = originUrl.hostname;
+        originUrl = new URL(originHeader);
       } catch {
         return failure("forbidden: invalid Origin header", 403);
       }
-      if (!allowedHostnames.has(originHostname)) {
+      const originPort = originUrl.port || "80";
+      if (
+        originUrl.protocol !== url.protocol ||
+        !allowedHostnames.has(originUrl.hostname) ||
+        originPort !== String(serverPort)
+      ) {
         return failure("forbidden: cross-origin requests not allowed", 403);
       }
+    }
+
+    const refererHeader = req.headers.get("referer");
+    if (refererHeader !== null) {
+      let refererUrl: URL;
+      try {
+        refererUrl = new URL(refererHeader);
+      } catch {
+        return failure("forbidden: cross-origin referer not allowed", 403);
+      }
+      const refererPort = refererUrl.port || "80";
+      if (
+        refererUrl.protocol !== url.protocol ||
+        !allowedHostnames.has(refererUrl.hostname) ||
+        refererPort !== String(serverPort)
+      ) {
+        return failure("forbidden: cross-origin referer not allowed", 403);
+      }
+    }
+
+    if (req.headers.has("x-pocket-csrf") && req.headers.get("x-pocket-csrf") !== csrfToken) {
+      return failure("forbidden: invalid CSRF token", 403);
+    }
+
+    const isAssetUpload = method === "POST" && /^\/api\/projects\/[^/]+\/assets$/i.test(url.pathname);
+    const hasCsrf = req.headers.get("x-pocket-csrf") === csrfToken;
+    const hasEditor = req.headers.get("x-pocket-editor") === "1";
+    if (!isAssetUpload && !hasCsrf && !hasEditor) {
+      return failure("forbidden: missing CSRF token or editor credential", 403);
     }
   }
 
@@ -751,6 +877,7 @@ function validateRequestSecurity(req: Request, url: URL): Response | null {
 }
 
 export async function startEditor(options: StartEditorOptions = {}): Promise<EditorServer> {
+  const csrfToken = randomUUID();
   const workspaceRoot = resolve(options.workspace ?? process.env.POCKET_EDITOR_WORKSPACE ?? join(root, ".pocket-build/editor-workspace"));
   const configuredProject = options.projectRoot ?? process.env.POCKET_EDITOR_PROJECT_ROOT;
   let projectRoot: string | undefined;
@@ -799,12 +926,12 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     maxRequestBodySize: maxAssetBytes,
     async fetch(request): Promise<Response> {
       const url = new URL(request.url);
-      const securityError = validateRequestSecurity(request, url);
+      const securityError = validateRequestSecurity(request, url, server.port, csrfToken);
       if (securityError) return securityError;
       const path = url.pathname;
       const method = request.method.toUpperCase();
       try {
-        if (path === "/health" && method === "GET") return json({ ok: true, service: "pocket-editor", workspace: workspace.root, ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}) });
+        if (path === "/health" && method === "GET") return json({ ok: true, service: "pocket-editor", csrfToken, workspace: workspace.root, ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}) });
         if (path === "/" && method === "GET") return new Response(await readFile(join(root, "editor/client/index.html")), { headers: { "content-type": "text/html; charset=utf-8" } });
         if (["/editor.css", "/editor.js"].includes(path) && method === "GET") {
           const file = join(root, "editor/client", path.slice(1));
@@ -815,15 +942,13 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           if (updateParts.length < 3) return failure("not found", 404);
           const updateId = asProjectId(updateParts[1]);
           const relPath = updateParts.slice(2).join("/");
-          const releasePath = safeChild(join(workspace.updates, updateId), relPath);
-          if (!existsSync(releasePath)) return failure("update artifact not found", 404);
+          const releasePath = safeArtifactFile(workspace.updates, `${updateId}/${relPath}`);
           return new Response(await readFile(releasePath), { headers: { "content-type": contentType(releasePath), "cache-control": "no-store" } });
         }
         if (path.startsWith("/releases/") && method === "GET") {
           const match = path.match(/^\/releases\/([a-z][a-z0-9-]{0,47})\.tar\.gz$/);
           if (!match) return failure("not found", 404);
-          const archive = safeChild(workspace.updates, `${match[1]}.tar.gz`);
-          if (!existsSync(archive)) return failure("release not found", 404);
+          const archive = safeArtifactFile(workspace.updates, `${match[1]}.tar.gz`);
           return new Response(await readFile(archive), { headers: { "content-type": "application/gzip", "content-disposition": `attachment; filename="${match[1]}.tar.gz"` } });
         }
         if (path === "/api/projects" && method === "GET") return json(await listProjects(workspace));
@@ -839,9 +964,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         }
         const parts = path.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
         if (parts[0] !== "api" || parts[1] !== "projects" || !parts[2]) {
-          if (path.startsWith("/artifacts/") || path.startsWith("/updates/") || path.startsWith("/releases/")) {
-            // handled below, outside the project API parser
-          } else return failure("not found", 404);
+          return failure("not found", 404);
         }
         const id = parts[2] ? asProjectId(parts[2]) : "";
         const exists = existsSync(projectDir(id));
@@ -929,7 +1052,17 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           if (parts[3] === "assets") {
             if (method === "GET") return json({ assets: await listAssets(projectDir(id)) });
             if (method === "POST") {
+              const csrfHeader = request.headers.get("x-pocket-csrf");
+              const editorHeader = request.headers.get("x-pocket-editor");
               const form = await request.formData();
+              const formCsrf = form.get("csrfToken");
+              const hasValidProof =
+                csrfHeader === csrfToken ||
+                editorHeader === "1" ||
+                (typeof formCsrf === "string" && formCsrf === csrfToken);
+              if (!hasValidProof) {
+                return failure("forbidden: missing CSRF token for asset upload", 403);
+              }
               const value = form.get("file");
               if (!(value instanceof File)) throw new Error("multipart field 'file' is required");
               if (value.size > maxAssetBytes) throw new Error("asset is too large");
@@ -946,10 +1079,12 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             }
           }
           if ((parts[3] === "build" || parts[3] === "compile") && method === "POST") {
+            await parseJsonBody(request);
             queueBuild(workspace, id, states, runner);
             return json({ status: publicStatus(id, state) }, 202);
           }
           if ((parts[3] === "publish" || parts[3] === "package") && method === "POST") {
+            await parseJsonBody(request);
             if (state.busy) return failure("build is still running", 409);
             const config = await loadConfig(projectDir(id), id);
             const boundOrigin = `http://127.0.0.1:${server.port}`;

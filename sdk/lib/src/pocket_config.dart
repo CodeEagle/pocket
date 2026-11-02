@@ -66,7 +66,6 @@ final class PocketAppConfig {
     this.metadataAsset = 'assets/app.bytecode.json',
     this.manifestAsset = 'assets/guest-manifest.json',
     this.updates,
-    this.enableHardware = false,
     this.showFps = false,
     this.allowedPermissions = const {},
     this.pluginFactories = const [],
@@ -79,9 +78,6 @@ final class PocketAppConfig {
   final String manifestAsset;
   final PocketUpdateConfig? updates;
 
-  /// Makes the compiled hardware provider available. OS permissions are still
-  /// requested only by an explicit guest action and host admission policy.
-  final bool enableHardware;
   final bool showFps;
   final Set<String> allowedPermissions;
   final List<PocketPluginFactory> pluginFactories;
@@ -105,7 +101,6 @@ final class PocketAppConfig {
           metadataAsset == other.metadataAsset &&
           manifestAsset == other.manifestAsset &&
           updates == other.updates &&
-          enableHardware == other.enableHardware &&
           showFps == other.showFps &&
           setEquals(allowedPermissions, other.allowedPermissions) &&
           listEquals(pluginFactories, other.pluginFactories) &&
@@ -113,16 +108,15 @@ final class PocketAppConfig {
 
   @override
   int get hashCode => Object.hash(
-        appId,
-        bytecodeAsset,
-        pakAsset,
-        metadataAsset,
-        manifestAsset,
-        updates,
-        enableHardware,
-        showFps,
-        Object.hashAll(allowedPermissions),
-        Object.hashAll(pluginFactories),
-        Object.hashAll(additionalCapabilities),
-      );
+    appId,
+    bytecodeAsset,
+    pakAsset,
+    metadataAsset,
+    manifestAsset,
+    updates,
+    showFps,
+    Object.hashAllUnordered(allowedPermissions),
+    Object.hashAll(pluginFactories),
+    Object.hashAllUnordered(additionalCapabilities),
+  );
 }

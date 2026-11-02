@@ -1,8 +1,9 @@
 import { strict as assert } from "node:assert";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 
 type JsonObject = Record<string, unknown>;
 type DrawOp = {
@@ -19,15 +20,26 @@ type ProbeResponse = { ok?: boolean; error?: string; frame?: Frame };
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const sdkRoot = resolve(testDir, "../../..");
-const artifactDir = process.env.POCKET_WIDGET_FIXTURE_DIR ?? process.env.POCKET_WIDGET_FIXTURE_OUTDIR;
+let generatedFixture: string | undefined;
+let artifactDir = process.env.POCKET_WIDGET_FIXTURE_DIR ?? process.env.POCKET_WIDGET_FIXTURE_OUTDIR;
 if (!artifactDir) {
-  throw new Error(
-    "flutter_widgets_native.test: set POCKET_WIDGET_FIXTURE_DIR to a built fixture directory (run flutter_widgets.test.ts with POCKET_WIDGET_FIXTURE_OUTDIR=...)",
-  );
+  // Keep `bun test` self-contained. This remains a real QuickJS/native probe;
+  // it only builds its small public-widget fixture on demand for CI.
+  generatedFixture = mkdtempSync(join(tmpdir(), "pocket-ui-flutter-widgets-native-"));
+  const build = spawnSync("bun", [join(testDir, "flutter_widgets.test.ts")], {
+    env: { ...process.env, POCKET_WIDGET_FIXTURE_OUTDIR: generatedFixture },
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+  if (build.status !== 0) {
+    rmSync(generatedFixture, { recursive: true, force: true });
+    throw new Error(`flutter_widgets_native.test: fixture build failed\n${build.stdout}\n${build.stderr}`);
+  }
+  artifactDir = generatedFixture;
 }
 
-const bytecodePath = join(resolve(artifactDir), "app.qjbc");
-const pakPath = join(resolve(artifactDir), "app.pak");
+const bytecodePath = join(resolve(artifactDir!), "app.qjbc");
+const pakPath = join(resolve(artifactDir!), "app.pak");
 assert.ok(existsSync(bytecodePath), `fixture bytecode is missing: ${bytecodePath}`);
 assert.ok(existsSync(pakPath), `fixture PAK is missing: ${pakPath}`);
 const configuredProbe = process.env.POCKET_NATIVE_PROBE;
@@ -169,3 +181,4 @@ assert.equal(textOp(afterLibrary, "Library").color, initialHomeColor, "Library s
 assert.notEqual(textOp(afterChip, "Toggle Chip").color, initialChipColor, "Chip selected styling did not update");
 
 console.log(`flutter_widgets_native.test: pointer callbacks, disabled gating and selected styling passed (${probe}; ${artifactDir})`);
+if (generatedFixture) rmSync(generatedFixture, { recursive: true, force: true });

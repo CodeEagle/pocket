@@ -5,6 +5,7 @@
   "name": "pocket-host-showcase",
   "title": "PocketJS Flutter host showcase",
   "version": "0.1.0",
+  "build": 1,
   "engine": {
     "capabilities": {
       "requires": ["text.glyphs.baked"],

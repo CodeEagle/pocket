@@ -605,12 +605,30 @@ final class PocketPackageStore {
     return completer.future;
   }
 
+  static const Set<String> _allowedPointerNames = <String>{
+    'active',
+    'previous',
+    'lastGood',
+  };
+
+  static String _requirePointerName(String name) {
+    final safe = _requireSafeToken(name, 'pointerName');
+    if (!_allowedPointerNames.contains(safe)) {
+      throw PocketPackageException(
+        'unknown pointer name: $name',
+        code: 'unsafe-token',
+      );
+    }
+    return safe;
+  }
+
   Directory get _blobs => Directory(path.join(rootDirectory.path, 'blobs'));
   Directory get _stateRoot => appId == null
       ? rootDirectory
       : Directory(path.join(rootDirectory.path, 'apps', _safePart(appId!)));
   Directory get _versions => Directory(path.join(_stateRoot.path, 'versions'));
-  File _pointer(String name) => File(path.join(_stateRoot.path, name));
+  File _pointer(String name) =>
+      File(path.join(_stateRoot.path, _requirePointerName(name)));
 
   Future<void> initialize() async {
     await _blobs.create(recursive: true);
@@ -834,16 +852,31 @@ final class PocketPackageStore {
   Future<void> activate(
     PocketPackage package, {
     bool recordPrevious = true,
+    int minimumBuild = 0,
+    bool allowDowngrade = false,
   }) =>
       _synchronized(
-        () => _activateUnlocked(package, recordPrevious: recordPrevious),
+        () => _activateUnlocked(
+          package,
+          recordPrevious: recordPrevious,
+          minimumBuild: minimumBuild,
+          allowDowngrade: allowDowngrade,
+        ),
       );
 
   Future<void> _activateUnlocked(
     PocketPackage package, {
     bool recordPrevious = true,
+    int minimumBuild = 0,
+    bool allowDowngrade = false,
   }) async {
+    _requireSafeToken(package.versionId, 'versionId');
     await initialize();
+    await _checkAntiDowngradeUnlocked(
+      package: package,
+      minimumBuild: minimumBuild,
+      allowDowngrade: allowDowngrade,
+    );
     final active = _pointer('active');
     if (recordPrevious && await active.exists()) {
       final old = (await active.readAsString()).trim();
@@ -859,15 +892,30 @@ final class PocketPackageStore {
   Future<void> commitHealthy(
     PocketPackage package, {
     required PocketManifestVerifier verifier,
+    int minimumBuild = 0,
+    bool allowDowngrade = false,
   }) =>
       _synchronized(
-        () => _commitHealthyUnlocked(package, verifier: verifier),
+        () => _commitHealthyUnlocked(
+          package,
+          verifier: verifier,
+          minimumBuild: minimumBuild,
+          allowDowngrade: allowDowngrade,
+        ),
       );
 
   Future<void> _commitHealthyUnlocked(
     PocketPackage package, {
     required PocketManifestVerifier verifier,
+    int minimumBuild = 0,
+    bool allowDowngrade = false,
   }) async {
+    _requireSafeToken(package.versionId, 'versionId');
+    await _checkAntiDowngradeUnlocked(
+      package: package,
+      minimumBuild: minimumBuild,
+      allowDowngrade: allowDowngrade,
+    );
     final verified = await _loadVersion(package.versionId, verifier: verifier);
     if (verified.manifest.payload.contentHash !=
         package.manifest.payload.contentHash) {
@@ -876,39 +924,112 @@ final class PocketPackageStore {
         code: 'cache-package',
       );
     }
-    await _activateUnlocked(verified);
+    await _activateUnlocked(
+      verified,
+      minimumBuild: minimumBuild,
+      allowDowngrade: allowDowngrade,
+    );
     await _writeAtomic(_pointer('lastGood'), utf8.encode(verified.versionId));
     await _pruneInactiveVersionsUnlocked(keep: 2);
+  }
+
+  Future<int?> _readBuildForVersionId(String id) async {
+    try {
+      final safeId = _requireSafeToken(id, 'versionId');
+      final manifestFile = File(
+        path.join(_versions.path, safeId, 'manifest.json'),
+      );
+      if (!await manifestFile.exists()) return null;
+      final bytes = await manifestFile.readAsBytes();
+      final signed = PocketSignedManifest.fromBytes(
+        Uint8List.fromList(bytes),
+      );
+      return signed.payload.build;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _checkAntiDowngradeUnlocked({
+    required PocketPackage package,
+    required int minimumBuild,
+    required bool allowDowngrade,
+  }) async {
+    if (allowDowngrade) return;
+
+    final activeId = await _readPointerId('active');
+    final goodId = await _readPointerId('lastGood');
+
+    int? activeBuild;
+    if (activeId != null) {
+      activeBuild = await _readBuildForVersionId(activeId);
+    }
+
+    int? goodBuild;
+    if (goodId != null) {
+      goodBuild = await _readBuildForVersionId(goodId);
+    }
+
+    final hasBaseline =
+        minimumBuild > 0 || goodBuild != null || activeBuild != null;
+    if (!hasBaseline) return;
+
+    final floorBuild = math.max(
+      minimumBuild,
+      math.max(goodBuild ?? 0, activeBuild ?? 0),
+    );
+
+    final establishedIdsAtFloor = <String>{
+      if (goodId != null && goodBuild != null && goodBuild == floorBuild)
+        goodId,
+      if (activeId != null && activeBuild != null && activeBuild == floorBuild)
+        activeId,
+    };
+
+    final candidateBuild = package.manifest.payload.build;
+    final candidateId = package.versionId;
+
+    if (candidateBuild < floorBuild ||
+        (candidateBuild == floorBuild &&
+            (establishedIdsAtFloor.isEmpty ||
+                !establishedIdsAtFloor.every((id) => id == candidateId)))) {
+      throw PocketPackageFormatException(
+        'Refusing downgrade or replay: package build $candidateBuild is not newer than current build $floorBuild',
+      );
+    }
   }
 
   Future<PocketPackage?> fallbackFor(
     String failedVersionId, {
     required PocketManifestVerifier verifier,
-  }) =>
-      _synchronized(
-        () => _fallbackForUnlocked(failedVersionId, verifier: verifier),
-      );
+  }) async {
+    final safeFailedId = _requireSafeToken(failedVersionId, 'failedVersionId');
+    return _synchronized(
+      () => _fallbackForUnlocked(safeFailedId, verifier: verifier),
+    );
+  }
 
   Future<PocketPackage?> _fallbackForUnlocked(
     String failedVersionId, {
     required PocketManifestVerifier verifier,
   }) async {
+    final safeFailedId = _requireSafeToken(failedVersionId, 'failedVersionId');
     await initialize();
     final lastGoodId = await _readPointerId('lastGood');
     final previousId = await _readPointerId('previous');
 
     String? fallbackId;
-    if (lastGoodId != null && lastGoodId != failedVersionId) {
+    if (lastGoodId != null && lastGoodId != safeFailedId) {
       fallbackId = lastGoodId;
-    } else if (previousId != null && previousId != failedVersionId) {
+    } else if (previousId != null && previousId != safeFailedId) {
       fallbackId = previousId;
     }
 
-    if (previousId == failedVersionId) {
+    if (previousId == safeFailedId) {
       final prevFile = _pointer('previous');
       if (await prevFile.exists()) await prevFile.delete();
     }
-    if (lastGoodId == failedVersionId) {
+    if (lastGoodId == safeFailedId) {
       final lgFile = _pointer('lastGood');
       if (fallbackId != null) {
         await _writeAtomic(lgFile, utf8.encode(fallbackId));
@@ -936,7 +1057,7 @@ final class PocketPackageStore {
       if (await lgFile.exists()) await lgFile.delete();
     }
 
-    final failedDir = Directory(path.join(_versions.path, failedVersionId));
+    final failedDir = Directory(path.join(_versions.path, safeFailedId));
     if (await failedDir.exists()) {
       try {
         await failedDir.delete(recursive: true);
@@ -966,15 +1087,22 @@ final class PocketPackageStore {
   Future<void> rollback({
     String? versionId,
     required PocketManifestVerifier verifier,
-  }) =>
-      _synchronized(
-        () => _rollbackUnlocked(versionId: versionId, verifier: verifier),
-      );
+  }) async {
+    if (versionId != null) {
+      _requireSafeToken(versionId, 'versionId');
+    }
+    return _synchronized(
+      () => _rollbackUnlocked(versionId: versionId, verifier: verifier),
+    );
+  }
 
   Future<void> _rollbackUnlocked({
     String? versionId,
     required PocketManifestVerifier verifier,
   }) async {
+    if (versionId != null) {
+      _requireSafeToken(versionId, 'versionId');
+    }
     final targetId =
         versionId ??
         (await _readPointerId('previous') ?? await _readPointerId('lastGood'));
@@ -1075,6 +1203,7 @@ final class PocketPackageStore {
   }
 
   Future<String?> _readPointerId(String name) async {
+    _requirePointerName(name);
     final file = _pointer(name);
     if (!await file.exists()) return null;
     final id = (await file.readAsString()).trim();
@@ -1092,7 +1221,8 @@ final class PocketPackageStore {
     String id, {
     required PocketManifestVerifier verifier,
   }) async {
-    final directory = Directory(path.join(_versions.path, id));
+    final safeId = _requireSafeToken(id, 'versionId');
+    final directory = Directory(path.join(_versions.path, safeId));
     final manifestFile = File(path.join(directory.path, 'manifest.json'));
     final entry = File(path.join(directory.path, 'entry.js'));
     final pak = File(path.join(directory.path, 'package.pak'));
@@ -1128,7 +1258,7 @@ final class PocketPackageStore {
         );
       }
     }
-    return PocketPackage(manifest: signed, versionId: id, directory: directory);
+    return PocketPackage(manifest: signed, versionId: safeId, directory: directory);
   }
 
   Future<void> _assemblePak(

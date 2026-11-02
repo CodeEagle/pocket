@@ -155,9 +155,16 @@ final class HardwarePlugin extends PocketPlugin {
   bool _stopped = true;
   int _previewEpoch = 0;
   Future<void> _cameraTail = Future<void>.value();
+  PocketPluginContext? _activeContext;
 
   void _checkPermission(String permission) {
     if (_grantedPermissions != null && !_grantedPermissions.contains(permission)) {
+      throw PocketCapabilityException(
+        'permission_denied',
+        'permission $permission is not granted',
+      );
+    }
+    if (_activeContext != null && !_activeContext!.grantedPermissions.contains(permission)) {
       throw PocketCapabilityException(
         'permission_denied',
         'permission $permission is not granted',
@@ -172,6 +179,7 @@ final class HardwarePlugin extends PocketPlugin {
         description:
             'Compiled host camera, photos, BLE, sensors, biometrics, location and weather provider',
         permissions: const <String>{},
+        optionalPermissions: HardwarePermissions.all,
         limits: PocketPluginLimits(
           maxConcurrentRequests: 4,
           maxResponseBytes: 512 * 1024,
@@ -187,6 +195,7 @@ final class HardwarePlugin extends PocketPlugin {
             name: HardwareCapabilities.requestPermission,
             kind: PocketCapabilityKind.request,
             permissions: const <String>{},
+            optionalPermissions: HardwarePermissions.all,
           ),
           HardwareCapabilities.cameraPreviewStart: PocketPluginCapability(
             name: HardwareCapabilities.cameraPreviewStart,
@@ -252,18 +261,21 @@ final class HardwarePlugin extends PocketPlugin {
             name: HardwareCapabilities.weatherCurrent,
             kind: PocketCapabilityKind.request,
             permissions: const <String>{HardwarePermissions.network},
+            optionalPermissions: const <String>{HardwarePermissions.location},
           ),
         },
       );
 
   @override
   void register(PocketPluginContext context) {
+    _activeContext = context;
     context.registerRequest(HardwareCapabilities.permissions, (_) {
       return _native('checkPermissions');
     });
     context.registerRequest(HardwareCapabilities.requestPermission, (params) {
       final permission = _string(params, 'permission');
       _validatePermission(permission);
+      _checkPermission(permission);
       return _native(
         'requestPermission',
         params: <String, dynamic>{'permission': _nativePermission(permission)},
@@ -379,7 +391,13 @@ final class HardwarePlugin extends PocketPlugin {
   }
 
   @override
+  FutureOr<void> activate(PocketPluginContext context) {
+    _activeContext = context;
+  }
+
+  @override
   Future<void> deactivate(PocketPluginContext context) async {
+    _activeContext = null;
     await _stopPreviewBestEffort();
     await _disposeNativeSessionBestEffort();
     _stopped = true;
@@ -387,6 +405,7 @@ final class HardwarePlugin extends PocketPlugin {
 
   @override
   Future<void> dispose() async {
+    _activeContext = null;
     await _stopPreviewBestEffort();
     await _disposeNativeSessionBestEffort();
     _stopped = true;
@@ -587,6 +606,7 @@ final class HardwarePlugin extends PocketPlugin {
   }
 
   Future<Map<String, dynamic>> _weather(Map<String, dynamic> params) async {
+    _checkPermission(HardwarePermissions.network);
     final suppliedLatitude = params['latitude'];
     final suppliedLongitude = params['longitude'];
     if ((suppliedLatitude == null) != (suppliedLongitude == null)) {

@@ -19,7 +19,7 @@ void main() => runApp(const PocketApp(
 
 - `updates: PocketUpdateConfig(...)` 接入签名发布源；`PocketUpdateConfig.fromEnvironment()` 读取开发环境的四个 `POCKET_*` 配置。客户端只接收公钥。
 - `showFps: true` 显示实时指标；有界历史按 `appId` 隔离保存。
-- `enableHardware: true` 注册已编译的硬件能力，再用 `allowedPermissions` 明确宿主策略；JS manifest 只能进一步收窄权限，系统授权仅在用户操作后请求。
+- 消费工程显式依赖 `pocket_hardware` 并通过 `pluginFactories` 注册硬件能力，再用 `allowedPermissions` 明确宿主策略；JS manifest 只能进一步收窄权限，系统授权仅在用户操作后请求。
 - `pluginFactories` 注入应用插件。工厂接收 `PocketViewController`，每次经过验证的 guest 切换创建新实例，SDK 负责准入、激活、撤销与销毁。
 - 四个 asset 字段可按项目调整，运行时仍只接受匹配 ABI 的字节码。
 

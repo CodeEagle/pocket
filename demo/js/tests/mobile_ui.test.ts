@@ -248,6 +248,10 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(displaySource, /previous\?\.\(line\)/);
   assert.match(displaySource, /parseDisplayGeometry/);
   assert.match(mobileSource, /PlatformTextureSurface/);
+  assert.match(mobileSource, /radius\?: number/);
+  assert.match(mobileSource, /Number\.isFinite/);
+  assert.match(mobileSource, /radius: platformTextureRadius\(props\.radius\)/);
+  assert.match(mobileSource, /registerSurface\(id, "platformTexture", payload\(\)\) !== false/);
   assert.match(mobileSource, /<Show when=\{typeof props\.open === "function"/);
   assert.match(mobileSource, /focusable=\{!props\.disabled\}/);
   assert.match(pageSource, /hardware\.camera\.preview\.start/);

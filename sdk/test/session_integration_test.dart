@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
+import 'package:pocket_sdk/src/pocket_app.dart'
+    show PocketGuestSession, PocketGuestSessionState;
 
 final class _ApplicationPlugin extends PocketPlugin {
   String? activatedApp;
@@ -49,7 +51,12 @@ void main() {
     ) async {
       final name = utf8.decode(data!.buffer.asUint8List());
       final content = name.endsWith('metadata.json')
-          ? {'runtimeAbi': 'test-session-admission', 'bytecodeBytes': 123}
+          ? {
+              'runtimeAbi': 'test-session-admission',
+              'bytecodeBytes': 123,
+              'build': 42,
+              'version': '2.3.0',
+            }
           : {
               'capabilities': {
                 'requires': [
@@ -102,7 +109,13 @@ void main() {
           session.performance.logPath,
           contains('/pocket-performance/external.sample/'),
         );
-        expect((await session.status())['configured'], isFalse);
+        final status = await session.status();
+        expect(status['configured'], isFalse);
+        expect(status['activeBuild'], 42);
+        expect(status['activeVersion'], '2.3.0');
+        expect((status['versions'] as List).single['build'], 42);
+        expect(session.runtimeInfo()['build'], 42);
+        expect(session.runtimeInfo()['version'], '2.3.0');
       } finally {
         session.dispose();
         await plugin.disposed.future;
@@ -220,9 +233,7 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
-          home: Scaffold(
-            body: PocketGuest(config: config1),
-          ),
+          home: Scaffold(body: PocketGuest(config: config1)),
         ),
       );
 
@@ -233,9 +244,7 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
-          home: Scaffold(
-            body: PocketGuest(config: config2),
-          ),
+          home: Scaffold(body: PocketGuest(config: config2)),
         ),
       );
 

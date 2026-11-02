@@ -37,7 +37,12 @@ class _SurfaceRuntime implements PocketRuntime {
         'textureId': 42,
         'rotationDegrees': 90,
         'mirrorX': true,
+        'radius': 16,
       },
+      // The camera is only partly inside this viewport. Its rounded mask must
+      // still be measured against the original 100x80 surface, not this
+      // 100x50 visible intersection.
+      clip: PocketClip(x: 0, y: 100, width: 320, height: 70),
     ),
   ];
   @override
@@ -130,6 +135,15 @@ void main() {
       expect(find.byType(Texture), findsOneWidget);
       expect(find.byType(RotatedBox), findsOneWidget);
       expect(find.byType(Transform), findsOneWidget);
+      final cameraSurface = find.byKey(const ValueKey('surface-camera'));
+      expect(cameraSurface, findsOneWidget);
+      final cameraRadiusClip = find.descendant(
+        of: cameraSurface,
+        matching: find.byType(ClipRRect),
+      );
+      expect(cameraRadiusClip, findsOneWidget);
+      expect(tester.getSize(cameraRadiusClip), const Size(100, 80));
+      expect(tester.widget<Positioned>(cameraSurface).height, 50);
       controller.revokePlatformTexture(42);
       await tester.pump(const Duration(milliseconds: 40));
       expect(find.byType(Texture), findsNothing);

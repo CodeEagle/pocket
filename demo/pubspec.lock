@@ -343,7 +343,7 @@ packages:
     source: path
     version: "0.1.0"
   pocket_hardware:
-    dependency: "direct dev"
+    dependency: "direct main"
     description:
       path: "../sdk/packages/pocket_hardware"
       relative: true

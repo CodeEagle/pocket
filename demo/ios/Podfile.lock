@@ -45,7 +45,7 @@ SPEC CHECKSUMS:
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
   package_info_plus: af8e2ca6888548050f16fa2f1938db7b5a5df499
   path_provider_foundation: bb55f6dbba17d0dccd6737fe6f7f34fbd0376880
-  pocket_flutter: 52d1c77aa20497517bdee564173f8aa459c40ae1
+  pocket_flutter: 90650a735fd0ba3015755831a54d436ccb641324
   pocket_hardware: eec608321410b48324570aa8478df221b2ecdafa
   video_player_avfoundation: dd410b52df6d2466a42d28550e33e4146928280a
 

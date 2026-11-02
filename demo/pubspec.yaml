@@ -12,9 +12,10 @@ dependencies:
   pocket_sdk:
     path: ../sdk
 
-dev_dependencies:
   pocket_hardware:
     path: ../sdk/packages/pocket_hardware
+
+dev_dependencies:
   pocket_flutter:
     path: ../sdk/packages/pocket_flutter
   pocket_services:

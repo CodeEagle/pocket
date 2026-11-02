@@ -269,6 +269,10 @@ pub struct HostState {
     last_error: String,
     error_output: CString,
     output: CString,
+    /// Last compact binary frame returned by the optional binary delta ABI.
+    /// The pointer is borrowed by the Flutter caller until the next native
+    /// frame call; Dart copies it immediately before issuing another FFI call.
+    binary_output: Vec<u8>,
     frame: u64,
     /// Fixed core/guest tick rate selected before the guest is mounted.  The
     /// PocketJS bundle must have been built for this same rate (`--hz`).
@@ -302,6 +306,233 @@ pub struct HostState {
     frame_json_serialized_bytes: u64,
     frame_json_cache_hits: u64,
     draw_decode_count: u64,
+}
+
+/// Compact, little-endian frame transport used by the production Flutter
+/// bridge. JSON remains available through `pocket_frame` and
+/// `pocket_frame_delta` for diagnostics and older hosts, while this format
+/// keeps DrawOps and image pixels out of the UTF-8/serde JSON path.
+const BINARY_FRAME_MAGIC: u32 = u32::from_le_bytes(*b"PFB1");
+const BINARY_FRAME_VERSION: u16 = 1;
+
+struct BinaryFrameWriter {
+    bytes: Vec<u8>,
+}
+
+impl BinaryFrameWriter {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    fn u16(&mut self, value: u16) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn f32(&mut self, value: f32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn bytes(&mut self, value: &[u8]) -> Result<(), String> {
+        let len = u32::try_from(value.len()).map_err(|_| "binary frame field is too large".to_owned())?;
+        self.u32(len);
+        self.bytes.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn string(&mut self, value: &str) -> Result<(), String> {
+        self.bytes(value.as_bytes())
+    }
+
+    fn optional_u32(&mut self, value: Option<u32>) {
+        match value {
+            Some(value) => {
+                self.u8(1);
+                self.u32(value);
+            }
+            None => self.u8(0),
+        }
+    }
+
+    fn clip(&mut self, clip: &Clip) {
+        self.f32(clip.x);
+        self.f32(clip.y);
+        self.f32(clip.w);
+        self.f32(clip.h);
+    }
+
+    fn op(&mut self, op: &FrameOp) -> Result<(), String> {
+        let tag = match op.kind.as_str() {
+            "rect" => 0,
+            "rounded" => 1,
+            "gradient" => 2,
+            "triangle" => 3,
+            "textureTriangle" => 4,
+            "text" => 5,
+            "image" => 6,
+            "hostSurface" => 7,
+            "video" => 8,
+            other => return Err(format!("unsupported binary frame operation {other}")),
+        };
+        self.u8(tag);
+        self.f32(op.x);
+        self.f32(op.y);
+        self.f32(op.w);
+        self.f32(op.h);
+        self.clip(&op.clip);
+        match tag {
+            0 => self.u32(op.color.unwrap_or(0)),
+            1 => {
+                self.u32(op.color.unwrap_or(0));
+                self.f32(op.radius.unwrap_or(0.0));
+            }
+            2 => {
+                self.u32(op.from_color.unwrap_or(0));
+                self.u32(op.to_color.unwrap_or(0));
+                self.u32(op.direction.unwrap_or(0));
+            }
+            3 => {
+                let points = op.points.as_ref().ok_or_else(|| "triangle points missing".to_owned())?;
+                let colors = op.colors.as_ref().ok_or_else(|| "triangle colors missing".to_owned())?;
+                if points.len() != 3 || colors.len() != 3 {
+                    return Err("triangle must contain three points and colors".to_owned());
+                }
+                for point in points {
+                    self.f32(point.x);
+                    self.f32(point.y);
+                }
+                for color in colors {
+                    self.u32(*color);
+                }
+            }
+            4 => {
+                let points = op.points.as_ref().ok_or_else(|| "texture triangle points missing".to_owned())?;
+                let uvs = op.uvs.as_ref().ok_or_else(|| "texture triangle UVs missing".to_owned())?;
+                if points.len() != 3 || uvs.len() != 6 {
+                    return Err("texture triangle must contain three points and six UVs".to_owned());
+                }
+                self.string(op.asset.as_deref().unwrap_or(""))?;
+                self.u32(op.color.unwrap_or(0));
+                for point in points {
+                    self.f32(point.x);
+                    self.f32(point.y);
+                }
+                for uv in uvs {
+                    self.f32(*uv);
+                }
+            }
+            5 => {
+                self.string(op.text.as_deref().unwrap_or(""))?;
+                self.f32(op.size.unwrap_or(16.0));
+                self.u32(op.color.unwrap_or(0));
+                match op.font_slot {
+                    Some(slot) => {
+                        self.u8(1);
+                        self.u8(slot);
+                    }
+                    None => self.u8(0),
+                }
+            }
+            6 => {
+                self.string(op.asset.as_deref().unwrap_or(""))?;
+                match op.uv.as_ref() {
+                    Some(uv) if uv.len() == 4 => {
+                        self.u8(1);
+                        for value in uv {
+                            self.f32(*value);
+                        }
+                    }
+                    Some(_) => return Err("image UVs must contain four values".to_owned()),
+                    None => self.u8(0),
+                }
+                self.optional_u32(op.color);
+            }
+            7 | 8 => {
+                self.string(op.id.as_deref().unwrap_or(""))?;
+                self.string(op.asset.as_deref().unwrap_or(""))?;
+                if tag == 7 {
+                    // hostSurface assets are the canonical descriptor JSON;
+                    // the Dart decoder extracts kind/parameters exactly as
+                    // it does for the legacy JSON schema.
+                } else {
+                    self.u8(if op.fit.as_deref() == Some("contain") { 1 } else if op.fit.as_deref() == Some("fill") { 2 } else { 0 });
+                    self.u8(1); // video autoplay is true for native surfaces
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn ops(&mut self, ops: &[FrameOp]) -> Result<(), String> {
+        let count = u32::try_from(ops.len()).map_err(|_| "too many frame operations".to_owned())?;
+        self.u32(count);
+        for op in ops {
+            self.op(op)?;
+        }
+        Ok(())
+    }
+}
+
+fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
+    let mut writer = BinaryFrameWriter::new();
+    writer.u32(BINARY_FRAME_MAGIC);
+    writer.u16(BINARY_FRAME_VERSION);
+    writer.u16(0);
+    writer.u64(frame.frame);
+    writer.f32(frame.width);
+    writer.f32(frame.height);
+    writer.ops(&frame.ops)?;
+    let event_count = u32::try_from(frame.events.len()).map_err(|_| "too many frame events".to_owned())?;
+    writer.u32(event_count);
+    for event in &frame.events {
+        let encoded = serde_json::to_vec(event).map_err(|error| format!("event JSON encode: {error}"))?;
+        writer.bytes(&encoded)?;
+    }
+    let resource_count = u32::try_from(frame.resources.len()).map_err(|_| "too many frame resources".to_owned())?;
+    writer.u32(resource_count);
+    for resource in &frame.resources {
+        writer.string(&resource.asset)?;
+        writer.u64(resource.revision);
+        writer.u32(resource.width);
+        writer.u32(resource.height);
+        writer.u32(resource.psm);
+        writer.u8(if resource.linear { 1 } else { 0 });
+        writer.bytes(&resource.pixels)?;
+        match resource.palette.as_deref() {
+            Some(palette) => {
+                writer.u8(1);
+                writer.bytes(palette)?;
+            }
+            None => writer.u8(0),
+        }
+    }
+    let released_count = u32::try_from(frame.released_resources.len()).map_err(|_| "too many released resources".to_owned())?;
+    writer.u32(released_count);
+    for resource in &frame.released_resources {
+        writer.string(resource)?;
+    }
+    match frame.auxiliary.as_ref() {
+        Some(auxiliary) => {
+            writer.u8(1);
+            writer.f32(auxiliary.width);
+            writer.f32(auxiliary.height);
+            writer.ops(&auxiliary.ops)?;
+        }
+        None => writer.u8(0),
+    }
+    Ok(writer.bytes)
 }
 
 fn new_duplex_channel() -> (Arc<duplex::DuplexRing>, duplex::IngressConsumer) {
@@ -785,18 +1016,65 @@ fn dispatch_duplex_event(
         .ok_or_else(|| "guest context is not initialized".to_owned())?
 }
 
+/// Translate the reserved numeric pointer message into the exact canonical
+/// `input.pointer` path used by JSON callers. The conversion is confined to
+/// the native owner thread: it queues the hit-tested touch snapshot and then
+/// delivers the same `__pocketEvent` line to the guest, so a JS app does not
+/// need a second pointer protocol just because the host selected the
+/// lock-free transport.
+fn dispatch_duplex_pointer(host: &mut HostState, message: duplex::DuplexMessage) -> Result<(), String> {
+    const POINTER_MESSAGE_TYPE: u16 = 1;
+    const POINTER_PHASE_MASK: u16 = 0x00ff;
+    const POINTER_AUXILIARY_FLAG: u16 = 0x0100;
+    if message.msg_type != POINTER_MESSAGE_TYPE {
+        return Err("not a pointer duplex message".to_owned());
+    }
+    let phase = match message.flags & POINTER_PHASE_MASK {
+        1 => "down",
+        2 => "move",
+        3 => "up",
+        4 => "cancel",
+        value => return Err(format!("duplex pointer phase {value} is invalid")),
+    };
+    if message.flags & !(POINTER_PHASE_MASK | POINTER_AUXILIARY_FLAG) != 0 {
+        return Err("duplex pointer flags contain unknown bits".to_owned());
+    }
+    let mut payload = serde_json::json!({
+        "phase": phase,
+        "id": message.target_id,
+        "x": message.arg0,
+        "y": message.arg1,
+    });
+    if message.flags & POINTER_AUXILIARY_FLAG != 0 {
+        payload["surface"] = serde_json::json!(1);
+    }
+    let input = serde_json::json!({
+        "type": "event",
+        "name": "input.pointer",
+        "payload": payload,
+    });
+    queue_input(host, &input)?;
+    let line = serde_json::to_string(&input)
+        .map_err(|error| format!("duplex pointer event encode: {error}"))?;
+    dispatch_guest(&host.guest, "__pocketEvent", &line)
+}
+
 /// Drain host-written records on the native owner thread and dispatch them to
-/// the current QuickJS guest.  The cursor is committed only after JS accepts a
+/// the current QuickJS guest. The cursor is committed only after JS accepts a
 /// record, making an unset/failed handler observable rather than silently
-/// dropping input.  The only copy is one 16-byte scalar record held while JS
-/// executes; no JSON serialization or ring-sized copy occurs.
+/// dropping input. Generic duplex records remain scalar-only; the reserved
+/// pointer record is adapted to the canonical `__pocketEvent` compatibility
+/// path, where one small JSON event is intentionally created so existing JS
+/// guests observe exactly the same input contract as JSON callers.
 fn drain_duplex(host: &mut HostState) -> Result<i32, String> {
     let mut processed = 0_i32;
     loop {
         let Some(message) = host.duplex_ingress_consumer.peek() else {
             break;
         };
-        if !dispatch_duplex_event(&host.guest, message)? {
+        if message.msg_type == 1 && (1..=4).contains(&(message.flags & 0x00ff)) {
+            dispatch_duplex_pointer(host, message)?;
+        } else if !dispatch_duplex_event(&host.guest, message)? {
             break;
         }
         if !host.duplex_ingress_consumer.consume_one() {
@@ -2524,6 +2802,7 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
             last_error: format!("{error:?}"),
             error_output: c_string(&format!("{error:?}")),
             output: c_string("{}"),
+            binary_output: Vec::new(),
             frame: 0,
             tick_hz,
             tick_remainder_ms: 0.0,
@@ -2575,6 +2854,7 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
             last_error: format!("{error:?}"),
             error_output: c_string(&format!("{error:?}")),
             output: c_string("{}"),
+            binary_output: Vec::new(),
             frame: 0,
             tick_hz,
             tick_remainder_ms: 0.0,
@@ -2613,6 +2893,7 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         last_error: String::new(),
         error_output: c_string(""),
         output: c_string("{}"),
+        binary_output: Vec::new(),
         frame: 0,
         tick_hz,
         tick_remainder_ms: 0.0,
@@ -3567,6 +3848,50 @@ pub unsafe extern "C" fn pocket_frame_delta(
     }
 }
 
+/// Compact binary counterpart of `pocket_frame_delta`.  A zero output length
+/// with no `pocket_last_error` means the retained frame was unchanged.  The
+/// returned bytes are borrowed from the runtime and remain valid until the
+/// next frame call; Flutter copies them immediately.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_frame_delta_binary(
+    handle: *mut HostState,
+    delta_ms: f64,
+    out_byte_length: *mut u64,
+) -> *const u8 {
+    if let Some(length) = out_byte_length.as_mut() {
+        *length = 0;
+    }
+    let Some(host) = handle.as_mut() else {
+        return ptr::null();
+    };
+    match build_frame(host, delta_ms) {
+        Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
+            clear_error(host);
+            ptr::null()
+        }
+        Ok(built) => match encode_binary_frame(&built.result) {
+            Ok(bytes) => {
+                host.binary_output = bytes;
+                if let Some(length) = out_byte_length.as_mut() {
+                    *length = host.binary_output.len() as u64;
+                }
+                clear_error(host);
+                host.binary_output.as_ptr()
+            }
+            Err(error) => {
+                host.binary_output.clear();
+                set_error(host, format!("frame binary encode: {error}"));
+                ptr::null()
+            }
+        },
+        Err(error) => {
+            host.binary_output.clear();
+            failed_frame_output(host, error);
+            ptr::null()
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pocket_send(handle: *mut HostState, message: *const c_char) -> i32 {
     let Some(host) = handle.as_mut() else {
@@ -3589,6 +3914,15 @@ pub unsafe extern "C" fn pocket_send(handle: *mut HostState, message: *const c_c
     } else {
         "__pocketEvent"
     };
+    // A duplex producer may be full for one edge, in which case Flutter
+    // falls back to this JSON entry point. Drain already-published numeric
+    // records first so a fallback UP/CANCEL cannot overtake a queued DOWN.
+    if host.guest_loaded {
+        if let Err(error) = drain_duplex(host) {
+            set_error(host, error);
+            return -1;
+        }
+    }
     if let Err(error) = queue_input(host, &parsed) {
         set_error(host, error);
         return -1;
@@ -3629,12 +3963,112 @@ pub unsafe extern "C" fn pocket_destroy(handle: *mut HostState) {
 mod smoke_tests {
     use super::*;
     use std::ffi::{CStr, CString};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use rquickjs::{Context, Module, Runtime, WriteOptions, WriteOptionsEndianness};
 
     fn frame_json(handle: *mut HostState) -> serde_json::Value {
         let pointer = unsafe { pocket_frame(handle, 16.0) };
         assert!(!pointer.is_null());
         let text = unsafe { CStr::from_ptr(pointer) }.to_str().unwrap();
         serde_json::from_str(text).unwrap()
+    }
+
+    struct PackageFixture {
+        root: Option<PathBuf>,
+        source: PathBuf,
+        pak: PathBuf,
+        bytecode: PathBuf,
+    }
+
+    impl Drop for PackageFixture {
+        fn drop(&mut self) {
+            if let Some(root) = self.root.take() {
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    fn empty_pak() -> Vec<u8> {
+        let mut pak = vec![0u8; 32];
+        pak[0..4].copy_from_slice(&PAK_MAGIC.to_le_bytes());
+        pak[4..6].copy_from_slice(&1u16.to_le_bytes());
+        pak[12..16].copy_from_slice(&32u32.to_le_bytes());
+        pak[16..20].copy_from_slice(&32u32.to_le_bytes());
+        pak[20..24].copy_from_slice(&32u32.to_le_bytes());
+        pak[24..28].copy_from_slice(&32u32.to_le_bytes());
+        pak
+    }
+
+    fn compile_test_bytecode(source: &[u8]) -> Vec<u8> {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let payload = context
+            .with(|ctx| {
+                let module = Module::declare(ctx, "fixture.js", source.to_vec()).unwrap();
+                module
+                    .write(WriteOptions {
+                        endianness: WriteOptionsEndianness::Little,
+                        strip_source: true,
+                        strip_debug: true,
+                        ..Default::default()
+                    })
+                    .unwrap()
+            });
+        bytecode::encode(
+            bytecode::BytecodeKind::Module,
+            bytecode::DEFAULT_FLAGS,
+            BINDING_GENERATION,
+            DEFAULT_TICK_HZ,
+            source,
+            &payload,
+        )
+        .unwrap()
+    }
+
+    fn package_fixture() -> PackageFixture {
+        let source_env = std::env::var_os("POCKET_TEST_SOURCE").map(PathBuf::from);
+        let pak_env = std::env::var_os("POCKET_TEST_ASSETS")
+            .map(PathBuf::from)
+            .map(|path| path.join("app.pak"));
+        let bytecode_env = std::env::var_os("POCKET_TEST_ASSETS")
+            .map(PathBuf::from)
+            .map(|path| path.join("app.qjbc"));
+        if let (Some(source), Some(pak), Some(bytecode)) =
+            (source_env, pak_env, bytecode_env)
+        {
+            if source.is_file() && pak.is_file() && bytecode.is_file() {
+                return PackageFixture {
+                    root: None,
+                    source,
+                    pak,
+                    bytecode,
+                };
+            }
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "pocket-native-fixture-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("app.js");
+        let pak = root.join("app.pak");
+        let bytecode = root.join("app.qjbc");
+        let source_bytes = b"globalThis.frame = function() {};\n";
+        std::fs::write(&source, source_bytes).unwrap();
+        std::fs::write(&pak, empty_pak()).unwrap();
+        std::fs::write(&bytecode, compile_test_bytecode(source_bytes)).unwrap();
+        PackageFixture {
+            root: Some(root),
+            source,
+            pak,
+            bytecode,
+        }
     }
 
     #[test]
@@ -3692,6 +4126,34 @@ mod smoke_tests {
             .unwrap()
             .iter()
             .any(|op| op["type"] == "rect"));
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn binary_frame_delta_encodes_draw_ops_without_json() {
+        let handle = pocket_create(320.0, 480.0);
+        let source = CString::new(
+            r#"globalThis.frame = function() {
+                const node = ui.createNode(0);
+                ui.setProp(node, 1, 40);
+                ui.setProp(node, 2, 24);
+                ui.setProp(node, 64, 0xff336699);
+                ui.insertBefore(1, node, 0);
+            };"#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        let mut length = 0u64;
+        let pointer = unsafe { pocket_frame_delta_binary(handle, 16.0, &mut length) };
+        assert!(!pointer.is_null());
+        assert!(length > 32);
+        let bytes = unsafe { std::slice::from_raw_parts(pointer, length as usize) };
+        assert_eq!(&bytes[..4], b"PFB1");
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
+        // Header (24 bytes) is followed by the operation count. The source
+        // above emits at least one rect operation.
+        let op_count = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        assert!(op_count > 0);
         unsafe { pocket_destroy(handle) };
     }
 
@@ -3975,22 +4437,11 @@ mod smoke_tests {
         unsafe { pocket_destroy(handle) };
     }
 
-    // Package integration fixtures are caller-supplied; the SDK has no
-    // dependency on a sibling demo directory or its application assets.
-    fn package_fixture(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(std::env::var("POCKET_TEST_ASSETS")
-            .expect("set POCKET_TEST_ASSETS to a compiled guest asset directory"))
-            .join(name)
-    }
-
     #[test]
     fn packaged_guest_loads_real_host_assets() {
-        let source_path = std::path::PathBuf::from(std::env::var("POCKET_TEST_SOURCE")
-            .expect("set POCKET_TEST_SOURCE to compiled guest JS for source-ablation tests"));
-        let pak_path = package_fixture("app.pak");
-        assert!(source_path.is_file() && pak_path.is_file(), "compile the package fixture before testing");
-        let source_file = CString::new(source_path.to_str().unwrap()).unwrap();
-        let pak_file = CString::new(pak_path.to_str().unwrap()).unwrap();
+        let fixture = package_fixture();
+        let source_file = CString::new(fixture.source.to_str().unwrap()).unwrap();
+        let pak_file = CString::new(fixture.pak.to_str().unwrap()).unwrap();
         let handle = pocket_create(390.0, 844.0);
         assert!(!handle.is_null());
         let result = unsafe { pocket_load_files(handle, source_file.as_ptr(), pak_file.as_ptr()) };
@@ -4003,11 +4454,9 @@ mod smoke_tests {
 
     #[test]
     fn packaged_bytecode_guest_runs_multiple_frames_and_gc() {
-        let bytecode_path = package_fixture("app.qjbc");
-        let pak_path = package_fixture("app.pak");
-        assert!(bytecode_path.is_file() && pak_path.is_file(), "compile the package fixture before testing");
-        let bytecode_file = CString::new(bytecode_path.to_str().unwrap()).unwrap();
-        let pak_file = CString::new(pak_path.to_str().unwrap()).unwrap();
+        let fixture = package_fixture();
+        let bytecode_file = CString::new(fixture.bytecode.to_str().unwrap()).unwrap();
+        let pak_file = CString::new(fixture.pak.to_str().unwrap()).unwrap();
         let handle = pocket_create(390.0, 844.0);
         assert!(!handle.is_null());
         let result = unsafe {
@@ -4031,12 +4480,10 @@ mod smoke_tests {
 
     #[test]
     fn malformed_bytecode_is_rejected_without_source_fallback() {
-        let bytecode_path = package_fixture("app.qjbc");
-        let pak_path = package_fixture("app.pak");
-        assert!(bytecode_path.is_file() && pak_path.is_file(), "compile the package fixture before testing");
-        let mut bytecode = std::fs::read(bytecode_path).unwrap();
+        let fixture = package_fixture();
+        let mut bytecode = std::fs::read(&fixture.bytecode).unwrap();
         bytecode[bytecode::HEADER_LEN] ^= 1;
-        let pak = std::fs::read(pak_path).unwrap();
+        let pak = std::fs::read(&fixture.pak).unwrap();
         let handle = pocket_create(390.0, 844.0);
         assert!(!handle.is_null());
         let result = unsafe {
@@ -4055,5 +4502,125 @@ mod smoke_tests {
             "unexpected bytecode error: {error}"
         );
         unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn duplex_pointer_message_uses_canonical_input_path() {
+        let handle = pocket_create(320.0, 480.0);
+        let source = CString::new(
+            r#"
+            const node = ui.createNode(0);
+            ui.setProp(node, 1, 40); ui.setProp(node, 2, 24);
+            ui.setProp(node, 64, 0xff336699); ui.insertBefore(1, node, 0);
+            globalThis.frame = function() {};
+            globalThis.__pocketEvent = function(line) {
+                const event = JSON.parse(line);
+                if (event.name === 'input.pointer' && event.payload.phase === 'up') {
+                    ui.setProp(node, 64, 0xffcc6633);
+                }
+            };
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        let endpoint = unsafe { pocket_duplex_endpoint_acquire(handle) };
+        assert!(!endpoint.is_null());
+        let count = 0u32;
+        let write_pointer = |flags: u16| {
+            let mut count = count;
+            let payload = unsafe { pocket_duplex_ingress_reserve(endpoint, 1, &mut count) };
+            assert!(!payload.is_null());
+            unsafe {
+                ptr::write(
+                    payload.cast::<duplex::DuplexMessage>(),
+                    duplex::DuplexMessage {
+                        msg_type: 1,
+                        flags,
+                        target_id: 0,
+                        arg0: 8.0,
+                        arg1: 12.0,
+                    },
+                );
+                assert_eq!(pocket_duplex_ingress_publish(endpoint, count), 1);
+            }
+        };
+        write_pointer(1);
+        let down = frame_json(handle);
+        let down_color = down["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "rect")
+            .and_then(|op| op["color"].as_u64());
+        write_pointer(3);
+        let up = frame_json(handle);
+        let up_color = up["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "rect")
+            .and_then(|op| op["color"].as_u64());
+        assert_ne!(down_color, up_color);
+        unsafe {
+            pocket_duplex_endpoint_release(endpoint);
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn json_pointer_fallback_does_not_overtake_queued_duplex_down() {
+        let handle = pocket_create(320.0, 480.0);
+        let source = CString::new(
+            r#"
+            const node = ui.createNode(0);
+            ui.setProp(node, 1, 40); ui.setProp(node, 2, 24);
+            ui.insertBefore(1, node, 0);
+            globalThis.frame = function() {};
+            globalThis.__pocketEvent = function(line) {
+                const event = JSON.parse(line);
+                if (event.name === 'input.pointer') {
+                    pocket._emit(JSON.stringify({type:'event', name:'input.seen', payload:{phase:event.payload.phase}}));
+                }
+            };
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        let endpoint = unsafe { pocket_duplex_endpoint_acquire(handle) };
+        assert!(!endpoint.is_null());
+        let mut count = 0u32;
+        let payload = unsafe { pocket_duplex_ingress_reserve(endpoint, 1, &mut count) };
+        assert!(!payload.is_null());
+        unsafe {
+            ptr::write(
+                payload.cast::<duplex::DuplexMessage>(),
+                duplex::DuplexMessage {
+                    msg_type: 1,
+                    flags: 1,
+                    target_id: 0,
+                    arg0: 8.0,
+                    arg1: 12.0,
+                },
+            );
+            assert_eq!(pocket_duplex_ingress_publish(endpoint, count), 1);
+        }
+        let fallback_up = CString::new(
+            r#"{"type":"event","name":"input.pointer","payload":{"phase":"up","id":0,"x":8,"y":12}}"#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_send(handle, fallback_up.as_ptr()) }, 0);
+        let frame = frame_json(handle);
+        let phases = frame["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["name"] == "input.seen")
+            .filter_map(|event| event["payload"]["phase"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(phases, vec!["down", "up"]);
+        unsafe {
+            pocket_duplex_endpoint_release(endpoint);
+            pocket_destroy(handle);
+        }
     }
 }

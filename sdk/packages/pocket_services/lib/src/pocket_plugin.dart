@@ -36,12 +36,14 @@ final class PocketPluginCapability {
     required this.kind,
     this.description = '',
     this.permissions,
+    this.optionalPermissions = const <String>{},
   });
 
   final String name;
   final PocketCapabilityKind kind;
   final String description;
   final Set<String>? permissions;
+  final Set<String> optionalPermissions;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'name': name,
@@ -49,6 +51,8 @@ final class PocketPluginCapability {
     if (description.isNotEmpty) 'description': description,
     if (permissions != null && permissions!.isNotEmpty)
       'permissions': permissions!.toList()..sort(),
+    if (optionalPermissions.isNotEmpty)
+      'optionalPermissions': optionalPermissions.toList()..sort(),
   };
 }
 
@@ -98,6 +102,7 @@ final class PocketPluginDescriptor {
     this.protocolVersion = currentProtocolVersion,
     this.kind = 'capability',
     this.permissions = const <String>{},
+    this.optionalPermissions = const <String>{},
     this.limits = const PocketPluginLimits(),
     this.description = '',
   });
@@ -109,6 +114,7 @@ final class PocketPluginDescriptor {
   final String version;
   final String kind;
   final Set<String> permissions;
+  final Set<String> optionalPermissions;
   final PocketPluginLimits limits;
   final Map<String, PocketPluginCapability> capabilities;
   final String description;
@@ -119,6 +125,8 @@ final class PocketPluginDescriptor {
     'version': version,
     'kind': kind,
     if (permissions.isNotEmpty) 'permissions': permissions.toList()..sort(),
+    if (optionalPermissions.isNotEmpty)
+      'optionalPermissions': optionalPermissions.toList()..sort(),
     if (!limits.isEmpty) 'limits': limits.toJson(),
     if (description.isNotEmpty) 'description': description,
     'capabilities': capabilities.values
@@ -160,7 +168,9 @@ final class PocketPluginContext {
     required this.sessionId,
     required this.registry,
     this.budget = const PocketPluginBudget(),
-  }) : _registered = <String>{} {
+    Set<String> Function()? grantedPermissionsLookup,
+  }) : _registered = <String>{},
+       _grantedPermissionsLookup = grantedPermissionsLookup {
     budget.validate();
   }
 
@@ -169,6 +179,12 @@ final class PocketPluginContext {
   final String sessionId;
   final PocketHostRegistry registry;
   final PocketPluginBudget budget;
+  Set<String> Function()? _grantedPermissionsLookup;
+  set grantedPermissionsLookup(Set<String> Function()? lookup) =>
+      _grantedPermissionsLookup = lookup;
+  Set<String> get grantedPermissions =>
+      _grantedPermissionsLookup?.call() ?? const <String>{};
+
   final Set<String> _registered;
   final Set<PocketDuplexStream> _ports = <PocketDuplexStream>{};
   final Map<String, StreamSubscription<Object?>> _subscriptions =
@@ -186,14 +202,20 @@ final class PocketPluginContext {
   void registerRequest(String name, PocketCapabilityRequest handler) {
     _ensureCapability(name, PocketCapabilityKind.request);
     _ensureOpen();
-    registry.registerRequest(name, (params) => _guardRequest(handler, params));
+    registry.registerRequest(
+      name,
+      (params) => _guardRequest(name, handler, params),
+    );
     _registered.add(name);
   }
 
   void registerStream(String name, PocketCapabilityStream handler) {
     _ensureCapability(name, PocketCapabilityKind.stream);
     _ensureOpen();
-    registry.registerStream(name, (remote) => _guardStream(handler, remote));
+    registry.registerStream(
+      name,
+      (remote) => _guardStream(name, handler, remote),
+    );
     _registered.add(name);
   }
 
@@ -229,14 +251,27 @@ final class PocketPluginContext {
   }
 
   Future<Object?> _guardRequest(
+    String capabilityName,
     PocketCapabilityRequest handler,
     Map<String, dynamic> params,
   ) async {
-    if (_revoked)
+    if (_revoked) {
       throw const PocketCapabilityException(
         'plugin_revoked',
         'plugin is revoked',
       );
+    }
+    final method = plugin.capabilities[capabilityName];
+    if (method != null) {
+      final requiredPerms = method.permissions ?? plugin.permissions;
+      final missing = requiredPerms.difference(grantedPermissions);
+      if (missing.isNotEmpty) {
+        throw PocketCapabilityException(
+          'permission_denied',
+          'missing permissions: ${missing.toList()..sort()}',
+        );
+      }
+    }
     if (_activeRequests >= budget.maxConcurrentRequests) {
       throw const PocketCapabilityException(
         'plugin_request_quota',
@@ -261,6 +296,7 @@ final class PocketPluginContext {
   }
 
   Stream<Object?> _guardStream(
+    String capabilityName,
     PocketCapabilityStream handler,
     PocketHostStreamContext remote,
   ) {
@@ -282,6 +318,21 @@ final class PocketPluginContext {
       if (_revoked || _activeStreams >= budget.maxActiveStreams) {
         controller.close();
         return;
+      }
+      final method = plugin.capabilities[capabilityName];
+      if (method != null) {
+        final requiredPerms = method.permissions ?? plugin.permissions;
+        final missing = requiredPerms.difference(grantedPermissions);
+        if (missing.isNotEmpty) {
+          controller.addError(
+            PocketCapabilityException(
+              'permission_denied',
+              'missing permissions: ${missing.toList()..sort()}',
+            ),
+          );
+          controller.close();
+          return;
+        }
       }
       _activeStreams++;
       admitted = true;
@@ -424,6 +475,8 @@ final class PocketPluginManager {
       sessionId: sessionId,
       registry: host.registry,
       budget: _budgetFor(plugin.descriptor),
+      grantedPermissionsLookup: () =>
+          grantedPermissionsFor(plugin.descriptor.id),
     );
     final state = _PluginState(plugin, context);
     _plugins[plugin.descriptor.id] = state;
@@ -447,9 +500,14 @@ final class PocketPluginManager {
       final declared = _plugins.values
           .expand((state) {
             final desc = state.plugin.descriptor;
-            final methodPerms = desc.capabilities.values
-                .expand((m) => m.permissions ?? desc.permissions);
-            return desc.permissions.followedBy(methodPerms);
+            final methodPerms = desc.capabilities.values.expand(
+              (m) => (m.permissions ?? desc.permissions).followedBy(
+                m.optionalPermissions,
+              ),
+            );
+            return desc.permissions
+                .followedBy(desc.optionalPermissions)
+                .followedBy(methodPerms);
           })
           .toSet();
       final undeclared = requested.difference(declared);
@@ -483,38 +541,73 @@ final class PocketPluginManager {
       for (final state in _plugins.values) {
         final descriptor = state.plugin.descriptor;
         final names = descriptor.capabilities.keys.toSet();
-        final shouldActivate = names.any(granted.contains);
+        final shouldActivate = names.isEmpty
+            ? descriptor.permissions.isNotEmpty
+            : names.any(granted.contains);
         if (!shouldActivate || state.active) continue;
         final requiredCapability = names.any(availability.required.contains);
-        final grantedMethods = descriptor.capabilities.values
-            .where((method) => granted.contains(method.name));
-        final requiredPermissions = (grantedMethods.isEmpty
-                ? descriptor.capabilities.values
-                : grantedMethods)
-            .expand((method) => method.permissions ?? descriptor.permissions)
-            .toSet();
-        // A missing guest declaration is an empty declaration, never an
-        // implicit grant of every permission declared by a provider.
-        final requested = requiredPermissions.intersection(
-          _guestRequestedPermissions ?? const <String>{},
-        );
-        final notDeclared = requiredPermissions.difference(requested);
-        if (notDeclared.isNotEmpty) {
-          if (requiredCapability) {
-            host.revokeCapabilities(names);
-            throw PocketCapabilityException(
-              'permission_not_declared',
-              'plugin ${descriptor.id} permissions were not declared',
-            );
+
+        if (_guestRequestedPermissions != null) {
+          for (final method in descriptor.capabilities.values) {
+            if (!granted.contains(method.name)) continue;
+            final methodPerms = method.permissions ?? descriptor.permissions;
+            final notDeclared =
+                methodPerms.difference(_guestRequestedPermissions!);
+            if (notDeclared.isNotEmpty) {
+              if (availability.required.contains(method.name)) {
+                host.revokeCapabilities(names);
+                throw PocketCapabilityException(
+                  'permission_not_declared',
+                  'plugin ${descriptor.id} capability ${method.name} permissions were not declared',
+                );
+              } else {
+                granted.remove(method.name);
+                host.revokeCapabilities(<String>[method.name]);
+              }
+            }
           }
-          // An optional provider whose permissions were not declared is not
-          // part of this guest session. Do not activate its Dart/native
-          // implementation merely because its capability name was optional.
-          granted.removeAll(names);
-          host.revokeCapabilities(names);
-          continue;
         }
-        final pending = requested.difference(allowedPermissions);
+
+        final grantedMethods = descriptor.capabilities.values
+            .where((m) => granted.contains(m.name))
+            .toList();
+
+        if (descriptor.capabilities.isNotEmpty && grantedMethods.isEmpty) {
+          if (descriptor.permissions.isEmpty) {
+            host.revokeCapabilities(names);
+            continue;
+          }
+        }
+
+        final requestedPermissionsForPlugin = grantedMethods.isNotEmpty
+            ? grantedMethods
+                .expand((m) => m.permissions ?? descriptor.permissions)
+                .toSet()
+            : (descriptor.capabilities.isEmpty
+                ? descriptor.permissions.intersection(
+                    _guestRequestedPermissions ?? descriptor.permissions,
+                  )
+                : const <String>{});
+
+        if (descriptor.capabilities.isEmpty &&
+            _guestRequestedPermissions != null) {
+          final notDeclared =
+              descriptor.permissions.difference(_guestRequestedPermissions!);
+          if (notDeclared.isNotEmpty) {
+            if (requiredCapability) {
+              host.revokeCapabilities(names);
+              throw PocketCapabilityException(
+                'permission_not_declared',
+                'plugin ${descriptor.id} permissions were not declared',
+              );
+            }
+            continue;
+          }
+        }
+
+        var approvedPermissions = const <String>{};
+        final pending =
+            requestedPermissionsForPlugin.difference(allowedPermissions);
         if (pending.isNotEmpty) {
           final approved = (await permissionRequest(
             PocketPermissionRequest(
@@ -524,24 +617,55 @@ final class PocketPluginManager {
               reason: permissionReason,
             ),
           )).toSet();
-          if (!pending.containsAll(approved))
+          if (!pending.containsAll(approved)) {
             throw const PocketCapabilityException(
               'invalid_permission_decision',
               'permission callback widened authority',
             );
+          }
+          approvedPermissions = approved;
           final denied = pending.difference(approved);
           if (denied.isNotEmpty) {
-            if (requiredCapability)
-              throw PocketCapabilityException(
-                'plugin_permission_denied',
-                'denied permissions: ${denied.toList()..sort()}',
-              );
-            granted.removeAll(names);
-            host.revokeCapabilities(names);
-            continue;
+            for (final method in grantedMethods.toList()) {
+              final methodPerms = method.permissions ?? descriptor.permissions;
+              if (methodPerms.intersection(denied).isNotEmpty) {
+                if (availability.required.contains(method.name)) {
+                  throw PocketCapabilityException(
+                    'plugin_permission_denied',
+                    'denied permissions: ${denied.toList()..sort()}',
+                  );
+                } else {
+                  granted.remove(method.name);
+                  host.revokeCapabilities(<String>[method.name]);
+                }
+              }
+            }
+            if (descriptor.capabilities.isEmpty && denied.isNotEmpty) {
+              if (requiredCapability) {
+                throw PocketCapabilityException(
+                  'plugin_permission_denied',
+                  'denied permissions: ${denied.toList()..sort()}',
+                );
+              } else {
+                continue;
+              }
+            }
           }
-          _grantedPermissions[descriptor.id] = approved;
         }
+
+        if (descriptor.capabilities.isNotEmpty &&
+            !names.any(granted.contains)) {
+          host.revokeCapabilities(names);
+          continue;
+        }
+
+        final effectiveAllowed = allowedPermissions.union(approvedPermissions);
+        final effectiveGranted = _guestRequestedPermissions != null
+            ? _guestRequestedPermissions!.intersection(effectiveAllowed)
+            : effectiveAllowed;
+        _grantedPermissions[descriptor.id] =
+            Set<String>.unmodifiable(effectiveGranted);
+
         try {
           await state.plugin.activate(state.context);
         } catch (_) {
@@ -553,7 +677,8 @@ final class PocketPluginManager {
         }
         state.active = true;
         state.context.restore();
-        host.restoreCapabilities(names);
+        host.restoreCapabilities(names.where(granted.contains));
+        host.revokeCapabilities(names.where((n) => !granted.contains(n)));
       }
       return PocketCapabilityAvailability(
         required: availability.required,
@@ -608,7 +733,10 @@ final class PocketPluginManager {
   }
 
   Set<String> grantedPermissionsFor(String pluginId) =>
-      _grantedPermissions[pluginId] ?? allowedPermissions;
+      _grantedPermissions[pluginId] ??
+      (_guestRequestedPermissions != null
+          ? _guestRequestedPermissions!.intersection(allowedPermissions)
+          : allowedPermissions);
 
   Future<Object?> invoke(
     String capabilityName, [
@@ -618,13 +746,21 @@ final class PocketPluginManager {
     for (final state in _plugins.values) {
       final method = state.plugin.descriptor.capabilities[capabilityName];
       if (method != null) {
+        if (!state.active || !host.isAllowed(capabilityName)) {
+          throw PocketCapabilityException(
+            'capability_denied',
+            'capability $capabilityName is not granted',
+          );
+        }
         final plugin = state.plugin;
-        final grantedPermissions =
-            _grantedPermissions[plugin.descriptor.id] ?? allowedPermissions;
+        final effectiveGranted = _grantedPermissions[plugin.descriptor.id] ??
+            (_guestRequestedPermissions != null
+                ? _guestRequestedPermissions!.intersection(allowedPermissions)
+                : allowedPermissions);
         final requiredPermissions =
             method.permissions ?? plugin.descriptor.permissions;
         final missingPermissions =
-            requiredPermissions.difference(grantedPermissions);
+            requiredPermissions.difference(effectiveGranted);
         if (missingPermissions.isNotEmpty) {
           throw PocketCapabilityException(
             'plugin_permission_denied',
@@ -633,7 +769,7 @@ final class PocketPluginManager {
         }
         final registration = host.registry.registrationFor(capabilityName);
         if (registration?.request == null) {
-          throw PocketCapabilityException(
+          throw const PocketCapabilityException(
             'capability_unavailable',
             'request provider is unavailable',
           );
@@ -695,6 +831,10 @@ final class PocketPluginManager {
       if (!PocketPermissionName.isValid(permission))
         throw ArgumentError.value(permission, 'plugin.permissions');
     }
+    for (final permission in descriptor.optionalPermissions) {
+      if (!PocketPermissionName.isValid(permission))
+        throw ArgumentError.value(permission, 'plugin.optionalPermissions');
+    }
     for (final capability in descriptor.capabilities.values) {
       if (!PocketCapabilityName.isValid(capability.name))
         throw ArgumentError.value(capability.name, 'plugin.capabilities');
@@ -703,6 +843,14 @@ final class PocketPluginManager {
           if (!PocketPermissionName.isValid(permission)) {
             throw ArgumentError.value(permission, 'capability.permissions');
           }
+        }
+      }
+      for (final permission in capability.optionalPermissions) {
+        if (!PocketPermissionName.isValid(permission)) {
+          throw ArgumentError.value(
+            permission,
+            'capability.optionalPermissions',
+          );
         }
       }
     }
