@@ -1,0 +1,22 @@
+{
+  "name": "pocketjs-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/pocket_ui"
+  ],
+  "dependencies": {
+    "@pocket/ui": "workspace:*"
+  },
+  "description": "Embeddable PocketJS bytecode host SDK for Flutter applications.",
+  "scripts": {
+    "check:architecture": "python3 scripts/check_architecture.py",
+    "test:packages": "bun test scripts/tests/package_update.test.ts",
+    "test:editor": "bun test editor/test/editor_server.test.ts",
+    "test:editor:live": "bun editor/test/editor_live_probe.ts",
+    "editor": "bun editor/server.ts",
+    "init": "bun pocket.ts init",
+    "build": "bun pocket.ts build"
+  }
+}

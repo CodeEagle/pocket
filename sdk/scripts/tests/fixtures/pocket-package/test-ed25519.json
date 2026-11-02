@@ -1,0 +1,6 @@
+{
+  "keyId": "fixture",
+  "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIOoxKlMGJInHEhj5RqsxXpYPsvse7y+ZCYr0bmnWFOm5\n-----END PRIVATE KEY-----\n",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAySv/5RGFHvcWkd2e15IRMJRNKwHWKDb9m7isfAWsbL0=\n-----END PUBLIC KEY-----\n",
+  "publicKeyBase64": "ySv/5RGFHvcWkd2e15IRMJRNKwHWKDb9m7isfAWsbL0="
+}

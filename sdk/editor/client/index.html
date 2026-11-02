@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pocket Studio</title>
+  <link rel="stylesheet" href="/editor.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">P</span><span><strong>Pocket Studio</strong><small>local guest workspace</small></span></div>
+    <div class="sidebar-heading"><span>Projects</span><button id="new-project" class="icon-button" title="Create project">+</button></div>
+    <nav id="projects" aria-label="Projects"></nav>
+    <div class="sidebar-foot"><span class="status-dot"></span> Local only<small>No source leaves this machine.</small></div>
+  </aside>
+  <main>
+    <header class="topbar">
+      <div><div class="eyebrow">POCKET HOST / EDITOR</div><h1 id="project-title">Select a project</h1><p id="project-subtitle">Create a scaffold backed by the pinned PocketJS compiler.</p></div>
+      <div class="top-actions"><span id="save-status" class="status-text">Ready</span><button id="save" class="secondary" disabled>Save</button><button id="build" class="secondary" disabled>Build qjbc + PAK</button><button id="publish" class="primary" disabled>Publish signed update</button></div>
+    </header>
+    <div id="notice" class="notice" role="alert" hidden></div>
+    <div class="workspace">
+      <section class="panel source-panel">
+        <div class="panel-header"><div><span class="eyebrow">GUEST SOURCE</span><div class="file-heading"><h2 id="active-file">app.tsx</h2><select id="file-picker" aria-label="Guest source file" disabled></select></div></div><span id="source-bytes" class="pill">—</span></div>
+        <textarea id="source" spellcheck="false" aria-label="Guest app.tsx source" placeholder="Create or select a project to edit its guest source."></textarea>
+        <div class="source-foot"><span>Solid TSX · JavaScript owns the UI</span><span id="source-revision">revision —</span></div>
+      </section>
+      <section class="right-column">
+        <section class="panel config-panel">
+          <div class="panel-header"><div><span class="eyebrow">PROJECT CONFIG</span><h2>Build settings</h2></div><span id="build-state" class="pill">Not built</span></div>
+          <div class="form-grid">
+            <label>Display name<input id="config-name" autocomplete="off"></label>
+            <label>App ID<input id="config-app-id" autocomplete="off"></label>
+            <label>Version<input id="config-version" autocomplete="off"></label>
+            <label>Build<input id="config-build" type="number" min="0" step="1"></label>
+            <label>Tick rate<input id="config-tick" type="number" min="1" max="120" step="1"></label>
+          </div>
+        </section>
+        <section class="panel artifacts-panel">
+          <div class="panel-header"><div><span class="eyebrow">ARTIFACTS</span><h2>Native package outputs</h2></div><span id="runtime-abi" class="pill">ABI —</span></div>
+          <div id="artifacts" class="artifact-list"><span class="muted">Build the project to produce real QuickJS bytecode.</span></div>
+          <div id="publish-info" class="publish-info" hidden></div>
+        </section>
+        <section class="panel log-panel">
+          <div class="panel-header"><div><span class="eyebrow">BUILD LOG</span><h2>Diagnostics</h2></div><button id="clear-log" class="text-button">Clear view</button></div>
+          <pre id="log" aria-live="polite">No project selected.</pre>
+        </section>
+      </section>
+    </div>
+  </main>
+  <dialog id="create-dialog">
+    <form id="create-form" method="dialog">
+      <div class="eyebrow">NEW LOCAL PROJECT</div><h2>Start from the host showcase</h2><p>The complete guest source and manifest are copied into the editor workspace, then you can replace <code>app.tsx</code>.</p>
+      <label>Folder ID<input name="id" required pattern="[a-z][a-z0-9-]{0,47}" value="my-pocket-app" autocomplete="off"></label>
+      <label>Display name<input name="name" required value="My Pocket App" autocomplete="off"></label>
+      <label>App ID<input name="appId" required value="pocket.host.demo" autocomplete="off"></label>
+      <div class="form-grid"><label>Version<input name="version" value="0.1.0"></label><label>Tick rate<input name="tickHz" type="number" min="1" max="120" value="60"></label></div>
+      <div class="dialog-actions"><button type="button" id="cancel-create" class="secondary">Cancel</button><button class="primary" type="submit">Create project</button></div>
+    </form>
+  </dialog>
+  <script type="module" src="/editor.js"></script>
+</body>
+</html>

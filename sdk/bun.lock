@@ -1,0 +1,19 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "pocketjs-sdk",
+      "dependencies": {
+        "@pocket/ui": "file:packages/pocket_ui",
+      },
+    },
+    "packages/pocket_ui": {
+      "name": "@pocket/ui",
+      "version": "0.1.0",
+    },
+  },
+  "packages": {
+    "@pocket/ui": ["@pocket/ui@workspace:packages/pocket_ui"],
+  }
+}

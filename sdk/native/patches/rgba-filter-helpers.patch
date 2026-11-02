@@ -1,0 +1,359 @@
+--- /dev/null
++++ b/framework/compiler/rgba_filter.ts
+@@ -0,0 +1,111 @@
++// Lossless RGBA tile filter used by the TILESET v2 cooker.
++//
++// The wire payload is intentionally smaller than a complete PNG: every row
++// starts with a PNG filter byte (0..4), followed by RGBA residual bytes, and
++// the complete filtered stream is wrapped with zlib DEFLATE.  The matching
++// core helper reverses the row filters after bounded inflation.
++
++import { deflateSync } from "node:zlib";
++
++/**
++ * Encode one tightly packed RGBA image as filtered, zlib-wrapped bytes.
++ *
++ * The encoder is deliberately independent of the TILESET header/codec code:
++ * callers can put these bytes in a per-tile directory entry without pulling
++ * PNG chunks, CRCs, or a browser image decoder into the runtime.
++ */
++export function encodeFilteredRgba(
++  rgba: Uint8Array,
++  width: number,
++  height: number,
++): Uint8Array {
++  if (!Number.isSafeInteger(width) || width <= 0) {
++    throw new Error(`rgba filter: invalid width ${width}`);
++  }
++  if (!Number.isSafeInteger(height) || height <= 0) {
++    throw new Error(`rgba filter: invalid height ${height}`);
++  }
++
++  const rowBytes = width * 4;
++  const rawBytes = rowBytes * height;
++  const filteredBytes = (rowBytes + 1) * height;
++  if (
++    !Number.isSafeInteger(rowBytes) ||
++    !Number.isSafeInteger(rawBytes) ||
++    !Number.isSafeInteger(filteredBytes)
++  ) {
++    throw new Error("rgba filter: dimensions overflow");
++  }
++  if (rgba.byteLength !== rawBytes) {
++    throw new Error(`rgba filter: length ${rgba.byteLength}, want ${rawBytes}`);
++  }
++
++  const filtered = new Uint8Array(filteredBytes);
++  const candidate = new Uint8Array(rowBytes);
++  const best = new Uint8Array(rowBytes);
++
++  for (let y = 0; y < height; y++) {
++    const row = y * rowBytes;
++    const previous = row - rowBytes;
++    const output = y * (rowBytes + 1);
++    let bestFilter = 0;
++    let bestScore = Number.POSITIVE_INFINITY;
++
++    // The tie order is intentional: it gives stable output and prefers the
++    // cheaper filters when two candidates have the same residual score.
++    for (let filter = 0; filter <= 4; filter++) {
++      let score = 0;
++      for (let x = 0; x < rowBytes; x++) {
++        const value = rgba[row + x];
++        const left = x >= 4 ? rgba[row + x - 4] : 0;
++        const up = y > 0 ? rgba[previous + x] : 0;
++        const upLeft = y > 0 && x >= 4 ? rgba[previous + x - 4] : 0;
++        let predictor: number;
++        switch (filter) {
++          case 0:
++            predictor = 0;
++            break;
++          case 1:
++            predictor = left;
++            break;
++          case 2:
++            predictor = up;
++            break;
++          case 3:
++            predictor = (left + up) >> 1;
++            break;
++          default:
++            predictor = paeth(left, up, upLeft);
++            break;
++        }
++        const residual = value - predictor;
++        candidate[x] = residual & 0xff;
++        // PNG's filter heuristic scores the stored byte as signed int8,
++        // rather than the pre-modulo difference in [-255, 255].
++        const signedResidual =
++          residual > 127 ? residual - 256 : residual < -128 ? residual + 256 : residual;
++        score += Math.abs(signedResidual);
++      }
++      if (score < bestScore) {
++        bestScore = score;
++        bestFilter = filter;
++        best.set(candidate);
++      }
++    }
++
++    filtered[output] = bestFilter;
++    filtered.set(best, output + 1);
++  }
++
++  // zlib-wrapped DEFLATE is the format understood by miniz_oxide's
++  // DataFormat::Zlib decoder.  No PNG container or host std::io is required.
++  return new Uint8Array(deflateSync(filtered, { level: 9 }));
++}
++
++function paeth(left: number, up: number, upLeft: number): number {
++  const p = left + up - upLeft;
++  const pa = Math.abs(p - left);
++  const pb = Math.abs(p - up);
++  const pc = Math.abs(p - upLeft);
++  return pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft;
++}
+--- /dev/null
++++ b/engine/core/src/tile_rgba_deflate.rs
+@@ -0,0 +1,151 @@
++//! Bounded decoder for filtered, zlib-wrapped RGBA8888 tile streams.
++//!
++//! The compiler writes one PNG-style filter byte plus residual bytes per row,
++//! then wraps the complete stream in zlib DEFLATE.  This is deliberately not
++//! a PNG parser: the core only needs a bounded tile decoder and should remain
++//! `no_std + alloc` on wasm32 and embedded/mobile targets.
++
++use alloc::vec::Vec;
++use core::fmt;
++
++use miniz_oxide::{
++    inflate::stream::{inflate, InflateState},
++    DataFormat, MZFlush, MZStatus,
++};
++
++/// TILESET dimensions are bounded by the core texture limit.  Keeping the
++/// guard here also prevents malformed metadata from requesting an unbounded
++/// allocation before the zlib output limit is applied.
++pub const MAX_TILE_DIM: u32 = 512;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum DecodeError {
++    EmptyInput,
++    InvalidDimensions,
++    LengthOverflow,
++    Inflate,
++    OutputLength { expected: usize, actual: usize },
++    TrailingInput { consumed: usize, total: usize },
++    BadFilter(u8),
++}
++
++impl fmt::Display for DecodeError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::EmptyInput => f.write_str("empty zlib tile stream"),
++            Self::InvalidDimensions => f.write_str("tile dimensions are outside 1..=512"),
++            Self::LengthOverflow => f.write_str("tile byte length overflow"),
++            Self::Inflate => f.write_str("invalid or truncated zlib stream"),
++            Self::OutputLength { expected, actual } => {
++                write!(f, "zlib output length {actual}, want {expected}")
++            }
++            Self::TrailingInput { consumed, total } => {
++                write!(f, "zlib consumed {consumed} of {total} bytes")
++            }
++            Self::BadFilter(filter) => write!(f, "invalid row filter {filter}"),
++        }
++    }
++}
++
++/// Decode one filtered RGBA8888 tile.
++///
++/// The output is exactly `width * height * 4` bytes in row-major RGBA order.
++/// Inflation is performed with an output slice sized to the exact filtered
++/// stream length, so a compressed bomb cannot grow the result beyond the
++/// declared tile dimensions.  Input must contain exactly one zlib stream;
++/// trailing bytes are rejected rather than silently accepted as padding.
++pub fn decode(input: &[u8], width: u32, height: u32) -> Result<Vec<u8>, DecodeError> {
++    if input.is_empty() {
++        return Err(DecodeError::EmptyInput);
++    }
++    if width == 0 || height == 0 || width > MAX_TILE_DIM || height > MAX_TILE_DIM {
++        return Err(DecodeError::InvalidDimensions);
++    }
++
++    let width = usize::try_from(width).map_err(|_| DecodeError::LengthOverflow)?;
++    let height = usize::try_from(height).map_err(|_| DecodeError::LengthOverflow)?;
++    let row_bytes = width
++        .checked_mul(4)
++        .ok_or(DecodeError::LengthOverflow)?;
++    let rgba_len = row_bytes
++        .checked_mul(height)
++        .ok_or(DecodeError::LengthOverflow)?;
++    let filtered_len = row_bytes
++        .checked_add(1)
++        .and_then(|n| n.checked_mul(height))
++        .ok_or(DecodeError::LengthOverflow)?;
++
++    // `new_boxed` keeps miniz's 32 KiB dictionary off the mobile/wasm stack.
++    let mut state = InflateState::new_boxed(DataFormat::Zlib);
++    let mut filtered = Vec::new();
++    filtered.try_reserve_exact(filtered_len).map_err(|_| DecodeError::LengthOverflow)?;
++    filtered.resize(filtered_len, 0);
++
++    let result = inflate(&mut state, input, &mut filtered, MZFlush::Finish);
++    if result.status != Ok(MZStatus::StreamEnd) {
++        return Err(DecodeError::Inflate);
++    }
++    if result.bytes_written != filtered_len {
++        return Err(DecodeError::OutputLength {
++            expected: filtered_len,
++            actual: result.bytes_written,
++        });
++    }
++    if result.bytes_consumed != input.len() {
++        return Err(DecodeError::TrailingInput {
++            consumed: result.bytes_consumed,
++            total: input.len(),
++        });
++    }
++
++    // Compact/unfilter in place.  For row y, the destination begins y bytes
++    // before its source; iterating x from left to right means each write only
++    // overwrites source bytes that were already consumed.
++    for y in 0..height {
++        let source = y * (row_bytes + 1);
++        let output = y * row_bytes;
++        let filter = filtered[source];
++        if filter > 4 {
++            return Err(DecodeError::BadFilter(filter));
++        }
++        for x in 0..row_bytes {
++            let value = filtered[source + 1 + x];
++            let left = if x >= 4 { filtered[output + x - 4] } else { 0 };
++            let up = if y > 0 {
++                filtered[output - row_bytes + x]
++            } else {
++                0
++            };
++            let up_left = if y > 0 && x >= 4 {
++                filtered[output - row_bytes + x - 4]
++            } else {
++                0
++            };
++            let predictor = match filter {
++                0 => 0,
++                1 => left,
++                2 => up,
++                3 => ((left as u16 + up as u16) >> 1) as u8,
++                4 => paeth(left, up, up_left),
++                _ => unreachable!(),
++            };
++            filtered[output + x] = value.wrapping_add(predictor);
++        }
++    }
++    filtered.truncate(rgba_len);
++    Ok(filtered)
++}
++
++fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
++    let p = left as i32 + up as i32 - up_left as i32;
++    let pa = (p - left as i32).abs();
++    let pb = (p - up as i32).abs();
++    let pc = (p - up_left as i32).abs();
++    if pa <= pb && pa <= pc {
++        left
++    } else if pb <= pc {
++        up
++    } else {
++        up_left
++    }
++}
+--- /dev/null
++++ b/engine/core/tests/tile_rgba_deflate.rs
+@@ -0,0 +1,88 @@
++#[path = "../src/tile_rgba_deflate.rs"]
++mod tile_rgba_deflate;
++
++extern crate alloc;
++
++use miniz_oxide::deflate::compress_to_vec_zlib;
++use tile_rgba_deflate::{decode, DecodeError};
++
++fn filter_rows(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
++    let row_bytes = width * 4;
++    let mut filtered = Vec::with_capacity((row_bytes + 1) * height);
++    for y in 0..height {
++        let filter = (y % 5) as u8;
++        filtered.push(filter);
++        for x in 0..row_bytes {
++            let value = rgba[y * row_bytes + x];
++            let left = if x >= 4 { rgba[y * row_bytes + x - 4] } else { 0 };
++            let up = if y > 0 { rgba[(y - 1) * row_bytes + x] } else { 0 };
++            let up_left = if y > 0 && x >= 4 {
++                rgba[(y - 1) * row_bytes + x - 4]
++            } else {
++                0
++            };
++            let predictor = match filter {
++                0 => 0,
++                1 => left,
++                2 => up,
++                3 => ((left as u16 + up as u16) >> 1) as u8,
++                4 => paeth(left, up, up_left),
++                _ => unreachable!(),
++            };
++            filtered.push(value.wrapping_sub(predictor));
++        }
++    }
++    filtered
++}
++
++fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
++    let p = left as i32 + up as i32 - up_left as i32;
++    let pa = (p - left as i32).abs();
++    let pb = (p - up as i32).abs();
++    let pc = (p - up_left as i32).abs();
++    if pa <= pb && pa <= pc {
++        left
++    } else if pb <= pc {
++        up
++    } else {
++        up_left
++    }
++}
++
++#[test]
++fn round_trips_all_row_filters_and_alpha() {
++    let width = 23;
++    let height = 13;
++    let mut rgba = vec![0u8; width * height * 4];
++    for y in 0..height {
++        for x in 0..width {
++            let i = (y * width + x) * 4;
++            rgba[i] = (x * 37 + y * 11) as u8;
++            rgba[i + 1] = (x * 13 + y * 53 + 7) as u8;
++            rgba[i + 2] = (x * 71 + y * 19 + 29) as u8;
++            rgba[i + 3] = (x * 17 + y * 31 + 3) as u8;
++        }
++    }
++    let filtered = filter_rows(&rgba, width, height);
++    let compressed = compress_to_vec_zlib(&filtered, 9);
++    assert_eq!(decode(&compressed, width as u32, height as u32).unwrap(), rgba);
++}
++
++#[test]
++fn rejects_trailing_bytes_and_bad_filters() {
++    let rgba = [0x10, 0x20, 0x30, 0x40];
++    let filtered = filter_rows(&rgba, 1, 1);
++    let compressed = compress_to_vec_zlib(&filtered, 9);
++
++    let mut trailing = compressed.clone();
++    trailing.push(0);
++    assert!(matches!(
++        decode(&trailing, 1, 1),
++        Err(DecodeError::TrailingInput { .. })
++    ));
++
++    let mut bad_filter = filter_rows(&rgba, 1, 1);
++    bad_filter[0] = 5;
++    let bad_compressed = compress_to_vec_zlib(&bad_filter, 9);
++    assert_eq!(decode(&bad_compressed, 1, 1), Err(DecodeError::BadFilter(5)));
++}

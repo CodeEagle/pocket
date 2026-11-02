@@ -1,0 +1,29 @@
+[package]
+name = "pocket_flutter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+
+[lib]
+# Keep the platform archives for Flutter and expose an rlib so the static
+# probe binary can exercise the same Rust runtime without dlopening a dylib.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+pocket-runtime = { path = "../.cache/pocketjs/engine/runtime" }
+pocket-guest-rquickjs = { path = "../.cache/pocketjs/engine/guest-rquickjs" }
+pocketjs-core = { path = "../.cache/pocketjs/engine/core" }
+pocket-spec = { path = "../.cache/pocketjs/engine/spec" }
+pocket-drivers = { path = "../.cache/pocketjs/engine/drivers" }
+pocket-draw-ops = { path = "../.cache/pocketjs/engine/render/draw-ops" }
+rquickjs = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Android NDK targets do not have the pre-generated QuickJS bindings shipped
+# for the host architecture. Ask rquickjs-sys to generate them with bindgen;
+# the build script supplies LIBCLANG_PATH and the NDK sysroot.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+rquickjs = { version = "0.12", features = ["bindgen"] }
+
+[workspace]

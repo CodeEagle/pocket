@@ -1,0 +1,6 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-guest-manifest.json",
+  "protocolVersion": 1,
+  "capabilities": { "requires": ["text.glyphs.baked"], "optional": [] },
+  "permissions": { "optional": [] }
+}

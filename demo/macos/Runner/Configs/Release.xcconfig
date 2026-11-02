@@ -1,0 +1,5 @@
+#include "../../Flutter/Flutter-Release.xcconfig"
+#include "Warnings.xcconfig"
+
+// Native archive currently targets Apple Silicon; applies to Profile too.
+ARCHS = arm64

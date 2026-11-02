@@ -1,0 +1,65 @@
+{
+  "source": "DeviceHub iPhone Duo geometry drive; captured from artifacts/showcase/duo-geometry.json",
+  "capturedAt": "2026-11-02",
+  "samples": [
+    {
+      "width": 951,
+      "height": 669,
+      "safeArea": { "top": 0, "right": 84, "bottom": 34, "left": 0 },
+      "keyboardInset": 0,
+      "reservedRegions": [
+        {
+          "id": "ID()",
+          "kind": "division",
+          "frame": { "left": 455.5, "top": 0, "width": 40, "height": 669 },
+          "margins": { "top": 0, "right": 20, "bottom": 0, "left": 20 },
+          "active": true
+        },
+        {
+          "id": "ID()",
+          "kind": "occlusion",
+          "frame": { "left": 867, "top": 0, "width": 84, "height": 124 },
+          "margins": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+          "active": true
+        }
+      ]
+    },
+    {
+      "width": 951,
+      "height": 669,
+      "safeArea": { "top": 0, "right": 84, "bottom": 34, "left": 0 },
+      "keyboardInset": 0,
+      "reservedRegions": [
+        {
+          "id": "ID()",
+          "kind": "division",
+          "frame": { "left": 455.5, "top": 0, "width": 40, "height": 669 },
+          "margins": { "top": 0, "right": 20, "bottom": 0, "left": 20 },
+          "active": false
+        },
+        {
+          "id": "ID()",
+          "kind": "occlusion",
+          "frame": { "left": 867, "top": 0, "width": 84, "height": 124 },
+          "margins": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+          "active": true
+        }
+      ]
+    },
+    {
+      "width": 466,
+      "height": 678,
+      "safeArea": { "top": 0, "right": 84, "bottom": 34, "left": 0 },
+      "keyboardInset": 0,
+      "reservedRegions": [
+        {
+          "id": "ID()",
+          "kind": "occlusion",
+          "frame": { "left": 382, "top": 0, "width": 84, "height": 174 },
+          "margins": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+          "active": true
+        }
+      ]
+    }
+  ]
+}

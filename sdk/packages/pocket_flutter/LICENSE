@@ -1,0 +1,5 @@
+Copyright (c) PocketJS contributors.
+
+This package is an application-local integration component. Upstream PocketJS
+engine licensing and notices remain in the pinned source cache populated by
+scripts/prepare_upstream.py.

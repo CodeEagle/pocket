@@ -1,0 +1,24 @@
+{
+  "name": "pocket-showcase-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@pocket/ui": "file:../../sdk/packages/pocket_ui"
+  },
+  "scripts": {
+    "build": "bun ../../sdk/scripts/build_guest.ts --project-root=\"$PWD\" --copy-assets-to=\"$PWD/../assets\" --keep-source=\"$PWD/.pocket-build/app.js\"",
+    "test": "bash scripts/test_guest.sh",
+    "test:unit": "bun tests/guest_state.test.ts",
+    "test:mobile": "bun tests/mobile_ui.test.ts",
+    "test:hardware": "bun tests/hardware_platform.test.ts",
+    "test:native": "bun tests/native_guest_probe.ts --required",
+    "test:ablation": "bun tests/guest_ablation.ts --required",
+    "test:updates": "bun scripts/test_updates.ts",
+    "updates:prepare": "bun scripts/dev_updates.ts setup",
+    "updates:serve": "bun ../../sdk/scripts/serve_updates.ts --root .pocket-updates/public",
+    "run": "cd .. && flutter run",
+    "editor": "bash ../../sdk/scripts/editor_service.sh start",
+    "profile:macos": "bash scripts/profile_macos.sh"
+  }
+}

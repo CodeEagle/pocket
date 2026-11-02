@@ -1,0 +1,55 @@
+diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
+--- a/engine/guest-rquickjs/src/lib.rs
++++ b/engine/guest-rquickjs/src/lib.rs
+@@ -18,3 +18,3 @@ use rquickjs::{
+     function::Rest, Array, ArrayBuffer, Coerced, Context, Ctx, Exception, FromJs, Function, IntoJs,
+-    Object, Runtime, Value,
++    Object, Runtime, Value, qjs,
+ };
+@@ -65,10 +65,46 @@
+     fn remember<T, E: std::fmt::Display>(
+         &mut self,
+         result: Result<T, E>,
+     ) -> Result<T, RuntimeError> {
+         result.map_err(|error| {
+             self.last_error = Some(error.to_string());
+             RuntimeError::Guest
+         })
++    }
++
++    /// Evaluate a trusted QuickJS serialized function/module object. The
++    /// caller must validate its package envelope and engine ABI before
++    /// entering this method; this path never interprets the bytes as source.
++    pub fn evaluate_bytecode(&mut self, bytecode: &[u8], tick_hz: u32) -> Result<(), RuntimeError> {
++        self.begin_turn(Duration::from_secs(5));
++        let context = self.context.as_ref().ok_or(RuntimeError::Guest)?;
++        let result = context.with(|ctx| {
++            ctx.globals()
++                .set("__simHz", tick_hz)
++                .map_err(|error| engine_error(&ctx, error))?;
++            if bytecode.is_empty() {
++                return Err("empty QuickJS bytecode".to_owned());
++            }
++            let value = unsafe {
++                qjs::JS_ReadObject(
++                    ctx.as_raw().as_ptr(),
++                    bytecode.as_ptr(),
++                    bytecode.len().try_into().map_err(|_| "bytecode is too large")?,
++                    qjs::JS_READ_OBJ_BYTECODE as i32,
++                )
++            };
++            if unsafe { qjs::JS_VALUE_GET_NORM_TAG(value) } == qjs::JS_TAG_EXCEPTION {
++                return Err(engine_error(&ctx, rquickjs::Error::Exception));
++            }
++            // JS_EvalFunction consumes the loaded function/module object.
++            let evaluated = unsafe { qjs::JS_EvalFunction(ctx.as_raw().as_ptr(), value) };
++            if unsafe { qjs::JS_VALUE_GET_NORM_TAG(evaluated) } == qjs::JS_TAG_EXCEPTION {
++                return Err(engine_error(&ctx, rquickjs::Error::Exception));
++            }
++            unsafe { qjs::JS_FreeValue(ctx.as_raw().as_ptr(), evaluated) };
++            Ok(())
++        });
++        self.remember(result)?;
++        self.collect()
+     }
+ }

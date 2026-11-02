@@ -1,0 +1,11 @@
+group 'dev.pocketjs.pocket_flutter'
+version '1.0-SNAPSHOT'
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'dev.pocketjs.pocket_flutter'
+    compileSdk 36
+    defaultConfig { minSdk 24 }
+    sourceSets { main { jniLibs.srcDirs = ['src/main/jniLibs'] } }
+}

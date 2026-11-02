@@ -1,0 +1,46 @@
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -244,5 +244,25 @@ fn wh_word(w: f32, h: f32) -> u32 {
+     wi | (hi << 16)
+ }
+ 
++/// Pack a textured quad from the same quantized edges used by `xy_word`.
++///
++/// TEX_QUAD boxes are often adjacent (DeepZoom tiles, sprites, and atlas
++/// cells).  Rounding the origin and the extent independently can leave a
++/// one-pixel hole when a transformed edge is fractional: `round(x0) +
++/// round(x1 - x0)` need not cover `round(x1)`.  Keep the existing rounded
++/// origin for compatibility, but round the far edge and derive the extent from
++/// those two shared edges.  Adjacent quads therefore use the exact same
++/// quantized boundary: there is no hole and no extra overdraw at the seam.
++#[inline]
++fn tex_quad_wh(x0: f32, y0: f32, x1: f32, y1: f32) -> u32 {
++    let qx0 = roundf(x0);
++    let qy0 = roundf(y0);
++    let qx1 = roundf(x1);
++    let qy1 = roundf(y1);
++    let wi = (qx1 - qx0).max(0.0) as i32 as u16 as u32;
++    let hi = (qy1 - qy0).max(0.0) as i32 as u16 as u32;
++    wi | (hi << 16)
++}
++
+ /// Multiply a packed ABGR color's alpha by `opacity` (0..1).
+ fn scale_alpha(color: u32, opacity: f32) -> u32 {
+@@ -1950,7 +1965,7 @@ impl<'a> Painter<'a> {
+             spec::draw_op::TEX_QUAD,
+             tex,
+             xy_word(c.x0, c.y0),
+-            wh_word(c.x1 - c.x0, c.y1 - c.y0),
++            tex_quad_wh(c.x0, c.y0, c.x1, c.y1),
+             cu0.to_bits(),
+             cv0.to_bits(),
+             cu1.to_bits(),
+@@ -2696,7 +2711,7 @@ impl<'a> Painter<'a> {
+         dl.words.push(spec::draw_op::TEX_QUAD);
+         dl.words.push(tex);
+         dl.words.push(xy_word(c.x0, c.y0));
+-        dl.words.push(wh_word(c.x1 - c.x0, c.y1 - c.y0));
++        dl.words.push(tex_quad_wh(c.x0, c.y0, c.x1, c.y1));
+         dl.words.push(u0.to_bits());
+         dl.words.push(v0.to_bits());
+         dl.words.push(u1.to_bits());

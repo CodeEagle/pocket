@@ -1,0 +1,2788 @@
+{
+  "source": "/Volumes/ORICO/Development/TryJoy.c/TryJoyMono/App/repos/pocket_flutter_poc",
+  "baseCommit": "4c21e7fc3d737b43fa00f6b100fef6e2a3236160",
+  "archive": "pocket_flutter_poc-source-20261102.tar.gz",
+  "sha256": "0e9f202e80a9659940105e0c97e77d3a2267dd5b34577a24a4eb8dea1030b635",
+  "excludedGeneratedExtensions": [
+    ".a",
+    ".bin",
+    ".dylib",
+    ".pak",
+    ".pjc",
+    ".qjbc",
+    ".so",
+    ".wasm"
+  ],
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 309,
+      "sha256": "45a40902f2feb9a64f18885d07bd393997ef23f4bb4cf867427d6333072208f3"
+    },
+    {
+      "path": "AGENTS.md",
+      "bytes": 4310,
+      "sha256": "2c2e9612c3b7501b40ac8f244b394dd0bdcad7862b8f418b6c6f919c22062d6b"
+    },
+    {
+      "path": "PocketEditor/README.md",
+      "bytes": 951,
+      "sha256": "ab9eb8017119dc25bf43d72e84451b63858885e5943a381405454f410cf990c0"
+    },
+    {
+      "path": "PocketEditor/package.json",
+      "bytes": 596,
+      "sha256": "b14e9fb677bcc9f5068d45dfae0f8381851db75a694c239e4986cb27d760c245"
+    },
+    {
+      "path": "PocketEditor/src/client/editor.css",
+      "bytes": 54799,
+      "sha256": "9773b4bf52565ba90b66334b8874b1b3754c039dbc3d8715350079dbad77f0b4"
+    },
+    {
+      "path": "PocketEditor/src/client/editor.js",
+      "bytes": 213631,
+      "sha256": "2672cc1c394d4e5fd503a3c447ef00508f1bd8741f32bea50d5be4d2d40ee1a6"
+    },
+    {
+      "path": "PocketEditor/src/client/index.html",
+      "bytes": 14801,
+      "sha256": "e6b8ae22515cd86255e76479f44842e84b7c33ba33bce108683b173ed246000f"
+    },
+    {
+      "path": "PocketEditor/src/client/page_graph.js",
+      "bytes": 11372,
+      "sha256": "87006bf92ffd6e18bf38a41957557398419eb71765ffddd0077e74a616e0e601"
+    },
+    {
+      "path": "PocketEditor/src/server/build_queue.ts",
+      "bytes": 1555,
+      "sha256": "af44ba09595cd10dcc7048b9012ca131aab461c98f9dda88f67e904998a4b18e"
+    },
+    {
+      "path": "PocketEditor/src/server/editor_server.ts",
+      "bytes": 22309,
+      "sha256": "419175975d752de0c622e5b7cd3a89d63375634e7b04b631d47c3eeb5b83f1f7"
+    },
+    {
+      "path": "PocketJSKit/.fvmrc",
+      "bytes": 26,
+      "sha256": "83dc6a5c35b481a8214b6de0910c68fbe0e2bce90f0f386be3792d3023a54ef7"
+    },
+    {
+      "path": "PocketJSKit/.gitignore",
+      "bytes": 996,
+      "sha256": "1e1cebb7b7054cc8ff41ab32104f7079416e62806137144b198e6658cd7e0572"
+    },
+    {
+      "path": "PocketJSKit/.metadata",
+      "bytes": 1262,
+      "sha256": "1ee0ac5bc7c44885d8baa854dd1fb58e21d5d612c6e6c82ededa4aca8fdcad52"
+    },
+    {
+      "path": "PocketJSKit/AGENTS.md",
+      "bytes": 10530,
+      "sha256": "e249d3228aa38cbfc8c12f768d5f2aba88795141c51001bfeb54b9d376aafb40"
+    },
+    {
+      "path": "PocketJSKit/DEVELOPMENT.md",
+      "bytes": 13644,
+      "sha256": "847fbfe077e8f7a2b0a5cfb5fc706d07d123660b6d01e75d20e3a77cd78311cb"
+    },
+    {
+      "path": "PocketJSKit/FRAMEWORK.md",
+      "bytes": 13629,
+      "sha256": "44a2c36d06034397e3c50ff29cef728ac55014c7aeed93792c34fe893d8be9d5"
+    },
+    {
+      "path": "PocketJSKit/PERFORMANCE.md",
+      "bytes": 13590,
+      "sha256": "cadd8f4c63a62e5e5726f05e96f7f8213ef3ae909ce766942f874d7be53c900b"
+    },
+    {
+      "path": "PocketJSKit/POCKETJS_LICENSE",
+      "bytes": 1075,
+      "sha256": "30dc7007842dcde53472e2aaa0406723507b081c89c7f2550a3d65a3e10d9227"
+    },
+    {
+      "path": "PocketJSKit/README.md",
+      "bytes": 6634,
+      "sha256": "8323b934c46a75909a1df89a46aa559f7e9fc4e86536db022bca449f3f2ff01d"
+    },
+    {
+      "path": "PocketJSKit/REFERENCE.md",
+      "bytes": 16679,
+      "sha256": "2c7f437917dc891a032d764276ffdc0bad15ad6419104e26dd47791a72da0a51"
+    },
+    {
+      "path": "PocketJSKit/SUPPORT.md",
+      "bytes": 4727,
+      "sha256": "800f7629ee66dc68741602d750b8a0a3e60a4c64624b1d8ae3e8252caa598039"
+    },
+    {
+      "path": "PocketJSKit/VALIDATION.md",
+      "bytes": 45206,
+      "sha256": "5778f0b6382c193d7a0bb9febf1104f88249b27b1c791565a232d9d1ab13bfdc"
+    },
+    {
+      "path": "PocketJSKit/analysis_options.yaml",
+      "bytes": 1420,
+      "sha256": "e0ea485cfdbc3e12b93efb8679a5ea73ebfe20ea4ca0c473dc594fc2fb274ed5"
+    },
+    {
+      "path": "PocketJSKit/android/.gitignore",
+      "bytes": 253,
+      "sha256": "b027c9de1011765c015e5819bf857c0d75bfcd0886fb01721c091159012e50f1"
+    },
+    {
+      "path": "PocketJSKit/android/app/build.gradle.kts",
+      "bytes": 1435,
+      "sha256": "89f2d5fea47293a612ca5cfb7050132614759d11624dd1fae2521ff4487dc85f"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/debug/AndroidManifest.xml",
+      "bytes": 378,
+      "sha256": "30b0832ed8b92dfbd6ae2abfa939ccf26333d37600056b1572bd4a397a18a74b"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/AndroidManifest.xml",
+      "bytes": 2272,
+      "sha256": "a38d1321cea9d3298ae4d33ce95299d31b98671353c1f9af46a1060358970d62"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/kotlin/com/example/pocket_flutter_poc/MainActivity.kt",
+      "bytes": 132,
+      "sha256": "3f444033d93143256bcebb4d03b5fbcbf7f8c4ac9c879a210b2747f53ad32874"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/drawable-v21/launch_background.xml",
+      "bytes": 438,
+      "sha256": "7ca6d5cec2169c5a98661a119db23a6f3399c8fef2256ff04f3a642831282478"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/drawable/launch_background.xml",
+      "bytes": 434,
+      "sha256": "94433756fe10005ddd6fc55cc5c0b1e9f3c10b66a08ceac795ece6713d34e28a"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/mipmap-hdpi/ic_launcher.png",
+      "bytes": 544,
+      "sha256": "6a7c8f0d703e3682108f9662f813302236240d3f8f638bb391e32bfb96055fef"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/mipmap-mdpi/ic_launcher.png",
+      "bytes": 442,
+      "sha256": "c7c0c0189145e4e32a401c61c9bdc615754b0264e7afae24e834bb81049eaf81"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/mipmap-xhdpi/ic_launcher.png",
+      "bytes": 721,
+      "sha256": "e14aa40904929bf313fded22cf7e7ffcbf1d1aac4263b5ef1be8bfce650397aa"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png",
+      "bytes": 1031,
+      "sha256": "4d470bf22d5c17d84edc5f82516d1ba8a1c09559cd761cefb792f86d9f52b540"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+      "bytes": 1443,
+      "sha256": "3c34e1f298d0c9ea3455d46db6b7759c8211a49e9ec6e44b635fc5c87dfb4180"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/values-night/styles.xml",
+      "bytes": 995,
+      "sha256": "8c5bad5152f217e837519f9c15211d19f39bd45f5f67faf6dd81cb4b299e518f"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/main/res/values/styles.xml",
+      "bytes": 996,
+      "sha256": "937d7c82f539c72eb94fd3a3773f29b3d3fef1997213c92cb632298cedf4bda9"
+    },
+    {
+      "path": "PocketJSKit/android/app/src/profile/AndroidManifest.xml",
+      "bytes": 378,
+      "sha256": "30b0832ed8b92dfbd6ae2abfa939ccf26333d37600056b1572bd4a397a18a74b"
+    },
+    {
+      "path": "PocketJSKit/android/build.gradle.kts",
+      "bytes": 537,
+      "sha256": "6a26dba2cb8dfba1e74f540b0d17a89d96c1301d3c3bfda14348bed257fddcba"
+    },
+    {
+      "path": "PocketJSKit/android/gradle.properties",
+      "bytes": 166,
+      "sha256": "20c411ebbe5162992d16d170656ee19a9ffe0571e6c4d4c5a5314bb06da0a672"
+    },
+    {
+      "path": "PocketJSKit/android/gradle/wrapper/gradle-wrapper.properties",
+      "bytes": 201,
+      "sha256": "4f0df93978f8c53f8995c6afcdecd9d290b5df35fa08f236163e8e5df8557c8e"
+    },
+    {
+      "path": "PocketJSKit/android/settings.gradle.kts",
+      "bytes": 770,
+      "sha256": "f822f8653a25b632ea3334473d8e9964e7d7da73e3ec33448f17e8600834b063"
+    },
+    {
+      "path": "PocketJSKit/apps/editor/editor.css",
+      "bytes": 54799,
+      "sha256": "9773b4bf52565ba90b66334b8874b1b3754c039dbc3d8715350079dbad77f0b4"
+    },
+    {
+      "path": "PocketJSKit/apps/editor/editor.js",
+      "bytes": 213631,
+      "sha256": "2672cc1c394d4e5fd503a3c447ef00508f1bd8741f32bea50d5be4d2d40ee1a6"
+    },
+    {
+      "path": "PocketJSKit/apps/editor/index.html",
+      "bytes": 14801,
+      "sha256": "e6b8ae22515cd86255e76479f44842e84b7c33ba33bce108683b173ed246000f"
+    },
+    {
+      "path": "PocketJSKit/apps/editor/page_graph.js",
+      "bytes": 11372,
+      "sha256": "87006bf92ffd6e18bf38a41957557398419eb71765ffddd0077e74a616e0e601"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_display.ts",
+      "bytes": 10399,
+      "sha256": "e67ac925a700abcd66e83b5041f16aa6c10802f2d394b4437295d3c2336fb92d"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_fit.ts",
+      "bytes": 127,
+      "sha256": "1935d932cfdcf771f823438ce9071b2542871b039af35291ec40e3a690b65b02"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_fit_content.tsx",
+      "bytes": 137,
+      "sha256": "ce116089c34734361db87bd9f495fbdaf9acf4fdea7b6e258c6ca306c6492174"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_fps.ts",
+      "bytes": 7632,
+      "sha256": "ff295db40b3287a658e7b1622ab9fa692f73052eec9fefa847cbbbd076fb2cbb"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_host_preview.ts",
+      "bytes": 4501,
+      "sha256": "1f0674548bff388991b6f7538c54e0ff4097e3d9d3ae18a881ae616413aed237"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_input_queue.ts",
+      "bytes": 3496,
+      "sha256": "bddebdbd13d232f1bf81d0d592ed976042120edb061be542c64d8f516e706f33"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_page.tsx",
+      "bytes": 1809,
+      "sha256": "be0e9790368987e19938b6170ef446d094d75ea096b7945057be2b09092a7f04"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_page_geometry.ts",
+      "bytes": 1322,
+      "sha256": "50e0d8c4351d93d4921fc039b92202c0f933f90484bae0904efc6c3cc629c3ce"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_router.ts",
+      "bytes": 211,
+      "sha256": "d2f9f5d82a92ecfca668df6eaf24f452b0adec0b407e44c2cf9ec733fcca3e70"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_scheduler.ts",
+      "bytes": 4086,
+      "sha256": "10733619baedd7fe9a0fd55d61f68373b6826e2f24e8075044acec23b1354922"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_stream.ts",
+      "bytes": 211,
+      "sha256": "f34f521ae6946756acd0caf5400a44ddc074068ea7d28a3e6a8dbf6c2268ef08"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_transition.ts",
+      "bytes": 2972,
+      "sha256": "7f94eb00fa831782f8269b18de09f24f28d6293b79aab2d43802b991ec6f5dea"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_viewport.ts",
+      "bytes": 6489,
+      "sha256": "306a7746c5282fd650bf7105e8a4bd04f3dbdeb3ca93f8cc5d354b3401501d04"
+    },
+    {
+      "path": "PocketJSKit/apps/shared/pocket_worker_bridge.ts",
+      "bytes": 4646,
+      "sha256": "39ac1764aecc896991a06bba135819e2151b13e77aa155166d0f3edae89f0735"
+    },
+    {
+      "path": "PocketJSKit/apps/solid-tests/app.tsx",
+      "bytes": 40761,
+      "sha256": "23256002455772d246aa58e014216bca1e444c54b14d634e94419dead01e6868"
+    },
+    {
+      "path": "PocketJSKit/apps/solid-tests/component_catalog.json",
+      "bytes": 7722,
+      "sha256": "d2bf28b3291d56c80656b51f522c1842723c7e4dc61dffb43492be61a953bbf9"
+    },
+    {
+      "path": "PocketJSKit/apps/solid-tests/demo.png",
+      "bytes": 1884,
+      "sha256": "8b835a6b4c89a987c7eac29eb324f82443202998cab17b51d3fc204635cb9dd3"
+    },
+    {
+      "path": "PocketJSKit/apps/solid-tests/layouts.tsx",
+      "bytes": 8949,
+      "sha256": "83aa2a2c743402902ccb7bb4ed2f322afeb411f23f4033749bbd40c4227492df"
+    },
+    {
+      "path": "PocketJSKit/apps/solid-tests/pak.json",
+      "bytes": 89,
+      "sha256": "dd41b592f444a50c30d2c44705b10a0f7d36cab973e88ee9229a63a2c80d32a1"
+    },
+    {
+      "path": "PocketJSKit/apps/solid-tests/pocket.json",
+      "bytes": 755,
+      "sha256": "607e6a92aedf00ed5929ba9dad1591dfe54f071fdc5af230ac4eba0fc60b47e5"
+    },
+    {
+      "path": "PocketJSKit/apps/solid-tests/sprite.png",
+      "bytes": 1884,
+      "sha256": "8b835a6b4c89a987c7eac29eb324f82443202998cab17b51d3fc204635cb9dd3"
+    },
+    {
+      "path": "PocketJSKit/apps/solid-tests/sprites.json",
+      "bytes": 88,
+      "sha256": "694a592dd8a4d36a4ad3e16c7808072f7ad28de61e87ab9b03e350b12a28ac99"
+    },
+    {
+      "path": "PocketJSKit/apps/web-preview/index.html",
+      "bytes": 1873,
+      "sha256": "8ce12e0d77815c99e2767edab22637da70b95a959435194ba5fdcc8d5d96bd54"
+    },
+    {
+      "path": "PocketJSKit/apps/web-preview/inspector.js",
+      "bytes": 19292,
+      "sha256": "573e7966397d4f727dd4882200ce51d7d36466577556b0d5614467688abcb336"
+    },
+    {
+      "path": "PocketJSKit/apps/web-preview/pocket_worker.js",
+      "bytes": 9173,
+      "sha256": "0ee3792a64f332ec71092dce21a111c75c69f17a265fea220fc00b447b112a45"
+    },
+    {
+      "path": "PocketJSKit/apps/web-preview/preview.js",
+      "bytes": 44398,
+      "sha256": "de511b80e06109b251e1495a0e2a8c4853c94682ad45786d514c97edb1ff4d61"
+    },
+    {
+      "path": "PocketJSKit/apps/wechat-miniprogram/runtime/codec.js",
+      "bytes": 2061,
+      "sha256": "8c7267c291f863cdcf076faace53fddc433da7be764f8107f6ae27e70597c3b6"
+    },
+    {
+      "path": "PocketJSKit/apps/wechat-miniprogram/runtime/host.js",
+      "bytes": 48848,
+      "sha256": "958636f5286a67f16d5ec5ea9ef0ef0aaafd75706796bd6aa3a1b1bee78d345b"
+    },
+    {
+      "path": "PocketJSKit/apps/wechat-miniprogram/runtime/video.js",
+      "bytes": 27898,
+      "sha256": "7a5505b14dd5a333a0209518fbac6bc1bb5b067b1683848c8a154e6206b3627f"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/app.tsx",
+      "bytes": 71046,
+      "sha256": "1d0749dae02c985d63e0142e67cffa94315ae07d7b2fc1556748044b1ec58f36"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/asset-keys.ts",
+      "bytes": 4590,
+      "sha256": "ec51e2ff054d2cbba52823ecd72801d5fd3da760eba72504c9f35820ba74743d"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/asset-map.json",
+      "bytes": 33679,
+      "sha256": "adbd27f3cabcf762c647145ac15c184258f58f3fa9f725d69652468c52cb264d"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/asset-registry.json",
+      "bytes": 8927,
+      "sha256": "61c9f22db6a3db4904639a5bc6dfb92409f08bd06beaadad4f490f5791745a1b"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/bg_01_orbit.png",
+      "bytes": 157394,
+      "sha256": "b3641155762e18d8b51f72043339112f8a7e560c7b7fed420550e6045bba2317"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/bg_02_landing_with_pet.png",
+      "bytes": 289675,
+      "sha256": "6df674c29b8c775e944ada866a0e1cd7466bd05aa855f7ce9bd9cebf5f733237"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/bg_03_cockpit_empty.png",
+      "bytes": 280866,
+      "sha256": "aaea9d92ee2f511f9374020162f24e148432aa3384b55683c3a56ab43f901e91"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/calibration_01_wait.png",
+      "bytes": 288344,
+      "sha256": "3bb31b6c7f5a88e4d7b1b1c912d5d521f03f8aa7c7dda9762d8b5e01789c1992"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/calibration_02_report.png",
+      "bytes": 292842,
+      "sha256": "bd872c8be7d9048ae53ab33f7813d0ef082ec2b7f2ee1171945bdf42c117782d"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/calibration_03_invite.png",
+      "bytes": 292188,
+      "sha256": "d53208bc8cc089fc5ac852f65e40e63768be4f0e1a9590717e01ddae55b43ccc"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/calibration_04_observe.png",
+      "bytes": 291676,
+      "sha256": "4cfab9fda1694e5fe5b4145086a6161bb967516936cb3db3810a1f5a6426eb77"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/calibration_05_exchange.png",
+      "bytes": 296786,
+      "sha256": "86f0a2ea6b9abb0d1d8049c35f00c28c11148ece4f022c4d9a1bd960a1fdc8e9"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/calibration_06_linger.png",
+      "bytes": 289242,
+      "sha256": "3c688aca81cfc805510bea23b1725217fde7f20993f512c2005b136cd6262205"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/calibration_07_memory.png",
+      "bytes": 291543,
+      "sha256": "bd141364b8bdc879a83bb99d775dc40ba79b17c525613664c435bba563bbe7bf"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/content-and-settings.json",
+      "bytes": 240882,
+      "sha256": "93a44801bf5c0765722019680fd7aeb38c925364aae6f35d4a5c6ecfc52c0524"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/curiosity_window_v25.png",
+      "bytes": 305798,
+      "sha256": "313a4ca41c59758f74def944ea7baa275f8d1665a6efaec0a61c2fcf73ae5032"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/daily_distance.png",
+      "bytes": 292760,
+      "sha256": "a6430c7bda6e01e6d84989cad7d8bf7e58770548b31322cc2393336e377d604c"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/daily_night.png",
+      "bytes": 281208,
+      "sha256": "515319dbdb41862456c3b5b1377754ecee81ff19803deae1580d44ea589f516f"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/daily_thanks.png",
+      "bytes": 301405,
+      "sha256": "be424ec6e122af316babfbda11df71146af5bf53ca0ffc5c5d946d4775403a48"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/device-reference.png",
+      "bytes": 76831,
+      "sha256": "2140061a975f8aa72f50d0b58742f0bdd8162f5c834e29164ac51c648552a465"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/ending_01_next_time_v1.png",
+      "bytes": 294422,
+      "sha256": "713dad619c9ff7a9021637a3adb4a7541b65f4d88a28aeb83c27503f739c13ed"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/ending_goodbye_night_v25.png",
+      "bytes": 285735,
+      "sha256": "47e80cd1b3ca29a81b9f0330a93502369447b7fbea94557c38475df8810fa0a3"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/ending_goodbye_v25.png",
+      "bytes": 294929,
+      "sha256": "b124adcf9ab09a0f38add26b95398eb2e0d762ccb2f6a94daf093ce046e9fdbc"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/finale_01_restored_v1.png",
+      "bytes": 286529,
+      "sha256": "2d9997ce2645b2ff8218cc5e21419f0d92b997a6695ab03bdd63379e26a044d8"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/finale_02_private_signal_v1.png",
+      "bytes": 298743,
+      "sha256": "14861061100d5e08b994aacb2c4949bd13dacf13ab5d2907ab6d70255de99151"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/finale_03_make_room_v1.png",
+      "bytes": 281566,
+      "sha256": "46abb3d13bd6eceb0100d987451f52473eab4de60692bb879f3e49fd2a4cae6d"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/finale_signal_night_v25.png",
+      "bytes": 301447,
+      "sha256": "f0f4e5d954a0da1fcae7513196b56006bdc2ec5a483a24a008957c290a543368"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/finale_signal_v25.png",
+      "bytes": 325877,
+      "sha256": "1a6fde6f1830a8c4e363fc425b2d7621c713fd60450fcfa9cd3112d1cc630630"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/fonts/LICENSE-NotoSansSC.txt",
+      "bytes": 4301,
+      "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/fonts/NotoSansSC-Regular.otf",
+      "bytes": 468036,
+      "sha256": "417069123f29639b1c4c75336494a431dfd2f8e6e71820124e540241a872c82a"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/fonts/NotoSansSC-SOURCE.md",
+      "bytes": 920,
+      "sha256": "3b2f5143c52caee13adfa22363a5d3e155721f1ee4aa427dff51ac572dfd822a"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/fonts/NotoSansSC.meta.json",
+      "bytes": 541,
+      "sha256": "1ee7c61efb0eb2ea22ff0a85e0d46a5eefae784211371b93a1a9b4bed6c709c5"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/fonts/xingqi-chars.txt",
+      "bytes": 3304,
+      "sha256": "f6e2c11e4e5a4bf321215731e4df2671a3041bb438922f2add5b8af518010d9a"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/heroine.png",
+      "bytes": 120108,
+      "sha256": "a892ae1255c9a8bd0fc8487ed5e0ec905ce9ba6008664a27b136291267a11be1"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/intro_01_core.png",
+      "bytes": 285540,
+      "sha256": "9b049e1c911119a8192092ddbb54533777c3573e38b5cd0e4afa79d790bf9ec7"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/intro_02_contact.png",
+      "bytes": 280299,
+      "sha256": "d64c27a6e57a5eef1d878e2a7f169f69fc2539ffae8750a45348a6d834f4b629"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/intro_03_restore.png",
+      "bytes": 288108,
+      "sha256": "3e8677894d59671b2deaf15d9fced492428d0da2a0f923df9252464c8ccc6b24"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/pet_01_idle_rgba.png",
+      "bytes": 159331,
+      "sha256": "631289544b53bafbc698e1165a9d90495b4ca5d9c5021da8f039ad36563a74e3"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/r03-core-r20261023.png",
+      "bytes": 100918,
+      "sha256": "2cb37e482248283739b9d61865809bf67b495aa7406ef4bbdcbbb171abdb65b0"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_01_repair.png",
+      "bytes": 293069,
+      "sha256": "6d37ead6a6be98e8524946efd0c4b3b61a6be8830cb4dab8c1c64b2411e98d96"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_02_stumble.png",
+      "bytes": 289844,
+      "sha256": "e3fec56b63026f520ba61fa4ae8ceb3f0c2e85c2684846e41773918081251c81"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_03_first_rain.png",
+      "bytes": 266220,
+      "sha256": "a64956ca67d5f68450f22e1905c6640b6c46457b639977e280d4854c72cc89f2"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_04_connect.png",
+      "bytes": 304857,
+      "sha256": "0e6bb6633bbdf1cc39aac8c6db30ab1a98a3043b7f33e6f9e24ffe715b2b4720"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_05_listen.png",
+      "bytes": 313676,
+      "sha256": "b3d9e288bba86e60881c68c543549d97beb1cd945fb78a50104eac35b278baa1"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_06_check.png",
+      "bytes": 321591,
+      "sha256": "423e7002ce12978c5be02c8ec6671370fa60572785f4a56003bc0e683154c0b3"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_07_wait.png",
+      "bytes": 310118,
+      "sha256": "a7275123c35d672134e31abf29819f382607bfd0707196f089ae42677b5a31d7"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_08_establish.png",
+      "bytes": 325369,
+      "sha256": "ccee8b0e4be89e49756ecb18f0d809935b8db2b4b94acda593241f16ad61afad"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_09_pet.png",
+      "bytes": 294195,
+      "sha256": "143808419266abce67b5e1b891a8092991891dc3550993f844d0e0ed822c589a"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_10_approach.png",
+      "bytes": 312359,
+      "sha256": "07ca34230a83c812785a4561abb29a0d9ff9ff548b1c4d1613012403f2ce8ced"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_11_shelter.png",
+      "bytes": 311467,
+      "sha256": "f6a46f87a7a22bfbf022afd605c2e9ee4b5610de31be6fc14ced040d8f9bd937"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/rain_12_core.png",
+      "bytes": 322679,
+      "sha256": "bf6294548ce6097d226edc1883a83d307b94a8533e98ad0b0011d75d8fc05217"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/reward_01_turn_v1.png",
+      "bytes": 284924,
+      "sha256": "1e5ca42fa1912c6e01fdd57ce4b3cf54355a0ce786728acb09acab1d417c7d95"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/reward_02_approach_v1.png",
+      "bytes": 294772,
+      "sha256": "25fa084599ab3379b52ace5e777efee2c5b0aa632b14b582bb208d0e7a020f8d"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/reward_03_listen_v1.png",
+      "bytes": 285515,
+      "sha256": "c382106e4d73733a433d279b9a44bf88518d3d60e081357f7bcf89922d4de65c"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/reward_04_linger_v1.png",
+      "bytes": 281866,
+      "sha256": "c53e02e92b016050a07275e892cddb07a365393a401d02281fdfd6bb3d3e454c"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-d01-r20261023.png",
+      "bytes": 300768,
+      "sha256": "1eb1013607f4cd53e6851fa74d912f53cae36c3570bbe0366f6a6f3e1c5948a1"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-d02-r20261023.png",
+      "bytes": 304962,
+      "sha256": "d886b1db067452500e2f682ec2029900050988cc8ba60b6aee54cc7d25496a22"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-d03-r20261023.png",
+      "bytes": 262043,
+      "sha256": "61e8ef391e4a3bace92e373211814efcb8c9aaa36472acf4e1c9c13c43a72de3"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-d04-r20261023.png",
+      "bytes": 260152,
+      "sha256": "ab509d4ada8f69ca79f5a0805c847fbed21ae598e08d8b63ef6da0929c14b9e2"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-d05-r20261023.png",
+      "bytes": 266904,
+      "sha256": "c01f7b54833ee071d130a91d490dc44c6797e508919b7431ba5aa50c403ef65b"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-d06-r20261023.png",
+      "bytes": 267031,
+      "sha256": "b6980e56cbfe92828e508070e4ce3d006dfda3779a7e8f55a32e71a9479d0493"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-d07-r20261023.png",
+      "bytes": 273717,
+      "sha256": "f950c99c4c9e4b64145792e8fd50bac652ad4846718e6368efaf6b241db7537d"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-d08-r20261023.png",
+      "bytes": 283568,
+      "sha256": "db0cb90b66ac01023c35c5a515b913b2a73d1c7f4ca70aadc9a8161d603f036e"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m01-r20261023.png",
+      "bytes": 298105,
+      "sha256": "4592f42b5ee90e69c0c35fa1dd4255678d9998cbdbe2475b60bf0ffa1bb15b63"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m02-r20261023.png",
+      "bytes": 274365,
+      "sha256": "efb42e9e84cd87e09e60f5940a061364f94edba4f5b6ca6993560052d5f52431"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m03-r20261023.png",
+      "bytes": 282617,
+      "sha256": "c4f806c40564ddbb9c1af21dc3b2b9236d56a819721ecd81d6ebf31ea93666ee"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m04-r20261023.png",
+      "bytes": 267365,
+      "sha256": "711e7ca8e2511d60a20a1afad1211a237ed20a48476123b1f6cbf4e1190dd8a4"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m05-r20261023.png",
+      "bytes": 265950,
+      "sha256": "76a647b29f4bbe1e45bbef7b548fa78bf176ca12f038ba12cf0ee70c72f73f73"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m06-r20261023.png",
+      "bytes": 309892,
+      "sha256": "7675fb9de7aedb6a503a0fa9cca095fb25473ee8562456fc584821c09c96fb13"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m07-r20261023.png",
+      "bytes": 266855,
+      "sha256": "384dfd3f3aa1821b85ee30b1e53a8ac4070cd0cf2fad38260c5c5e7d68fd9c13"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m08-r20261023.png",
+      "bytes": 277239,
+      "sha256": "7aaefc72779442bd65688e6b923cf69c7410ac94fd1c2a903e8cc28f70bc8ecf"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m09-r20261023.png",
+      "bytes": 267123,
+      "sha256": "102afd145099f10b07d84e0a2dd445a04d0696ca38690da4bef1ea525ddba8c2"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m10-r20261023.png",
+      "bytes": 255875,
+      "sha256": "35cb33cf29a99781bf58945b7b97fc306d32222f2a31b4b4f5b8ca975ed4abc1"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/s01-m11-r20261023.png",
+      "bytes": 279199,
+      "sha256": "2fb8cb5b84bbd1f71437909fa6cadc2bfc4f21a68ad231584251ec0c1e202fd3"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/starlight_01.png",
+      "bytes": 253461,
+      "sha256": "cf793ffd1b1d2d08f54c83bb35a62fc04ccaf18bed20cbbd1a9c1d18a7da4dd5"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/starlight_02.png",
+      "bytes": 271496,
+      "sha256": "d9b7326771675fac9d9925d7319896514b73c323b5e040ca7df515b1dc94fe7e"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/starlight_03.png",
+      "bytes": 264614,
+      "sha256": "a44c56cd6d2a2cff4b48824b36a99acd0db53b3bad99b1abe2228b29d87039ad"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/story_feedback_fast.png",
+      "bytes": 315199,
+      "sha256": "dca033f90fc6ede7f9ec835a8d82e0ef0c8b9d949c7d8d2188696b761f46b3e7"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/assets/story_feedback_slow.png",
+      "bytes": 314002,
+      "sha256": "9c7727484e38663ccea301aab07b4dfd3810774c7be0b02197304fdc99ea70ee"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/content.json",
+      "bytes": 240882,
+      "sha256": "93a44801bf5c0765722019680fd7aeb38c925364aae6f35d4a5c6ecfc52c0524"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/content.ts",
+      "bytes": 6567,
+      "sha256": "fa8541b800879d4f8f70757eb88cbefa09857da34a5618ff5b2efea876e477e8"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/fonts.json",
+      "bytes": 166,
+      "sha256": "e93514b956e904fd8badad181ad5f673297e873ff87be612a5d1b8c985adddc0"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/images.json",
+      "bytes": 5114,
+      "sha256": "ff2a25d3337d8d36480981c71d142319372e7035433d9c4b0f0559a9614b02e0"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/pak.json",
+      "bytes": 7118,
+      "sha256": "e979ea886201d3ccc9c9acf2f82ba91e7a23bbd85c8273ef5c158b930b9902d1"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/story.ts",
+      "bytes": 10748,
+      "sha256": "5584ad3fdd7e4de8c731ec92d04c8d7a183e6f309738e6a8d4b1013fa71c8302"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/tiles.ts",
+      "bytes": 15865,
+      "sha256": "a8fc6f343dae699bcbc268a984f11dbd3dc098f9d27b63ba0118aa8694a5ba96"
+    },
+    {
+      "path": "PocketJSKit/apps/xingqi/tiles/.meta.json",
+      "bytes": 9862,
+      "sha256": "af624951922ec6add65e2040592f33594674a5f609c491834131d6bb05d5c6ed"
+    },
+    {
+      "path": "PocketJSKit/archive/obsolete-pocket-flutter-20261030/manifest.json",
+      "bytes": 380,
+      "sha256": "7ad74338ad7aebbd064eaaf6926ad4f27b12372e2efddea1f3b3bae959b20738"
+    },
+    {
+      "path": "PocketJSKit/archive/obsolete-pocket-flutter-20261030/web-demo-package-budget.patch",
+      "bytes": 482,
+      "sha256": "c80c3ff705b76bb9baa0b7ac119d9f83fc33e4bb8e6b332a9a0c8f17a108840a"
+    },
+    {
+      "path": "PocketJSKit/archive/tryjoymono-root-20261030/README.md",
+      "bytes": 639,
+      "sha256": "8e7a85958f8fce40145a4f61ca9c660e6c9325cb6af218ef8a5586239ad4f0bf"
+    },
+    {
+      "path": "PocketJSKit/archive/tryjoymono-root-20261030/apps/xingqi/tiles.ts",
+      "bytes": 277,
+      "sha256": "75c794427897b6c4b9ed21286bfba42a94f2900293ac27859a5edd4b25d5624e"
+    },
+    {
+      "path": "PocketJSKit/archive/tryjoymono-root-20261030/assets/demo.js",
+      "bytes": 2361,
+      "sha256": "a8824ffed27b192ce53f307ccba917da170075c3d973c4d74a66900cf312e84b"
+    },
+    {
+      "path": "PocketJSKit/archive/tryjoymono-root-20261030/manifest.json",
+      "bytes": 966,
+      "sha256": "eecee5c023389aa182e975d23b4d43b31ab32efe87cafca8ce6799fbd7208c82"
+    },
+    {
+      "path": "PocketJSKit/assets/demo.js",
+      "bytes": 6893,
+      "sha256": "20340029f78662b9967a148cfda7ecd924c09c408bf489f04841ea3fa8f880d0"
+    },
+    {
+      "path": "PocketJSKit/assets/demo.mp4",
+      "bytes": 555398,
+      "sha256": "ba0220043b061b90c7e1d44914a7eff692a1b9acaac481382201c85863609345"
+    },
+    {
+      "path": "PocketJSKit/assets/demo.png",
+      "bytes": 1884,
+      "sha256": "8b835a6b4c89a987c7eac29eb324f82443202998cab17b51d3fc204635cb9dd3"
+    },
+    {
+      "path": "PocketJSKit/assets/fonts/Inter-Bold.ttf",
+      "bytes": 420428,
+      "sha256": "288316099b1e0a47a4716d159098005eef7c0066921f34e3200393dbdb01947f"
+    },
+    {
+      "path": "PocketJSKit/assets/fonts/Inter-Regular.ttf",
+      "bytes": 411640,
+      "sha256": "40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82"
+    },
+    {
+      "path": "PocketJSKit/assets/fonts/JetBrainsMono-Regular.ttf",
+      "bytes": 273900,
+      "sha256": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
+    },
+    {
+      "path": "PocketJSKit/assets/fonts/LICENSE-JetBrainsMono.txt",
+      "bytes": 4398,
+      "sha256": "60d55f23c6ce05a81099a762cb67ca2c9b6ea251c7912720998b4c89ebfd4faa"
+    },
+    {
+      "path": "PocketJSKit/assets/fonts/LICENSE-NotoSansSC.txt",
+      "bytes": 4301,
+      "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    },
+    {
+      "path": "PocketJSKit/assets/fonts/LICENSE.txt",
+      "bytes": 4380,
+      "sha256": "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a"
+    },
+    {
+      "path": "PocketJSKit/assets/fonts/NotoSansSC-Regular.otf",
+      "bytes": 464844,
+      "sha256": "3c08ffad18a21285aaf79c0d5d5dd7e6521c24fffe5625fd3e11b6ae230e9f80"
+    },
+    {
+      "path": "PocketJSKit/assets/solid_test.js",
+      "bytes": 403979,
+      "sha256": "458ef50ff33c8109a477fb2295ad1fc3e0e404a5850f277971b21acb00ae9201"
+    },
+    {
+      "path": "PocketJSKit/assets/xingqi.js",
+      "bytes": 652802,
+      "sha256": "682dc36bd5b78d035668fe8a1e7c437d32500a79c74926f544b838e77a58da17"
+    },
+    {
+      "path": "PocketJSKit/docs/folder-import.md",
+      "bytes": 12203,
+      "sha256": "eaab942bb87789713f524c9aae3e4404ed4fa0ed35e4f0a4b1b633be0051a955"
+    },
+    {
+      "path": "PocketJSKit/docs/kit/ARCHITECTURE.md",
+      "bytes": 7535,
+      "sha256": "32bf0b04fb788a5b34629f3e7de2cb15b8a1e5d793edc1bae73e44895751841f"
+    },
+    {
+      "path": "PocketJSKit/docs/kit/LAYOUT.md",
+      "bytes": 5966,
+      "sha256": "bc7bb85b42d5d938a0674d8e81aa31fac76d0dfb45f2f8fef0b52b74258cc4d0"
+    },
+    {
+      "path": "PocketJSKit/docs/kit/WECHAT.md",
+      "bytes": 6493,
+      "sha256": "fe59bf0894a10f218ab6da5e350139a1829177c00e429780a27e52a258cabca6"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/PROLOGUE_INTERACTIONS.md",
+      "bytes": 9474,
+      "sha256": "0de1a2d722e07610141d979163bc610720c9c14c44bc2ce5ef4464db1037439f"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/README.md",
+      "bytes": 6079,
+      "sha256": "0f9fb3ee81b03b8f12244cb9c7642d849ebaea6f68511197a56fa24bf661b204"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/assets/prologue/bg_01_orbit.png",
+      "bytes": 1169270,
+      "sha256": "5dcad86f657fac46dc84de25fd15991f913042e5cb65a2f9521b8ebb2c0d98f5"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/assets/prologue/bg_02_landing_with_pet.png",
+      "bytes": 2494472,
+      "sha256": "5c82b645c51f765eaceb4f550bd29de9ce9182e2042cd7a8dd65afa727548d83"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/assets/prologue/ending_goodbye_v25.png",
+      "bytes": 2337965,
+      "sha256": "a1f6df18f85035a9103940315dbf1b09f8abc31081b9e967be3d9dec9b60ba25"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/assets/prologue/intro_01_core.png",
+      "bytes": 2307107,
+      "sha256": "799c0e3a17a73e924fd4a5316c8c4cbbe82477a44b4f5dd10653cefefc4a9ca8"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/assets/prologue/intro_02_contact.png",
+      "bytes": 2225279,
+      "sha256": "6ea34237f17eaaf5f21b077c1d7aade574157b2816723f4227267f5245f4ec9f"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/assets/prologue/intro_03_restore.png",
+      "bytes": 2310625,
+      "sha256": "5f2dd38105254313e85c69c82231a362cf5899dedab4f884533fea7316873adb"
+    },
+    {
+      "path": "PocketJSKit/examples/import-game/config.json",
+      "bytes": 121755,
+      "sha256": "1d0a8be9c4a5df30702ac960eefec44da3a6d6c2030150f219faae16e55ad65b"
+    },
+    {
+      "path": "PocketJSKit/integration_test/fixtures/xingqi_nodes.dart",
+      "bytes": 56939,
+      "sha256": "c66df6f41da4104bd2d193014740444d5a0ae83c310540a6ef3a66a367db595c"
+    },
+    {
+      "path": "PocketJSKit/integration_test/pocket_display_integration_test.dart",
+      "bytes": 4382,
+      "sha256": "70d20286b396bed6b7d66e79fafbf348d44ad78b575bbde2573518018ed2d4bb"
+    },
+    {
+      "path": "PocketJSKit/integration_test/pocket_poc_test.dart",
+      "bytes": 62735,
+      "sha256": "5feb35f7f5ffb8ecbccc46b358e4bf8e0a027f690eb4fea3906d9c45fa6bf2e5"
+    },
+    {
+      "path": "PocketJSKit/integration_test/pocket_stream_integration_test.dart",
+      "bytes": 10002,
+      "sha256": "94c7b1057118cc8ad316f1ced5db7e45a17b1e75e10a69683971a2799a8ca8c3"
+    },
+    {
+      "path": "PocketJSKit/integration_test/pocket_update_integration_test.dart",
+      "bytes": 21627,
+      "sha256": "2c686ee9959604e40dc0180f14e760820a6372fb07b92a6b6659665d4770141c"
+    },
+    {
+      "path": "PocketJSKit/integration_test/pocket_viewport_integration_test.dart",
+      "bytes": 7529,
+      "sha256": "9c4aa0f65d21c687dd69b02c731d93cb0ff4ac14ec1e5fde27f0d3af1154274c"
+    },
+    {
+      "path": "PocketJSKit/integration_test/xingqi_integration_test.dart",
+      "bytes": 17648,
+      "sha256": "743602506ae7e28304ca3e510ad52f7912f3513679cd7473d349bbbeb848726e"
+    },
+    {
+      "path": "PocketJSKit/ios/.gitignore",
+      "bytes": 569,
+      "sha256": "37380775aeb2499662b7aca80f4ac4c95ae827c3ba2bfa179aa3e9af4812c623"
+    },
+    {
+      "path": "PocketJSKit/ios/Flutter/AppFrameworkInfo.plist",
+      "bytes": 774,
+      "sha256": "91b8d35bd9c88b43ae0eac8348f9b57d2f3e209a4500e6516b18b459b7e3f2be"
+    },
+    {
+      "path": "PocketJSKit/ios/Flutter/Debug.xcconfig",
+      "bytes": 107,
+      "sha256": "690b8a8b1ae15ddd29b241429963e971bbc6720ab22f154cf8cf6b085b6d4925"
+    },
+    {
+      "path": "PocketJSKit/ios/Flutter/Release.xcconfig",
+      "bytes": 109,
+      "sha256": "75abb819a9de1e0e41c835e7307bc64a506cac25a9a5c0b0d8253fa1c3d5d422"
+    },
+    {
+      "path": "PocketJSKit/ios/Podfile",
+      "bytes": 1446,
+      "sha256": "aebde642c89dd018792a103152bdeb4ee9730f85af370419bd386c41ac2c288f"
+    },
+    {
+      "path": "PocketJSKit/ios/Podfile.lock",
+      "bytes": 1376,
+      "sha256": "595455ced439774453bf7d561a40ed92f90bb80e09d6a0d26dc3b776e1dc95dd"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner.xcodeproj/project.pbxproj",
+      "bytes": 31137,
+      "sha256": "eaa9dbe4aa9829e91bf84544b931a67635a3b5f57beaf33e7b7167dc98257609"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner.xcodeproj/project.xcworkspace/contents.xcworkspacedata",
+      "bytes": 135,
+      "sha256": "7f3b00b5c3fdb45242d7b87e1e5c4e25d1fa8129a16c94295ecc4e8ea2235c5f"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist",
+      "bytes": 238,
+      "sha256": "dfa0f9bb85b95ccba9c6811adadf8cb407fb5d52088e89db83ebc308ec448542"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      "bytes": 226,
+      "sha256": "11b247bc6796892d67c9a821d18604db4dd6a880981b34f38460b9866e6b247f"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme",
+      "bytes": 3833,
+      "sha256": "2dd28b879e66081e28a3324cf2bee7ab2f70be9a3e50e08926b7366dadff7d6e"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner.xcworkspace/contents.xcworkspacedata",
+      "bytes": 224,
+      "sha256": "465e6de5660384eb6832e8078920ba6cd5305c445cb29a24a86a2fda4aa6b67e"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist",
+      "bytes": 238,
+      "sha256": "dfa0f9bb85b95ccba9c6811adadf8cb407fb5d52088e89db83ebc308ec448542"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      "bytes": 226,
+      "sha256": "11b247bc6796892d67c9a821d18604db4dd6a880981b34f38460b9866e6b247f"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/AppDelegate.swift",
+      "bytes": 391,
+      "sha256": "9418c676adebac7e3f04daa80a7db62066e77f9766c804fd3e5e264124a31f80"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Contents.json",
+      "bytes": 2519,
+      "sha256": "3b1e214f466ffedff74baa5598ad5c4421130eea6bc8d57b8fe23435e8280ae4"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-1024x1024@1x.png",
+      "bytes": 10932,
+      "sha256": "7770183009e914112de7d8ef1d235a6a30c5834424858e0d2f8253f6b8d31926"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@1x.png",
+      "bytes": 295,
+      "sha256": "cab10a0d391ec5bc09ef50ce49e8ad401cee7ef03707ec0923a222c5c2b3d212"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@2x.png",
+      "bytes": 406,
+      "sha256": "b9ad02cf6576a04d1b6806ac02a2431481b448dd0c2e505ce25842d1f7c4730b"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@3x.png",
+      "bytes": 450,
+      "sha256": "c6e6d3b215ae744a9c391f4c4d44157eff5e739d6ad6c39f9bfa5df66dddd267"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@1x.png",
+      "bytes": 282,
+      "sha256": "5dee24dc104ac76dc162e42ae0beb163d426bf365562ee28ba7b3ad368559a60"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@2x.png",
+      "bytes": 462,
+      "sha256": "a9b21eb6f4271385655a8771f76e29eef8c1107d7879cbcfc567e6619d1f716a"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@3x.png",
+      "bytes": 704,
+      "sha256": "e677d701ffe4af7bc2935098d6b3984cc9ab7ace573e6900955a5535b12410cf"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@1x.png",
+      "bytes": 406,
+      "sha256": "b9ad02cf6576a04d1b6806ac02a2431481b448dd0c2e505ce25842d1f7c4730b"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@2x.png",
+      "bytes": 586,
+      "sha256": "7c61c42fc7b657d9cf314d32a4ec458f0647c3aaf360be1b9377857266ec2499"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@3x.png",
+      "bytes": 862,
+      "sha256": "19be171481dc71a0b2803ebcd01dd8b0c5fd5778dee34c0a3cabc948c225f24e"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-60x60@2x.png",
+      "bytes": 862,
+      "sha256": "19be171481dc71a0b2803ebcd01dd8b0c5fd5778dee34c0a3cabc948c225f24e"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-60x60@3x.png",
+      "bytes": 1674,
+      "sha256": "4209a49e44a92ec40a327d3455eb1b1c153ee83d75de1c2be0a12ab18b2ff9de"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-76x76@1x.png",
+      "bytes": 762,
+      "sha256": "836c918cb613249eba0483a6b02fa3df3c1c0a89a315ee4d3b88509b83c7ab73"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-76x76@2x.png",
+      "bytes": 1226,
+      "sha256": "41c7d42f6e61f8fe7f30b1ffa2256aecbc9682be06d18c4a3062043e1a2e547c"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-83.5x83.5@2x.png",
+      "bytes": 1418,
+      "sha256": "5d7e5bdf01b93802bc973345b3a78c038907147625035952a08a115a563b7f81"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/LaunchImage.imageset/Contents.json",
+      "bytes": 391,
+      "sha256": "ccc7950fd5f5b82067c85f667940a9d59189151460761ece8098ca78daa19469"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage.png",
+      "bytes": 68,
+      "sha256": "93ae7d494fad0fb30cbf3ae746a39c4bc7a0f8bbf87fbb587a3f3c01f3c5ce20"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage@2x.png",
+      "bytes": 68,
+      "sha256": "93ae7d494fad0fb30cbf3ae746a39c4bc7a0f8bbf87fbb587a3f3c01f3c5ce20"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage@3x.png",
+      "bytes": 68,
+      "sha256": "93ae7d494fad0fb30cbf3ae746a39c4bc7a0f8bbf87fbb587a3f3c01f3c5ce20"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Assets.xcassets/LaunchImage.imageset/README.md",
+      "bytes": 336,
+      "sha256": "a985b626c4f7546a8ba392d135e9226c3547c8e2b46895f5f2bdf40d7b14ef9f"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Base.lproj/LaunchScreen.storyboard",
+      "bytes": 2377,
+      "sha256": "857e61203b3deafb05766d8fcda898b86a7cb6f3d5e385ecc9926c4d698215e9"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Base.lproj/Main.storyboard",
+      "bytes": 1605,
+      "sha256": "fd367b6c43006d61b730f674970dd48b9f662c8f2264e52ffc1558102a2c9f2d"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Info.plist",
+      "bytes": 1936,
+      "sha256": "f3c410ede5cd4c25085b4f58bf83c5ea4c2669a7329312f846ea00a400b5b311"
+    },
+    {
+      "path": "PocketJSKit/ios/Runner/Runner-Bridging-Header.h",
+      "bytes": 38,
+      "sha256": "1a8d11d01d1cc92c650c9c9ed35299240052d4683a15a719a2315ef44185e074"
+    },
+    {
+      "path": "PocketJSKit/ios/RunnerTests/RunnerTests.swift",
+      "bytes": 285,
+      "sha256": "5e8f4908dacea6f29b2a790e4d38bf5fded69096063f9a27a2f21584d62b30c0"
+    },
+    {
+      "path": "PocketJSKit/lib/main.dart",
+      "bytes": 1636,
+      "sha256": "fff3a2fd3128669392cb80b010e1fd0f54a866130841ecca79009d9952b85d47"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_assets.dart",
+      "bytes": 129,
+      "sha256": "65236226599971157ed9dfb9c586f4ca801e2c336487078bb729ddbdbab9c236"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_display.dart",
+      "bytes": 130,
+      "sha256": "92d634531dd047093206a9d4d75f9fd782a63f1c1fb15f68602877d9e111620a"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_game_config.dart",
+      "bytes": 134,
+      "sha256": "0bc5357c32fccb61d0f6b8d3772232a99214aede2873fd6983bc125f5f1d27ec"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_game_container.dart",
+      "bytes": 137,
+      "sha256": "c4c2b7570bb68e44fd7412c704af9829398ca1f9e0d7c3d7fc62c1e576590e2b"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_host.dart",
+      "bytes": 127,
+      "sha256": "f32d93252e0333189519f11142c0fcf8d4ad845a4f3f3f7e1e0eceef0570a0f6"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_model.dart",
+      "bytes": 128,
+      "sha256": "06ce3fc6c0efd8a5ac4bfbadd6239a43ecc70454462fc4e110948735471b2598"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_navigation.dart",
+      "bytes": 133,
+      "sha256": "05c0844218be8185b6640762148878c1a9cefafcc01b0f796a32c891fa9bd795"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_package.dart",
+      "bytes": 130,
+      "sha256": "ce3fb5de9be5dc4c5551be81eb2d784c1380630a3011714f32b4e1b415bb2061"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_runtime.dart",
+      "bytes": 130,
+      "sha256": "6f79457624acbe8f1e962201af6b0f365fac9475c077f6b512c558d3bedc7b14"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_stream.dart",
+      "bytes": 129,
+      "sha256": "93170712d6a1c2df84a303d42946b0046a2f09f6dd4ec2d5516961c0ca6c1728"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_text_cache.dart",
+      "bytes": 133,
+      "sha256": "e51248efb1db7a89d5484c62e806a0a1c6e5591e891584deb3dc44ae55d30480"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_update.dart",
+      "bytes": 129,
+      "sha256": "acdddfb3ed03f3c35e246cb5a793434d4105acdee0f9ffa4985ff912e362b390"
+    },
+    {
+      "path": "PocketJSKit/lib/pocket/pocket_view.dart",
+      "bytes": 127,
+      "sha256": "7ab3c1a64b4834f83d701633156fcf44395634e568c29ee7ac1041c7c7a211ce"
+    },
+    {
+      "path": "PocketJSKit/lib/xingqi_device_service.dart",
+      "bytes": 3277,
+      "sha256": "a380be27759adc759bc2749b3135a69fedaa25967fe14eda1cb07001b50dc086"
+    },
+    {
+      "path": "PocketJSKit/lib/xingqi_main.dart",
+      "bytes": 3721,
+      "sha256": "8175661bb18b05d21e4a7bc29f53449ed9059ae5eb50de68922fc076993a3943"
+    },
+    {
+      "path": "PocketJSKit/lib/xingqi_remote_main.dart",
+      "bytes": 3008,
+      "sha256": "11d92e45b17f5f3fa94c7bfd73bc4ec531ea1f63ac3c7dabbb524d0f0c34e8b0"
+    },
+    {
+      "path": "PocketJSKit/native/Cargo.lock",
+      "bytes": 15449,
+      "sha256": "08f3309d5b4ed41448c51af42c8f894c2f20c567d4304210d2f8453d91a6a4f4"
+    },
+    {
+      "path": "PocketJSKit/native/Cargo.toml",
+      "bytes": 994,
+      "sha256": "550b61c34ba3bfaedd698837cb94f7f228f8b4a016d9a6b3bd80cb9ad58820ad"
+    },
+    {
+      "path": "PocketJSKit/native/patches/guest-execution-budget.patch",
+      "bytes": 3583,
+      "sha256": "7daf374c3b203c857d064e26956502c29571c5f39bd2ee14d4778146278f76c6"
+    },
+    {
+      "path": "PocketJSKit/native/patches/guest-rquickjs-stack-size.patch",
+      "bytes": 507,
+      "sha256": "1ac453c7a30108ca11bd631468d8b617dd8ce73477b53a33f302298e9022aa5e"
+    },
+    {
+      "path": "PocketJSKit/native/patches/rgba-filter-helpers.patch",
+      "bytes": 12755,
+      "sha256": "46098de27ecf9808e08b4830df5a4de2908cd0f9f8da28c1111e86637bd2d041"
+    },
+    {
+      "path": "PocketJSKit/native/patches/rgba-tileset.patch",
+      "bytes": 33259,
+      "sha256": "b2accb45952f09bc7e1f9fe10ea2b7451ae46e3ab9504af37620479f134dfc02"
+    },
+    {
+      "path": "PocketJSKit/native/patches/tex-quad-fractional-coverage.patch",
+      "bytes": 1906,
+      "sha256": "08d64ca03f4558bafb8ceaae82967c651dda4f72439889ba57c6ae55dbd7a497"
+    },
+    {
+      "path": "PocketJSKit/native/patches/web-damage-capture.patch",
+      "bytes": 6243,
+      "sha256": "893ca7c7f01f87b8bb709bc79572c92ea9a03fbf39c2afdcdbed484b19f5e866"
+    },
+    {
+      "path": "PocketJSKit/native/patches/web-demo-package-budget.patch",
+      "bytes": 481,
+      "sha256": "f65d0dd202cb394d7b0977d9ed706fe28dc662df89b144b030c547e49dee7f36"
+    },
+    {
+      "path": "PocketJSKit/native/patches/web-inspector-style.patch",
+      "bytes": 6284,
+      "sha256": "c7005d105e7c5677d3fa4797154ad28e294b85dab27204103aaef714a5d4a333"
+    },
+    {
+      "path": "PocketJSKit/native/src/lib.rs",
+      "bytes": 159873,
+      "sha256": "f2a2109fa5ef38d201673e162886defc886d57be413676d4dd5ac7b60d5247b7"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/.gitignore",
+      "bytes": 503,
+      "sha256": "069b6721ce76007af662c1c93a78a78c3bc979de10e4e78e4a3c3324214ea64a"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/LICENSE",
+      "bytes": 1075,
+      "sha256": "30dc7007842dcde53472e2aaa0406723507b081c89c7f2550a3d65a3e10d9227"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/README.md",
+      "bytes": 3897,
+      "sha256": "bd158e393b04a2e9ac3f5dbb6a0ff988a488cc0fc26291f20fa858b33c36fddd"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/android/build.gradle",
+      "bytes": 448,
+      "sha256": "eafc709ceadf9f7771a5a5de06a1e010cf7220dfcdcffd5de1bc7cf275b72832"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/.gitignore",
+      "bytes": 703,
+      "sha256": "4a8d984279954e0461e0ffef9b9e7455340a0a762f227c01065a53482a83a4f1"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/.metadata",
+      "bytes": 1706,
+      "sha256": "c5dcdc88db44ea94909a7536fe3209b8943cca0a6bc76a3e604287e04cba433e"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/README.md",
+      "bytes": 3886,
+      "sha256": "60d3f7f7836df7de0317a0bae0e2cd74bde6737dcc6b3e7938b7543da15eed87"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/analysis_options.yaml",
+      "bytes": 1420,
+      "sha256": "e0ea485cfdbc3e12b93efb8679a5ea73ebfe20ea4ca0c473dc594fc2fb274ed5"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/.gitignore",
+      "bytes": 253,
+      "sha256": "b027c9de1011765c015e5819bf857c0d75bfcd0886fb01721c091159012e50f1"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/build.gradle.kts",
+      "bytes": 1416,
+      "sha256": "383e57f74ccdbfe889ac8310ca756acf983fb00cfa7031b6cd53c5f61cf16c9f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/debug/AndroidManifest.xml",
+      "bytes": 378,
+      "sha256": "30b0832ed8b92dfbd6ae2abfa939ccf26333d37600056b1572bd4a397a18a74b"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/AndroidManifest.xml",
+      "bytes": 2210,
+      "sha256": "0a7dbee40046187a9896b36643149f090d8fd71f5f929714f900507a154f5f72"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/kotlin/com/example/pocket_flutter_example/MainActivity.kt",
+      "bytes": 136,
+      "sha256": "fea2a5b9aa68c53bad437c06485f72ea2e58a6e04d7ca2b8b2b0a218af7e6bac"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/drawable-v21/launch_background.xml",
+      "bytes": 438,
+      "sha256": "7ca6d5cec2169c5a98661a119db23a6f3399c8fef2256ff04f3a642831282478"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/drawable/launch_background.xml",
+      "bytes": 434,
+      "sha256": "94433756fe10005ddd6fc55cc5c0b1e9f3c10b66a08ceac795ece6713d34e28a"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/mipmap-hdpi/ic_launcher.png",
+      "bytes": 544,
+      "sha256": "6a7c8f0d703e3682108f9662f813302236240d3f8f638bb391e32bfb96055fef"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/mipmap-mdpi/ic_launcher.png",
+      "bytes": 442,
+      "sha256": "c7c0c0189145e4e32a401c61c9bdc615754b0264e7afae24e834bb81049eaf81"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/mipmap-xhdpi/ic_launcher.png",
+      "bytes": 721,
+      "sha256": "e14aa40904929bf313fded22cf7e7ffcbf1d1aac4263b5ef1be8bfce650397aa"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png",
+      "bytes": 1031,
+      "sha256": "4d470bf22d5c17d84edc5f82516d1ba8a1c09559cd761cefb792f86d9f52b540"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+      "bytes": 1443,
+      "sha256": "3c34e1f298d0c9ea3455d46db6b7759c8211a49e9ec6e44b635fc5c87dfb4180"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/values-night/styles.xml",
+      "bytes": 995,
+      "sha256": "8c5bad5152f217e837519f9c15211d19f39bd45f5f67faf6dd81cb4b299e518f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/main/res/values/styles.xml",
+      "bytes": 996,
+      "sha256": "937d7c82f539c72eb94fd3a3773f29b3d3fef1997213c92cb632298cedf4bda9"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/app/src/profile/AndroidManifest.xml",
+      "bytes": 378,
+      "sha256": "30b0832ed8b92dfbd6ae2abfa939ccf26333d37600056b1572bd4a397a18a74b"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/build.gradle.kts",
+      "bytes": 537,
+      "sha256": "6a26dba2cb8dfba1e74f540b0d17a89d96c1301d3c3bfda14348bed257fddcba"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/gradle.properties",
+      "bytes": 166,
+      "sha256": "20c411ebbe5162992d16d170656ee19a9ffe0571e6c4d4c5a5314bb06da0a672"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/gradle/wrapper/gradle-wrapper.properties",
+      "bytes": 201,
+      "sha256": "4f0df93978f8c53f8995c6afcdecd9d290b5df35fa08f236163e8e5df8557c8e"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/android/settings.gradle.kts",
+      "bytes": 770,
+      "sha256": "f822f8653a25b632ea3334473d8e9964e7d7da73e3ec33448f17e8600834b063"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/assets/device_control.js",
+      "bytes": 230861,
+      "sha256": "f322d969c1ea513de3b8b4f62afca82cf7cfa5f9812f8e0a94d037acb1fcd79f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/fixtures/device_control/README.md",
+      "bytes": 1106,
+      "sha256": "2938e6ca6dbf4e899ce480868df70ad09565005bebe7785d164c6410ffeac639"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/fixtures/device_control/app.tsx",
+      "bytes": 9132,
+      "sha256": "b5c44e992ca81d0247f5c13dbf2ee2006f279e810e12542eeb2312d24681a682"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/fixtures/device_control/game.config.json",
+      "bytes": 1851,
+      "sha256": "3206a804708e33db5bc92fa68014b37b0bdca56b65270c3ce6278ae21c497a10"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/fixtures/device_control/generated/assets.tsx",
+      "bytes": 342,
+      "sha256": "6b38cd7b1c44135148d74b29b57cd6c075a0e6002674661240ea6872d35dc69b"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/fixtures/device_control/generated/game_config.ts",
+      "bytes": 2109,
+      "sha256": "a1ab6dcace8a1eb30fd740f6521ba9e897c6879e3f36b054349f1de87851aef6"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/fixtures/device_control/generated/pocket_sdk.ts",
+      "bytes": 130,
+      "sha256": "4bea89dc783f641f6bf55a8e56c6ea94031b9b9906c40304b20455c3fe9d6186"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/fixtures/device_control/pocket.json",
+      "bytes": 614,
+      "sha256": "503915451ec10e408115909850a5bf653c56c444c837e552a89cd1802da157b8"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/.gitignore",
+      "bytes": 569,
+      "sha256": "37380775aeb2499662b7aca80f4ac4c95ae827c3ba2bfa179aa3e9af4812c623"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Flutter/AppFrameworkInfo.plist",
+      "bytes": 774,
+      "sha256": "91b8d35bd9c88b43ae0eac8348f9b57d2f3e209a4500e6516b18b459b7e3f2be"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Flutter/Debug.xcconfig",
+      "bytes": 107,
+      "sha256": "690b8a8b1ae15ddd29b241429963e971bbc6720ab22f154cf8cf6b085b6d4925"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Flutter/Release.xcconfig",
+      "bytes": 109,
+      "sha256": "75abb819a9de1e0e41c835e7307bc64a506cac25a9a5c0b0d8253fa1c3d5d422"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Podfile",
+      "bytes": 1446,
+      "sha256": "aebde642c89dd018792a103152bdeb4ee9730f85af370419bd386c41ac2c288f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Podfile.lock",
+      "bytes": 1130,
+      "sha256": "fd27610c419e678cfe4a6920255bb993f8e5547f75bd6c9f98b482feb41cc4ea"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner.xcodeproj/project.pbxproj",
+      "bytes": 31011,
+      "sha256": "abba83fcd693ca0cadff477e93e6527bf4033cebe7bac57d5648b4d682806fa2"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner.xcodeproj/project.xcworkspace/contents.xcworkspacedata",
+      "bytes": 135,
+      "sha256": "7f3b00b5c3fdb45242d7b87e1e5c4e25d1fa8129a16c94295ecc4e8ea2235c5f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist",
+      "bytes": 238,
+      "sha256": "dfa0f9bb85b95ccba9c6811adadf8cb407fb5d52088e89db83ebc308ec448542"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      "bytes": 226,
+      "sha256": "11b247bc6796892d67c9a821d18604db4dd6a880981b34f38460b9866e6b247f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme",
+      "bytes": 3833,
+      "sha256": "2dd28b879e66081e28a3324cf2bee7ab2f70be9a3e50e08926b7366dadff7d6e"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner.xcworkspace/contents.xcworkspacedata",
+      "bytes": 224,
+      "sha256": "465e6de5660384eb6832e8078920ba6cd5305c445cb29a24a86a2fda4aa6b67e"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist",
+      "bytes": 238,
+      "sha256": "dfa0f9bb85b95ccba9c6811adadf8cb407fb5d52088e89db83ebc308ec448542"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      "bytes": 226,
+      "sha256": "11b247bc6796892d67c9a821d18604db4dd6a880981b34f38460b9866e6b247f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/AppDelegate.swift",
+      "bytes": 391,
+      "sha256": "9418c676adebac7e3f04daa80a7db62066e77f9766c804fd3e5e264124a31f80"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Contents.json",
+      "bytes": 2519,
+      "sha256": "3b1e214f466ffedff74baa5598ad5c4421130eea6bc8d57b8fe23435e8280ae4"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-1024x1024@1x.png",
+      "bytes": 10932,
+      "sha256": "7770183009e914112de7d8ef1d235a6a30c5834424858e0d2f8253f6b8d31926"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@1x.png",
+      "bytes": 295,
+      "sha256": "cab10a0d391ec5bc09ef50ce49e8ad401cee7ef03707ec0923a222c5c2b3d212"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@2x.png",
+      "bytes": 406,
+      "sha256": "b9ad02cf6576a04d1b6806ac02a2431481b448dd0c2e505ce25842d1f7c4730b"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@3x.png",
+      "bytes": 450,
+      "sha256": "c6e6d3b215ae744a9c391f4c4d44157eff5e739d6ad6c39f9bfa5df66dddd267"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@1x.png",
+      "bytes": 282,
+      "sha256": "5dee24dc104ac76dc162e42ae0beb163d426bf365562ee28ba7b3ad368559a60"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@2x.png",
+      "bytes": 462,
+      "sha256": "a9b21eb6f4271385655a8771f76e29eef8c1107d7879cbcfc567e6619d1f716a"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@3x.png",
+      "bytes": 704,
+      "sha256": "e677d701ffe4af7bc2935098d6b3984cc9ab7ace573e6900955a5535b12410cf"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@1x.png",
+      "bytes": 406,
+      "sha256": "b9ad02cf6576a04d1b6806ac02a2431481b448dd0c2e505ce25842d1f7c4730b"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@2x.png",
+      "bytes": 586,
+      "sha256": "7c61c42fc7b657d9cf314d32a4ec458f0647c3aaf360be1b9377857266ec2499"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@3x.png",
+      "bytes": 862,
+      "sha256": "19be171481dc71a0b2803ebcd01dd8b0c5fd5778dee34c0a3cabc948c225f24e"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-60x60@2x.png",
+      "bytes": 862,
+      "sha256": "19be171481dc71a0b2803ebcd01dd8b0c5fd5778dee34c0a3cabc948c225f24e"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-60x60@3x.png",
+      "bytes": 1674,
+      "sha256": "4209a49e44a92ec40a327d3455eb1b1c153ee83d75de1c2be0a12ab18b2ff9de"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-76x76@1x.png",
+      "bytes": 762,
+      "sha256": "836c918cb613249eba0483a6b02fa3df3c1c0a89a315ee4d3b88509b83c7ab73"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-76x76@2x.png",
+      "bytes": 1226,
+      "sha256": "41c7d42f6e61f8fe7f30b1ffa2256aecbc9682be06d18c4a3062043e1a2e547c"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-83.5x83.5@2x.png",
+      "bytes": 1418,
+      "sha256": "5d7e5bdf01b93802bc973345b3a78c038907147625035952a08a115a563b7f81"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/LaunchImage.imageset/Contents.json",
+      "bytes": 391,
+      "sha256": "ccc7950fd5f5b82067c85f667940a9d59189151460761ece8098ca78daa19469"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage.png",
+      "bytes": 68,
+      "sha256": "93ae7d494fad0fb30cbf3ae746a39c4bc7a0f8bbf87fbb587a3f3c01f3c5ce20"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage@2x.png",
+      "bytes": 68,
+      "sha256": "93ae7d494fad0fb30cbf3ae746a39c4bc7a0f8bbf87fbb587a3f3c01f3c5ce20"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage@3x.png",
+      "bytes": 68,
+      "sha256": "93ae7d494fad0fb30cbf3ae746a39c4bc7a0f8bbf87fbb587a3f3c01f3c5ce20"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Assets.xcassets/LaunchImage.imageset/README.md",
+      "bytes": 336,
+      "sha256": "a985b626c4f7546a8ba392d135e9226c3547c8e2b46895f5f2bdf40d7b14ef9f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Base.lproj/LaunchScreen.storyboard",
+      "bytes": 2377,
+      "sha256": "857e61203b3deafb05766d8fcda898b86a7cb6f3d5e385ecc9926c4d698215e9"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Base.lproj/Main.storyboard",
+      "bytes": 1605,
+      "sha256": "fd367b6c43006d61b730f674970dd48b9f662c8f2264e52ffc1558102a2c9f2d"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Info.plist",
+      "bytes": 2226,
+      "sha256": "12d8e286f04d3c1518e6a02da0d22133572dbe65b6463455d1b8e717062d7999"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/Runner/Runner-Bridging-Header.h",
+      "bytes": 38,
+      "sha256": "1a8d11d01d1cc92c650c9c9ed35299240052d4683a15a719a2315ef44185e074"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/ios/RunnerTests/RunnerTests.swift",
+      "bytes": 285,
+      "sha256": "5e8f4908dacea6f29b2a790e4d38bf5fded69096063f9a27a2f21584d62b30c0"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/lib/main.dart",
+      "bytes": 6090,
+      "sha256": "9117495aa7a59e549775bcdd1bc198fe351223c168e2a0981367332df8fe1227"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/lib/remote_main.dart",
+      "bytes": 6535,
+      "sha256": "ffac366bb31ae9f574dd769f600c697f4a56042616386280ac0f3ab17982dd25"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/pubspec.yaml",
+      "bytes": 3829,
+      "sha256": "1bf85fc475a24e9dbcc51d2fa0de0538a07a44418f0b2cfbee83c46ade691c05"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/example/test/widget_test.dart",
+      "bytes": 511,
+      "sha256": "f2d539b0951a33266b0961e9e307ad0c7992fa0768a8fd3e0de34cbc051ca6c0"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/ios/pocket_flutter.podspec",
+      "bytes": 1144,
+      "sha256": "203e3fbce473057e7c62692740d5c408844a153cf9fe15391e5e82d059930712"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/pocket_flutter.dart",
+      "bytes": 521,
+      "sha256": "69aa2e38e81ec80d84a278598b5e45bf170e645f370b1e8c099de73945d76c9f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_assets.dart",
+      "bytes": 9103,
+      "sha256": "d6290b9c9edc24fc163978de4fa3458c4d83a9fd05148e984755dd1b43256896"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_display.dart",
+      "bytes": 319,
+      "sha256": "7b4a0c327abca2191a9b949e4cd571ac71a808bf8aa24d3ffbc61b3d29fb8144"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_game_config.dart",
+      "bytes": 5009,
+      "sha256": "7fd9ca891b4a51b16b11821841f2bbd2a709f56d971fadec678eb568856e9530"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_game_container.dart",
+      "bytes": 12220,
+      "sha256": "ed2000684524e46a9409da76cdd103034f950bd0070e6170d0c5b8ba4547f7a6"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_host.dart",
+      "bytes": 23077,
+      "sha256": "34f11d4b30b50ac73d633d2029ce9b8ce22223b1272bde523cd130354ab5856f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_model.dart",
+      "bytes": 16293,
+      "sha256": "6f96b17c3c24f25a22610104a44f19349648e468faa3a067284e559c3c938228"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_navigation.dart",
+      "bytes": 2205,
+      "sha256": "d4c5b271b411e8e98ce6e8f507b54f5d3914e2986558b8bd441bf0243a8eb6aa"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_package.dart",
+      "bytes": 35570,
+      "sha256": "2c3c00765ad3c1ac6c34426414a1a1fa99b32c5e220a2878610b524b7bbab510"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_plugin.dart",
+      "bytes": 28679,
+      "sha256": "baffac8605060425bb9f2402c6b4dc3d975e1deb3e93b202a0c801f7bed95ffa"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_runtime.dart",
+      "bytes": 15688,
+      "sha256": "370857c9464dccad95e2829960a1b17d24a6a73f21fbdb5cae6e570bf23a716d"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_stream.dart",
+      "bytes": 20133,
+      "sha256": "b964dee9aafd5bb59fe2641c7dc63a7ca89a7beaae5e038e16fd2ccf24d3737a"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_text_cache.dart",
+      "bytes": 4064,
+      "sha256": "5468100963555d14d89d248f7a7ee4af2892b66d907c22041459cbafca17a382"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_update.dart",
+      "bytes": 30443,
+      "sha256": "b3ddc332022a1291e51088d358fdd3afc601436640111cc1615a4987426d5601"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_update_source.dart",
+      "bytes": 2539,
+      "sha256": "33a41a1d3450b3264b6c12b3c0278415cf8f59b925da48a9bb2733bffd06fb6e"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_view.dart",
+      "bytes": 64650,
+      "sha256": "1363c04c9432ac0a1127379bd84c7dc76178f4d370f8092c0bc19ceb506c4047"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/lib/src/pocket_view_painter.dart",
+      "bytes": 26617,
+      "sha256": "41b23e7de069b2db7f803d7e36f1cf9ef3d958309871562ff33ea4bb50ed8d56"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_flutter/pubspec.yaml",
+      "bytes": 916,
+      "sha256": "1251c596e330000204413aee4a203476c3fec7efef56d02db8a2cf02eaf1cc34"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/AGENTS.md",
+      "bytes": 5240,
+      "sha256": "bb3483fca57d97fcfe1fd3de7b45c38f7fa14291f779fa6257d6c26c33e64f71"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/README.md",
+      "bytes": 9017,
+      "sha256": "a5b2a1f6acdc461c37836cec5a009b89f35d3f3b036ee21f85835d422b2d4758"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/bin/pocket-kit.ts",
+      "bytes": 12272,
+      "sha256": "04deb916a73de05e2908b274b586622d2926a93b672e184ce895520dbd9e32c0"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/fixtures/pocket-plugin-manifest.golden.json",
+      "bytes": 558,
+      "sha256": "7ccfbb80f0186ec02afbff73488f84e8e451f05c9a24087e66dadc38f8c14019"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/package.json",
+      "bytes": 511,
+      "sha256": "ffaa1c359626240d04dd54d9bf409422ce717fdf883c4537a3dbf9c4d2b45586"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/pocket-kit.config.example.json",
+      "bytes": 892,
+      "sha256": "9318e366cd66feb1b17c99e36c37a9287cf46ebbbb1677b2c2cdc841f16d6a30"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/schema/pocket-agent.schema.json",
+      "bytes": 1688,
+      "sha256": "7e1313972ba0cbde8416e60f6b6e3846764c5a126b9682a62bfa443cc12da4af"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/schema/pocket-kit.config.schema.json",
+      "bytes": 3691,
+      "sha256": "61bcbef7b7ca2e6dce0de57afed8524b9043bfadb89b079f5cf014d19a267054"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/schema/pocket-plugin-manifest.schema.json",
+      "bytes": 2263,
+      "sha256": "2d6c816c900cca71c4eea39506cae02fe8aa12fc73971b4c66d49ae6e28b1d76"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/src/agent.ts",
+      "bytes": 2918,
+      "sha256": "ea8a388807232bd3b8355a9cba58240fa3b08aa02068354adff0f2c3b478cfe5"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/src/config.ts",
+      "bytes": 11024,
+      "sha256": "3f1c7000aa1f6be647a423db1b21c5371ae22593c751ee26b8193d8e95b29184"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/src/cos.ts",
+      "bytes": 1205,
+      "sha256": "4945beb569e1acbcce835969c5d8465202bc5be6dce0bdc2358fb4f11f384e4a"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/src/index.ts",
+      "bytes": 197,
+      "sha256": "d053622899c2879b601174045b7b0e98a3999deb7a7ca622992bb6f00b3af2c5"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/src/json.ts",
+      "bytes": 283,
+      "sha256": "fa8b329da10bb72976c43f66b70809860a95da3921a186996ba209fb22a8ec62"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/src/runtime.ts",
+      "bytes": 11004,
+      "sha256": "989639502c4697c5acdf3072f43b228b269fdfefee35dce5ebadab8922b6d953"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/src/types.ts",
+      "bytes": 3278,
+      "sha256": "5aad95d87d9968451545267e8cbe15f3fc0f417136c6d8d0830e2245757a329c"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_kit/src/wechat.ts",
+      "bytes": 1187,
+      "sha256": "11200956ee054e4c1d5a1d5ecda9341df61b9930c251975c36f814b99f4c927f"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/README.md",
+      "bytes": 3607,
+      "sha256": "991ea9fb8b7f77c1096565d6f8e5ab3489cc188c41900e046ddf5a6a4856f836"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/STATE.md",
+      "bytes": 3426,
+      "sha256": "13d3104b9393038641abc7f996916acaf9b6cfc8b959f83ebe2b1244424dcf37"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/package.json",
+      "bytes": 251,
+      "sha256": "0688d70d78718b2c4d43270494eb2af40f610e8c95b3bef616b7e0b9728c8687"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/app.ts",
+      "bytes": 8469,
+      "sha256": "038256374cbb81074e1988eb085cae68052774395cbc8b6895101cca7de86248"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/draft_validator.ts",
+      "bytes": 6386,
+      "sha256": "5296030496d9c8901ad54cb4fa4e1ca3cfea262db95aca32136058383f458250"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/fit.ts",
+      "bytes": 2087,
+      "sha256": "656084d394057b02409e9c2454ad4fc3320c1dcca56ad1b240bc6d2154c1c035"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/fit_content.tsx",
+      "bytes": 1499,
+      "sha256": "28bbd5b3c188cc75b524035b10397e798b61e218131d9247a25153da55954d26"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/game_config.ts",
+      "bytes": 65894,
+      "sha256": "2d3b1d058b6e713d257506221a52dd0c1fee152f8d826a3f085cb4d67984be49"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/index.ts",
+      "bytes": 780,
+      "sha256": "949f850958baf5df4dd7a153649039bf26807cec3fd88c759ba0d030d12be12e"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/page_templates.ts",
+      "bytes": 67,
+      "sha256": "70c5ea6cc522fe0064d44fb622805323df6f10505dfcc56368a9e475c46d9532"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/prologue_activity.ts",
+      "bytes": 86,
+      "sha256": "46741123dfb1c41b5feaf487716fa4ad37b00f10206c5d59d637516d91dcd941"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/prologue_activity_view.tsx",
+      "bytes": 92,
+      "sha256": "188f6091db9bdc159198f3fbd68cf285aebacbc12b36eea92951d2bec6e0a09a"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/reading.ts",
+      "bytes": 60,
+      "sha256": "32c597e7982c8bd9ec1a2058a332a2d40d28bb1af051aab022a8465bb43376a4"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/router.ts",
+      "bytes": 12720,
+      "sha256": "17ff8d61128629b2b65352ce6b796a30d5f4e0ed26a355ce13430b8c4885cdda"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/state.ts",
+      "bytes": 4255,
+      "sha256": "2e67a237c0bdaec964266d28186245a5c146ddcacdcd7ee70d2f4350dd597993"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/stream.ts",
+      "bytes": 18066,
+      "sha256": "6d6715792ea1fc6ab7abd8397852cd0bcb6a2e12c639c8a5b7e92a2be0d9e491"
+    },
+    {
+      "path": "PocketJSKit/packages/pocket_sdk/src/text.ts",
+      "bytes": 669,
+      "sha256": "bb6f9f67741421824483bd7d9e462985b4f6ad57a4097ff4825802f00c1290c7"
+    },
+    {
+      "path": "PocketJSKit/pubspec.lock",
+      "bytes": 14257,
+      "sha256": "5d1f67ec13ab4def86196da8c9169634b9b7a6009deaf9f50ec321cd9ff488ae"
+    },
+    {
+      "path": "PocketJSKit/pubspec.yaml",
+      "bytes": 4616,
+      "sha256": "fb5b8dbb4ed2d4aa87bc50bbb4ae6ec14722f14b11c30c1336145fc2a8d9257f"
+    },
+    {
+      "path": "PocketJSKit/scripts/build_native.sh",
+      "bytes": 2723,
+      "sha256": "1b43c0e8ffd9736e770047aa721399e2bc9edf5d985c98799339607cca946a84"
+    },
+    {
+      "path": "PocketJSKit/scripts/build_tsx.sh",
+      "bytes": 1600,
+      "sha256": "6e3a2256b011559ee9449935ccd6c0d35b1453ce646ab9c4c7d15aa5249e65d5"
+    },
+    {
+      "path": "PocketJSKit/scripts/build_web_host.sh",
+      "bytes": 885,
+      "sha256": "a38ff77f7416f5864a2378a8d63930762b5856616594d12e24035d21adc4ab43"
+    },
+    {
+      "path": "PocketJSKit/scripts/build_xingqi.sh",
+      "bytes": 2690,
+      "sha256": "c903ed8b31451a52e8526b6aa22919d8f2886604ff6c80e527801d76cf4c0654"
+    },
+    {
+      "path": "PocketJSKit/scripts/check_component_coverage.py",
+      "bytes": 1941,
+      "sha256": "67ceb1440ecb95e887a3886d8fa4db811897ea8c1ee041085af42c6753813476"
+    },
+    {
+      "path": "PocketJSKit/scripts/create_wechat_demo.ts",
+      "bytes": 1781,
+      "sha256": "43b623bfe2bf2193dcdc89448f36f4b195d15a26ec2ff7e08e14fc84e5ac20eb"
+    },
+    {
+      "path": "PocketJSKit/scripts/gen_xingqi_tiles.ts",
+      "bytes": 22998,
+      "sha256": "3d645a6294ebbb79c26427b8718c8628e6c9b80baae856cbd8c37eac9f86ad10"
+    },
+    {
+      "path": "PocketJSKit/scripts/generate_deepzoom_fixture.ts",
+      "bytes": 1108,
+      "sha256": "82c108b87e40db5af204728d89f60351ad416c3b22589544747da9adff454384"
+    },
+    {
+      "path": "PocketJSKit/scripts/generate_prologue_import.ts",
+      "bytes": 14635,
+      "sha256": "df464ed0023f0517d38b2bce0354ad5ca180bfaddcf6e213e386773660b31cce"
+    },
+    {
+      "path": "PocketJSKit/scripts/measure_web_transition.ts",
+      "bytes": 1831,
+      "sha256": "c354fc02da206803a882dbb7700b1ea3ff5bea71f8123a674b3c3f75aa393acb"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket.ts",
+      "bytes": 30039,
+      "sha256": "347450910f21f6dc152bfce5540d52e7ca25de873a33ebb5ae63cfc1e5a8977c"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_assets.ts",
+      "bytes": 7216,
+      "sha256": "3f8b1ae977e66e8c00bfb992b49f4590371130b8fd7e2dd29e6f34e142694228"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_cjk.ts",
+      "bytes": 4577,
+      "sha256": "057dc3cead07a10b443e1dc62e65c65a4d20df006b9a9f39826ac7df31de2053"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_editor.test.ts",
+      "bytes": 8946,
+      "sha256": "39585375f33517dd67e3d73df45f47cc3389caae1a742aae86e3a0b1382ee3b8"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_editor.ts",
+      "bytes": 518,
+      "sha256": "1d2062a2a6d314c29aaa4938f583988997f247f376a64d2a9cd57d35b868c0c9"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_host_preview.test.ts",
+      "bytes": 3538,
+      "sha256": "b064a4e5972215d47823f09c391d155e28ab499fbe9f94edb75b0fb583058a91"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_import.ts",
+      "bytes": 60,
+      "sha256": "ab4beeb2fcdea94e2838fef233c7c572af6db1cd433d60b3f3584df15750f67b"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_package.ts",
+      "bytes": 20244,
+      "sha256": "6b1453595b503ff3ebd7955627fd9e0c255c615ffc78c997a6b13fb2f0b408a6"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_tiles.ts",
+      "bytes": 4566,
+      "sha256": "4af602d172cece65d6261794e74cf909745842bd0dd9e615dd7e499d6ee8538e"
+    },
+    {
+      "path": "PocketJSKit/scripts/pocket_wechat_runtime.ts",
+      "bytes": 7830,
+      "sha256": "1ee6bfa388bc857644479ab7cbdb94c24d92c752620705ecaf2d4429284618da"
+    },
+    {
+      "path": "PocketJSKit/scripts/prepare_pocket_tools.ts",
+      "bytes": 461,
+      "sha256": "56768199e90c2712e6f50e03eb2b8b975c5d87bc818408a3a16eb10a9446cb48"
+    },
+    {
+      "path": "PocketJSKit/scripts/prepare_upstream.py",
+      "bytes": 12682,
+      "sha256": "926bd160189be315fc9335f60759233e31050ff820cea8d2b6976da57e74ec8d"
+    },
+    {
+      "path": "PocketJSKit/scripts/prepare_xingqi_assets.py",
+      "bytes": 20255,
+      "sha256": "55a15b022ab785ea7626dd166d776daba5bfde17a53add6a4e83a7d9e4dca1aa"
+    },
+    {
+      "path": "PocketJSKit/scripts/run_android.sh",
+      "bytes": 367,
+      "sha256": "afdd71768ecb76f19ca81374567644886819d12629a3702c2794aebde9db1d47"
+    },
+    {
+      "path": "PocketJSKit/scripts/run_ios_sim.sh",
+      "bytes": 363,
+      "sha256": "848e52106c301404c0afa7568c781a0fc80ac687558afbe31585a81c5990ab36"
+    },
+    {
+      "path": "PocketJSKit/scripts/run_xingqi_remote.sh",
+      "bytes": 10066,
+      "sha256": "cc2bf7fa9bd3a59769ec04d2b7a8846318f4f46739946b1207e30cd245ec081a"
+    },
+    {
+      "path": "PocketJSKit/scripts/run_xingqi_web.sh",
+      "bytes": 385,
+      "sha256": "105c6094d1f69f49ca98e90bfa2d41a92c6dda4b1aed2d3f332e3c4ce89970b3"
+    },
+    {
+      "path": "PocketJSKit/scripts/serve_pocket_updates.ts",
+      "bytes": 5936,
+      "sha256": "a2e9a61548143b67411a1f876c732b281ed3d2883548c476d8320b0c9d08cbc9"
+    },
+    {
+      "path": "PocketJSKit/scripts/serve_xingqi_web.ts",
+      "bytes": 2175,
+      "sha256": "253a0fce5ccdca2b0cad8a6a8f4a6d6c2dfc03d8eab78dec239ebf6dc4c8d7b9"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/fixtures/pocket-host/packets.json",
+      "bytes": 404,
+      "sha256": "74cb87a8ac1868c27ecd0c2ed00174e3dfe8618c319425e90a808b6fc920c0dd"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/fixtures/pocket-package/signed-manifest-dart.json",
+      "bytes": 2449,
+      "sha256": "b284d978233c95d56f4a278437506c0d1ac23b40fbd29246b69d81ebe337a954"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/fixtures/pocket-package/test-ed25519.json",
+      "bytes": 377,
+      "sha256": "3592a799aab400c44f6c5b352d10d6a9937b3d42f54d689b922a93a3d415b43f"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_activity_config.test.ts",
+      "bytes": 1326,
+      "sha256": "4a6075ffacd25d595d58cf0762b1d6118516ddc6219cb592c42c2ac9322ef496"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_app_limits.test.ts",
+      "bytes": 1576,
+      "sha256": "6fb1b1237e5c9da0ee6dd1e816a2e42298b112b4ba0e925b6640a7351e1a39b6"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_assets.test.ts",
+      "bytes": 12577,
+      "sha256": "7dbf33d7e1707d9cef979b9e2fb304fd019bb927fd9df73e9daae665adeeb235"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_block_groups.test.ts",
+      "bytes": 45819,
+      "sha256": "1b098a664852f1224226dd47255cb42f1711c3b28859d1b69186c548d7a1f542"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_block_layout.test.ts",
+      "bytes": 15311,
+      "sha256": "ccdede190d47c4b1de1863762093f6957da88050513fd1393bb408bbc6d31441"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_cjk.test.ts",
+      "bytes": 2184,
+      "sha256": "1bb08683257115b448f64d6c383b01941ac2d5c1827bdb79f98bb3cee3252bbf"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_cli.test.ts",
+      "bytes": 9332,
+      "sha256": "bbdb5ddf850bc203b84c133e82833a8859805541e0e36097db1afab19614c843"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_container_contract.test.ts",
+      "bytes": 7053,
+      "sha256": "a04907ca462c83c7a67acfe798c9872723b5c75605448f6f68112758ca7a3f32"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_display.test.ts",
+      "bytes": 11374,
+      "sha256": "4e7840a8777f926fe89afacb492be00dadf7b5b1d84e75cdd1ba84f5559fc8dc"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_editor_draft.test.ts",
+      "bytes": 23646,
+      "sha256": "445713a7c95d1bba45f6738fa66aa2136a533a28ae31801fc979eb1d80103719"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_editor_layout.test.ts",
+      "bytes": 29509,
+      "sha256": "5aa0c86edb513a89fac1be586c633a81110e355c7cd53a8d9897f9333cb8839e"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_editor_selection.test.ts",
+      "bytes": 16676,
+      "sha256": "c8d3aac679c093075c114bf2053dc31bedf82c9ffa4effd36f9f3fa902262983"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_editor_toggle.test.ts",
+      "bytes": 18685,
+      "sha256": "c34768b25dcc9024aa0aef1e3b06c090c3300cbc1d2a6047eac084af3cb6b111"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_fit.test.ts",
+      "bytes": 1119,
+      "sha256": "4a937ba7f5916199b70e86d3c389acc2875a7833dc50e3397d2efa510e75579a"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_fps.test.ts",
+      "bytes": 4326,
+      "sha256": "f269288d2bf5947ee13e669fb5d664eff43dfc35202df62dba56ac01b5c32b23"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_import.test.ts",
+      "bytes": 5487,
+      "sha256": "cdb3822c914b1d494248e574bbe47513d5a8cf617be1288a0f86091e0802cb3e"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_input_queue.test.ts",
+      "bytes": 2463,
+      "sha256": "64483820924982df7a141f1a4522b387e997dedd4d1e0b0ba17bb3b0a0f71d60"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_inspector.test.ts",
+      "bytes": 6968,
+      "sha256": "9fa4eee89f8e153732ca2aa7894ca69dcef465ba65225b119cefb4a50d5c5f70"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_inspector_wasm.test.ts",
+      "bytes": 4283,
+      "sha256": "a0d8e0cf946514db5a26276c3d55dae8de2b38dd45bbdc8f84bfb512e4febd4e"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_kit.test.ts",
+      "bytes": 10982,
+      "sha256": "94188e3cdc1992f86793b307c7242d898ff0c949d5ffeda2b6ca751ed8606b91"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_kit_cli.test.ts",
+      "bytes": 3271,
+      "sha256": "8ee32f70e807f00302e53da431d0d5a93d07b685835d3c696894fc95367eae28"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_package.test.ts",
+      "bytes": 12242,
+      "sha256": "e979b12d2f85cc11b108e06ded3baf3b76a44f589f3adb72e60cc55e980fa8e8"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_page.test.ts",
+      "bytes": 962,
+      "sha256": "70dafd5ae68e1cb670961dc88d343a1a2fe13a6a18016441fc4786ed49ab6b98"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_page_graph.test.ts",
+      "bytes": 13637,
+      "sha256": "1a740406eaaa43f57f8c7a2f1b52190d0cbcb2b3114b9ee655904effb69ec6d7"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_page_template_render.test.ts",
+      "bytes": 12116,
+      "sha256": "45ceda39481e5b62b75ea8763131d24c4cf1d2ad8db67d96294fc2fd3a150ead"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_page_templates.test.ts",
+      "bytes": 2856,
+      "sha256": "ccf216512fe727d23c9878cee157cf2c8f72893034438ab72d676883d149cbf5"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_preview_draft.test.ts",
+      "bytes": 3951,
+      "sha256": "aaaa7767dc054c99c5088125ca0a32e6884c36c98d987a8ec7542ec15a07f4d4"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_preview_edit_mode.test.ts",
+      "bytes": 2243,
+      "sha256": "a42d6294f7993c05f96fd8aee3bf69dad68435ec4c4d0ba125eade1842ee6535"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_prologue_activity.test.ts",
+      "bytes": 19260,
+      "sha256": "85823603fa7b2ef7836cddc3714cc927da54e9ff43152d25cc42aabd5039dad8"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_prologue_import.test.ts",
+      "bytes": 8452,
+      "sha256": "c938aae193dbf81927ae9a384fd98c485574f81dbf757994d80a7ec7b98498c7"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_prologue_navigation.test.ts",
+      "bytes": 6991,
+      "sha256": "2a9f767d689465f61c3ec3ec168d040c7fae7fe943148f0b012cac9d768015d9"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_reading.test.ts",
+      "bytes": 2313,
+      "sha256": "fdca23d23c9a8ca0f61ecd3b9ca3815b3bb89b29086242e77915130339937dea"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_reading_flow.test.ts",
+      "bytes": 21359,
+      "sha256": "69f3fa1d51d9777731754981fd59b8a898af70551e20b19f7b2d8f908befa969"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_rgba_filter.test.ts",
+      "bytes": 2719,
+      "sha256": "4779fe7298638f04ab9106945ed856d87ce0d61c356ae89b96f34cd6636588af"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_router.test.ts",
+      "bytes": 5368,
+      "sha256": "1ce1b6d170dcb492688038f7a9d81ba9e369ec3ff52ee716679f47bb6ecc1345"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_scheduler.test.ts",
+      "bytes": 2549,
+      "sha256": "7cf3bd4ab0dbfc0d04c42419b6b2f97b0f50d425340ac14003dc40192e88de1c"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_state.test.ts",
+      "bytes": 3311,
+      "sha256": "e479b983964a9ed2288a6843d93919bebb26403def7bcb734fcfd026763471f7"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_stream.test.ts",
+      "bytes": 8330,
+      "sha256": "a84ecfbd603dad2679c9e614222324a907931000821bca167f47a564f105c828"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_template.test.ts",
+      "bytes": 6813,
+      "sha256": "c3179feeb2a5a036e059c2949701f29f0fe075b977918608e334baf9f3d85659"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_transition.test.ts",
+      "bytes": 2186,
+      "sha256": "d860529273a0d96058a9ba486a7d8cc86cf02a42d42adc28fc82e57e1b810d07"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_viewport.test.ts",
+      "bytes": 4688,
+      "sha256": "f1a774a7746a5a3636666a988bcb8db7068a08b0a03020c5c47cd0697001961e"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wasm_damage.test.ts",
+      "bytes": 3131,
+      "sha256": "9a2a936b286b126f94ff3e4e037ef3bd8ae09119b5ecd2760438fc2f1b932574"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wasm_rgba_tileset.test.ts",
+      "bytes": 3330,
+      "sha256": "694fec301267558a91b8825823a6a6e528b61a9c1949b6ef01912cde020242eb"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wasm_tex_quad_seams.test.ts",
+      "bytes": 4323,
+      "sha256": "72e30da8d8114f582dbef24e39f6155d0b95c37daa5c49c49fb0983560fb8b9a"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wasm_viewport.test.ts",
+      "bytes": 12584,
+      "sha256": "f855364229be34839666a33286ea0832cfd7c11e847c2bd3406c97d6660ff504"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_web_preview_input.test.ts",
+      "bytes": 3722,
+      "sha256": "c5daec0702e0ce6caa390558e91423582b197713d5a3c1c47bebe890ef830592"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wechat_counter.test.ts",
+      "bytes": 5043,
+      "sha256": "25af0eb32eaddb781a52b3306d98ab0617b5d740c1bb92a3dd2ca80cb69d8af4"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wechat_export.test.ts",
+      "bytes": 16836,
+      "sha256": "f98be16f13a80108b64329305f231f56f611f097cf0e9326700c2ce11fcc359f"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wechat_host.test.ts",
+      "bytes": 21115,
+      "sha256": "3db83c80c2bcfbabd6629576cf8f5f21d6591469f2fd87b2b21c7e06f1e21b3d"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wechat_integrity.test.ts",
+      "bytes": 772,
+      "sha256": "ad2d37289fd85c52ba33dcb4e617efc827689ecbbde230704e25dc2d990a5b43"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wechat_runtime.test.ts",
+      "bytes": 3833,
+      "sha256": "0ab0df905a6e37a124bf6d4f22fb1229176ee914cfc78a70bc8d46738d4b4057"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_wechat_video.test.ts",
+      "bytes": 10416,
+      "sha256": "ef95cfaafae1ab6c8ef8e24aae9b54c4e365f0b9b8cd06eb1f689cbfb7b86922"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/pocket_worker_bridge.test.ts",
+      "bytes": 5213,
+      "sha256": "aeb865728e46c9ebbe73ab46320eb7f94dcee8bc144436c9135d1d63654cb6d8"
+    },
+    {
+      "path": "PocketJSKit/scripts/tests/xingqi_tiles.test.ts",
+      "bytes": 4014,
+      "sha256": "d03cbabc807941815d4636e5619c4244a39a6270808469c9c8f1ba32ac0cd9d4"
+    },
+    {
+      "path": "PocketJSKit/scripts/tsconfig.solid-tests.json",
+      "bytes": 1269,
+      "sha256": "74671e11f3290a62988533ccd2f0e9cc036ecbabe708609b4df7ca9f7e0c00a5"
+    },
+    {
+      "path": "PocketJSKit/scripts/tsconfig.xingqi.json",
+      "bytes": 1513,
+      "sha256": "de4f54339f49e831df188db3a48c08e4b1cacfe0bc34b571ec9422f226d172d3"
+    },
+    {
+      "path": "PocketJSKit/scripts/typecheck_tsx.sh",
+      "bytes": 457,
+      "sha256": "441cc31a039aa18f757f8e87edeefa9202b24190b27e591e0039073825429232"
+    },
+    {
+      "path": "PocketJSKit/scripts/typecheck_xingqi.sh",
+      "bytes": 452,
+      "sha256": "2ce6da8bf2a5aa9fdcddf134e4964961d8916cf999b03657ec396518dcad3646"
+    },
+    {
+      "path": "PocketJSKit/scripts/verify_web_worker_idle.cjs",
+      "bytes": 7227,
+      "sha256": "cb205ea9c3b10d2b482c9f7d5e8dee1e4f881c6260dce67f4f12b89d7c04737a"
+    },
+    {
+      "path": "PocketJSKit/state-full.md",
+      "bytes": 92857,
+      "sha256": "ce97dae7458d9f52896775e156db198a842bb9e029513d502df3bac8cd44edb9"
+    },
+    {
+      "path": "PocketJSKit/state.md",
+      "bytes": 1270,
+      "sha256": "ac2fd13a1c05550a0ffa4e795658a8769875da2af9638424d7e62e9642a1cbb7"
+    },
+    {
+      "path": "PocketJSKit/templates/device-control/README.md",
+      "bytes": 657,
+      "sha256": "6bd943f7012cf4b0700be222d22c44675d1a646c87de7d4f94ab687e027b24ef"
+    },
+    {
+      "path": "PocketJSKit/templates/game/README.md",
+      "bytes": 2331,
+      "sha256": "6c68b05633b8565162c6969d0dbff38b1d1a15fb198c0f98c287c089d941fc91"
+    },
+    {
+      "path": "PocketJSKit/templates/game/app.tsx",
+      "bytes": 81180,
+      "sha256": "cb20311929b2a5dafedccc5c116ce0c15c85cd03b348f92f075154ddeb4d1d74"
+    },
+    {
+      "path": "PocketJSKit/templates/game/assets/fonts/LICENSE-NotoSansSC.txt",
+      "bytes": 4301,
+      "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    },
+    {
+      "path": "PocketJSKit/templates/game/assets/fonts/NotoSansSC-Regular.otf",
+      "bytes": 16437364,
+      "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+    },
+    {
+      "path": "PocketJSKit/templates/game/assets/fonts/NotoSansSC-SOURCE.md",
+      "bytes": 449,
+      "sha256": "6b1cde407e0f343ef33f3ed43b9a25c30e80313404073aea444de2f61544a5ff"
+    },
+    {
+      "path": "PocketJSKit/templates/game/fonts.json",
+      "bytes": 116,
+      "sha256": "d40b898f7a6c6eef0cebd645ec42a8b496661612be57bc6d5c05b5760ea76bb3"
+    },
+    {
+      "path": "PocketJSKit/templates/game/game.config.json",
+      "bytes": 844,
+      "sha256": "43d5167f8cc66f0c9e8eced3bc52330b875f743b8297c1cb4a7951322519b00c"
+    },
+    {
+      "path": "PocketJSKit/templates/game/generated/assets.tsx",
+      "bytes": 2007,
+      "sha256": "35448edfeffeaf63fa6d27af1fc62980f225239173e8f0cc933b5b99fef73aec"
+    },
+    {
+      "path": "PocketJSKit/templates/game/generated/game_config.ts",
+      "bytes": 1209,
+      "sha256": "352176bb7f8cbfee13642ff8d92d32a4a22db3b9cf71d008a5a2a8a985ea6269"
+    },
+    {
+      "path": "PocketJSKit/templates/game/generated/pocket_sdk.ts",
+      "bytes": 133,
+      "sha256": "f77e9eb55fb735fca8098c14092e095747f20058ea5ab9655f0e82161f4f1acd"
+    },
+    {
+      "path": "PocketJSKit/templates/game/pocket.json",
+      "bytes": 525,
+      "sha256": "43abb7623b811766a9d435a69a76b576a4e6523435ee525f838f24ee3db5f10e"
+    },
+    {
+      "path": "PocketJSKit/templates/story/README.md",
+      "bytes": 228,
+      "sha256": "63cd0f69b5618b2d505795d013c34802e211482db5d4c6deed83eb529d844b1f"
+    },
+    {
+      "path": "PocketJSKit/templates/wechat-counter/app.tsx",
+      "bytes": 2014,
+      "sha256": "2526e0be282030aadd7a3eac40cf5727ef7ad26514651b40b3759c256b0baf35"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_assets_test.dart",
+      "bytes": 4874,
+      "sha256": "2025a14053592c8e1c7f41671f5a526b39c5b84f11dddbdf225171a336f2c58e"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_display_test.dart",
+      "bytes": 544,
+      "sha256": "5171c27bbd48533446be3f43d7e4e7a55be6ef489416cd9bf189f7b842d26438"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_game_container_test.dart",
+      "bytes": 7182,
+      "sha256": "a12d317afa87a8db637ecc2d65e913ca4063209741c25b00b8e086960443155c"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_host_test.dart",
+      "bytes": 10627,
+      "sha256": "0fc4378aa9c00254f7d128b48560342c7f93ee6f0fea40d6fd45d5496dad3c68"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_model_test.dart",
+      "bytes": 4489,
+      "sha256": "5c11301ac99f42693a090d6157b4fdcebac10034c981717ebf5d0ff697c47d29"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_navigation_test.dart",
+      "bytes": 3097,
+      "sha256": "4659a7451d8b9206ebcb567c167dce99f157d1067054f617f61c037268271344"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_package_asset_test.dart",
+      "bytes": 7256,
+      "sha256": "29811a97b3a3f2448777962b06dc4618598059bcfac886605cd48a3c4eceb15d"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_package_contract_test.dart",
+      "bytes": 2758,
+      "sha256": "cbd8033344451bbd15656b3079f7a6881860b539892bec96e3d5cce888e5d86e"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_plugin_test.dart",
+      "bytes": 18335,
+      "sha256": "72660146e178d973af85e9b04ebb1db243b42f45d80cc3b4804845d7ac736a24"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_stream_test.dart",
+      "bytes": 11197,
+      "sha256": "0e6a0b7d8ba1cb30221f4386f4325d12e5d88bb319300cad3c94c09a1b1c99ef"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_update_gate_test.dart",
+      "bytes": 8445,
+      "sha256": "b24b17b3dbc53b52e27db39d3bf57bc407b5b0a82fe91bc0b92dc8f669e27e7a"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_update_test.dart",
+      "bytes": 15411,
+      "sha256": "1cbea6496ca5bd6c81e3fb2489a3b46f35f0f4f64232c9cd05038eecab0bc3b4"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_update_transport_test.dart",
+      "bytes": 3483,
+      "sha256": "ed3f2759dd47d0f1f20625e3bc1077b3bc5492ed0248cff55f4669ce9228296f"
+    },
+    {
+      "path": "PocketJSKit/test/pocket_view_test.dart",
+      "bytes": 77150,
+      "sha256": "ec16ab483cae4064b7e57c547a1e1df55bf8e20d1c41a51c270d3805976b7dd3"
+    },
+    {
+      "path": "PocketJSKit/test/xingqi_device_service_test.dart",
+      "bytes": 2240,
+      "sha256": "d676e95bc457d8c02da26009435b3171e605aca2c7c6486e8fbfdb5b377006fb"
+    },
+    {
+      "path": "PocketPlugins/README.md",
+      "bytes": 1000,
+      "sha256": "0197bae58c631b346eba0667baa8438fa98df90f64c8f15effb9435366ce162e"
+    },
+    {
+      "path": "PocketPlugins/package.json",
+      "bytes": 553,
+      "sha256": "fd5118da392facda4eb137885f626a29c8ea44150e75a812366cf3c44ebc8469"
+    },
+    {
+      "path": "PocketPlugins/src/cos_publisher/cos.ts",
+      "bytes": 6173,
+      "sha256": "08a102230f62f9d63df33075720199251cff6fe23b3a184282345fec20f0ff9c"
+    },
+    {
+      "path": "PocketPlugins/src/cos_publisher/plugin.ts",
+      "bytes": 26,
+      "sha256": "d81cd7cd502357c11ba726a59c7f507c2d57999acaa03f4ca66c9a0dfe55764c"
+    },
+    {
+      "path": "PocketPlugins/src/index.ts",
+      "bytes": 135,
+      "sha256": "b83825b4d0989cb7af289d29cdc8990a9aa17a3446076088cc429cb67545203d"
+    },
+    {
+      "path": "PocketPlugins/src/prologue_activity/plugin.ts",
+      "bytes": 552,
+      "sha256": "e3076f9333c788d49e6d977e43d8b3c0e568584c9d0ce4e710a7b068f5297e39"
+    },
+    {
+      "path": "PocketPlugins/src/prologue_activity/prologue_activity.ts",
+      "bytes": 21786,
+      "sha256": "eca3c202ad755a0e03c3af50f5fb826975d3dc3d8a5e94c87706b1e68ea43c15"
+    },
+    {
+      "path": "PocketPlugins/src/prologue_activity/prologue_activity_view.tsx",
+      "bytes": 17293,
+      "sha256": "beccf8f54706055e985d00d65fba5a773d5fcb82b74e1434a26b956594b425d2"
+    },
+    {
+      "path": "PocketPlugins/src/wechat_exporter/plugin.ts",
+      "bytes": 29,
+      "sha256": "a45b29859668a7d061b87510d8817913e4f8e8ec99555b6acc254bc12df44077"
+    },
+    {
+      "path": "PocketPlugins/src/wechat_exporter/wechat.ts",
+      "bytes": 21767,
+      "sha256": "09407e1ccb9e910080312dc1ef73f188dbb0ae5386982f6daab975254cce8304"
+    },
+    {
+      "path": "PocketTemplates/README.md",
+      "bytes": 981,
+      "sha256": "e02570f09e0e3b233e87fcbb3e4986a5bff56657aa15c9ef3d27d6ac4b239b69"
+    },
+    {
+      "path": "PocketTemplates/package.json",
+      "bytes": 567,
+      "sha256": "e66c1c27755665a0983168e3b22df28032de162aebc3985a8b644164b10d4729"
+    },
+    {
+      "path": "PocketTemplates/src/import_folder.ts",
+      "bytes": 8186,
+      "sha256": "b6bbdf93ce876bd0fb7da89278bf703a8a44e308728019db17784fbc5d4ceec2"
+    },
+    {
+      "path": "PocketTemplates/src/index.ts",
+      "bytes": 103,
+      "sha256": "6fea34844c9a730d266e5f8da54f2608fb36f590dac9d2a58302af8241aa1dba"
+    },
+    {
+      "path": "PocketTemplates/src/page_templates.ts",
+      "bytes": 9471,
+      "sha256": "a8b330aa708a5f7f62078e1c13f8a82bbee9372ca6b1c087e87a16655fd66cf5"
+    },
+    {
+      "path": "PocketTemplates/src/reading.ts",
+      "bytes": 3247,
+      "sha256": "38bcb5b529319810cbddee426f247e31f61285973311bae2fef3a33628e4fe22"
+    },
+    {
+      "path": "PocketTemplates/templates/game/README.md",
+      "bytes": 2331,
+      "sha256": "6c68b05633b8565162c6969d0dbff38b1d1a15fb198c0f98c287c089d941fc91"
+    },
+    {
+      "path": "PocketTemplates/templates/game/app.tsx",
+      "bytes": 81180,
+      "sha256": "cb20311929b2a5dafedccc5c116ce0c15c85cd03b348f92f075154ddeb4d1d74"
+    },
+    {
+      "path": "PocketTemplates/templates/game/assets/fonts/LICENSE-NotoSansSC.txt",
+      "bytes": 4301,
+      "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    },
+    {
+      "path": "PocketTemplates/templates/game/assets/fonts/NotoSansSC-Regular.otf",
+      "bytes": 16437364,
+      "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+    },
+    {
+      "path": "PocketTemplates/templates/game/assets/fonts/NotoSansSC-SOURCE.md",
+      "bytes": 449,
+      "sha256": "6b1cde407e0f343ef33f3ed43b9a25c30e80313404073aea444de2f61544a5ff"
+    },
+    {
+      "path": "PocketTemplates/templates/game/fonts.json",
+      "bytes": 116,
+      "sha256": "d40b898f7a6c6eef0cebd645ec42a8b496661612be57bc6d5c05b5760ea76bb3"
+    },
+    {
+      "path": "PocketTemplates/templates/game/game.config.json",
+      "bytes": 844,
+      "sha256": "43d5167f8cc66f0c9e8eced3bc52330b875f743b8297c1cb4a7951322519b00c"
+    },
+    {
+      "path": "PocketTemplates/templates/game/generated/assets.tsx",
+      "bytes": 2007,
+      "sha256": "35448edfeffeaf63fa6d27af1fc62980f225239173e8f0cc933b5b99fef73aec"
+    },
+    {
+      "path": "PocketTemplates/templates/game/generated/game_config.ts",
+      "bytes": 1209,
+      "sha256": "352176bb7f8cbfee13642ff8d92d32a4a22db3b9cf71d008a5a2a8a985ea6269"
+    },
+    {
+      "path": "PocketTemplates/templates/game/generated/pocket_sdk.ts",
+      "bytes": 133,
+      "sha256": "f77e9eb55fb735fca8098c14092e095747f20058ea5ab9655f0e82161f4f1acd"
+    },
+    {
+      "path": "PocketTemplates/templates/game/pocket.json",
+      "bytes": 525,
+      "sha256": "43abb7623b811766a9d435a69a76b576a4e6523435ee525f838f24ee3db5f10e"
+    },
+    {
+      "path": "README.md",
+      "bytes": 7414,
+      "sha256": "781b119cdeb028990a05fdad8c6b537b087e1747448e830687698be1a382d103"
+    }
+  ]
+}

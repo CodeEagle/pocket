@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Pocket Host</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>pocket_host</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(FLUTTER_BUILD_NAME)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Pocket Host uses Bluetooth only when a guest explicitly requests a nearby device capability.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Pocket Host uses Bluetooth only when a guest explicitly requests a nearby device capability.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Pocket Host shows a live camera surface only after the guest requests camera access.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Pocket Host saves photos captured by the guest camera capability when you allow it.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Pocket Host lists photos created by its camera capability when you allow it.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Pocket Host requests microphone access only for a guest hardware capability.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Pocket Host uses your location only when a guest requests real location or weather data.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Pocket Host uses Face ID only when a guest explicitly requests biometric authentication.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Pocket Host reads motion and barometer sensors only when a guest requests them.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Pocket Host uses local networking only for its explicitly configured update service.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>UIWindowScene</string>
+					<key>UISceneDelegateClassName</key>
+					<string>FlutterSceneDelegate</string>
+					<key>UISceneConfigurationName</key>
+					<string>flutter</string>
+					<key>UISceneStoryboardFile</key>
+					<string>Main</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+</dict>
+</plist>

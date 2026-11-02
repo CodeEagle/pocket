@@ -1,0 +1,44 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-guest-manifest.json",
+  "protocolVersion": 1,
+  "capabilities": {
+    "requires": ["text.glyphs.baked"],
+    "optional": [
+      "runtime.info",
+      "runtime.performance",
+      "plugins.list",
+      "plugins.packageInfo",
+      "updates.status",
+      "updates.check",
+      "updates.apply",
+      "updates.rollback",
+      "hardware.permissions",
+      "hardware.permissions.request",
+      "hardware.camera.preview.start",
+      "hardware.camera.preview.stop",
+      "hardware.camera.lens.switch",
+      "hardware.camera.flash.toggle",
+      "hardware.camera.capture",
+      "hardware.photos.list",
+      "hardware.photos.delete",
+      "hardware.bluetooth.scan",
+      "hardware.bluetooth.connect",
+      "hardware.sensors.read",
+      "hardware.biometrics.authenticate",
+      "hardware.location.current",
+      "hardware.weather.current"
+    ]
+  },
+  "permissions": {
+    "optional": [
+      "hardware.camera",
+      "hardware.photos",
+      "hardware.bluetooth",
+      "hardware.sensors",
+      "hardware.biometrics",
+      "hardware.location",
+      "hardware.microphone",
+      "hardware.network"
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+name: pocket_host
+description: Minimal Flutter host for a PocketJS JavaScript guest.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  pocket_sdk:
+    path: ../sdk
+
+dev_dependencies:
+  pocket_hardware:
+    path: ../sdk/packages/pocket_hardware
+  pocket_flutter:
+    path: ../sdk/packages/pocket_flutter
+  pocket_services:
+    path: ../sdk/packages/pocket_services
+  path_provider: ^2.1.5
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/app.qjbc
+    - assets/app.bytecode.json
+    - assets/guest-manifest.json
+    - assets/app.pak

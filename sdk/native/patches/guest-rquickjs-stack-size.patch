@@ -1,0 +1,10 @@
+--- a/engine/guest-rquickjs/src/lib.rs
++++ b/engine/guest-rquickjs/src/lib.rs
+@@ -82,4 +82,7 @@ impl Guest for RquickjsGuest {
+         if environment.heap_limit != 0 {
+             runtime.set_memory_limit(environment.heap_limit);
+         }
++        // Keep QuickJS's stack guard bounded while allowing the generated
++        // Solid mount graph to resolve its initial reactive styles.
++        runtime.set_max_stack_size(4 * 1024 * 1024);
+         let context = self.remember(Context::full(&runtime))?;

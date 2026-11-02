@@ -1,0 +1,81 @@
+--- a/engine/guest-rquickjs/src/lib.rs
++++ b/engine/guest-rquickjs/src/lib.rs
+@@ -1,4 +1,6 @@
+ //! A QuickJS realm whose UI calls dispatch through the runtime's generated contract.
++use std::sync::{Arc, Mutex};
++use std::time::{Duration, Instant};
+ use pocket_runtime::generated_ops::{
+     ArgKind, OpDescriptor, ResultKind, BINDING_GENERATION, IDF_OPS, LEGACY_C_OPS, OP_DESCRIPTORS,
+ };
+@@ -33,6 +35,8 @@
+     runtime: Option<Runtime>,
+     profile: BindingProfile,
+     last_error: Option<String>,
++    // Shared by the interrupt handler and the host-side microtask drain.
++    turn_deadline: Arc<Mutex<Option<Instant>>>,
+ }
+ impl Default for RquickjsGuest {
+     fn default() -> Self {
+@@ -46,7 +50,11 @@
+             runtime: None,
+             profile,
+             last_error: None,
+-        }
++            turn_deadline: Arc::new(Mutex::new(None)),
++        }
++    }
++    fn begin_turn(&self, duration: Duration) {
++        *self.turn_deadline.lock().unwrap() = Some(Instant::now() + duration);
+     }
+     pub fn last_error(&self) -> Option<&str> {
+         self.last_error.as_deref()
+@@ -85,6 +93,12 @@
+         // Keep QuickJS's stack guard bounded while allowing the generated
+         // Solid mount graph to resolve its initial reactive styles.
+         runtime.set_max_stack_size(4 * 1024 * 1024);
++        // The guest cannot block Flutter forever with a loop or promise storm.
++        let deadline = Arc::clone(&self.turn_deadline);
++        runtime.set_interrupt_handler(Some(Box::new(move || {
++            deadline.lock().unwrap().is_some_and(|end| Instant::now() >= end)
++        })));
++        self.begin_turn(Duration::from_secs(5));
+         let context = self.remember(Context::full(&runtime))?;
+         let result = context.with(|ctx| mount_ui(&ctx, ops, environment, self.profile));
+         self.remember(result)?;
+@@ -93,6 +107,7 @@
+         Ok(())
+     }
+     fn evaluate(&mut self, code: &[u8]) -> Result<(), RuntimeError> {
++        self.begin_turn(Duration::from_secs(5));
+         let context = self.context.as_ref().ok_or(RuntimeError::Guest)?;
+         // Package JS includes one terminal NUL for C consumers. The rquickjs
+         // evaluator appends its own terminator and expects a source-only span.
+@@ -105,6 +120,7 @@
+         self.collect()
+     }
+     fn frame(&mut self, frame: &GuestFrame<'_>) -> Result<(), RuntimeError> {
++        self.begin_turn(Duration::from_millis(250));
+         let context = self.context.as_ref().ok_or(RuntimeError::Guest)?;
+         let result = context.with(|ctx| call_frame(&ctx, frame));
+         self.remember(result)?;
+@@ -113,6 +129,12 @@
+     fn collect(&mut self) -> Result<(), RuntimeError> {
+         if let Some(runtime) = &self.runtime {
+             while runtime.is_job_pending() {
++                // Individual tiny jobs can evade QuickJS's instruction callback;
++                // never reset the deadline while draining a guest turn.
++                if self.turn_deadline.lock().unwrap().is_some_and(|end| Instant::now() >= end) {
++                    self.last_error = Some("Pocket guest turn exceeded execution budget".to_owned());
++                    return Err(RuntimeError::Guest);
++                }
+                 if let Err(error) = runtime.execute_pending_job() {
+                     self.last_error = Some(error.to_string());
+                     return Err(RuntimeError::Guest);
+@@ -122,6 +144,7 @@
+         Ok(())
+     }
+     fn shutdown(&mut self) {
++        *self.turn_deadline.lock().unwrap() = None;
+         self.context = None;
+         self.runtime = None;
+     }
