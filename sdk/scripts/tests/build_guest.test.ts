@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildGuest } from "../build_guest.ts";
+import { buildGuest, resolveReleaseIdentity } from "../build_guest.ts";
+import { buildProject } from "../../pocket.ts";
 
 // These tests exercise the full pinned JSX compiler and the Rust QuickJS
 // bytecode builder.  Bun's per-test default is 5 seconds, which is shorter
@@ -137,6 +138,69 @@ test("build_guest carries editor release identity into bytecode metadata", async
     expect(nextManifest.build).toBe(43);
   } finally {
     rmSync(project, { recursive: true, force: true });
+  }
+}, BUILD_GUEST_TEST_TIMEOUT_MS);
+
+test("release identity chooses one source without mixing version and build fields", () => {
+  const project = mkdtempSync(join(tmpdir(), "pocket-release-identity-source-"));
+  try {
+    writeFileSync(join(project, "editor.json"), JSON.stringify({ version: "2.4.0" }));
+    writeFileSync(join(project, "pocket.json"), JSON.stringify({ version: "1.0.0", build: 42 }));
+    const manifest = { version: "0.1.0", build: 1 };
+    expect(resolveReleaseIdentity(project, manifest)).toEqual({ version: "2.4.0", build: 1 });
+    rmSync(join(project, "editor.json"));
+    expect(resolveReleaseIdentity(project, manifest)).toEqual({ version: "1.0.0", build: 42 });
+    rmSync(join(project, "pocket.json"));
+    expect(resolveReleaseIdentity(project, manifest)).toEqual(manifest);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("release identity rejects an invalid authoritative editor field instead of falling back", () => {
+  const project = mkdtempSync(join(tmpdir(), "pocket-release-identity-invalid-"));
+  try {
+    writeFileSync(join(project, "editor.json"), JSON.stringify({ build: 0 }));
+    writeFileSync(join(project, "pocket.json"), JSON.stringify({ build: 42 }));
+    expect(() => resolveReleaseIdentity(project)).toThrow(/positive safe integer/);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("projectConfig and build_guest emit the same complete identity for partial and absent release config", async () => {
+  const cases = [
+    {
+      name: "partial-editor",
+      editor: { version: "2.4.0" },
+      pocket: { version: "1.0.0", build: 42 },
+      expected: { version: "2.4.0", build: 1 },
+    },
+    {
+      name: "no-release-source",
+      editor: undefined,
+      pocket: {},
+      expected: { version: "0.1.0", build: 1 },
+    },
+  ] as const;
+
+  for (const fixture of cases) {
+    const project = mkdtempSync(join(tmpdir(), `pocket-release-artifact-${fixture.name}-`));
+    const output = join(project, "build");
+    try {
+      writeFileSync(join(project, "app.tsx"), "export default function App(){ return <text value='identity'/>; }\n");
+      writeFileSync(join(project, "pocket.json"), JSON.stringify({ id: "fixture-app", ...fixture.pocket, app: { entry: "app.tsx" } }));
+      writeFileSync(join(project, "manifest.json"), JSON.stringify({ capabilities: { requires: [] } }));
+      writeFileSync(join(project, "editor.json"), JSON.stringify(fixture.editor ?? {}));
+
+      const result = await buildProject(project, { outDir: output });
+      const buildInfo = JSON.parse(readFileSync(join(output, "build.json"), "utf8")) as Record<string, unknown>;
+      const metadata = JSON.parse(readFileSync(result.metadata, "utf8")) as Record<string, unknown>;
+      expect({ version: buildInfo.version, build: buildInfo.build }).toEqual(fixture.expected);
+      expect({ version: metadata.version, build: metadata.build }).toEqual(fixture.expected);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
   }
 }, BUILD_GUEST_TEST_TIMEOUT_MS);
 

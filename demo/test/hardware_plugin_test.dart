@@ -15,7 +15,7 @@ void main() {
   });
 
   test(
-    'granting only network allows weather to succeed while cameraCapture throws permission_denied',
+    'network-only weather with explicit coordinates succeeds without native GPS',
     () async {
       final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{
         'getCurrentLocation': <String, dynamic>{
@@ -23,55 +23,118 @@ void main() {
           'latitude': 1.29,
           'longitude': 103.85,
         },
-        'capturePhoto': <String, dynamic>{
-          'ok': true,
-        },
       });
-      final plugin = HardwarePlugin(
-        platform: fake,
-        grantedPermissions: const <String>{HardwarePermissions.network},
-        weatherFetcher: (_) async => <String, dynamic>{
-          'current': <String, dynamic>{'temperature_2m': 20.0},
-        },
+      final harness = await _Harness.create(
+        _weatherPlugin(fake),
+        allowedPermissions: const <String>{HardwarePermissions.network},
+        requestedPermissions: const <String>{HardwarePermissions.network},
       );
-      final harness = await _Harness.create(plugin);
       try {
-        await harness.request(
+        final result = await harness.manager.invoke(
           HardwareCapabilities.weatherCurrent,
-          'weather-perm-test',
+          const <String, dynamic>{'latitude': 31.2304, 'longitude': 121.4737},
         );
-        expect(harness.last['ok'], isTrue);
-
-        await harness.request(
-          HardwareCapabilities.cameraCapture,
-          'camera-perm-test',
-        );
-        expect(harness.last['ok'], isFalse);
-        expect((harness.last['error'] as Map)['code'], 'permission_denied');
+        final response = result as Map;
+        expect(response['ok'], isTrue);
+        expect(response['realGps'], isFalse);
+        expect(fake.calls, isNot(contains('getCurrentLocation')));
       } finally {
         await harness.dispose();
       }
     },
   );
 
-  test('switchCameraLens returns stopped when preview is not running', () async {
-    final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{});
-    final harness = await _Harness.create(HardwarePlugin(platform: fake));
-    try {
-      await harness.request(
-        HardwareCapabilities.cameraLensSwitch,
-        'switch-stopped',
-        params: <String, dynamic>{'lens': 'front'},
+  test(
+    'network-only weather without coordinates is denied before native GPS',
+    () async {
+      final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{
+        'getCurrentLocation': <String, dynamic>{
+          'ok': true,
+          'latitude': 1.29,
+          'longitude': 103.85,
+        },
+      });
+      final harness = await _Harness.create(
+        _weatherPlugin(fake),
+        allowedPermissions: const <String>{HardwarePermissions.network},
+        requestedPermissions: const <String>{HardwarePermissions.network},
       );
-      expect(harness.last['ok'], isTrue);
-      final result = harness.last['result'] as Map;
-      expect(result['stopped'], isTrue);
-      expect(result['lens'], 'front');
-      expect(fake.calls, isEmpty);
-    } finally {
-      await harness.dispose();
-    }
-  });
+      try {
+        await expectLater(
+          harness.manager.invoke(
+            HardwareCapabilities.weatherCurrent,
+            const <String, dynamic>{},
+          ),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'permission_denied',
+            ),
+          ),
+        );
+        expect(fake.calls, isNot(contains('getCurrentLocation')));
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  test(
+    'network plus location weather without coordinates invokes native GPS',
+    () async {
+      final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{
+        'getCurrentLocation': <String, dynamic>{
+          'ok': true,
+          'realGps': true,
+          'latitude': 1.29,
+          'longitude': 103.85,
+        },
+      });
+      final permissions = <String>{
+        HardwarePermissions.network,
+        HardwarePermissions.location,
+      };
+      final harness = await _Harness.create(
+        _weatherPlugin(fake),
+        allowedPermissions: permissions,
+        requestedPermissions: permissions,
+      );
+      try {
+        final result = await harness.manager.invoke(
+          HardwareCapabilities.weatherCurrent,
+        );
+        final response = result as Map;
+        expect(response['ok'], isTrue);
+        expect(response['realGps'], isTrue);
+        expect(fake.calls, contains('getCurrentLocation'));
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  test(
+    'switchCameraLens returns stopped when preview is not running',
+    () async {
+      final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{});
+      final harness = await _Harness.create(HardwarePlugin(platform: fake));
+      try {
+        await harness.request(
+          HardwareCapabilities.cameraLensSwitch,
+          'switch-stopped',
+          params: <String, dynamic>{'lens': 'front'},
+        );
+        expect(harness.last['ok'], isTrue);
+        final result = harness.last['result'] as Map;
+        expect(result['stopped'], isTrue);
+        expect(result['lens'], 'front');
+        expect(fake.calls, isEmpty);
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
 
   test('switchCameraLens updates texture when preview is active', () async {
     final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{
@@ -383,6 +446,13 @@ void main() {
     }
   });
 }
+
+HardwarePlugin _weatherPlugin(_FakeHardwarePlatform fake) => HardwarePlugin(
+  platform: fake,
+  weatherFetcher: (_) async => <String, dynamic>{
+    'current': <String, dynamic>{'temperature_2m': 20.0},
+  },
+);
 
 final class _FakeHardwarePlatform implements HardwarePlatform {
   _FakeHardwarePlatform(this.responses);

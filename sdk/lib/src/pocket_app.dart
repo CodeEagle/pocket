@@ -54,12 +54,16 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
   }
 
   void _startSession() {
-    session = PocketSession(config: widget.config);
-    session.addListener(_changed);
+    final created = PocketSession(config: widget.config);
+    session = created;
+    created.addListener(_changed);
     unawaited(
-      session.initialize().catchError((Object error) {
-        session.dispose();
-        if (mounted) setState(() => startupError = error);
+      created.initialize().catchError((Object error) {
+        created.removeListener(_changed);
+        created.dispose();
+        if (mounted && identical(session, created)) {
+          setState(() => startupError = error);
+        }
       }),
     );
   }

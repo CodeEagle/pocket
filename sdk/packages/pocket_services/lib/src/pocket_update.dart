@@ -157,10 +157,12 @@ final class PocketPreparedPackage {
   const PocketPreparedPackage({
     required this.package,
     required this.needsActivation,
+    this.isRollback = false,
   });
 
   final PocketPackage package;
   final bool needsActivation;
+  final bool isRollback;
   PocketPackageSource get source => package.source;
   String get version => package.manifest.payload.version;
   int get build => package.manifest.payload.build;
@@ -368,13 +370,20 @@ final class PocketUpdateCoordinator {
         : PocketPreparedPackage(package: package, needsActivation: false);
   }
 
-  Future<void> commitHealthy(PocketPreparedPackage prepared) =>
-      _store.commitHealthy(
-        prepared.package,
+  Future<void> commitHealthy(PocketPreparedPackage prepared) {
+    if (prepared.isRollback) {
+      return _store.rollback(
+        versionId: prepared.package.versionId,
         verifier: verifier,
-        minimumBuild: minimumBuild,
-        allowDowngrade: allowDowngrade,
       );
+    }
+    return _store.commitHealthy(
+      prepared.package,
+      verifier: verifier,
+      minimumBuild: minimumBuild,
+      allowDowngrade: allowDowngrade,
+    );
+  }
   Future<void> activate(PocketPreparedPackage prepared) =>
       commitHealthy(prepared);
 

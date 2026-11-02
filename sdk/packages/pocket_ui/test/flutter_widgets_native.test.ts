@@ -15,7 +15,8 @@ type DrawOp = {
   w?: number;
   h?: number;
 };
-type Frame = { ops?: DrawOp[] };
+type FrameEvent = { name?: string; payload?: JsonObject };
+type Frame = { ops?: DrawOp[]; events?: FrameEvent[] };
 type ProbeResponse = { ok?: boolean; error?: string; frame?: Frame };
 
 const testDir = dirname(fileURLToPath(import.meta.url));
@@ -88,10 +89,18 @@ function textOp(frame: Frame, label: string): DrawOp {
   return op;
 }
 
+function hasText(frame: Frame, label: string): boolean {
+  return (frame.ops ?? []).some((item) => item.type === "text" && item.text === label);
+}
+
 function textValue(frame: Frame, prefix: string): string {
   const op = (frame.ops ?? []).find((item) => item.type === "text" && item.text?.startsWith(prefix));
   assert.ok(op?.text, `frame is missing text prefix ${prefix}`);
   return op.text!;
+}
+
+function frameEvents(frame: Frame, name: string): FrameEvent[] {
+  return (frame.events ?? []).filter((item) => item.name === name);
 }
 
 function progressFill(frame: Frame): DrawOp {
@@ -180,5 +189,78 @@ assert.notEqual(textOp(afterLibrary, "Library").color, initialLibraryColor, "Lib
 assert.equal(textOp(afterLibrary, "Library").color, initialHomeColor, "Library selected color differs from initial Home color");
 assert.notEqual(textOp(afterChip, "Toggle Chip").color, initialChipColor, "Chip selected styling did not update");
 
-console.log(`flutter_widgets_native.test: pointer callbacks, disabled gating and selected styling passed (${probe}; ${artifactDir})`);
+// The compiled fixture also mounts the real JS page scroller and input shell.
+// Drive it through the native QuickJS probe so this is a QJBC layout/IME
+// check, not only the isolated mocked geometry test in flutter_widgets.test.
+const inputPoint = center(initial, "Tap to type");
+const inputResponses = runProbe([
+  ...bootstrap(),
+  ...tap(inputPoint),
+  event("textInput.edit", {
+    id: "guest-text-input-1",
+    editingSession: "guest-text-input-1:1",
+    text: "native input",
+    selectionBase: 12,
+    selectionExtent: 12,
+    composingBase: -1,
+    composingExtent: -1,
+  }),
+  { op: "frame", deltaMs: 16 },
+  event("textInput.submit", {
+    id: "guest-text-input-1",
+    editingSession: "guest-text-input-1:1",
+    text: "native submitted",
+    selectionBase: 16,
+    selectionExtent: 16,
+    composingBase: -1,
+    composingExtent: -1,
+  }),
+  { op: "frame", deltaMs: 16 },
+  { op: "quit" },
+]);
+const inputFrames = framesOf(inputResponses);
+const openEvent = inputFrames
+  .flatMap((frame) => frameEvents(frame, "textInput.open"))
+  .find((item) => item.payload?.id === "guest-text-input-1");
+assert.ok(openEvent, "native QJBC pointer input did not emit textInput.open");
+const openRect = openEvent.payload?.rect;
+assert.ok(openRect && typeof openRect === "object", "textInput.open must carry a measured rect");
+assert.equal(typeof (openRect as JsonObject).x, "number", "textInput.open rect must have x");
+assert.equal(typeof (openRect as JsonObject).y, "number", "textInput.open rect must have y");
+assert.equal(typeof (openRect as JsonObject).width, "number", "textInput.open rect must have width");
+assert.equal(typeof (openRect as JsonObject).height, "number", "textInput.open rect must have height");
+const editedFrame = inputFrames.find((frame) => hasText(frame, "native input"));
+assert.ok(editedFrame, "native textInput.edit did not update the QJBC draft");
+assert.equal(frameEvents(editedFrame!, "textInput.update").length, 0, "native text echo caused a redundant update");
+assert.ok(inputFrames.some((frame) => hasText(frame, "native submitted")), "textInput.submit did not update the QJBC draft");
+
+const resizeResponses = runProbe([
+  ...bootstrap(),
+  ...tap(inputPoint),
+  { op: "resize", width: 390, height: 200 },
+  { op: "frame", deltaMs: 16 },
+  { op: "frame", deltaMs: 16 },
+  { op: "quit" },
+]);
+const resizeFrames = framesOf(resizeResponses);
+const resizeOpen = resizeFrames
+  .flatMap((frame) => frameEvents(frame, "textInput.open"))
+  .find((item) => item.payload?.id === "guest-text-input-1");
+assert.ok(resizeOpen, "QJBC resize scenario did not open the text input");
+const resizeOpenRect = resizeOpen.payload?.rect as JsonObject | undefined;
+assert.ok(resizeOpenRect && typeof resizeOpenRect.y === "number", "resize open rect must include y");
+const movedRectUpdate = resizeFrames
+  .flatMap((frame) => frameEvents(frame, "textInput.update"))
+  .find((item) => {
+    const rect = item.payload?.rect as JsonObject | undefined;
+    return rect && typeof rect.y === "number" && rect.y !== resizeOpenRect.y && !Object.hasOwn(item.payload ?? {}, "text");
+  });
+assert.ok(movedRectUpdate, "live QJBC viewport resize did not emit a rect-only textInput.update");
+assert.equal(
+  resizeFrames.some((frame) => frameEvents(frame, "textInput.close").some((item) => item.payload?.id === "guest-text-input-1")),
+  false,
+  "QJBC viewport resize incorrectly closed the active input",
+);
+
+console.log(`flutter_widgets_native.test: pointer, compiled scroll and IME layout passed (${probe}; ${artifactDir})`);
 if (generatedFixture) rmSync(generatedFixture, { recursive: true, force: true });

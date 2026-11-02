@@ -660,7 +660,10 @@ void main() {
         // timeout. The ticker may be stopped again after the wake, but it
         // must not remain permanently dormant.
         await tester.pump(const Duration(milliseconds: 100));
-        expect(state.isTickerActive, isTrue);
+        // The timer probe stays asleep when no frame changed. External
+        // controller messages below still restart the normal active ticker.
+        expect(state.isTickerActive, isFalse);
+        expect(state.idleTicks, greaterThanOrEqualTo(6));
 
         // Sending a message via controller wakes the ticker
         controller.send(method: 'test.wake');
@@ -683,59 +686,68 @@ void main() {
     },
   );
 
-  testWidgets('idle wake excludes intentional sleep from the performance gap', (
-    tester,
-  ) async {
-    final runtime = _TestMockRuntime();
-    final samples = <PocketPerformanceSample>[];
-    await tester.pumpWidget(
-      MaterialApp(
-        home: SizedBox(
-          width: 320,
-          height: 480,
-          child: PocketView(
-            runtime: runtime,
-            jsSource: '',
-            pakBytes: Uint8List(0),
-            showDebugFps: false,
-            onPerformanceSample: samples.add,
+  testWidgets(
+    'repeated idle probes exclude all sleep from the performance window',
+    (tester) async {
+      final runtime = _TestMockRuntime();
+      final samples = <PocketPerformanceSample>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              showDebugFps: false,
+              onPerformanceSample: samples.add,
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pump();
+      );
+      await tester.pump();
 
-    var calls = 0;
-    debugPocketFrameDeltaAtOverride = (rt, _) {
-      calls++;
-      // Establish an active performance baseline, then simulate six truly
-      // unchanged frames so PocketView enters its bounded idle path.
-      if (calls >= 9 && calls <= 14) return null;
-      return rt.frame(0);
-    };
-    try {
-      for (var index = 0; index < 8; index++) {
-        await tester.pump(const Duration(milliseconds: 16));
-      }
-      for (var index = 0; index < 6; index++) {
-        await tester.pump(const Duration(milliseconds: 16));
-      }
-      final state = tester.state(find.byType(PocketView)) as dynamic;
-      expect(state.isTickerActive, isFalse);
+      var calls = 0;
+      var sleeping = true;
+      debugPocketFrameDeltaAtOverride = (rt, _) {
+        calls++;
+        // Remain unchanged across multiple timer probes, then resume drawing.
+        if (calls >= 9 && sleeping) return null;
+        return rt.frame(0);
+      };
+      try {
+        for (var index = 0; index < 8; index++) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        for (var index = 0; index < 6; index++) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        final state = tester.state(find.byType(PocketView)) as dynamic;
+        expect(state.isTickerActive, isFalse);
 
-      // The bounded wake restarts the ticker; the 100ms sleep must be
-      // removed from the one-second FPS window instead of becoming a
-      // synthetic dropped frame.
-      await tester.pump(const Duration(milliseconds: 100));
-      expect(state.isTickerActive, isTrue);
-      for (var index = 0; index < 90; index++) {
-        await tester.pump(const Duration(milliseconds: 16));
+        // Earlier sleep intervals must survive multiple unsuccessful probes.
+        // Resetting the idle baseline on every probe depresses the first FPS
+        // sample even though no display work was requested during this time.
+        for (var probe = 0; probe < 4; probe++) {
+          await tester.pump(const Duration(milliseconds: 250));
+          await tester.pump();
+          expect(state.isTickerActive, isFalse);
+        }
+        sleeping = false;
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.pump();
+        expect(state.isTickerActive, isTrue);
+        for (var index = 0; index < 90; index++) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(samples, isNotEmpty);
+        expect(samples.first.fps, greaterThan(45));
+        expect(samples.first.maxGapMs, lessThan(50));
+        expect(samples.last.slowFrames, 0);
+      } finally {
+        debugPocketFrameDeltaAtOverride = null;
       }
-      expect(samples, isNotEmpty);
-      expect(samples.last.maxGapMs, lessThan(50));
-      expect(samples.last.slowFrames, 0);
-    } finally {
-      debugPocketFrameDeltaAtOverride = null;
-    }
-  });
+    },
+  );
 }

@@ -433,8 +433,8 @@ class _PocketViewState extends State<PocketView>
   bool _isDisposed = false;
   double _firstFrameDeltaMs = 1000.0 / 60.0;
 
-  void _wakeTicker() {
-    _idleTicks = 0;
+  void _wakeTicker({bool idleProbe = false}) {
+    _idleTicks = idleProbe ? 5 : 0;
     _idleWakeTimer?.cancel();
     _idleWakeTimer = null;
     if (_isDisposed || _lifecyclePaused || !mounted || _runtime == null) return;
@@ -972,11 +972,21 @@ class _PocketViewState extends State<PocketView>
 
   void _scheduleIdleWake() {
     _idleWakeTimer?.cancel();
-    _idleStartedAt = _lastSchedulerTimestamp;
-    _resumedFromIdle = false;
+    // Keep the first timestamp across repeated probe cycles. A guest can be
+    // unchanged for many 100ms probes; resetting this value on every cycle
+    // would count all earlier intentional sleep as a dropped-frame gap when
+    // the next real frame finally arrives.
+    final alreadyIdle = _idleStartedAt != null;
+    _idleStartedAt ??= _lastSchedulerTimestamp;
+    if (!alreadyIdle) _resumedFromIdle = false;
     _idleWakeTimer = Timer(_idleWakeInterval, () {
       _idleWakeTimer = null;
-      _wakeTicker();
+      // A timer probe only needs one native call. Starting from five keeps
+      // the existing six-unchanged-frame threshold while avoiding another
+      // six-frame burst during every idle period. Input, host messages and
+      // lifecycle wakeups still call _wakeTicker() with the normal zeroed
+      // counter.
+      _wakeTicker(idleProbe: true);
     });
   }
 
@@ -1904,6 +1914,24 @@ class _PocketViewState extends State<PocketView>
     });
   }
 
+  /// Returns the portion of the native editor that is actually visible to
+  /// hit testing. The TextField is clipped by [_textInputClipRect] in the
+  /// widget tree, so pointer routing must use the same effective geometry;
+  /// otherwise an invisible part of a scrolled editor can swallow a guest
+  /// button or navigation tap underneath it.
+  Rect? _effectiveTextInputRect() {
+    final rect = _textInputRect;
+    if (rect == null) {
+      return null;
+    }
+    final clipRect = _textInputClipRect;
+    final visible = clipRect == null ? rect : rect.intersect(clipRect);
+    if (visible.width <= 0 || visible.height <= 0) {
+      return null;
+    }
+    return visible;
+  }
+
   Rect? _textInputClipRectFromParams(Map<String, dynamic> params) {
     return _textInputRectFromRaw(params['clip']);
   }
@@ -2705,12 +2733,17 @@ class _PocketViewState extends State<PocketView>
     final rawY = localPosition.dy * frameHeight / actualHeight;
     if (!rawX.isFinite || !rawY.isFinite) return false;
 
+    final effectiveTextInputRect = surface == 0
+        ? _effectiveTextInputRect()
+        : null;
+
     final outsideTextInputDown =
         phase == 'down' &&
         surface == 0 &&
         _textInputId != null &&
         _textInputRect != null &&
-        !_textInputRect!.contains(Offset(rawX, rawY));
+        (effectiveTextInputRect == null ||
+            !effectiveTextInputRect.contains(Offset(rawX, rawY)));
     final Offset? outsideTextInputOrigin = phase == 'up' || phase == 'cancel'
         ? _outsideTextInputPointerOrigins.remove(id)
         : null;
@@ -2723,8 +2756,8 @@ class _PocketViewState extends State<PocketView>
     if (phase == 'down' &&
         surface == 0 &&
         _textInputId != null &&
-        _textInputRect != null) {
-      if (_textInputRect!.contains(Offset(rawX, rawY))) return false;
+        effectiveTextInputRect != null) {
+      if (effectiveTextInputRect.contains(Offset(rawX, rawY))) return false;
       // Do not dismiss on pointer down. The guest needs the complete
       // down/up pair for a button tap (and the viewport can change as the IME
       // starts closing). TextField.onTapUpOutside handles taps outside this
@@ -2841,10 +2874,9 @@ class _PocketViewState extends State<PocketView>
         outsideTextInputContact &&
         outgoingPhase == 'up' &&
         (localPosition - outsideTextInputOrigin).distance <= kTouchSlop) {
-      final rect = _textInputRect;
+      final rect = _effectiveTextInputRect();
       if (_textInputId != null &&
-          rect != null &&
-          !rect.contains(Offset(rawX, rawY))) {
+          (rect == null || !rect.contains(Offset(rawX, rawY)))) {
         // Deliver the guest up edge before changing the overlay/focus tree so
         // a button tap cannot lose its action when the IME starts dismissing.
         _scheduleOutsideTextInputDismiss();

@@ -63,10 +63,15 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   const cleanupCallbacks: Array<() => void> = [];
   const frameCallbacks: Array<() => void> = [];
   let scrollOffset = 0;
+  let scrollMax = Number.POSITIVE_INFINITY;
   let scrollerOptions: any;
   let layoutQueryCount = 0;
   let zeroWidthContent = false;
+  let zeroWidthViewport = false;
+  const viewportWidth = 180;
   let nextViewNodeId = 1000;
+  let viewportNodeId = 0;
+  let contentNodeId = 0;
   let pressInput: (() => void) | undefined;
 
   const mockSolid = {
@@ -117,7 +122,7 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
         endDrag: () => {},
         step: () => {},
         scrollBy: (delta: number) => {
-          scrollOffset += delta;
+          scrollOffset = Math.max(0, Math.min(scrollMax, scrollOffset + delta));
         },
       };
     },
@@ -138,7 +143,10 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
     Modal: () => null,
     Text: () => null,
     View: (props: any) => {
-      props?.ref?.({ id: ++nextViewNodeId });
+      const id = ++nextViewNodeId;
+      if (props?.class === "flex-1 w-full overflow-hidden") viewportNodeId = id;
+      if (props?.class === "flex-col w-full shrink-0") contentNodeId = id;
+      props?.ref?.({ id });
       return null;
     },
   }));
@@ -148,16 +156,32 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   (globalThis as any).pocket = {
     getLayout: (id: number) => {
       if (id === 101) return inputLayout;
+      if (id === viewportNodeId) {
+        return {
+          x: 0,
+          y: 0,
+          width: zeroWidthViewport ? 0 : viewportWidth,
+          height: 400,
+        };
+      }
+      if (id === contentNodeId) {
+        return {
+          x: 0,
+          y: 0,
+          width: zeroWidthContent ? 0 : viewportWidth,
+          height: zeroWidthContent ? 900 : 400,
+        };
+      }
       layoutQueryCount += 1;
       if (zeroWidthContent) {
         // ScrollablePage queries the viewport then the content canvas. Keep
         // the viewport valid while injecting a retained content width of 0;
         // the content height must still update the kinetic extent.
         return layoutQueryCount % 2 === 1
-          ? { x: 0, y: 0, width: 300, height: 400 }
+          ? { x: 0, y: 0, width: viewportWidth, height: 400 }
           : { x: 0, y: 0, width: 0, height: 900 };
       }
-      return { x: 0, y: 0, width: 300, height: 400 };
+      return { x: 0, y: 0, width: viewportWidth, height: 400 };
     },
     _emit: (line: string) => {
       emitted.push(JSON.parse(line));
@@ -165,7 +189,7 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
     },
   };
 
-  const { deliverTextInputEvent, InputField, ScrollablePage } = await import("../src/ui.tsx");
+  const { deliverTextInputEvent, InputField, ScrollablePage, getActiveTextInputSession } = await import("../src/ui.tsx");
 
   const [draft, setDraft] = mockSolid.createSignal("");
 
@@ -203,9 +227,32 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   assert.equal(emitted[0].payload.jsRevision, 1);
   const inputId = emitted[0].payload.id;
 
+  // A transient zero-width viewport must use the retained pane width. The
+  // live host width is the full Duo window (300 here), so accepting it would
+  // expand the input clip across the sibling pane and emit a false overlay
+  // resize. The retained content node may still report its height normally.
+  zeroWidthViewport = true;
+  layoutQueryCount = 0;
+  frameCallbacks.forEach((callback) => callback());
+  assert.equal(emitted.length, 1, "zero-width viewport must retain the pane clip");
+  assert.equal(scrollerOptions.max(), 150, "zero-width viewport must retain its height");
+  zeroWidthViewport = false;
+
+  // A host may deliver a layout frame before publishing its live viewport
+  // snapshot. The retained pane geometry must still be usable; the missing
+  // optional global must not widen the clip or drop the scroll extent.
+  const savedUi = (globalThis as any).ui;
+  (globalThis as any).ui = {};
+  zeroWidthViewport = true;
+  frameCallbacks.forEach((callback) => callback());
+  assert.equal(emitted.length, 1, "missing live viewport must retain the pane clip");
+  assert.equal(scrollerOptions.max(), 150, "missing live viewport must retain page extent");
+  zeroWidthViewport = false;
+  (globalThis as any).ui = savedUi;
+
   zeroWidthContent = true;
   layoutQueryCount = 0;
-  frameCallbacks[0]!();
+  frameCallbacks.forEach((callback) => callback());
   assert.equal(
     scrollerOptions.max(),
     650,
@@ -237,6 +284,40 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   // Keep the original IME ordering assertions focused on the open/edit lane;
   // the layout-only event was fully asserted above.
   emitted.splice(1, 1);
+
+  // A resize-time ensureVisible correction is not a user scroll. Limit the
+  // mock scroller so the correction remains partially clipped; the next
+  // frame must not close the still-focused input merely because the offset
+  // changed during that automatic correction.
+  frameCallbacks.forEach((callback) => callback());
+  scrollMax = 60;
+  (globalThis as any).ui = { __viewport: { w: 300, h: 100 } };
+  receiveViewport!(JSON.stringify({
+    type: "event",
+    name: "display.viewport",
+    payload: { width: 300, height: 100 },
+  }));
+  frameCallbacks.forEach((callback) => callback());
+  assert.equal(
+    emitted.some((event) => event.name === "textInput.close"),
+    false,
+    "automatic resize scrolling must not be treated as a user scroll",
+  );
+  assert.equal(
+    getActiveTextInputSession()?.isOpen(),
+    true,
+    "ensureVisible must not spuriously trigger focus loss or close on subsequent frame tick",
+  );
+  console.log("flutter_widgets.test: ensureVisible focus preservation on subsequent frame passed");
+  scrollMax = Number.POSITIVE_INFINITY;
+  (globalThis as any).ui = { __viewport: { w: 300, h: 250 } };
+  receiveViewport!(JSON.stringify({
+    type: "event",
+    name: "display.viewport",
+    payload: { width: 300, height: 250 },
+  }));
+  frameCallbacks.forEach((callback) => callback());
+  emitted.splice(1);
 
   // 1) textInput.edit with revision: 1, text: "ab"
   const handled1 = deliverTextInputEvent("textInput.edit", {

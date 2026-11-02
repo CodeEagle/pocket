@@ -84,14 +84,14 @@ final class PocketSession extends ChangeNotifier {
     final manifestSource = await rootBundle.loadString(config.manifestAsset);
     _embeddedManifest = PocketGuestManifest.fromJsonString(manifestSource);
     final manifestJson = jsonDecode(manifestSource);
-    final manifestBuild = manifestJson is Map
-        ? (manifestJson['build'] as num?)?.toInt()
-        : null;
-    final embeddedBuild =
-        (_metadata['build'] as num?)?.toInt() ?? manifestBuild ?? 0;
+    final updateConfig = config.updates;
+    final embeddedBuild = _resolveEmbeddedBuild(
+      _metadata,
+      manifestJson,
+      requireBuild: updateConfig?.configured == true,
+    );
     _embeddedBuild = embeddedBuild;
     _embeddedVersion = _metadata['version'] as String? ?? 'embedded';
-    final updateConfig = config.updates;
     if (updateConfig != null && updateConfig.configured) {
       final directory = await getApplicationSupportDirectory();
       final namespace = updateConfig.namespace;
@@ -141,6 +141,32 @@ final class PocketSession extends ChangeNotifier {
     ready = true;
     notifyListeners();
     _watchStartup();
+  }
+
+  static int _resolveEmbeddedBuild(
+    Map<String, dynamic> metadata,
+    Object? manifest, {
+    required bool requireBuild,
+  }) {
+    // Legacy artifacts may carry their release floor only in the manifest.
+    // An explicitly invalid metadata build must not be hidden by that fallback.
+    final value = metadata.containsKey('build')
+        ? metadata['build']
+        : manifest is Map && manifest.containsKey('build')
+        ? manifest['build']
+        : null;
+    if (value == null && !requireBuild) return 0;
+    if (value is! num ||
+        !value.isFinite ||
+        value < 1 ||
+        value > 9007199254740991 ||
+        value != value.truncateToDouble()) {
+      throw const FormatException(
+        'A positive integer embedded build is required in app.bytecode.json '
+        'or guest-manifest.json before enabling updates',
+      );
+    }
+    return value.toInt();
   }
 
   Map<String, dynamic> runtimeInfo() => {
@@ -280,6 +306,7 @@ final class PocketSession extends ChangeNotifier {
         await _promotion;
         _promotion = null;
         _resetCacheOnHealth = false;
+        _embeddedRollbackFallback = null;
         if (_disposed || generation != mountedGeneration) return;
         stage = _updates == null ? 'not_configured' : 'ready';
         _busy = false;
@@ -368,13 +395,19 @@ final class PocketSession extends ChangeNotifier {
         next = PocketPreparedPackage(
           package: previous.first.package,
           needsActivation: true,
+          isRollback: true,
         );
       }
       // The immutable embedded bundle is always a rollback target. Remove cache
       // pointers only after the embedded guest has started successfully.
+      final embeddedFallback = next == null ? active : null;
       _mountTimer = Timer(
         const Duration(milliseconds: 150),
-        () => _mount(next, resetCache: next == null),
+        () => _mount(
+          next,
+          resetCache: next == null,
+          embeddedRollbackFallback: embeddedFallback,
+        ),
       );
       return {'scheduled': true, 'version': next?.version ?? 'embedded'};
     } catch (_) {
@@ -384,10 +417,14 @@ final class PocketSession extends ChangeNotifier {
   }
 
   bool _resetCacheOnHealth = false;
+  // An explicit rollback to the immutable bundle must retain its verified
+  // recovery target until the embedded guest completes the health window.
+  PocketPreparedPackage? _embeddedRollbackFallback;
 
   Future<void> _mount(
     PocketPreparedPackage? next, {
     bool resetCache = false,
+    PocketPreparedPackage? embeddedRollbackFallback,
   }) async {
     if (_disposed) return;
     _healthTimer?.cancel();
@@ -400,6 +437,7 @@ final class PocketSession extends ChangeNotifier {
       if (_disposed) return;
       active = next;
       _resetCacheOnHealth = resetCache;
+      _embeddedRollbackFallback = embeddedRollbackFallback;
       _candidate = null;
       stage = 'loading';
       notifyListeners();
@@ -444,6 +482,9 @@ final class PocketSession extends ChangeNotifier {
     _mountTimer = null;
     _healthTimer?.cancel();
     _startupTimer?.cancel();
+    final embeddedFallback = _embeddedRollbackFallback;
+    _embeddedRollbackFallback = null;
+    _resetCacheOnHealth = false;
     lastError = '$error';
     stage = 'error';
     _busy = true;
@@ -457,7 +498,11 @@ final class PocketSession extends ChangeNotifier {
       if (_disposed) return;
       final failed = active;
       if (failed == null) {
-        _busy = false;
+        if (embeddedFallback != null) {
+          await _mount(embeddedFallback);
+        } else {
+          _busy = false;
+        }
         return;
       }
       PocketPreparedPackage? fallback;

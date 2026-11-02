@@ -1,8 +1,44 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
+
+final class _IdleProbeRuntime implements PocketRuntime {
+  static const _frame = PocketFrame(
+    width: 320,
+    height: 480,
+    ops: <PocketOp>[
+      PocketRectOp(x: 0, y: 0, width: 320, height: 480, color: 0xff101827),
+    ],
+    events: <PocketEvent>[],
+  );
+
+  @override
+  PocketFrame eval(String source) => _frame;
+
+  @override
+  PocketFrame frame(int deltaMilliseconds) => _frame;
+
+  @override
+  PocketFrame load(String source, Uint8List pak) => _frame;
+
+  @override
+  bool resizeViewport(double width, double height) => false;
+
+  @override
+  void enableAuxiliary(double width, double height) {}
+
+  @override
+  void send(Map<String, dynamic> message) {}
+
+  @override
+  String? get lastError => null;
+
+  @override
+  void dispose() {}
+}
 
 void main() {
   final libraryPath = Platform.environment['POCKET_NATIVE_LIBRARY'];
@@ -66,5 +102,48 @@ void main() {
       }
     },
     skip: libraryPath == null,
+  );
+
+  testWidgets(
+    'idle timer probes one frame instead of restarting a six-frame burst',
+    (tester) async {
+      final runtime = _IdleProbeRuntime();
+      final calls = <double>[];
+      final previous = debugPocketFrameDeltaAtOverride;
+      debugPocketFrameDeltaAtOverride = (_, delta) {
+        calls.add(delta);
+        return null;
+      };
+      addTearDown(() {
+        debugPocketFrameDeltaAtOverride = previous;
+        runtime.dispose();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      for (var index = 0; index < 7; index++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(calls.length, greaterThanOrEqualTo(6));
+      final beforeProbe = calls.length;
+
+      // The stopped ticker wakes after the bounded idle interval. A timer
+      // probe must issue one native call and immediately sleep again when the
+      // frame is unchanged; the old implementation issued six calls here.
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(calls.length - beforeProbe, lessThanOrEqualTo(1));
+    },
   );
 }

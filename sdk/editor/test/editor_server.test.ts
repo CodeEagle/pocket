@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pack } from "../../.cache/pocketjs/framework/compiler/pak.ts";
@@ -96,6 +96,9 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     symlinkSync(join(projectDir, "app.tsx"), join(projectDir, "ui/link.tsx"));
     const symlink = await request(server, "/api/projects/fixture-app/files/ui/link.tsx");
     expect(symlink.response.status).toBe(400);
+    // The build input policy rejects source symlinks as well; remove this
+    // read-boundary fixture before exercising the normal build flow below.
+    rmSync(join(projectDir, "ui/link.tsx"), { force: true });
     const protectedFile = await request(server, "/api/projects/fixture-app/files/editor-state.json");
     expect(protectedFile.response.status).toBe(400);
     const privatePath = await request(server, "/api/projects/fixture-app/files/keys/private.json", {
@@ -217,6 +220,39 @@ test("editor rejects unsafe project identifiers before touching the workspace", 
   }
 });
 
+test("editor requires a positive release build", async () => {
+  const workspace = temporaryWorkspace();
+  const server = await startEditor({ port: 0, workspace });
+  try {
+    const result = await request(server, "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "zero-build", name: "Zero Build", build: 0 }),
+    });
+    expect(result.response.status).toBe(400);
+    expect(result.value.error).toContain("positive safe integer");
+    expect(existsSync(join(workspace, "projects/zero-build"))).toBe(false);
+
+    const valid = await request(server, "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "valid-build", name: "Valid Build", build: 1 }),
+    });
+    expect(valid.response.status).toBe(201);
+
+    const zeroPut = await request(server, "/api/projects/valid-build/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ appId: "pocket.host.demo", name: "Valid Build", build: 0 }),
+    });
+    expect(zeroPut.response.status).toBe(400);
+    expect(zeroPut.value.error).toContain("positive safe integer");
+  } finally {
+    server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("editor can attach to an external SDK project without copying guest source", async () => {
   const workspace = temporaryWorkspace();
   const project = temporaryWorkspace();
@@ -252,6 +288,16 @@ test("editor can attach to an external SDK project without copying guest source"
     const edited = await request(server, "/api/projects/external-app/files/app.tsx", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "export const edited = true;\n" }) });
     expect(edited.response.status).toBe(200);
     expect(existsSync(join(project, "editor-state.json"))).toBe(false);
+    const firstNestedWrite = await request(server, "/api/projects/external-app/files/new/first.tsx", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "export const first = true;\n" }),
+    });
+    expect(firstNestedWrite.response.status).toBe(200);
+    expect(readFileSync(join(project, "new/first.tsx"), "utf8")).toContain("first = true");
+    const firstAssetsList = await request(server, "/api/projects/external-app/assets");
+    expect(firstAssetsList.response.status).toBe(200);
+    expect(firstAssetsList.value.assets).toEqual([]);
     const build = await request(server, "/api/projects/external-app/build", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -271,6 +317,65 @@ test("editor can attach to an external SDK project without copying guest source"
     rmSync(workspace, { recursive: true, force: true });
     rmSync(project, { recursive: true, force: true });
     rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("editor preserves build from a pocket.json-only external project", async () => {
+  const workspace = temporaryWorkspace();
+  const project = temporaryWorkspace();
+  writeFileSync(join(project, "pocket.json"), JSON.stringify({
+    pocket: 2,
+    id: "dev.example.pocket-only",
+    name: "pocket-only-app",
+    version: "0.4.0",
+    build: 42,
+    app: { entry: "app.tsx", output: "app", framework: "solid" },
+  }));
+  writeFileSync(join(project, "manifest.json"), JSON.stringify({ protocolVersion: 1, capabilities: { requires: [], optional: [] } }));
+  writeFileSync(join(project, "app.tsx"), "export const pocketOnly = true;\n");
+  const server = await startEditor({ port: 0, workspace, projectRoot: project });
+  try {
+    const listed = await request(server, "/api/projects");
+    expect(listed.response.status).toBe(200);
+    expect(listed.value).toHaveLength(1);
+    expect(listed.value[0].build).toBe(42);
+    const loaded = await request(server, "/api/projects/pocket-only-app");
+    expect(loaded.response.status).toBe(200);
+    expect(loaded.value.build).toBe(42);
+  } finally {
+    server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("editor validates both external config paths on read and write", async () => {
+  const workspace = temporaryWorkspace();
+  const project = temporaryWorkspace();
+  const externalDir = temporaryWorkspace();
+  const editorPath = join(project, "editor.json");
+  const pocketPath = join(project, "pocket.json");
+  writeFileSync(editorPath, JSON.stringify({ id: "guarded-app", appId: "dev.example.guarded", name: "Guarded", title: "Guarded", version: "0.1.0", build: 1, tickHz: 60, entry: "app.tsx", framework: "solid" }));
+  writeFileSync(join(externalDir, "pocket.json"), JSON.stringify({ pocket: 2, id: "dev.example.guarded", name: "guarded-app", version: "0.1.0", build: 1, app: { entry: "app.tsx" } }));
+  symlinkSync(join(externalDir, "pocket.json"), pocketPath);
+  const server = await startEditor({ port: 0, workspace, projectRoot: project });
+  try {
+    const readRes = await request(server, "/api/projects/guarded-app");
+    expect(readRes.response.status).toBe(400);
+    expect(readRes.value.error).toContain("symbolic links are not allowed");
+
+    const writeRes = await request(server, "/api/projects/guarded-app/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ appId: "dev.example.guarded", name: "Guarded", build: 2 }),
+    });
+    expect(writeRes.response.status).toBe(400);
+    expect(writeRes.value.error).toContain("symbolic links are not allowed");
+  } finally {
+    server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+    rmSync(externalDir, { recursive: true, force: true });
   }
 });
 
@@ -332,6 +437,17 @@ test("editor enforces security boundaries against CSRF, Host header poisoning, a
     expect(created.response.status).toBe(201);
 
     const projectDir = join(workspace, "projects/sec-app");
+
+    // Even with a non-empty authoritative editor.json, loadConfig validates
+    // the legacy pocket.json path before returning early.
+    const pocketPath = join(projectDir, "pocket.json");
+    const pocketContents = readFileSync(pocketPath, "utf8");
+    rmSync(pocketPath, { force: true });
+    symlinkSync(secretFile, pocketPath);
+    const configWithPocketLink = await request(server, "/api/projects/sec-app/config");
+    expect(configWithPocketLink.response.status).toBe(400);
+    rmSync(pocketPath, { force: true });
+    writeFileSync(pocketPath, pocketContents);
 
     // 4. Symlinked app.tsx pointing outside the project is rejected with 400
     const appTsx = join(projectDir, "app.tsx");
@@ -509,3 +625,266 @@ test("editor enforces security boundaries against CSRF, Host header poisoning, a
     rmSync(externalDir, { recursive: true, force: true });
   }
 });
+
+test("editor rejects dangling and parent symlinks across project write boundaries", async () => {
+  const workspace = temporaryWorkspace();
+  const externalDir = temporaryWorkspace();
+  const server = await startEditor({ port: 0, workspace });
+  try {
+    const created = await request(server, "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "boundary-app", name: "Boundary App" }),
+    });
+    expect(created.response.status).toBe(201);
+    const projectDir = join(workspace, "projects/boundary-app");
+
+    const danglingSource = join(externalDir, "new-source.tsx");
+    const appPath = join(projectDir, "app.tsx");
+    rmSync(appPath, { force: true });
+    symlinkSync(danglingSource, appPath);
+    const sourceWrite = await request(server, "/api/projects/boundary-app/source", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source: "outside source" }),
+    });
+    expect(sourceWrite.response.status).toBe(400);
+    expect(existsSync(danglingSource)).toBe(false);
+    rmSync(appPath, { force: true });
+    writeFileSync(appPath, "export const restored = true;\n");
+
+    const danglingManifest = join(externalDir, "new-manifest.json");
+    const manifestPath = join(projectDir, "manifest.json");
+    rmSync(manifestPath, { force: true });
+    symlinkSync(danglingManifest, manifestPath);
+    const manifestWrite = await request(server, "/api/projects/boundary-app/manifest", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ protocolVersion: 1 }),
+    });
+    expect(manifestWrite.response.status).toBe(400);
+    expect(existsSync(danglingManifest)).toBe(false);
+    rmSync(manifestPath, { force: true });
+    writeFileSync(manifestPath, JSON.stringify({ protocolVersion: 1, capabilities: { requires: [], optional: [] } }));
+
+    const outsideParent = join(externalDir, "nested-target");
+    mkdirSync(outsideParent, { recursive: true });
+    const parentLink = join(projectDir, "nested-link");
+    symlinkSync(outsideParent, parentLink);
+    const nestedRejected = await request(server, "/api/projects/boundary-app/files/nested-link/blocked.tsx", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "outside parent" }),
+    });
+    expect(nestedRejected.response.status).toBe(400);
+    expect(existsSync(join(outsideParent, "blocked.tsx"))).toBe(false);
+    rmSync(parentLink, { force: true });
+
+    const nestedAccepted = await request(server, "/api/projects/boundary-app/files/new/first.tsx", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "export const first = true;\n" }),
+    });
+    expect(nestedAccepted.response.status).toBe(200);
+    expect(readFileSync(join(projectDir, "new/first.tsx"), "utf8")).toContain("first = true");
+
+    const editorVictim = join(externalDir, "editor-victim.json");
+    const editorContents = readFileSync(join(projectDir, "editor.json"), "utf8");
+    writeFileSync(editorVictim, editorContents);
+    const editorPath = join(projectDir, "editor.json");
+    rmSync(editorPath, { force: true });
+    symlinkSync(editorVictim, editorPath);
+    const configRejected = await request(server, "/api/projects/boundary-app/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ appId: "pocket.host.demo", name: "Blocked", version: "0.2.0", build: 2, tickHz: 60 }),
+    });
+    expect(configRejected.response.status).toBe(400);
+    expect(JSON.parse(readFileSync(editorVictim, "utf8")).name).toBe("Boundary App");
+    rmSync(editorPath, { force: true });
+
+    const danglingEditor = join(externalDir, "dangling-editor.json");
+    symlinkSync(danglingEditor, editorPath);
+    const danglingGet = await request(server, "/api/projects/boundary-app/config");
+    expect(danglingGet.response.status).toBe(400);
+    const danglingPut = await request(server, "/api/projects/boundary-app/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ appId: "pocket.host.demo", name: "Blocked", version: "0.2.0", build: 2, tickHz: 60 }),
+    });
+    expect(danglingPut.response.status).toBe(400);
+    expect(existsSync(danglingEditor)).toBe(false);
+    rmSync(editorPath, { force: true });
+    writeFileSync(editorPath, editorContents);
+
+    const pocketVictim = join(externalDir, "pocket-victim.json");
+    const pocketContents = readFileSync(join(projectDir, "pocket.json"), "utf8");
+    writeFileSync(pocketVictim, pocketContents);
+    const pocketPath = join(projectDir, "pocket.json");
+    rmSync(pocketPath, { force: true });
+    symlinkSync(pocketVictim, pocketPath);
+    const pocketRejected = await request(server, "/api/projects/boundary-app/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ appId: "pocket.host.demo", name: "Blocked", version: "0.2.0", build: 2, tickHz: 60 }),
+    });
+    expect(pocketRejected.response.status).toBe(400);
+    expect(JSON.parse(readFileSync(pocketVictim, "utf8")).name).toBe("Boundary App");
+    rmSync(pocketPath, { force: true });
+    writeFileSync(pocketPath, pocketContents);
+
+    const danglingAsset = join(externalDir, "new-asset.png");
+    const assetLink = join(projectDir, "assets/dangling.png");
+    symlinkSync(danglingAsset, assetLink);
+    const form = new FormData();
+    form.append("file", new File([new TextEncoder().encode("asset")], "dangling.png", { type: "image/png" }));
+    const assetRejected = await request(server, "/api/projects/boundary-app/assets", {
+      method: "POST",
+      headers: { "x-pocket-editor": "1" },
+      body: form,
+    });
+    expect(assetRejected.response.status).toBe(400);
+    expect(existsSync(danglingAsset)).toBe(false);
+    rmSync(assetLink, { force: true });
+
+    const assetDirectory = join(projectDir, "assets");
+    const externalAssetDirectory = join(externalDir, "assets-out");
+    mkdirSync(externalAssetDirectory, { recursive: true });
+    writeFileSync(join(externalAssetDirectory, "secret.png"), "not-for-editor");
+    rmSync(assetDirectory, { recursive: true, force: true });
+    symlinkSync(externalAssetDirectory, assetDirectory);
+    const assetsRejected = await request(server, "/api/projects/boundary-app/assets");
+    expect(assetsRejected.response.status).toBe(400);
+  } finally {
+    server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(externalDir, { recursive: true, force: true });
+  }
+});
+
+test("editor rejects a legacy external editor-state symlink", async () => {
+  const workspace = temporaryWorkspace();
+  const project = temporaryWorkspace();
+  const externalDir = temporaryWorkspace();
+  const stateVictim = join(externalDir, "state.json");
+  writeFileSync(join(project, "editor.json"), JSON.stringify({ id: "legacy-app", appId: "dev.example.legacy", name: "Legacy", title: "Legacy", version: "0.1.0", build: 1, tickHz: 60, entry: "app.tsx", framework: "solid" }));
+  writeFileSync(join(project, "pocket.json"), JSON.stringify({ pocket: 2, id: "dev.example.legacy", name: "legacy-app", version: "0.1.0", app: { entry: "app.tsx" } }));
+  writeFileSync(join(project, "manifest.json"), JSON.stringify({ protocolVersion: 1, capabilities: { requires: [], optional: [] } }));
+  writeFileSync(join(project, "app.tsx"), "export const legacy = true;\n");
+  writeFileSync(stateVictim, JSON.stringify({ revision: 99, builtRevision: null, busy: false, logs: ["outside"] }));
+  symlinkSync(stateVictim, join(project, "editor-state.json"));
+  const server = await startEditor({ port: 0, workspace, projectRoot: project });
+  try {
+    const status = await request(server, "/api/projects/legacy-app/status");
+    expect(status.response.status).toBe(400);
+    expect(JSON.parse(readFileSync(stateVictim, "utf8")).revision).toBe(99);
+  } finally {
+    server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+    rmSync(externalDir, { recursive: true, force: true });
+  }
+});
+
+test("editor validates custom build entries and static source/assets links", async () => {
+  const workspace = temporaryWorkspace();
+  const externalDir = temporaryWorkspace();
+  const server = await startEditor({ port: 0, workspace });
+  try {
+    const created = await request(server, "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "custom-entry", name: "Custom Entry" }),
+    });
+    expect(created.response.status).toBe(201);
+    const projectDir = join(workspace, "projects/custom-entry");
+    const source = readFileSync(join(projectDir, "app.tsx"), "utf8");
+    mkdirSync(join(projectDir, "src"), { recursive: true });
+    writeFileSync(join(projectDir, "src/main.tsx"), source);
+    const pocketPath = join(projectDir, "pocket.json");
+    const pocket = JSON.parse(readFileSync(pocketPath, "utf8")) as Record<string, any>;
+    pocket.app = { ...(pocket.app as Record<string, unknown>), entry: "src/main.tsx" };
+    writeFileSync(pocketPath, `${JSON.stringify(pocket, null, 2)}\n`);
+
+    // A package-manager SDK link is an allowed build dependency and is not
+    // traversed as application source by the Editor scanner.
+    mkdirSync(join(projectDir, "node_modules/@pocket"), { recursive: true });
+    symlinkSync(join(import.meta.dir, "../../packages/pocket_ui"), join(projectDir, "node_modules/@pocket/ui"), "dir");
+    const firstBuild = await request(server, "/api/projects/custom-entry/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(firstBuild.response.status).toBe(202);
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      const status = await request(server, "/api/projects/custom-entry/status");
+      if (!status.value.busy) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const firstStatus = await request(server, "/api/projects/custom-entry/status");
+    expect(firstStatus.value.error).toBeUndefined();
+    expect(firstStatus.value.builtRevision).toBe(firstStatus.value.revision);
+
+    // Cache contents are not traversed, but the cache boundary itself may not
+    // be a symlink that hides arbitrary project input.
+    symlinkSync(externalDir, join(projectDir, "build"), "dir");
+    const cacheLinkBuild = await request(server, "/api/projects/custom-entry/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(cacheLinkBuild.response.status).toBe(202);
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const status = await request(server, "/api/projects/custom-entry/status");
+      if (!status.value.busy) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const cacheLinkStatus = await request(server, "/api/projects/custom-entry/status");
+    expect(cacheLinkStatus.value.error).toContain("unsupported source symlink: build");
+    rmSync(join(projectDir, "build"), { force: true });
+
+    // A relative import that is materialized as a project source symlink is
+    // rejected before build_guest can read the external target.
+    const linkedSource = join(externalDir, "linked.tsx");
+    writeFileSync(linkedSource, "export default () => null;\n");
+    writeFileSync(join(projectDir, "src/main.tsx"), `${source}\nimport Linked from './linked.tsx';\nvoid Linked;\n`);
+    symlinkSync(linkedSource, join(projectDir, "src/linked.tsx"));
+    const linkedBuild = await request(server, "/api/projects/custom-entry/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(linkedBuild.response.status).toBe(202);
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const status = await request(server, "/api/projects/custom-entry/status");
+      if (!status.value.busy) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const linkedStatus = await request(server, "/api/projects/custom-entry/status");
+    expect(linkedStatus.value.error).toContain("unsupported source symlink: src/linked.tsx");
+    rmSync(join(projectDir, "src/linked.tsx"), { force: true });
+
+    // Assets are runtime inputs too; nested dangling links must not be
+    // silently omitted by the top-level assets check.
+    const nestedAsset = join(projectDir, "assets/nested");
+    mkdirSync(nestedAsset, { recursive: true });
+    symlinkSync(join(externalDir, "missing.png"), join(nestedAsset, "missing.png"));
+    const assetBuild = await request(server, "/api/projects/custom-entry/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(assetBuild.response.status).toBe(202);
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const status = await request(server, "/api/projects/custom-entry/status");
+      if (!status.value.busy) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const assetStatus = await request(server, "/api/projects/custom-entry/status");
+    expect(assetStatus.value.error).toContain("unsupported asset symlink: assets/nested/missing.png");
+  } finally {
+    server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(externalDir, { recursive: true, force: true });
+  }
+}, 120_000);

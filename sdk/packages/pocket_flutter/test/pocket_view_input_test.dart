@@ -656,6 +656,65 @@ void main() {
   });
 
   testWidgets(
+    'pointer taps in the clipped-away part of an input reach the guest',
+    (tester) async {
+      final open = _textInputOpenParams('session-clip-hit-test');
+      open['rect'] = <String, double>{'x': 20, 'y': 180, 'w': 180, 'h': 42};
+      open['clip'] = <String, double>{'x': 0, 'y': 0, 'w': 320, 'h': 200};
+      final runtime = _TextInputRuntime(
+        initialEvent: _textInputEvent('textInput.open', open),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final surface = find.byKey(const ValueKey<String>('pocket-surface-0'));
+      final surfaceBox = tester.renderObject<RenderBox>(surface);
+      final messageStart = runtime.messages.length;
+      // y=210 is inside the raw field (180..222), but outside its visible
+      // clip (0..200). It must be treated as a guest/page tap, not swallowed
+      // by the platform TextField hit-test guard.
+      await tester.tapAt(surfaceBox.localToGlobal(const Offset(50, 210)));
+      await tester.pump();
+      await tester.pump();
+
+      final messages = runtime.messages.sublist(messageStart);
+      expect(
+        messages
+            .where((message) => message['name'] == 'input.pointer')
+            .map((message) => (message['payload'] as Map)['phase']),
+        containsAllInOrder(<String>['down', 'up']),
+      );
+      final dismiss = messages.lastWhere(
+        (message) => message['name'] == 'textInput.dismiss',
+      );
+      final pointerUpIndex = messages.lastIndexWhere(
+        (message) =>
+            message['name'] == 'input.pointer' &&
+            (message['payload'] as Map)['phase'] == 'up',
+      );
+      expect(messages.indexOf(dismiss), greaterThan(pointerUpIndex));
+      expect(
+        find.byKey(
+          const ValueKey<String>('pocket-text-input-session-clip-hit-test'),
+        ),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
     'transient view inset changes do not dismiss a focused text input',
     (tester) async {
       addTearDown(tester.view.resetViewInsets);

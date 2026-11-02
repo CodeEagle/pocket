@@ -1103,9 +1103,17 @@ final class PocketPackageStore {
     if (versionId != null) {
       _requireSafeToken(versionId, 'versionId');
     }
+    final previousId = await _readPointerId('previous');
+    final lastGoodId = await _readPointerId('lastGood');
+    if (versionId != null) {
+      if (versionId != previousId && versionId != lastGoodId) {
+        throw PocketPackageFormatException(
+          'Rollback target $versionId is not a recorded previous or lastGood version',
+        );
+      }
+    }
     final targetId =
-        versionId ??
-        (await _readPointerId('previous') ?? await _readPointerId('lastGood'));
+        versionId ?? (previousId ?? lastGoodId);
     if (targetId == null) {
       throw const PocketPackageException(
         'no verified rollback target',

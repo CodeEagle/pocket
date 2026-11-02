@@ -42,6 +42,11 @@ final class PocketHardwareManager: NSObject,
   private var cameraTexture: PocketHardwareTexture?
   private var textureId: Int64?
   private var pendingPhotoResult: FlutterResult?
+  // Both values identify the capture whose result is currently retained.  A
+  // late AVCapturePhoto callback from an older capture must never complete a
+  // newer request that has reused the single pending-result slot.
+  private var pendingPhotoCaptureID: Int64?
+  private var pendingPhotoGeneration: UInt64?
   private var photoCaptureGeneration: UInt64 = 0
   private var activeBiometricContext: LAContext?
 
@@ -428,6 +433,8 @@ final class PocketHardwareManager: NSObject,
       self.photoCaptureGeneration &+= 1
       if let pending = self.pendingPhotoResult {
         self.pendingPhotoResult = nil
+        self.pendingPhotoCaptureID = nil
+        self.pendingPhotoGeneration = nil
         self.main {
           pending(FlutterError(code: "cancelled", message: "Camera preview stopped before photo capture completed", details: nil))
         }
@@ -492,6 +499,8 @@ final class PocketHardwareManager: NSObject,
         self.photoCaptureGeneration &+= 1
         if let callback = self.pendingPhotoResult {
           self.pendingPhotoResult = nil
+          self.pendingPhotoCaptureID = nil
+          self.pendingPhotoGeneration = nil
           self.main {
             callback(self.error(code: "plugin_revoked", message: "hardware session disposed"))
           }
@@ -554,7 +563,6 @@ final class PocketHardwareManager: NSObject,
 
   private func capturePhoto(result: @escaping FlutterResult) {
     cameraQueue.async {
-      self.photoCaptureGeneration &+= 1
       guard let output = self.photoOutput, let device = self.cameraDevice else {
         self.main { result(self.error(code: "hardware_not_ready", message: "camera preview is not running")) }
         return
@@ -563,8 +571,12 @@ final class PocketHardwareManager: NSObject,
         self.main { result(self.error(code: "hardware_busy", message: "a photo capture is already in progress")) }
         return
       }
+      self.photoCaptureGeneration &+= 1
+      let generation = self.photoCaptureGeneration
       let settings = AVCapturePhotoSettings()
       if device.hasFlash { settings.flashMode = self.flashMode }
+      self.pendingPhotoCaptureID = settings.uniqueID
+      self.pendingPhotoGeneration = generation
       self.pendingPhotoResult = result
       output.capturePhoto(with: settings, delegate: self)
     }
@@ -572,15 +584,27 @@ final class PocketHardwareManager: NSObject,
 
   func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
     cameraQueue.async {
-      let generation = self.photoCaptureGeneration
-      guard let callback = self.pendingPhotoResult else { return }
-      self.pendingPhotoResult = nil
+      guard let captureID = self.pendingPhotoCaptureID,
+            let generation = self.pendingPhotoGeneration,
+            photo.resolvedSettings.uniqueID == captureID,
+            self.photoCaptureGeneration == generation,
+            self.pendingPhotoResult != nil else { return }
       if let error = error {
-        self.main { callback(self.error(code: "hardware_capture_error", message: error.localizedDescription)) }
+        if let callback = self.pendingPhotoResult {
+          self.pendingPhotoResult = nil
+          self.pendingPhotoCaptureID = nil
+          self.pendingPhotoGeneration = nil
+          self.main { callback(self.error(code: "hardware_capture_error", message: error.localizedDescription)) }
+        }
         return
       }
       guard let data = photo.fileDataRepresentation() else {
-        self.main { callback(self.error(code: "hardware_capture_error", message: "camera returned no photo data")) }
+        if let callback = self.pendingPhotoResult {
+          self.pendingPhotoResult = nil
+          self.pendingPhotoCaptureID = nil
+          self.pendingPhotoGeneration = nil
+          self.main { callback(self.error(code: "hardware_capture_error", message: "camera returned no photo data")) }
+        }
         return
       }
       do {
@@ -590,22 +614,34 @@ final class PocketHardwareManager: NSObject,
         let file = directory.appendingPathComponent(name)
         try data.write(to: file, options: .atomic)
         self.saveToPhotosIfAuthorized(file: file) { albumSaved, albumError in
-          guard self.photoCaptureGeneration == generation else { return }
-          var response: [String: Any] = [
-            "ok": true,
-            "realHardwareCamera": true,
-            "fileName": name,
-            "filePath": file.path,
-            "sizeBytes": data.count,
-            "lens": self.cameraPosition == .front ? "front" : "back",
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "savedToAlbum": albumSaved,
-          ]
-          if let albumError = albumError { response["albumErrorCode"] = albumError }
-          self.main { callback(response) }
+          self.cameraQueue.async {
+            guard self.photoCaptureGeneration == generation,
+                  self.pendingPhotoCaptureID == captureID,
+                  let callback = self.pendingPhotoResult else { return }
+            self.pendingPhotoResult = nil
+            self.pendingPhotoCaptureID = nil
+            self.pendingPhotoGeneration = nil
+            var response: [String: Any] = [
+              "ok": true,
+              "realHardwareCamera": true,
+              "fileName": name,
+              "filePath": file.path,
+              "sizeBytes": data.count,
+              "lens": self.cameraPosition == .front ? "front" : "back",
+              "timestamp": ISO8601DateFormatter().string(from: Date()),
+              "savedToAlbum": albumSaved,
+            ]
+            if let albumError = albumError { response["albumErrorCode"] = albumError }
+            self.main { callback(response) }
+          }
         }
       } catch {
-        guard self.photoCaptureGeneration == generation else { return }
+        guard self.photoCaptureGeneration == generation,
+              self.pendingPhotoCaptureID == captureID,
+              let callback = self.pendingPhotoResult else { return }
+        self.pendingPhotoResult = nil
+        self.pendingPhotoCaptureID = nil
+        self.pendingPhotoGeneration = nil
         self.main { callback(self.error(code: "hardware_storage_error", message: error.localizedDescription)) }
       }
     }

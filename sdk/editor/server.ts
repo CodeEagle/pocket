@@ -8,10 +8,11 @@
  * entryFormat=quickjs-bytecode.
  */
 
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import {
   cp,
+  open,
   mkdir,
   mkdtemp,
   readFile,
@@ -180,14 +181,57 @@ function isInside(parent: string, candidate: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(rel));
 }
 
+type FileStat = ReturnType<typeof lstatSync>;
+
+/**
+ * `existsSync` follows symlinks and returns false for a dangling symlink. A
+ * project editor must distinguish a missing path (which is valid for a first
+ * write) from a symlink whose target has not been created yet.
+ */
+function lstatIfExists(path: string): FileStat | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function pathFailure(message: string, status = 400): never {
+  const error = new Error(message);
+  (error as unknown as { status: number }).status = status;
+  throw error;
+}
+
 const editableFilePattern = /\.(?:ts|tsx|js|jsx|json|svg|css|md)$/i;
 const protectedFilePattern = /^(?:editor(?:-state)?|pocket|host|payload|latest|signed-manifest|build|app\.bytecode|private|secret)\.json$|\.(?:pem|key|qjbc|pak|tar|gz)$/i;
 const protectedDirectoryNames = new Set(["assets", "builds", "updates", "keys", "node_modules", ".git", ".pocket-build"]);
+// These directories are not consumer source inputs. In particular, a
+// package-manager SDK link under node_modules and a generated build cache may
+// legitimately point outside the project; neither is followed by the editor
+// input scanner.
+const ignoredProjectInputDirectories = new Set([
+  "node_modules",
+  ".git",
+  ".pocket-build",
+  "build",
+  "builds",
+  "dist",
+  "out",
+  "updates",
+  "keys",
+]);
+
+function isAllowedExternalSdkLink(relativePath: string): boolean {
+  return relativePath.replaceAll("\\", "/") === "vendor/pocket-ui";
+}
 
 type SafeProjectFileOptions = {
   allowAssets?: boolean;
   isDirectory?: boolean;
   allowProtected?: boolean;
+  allowConfig?: boolean;
+  mustExist?: boolean;
 };
 
 /**
@@ -200,97 +244,92 @@ function safeProjectFile(projectDir: string, relativePath: string, options: Safe
   const segments = normalized.split("/");
   const leaf = segments.at(-1) ?? "";
   if (!normalized || normalized.startsWith("/") || normalized.includes("\0") || segments.some((part) => !part || part === "." || part === "..")) {
-    const err = new Error("file path must stay inside the project");
-    (err as unknown as { status: number }).status = 400;
-    throw err;
+    pathFailure("file path must stay inside the project");
   }
-  if (!options.allowAssets && segments.some((part) => protectedDirectoryNames.has(part.toLowerCase()))) {
-    const err = new Error("file is not an editable guest source file");
-    (err as unknown as { status: number }).status = 400;
-    throw err;
+  const isConfigFile = leaf === "editor.json" || leaf === "pocket.json";
+  if (!options.allowAssets && !(options.allowConfig && isConfigFile) && segments.some((part) => protectedDirectoryNames.has(part.toLowerCase()))) {
+    pathFailure("file is not an editable guest source file");
   }
-  if (!options.allowProtected && protectedFilePattern.test(leaf)) {
-    const err = new Error("file is not an editable guest source file");
-    (err as unknown as { status: number }).status = 400;
-    throw err;
+  if (!options.allowProtected && !(options.allowConfig && isConfigFile) && protectedFilePattern.test(leaf)) {
+    pathFailure("file is not an editable guest source file");
   }
-  if (!options.isDirectory && !options.allowAssets && !editableFilePattern.test(leaf)) {
-    const err = new Error("file is not an editable guest source file");
-    (err as unknown as { status: number }).status = 400;
-    throw err;
+  if (!options.isDirectory && !options.allowAssets && !(options.allowConfig && isConfigFile) && !editableFilePattern.test(leaf)) {
+    pathFailure("file is not an editable guest source file");
   }
 
   const resolved = safeChild(projectDir, normalized);
-  if (!existsSync(projectDir)) {
-    const err = new Error("project directory does not exist");
-    (err as unknown as { status: number }).status = 404;
-    throw err;
-  }
-  if (lstatSync(projectDir).isSymbolicLink()) {
-    const err = new Error("project directory must not be a symlink");
-    (err as unknown as { status: number }).status = 400;
-    throw err;
-  }
+  const projectStat = lstatIfExists(projectDir);
+  if (!projectStat) pathFailure("project directory does not exist", 404);
+  if (projectStat.isSymbolicLink()) pathFailure("project directory must not be a symlink");
+  if (!projectStat.isDirectory()) pathFailure("project path is not a directory");
   const projectReal = realpathSync(projectDir);
 
   let currentPath = resolve(projectDir);
   let deepestExistingAncestor = projectReal;
 
-  for (const segment of segments) {
+  for (const [index, segment] of segments.entries()) {
     const nextPath = join(currentPath, segment);
-    if (existsSync(nextPath)) {
-      const entry = lstatSync(nextPath);
-      if (entry.isSymbolicLink()) {
-        const err = new Error(`symbolic links are not allowed: ${segment}`);
-        (err as unknown as { status: number }).status = 400;
-        throw err;
-      }
-      const realNext = realpathSync(nextPath);
-      if (!isInside(projectReal, realNext)) {
-        const err = new Error("file path escapes project through a symlink");
-        (err as unknown as { status: number }).status = 400;
-        throw err;
-      }
+    const entry = lstatIfExists(nextPath);
+    if (!entry) {
+      if (!isInside(projectReal, deepestExistingAncestor)) pathFailure("file path escapes project through a symlink");
       currentPath = nextPath;
-      deepestExistingAncestor = realNext;
-    } else {
-      if (!isInside(projectReal, deepestExistingAncestor)) {
-        const err = new Error("file path escapes project through a symlink");
-        (err as unknown as { status: number }).status = 400;
-        throw err;
-      }
-      currentPath = nextPath;
+      continue;
     }
+    // lstat(), unlike existsSync(), sees dangling links. Never treat one as a
+    // permissible first-write path.
+    if (entry.isSymbolicLink()) pathFailure(`symbolic links are not allowed: ${segment}`);
+    const realNext = realpathSync(nextPath);
+    if (!isInside(projectReal, realNext)) pathFailure("file path escapes project through a symlink");
+    if (index < segments.length - 1 && !entry.isDirectory()) pathFailure("project path parent is not a directory");
+    currentPath = nextPath;
+    deepestExistingAncestor = realNext;
   }
 
-  if (existsSync(resolved)) {
-    const entry = lstatSync(resolved);
-    if (entry.isSymbolicLink()) {
-      const err = new Error("symbolic links are not allowed");
-      (err as unknown as { status: number }).status = 400;
-      throw err;
-    }
-    if (!isInside(projectReal, realpathSync(resolved))) {
-      const err = new Error("file path escapes project through a symlink");
-      (err as unknown as { status: number }).status = 400;
-      throw err;
-    }
+  const finalEntry = lstatIfExists(resolved);
+  if (finalEntry) {
+    if (finalEntry.isSymbolicLink()) pathFailure("symbolic links are not allowed");
+    if (!isInside(projectReal, realpathSync(resolved))) pathFailure("file path escapes project through a symlink");
     if (options.isDirectory) {
-      if (!entry.isDirectory()) {
-        const err = new Error("path is not a directory");
-        (err as unknown as { status: number }).status = 400;
-        throw err;
-      }
+      if (!finalEntry.isDirectory()) pathFailure("path is not a directory");
     } else {
-      if (!entry.isFile()) {
-        const err = new Error("project file is not a regular file");
-        (err as unknown as { status: number }).status = 400;
-        throw err;
-      }
+      if (!finalEntry.isFile()) pathFailure("project file is not a regular file");
     }
+  } else if (options.mustExist) {
+    pathFailure("file not found", 404);
   }
 
   return resolved;
+}
+
+/**
+ * Create project parents only after the path has passed the lstat boundary,
+ * then re-check them. The final open uses O_NOFOLLOW so a static leaf symlink
+ * cannot redirect the write. A hostile same-UID process can still race a
+ * string-path parent replacement between these syscalls; eliminating that
+ * class requires directory-fd traversal and is intentionally outside this
+ * local editor's compatibility-preserving patch.
+ */
+async function writeProjectFile(
+  projectDir: string,
+  relativePath: string,
+  contents: string | Uint8Array,
+  options: SafeProjectFileOptions = {},
+): Promise<void> {
+  const initialPath = safeProjectFile(projectDir, relativePath, options);
+  await mkdir(dirname(initialPath), { recursive: true });
+  const filePath = safeProjectFile(projectDir, relativePath, options);
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollow;
+  const handle = await open(filePath, flags, 0o644);
+  try {
+    await handle.writeFile(contents);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  // Verify that the final path is still a regular in-project file after the
+  // write. This also catches a platform that lacks O_NOFOLLOW.
+  safeProjectFile(projectDir, relativePath, options);
 }
 
 function safeArtifactFile(rootDir: string, relativePath: string): string {
@@ -362,15 +401,22 @@ function safeArtifactFile(rootDir: string, relativePath: string): string {
 }
 
 async function listEditableFiles(projectDir: string): Promise<Array<{ path: string; bytes: number }>> {
+  await validateProjectInputTree(projectDir);
   const result: Array<{ path: string; bytes: number }> = [];
   const walk = async (directory: string): Promise<void> => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (entry.name === "assets" || entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      if (ignoredProjectInputDirectories.has(entry.name)) continue;
+      if (entry.name === "assets") {
+        if (entry.isSymbolicLink()) pathFailure("project contains unsupported source symlink: assets");
+        continue;
+      }
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
       const filePath = join(directory, entry.name);
+      const relativePath = relative(projectDir, filePath).replaceAll("\\", "/");
+      if (entry.isSymbolicLink() && isAllowedExternalSdkLink(relativePath)) continue;
       if (entry.isDirectory()) {
         await walk(filePath);
       } else if (entry.isFile() && editableFilePattern.test(entry.name) && !protectedFilePattern.test(entry.name)) {
-        const relativePath = relative(projectDir, filePath).replaceAll("\\", "/");
         // Reuse the same symlink/path policy used for reads and writes.
         safeProjectFile(projectDir, relativePath);
         result.push({ path: relativePath, bytes: (await stat(filePath)).size });
@@ -381,6 +427,63 @@ async function listEditableFiles(projectDir: string): Promise<Array<{ path: stri
   };
   await walk(projectDir);
   return result.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+/**
+ * Validate the project-local source/assets tree that Editor treats as input.
+ * node_modules and the explicit vendor/pocket-ui package boundary are trusted
+ * dependencies and are not traversed; generated build/cache directories are
+ * not traversed either. This is not a JavaScript dependency-graph sandbox:
+ * build_guest/compiler resolution of external imports remains its existing
+ * local-development behavior. Assets are scanned separately because they are
+ * runtime inputs, and a nested dangling link there is still unsafe.
+ */
+async function validateProjectInputTree(projectDir: string): Promise<void> {
+  const walk = async (directory: string, insideAssets: boolean): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const filePath = join(directory, entry.name);
+      const relativePath = relative(projectDir, filePath).replaceAll("\\", "/");
+
+      if (!insideAssets && ignoredProjectInputDirectories.has(entry.name)) {
+        // node_modules is an explicit package-manager dependency boundary; a
+        // symlinked package tree there is allowed and is handled by
+        // build_guest. Build/cache directories are not dependency boundaries,
+        // so do not let a directory symlink hide a source tree from this
+        // editor check.
+        if (entry.isSymbolicLink() && entry.name !== "node_modules") {
+          pathFailure(`project contains unsupported source symlink: ${relativePath}`);
+        }
+        continue;
+      }
+      if (!insideAssets && entry.name === "assets") {
+        if (entry.isSymbolicLink()) pathFailure(`project contains unsupported asset symlink: ${relativePath}`);
+        if (!entry.isDirectory()) pathFailure(`project asset path is not a directory: ${relativePath}`);
+        await walk(filePath, true);
+        continue;
+      }
+
+      if (entry.isSymbolicLink()) {
+        if (insideAssets) pathFailure(`project contains unsupported asset symlink: ${relativePath}`);
+        if (isAllowedExternalSdkLink(relativePath)) {
+          // A valid external UI package is an explicit build_guest input. Do
+          // not follow it here; build_guest handles its package boundary.
+          try {
+            realpathSync(filePath);
+          } catch {
+            pathFailure(`external SDK link is dangling: ${relativePath}`);
+          }
+          continue;
+        }
+        pathFailure(`project contains unsupported source symlink: ${relativePath}`);
+      }
+      if (entry.isDirectory()) {
+        await walk(filePath, insideAssets);
+      } else if (!entry.isFile()) {
+        pathFailure(`project contains unsupported input: ${relativePath}`);
+      }
+    }
+  };
+  await walk(projectDir, false);
 }
 
 async function readJsonFile<T>(path: string, fallback?: T): Promise<T> {
@@ -429,7 +532,7 @@ function defaultConfig(id: string, input: Record<string, unknown>): EditorConfig
   // scaffold is immediately consumable by that host without extra edits.
   const appId = typeof input.appId === "string" && appIdPattern.test(input.appId) ? input.appId : "pocket.host.demo";
   const version = typeof input.version === "string" && versionPattern.test(input.version) ? input.version : "0.1.0";
-  const build = Number.isSafeInteger(input.build) && Number(input.build) >= 0 ? Number(input.build) : 1;
+  const build = Number.isSafeInteger(Number(input.build)) && Number(input.build) >= 1 ? Number(input.build) : 1;
   const tickHz = Number.isSafeInteger(input.tickHz) && Number(input.tickHz) >= 1 && Number(input.tickHz) <= 120 ? Number(input.tickHz) : 60;
   return { id, appId, name, title: name, version, build, tickHz, entry: "app.tsx", framework: "solid" };
 }
@@ -442,7 +545,11 @@ function validateConfig(id: string, input: Record<string, unknown>): EditorConfi
   if (!config.name) throw new Error("name must not be empty");
   if (typeof input.appId === "string" && !appIdPattern.test(input.appId)) throw new Error("appId contains unsafe characters");
   if (typeof input.version === "string" && !versionPattern.test(input.version)) throw new Error("version contains unsafe characters");
-  if (input.build !== undefined && (!Number.isSafeInteger(input.build) || Number(input.build) < 0)) throw new Error("build must be a non-negative integer");
+  if (input.build !== undefined && (!Number.isSafeInteger(Number(input.build)) || Number(input.build) < 1)) {
+    const err = new Error("build must be a positive safe integer");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
+  }
   if (input.tickHz !== undefined && (!Number.isSafeInteger(input.tickHz) || Number(input.tickHz) < 1 || Number(input.tickHz) > 120)) throw new Error("tickHz must be an integer from 1 through 120");
   config.appId = typeof input.appId === "string" ? input.appId : config.appId;
   config.version = typeof input.version === "string" ? input.version : config.version;
@@ -453,24 +560,32 @@ function validateConfig(id: string, input: Record<string, unknown>): EditorConfi
 }
 
 async function loadConfig(projectDir: string, id: string): Promise<EditorConfig> {
-  const editorPath = join(projectDir, "editor.json");
+  const editorPath = safeProjectFile(projectDir, "editor.json", { allowConfig: true });
+  // Validate both configuration files before reading either one. An editor
+  // config is authoritative when present, but a malformed legacy pocket.json
+  // must still not become an unguarded read through a project symlink.
+  const pocketPath = safeProjectFile(projectDir, "pocket.json", { allowConfig: true });
   const editor = await readJsonFile<Record<string, unknown>>(editorPath, {});
   if (Object.keys(editor).length > 0) return validateConfig(id, editor);
-  const pocket = await readJsonFile<Record<string, unknown>>(join(projectDir, "pocket.json"), {});
+  const pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {});
   const app = isObject(pocket.app) ? pocket.app : {};
   return validateConfig(id, {
     id,
     appId: pocket.id,
     name: pocket.title ?? pocket.name,
     version: pocket.version,
+    build: pocket.build,
     tickHz: 60,
     entry: app.entry,
   });
 }
 
 async function writeConfig(projectDir: string, config: EditorConfig): Promise<void> {
-  await writeFile(join(projectDir, "editor.json"), JSON.stringify(config, null, 2) + "\n");
-  const pocketPath = join(projectDir, "pocket.json");
+  // Validate both destinations before mutating either one. A malformed
+  // external project must not get a partial config update when its second
+  // config file is a symlink.
+  safeProjectFile(projectDir, "editor.json", { allowConfig: true });
+  const pocketPath = safeProjectFile(projectDir, "pocket.json", { allowConfig: true });
   const pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {
     $schema: "https://pocketjs.dev/schema/pocket-2.json",
     pocket: 2,
@@ -482,18 +597,19 @@ async function writeConfig(projectDir: string, config: EditorConfig): Promise<vo
   pocket.version = config.version;
   const app = isObject(pocket.app) ? pocket.app : {};
   pocket.app = { ...app, entry: "app.tsx", output: "app", framework: "solid" };
-  await writeFile(pocketPath, JSON.stringify(pocket, null, 2) + "\n");
+  await writeProjectFile(projectDir, "editor.json", JSON.stringify(config, null, 2) + "\n", { allowConfig: true });
+  await writeProjectFile(projectDir, "pocket.json", JSON.stringify(pocket, null, 2) + "\n", { allowConfig: true });
 }
 
 async function createProject(workspace: Workspace, id: string, input: Record<string, unknown>): Promise<EditorConfig> {
   const projectDir = safeChild(workspace.projects, id);
   if (existsSync(projectDir)) throw new Error(`project already exists: ${id}`);
   await mkdir(workspace.projects, { recursive: true });
+  const config = validateConfig(id, input);
   // New projects start from the one SDK-owned starter shared with `pocket
   // init`. The Showcase lives in the sibling demo entry and is deliberately
   // not copied into editor projects.
   await copyTree(join(root, "templates/starter"), projectDir);
-  const config = validateConfig(id, input);
   await writeConfig(projectDir, config);
   await mkdir(join(projectDir, "assets"), { recursive: true });
   return config;
@@ -532,7 +648,8 @@ async function loadState(workspace: Workspace, id: string): Promise<EditorState>
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     // Preserve a pre-existing editor state once, but keep new state outside
     // the external guest project so build inputs never see it.
-    state = await readJsonFile<EditorState>(join(projectDirectory(workspace, id), "editor-state.json"), {
+    const legacyStatePath = safeProjectFile(projectDirectory(workspace, id), "editor-state.json", { allowProtected: true });
+    state = await readJsonFile<EditorState>(legacyStatePath, {
       revision: 1,
       builtRevision: null,
       busy: false,
@@ -607,15 +724,17 @@ async function realBuild(input: Parameters<BuildRunner>[0]): Promise<BuildOutput
 async function buildProject(workspace: Workspace, id: string, state: EditorState, config: EditorConfig, runner: BuildRunner): Promise<void> {
   const revision = state.revision;
   const projectDir = projectDirectory(workspace, id);
-  safeProjectFile(projectDir, "app.tsx");
-  const projectManifest = safeProjectFile(projectDir, "manifest.json");
-  const assetsDir = join(projectDir, "assets");
-  if (existsSync(assetsDir)) {
-    safeProjectFile(projectDir, "assets", { allowAssets: true, isDirectory: true });
-    for (const entry of await readdir(assetsDir, { withFileTypes: true })) {
-      safeProjectFile(projectDir, `assets/${entry.name}`, { allowAssets: true, isDirectory: entry.isDirectory() });
-    }
-  }
+  // All build configuration paths are checked before parsing. The effective
+  // entry comes from legacy pocket.json when present, so a custom entry must
+  // receive the same no-symlink/existing-file policy as app.tsx.
+  safeProjectFile(projectDir, "editor.json", { allowConfig: true });
+  const pocketPath = safeProjectFile(projectDir, "pocket.json", { allowConfig: true });
+  const projectManifest = safeProjectFile(projectDir, "manifest.json", { mustExist: true });
+  const pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {});
+  const app = isObject(pocket.app) ? pocket.app : {};
+  const configuredEntry = typeof app.entry === "string" ? app.entry : config.entry;
+  safeProjectFile(projectDir, configuredEntry, { mustExist: true });
+  await validateProjectInputTree(projectDir);
   const buildDir = safeChild(workspace.builds, `${id}/${revision}`);
   await mkdir(buildDir, { recursive: true });
   const temp = await mkdtemp(join(tmpdir(), "pocket-editor-build-"));
@@ -778,9 +897,14 @@ async function publishProject(
 }
 
 async function listAssets(projectDir: string): Promise<string[]> {
-  const directory = join(projectDir, "assets");
+  const directory = safeProjectFile(projectDir, "assets", { allowAssets: true, isDirectory: true });
   await mkdir(directory, { recursive: true });
-  return (await readdir(directory, { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
+  const checkedDirectory = safeProjectFile(projectDir, "assets", { allowAssets: true, isDirectory: true });
+  const entries = await readdir(checkedDirectory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) pathFailure(`symbolic links are not allowed: assets/${entry.name}`);
+  }
+  return entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
 }
 
 function contentType(path: string): string {
@@ -898,8 +1022,23 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       throw new Error(`editor project root is not a directory: ${projectRoot}`);
     }
     if (lstatSync(projectRoot).isSymbolicLink()) throw new Error("editor project root must not be a symlink");
-    const editor = await readJsonFile<Record<string, unknown>>(join(projectRoot, "editor.json"), {});
-    const pocket = await readJsonFile<Record<string, unknown>>(join(projectRoot, "pocket.json"), {});
+    // Check config paths via safeProjectFile before reading either one during
+    // startup ID discovery. Never follow a symlinked config file; defer the 400
+    // rejection to the config/project API routes.
+    let editor: Record<string, unknown> = {};
+    let pocket: Record<string, unknown> = {};
+    try {
+      const editorPath = safeProjectFile(projectRoot, "editor.json", { allowConfig: true });
+      editor = await readJsonFile<Record<string, unknown>>(editorPath, {});
+    } catch {
+      editor = {};
+    }
+    try {
+      const pocketPath = safeProjectFile(projectRoot, "pocket.json", { allowConfig: true });
+      pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {});
+    } catch {
+      pocket = {};
+    }
     const candidate = typeof editor.id === "string"
       ? editor.id
       : typeof pocket.name === "string"
@@ -1008,7 +1147,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               const body = await parseJsonBody(request, maxSourceBytes);
               const source = asString(body.source, "source", maxSourceBytes);
               if (source.includes("\0")) throw new Error("source contains a NUL byte");
-              await writeFile(sourcePath, source);
+              await writeProjectFile(projectDir(id), "app.tsx", source);
               state.revision += 1;
               state.error = undefined;
               state.publish = undefined;
@@ -1032,8 +1171,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               const body = await parseJsonBody(request, maxSourceBytes);
               const content = asString(body.content, "content", maxSourceBytes);
               if (content.includes("\0")) throw new Error("content contains a NUL byte");
-              await mkdir(dirname(filePath), { recursive: true });
-              await writeFile(filePath, content);
+              await writeProjectFile(projectDir(id), relativePath, content);
               state.revision += 1;
               state.error = undefined;
               state.publish = undefined;
@@ -1048,7 +1186,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             if (method === "PUT") {
               const body = await parseJsonBody(request, maxJsonBytes);
               const content = JSON.stringify(body, null, 2) + "\n";
-              await writeFile(manifestPath, content);
+              await writeProjectFile(projectDir(id), "manifest.json", content);
               state.revision += 1;
               state.error = undefined;
               state.publish = undefined;
@@ -1078,9 +1216,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               if (value.size > maxAssetBytes) throw new Error("asset is too large");
               const fileName = basename(value.name);
               if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(fileName)) throw new Error("asset filename is unsafe");
-              const assetPath = safeProjectFile(projectDir(id), `assets/${fileName}`, { allowAssets: true });
-              await mkdir(dirname(assetPath), { recursive: true });
-              await writeFile(assetPath, new Uint8Array(await value.arrayBuffer()));
+              await writeProjectFile(projectDir(id), `assets/${fileName}`, new Uint8Array(await value.arrayBuffer()), { allowAssets: true });
               state.revision += 1;
               state.publish = undefined;
               pushLog(state, `asset saved: ${fileName}`);

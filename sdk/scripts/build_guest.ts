@@ -37,10 +37,12 @@ export type BuildGuestResult = {
   tickHz: number;
 };
 
-type GuestReleaseIdentity = {
-  version?: string;
-  build?: number;
+export type GuestReleaseIdentity = {
+  version: string;
+  build: number;
 };
+
+const DEFAULT_RELEASE_IDENTITY: GuestReleaseIdentity = { version: "0.1.0", build: 1 };
 
 function readJsonObject(path: string): Record<string, unknown> | undefined {
   if (!existsSync(path)) return undefined;
@@ -65,8 +67,13 @@ function readJsonObject(path: string): Record<string, unknown> | undefined {
  * predate both files carrying release fields. The source guest manifest is
  * otherwise a protocol/capability declaration, so it must not shadow an
  * Editor build update with a stale copied artifact.
+ *
+ * A source is selected when it contains either release field. Missing fields
+ * in that source use the explicit compatibility default; they are deliberately
+ * not filled from a lower priority file. Projects with no release fields use
+ * that same default, so every caller receives the same complete identity.
  */
-function releaseIdentity(projectRoot: string, manifest?: Record<string, unknown>): GuestReleaseIdentity {
+export function resolveReleaseIdentity(projectRoot: string, manifest?: Record<string, unknown>): GuestReleaseIdentity {
   const editor = readJsonObject(join(projectRoot, "editor.json"));
   const pocket = readJsonObject(join(projectRoot, "pocket.json"));
   // Select one authoritative object instead of silently mixing a version from
@@ -76,7 +83,7 @@ function releaseIdentity(projectRoot: string, manifest?: Record<string, unknown>
   const source = [editor, pocket, manifest].find((value) =>
     value !== undefined && (Object.hasOwn(value, "version") || Object.hasOwn(value, "build")),
   );
-  if (!source) return {};
+  if (!source) return { ...DEFAULT_RELEASE_IDENTITY };
   const hasVersion = Object.hasOwn(source, "version");
   const hasBuild = Object.hasOwn(source, "build");
   if (hasVersion && (typeof source.version !== "string" || source.version.length === 0)) {
@@ -86,8 +93,8 @@ function releaseIdentity(projectRoot: string, manifest?: Record<string, unknown>
     throw new Error("build_guest: release build must be a positive safe integer");
   }
   return {
-    ...(hasVersion ? { version: source.version as string } : {}),
-    ...(hasBuild ? { build: source.build as number } : {}),
+    version: hasVersion ? source.version as string : DEFAULT_RELEASE_IDENTITY.version,
+    build: hasBuild ? source.build as number : DEFAULT_RELEASE_IDENTITY.build,
   };
 }
 
@@ -460,14 +467,14 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     if (!existsSync(bytecode) || !existsSync(metadata)) throw new Error("QuickJS compiler did not produce app.qjbc and app.bytecode.json");
     const guestManifest = join(projectRoot, "manifest.json");
     const manifestObj = readJsonObject(guestManifest);
-    const identity = releaseIdentity(projectRoot, manifestObj);
+    const identity = resolveReleaseIdentity(projectRoot, manifestObj);
     const metadataObj = readJsonObject(metadata) ?? {};
     let metadataModified = false;
-    if (identity.version !== undefined && metadataObj.version !== identity.version) {
+    if (metadataObj.version !== identity.version) {
       metadataObj.version = identity.version;
       metadataModified = true;
     }
-    if (identity.build !== undefined && metadataObj.build !== identity.build) {
+    if (metadataObj.build !== identity.build) {
       metadataObj.build = identity.build;
       metadataModified = true;
     }
@@ -478,8 +485,8 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       // does not request host assets. The Editor runner packages this output;
       // source manifest.json remains protocol/capability-only.
       const outputManifest = { ...manifestObj } as Record<string, unknown>;
-      if (identity.version !== undefined) outputManifest.version = identity.version;
-      if (identity.build !== undefined) outputManifest.build = identity.build;
+      outputManifest.version = identity.version;
+      outputManifest.build = identity.build;
       writeFileSync(generatedManifest, `${JSON.stringify(outputManifest, null, 2)}\n`);
     }
     const assets = options.copyAssetsTo ? resolve(options.copyAssetsTo) : undefined;

@@ -648,6 +648,118 @@ void main() {
         );
       },
     );
+
+    test(
+      '10. Session rollback promotion path: commitHealthy(isRollback: true) and coordinator.rollback() promote previous to active and lastGood',
+      () async {
+        final store = PocketPackageStore(tempDir);
+        final transport = _MemoryTransport(<String, List<int>>{});
+        final manifestUri = Uri.parse('http://127.0.0.1:39123/latest.json');
+
+        final entry1 = <int>[1, 1, 1];
+        final pak1 = <int>[1, 1, 2];
+        final signed1 = await makeSignedManifest(
+          build: 1,
+          version: '1.0.1',
+          entryBytes: entry1,
+          pakBytes: pak1,
+        );
+
+        final entry2 = <int>[2, 2, 2];
+        final pak2 = <int>[2, 2, 3];
+        final signed2 = await makeSignedManifest(
+          build: 2,
+          version: '1.0.2',
+          entryBytes: entry2,
+          pakBytes: pak2,
+        );
+
+        final coordinator = PocketUpdateCoordinator(
+          manifestUri: manifestUri,
+          appId: 'test.app',
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          store: store,
+          transport: transport,
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+        );
+
+        // Install & commit v1
+        final hashEntry1 = _sha256(entry1);
+        final hashPak1 = _sha256(pak1);
+        transport.responses[manifestUri.toString()] = signed1.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry1').toString()] =
+            entry1;
+        transport.responses[manifestUri.resolve('blobs/$hashPak1').toString()] =
+            pak1;
+
+        final prepared1 = await coordinator.prepare();
+        await coordinator.commitHealthy(prepared1);
+
+        // Install & commit v2
+        final hashEntry2 = _sha256(entry2);
+        final hashPak2 = _sha256(pak2);
+        transport.responses[manifestUri.toString()] = signed2.envelopeBytes;
+        transport.responses[manifestUri.resolve('blobs/$hashEntry2').toString()] =
+            entry2;
+        transport.responses[manifestUri.resolve('blobs/$hashPak2').toString()] =
+            pak2;
+
+        final prepared2 = await coordinator.prepare();
+        await coordinator.commitHealthy(prepared2);
+
+        final current = await coordinator.lastGood();
+        expect(current?.version, '1.0.2');
+
+        final versions = await coordinator.listVersions();
+        final previous = versions.firstWhere((v) => v.isPrevious);
+        expect(previous.version, '1.0.1');
+
+        // Normal commitHealthy without isRollback throws downgrade rejection
+        final nonRollbackCandidate = PocketPreparedPackage(
+          package: previous.package,
+          needsActivation: true,
+        );
+        await expectLater(
+          coordinator.commitHealthy(nonRollbackCandidate),
+          throwsA(
+            isA<PocketPackageFormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('Refusing downgrade or replay'),
+            ),
+          ),
+        );
+
+        // Rollback candidate with isRollback: true succeeds
+        final rollbackCandidate = PocketPreparedPackage(
+          package: previous.package,
+          needsActivation: true,
+          isRollback: true,
+        );
+        await coordinator.commitHealthy(rollbackCandidate);
+
+        final afterRollback = await coordinator.lastGood();
+        expect(afterRollback?.version, '1.0.1');
+        expect(afterRollback?.build, 1);
+
+        final versionsAfter = await coordinator.listVersions();
+        final v1Info = versionsAfter.firstWhere((v) => v.versionId == previous.versionId);
+        expect(v1Info.isActive, isTrue);
+        expect(v1Info.isLastGood, isTrue);
+        expect(v1Info.isPrevious, isFalse);
+
+        final v2Info = versionsAfter.firstWhere((v) => v.version == '1.0.2');
+        expect(v2Info.isActive, isFalse);
+        expect(v2Info.isLastGood, isFalse);
+        expect(v2Info.isPrevious, isTrue);
+
+        // Also test coordinator.rollback(versionId: v2Info.versionId) back to v2 succeeds
+        await coordinator.rollback(versionId: v2Info.versionId);
+        final afterSecondRollback = await coordinator.lastGood();
+        expect(afterSecondRollback?.version, '1.0.2');
+      },
+    );
   });
 }
 

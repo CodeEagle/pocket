@@ -425,17 +425,20 @@ function committedLayout(node: NodeMirror | undefined, allowZeroWidth = false): 
 }
 
 function viewportLayout(node: NodeMirror | undefined): TextInputRect | undefined {
-  const rect = committedLayout(node, true);
+  // A zero-width viewport is a transient retained-layout state during Duo
+  // pane/IME resize. Treat it as unavailable so measureViewport() can retain
+  // the last pane geometry and apply its live-width cap. The content canvas
+  // intentionally has a separate allowZeroWidth=true read below because its
+  // height still determines the scroll extent while a pane is relaid out.
+  const rect = committedLayout(node);
   if (!rect) return undefined;
   // During a live keyboard/Duo resize the retained layout tree can report the
   // previous clip height for one or more frames. The framework's canonical
   // `ui.__viewport` is already updated by resizeViewport; use it to cap the
   // visible page extent while retaining the committed canvas origin.
   const liveHeight = finiteNumber(textInputGlobal.ui?.__viewport?.h);
-  const liveWidth = finiteNumber(textInputGlobal.ui?.__viewport?.w);
-  const width = rect.width > 0 ? rect.width : liveWidth && liveWidth > 0 ? liveWidth : rect.width;
-  if (liveHeight === undefined || liveHeight <= rect.y) return { ...rect, width };
-  return { ...rect, width, height: Math.max(1, Math.min(rect.height, liveHeight - rect.y)) };
+  if (liveHeight === undefined || liveHeight <= rect.y) return rect;
+  return { ...rect, height: Math.max(1, Math.min(rect.height, liveHeight - rect.y)) };
 }
 
 function emitTextInput(method: string, params: TextInputParams): boolean {
@@ -926,8 +929,13 @@ export function ScrollablePage(props: {
       const inputBottom = input.y + input.height;
       if (inputBottom > bottom) {
         scroller.scrollBy(inputBottom - bottom, { immediate: true });
+        // This correction is initiated by viewport/IME geometry, not by a
+        // user's drag. Consume the resulting offset so the next frame does
+        // not misclassify the automatic scroll and dismiss the focused input.
+        previousOffset = scroller.offset();
       } else if (input.y < top) {
         scroller.scrollBy(input.y - top, { immediate: true });
+        previousOffset = scroller.offset();
       }
     },
   };

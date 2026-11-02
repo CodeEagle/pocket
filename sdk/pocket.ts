@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { buildGuest } from "./scripts/build_guest.ts";
+import { buildGuest, resolveReleaseIdentity } from "./scripts/build_guest.ts";
 
 // `pocket.ts` is the SDK entrypoint itself.  Keep the default rooted at this
 // directory so a consumer can run `bun /path/to/pocket/sdk/pocket.ts init`
@@ -567,15 +567,27 @@ export async function initProject(directory: string, options: { sdkRoot?: string
 }
 
 function projectConfig(project: string): { appId: string; version: string; build: number; tickHz: number; hardware: boolean } {
-  const editor = readJson(join(project, "editor.json"));
-  const pocket = readJson(join(project, "pocket.json"));
-  const appId = typeof editor.appId === "string" ? editor.appId : pocket.id;
-  const version = typeof editor.version === "string" ? editor.version : pocket.version;
-  const build = typeof editor.build === "number"
-    ? editor.build
-    : (typeof pocket.build === "number" ? pocket.build : 1);
-  const tickHz = typeof editor.tickHz === "number" ? editor.tickHz : 60;
-  const hardware = editor.hardware === true;
+  const editorPath = join(project, "editor.json");
+  const pocketPath = join(project, "pocket.json");
+  const manifestPath = join(project, "manifest.json");
+  const editor = existsSync(editorPath) ? readJson(editorPath) : undefined;
+  const pocket = existsSync(pocketPath) ? readJson(pocketPath) : undefined;
+  const manifest = existsSync(manifestPath) ? readJson(manifestPath) : undefined;
+  if (editor && editor.build !== undefined && (!Number.isSafeInteger(Number(editor.build)) || Number(editor.build) < 1)) {
+    fail(`project build must be a positive safe integer in ${project}`);
+  }
+  if (pocket && pocket.build !== undefined && (!Number.isSafeInteger(Number(pocket.build)) || Number(pocket.build) < 1)) {
+    fail(`project build must be a positive safe integer in ${project}`);
+  }
+  const appId = typeof editor?.appId === "string" ? editor.appId : (typeof pocket?.id === "string" ? pocket.id : undefined);
+  // Keep the CLI project identity in lockstep with build_guest: select one
+  // complete release object (editor > pocket > manifest) instead of mixing a
+  // version from one config file with a build from another.
+  const identity = resolveReleaseIdentity(project, manifest);
+  const version = identity.version;
+  const build = identity.build;
+  const tickHz = typeof editor?.tickHz === "number" ? editor.tickHz : 60;
+  const hardware = editor?.hardware === true;
   if (typeof appId !== "string" || !appIdPattern.test(appId)) fail(`unsafe appId in ${project}`);
   if (typeof version !== "string" || !versionPattern.test(version)) fail(`unsafe version in ${project}`);
   if (!Number.isSafeInteger(build) || build < 1) fail(`unsafe build in ${project}`);

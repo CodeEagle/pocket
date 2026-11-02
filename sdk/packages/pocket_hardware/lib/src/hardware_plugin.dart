@@ -619,9 +619,13 @@ final class HardwarePlugin extends PocketPlugin {
     late final double latitude;
     late final double longitude;
     var realGps = false;
-    if (suppliedLatitude == null) {
+    if (suppliedLatitude == null || suppliedLongitude == null) {
+      _checkPermission(HardwarePermissions.location);
       final location = await _native(
         'getCurrentLocation',
+        params: <String, dynamic>{
+          if (params['accuracy'] != null) 'accuracy': params['accuracy'],
+        },
         timeout: const Duration(seconds: 30),
       );
       latitude = _finiteNumber(location['latitude'], 'latitude');
