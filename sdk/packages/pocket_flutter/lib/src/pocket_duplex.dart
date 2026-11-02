@@ -56,6 +56,10 @@ abstract interface class PocketBinaryDuplexRuntime {
 /// Native channels publish cursors through [PocketDuplexEndpoint]; Dart only
 /// writes/reads payload bytes while owning a reserved slot. Returned event
 /// objects are consumer allocations and are excluded from the zero-copy claim.
+/// A channel is bound to the runtime generation from which it was acquired:
+/// close it before loading/reloading a guest and create a new channel for the
+/// new generation. A retained old endpoint may keep native storage alive for
+/// safety, but it must never be used as the new runtime's channel.
 final class PocketDuplexChannel {
   static const int ringCapacity = 256;
   static const int messageByteSize = PocketDuplexEndpoint.messageByteSize;
@@ -108,13 +112,18 @@ final class PocketDuplexChannel {
       throw StateError('an ingress reservation is already active');
     }
     _validateFields(msgType, flags, targetId, arg0, arg1);
-    final view = _endpoint.reserveIngress(1);
-    if (view == null || view.isEmpty) return false;
-    if (view.length != messageByteSize) {
-      throw StateError('native ingress view is not message aligned');
-    }
-    _ingressReserved = true;
+    Uint8List? view;
     try {
+      view = _endpoint.reserveIngress(1);
+    } catch (error, stack) {
+      _closeAndRethrow(error, stack);
+    }
+    if (view == null || view.isEmpty) return false;
+    try {
+      if (view.length != messageByteSize) {
+        throw StateError('native ingress view is not message aligned');
+      }
+      _ingressReserved = true;
       _writeFields(
         ByteData.sublistView(view),
         0,
@@ -126,6 +135,8 @@ final class PocketDuplexChannel {
       );
       _endpoint.publishIngress(1);
       return true;
+    } catch (error, stack) {
+      _closeAndRethrow(error, stack);
     } finally {
       _ingressReserved = false;
     }
@@ -149,23 +160,30 @@ final class PocketDuplexChannel {
     for (final message in pending) {
       _validateMessage(message);
     }
-    final view = _endpoint.reserveIngress(pending.length);
-    if (view == null || view.isEmpty) return 0;
-    if (view.length % messageByteSize != 0) {
-      throw StateError('native ingress view is not message aligned');
-    }
-    final accepted = view.length ~/ messageByteSize;
-    if (accepted > pending.length) {
-      throw StateError('native ingress view exceeds requested batch');
-    }
-    _ingressReserved = true;
+    Uint8List? view;
     try {
+      view = _endpoint.reserveIngress(pending.length);
+    } catch (error, stack) {
+      _closeAndRethrow(error, stack);
+    }
+    if (view == null || view.isEmpty) return 0;
+    try {
+      if (view.length % messageByteSize != 0) {
+        throw StateError('native ingress view is not message aligned');
+      }
+      final accepted = view.length ~/ messageByteSize;
+      if (accepted > pending.length) {
+        throw StateError('native ingress view exceeds requested batch');
+      }
+      _ingressReserved = true;
       final bytes = ByteData.sublistView(view);
       for (var index = 0; index < accepted; index++) {
         _writeMessage(bytes, index * messageByteSize, pending[index]);
       }
       _endpoint.publishIngress(accepted);
       return accepted;
+    } catch (error, stack) {
+      _closeAndRethrow(error, stack);
     } finally {
       _ingressReserved = false;
     }
@@ -186,23 +204,33 @@ final class PocketDuplexChannel {
     if (_egressPeeked) {
       throw StateError('an egress reservation is already active');
     }
-    final view = _endpoint.peekEgress(maxBatch);
-    if (view == null || view.isEmpty) return <PocketDuplexEvent>[];
-    if (view.length % messageByteSize != 0) {
-      throw StateError('native egress view is not message aligned');
-    }
-    final count = view.length ~/ messageByteSize;
-    if (count > maxBatch) throw StateError('native egress view exceeds batch');
-    _egressPeeked = true;
+    Uint8List? view;
     try {
+      view = _endpoint.peekEgress(maxBatch);
+    } catch (error, stack) {
+      _closeAndRethrow(error, stack);
+    }
+    if (view == null || view.isEmpty) return <PocketDuplexEvent>[];
+    try {
+      if (view.length % messageByteSize != 0) {
+        throw StateError('native egress view is not message aligned');
+      }
+      final count = view.length ~/ messageByteSize;
+      if (count > maxBatch) {
+        throw StateError('native egress view exceeds batch');
+      }
+      _egressPeeked = true;
       final bytes = ByteData.sublistView(view);
-      return List<PocketDuplexEvent>.generate(
+      final events = List<PocketDuplexEvent>.generate(
         count,
         (index) => _readEvent(bytes, index * messageByteSize),
         growable: false,
       );
-    } finally {
       _endpoint.consumeEgress(count);
+      return events;
+    } catch (error, stack) {
+      _closeAndRethrow(error, stack);
+    } finally {
       _egressPeeked = false;
     }
   }
@@ -220,6 +248,16 @@ final class PocketDuplexChannel {
       close();
       throw StateError('Pocket duplex runtime is disposed');
     }
+  }
+
+  Never _closeAndRethrow(Object error, StackTrace stack) {
+    try {
+      close();
+    } catch (_) {
+      // Preserve the operation that lost the native reservation. close() is
+      // best-effort here; a native endpoint must never remain half-reserved.
+    }
+    Error.throwWithStackTrace(error, stack);
   }
 
   static void _writeMessage(

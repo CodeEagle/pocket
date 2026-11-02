@@ -102,6 +102,33 @@ void main() {
     );
     expect(endpoint.reserveCalls, 0);
   });
+
+  test(
+    'publish failure closes channel so a native reservation cannot linger',
+    () {
+      final endpoint = _FakeEndpoint(native: true)
+        ..publishFailure = StateError('publish failed');
+      final channel = PocketDuplexChannel.fromRuntime(_FakeRuntime(endpoint));
+
+      expect(
+        () => channel.pushToPocketJs(msgType: 1, targetId: 1),
+        throwsA(isA<StateError>()),
+      );
+      expect(channel.isClosed, isTrue);
+      expect(endpoint.closed, isTrue);
+    },
+  );
+
+  test('consume failure closes channel after an egress peek', () {
+    final endpoint = _FakeEndpoint(native: true)
+      ..consumeFailure = StateError('consume failed');
+    endpoint.seedEgress(const PocketDuplexMessage(msgType: 3, targetId: 9));
+    final channel = PocketDuplexChannel.fromRuntime(_FakeRuntime(endpoint));
+
+    expect(() => channel.drainFromPocketJs(), throwsA(isA<StateError>()));
+    expect(channel.isClosed, isTrue);
+    expect(endpoint.closed, isTrue);
+  });
 }
 
 final class _FakeRuntime implements PocketBinaryDuplexRuntime {
@@ -133,6 +160,8 @@ final class _FakeEndpoint implements PocketDuplexEndpoint {
   final consumed = <int>[];
   var reserveCalls = 0;
   var closed = false;
+  Object? publishFailure;
+  Object? consumeFailure;
 
   @override
   bool get isNativeZeroCopy => native;
@@ -146,7 +175,11 @@ final class _FakeEndpoint implements PocketDuplexEndpoint {
   }
 
   @override
-  void publishIngress(int messageCount) => published.add(messageCount);
+  void publishIngress(int messageCount) {
+    final failure = publishFailure;
+    if (failure != null) throw failure;
+    published.add(messageCount);
+  }
 
   @override
   Uint8List? peekEgress(int maxMessages) {
@@ -167,6 +200,8 @@ final class _FakeEndpoint implements PocketDuplexEndpoint {
 
   @override
   void consumeEgress(int messageCount) {
+    final failure = consumeFailure;
+    if (failure != null) throw failure;
     consumed.add(messageCount);
     _egress.removeRange(0, messageCount);
   }

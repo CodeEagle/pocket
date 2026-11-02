@@ -85,12 +85,12 @@
 
 ## 本轮新增实现的验证记录
 
-- `cargo test --locked --lib binary_duplex`：3 项通过，实际 QuickJS 处理/回写、缺少 handler 与异常 handler。
-- `cargo test --locked --test duplex_layout`：3 项通过，固定 ABI 和队列满保护。
-- `pocket_flutter: flutter test test/pocket_duplex_test.dart`：4 项通过，Dart ring 语义与 dispose 访问保护。
+- `cargo test --locked --lib binary_duplex`：5 项通过，实际 QuickJS 处理/回写、缺少 handler 与异常 handler。
+- `cargo test --locked --test duplex_layout`：6 项通过，原子 SPSC 百万消息并发、满队列、角色独占与关闭竞态；另有手动 release benchmark。
+- `pocket_flutter: flutter test test/pocket_duplex_test.dart`：传输协议、批量 FFI 次数和 dispose 访问保护；最新实测与真实 FFI 记录见 `DUPLEX_TRANSPORT.md`。
 - `bun sdk/packages/pocket_ui/test/graphics.test.ts`：纯图形计算测试通过。
 
-这是源码/主机侧定点验证记录。新 duplex 符号需要重新构建对应平台原生库并随宿主发布；
+这是源码/主机侧定点验证记录。ABI v2 的 Android arm64 与 iOS arm64 simulator 原生库已重建并检查导出；需随宿主发布。
 不能用之前 Android APK/模拟器结果证明新 FFI 已在设备上通过，也不能据此声称端到端性能改善。
 - `flutter_widgets.test.ts`：独立 SDK 消费 fixture 编译通过，不导入 Demo 内部。
 - `flutter_widgets_native.test.ts`：真实 QuickJS 指针回调通过；FAB 禁用/恢复、Chip 与导航项选中颜色更新，进度实际 DrawOp 宽度从 50%→60%→70% 增长通过。

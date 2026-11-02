@@ -109,3 +109,56 @@ References: [Rust atomic memory model and lock-free portability](https://doc.rus
 [Dart leaf FFI call restrictions](https://api.dart.dev/dart-ffi/Native/isLeaf.html).
 Only short native operations without VM callbacks qualify for leaf calls;
 QuickJS dispatch is not one of them.
+
+## Local validation (2026-11-02)
+
+On the aarch64 macOS development host:
+
+- Native queue tests: 6 passed, plus one explicitly ignored manual benchmark.
+  Includes 1,000,000 ordered records across two threads, wrap/full protection,
+  exclusive roles, exact consumer reservation and concurrent close.
+- Native QuickJS/FFI tests: 5 passed, including real callback/emit, missing or
+  throwing handler, full egress and actual runtime reload with retained old
+  endpoints.
+- Dart protocol/exception tests: 8 passed; a separate real dylib FFI round-trip
+  test passed, including duplicate-role rejection and ABI assertions. Targeted
+  Dart analysis passed. Native queue/ABI lookup calls use short leaf FFI calls;
+  endpoint allocation/release and QuickJS dispatch do not.
+- Android arm64 release and iOS arm64 simulator release libraries rebuilt;
+  the ABI v2 endpoint symbols are present in both artifacts.
+
+Three consecutive release runs of the manual queue benchmark used 1,000,000
+16-byte records, two threads, 255 usable slots, sequence validation and the
+same partial-batch/backpressure policy. Results below are elapsed ranges in
+milliseconds; thread startup and scheduling are included.
+
+| Maximum batch | Atomic SPSC | Mutex VecDeque |
+| ---: | ---: | ---: |
+| 1 | 21.35–22.99 | 161.72–173.78 |
+| 16 | 5.73–5.86 | 18.71–19.95 |
+| 64 | 1.99–2.12 | 15.34–17.40 |
+| 255 | 2.68–2.84 | 15.22–16.60 |
+
+This is a local throughput ablation, not a device/FPS result. Full queues retry
+in the harness instead of dropping messages. The benchmark does not measure
+FFI/JS callbacks, p95 latency, allocations, cache-padding alternatives or mobile
+power consumption. A maximum batch of 255 was slower than 64 here, so the Dart
+read default remains 64 rather than assuming the largest batch is best.
+
+```sh
+cd sdk/native
+cargo test --locked --lib binary_duplex
+cargo test --locked --test duplex_layout
+cargo test --locked --release --test duplex_layout -- --ignored --nocapture
+```
+
+```sh
+cd sdk/packages/pocket_flutter
+POCKET_NATIVE_LIBRARY=/absolute/path/to/libpocket_flutter.dylib \
+  flutter test test/pocket_duplex_test.dart test/pocket_duplex_ffi_test.dart
+```
+
+The real FFI fixture is skipped when `POCKET_NATIVE_LIBRARY` is unset; a skipped
+fixture is not a native validation pass. Mobile artifacts were cross-built and
+inspected here, not revalidated as running apps on mobile devices. No TSAN or
+model-checking result is claimed.

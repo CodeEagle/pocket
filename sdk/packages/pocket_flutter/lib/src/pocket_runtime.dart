@@ -838,31 +838,38 @@ final class FfiPocketRuntime
       _duplexIngressReserve = _library
           .lookupFunction<_DuplexReserveNative, _DuplexReserveDart>(
             'pocket_duplex_ingress_reserve',
+            isLeaf: true,
           );
       _duplexIngressPublish = _library
           .lookupFunction<_DuplexCommitNative, _DuplexCommitDart>(
             'pocket_duplex_ingress_publish',
+            isLeaf: true,
           );
       _duplexEgressPeek = _library
           .lookupFunction<_DuplexPeekNative, _DuplexPeekDart>(
             'pocket_duplex_egress_peek',
+            isLeaf: true,
           );
       _duplexEgressConsume = _library
           .lookupFunction<_DuplexCommitNative, _DuplexCommitDart>(
             'pocket_duplex_egress_consume',
+            isLeaf: true,
           );
-      _duplexAbiVersion = _library.lookupFunction<
-        _DuplexU32Native,
-        _DuplexU32Dart
-      >('pocket_duplex_abi_version');
-      _duplexMessageSize = _library.lookupFunction<
-        _DuplexU32Native,
-        _DuplexU32Dart
-      >('pocket_duplex_message_size');
-      _duplexCapacity = _library.lookupFunction<
-        _DuplexU32Native,
-        _DuplexU32Dart
-      >('pocket_duplex_capacity');
+      _duplexAbiVersion = _library
+          .lookupFunction<_DuplexU32Native, _DuplexU32Dart>(
+            'pocket_duplex_abi_version',
+            isLeaf: true,
+          );
+      _duplexMessageSize = _library
+          .lookupFunction<_DuplexU32Native, _DuplexU32Dart>(
+            'pocket_duplex_message_size',
+            isLeaf: true,
+          );
+      _duplexCapacity = _library
+          .lookupFunction<_DuplexU32Native, _DuplexU32Dart>(
+            'pocket_duplex_capacity',
+            isLeaf: true,
+          );
     } on Object {
       _duplexEndpointAcquire = null;
       _duplexEndpointRelease = null;
@@ -948,6 +955,9 @@ final class _FfiPocketDuplexBindings {
     required this.publishIngress,
     required this.peekEgress,
     required this.consumeEgress,
+    required this.abiVersion,
+    required this.messageSize,
+    required this.capacity,
   });
 
   final _DuplexEndpointAcquireDart acquire;
@@ -957,6 +967,9 @@ final class _FfiPocketDuplexBindings {
   final _DuplexCommitDart publishIngress;
   final _DuplexPeekDart peekEgress;
   final _DuplexCommitDart consumeEgress;
+  final _DuplexU32Dart abiVersion;
+  final _DuplexU32Dart messageSize;
+  final _DuplexU32Dart capacity;
 }
 
 // Keep the native finalizer objects reachable for the lifetime of the isolate.
@@ -1031,11 +1044,9 @@ final class _FfiPocketDuplexEndpoint
   final _DuplexCommitDart _consumeEgress;
   final _FfiDuplexScratch _scratch;
   final NativeFinalizer _nativeFinalizer;
-  // Reserve and peek can legitimately run concurrently: they are the two
-  // independent SPSC lanes of one endpoint. Keep a count cell per lane so a
-  // producer cannot overwrite the consumer's out-count between the native
-  // reserve call and its view construction. These are allocated once per
-  // endpoint, never once per message/call.
+  // Keep scratch counts separate for the two lanes. They are allocated once
+  // per endpoint, never per message/call. This endpoint remains isolate-affine;
+  // independent lanes do not authorize concurrent calls on the same handle.
   bool _closed = false;
 
   @override

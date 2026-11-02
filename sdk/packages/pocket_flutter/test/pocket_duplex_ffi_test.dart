@@ -31,6 +31,8 @@ typedef _CommitNative = Int32 Function(Pointer<Void>, Uint32 count);
 typedef _CommitDart = int Function(Pointer<Void>, int count);
 typedef _StepNative = Int32 Function(Pointer<Void>);
 typedef _StepDart = int Function(Pointer<Void>);
+typedef _U32Native = Uint32 Function();
+typedef _U32Dart = int Function();
 
 void main() {
   final libraryPath = Platform.environment['POCKET_NATIVE_LIBRARY'];
@@ -70,6 +72,18 @@ void main() {
       final step = library.lookupFunction<_StepNative, _StepDart>(
         'pocket_duplex_step',
       );
+      final abiVersion = library.lookupFunction<_U32Native, _U32Dart>(
+        'pocket_duplex_abi_version',
+      );
+      final messageSize = library.lookupFunction<_U32Native, _U32Dart>(
+        'pocket_duplex_message_size',
+      );
+      final capacity = library.lookupFunction<_U32Native, _U32Dart>(
+        'pocket_duplex_capacity',
+      );
+      expect(abiVersion(), 2);
+      expect(messageSize(), 16);
+      expect(capacity(), 255);
 
       final handle = create(360, 640);
       expect(handle.address, isNot(0));
