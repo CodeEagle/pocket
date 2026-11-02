@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
@@ -193,6 +194,58 @@ void main() {
       await closing;
       expect(session.ready, isFalse);
       expect(session.stage, 'initializing');
+    },
+  );
+
+  testWidgets(
+    'rebuilding PocketGuest with identical non-const PocketAppConfig preserves the same PocketSession instance',
+    (tester) async {
+      PocketAppConfig makeConfig() => PocketAppConfig(
+        appId: 'external.rebuild',
+        metadataAsset: 'external/metadata.json',
+        manifestAsset: 'external/manifest.json',
+        allowedPermissions: const {'test.perm'},
+        additionalCapabilities: const {'test.cap'},
+        updates: const PocketUpdateConfig(
+          url: 'http://127.0.0.1:1/manifest.json',
+          keyId: 'test-key',
+          publicKey: 'AA==',
+        ),
+      );
+
+      final config1 = makeConfig();
+      final config2 = makeConfig();
+      expect(identical(config1, config2), isFalse);
+      expect(config1 == config2, isTrue);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PocketGuest(config: config1),
+          ),
+        ),
+      );
+
+      final state1 = tester.state<PocketGuestSessionState>(
+        find.byType(PocketGuestSession),
+      );
+      final session1 = state1.session;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PocketGuest(config: config2),
+          ),
+        ),
+      );
+
+      final state2 = tester.state<PocketGuestSessionState>(
+        find.byType(PocketGuestSession),
+      );
+      final session2 = state2.session;
+
+      expect(identical(state1, state2), isTrue);
+      expect(identical(session1, session2), isTrue);
     },
   );
 }

@@ -7,10 +7,27 @@ final class PocketPackageSource {
   const PocketPackageSource({
     required this.entryPath,
     required this.pakPath,
-    this.entryFormat = 'javascript',
+    this.entryFormat = 'bytecode',
     this.runtimeAbi,
     this.assetPaths = const <String, String>{},
   });
+
+  factory PocketPackageSource.fromJson(Object? value) {
+    if (value is! Map) {
+      throw ArgumentError.value(value, 'value', 'must be a Map');
+    }
+    final json = value.cast<String, dynamic>();
+    return PocketPackageSource(
+      entryPath: json['entryPath'] as String? ?? '',
+      pakPath: json['pakPath'] as String? ?? '',
+      entryFormat: json['entryFormat'] as String? ?? 'bytecode',
+      runtimeAbi: json['runtimeAbi'] as String?,
+      assetPaths: (json['assetPaths'] as Map?)?.cast<String, dynamic>().map(
+            (k, v) => MapEntry(k, v.toString()),
+          ) ??
+          const <String, String>{},
+    );
+  }
 
   final String entryPath;
   final String pakPath;
@@ -23,3 +40,5 @@ final class PocketPackageSource {
 
   String? pathForAsset(String asset) => assetPaths[asset];
 }
+
+typedef PocketPackageManifest = PocketPackageSource;

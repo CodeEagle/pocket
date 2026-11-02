@@ -20,11 +20,12 @@ struct Args {
     kind: BytecodeKind,
     binding_generation: u32,
     tick_hz: u32,
+    module_name: String,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: pocketjs_bytecode --input app.js --output app.qjbc [--metadata app.bytecode.json] [--kind script|module] [--binding-generation N] [--tick-hz N]"
+        "usage: pocketjs_bytecode --input app.js --output app.qjbc [--module-name app.js] [--metadata app.bytecode.json] [--kind script|module] [--binding-generation N] [--tick-hz N]"
     );
     std::process::exit(2);
 }
@@ -36,6 +37,7 @@ fn parse_args() -> Args {
     let mut kind = BytecodeKind::Script;
     let mut binding_generation = BINDING_GENERATION;
     let mut tick_hz = 60;
+    let mut module_name = String::from("app.js");
     let mut args = env::args_os().skip(1);
     while let Some(argument) = args.next() {
         let name = argument.to_string_lossy();
@@ -44,6 +46,10 @@ fn parse_args() -> Args {
                 eprintln!("invalid --tick-hz");
                 usage();
             });
+            continue;
+        }
+        if let Some(raw) = name.strip_prefix("--module-name=") {
+            module_name = raw.to_string();
             continue;
         }
         let mut value = |label: &str| {
@@ -56,6 +62,7 @@ fn parse_args() -> Args {
             "--input" => input = Some(PathBuf::from(value("--input"))),
             "--output" => output = Some(PathBuf::from(value("--output"))),
             "--metadata" => metadata = Some(PathBuf::from(value("--metadata"))),
+            "--module-name" => module_name = value("--module-name").to_string_lossy().into_owned(),
             "--kind" => {
                 kind = match value("--kind").to_string_lossy().as_ref() {
                     "script" => BytecodeKind::Script,
@@ -104,6 +111,7 @@ fn parse_args() -> Args {
         kind,
         binding_generation,
         tick_hz,
+        module_name,
     }
 }
 
@@ -177,12 +185,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if source.contains(&0) {
         return Err("input source contains a NUL byte".into());
     }
-    let filename = CString::new(args.input.to_string_lossy().as_bytes())?;
+    let filename = CString::new(args.module_name.as_bytes())?;
     let runtime = Runtime::new()?;
     let context = Context::full(&runtime)?;
     let payload = context.with(|ctx| match args.kind {
         BytecodeKind::Script => compile_script(ctx, &source, &filename),
-        BytecodeKind::Module => compile_module(ctx, &source, &args.input.to_string_lossy()),
+        BytecodeKind::Module => compile_module(ctx, &source, &args.module_name),
     })?;
     let artifact = bytecode::encode(
         args.kind,

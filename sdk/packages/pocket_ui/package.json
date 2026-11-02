@@ -10,6 +10,7 @@
     "./mobile": "./src/mobile.tsx",
     "./legacy": "./src/legacy.ts",
     "./responsive": "./src/responsive.ts",
-    "./display": "./src/display.ts"
+    "./display": "./src/display.ts",
+    "./graphics": "./src/graphics.ts"
   }
 }

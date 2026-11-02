@@ -15,12 +15,12 @@ retained frame and host capability messages.
   the previous VDOM/Dart integration shape, so it is not imported at runtime.
   `packages/pocket_ui/src/mobile.tsx` keeps the useful slots and callback
   semantics while composing `View`, `Text`, `Focusable`, `Modal`, and
-  `CompositorSurface`. The `guest/ui/mobile.tsx` path is only a compatibility
-  re-export; pages import the public `@pocket/ui` package.
+  `CompositorSurface`. The `demo/js/ui/mobile.tsx` path was a compatibility
+  re-export; pages import the public `@pocket/ui` package directly.
 - `../../mini_apps/syslib/pocket_syslib_router.js` supplied
   `TRANSITION_MODES` and `computeTransitionDescriptor`. The local pure adapter
   is `packages/pocket_ui/src/legacy.ts`; the reducer owns the route stack and
-  selected mode. `guest/legacy.ts` is a compatibility re-export only.
+  selected mode. `demo/js/legacy.ts` was a compatibility re-export only.
 - `../../mini_apps/pocketjs_uikit.js` supplied the SDF, smooth-step, gradient,
   rim, and refraction parameter math. `buildLiquidGlassRecipe` preserves that
   math as a local, testable recipe.
@@ -35,7 +35,7 @@ retained frame and host capability messages.
 
 ## What is mounted
 
-`guest/mobile-pages.tsx` adds real JS-owned pages for Mobile UI, Transitions,
+`demo/js/mobile-pages.tsx` (or `demo/js/app.tsx`) adds real JS-owned pages for Mobile UI, Transitions,
 Liquid Glass, and Hardware. The Mobile UI page exercises themed AppBar/Card/
 ListTile/buttons, segmented controls, a switch, a stepper, and an official
 Modal. Transitions samples all four source-backed descriptors and pushes/pops

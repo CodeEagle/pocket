@@ -1,6 +1,7 @@
 export 'src/pocket_assets.dart';
 export 'src/pocket_display.dart';
 export 'src/pocket_display_geometry.dart';
+export 'src/pocket_duplex.dart';
 export 'src/pocket_model.dart';
 export 'src/pocket_package.dart';
 export 'src/pocket_performance.dart';

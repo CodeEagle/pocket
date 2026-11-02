@@ -11,7 +11,112 @@ void main() {
     final descriptor = HardwarePlugin().descriptor;
     expect(descriptor.id, hardwarePluginId);
     expect(descriptor.capabilities.keys, containsAll(HardwareCapabilities.all));
-    expect(descriptor.permissions, equals(HardwarePermissions.all));
+    expect(descriptor.permissions, isEmpty);
+  });
+
+  test(
+    'granting only network allows weather to succeed while cameraCapture throws permission_denied',
+    () async {
+      final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{
+        'getCurrentLocation': <String, dynamic>{
+          'ok': true,
+          'latitude': 1.29,
+          'longitude': 103.85,
+        },
+        'capturePhoto': <String, dynamic>{
+          'ok': true,
+        },
+      });
+      final plugin = HardwarePlugin(
+        platform: fake,
+        grantedPermissions: const <String>{HardwarePermissions.network},
+        weatherFetcher: (_) async => <String, dynamic>{
+          'current': <String, dynamic>{'temperature_2m': 20.0},
+        },
+      );
+      final harness = await _Harness.create(plugin);
+      try {
+        await harness.request(
+          HardwareCapabilities.weatherCurrent,
+          'weather-perm-test',
+        );
+        expect(harness.last['ok'], isTrue);
+
+        await harness.request(
+          HardwareCapabilities.cameraCapture,
+          'camera-perm-test',
+        );
+        expect(harness.last['ok'], isFalse);
+        expect((harness.last['error'] as Map)['code'], 'permission_denied');
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  test('switchCameraLens returns stopped when preview is not running', () async {
+    final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{});
+    final harness = await _Harness.create(HardwarePlugin(platform: fake));
+    try {
+      await harness.request(
+        HardwareCapabilities.cameraLensSwitch,
+        'switch-stopped',
+        params: <String, dynamic>{'lens': 'front'},
+      );
+      expect(harness.last['ok'], isTrue);
+      final result = harness.last['result'] as Map;
+      expect(result['stopped'], isTrue);
+      expect(result['lens'], 'front');
+      expect(fake.calls, isEmpty);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  test('switchCameraLens updates texture when preview is active', () async {
+    final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{
+      'startCameraPreview': <String, dynamic>{
+        'ok': true,
+        'textureId': 10,
+        'width': 1280,
+        'height': 720,
+        'lens': 'back',
+      },
+      'switchCameraLens': <String, dynamic>{
+        'ok': true,
+        'textureId': 20,
+        'width': 1280,
+        'height': 720,
+        'lens': 'front',
+      },
+      'stopCameraPreview': <String, dynamic>{
+        'ok': true,
+        'previewActive': false,
+      },
+    });
+    final registered = <int>[];
+    final released = <int>[];
+    final plugin = HardwarePlugin(
+      platform: fake,
+      onTextureRegistered: registered.add,
+      onTextureReleased: released.add,
+    );
+    final harness = await _Harness.create(plugin);
+    try {
+      await harness.request(HardwareCapabilities.cameraPreviewStart, 'start');
+      expect(registered, <int>[10]);
+      await harness.request(
+        HardwareCapabilities.cameraLensSwitch,
+        'switch-active',
+        params: <String, dynamic>{'lens': 'front'},
+      );
+      expect(registered, <int>[10, 20]);
+      expect(released, <int>[10]);
+      await harness.manager.deactivate();
+      expect(released, <int>[10, 20]);
+    } finally {
+      await harness.dispose();
+    }
   });
 
   test(
@@ -337,7 +442,11 @@ final class _Harness {
 
   Map<String, dynamic> get last => sent.last;
 
-  static Future<_Harness> create(HardwarePlugin plugin) async {
+  static Future<_Harness> create(
+    HardwarePlugin plugin, {
+    Set<String> allowedPermissions = HardwarePermissions.all,
+    Set<String>? requestedPermissions,
+  }) async {
     final sent = <Map<String, dynamic>>[];
     final registry = PocketHostRegistry();
     final streams = PocketStreamBridge(send: (_, __) => true);
@@ -354,14 +463,21 @@ final class _Harness {
       host: host,
       appId: 'test.hardware',
       sessionId: 'hardware-test-session',
-      allowedPermissions: HardwarePermissions.all,
-      onPermissionRequest: (_) => HardwarePermissions.all,
+      allowedPermissions: allowedPermissions,
+      onPermissionRequest: (_) => allowedPermissions,
     );
     manager.register(plugin);
+    final declaredPermissions = plugin.descriptor.capabilities.values
+        .expand((m) => m.permissions ?? plugin.descriptor.permissions)
+        .toSet();
     final availability = manager.negotiate(
       required: const <String>[],
       optional: HardwareCapabilities.all,
-      requestedPermissions: HardwarePermissions.all,
+      requestedPermissions:
+          requestedPermissions ??
+          (plugin.descriptor.permissions.isNotEmpty
+              ? plugin.descriptor.permissions
+              : declaredPermissions),
     );
     await manager.activate(availability);
     return _Harness(plugin, host, manager, sent);

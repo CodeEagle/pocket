@@ -5,6 +5,7 @@
 //! this library owns JavaScript execution, flexbox layout and frame timing.
 
 pub mod bytecode;
+pub mod duplex;
 
 use pocket_draw_ops::{DrawOps, Operation};
 use pocket_drivers::{abi, AxisDelta, MotionState};
@@ -20,6 +21,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::io::Read;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 struct NodeMeta {
@@ -203,10 +205,9 @@ struct FrameDrawCache {
 }
 
 impl FrameDrawCache {
-    fn matches(
+    fn matches_primary(
         &self,
         words: &[u32],
-        auxiliary_words: Option<&[u32]>,
         width: f32,
         height: f32,
         auxiliary_size: Option<(f32, f32)>,
@@ -219,7 +220,10 @@ impl FrameDrawCache {
             && self.raster_revision == raster_revision
             && self.nodes == nodes
             && self.words == words
-            && self.auxiliary_words.as_deref() == auxiliary_words
+    }
+
+    fn matches_auxiliary(&self, auxiliary_words: Option<&[u32]>) -> bool {
+        self.auxiliary_words.as_deref() == auxiliary_words
     }
 }
 
@@ -257,6 +261,11 @@ pub struct HostState {
     guest: RquickjsGuest,
     nodes: Rc<RefCell<Vec<NodeMeta>>>,
     outbound: Rc<RefCell<Vec<serde_json::Value>>>,
+    /// One lock-free SPSC channel per runtime. Reload closes this generation
+    /// and installs a new Arc rather than clearing a ring borrowed by another
+    /// isolate.
+    duplex: Arc<duplex::DuplexRing>,
+    duplex_ingress_consumer: duplex::IngressConsumer,
     last_error: String,
     error_output: CString,
     output: CString,
@@ -293,6 +302,14 @@ pub struct HostState {
     frame_json_serialized_bytes: u64,
     frame_json_cache_hits: u64,
     draw_decode_count: u64,
+}
+
+fn new_duplex_channel() -> (Arc<duplex::DuplexRing>, duplex::IngressConsumer) {
+    let ring = duplex::DuplexRing::new_shared();
+    let consumer = ring
+        .claim_ingress_consumer()
+        .expect("new duplex channel must have an unclaimed ingress consumer");
+    (ring, consumer)
 }
 
 fn c_string(value: &str) -> CString {
@@ -416,11 +433,22 @@ fn empty_frame_json(host: &HostState) -> String {
     frame.to_string()
 }
 
+fn checked_duplex_u16(value: f64) -> Option<u16> {
+    (value.is_finite() && value >= 0.0 && value <= u16::MAX as f64 && value.fract() == 0.0)
+        .then_some(value as u16)
+}
+
+fn checked_duplex_u32(value: f64) -> Option<u32> {
+    (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
+        .then_some(value as u32)
+}
+
 fn install_bridge(
     guest: &RquickjsGuest,
     ops: OpContext,
     nodes: Rc<RefCell<Vec<NodeMeta>>>,
     outbound: Rc<RefCell<Vec<serde_json::Value>>>,
+    duplex: Arc<duplex::DuplexRing>,
     auxiliary: Option<(i32, f32, f32)>,
 ) -> Result<(), String> {
     guest
@@ -442,6 +470,48 @@ fn install_bridge(
                 Ok::<bool, rquickjs::Error>(true)
             })?;
             bridge.set("_emit", emit)?;
+
+            // Binary high-frequency host/guest transport.  The record is
+            // written straight into the native-owned ring; only five scalar
+            // values cross QuickJS, never a JSON envelope.  The ring remains
+            // owner-thread serialized, so this closure must not be moved to a
+            // worker or retained after the host is destroyed.
+            let duplex_emit_ring = duplex
+                .claim_egress_producer()
+                .ok_or_else(|| Exception::throw_type(&ctx, "duplex egress producer is already claimed"))?;
+            let duplex_emit = Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, msg_type: f64, flags: f64, target_id: f64, arg0: f64, arg1: f64| {
+                    let msg_type = checked_duplex_u16(msg_type)
+                        .ok_or_else(|| Exception::throw_type(&ctx, "duplex msgType must be a uint16"))?;
+                    let flags = checked_duplex_u16(flags)
+                        .ok_or_else(|| Exception::throw_type(&ctx, "duplex flags must be a uint16"))?;
+                    let target_id = checked_duplex_u32(target_id)
+                        .ok_or_else(|| Exception::throw_type(&ctx, "duplex targetId must be a uint32"))?;
+                    if !arg0.is_finite()
+                        || !arg1.is_finite()
+                        || arg0.abs() > f32::MAX as f64
+                        || arg1.abs() > f32::MAX as f64
+                    {
+                        return Err(Exception::throw_type(
+                            &ctx,
+                            "duplex arguments must be finite float32 values",
+                        ));
+                    }
+                    Ok::<bool, rquickjs::Error>(duplex_emit_ring.push(
+                        duplex::DuplexMessage {
+                            msg_type,
+                            flags,
+                            target_id,
+                            arg0: arg0 as f32,
+                            arg1: arg1 as f32,
+                        },
+                    ))
+                },
+            )?;
+            let duplex_bridge = Object::new(ctx.clone())?;
+            duplex_bridge.set("emit", duplex_emit)?;
+            bridge.set("duplex", duplex_bridge)?;
 
             let register_nodes = nodes.clone();
             let register = Function::new(
@@ -678,6 +748,63 @@ fn dispatch_guest(guest: &RquickjsGuest, function_name: &str, line: &str) -> Res
                 .map_err(|error| quickjs_error(&ctx, error))
         })
         .ok_or_else(|| "guest context is not initialized".to_owned())?
+}
+
+/// Invoke the optional JS duplex consumer with scalar arguments.  Returning
+/// `false` means the guest has not installed a consumer yet; in that case the
+/// ingress cursor is intentionally left untouched so a later frame can attach
+/// the handler without losing host messages.
+fn dispatch_duplex_event(
+    guest: &RquickjsGuest,
+    message: duplex::DuplexMessage,
+) -> Result<bool, String> {
+    guest
+        .with(|ctx| -> Result<bool, String> {
+            let value: Value = ctx
+                .globals()
+                .get("__pocketDuplexEvent")
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            if value.is_undefined() || value.is_null() {
+                return Ok(false);
+            }
+            let function = Function::from_js(&ctx, value)
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            function
+                .call::<_, ()>(
+                    (
+                        message.msg_type as u32,
+                        message.flags as u32,
+                        message.target_id,
+                        message.arg0,
+                        message.arg1,
+                    ),
+                )
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            Ok(true)
+        })
+        .ok_or_else(|| "guest context is not initialized".to_owned())?
+}
+
+/// Drain host-written records on the native owner thread and dispatch them to
+/// the current QuickJS guest.  The cursor is committed only after JS accepts a
+/// record, making an unset/failed handler observable rather than silently
+/// dropping input.  The only copy is one 16-byte scalar record held while JS
+/// executes; no JSON serialization or ring-sized copy occurs.
+fn drain_duplex(host: &mut HostState) -> Result<i32, String> {
+    let mut processed = 0_i32;
+    loop {
+        let Some(message) = host.duplex_ingress_consumer.peek() else {
+            break;
+        };
+        if !dispatch_duplex_event(&host.guest, message)? {
+            break;
+        }
+        if !host.duplex_ingress_consumer.consume_one() {
+            return Err("duplex ingress cursor changed while dispatching".to_owned());
+        }
+        processed = processed.saturating_add(1);
+    }
+    Ok(processed)
 }
 
 /// Update the framework's live-viewport hook in the existing QuickJS realm.
@@ -1359,6 +1486,10 @@ fn run_virtual_frames(
 }
 
 fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String> {
+    // Service the binary host -> guest channel before any guest/core tick.
+    // The standalone FFI step calls this same helper, so callers may either
+    // explicitly pump input or rely on the ordinary frame boundary.
+    drain_duplex(host)?;
     // A host may deliver several pointer edges between vblanks.  Feed the
     // retained guest one complete snapshot per queued edge so its official
     // gesture pump can observe DOWN followed by UP (or CANCEL).  When there
@@ -1367,36 +1498,31 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
     let tick_count = fixed_tick_count(host, delta_ms);
     let guest_result = run_virtual_frames(host, pending, tick_count);
     guest_result?;
-    let (words, auxiliary_words, (width, height), auxiliary_size, raster_revision) = {
+    let (cache_hit, (width, height), auxiliary_size, raster_revision) = {
         let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
         core.ui.relayout_outputs();
-        let words = core.ui.draw().words.clone();
         let auxiliary_size = core.ui.auxiliary_viewport();
-        let auxiliary_words = if auxiliary_size.is_some() {
-            core.ui.draw_auxiliary().map(|draw| draw.words.clone())
+        let (width, height) = core.ui.viewport();
+        let raster_revision = core.ui.raster_revision();
+        let nodes = host.nodes.borrow();
+        let hit = if let Some(cache) = host.draw_cache.as_ref() {
+            cache.matches_primary(
+                &core.ui.draw().words,
+                width,
+                height,
+                auxiliary_size,
+                raster_revision,
+                &nodes,
+            ) && cache.matches_auxiliary(if auxiliary_size.is_some() {
+                core.ui.draw_auxiliary().map(|draw| draw.words.as_slice())
+            } else {
+                None
+            })
         } else {
-            None
+            false
         };
-        (
-            words,
-            auxiliary_words,
-            core.ui.viewport(),
-            auxiliary_size,
-            core.ui.raster_revision(),
-        )
+        (hit, (width, height), auxiliary_size, raster_revision)
     };
-    let nodes = host.nodes.borrow().clone();
-    let cache_hit = host.draw_cache.as_ref().is_some_and(|cache| {
-        cache.matches(
-            &words,
-            auxiliary_words.as_deref(),
-            width,
-            height,
-            auxiliary_size,
-            raster_revision,
-            &nodes,
-        )
-    });
 
     // Consume the actual PocketJS DrawList. Unsupported operations are
     // surfaced as development diagnostics instead of inventing boxes. Every
@@ -1419,6 +1545,17 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
         // frame happens to emit no bridge events.
         host.frame_json_cache = None;
         host.draw_decode_count = host.draw_decode_count.wrapping_add(1);
+        let (words, auxiliary_words) = {
+            let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
+            let words = core.ui.draw().words.clone();
+            let auxiliary_words = if auxiliary_size.is_some() {
+                core.ui.draw_auxiliary().map(|draw| draw.words.clone())
+            } else {
+                None
+            };
+            (words, auxiliary_words)
+        };
+        let nodes = host.nodes.borrow().clone();
         let core = host.ops.core().map_err(|error| format!("{error:?}"))?;
         let mut generic_texture_handles = HashSet::new();
         let ops = decode_draw_ops(
@@ -1450,13 +1587,13 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
         };
         let generic_texture_handles = generic_texture_handles.into_iter().collect::<Vec<_>>();
         host.draw_cache = Some(FrameDrawCache {
-            words: words.clone(),
-            auxiliary_words: auxiliary_words.clone(),
+            words,
+            auxiliary_words,
             width,
             height,
             auxiliary_size,
             raster_revision,
-            nodes: nodes.clone(),
+            nodes,
             ops: ops.clone(),
             auxiliary: auxiliary.clone(),
             generic_texture_handles: generic_texture_handles.clone(),
@@ -1485,7 +1622,8 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
         host.sent_resources.remove(asset);
     }
     let mut resources = Vec::new();
-    for node in &nodes {
+    let nodes_borrow = host.nodes.borrow();
+    for node in nodes_borrow.iter() {
         if !node.from_pack || node.asset.is_empty() || !referenced_assets.contains(&node.asset) {
             continue;
         }
@@ -2362,6 +2500,7 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
     let width = width.max(1.0).min(65535.0) as u32;
     let height = height.max(1.0).min(65535.0) as u32;
     let text_metrics = Rc::new(RefCell::new(TextMetrics::default()));
+    let (duplex, duplex_ingress_consumer) = new_duplex_channel();
     let mut ui = Ui::new_with_raster_density(raster_density);
     ui.set_viewport(width as f32, height as f32);
     // Native text mode makes the core emit TEXT_RUN records. Flutter decodes
@@ -2374,11 +2513,14 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
     // capability before mounting exposes ui.setCompositorSurface to JS and
     // causes Surface nodes to produce SURFACE_QUAD DrawOps.
     if let Err(error) = ops.set_compositor_enabled(true) {
+        let (error_duplex, error_ingress_consumer) = new_duplex_channel();
         return Box::into_raw(Box::new(HostState {
             ops,
             guest: RquickjsGuest::new(BindingProfile::Canonical),
             nodes: Rc::new(RefCell::new(Vec::new())),
             outbound: Rc::new(RefCell::new(Vec::new())),
+            duplex: error_duplex,
+            duplex_ingress_consumer: error_ingress_consumer,
             last_error: format!("{error:?}"),
             error_output: c_string(&format!("{error:?}")),
             output: c_string("{}"),
@@ -2422,11 +2564,14 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         assets: None,
     };
     if let Err(error) = guest.initialize(ops.clone(), &env) {
+        let (error_duplex, error_ingress_consumer) = new_duplex_channel();
         return Box::into_raw(Box::new(HostState {
             ops,
             guest,
             nodes: Rc::new(RefCell::new(Vec::new())),
             outbound: Rc::new(RefCell::new(Vec::new())),
+            duplex: error_duplex,
+            duplex_ingress_consumer: error_ingress_consumer,
             last_error: format!("{error:?}"),
             error_output: c_string(&format!("{error:?}")),
             output: c_string("{}"),
@@ -2463,6 +2608,8 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         guest,
         nodes: nodes.clone(),
         outbound: outbound.clone(),
+        duplex,
+        duplex_ingress_consumer,
         last_error: String::new(),
         error_output: c_string(""),
         output: c_string("{}"),
@@ -2496,6 +2643,7 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         host.ops.clone(),
         nodes,
         outbound,
+        host.duplex.clone(),
         auxiliary_descriptor(&host),
     ) {
         set_error(&mut host, error);
@@ -2656,6 +2804,7 @@ pub unsafe extern "C" fn pocket_enable_auxiliary(
         host.ops.clone(),
         host.nodes.clone(),
         host.outbound.clone(),
+        host.duplex.clone(),
         auxiliary_descriptor(host),
     ) {
         set_error(host, error);
@@ -2694,6 +2843,12 @@ fn read_application_file(path: &CStr, limit: u64, label: &str) -> Result<Vec<u8>
 
 fn reset_host_for_load(host: &mut HostState) {
     host.nodes.borrow_mut().clear();
+    // A reload is a channel-generation boundary. Never clear cursors in an
+    // Arc that may still be borrowed by a background Dart isolate.
+    host.duplex.close();
+    let (duplex, ingress_consumer) = new_duplex_channel();
+    host.duplex = duplex;
+    host.duplex_ingress_consumer = ingress_consumer;
     host.touches.clear();
     host.pending_touch_frames.clear();
     host.buttons = 0;
@@ -2777,6 +2932,7 @@ fn initialize_guest_for_load(
         host.ops.clone(),
         host.nodes.clone(),
         host.outbound.clone(),
+        host.duplex.clone(),
         auxiliary_descriptor(host),
     )
 }
@@ -3117,6 +3273,276 @@ pub unsafe extern "C" fn pocket_frame(handle: *mut HostState, delta_ms: f64) -> 
     }
 }
 
+/// Opaque ABI v2 endpoint. The normal host endpoint owns both external SPSC
+/// roles (Dart ingress producer and Dart egress consumer). Advanced background
+/// isolates can attach a single role to a retained channel handle instead.
+/// There is no MPMC endpoint: each role can be claimed once per generation.
+/// An endpoint role is thread/isolate-affine; the two independent roles may
+/// run concurrently, but one role must not be called concurrently by two
+/// threads. A returned payload pointer is borrowed until its matching
+/// publish/consume and must not be retained afterwards.
+pub struct DuplexEndpoint {
+    ingress: Option<duplex::IngressProducer>,
+    egress: Option<duplex::EgressConsumer>,
+}
+
+unsafe fn clone_duplex_channel(
+    channel: *const duplex::DuplexRing,
+) -> Option<Arc<duplex::DuplexRing>> {
+    if channel.is_null() {
+        return None;
+    }
+    // The caller owns one strong count from pocket_duplex_channel_acquire or
+    // pocket_duplex_channel_retain. Clone that count before constructing a
+    // temporary Arc, leaving the caller's count untouched.
+    Arc::increment_strong_count(channel);
+    Some(Arc::from_raw(channel))
+}
+
+/// Acquire an independent strong channel reference. It remains valid after
+/// `pocket_destroy`; release it with `pocket_duplex_channel_release`.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_channel_acquire(
+    handle: *mut HostState,
+) -> *const duplex::DuplexRing {
+    let Some(host) = handle.as_ref() else {
+        return ptr::null();
+    };
+    Arc::into_raw(host.duplex.clone())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_channel_retain(
+    channel: *const duplex::DuplexRing,
+) -> *const duplex::DuplexRing {
+    if channel.is_null() {
+        return ptr::null();
+    }
+    Arc::increment_strong_count(channel);
+    channel
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_channel_release(
+    channel: *const duplex::DuplexRing,
+) {
+    if !channel.is_null() {
+        Arc::decrement_strong_count(channel);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_channel_close(
+    channel: *const duplex::DuplexRing,
+) {
+    if let Some(channel) = channel.as_ref() {
+        channel.close();
+    }
+}
+
+unsafe fn attach_duplex_endpoint(
+    channel: *const duplex::DuplexRing,
+    ingress: bool,
+    egress: bool,
+) -> *mut DuplexEndpoint {
+    let Some(channel) = clone_duplex_channel(channel) else {
+        return ptr::null_mut();
+    };
+    make_duplex_endpoint(channel, ingress, egress)
+}
+
+fn make_duplex_endpoint(
+    channel: Arc<duplex::DuplexRing>,
+    ingress: bool,
+    egress: bool,
+) -> *mut DuplexEndpoint {
+    let ingress_endpoint = if ingress {
+        let Some(endpoint) = channel.claim_ingress_producer() else {
+            return ptr::null_mut();
+        };
+        Some(endpoint)
+    } else {
+        None
+    };
+    let egress_endpoint = if egress {
+        let Some(endpoint) = channel.claim_egress_consumer() else {
+            return ptr::null_mut();
+        };
+        Some(endpoint)
+    } else {
+        None
+    };
+    Box::into_raw(Box::new(DuplexEndpoint {
+        ingress: ingress_endpoint,
+        egress: egress_endpoint,
+    }))
+}
+
+/// Acquire the normal combined endpoint for the host's current channel
+/// generation. The endpoint retains the channel independently of HostState.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_endpoint_acquire(
+    handle: *mut HostState,
+) -> *mut DuplexEndpoint {
+    let Some(host) = handle.as_ref() else {
+        return ptr::null_mut();
+    };
+    make_duplex_endpoint(host.duplex.clone(), true, true)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_attach_ingress_producer(
+    channel: *const duplex::DuplexRing,
+) -> *mut DuplexEndpoint {
+    attach_duplex_endpoint(channel, true, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_attach_egress_consumer(
+    channel: *const duplex::DuplexRing,
+) -> *mut DuplexEndpoint {
+    attach_duplex_endpoint(channel, false, true)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_endpoint_release(endpoint: *mut DuplexEndpoint) {
+    if !endpoint.is_null() {
+        drop(Box::from_raw(endpoint));
+    }
+}
+
+/// Reserve a contiguous ingress batch. On success the returned pointer points
+/// into native-owned slots; the same endpoint must publish exactly `out_count`
+/// records. Dart never reads or writes an atomic cursor. The returned pointer
+/// is borrowed until `pocket_duplex_ingress_publish`.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_ingress_reserve(
+    endpoint: *mut DuplexEndpoint,
+    max_count: u32,
+    out_count: *mut u32,
+) -> *mut u8 {
+    if endpoint.is_null() || out_count.is_null() {
+        return ptr::null_mut();
+    }
+    *out_count = 0;
+    let Some(producer) = (*endpoint).ingress.as_ref() else {
+        return ptr::null_mut();
+    };
+    let Some(reservation) = producer.reserve(max_count) else {
+        return ptr::null_mut();
+    };
+    let Some(payload) = producer.payload_ptr(reservation) else {
+        return ptr::null_mut();
+    };
+    *out_count = reservation.count();
+    payload
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_ingress_publish(
+    endpoint: *mut DuplexEndpoint,
+    count: u32,
+) -> i32 {
+    if endpoint.is_null() {
+        return -1;
+    }
+    let Some(producer) = (*endpoint).ingress.as_ref() else {
+        return -2;
+    };
+    producer.commit_count(count) as i32
+}
+
+/// Return a contiguous egress batch. The pointer remains valid until this
+/// endpoint consumes exactly the returned count; no producer can overwrite it
+/// before that Release cursor store. A second peek before consume is rejected
+/// so a new span cannot invalidate the existing borrow.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_egress_peek(
+    endpoint: *mut DuplexEndpoint,
+    max_count: u32,
+    out_count: *mut u32,
+) -> *const u8 {
+    if endpoint.is_null() || out_count.is_null() {
+        return ptr::null();
+    }
+    *out_count = 0;
+    let Some(consumer) = (*endpoint).egress.as_ref() else {
+        return ptr::null();
+    };
+    let Some((payload, count)) = consumer.peek(max_count) else {
+        return ptr::null();
+    };
+    *out_count = count;
+    payload
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_egress_consume(
+    endpoint: *mut DuplexEndpoint,
+    count: u32,
+) -> i32 {
+    if endpoint.is_null() {
+        return -1;
+    }
+    let Some(consumer) = (*endpoint).egress.as_ref() else {
+        return -2;
+    };
+    consumer.consume(count) as i32
+}
+
+#[no_mangle]
+pub extern "C" fn pocket_duplex_abi_version() -> u32 {
+    duplex::ABI_VERSION
+}
+
+#[no_mangle]
+pub extern "C" fn pocket_duplex_message_size() -> u32 {
+    duplex::MESSAGE_BYTES as u32
+}
+
+#[no_mangle]
+pub extern "C" fn pocket_duplex_capacity() -> u32 {
+    (duplex::RING_CAPACITY - 1) as u32
+}
+
+/// The old raw-ring ABI is intentionally disabled. In particular, returning
+/// a pointer here would let Dart overwrite atomic cursors and violate SPSC.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_get_ring(
+    handle: *mut HostState,
+    out_byte_size: *mut u32,
+) -> *mut u8 {
+    if let Some(out_byte_size) = out_byte_size.as_mut() {
+        *out_byte_size = 0;
+    }
+    let _ = handle;
+    ptr::null_mut()
+}
+
+/// Drain host-written duplex records on the runtime owner thread and invoke
+/// `globalThis.__pocketDuplexEvent` for each one.  A missing JS handler leaves
+/// ingress queued; a throwing handler leaves the current record uncommitted.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_duplex_step(handle: *mut HostState) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    if !host.guest_loaded {
+        set_error(host, "duplex step requires a loaded guest");
+        return -1;
+    }
+    match drain_duplex(host) {
+        Ok(processed) => {
+            clear_error(host);
+            processed
+        }
+        Err(error) => {
+            set_error(host, error);
+            -1
+        }
+    }
+}
+
 /// Delta-aware frame ABI. The native engine still performs the complete
 /// guest/input/tick/layout/resource pass; only a stable DrawList with no
 /// transient events or resource lifecycle changes is reduced to a tiny marker.
@@ -3192,6 +3618,9 @@ pub unsafe extern "C" fn pocket_last_error(handle: *mut HostState) -> *const c_c
 #[no_mangle]
 pub unsafe extern "C" fn pocket_destroy(handle: *mut HostState) {
     if !handle.is_null() {
+        // Make the generation boundary visible to any retained background
+        // channel handle before dropping the owner-side QuickJS state.
+        (*handle).duplex.close();
         drop(Box::from_raw(handle));
     }
 }
@@ -3264,6 +3693,233 @@ mod smoke_tests {
             .iter()
             .any(|op| op["type"] == "rect"));
         unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn binary_duplex_reaches_quickjs_and_returns_without_json() {
+        let handle = pocket_create(320.0, 480.0);
+        assert!(!handle.is_null());
+        let source = CString::new(
+            r#"globalThis.__pocketDuplexEvent = function(type, flags, target, a0, a1) {
+                pocket.duplex.emit(type + 1, flags + 1, target + 1, a0 + 0.25, a1 + 0.5);
+            };"#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+
+        let producer = unsafe { (&*handle).duplex.claim_ingress_producer().unwrap() };
+        let reservation = producer.reserve(1).unwrap();
+        unsafe {
+            ptr::write(
+                producer
+                    .payload_ptr(reservation)
+                    .unwrap()
+                    .cast::<duplex::DuplexMessage>(),
+                duplex::DuplexMessage {
+                    msg_type: 11,
+                    flags: 2,
+                    target_id: 101,
+                    arg0: 1.5,
+                    arg1: 2.5,
+                },
+            );
+        }
+        assert!(producer.commit(reservation));
+
+        assert_eq!(unsafe { pocket_duplex_step(handle) }, 1);
+        let consumer = unsafe { (&*handle).duplex.claim_egress_consumer().unwrap() };
+        let (payload, count) = consumer.peek(1).unwrap();
+        assert_eq!(count, 1);
+        let message = unsafe { *payload.cast::<duplex::DuplexMessage>() };
+        assert_eq!(message.msg_type, 12);
+        assert_eq!(message.flags, 3);
+        assert_eq!(message.target_id, 102);
+        assert!((message.arg0 - 1.75).abs() < f32::EPSILON);
+        assert!((message.arg1 - 3.0).abs() < f32::EPSILON);
+        assert!(consumer.consume(1));
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn binary_duplex_keeps_ingress_when_guest_has_no_or_failing_handler() {
+        let handle = pocket_create(320.0, 480.0);
+        assert!(!handle.is_null());
+        let source = CString::new("globalThis.frame = function() {};").unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+
+        let producer = unsafe { (&*handle).duplex.claim_ingress_producer().unwrap() };
+        let reservation = producer.reserve(1).unwrap();
+        unsafe {
+            ptr::write(
+                producer.payload_ptr(reservation).unwrap().cast::<duplex::DuplexMessage>(),
+                duplex::DuplexMessage {
+                    msg_type: 9,
+                    ..duplex::DuplexMessage::default()
+                },
+            );
+        }
+        assert!(producer.commit(reservation));
+        assert_eq!(unsafe { pocket_duplex_step(handle) }, 0);
+        assert_eq!(unsafe { (&*handle).duplex_ingress_consumer.peek().unwrap().msg_type }, 9);
+
+        let failing = CString::new(
+            "globalThis.__pocketDuplexEvent = function() { throw new Error('duplex failure'); };
+            ",
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, failing.as_ptr()) }, 0);
+        assert_eq!(unsafe { pocket_duplex_step(handle) }, -1);
+        assert_eq!(unsafe { (&*handle).duplex_ingress_consumer.peek().unwrap().msg_type }, 9);
+        let error = unsafe { CStr::from_ptr(pocket_last_error(handle)) }.to_string_lossy();
+        assert!(error.contains("duplex failure"), "unexpected error: {error}");
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn binary_duplex_js_emit_respects_full_egress_without_overwrite() {
+        let handle = pocket_create(320.0, 480.0);
+        assert!(!handle.is_null());
+        let source = CString::new(
+            "globalThis.__pocketDuplexEvent = function() { pocket.duplex.emit(99, 0, 1, 2, 3); };",
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        let producer = unsafe { (&*handle).duplex.claim_ingress_producer().unwrap() };
+        let reservation = producer.reserve((duplex::RING_CAPACITY - 1) as u32).unwrap();
+        for index in 0..reservation.count() {
+            unsafe {
+                ptr::write(
+                    producer
+                        .payload_ptr(reservation)
+                        .unwrap()
+                        .cast::<duplex::DuplexMessage>()
+                        .add(index as usize),
+                    duplex::DuplexMessage {
+                        msg_type: index as u16,
+                        ..duplex::DuplexMessage::default()
+                    },
+                );
+            }
+        }
+        assert!(producer.commit(reservation));
+        assert_eq!(unsafe { pocket_duplex_step(handle) }, (duplex::RING_CAPACITY - 1) as i32);
+        let consumer = unsafe { (&*handle).duplex.claim_egress_consumer().unwrap() };
+        let (payload, count) = consumer.peek(1).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(unsafe { (*payload.cast::<duplex::DuplexMessage>()).msg_type }, 99);
+
+        // The egress queue is full. A subsequent JS emit must fail without
+        // changing the first published record.
+        let reservation = producer.reserve(1).unwrap();
+        unsafe {
+            ptr::write(
+                producer.payload_ptr(reservation).unwrap().cast::<duplex::DuplexMessage>(),
+                duplex::DuplexMessage::default(),
+            );
+        }
+        assert!(producer.commit(reservation));
+        assert_eq!(unsafe { pocket_duplex_step(handle) }, 1);
+        assert_eq!(unsafe { (*payload.cast::<duplex::DuplexMessage>()).msg_type }, 99);
+        assert!(consumer.consume(1));
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn binary_duplex_ffi_endpoint_contract_uses_retained_channel() {
+        let handle = pocket_create(320.0, 480.0);
+        assert!(!handle.is_null());
+        let source = CString::new(
+            "globalThis.__pocketDuplexEvent = function(type, flags, target, a0, a1) { pocket.duplex.emit(type + 1, flags, target, a0, a1); };",
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+
+        let channel = unsafe { pocket_duplex_channel_acquire(handle) };
+        assert!(!channel.is_null());
+        let retained_channel = unsafe { pocket_duplex_channel_retain(channel) };
+        assert_eq!(retained_channel, channel);
+        let endpoint = unsafe { pocket_duplex_endpoint_acquire(handle) };
+        assert!(!endpoint.is_null());
+
+        let payload;
+        let mut count = 0_u32;
+        payload = unsafe { pocket_duplex_ingress_reserve(endpoint, 1, &mut count) };
+        assert!(!payload.is_null());
+        assert_eq!(count, 1);
+        unsafe {
+            ptr::write(
+                payload.cast::<duplex::DuplexMessage>(),
+                duplex::DuplexMessage {
+                    msg_type: 20,
+                    ..duplex::DuplexMessage::default()
+                },
+            );
+        }
+        assert_eq!(unsafe { pocket_duplex_ingress_publish(endpoint, count) }, 1);
+        assert_eq!(unsafe { pocket_duplex_step(handle) }, 1);
+
+        let mut output_count = 0_u32;
+        let output = unsafe { pocket_duplex_egress_peek(endpoint, 1, &mut output_count) };
+        assert!(!output.is_null());
+        assert_eq!(output_count, 1);
+        assert_eq!(unsafe { (*output.cast::<duplex::DuplexMessage>()).msg_type }, 21);
+        assert_eq!(unsafe { pocket_duplex_egress_consume(endpoint, 1) }, 1);
+
+        unsafe {
+            pocket_duplex_endpoint_release(endpoint);
+            pocket_duplex_channel_release(channel);
+            pocket_duplex_channel_release(retained_channel);
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn binary_duplex_reload_keeps_old_endpoint_and_allocates_new_generation() {
+        let handle = pocket_create(320.0, 480.0);
+        assert!(!handle.is_null());
+        let old_channel = unsafe { pocket_duplex_channel_acquire(handle) };
+        let old_endpoint = unsafe { pocket_duplex_endpoint_acquire(handle) };
+        assert!(!old_channel.is_null());
+        assert!(!old_endpoint.is_null());
+
+        let mut old_count = 0_u32;
+        let old_payload = unsafe { pocket_duplex_ingress_reserve(old_endpoint, 1, &mut old_count) };
+        assert!(!old_payload.is_null());
+        unsafe {
+            ptr::write(
+                old_payload.cast::<duplex::DuplexMessage>(),
+                duplex::DuplexMessage {
+                    target_id: 0xfeed,
+                    ..duplex::DuplexMessage::default()
+                },
+            );
+        }
+
+        // This is the same generation transition used by pocket_load and
+        // pocket_load_bytecode, exercised directly without requiring a PAK
+        // fixture. The old endpoint retains its old Arc and may finish its
+        // in-flight publish, while the host receives a fresh channel.
+        unsafe { reset_host_for_load(&mut *handle) };
+        assert_eq!(unsafe { pocket_duplex_ingress_publish(old_endpoint, old_count) }, 1);
+        let new_channel = unsafe { pocket_duplex_channel_acquire(handle) };
+        let new_endpoint = unsafe { pocket_duplex_endpoint_acquire(handle) };
+        assert!(!new_channel.is_null());
+        assert!(!new_endpoint.is_null());
+        assert_ne!(old_channel, new_channel);
+
+        let mut new_count = 0_u32;
+        let new_payload = unsafe { pocket_duplex_ingress_reserve(new_endpoint, 1, &mut new_count) };
+        assert!(!new_payload.is_null());
+        assert_eq!(new_count, 1);
+        assert_eq!(unsafe { pocket_duplex_ingress_publish(new_endpoint, new_count) }, 1);
+
+        unsafe {
+            pocket_destroy(handle);
+            pocket_duplex_endpoint_release(old_endpoint);
+            pocket_duplex_endpoint_release(new_endpoint);
+            pocket_duplex_channel_release(old_channel);
+            pocket_duplex_channel_release(new_channel);
+        }
     }
 
     #[test]

@@ -222,3 +222,107 @@ test("editor can attach to an external SDK project without copying guest source"
     rmSync(fixture, { recursive: true, force: true });
   }
 });
+
+test("editor enforces security boundaries against CSRF, Host header poisoning, and symlinks", async () => {
+  const workspace = temporaryWorkspace();
+  const externalDir = temporaryWorkspace();
+  const secretFile = join(externalDir, "secret.json");
+  writeFileSync(secretFile, JSON.stringify({ secret: "classified" }));
+
+  const server = await startEditor({ port: 0, workspace });
+  try {
+    // 1. Cross-origin Origin: https://evil.example POST is rejected with 403
+    const crossOrigin = await request(server, "/api/projects", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://evil.example",
+      },
+      body: JSON.stringify({ id: "evil-app" }),
+    });
+    expect(crossOrigin.response.status).toBe(403);
+
+    // 2. Content-Type: text/plain POST to /api/projects is rejected with 415
+    const plainText = await request(server, "/api/projects", {
+      method: "POST",
+      headers: {
+        "content-type": "text/plain",
+      },
+      body: JSON.stringify({ id: "plain-app" }),
+    });
+    expect(plainText.response.status).toBe(415);
+
+    // 3. Host: attacker.example POST is rejected with 403
+    const evilHost = await request(server, "/api/projects", {
+      method: "POST",
+      headers: {
+        host: "attacker.example",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ id: "attacker-app" }),
+    });
+    expect(evilHost.response.status).toBe(403);
+
+    // Create a valid project first
+    const created = await request(server, "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "sec-app", name: "Security App" }),
+    });
+    expect(created.response.status).toBe(201);
+
+    const projectDir = join(workspace, "projects/sec-app");
+
+    // 4. Symlinked app.tsx pointing outside the project is rejected with 400
+    const appTsx = join(projectDir, "app.tsx");
+    rmSync(appTsx, { force: true });
+    symlinkSync(secretFile, appTsx);
+    const sourceGet = await request(server, "/api/projects/sec-app/source");
+    expect(sourceGet.response.status).toBe(400);
+
+    const sourcePut = await request(server, "/api/projects/sec-app/source", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source: "pwned" }),
+    });
+    expect(sourcePut.response.status).toBe(400);
+
+    // Restore real app.tsx, test symlinked manifest.json
+    rmSync(appTsx, { force: true });
+    writeFileSync(appTsx, "export const ok = true;\n");
+
+    const manifestJson = join(projectDir, "manifest.json");
+    rmSync(manifestJson, { force: true });
+    symlinkSync(secretFile, manifestJson);
+
+    const manifestGet = await request(server, "/api/projects/sec-app/manifest");
+    expect(manifestGet.response.status).toBe(400);
+
+    const manifestPut = await request(server, "/api/projects/sec-app/manifest", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hacked: true }),
+    });
+    expect(manifestPut.response.status).toBe(400);
+
+    // Symlinked app.tsx or manifest.json during build is rejected
+    const buildResp = await request(server, "/api/projects/sec-app/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(buildResp.response.status).toBe(202);
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const status = await request(server, "/api/projects/sec-app/status");
+      if (!status.value.busy) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const status = await request(server, "/api/projects/sec-app/status");
+    expect(status.value.error).toBeDefined();
+    expect(status.value.error).toContain("symbolic links are not allowed");
+  } finally {
+    server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(externalDir, { recursive: true, force: true });
+  }
+});

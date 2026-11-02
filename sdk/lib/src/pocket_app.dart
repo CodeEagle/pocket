@@ -29,23 +29,32 @@ final class PocketGuest extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      _PocketGuestSession(key: ValueKey(config), config: config);
+      _PocketGuestSession(key: ValueKey<String>(config.appId), config: config);
 }
 
-final class _PocketGuestSession extends StatefulWidget {
-  const _PocketGuestSession({super.key, required this.config});
+@visibleForTesting
+final class PocketGuestSession extends StatefulWidget {
+  const PocketGuestSession({super.key, required this.config});
   final PocketAppConfig config;
   @override
-  State<_PocketGuestSession> createState() => _PocketGuestSessionState();
+  State<PocketGuestSession> createState() => PocketGuestSessionState();
 }
 
-final class _PocketGuestSessionState extends State<_PocketGuestSession> {
-  late final session = PocketSession(config: widget.config);
+typedef _PocketGuestSession = PocketGuestSession;
+
+@visibleForTesting
+final class PocketGuestSessionState extends State<PocketGuestSession> {
+  late PocketSession session;
   Object? startupError;
 
   @override
   void initState() {
     super.initState();
+    _startSession();
+  }
+
+  void _startSession() {
+    session = PocketSession(config: widget.config);
     session.addListener(_changed);
     unawaited(
       session.initialize().catchError((Object error) {
@@ -53,6 +62,17 @@ final class _PocketGuestSessionState extends State<_PocketGuestSession> {
         if (mounted) setState(() => startupError = error);
       }),
     );
+  }
+
+  @override
+  void didUpdateWidget(covariant PocketGuestSession oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.config != widget.config) {
+      session.removeListener(_changed);
+      session.dispose();
+      startupError = null;
+      _startSession();
+    }
   }
 
   void _changed() {

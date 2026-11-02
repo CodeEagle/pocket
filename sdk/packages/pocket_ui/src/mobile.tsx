@@ -384,10 +384,13 @@ export function GlassSurface(props: {
   let mounted = false;
   const register = (): void => {
     const registerSurface = surfaceGlobal.pocket?.registerSurface;
-    if (typeof registerSurface !== "function") return;
+    if (typeof registerSurface !== "function") {
+      setRegistered(false);
+      return;
+    }
     try {
-      registerSurface(id, "glass", payload());
-      setRegistered(true);
+      const ok = registerSurface(id, "glass", payload()) !== false;
+      setRegistered(ok);
     } catch {
       setRegistered(false);
     }

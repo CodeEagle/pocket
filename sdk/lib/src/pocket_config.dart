@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_services/pocket_services.dart';
 
@@ -41,6 +42,19 @@ final class PocketUpdateConfig {
       throw const FormatException('Invalid package store namespace');
     }
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PocketUpdateConfig &&
+          runtimeType == other.runtimeType &&
+          url == other.url &&
+          keyId == other.keyId &&
+          publicKey == other.publicKey &&
+          namespace == other.namespace;
+
+  @override
+  int get hashCode => Object.hash(url, keyId, publicKey, namespace);
 }
 
 /// App-specific identity and admission policy, separate from the reusable host.
@@ -79,4 +93,36 @@ final class PocketAppConfig {
     }
     updates?.validate();
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PocketAppConfig &&
+          runtimeType == other.runtimeType &&
+          appId == other.appId &&
+          bytecodeAsset == other.bytecodeAsset &&
+          pakAsset == other.pakAsset &&
+          metadataAsset == other.metadataAsset &&
+          manifestAsset == other.manifestAsset &&
+          updates == other.updates &&
+          enableHardware == other.enableHardware &&
+          showFps == other.showFps &&
+          setEquals(allowedPermissions, other.allowedPermissions) &&
+          listEquals(pluginFactories, other.pluginFactories) &&
+          setEquals(additionalCapabilities, other.additionalCapabilities);
+
+  @override
+  int get hashCode => Object.hash(
+        appId,
+        bytecodeAsset,
+        pakAsset,
+        metadataAsset,
+        manifestAsset,
+        updates,
+        enableHardware,
+        showFps,
+        Object.hashAll(allowedPermissions),
+        Object.hashAll(pluginFactories),
+        Object.hashAll(additionalCapabilities),
+      );
 }

@@ -97,6 +97,15 @@ export interface StressState {
   lastAction: string;
 }
 
+export interface CameraPreviewState {
+  phase: CapabilityPhase;
+  lens?: string;
+  surfaceId?: number;
+  width?: number;
+  height?: number;
+  detail?: string;
+}
+
 export type PerformanceTimestamp = string | number;
 
 export interface PerformancePoint {
@@ -151,6 +160,7 @@ export interface DemoState {
   hardwareBiometricsAuthenticate: CapabilityState;
   hardwareLocationCurrent: CapabilityState;
   hardwareWeatherCurrent: CapabilityState;
+  cameraPreview: CameraPreviewState;
   stress: StressState;
 }
 
@@ -299,6 +309,14 @@ export function initialDemoState(): DemoState {
     hardwareBiometricsAuthenticate: idleCapability(),
     hardwareLocationCurrent: idleCapability(),
     hardwareWeatherCurrent: idleCapability(),
+    cameraPreview: {
+      phase: "idle",
+      lens: "back",
+      surfaceId: undefined,
+      width: undefined,
+      height: undefined,
+      detail: "Preview idle",
+    },
     routeStack: ["home"],
     transitionMode: "IOS_SPRING_PARALLAX",
     stress: { nodeCount: 0, checksum: 0, durationMs: 0, lastAction: "Not run" },
@@ -314,6 +332,28 @@ function withCapability(state: DemoState, key: CapabilityKey, value: CapabilityS
 }
 
 export function reduceDemoState(state: DemoState, event: DemoEvent): DemoState {
+  const action = event as unknown as Record<string, unknown>;
+  if (action.operation === "cameraStop" || action.type === "cameraStop") {
+    return {
+      ...state,
+      cameraPreview: {
+        phase: "idle",
+        lens: state.cameraPreview.lens,
+        surfaceId: undefined,
+        width: undefined,
+        height: undefined,
+        detail: "Preview stopped",
+      },
+      hardwareCameraPreviewStart: idleCapability(),
+      hardwareCameraPreviewStop: {
+        phase: "ready",
+        requestId: null,
+        result: { stopped: true },
+        error: null,
+      },
+      lastAction: "Preview stopped",
+    };
+  }
   switch (event.type) {
     case "navigate":
       {
@@ -379,12 +419,45 @@ export function reduceDemoState(state: DemoState, event: DemoEvent): DemoState {
     case "capabilitySuccess": {
       const current = capabilityState(state, event.key);
       if (current.requestId !== event.requestId) return state;
-      return withCapability(state, event.key, {
+      let nextState = withCapability(state, event.key, {
         phase: "ready",
         requestId: event.requestId,
         result: event.result,
         error: null,
       });
+      if (event.key === "hardwareCameraPreviewStop") {
+        nextState = {
+          ...nextState,
+          cameraPreview: {
+            phase: "idle",
+            lens: state.cameraPreview.lens,
+            surfaceId: undefined,
+            width: undefined,
+            height: undefined,
+            detail: "Preview stopped",
+          },
+          hardwareCameraPreviewStart: idleCapability(),
+        };
+      } else if (event.key === "hardwareCameraPreviewStart") {
+        const res = isRecord(event.result) ? event.result : {};
+        nextState = {
+          ...nextState,
+          cameraPreview: {
+            phase: "ready",
+            lens: typeof res.lens === "string" ? res.lens : state.cameraPreview.lens,
+            surfaceId:
+              typeof res.textureId === "number"
+                ? res.textureId
+                : typeof res.surfaceId === "number"
+                ? res.surfaceId
+                : undefined,
+            width: typeof res.width === "number" ? res.width : undefined,
+            height: typeof res.height === "number" ? res.height : undefined,
+            detail: "Preview active",
+          },
+        };
+      }
+      return nextState;
     }
     case "capabilityFailure": {
       const current = capabilityState(state, event.key);

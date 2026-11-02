@@ -183,34 +183,112 @@ const editableFilePattern = /\.(?:ts|tsx|js|jsx|json|svg|css|md)$/i;
 const protectedFilePattern = /^(?:editor(?:-state)?|pocket|host|payload|latest|signed-manifest|build|app\.bytecode|private|secret)\.json$|\.(?:pem|key|qjbc|pak|tar|gz)$/i;
 const protectedDirectoryNames = new Set(["assets", "builds", "updates", "keys", "node_modules", ".git", ".pocket-build"]);
 
+type SafeProjectFileOptions = {
+  allowAssets?: boolean;
+  isDirectory?: boolean;
+  allowProtected?: boolean;
+};
+
 /**
  * Resolve a guest text file without following a symlink out of the project.
  * Build outputs, editor state, package keys and update artifacts are never
  * exposed through this API, even if a caller guesses their path.
  */
-function safeProjectFile(projectDir: string, relativePath: string): string {
+function safeProjectFile(projectDir: string, relativePath: string, options: SafeProjectFileOptions = {}): string {
   const normalized = relativePath.replaceAll("\\", "/");
   const segments = normalized.split("/");
   const leaf = segments.at(-1) ?? "";
   if (!normalized || normalized.startsWith("/") || normalized.includes("\0") || segments.some((part) => !part || part === "." || part === "..")) {
-    throw new Error("file path must stay inside the project");
+    const err = new Error("file path must stay inside the project");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
   }
-  if (segments.some((part) => protectedDirectoryNames.has(part.toLowerCase())) || protectedFilePattern.test(leaf) || !editableFilePattern.test(leaf)) {
-    throw new Error("file is not an editable guest source file");
+  if (!options.allowAssets && segments.some((part) => protectedDirectoryNames.has(part.toLowerCase()))) {
+    const err = new Error("file is not an editable guest source file");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
   }
+  if (!options.allowProtected && protectedFilePattern.test(leaf)) {
+    const err = new Error("file is not an editable guest source file");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
+  }
+  if (!options.isDirectory && !options.allowAssets && !editableFilePattern.test(leaf)) {
+    const err = new Error("file is not an editable guest source file");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
+  }
+
   const resolved = safeChild(projectDir, normalized);
-  const projectReal = realpathSync(projectDir);
-  let existingParent = dirname(resolved);
-  while (!existsSync(existingParent) && existingParent !== projectDir) existingParent = dirname(existingParent);
-  if (existsSync(existingParent) && !isInside(projectReal, realpathSync(existingParent))) {
-    throw new Error("file path escapes project through a symlink");
+  if (!existsSync(projectDir)) {
+    const err = new Error("project directory does not exist");
+    (err as unknown as { status: number }).status = 404;
+    throw err;
   }
+  if (lstatSync(projectDir).isSymbolicLink()) {
+    const err = new Error("project directory must not be a symlink");
+    (err as unknown as { status: number }).status = 400;
+    throw err;
+  }
+  const projectReal = realpathSync(projectDir);
+
+  let currentPath = resolve(projectDir);
+  let deepestExistingAncestor = projectReal;
+
+  for (const segment of segments) {
+    const nextPath = join(currentPath, segment);
+    if (existsSync(nextPath)) {
+      const entry = lstatSync(nextPath);
+      if (entry.isSymbolicLink()) {
+        const err = new Error(`symbolic links are not allowed: ${segment}`);
+        (err as unknown as { status: number }).status = 400;
+        throw err;
+      }
+      const realNext = realpathSync(nextPath);
+      if (!isInside(projectReal, realNext)) {
+        const err = new Error("file path escapes project through a symlink");
+        (err as unknown as { status: number }).status = 400;
+        throw err;
+      }
+      currentPath = nextPath;
+      deepestExistingAncestor = realNext;
+    } else {
+      if (!isInside(projectReal, deepestExistingAncestor)) {
+        const err = new Error("file path escapes project through a symlink");
+        (err as unknown as { status: number }).status = 400;
+        throw err;
+      }
+      currentPath = nextPath;
+    }
+  }
+
   if (existsSync(resolved)) {
     const entry = lstatSync(resolved);
-    if (entry.isSymbolicLink()) throw new Error("symbolic links are not editable");
-    if (!isInside(projectReal, realpathSync(resolved))) throw new Error("file path escapes project through a symlink");
-    if (!entry.isFile()) throw new Error("project file is not a regular file");
+    if (entry.isSymbolicLink()) {
+      const err = new Error("symbolic links are not allowed");
+      (err as unknown as { status: number }).status = 400;
+      throw err;
+    }
+    if (!isInside(projectReal, realpathSync(resolved))) {
+      const err = new Error("file path escapes project through a symlink");
+      (err as unknown as { status: number }).status = 400;
+      throw err;
+    }
+    if (options.isDirectory) {
+      if (!entry.isDirectory()) {
+        const err = new Error("path is not a directory");
+        (err as unknown as { status: number }).status = 400;
+        throw err;
+      }
+    } else {
+      if (!entry.isFile()) {
+        const err = new Error("project file is not a regular file");
+        (err as unknown as { status: number }).status = 400;
+        throw err;
+      }
+    }
   }
+
   return resolved;
 }
 
@@ -246,6 +324,12 @@ async function readJsonFile<T>(path: string, fallback?: T): Promise<T> {
 }
 
 async function parseJsonBody(request: Request, maxBytes = maxJsonBytes): Promise<Record<string, unknown>> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    const err = new Error("unsupported media type: expected application/json");
+    (err as unknown as { status: number }).status = 415;
+    throw err;
+  }
   const length = Number(request.headers.get("content-length") ?? "0");
   if (length > maxBytes) throw new Error("request body is too large");
   const raw = await request.text();
@@ -254,6 +338,8 @@ async function parseJsonBody(request: Request, maxBytes = maxJsonBytes): Promise
   if (!isObject(value)) throw new Error("request body must be a JSON object");
   return value;
 }
+
+const readBody = parseJsonBody;
 
 async function copyTree(source: string, destination: string): Promise<void> {
   await mkdir(destination, { recursive: true });
@@ -452,6 +538,15 @@ async function realBuild(input: Parameters<BuildRunner>[0]): Promise<BuildOutput
 async function buildProject(workspace: Workspace, id: string, state: EditorState, config: EditorConfig, runner: BuildRunner): Promise<void> {
   const revision = state.revision;
   const projectDir = projectDirectory(workspace, id);
+  safeProjectFile(projectDir, "app.tsx");
+  const projectManifest = safeProjectFile(projectDir, "manifest.json");
+  const assetsDir = join(projectDir, "assets");
+  if (existsSync(assetsDir)) {
+    safeProjectFile(projectDir, "assets", { allowAssets: true, isDirectory: true });
+    for (const entry of await readdir(assetsDir, { withFileTypes: true })) {
+      safeProjectFile(projectDir, `assets/${entry.name}`, { allowAssets: true, isDirectory: entry.isDirectory() });
+    }
+  }
   const buildDir = safeChild(workspace.builds, `${id}/${revision}`);
   await mkdir(buildDir, { recursive: true });
   const temp = await mkdtemp(join(tmpdir(), "pocket-editor-build-"));
@@ -462,7 +557,7 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
     await copy("app.pak", output.pak);
     await copy("app.qjbc", output.bytecode);
     await copy("app.bytecode.json", output.metadata);
-    await copy("guest-manifest.json", join(projectDir, "manifest.json"));
+    await copy("guest-manifest.json", projectManifest);
     const buildInfo = {
       id,
       revision,
@@ -566,8 +661,15 @@ async function publishProject(
     guestManifestPath: join(buildDir, "guest-manifest.json"),
   });
   const key = await readJsonFile<PublicKeyConfig & { publicKeyPem?: string }>(keyPath);
-  const manifestUrl = `${origin}/updates/${id}/latest.json`;
-  const hostConfigUrl = `${origin}/updates/${id}/host.json`;
+  let safeOrigin = origin;
+  try {
+    const parsed = new URL(origin);
+    safeOrigin = `http://127.0.0.1:${parsed.port || 80}`;
+  } catch {
+    safeOrigin = "http://127.0.0.1:8790";
+  }
+  const manifestUrl = `${safeOrigin}/updates/${id}/latest.json`;
+  const hostConfigUrl = `${safeOrigin}/updates/${id}/host.json`;
   await writeFile(join(releaseDir, "host.json"), JSON.stringify({
     POCKET_UPDATE_URL: manifestUrl,
     POCKET_UPDATE_KEY_ID: key.keyId,
@@ -607,6 +709,45 @@ function contentType(path: string): string {
     case ".gz": return "application/gzip";
     default: return "application/octet-stream";
   }
+}
+
+function validateRequestSecurity(req: Request, url: URL): Response | null {
+  const allowedHostnames = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
+  const hostHeader = req.headers.get("host");
+  if (!hostHeader) {
+    return failure("forbidden: missing Host header", 403);
+  }
+  let hostName: string;
+  try {
+    const dummyUrl = new URL(`http://${hostHeader}`);
+    hostName = dummyUrl.hostname;
+  } catch {
+    return failure("forbidden: invalid Host header", 403);
+  }
+  if (!allowedHostnames.has(hostName)) {
+    return failure("forbidden: host not allowed", 403);
+  }
+
+  const method = req.method.toUpperCase();
+  const mutatingMethods = new Set(["POST", "PUT", "DELETE", "PATCH"]);
+  if (mutatingMethods.has(method)) {
+    const originHeader = req.headers.get("origin");
+    if (originHeader) {
+      let originHostname: string;
+      try {
+        const originUrl = new URL(originHeader);
+        originHostname = originUrl.hostname;
+      } catch {
+        return failure("forbidden: invalid Origin header", 403);
+      }
+      if (!allowedHostnames.has(originHostname)) {
+        return failure("forbidden: cross-origin requests not allowed", 403);
+      }
+    }
+  }
+
+  return null;
 }
 
 export async function startEditor(options: StartEditorOptions = {}): Promise<EditorServer> {
@@ -658,6 +799,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     maxRequestBodySize: maxAssetBytes,
     async fetch(request): Promise<Response> {
       const url = new URL(request.url);
+      const securityError = validateRequestSecurity(request, url);
+      if (securityError) return securityError;
       const path = url.pathname;
       const method = request.method.toUpperCase();
       try {
@@ -723,7 +866,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             }
           }
           if (parts[3] === "source") {
-            const sourcePath = join(projectDir(id), "app.tsx");
+            const sourcePath = safeProjectFile(projectDir(id), "app.tsx");
             if (method === "GET") {
               const source = await readFile(sourcePath, "utf8");
               return json({ path: "app.tsx", source, bytes: Buffer.byteLength(source), revision: state.revision });
@@ -766,7 +909,21 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               return json({ path: relativePath, bytes: Buffer.byteLength(content), revision: state.revision });
             }
           }
-          if (parts[3] === "manifest" && method === "GET") return new Response(await readFile(join(projectDir(id), "manifest.json")), { headers: { "content-type": "application/json; charset=utf-8" } });
+          if (parts[3] === "manifest") {
+            const manifestPath = safeProjectFile(projectDir(id), "manifest.json");
+            if (method === "GET") return new Response(await readFile(manifestPath), { headers: { "content-type": "application/json; charset=utf-8" } });
+            if (method === "PUT") {
+              const body = await parseJsonBody(request, maxJsonBytes);
+              const content = JSON.stringify(body, null, 2) + "\n";
+              await writeFile(manifestPath, content);
+              state.revision += 1;
+              state.error = undefined;
+              state.publish = undefined;
+              pushLog(state, `manifest saved: revision ${state.revision}`);
+              await saveState(workspace, id, state);
+              return json({ path: "manifest.json", bytes: Buffer.byteLength(content), revision: state.revision });
+            }
+          }
           if (parts[3] === "status" && method === "GET") return json(publicStatus(id, state));
           if (parts[3] === "logs" && method === "GET") return json({ logs: state.logs, error: state.error ?? null });
           if (parts[3] === "assets") {
@@ -778,7 +935,9 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               if (value.size > maxAssetBytes) throw new Error("asset is too large");
               const fileName = basename(value.name);
               if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(fileName)) throw new Error("asset filename is unsafe");
-              await writeFile(join(projectDir(id), "assets", fileName), new Uint8Array(await value.arrayBuffer()));
+              const assetPath = safeProjectFile(projectDir(id), `assets/${fileName}`, { allowAssets: true });
+              await mkdir(dirname(assetPath), { recursive: true });
+              await writeFile(assetPath, new Uint8Array(await value.arrayBuffer()));
               state.revision += 1;
               state.publish = undefined;
               pushLog(state, `asset saved: ${fileName}`);
@@ -793,7 +952,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           if ((parts[3] === "publish" || parts[3] === "package") && method === "POST") {
             if (state.busy) return failure("build is still running", 409);
             const config = await loadConfig(projectDir(id), id);
-            const result = await publishProject(workspace, id, config, state, url.origin);
+            const boundOrigin = `http://127.0.0.1:${server.port}`;
+            const result = await publishProject(workspace, id, config, state, boundOrigin);
             return json({
               status: publicStatus(id, state),
               manifest: result.envelope,
@@ -814,7 +974,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         return failure("not found", 404);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return failure(message, message.includes("not found") ? 404 : 400);
+        const status = (error as unknown as { status?: number })?.status ?? (message.includes("not found") ? 404 : 400);
+        return failure(message, status);
       }
     },
   });

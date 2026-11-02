@@ -207,15 +207,15 @@ pocket_host/
 
 这一层不应该放 Canvas painter 或业务页面。反过来 renderer 不应该决定发布渠道、版本列表或业务权限。
 
-### 3.5 `packages/pocket_sdk/` 与 `packages/pocket_hardware/`：公开宿主入口和编译能力
+### 3.5 `sdk/`（`pocket_sdk`）与 `packages/pocket_hardware/`：公开宿主入口和编译能力
 
 | 文件 | 职责 |
 | --- | --- |
-| `pocket_sdk/lib/src/pocket_config.dart` | 外部应用的 bytecode/PAK/manifest/update、namespace、权限和插件 factory 配置；不承载 JS 页面状态 |
-| `pocket_sdk/lib/src/pocket_app.dart` | `PocketApp`/`PocketGuest` 的薄 Flutter facade；只挂载 `PocketView`，路由与页面仍由 JS 拥有 |
-| `pocket_sdk/lib/src/pocket_session.dart` | 启动内置/已验签更新包、建立 generation 隔离、健康晋升/回滚、注册 package-info/hardware/provider factories、转发性能和 host request |
-| `pocket_sdk/lib/src/package_info_plugin.dart` | 使用真实 `package_info_plus` 的 SDK provider；依赖由消费应用编译进宿主 |
-| `pocket_sdk/lib/src/performance_history.dart` | 应用级最多 600 条性能历史和持久化；不是 renderer 的第二份帧状态 |
+| `sdk/lib/src/pocket_config.dart` | 外部应用的 bytecode/PAK/manifest/update、namespace、权限和插件 factory 配置；不承载 JS 页面状态 |
+| `sdk/lib/src/pocket_app.dart` | `PocketApp`/`PocketGuest` 的薄 Flutter facade；只挂载 `PocketView`，路由与页面仍由 JS 拥有 |
+| `sdk/lib/src/pocket_session.dart` | 启动内置/已验签更新包、建立 generation 隔离、健康晋升/回滚、注册 package-info/hardware/provider factories、转发性能和 host request |
+| `sdk/lib/src/package_info_plugin.dart` | 使用真实 `package_info_plus` 的 SDK provider；依赖由消费应用编译进宿主 |
+| `sdk/lib/src/performance_history.dart` | 应用级最多 600 条性能历史和持久化；不是 renderer 的第二份帧状态 |
 | `pocket_hardware/lib/src/hardware_plugin.dart` | `HardwarePlugin`、`HardwareCapabilities`、`HardwarePermissions` 及 MethodChannel/天气 adapter；结构化拒绝、超时、late-result 和 Texture cleanup |
 | `pocket_hardware/ios/Classes/PocketHardwarePlugin.swift` | 标准 Flutter 自动注册入口，调用同模块 `PocketHardwareManager`；外部 guest 不能下载/替换该原生实现 |
 | `pocket_flutter/ios/Classes/PocketFlutterPlugin.swift` | 标准自动注册入口，挂接 UIKit ReservedRegion geometry channel；Dart `PocketView` 在本地 canvas 中裁剪/变换后才发给 JS |
@@ -308,8 +308,8 @@ iOS 真机和模拟器构建目前复制到同一个插件静态库位置；切�
 | `packages/pocket_flutter/test/pocket_surface_test.dart` | `hostSurface` descriptor、clip/paint order、glass BackdropFilter、授权后 Texture 与撤销 | 真实摄像头帧、Impeller 设备视觉一致性 |
 | `demo/test/hardware_plugin_test.dart` | 直接验证 `pocket_hardware` package 的 descriptor、Android-shaped contract、unsupported/timeout、相机 Texture 注册撤销、weather coordinates、late result | 这是 provider 单测，不等于真实 iOS/Android hardware 已通过；`hardware_native_test.dart` 的设备集成仍由 root 验证 |
 | `editor/test/editor_server.test.ts` / `editor/test/editor_live_probe.ts` | 多文件 API/越界拒绝与真实 qjbc→PAK→签名发布、坏源不发布旧 build | 生产发布服务、远程权限与多用户并发 |
-| `host/test/widget_test.dart` | 注入静态 runtime 的 renderer 挂载冒烟检查 | 真实引擎端到端 |
-| `host/test/performance_history_test.dart` | 600 条上限、恢复、坏数据和写盘故障 | 所有自然掉帧已定位 |
+| `demo/test/widget_test.dart` | 注入静态 runtime 的 renderer 挂载冒烟检查 | 真实引擎端到端 |
+| `demo/test/performance_history_test.dart` | 600 条上限、恢复、坏数据和写盘故障 | 所有自然掉帧已定位 |
 | `integration_test/guest_interaction_test.dart` | 真实点击计数、导航、字节码/插件/更新错误、压力页 | 所有 Gallery 控件交互都覆盖 |
 | `integration_test/update_lifecycle_test.dart` | v1/v2、回滚、坏包恢复、健康缓存重挂载 | 生产服务器/断电事务/多渠道发布已就绪 |
 | `integration_test/system_keyboard_test.dart` | 真实 guest + TextInputClient，中文/emoji、selection/composing、删除、done、draft 保留；平台输入使用 TestTextInput | 所有实际键盘按键与语言键盘均验证 |
@@ -453,10 +453,10 @@ Kit 的底层是本工程主要来源。**不能说“绘制没继承”，也�
 
 | 要做的事 | 优先入口 | 验收 |
 | --- | --- | --- |
-| 新业务页、导航、计数/表单状态 | `guest/app.tsx`、`guest/state.ts` | reducer + 真实 pointer/导航/返回状态 |
+| 新业务页、导航、计数/表单状态 | `demo/js/app.tsx`、`demo/js/state.ts` | reducer + 真实 pointer/导航/返回状态 |
 | 新 UI 组合 | 先查两个 Demo 和 `packages/pocket_ui/src/ui.tsx`，再通过 `@pocket/ui` 使用 | 用 JS 组合；进入 Gallery，确认点击/焦点/布局 |
-| mobile UI / 转场 / glass | `packages/pocket_ui/src/mobile.tsx`、`guest/mobile-pages.tsx`、`packages/pocket_ui/src/legacy.ts`、`packages/pocket_flutter/lib/src/pocket_surface.dart` | `tests/mobile_ui.test.ts` + `pocket_surface_test.dart`；再做真实 iOS visual/Impeller 验收 |
-| 显示几何/响应式 panes | `packages/pocket_ui/src/display.ts`、`packages/pocket_ui/src/responsive.ts`、`guest/app.tsx` | display.viewport 事件、division/occlusion、窄宽布局和真实 Duo 开合；不要添加机型硬编码 |
+| mobile UI / 转场 / glass | `packages/pocket_ui/src/mobile.tsx`、`demo/js/mobile-pages.tsx`、`packages/pocket_ui/src/legacy.ts`、`packages/pocket_flutter/lib/src/pocket_surface.dart` | `tests/mobile_ui.test.ts` + `pocket_surface_test.dart`；再做真实 iOS visual/Impeller 验收 |
+| 显示几何/响应式 panes | `packages/pocket_ui/src/display.ts`、`packages/pocket_ui/src/responsive.ts`、`demo/js/app.tsx` | display.viewport 事件、division/occlusion、窄宽布局和真实 Duo 开合；不要添加机型硬编码 |
 | 输入框或页面滚动问题 | `packages/pocket_ui/src/ui.tsx` 与 `packages/pocket_flutter/lib/src/pocket_view.dart` 对照；先读 INPUT_REUSE/SCROLL_REUSE | 系统键盘、真实拖动、视口逐帧，不用业务延时掩盖框架问题 |
 | 新宿主能力/Flutter 插件 | `pocket_services`、`pocket_sdk`、`pocket_hardware`、guest manifest/client；消费应用只在配置中启用 provider | 真原生调用、权限拒绝、错误和卸载/切包；原生 plugin 由 pubspec/CocoaPods 自动注册 |
 | editor 工程脚手架 | `editor/server.ts`、`editor/client/`、`editor/test/editor_live_probe.ts` | 多文件越界保护、真实 qjbc/PAK、signed manifest/blob/host.json，坏源码不能发布旧 build |

@@ -401,6 +401,27 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     const metadata = join(output, "app.bytecode.json");
     runOrThrow(["cargo", "run", "--locked", "--manifest-path", join(root, "native/Cargo.toml"), "--bin", "pocketjs_bytecode", "--", "--input", source, "--output", bytecode, "--metadata", metadata, "--kind", "script", "--binding-generation", "12", "--tick-hz", String(tickHz)], root, options.log);
     if (!existsSync(bytecode) || !existsSync(metadata)) throw new Error("QuickJS compiler did not produce app.qjbc and app.bytecode.json");
+    const guestManifest = join(projectRoot, "manifest.json");
+    if (existsSync(guestManifest)) {
+      try {
+        const manifestObj = JSON.parse(readFileSync(guestManifest, "utf8")) as Record<string, unknown>;
+        const metadataObj = JSON.parse(readFileSync(metadata, "utf8")) as Record<string, unknown>;
+        let modified = false;
+        if (typeof manifestObj.version !== "undefined") {
+          metadataObj.version = manifestObj.version;
+          modified = true;
+        }
+        if (typeof manifestObj.build !== "undefined") {
+          metadataObj.build = manifestObj.build;
+          modified = true;
+        }
+        if (modified) {
+          writeFileSync(metadata, `${JSON.stringify(metadataObj, null, 2)}\n`);
+        }
+      } catch {
+        // Ignore if manifest.json is invalid JSON
+      }
+    }
     const assets = options.copyAssetsTo ? resolve(options.copyAssetsTo) : undefined;
     if (assets) {
       mkdirSync(assets, { recursive: true });

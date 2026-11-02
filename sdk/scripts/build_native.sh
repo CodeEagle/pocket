@@ -13,10 +13,10 @@ build() {
 
 case "${1:-}" in
   macos)
-    # Keep Rust/rquickjs objects aligned with the Flutter/Xcode deployment
-    # target.  Without this, the host can link successfully but Xcode emits
-    # mixed macOS 12/27 object warnings (and future toolchains may reject it).
-    export MACOSX_DEPLOYMENT_TARGET=12.0
+    # Keep target objects aligned with the Flutter/Xcode deployment target
+    # without polluting host proc-macros (which breaks libserde_derive on Xcode 27.2).
+    export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="-C link-arg=-mmacosx-version-min=12.0"
+    export CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS="-C link-arg=-mmacosx-version-min=12.0"
     build aarch64-apple-darwin
     # Build the host-side static probe separately.  It is intentionally not
     # part of iOS/Android cross builds because those targets ship the library,

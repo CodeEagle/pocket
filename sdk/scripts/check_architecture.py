@@ -74,12 +74,21 @@ for base in source_roots:
         if "simulateWatchdogCheck" in source or "PocketSyslibAotBundle" in source:
             errors.append(f"legacy simulation: {path.relative_to(REPOROOT)}")
 
-main = DEMOROOT / "lib/main.dart"
-if main.exists():
-    source = main.read_text(errors="replace")
-    for pattern in [r"Navigator\.", r"\bCounter\b", r"case\s+['\"]View\.", r"PocketUiNode"]:
-        if re.search(pattern, source):
-            errors.append(f"Flutter demo owns application behavior: {pattern}")
+demo_lib = DEMOROOT / "lib"
+if demo_lib.exists():
+    dart_files = sorted(demo_lib.rglob("*.dart"))
+    for dart_file in dart_files:
+        rel = dart_file.relative_to(DEMOROOT)
+        if dart_file.name != "main.dart":
+            errors.append(f"forbidden extra Dart file in demo host: {rel}")
+            continue
+        lines = dart_file.read_text(errors="replace").splitlines()
+        if len(lines) > 50:
+            errors.append(f"demo main.dart exceeds thin host limit (max 50 lines, got {len(lines)}): {rel}")
+        source = "\n".join(lines)
+        for pattern in [r"Navigator\.", r"\bCounter\b", r"case\s+['\"]View\.", r"PocketUiNode", r"\bStatefulWidget\b", r"\bsetState\b"]:
+            if re.search(pattern, source):
+                errors.append(f"Flutter demo owns application behavior ({pattern}): {rel}")
 if (DEMOROOT / "pubspec.yaml").exists() and "assets/app.js" in (DEMOROOT / "pubspec.yaml").read_text():
     errors.append("demo host ships JS source instead of bytecode-only entry")
 

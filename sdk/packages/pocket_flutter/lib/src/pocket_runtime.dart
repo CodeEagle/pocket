@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'pocket_duplex.dart';
 import 'pocket_model.dart';
 
 /// The narrow ABI shared by the Flutter side and the PocketJS host library.
@@ -269,10 +270,45 @@ typedef _StringNative = Pointer<Utf8> Function(Pointer<Void>);
 typedef _StringDart = Pointer<Utf8> Function(Pointer<Void>);
 typedef _AbiNative = Pointer<Utf8> Function();
 typedef _AbiDart = Pointer<Utf8> Function();
+typedef _DuplexStepNative = Int32 Function(Pointer<Void>);
+typedef _DuplexStepDart = int Function(Pointer<Void>);
+typedef _DuplexEndpointAcquireNative = Pointer<Void> Function(Pointer<Void>);
+typedef _DuplexEndpointAcquireDart = Pointer<Void> Function(Pointer<Void>);
+typedef _DuplexEndpointReleaseNative = Void Function(Pointer<Void>);
+typedef _DuplexEndpointReleaseDart = void Function(Pointer<Void>);
+typedef _DuplexReserveNative =
+    Pointer<Uint8> Function(
+      Pointer<Void>,
+      Uint32 maxMessages,
+      Pointer<Uint32> outCount,
+    );
+typedef _DuplexReserveDart =
+    Pointer<Uint8> Function(
+      Pointer<Void>,
+      int maxMessages,
+      Pointer<Uint32> outCount,
+    );
+typedef _DuplexCommitNative = Int32 Function(Pointer<Void>, Uint32 count);
+typedef _DuplexCommitDart = int Function(Pointer<Void>, int count);
+typedef _DuplexPeekNative =
+    Pointer<Uint8> Function(
+      Pointer<Void>,
+      Uint32 maxMessages,
+      Pointer<Uint32> outCount,
+    );
+typedef _DuplexPeekDart =
+    Pointer<Uint8> Function(
+      Pointer<Void>,
+      int maxMessages,
+      Pointer<Uint32> outCount,
+    );
+typedef _DuplexU32Native = Uint32 Function();
+typedef _DuplexU32Dart = int Function();
 
 /// FFI binding to the PocketJS host. Apple targets link the static archive into
 /// the runner process; Android packages the shared library in the APK.
-final class FfiPocketRuntime implements PocketRuntime, PocketBytecodeRuntime {
+final class FfiPocketRuntime
+    implements PocketRuntime, PocketBytecodeRuntime, PocketBinaryDuplexRuntime {
   FfiPocketRuntime._({
     required DynamicLibrary library,
     required Pointer<Void> handle,
@@ -310,6 +346,23 @@ final class FfiPocketRuntime implements PocketRuntime, PocketBytecodeRuntime {
   bool _loadBytecodeFilesLookedUp = false;
   _AbiDart? _actualAbi;
   bool _actualAbiLookedUp = false;
+  _DuplexStepDart? _duplexStep;
+  bool _duplexStepLookedUp = false;
+  _DuplexEndpointAcquireDart? _duplexEndpointAcquire;
+  _DuplexEndpointReleaseDart? _duplexEndpointRelease;
+  Pointer<NativeFunction<_DuplexEndpointReleaseNative>>?
+  _duplexEndpointReleasePointer;
+  _DuplexReserveDart? _duplexIngressReserve;
+  _DuplexCommitDart? _duplexIngressPublish;
+  _DuplexPeekDart? _duplexEgressPeek;
+  _DuplexCommitDart? _duplexEgressConsume;
+  _DuplexU32Dart? _duplexAbiVersion;
+  _DuplexU32Dart? _duplexMessageSize;
+  _DuplexU32Dart? _duplexCapacity;
+  bool _duplexEndpointBindingsLookedUp = false;
+  bool _duplexAbiValidated = false;
+  final List<_FfiPocketDuplexEndpoint> _duplexEndpoints =
+      <_FfiPocketDuplexEndpoint>[];
   bool _disposed = false;
 
   /// Opens a real QuickJS/PocketJS host. [tickHz] must match the bundle's
@@ -679,6 +732,176 @@ final class FfiPocketRuntime implements PocketRuntime, PocketBytecodeRuntime {
   }
 
   @override
+  bool get duplexRuntimeAlive => !_disposed;
+
+  /// Returns the retained native SPSC endpoint when all atomic reserve/commit
+  /// symbols are present. Older libraries return null and are rejected by
+  /// [PocketDuplexChannel.fromRuntime] instead of falling back to a raw ring
+  /// view. The native header/cursors are never exposed to Dart.
+  @override
+  PocketDuplexEndpoint? get duplexEndpoint {
+    _checkAlive();
+    final bindings = _lookupDuplexEndpointBindings();
+    if (bindings == null) return null;
+    if (!_duplexAbiValidated) {
+      final abiVersion = bindings.abiVersion();
+      final messageSize = bindings.messageSize();
+      final capacity = bindings.capacity();
+      if (abiVersion != 2 ||
+          messageSize != PocketDuplexChannel.messageByteSize ||
+          capacity != PocketDuplexChannel.ringCapacity - 1) {
+        throw PocketRuntimeException(
+          'Pocket duplex ABI mismatch: version=$abiVersion '
+          'messageSize=$messageSize capacity=$capacity',
+        );
+      }
+      _duplexAbiValidated = true;
+    }
+
+    // Deliberately acquire on every channel construction. Native owns both
+    // SPSC role claims in this retained endpoint; a second endpoint must be
+    // rejected by those atomics, including construction in another isolate.
+    // A Dart-side cached bool would not provide that guarantee.
+    final endpoint = bindings.acquire(_handle);
+    if (endpoint.address == 0) {
+      throw StateError(
+        'Pocket native duplex endpoint claim rejected; '
+        'the SPSC producer/consumer lease is already in use',
+      );
+    }
+    final retained = _FfiPocketDuplexEndpoint(
+      handle: endpoint,
+      release: bindings.release,
+      releasePointer: bindings.releasePointer,
+      reserveIngress: bindings.reserveIngress,
+      publishIngress: bindings.publishIngress,
+      peekEgress: bindings.peekEgress,
+      consumeEgress: bindings.consumeEgress,
+    );
+    _duplexEndpoints.add(retained);
+    return retained;
+  }
+
+  _FfiPocketDuplexBindings? _lookupDuplexEndpointBindings() {
+    if (_duplexEndpointBindingsLookedUp) {
+      final acquire = _duplexEndpointAcquire;
+      final release = _duplexEndpointRelease;
+      final releasePointer = _duplexEndpointReleasePointer;
+      final reserveIngress = _duplexIngressReserve;
+      final publishIngress = _duplexIngressPublish;
+      final peekEgress = _duplexEgressPeek;
+      final consumeEgress = _duplexEgressConsume;
+      final abiVersion = _duplexAbiVersion;
+      final messageSize = _duplexMessageSize;
+      final capacity = _duplexCapacity;
+      if (acquire == null ||
+          release == null ||
+          releasePointer == null ||
+          reserveIngress == null ||
+          publishIngress == null ||
+          peekEgress == null ||
+          consumeEgress == null ||
+          abiVersion == null ||
+          messageSize == null ||
+          capacity == null) {
+        return null;
+      }
+      return _FfiPocketDuplexBindings(
+        acquire: acquire,
+        release: release,
+        releasePointer: releasePointer,
+        reserveIngress: reserveIngress,
+        publishIngress: publishIngress,
+        peekEgress: peekEgress,
+        consumeEgress: consumeEgress,
+        abiVersion: abiVersion,
+        messageSize: messageSize,
+        capacity: capacity,
+      );
+    }
+    _duplexEndpointBindingsLookedUp = true;
+    try {
+      _duplexEndpointAcquire = _library
+          .lookupFunction<
+            _DuplexEndpointAcquireNative,
+            _DuplexEndpointAcquireDart
+          >('pocket_duplex_endpoint_acquire');
+      _duplexEndpointRelease = _library
+          .lookupFunction<
+            _DuplexEndpointReleaseNative,
+            _DuplexEndpointReleaseDart
+          >('pocket_duplex_endpoint_release');
+      _duplexEndpointReleasePointer = _library
+          .lookup<NativeFunction<_DuplexEndpointReleaseNative>>(
+            'pocket_duplex_endpoint_release',
+          );
+      _duplexIngressReserve = _library
+          .lookupFunction<_DuplexReserveNative, _DuplexReserveDart>(
+            'pocket_duplex_ingress_reserve',
+          );
+      _duplexIngressPublish = _library
+          .lookupFunction<_DuplexCommitNative, _DuplexCommitDart>(
+            'pocket_duplex_ingress_publish',
+          );
+      _duplexEgressPeek = _library
+          .lookupFunction<_DuplexPeekNative, _DuplexPeekDart>(
+            'pocket_duplex_egress_peek',
+          );
+      _duplexEgressConsume = _library
+          .lookupFunction<_DuplexCommitNative, _DuplexCommitDart>(
+            'pocket_duplex_egress_consume',
+          );
+      _duplexAbiVersion = _library.lookupFunction<
+        _DuplexU32Native,
+        _DuplexU32Dart
+      >('pocket_duplex_abi_version');
+      _duplexMessageSize = _library.lookupFunction<
+        _DuplexU32Native,
+        _DuplexU32Dart
+      >('pocket_duplex_message_size');
+      _duplexCapacity = _library.lookupFunction<
+        _DuplexU32Native,
+        _DuplexU32Dart
+      >('pocket_duplex_capacity');
+    } on Object {
+      _duplexEndpointAcquire = null;
+      _duplexEndpointRelease = null;
+      _duplexEndpointReleasePointer = null;
+      _duplexIngressReserve = null;
+      _duplexIngressPublish = null;
+      _duplexEgressPeek = null;
+      _duplexEgressConsume = null;
+      _duplexAbiVersion = null;
+      _duplexMessageSize = null;
+      _duplexCapacity = null;
+    }
+    return _lookupDuplexEndpointBindings();
+  }
+
+  @override
+  int duplexStep() {
+    _checkAlive();
+    final step = _lookupDuplexStep();
+    if (step == null) return 0;
+    final result = step(_handle);
+    if (result < 0) _throwLastError('pocket_duplex_step failed');
+    return result;
+  }
+
+  _DuplexStepDart? _lookupDuplexStep() {
+    if (_duplexStepLookedUp) return _duplexStep;
+    _duplexStepLookedUp = true;
+    try {
+      _duplexStep = _library.lookupFunction<_DuplexStepNative, _DuplexStepDart>(
+        'pocket_duplex_step',
+      );
+    } on Object {
+      _duplexStep = null;
+    }
+    return _duplexStep;
+  }
+
+  @override
   void send(Map<String, dynamic> message) {
     _checkAlive();
     final encoded = jsonEncode(message);
@@ -698,6 +921,10 @@ final class FfiPocketRuntime implements PocketRuntime, PocketBytecodeRuntime {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    for (final endpoint in _duplexEndpoints) {
+      endpoint.close();
+    }
+    _duplexEndpoints.clear();
     _destroy(_handle);
   }
 
@@ -709,6 +936,176 @@ final class FfiPocketRuntime implements PocketRuntime, PocketBytecodeRuntime {
 
   Never _throwLastError(String fallback) {
     throw PocketRuntimeException(lastError ?? fallback);
+  }
+}
+
+final class _FfiPocketDuplexBindings {
+  const _FfiPocketDuplexBindings({
+    required this.acquire,
+    required this.release,
+    required this.releasePointer,
+    required this.reserveIngress,
+    required this.publishIngress,
+    required this.peekEgress,
+    required this.consumeEgress,
+  });
+
+  final _DuplexEndpointAcquireDart acquire;
+  final _DuplexEndpointReleaseDart release;
+  final Pointer<NativeFunction<_DuplexEndpointReleaseNative>> releasePointer;
+  final _DuplexReserveDart reserveIngress;
+  final _DuplexCommitDart publishIngress;
+  final _DuplexPeekDart peekEgress;
+  final _DuplexCommitDart consumeEgress;
+}
+
+// Keep the native finalizer objects reachable for the lifetime of the isolate.
+// The callback pointer belongs to the loaded Pocket library, so one finalizer
+// per callback address is sufficient for all endpoint leases in that isolate.
+final Map<int, NativeFinalizer> _pocketDuplexNativeFinalizers =
+    <int, NativeFinalizer>{};
+
+NativeFinalizer _pocketDuplexNativeFinalizer(
+  Pointer<NativeFunction<_DuplexEndpointReleaseNative>> callback,
+) => _pocketDuplexNativeFinalizers.putIfAbsent(
+  callback.address,
+  () => NativeFinalizer(callback),
+);
+
+final _pocketDuplexScratchFinalizer = Finalizer<_FfiDuplexScratch>(
+  (scratch) => scratch.dispose(),
+);
+
+final class _FfiDuplexScratch {
+  _FfiDuplexScratch()
+    : ingressCount = calloc<Uint32>(),
+      egressCount = calloc<Uint32>();
+
+  final Pointer<Uint32> ingressCount;
+  final Pointer<Uint32> egressCount;
+  bool _disposed = false;
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    calloc.free(ingressCount);
+    calloc.free(egressCount);
+  }
+}
+
+/// FFI adapter for the retained native SPSC endpoint. Native owns cursor
+/// publication; Dart only receives borrowed payload views and commits counts
+/// through atomic native calls. The endpoint contains no `ByteData` cursor
+/// access. Its lease is not transferable through Dart isolates: an embedding
+/// that needs a background producer/consumer must expose an opaque native
+/// retain/claim token and reconstruct the endpoint there. The QuickJS step
+/// remains owner-thread-only.
+final class _FfiPocketDuplexEndpoint
+    implements PocketDuplexEndpoint, Finalizable {
+  _FfiPocketDuplexEndpoint({
+    required Pointer<Void> handle,
+    required _DuplexEndpointReleaseDart release,
+    required Pointer<NativeFunction<_DuplexEndpointReleaseNative>>
+    releasePointer,
+    required _DuplexReserveDart reserveIngress,
+    required _DuplexCommitDart publishIngress,
+    required _DuplexPeekDart peekEgress,
+    required _DuplexCommitDart consumeEgress,
+  }) : _handle = handle,
+       _release = release,
+       _reserveIngress = reserveIngress,
+       _publishIngress = publishIngress,
+       _peekEgress = peekEgress,
+       _consumeEgress = consumeEgress,
+       _scratch = _FfiDuplexScratch(),
+       _nativeFinalizer = _pocketDuplexNativeFinalizer(releasePointer) {
+    _nativeFinalizer.attach(this, handle, detach: this);
+    _pocketDuplexScratchFinalizer.attach(this, _scratch, detach: this);
+  }
+
+  final Pointer<Void> _handle;
+  final _DuplexEndpointReleaseDart _release;
+  final _DuplexReserveDart _reserveIngress;
+  final _DuplexCommitDart _publishIngress;
+  final _DuplexPeekDart _peekEgress;
+  final _DuplexCommitDart _consumeEgress;
+  final _FfiDuplexScratch _scratch;
+  final NativeFinalizer _nativeFinalizer;
+  // Reserve and peek can legitimately run concurrently: they are the two
+  // independent SPSC lanes of one endpoint. Keep a count cell per lane so a
+  // producer cannot overwrite the consumer's out-count between the native
+  // reserve call and its view construction. These are allocated once per
+  // endpoint, never once per message/call.
+  bool _closed = false;
+
+  @override
+  bool get isNativeZeroCopy => true;
+
+  @override
+  Uint8List? reserveIngress(int maxMessages) {
+    _ensureOpen();
+    if (maxMessages < 1) throw RangeError.value(maxMessages, 'maxMessages');
+    _scratch.ingressCount.value = 0;
+    final pointer = _reserveIngress(
+      _handle,
+      maxMessages,
+      _scratch.ingressCount,
+    );
+    return _view(pointer, _scratch.ingressCount.value, maxMessages, 'ingress');
+  }
+
+  @override
+  void publishIngress(int messageCount) {
+    _ensureOpen();
+    _commit(_publishIngress, messageCount, 'ingress publish');
+  }
+
+  @override
+  Uint8List? peekEgress(int maxMessages) {
+    _ensureOpen();
+    if (maxMessages < 1) throw RangeError.value(maxMessages, 'maxMessages');
+    _scratch.egressCount.value = 0;
+    final pointer = _peekEgress(_handle, maxMessages, _scratch.egressCount);
+    return _view(pointer, _scratch.egressCount.value, maxMessages, 'egress');
+  }
+
+  @override
+  void consumeEgress(int messageCount) {
+    _ensureOpen();
+    _commit(_consumeEgress, messageCount, 'egress consume');
+  }
+
+  @override
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    _nativeFinalizer.detach(this);
+    _pocketDuplexScratchFinalizer.detach(this);
+    _release(_handle);
+    _scratch.dispose();
+  }
+
+  void _ensureOpen() {
+    if (_closed) throw StateError('Pocket duplex endpoint is closed');
+  }
+
+  static Uint8List? _view(
+    Pointer<Uint8> pointer,
+    int count,
+    int requested,
+    String lane,
+  ) {
+    if (pointer.address == 0 || count == 0) return null;
+    if (count > requested) {
+      throw StateError('native $lane reservation exceeds requested batch');
+    }
+    return pointer.asTypedList(count * PocketDuplexEndpoint.messageByteSize);
+  }
+
+  void _commit(_DuplexCommitDart commit, int count, String operation) {
+    if (count < 1) throw RangeError.value(count, 'messageCount');
+    final result = commit(_handle, count);
+    if (result != 1) throw PocketRuntimeException('$operation failed');
   }
 }
 

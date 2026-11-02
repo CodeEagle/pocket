@@ -12,7 +12,7 @@
  *   bun pocket.ts editor <directory> [--port=8790]
  */
 
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -68,11 +68,25 @@ function slugForDirectory(directory: string): string {
 
 function takeFlag(args: string[], name: string): string | undefined {
   const prefix = `--${name}=`;
-  const index = args.findIndex((arg) => arg.startsWith(prefix));
-  if (index < 0) return undefined;
-  const value = args.splice(index, 1)[0]!.slice(prefix.length);
-  if (!value) fail(`--${name} requires a value`);
-  return value;
+  const flag = `--${name}`;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg.startsWith(prefix)) {
+      args.splice(i, 1);
+      const value = arg.slice(prefix.length);
+      if (!value) fail(`--${name} requires a value`);
+      return value;
+    }
+    if (arg === flag) {
+      if (i + 1 >= args.length || args[i + 1]!.startsWith("-")) {
+        fail(`--${name} requires a value`);
+      }
+      args.splice(i, 1);
+      const value = args.splice(i, 1)[0]!;
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function takeBooleanFlag(args: string[], name: string): boolean {
@@ -374,6 +388,24 @@ function prepareFlutterDependencies(flutterDirectory: string, required: boolean)
 
 type NativePlatform = "ios-sim" | "ios" | "macos";
 
+function newestMtimeMs(targetPath: string): number {
+  if (!existsSync(targetPath)) return 0;
+  const stat = statSync(targetPath);
+  if (!stat.isDirectory()) return stat.mtimeMs;
+  let newest = stat.mtimeMs;
+  for (const entry of readdirSync(targetPath, { withFileTypes: true })) {
+    const full = join(targetPath, entry.name);
+    if (entry.isDirectory()) {
+      newest = Math.max(newest, newestMtimeMs(full));
+    } else {
+      try {
+        newest = Math.max(newest, statSync(full).mtimeMs);
+      } catch {}
+    }
+  }
+  return newest;
+}
+
 function prepareNative(sdk: string, platform: NativePlatform): void {
   const packageRoot = join(sdk, "packages/pocket_flutter");
   const archive = platform === "macos"
@@ -382,7 +414,11 @@ function prepareNative(sdk: string, platform: NativePlatform): void {
   const stampPath = join(sdk, ".pocket-build/sdk-native/current.json");
   let stamp: JsonObject | undefined;
   try { stamp = readJson(stampPath); } catch { stamp = undefined; }
-  if (stamp?.platform === platform && existsSync(archive)) {
+  const nativeSrc = join(sdk, "native/src");
+  const nativeCargo = join(sdk, "native/Cargo.toml");
+  const newestSrcMtime = Math.max(newestMtimeMs(nativeSrc), newestMtimeMs(nativeCargo));
+  const archiveMtime = existsSync(archive) ? statSync(archive).mtimeMs : 0;
+  if (stamp?.platform === platform && existsSync(archive) && newestSrcMtime <= archiveMtime) {
     console.log(`pocket: native ${platform} archive already prepared: ${archive}`);
     return;
   }
@@ -393,6 +429,14 @@ function prepareNative(sdk: string, platform: NativePlatform): void {
   if (result.error) throw result.error;
   if (result.status !== 0 || !existsSync(archive)) fail(`native ${platform} build did not produce ${archive}`);
   writeJson(stampPath, { platform, archive, generatedAt: new Date().toISOString() });
+}
+
+function scaffoldTest(flutterDirectory: string, appId: string): void {
+  mkdirSync(join(flutterDirectory, "test"), { recursive: true });
+  writeFileSync(
+    join(flutterDirectory, "test/widget_test.dart"),
+    `import 'package:flutter_test/flutter_test.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  testWidgets('PocketAppConfig constructs and validates configuration', (tester) async {\n    const config = PocketAppConfig(\n      appId: '${appId.replaceAll("'", "\\'")}',\n    );\n    expect(config.appId, equals('${appId.replaceAll("'", "\\'")}'));\n    expect(config.bytecodeAsset, equals('assets/app.qjbc'));\n    expect(config.manifestAsset, equals('assets/guest-manifest.json'));\n    expect(config.pakAsset, equals('assets/app.pak'));\n  });\n}\n`,
+  );
 }
 
 function createFlutterHost(project: string, sdk: string, appId: string, hardware: boolean): void {
@@ -431,7 +475,7 @@ function createFlutterHost(project: string, sdk: string, appId: string, hardware
     ? "enableHardware: true,\n    allowedPermissions: HardwarePermissions.all,\n  "
     : "";
   writeFileSync(join(flutterDirectory, "lib/main.dart"), `import 'package:flutter/material.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  WidgetsFlutterBinding.ensureInitialized();\n  runApp(PocketApp(config: PocketAppConfig(\n    appId: '${appId.replaceAll("'", "\\'")}',\n    ${hardwareConfig})));\n}\n`);
-  writeFileSync(join(flutterDirectory, "test/widget_test.dart"), `import 'package:flutter_test/flutter_test.dart';\n\nvoid main() {\n  testWidgets('Pocket SDK scaffold has a test target', (tester) async {\n    expect(tester, isNotNull);\n  });\n}\n`);
+  scaffoldTest(flutterDirectory, appId);
   // `flutter create --no-pub` does not materialize ios/Podfile. Resolve the
   // generated local SDK dependency once so the iOS policy can be applied to
   // the real Podfile, while retaining a useful source-only init without

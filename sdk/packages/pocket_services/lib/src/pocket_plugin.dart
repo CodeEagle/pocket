@@ -35,18 +35,24 @@ final class PocketPluginCapability {
     required this.name,
     required this.kind,
     this.description = '',
+    this.permissions,
   });
 
   final String name;
   final PocketCapabilityKind kind;
   final String description;
+  final Set<String>? permissions;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'name': name,
     'kind': kind.name,
     if (description.isNotEmpty) 'description': description,
+    if (permissions != null && permissions!.isNotEmpty)
+      'permissions': permissions!.toList()..sort(),
   };
 }
+
+typedef PocketPluginMethod = PocketPluginCapability;
 
 final class PocketPluginLimits {
   const PocketPluginLimits({
@@ -439,7 +445,12 @@ final class PocketPluginManager {
     if (requestedPermissions != null) {
       final requested = _validatePermissions(requestedPermissions);
       final declared = _plugins.values
-          .expand((state) => state.plugin.descriptor.permissions)
+          .expand((state) {
+            final desc = state.plugin.descriptor;
+            final methodPerms = desc.capabilities.values
+                .expand((m) => m.permissions ?? desc.permissions);
+            return desc.permissions.followedBy(methodPerms);
+          })
           .toSet();
       final undeclared = requested.difference(declared);
       if (undeclared.isNotEmpty)
@@ -475,12 +486,19 @@ final class PocketPluginManager {
         final shouldActivate = names.any(granted.contains);
         if (!shouldActivate || state.active) continue;
         final requiredCapability = names.any(availability.required.contains);
+        final grantedMethods = descriptor.capabilities.values
+            .where((method) => granted.contains(method.name));
+        final requiredPermissions = (grantedMethods.isEmpty
+                ? descriptor.capabilities.values
+                : grantedMethods)
+            .expand((method) => method.permissions ?? descriptor.permissions)
+            .toSet();
         // A missing guest declaration is an empty declaration, never an
         // implicit grant of every permission declared by a provider.
-        final requested = descriptor.permissions.intersection(
+        final requested = requiredPermissions.intersection(
           _guestRequestedPermissions ?? const <String>{},
         );
-        final notDeclared = descriptor.permissions.difference(requested);
+        final notDeclared = requiredPermissions.difference(requested);
         if (notDeclared.isNotEmpty) {
           if (requiredCapability) {
             host.revokeCapabilities(names);
@@ -589,6 +607,46 @@ final class PocketPluginManager {
     if (_disposed) throw StateError('PocketPluginManager is disposed');
   }
 
+  Set<String> grantedPermissionsFor(String pluginId) =>
+      _grantedPermissions[pluginId] ?? allowedPermissions;
+
+  Future<Object?> invoke(
+    String capabilityName, [
+    Map<String, dynamic> params = const <String, dynamic>{},
+  ]) async {
+    _ensureOpen();
+    for (final state in _plugins.values) {
+      final method = state.plugin.descriptor.capabilities[capabilityName];
+      if (method != null) {
+        final plugin = state.plugin;
+        final grantedPermissions =
+            _grantedPermissions[plugin.descriptor.id] ?? allowedPermissions;
+        final requiredPermissions =
+            method.permissions ?? plugin.descriptor.permissions;
+        final missingPermissions =
+            requiredPermissions.difference(grantedPermissions);
+        if (missingPermissions.isNotEmpty) {
+          throw PocketCapabilityException(
+            'plugin_permission_denied',
+            'missing permissions: ${missingPermissions.toList()..sort()}',
+          );
+        }
+        final registration = host.registry.registrationFor(capabilityName);
+        if (registration?.request == null) {
+          throw PocketCapabilityException(
+            'capability_unavailable',
+            'request provider is unavailable',
+          );
+        }
+        return await registration!.request!(params);
+      }
+    }
+    throw PocketCapabilityException(
+      'capability_not_found',
+      'capability $capabilityName not found',
+    );
+  }
+
   PocketPluginBudget _budgetFor(PocketPluginDescriptor descriptor) {
     final limits = descriptor.limits;
     int min(int base, int? value) => value == null
@@ -640,9 +698,18 @@ final class PocketPluginManager {
     for (final capability in descriptor.capabilities.values) {
       if (!PocketCapabilityName.isValid(capability.name))
         throw ArgumentError.value(capability.name, 'plugin.capabilities');
+      if (capability.permissions != null) {
+        for (final permission in capability.permissions!) {
+          if (!PocketPermissionName.isValid(permission)) {
+            throw ArgumentError.value(permission, 'capability.permissions');
+          }
+        }
+      }
     }
   }
 }
+
+typedef PocketPluginRegistry = PocketPluginManager;
 
 final class PocketPluginSession {
   PocketPluginSession(this.manager);

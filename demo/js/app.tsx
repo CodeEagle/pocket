@@ -376,6 +376,11 @@ function App() {
   const isShowcaseRoute = (route: Route): boolean =>
     route === "mobile" || route === "transitions" || route === "glass" || route === "hardware";
 
+  const nowMs = (): number =>
+    typeof globalThis.performance !== "undefined" && typeof globalThis.performance.now === "function"
+      ? globalThis.performance.now()
+      : Date.now();
+
   createEffect(() => {
     const nextRoute = state().route;
     if (nextRoute === previousRoute) return;

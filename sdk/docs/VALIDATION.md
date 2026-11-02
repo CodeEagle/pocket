@@ -6,7 +6,7 @@
 
 | 验证 | 已执行结果 |
 | --- | --- |
-| 固定上游准备、6 个补丁、guest 编译 | 完整 `bash scripts/test_guest.sh` 通过；幂等 prepare；子代理在 pristine 固定 revision 临时目录应用全部补丁通过 |
+| 固定上游准备、6 个补丁、guest 编译 | 完整 `python3 scripts/prepare_upstream.py` 与 `bun scripts/build_guest.ts demo/js --out ../demo/assets` 通过；幂等 prepare；子代理在 pristine 固定 revision 临时目录应用全部补丁通过 |
 | QuickJS bytecode 编译 / 加载 | 真实 JS_EVAL_FLAG_COMPILE_ONLY + JS_WriteObject；运行时 JS_ReadObject + JS_EvalFunction；宿主不打包 app.js |
 | Rust 单元测试 | 9/9 通过；格式、ABI、摘要、真实运行与输入路径 |
 | 静态 native probe | qjbc 加载、ABI、host request/response、真实 pointer、状态和导航通过 |
@@ -118,10 +118,10 @@ flutter drive --driver=test_driver/showcase.dart \
 
 ## 公共 SDK 集成回归（2026-11-02）
 
-- `packages/pocket_sdk`：3 个会话测试通过，包含独立 appId、外部 plugin factory、必需能力拒绝、初始化中关闭；analyze 无问题。
+- `sdk/test`（Session 集成测试）：3 个会话测试通过，包含独立 appId、外部 plugin factory、必需能力拒绝、初始化中关闭；analyze 无问题。
 - `packages/pocket_flutter`：最终 25 个测试通过，analyze 无问题；包括原生几何坐标转换、错帧延迟、嵌套/固定视口、FPS 安全区和既有输入/绘制回归。
 - `packages/pocket_services`：14 项通过；签名发布工具 10 项 / 92 assertions 通过。
-- `host/test`：公共 SDK 迁移后 13 项通过，硬件测试直接导入 `pocket_hardware`，不再依赖 host 私有 adapter。
+- `demo/test`：公共 SDK 迁移后 13 项通过，硬件测试直接导入 `pocket_hardware`，不再依赖 host 私有 adapter。
 - iPhone Duo `hardware_native_test.dart` 在自动插件注册后再次通过：真实 qjbc 页面启动、原生 MethodChannel 可用性/不支持错误和清理。仍不代表物理相机、BLE、定位等真机能力验收。
 - 独立临时工程通过 `init → build --platform=ios-sim → flutter analyze → flutter build ios --simulator --no-codesign`；SDK 未反向依赖 Showcase 的 `demo/lib` 或 `demo/js`。
 

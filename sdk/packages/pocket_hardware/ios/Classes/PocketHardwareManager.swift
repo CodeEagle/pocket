@@ -162,13 +162,19 @@ final class PocketHardwareManager: NSObject,
           status: bluetoothStatusString(),
           granted: CBCentralManager.authorization == .allowedAlways
         ),
-        "sensors": permissionState(
-          supported: CMMotionManager().isDeviceMotionAvailable ||
-            CMAltimeter.isRelativeAltitudeAvailable(),
-          status: "available",
-          granted: CMMotionManager().isDeviceMotionAvailable ||
-            CMAltimeter.isRelativeAltitudeAvailable()
-        ),
+        "sensors": {
+          let supported = CMMotionManager().isDeviceMotionAvailable || CMAltimeter.isRelativeAltitudeAvailable()
+          switch CMAltimeter.authorizationStatus() {
+          case .authorized:
+            return permissionState(supported: supported, status: "granted", granted: true)
+          case .denied, .restricted:
+            return permissionState(supported: supported, status: "denied", granted: false)
+          case .notDetermined:
+            return permissionState(supported: supported, status: "notDetermined", granted: false)
+          @unknown default:
+            return permissionState(supported: supported, status: "notDetermined", granted: false)
+          }
+        }(),
         "biometrics": permissionState(
           supported: biometricSupported,
           status: biometricSupported ? "available" : "unavailable",
@@ -282,10 +288,19 @@ final class PocketHardwareManager: NSObject,
       }
     case "sensors":
       let supported = CMMotionManager().isDeviceMotionAvailable || CMAltimeter.isRelativeAltitudeAvailable()
-      if supported {
-        result(["ok": true, "permission": permission, "granted": true, "status": "available", "realHardware": true])
-      } else {
+      guard supported else {
         result(error(code: "hardware_unsupported", message: "motion and barometer sensors are unavailable"))
+        return
+      }
+      switch CMAltimeter.authorizationStatus() {
+      case .authorized:
+        result(["ok": true, "permission": permission, "granted": true, "status": "granted", "realHardware": true])
+      case .denied, .restricted:
+        result(["ok": true, "permission": permission, "granted": false, "status": "denied", "realHardware": true])
+      case .notDetermined:
+        result(["ok": true, "permission": permission, "granted": false, "status": "notDetermined", "realHardware": true])
+      @unknown default:
+        result(["ok": true, "permission": permission, "granted": false, "status": "notDetermined", "realHardware": true])
       }
     case "biometrics":
       let context = LAContext()
@@ -409,7 +424,12 @@ final class PocketHardwareManager: NSObject,
       self.videoOutput = nil
       self.photoOutput = nil
       self.cameraDevice = nil
-      self.pendingPhotoResult = nil
+      if let pending = self.pendingPhotoResult {
+        self.pendingPhotoResult = nil
+        self.main {
+          pending(FlutterError(code: "cancelled", message: "Camera preview stopped before photo capture completed", details: nil))
+        }
+      }
       if let id = self.textureId, let registry = self.textureRegistry {
         registry.unregisterTexture(id)
       }
@@ -462,6 +482,11 @@ final class PocketHardwareManager: NSObject,
           self.main { callback(self.error(code: "plugin_revoked", message: "hardware session disposed")) }
         }
         self.pendingConnections.removeAll()
+        for peripheral in self.discovered.values {
+          if peripheral.state == .connected || peripheral.state == .connecting {
+            self.central?.cancelPeripheralConnection(peripheral)
+          }
+        }
         self.connectionTimeouts.values.forEach { $0.cancel() }
         self.connectionTimeouts.removeAll()
       }
@@ -926,30 +951,30 @@ final class PocketHardwareManager: NSObject,
         result(self.error(code: "hardware_unsupported", message: "location services are disabled"))
         return
       }
+      guard self.pendingLocationResult == nil else {
+        result(self.error(code: "hardware_busy", message: "location request is already pending"))
+        return
+      }
+      self.pendingLocationResult = result
+      let timeout = DispatchWorkItem { [weak self] in
+        guard let self = self, let callback = self.pendingLocationResult else { return }
+        self.pendingLocationResult = nil
+        self.locationTimeout = nil
+        callback(self.error(code: "hardware_location_timeout", message: "location request timed out"))
+      }
+      self.locationTimeout = timeout
+      DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
+
       let manager = self.ensureLocationManager()
       switch manager.authorizationStatus {
       case .notDetermined:
-        guard self.pendingLocationResult == nil else {
-          result(self.error(code: "hardware_busy", message: "location request is already pending"))
-          return
-        }
-        self.pendingLocationResult = result
         manager.requestWhenInUseAuthorization()
       case .authorizedAlways, .authorizedWhenInUse:
-        guard self.pendingLocationResult == nil else {
-          result(self.error(code: "hardware_busy", message: "location request is already pending"))
-          return
-        }
-        self.pendingLocationResult = result
         manager.requestLocation()
-        let timeout = DispatchWorkItem {
-          guard let callback = self.pendingLocationResult else { return }
-          self.pendingLocationResult = nil
-          callback(self.error(code: "hardware_location_timeout", message: "no location fix was received"))
-        }
-        self.locationTimeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
       default:
+        self.pendingLocationResult = nil
+        self.locationTimeout?.cancel()
+        self.locationTimeout = nil
         result(self.error(code: "hardware_permission_denied", message: "location permission is denied"))
       }
     }
@@ -971,6 +996,7 @@ final class PocketHardwareManager: NSObject,
         let timeout = DispatchWorkItem { [weak self] in
           guard let self = self, let callback = self.pendingLocationResult else { return }
           self.pendingLocationResult = nil
+          self.locationTimeout = nil
           callback(self.error(code: "hardware_location_timeout", message: "no location fix was received"))
         }
         locationTimeout = timeout
@@ -978,6 +1004,8 @@ final class PocketHardwareManager: NSObject,
       }
     } else if let callback = pendingLocationResult, status != .notDetermined {
       pendingLocationResult = nil
+      locationTimeout?.cancel()
+      locationTimeout = nil
       callback(error(code: "hardware_permission_denied", message: "location permission is denied"))
     }
   }

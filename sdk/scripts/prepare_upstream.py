@@ -101,19 +101,32 @@ def apply_patch(filename: str, label: str) -> None:
     # patch's context lines. In that case reverse dry-run cannot recognize a
     # complete application; verify every non-empty added line before failing.
     patch_text = patch_bytes.decode("utf-8")
-    target_name = next(
-        (line[6:].strip() for line in patch_text.splitlines() if line.startswith("+++ b/")),
-        "",
-    )
-    added = [
-        line[1:]
-        for line in patch_text.splitlines()
-        if line.startswith("+") and not line.startswith("+++") and line[1:]
-    ]
-    target = CACHE / target_name if target_name else None
-    if target is not None and target.is_file():
-        body = target.read_text(encoding="utf-8")
-        if added and all(line in body for line in added):
+    sections: dict[str, list[str]] = {}
+    current_target: str | None = None
+    for line in patch_text.splitlines():
+        if line.startswith("+++ b/"):
+            current_target = line[6:].strip()
+            if current_target not in sections:
+                sections[current_target] = []
+        elif line.startswith("+") and not line.startswith("+++"):
+            added_line = line[1:]
+            if added_line and current_target:
+                sections[current_target].append(added_line)
+
+    if sections:
+        all_matched = True
+        for target_name, added_lines in sections.items():
+            if not added_lines:
+                continue
+            target = CACHE / target_name
+            if not target.is_file():
+                all_matched = False
+                break
+            body = target.read_text(encoding="utf-8")
+            if not all(added_line in body for added_line in added_lines):
+                all_matched = False
+                break
+        if all_matched:
             print(f"PocketJS {label}: already present (content check)")
             return
     detail = forward.stdout.decode("utf-8", errors="replace").strip()

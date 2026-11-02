@@ -18,6 +18,12 @@ import {
   MOBILE_THEME_DARK,
   MOBILE_THEME_LIGHT,
   MobileThemeProvider,
+  FlutterChip,
+  FlutterDivider,
+  FlutterFloatingActionButton,
+  FlutterIconButton,
+  FlutterLinearProgressIndicator,
+  FlutterNavigationDestination,
 } from "@pocket/ui";
 import {
   TRANSITION_MODES,
@@ -62,6 +68,7 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
   const [level, setLevel] = createSignal(3);
   const [draft, setDraft] = createSignal("");
   const [dialogOpen, setDialogOpen] = createSignal(false);
+  const [destination, setDestination] = createSignal("home");
   const toggleTheme = (): void => {
     const next = !dark();
     props.dispatch({ type: "setMobileDark", value: next });
@@ -87,6 +94,20 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
             <View class="flex-row gap-2">
               <MobileFilledButton label="Primary" onPress={() => props.dispatch({ type: "setTransitionMode", mode: "IOS_SPRING_PARALLAX" })} />
               <MobileButton label="Transitions" kind="outlined" onPress={() => props.dispatch({ type: "navigate", route: "transitions" })} />
+            </View>
+          </MobileCard>
+          <MobileCard title="Flutter widget vocabulary" detail="Public @pocket/ui adapters composed from official View/Text/Focusable.">
+            <View class="flex-row items-center gap-2">
+              <FlutterChip label="Chip" selected={enabled()} onPress={() => setEnabled((value) => !value)} />
+              <FlutterIconButton icon="⋯" tooltip="More" onPress={() => setDialogOpen(true)} />
+              <FlutterFloatingActionButton icon="+" tooltip="Increment" onPress={() => props.dispatch({ type: "increment" })} />
+            </View>
+            <FlutterDivider />
+            <Text class={dark() ? "text-xs text-slate-300" : "text-xs text-slate-600"}>LinearProgressIndicator · {level()}/10</Text>
+            <FlutterLinearProgressIndicator value={level() / 10} />
+            <View class="flex-row items-center gap-1">
+              <FlutterNavigationDestination icon="⌂" label="Home" selected={destination() === "home"} onPress={() => setDestination("home")} />
+              <FlutterNavigationDestination icon="◉" label="Library" selected={destination() === "library"} onPress={() => setDestination("library")} />
             </View>
           </MobileCard>
         </Show>

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -187,6 +188,8 @@ final class PocketUpdateCoordinator {
     this.maxTotalBytes = 768 * 1024 * 1024,
     this.expectedRuntimeAbi,
     this.requireBytecode = false,
+    this.minimumBuild = 0,
+    this.allowDowngrade = false,
     Iterable<String> debugHttpHosts = const <String>[],
   }) : transport = transport ?? HttpPocketUpdateTransport(),
        debugHttpHosts = Set<String>.unmodifiable(
@@ -209,6 +212,8 @@ final class PocketUpdateCoordinator {
   final int maxTotalBytes;
   final String? expectedRuntimeAbi;
   final bool requireBytecode;
+  final int minimumBuild;
+  final bool allowDowngrade;
   final Set<String> debugHttpHosts;
 
   PocketPackageStore get _store => store.scoped(appId);
@@ -240,6 +245,23 @@ final class PocketUpdateCoordinator {
     );
     final signed = await _fetchManifest(token, onProgress);
     await verifier.verify(signed);
+    final currentGood = await _store.lastGood(verifier: verifier) ??
+        await _store.active(verifier: verifier);
+    final floorBuild = math.max(
+      minimumBuild,
+      currentGood?.manifest.payload.build ?? 0,
+    );
+    final manifestVersionId = pocketVersionId(signed.payload);
+    if (!allowDowngrade) {
+      if (signed.payload.build < floorBuild ||
+          (signed.payload.build == floorBuild &&
+              currentGood != null &&
+              manifestVersionId != currentGood.versionId)) {
+        throw PocketPackageFormatException(
+          'Refusing downgrade or replay: package build ${signed.payload.build} is not newer than current build $floorBuild',
+        );
+      }
+    }
     final current = await _store.active(verifier: verifier);
     if (current != null &&
         current.manifest.payload.contentHash == signed.payload.contentHash) {
@@ -336,11 +358,13 @@ final class PocketUpdateCoordinator {
   Future<PocketPreparedPackage?> fallbackFor(
     PocketPreparedPackage failed,
   ) async {
-    final active = await _store.active(verifier: verifier);
-    if (active?.versionId == failed.package.versionId) {
-      await _store.rollback(verifier: verifier);
-    }
-    return lastGood();
+    final pkg = await _store.fallbackFor(
+      failed.package.versionId,
+      verifier: verifier,
+    );
+    return pkg == null
+        ? null
+        : PocketPreparedPackage(package: pkg, needsActivation: false);
   }
 
   Future<List<PocketVersionInfo>> listVersions() =>

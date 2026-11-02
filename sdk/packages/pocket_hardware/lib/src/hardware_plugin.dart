@@ -140,18 +140,30 @@ final class HardwarePlugin extends PocketPlugin {
     this.onTextureRegistered,
     this.onTextureReleased,
     this.requestTimeout = const Duration(seconds: 12),
+    Set<String>? grantedPermissions,
   })  : _platform = platform ?? MethodChannelHardwarePlatform(),
-        _weatherFetcher = weatherFetcher ?? _fetchOpenMeteo;
+        _weatherFetcher = weatherFetcher ?? _fetchOpenMeteo,
+        _grantedPermissions = grantedPermissions;
 
   final HardwarePlatform _platform;
   final HardwareWeatherFetcher _weatherFetcher;
   final HardwareTextureCallback? onTextureRegistered;
   final HardwareTextureCallback? onTextureReleased;
   final Duration requestTimeout;
+  final Set<String>? _grantedPermissions;
   int? _textureId;
   bool _stopped = true;
-  int _cameraEpoch = 0;
+  int _previewEpoch = 0;
   Future<void> _cameraTail = Future<void>.value();
+
+  void _checkPermission(String permission) {
+    if (_grantedPermissions != null && !_grantedPermissions.contains(permission)) {
+      throw PocketCapabilityException(
+        'permission_denied',
+        'permission $permission is not granted',
+      );
+    }
+  }
 
   @override
   PocketPluginDescriptor get descriptor => const PocketPluginDescriptor(
@@ -159,7 +171,7 @@ final class HardwarePlugin extends PocketPlugin {
         version: '1.0.0',
         description:
             'Compiled host camera, photos, BLE, sensors, biometrics, location and weather provider',
-        permissions: HardwarePermissions.all,
+        permissions: const <String>{},
         limits: PocketPluginLimits(
           maxConcurrentRequests: 4,
           maxResponseBytes: 512 * 1024,
@@ -169,62 +181,77 @@ final class HardwarePlugin extends PocketPlugin {
           HardwareCapabilities.permissions: PocketPluginCapability(
             name: HardwareCapabilities.permissions,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{},
           ),
           HardwareCapabilities.requestPermission: PocketPluginCapability(
             name: HardwareCapabilities.requestPermission,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{},
           ),
           HardwareCapabilities.cameraPreviewStart: PocketPluginCapability(
             name: HardwareCapabilities.cameraPreviewStart,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.camera},
           ),
           HardwareCapabilities.cameraPreviewStop: PocketPluginCapability(
             name: HardwareCapabilities.cameraPreviewStop,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.camera},
           ),
           HardwareCapabilities.cameraLensSwitch: PocketPluginCapability(
             name: HardwareCapabilities.cameraLensSwitch,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.camera},
           ),
           HardwareCapabilities.cameraFlashToggle: PocketPluginCapability(
             name: HardwareCapabilities.cameraFlashToggle,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.camera},
           ),
           HardwareCapabilities.cameraCapture: PocketPluginCapability(
             name: HardwareCapabilities.cameraCapture,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.camera},
           ),
           HardwareCapabilities.photosList: PocketPluginCapability(
             name: HardwareCapabilities.photosList,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.photos},
           ),
           HardwareCapabilities.photosDelete: PocketPluginCapability(
             name: HardwareCapabilities.photosDelete,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.photos},
           ),
           HardwareCapabilities.bluetoothScan: PocketPluginCapability(
             name: HardwareCapabilities.bluetoothScan,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.bluetooth},
           ),
           HardwareCapabilities.bluetoothConnect: PocketPluginCapability(
             name: HardwareCapabilities.bluetoothConnect,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.bluetooth},
           ),
           HardwareCapabilities.sensorsRead: PocketPluginCapability(
             name: HardwareCapabilities.sensorsRead,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.sensors},
           ),
           HardwareCapabilities.biometricAuthenticate: PocketPluginCapability(
             name: HardwareCapabilities.biometricAuthenticate,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.biometrics},
           ),
           HardwareCapabilities.locationCurrent: PocketPluginCapability(
             name: HardwareCapabilities.locationCurrent,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.location},
           ),
           HardwareCapabilities.weatherCurrent: PocketPluginCapability(
             name: HardwareCapabilities.weatherCurrent,
             kind: PocketCapabilityKind.request,
+            permissions: const <String>{HardwarePermissions.network},
           ),
         },
       );
@@ -243,20 +270,19 @@ final class HardwarePlugin extends PocketPlugin {
       );
     });
     context.registerRequest(HardwareCapabilities.cameraPreviewStart, (params) {
+      _checkPermission(HardwarePermissions.camera);
       return _startPreview(params);
     });
     context.registerRequest(HardwareCapabilities.cameraPreviewStop, (_) {
+      _checkPermission(HardwarePermissions.camera);
       return _stopPreview();
     });
     context.registerRequest(HardwareCapabilities.cameraLensSwitch, (params) {
-      final lens = params['lens'];
-      if (lens != null) _validateLens(lens);
-      return _native(
-        'switchCameraLens',
-        params: <String, dynamic>{if (lens != null) 'lens': lens},
-      );
+      _checkPermission(HardwarePermissions.camera);
+      return _switchCameraLens(params);
     });
     context.registerRequest(HardwareCapabilities.cameraFlashToggle, (params) {
+      _checkPermission(HardwarePermissions.camera);
       final mode = params['flash'];
       if (mode != null) _validateFlash(mode);
       return _native(
@@ -265,12 +291,15 @@ final class HardwarePlugin extends PocketPlugin {
       );
     });
     context.registerRequest(HardwareCapabilities.cameraCapture, (params) {
+      _checkPermission(HardwarePermissions.camera);
       return _native('capturePhoto', params: params);
     });
     context.registerRequest(HardwareCapabilities.photosList, (_) {
+      _checkPermission(HardwarePermissions.photos);
       return _native('listSavedPhotos');
     });
     context.registerRequest(HardwareCapabilities.photosDelete, (params) {
+      _checkPermission(HardwarePermissions.photos);
       final path = _string(params, 'filePath');
       if (path.trim().isEmpty) {
         throw const PocketCapabilityException(
@@ -284,6 +313,7 @@ final class HardwarePlugin extends PocketPlugin {
       );
     });
     context.registerRequest(HardwareCapabilities.bluetoothScan, (params) {
+      _checkPermission(HardwarePermissions.bluetooth);
       final timeoutMs = _boundedInt(
         params['timeoutMs'],
         field: 'timeoutMs',
@@ -298,6 +328,7 @@ final class HardwarePlugin extends PocketPlugin {
       );
     });
     context.registerRequest(HardwareCapabilities.bluetoothConnect, (params) {
+      _checkPermission(HardwarePermissions.bluetooth);
       final deviceId = _string(params, 'deviceId');
       if (deviceId.trim().isEmpty) {
         throw const PocketCapabilityException(
@@ -312,11 +343,13 @@ final class HardwarePlugin extends PocketPlugin {
       );
     });
     context.registerRequest(HardwareCapabilities.sensorsRead, (_) {
+      _checkPermission(HardwarePermissions.sensors);
       return _native('readSensors', timeout: const Duration(seconds: 3));
     });
     context.registerRequest(HardwareCapabilities.biometricAuthenticate, (
       params,
     ) {
+      _checkPermission(HardwarePermissions.biometrics);
       final reason = params['reason'] == null
           ? 'Authenticate to continue'
           : _string(params, 'reason');
@@ -333,12 +366,14 @@ final class HardwarePlugin extends PocketPlugin {
       );
     });
     context.registerRequest(HardwareCapabilities.locationCurrent, (_) {
+      _checkPermission(HardwarePermissions.location);
       return _native(
         'getCurrentLocation',
         timeout: const Duration(seconds: 30),
       );
     });
     context.registerRequest(HardwareCapabilities.weatherCurrent, (params) {
+      _checkPermission(HardwarePermissions.network);
       return _weather(params);
     });
   }
@@ -360,7 +395,7 @@ final class HardwarePlugin extends PocketPlugin {
   Future<Map<String, dynamic>> _startPreview(
     Map<String, dynamic> params,
   ) async {
-    final operationEpoch = ++_cameraEpoch;
+    final operationEpoch = ++_previewEpoch;
     return _serializeCamera(() async {
       final lens = params['lens'] ?? 'back';
       _validateLens(lens);
@@ -383,7 +418,7 @@ final class HardwarePlugin extends PocketPlugin {
           'camera preview did not return textureId, width and height',
         );
       }
-      if (operationEpoch != _cameraEpoch) {
+      if (operationEpoch != _previewEpoch) {
         // A deactivation/stop overtook this native call.  The native manager
         // may have created a session after the stop, so clean it up while the
         // camera operation tail still excludes a newer start.
@@ -393,24 +428,62 @@ final class HardwarePlugin extends PocketPlugin {
           'camera preview request completed after deactivation',
         );
       }
-      final previous = _textureId;
-      _textureId = textureId;
       _stopped = false;
-      if (previous != null && previous != textureId) {
-        onTextureReleased?.call(previous);
-      }
-      if (previous != textureId) onTextureRegistered?.call(textureId);
+      _registerTexture(textureId);
       return <String, dynamic>{
         ...result,
         'textureId': textureId,
+        'surfaceId': textureId,
         'width': width,
         'height': height,
       };
     });
   }
 
+  Future<Map<String, dynamic>> _switchCameraLens(
+    Map<String, dynamic> params,
+  ) async {
+    final lens = params['lens'];
+    if (lens != null) _validateLens(lens);
+    if (_stopped) {
+      return <String, dynamic>{
+        'stopped': true,
+        'lens': lens ?? 'back',
+      };
+    }
+    final epoch = ++_previewEpoch;
+    return _serializeCamera(() async {
+      if (_stopped || epoch != _previewEpoch) {
+        return <String, dynamic>{
+          'stopped': true,
+          'lens': lens ?? 'back',
+        };
+      }
+      final result = await _native(
+        'switchCameraLens',
+        params: <String, dynamic>{if (lens != null) 'lens': lens},
+        timeout: requestTimeout,
+      );
+      final surfaceId = _intFrom(result['surfaceId'] ?? result['textureId']);
+      if (_stopped || epoch != _previewEpoch) {
+        if (surfaceId != null && onTextureReleased != null) {
+          onTextureReleased?.call(surfaceId);
+        }
+        await _native('stopCameraPreview', timeout: requestTimeout);
+        return <String, dynamic>{
+          'stopped': true,
+          'lens': lens ?? 'back',
+        };
+      }
+      if (surfaceId != null) {
+        _registerTexture(surfaceId);
+      }
+      return result;
+    });
+  }
+
   Future<Map<String, dynamic>> _stopPreview() async {
-    ++_cameraEpoch;
+    ++_previewEpoch;
     return _serializeCamera(() async {
       try {
         final result = await _native(
@@ -431,7 +504,7 @@ final class HardwarePlugin extends PocketPlugin {
   }
 
   Future<void> _stopPreviewBestEffort() async {
-    ++_cameraEpoch;
+    ++_previewEpoch;
     if (_textureId == null && _stopped) return;
     try {
       await _stopPreview();
@@ -463,6 +536,17 @@ final class HardwarePlugin extends PocketPlugin {
     });
     _cameraTail = run.then<void>((_) {}, onError: (_, __) {});
     return completion.future;
+  }
+
+  void _registerTexture(int textureId) {
+    final previous = _textureId;
+    _textureId = textureId;
+    if (previous != null && previous != textureId) {
+      onTextureReleased?.call(previous);
+    }
+    if (previous != textureId) {
+      onTextureRegistered?.call(textureId);
+    }
   }
 
   void _releaseTexture() {

@@ -60,6 +60,8 @@ final class PocketViewController {
   /// exposes bytecode admission. Hosts can include this in runtime.info.
   String? get runtimeAbi => _runtime?.actualAbi;
 
+  VoidCallback? _onMessageSent;
+
   bool send({required String method, Map<String, dynamic> params = const {}}) {
     final runtime = _runtime;
     if (runtime == null) return false;
@@ -69,6 +71,7 @@ final class PocketViewController {
       'name': method,
       'payload': params,
     });
+    _onMessageSent?.call();
     return true;
   }
 
@@ -80,12 +83,18 @@ final class PocketViewController {
     final runtime = _runtime;
     if (runtime == null) return false;
     runtime.send(Map<String, dynamic>.from(message));
+    _onMessageSent?.call();
     return true;
   }
 
-  void _attach(PocketRuntime runtime, VoidCallback surfacesChanged) {
+  void _attach(
+    PocketRuntime runtime,
+    VoidCallback surfacesChanged, {
+    VoidCallback? onMessageSent,
+  }) {
     _runtime = runtime;
     _surfacesChanged = surfacesChanged;
+    _onMessageSent = onMessageSent;
   }
 
   void _detach(PocketRuntime runtime) {
@@ -93,6 +102,7 @@ final class PocketViewController {
       _runtime = null;
       _platformTextures.clear();
       _surfacesChanged = null;
+      _onMessageSent = null;
     }
   }
 }
@@ -234,6 +244,10 @@ final class _PocketCanvasGeometry {
   final Offset origin;
 }
 
+@visibleForTesting
+PocketFrame? Function(PocketRuntime runtime, double deltaMilliseconds)?
+debugPocketFrameDeltaAtOverride;
+
 class _PocketViewState extends State<PocketView>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   static final PocketDisplayGeometrySource _defaultDisplayGeometry =
@@ -307,7 +321,25 @@ class _PocketViewState extends State<PocketView>
   String? _scheduledOutsideTextInputId;
   Ticker? _ticker;
   Duration? _lastTick;
+  int _idleTicks = 0;
+  bool _isDisposed = false;
   double _firstFrameDeltaMs = 1000.0 / 60.0;
+
+  void _wakeTicker() {
+    _idleTicks = 0;
+    if (_isDisposed || _lifecyclePaused || !mounted || _runtime == null) return;
+    final ticker = _ticker;
+    if (ticker != null && !ticker.isActive) {
+      _lastTick = null;
+      ticker.start();
+    }
+  }
+
+  @visibleForTesting
+  int get idleTicks => _idleTicks;
+
+  @visibleForTesting
+  bool get isTickerActive => _ticker?.isActive ?? false;
   Object? _error;
   bool _loading = true;
   bool _ownsRuntime = false;
@@ -395,6 +427,7 @@ class _PocketViewState extends State<PocketView>
     // Register the inherited dependency explicitly; the actual lookup is
     // performed later from the host RenderBox after layout.
     MediaQuery.maybeOf(context);
+    _wakeTicker();
     _scheduleStartIfReady();
     _scheduleSafeAreaReport();
   }
@@ -410,6 +443,7 @@ class _PocketViewState extends State<PocketView>
     // an input-session close from a transient zero inset: iOS can publish a
     // zero while the keyboard is transitioning, and the Flutter focus node or
     // an explicit guest close is the authoritative dismissal signal.
+    _wakeTicker();
     _scheduleSafeAreaReport();
   }
 
@@ -472,6 +506,7 @@ class _PocketViewState extends State<PocketView>
     if (runtime == null || widget.runtime != null || widget.viewport != null) {
       return;
     }
+    _wakeTicker();
     try {
       if (!runtime.resizeViewport(size.width, size.height)) {
         // Older native libraries retain their original logical viewport. The
@@ -555,9 +590,13 @@ class _PocketViewState extends State<PocketView>
         return;
       }
       _runtime = runtime;
-      _controller._attach(runtime, () {
-        if (mounted) setState(() {});
-      });
+      _controller._attach(
+        runtime,
+        () {
+          if (mounted) setState(() {});
+        },
+        onMessageSent: _wakeTicker,
+      );
       final visualFirst = _visualFrame(first);
       _frame = visualFirst;
       _auxiliaryFrame = visualFirst.auxiliary;
@@ -595,7 +634,8 @@ class _PocketViewState extends State<PocketView>
     // signed package must win, and a bytecode entry must never be decoded as
     // UTF-8 source.
     if (packageSource != null) {
-      if (packageSource.entryFormat == 'quickjs-bytecode') {
+      if (packageSource.entryFormat == 'quickjs-bytecode' ||
+          packageSource.entryFormat == 'bytecode') {
         if (runtime is FfiPocketRuntime) {
           return runtime.loadBytecodeFiles(
             bytecodePath: packageSource.entryPath,
@@ -832,15 +872,22 @@ class _PocketViewState extends State<PocketView>
         // returned-string copy, and JSON frame decode for the real runtime.
         // Keep the compatibility sample key `nativeMsP95`, but do not read it
         // as a pure native-CPU measurement.
-        next = pocketFrameDeltaAt(runtime, delta.clamp(0.0, 1000.0).toDouble());
+        final deltaFn = debugPocketFrameDeltaAtOverride ?? pocketFrameDeltaAt;
+        next = deltaFn(runtime, delta.clamp(0.0, 1000.0).toDouble());
       } finally {
         stopwatch?.stop();
       }
-      if (stopwatch != null) {
-        _recordPerformanceTick(elapsed, stopwatch.elapsed);
-      }
       if (next != null) {
+        _idleTicks = 0;
+        if (stopwatch != null) {
+          _recordPerformanceTick(elapsed, stopwatch.elapsed);
+        }
         _applyFrame(next);
+      } else {
+        _idleTicks++;
+        if (_idleTicks >= 6) {
+          _ticker?.stop();
+        }
       }
     } catch (error) {
       _failRuntime(error);
@@ -1762,17 +1809,6 @@ class _PocketViewState extends State<PocketView>
     return changed;
   }
 
-  int _textInputOffset(
-    Object? value,
-    int fallback,
-    int textLength, {
-    bool allowUnset = false,
-  }) {
-    final number = value is num && value.isFinite ? value.toInt() : fallback;
-    if (allowUnset && number < 0) return -1;
-    return number.clamp(0, textLength);
-  }
-
   TextInputType _textInputKeyboardTypeFromParams(
     Map<String, dynamic> params, {
     TextInputType fallback = TextInputType.text,
@@ -1849,65 +1885,21 @@ class _PocketViewState extends State<PocketView>
     };
   }
 
-  TextEditingValue _textInputValueFromParams(
-    Map<String, dynamic> params, {
-    required TextEditingValue fallback,
-  }) {
-    final text = params.containsKey('text')
-        ? '${params['text'] ?? ''}'
-        : fallback.text;
-    final fallbackSelectionBase = fallback.selection.baseOffset < 0
-        ? text.length
-        : fallback.selection.baseOffset;
-    final fallbackSelectionExtent = fallback.selection.extentOffset < 0
-        ? text.length
-        : fallback.selection.extentOffset;
-    final selectionBase = _textInputOffset(
-      params['selectionBase'],
-      fallbackSelectionBase,
-      text.length,
-      allowUnset: true,
-    );
-    final selectionExtent = _textInputOffset(
-      params['selectionExtent'],
-      fallbackSelectionExtent,
-      text.length,
-      allowUnset: true,
-    );
-    final hasComposing =
-        params.containsKey('composingBase') ||
-        params.containsKey('composingExtent');
-    final composingBase = _textInputOffset(
-      params['composingBase'],
-      fallback.composing.start,
-      text.length,
-      allowUnset: true,
-    );
-    final composingExtent = _textInputOffset(
-      params['composingExtent'],
-      fallback.composing.end,
-      text.length,
-      allowUnset: true,
-    );
-    final composing = hasComposing
-        ? (composingBase >= 0 &&
-                  composingExtent >= 0 &&
-                  composingBase <= composingExtent)
-              ? TextRange(start: composingBase, end: composingExtent)
-              : TextRange.empty
-        : (fallback.composing.start >= 0 &&
-              fallback.composing.end >= fallback.composing.start &&
-              fallback.composing.end <= text.length)
-        ? fallback.composing
-        : TextRange.empty;
-    return TextEditingValue(
-      text: text,
-      selection: TextSelection(
-        baseOffset: selectionBase,
-        extentOffset: selectionExtent,
-      ),
-      composing: composing,
-    );
+  void _syncTextController(
+    TextEditingController controller,
+    _PocketTextInputState state,
+  ) {
+    if (!state.hasExplicitTextOrSelection) {
+      return;
+    }
+    final nextValue = state.value;
+    if (controller.value == nextValue) return;
+    _applyingTextInputValue = true;
+    try {
+      controller.value = nextValue;
+    } finally {
+      _applyingTextInputValue = false;
+    }
   }
 
   String? _textInputEventId(Map<String, dynamic> params) {
@@ -1965,6 +1957,7 @@ class _PocketViewState extends State<PocketView>
   }
 
   void _openTextInput(Map<String, dynamic> params) {
+    _wakeTicker();
     final id = _textInputEventId(params);
     final rect = _textInputRectFromParams(params);
     if (id == null || rect == null) return;
@@ -1972,11 +1965,12 @@ class _PocketViewState extends State<PocketView>
     if (_textInputId != null) {
       _dismissTextInput(reason: 'replaced', rebuild: false);
     }
-    final value = _textInputValueFromParams(
+    final inputState = _PocketTextInputState.fromJson(
       params,
       fallback: const TextEditingValue(),
+      isOpen: true,
     );
-    final controller = TextEditingController.fromValue(value);
+    final controller = TextEditingController.fromValue(inputState.value);
     final focusNode = FocusNode(debugLabel: 'PocketJS textInput $id');
     controller.addListener(_onTextInputChanged);
     focusNode.addListener(_onTextInputFocusChanged);
@@ -2015,13 +2009,12 @@ class _PocketViewState extends State<PocketView>
     if (!_isCurrentTextInput(params)) return;
     final controller = _textInputController;
     if (controller == null) return;
-    final value = _textInputValueFromParams(params, fallback: controller.value);
-    _applyingTextInputValue = true;
-    try {
-      controller.value = value;
-    } finally {
-      _applyingTextInputValue = false;
-    }
+    final state = _PocketTextInputState.fromJson(
+      params,
+      fallback: controller.value,
+      isOpen: false,
+    );
+    _syncTextController(controller, state);
     var metadataChanged = _updateTextInputAppearance(params);
     if (params.containsKey('keyboardType') || params.containsKey('inputType')) {
       _textInputKeyboardType = _textInputKeyboardTypeFromParams(
@@ -2155,6 +2148,7 @@ class _PocketViewState extends State<PocketView>
 
   void _closeTextInput({String? id, bool rebuild = true}) {
     if (_textInputId == null || (id != null && id != _textInputId)) return;
+    _wakeTicker();
     final controller = _textInputController;
     final focusNode = _textInputFocusNode;
     controller?.removeListener(_onTextInputChanged);
@@ -2252,6 +2246,7 @@ class _PocketViewState extends State<PocketView>
           'result': result,
           'payload': event.params,
         });
+        _wakeTicker();
       }
       widget.onEvent?.call(event);
     }
@@ -2265,6 +2260,7 @@ class _PocketViewState extends State<PocketView>
     required double actualWidth,
     required double actualHeight,
   }) {
+    _wakeTicker();
     if (surface != 0 && _auxiliaryFrame == null) return false;
     // PocketFrame and PocketSurfaceFrame intentionally share the same
     // dimensions, but are separate model types. Select the concrete frame
@@ -2435,9 +2431,11 @@ class _PocketViewState extends State<PocketView>
 
   @override
   void dispose() {
+    _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_stopDisplayGeometry());
     _ticker?.dispose();
+    _ticker = null;
     _pointerSlots.clear();
     _outsideTextInputPointerOrigins.clear();
     _textInputTapRegionDowns.clear();
@@ -3147,6 +3145,7 @@ class _PocketViewState extends State<PocketView>
       child: Listener(
         key: ValueKey<String>('pocket-surface-$surface'),
         behavior: HitTestBehavior.opaque,
+        onPointerSignal: (event) => _wakeTicker(),
         onPointerDown: allowHostArena
             ? null
             : (event) => _sendPointer(
@@ -3198,4 +3197,110 @@ final class _PocketVideoRequest {
 
   final PocketVideoOp op;
   final bool visible;
+}
+
+final class _PocketTextInputState {
+  const _PocketTextInputState({
+    required this.value,
+    required this.hasExplicitTextOrSelection,
+  });
+
+  final TextEditingValue value;
+  final bool hasExplicitTextOrSelection;
+
+  static int _textInputOffset(
+    Object? value,
+    int fallback,
+    int textLength, {
+    bool allowUnset = false,
+  }) {
+    final number = value is num && value.isFinite ? value.toInt() : fallback;
+    if (allowUnset && number < 0) return -1;
+    return number.clamp(0, textLength);
+  }
+
+  static _PocketTextInputState fromJson(
+    Map<String, dynamic> params, {
+    TextEditingValue? fallback,
+    bool isOpen = false,
+  }) {
+    final effectiveFallback = fallback ?? const TextEditingValue();
+    final text = params.containsKey('text')
+        ? '${params['text'] ?? ''}'
+        : effectiveFallback.text;
+    final fallbackSelectionBase = effectiveFallback.selection.baseOffset < 0
+        ? text.length
+        : effectiveFallback.selection.baseOffset;
+    final fallbackSelectionExtent = effectiveFallback.selection.extentOffset < 0
+        ? text.length
+        : effectiveFallback.selection.extentOffset;
+    final selectionBase = _textInputOffset(
+      params['selectionBase'],
+      fallbackSelectionBase,
+      text.length,
+      allowUnset: true,
+    );
+    final selectionExtent = _textInputOffset(
+      params['selectionExtent'],
+      fallbackSelectionExtent,
+      text.length,
+      allowUnset: true,
+    );
+    final hasComposing =
+        params.containsKey('composingBase') ||
+        params.containsKey('composingExtent');
+    final composingBase = _textInputOffset(
+      params['composingBase'],
+      effectiveFallback.composing.start,
+      text.length,
+      allowUnset: true,
+    );
+    final composingExtent = _textInputOffset(
+      params['composingExtent'],
+      effectiveFallback.composing.end,
+      text.length,
+      allowUnset: true,
+    );
+    final composing = hasComposing
+        ? (composingBase >= 0 &&
+                  composingExtent >= 0 &&
+                  composingBase <= composingExtent)
+              ? TextRange(start: composingBase, end: composingExtent)
+              : TextRange.empty
+        : (effectiveFallback.composing.start >= 0 &&
+              effectiveFallback.composing.end >= effectiveFallback.composing.start &&
+              effectiveFallback.composing.end <= text.length)
+        ? effectiveFallback.composing
+        : TextRange.empty;
+
+    final TextSelection selection;
+    if (fallback != null &&
+        params['selectionBase'] == null &&
+        params['selectionExtent'] == null &&
+        selectionBase == fallback.selection.baseOffset &&
+        selectionExtent == fallback.selection.extentOffset) {
+      selection = fallback.selection;
+    } else {
+      selection = TextSelection(
+        baseOffset: selectionBase,
+        extentOffset: selectionExtent,
+      );
+    }
+
+    final hasExplicitTextOrSelection = isOpen ||
+        params.containsKey('text') ||
+        params.containsKey('selectionBase') ||
+        params.containsKey('selectionExtent') ||
+        params.containsKey('composingBase') ||
+        params.containsKey('composingExtent');
+
+    return _PocketTextInputState(
+      value: TextEditingValue(
+        text: text,
+        selection: selection,
+        composing: composing,
+      ),
+      hasExplicitTextOrSelection: hasExplicitTextOrSelection,
+    );
+  }
 }

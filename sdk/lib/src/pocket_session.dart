@@ -82,9 +82,13 @@ final class PocketSession extends ChangeNotifier {
     _metadata = Map<String, dynamic>.from(
       jsonDecode(await rootBundle.loadString(config.metadataAsset)) as Map,
     );
-    _embeddedManifest = PocketGuestManifest.fromJsonString(
-      await rootBundle.loadString(config.manifestAsset),
-    );
+    final manifestSource = await rootBundle.loadString(config.manifestAsset);
+    _embeddedManifest = PocketGuestManifest.fromJsonString(manifestSource);
+    final manifestJson = jsonDecode(manifestSource);
+    final manifestBuild =
+        manifestJson is Map ? (manifestJson['build'] as num?)?.toInt() : null;
+    final embeddedBuild =
+        (_metadata['build'] as num?)?.toInt() ?? manifestBuild ?? 0;
     final updateConfig = config.updates;
     if (updateConfig != null && updateConfig.configured) {
       final directory = await getApplicationSupportDirectory();
@@ -98,6 +102,7 @@ final class PocketSession extends ChangeNotifier {
         ),
         expectedRuntimeAbi: _metadata['runtimeAbi'] as String,
         requireBytecode: true,
+        minimumBuild: embeddedBuild,
         debugHttpHosts: kDebugMode
             ? const ['127.0.0.1', 'localhost', '10.0.2.2']
             : const [],
@@ -112,6 +117,10 @@ final class PocketSession extends ChangeNotifier {
       _updates = updates;
       try {
         active = await updates.lastGood();
+        if (active != null && embeddedBuild > active!.build) {
+          await updates.resetToEmbedded();
+          active = null;
+        }
       } catch (error) {
         lastError = 'Cached package rejected: $error';
       }
@@ -144,7 +153,8 @@ final class PocketSession extends ChangeNotifier {
         : 'frosted',
     'hostSurfaces': ['glass', 'platformTexture'],
     'version': active?.version ?? 'embedded',
-    'build': active?.build ?? 0,
+    'build':
+        active?.build ?? ((_metadata['build'] as num?)?.toInt() ?? 0),
     'source': active == null ? 'embedded' : 'verified-cache',
     'entryBytes':
         active?.package.manifest.payload.entry.size ??

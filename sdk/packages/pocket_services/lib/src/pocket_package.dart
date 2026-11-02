@@ -22,6 +22,13 @@ final class PocketPackageException implements Exception {
   String toString() => 'PocketPackageException($code): $message';
 }
 
+final class PocketPackageFormatException extends PocketPackageException {
+  const PocketPackageFormatException(
+    super.message, {
+    super.code = 'manifest-format',
+  });
+}
+
 final class PocketUpdateCancellation implements Exception {
   const PocketUpdateCancellation();
 
@@ -192,7 +199,7 @@ final class PocketPackageManifest {
     required this.entry,
     required this.pak,
     required this.files,
-    this.entryFormat = 'javascript',
+    this.entryFormat = 'bytecode',
     this.runtimeAbi,
     this.assets = const <String, PocketManifestAsset>{},
     this.guestManifest = const PocketGuestManifest(),
@@ -231,7 +238,7 @@ final class PocketPackageManifest {
       ),
       entryFormat: json['entryFormat'] is String
           ? json['entryFormat'] as String
-          : 'javascript',
+          : 'bytecode',
       runtimeAbi: json['runtimeAbi'] is String
           ? json['runtimeAbi'] as String
           : null,
@@ -254,7 +261,8 @@ final class PocketPackageManifest {
   final Map<String, PocketManifestAsset> assets;
   final PocketGuestManifest guestManifest;
 
-  bool get isBytecode => entryFormat == 'quickjs-bytecode';
+  bool get isBytecode =>
+      entryFormat == 'quickjs-bytecode' || entryFormat == 'bytecode';
 
   Map<String, dynamic> toJson() {
     final sortedAssets = <String, dynamic>{};
@@ -329,13 +337,15 @@ final class PocketPackageManifest {
         code: 'host-version',
       );
     }
-    if (entryFormat != 'javascript' && entryFormat != 'quickjs-bytecode') {
+    if (entryFormat != 'javascript' &&
+        entryFormat != 'quickjs-bytecode' &&
+        entryFormat != 'bytecode') {
       throw PocketPackageException(
         'unsupported entryFormat $entryFormat',
         code: 'manifest-entry-format',
       );
     }
-    if (entryFormat == 'quickjs-bytecode' &&
+    if (isBytecode &&
         (runtimeAbi == null || runtimeAbi!.trim().isEmpty)) {
       throw const PocketPackageException(
         'bytecode entry requires runtimeAbi',
@@ -571,6 +581,30 @@ final class PocketPackageStore {
     return PocketPackageStore(rootDirectory, appId: applicationId);
   }
 
+  static int _tempCounter = 0;
+  static final Map<String, Future<void>> _locks = <String, Future<void>>{};
+
+  Future<T> _synchronized<T>(Future<T> Function() action) {
+    final key = path.canonicalize(_stateRoot.path);
+    final previousLock = _locks[key] ?? Future<void>.value();
+    final completer = Completer<T>();
+    final nextLock = previousLock.whenComplete(() async {
+      try {
+        final result = await action();
+        completer.complete(result);
+      } catch (e, st) {
+        completer.completeError(e, st);
+      }
+    });
+    _locks[key] = nextLock;
+    nextLock.whenComplete(() {
+      if (_locks[key] == nextLock) {
+        _locks.remove(key);
+      }
+    });
+    return completer.future;
+  }
+
   Directory get _blobs => Directory(path.join(rootDirectory.path, 'blobs'));
   Directory get _stateRoot => appId == null
       ? rootDirectory
@@ -620,7 +654,7 @@ final class PocketPackageStore {
     final temporary = File(
       path.join(
         _blobs.path,
-        '.${file.sha256}.tmp-${DateTime.now().microsecondsSinceEpoch}',
+        '.${file.sha256}.tmp-${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}',
       ),
     );
     final sink = temporary.openWrite();
@@ -653,8 +687,12 @@ final class PocketPackageStore {
         );
       }
       final target = File(path.join(_blobs.path, file.sha256));
-      if (await target.exists()) await target.delete();
-      return temporary.rename(target.path);
+      try {
+        return await temporary.rename(target.path);
+      } catch (_) {
+        if (await target.exists()) await target.delete();
+        return await temporary.rename(target.path);
+      }
     } catch (_) {
       await sink.close();
       if (await temporary.exists()) await temporary.delete();
@@ -675,6 +713,68 @@ final class PocketPackageStore {
     required File entryBlob,
     required Map<String, File> blobs,
     required PocketCancellationToken cancellation,
+  }) =>
+      _synchronized(
+        () => _stageUnlocked(
+          signed: signed,
+          verifier: verifier,
+          entryBlob: entryBlob,
+          blobs: blobs,
+          cancellation: cancellation,
+        ),
+      );
+
+  Future<PocketPackage> prepare(
+    dynamic packageOrSigned, {
+    PocketManifestVerifier? verifier,
+    File? entryBlob,
+    Map<String, File>? blobs,
+    PocketCancellationToken? cancellation,
+  }) =>
+      _synchronized(() async {
+        await initialize();
+        if (packageOrSigned is PocketPackage) {
+          final id = _versionId(packageOrSigned.manifest.payload);
+          final directory = Directory(path.join(_versions.path, id));
+          if (await directory.exists()) {
+            return packageOrSigned;
+          }
+          if (verifier == null) {
+            return packageOrSigned;
+          }
+          return _stageUnlocked(
+            signed: packageOrSigned.manifest,
+            verifier: verifier,
+            entryBlob: entryBlob ?? packageOrSigned.entryFile,
+            blobs: blobs ?? <String, File>{},
+            cancellation: cancellation ?? PocketCancellationToken(),
+          );
+        } else if (packageOrSigned is PocketSignedManifest) {
+          if (verifier == null ||
+              entryBlob == null ||
+              blobs == null ||
+              cancellation == null) {
+            throw ArgumentError(
+              'verifier, entryBlob, blobs, and cancellation are required for PocketSignedManifest',
+            );
+          }
+          return _stageUnlocked(
+            signed: packageOrSigned,
+            verifier: verifier,
+            entryBlob: entryBlob,
+            blobs: blobs,
+            cancellation: cancellation,
+          );
+        }
+        throw ArgumentError.value(packageOrSigned, 'packageOrSigned');
+      });
+
+  Future<PocketPackage> _stageUnlocked({
+    required PocketSignedManifest signed,
+    required PocketManifestVerifier verifier,
+    required File entryBlob,
+    required Map<String, File> blobs,
+    required PocketCancellationToken cancellation,
   }) async {
     await initialize();
     final id = _versionId(signed.payload);
@@ -682,10 +782,13 @@ final class PocketPackageStore {
     if (await directory.exists()) {
       try {
         final loaded = await _loadVersion(id, verifier: verifier);
-        if (loaded.manifest.payload.contentHash == signed.payload.contentHash)
+        if (loaded.manifest.payload.contentHash == signed.payload.contentHash) {
           return loaded;
+        }
       } on Object {
-        await directory.delete(recursive: true);
+        try {
+          await directory.delete(recursive: true);
+        } catch (_) {}
       }
     }
     await directory.create(recursive: true);
@@ -703,11 +806,12 @@ final class PocketPackageStore {
       );
       for (final item in signed.payload.assets.entries) {
         final blob = blobs[item.value.sha256];
-        if (blob == null)
+        if (blob == null) {
           throw PocketPackageException(
             'missing asset ${item.key}',
             code: 'asset-file',
           );
+        }
         final target = File(
           path.join(directory.path, 'loose-assets', item.key),
         );
@@ -720,7 +824,9 @@ final class PocketPackageStore {
         directory: directory,
       );
     } on Object {
-      await directory.delete(recursive: true);
+      try {
+        await directory.delete(recursive: true);
+      } catch (_) {}
       rethrow;
     }
   }
@@ -728,13 +834,22 @@ final class PocketPackageStore {
   Future<void> activate(
     PocketPackage package, {
     bool recordPrevious = true,
+  }) =>
+      _synchronized(
+        () => _activateUnlocked(package, recordPrevious: recordPrevious),
+      );
+
+  Future<void> _activateUnlocked(
+    PocketPackage package, {
+    bool recordPrevious = true,
   }) async {
     await initialize();
     final active = _pointer('active');
     if (recordPrevious && await active.exists()) {
       final old = (await active.readAsString()).trim();
-      if (old.isNotEmpty && old != package.versionId)
+      if (old.isNotEmpty && old != package.versionId) {
         await _writeAtomic(_pointer('previous'), utf8.encode(old));
+      }
     }
     await _writeAtomic(active, utf8.encode(package.versionId));
   }
@@ -744,11 +859,15 @@ final class PocketPackageStore {
   Future<void> commitHealthy(
     PocketPackage package, {
     required PocketManifestVerifier verifier,
+  }) =>
+      _synchronized(
+        () => _commitHealthyUnlocked(package, verifier: verifier),
+      );
+
+  Future<void> _commitHealthyUnlocked(
+    PocketPackage package, {
+    required PocketManifestVerifier verifier,
   }) async {
-    // A candidate can be modified on disk after `stage` returns. Re-read the
-    // signed manifest and every content-addressed artifact immediately before
-    // promoting it. This keeps a blob tamper from becoming the active/lastGood
-    // pointer during the health-commit window.
     final verified = await _loadVersion(package.versionId, verifier: verifier);
     if (verified.manifest.payload.contentHash !=
         package.manifest.payload.contentHash) {
@@ -757,15 +876,86 @@ final class PocketPackageStore {
         code: 'cache-package',
       );
     }
-    await activate(verified);
+    await _activateUnlocked(verified);
     await _writeAtomic(_pointer('lastGood'), utf8.encode(verified.versionId));
+    await _pruneInactiveVersionsUnlocked(keep: 2);
+  }
+
+  Future<PocketPackage?> fallbackFor(
+    String failedVersionId, {
+    required PocketManifestVerifier verifier,
+  }) =>
+      _synchronized(
+        () => _fallbackForUnlocked(failedVersionId, verifier: verifier),
+      );
+
+  Future<PocketPackage?> _fallbackForUnlocked(
+    String failedVersionId, {
+    required PocketManifestVerifier verifier,
+  }) async {
+    await initialize();
+    final lastGoodId = await _readPointerId('lastGood');
+    final previousId = await _readPointerId('previous');
+
+    String? fallbackId;
+    if (lastGoodId != null && lastGoodId != failedVersionId) {
+      fallbackId = lastGoodId;
+    } else if (previousId != null && previousId != failedVersionId) {
+      fallbackId = previousId;
+    }
+
+    if (previousId == failedVersionId) {
+      final prevFile = _pointer('previous');
+      if (await prevFile.exists()) await prevFile.delete();
+    }
+    if (lastGoodId == failedVersionId) {
+      final lgFile = _pointer('lastGood');
+      if (fallbackId != null) {
+        await _writeAtomic(lgFile, utf8.encode(fallbackId));
+      } else if (await lgFile.exists()) {
+        await lgFile.delete();
+      }
+    }
+
+    PocketPackage? fallbackPackage;
+    if (fallbackId != null) {
+      try {
+        fallbackPackage = await _loadVersion(fallbackId, verifier: verifier);
+      } catch (_) {
+        fallbackPackage = null;
+        fallbackId = null;
+      }
+    }
+
+    final activeFile = _pointer('active');
+    if (fallbackPackage != null) {
+      await _writeAtomic(activeFile, utf8.encode(fallbackPackage.versionId));
+    } else {
+      if (await activeFile.exists()) await activeFile.delete();
+      final lgFile = _pointer('lastGood');
+      if (await lgFile.exists()) await lgFile.delete();
+    }
+
+    final failedDir = Directory(path.join(_versions.path, failedVersionId));
+    if (await failedDir.exists()) {
+      try {
+        await failedDir.delete(recursive: true);
+      } catch (_) {}
+    }
+
+    return fallbackPackage;
   }
 
   /// Removes activation pointers while retaining verified version directories
   /// and shared blobs. Hosts use this after the immutable embedded package has
   /// passed its health check, so a later restart starts from the embedded
   /// package instead of an old OTA pointer.
-  Future<void> clearActivation() async {
+  Future<void> clearActivation() =>
+      _synchronized(() => _clearActivationUnlocked());
+
+  Future<void> resetToEmbedded() => clearActivation();
+
+  Future<void> _clearActivationUnlocked() async {
     await initialize();
     for (final name in <String>['active', 'previous', 'lastGood']) {
       final pointer = _pointer(name);
@@ -776,19 +966,29 @@ final class PocketPackageStore {
   Future<void> rollback({
     String? versionId,
     required PocketManifestVerifier verifier,
+  }) =>
+      _synchronized(
+        () => _rollbackUnlocked(versionId: versionId, verifier: verifier),
+      );
+
+  Future<void> _rollbackUnlocked({
+    String? versionId,
+    required PocketManifestVerifier verifier,
   }) async {
     final targetId =
         versionId ??
         (await _readPointerId('previous') ?? await _readPointerId('lastGood'));
-    if (targetId == null)
+    if (targetId == null) {
       throw const PocketPackageException(
         'no verified rollback target',
         code: 'rollback-missing',
       );
+    }
     final target = await _loadVersion(targetId, verifier: verifier);
     final active = await _readPointerId('active');
-    if (active != null && active != target.versionId)
+    if (active != null && active != target.versionId) {
       await _writeAtomic(_pointer('previous'), utf8.encode(active));
+    }
     await _writeAtomic(_pointer('active'), utf8.encode(target.versionId));
     await _writeAtomic(_pointer('lastGood'), utf8.encode(target.versionId));
   }
@@ -804,8 +1004,18 @@ final class PocketPackageStore {
     await for (final entity in _versions.list(followLinks: false)) {
       if (entity is! Directory) continue;
       final id = path.basename(entity.path);
+      final manifestFile = File(path.join(entity.path, 'manifest.json'));
+      if (!await manifestFile.exists()) continue;
       try {
-        final package = await _loadVersion(id, verifier: verifier);
+        final signed = PocketSignedManifest.fromBytes(
+          Uint8List.fromList(await manifestFile.readAsBytes()),
+        );
+        await verifier.verify(signed);
+        final package = PocketPackage(
+          manifest: signed,
+          versionId: id,
+          directory: entity,
+        );
         result.add(
           PocketVersionInfo(
             package: package,
@@ -826,21 +1036,27 @@ final class PocketPackageStore {
     return List<PocketVersionInfo>.unmodifiable(result);
   }
 
-  Future<void> pruneInactiveVersions(String applicationId) async {
-    final target = scoped(applicationId);
-    if (!await target._versions.exists()) return;
-    final keep = <String>{};
-    for (final future in <Future<String?>>[
-      target._readPointerId('active'),
-      target._readPointerId('previous'),
-      target._readPointerId('lastGood'),
-    ]) {
-      final value = await future;
-      if (value != null) keep.add(value);
+  Future<void> pruneInactiveVersions([
+    String? applicationId,
+    int keep = 2,
+  ]) =>
+      _synchronized(() {
+        final target = applicationId != null ? scoped(applicationId) : this;
+        return target._pruneInactiveVersionsUnlocked(keep: keep);
+      });
+
+  Future<void> _pruneInactiveVersionsUnlocked({int keep = 2}) async {
+    if (!await _versions.exists()) return;
+    final keepSet = <String>{};
+    for (final name in ['active', 'previous', 'lastGood']) {
+      final id = await _readPointerId(name);
+      if (id != null) keepSet.add(id);
     }
-    await for (final entity in target._versions.list(followLinks: false)) {
-      if (entity is Directory && !keep.contains(path.basename(entity.path))) {
-        await entity.delete(recursive: true);
+    await for (final entity in _versions.list(followLinks: false)) {
+      if (entity is Directory && !keepSet.contains(path.basename(entity.path))) {
+        try {
+          await entity.delete(recursive: true);
+        } catch (_) {}
       }
     }
   }
@@ -862,9 +1078,15 @@ final class PocketPackageStore {
     final file = _pointer(name);
     if (!await file.exists()) return null;
     final id = (await file.readAsString()).trim();
-    if (id.isEmpty || id.contains('/') || id.contains('\\')) return null;
-    return id;
+    if (id.isEmpty) return null;
+    try {
+      return _requireSafeToken(id, 'versionPointer');
+    } catch (_) {
+      return null;
+    }
   }
+
+  Future<String?> readPointerId(String name) => _readPointerId(name);
 
   Future<PocketPackage> _loadVersion(
     String id, {
@@ -916,7 +1138,7 @@ final class PocketPackageStore {
     PocketCancellationToken cancellation,
   ) async {
     final temporary = File(
-      '${destination.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
+      '${destination.path}.tmp-${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}',
     );
     final sink = temporary.openWrite();
     final digest = <crypto.Digest>[];
@@ -951,8 +1173,12 @@ final class PocketPackageStore {
           code: 'pak-hash',
         );
       }
-      if (await destination.exists()) await destination.delete();
-      await temporary.rename(destination.path);
+      try {
+        await temporary.rename(destination.path);
+      } catch (_) {
+        if (await destination.exists()) await destination.delete();
+        await temporary.rename(destination.path);
+      }
     } catch (_) {
       await sink.close();
       if (await temporary.exists()) await temporary.delete();
@@ -962,21 +1188,29 @@ final class PocketPackageStore {
 
   Future<void> _copyAtomic(File source, File destination) async {
     final temporary = File(
-      '${destination.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
+      '${destination.path}.tmp-${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}',
     );
     await source.openRead().pipe(temporary.openWrite());
-    if (await destination.exists()) await destination.delete();
-    await temporary.rename(destination.path);
+    try {
+      await temporary.rename(destination.path);
+    } catch (_) {
+      if (await destination.exists()) await destination.delete();
+      await temporary.rename(destination.path);
+    }
   }
 
   Future<void> _writeAtomic(File destination, List<int> bytes) async {
     await destination.parent.create(recursive: true);
     final temporary = File(
-      '${destination.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
+      '${destination.path}.tmp-${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}',
     );
     await temporary.writeAsBytes(bytes, flush: true);
-    if (await destination.exists()) await destination.delete();
-    await temporary.rename(destination.path);
+    try {
+      await temporary.rename(destination.path);
+    } catch (_) {
+      if (await destination.exists()) await destination.delete();
+      await temporary.rename(destination.path);
+    }
   }
 }
 
@@ -1042,6 +1276,23 @@ String pocketVersionId(PocketPackageManifest manifest) {
 }
 
 String _versionId(PocketPackageManifest manifest) => pocketVersionId(manifest);
+
+String _requireSafeToken(String value, String field) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty ||
+      trimmed == '.' ||
+      trimmed == '..' ||
+      trimmed.contains('/') ||
+      trimmed.contains('\\') ||
+      trimmed.contains('\u0000') ||
+      !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(trimmed)) {
+    throw PocketPackageException(
+      'unsafe token for $field: $value',
+      code: 'unsafe-token',
+    );
+  }
+  return trimmed;
+}
 
 String _safePart(String value) {
   final normalized = value.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');

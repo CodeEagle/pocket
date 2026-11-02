@@ -95,6 +95,7 @@ void main() {
       );
       final editor = tester.state<EditableTextState>(find.byType(EditableText));
       for (var i = 0; i < 60; i++) {
+        final previousAnchorCount = keyboardAnchorFrames.length;
         await tester.pump(const Duration(milliseconds: 50));
         expect(find.byType(EditableText), findsOneWidget);
         expect(
@@ -103,6 +104,44 @@ void main() {
         );
         expect(editor.widget.focusNode.hasFocus, isTrue);
         expect(tester.view.viewInsets.bottom, greaterThan(0));
+        if (keyboardAnchorFrames.length == previousAnchorCount) {
+          final paints = find
+              .byWidgetPredicate(
+                (widget) =>
+                    widget is CustomPaint &&
+                    widget.painter is PocketCanvasPainter,
+              )
+              .evaluate();
+          if (paints.isNotEmpty) {
+            final paint = paints.first.widget as CustomPaint;
+            final painter = paint.painter! as PocketCanvasPainter;
+            final canvasBox = paints.first.findRenderObject() as RenderBox?;
+            final hostBox = find
+                .byType(PocketView)
+                .evaluate()
+                .firstOrNull
+                ?.findRenderObject() as RenderBox?;
+            if (canvasBox != null && hostBox != null) {
+              final canvas = Rect.fromPoints(
+                canvasBox.localToGlobal(Offset.zero),
+                canvasBox.localToGlobal(canvasBox.size.bottomRight(Offset.zero)),
+              );
+              final hostOrigin = hostBox.localToGlobal(Offset.zero);
+              transitionFrames.add((
+                scaleX: canvas.width / painter.width,
+                scaleY: canvas.height / painter.height,
+                dx: canvas.left - hostOrigin.dx,
+                dy: canvas.top - hostOrigin.dy,
+              ));
+            }
+          }
+          final anchors = _guestTextRects(layoutAnchors);
+          if (tester.view.viewInsets.bottom > 0 &&
+              referenceAnchors.isNotEmpty &&
+              layoutAnchors.every(anchors.containsKey)) {
+            keyboardAnchorFrames.add(anchors);
+          }
+        }
       }
       final inputBounds = tester.getRect(find.byType(TextField));
       final surfaceBounds = tester.getRect(find.byType(PocketView));
