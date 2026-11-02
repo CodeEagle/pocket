@@ -20,6 +20,7 @@ import {
   type NodeMirror,
   type ViewProps,
 } from "@pocketjs/framework/solid/components";
+import { createDisplayGeometry } from "./display.ts";
 import { availableDisplayPanes, deriveResponsiveLayout, type DisplayGeometry } from "./responsive.ts";
 
 export interface HeaderProps {
@@ -272,6 +273,8 @@ export interface TextInputParams {
   editingSession?: string;
   revision?: number;
   jsRevision?: number;
+  /** The page viewport that clips the guest-owned input shell. */
+  clip?: TextInputRect | null;
   text?: string;
   selectionBase?: number;
   selectionExtent?: number;
@@ -322,6 +325,7 @@ interface TextInputSession {
   isOpen: () => boolean;
   node: () => NodeMirror | undefined;
   visualRect: () => TextInputRect | undefined;
+  refreshLayout: () => void;
   close: () => void;
   accepts: (params: TextInputParams) => boolean;
   onEdit: (params: TextInputParams) => void;
@@ -394,6 +398,7 @@ let activeTextInput: TextInputSession | undefined;
 let activePageScroll: {
   ensureVisible: (node: NodeMirror, fallback?: TextInputRect) => void;
   visualRect: (node: NodeMirror, fallback?: TextInputRect) => TextInputRect | undefined;
+  clipRect: () => TextInputRect | undefined;
 } | undefined;
 
 function finiteNumber(value: unknown): number | undefined {
@@ -504,6 +509,7 @@ export function InputField(props: {
   let composingBase = -1;
   let composingExtent = -1;
   let lastRect: TextInputRect | undefined;
+  let lastClipRect: TextInputRect | undefined;
   let textLayoutDirty = false;
   const appearance = (): Required<InputFieldAppearance> => {
     const provided = props.appearance ?? {};
@@ -560,6 +566,18 @@ export function InputField(props: {
   const visualRect = (): TextInputRect | undefined =>
     activePageScroll?.visualRect(node, lastRect) ?? committedLayout(node) ?? lastRect;
 
+  const visualClip = (): TextInputRect | undefined =>
+    activePageScroll?.clipRect();
+
+  const sameRect = (
+    left: TextInputRect | undefined,
+    right: TextInputRect | undefined,
+  ): boolean => {
+    if (left === undefined || right === undefined) return left === right;
+    return left.x === right.x && left.y === right.y &&
+      left.width === right.width && left.height === right.height;
+  };
+
   const updateOffsets = (params: TextInputParams, text: string): void => {
     selectionBase = offsetFrom(params.selectionBase, selectionBase < 0 ? text.length : selectionBase, text.length);
     selectionExtent = offsetFrom(params.selectionExtent, selectionExtent < 0 ? text.length : selectionExtent, text.length);
@@ -579,6 +597,7 @@ export function InputField(props: {
 
   const sendUpdate = (text: string): void => {
     const rect = visualRect();
+    const clip = visualClip();
     if (!rect) return;
     jsRevision += 1;
     const sent = emitTextInput("textInput.update", {
@@ -590,6 +609,7 @@ export function InputField(props: {
       force: true,
       source: "js",
       rect,
+      clip: clip ?? null,
       text,
       selectionBase,
       selectionExtent,
@@ -597,20 +617,18 @@ export function InputField(props: {
       composingExtent,
       ...appearanceParams(),
     });
-    if (sent) lastRect = rect;
+    if (sent) {
+      lastRect = rect;
+      lastClipRect = clip;
+    }
   };
 
   const sendRectUpdate = (): void => {
     if (!opened || activeTextInput !== session) return;
     const rect = visualRect();
+    const clip = visualClip();
     if (!rect) return;
-    if (
-      lastRect &&
-      lastRect.x === rect.x &&
-      lastRect.y === rect.y &&
-      lastRect.width === rect.width &&
-      lastRect.height === rect.height
-    ) {
+    if (sameRect(lastRect, rect) && sameRect(lastClipRect, clip)) {
       textLayoutDirty = false;
       return;
     }
@@ -624,7 +642,8 @@ export function InputField(props: {
       lastRect &&
       lastRect.x === rect.x &&
       lastRect.y === rect.y &&
-      lastRect.height === rect.height
+      lastRect.height === rect.height &&
+      sameRect(lastClipRect, clip)
     ) {
       lastRect = rect;
       textLayoutDirty = false;
@@ -633,8 +652,16 @@ export function InputField(props: {
     // A layout-only update deliberately omits text and selection metadata.
     // Flutter keeps the current controller value/caret/composing range while
     // moving/resizing its overlay after viewport or keyboard changes.
-    if (emitTextInput("textInput.update", { id, editingSession, revision: lastNativeRevision, jsRevision, rect })) {
+    if (emitTextInput("textInput.update", {
+      id,
+      editingSession,
+      revision: lastNativeRevision,
+      jsRevision,
+      rect,
+      clip: clip ?? null,
+    })) {
       lastRect = rect;
+      lastClipRect = clip;
       textLayoutDirty = false;
     }
   };
@@ -644,6 +671,7 @@ export function InputField(props: {
     // Translations are paint-only in the core layout ABI; use the page
     // scroller's visual rect so Flutter's overlay follows the moved shell.
     const rect = visualRect();
+    const clip = visualClip();
     if (!rect) return;
     const text = props.value();
     const wasOpened = opened;
@@ -669,6 +697,7 @@ export function InputField(props: {
       revision: lastNativeRevision,
       jsRevision,
       rect,
+      clip: clip ?? null,
       text,
       selectionBase,
       selectionExtent,
@@ -684,8 +713,10 @@ export function InputField(props: {
     if (sent) {
       activeTextInput = session;
       lastRect = rect;
+      lastClipRect = clip;
     } else {
       lastRect = undefined;
+      lastClipRect = undefined;
     }
   };
 
@@ -694,6 +725,7 @@ export function InputField(props: {
     opened = false;
     setIsFocused(false);
     lastRect = undefined;
+    lastClipRect = undefined;
     emitTextInput("textInput.close", { id, editingSession, revision: lastNativeRevision, jsRevision });
   };
 
@@ -702,6 +734,7 @@ export function InputField(props: {
     isOpen: () => opened,
     node: () => node,
     visualRect,
+    refreshLayout: sendRectUpdate,
     close,
     accepts: (params) => {
       // Old hosts without the additive fields remain compatible. Current
@@ -812,18 +845,78 @@ export function ScrollablePage(props: {
     max: () => Math.max(0, contentHeight() - viewportHeight()),
     extent: () => viewportHeight(),
   });
+  let lastViewportRect: TextInputRect | undefined;
+
+  /**
+   * Read the page clip with a retained-layout fallback. During a live Duo
+   * resize the core may invalidate the viewport node for one layout pass, but
+   * the host's canonical ui.__viewport has already received the new height.
+   * Keep the last origin/size in that gap and cap it with the live viewport.
+   */
+  const measureViewport = (): TextInputRect | undefined => {
+    const measured = viewportLayout(viewportNode);
+    if (measured) {
+      lastViewportRect = measured;
+      return measured;
+    }
+    const fallback = lastViewportRect;
+    if (!fallback) return undefined;
+    const liveWidth = finiteNumber(textInputGlobal.ui?.__viewport?.w);
+    const liveHeight = finiteNumber(textInputGlobal.ui?.__viewport?.h);
+    // A live host width describes the whole Duo window, while this retained
+    // rect may be the left content pane beside a rail/hinge. Never let the
+    // fallback clip expand across that sibling pane during the gap.
+    const width = liveWidth !== undefined && liveWidth > 0
+      ? Math.max(1, Math.min(fallback.width, liveWidth - fallback.x))
+      : fallback.width;
+    if (liveHeight === undefined || liveHeight <= fallback.y) {
+      return { ...fallback, width };
+    }
+    return {
+      ...fallback,
+      width,
+      height: Math.max(1, Math.min(fallback.height, liveHeight - fallback.y)),
+    };
+  };
+
+  const refreshMeasurements = (): {
+    rect: TextInputRect | undefined;
+    viewportChanged: boolean;
+  } => {
+    const rect = measureViewport();
+    const viewportChanged = rect !== undefined &&
+      rect.height > 0 && rect.height !== previousViewportHeight;
+    if (rect && rect.height > 0 && rect.height !== previousViewportHeight) {
+      previousViewportHeight = rect.height;
+      setViewportHeight(rect.height);
+    }
+    // A zero-width retained node can occur for one layout pass while a Duo
+    // pane is resizing. Its height remains useful for the scroll extent;
+    // rejecting the whole record would leave maxScroll frozen at an old value.
+    const measuredContent = committedLayout(contentNode, true);
+    if (measuredContent) {
+      const nextContentHeight = Math.max(rect?.height ?? viewportHeight(), measuredContent.height);
+      if (nextContentHeight !== contentHeight()) setContentHeight(nextContentHeight);
+    }
+    return { rect, viewportChanged };
+  };
 
   const pageScroll = {
     visualRect: (node: NodeMirror, fallback?: TextInputRect): TextInputRect | undefined => {
-      const rect = committedLayout(node) ?? fallback;
-      if (!rect) return undefined;
+      // The fallback is already in painted/visual coordinates: InputField
+      // stores the last emitted overlay rect and ensureVisible passes its
+      // current visual rect back here. Only a fresh committed layout is raw
+      // geometry that still needs the page scroll translation.
+      const committed = committedLayout(node);
+      if (!committed) return fallback;
       // `getLayout` intentionally reports flex geometry without paint
       // transforms. The canvas is the only translated ancestor of page input
       // shells, so apply the current kinetic offset for overlay coordinates.
-      return { ...rect, y: rect.y - scroller.offset() };
+      return { ...committed, y: committed.y - scroller.offset() };
     },
+    clipRect: (): TextInputRect | undefined => measureViewport(),
     ensureVisible: (node: NodeMirror, fallback?: TextInputRect): void => {
-      const viewport = viewportLayout(viewportNode);
+      const viewport = measureViewport();
       if (!viewport) return;
       const input = pageScroll.visualRect(node, fallback);
       if (!input) return;
@@ -843,6 +936,20 @@ export function ScrollablePage(props: {
     if (activePageScroll === pageScroll) activePageScroll = undefined;
   });
 
+  const syncViewportResize = (): void => {
+    const { rect } = refreshMeasurements();
+    if (!rect || activePageScroll !== pageScroll) return;
+    const input = activeTextInput;
+    const inputNode = input?.isOpen() ? input.node() : undefined;
+    if (!input || !inputNode) return;
+    // Reuse the normal page ensure-visible calculation, then synchronously
+    // publish the moved overlay rect. This runs inside the existing
+    // display.viewport bridge before PocketView asks for its delta=0 frame.
+    pageScroll.ensureVisible(inputNode, input.visualRect());
+    input.refreshLayout();
+  };
+  createDisplayGeometry({ onChange: syncViewportResize });
+
   createGesture({
     axis: "y",
     // Keep the node hit fact when a host provides it, but retain the official
@@ -853,7 +960,7 @@ export function ScrollablePage(props: {
     region: {
       node: () => viewportNode,
       rect: () => {
-        const rect = viewportLayout(viewportNode);
+        const rect = measureViewport();
         return rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : undefined;
       },
     },
@@ -870,17 +977,7 @@ export function ScrollablePage(props: {
     const currentOffset = scroller.offset();
     const scrolled = currentOffset !== previousOffset;
     previousOffset = currentOffset;
-    const rect = viewportLayout(viewportNode);
-    const viewportChanged = rect !== undefined && rect.height > 0 && rect.height !== previousViewportHeight;
-    if (rect && rect.height > 0 && rect.height !== previousViewportHeight) {
-      previousViewportHeight = rect.height;
-      setViewportHeight(rect.height);
-    }
-    const measuredContent = committedLayout(contentNode);
-    if (measuredContent) {
-      const nextContentHeight = Math.max(rect?.height ?? viewportHeight(), measuredContent.height);
-      if (nextContentHeight !== contentHeight()) setContentHeight(nextContentHeight);
-    }
+    const { rect, viewportChanged } = refreshMeasurements();
     const input = activeTextInput;
     const inputNode = input?.isOpen() ? input.node() : undefined;
     if (viewportChanged && inputNode && activePageScroll === pageScroll) {

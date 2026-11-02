@@ -27,8 +27,170 @@ void main() {
       'Input round-trip',
       'Tap to type',
     };
+    const fixedLayoutAnchors = <String>{'Home', 'Gallery', 'Host'};
+    const inputLayoutAnchors = <String>{'Input round-trip', 'Tap to type'};
     var referenceAnchors = <String, Rect>{};
     final keyboardAnchorFrames = <Map<String, Rect>>[];
+    final keyboardInputAnchorFrames = <Map<String, Rect>>[];
+    var keyboardFramesObserved = 0;
+    var lastMissingKeyboardAnchors = <String>{};
+    var lastKeyboardTextOps = <String>[];
+    var keyboardInputFramesObserved = 0;
+    Rect? firstKeyboardInputBounds;
+    Rect? firstKeyboardInputTextRect;
+    var inputAlignmentSamples = 0;
+
+    // Keep the real production frame seam under observation while this test
+    // runs. The ring is intentionally bounded so a long-lived device test
+    // cannot retain every frame it ever rendered.
+    final previousFrameDeltaOverride = debugPocketFrameDeltaAtOverride;
+    final frameDeltaTrace = <String>[];
+    var frameDeltaSequence = 0;
+    double? previousInset;
+
+    void recordFrameDelta(String entry) {
+      if (frameDeltaTrace.length >= 200) frameDeltaTrace.removeAt(0);
+      frameDeltaTrace.add('#${frameDeltaSequence++} $entry');
+    }
+
+    String formatNumber(Object? value) {
+      if (value is num && value.isFinite) return value.toStringAsFixed(2);
+      return '-';
+    }
+
+    String formatTextInputUpdateRects(PocketFrame? frame) {
+      if (frame == null) return '-';
+      final rects = <String>[];
+      for (final event in frame.events.where(
+        (event) => event.method == 'textInput.update',
+      )) {
+        final rawRect = event.params['rect'];
+        final rect = rawRect is Map ? rawRect : event.params;
+        final x = rect['x'];
+        final y = rect['y'];
+        final width = rect['width'] ?? rect['w'];
+        final height = rect['height'] ?? rect['h'];
+        rects.add(
+          '{x:${formatNumber(x)},y:${formatNumber(y)},'
+          'w:${formatNumber(width)},h:${formatNumber(height)}}',
+        );
+      }
+      return rects.isEmpty ? '-' : rects.join(';');
+    }
+
+    String formatInputTextY(PocketFrame? frame) {
+      if (frame == null) return '-';
+      final ys = frame.ops
+          .whereType<PocketTextOp>()
+          .where((op) => op.text == 'Tap to type')
+          .map((op) => formatNumber(op.y))
+          .toList(growable: false);
+      return ys.isEmpty ? '-' : ys.join(',');
+    }
+
+    // Temporary diagnostic for the intermittent 148 -> 111 draw-list
+    // transition. A non-null delta frame is a new native DrawList, so record
+    // its viewport and the key page text geometry to distinguish JS scroll
+    // state from native culling/clip state. Remove after the Duo root-cause
+    // run; this is deliberately test-only and does not alter the bridge.
+    String formatFramePaintDiagnostics(PocketFrame? frame) {
+      if (frame == null) return '-';
+      final counts = <String, int>{};
+      final anchors = <String>[];
+      const labels = <String>{
+        'Home',
+        'Gallery',
+        'Host',
+        'Input round-trip',
+        'Tap to type',
+        'Counter',
+      };
+      for (final op in frame.ops) {
+        final type = op.runtimeType.toString();
+        counts[type] = (counts[type] ?? 0) + 1;
+        if (op case final PocketTextOp text when labels.contains(text.text)) {
+          final clip = text.clip;
+          anchors.add(
+            '${text.text}@${formatNumber(text.x)},${formatNumber(text.y)}'
+            ' ${formatNumber(text.width)}x${formatNumber(text.height)}'
+            '${clip == null ? '' : ' clip=${formatNumber(clip.x)},${formatNumber(clip.y)},${formatNumber(clip.width)}x${formatNumber(clip.height)}'}',
+          );
+        }
+      }
+      final viewportEvents = frame.events
+          .where((event) => event.method == 'display.viewport')
+          .map((event) => event.params)
+          .toList(growable: false);
+      return 'frame=${formatNumber(frame.width)}x${formatNumber(frame.height)} '
+          'counts=$counts anchors=${anchors.isEmpty ? '-' : anchors.join('|')} '
+          'viewport=${viewportEvents.isEmpty ? '-' : viewportEvents.join('|')}';
+    }
+
+    debugPocketFrameDeltaAtOverride = (runtime, deltaMilliseconds) {
+      final insetBefore = tester.view.viewInsets.bottom;
+      final priorInset = previousInset;
+      PocketFrame? frame;
+      try {
+        // Call the production seam directly. It does not consult this test
+        // override, so this cannot recurse and preserves the real FFI path.
+        frame = pocketFrameDeltaAt(runtime, deltaMilliseconds);
+      } catch (error) {
+        recordFrameDelta(
+          'inset=${formatNumber(priorInset)}->${formatNumber(insetBefore)} '
+          'resize=error delta=${formatNumber(deltaMilliseconds)} '
+          'ops=error inputY=- updateRects=- error=$error',
+        );
+        rethrow;
+      }
+      final insetAfter = tester.view.viewInsets.bottom;
+      final changedBefore =
+          priorInset != null && (insetBefore - priorInset).abs() > .1;
+      final changedDuring = (insetAfter - insetBefore).abs() > .1;
+      final resize = changedBefore || changedDuring ? 'changed' : 'steady';
+      recordFrameDelta(
+        'inset=${formatNumber(insetBefore)}->${formatNumber(insetAfter)} '
+        'resize=$resize delta=${formatNumber(deltaMilliseconds)} '
+        'ops=${frame == null ? 'null' : frame.ops.length} '
+        'inputY=${formatInputTextY(frame)} '
+        'updateRects=${formatTextInputUpdateRects(frame)} '
+        'paint=${formatFramePaintDiagnostics(frame)}',
+      );
+      previousInset = insetAfter;
+      return frame;
+    };
+
+    void recordKeyboardAnchors(PocketCanvasPainter painter) {
+      if (tester.view.viewInsets.bottom <= 0 || referenceAnchors.isEmpty) {
+        return;
+      }
+      keyboardFramesObserved++;
+      final anchors = _guestTextRects(layoutAnchors);
+      final fixedAnchors = <String, Rect>{
+        for (final label in fixedLayoutAnchors)
+          if (anchors[label] case final rect?) label: rect,
+      };
+      final inputAnchors = <String, Rect>{
+        for (final label in inputLayoutAnchors)
+          if (anchors[label] case final rect?) label: rect,
+      };
+      // The input page is allowed to scroll vertically to keep the Flutter
+      // editor visible. Navigation is not allowed to change responsive mode,
+      // so use the fixed rail anchors as the per-frame layout sample and keep
+      // any visible input anchors as an independent coverage sample.
+      if (fixedAnchors.length == fixedLayoutAnchors.length) {
+        keyboardAnchorFrames.add(fixedAnchors);
+      }
+      if (inputAnchors.isNotEmpty) keyboardInputAnchorFrames.add(inputAnchors);
+      final missing = layoutAnchors.difference(anchors.keys.toSet());
+      if (missing.isNotEmpty) {
+        lastMissingKeyboardAnchors = missing;
+        lastKeyboardTextOps = painter.ops
+            .whereType<PocketTextOp>()
+            .map((op) => op.text)
+            .toList(growable: false);
+      }
+    }
+
     binding.addPersistentFrameCallback((_) {
       if (!recordFrames) return;
       binding.addPostFrameCallback((_) {
@@ -61,21 +223,33 @@ void main() {
           dx: canvas.left - hostOrigin.dx,
           dy: canvas.top - hostOrigin.dy,
         ));
-        final anchors = _guestTextRects(layoutAnchors);
-        if (tester.view.viewInsets.bottom > 0 &&
-            referenceAnchors.isNotEmpty &&
-            layoutAnchors.every(anchors.containsKey)) {
-          keyboardAnchorFrames.add(anchors);
-        }
+        recordKeyboardAnchors(painter);
       });
     });
     try {
       await tester.pumpWidget(const PocketHostApp());
       await guest.waitForContaining(tester, 'Tap to type');
-      referenceAnchors = await _waitForStableGuestLayout(
+      referenceAnchors = await _waitForStableGuestLayout(tester, layoutAnchors);
+      const scrollSyncAnchors = <String>{
+        'Input round-trip',
+        'Tap to type',
+        'Counter',
+      };
+      final referenceSurfaceBounds = tester.getRect(find.byType(PocketView));
+      final referenceScrollRects = _guestTextGlobalRects(
         tester,
-        layoutAnchors,
+        scrollSyncAnchors,
       );
+      final referenceInputTextRect = referenceScrollRects['Tap to type'];
+      expect(referenceInputTextRect, isNotNull);
+      var synchronizedPageSamples = 0;
+      var movedPageSamples = 0;
+      Rect? firstKeyboardSurfaceBounds;
+      var firstKeyboardInset = 0.0;
+      Map<String, Rect> lastKeyboardScrollRects = const <String, Rect>{};
+      Rect? firstKeyboardHintRect;
+      Rect? lastKeyboardHintRect;
+      var keyboardHintSamples = 0;
       await guest.tapGuest(tester, 'Tap to type');
       var sawKeyboard = false;
       for (var i = 0; i < 100; i++) {
@@ -104,6 +278,116 @@ void main() {
         );
         expect(editor.widget.focusNode.hasFocus, isTrue);
         expect(tester.view.viewInsets.bottom, greaterThan(0));
+        final inputBounds = tester.getRect(find.byType(TextField));
+        final surfaceBounds = tester.getRect(find.byType(PocketView));
+        firstKeyboardInputBounds ??= inputBounds;
+        firstKeyboardSurfaceBounds ??= surfaceBounds;
+        firstKeyboardInset = tester.view.viewInsets.bottom;
+        final hintFinder = find.text('Tap to type');
+        if (hintFinder.evaluate().isNotEmpty) {
+          final hintRect = tester.getRect(hintFinder.first);
+          firstKeyboardHintRect ??= hintRect;
+          lastKeyboardHintRect = hintRect;
+          keyboardHintSamples++;
+        }
+        keyboardInputFramesObserved++;
+        expect(inputBounds.top, greaterThanOrEqualTo(surfaceBounds.top));
+        expect(inputBounds.bottom, lessThanOrEqualTo(surfaceBounds.bottom));
+        expect(
+          inputBounds.left,
+          closeTo(firstKeyboardInputBounds.left, 2),
+          reason: 'Flutter input must keep its horizontal anchor during IME',
+        );
+        expect(
+          inputBounds.width,
+          closeTo(firstKeyboardInputBounds.width, 2),
+          reason: 'Flutter input must keep its width during IME',
+        );
+        final currentScrollRects = _guestTextGlobalRects(
+          tester,
+          scrollSyncAnchors,
+        );
+        lastKeyboardScrollRects = currentScrollRects;
+        final currentInputTextRect = currentScrollRects['Tap to type'];
+        if (currentInputTextRect != null && referenceInputTextRect != null) {
+          inputAlignmentSamples++;
+          firstKeyboardInputTextRect ??= currentInputTextRect;
+          // The Flutter hint is the only native overlay for this JS-owned
+          // field. Compare its global glyph origin with the guest text op so
+          // a merely co-moving but detached TextField cannot pass.
+          expect(
+            hintFinder,
+            findsOneWidget,
+            reason: 'Flutter hint must be attached to the JS input text',
+          );
+          final hintRect = tester.getRect(hintFinder.first);
+          expect(
+            hintRect.left,
+            closeTo(currentInputTextRect.left, 2),
+            reason: 'Flutter hint must share the JS input text left edge',
+          );
+          expect(
+            hintRect.top,
+            closeTo(currentInputTextRect.top, 2),
+            reason: 'Flutter hint must share the JS input text top edge',
+          );
+          final inputTextDeltaX =
+              currentInputTextRect.left - referenceInputTextRect.left;
+          final inputTextDeltaY =
+              currentInputTextRect.top - referenceInputTextRect.top;
+          final textStepX =
+              currentInputTextRect.left - firstKeyboardInputTextRect.left;
+          final textStepY =
+              currentInputTextRect.top - firstKeyboardInputTextRect.top;
+          final flutterStepX = inputBounds.left - firstKeyboardInputBounds.left;
+          final flutterStepY = inputBounds.top - firstKeyboardInputBounds.top;
+          expect(
+            flutterStepX,
+            closeTo(textStepX, 2),
+            reason: 'Flutter input must move with the JS input text',
+          );
+          expect(
+            flutterStepY,
+            closeTo(textStepY, 2),
+            reason: 'Flutter input must scroll with the JS input text',
+          );
+          final inputTitle = currentScrollRects['Input round-trip'];
+          final referenceInputTitle = referenceScrollRects['Input round-trip'];
+          final counter = currentScrollRects['Counter'];
+          final referenceCounter = referenceScrollRects['Counter'];
+          if (inputTitle != null && referenceInputTitle != null) {
+            expect(
+              inputTitle.left - referenceInputTitle.left,
+              closeTo(inputTextDeltaX, 2),
+              reason: 'Input card title must move with its editor',
+            );
+            expect(
+              inputTitle.top - referenceInputTitle.top,
+              closeTo(inputTextDeltaY, 2),
+              reason: 'Input card title must scroll with its editor',
+            );
+          }
+          if (counter != null && referenceCounter != null) {
+            expect(
+              counter.left - referenceCounter.left,
+              closeTo(inputTextDeltaX, 2),
+              reason:
+                  'Adjacent page content must keep the same horizontal offset',
+            );
+            expect(
+              counter.top - referenceCounter.top,
+              closeTo(inputTextDeltaY, 2),
+              reason: 'Adjacent page content must scroll with its editor',
+            );
+          }
+          if (inputTitle != null &&
+              referenceInputTitle != null &&
+              counter != null &&
+              referenceCounter != null) {
+            synchronizedPageSamples++;
+          }
+          if (inputTextDeltaY.abs() > 2) movedPageSamples++;
+        }
         if (keyboardAnchorFrames.length == previousAnchorCount) {
           final paints = find
               .byWidgetPredicate(
@@ -116,15 +400,19 @@ void main() {
             final paint = paints.first.widget as CustomPaint;
             final painter = paint.painter! as PocketCanvasPainter;
             final canvasBox = paints.first.findRenderObject() as RenderBox?;
-            final hostBox = find
-                .byType(PocketView)
-                .evaluate()
-                .firstOrNull
-                ?.findRenderObject() as RenderBox?;
+            final hostBox =
+                find
+                        .byType(PocketView)
+                        .evaluate()
+                        .firstOrNull
+                        ?.findRenderObject()
+                    as RenderBox?;
             if (canvasBox != null && hostBox != null) {
               final canvas = Rect.fromPoints(
                 canvasBox.localToGlobal(Offset.zero),
-                canvasBox.localToGlobal(canvasBox.size.bottomRight(Offset.zero)),
+                canvasBox.localToGlobal(
+                  canvasBox.size.bottomRight(Offset.zero),
+                ),
               );
               final hostOrigin = hostBox.localToGlobal(Offset.zero);
               transitionFrames.add((
@@ -134,12 +422,7 @@ void main() {
                 dy: canvas.top - hostOrigin.dy,
               ));
             }
-          }
-          final anchors = _guestTextRects(layoutAnchors);
-          if (tester.view.viewInsets.bottom > 0 &&
-              referenceAnchors.isNotEmpty &&
-              layoutAnchors.every(anchors.containsKey)) {
-            keyboardAnchorFrames.add(anchors);
+            recordKeyboardAnchors(painter);
           }
         }
       }
@@ -150,10 +433,58 @@ void main() {
       expect(
         keyboardAnchorFrames.length,
         greaterThan(5),
-        reason: 'Capture JS layout during the real keyboard resize',
+        reason:
+            'Capture JS layout during the real keyboard resize; '
+            'observed=$keyboardFramesObserved, '
+            'missing=$lastMissingKeyboardAnchors, '
+            'textOps=$lastKeyboardTextOps',
+      );
+      expect(
+        keyboardInputFramesObserved,
+        greaterThan(5),
+        reason: 'Keep the real Flutter input mounted throughout IME resize',
+      );
+      expect(
+        inputAlignmentSamples,
+        greaterThan(5),
+        reason:
+            'Keep the real Flutter input attached to the JS shell; '
+            'samples=$inputAlignmentSamples '
+            'referenceSurface=$referenceSurfaceBounds '
+            'keyboardSurface=$firstKeyboardSurfaceBounds '
+            'keyboardInset=$firstKeyboardInset '
+            'firstInput=$firstKeyboardInputBounds '
+            'referenceText=$referenceScrollRects '
+            'lastText=$lastKeyboardScrollRects '
+            'diagnostics=${_guestInputDiagnostics(tester)}',
+      );
+      debugPrint(
+        'keyboard geometry: referenceText=$referenceScrollRects '
+        'referenceSurface=$referenceSurfaceBounds '
+        'keyboardSurface=$firstKeyboardSurfaceBounds '
+        'keyboardInset=$firstKeyboardInset '
+        'firstInput=$firstKeyboardInputBounds '
+        'firstHint=$firstKeyboardHintRect '
+        'lastHint=$lastKeyboardHintRect '
+        'hintSamples=$keyboardHintSamples '
+        'lastText=$lastKeyboardScrollRects',
+      );
+      expect(
+        synchronizedPageSamples,
+        greaterThan(5),
+        reason:
+            'Input card and adjacent page content must be sampled with the '
+            'same scroll delta; samples=$synchronizedPageSamples',
+      );
+      expect(
+        movedPageSamples,
+        greaterThan(5),
+        reason:
+            'The JS page must scroll above the keyboard with the input; '
+            'movedSamples=$movedPageSamples',
       );
       for (final anchors in keyboardAnchorFrames) {
-        for (final label in layoutAnchors) {
+        for (final label in fixedLayoutAnchors) {
           final before = referenceAnchors[label];
           final during = anchors[label];
           if (before == null || during == null) continue;
@@ -171,8 +502,64 @@ void main() {
           );
         }
       }
-      await guest.tapGuest(tester, 'Gallery');
-      await guest.waitFor(tester, 'Official building blocks');
+      for (final anchors in keyboardInputAnchorFrames) {
+        for (final label in inputLayoutAnchors) {
+          final before = referenceAnchors[label];
+          final during = anchors[label];
+          if (before == null || during == null) continue;
+          expect(
+            during.left,
+            closeTo(before.left, 2),
+            reason: 'Keyboard resize must keep $label in the same pane',
+          );
+          expect(
+            during.width,
+            closeTo(before.width, 2),
+            reason: 'Keyboard resize must keep $label width stable',
+          );
+        }
+      }
+      final routeTapTrace = <String>[];
+
+      String routeTapSnapshot(String label) {
+        final point = guest.pointFor(tester, 'Gallery');
+        final pocketElements = find.byType(PocketView).evaluate();
+        final surface = pocketElements.isEmpty
+            ? null
+            : pocketElements.single.findRenderObject() as RenderBox?;
+        final local = point != null && surface != null
+            ? surface.globalToLocal(point)
+            : null;
+        final galleryOps = <String>[];
+        for (final painterWidget in guest.painters(tester)) {
+          final painter = painterWidget.painter! as PocketCanvasPainter;
+          for (final op in painter.ops.whereType<PocketTextOp>()) {
+            if (op.text == 'Gallery') {
+              galleryOps.add(
+                '${op.x},${op.y},${op.width},${op.height}'
+                '@${painter.width}x${painter.height}',
+              );
+            }
+          }
+        }
+        Rect? inputRect;
+        if (find.byType(TextField).evaluate().isNotEmpty) {
+          inputRect = tester.getRect(find.byType(TextField));
+        }
+        return '$label: point=$point local=$local '
+            'surface=${surface?.size} insets=${tester.view.viewInsets.bottom} '
+            'editable=${find.byType(EditableText).evaluate().length} '
+            'galleryOps=$galleryOps input=$inputRect';
+      }
+
+      routeTapTrace.add(routeTapSnapshot('before-first-gallery-tap'));
+      await guest.tapGuest(tester, 'Gallery', scroll: false);
+      routeTapTrace.add(routeTapSnapshot('after-first-gallery-tap'));
+      try {
+        await guest.waitFor(tester, 'Official building blocks');
+      } catch (error) {
+        fail('$error\n${routeTapTrace.join('\n')}');
+      }
       for (var i = 0; i < 100 && tester.view.viewInsets.bottom > 0; i++) {
         await tester.pump(const Duration(milliseconds: 50));
       }
@@ -201,8 +588,19 @@ void main() {
           reason: 'Canvas keeps its top anchor; guest content scrolls',
         );
       }
+    } catch (error, stack) {
+      debugPrint('keyboard lifecycle assertion/error: $error');
+      debugPrint('$stack');
+      debugPrint(
+        'keyboard frame delta diagnostic (${frameDeltaTrace.length} entries):',
+      );
+      for (final entry in frameDeltaTrace) {
+        debugPrint(entry);
+      }
+      rethrow;
     } finally {
       recordFrames = false;
+      debugPocketFrameDeltaAtOverride = previousFrameDeltaOverride;
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     }
@@ -240,6 +638,73 @@ Map<String, Rect> _guestTextRects(Iterable<String> labels) {
   return result;
 }
 
+Map<String, Rect> _guestTextGlobalRects(
+  WidgetTester tester,
+  Iterable<String> labels,
+) {
+  final wanted = labels.toSet();
+  final result = <String, Rect>{};
+  for (final widget in guest.painters(tester)) {
+    final painter = widget.painter! as PocketCanvasPainter;
+    final element = find.byWidget(widget).evaluate().firstOrNull;
+    final box = element?.renderObject;
+    if (box is! RenderBox || !box.hasSize) continue;
+    final scaleX = box.size.width / painter.width;
+    final scaleY = box.size.height / painter.height;
+    for (final textOp in painter.ops.whereType<PocketTextOp>()) {
+      if (!wanted.contains(textOp.text) || result.containsKey(textOp.text)) {
+        continue;
+      }
+      final logical = Rect.fromLTWH(
+        textOp.x,
+        textOp.y,
+        textOp.width,
+        textOp.height,
+      );
+      final topLeft = box.localToGlobal(
+        Offset(logical.left * scaleX, logical.top * scaleY),
+      );
+      final bottomRight = box.localToGlobal(
+        Offset(logical.right * scaleX, logical.bottom * scaleY),
+      );
+      result[textOp.text] = Rect.fromPoints(topLeft, bottomRight);
+    }
+  }
+  return result;
+}
+
+String _guestInputDiagnostics(WidgetTester tester) {
+  final blocks = <String>[];
+  var index = 0;
+  for (final widget in guest.painters(tester)) {
+    final painter = widget.painter! as PocketCanvasPainter;
+    final texts = painter.ops
+        .whereType<PocketTextOp>()
+        .map((op) => op.text)
+        .toList(growable: false);
+    final shapes = <String>[];
+    for (final op in painter.ops) {
+      if (op is PocketRoundedOp || op is PocketRectOp) {
+        final containsInputText =
+            op.x <= 220 &&
+            op.y <= 420 &&
+            op.x + op.width >= 80 &&
+            op.y + op.height >= 300;
+        if (containsInputText) {
+          shapes.add(
+            '${op.runtimeType}(${op.x},${op.y},${op.width},${op.height})',
+          );
+        }
+      }
+    }
+    blocks.add(
+      'block#$index ops=${painter.ops.length} texts=$texts shapes=$shapes',
+    );
+    index++;
+  }
+  return blocks.join(' | ');
+}
+
 Future<Map<String, Rect>> _waitForStableGuestLayout(
   WidgetTester tester,
   Iterable<String> labels,
@@ -250,7 +715,8 @@ Future<Map<String, Rect>> _waitForStableGuestLayout(
     await tester.pump(const Duration(milliseconds: 50));
     final current = _guestTextRects(labels);
     if (labels.every(current.containsKey)) {
-      final unchanged = previous != null &&
+      final unchanged =
+          previous != null &&
           labels.every((label) {
             final before = previous![label]!;
             final after = current[label]!;

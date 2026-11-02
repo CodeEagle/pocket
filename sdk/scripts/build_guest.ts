@@ -59,21 +59,21 @@ function readJsonObject(path: string): Record<string, unknown> | undefined {
 /**
  * Resolve release identity from the project's single release configuration.
  *
- * Older projects kept capabilities in manifest.json while editor.json (or
- * pocket.json) owned the release version/build.  The bytecode metadata must
- * still carry that identity: PocketSession cannot safely enforce an OTA floor
- * when it sees the default build 0.  A manifest value wins so an explicitly
- * pinned guest artifact remains reproducible; editor/pocket are fallbacks for
- * existing projects created before the fields were copied into the manifest.
+ * New projects keep the release identity in editor.json. pocket.json is the
+ * compatibility source for projects created before Editor was introduced;
+ * manifest.json is consulted only as a legacy fallback for projects that
+ * predate both files carrying release fields. The source guest manifest is
+ * otherwise a protocol/capability declaration, so it must not shadow an
+ * Editor build update with a stale copied artifact.
  */
 function releaseIdentity(projectRoot: string, manifest?: Record<string, unknown>): GuestReleaseIdentity {
   const editor = readJsonObject(join(projectRoot, "editor.json"));
   const pocket = readJsonObject(join(projectRoot, "pocket.json"));
   // Select one authoritative object instead of silently mixing a version from
-  // one file with a build from another. A manifest that explicitly carries a
-  // release field is an intentional artifact pin and therefore wins over the
-  // editor/project configuration.
-  const source = [manifest, editor, pocket].find((value) =>
+  // one file with a build from another. The order is deliberate: Editor is
+  // authoritative, pocket.json is the legacy project fallback, and a release
+  // field in manifest.json is accepted only for old projects with neither.
+  const source = [editor, pocket, manifest].find((value) =>
     value !== undefined && (Object.hasOwn(value, "version") || Object.hasOwn(value, "build")),
   );
   if (!source) return {};
@@ -472,18 +472,23 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       metadataModified = true;
     }
     if (metadataModified) writeFileSync(metadata, `${JSON.stringify(metadataObj, null, 2)}\n`);
+    const generatedManifest = join(output, "guest-manifest.json");
+    if (manifestObj) {
+      // Keep a generated manifest beside the bytecode even when the caller
+      // does not request host assets. The Editor runner packages this output;
+      // source manifest.json remains protocol/capability-only.
+      const outputManifest = { ...manifestObj } as Record<string, unknown>;
+      if (identity.version !== undefined) outputManifest.version = identity.version;
+      if (identity.build !== undefined) outputManifest.build = identity.build;
+      writeFileSync(generatedManifest, `${JSON.stringify(outputManifest, null, 2)}\n`);
+    }
     const assets = options.copyAssetsTo ? resolve(options.copyAssetsTo) : undefined;
     if (assets) {
       mkdirSync(assets, { recursive: true });
       copyFileSync(bytecode, join(assets, "app.qjbc"));
       copyFileSync(metadata, join(assets, "app.bytecode.json"));
       if (!manifestObj) throw new Error(`build_guest: missing or invalid guest manifest: ${guestManifest}`);
-      // Keep the copied manifest self-describing for package/update tools while
-      // leaving the consumer's source manifest untouched.
-      const outputManifest = { ...manifestObj } as Record<string, unknown>;
-      if (identity.version !== undefined) outputManifest.version = identity.version;
-      if (identity.build !== undefined) outputManifest.build = identity.build;
-      writeFileSync(join(assets, "guest-manifest.json"), `${JSON.stringify(outputManifest, null, 2)}\n`);
+      copyFileSync(generatedManifest, join(assets, "guest-manifest.json"));
       copyFileSync(pak, join(assets, "app.pak"));
     }
     if (options.keepSource) {

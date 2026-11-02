@@ -236,14 +236,21 @@ void main() {
       expect(field.style?.color, const Color(0xff102030));
       expect(field.style?.fontSize, 16);
       expect(field.style?.fontWeight, FontWeight.normal);
+      expect(field.style?.height, closeTo(20 / 16, 0.0001));
       expect(field.decoration?.hintText, '输入文本');
       expect(field.decoration?.fillColor, const Color(0xfff7f9fc));
       expect(field.decoration?.hintStyle?.color, const Color(0xff607080));
+      expect(field.decoration?.hintStyle?.height, closeTo(20 / 16, 0.0001));
       final inputBorder = field.decoration?.border as OutlineInputBorder;
       expect(inputBorder.borderRadius, BorderRadius.circular(10));
       expect(inputBorder.borderSide.color, const Color(0xff9aa5b2));
+      expect(inputBorder.gapPadding, 0);
+      final enabledBorder =
+          field.decoration?.enabledBorder as OutlineInputBorder;
+      expect(enabledBorder.gapPadding, 0);
       final focusBorder = field.decoration?.focusedBorder as OutlineInputBorder;
       expect(focusBorder.borderSide.color, const Color(0xff2676cb));
+      expect(focusBorder.gapPadding, 0);
       expect(
         field.decoration?.contentPadding,
         const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
@@ -329,6 +336,58 @@ void main() {
       );
     },
   );
+
+  testWidgets('native input glyph origin matches the JS text slot', (
+    tester,
+  ) async {
+    final open = _minimalTextInputOpenParams('session-line-box');
+    open.addAll(<String, dynamic>{
+      'rect': <String, double>{'x': 20, 'y': 40, 'w': 180, 'h': 33},
+      'placeholder': 'Tap to type',
+      'fontSize': 14,
+      'paddingHorizontal': 12,
+      'paddingVertical': 8,
+    });
+    final runtime = _TextInputRuntime(
+      initialEvent: _textInputEvent('textInput.open', open),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            showDebugFps: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final fieldFinder = find.byKey(
+      const ValueKey<String>('pocket-text-input-session-line-box'),
+    );
+    final hintFinder = find.text('Tap to type');
+    expect(fieldFinder, findsOneWidget);
+    expect(hintFinder, findsOneWidget);
+    final field = tester.widget<TextField>(fieldFinder);
+    final fieldRect = tester.getRect(fieldFinder);
+    final hintRect = tester.getRect(hintFinder);
+
+    // Native TEXT_RUN defaults to ceil(fontSize * 1.2), i.e. a 17px line box
+    // for the JS text-sm slot. The host must keep the Flutter glyph origin at
+    // the guest shell's padding edge instead of inheriting Material 3's
+    // 21px bodyLarge line box (which shifts it three pixels upward in a 33px
+    // input shell).
+    expect(field.style?.height, closeTo(17 / 14, 0.0001));
+    expect(field.decoration?.hintStyle?.height, closeTo(17 / 14, 0.0001));
+    expect(hintRect.left, closeTo(fieldRect.left + 12, 0.001));
+    expect(hintRect.top, closeTo(fieldRect.top + 8, 0.001));
+    expect(hintRect.height, closeTo(17, 0.001));
+  });
 
   testWidgets(
     'submit, outside tap, and disposal send session-scoped messages',
@@ -492,6 +551,108 @@ void main() {
     expect(field.decoration?.fillColor, Colors.white);
     expect(field.decoration?.hintStyle?.color, const Color(0xff667485));
     expect(field.decoration?.hintText, isNull);
+  });
+
+  testWidgets('text input overlay follows and clips to the guest page viewport', (
+    tester,
+  ) async {
+    final open = _textInputOpenParams('session-clip');
+    open['rect'] = <String, double>{'x': 20, 'y': 180, 'w': 180, 'h': 42};
+    open['clip'] = <String, double>{'x': 0, 'y': 0, 'w': 320, 'h': 200};
+    final runtime = _TextInputRuntime(
+      initialEvent: _textInputEvent('textInput.open', open),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            showDebugFps: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final overlay = find.byKey(
+      const ValueKey<String>('pocket-text-overlay-session-clip'),
+    );
+    expect(overlay, findsOneWidget);
+    final clippedOverlay = tester.widget<Positioned>(overlay);
+    final surfaceSize = tester.getSize(
+      find.byKey(const ValueKey<String>('pocket-surface-0')),
+    );
+    final scaleX = surfaceSize.width / 320;
+    final scaleY = surfaceSize.height / 480;
+    // The viewport remains the stable clipping container; the field keeps its
+    // full geometry inside it so scrolling it out does not dispose EditableText.
+    expect(clippedOverlay.left, 0);
+    expect(clippedOverlay.top, 0);
+    expect(clippedOverlay.width, closeTo(320 * scaleX, 0.001));
+    expect(clippedOverlay.height, closeTo(200 * scaleY, 0.001));
+    expect(
+      find.descendant(of: overlay, matching: find.byType(ClipRect)),
+      findsOneWidget,
+    );
+
+    // A scroll/viewport update must move the existing platform field and its
+    // clip together, without replacing the controller/focus owner.
+    final controller = tester
+        .widget<TextField>(
+          find.byKey(const ValueKey<String>('pocket-text-input-session-clip')),
+        )
+        .controller;
+    final focusNode = tester
+        .widget<TextField>(
+          find.byKey(const ValueKey<String>('pocket-text-input-session-clip')),
+        )
+        .focusNode;
+    runtime.enqueue(
+      _textInputEvent('textInput.update', <String, dynamic>{
+        'id': 'session-clip',
+        'rect': <String, double>{'x': 20, 'y': 300, 'w': 180, 'h': 42},
+        'clip': <String, double>{'x': 0, 'y': 0, 'w': 320, 'h': 160},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 16));
+    final movedOverlay = tester.widget<Positioned>(overlay);
+    expect(movedOverlay.left, 0);
+    expect(movedOverlay.top, 0);
+    expect(movedOverlay.width, closeTo(320 * scaleX, 0.001));
+    expect(movedOverlay.height, closeTo(160 * scaleY, 0.001));
+    expect(
+      find.byKey(const ValueKey<String>('pocket-text-input-session-clip')),
+      findsOneWidget,
+    );
+    expect(focusNode!.hasFocus, isTrue);
+
+    runtime.enqueue(
+      _textInputEvent('textInput.update', <String, dynamic>{
+        'id': 'session-clip',
+        'rect': <String, double>{'x': 20, 'y': 100, 'w': 180, 'h': 42},
+        'clip': <String, double>{'x': 0, 'y': 0, 'w': 320, 'h': 160},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(
+      tester.widget<Positioned>(overlay).height,
+      closeTo(160 * scaleY, 0.001),
+    );
+    expect(focusNode.hasFocus, isTrue);
+    expect(
+      tester
+          .widget<TextField>(
+            find.byKey(
+              const ValueKey<String>('pocket-text-input-session-clip'),
+            ),
+          )
+          .controller,
+      same(controller),
+    );
   });
 
   testWidgets(

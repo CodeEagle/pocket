@@ -1,8 +1,6 @@
 {
   "$schema": "https://pocketjs.dev/schema/pocket-guest-manifest.json",
   "protocolVersion": 1,
-  "version": "0.1.0",
-  "build": 1,
   "capabilities": {
     "requires": [
       "text.glyphs.baked"
@@ -44,5 +42,7 @@
       "hardware.microphone",
       "hardware.network"
     ]
-  }
+  },
+  "version": "0.1.0",
+  "build": 1
 }

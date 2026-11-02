@@ -1,11 +1,13 @@
 # Pocket SDK toolchain notes
 
-The release identity for a guest is carried by `editor.json` (or `pocket.json`
-for projects created before the editor file existed). `scripts/build_guest.ts`
-copies that identity into `app.bytecode.json` and into the generated
-`guest-manifest.json` asset. A manifest value remains authoritative when a
-consumer intentionally pins one. This keeps `PocketSession`'s embedded build
-floor connected to the same version used by Editor and the CLI.
+The release identity for a guest has one explicit priority: `editor.json`, then
+`pocket.json` for projects created before the editor file existed, and finally
+`manifest.json` only as a legacy fallback. `scripts/build_guest.ts` copies the
+selected identity into `app.bytecode.json` and into the generated
+`guest-manifest.json` asset. Current source manifests contain only protocol and
+capability declarations, so a stale copied manifest cannot shadow an Editor
+build update. This keeps `PocketSession`'s embedded build floor connected to
+the same version used by Editor and the CLI.
 Explicit release builds are positive safe integers; `pocket init` and the demo
 both start at build `1`, while malformed or zero build values fail the build.
 

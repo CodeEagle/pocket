@@ -15,6 +15,57 @@ export interface DisplayGeometryOptions {
   bridge?: DisplayGeometryBridge;
   /** Used when an older host has not sent a display.viewport event yet. */
   fallback?: DisplayGeometry;
+  /**
+   * Synchronous notification for resize-sensitive consumers. The callback is
+   * invoked in the existing display.viewport event lane, immediately after
+   * the parsed signal is updated and before the native resize call returns.
+   * It is intentionally a side effect hook, not a second transport.
+   */
+  onChange?: (geometry: DisplayGeometry) => void;
+}
+
+type DisplayListener = (line: string) => void;
+
+interface DisplayBridgeState {
+  readonly previous?: DisplayListener;
+  readonly receive: DisplayListener;
+  readonly listeners: Set<DisplayListener>;
+}
+
+// Keep one wrapper per host bridge. A page can be replaced while another
+// subscriber (for example the app shell) remains mounted; a wrapper-per-page
+// chain would retain disposed callbacks in `previous` and grow on every route.
+const displayBridgeStates = new WeakMap<object, DisplayBridgeState>();
+
+function subscribeDisplayBridge(bridge: DisplayGeometryBridge, listener: DisplayListener): () => void {
+  let state = displayBridgeStates.get(bridge);
+  if (!state) {
+    const listeners = new Set<DisplayListener>();
+    const previous = bridge.__pocketEvent;
+    const receive: DisplayListener = (line) => {
+      for (const current of [...listeners]) {
+        try {
+          current(line);
+        } catch {
+          // An observer must not prevent the remaining bridge subscribers.
+        }
+      }
+      previous?.(line);
+    };
+    state = { previous, receive, listeners };
+    displayBridgeStates.set(bridge, state);
+    bridge.__pocketEvent = receive;
+  }
+  const currentState = state;
+  currentState.listeners.add(listener);
+  return () => {
+    const active = displayBridgeStates.get(bridge);
+    if (!active) return;
+    active.listeners.delete(listener);
+    if (active.listeners.size !== 0) return;
+    if (bridge.__pocketEvent === active.receive) bridge.__pocketEvent = active.previous;
+    displayBridgeStates.delete(bridge);
+  };
 }
 
 function finite(value: unknown, fallback: number): number {
@@ -51,9 +102,10 @@ export function createDisplayGeometry(options: DisplayGeometryOptions = {}): () 
   const bridge = options.bridge ?? globalDisplayBridge();
   const fallback = options.fallback ?? EMPTY_DISPLAY_GEOMETRY;
   const [geometry, setGeometry] = createSignal<DisplayGeometry>(initialDisplayGeometry(bridge, fallback));
+  let disposed = false;
   onMount(() => {
-    const previous = bridge.__pocketEvent;
     const receive = (line: string): void => {
+      if (disposed) return;
       try {
         const message = JSON.parse(line) as {
           method?: unknown;
@@ -66,16 +118,22 @@ export function createDisplayGeometry(options: DisplayGeometryOptions = {}): () 
           : typeof message.name === "string" ? message.name : "";
         if (method === "display.viewport") {
           const params = message.params ?? message.payload;
-          setGeometry((current) => parseDisplayGeometry(params, current));
+          const next = parseDisplayGeometry(params, geometry());
+          setGeometry(next);
+          try {
+            options.onChange?.(next);
+          } catch {
+            // A resize observer must not break the existing host event lane.
+          }
         }
       } catch {
         // A malformed unrelated host line must not break the existing lane.
       }
-      previous?.(line);
     };
-    bridge.__pocketEvent = receive;
+    const unsubscribe = subscribeDisplayBridge(bridge, receive);
     onCleanup(() => {
-      if (bridge.__pocketEvent === receive) bridge.__pocketEvent = previous;
+      disposed = true;
+      unsubscribe();
     });
   });
   return geometry;

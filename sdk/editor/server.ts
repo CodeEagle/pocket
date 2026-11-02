@@ -626,7 +626,17 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
     await copy("app.pak", output.pak);
     await copy("app.qjbc", output.bytecode);
     await copy("app.bytecode.json", output.metadata);
-    await copy("guest-manifest.json", projectManifest);
+    // The source manifest is the protocol/capability declaration. Generate
+    // the artifact from the safe source path so injected/mock runners and the
+    // real compiler follow the same release identity from the current Editor
+    // config. Never let a stale source version/build pin this snapshot.
+    const sourceManifest = await readJsonFile<Record<string, unknown>>(projectManifest);
+    const artifactManifest = {
+      ...sourceManifest,
+      version: config.version,
+      build: config.build,
+    };
+    await writeFile(join(buildDir, "guest-manifest.json"), JSON.stringify(artifactManifest, null, 2) + "\n");
     const buildInfo = {
       id,
       revision,

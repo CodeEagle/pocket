@@ -20,9 +20,12 @@ The old server invokes `scripts/pocket.ts`, `packages/pocket_sdk`, page
 templates, WASM preview assets and a separate generated page model. Those
 paths are not present in this host's pinned cache and would make the editor
 depend on `/Volumes/ORICO/.../PocketJSKit`. The current editor therefore keeps
-one source of truth—the guest `app.tsx` plus `pocket.json`/`manifest.json`—and
-removes the redundant page-template/config generator and browser WASM preview.
-The served UI still provides a real source editor, build/package controls,
+one source of truth—the guest `app.tsx` plus `editor.json` (with `pocket.json`
+as the compatibility fallback) and a protocol/capability-only
+`manifest.json`—and removes the redundant page-template/config generator and
+browser WASM preview. Release identity is resolved in the same order by the
+compiler: `editor.json` > `pocket.json` > legacy `manifest.json`; the generated
+artifact receives the resolved version and build. The served UI still provides a real source editor, build/package controls,
 artifact links and diagnostics; the native Flutter host remains the preview
 for the generated qjbc + PAK pair.
 

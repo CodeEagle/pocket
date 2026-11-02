@@ -545,8 +545,6 @@ export async function initProject(directory: string, options: { sdkRoot?: string
   writeJson(join(project, "manifest.json"), {
     $schema: "https://pocketjs.dev/schema/pocket-guest-manifest.json",
     protocolVersion: 1,
-    version,
-    build: 1,
     capabilities: { requires: ["text.glyphs.baked"], optional: hardware ? hardwareCapabilities : [] },
     permissions: { optional: hardware ? hardwarePermissions : [] },
   });
@@ -616,7 +614,15 @@ export async function buildProject(directory: string, options: { outDir?: string
       if (!existsSync(source)) fail(`compiler did not produce ${name}`);
       cpSync(source, join(output, name));
     }
-    cpSync(join(project, "manifest.json"), join(output, "guest-manifest.json"));
+    // The source manifest declares the guest protocol and capabilities. Add
+    // the resolved release identity only to the generated artifact so a
+    // stale checked-in manifest can never pin the bytecode below editor.json.
+    const guestManifest = {
+      ...readJson(join(project, "manifest.json")),
+      version: config.version,
+      build: config.build,
+    };
+    writeJson(join(output, "guest-manifest.json"), guestManifest);
     const metadata = readJson(join(output, "app.bytecode.json"));
     if (metadata.entryFormat !== "quickjs-bytecode" || typeof metadata.runtimeAbi !== "string" || !metadata.runtimeAbi) fail("bytecode metadata is not a real QuickJS artifact");
     const flutterAssets = join(project, "flutter/assets");

@@ -391,6 +391,11 @@ class _PocketViewState extends State<PocketView>
   // revision acknowledged by this Flutter editor.
   int _textInputJsRevision = 0;
   Rect? _textInputRect;
+  // A JS scroll viewport can clip the input shell independently of the
+  // shell's current visual rect. Keep it in surface coordinates so the
+  // platform TextField cannot float above a page header/navigation bar while
+  // the guest content is scrolled.
+  Rect? _textInputClipRect;
   TextEditingController? _textInputController;
   FocusNode? _textInputFocusNode;
   TextInputType _textInputKeyboardType = TextInputType.text;
@@ -629,7 +634,8 @@ class _PocketViewState extends State<PocketView>
       }
       // The resize event and the new root layout are observable immediately;
       // obtain the first post-resize frame without advancing guest time.
-      final next = pocketFrameDeltaAt(runtime, 0);
+      final deltaFn = debugPocketFrameDeltaAtOverride ?? pocketFrameDeltaAt;
+      final next = deltaFn(runtime, 0);
       if (next != null) _applyFrame(next);
       _scheduleSafeAreaReport();
     } catch (error) {
@@ -1107,13 +1113,19 @@ class _PocketViewState extends State<PocketView>
               1000.0;
     try {
       widget.onBeforeFrame?.call();
+      // A pointer edge that fell back because the duplex ring was full must
+      // reach the native queue before this frame boundary. Otherwise the
+      // post-frame outside-editor dismiss can enqueue `textInput.dismiss`
+      // first, and the guest may process the dismiss/re-layout before the
+      // pending pointer-up snapshot is consumed by its next frame.
+      _flushPendingPointerJson();
       final stopwatch = _performanceCollectionEnabled
           ? (Stopwatch()..start())
           : null;
       PocketFrame? next;
       try {
         // This public seam measures the whole renderer bridge path: FFI,
-        // returned-string copy, and JSON frame decode for the real runtime.
+        // compact binary frame copy and decode for the real runtime.
         // Keep the compatibility sample key `nativeMsP95`, but do not read it
         // as a pure native-CPU measurement.
         final deltaFn = debugPocketFrameDeltaAtOverride ?? pocketFrameDeltaAt;
@@ -1135,7 +1147,6 @@ class _PocketViewState extends State<PocketView>
         }
       }
       _drainDuplexEvents();
-      _flushPendingPointerJson();
     } catch (error) {
       _failRuntime(error);
     }
@@ -1490,21 +1501,19 @@ class _PocketViewState extends State<PocketView>
     // same display.viewport contract with Flutter's logical safe-area data,
     // without remounting or adding a second runtime channel.
     try {
-      if (_controller.send(
-        method: 'display.viewport',
-        params: <String, dynamic>{
-          'width': viewport.width,
-          'height': viewport.height,
-          'safeArea': <String, double>{
-            'top': safeArea.top,
-            'right': safeArea.right,
-            'bottom': safeArea.bottom,
-            'left': safeArea.left,
-          },
-          'keyboardInset': keyboardInset,
-          'reservedRegions': reservedRegions,
+      final payload = <String, dynamic>{
+        'width': viewport.width,
+        'height': viewport.height,
+        'safeArea': <String, double>{
+          'top': safeArea.top,
+          'right': safeArea.right,
+          'bottom': safeArea.bottom,
+          'left': safeArea.left,
         },
-      )) {
+        'keyboardInset': keyboardInset,
+        'reservedRegions': reservedRegions,
+      };
+      if (_controller.send(method: 'display.viewport', params: payload)) {
         _reportedViewport = viewport;
         _reportedSafeArea = safeArea;
         _reportedKeyboardInset = keyboardInset;
@@ -1866,16 +1875,9 @@ class _PocketViewState extends State<PocketView>
     return value.toDouble();
   }
 
-  Rect? _textInputRectFromParams(Map<String, dynamic> params) {
-    final rawRect = params['rect'];
-    final rect = rawRect is Map
-        ? Map<String, dynamic>.from(rawRect)
-        : <String, dynamic>{
-            'x': params['x'],
-            'y': params['y'],
-            'width': params['width'] ?? params['w'],
-            'height': params['height'] ?? params['h'],
-          };
+  Rect? _textInputRectFromRaw(Object? rawRect) {
+    final rect = rawRect is Map ? Map<String, dynamic>.from(rawRect) : null;
+    if (rect == null) return null;
     final x = _finiteTextInputNumber(rect['x']);
     final y = _finiteTextInputNumber(rect['y']);
     final width = _finiteTextInputNumber(rect['width'] ?? rect['w']);
@@ -1889,6 +1891,21 @@ class _PocketViewState extends State<PocketView>
       return null;
     }
     return Rect.fromLTWH(x, y, width, height);
+  }
+
+  Rect? _textInputRectFromParams(Map<String, dynamic> params) {
+    final parsed = _textInputRectFromRaw(params['rect']);
+    if (parsed != null) return parsed;
+    return _textInputRectFromRaw(<String, dynamic>{
+      'x': params['x'],
+      'y': params['y'],
+      'width': params['width'] ?? params['w'],
+      'height': params['height'] ?? params['h'],
+    });
+  }
+
+  Rect? _textInputClipRectFromParams(Map<String, dynamic> params) {
+    return _textInputRectFromRaw(params['clip']);
   }
 
   Color _textInputColor(Object? value, Color fallback) {
@@ -1915,6 +1932,18 @@ class _PocketViewState extends State<PocketView>
   }) {
     if (value is! num || !value.isFinite) return fallback;
     return value.toDouble().clamp(minimum, maximum);
+  }
+
+  // PocketJS's native text slots use ceil(fontSize * 1.2) as their default
+  // line box (see sdk/native/src/lib.rs:font_slot_line_height).  TextField's
+  // Material 3 default inherits bodyLarge.height instead; leaving `height`
+  // unset therefore makes a 14px input line 21px tall and moves its glyph
+  // three pixels above the JS text op inside the fixed 33px shell. Keep the
+  // platform editor's line box on the same protocol value as the guest.
+  double _textInputLineHeight() {
+    final fontSize = _textInputFontSize;
+    if (!fontSize.isFinite || fontSize <= 0) return 1.2;
+    return (fontSize * 1.2).ceilToDouble() / fontSize;
   }
 
   FontWeight _resolveTextInputFontWeight(Object? value, FontWeight fallback) {
@@ -2287,6 +2316,7 @@ class _PocketViewState extends State<PocketView>
         0;
     _textInputJsRevision = _textInputJsRevisionFromParams(params) ?? 0;
     _textInputRect = rect;
+    _textInputClipRect = _textInputClipRectFromParams(params);
     _textInputController = controller;
     _textInputFocusNode = focusNode;
     _updateTextInputAppearance(params);
@@ -2419,6 +2449,10 @@ class _PocketViewState extends State<PocketView>
       _textInputRect = rect;
       metadataChanged = true;
     }
+    if (params.containsKey('clip')) {
+      _textInputClipRect = _textInputClipRectFromParams(params);
+      metadataChanged = true;
+    }
     if (metadataChanged && mounted) setState(() {});
   }
 
@@ -2525,6 +2559,7 @@ class _PocketViewState extends State<PocketView>
     _textInputRevision = 0;
     _textInputJsRevision = 0;
     _textInputRect = null;
+    _textInputClipRect = null;
     _textInputController = null;
     _textInputFocusNode = null;
     _textInputKeyboardType = TextInputType.text;
@@ -3494,77 +3529,109 @@ class _PocketViewState extends State<PocketView>
     flushCanvas();
     final textInputId = _textInputId;
     final textInputRect = _textInputRect;
+    final textInputClipRect = _textInputClipRect;
     final textInputController = _textInputController;
     final textInputFocusNode = _textInputFocusNode;
+    final textInputLineHeight = _textInputLineHeight();
     if (surface == 0 &&
         textInputId != null &&
         textInputRect != null &&
         textInputController != null &&
         textInputFocusNode != null) {
+      final textInputField = Material(
+        type: MaterialType.transparency,
+        child: TextField(
+          key: ValueKey<String>('pocket-text-input-$textInputId'),
+          controller: textInputController,
+          focusNode: textInputFocusNode,
+          keyboardType: _textInputKeyboardType,
+          textInputAction: _textInputAction,
+          obscureText: _textInputObscure,
+          autocorrect: _textInputAutocorrect,
+          enableSuggestions: !_textInputObscure,
+          maxLines: _textInputMaxLines,
+          minLines: _textInputMinLines,
+          scrollPadding: EdgeInsets.zero,
+          onEditingComplete: () {},
+          onSubmitted: (_) => _submitTextInput(),
+          // A down-outside callback would close the overlay before the
+          // surrounding Pocket surface can deliver its matching up edge.
+          // Keep down as a no-op and dismiss after the complete tap.
+          onTapOutside: _onTextInputTapOutside,
+          onTapUpOutside: _onTextInputTapUpOutside,
+          style: TextStyle(
+            color: _textInputTextColor,
+            fontSize: _textInputFontSize,
+            fontWeight: _textInputFontWeight,
+            height: textInputLineHeight,
+          ),
+          cursorColor: _textInputFocusedBorderColor,
+          decoration: InputDecoration(
+            isDense: true,
+            filled: true,
+            fillColor: _textInputFillColor,
+            hintText: _textInputHintText,
+            hintStyle: TextStyle(
+              color: _textInputHintColor,
+              fontSize: _textInputFontSize,
+              fontWeight: _textInputFontWeight,
+              height: textInputLineHeight,
+            ),
+            contentPadding: EdgeInsets.symmetric(
+              horizontal: _textInputPaddingHorizontal,
+              vertical: _textInputPaddingVertical,
+            ),
+            border: OutlineInputBorder(
+              // Material 3 adds OutlineInputBorder.gapPadding to the
+              // input's horizontal origin even when there is no floating
+              // label. JS owns the shell geometry, so keep the native text
+              // origin aligned with its 12px content padding.
+              gapPadding: 0,
+              borderRadius: BorderRadius.circular(_textInputBorderRadius),
+              borderSide: BorderSide(color: _textInputBorderColor),
+            ),
+            enabledBorder: OutlineInputBorder(
+              gapPadding: 0,
+              borderRadius: BorderRadius.circular(_textInputBorderRadius),
+              borderSide: BorderSide(color: _textInputBorderColor),
+            ),
+            focusedBorder: OutlineInputBorder(
+              gapPadding: 0,
+              borderRadius: BorderRadius.circular(_textInputBorderRadius),
+              borderSide: BorderSide(
+                color: _textInputFocusedBorderColor,
+                width: 1,
+              ),
+            ),
+          ),
+        ),
+      );
+      // Keep the TextField in one stable Element tree even when the page
+      // scrolls it fully outside the viewport. Removing it on an empty
+      // intersection would dispose EditableText, close the platform keyboard,
+      // and recreate the controller on the next scroll frame. The outer
+      // viewport remains the clip; the child retains its full input geometry
+      // relative to that viewport.
+      final overlayBounds = textInputClipRect ?? textInputRect;
       sceneChildren.add(
         Positioned(
           key: ValueKey<String>('pocket-text-overlay-$textInputId'),
-          left: textInputRect.left * scaleX,
-          top: textInputRect.top * scaleY,
-          width: textInputRect.width * scaleX,
-          height: textInputRect.height * scaleY,
-          child: Material(
-            type: MaterialType.transparency,
-            child: TextField(
-              key: ValueKey<String>('pocket-text-input-$textInputId'),
-              controller: textInputController,
-              focusNode: textInputFocusNode,
-              keyboardType: _textInputKeyboardType,
-              textInputAction: _textInputAction,
-              obscureText: _textInputObscure,
-              autocorrect: _textInputAutocorrect,
-              enableSuggestions: !_textInputObscure,
-              maxLines: _textInputMaxLines,
-              minLines: _textInputMinLines,
-              scrollPadding: EdgeInsets.zero,
-              onEditingComplete: () {},
-              onSubmitted: (_) => _submitTextInput(),
-              // A down-outside callback would close the overlay before the
-              // surrounding Pocket surface can deliver its matching up edge.
-              // Keep down as a no-op and dismiss after the complete tap.
-              onTapOutside: _onTextInputTapOutside,
-              onTapUpOutside: _onTextInputTapUpOutside,
-              style: TextStyle(
-                color: _textInputTextColor,
-                fontSize: _textInputFontSize,
-                fontWeight: _textInputFontWeight,
-              ),
-              cursorColor: _textInputFocusedBorderColor,
-              decoration: InputDecoration(
-                isDense: true,
-                filled: true,
-                fillColor: _textInputFillColor,
-                hintText: _textInputHintText,
-                hintStyle: TextStyle(
-                  color: _textInputHintColor,
-                  fontSize: _textInputFontSize,
-                  fontWeight: _textInputFontWeight,
+          left: overlayBounds.left * scaleX,
+          top: overlayBounds.top * scaleY,
+          width: overlayBounds.width * scaleX,
+          height: overlayBounds.height * scaleY,
+          child: ClipRect(
+            child: Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                Positioned(
+                  left: (textInputRect.left - overlayBounds.left) * scaleX,
+                  top: (textInputRect.top - overlayBounds.top) * scaleY,
+                  width: textInputRect.width * scaleX,
+                  height: textInputRect.height * scaleY,
+                  child: textInputField,
                 ),
-                contentPadding: EdgeInsets.symmetric(
-                  horizontal: _textInputPaddingHorizontal,
-                  vertical: _textInputPaddingVertical,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(_textInputBorderRadius),
-                  borderSide: BorderSide(color: _textInputBorderColor),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(_textInputBorderRadius),
-                  borderSide: BorderSide(color: _textInputBorderColor),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(_textInputBorderRadius),
-                  borderSide: BorderSide(
-                    color: _textInputFocusedBorderColor,
-                    width: 1,
-                  ),
-                ),
-              ),
+              ],
             ),
           ),
         ),

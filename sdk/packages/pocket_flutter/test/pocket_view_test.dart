@@ -69,7 +69,8 @@ class _TestMockRuntime implements PocketRuntime {
 
 final class _ViewDuplexRuntime extends _TestMockRuntime
     implements PocketBinaryDuplexRuntime {
-  _ViewDuplexRuntime(this.endpoint);
+  _ViewDuplexRuntime(this.endpoint, {PocketEvent? initialEvent})
+    : super(initialEvent: initialEvent);
 
   final _ViewDuplexEndpoint endpoint;
   bool alive = true;
@@ -262,6 +263,75 @@ void main() {
         ),
         ['down', 'up'],
       );
+    },
+  );
+
+  testWidgets(
+    'outside editor tap flushes fallback up before dismissing the editor',
+    (tester) async {
+      // Keep the production default duplex path enabled, but force its ring
+      // full so this exercises the delayed JSON fallback that can race a
+      // post-frame TextField outside dismissal.
+      final endpoint = _ViewDuplexEndpoint()..ingressFull = true;
+      final runtime = _ViewDuplexRuntime(
+        endpoint,
+        initialEvent: const PocketEvent(
+          id: 'event-open-outside-duplex',
+          method: 'textInput.open',
+          params: <String, dynamic>{
+            'id': 'field-outside-duplex',
+            'editingSession': 'session-outside-duplex',
+            'rect': <String, double>{'x': 20, 'y': 40, 'w': 180, 'h': 42},
+            'text': '',
+          },
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              showDebugFps: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      final field = find.byKey(
+        const ValueKey<String>('pocket-text-input-field-outside-duplex'),
+      );
+      expect(field, findsOneWidget);
+
+      final messageStart = runtime.messages.length;
+      final gesture = await tester.startGesture(const Offset(300, 450));
+      await tester.pump(const Duration(milliseconds: 50));
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 550));
+      await tester.pump();
+
+      final outsideMessages = runtime.messages.sublist(messageStart);
+      final pointerPhases = outsideMessages
+          .where((message) => message['name'] == 'input.pointer')
+          .map(
+            (message) => (message['payload'] as Map<String, dynamic>)['phase'],
+          )
+          .toList(growable: false);
+      expect(pointerPhases, <Object?>['down', 'up']);
+      final pointerUpIndex = outsideMessages.lastIndexWhere(
+        (message) =>
+            message['name'] == 'input.pointer' &&
+            (message['payload'] as Map<String, dynamic>)['phase'] == 'up',
+      );
+      final dismissIndex = outsideMessages.lastIndexWhere(
+        (message) => message['name'] == 'textInput.dismiss',
+      );
+      expect(pointerUpIndex, greaterThanOrEqualTo(0));
+      expect(dismissIndex, greaterThan(pointerUpIndex));
+      expect(field, findsNothing);
     },
   );
 

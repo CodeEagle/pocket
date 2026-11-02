@@ -136,6 +136,35 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     expect(status.value.builtRevision).toBe(status.value.revision);
     expect(status.value.artifacts.bytecode).toContain("app.qjbc");
 
+    const firstManifest = await request(server, "/api/projects/fixture-app/artifacts/guest-manifest.json");
+    expect(firstManifest.response.status).toBe(200);
+    expect(firstManifest.value.version).toBe("0.1.0");
+    expect(firstManifest.value.build).toBe(1);
+    expect(firstManifest.value.capabilities.requires).toContain("text.glyphs.baked");
+
+    const updatedConfig = await request(server, "/api/projects/fixture-app/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ appId: "pocket.host.demo", name: "Fixture App", version: "0.2.0", build: 2, tickHz: 60 }),
+    });
+    expect(updatedConfig.response.status).toBe(200);
+    const secondBuild = await request(server, "/api/projects/fixture-app/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(secondBuild.response.status).toBe(202);
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const nextStatus = await request(server, "/api/projects/fixture-app/status");
+      if (!nextStatus.value.busy) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const secondManifest = await request(server, "/api/projects/fixture-app/artifacts/guest-manifest.json");
+    expect(secondManifest.response.status).toBe(200);
+    expect(secondManifest.value.version).toBe("0.2.0");
+    expect(secondManifest.value.build).toBe(2);
+    expect(secondManifest.value.capabilities.requires).toContain("text.glyphs.baked");
+
     const artifact = await request(server, "/api/projects/fixture-app/artifacts/app.qjbc");
     expect(artifact.response.status).toBe(200);
     expect(new Uint8Array(artifact.value)).toEqual(new Uint8Array([0x51, 0x4a, 0x42, 0x43, 1, 2, 3]));
