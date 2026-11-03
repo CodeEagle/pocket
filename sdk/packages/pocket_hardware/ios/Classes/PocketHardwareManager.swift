@@ -77,8 +77,10 @@ final class PocketHardwareManager: NSObject,
   private lazy var motionManager = CMMotionManager()
   private lazy var altimeter = CMAltimeter()
   private var sensorGeneration: UInt64 = 0
+  private var sensorOperationId: Int?
   private var pendingSensorResult: FlutterResult?
   private var sensorTimeout: DispatchWorkItem?
+  private var motionAccessVerified = false
 
   private override init() {
     super.init()
@@ -103,13 +105,20 @@ final class PocketHardwareManager: NSObject,
     case "checkPermissions":
       result(permissionSnapshot())
     case "requestPermission":
-      requestPermission(args["permission"] as? String ?? "", result: result)
+      requestPermission(
+        args["permission"] as? String ?? "",
+        operationId: args["operationId"] as? Int,
+        timeoutMs: args["timeoutMs"] as? Int,
+        result: result
+      )
     case "startCameraPreview":
       startCameraPreview(lens: args["lens"] as? String ?? "back", result: result)
     case "stopCameraPreview":
       stopCameraPreview(result: result)
     case "disposeSession":
       disposeSession(result: result)
+    case "cancelSensorOperation":
+      cancelSensorOperation(operationId: args["operationId"] as? Int, result: result)
     case "switchCameraLens":
       switchCameraLens(requested: args["lens"] as? String, result: result)
     case "toggleCameraFlash":
@@ -126,7 +135,11 @@ final class PocketHardwareManager: NSObject,
     case "connectBleDevice":
       connectBleDevice(id: args["deviceId"] as? String ?? "", result: result)
     case "readSensors":
-      readSensors(result: result)
+      readSensors(
+        operationId: args["operationId"] as? Int,
+        timeoutMs: args["timeoutMs"] as? Int,
+        result: result
+      )
     case "authenticateBiometrics":
       authenticateBiometrics(
         reason: args["reason"] as? String ?? "Authenticate to continue",
@@ -178,8 +191,8 @@ final class PocketHardwareManager: NSObject,
           if !altitudeAvailable {
             return permissionState(
               supported: supported,
-              status: supported ? "granted" : "unavailable",
-              granted: supported
+              status: supported ? (self.motionAccessVerified ? "granted" : "available") : "unavailable",
+              granted: supported && self.motionAccessVerified
             )
           }
           switch CMAltimeter.authorizationStatus() {
@@ -222,7 +235,12 @@ final class PocketHardwareManager: NSObject,
     ["supported": supported, "status": status, "granted": granted]
   }
 
-  private func requestPermission(_ permission: String, result: @escaping FlutterResult) {
+  private func requestPermission(
+    _ permission: String,
+    operationId: Int? = nil,
+    timeoutMs: Int? = nil,
+    result: @escaping FlutterResult
+  ) {
     switch permission {
     case "camera":
       guard AVCaptureDevice.default(for: .video) != nil else {
@@ -305,46 +323,71 @@ final class PocketHardwareManager: NSObject,
         }
       }
     case "sensors":
-      let motionAvailable = motionManager.isDeviceMotionAvailable
-      let altitudeAvailable = CMAltimeter.isRelativeAltitudeAvailable()
-      guard motionAvailable || altitudeAvailable else {
-        result(error(code: "hardware_unsupported", message: "motion and barometer sensors are unavailable"))
-        return
-      }
-      if !altitudeAvailable {
-        result(["ok": true, "permission": permission, "granted": true, "status": "granted", "realHardware": true])
-        return
-      }
-      switch CMAltimeter.authorizationStatus() {
-      case .authorized:
-        result(["ok": true, "permission": permission, "granted": true, "status": "granted", "realHardware": true])
-      case .denied, .restricted:
-        result(["ok": true, "permission": permission, "granted": false, "status": "denied", "realHardware": true])
-      case .notDetermined:
-        sensorQueue.addOperation { [weak self] in
-          guard let self = self else { return }
-          self.sensorGeneration &+= 1
-          let generation = self.sensorGeneration
+      sensorQueue.addOperation { [weak self] in
+        guard let self = self else { return }
+        let generation = self.supersedeSensorOperationOnQueue(
+          code: "hardware_cancelled",
+          message: "sensor request superseded"
+        )!
+        let motionAvailable = self.motionManager.isDeviceMotionAvailable
+        let altitudeAvailable = CMAltimeter.isRelativeAltitudeAvailable()
+        guard motionAvailable || altitudeAvailable else {
+          self.main {
+            result(self.error(code: "hardware_unsupported", message: "motion and barometer sensors are unavailable"))
+          }
+          return
+        }
+        if altitudeAvailable {
+          switch CMAltimeter.authorizationStatus() {
+          case .authorized:
+            self.main {
+              result(["ok": true, "permission": permission, "granted": true, "status": "granted", "realHardware": true])
+            }
+            return
+          case .denied, .restricted:
+            self.main {
+              result(["ok": true, "permission": permission, "granted": false, "status": "denied", "realHardware": true])
+            }
+            return
+          case .notDetermined:
+            break
+          @unknown default:
+            self.main {
+              result(["ok": true, "permission": permission, "granted": false, "status": "notDetermined", "realHardware": true])
+            }
+            return
+          }
+        } else if self.motionAccessVerified {
+          self.main {
+            result(["ok": true, "permission": permission, "granted": true, "status": "granted", "realHardware": true])
+          }
+          return
+        }
+
+        self.sensorOperationId = operationId
+        self.pendingSensorResult = result
+        let finishPermission: (_ overrideGranted: Bool?, _ overrideStatus: String?, _ errorPayload: [String: Any]?) -> Void = { [weak self] overrideGranted, overrideStatus, errorPayload in
+          guard let self = self, self.sensorGeneration == generation, let callback = self.pendingSensorResult else {
+            return
+          }
+          self.pendingSensorResult = nil
+          self.sensorOperationId = nil
           self.sensorTimeout?.cancel()
           self.sensorTimeout = nil
-          if let previous = self.pendingSensorResult {
-            self.pendingSensorResult = nil
-            self.main {
-              previous(self.error(code: "hardware_cancelled", message: "sensor request superseded"))
-            }
+          self.motionManager.stopDeviceMotionUpdates()
+          self.altimeter.stopRelativeAltitudeUpdates()
+          if let errorPayload = errorPayload {
+            self.main { callback(errorPayload) }
+            return
           }
-          self.pendingSensorResult = result
-          let finishPermission: () -> Void = { [weak self] in
-            guard let self = self, self.sensorGeneration == generation, let callback = self.pendingSensorResult else {
-              return
-            }
-            self.pendingSensorResult = nil
-            self.sensorTimeout?.cancel()
-            self.sensorTimeout = nil
-            self.altimeter.stopRelativeAltitudeUpdates()
+          let granted: Bool
+          let statusString: String
+          if let overrideGranted = overrideGranted, let overrideStatus = overrideStatus {
+            granted = overrideGranted
+            statusString = overrideStatus
+          } else if altitudeAvailable {
             let status = CMAltimeter.authorizationStatus()
-            let granted = status == .authorized
-            let statusString: String
+            granted = status == .authorized
             switch status {
             case .authorized:
               statusString = "granted"
@@ -355,29 +398,65 @@ final class PocketHardwareManager: NSObject,
             @unknown default:
               statusString = "notDetermined"
             }
-            self.main {
-              callback([
-                "ok": true,
-                "permission": permission,
-                "granted": granted,
-                "status": statusString,
-                "realHardware": true,
-              ])
-            }
+          } else {
+            granted = self.motionAccessVerified
+            statusString = granted ? "granted" : "notDetermined"
           }
-          self.altimeter.startRelativeAltitudeUpdates(to: self.sensorQueue) { _, _ in
-            finishPermission()
+          self.main {
+            callback([
+              "ok": true,
+              "permission": permission,
+              "granted": granted,
+              "status": statusString,
+              "realHardware": true,
+            ])
           }
-          let timeoutItem = DispatchWorkItem { [weak self] in
-            self?.sensorQueue.addOperation {
-              finishPermission()
-            }
-          }
-          self.sensorTimeout = timeoutItem
-          DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .seconds(15), execute: timeoutItem)
         }
-      @unknown default:
-        result(["ok": true, "permission": permission, "granted": false, "status": "notDetermined", "realHardware": true])
+        if altitudeAvailable {
+          self.altimeter.startRelativeAltitudeUpdates(to: self.sensorQueue) { [weak self] value, error in
+            guard let self = self, self.sensorGeneration == generation else { return }
+            if let error = error {
+              if CMAltimeter.authorizationStatus() == .denied || CMAltimeter.authorizationStatus() == .restricted || self.isMotionAuthDenied(error) {
+                finishPermission(false, "denied", nil)
+              } else {
+                finishPermission(nil, nil, self.error(code: "hardware_sensor_error", message: error.localizedDescription))
+              }
+              return
+            }
+            if value != nil {
+              finishPermission(true, "granted", nil)
+            } else if CMAltimeter.authorizationStatus() != .notDetermined {
+              finishPermission(nil, nil, nil)
+            }
+          }
+        } else if motionAvailable {
+          self.motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
+          self.motionManager.startDeviceMotionUpdates(to: self.sensorQueue) { [weak self] value, error in
+            guard let self = self, self.sensorGeneration == generation else { return }
+            if let error = error {
+              if self.isMotionAuthDenied(error) {
+                finishPermission(false, "denied", nil)
+              } else {
+                finishPermission(nil, nil, self.error(code: "hardware_sensor_error", message: error.localizedDescription))
+              }
+              return
+            }
+            if value != nil {
+              self.motionAccessVerified = true
+              finishPermission(true, "granted", nil)
+            }
+          }
+        }
+        let timeoutItem = DispatchWorkItem { [weak self] in
+          self?.sensorQueue.addOperation {
+            finishPermission(nil, nil, nil)
+          }
+        }
+        self.sensorTimeout = timeoutItem
+        DispatchQueue.global(qos: .utility).asyncAfter(
+          deadline: .now() + self.sensorPromptDelay(timeoutMs: timeoutMs),
+          execute: timeoutItem
+        )
       }
     case "biometrics":
       let context = LAContext()
@@ -540,17 +619,10 @@ final class PocketHardwareManager: NSObject,
       self.activeBiometricContext?.invalidate()
       self.activeBiometricContext = nil
       self.sensorQueue.addOperation {
-        self.sensorGeneration &+= 1
-        self.sensorTimeout?.cancel()
-        self.sensorTimeout = nil
-        if let callback = self.pendingSensorResult {
-          self.pendingSensorResult = nil
-          self.main {
-            callback(self.error(code: "plugin_revoked", message: "hardware session disposed"))
-          }
-        }
-        self.motionManager.stopDeviceMotionUpdates()
-        self.altimeter.stopRelativeAltitudeUpdates()
+        _ = self.supersedeSensorOperationOnQueue(
+          code: "plugin_revoked",
+          message: "hardware session disposed"
+        )
       }
       self.bleQueue.async {
         self.central?.stopScan()
@@ -965,34 +1037,99 @@ final class PocketHardwareManager: NSObject,
 
   // MARK: - Sensors, biometrics and location
 
-  private func readSensors(result: @escaping FlutterResult) {
+  @discardableResult
+  private func supersedeSensorOperationOnQueue(
+    code: String,
+    message: String,
+    matchingOperationId: Int? = nil
+  ) -> UInt64? {
+    if let matchingOperationId = matchingOperationId,
+       let currentOperationId = self.sensorOperationId,
+       currentOperationId != matchingOperationId {
+      return nil
+    }
+    self.sensorGeneration &+= 1
+    self.sensorOperationId = nil
+    self.sensorTimeout?.cancel()
+    self.sensorTimeout = nil
+    self.motionManager.stopDeviceMotionUpdates()
+    self.altimeter.stopRelativeAltitudeUpdates()
+    if let previous = self.pendingSensorResult {
+      self.pendingSensorResult = nil
+      self.main {
+        previous(self.error(code: code, message: message))
+      }
+    }
+    return self.sensorGeneration
+  }
+
+  private func cancelSensorOperation(operationId: Int?, result: @escaping FlutterResult) {
     sensorQueue.addOperation { [weak self] in
       guard let self = self else { return }
+      let cancelled = self.supersedeSensorOperationOnQueue(
+        code: "hardware_cancelled",
+        message: "sensor operation cancelled",
+        matchingOperationId: operationId
+      ) != nil
+      self.main {
+        result(["ok": true, "cancelled": cancelled])
+      }
+    }
+  }
+
+  private func isMotionAuthDenied(_ error: Error?) -> Bool {
+    guard let nsError = error as NSError? else { return false }
+    return nsError.domain == CMErrorDomain &&
+      nsError.code == Int(CMErrorMotionActivityNotAuthorized.rawValue)
+  }
+
+  private func sensorPromptDelay(timeoutMs: Int?) -> DispatchTimeInterval {
+    guard let timeoutMs = timeoutMs, timeoutMs > 0 else {
+      return .seconds(15)
+    }
+    // Complete slightly before the Dart caller's deadline when a long prompt
+    // budget is configured, while clamping to [250ms, 15000ms].
+    let effectiveMs = timeoutMs > 1000 ? min(timeoutMs - 500, 15000) : max(250, timeoutMs)
+    return .milliseconds(effectiveMs)
+  }
+
+  private func readSensors(
+    operationId: Int? = nil,
+    timeoutMs: Int? = nil,
+    result: @escaping FlutterResult
+  ) {
+    sensorQueue.addOperation { [weak self] in
+      guard let self = self else { return }
+      let generation = self.supersedeSensorOperationOnQueue(
+        code: "hardware_cancelled",
+        message: "sensor read superseded"
+      )!
       let motionAvailable = self.motionManager.isDeviceMotionAvailable
       let altitudeAvailable = CMAltimeter.isRelativeAltitudeAvailable()
       guard motionAvailable || altitudeAvailable else {
         self.main { result(self.error(code: "hardware_unsupported", message: "motion and barometer sensors are unavailable")) }
         return
       }
-      self.sensorGeneration &+= 1
-      let generation = self.sensorGeneration
-      self.sensorTimeout?.cancel()
-      self.sensorTimeout = nil
-      if let previous = self.pendingSensorResult {
-        self.pendingSensorResult = nil
-        self.main {
-          previous(self.error(code: "hardware_cancelled", message: "sensor read superseded"))
+      if altitudeAvailable {
+        let status = CMAltimeter.authorizationStatus()
+        if status == .denied || status == .restricted {
+          self.main { result(self.error(code: "hardware_permission_denied", message: "motion and fitness permission is denied")) }
+          return
         }
       }
+      self.sensorOperationId = operationId
       self.pendingSensorResult = result
       var motion: CMDeviceMotion?
       var pressure: Double?
       var relativeAltitude: Double?
+      var sensorError: Error?
+      var settleScheduled = false
       let finishSample: () -> Void = { [weak self] in
         guard let self = self, self.sensorGeneration == generation, let callback = self.pendingSensorResult else {
           return
         }
         self.pendingSensorResult = nil
+        self.sensorOperationId = nil
         self.sensorTimeout?.cancel()
         self.sensorTimeout = nil
         self.motionManager.stopDeviceMotionUpdates()
@@ -1000,13 +1137,16 @@ final class PocketHardwareManager: NSObject,
         guard let sampledMotion = motion ?? self.motionManager.deviceMotion else {
           if let pressure = pressure {
             self.main { callback(["ok": true, "realSensors": true, "pressureHpa": pressure, "relativeAltitudeM": relativeAltitude as Any]) }
-          } else if altitudeAvailable && (CMAltimeter.authorizationStatus() == .denied || CMAltimeter.authorizationStatus() == .restricted) && !motionAvailable {
+          } else if (altitudeAvailable && (CMAltimeter.authorizationStatus() == .denied || CMAltimeter.authorizationStatus() == .restricted)) || self.isMotionAuthDenied(sensorError) {
             self.main { callback(self.error(code: "hardware_permission_denied", message: "motion and fitness permission is denied")) }
+          } else if let sensorError = sensorError {
+            self.main { callback(self.error(code: "hardware_sensor_error", message: sensorError.localizedDescription)) }
           } else {
             self.main { callback(self.error(code: "hardware_sensor_timeout", message: "sensor sample was unavailable")) }
           }
           return
         }
+        self.motionAccessVerified = true
         var values: [String: Any] = [
           "ok": true,
           "realSensors": true,
@@ -1027,26 +1167,51 @@ final class PocketHardwareManager: NSObject,
         if let altitude = relativeAltitude { values["relativeAltitudeM"] = altitude }
         self.main { callback(values) }
       }
-      let awaitingAuthPrompt = altitudeAvailable && CMAltimeter.authorizationStatus() == .notDetermined
+      let awaitingAuthPrompt = (altitudeAvailable && CMAltimeter.authorizationStatus() == .notDetermined) ||
+        (!altitudeAvailable && motionAvailable && !self.motionAccessVerified)
+      let scheduleSettle: () -> Void = { [weak self] in
+        guard awaitingAuthPrompt, !settleScheduled, let self = self, self.sensorGeneration == generation else { return }
+        settleScheduled = true
+        self.sensorTimeout?.cancel()
+        let settleItem = DispatchWorkItem { [weak self] in
+          self?.sensorQueue.addOperation {
+            finishSample()
+          }
+        }
+        self.sensorTimeout = settleItem
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(250), execute: settleItem)
+      }
       if motionAvailable {
         self.motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
-        self.motionManager.startDeviceMotionUpdates(to: self.sensorQueue) { value, _ in motion = value }
-      }
-      if altitudeAvailable {
-        self.altimeter.startRelativeAltitudeUpdates(to: self.sensorQueue) { [weak self] value, _ in
+        self.motionManager.startDeviceMotionUpdates(to: self.sensorQueue) { [weak self] value, error in
+          guard let self = self, self.sensorGeneration == generation else { return }
           if let value = value {
-            pressure = value.pressure.doubleValue * 10.0
-            relativeAltitude = value.relativeAltitude.doubleValue
-          }
-          guard awaitingAuthPrompt, let self = self, self.sensorGeneration == generation else { return }
-          self.sensorTimeout?.cancel()
-          let settleItem = DispatchWorkItem { [weak self] in
-            self?.sensorQueue.addOperation {
+            self.motionAccessVerified = true
+            motion = value
+            if !altitudeAvailable {
+              scheduleSettle()
+            }
+          } else if let error = error {
+            sensorError = error
+            if self.isMotionAuthDenied(error) || !altitudeAvailable {
               finishSample()
             }
           }
-          self.sensorTimeout = settleItem
-          DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(250), execute: settleItem)
+        }
+      }
+      if altitudeAvailable {
+        self.altimeter.startRelativeAltitudeUpdates(to: self.sensorQueue) { [weak self] value, error in
+          guard let self = self, self.sensorGeneration == generation else { return }
+          if let value = value {
+            pressure = value.pressure.doubleValue * 10.0
+            relativeAltitude = value.relativeAltitude.doubleValue
+            scheduleSettle()
+          } else if let error = error {
+            sensorError = error
+            if CMAltimeter.authorizationStatus() == .denied || CMAltimeter.authorizationStatus() == .restricted || self.isMotionAuthDenied(error) || !motionAvailable {
+              finishSample()
+            }
+          }
         }
       }
       // OperationQueue is required by Core Motion and has no delayed-submit
@@ -1058,7 +1223,9 @@ final class PocketHardwareManager: NSObject,
         }
       }
       self.sensorTimeout = timeoutItem
-      let initialDelay: DispatchTimeInterval = awaitingAuthPrompt ? .seconds(15) : .milliseconds(250)
+      let initialDelay: DispatchTimeInterval = awaitingAuthPrompt
+        ? self.sensorPromptDelay(timeoutMs: timeoutMs)
+        : .milliseconds(250)
       DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + initialDelay, execute: timeoutItem)
     }
   }

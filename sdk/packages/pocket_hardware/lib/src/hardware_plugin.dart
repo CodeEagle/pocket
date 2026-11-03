@@ -139,7 +139,7 @@ final class HardwarePlugin extends PocketPlugin {
     HardwareWeatherFetcher? weatherFetcher,
     this.onTextureRegistered,
     this.onTextureReleased,
-    this.requestTimeout = const Duration(seconds: 12),
+    this.requestTimeout = const Duration(seconds: 16),
     Set<String>? grantedPermissions,
   })  : _platform = platform ?? MethodChannelHardwarePlatform(),
         _weatherFetcher = weatherFetcher ?? _fetchOpenMeteo,
@@ -154,6 +154,7 @@ final class HardwarePlugin extends PocketPlugin {
   int? _textureId;
   bool _stopped = true;
   int _previewEpoch = 0;
+  int _sensorOperationEpoch = 0;
   Future<void> _cameraTail = Future<void>.value();
   PocketPluginContext? _activeContext;
 
@@ -276,9 +277,23 @@ final class HardwarePlugin extends PocketPlugin {
       final permission = _string(params, 'permission');
       _validatePermission(permission);
       _checkPermission(permission);
+      final nativePermission = _nativePermission(permission);
+      if (permission == HardwarePermissions.sensors) {
+        final operationId = ++_sensorOperationEpoch;
+        return _native(
+          'requestPermission',
+          params: <String, dynamic>{
+            'permission': nativePermission,
+            'operationId': operationId,
+            'timeoutMs': requestTimeout.inMilliseconds,
+          },
+          timeout: requestTimeout,
+          onTimeout: () => _cancelSensorOperation(operationId),
+        );
+      }
       return _native(
         'requestPermission',
-        params: <String, dynamic>{'permission': _nativePermission(permission)},
+        params: <String, dynamic>{'permission': nativePermission},
       );
     });
     context.registerRequest(HardwareCapabilities.cameraPreviewStart, (params) {
@@ -356,7 +371,16 @@ final class HardwarePlugin extends PocketPlugin {
     });
     context.registerRequest(HardwareCapabilities.sensorsRead, (_) {
       _checkPermission(HardwarePermissions.sensors);
-      return _native('readSensors', timeout: const Duration(seconds: 3));
+      final operationId = ++_sensorOperationEpoch;
+      return _native(
+        'readSensors',
+        params: <String, dynamic>{
+          'operationId': operationId,
+          'timeoutMs': requestTimeout.inMilliseconds,
+        },
+        timeout: requestTimeout,
+        onTimeout: () => _cancelSensorOperation(operationId),
+      );
     });
     context.registerRequest(HardwareCapabilities.biometricAuthenticate, (
       params,
@@ -574,10 +598,24 @@ final class HardwarePlugin extends PocketPlugin {
     if (textureId != null) onTextureReleased?.call(textureId);
   }
 
+  Future<void> _cancelSensorOperation(int operationId) async {
+    try {
+      await _platform
+          .invoke(
+            'cancelSensorOperation',
+            <String, dynamic>{'operationId': operationId},
+          )
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {
+      // Best-effort native cleanup when the caller times out early.
+    }
+  }
+
   Future<Map<String, dynamic>> _native(
     String method, {
     Map<String, dynamic> params = const <String, dynamic>{},
     Duration? timeout,
+    FutureOr<void> Function()? onTimeout,
   }) async {
     try {
       final result = await _platform
@@ -596,6 +634,9 @@ final class HardwarePlugin extends PocketPlugin {
     } on HardwarePlatformException catch (error) {
       throw PocketCapabilityException(error.code, error.message);
     } on TimeoutException {
+      if (onTimeout != null) {
+        unawaited(Future<void>.sync(onTimeout).catchError((_) {}));
+      }
       throw const PocketCapabilityException(
         'hardware_timeout',
         'hardware request timed out',

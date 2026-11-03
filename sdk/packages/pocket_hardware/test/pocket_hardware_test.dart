@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_hardware/pocket_hardware.dart';
 import 'package:pocket_services/pocket_services.dart';
@@ -7,6 +9,11 @@ final class _RecordingHardwarePlatform implements HardwarePlatform {
 
   final Map<String, Map<String, dynamic>> responses;
   final List<String> calls = <String>[];
+  final List<Map<String, dynamic>> callArguments = <Map<String, dynamic>>[];
+  Future<Map<String, dynamic>> Function(
+    String method,
+    Map<String, dynamic> arguments,
+  )? handler;
 
   @override
   Future<Map<String, dynamic>> invoke(
@@ -14,6 +21,10 @@ final class _RecordingHardwarePlatform implements HardwarePlatform {
     Map<String, dynamic> arguments = const <String, dynamic>{},
   ]) async {
     calls.add(method);
+    callArguments.add(Map<String, dynamic>.from(arguments));
+    if (handler != null) {
+      return handler!(method, arguments);
+    }
     return responses[method] ??
         <String, dynamic>{
           'ok': false,
@@ -112,5 +123,148 @@ void main() {
         'disposeSession',
       ]),
     );
+  });
+
+  test('readSensors waits across a >3s first-time OS authorization prompt and returns numeric data', () async {
+    final platform = _RecordingHardwarePlatform(<String, Map<String, dynamic>>{});
+    platform.handler = (method, arguments) async {
+      if (method == 'readSensors') {
+        await Future<void>.delayed(const Duration(milliseconds: 3300));
+        return <String, dynamic>{
+          'ok': true,
+          'realSensors': true,
+          'accelX': 0.25,
+          'accelY': -0.05,
+          'accelZ': 0.11,
+        };
+      }
+      return <String, dynamic>{'ok': true};
+    };
+
+    final registry = PocketHostRegistry();
+    final host = PocketHost(
+      registry: registry,
+      streams: PocketStreamBridge(send: (_, __) => true),
+      allowedCapabilities: HardwareCapabilities.all,
+      send: (_, __) => true,
+    );
+    final plugin = HardwarePlugin(platform: platform);
+    final manager = PocketPluginManager(
+      host: host,
+      appId: 'test.pocket_hardware.prompt',
+      sessionId: 'session-prompt',
+      allowedPermissions: HardwarePermissions.all,
+      onPermissionRequest: (_) => HardwarePermissions.all,
+    );
+    manager.register(plugin);
+    final availability = manager.negotiate(
+      required: const <String>[],
+      optional: HardwareCapabilities.all,
+      requestedPermissions: HardwarePermissions.all,
+    );
+    await manager.activate(availability);
+
+    final result = await manager.invoke(
+      HardwareCapabilities.sensorsRead,
+    ) as Map<String, dynamic>;
+    expect(result['ok'], isTrue);
+    expect(result['accelX'], 0.25);
+    expect(platform.calls, equals(<String>['readSensors']));
+    expect(platform.callArguments.first['operationId'], 1);
+    expect(platform.callArguments.first['timeoutMs'], 16000);
+
+    await manager.dispose();
+    host.dispose();
+  });
+
+  test('sensor timeout cancels the matching native operationId and subsequent read succeeds', () async {
+    final hungRead = Completer<Map<String, dynamic>>();
+    var readAttempt = 0;
+    final platform = _RecordingHardwarePlatform(<String, Map<String, dynamic>>{});
+    platform.handler = (method, arguments) async {
+      if (method == 'readSensors') {
+        readAttempt += 1;
+        if (readAttempt == 1) {
+          return hungRead.future;
+        }
+        return <String, dynamic>{
+          'ok': true,
+          'realSensors': true,
+          'accelX': 0.42,
+        };
+      }
+      if (method == 'requestPermission') {
+        return <String, dynamic>{
+          'ok': true,
+          'permission': 'sensors',
+          'granted': false,
+          'status': 'denied',
+          'realHardware': true,
+        };
+      }
+      return <String, dynamic>{'ok': true, 'cancelled': true};
+    };
+
+    final registry = PocketHostRegistry();
+    final host = PocketHost(
+      registry: registry,
+      streams: PocketStreamBridge(send: (_, __) => true),
+      allowedCapabilities: HardwareCapabilities.all,
+      send: (_, __) => true,
+    );
+    final plugin = HardwarePlugin(
+      platform: platform,
+      requestTimeout: const Duration(milliseconds: 40),
+    );
+    final manager = PocketPluginManager(
+      host: host,
+      appId: 'test.pocket_hardware.timeout',
+      sessionId: 'session-timeout',
+      allowedPermissions: HardwarePermissions.all,
+      onPermissionRequest: (_) => HardwarePermissions.all,
+    );
+    manager.register(plugin);
+    final availability = manager.negotiate(
+      required: const <String>[],
+      optional: HardwareCapabilities.all,
+      requestedPermissions: HardwarePermissions.all,
+    );
+    await manager.activate(availability);
+
+    await expectLater(
+      manager.invoke(HardwareCapabilities.sensorsRead),
+      throwsA(
+        isA<PocketCapabilityException>().having(
+          (error) => error.code,
+          'code',
+          'hardware_timeout',
+        ),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(
+      platform.calls,
+      equals(<String>['readSensors', 'cancelSensorOperation']),
+    );
+    expect(
+      platform.callArguments[1]['operationId'],
+      equals(platform.callArguments[0]['operationId']),
+    );
+
+    final deniedPerm = await manager.invoke(
+      HardwareCapabilities.requestPermission,
+      const <String, dynamic>{'permission': HardwarePermissions.sensors},
+    ) as Map<String, dynamic>;
+    expect(deniedPerm['granted'], isFalse);
+    expect(deniedPerm['status'], 'denied');
+
+    final secondRead = await manager.invoke(
+      HardwareCapabilities.sensorsRead,
+    ) as Map<String, dynamic>;
+    expect(secondRead['ok'], isTrue);
+    expect(secondRead['accelX'], 0.42);
+
+    await manager.dispose();
+    host.dispose();
   });
 }

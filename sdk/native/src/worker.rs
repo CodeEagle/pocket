@@ -20,7 +20,9 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::ffi::{c_int, c_long};
 use std::io::{ErrorKind, Read};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -634,20 +636,109 @@ impl WorkerClock {
     }
 }
 
+fn current_thread_token() -> usize {
+    thread_local! {
+        static TOKEN: u8 = const { 0 };
+    }
+    TOKEN.with(|token| token as *const u8 as usize)
+}
+
 #[derive(Default)]
-struct SpinLock(AtomicBool);
+struct SpinLock {
+    owner: AtomicUsize,
+    depth: AtomicU32,
+}
 impl SpinLock {
     fn lock(&self) {
+        let me = current_thread_token();
+        if self.owner.load(Ordering::Relaxed) == me {
+            let depth = self.depth.load(Ordering::Relaxed);
+            self.depth.store(depth + 1, Ordering::Relaxed);
+            return;
+        }
         while self
-            .0
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .owner
+            .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             std::hint::spin_loop();
         }
+        self.depth.store(1, Ordering::Relaxed);
     }
+
+    fn lock_alive(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Option<Instant>,
+    ) -> Result<SpinLockGuard<'_>, String> {
+        let me = current_thread_token();
+        if self.owner.load(Ordering::Relaxed) == me {
+            if cancel.load(Ordering::Acquire) {
+                return Err("HTTP request cancelled".to_owned());
+            }
+            if let Some(limit) = deadline {
+                if Instant::now() >= limit {
+                    return Err("HTTP request timed out".to_owned());
+                }
+            }
+            let depth = self.depth.load(Ordering::Relaxed);
+            self.depth.store(depth + 1, Ordering::Relaxed);
+            return Ok(SpinLockGuard(self));
+        }
+        let mut spins = 0u32;
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Err("HTTP request cancelled".to_owned());
+            }
+            if let Some(limit) = deadline {
+                if Instant::now() >= limit {
+                    return Err("HTTP request timed out".to_owned());
+                }
+            }
+            if self
+                .owner
+                .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.depth.store(1, Ordering::Relaxed);
+                if cancel.load(Ordering::Acquire) {
+                    self.unlock();
+                    return Err("HTTP request cancelled".to_owned());
+                }
+                if let Some(limit) = deadline {
+                    if Instant::now() >= limit {
+                        self.unlock();
+                        return Err("HTTP request timed out".to_owned());
+                    }
+                }
+                return Ok(SpinLockGuard(self));
+            }
+            spins = spins.wrapping_add(1);
+            if spins & 63 == 0 {
+                thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
     fn unlock(&self) {
-        self.0.store(false, Ordering::Release);
+        let me = current_thread_token();
+        debug_assert_eq!(self.owner.load(Ordering::Relaxed), me);
+        let depth = self.depth.load(Ordering::Relaxed);
+        if depth > 1 {
+            self.depth.store(depth - 1, Ordering::Relaxed);
+        } else {
+            self.depth.store(0, Ordering::Relaxed);
+            self.owner.store(0, Ordering::Release);
+        }
+    }
+}
+
+struct SpinLockGuard<'a>(&'a SpinLock);
+impl Drop for SpinLockGuard<'_> {
+    fn drop(&mut self) {
+        self.0.unlock();
     }
 }
 #[derive(Default)]
@@ -3571,25 +3662,28 @@ fn emit_with_backpressure(
         return Err("HTTP chunk exceeds 1024 bytes".to_owned());
     }
     loop {
-        if kind == FACT_ERROR {
-            if cancel.load(Ordering::Acquire) {
-                return Err("HTTP request cancelled".to_owned());
-            }
-        } else {
-            check_request_alive(cancel, deadline)?;
-        }
         let seen = state.pulse.snapshot();
-        let status = unsafe {
-            pocket_worker_emit_request(
-                core,
-                handle,
-                request,
-                kind,
-                STATUS_OK,
-                offset,
-                bytes.as_ptr(),
-                bytes.len(),
-            )
+        let status = {
+            let _lock_guard = state.core_lock.lock_alive(
+                cancel,
+                if kind == FACT_ERROR {
+                    None
+                } else {
+                    Some(deadline)
+                },
+            )?;
+            unsafe {
+                pocket_worker_emit_request(
+                    core,
+                    handle,
+                    request,
+                    kind,
+                    STATUS_OK,
+                    offset,
+                    bytes.as_ptr(),
+                    bytes.len(),
+                )
+            }
         };
         if status == STATUS_OK {
             return Ok(());
@@ -4377,6 +4471,7 @@ mod tests {
             let address = listener.local_addr().unwrap();
             let thread = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.set_nodelay(true);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let mut request = Vec::new();
                 let mut chunk = [0u8; 512];
@@ -4407,8 +4502,8 @@ mod tests {
         // body take 360 ms in total. The old agent (without timeout()) reads
         // the byte successfully; the fixed agent aborts at the total budget.
         let (headers_url, headers_thread) = delayed_server(
-            Duration::from_millis(180),
-            vec![Duration::from_millis(180)],
+            Duration::from_millis(120),
+            vec![Duration::from_millis(240)],
         );
         let headers_started = Instant::now();
         let response = http_agent(Duration::from_millis(300))
@@ -4685,6 +4780,7 @@ mod tests {
         )
         .unwrap();
         worker.wait_ready(Duration::from_secs(2)).unwrap();
+        worker.request_stop_and_wait();
         let core = worker.state.core.load(Ordering::Acquire);
         assert!(!core.is_null());
         let cancel = AtomicBool::new(false);
@@ -4713,7 +4809,79 @@ mod tests {
             &cancel,
         );
         assert_eq!(data_result, Err("HTTP request timed out".to_owned()));
-        worker.request_stop_and_wait();
+        let locked_state = Arc::clone(&worker.state);
+        let locked_core = core as usize;
+        let locked_cancel = Arc::new(AtomicBool::new(false));
+        worker.state.core_lock.lock();
+        let blocked_emit = thread::spawn(move || {
+            emit_with_backpressure(
+                &locked_state,
+                locked_core as *mut CWorkerCore,
+                1,
+                1,
+                FACT_DATA,
+                0,
+                b"blocked",
+                Instant::now() + Duration::from_millis(5),
+                &locked_cancel,
+            )
+        });
+        thread::sleep(Duration::from_millis(20));
+        worker.state.core_lock.unlock();
+        let blocked_result = blocked_emit.join().unwrap();
+        assert_eq!(blocked_result, Err("HTTP request timed out".to_owned()));
+        let error_result = emit_with_backpressure(
+            &worker.state,
+            core,
+            1,
+            1,
+            FACT_ERROR,
+            0,
+            b"late-error",
+            expired,
+            &cancel,
+        );
+        assert_eq!(error_result, Ok(()));
+        for offset in 0..(MAX_EVENTS - 1) {
+            let status = unsafe {
+                pocket_worker_emit_request(
+                    core,
+                    1,
+                    1,
+                    FACT_DATA,
+                    STATUS_OK,
+                    offset as u64,
+                    b"queued".as_ptr(),
+                    6,
+                )
+            };
+            assert_eq!(status, STATUS_OK);
+        }
+        let busy_error = emit_with_backpressure(
+            &worker.state,
+            core,
+            1,
+            1,
+            FACT_ERROR,
+            0,
+            b"queue-full",
+            Instant::now() + Duration::from_millis(5),
+            &cancel,
+        );
+        assert_eq!(busy_error, Err("HTTP request timed out".to_owned()));
+        cancel.store(true, Ordering::Release);
+        let cancelled_error = emit_with_backpressure(
+            &worker.state,
+            core,
+            1,
+            1,
+            FACT_ERROR,
+            0,
+            b"cancelled",
+            Instant::now() + Duration::from_secs(1),
+            &cancel,
+        );
+        assert_eq!(cancelled_error, Err("HTTP request cancelled".to_owned()));
         worker.destroy_and_join().unwrap();
     }
 }

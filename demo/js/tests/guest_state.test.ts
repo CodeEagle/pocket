@@ -1,6 +1,7 @@
 import { test as bunTest } from "bun:test";
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -516,6 +517,162 @@ test("stress and performance snapshots", () => {
   assert.equal(mixedEvents[0]?.activeGapMs, 80);
   assert.equal(mixedEvents[1]?.context, "new-open");
   assert.equal(mixedEvents[1]?.buildMs, 45);
+
+  const probeCandidates = [
+    process.env.POCKET_NATIVE_PROBE,
+    join(root, "../../sdk/native/target/debug/pocket_probe"),
+    join(root, "../../sdk/native/target/release/pocket_probe"),
+  ].filter((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
+  if (probeCandidates.length > 0) {
+    const probe = probeCandidates[0]!;
+    const bytecodePath = join(root, "../assets/app.qjbc");
+    const pakPath = join(root, "../assets/app.pak");
+    const metadataPath = join(root, "../assets/app.bytecode.json");
+    const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+    const sendEvent = (name: string, payload: Record<string, unknown> = {}) => ({
+      op: "send",
+      message: { type: "event", name, payload },
+    });
+    const sendResponse = (requestId: string, capability: string, result: Record<string, unknown>) =>
+      sendEvent("host.response", { requestId, capability, ok: true, result });
+    const runProbeCommands = (commands: Record<string, unknown>[]) => {
+      const proc = spawnSync(probe, {
+        input: `${commands.map((item) => JSON.stringify(item)).join("\n")}\n`,
+        encoding: "utf8",
+        timeout: 120_000,
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      if (proc.error) throw proc.error;
+      assert.equal(proc.status, 0, `pocket_probe failed: ${proc.stderr}`);
+      return String(proc.stdout)
+        .trim()
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, any>);
+    };
+    const baseCommands = [
+      { op: "create", width: 720, height: 2000, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } },
+      { op: "loadBytecode", bytecodePath, pakPath },
+      { op: "frame", deltaMs: 16 },
+    ];
+    const bootFrames = runProbeCommands([...baseCommands, { op: "quit" }]).flatMap((r) => (r.frame ? [r.frame] : []));
+    const bootRequests = bootFrames.flatMap((f) => (f.events ?? []).filter((e: any) => e.name === "host.request"));
+    const requestIdFor = (capability: string): string => {
+      const found = bootRequests.find((e: any) => e.payload?.capability === capability);
+      assert.ok(found?.payload?.requestId, `missing boot request ${capability}`);
+      return String(found.payload.requestId);
+    };
+    const mixedProbeResult = {
+      latest: null,
+      history: [{
+        timestamp: "2026-11-02T00:00:00.000Z",
+        fps: 60,
+        activeGapMs: 80,
+        slowFrames: 1,
+        refreshHz: 60,
+        context: "legacy-scroll",
+      }],
+      longFrameEvents: [{
+        timestamp: "2026-11-03T00:00:00.000Z",
+        buildMs: 45,
+        scope: "flutterView",
+        context: "new-open",
+      }],
+      recording: true,
+    };
+    const navFrames = runProbeCommands([
+      ...baseCommands,
+      sendResponse(requestIdFor("runtime.info"), "runtime.info", {
+        entryFormat: "quickjs-bytecode",
+        runtimeAbi: String(metadata.runtimeAbi),
+        version: "embedded",
+        build: 0,
+        source: "embedded",
+        entryBytes: metadata.bytecodeBytes,
+      }),
+      sendResponse(requestIdFor("plugins.list"), "plugins.list", { plugins: [] }),
+      sendResponse(requestIdFor("plugins.packageInfo"), "plugins.packageInfo", {
+        provider: "probe",
+        appName: "Pocket Host",
+        packageName: "dev.tryjoy.pocket-host",
+        version: "0.1.0",
+        buildNumber: "1",
+      }),
+      sendResponse(requestIdFor("updates.status"), "updates.status", {
+        configured: false,
+        stage: "not_configured",
+        activeVersion: "embedded",
+        activeBuild: 0,
+        availableVersion: null,
+        versions: [],
+        lastError: null,
+      }),
+      sendEvent("host.response", {
+        requestId: requestIdFor("system.runtime.configure"),
+        capability: "system.runtime.configure",
+        ok: false,
+        error: { code: "capability_unavailable", message: "single-instance probe" },
+      }),
+      { op: "frame", deltaMs: 16 },
+      sendEvent("demo.navigate", { route: "performance" }),
+      { op: "frame", deltaMs: 16 },
+      { op: "quit" },
+    ]).flatMap((r) => (r.frame ? [r.frame] : []));
+    const perfReq = navFrames
+      .flatMap((f) => (f.events ?? []).filter((e: any) => e.name === "host.request"))
+      .filter((e: any) => e.payload?.capability === "runtime.performance")
+      .at(-1);
+    assert.ok(perfReq?.payload?.requestId, "performance request was not emitted by tracked app.qjbc");
+    const renderedFrames = runProbeCommands([
+      ...baseCommands,
+      sendResponse(requestIdFor("runtime.info"), "runtime.info", {
+        entryFormat: "quickjs-bytecode",
+        runtimeAbi: String(metadata.runtimeAbi),
+        version: "embedded",
+        build: 0,
+        source: "embedded",
+        entryBytes: metadata.bytecodeBytes,
+      }),
+      sendResponse(requestIdFor("plugins.list"), "plugins.list", { plugins: [] }),
+      sendResponse(requestIdFor("plugins.packageInfo"), "plugins.packageInfo", {
+        provider: "probe",
+        appName: "Pocket Host",
+        packageName: "dev.tryjoy.pocket-host",
+        version: "0.1.0",
+        buildNumber: "1",
+      }),
+      sendResponse(requestIdFor("updates.status"), "updates.status", {
+        configured: false,
+        stage: "not_configured",
+        activeVersion: "embedded",
+        activeBuild: 0,
+        availableVersion: null,
+        versions: [],
+        lastError: null,
+      }),
+      sendEvent("host.response", {
+        requestId: requestIdFor("system.runtime.configure"),
+        capability: "system.runtime.configure",
+        ok: false,
+        error: { code: "capability_unavailable", message: "single-instance probe" },
+      }),
+      { op: "frame", deltaMs: 16 },
+      sendEvent("demo.navigate", { route: "performance" }),
+      { op: "frame", deltaMs: 16 },
+      sendResponse(String(perfReq.payload.requestId), "runtime.performance", mixedProbeResult),
+      sendResponse("guest-7", "runtime.performance", mixedProbeResult),
+      { op: "frame", deltaMs: 16 },
+      { op: "frame", deltaMs: 16 },
+      { op: "frame", deltaMs: 16 },
+      { op: "quit" },
+    ]).flatMap((r) => (r.frame ? [r.frame] : []));
+    const finalFrameText = (renderedFrames.at(-1)?.ops ?? [])
+      .filter((op: any) => op.type === "text" && typeof op.text === "string")
+      .map((op: any) => op.text)
+      .join("\n");
+    assert.ok(finalFrameText.includes("legacy-scroll"), "tracked app.qjbc must render legacy aggregate jank");
+    assert.ok(finalFrameText.includes("new-open"), "tracked app.qjbc must render explicit longFrameEvents jank");
+  }
 });
 
 test("source checks and boundary integrity", () => {
