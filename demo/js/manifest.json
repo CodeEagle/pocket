@@ -47,7 +47,7 @@
       "hardware.weather.current",
       "system.runtime.configure",
       "system.runtime.create",
-      "system.runtime.present",
+      "system.runtime.awaitFirstFrame",
       "system.runtime.destroy",
       "system.runtime.post",
       "system.runtime.respond",

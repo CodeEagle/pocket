@@ -2933,6 +2933,7 @@ final class PocketReplayRunner {
   /// native replay runner is the only place that can make that distinction
   /// without adding another schema/state machine to the archive model.
   PocketReplayMismatch? _validateReplayEvidence(PocketRecording recording) {
+    final activeWorkerTurns = <String, int>{};
     for (final entry in recording.entries) {
       if (entry.result['traceClock'] is! Map) {
         return PocketReplayMismatch(
@@ -2941,6 +2942,36 @@ final class PocketReplayRunner {
           reason: 'recording clock envelope is missing; replay is unverified',
           expected: 'traceClock',
         );
+      }
+      final traceClock = entry.result['traceClock'] as Map;
+      final workerEvents = traceClock['workerEvents'];
+      if (workerEvents is List) {
+        for (final rawEvent in workerEvents) {
+          if (rawEvent is! Map) continue;
+          final kind = rawEvent['kind']?.toString() ?? '';
+          final session = rawEvent['session']?.toString() ?? '';
+          if (kind == 'turn.begin') {
+            if (activeWorkerTurns.containsKey(session)) {
+              return PocketReplayMismatch(
+                entryIndex: entry.index,
+                transaction: entry.kind,
+                reason:
+                    'worker turn.begin occurred while a turn was already active; replay is unverified',
+              );
+            }
+            activeWorkerTurns[session] = entry.index;
+          } else if (kind == 'turn.end' || kind == 'worker.exit') {
+            if (kind == 'turn.end' && !activeWorkerTurns.containsKey(session)) {
+              return PocketReplayMismatch(
+                entryIndex: entry.index,
+                transaction: entry.kind,
+                reason:
+                    'worker turn.end occurred without matching turn.begin; replay is unverified',
+              );
+            }
+            activeWorkerTurns.remove(session);
+          }
+        }
       }
       if (entry.error != null) continue;
       if (entry.kind == 'frameDelta') {
@@ -2970,6 +3001,23 @@ final class PocketReplayRunner {
           expected: 'result.frame.sha256',
         );
       }
+    }
+    if (activeWorkerTurns.isNotEmpty) {
+      final unclosedIndex = activeWorkerTurns.values.first;
+      final unclosedEntry = recording.entries.firstWhere(
+        (e) => e.index == unclosedIndex,
+        orElse: () => recording.entries.last,
+      );
+      return PocketReplayMismatch(
+        entryIndex: unclosedIndex,
+        transaction: unclosedEntry.kind,
+        reason:
+            'worker turn was not closed before recording ended; replay is unverified',
+        expected: const <String, Object?>{'workerTurnClosed': true},
+        actual: <String, Object?>{
+          'activeSessions': activeWorkerTurns.keys.toList(growable: false),
+        },
+      );
     }
     return null;
   }

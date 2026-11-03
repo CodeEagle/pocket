@@ -473,12 +473,17 @@ impl OffloadHost {
     /// Nonblocking dequeue for the trusted host provider. Dequeued work is
     /// marked dispatched so cancellation is forwarded to that provider.
     pub fn take_request(&self) -> Option<OffloadProviderRequest> {
-        self.inner.rearm_wake();
         let result = self.inner.transition(
             TraceActor::Offload,
             "offload.provider.take",
             |state, _expected, trace_enabled| {
                 let request = pop_request(state);
+                if state.request_queue.is_empty()
+                    && state.cancellations.is_empty()
+                    && state.replies.is_empty()
+                {
+                    self.inner.rearm_wake();
+                }
                 let trace_request = if trace_enabled {
                     request.as_ref().map(trace_data::ProviderRequest::from)
                 } else {
@@ -495,7 +500,6 @@ impl OffloadHost {
     }
 
     pub fn take_cancellation(&self) -> Option<OffloadProviderRequest> {
-        self.inner.rearm_wake();
         let result = self.inner.transition(
             TraceActor::Offload,
             "offload.provider.cancel.take",
@@ -503,6 +507,12 @@ impl OffloadHost {
                 let request = state.cancellations.pop_front();
                 if request.is_some() {
                     self.inner.changed.notify_all();
+                }
+                if state.request_queue.is_empty()
+                    && state.cancellations.is_empty()
+                    && state.replies.is_empty()
+                {
+                    self.inner.rearm_wake();
                 }
                 let trace_request = if trace_enabled {
                     request.as_ref().map(trace_data::ProviderRequest::from)

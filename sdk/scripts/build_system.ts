@@ -54,7 +54,10 @@ async function upstreamManifestApi(): Promise<UpstreamManifestApi> {
       // Keep this lazy: a clean checkout materializes the ignored upstream
       // cache in ensurePinnedUpstream before Bun evaluates its TypeScript.
       return await import("../.cache/pocketjs/framework/src/manifest/index.ts") as UpstreamManifestApi;
-    })();
+    })().catch((error) => {
+      upstreamApiPromise = undefined;
+      throw error;
+    });
   }
   return upstreamApiPromise;
 }

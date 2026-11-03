@@ -601,6 +601,50 @@ impl WorkerTrace {
             self.changed.notify_all();
             return Err(error);
         }
+        if mode == Mode::Record {
+            let deadline = Instant::now() + CUT_WAIT_TIMEOUT;
+            while self.mode() == Mode::Record
+                && state.incomplete.is_none()
+                && !state.active_turns.is_empty()
+            {
+                let now = Instant::now();
+                if now >= deadline {
+                    state.incomplete.get_or_insert_with(|| {
+                        "worker trace batch cut timed out with an active turn".into()
+                    });
+                    break;
+                }
+                let (next, result) = self
+                    .changed
+                    .wait_timeout(state, deadline.saturating_duration_since(now))
+                    .unwrap_or_else(|poison| poison.into_inner());
+                state = next;
+                if let Err(error) = Self::check_failure(&state) {
+                    state.batch_open = false;
+                    state.batch_events.clear();
+                    state.consumed_events.clear();
+                    state.pending_events.clear();
+                    state.replay_events.clear();
+                    self.changed.notify_all();
+                    return Err(error);
+                }
+                if result.timed_out() && !state.active_turns.is_empty() {
+                    state.incomplete.get_or_insert_with(|| {
+                        "worker trace batch cut timed out with an active turn".into()
+                    });
+                    break;
+                }
+            }
+            if let Some(reason) = &state.incomplete {
+                let reason = reason.clone();
+                state.batch_open = false;
+                state.batch_events.clear();
+                state.consumed_events.clear();
+                state.pending_events.clear();
+                self.changed.notify_all();
+                return Err(format!("worker recording is incomplete: {reason}"));
+            }
+        }
         if mode == Mode::Replay {
             let deadline = Instant::now() + CUT_WAIT_TIMEOUT;
             loop {
@@ -670,6 +714,18 @@ impl WorkerTrace {
         };
         self.changed.notify_all();
         Ok(events)
+    }
+
+    pub(crate) fn verify_replay_complete(&self) -> Result<(), String> {
+        let state = self.lock();
+        Self::check_failure(&state)?;
+        if !state.replay_events.is_empty() {
+            return Err("worker replay ended with unconsumed events".into());
+        }
+        if !state.active_turns.is_empty() {
+            return Err("worker replay ended with an active unclosed turn".into());
+        }
+        Ok(())
     }
 
     pub(crate) fn peek_replay(&self) -> Result<Option<WorkerTraceEvent>, String> {
@@ -876,7 +932,10 @@ impl WorkerTrace {
             let Some(event) = state.replay_events.front().filter(|event| event.seq == seq) else {
                 return Ok(true);
             };
-            if state.stopped_sessions.contains(&event.session) {
+            let event_actor = TraceActor::for_event(Mode::Replay, event);
+            if state.stopped_sessions.contains(&event.session)
+                && !stopped_event_allowed(&state, event_actor, &event.session, &event.kind)
+            {
                 return Err(format!(
                     "worker replay session {} stopped before event {seq}",
                     event.session
@@ -1197,9 +1256,18 @@ mod tests {
                 || json!({"nowMicros": 7}),
             )
             .unwrap();
+        record
+            .observe(
+                TraceActor::Worker,
+                "worker-1",
+                "turn.end",
+                || json!({"nowMicros": 7}),
+            )
+            .unwrap();
         let first = record.finish_batch().unwrap();
         assert_eq!(first[0].seq, 0);
         assert_eq!(first[1].seq, 1);
+        assert_eq!(first[2].seq, 2);
 
         let replay = WorkerTrace::new(Mode::Replay);
         replay.begin_batch(&first).unwrap();
@@ -1217,8 +1285,16 @@ mod tests {
                 || json!({"nowMicros": 7}),
             )
             .unwrap();
+        replay
+            .observe(
+                TraceActor::Worker,
+                "worker-1",
+                "turn.end",
+                || json!({"nowMicros": 7}),
+            )
+            .unwrap();
         let replayed = replay.finish_batch().unwrap();
-        assert_eq!(replayed.len(), 2);
+        assert_eq!(replayed.len(), 3);
     }
 
     #[test]
@@ -1313,5 +1389,73 @@ mod tests {
         record.mark_incomplete("test quota");
         assert!(record.finish_batch().unwrap_err().contains("test quota"));
         assert!(!record.batch_open());
+    }
+
+    #[test]
+    fn verify_replay_complete_fails_on_active_unclosed_turn() {
+        let replay = WorkerTrace::new(Mode::Replay);
+        let events = [
+            event(0, "turn.begin", json!({"sequence": 1, "nowMicros": 10})),
+        ];
+        replay.begin_batch(&events).unwrap();
+        replay.take(TraceActor::Worker, "worker-1", "turn.begin").unwrap();
+        replay.finish_batch().unwrap();
+
+        let err = replay.verify_replay_complete().unwrap_err();
+        assert_eq!(err, "worker replay ended with an active unclosed turn");
+    }
+
+    #[test]
+    fn verify_replay_complete_fails_on_unconsumed_events() {
+        let replay = WorkerTrace::new(Mode::Replay);
+        let events = [
+            event(0, "turn.begin", json!({"sequence": 1, "nowMicros": 10})),
+            event(1, "turn.end", json!({"sequence": 1})),
+        ];
+        replay.begin_batch(&events).unwrap();
+        replay.take(TraceActor::Worker, "worker-1", "turn.begin").unwrap();
+        let err = replay.verify_replay_complete().unwrap_err();
+        assert_eq!(err, "worker replay ended with unconsumed events");
+    }
+
+    #[test]
+    fn record_finish_batch_waits_for_active_turn_to_end() {
+        let record = WorkerTrace::new(Mode::Record);
+        record.begin_batch(&[]).unwrap();
+        let lane = Arc::clone(&record);
+        lane.observe(TraceActor::Worker, "worker-1", "turn.begin", || {
+            json!({"sequence": 1})
+        })
+        .unwrap();
+
+        let lane_worker = Arc::clone(&record);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            lane_worker
+                .observe(TraceActor::Worker, "worker-1", "turn.end", || {
+                    json!({"sequence": 1})
+                })
+                .unwrap();
+        });
+
+        let events = record.finish_batch().unwrap();
+        worker.join().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "turn.begin");
+        assert_eq!(events[1].kind, "turn.end");
+    }
+
+    #[test]
+    fn record_finish_batch_times_out_on_unclosed_active_turn() {
+        let record = WorkerTrace::new(Mode::Record);
+        record.begin_batch(&[]).unwrap();
+        record
+            .observe(TraceActor::Worker, "worker-1", "turn.begin", || {
+                json!({"sequence": 1})
+            })
+            .unwrap();
+
+        let err = record.finish_batch().unwrap_err();
+        assert!(err.contains("worker trace batch cut timed out with an active turn"));
     }
 }

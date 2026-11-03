@@ -627,11 +627,20 @@ export async function buildProject(directory: string, options: { outDir?: string
       if (!existsSync(source)) fail(`compiler did not produce ${name}`);
       cpSync(source, join(output, name));
     }
+    if (built.worker || existsSync(join(staging, "app.worker.qjbc"))) {
+      for (const name of ["app.worker.qjbc", "app.worker.bytecode.json"] as const) {
+        const source = join(staging, name);
+        if (existsSync(source)) cpSync(source, join(output, name));
+      }
+    }
     // The source manifest declares the guest protocol and capabilities. Add
     // the resolved release identity only to the generated artifact so a
     // stale checked-in manifest can never pin the bytecode below editor.json.
+    const manifestSource = existsSync(join(staging, "guest-manifest.json"))
+      ? join(staging, "guest-manifest.json")
+      : join(project, "manifest.json");
     const guestManifest = {
-      ...readJson(join(project, "manifest.json")),
+      ...readJson(manifestSource),
       version: config.version,
       build: config.build,
     };
@@ -641,6 +650,12 @@ export async function buildProject(directory: string, options: { outDir?: string
     const flutterAssets = join(project, "flutter/assets");
     mkdirSync(flutterAssets, { recursive: true });
     for (const name of ["app.qjbc", "app.pak", "app.bytecode.json", "guest-manifest.json"]) cpSync(join(output, name), join(flutterAssets, name));
+    if (existsSync(flutterAssets) && (built.worker || existsSync(join(staging, "app.worker.qjbc")))) {
+      for (const name of ["app.worker.qjbc", "app.worker.bytecode.json"] as const) {
+        const source = join(output, name);
+        if (existsSync(source)) cpSync(source, join(flutterAssets, name));
+      }
+    }
     const buildInfo = { appId: config.appId, version: config.version, build: config.build, tickHz: config.tickHz, entryFormat: "quickjs-bytecode", runtimeAbi: metadata.runtimeAbi, output };
     writeJson(join(output, "build.json"), buildInfo);
     console.log(JSON.stringify({ ok: true, project, output, qjbc: join(output, "app.qjbc"), pak: join(output, "app.pak"), metadata: join(output, "app.bytecode.json"), runtimeAbi: metadata.runtimeAbi }, null, 2));

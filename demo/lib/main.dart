@@ -20,6 +20,7 @@ const showcaseConfig = PocketAppConfig(
   updates: PocketUpdateConfig.fromEnvironment(),
   pluginFactories: [createHardwarePlugin],
   allowedPermissions: HardwarePermissions.all,
+  additionalCapabilities: {'ui.compositor-surfaces'},
   showFps: true,
   compositorSurfaces: {
     'pocket.demo.profile': 2,

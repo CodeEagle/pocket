@@ -739,7 +739,13 @@ fn stop_worker_checked(host: &mut HostState) -> Result<(), String> {
         bridge.detach();
     }
     if let Some(mut runtime) = host.worker_runtime.take() {
-        if let Err(error) = runtime.destroy_and_join() {
+        let worker_error = runtime.last_error();
+        let join_result = runtime.destroy_and_join();
+        let post_error = runtime.last_error();
+        if let Some(err) = worker_error.or(post_error) {
+            return Err(format!("worker error: {err}"));
+        }
+        if let Err(error) = join_result {
             return Err(format!("worker teardown: {error}"));
         }
     }
@@ -2206,7 +2212,10 @@ fn run_virtual_frames(
 
     if first_guest_turn
         && remaining_ticks == 0
-        && (!host.pending_text.is_empty() || host.external_work_pending)
+        && (!host.pending_text.is_empty()
+            || host.external_work_pending
+            || !host.axis_deltas.is_empty()
+            || host.motion.is_some())
     {
         let active = host.touches.clone();
         run_guest_touch_frame(host, &active, &[])?;

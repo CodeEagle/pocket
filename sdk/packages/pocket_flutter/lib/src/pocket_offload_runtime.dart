@@ -321,6 +321,10 @@ final class PocketBoundedOffloadProvider implements PocketOffloadProvider {
       final req = await _client.openUrl(currentMethod, uri);
       req.followRedirects = false;
       active.request = req;
+      if (active.cancellation.isCancelled) {
+        req.abort();
+        active.cancellation.throwIfCancelled();
+      }
       req.headers.set(
         HttpHeaders.acceptHeader,
         'application/json, text/plain, */*',
@@ -334,7 +338,12 @@ final class PocketBoundedOffloadProvider implements PocketOffloadProvider {
         req.headers.set(key, value);
       }
       if (currentBody.isNotEmpty) {
-        req.headers.contentType = ContentType.text;
+        final hasContentType = requestHeaders.keys.any(
+          (key) => key.toLowerCase() == 'content-type',
+        );
+        if (!hasContentType) {
+          req.headers.contentType = ContentType.text;
+        }
         req.add(utf8.encode(currentBody));
       }
       final response = await req.close().timeout(request.timeout);
@@ -359,12 +368,19 @@ final class PocketBoundedOffloadProvider implements PocketOffloadProvider {
             }.contains(key.toLowerCase()),
           );
         }
-        if (response.statusCode == HttpStatus.seeOther ||
-            ((response.statusCode == HttpStatus.movedPermanently ||
-                    response.statusCode == HttpStatus.found) &&
-                currentMethod == 'POST')) {
-          currentMethod = 'GET';
+        final statusCode = response.statusCode;
+        if (statusCode == 303 ||
+            ((statusCode == 301 || statusCode == 302) &&
+                currentMethod != 'GET' &&
+                currentMethod != 'HEAD')) {
+          if (currentMethod != 'HEAD') {
+            currentMethod = 'GET';
+          }
           currentBody = '';
+          requestHeaders.removeWhere((key, _) {
+            final lower = key.toLowerCase();
+            return lower == 'content-type' || lower == 'content-length';
+          });
         }
         uri = next;
         continue;

@@ -77,7 +77,11 @@ Page({
         isActive: () => this._active && !this._disposed,
       });
       this._host.start(this._width, Math.max(1, this._height - this._keyboardHeight), this._dpr)
-        .then(() => { if (this._active) this._host.show(); })
+        .then(() => {
+          if (!this._host || this._disposed) return;
+          this._host.resize(this._width, Math.max(1, this._height - this._keyboardHeight));
+          if (this._active) this._host.show();
+        })
         .catch((error) => this.setData({ error: String(error && error.message || error) }));
     });
   },

@@ -84,9 +84,11 @@ app/storage/message, and SystemUI compositor contracts. It leaves pointer,
 hardware text, and IME capabilities out until the host provides hover and the
 complete framework text-event/caret contracts. Its display class is explicitly
 `composited`; it does not inherit the pinned resolver's repaint default for
-unknown `flutter`. It does not advertise `io.offload`, network, camera, audio,
-or worker capabilities. Touch viewports are capped at 1024 logical pixels per
-axis to stay within the framework's 10-bit touch coordinate contract.
+unknown `flutter`. It does not advertise `io.offload`, network, camera,
+or audio capabilities; `PocketSystemHost` advertises `runtime.worker` when
+native Worker artifacts are supported. Touch viewports are capped at 1024
+logical pixels per axis to stay within the framework's 10-bit touch coordinate
+contract.
 
 The build output's `compositorSurfaces` property is a trusted consumer
 configuration derived from the same validated catalog used for the resolved

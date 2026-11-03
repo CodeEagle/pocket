@@ -597,6 +597,10 @@ class _PocketViewState extends State<PocketView>
   // stopped, so it is the correct clock for both native guest time and FPS
   // accounting. Lifecycle pauses explicitly clear the baseline below.
   Duration? _lastSchedulerTimestamp;
+  int _idleWakeCreditMicroseconds = 0;
+
+  @visibleForTesting
+  int get idleWakeCreditMicroseconds => _idleWakeCreditMicroseconds;
   bool _isDisposed = false;
   double _firstFrameDeltaMs = 1000.0 / 60.0;
 
@@ -916,6 +920,15 @@ class _PocketViewState extends State<PocketView>
       // obtain the first post-resize frame without advancing guest time.
       final deltaFn = debugPocketFrameDeltaAtOverride ?? pocketFrameDeltaAt;
       final next = deltaFn(runtime, 0);
+      _idleWakeCreditMicroseconds = 0;
+      if (_lastSchedulerTimestamp != null &&
+          SchedulerBinding.instance.schedulerPhase ==
+              SchedulerPhase.persistentCallbacks) {
+        _lastSchedulerTimestamp =
+            SchedulerBinding.instance.currentSystemFrameTimeStamp;
+      } else {
+        _lastSchedulerTimestamp = null;
+      }
       // Apply scheduling after decoded frame events and duplex egress callbacks
       // have had a chance to publish new owner-thread work.
       _beginGuestOutputDelivery();
@@ -1611,12 +1624,32 @@ class _PocketViewState extends State<PocketView>
     );
   }
 
+  static bool _isVisibleApplicationSurface(
+    PocketHostSurfaceOp op,
+    PocketFrame frame,
+  ) {
+    var rect = Rect.fromLTWH(op.x, op.y, op.width, op.height);
+    final clip = op.clip;
+    if (clip != null) {
+      rect = rect.intersect(
+        Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height),
+      );
+    }
+    final frameBounds = Rect.fromLTWH(0, 0, frame.width, frame.height);
+    rect = rect.intersect(frameBounds);
+    return rect.width > 0 && rect.height > 0;
+  }
+
   void _applyFrame(PocketFrame next) {
     if (identical(_frame, next)) return;
     final visual = _visualFrame(next);
     int? focusedApplication(PocketFrame frame) {
       for (final op in frame.ops.whereType<PocketHostSurfaceOp>()) {
-        if (op.kind == 'application' && op.focused) return op.surfaceHandle;
+        if (op.kind == 'application' &&
+            op.focused &&
+            _isVisibleApplicationSurface(op, frame)) {
+          return op.surfaceHandle;
+        }
       }
       return null;
     }

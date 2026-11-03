@@ -745,13 +745,24 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
     await copy("app.pak", output.pak);
     await copy("app.qjbc", output.bytecode);
     await copy("app.bytecode.json", output.metadata);
+    if (existsSync(join(temp, "app.worker.qjbc"))) {
+      await copy("app.worker.qjbc", join(temp, "app.worker.qjbc"));
+    }
+    if (existsSync(join(temp, "app.worker.bytecode.json"))) {
+      await copy("app.worker.bytecode.json", join(temp, "app.worker.bytecode.json"));
+    }
     // The source manifest is the protocol/capability declaration. Generate
     // the artifact from the safe source path so injected/mock runners and the
     // real compiler follow the same release identity from the current Editor
     // config. Never let a stale source version/build pin this snapshot.
-    const sourceManifest = await readJsonFile<Record<string, unknown>>(projectManifest);
+    const baseManifest = existsSync(join(temp, "guest-manifest.json"))
+      ? await readJsonFile<Record<string, unknown>>(join(temp, "guest-manifest.json"))
+      : existsSync(join(buildDir, "guest-manifest.json"))
+        ? await readJsonFile<Record<string, unknown>>(join(buildDir, "guest-manifest.json"))
+        : await readJsonFile<Record<string, unknown>>(projectManifest);
     const artifactManifest = {
-      ...sourceManifest,
+      ...(await readJsonFile<Record<string, unknown>>(projectManifest)),
+      ...baseManifest,
       version: config.version,
       build: config.build,
     };
@@ -825,7 +836,7 @@ function queueBuild(
 async function readArtifact(workspace: Workspace, id: string, file: string, state: EditorState): Promise<Uint8Array | undefined> {
   if (!state.artifacts || state.builtRevision === null) return undefined;
   const name = basename(file);
-  const allowed = new Set(["app.js", "app.qjbc", "app.bytecode.json", "app.pak", "guest-manifest.json", "build.json"]);
+  const allowed = new Set(["app.js", "app.qjbc", "app.bytecode.json", "app.pak", "guest-manifest.json", "build.json", "app.worker.qjbc", "app.worker.bytecode.json"]);
   if (!allowed.has(name)) return undefined;
   let path: string;
   try {

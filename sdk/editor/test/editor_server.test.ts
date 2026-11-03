@@ -172,6 +172,21 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     expect(artifact.response.status).toBe(200);
     expect(new Uint8Array(artifact.value)).toEqual(new Uint8Array([0x51, 0x4a, 0x42, 0x43, 1, 2, 3]));
 
+    const finalStatus = await request(server, "/api/projects/fixture-app/status");
+    const buildRevDir = join(workspace, "builds/fixture-app", String(finalStatus.value.builtRevision));
+    writeFileSync(join(buildRevDir, "app.worker.qjbc"), Buffer.from([0x51, 0x4a, 0x42, 0x43, 9, 9, 9]));
+    writeFileSync(join(buildRevDir, "app.worker.bytecode.json"), JSON.stringify({ entryFormat: "quickjs-bytecode", runtimeAbi: "fixture-abi-v1", bytecodeBytes: 7 }));
+    const workerQjbc = await request(server, "/api/projects/fixture-app/artifacts/app.worker.qjbc");
+    expect(workerQjbc.response.status).toBe(200);
+    expect(new Uint8Array(workerQjbc.value)).toEqual(new Uint8Array([0x51, 0x4a, 0x42, 0x43, 9, 9, 9]));
+    const workerMeta = await request(server, "/api/projects/fixture-app/artifacts/app.worker.bytecode.json");
+    expect(workerMeta.response.status).toBe(200);
+    expect(workerMeta.value.runtimeAbi).toBe("fixture-abi-v1");
+    const rejectedArtifact = await request(server, "/api/projects/fixture-app/artifacts/not-allowed.txt");
+    expect(rejectedArtifact.response.status).toBe(404);
+    rmSync(join(buildRevDir, "app.worker.qjbc"));
+    rmSync(join(buildRevDir, "app.worker.bytecode.json"));
+
     const published = await request(server, "/api/projects/fixture-app/publish", {
       method: "POST",
       headers: { "content-type": "application/json" },

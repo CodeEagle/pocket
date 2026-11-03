@@ -24,6 +24,8 @@ export type BuildGuestOptions = {
   keepSource?: string;
   /** Optional build log sink used by Pocket Studio. */
   log?: (line: string) => void;
+  /** Target platform profile (e.g. "pocket-flutter"). */
+  target?: string;
 };
 
 export type BuildGuestResult = {
@@ -408,7 +410,14 @@ export function parseBuildGuestArgs(args: string[]): BuildGuestOptions {
   return result;
 }
 
-export async function buildGuest(options: BuildGuestOptions = {}): Promise<BuildGuestResult> {
+export async function buildGuest(
+  optionsOrProjectRoot: BuildGuestOptions | string = {},
+  maybeOutDir?: string,
+  maybeOptions?: Partial<BuildGuestOptions>,
+): Promise<BuildGuestResult> {
+  const options: BuildGuestOptions = typeof optionsOrProjectRoot === "string"
+    ? { projectRoot: optionsOrProjectRoot, ...(maybeOutDir ? { outDir: maybeOutDir } : {}), ...maybeOptions }
+    : optionsOrProjectRoot;
   // The SDK has no application entry of its own. Consumers and the sibling
   // demo pass an explicit projectRoot; a zero-argument build is supported only
   // for a checkout that intentionally places app.tsx at its root.
@@ -552,7 +561,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       };
       metadataObj.worker = workerDescriptor;
     }
-    let metadataModified = false;
+    let metadataModified = workerDescriptor !== undefined;
     if (metadataObj.version !== identity.version) {
       metadataObj.version = identity.version;
       metadataModified = true;

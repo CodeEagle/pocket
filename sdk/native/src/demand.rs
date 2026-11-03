@@ -104,6 +104,10 @@ pub(super) fn capture(host: &mut HostState) {
         || !host.pending_text.is_empty()
         || !host.touches.is_empty()
         || host.buttons != 0
+        || !host.axis_deltas.is_empty()
+        || host.motion.is_some()
+        || host.analog != 0x8080
+        || host.right_analog != 0x8080
     {
         Work::Continuous
     } else {
@@ -115,7 +119,12 @@ pub(super) fn capture(host: &mut HostState) {
     } else {
         host.demand.trace_idle_pending = false;
         host.demand.idle_anchor = match host.demand.work {
-            Work::Idle { .. } => Some(Instant::now()),
+            Work::Idle { .. } => {
+                if host.demand.idle_anchor.is_none() {
+                    host.demand.elapsed_credit_ms = 0.0;
+                }
+                Some(Instant::now())
+            }
             Work::Continuous => None,
         };
     }

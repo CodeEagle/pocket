@@ -77,6 +77,9 @@ class PocketWechatHost {
     this.scale = 1;
     this.logicalWidth = 1;
     this.logicalHeight = 1;
+    this.width = 1;
+    this.height = 1;
+    this.scheduledIdle = null;
     this.imageData = null;
     this.outbound = [];
     this.pending = new Map();
@@ -103,6 +106,8 @@ class PocketWechatHost {
   async start(width, height, devicePixelRatio) {
     this.logicalWidth = Math.max(1, Math.floor(width));
     this.logicalHeight = Math.max(1, Math.floor(height));
+    this.width = this.logicalWidth;
+    this.height = this.logicalHeight;
     const scale = Math.min(4, Math.max(1, Math.floor(devicePixelRatio || 1)),
       Math.floor(MAX_CANVAS_DIMENSION / this.logicalWidth), Math.floor(MAX_CANVAS_DIMENSION / this.logicalHeight));
     if (scale < 1) throw new Error("PocketJS Canvas2D viewport exceeds WeChat's 1365px dimension limit.");
@@ -139,20 +144,19 @@ class PocketWechatHost {
 
   resize(width, height) {
     if (!this.exports || this.disposed) return;
-    const nextWidth = Math.max(1, Math.floor(width));
-    const nextHeight = Math.max(1, Math.floor(height));
-    const nextScale = Math.min(this.scale, Math.floor(MAX_CANVAS_DIMENSION / nextWidth), Math.floor(MAX_CANVAS_DIMENSION / nextHeight));
-    if (nextScale < 1) {
-      this.onError(new Error("PocketJS Canvas2D viewport exceeds WeChat's 1365px dimension limit."));
-      return;
-    }
-    const changed = nextWidth !== this.logicalWidth || nextHeight !== this.logicalHeight || nextScale !== this.scale;
+    const maxLogical = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / (this.scale || 1)));
+    const nextWidth = Math.min(maxLogical, Math.max(1, Math.floor(Number(width) || this.width || this.logicalWidth || 1)));
+    const nextHeight = Math.min(maxLogical, Math.max(1, Math.floor(Number(height) || this.height || this.logicalHeight || 1)));
+    const changed = nextWidth !== this.logicalWidth || nextHeight !== this.logicalHeight;
     if (!changed) return;
     this.logicalWidth = nextWidth;
+    this.width = nextWidth;
     this.logicalHeight = nextHeight;
-    this.scale = nextScale;
+    this.height = nextHeight;
     this.configureCanvas();
-    this.check(this.exports.web_resize(this.host, nextWidth, nextHeight), "PocketJS viewport resize failed.");
+    this.stopScheduled();
+    const resizeFn = this.exports.web_resize_viewport || this.exports.web_resize;
+    this.check(resizeFn.call(this.exports, this.host, nextWidth, nextHeight), "PocketJS viewport resize failed.");
     this.draw();
     this.drainOutbound();
     this.schedule();
@@ -246,12 +250,16 @@ class PocketWechatHost {
     const frames = Number(state.framesUntilTimer || 0);
     if (frames <= 0) return;
     this.running = true;
-    this.exports.web_wechat_skip_idle_frames(this.host, Math.max(0, frames - 1));
+    this.scheduledIdle = frames > 1 ? { frames, scheduledAt: Date.now(), hz: Math.max(1, Number(state.simulationHz) || 60) } : null;
     const delay = Math.max(1, Math.ceil(frames * 1000 / Math.max(1, Number(state.simulationHz) || 60)));
     this.timer = setTimeout(() => {
       this.running = false;
       this.timer = 0;
+      this.scheduledIdle = null;
       if (!this.visible || this.disposed) return;
+      if (frames > 1 && !this.disposed && this.exports && this.host) {
+        this.exports.web_wechat_skip_idle_frames(this.host, frames - 1);
+      }
       this.advance([]);
       this.schedule();
     }, delay);
@@ -265,6 +273,17 @@ class PocketWechatHost {
   }
 
   stopScheduled() {
+    if (this.scheduledIdle) {
+      const info = this.scheduledIdle;
+      this.scheduledIdle = null;
+      if (!this.disposed && this.exports && this.host) {
+        const elapsedMs = Math.max(0, Date.now() - info.scheduledAt);
+        const elapsedFrames = Math.min(Math.max(0, info.frames - 1), Math.floor((elapsedMs * info.hz) / 1000));
+        if (elapsedFrames > 0) {
+          this.exports.web_wechat_skip_idle_frames(this.host, elapsedFrames);
+        }
+      }
+    }
     if (this.raf) {
       if (this.rafUsesCanvas && this.canvas && this.canvas.cancelAnimationFrame) this.canvas.cancelAnimationFrame(this.raf);
       else clearTimeout(this.raf);
@@ -286,7 +305,7 @@ class PocketWechatHost {
     if (this.disposed) return;
     this.visible = false;
     this.stopScheduled();
-    this.cancelPending("cancelled", "Mini Program page became inactive");
+    this.cancelPending("page inactive");
     this.imeDismiss({});
   }
 
@@ -332,7 +351,8 @@ class PocketWechatHost {
       return;
     }
     const generation = this.generation;
-    const record = { request, generation, timer: 0, cancelled: false, controller: createAbortController() };
+    const record = { id: request.requestId, request, generation, timer: 0, cancelled: false, controller: createAbortController() };
+    record.abort = () => record.controller.abort();
     this.pending.set(request.requestId, record);
     record.timer = setTimeout(() => {
       if (!this.pending.delete(request.requestId)) return;
@@ -433,15 +453,44 @@ class PocketWechatHost {
     throw this.error("unsupported", `Unsupported WeChat storage operation: ${operation}`);
   }
 
-  respond(request, ok, result, error) {
+  respond(arg1, arg2, arg3, arg4) {
+    let requestId;
+    let capability;
+    let ok;
+    let result;
+    let error;
+
+    if (typeof arg1 === "object" && arg1 !== null) {
+      requestId = arg1.requestId;
+      capability = arg1.capability;
+      ok = Boolean(arg2);
+      result = arg3;
+      error = arg4;
+    } else {
+      requestId = String(arg1 || "");
+      if (typeof arg4 === "boolean") {
+        ok = arg4;
+        result = arg2;
+        error = arg3;
+      } else if (typeof arg2 === "boolean") {
+        ok = arg2;
+        result = arg3;
+        error = arg4;
+      } else {
+        ok = false;
+        result = arg2;
+        error = arg3;
+      }
+    }
+    const errorShape = typeof error === "string" ? { code: "cancelled", message: error } : error;
     const packet = JSON.stringify({
       type: "event",
       name: "host.response",
       payload: {
-        requestId: request.requestId,
-        capability: request.capability,
+        requestId,
+        ...(capability ? { capability } : {}),
         ok,
-        ...(ok ? { result: result === undefined ? null : result } : { error }),
+        ...(ok ? { result: result === undefined ? null : result } : { error: errorShape }),
       },
     });
     this.deliverResponse(packet);
@@ -595,30 +644,39 @@ class PocketWechatHost {
     });
   }
 
-  cancelPending(code, message) {
+  cancelPending(reason) {
     this.generation += 1;
-    for (const record of this.pending.values()) {
-      clearTimeout(record.timer);
-      record.cancelled = true;
-      record.controller.abort();
-      this.respond(record.request, false, null, { code, message });
-    }
+    const entries = Array.from(this.pending.values());
     this.pending.clear();
+    for (const entry of entries) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.cancelled = true;
+      if (typeof entry.abort === "function") entry.abort();
+      else if (entry.controller) entry.controller.abort();
+      if (!this.disposed && this.exports && this.host) {
+        try {
+          this.respond(entry.id, null, reason || "cancelled", false);
+        } catch (_) {}
+      }
+    }
   }
 
   dispose() {
     if (this.disposed) return;
     this.visible = false;
-    this.stopScheduled();
-    this.cancelPending("cancelled", "PocketJS host was disposed");
-    if (this.exports && this.host) {
-      this.exports.web_destroy(this.host);
-      this.host = 0;
+    try {
+      this.stopScheduled();
+      this.cancelPending("host disposed");
+    } finally {
+      if (this.exports && this.host) {
+        this.exports.web_destroy(this.host);
+        this.host = 0;
+      }
+      this.disposed = true;
+      this.outbound.length = 0;
+      this.instance = null;
+      this.exports = null;
     }
-    this.disposed = true;
-    this.outbound.length = 0;
-    this.instance = null;
-    this.exports = null;
   }
 }
 

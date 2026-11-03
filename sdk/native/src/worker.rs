@@ -76,7 +76,9 @@ const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 30_000;
 const MAX_HTTP_TIMEOUT_MS: u64 = 120_000;
 const MAX_HTTP_REDIRECTS: usize = 3;
+#[allow(dead_code)]
 const HTTP_READ_SLICE: Duration = Duration::from_millis(100);
+#[allow(dead_code)]
 const HTTP_CONNECT_SLICE: Duration = Duration::from_millis(500);
 
 type WorkerLock = unsafe extern "C" fn(*mut c_void);
@@ -2010,15 +2012,19 @@ unsafe fn await_replay_event(
         }
         if draining_stopped_turn {
             loop {
+                inject_replay_io_facts(state, trace, session)?;
                 let Some(next) = trace.peek_replay()? else {
-                    return trace.await_turn(actor, session, kind);
+                    break;
                 };
                 if next.session == session && next.kind == "io.fact" {
-                    inject_replay_io_facts(state, trace, session)?;
                     continue;
                 }
-                return trace.await_turn(actor, session, kind);
+                if TraceActor::for_event(Mode::Replay, &next) == actor && next.session == session {
+                    break;
+                }
+                trace.wait_for_advance(next.seq)?;
             }
+            return trace.await_turn(actor, session, kind);
         }
         let Some(next) = trace.peek_replay()? else {
             trace.wait_for_session(actor, session, &state.stop_requested)?;
@@ -2792,8 +2798,21 @@ fn trace_worker_exit(state: &WorkerState, status: &'static str) {
         return;
     }
     if trace.mode() == Mode::Replay {
-        let result = unsafe { inject_replay_io_facts(state, trace, session) };
-        if let Err(error) = result {
+        let drain_result: Result<(), String> = (|| loop {
+            unsafe { inject_replay_io_facts(state, trace, session)? };
+            let Some(next) = trace.peek_replay()? else {
+                break Ok(());
+            };
+            if next.session == *session && next.kind == "io.fact" {
+                continue;
+            }
+            if !(TraceActor::for_event(Mode::Replay, &next) == TraceActor::Worker && next.session == *session) {
+                trace.wait_for_advance(next.seq)?;
+                continue;
+            }
+            break Ok(());
+        })();
+        if let Err(error) = drain_result {
             *state
                 .errors
                 .lock()
@@ -3325,12 +3344,6 @@ fn perform_http(
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> Result<u64, String> {
-    let agent = ureq::builder()
-        .timeout_connect(descriptor.timeout.min(HTTP_CONNECT_SLICE))
-        .timeout_read(HTTP_READ_SLICE)
-        .timeout_write(HTTP_READ_SLICE)
-        .redirects(0)
-        .build();
     let mut url = descriptor.url.clone();
     let mut method = descriptor.method.clone();
     let mut body = descriptor.body.clone();
@@ -3339,6 +3352,15 @@ fn perform_http(
     let response = loop {
         check_request_alive(cancel, deadline)?;
         validate_destination(&url, &state.allowed_origins)?;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
+        let agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .timeout_connect(remaining)
+            .timeout_read(remaining)
+            .timeout_write(remaining)
+            .build();
         let mut request = agent
             .request(&method, url.as_str())
             .set("accept-encoding", "identity");

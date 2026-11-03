@@ -329,7 +329,6 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       config: instance.config,
       session: instance.session,
       inputEnabled: slot.visible && slot.focused,
-      viewport: slot.bounds.size,
       onFirstFrame: () => _onFirstFrame(instance!),
     );
   }
@@ -347,6 +346,9 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final visibilityChanged = instance.compositorVisible != visible;
     instance.compositorVisible = visible;
     instance.compositorFocused = focused;
+    if (visible) {
+      _checkFirstVisibleFrame(instance);
+    }
     final generation = instance.session.generation;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_isCurrent(instance) ||
@@ -659,6 +661,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     instance.session.addListener(instance.changeListener);
     instance.firstFrame = Completer<void>();
     unawaited(instance.firstFrame!.future.catchError((Object _) {}));
+    instance.firstVisibleFrame = Completer<void>();
+    unawaited(instance.firstVisibleFrame!.future.catchError((Object _) {}));
     _applications[instanceId] = instance;
     _publishFacts();
 
@@ -724,16 +728,11 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'Requested first frame belongs to a stale runtime generation',
       );
     }
-    if (!instance.firstFrameReady) {
-      final firstFrame = instance.firstFrame;
-      if (firstFrame == null) {
-        throw const PocketCapabilityException(
-          'first_frame_unavailable',
-          'Runtime has no first-frame waiter',
-        );
-      }
+    if (!instance.isFirstVisibleFrameReady) {
+      final waiter = instance.firstVisibleFrame ??= Completer<void>();
+      unawaited(waiter.future.catchError((Object _) {}));
       try {
-        await firstFrame.future.timeout(_platformRequestTimeout);
+        await waiter.future.timeout(_platformRequestTimeout);
       } on TimeoutException {
         throw const PocketCapabilityException(
           'first_frame_timeout',
@@ -743,7 +742,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     }
     if (!_isCurrent(instance) ||
         instance.session.generation != generation ||
-        !instance.firstFrameReady) {
+        !instance.isFirstVisibleFrameReady) {
       throw const PocketCapabilityException(
         'stale_instance',
         'Runtime changed before its first frame was ready',
@@ -797,6 +796,15 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final firstFrame = instance.firstFrame;
     if (firstFrame != null && !firstFrame.isCompleted) {
       firstFrame.completeError(
+        const PocketCapabilityException(
+          'instance_destroyed',
+          'Runtime destroyed',
+        ),
+      );
+    }
+    final firstVisibleFrame = instance.firstVisibleFrame;
+    if (firstVisibleFrame != null && !firstVisibleFrame.isCompleted) {
+      firstVisibleFrame.completeError(
         const PocketCapabilityException(
           'instance_destroyed',
           'Runtime destroyed',
@@ -1163,7 +1171,17 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     if (instance.firstFrame case final ready? when !ready.isCompleted) {
       ready.complete();
     }
+    _checkFirstVisibleFrame(instance);
     _publishFacts();
+  }
+
+  void _checkFirstVisibleFrame(_RuntimeInstance instance) {
+    if (instance.isFirstVisibleFrameReady) {
+      final waiter = instance.firstVisibleFrame;
+      if (waiter != null && !waiter.isCompleted) {
+        waiter.complete();
+      }
+    }
   }
 
   void _instanceChanged(_RuntimeInstance instance) {
@@ -1196,6 +1214,17 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       }
       instance.firstFrame = Completer<void>();
       unawaited(instance.firstFrame!.future.catchError((Object _) {}));
+      final oldVisibleFrame = instance.firstVisibleFrame;
+      if (oldVisibleFrame != null && !oldVisibleFrame.isCompleted) {
+        oldVisibleFrame.completeError(
+          const PocketCapabilityException(
+            'stale_instance',
+            'Runtime generation changed before its first visible frame',
+          ),
+        );
+      }
+      instance.firstVisibleFrame = Completer<void>();
+      unawaited(instance.firstVisibleFrame!.future.catchError((Object _) {}));
       if (instance.hasEverProducedFrame) {
         _announceChildGeneration(instance, nextGeneration);
       } else {
@@ -1207,6 +1236,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       if (!instance.hasEverProducedFrame) {
         final ready = instance.firstFrame;
         if (ready != null && !ready.isCompleted) ready.completeError(failure);
+        final visible = instance.firstVisibleFrame;
+        if (visible != null && !visible.isCompleted) {
+          visible.completeError(failure);
+        }
       } else if (instance.reportedFailureGeneration != nextGeneration) {
         instance.reportedFailureGeneration = nextGeneration;
         _systemUIInstance.session.controller.send(
@@ -1356,6 +1389,7 @@ final class _RuntimeInstance {
   final int ownerGeneration;
   late PocketSession session;
   Completer<void>? firstFrame;
+  Completer<void>? firstVisibleFrame;
   int observedGeneration = 0;
   int announcedGeneration = 0;
   int? reportedFailureGeneration;
@@ -1363,6 +1397,8 @@ final class _RuntimeInstance {
   bool hasEverProducedFrame = false;
   bool compositorVisible = false;
   bool compositorFocused = false;
+  bool get isFirstVisibleFrameReady =>
+      firstFrameReady && (isSystemUI || compositorVisible);
   bool closing = false;
   Future<void>? closeFuture;
   Object? startupError;

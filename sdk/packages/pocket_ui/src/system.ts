@@ -794,6 +794,16 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     top && this.touch(this.records.get(top.instanceId));
   }
 
+  private notifyPresentation(): void {
+    for (const listener of [...this.presentationListeners]) {
+      try {
+        listener();
+      } catch {
+        // The host event lane and other presentation subscribers stay live.
+      }
+    }
+  }
+
   private applyPresentation(
     instanceIds: readonly string[],
     focusedInstanceId: string | null,
@@ -805,13 +815,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.presentedInstanceIds = next;
     this.focusedInstanceId = focusedInstanceId;
     for (const instanceId of instanceIds) this.touch(this.records.get(instanceId));
-    for (const listener of [...this.presentationListeners]) {
-      try {
-        listener();
-      } catch {
-        // The host event lane and other presentation subscribers stay live.
-      }
-    }
+    this.notifyPresentation();
   }
 
   private readSurfaceRegistry(): Record<string, number> {
@@ -1228,11 +1232,13 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       callInstances.add(call.resumeInstanceId);
       callInstances.add(call.targetInstanceId);
     }
+    const presentedIds = new Set(this.presentedInstanceIds);
     const candidates = [...this.records.values()]
       .filter((record) =>
         record.instanceId !== SYSTEM_UI_INSTANCE_ID &&
         !stackInstances.has(record.instanceId) &&
         !callInstances.has(record.instanceId) &&
+        !presentedIds.has(record.instanceId) &&
         !record.closing &&
         !record.failed)
       .sort((a, b) => a.lastUsed - b.lastUsed || a.instanceId.localeCompare(b.instanceId));
@@ -1257,6 +1263,10 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         call.targetInstanceId === record.instanceId);
     if (stillReferenced) {
       throw new PocketSystemError("runtime_referenced", "runtime still has a stack or result reference");
+    }
+    if (this.presentedInstanceIds.includes(record.instanceId)) {
+      this.presentedInstanceIds = this.presentedInstanceIds.filter((id) => id !== record.instanceId);
+      this.notifyPresentation();
     }
     await this.hostRequest("system.runtime.destroy", { instanceId: record.instanceId });
     this.assertActive();
@@ -1315,7 +1325,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
   }
 
   private async cancelApp(request: SystemRequest): Promise<DispatchOutcome> {
-    const source = this.authorizeForeground(request);
+    const source = this.authorizeRuntime(request);
     if (!nonEmptyString(request.params.requestId)) {
       throw new PocketSystemError("invalid_request_id", "cancel needs a launch requestId");
     }
@@ -1326,8 +1336,15 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
     const targetIndex = this.stack.findIndex((frame) => frame.requestId === call.requestId);
     if (targetIndex < 1) throw new PocketSystemError("launch_not_active", "launch is not active");
-    if (source.appId !== this.systemUI && source.instanceId !== call.targetInstanceId) {
-      throw new PocketSystemError("cancel_denied", "only the foreground target or System UI may cancel this launch");
+    if (
+      source.appId !== this.systemUI &&
+      source.instanceId !== call.targetInstanceId &&
+      !(
+        source.instanceId === call.callerInstanceId &&
+        source.generation === call.callerGeneration
+      )
+    ) {
+      throw new PocketSystemError("cancel_denied", "caller is not authorized to cancel call");
     }
     const deferTargetCleanup = source.instanceId === call.targetInstanceId;
     const delivered = await this.cancelStackFrom(targetIndex, "cancelled", deferTargetCleanup);
@@ -1394,10 +1411,24 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     const target = this.records.get(primary.instanceId);
     if (!target) throw new PocketSystemError("stale_launch", "target runtime no longer exists");
 
+    const unwoundInstances = new Set(frames.map((frame) => frame.instanceId));
     for (let frameIndex = frames.length - 1; frameIndex > 0; frameIndex -= 1) {
       const frame = frames[frameIndex]!;
       const nestedCall = frame.requestId ? this.calls.get(frame.requestId) : undefined;
-      if (nestedCall) this.calls.delete(nestedCall.requestId);
+      if (nestedCall) {
+        if (!unwoundInstances.has(nestedCall.callerInstanceId)) {
+          const caller = this.records.get(nestedCall.callerInstanceId);
+          if (caller && caller.generation === nestedCall.callerGeneration) {
+            nestedCall.completion = {
+              cancelled: true,
+              value: null,
+              reason,
+            };
+            await this.tryDeliverResult(nestedCall);
+          }
+        }
+        this.calls.delete(nestedCall.requestId);
+      }
     }
     primaryCall.completion = { cancelled: true, value: null, reason };
     for (let frameIndex = this.stack.length - 1; frameIndex > index; frameIndex -= 1) {
@@ -1453,6 +1484,10 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       call.targetInstanceId === record.instanceId);
     if (hasCalls) {
       throw new PocketSystemError("runtime_referenced", "cannot destroy a runtime with pending result references");
+    }
+    if (this.presentedInstanceIds.includes(record.instanceId)) {
+      this.presentedInstanceIds = this.presentedInstanceIds.filter((id) => id !== record.instanceId);
+      this.notifyPresentation();
     }
     await this.hostRequest("system.runtime.destroy", { instanceId: record.instanceId });
     this.records.delete(record.instanceId);
@@ -1782,6 +1817,17 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         removedInstanceIds.has(call.callerInstanceId) ||
         removedInstanceIds.has(call.targetInstanceId)
       ) {
+        if (!removedInstanceIds.has(call.callerInstanceId)) {
+          const caller = this.records.get(call.callerInstanceId);
+          if (caller && caller.generation === call.callerGeneration) {
+            call.completion = {
+              cancelled: true,
+              value: null,
+              reason,
+            };
+            await this.tryDeliverResult(call);
+          }
+        }
         this.calls.delete(requestId);
         if (!removedInstanceIds.has(call.targetInstanceId)) orphanTargets.add(call.targetInstanceId);
       }

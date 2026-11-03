@@ -786,7 +786,7 @@
 -    const nub = analogY();
      if (nub !== 0) s.nudge(nub * nubStep);
 -  });
-+  }, { continuous: () => hasScrollInput });
++  }, { continuous: () => hasScrollInput || s.state() !== "idle" });
  }
 --- a/framework/src/kinetics.vue-vapor.ts
 +++ b/framework/src/kinetics.vue-vapor.ts

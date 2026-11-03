@@ -419,6 +419,9 @@ pub(super) fn set_mode(host: &mut HostState, raw_mode: u32) -> Result<(), String
     }
     let finalize_offline = host.trace.mode == Mode::Replay && mode == Mode::Live;
     if finalize_offline {
+        if let Some(lane) = &host.worker_trace {
+            lane.verify_replay_complete()?;
+        }
         if let Some(runtime) = &host.worker_runtime {
             runtime.prepare_replay_stop();
         }

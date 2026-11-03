@@ -115,6 +115,11 @@ sealed class PocketOp {
         );
       case 'text':
         final fontSlot = _fontSlot(json['fontSlot']);
+        final rawAlign = json['align'];
+        if (rawAlign != null &&
+            (rawAlign is! int || rawAlign < 0 || rawAlign > 2)) {
+          throw const FormatException('Invalid text alignment');
+        }
         return PocketTextOp(
           x: x,
           y: y,
@@ -124,7 +129,7 @@ sealed class PocketOp {
           size: _number(json['size'], fallback: _fontSlotSize(fontSlot)),
           color: _color(json['color']),
           fontSlot: fontSlot,
-          align: (json['align'] as num?)?.toInt() ?? 0,
+          align: (rawAlign as num?)?.toInt() ?? 0,
           clip: clip,
         );
       case 'image':

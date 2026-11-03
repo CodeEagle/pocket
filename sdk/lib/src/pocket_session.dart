@@ -240,6 +240,8 @@ final class PocketSession extends ChangeNotifier {
     'runtimeAbi': controller.runtimeAbi ?? _metadata['runtimeAbi'],
     if (active != null)
       'entrySha256': active!.package.manifest.payload.entry.sha256,
+    if (active != null && active!.package.manifest.payload.worker != null)
+      'worker': active!.package.manifest.payload.worker,
     'entryFormat': 'quickjs-bytecode',
     'glassRenderer': ui.ImageFilter.isShaderFilterSupported
         ? 'refractive'
@@ -382,7 +384,7 @@ final class PocketSession extends ChangeNotifier {
         actualRuntimeAbi: _metadata['runtimeAbi'] as String,
         expectedBindingGeneration: (_metadata['bindingGeneration'] as num)
             .toInt(),
-        expectedTickHz: tickHz,
+        expectedTickHz: (worker['tickHz'] as num?)?.toInt() ?? tickHz,
         admittedCapabilities: granted.granted,
         allowedHttpOrigins: config.workerHttpOrigins,
       ).program;

@@ -1,6 +1,6 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { buildGuest, type BuildGuestResult } from "../../../sdk/scripts/build_guest.ts";
-import { validateSystemFile } from "../../../sdk/scripts/build_system.ts";
+import { resolveSystemDocument, validateSystemFile } from "../../../sdk/scripts/build_system.ts";
 
 const scriptRoot = resolve(import.meta.dir);
 const miniApps = [
@@ -9,8 +9,14 @@ const miniApps = [
 ] as const;
 
 export async function buildMiniApps(): Promise<BuildGuestResult[]> {
-  const validated = await validateSystemFile(resolve(scriptRoot, "../pocket.system.json"));
+  const systemFile = resolve(scriptRoot, "../pocket.system.json");
+  const validated = await validateSystemFile(systemFile);
   if (!validated.ok) throw new Error(JSON.stringify(validated.diagnostics));
+  const resolved = await resolveSystemDocument(validated.value.contract, {
+    appRoot: dirname(systemFile),
+    target: "pocket-flutter",
+  });
+  if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics));
   const results: BuildGuestResult[] = [];
   for (const app of miniApps) {
     const assets = resolve(scriptRoot, `../../assets/apps/${app.name}`);
@@ -19,6 +25,7 @@ export async function buildMiniApps(): Promise<BuildGuestResult[]> {
       projectRoot: app.projectRoot,
       copyAssetsTo: assets,
       keepSource: resolve(app.projectRoot, ".pocket-build/app.js"),
+      target: "pocket-flutter",
     }));
     console.log(`build_mini_apps: wrote ${assets}`);
   }

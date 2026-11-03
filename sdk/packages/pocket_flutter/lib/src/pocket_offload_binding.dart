@@ -158,12 +158,12 @@ final class _PocketOffloadBinding {
     if (_disposing || !_configured || _callbackClosed || _owner._disposed) {
       return;
     }
-    var drained = 0;
     var hadError = false;
 
     // Cancellations free native/provider slots. Apply them before accepting
     // replacement requests from the same notification batch.
-    while (drained < _pocketOffloadBatchLimit) {
+    var drainedCancellations = 0;
+    while (drainedCancellations < 256) {
       String? record;
       try {
         record = _takeRecord(cancel: true);
@@ -172,14 +172,15 @@ final class _PocketOffloadBinding {
         break;
       }
       if (record == null) break;
-      drained++;
+      drainedCancellations++;
       try {
         _cancelRecord(record);
       } on Object {
         hadError = true;
       }
     }
-    while (drained < _pocketOffloadBatchLimit) {
+    var drainedRequests = 0;
+    while (drainedRequests < 256) {
       String? record;
       try {
         record = _takeRecord(cancel: false);
@@ -188,11 +189,30 @@ final class _PocketOffloadBinding {
         break;
       }
       if (record == null) break;
-      drained++;
+      drainedRequests++;
       try {
         _requestRecord(record);
       } on Object {
         hadError = true;
+      }
+    }
+    if (drainedRequests > 0) {
+      var postCancellations = 0;
+      while (postCancellations < 256) {
+        String? record;
+        try {
+          record = _takeRecord(cancel: true);
+        } on Object {
+          hadError = true;
+          break;
+        }
+        if (record == null) break;
+        postCancellations++;
+        try {
+          _cancelRecord(record);
+        } on Object {
+          hadError = true;
+        }
       }
     }
 

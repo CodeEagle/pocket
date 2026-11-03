@@ -46,10 +46,18 @@ Future<void> waitForContaining(WidgetTester tester, String fragment) async {
   );
 }
 
+Finder activePocketViewFinder() {
+  final activeViews = find.byWidgetPredicate(
+    (widget) => widget is PocketView && widget.inputEnabled,
+  );
+  if (activeViews.evaluate().isNotEmpty) return activeViews.last;
+  return find.byType(PocketView).last;
+}
+
 /// Only target the visible part of a DrawOp. A text record can survive
 /// clipping even when its original center is outside the scroller viewport.
 Offset? pointFor(WidgetTester tester, String label) {
-  for (final widget in painters(tester)) {
+  for (final widget in painters(tester).toList().reversed) {
     final painter = widget.painter! as PocketCanvasPainter;
     final box = tester.renderObject<RenderBox>(find.byWidget(widget));
     for (final op in painter.ops.whereType<PocketTextOp>()) {
@@ -95,7 +103,7 @@ Future<Offset> reveal(
       await tester.pump(const Duration(milliseconds: 50));
       continue;
     }
-    final box = tester.renderObject<RenderBox>(find.byType(PocketView));
+    final box = tester.renderObject<RenderBox>(activePocketViewFinder());
     final gesture = await tester.startGesture(
       box.localToGlobal(Offset(box.size.width * .35, box.size.height * .72)),
     );
