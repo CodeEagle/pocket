@@ -261,6 +261,81 @@ void main() {
   );
 
   test(
+    'BLE scan followed by sensors permission request and numeric read preserves full payload',
+    () async {
+      final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{
+        'startBleScan': <String, dynamic>{
+          'ok': true,
+          'realBle': true,
+          'state': 'poweredOn',
+          'devices': const <Map<String, dynamic>>[],
+        },
+        'requestPermission': <String, dynamic>{
+          'ok': true,
+          'permission': 'sensors',
+          'granted': true,
+          'status': 'granted',
+          'realHardware': true,
+        },
+        'readSensors': <String, dynamic>{
+          'ok': true,
+          'realSensors': true,
+          'accelX': 0.01,
+          'accelY': -0.02,
+          'accelZ': 0.03,
+          'gravityX': 0.0,
+          'gravityY': -0.98,
+          'gravityZ': -0.19,
+          'gyroX': 0.004,
+          'gyroY': -0.003,
+          'gyroZ': 0.001,
+          'pitch': 0.19,
+          'roll': 0.01,
+          'yaw': -0.42,
+          'pressureHpa': 1013.25,
+          'relativeAltitudeM': 1.5,
+        },
+      });
+      final harness = await _Harness.create(HardwarePlugin(platform: fake));
+      try {
+        await harness.request(
+          HardwareCapabilities.bluetoothScan,
+          'ble-scan-1',
+          params: const <String, dynamic>{'timeoutMs': 1600},
+        );
+        expect(harness.last['ok'], isTrue);
+        expect((harness.last['result'] as Map)['realBle'], isTrue);
+
+        await harness.request(
+          HardwareCapabilities.requestPermission,
+          'sensor-perm-1',
+          params: const <String, dynamic>{
+            'permission': HardwarePermissions.sensors,
+          },
+        );
+        expect(harness.last['ok'], isTrue);
+        expect((harness.last['result'] as Map)['granted'], isTrue);
+
+        await harness.request(HardwareCapabilities.sensorsRead, 'sensor-read-1');
+        expect(harness.last['ok'], isTrue);
+        final sensorResult = harness.last['result'] as Map<String, dynamic>;
+        expect(sensorResult['realSensors'], isTrue);
+        expect(sensorResult['accelX'], 0.01);
+        expect(sensorResult['gravityY'], -0.98);
+        expect(sensorResult['gyroZ'], 0.001);
+        expect(sensorResult['pitch'], 0.19);
+        expect(sensorResult['pressureHpa'], 1013.25);
+        expect(
+          fake.calls,
+          equals(<String>['startBleScan', 'requestPermission', 'readSensors']),
+        );
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  test(
     'camera texture registration and cutover cleanup are observable',
     () async {
       final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{

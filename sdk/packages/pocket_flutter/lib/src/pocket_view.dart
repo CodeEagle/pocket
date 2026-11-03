@@ -183,6 +183,9 @@ final class PocketViewController {
         (canSendImmediately != null && !canSendImmediately())) {
       return _enqueueMessage(message);
     }
+    if (_pendingMessages.isNotEmpty) {
+      _flushPendingMessages();
+    }
     runtime.send(message);
     if (wake) notifyWork();
     return true;
@@ -943,6 +946,7 @@ class _PocketViewState extends State<PocketView>
             desiredViewport.height != _frame.height)) {
       _scheduleResize(desiredViewport);
     }
+    if (_loading) return;
     try {
       _controller._flushPendingMessages();
     } catch (error) {
@@ -1071,7 +1075,7 @@ class _PocketViewState extends State<PocketView>
     bool waitForInitialImages = false,
   }) async {
     final runtime = _runtime;
-    if (runtime == null || !_effectiveActive || widget.runtime != null) {
+    if (runtime == null || widget.runtime != null) {
       return;
     }
     if (_loading && !allowWhileLoading) {
@@ -1079,6 +1083,9 @@ class _PocketViewState extends State<PocketView>
       // DrawList's image/mask resources are ready. Keep only the latest host
       // size; [_flushPendingStartupResizes] applies it after that barrier.
       _pendingResize = size;
+      return;
+    }
+    if (!_effectiveActive && !allowWhileLoading) {
       return;
     }
     _wakeTicker();
@@ -1273,7 +1280,7 @@ class _PocketViewState extends State<PocketView>
         },
         onMessageSent: _wakeTicker,
         duplexChannel: _duplexChannel,
-        canSendImmediately: () => _effectiveActive,
+        canSendImmediately: () => _effectiveActive && !_loading,
         onAppActiveChanged: _onControllerActivityChanged,
       );
       final visualFirst = _visualFrame(first);
@@ -1298,6 +1305,10 @@ class _PocketViewState extends State<PocketView>
           await _flushPendingStartupResizes();
           if (!mounted || _isDisposed) return;
           _loading = false;
+          if (_effectiveActive && _controller.pendingMessageCount > 0) {
+            _controller._flushPendingMessages();
+            _wakePendingUntilTickerCreated = true;
+          }
           widget.onReady?.call(_controller);
         } else {
           // Do not insert an async turn before controller events and the first
@@ -1319,7 +1330,12 @@ class _PocketViewState extends State<PocketView>
           SchedulerBinding.instance.currentSystemFrameTimeStamp;
       _resetPerformanceWindow();
       if (_effectiveActive) {
-        final wakePending = _wakePendingUntilTickerCreated;
+        pocketSetSchedulerPaused(runtime, false);
+        final hadPendingMessages = _controller.pendingMessageCount > 0;
+        if (hadPendingMessages) {
+          _controller._flushPendingMessages();
+        }
+        final wakePending = _wakePendingUntilTickerCreated || hadPendingMessages;
         _wakePendingUntilTickerCreated = false;
         if (wakePending) {
           _ticker!.start();
@@ -2685,7 +2701,7 @@ class _PocketViewState extends State<PocketView>
 
   void _reportSafeArea() {
     final runtime = _runtime;
-    if (runtime == null || !mounted) return;
+    if (runtime == null || _loading || !mounted) return;
     final hostContext = _hostKey.currentContext;
     if (hostContext == null) return;
     final renderObject = hostContext.findRenderObject();

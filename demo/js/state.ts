@@ -453,7 +453,18 @@ function mergePerformancePoint(history: PerformancePoint[], sample: PerformanceP
 }
 
 function sameJank(first: PerformanceJank, second: PerformanceJank): boolean {
-  return sameTimestamp(first.timestamp, second.timestamp);
+  if (!sameTimestamp(first.timestamp, second.timestamp)) return false;
+  if (first.reason === "window aggregate" || second.reason === "window aggregate") return true;
+  const firstIdentity = first.context ?? (first.page || first.action ? `${first.page ?? ""}:${first.action ?? ""}` : undefined);
+  const secondIdentity = second.context ?? (second.page || second.action ? `${second.page ?? ""}:${second.action ?? ""}` : undefined);
+  if (firstIdentity !== undefined && secondIdentity !== undefined && firstIdentity !== secondIdentity) {
+    const sharedFrameMetrics =
+      (first.activeGapMs !== undefined && first.activeGapMs === second.activeGapMs) ||
+      (first.durationMs !== undefined && first.durationMs === second.durationMs) ||
+      (first.nativeMs !== undefined && first.nativeMs === second.nativeMs);
+    if (!sharedFrameMetrics) return false;
+  }
+  return true;
 }
 
 function mergeJankEntry(existing: PerformanceJank, item: PerformanceJank): PerformanceJank {

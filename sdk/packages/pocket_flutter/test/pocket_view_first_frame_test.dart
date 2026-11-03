@@ -10,6 +10,8 @@ class _FirstFrameRuntime implements PocketRuntime {
   _FirstFrameRuntime(this.initialFrame);
 
   final PocketFrame initialFrame;
+  int frameCalls = 0;
+  final List<Map<String, dynamic>> sentMessages = <Map<String, dynamic>>[];
 
   @override
   PocketFrame eval(String source) => initialFrame;
@@ -18,7 +20,10 @@ class _FirstFrameRuntime implements PocketRuntime {
   PocketFrame load(String source, Uint8List pak) => initialFrame;
 
   @override
-  PocketFrame frame(int deltaMilliseconds) => initialFrame;
+  PocketFrame frame(int deltaMilliseconds) {
+    frameCalls += 1;
+    return initialFrame;
+  }
 
   @override
   bool resizeViewport(double width, double height) => false;
@@ -27,7 +32,9 @@ class _FirstFrameRuntime implements PocketRuntime {
   void enableAuxiliary(double width, double height) {}
 
   @override
-  void send(Map<String, dynamic> message) {}
+  void send(Map<String, dynamic> message) {
+    sentMessages.add(Map<String, dynamic>.from(message));
+  }
 
   @override
   String? get lastError => null;
@@ -109,6 +116,7 @@ PocketFrame _resizedImageFrame() {
 Widget _host(
   PocketRuntime runtime, {
   required PocketImageResourceDecoder decoder,
+  PocketViewController? controller,
   ValueChanged<Object>? onError,
   VoidCallback? onReady,
 }) {
@@ -117,6 +125,7 @@ Widget _host(
       width: 320,
       height: 480,
       child: PocketView(
+        controller: controller,
         runtime: runtime,
         jsSource: '',
         pakBytes: Uint8List(0),
@@ -349,6 +358,59 @@ void main() {
       expect(errors, isEmpty);
       expect(ready, isTrue);
       expect(find.byType(CircularProgressIndicator), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'lifecycle resume and controller messages during first image decode do not create a second ticker or advance the guest early',
+    (tester) async {
+      final decode = Completer<ui.Image>();
+      final errors = <Object>[];
+      var ready = false;
+      final controller = PocketViewController();
+      final runtime = _FirstFrameRuntime(_imageFrame());
+      await tester.pumpWidget(
+        _host(
+          runtime,
+          controller: controller,
+          decoder: (_) => decode.future,
+          onError: errors.add,
+          onReady: () => ready = true,
+        ),
+      );
+      await tester.pump();
+      expect(ready, isFalse);
+
+      // Queue controller work while the first-frame resource barrier is active.
+      expect(controller.send(method: 'during-barrier', params: const {'seq': 1}), isTrue);
+      expect(runtime.sentMessages, isEmpty);
+      expect(runtime.frameCalls, 0);
+
+      // Normal OS lifecycle and controller activity transitions during decoding
+      // must not create a premature ticker or advance the guest before ready.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      controller.setAppActive(false);
+      controller.setAppActive(true);
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(errors, isEmpty);
+      expect(ready, isFalse);
+      expect(runtime.frameCalls, 0);
+      expect(runtime.sentMessages, isEmpty);
+
+      decode.complete(await _onePixelImage(tester));
+      await tester.runAsync(() async => decode.future);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+
+      expect(errors, isEmpty, reason: 'normal OS lifecycle must not fail startup');
+      expect(ready, isTrue);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(
+        runtime.sentMessages.any((message) => message['name'] == 'during-barrier'),
+        isTrue,
+      );
+      expect(runtime.frameCalls, greaterThan(0));
     },
   );
 }

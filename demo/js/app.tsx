@@ -311,7 +311,18 @@ function jankFromPoint(point: PerformancePoint): PerformanceJank[] {
 }
 
 function sameJankEvent(first: PerformanceJank, second: PerformanceJank): boolean {
-  return String(first.timestamp) === String(second.timestamp);
+  if (String(first.timestamp) !== String(second.timestamp)) return false;
+  if (first.reason === "window aggregate" || second.reason === "window aggregate") return true;
+  const firstIdentity = first.context ?? (first.page || first.action ? `${first.page ?? ""}:${first.action ?? ""}` : undefined);
+  const secondIdentity = second.context ?? (second.page || second.action ? `${second.page ?? ""}:${second.action ?? ""}` : undefined);
+  if (firstIdentity !== undefined && secondIdentity !== undefined && firstIdentity !== secondIdentity) {
+    const sharedFrameMetrics =
+      (first.activeGapMs !== undefined && first.activeGapMs === second.activeGapMs) ||
+      (first.durationMs !== undefined && first.durationMs === second.durationMs) ||
+      (first.nativeMs !== undefined && first.nativeMs === second.nativeMs);
+    if (!sharedFrameMetrics) return false;
+  }
+  return true;
 }
 
 function performanceScopeLabel(event: PerformanceJank): string {
@@ -361,11 +372,9 @@ function recentPerformanceJanks(snapshot: PerformanceSnapshot): PerformanceJank[
       merged.push(event);
     }
   };
-  const hasExplicitEvents = (snapshot.longFrameEvents?.length ?? 0) > 0;
   for (const event of snapshot.longFrameEvents ?? []) add(event);
   for (const point of recentPerformance(snapshot)) {
-    const pointEvents = hasExplicitEvents ? (point.longFrameEvents ?? []) : jankFromPoint(point);
-    for (const event of pointEvents) add(event);
+    for (const event of jankFromPoint(point)) add(event);
   }
   merged.sort((first, second) => {
     const firstTime = Date.parse(String(first.timestamp));

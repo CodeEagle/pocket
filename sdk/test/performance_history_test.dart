@@ -400,4 +400,45 @@ void main() {
       await restored.dispose();
     },
   );
+
+  test(
+    'distinct explicit contexts at the same timestamp without shared frame metrics remain separate events',
+    () async {
+      final history = PerformanceHistory(
+        file: File(
+          '${Directory.systemTemp.path}/unused-distinct-same-timestamp-history.json',
+        ),
+      );
+      history.addLongFrameEvent(<String, dynamic>{
+        'timestamp': '2026-11-03T00:12:00.000Z',
+        'refreshHz': 60,
+        'budgetMs': 16.6667,
+        'nativeMs': 30,
+        'activeGapMs': 30,
+        'active': true,
+        'scope': 'pocketView',
+        'context': 'page=feed;action=scroll',
+      });
+      history.addLongFrameEvent(<String, dynamic>{
+        'timestamp': '2026-11-03T00:12:00.000Z',
+        'refreshHz': 60,
+        'budgetMs': 16.6667,
+        'buildMs': 40,
+        'rasterMs': 2,
+        'active': true,
+        'scope': 'flutterView',
+        'context': 'page=settings;action=open',
+      });
+
+      final events =
+          (history.snapshot()['longFrameEvents'] as List)
+              .cast<Map<String, dynamic>>();
+      expect(events, hasLength(2));
+      expect(events.first['context'], 'page=feed;action=scroll');
+      expect(events.first['scope'], 'pocketView');
+      expect(events.last['context'], 'page=settings;action=open');
+      expect(events.last['scope'], 'flutterView');
+      await history.dispose();
+    },
+  );
 }

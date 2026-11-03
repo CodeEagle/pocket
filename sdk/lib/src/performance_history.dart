@@ -292,6 +292,26 @@ final class PerformanceHistory {
     }
   }
 
+  static bool _canMergeLongFrameEvent(
+    Map<String, dynamic> existing,
+    Map<String, dynamic> incoming,
+  ) {
+    if (existing['timestamp'] != incoming['timestamp']) return false;
+    final existingContext = existing['context'] as String?;
+    final incomingContext = incoming['context'] as String?;
+    if (existingContext != null &&
+        incomingContext != null &&
+        existingContext != incomingContext) {
+      final sharedFrameMetrics =
+          (existing['activeGapMs'] != null &&
+              existing['activeGapMs'] == incoming['activeGapMs']) ||
+          (existing['nativeMs'] != null &&
+              existing['nativeMs'] == incoming['nativeMs']);
+      if (!sharedFrameMetrics) return false;
+    }
+    return true;
+  }
+
   Map<String, dynamic> _addLongFrameEvent(
     Map<String, dynamic> event, {
     bool attachCurrentContext = true,
@@ -300,9 +320,8 @@ final class PerformanceHistory {
     // A timing callback can first emit the native/gap portion and later merge
     // build/raster data into the same timestamp. Replace that record instead
     // of growing duplicate entries in the bounded persisted history.
-    final timestamp = event['timestamp'];
     final existingIndex = _longFrameEvents.indexWhere(
-      (item) => item['timestamp'] == timestamp,
+      (item) => _canMergeLongFrameEvent(item, event),
     );
     late final Map<String, dynamic> merged;
     if (existingIndex >= 0) {
@@ -311,8 +330,8 @@ final class PerformanceHistory {
         merged = <String, dynamic>{...event, ...existing};
       } else {
         final resolvedContext =
-            event['context'] as String? ??
             existing['context'] as String? ??
+            event['context'] as String? ??
             (attachCurrentContext ? _context : null);
         merged = <String, dynamic>{
           ...existing,
@@ -336,7 +355,7 @@ final class PerformanceHistory {
       );
     }
     final resultIndex = _longFrameEvents.indexWhere(
-      (item) => item['timestamp'] == timestamp,
+      (item) => identical(item, merged),
     );
     return resultIndex < 0
         ? Map<String, dynamic>.unmodifiable(merged)

@@ -3571,8 +3571,12 @@ fn emit_with_backpressure(
         return Err("HTTP chunk exceeds 1024 bytes".to_owned());
     }
     loop {
-        if cancel.load(Ordering::Acquire) {
-            return Err("HTTP request cancelled".to_owned());
+        if kind == FACT_ERROR {
+            if cancel.load(Ordering::Acquire) {
+                return Err("HTTP request cancelled".to_owned());
+            }
+        } else {
+            check_request_alive(cancel, deadline)?;
         }
         let seen = state.pulse.snapshot();
         let status = unsafe {
@@ -3678,6 +3682,7 @@ mod tests {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         thread_requests.fetch_add(1, Ordering::Relaxed);
+                        let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let mut request = Vec::new();
                         let mut chunk = [0u8; 512];
@@ -4625,5 +4630,90 @@ mod tests {
         bridge.detach();
         worker.destroy_and_join().unwrap();
         server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn expired_normal_fact_data_is_rejected_before_emission() {
+        let descriptor = serde_json::json!({
+            "url": "http://127.0.0.1:9/unused",
+            "method": "GET",
+            "timeoutMs": 60,
+            "maxBytes": 64,
+        })
+        .to_string();
+        let descriptor_bytes = descriptor
+            .as_bytes()
+            .iter()
+            .map(|byte| byte.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            r#"
+            const httpHandle=__pocketWorker.open(3,"net",new Uint8Array([{descriptor_bytes}]));
+            if(httpHandle<=0) throw new Error("HTTP open failed");
+            globalThis.__pocketWorkerTurn=()=>{{}};
+            "#
+        );
+        let bytecode = compile_worker_bytecode(&source);
+        let declaration = WorkerDeclaration {
+            entry: "worker.js".into(),
+            nodes: vec![WorkerNodeDeclaration {
+                name: "net".into(),
+                kind: WorkerResourceKind::Http,
+            }],
+            channels: vec![],
+        };
+        let policy = WorkerPolicy {
+            allowed_http_origins: vec!["http://127.0.0.1:9".into()],
+            required_capabilities: vec!["net.http".into()],
+        };
+        let limits = WorkerLimits {
+            heap_bytes: 16 * 1024 * 1024,
+            stack_bytes: 1024 * 1024,
+            turn_budget_micros: 10_000,
+            window_micros: 1_000_000,
+            quota_micros: 900_000,
+        };
+        let mut worker = WorkerRuntime::spawn(
+            &bytecode,
+            pocket_spec::BINDING_GENERATION,
+            60,
+            declaration,
+            policy,
+            limits,
+            Some(test_worker_wake),
+        )
+        .unwrap();
+        worker.wait_ready(Duration::from_secs(2)).unwrap();
+        let core = worker.state.core.load(Ordering::Acquire);
+        assert!(!core.is_null());
+        let cancel = AtomicBool::new(false);
+        let expired = Instant::now() - Duration::from_millis(1);
+        let headers_result = emit_with_backpressure(
+            &worker.state,
+            core,
+            1,
+            1,
+            FACT_HEADERS,
+            0,
+            b"{}",
+            expired,
+            &cancel,
+        );
+        assert_eq!(headers_result, Err("HTTP request timed out".to_owned()));
+        let data_result = emit_with_backpressure(
+            &worker.state,
+            core,
+            1,
+            1,
+            FACT_DATA,
+            0,
+            b"expired-chunk",
+            expired,
+            &cancel,
+        );
+        assert_eq!(data_result, Err("HTTP request timed out".to_owned()));
+        worker.request_stop_and_wait();
+        worker.destroy_and_join().unwrap();
     }
 }

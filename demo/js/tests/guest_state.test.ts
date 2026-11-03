@@ -449,6 +449,73 @@ test("stress and performance snapshots", () => {
   assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.nativeMs, 3.2);
   assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.page, "stress");
   assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.action, "Run 500 nodes");
+
+  // Independent events at the same wall-clock timestamp with distinct context
+  // and no shared frame metrics must not collapse into a single entry.
+  const distinctSameTimestamp = parsePerformanceSnapshot({
+    recording: true,
+    longFrameEvents: [
+      {
+        timestamp: "2026-11-03T00:00:00.000Z",
+        refreshHz: 60,
+        budgetMs: 16.6,
+        nativeMs: 30,
+        activeGapMs: 30,
+        active: true,
+        scope: "pocketView",
+        context: "page=feed;action=scroll",
+        page: "feed",
+        action: "scroll",
+      },
+      {
+        timestamp: "2026-11-03T00:00:00.000Z",
+        refreshHz: 60,
+        budgetMs: 16.6,
+        buildMs: 40,
+        rasterMs: 2,
+        active: true,
+        scope: "flutterView",
+        context: "page=settings;action=open",
+        page: "settings",
+        action: "open",
+      },
+    ],
+  });
+  assert.equal(distinctSameTimestamp.longFrameEvents?.length, 2);
+
+  // Mixed legacy history point (only activeGapMs/slowFrames) + new explicit
+  // longFrameEvents must retain both in recentPerformanceJanks.
+  const appSource = readFileSync(join(root, "app.tsx"), "utf8");
+  const start = appSource.indexOf("function recentPerformance(");
+  const end = appSource.indexOf("function performanceContextLabel(", start);
+  const compiledHelper = new Bun.Transpiler({ loader: "ts" }).transformSync(
+    "const PERFORMANCE_HISTORY_LIMIT=600, PERFORMANCE_JANK_LIMIT=240;\n" +
+      appSource.slice(start, end) +
+      "\nreturn recentPerformanceJanks;",
+  );
+  const recentPerformanceJanks = new Function(compiledHelper)();
+  const mixedEvents = recentPerformanceJanks({
+    history: [{
+      timestamp: "2026-11-02T00:00:00.000Z",
+      fps: 60,
+      activeGapMs: 80,
+      slowFrames: 1,
+      refreshHz: 60,
+      context: "legacy-scroll",
+    }],
+    longFrameEvents: [{
+      timestamp: "2026-11-03T00:00:00.000Z",
+      buildMs: 45,
+      scope: "flutterView",
+      context: "new-open",
+    }],
+    recording: true,
+  });
+  assert.equal(mixedEvents.length, 2);
+  assert.equal(mixedEvents[0]?.context, "legacy-scroll");
+  assert.equal(mixedEvents[0]?.activeGapMs, 80);
+  assert.equal(mixedEvents[1]?.context, "new-open");
+  assert.equal(mixedEvents[1]?.buildMs, 45);
 });
 
 test("source checks and boundary integrity", () => {
