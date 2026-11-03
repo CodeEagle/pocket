@@ -645,6 +645,9 @@ impl OffloadHost {
                 } else {
                     false
                 };
+                if work_queues_empty(state) {
+                    self.inner.rearm_wake();
+                }
                 Ok(CancelOutcome {
                     accepted,
                     session,
@@ -683,6 +686,9 @@ impl OffloadHost {
                     expect_u32(expected, "to", session)?;
                 }
                 let outcome = set_session_locked(state, session, trace_enabled);
+                if work_queues_empty(state) {
+                    self.inner.rearm_wake();
+                }
                 Ok(outcome)
             },
             |outcome| {
@@ -1463,11 +1469,15 @@ mod tests {
                 ctx.eval::<(), _>(
                     r#"
               let accepted = 0;
-              for (let id = 1; id <= 50000; id++) {
-                const record = JSON.stringify({v:1,id,method:"compute.sum",payload:"[]"});
-                if (!offload.submit(record)) break;
-                if (!offload.cancel(id, 17)) throw new Error("native cancel was rejected");
+              if (offload.submit(JSON.stringify({v:1,id:1,method:"compute.sum",payload:"[]"}))) {
                 accepted++;
+                for (let id = 2; id <= 50000; id++) {
+                  const record = JSON.stringify({v:1,id,method:"compute.sum",payload:"[]"});
+                  if (!offload.submit(record)) break;
+                  if (!offload.cancel(id, 17)) throw new Error("native cancel was rejected");
+                  accepted++;
+                }
+                if (!offload.cancel(1, 17)) throw new Error("native cancel was rejected");
               }
               globalThis.tightLoopAccepted = accepted;
             "#,
@@ -1479,7 +1489,11 @@ mod tests {
         assert_eq!(
             NOTIFICATION_COUNT.load(Ordering::Relaxed),
             1,
-            "50,000 synchronous submits without a provider drain must queue one host wake"
+            "50,000 synchronous submits while work remains queued must queue one host wake"
+        );
+        assert!(
+            !host.inner.wake_pending.load(Ordering::Acquire),
+            "cancelling the final queued request rearms wake_pending"
         );
         {
             let state = host.inner.lock_state();
@@ -1612,6 +1626,20 @@ mod tests {
         assert!(stale_host.take_reply().is_none());
         assert!(stale_host.submit_record(r#"{"v":1,"id":1,"method":"compute.sum","payload":"[]"}"#));
         assert_eq!(REPLY_DRAIN_NOTIFICATION_COUNT.load(Ordering::Relaxed), 1);
+        assert!(stale_host.cancel(17, 1));
+        assert!(
+            !stale_host.inner.wake_pending.load(Ordering::Acquire),
+            "cancelling the last undispatched work item rearms wake_pending"
+        );
+        assert!(stale_host.submit_record(r#"{"v":1,"id":2,"method":"compute.sum","payload":"[]"}"#));
+        assert_eq!(REPLY_DRAIN_NOTIFICATION_COUNT.load(Ordering::Relaxed), 2);
+        stale_host.set_session(18);
+        assert!(
+            !stale_host.inner.wake_pending.load(Ordering::Acquire),
+            "set_session rearms wake_pending when emptying the last queued work item"
+        );
+        assert!(stale_host.submit_record(r#"{"v":1,"id":1,"method":"compute.sum","payload":"[]"}"#));
+        assert_eq!(REPLY_DRAIN_NOTIFICATION_COUNT.load(Ordering::Relaxed), 3);
         stale_host.shutdown();
     }
 

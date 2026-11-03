@@ -8,19 +8,16 @@ import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_host/main.dart';
+import 'package:pocket_host/flutter_frame_monitor.dart';
 
 import 'guest_interaction_test.dart' as guest;
 import 'showcase_mobile_test.dart' as showcase;
-
-final _fpsLabel = RegExp(
-  r'^FPS\s+([0-9]+(?:\.[0-9]+)?)\s+\|\s+min\s+([0-9]+(?:\.[0-9]+)?)$',
-);
 
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
 
-  testWidgets('records real UI stalls in persistent FPS history', (
+  testWidgets('independent Flutter FPS detects stalls; guest tick history persists', (
     tester,
   ) async {
     final support = await getApplicationSupportDirectory();
@@ -28,16 +25,17 @@ void main() {
       '${support.path}/pocket-performance/pocket.host.demo/history.json',
     );
     final startedAt = DateTime.now().toUtc();
+    final monitor = FlutterFrameMonitorController(autoStart: false);
     Timer? stallTimer;
     Timer? transitionTimer;
 
     try {
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(PocketHostApp(frameMonitorController: monitor));
       await guest.waitFor(tester, '00');
       final controller = tester
           .widget<PocketView>(find.byType(PocketView))
           .controller!;
-      // FPS history measures intervals while the guest requests continuous
+      // Guest tick history measures intervals while the guest requests continuous
       // frames. A discrete event that parks after its output has no FPS cadence
       // to measure, so keep the real JS route transition active throughout the
       // warm-up, stall, and recovery windows.
@@ -55,13 +53,14 @@ void main() {
         nextRoute = nextRoute == 'mobile' ? 'transitions' : 'mobile';
       });
       await guest.waitFor(tester, 'Route motion');
-      final before = await _waitForFpsLabel(tester);
-      expect(before.minFps, greaterThan(0));
+      final before = await _waitForFlutterFps(tester, monitor);
+      expect(before, greaterThan(0));
+      expect(find.byKey(const ValueKey('flutter-frame-monitor-hud')), findsOneWidget);
 
       // Leave the real renderer alive long enough to emit a warm-up sample.
       await Future<void>.delayed(const Duration(seconds: 2));
-      final warmed = await _waitForFpsLabel(tester);
-      final baselineMin = warmed.minFps;
+      final baselineFps = await _waitForFlutterFps(tester, monitor);
+      final stallStartVsyncUs = monitor.latest.lastVsyncStartUs!;
 
       // This callback runs on the Flutter UI isolate. It intentionally keeps
       // that isolate busy for 45ms out of every 60ms period, producing real
@@ -77,11 +76,16 @@ void main() {
       stallTimer = null;
 
       await Future<void>.delayed(const Duration(seconds: 2));
-      final stalled = await _waitForLowerFpsLabel(tester, baselineMin);
+      final stalled = await _waitForLowerFlutterFps(
+        tester,
+        monitor,
+        baselineFps,
+        stallStartVsyncUs,
+      );
       expect(
-        stalled.minFps,
-        lessThan(baselineMin),
-        reason: 'real UI stalls should lower the renderer minimum FPS',
+        stalled,
+        lessThan(baselineFps),
+        reason: 'real UI stalls must lower independent engine cadence',
       );
       transitionTimer.cancel();
       transitionTimer = null;
@@ -92,15 +96,15 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 300));
       await guest.waitFor(tester, '00');
 
-      // FPS history is a Runtime-page entry, not a bottom navigation item.
+      // Frame diagnostics is a Runtime-page entry, not a bottom navigation item.
       await guest.tapGuest(tester, 'Host');
       await guest.waitFor(tester, 'Runtime');
-      await showcase.tap(tester, 'FPS history');
+      await showcase.tap(tester, 'Frame diagnostics');
       await _waitForGuestHistory(tester);
       // Route scroll offset may leave the intro above the viewport. Assert
       // the visible data section, then verify fresh persisted facts below.
-      expect(guest.texts(tester), contains('Latest FPS'));
-      expect(guest.texts(tester), isNot(contains('No FPS samples')));
+      expect(guest.texts(tester), contains('Guest ticks/s'));
+      expect(guest.texts(tester), isNot(contains('No guest tick samples')));
 
       // Replacing the real app triggers PocketSession.dispose(), which queues
       // the final history flush. Existing user history is never removed.
@@ -111,8 +115,7 @@ void main() {
       expect(
         degraded,
         isNotEmpty,
-        reason:
-            'the persisted window must contain a real low-FPS/slow-frame sample with a large gap',
+        reason: 'the guest history must retain a measured active scheduler gap',
       );
       final document = jsonDecode(await historyFile.readAsString()) as Map;
       final longFrames = (document['longFrameEvents'] as List? ?? const [])
@@ -142,44 +145,37 @@ void main() {
       await guest.waitFor(tester, '00');
       await guest.tapGuest(tester, 'Host');
       await guest.waitFor(tester, 'Runtime');
-      await showcase.tap(tester, 'FPS history');
+      await showcase.tap(tester, 'Frame diagnostics');
       await _waitForGuestHistory(tester);
-      expect(guest.texts(tester), contains('Latest FPS'));
-      expect(guest.texts(tester), isNot(contains('No FPS samples')));
+      expect(guest.texts(tester), contains('Guest ticks/s'));
+      expect(guest.texts(tester), isNot(contains('No guest tick samples')));
     } finally {
       stallTimer?.cancel();
       transitionTimer?.cancel();
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
+      monitor.dispose();
     }
   });
 }
 
-Future<_FpsLabel> _waitForFpsLabel(WidgetTester tester) async {
+Future<double> _waitForFlutterFps(
+  WidgetTester tester,
+  FlutterFrameMonitorController monitor,
+) async {
   for (var index = 0; index < 160; index++) {
-    final match = _readFpsLabel(tester);
-    if (match != null) return match;
+    final fps = monitor.latest.fps;
+    if (fps != null && fps > 0) return fps;
     await tester.pump(const Duration(milliseconds: 50));
   }
-  fail('Flutter FPS overlay did not become numeric: ${_flutterTexts(tester)}');
-}
-
-_FpsLabel? _readFpsLabel(WidgetTester tester) {
-  for (final widget in tester.widgetList<Text>(find.byType(Text))) {
-    final match = _fpsLabel.firstMatch(widget.data ?? '');
-    if (match == null) continue;
-    return _FpsLabel(
-      fps: double.parse(match.group(1)!),
-      minFps: double.parse(match.group(2)!),
-    );
-  }
-  return null;
+  fail('Independent Flutter engine monitor has no cadence sample');
 }
 
 Future<void> _waitForGuestHistory(WidgetTester tester) async {
   for (var index = 0; index < 200; index++) {
     final painted = guest.texts(tester);
-    if (painted.contains('Latest FPS') && !painted.contains('No FPS samples')) {
+    if (painted.contains('Guest ticks/s') &&
+        !painted.contains('No guest tick samples')) {
       return;
     }
     await tester.pump(const Duration(milliseconds: 50));
@@ -187,18 +183,21 @@ Future<void> _waitForGuestHistory(WidgetTester tester) async {
   fail('Guest FPS history page has no real samples: ${guest.texts(tester)}');
 }
 
-Future<_FpsLabel> _waitForLowerFpsLabel(
+Future<double> _waitForLowerFlutterFps(
   WidgetTester tester,
-  double baselineMin,
+  FlutterFrameMonitorController monitor,
+  double baselineFps,
+  int stallStartVsyncUs,
 ) async {
   for (var index = 0; index < 160; index++) {
-    final current = _readFpsLabel(tester);
-    if (current != null && current.minFps < baselineMin) return current;
+    for (final window in monitor.history) {
+      if ((window.firstVsyncStartUs ?? -1) < stallStartVsyncUs) continue;
+      final fps = window.fps;
+      if (fps != null && fps < baselineFps * .75) return fps;
+    }
     await tester.pump(const Duration(milliseconds: 50));
   }
-  fail(
-    'Flutter FPS minimum did not decrease below $baselineMin: ${_flutterTexts(tester)}',
-  );
+  fail('Flutter engine cadence did not decrease below $baselineFps');
 }
 
 Future<List<Map<String, dynamic>>> _waitForPersistedSamples(
@@ -249,16 +248,4 @@ bool _isDegradedSample(Map<String, dynamic> sample) {
       maxGapMs is num &&
       (fps < 45 || slowFrames > 0) &&
       maxGapMs >= 40;
-}
-
-List<String?> _flutterTexts(WidgetTester tester) => tester
-    .widgetList<Text>(find.byType(Text))
-    .map((widget) => widget.data)
-    .toList();
-
-final class _FpsLabel {
-  const _FpsLabel({required this.fps, required this.minFps});
-
-  final double fps;
-  final double minFps;
 }

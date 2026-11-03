@@ -287,4 +287,117 @@ void main() {
       await history.dispose();
     },
   );
+
+  test(
+    'delayed Phase-2 enrichment updates buildMs/rasterMs while preserving original context',
+    () async {
+      final history = PerformanceHistory(
+        file: File(
+          '${Directory.systemTemp.path}/unused-enrichment-context-history.json',
+        ),
+      );
+      history.setContext('route.feed');
+      final phase1 = <String, dynamic>{
+        'timestamp': '2026-11-03T00:10:00.250Z',
+        'refreshHz': 120,
+        'budgetMs': 8.333333,
+        'nativeMs': 11.75,
+        'activeGapMs': 20.0,
+        'active': true,
+      };
+      history.add(
+        _eventOnlySample(timestamp: '2026-11-03T00:10:00.300Z', event: phase1),
+      );
+
+      // User navigates to a different route before the engine FrameTiming batch arrives.
+      history.setContext('route.settings');
+      final phase2 = <String, dynamic>{
+        'timestamp': '2026-11-03T00:10:00.250Z',
+        'refreshHz': 120,
+        'budgetMs': 8.333333,
+        'buildMs': 15.5,
+        'rasterMs': 3.25,
+        'nativeMs': 11.75,
+        'activeGapMs': 20.0,
+        'active': true,
+      };
+      final enriched = history.add(
+        _eventOnlySample(timestamp: '2026-11-03T00:10:00.900Z', event: phase2),
+      );
+
+      expect(enriched, hasLength(1));
+      expect(enriched.single['context'], 'route.feed');
+      expect(enriched.single['buildMs'], 15.5);
+      expect(enriched.single['rasterMs'], 3.25);
+
+      final events = history.snapshot()['longFrameEvents'] as List;
+      expect(events, hasLength(1));
+      expect(events.single, <String, dynamic>{
+        ...phase2,
+        'context': 'route.feed',
+      });
+      await history.dispose();
+    },
+  );
+
+  test(
+    'initialize restoring disk events does not stamp current context onto historical context-free events',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'pocket-performance-history-init-context-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final file = File('${directory.path}/history.json');
+      final historicalWithoutContext = <String, dynamic>{
+        'timestamp': '2026-11-03T00:11:00.100Z',
+        'refreshHz': 60,
+        'budgetMs': 16.6667,
+        'nativeMs': 35,
+        'active': true,
+      };
+      final historicalPrePhase2 = <String, dynamic>{
+        'timestamp': '2026-11-03T00:11:01.100Z',
+        'refreshHz': 60,
+        'budgetMs': 16.6667,
+        'nativeMs': 22,
+        'active': true,
+        'context': 'route.original',
+      };
+      await file.writeAsString(
+        jsonEncode(<String, dynamic>{
+          'version': 2,
+          'history': const <Map<String, dynamic>>[],
+          'longFrameEvents': <Map<String, dynamic>>[
+            historicalWithoutContext,
+            historicalPrePhase2,
+          ],
+        }),
+      );
+
+      final restored = PerformanceHistory(file: file);
+      restored.setContext('route.current_session');
+      // Simulate an in-memory enrichment arriving before initialize() finishes reading disk.
+      restored.addLongFrameEvent(<String, dynamic>{
+        'timestamp': '2026-11-03T00:11:01.100Z',
+        'refreshHz': 60,
+        'budgetMs': 16.6667,
+        'buildMs': 19.5,
+        'rasterMs': 4.25,
+        'nativeMs': 22,
+        'active': true,
+        'context': 'route.original',
+      });
+      await restored.initialize();
+
+      final events =
+          (restored.snapshot()['longFrameEvents'] as List)
+              .cast<Map<String, dynamic>>();
+      expect(events, hasLength(2));
+      expect(events.first.containsKey('context'), isFalse);
+      expect(events.last['context'], 'route.original');
+      expect(events.last['buildMs'], 19.5);
+      expect(events.last['rasterMs'], 4.25);
+      await restored.dispose();
+    },
+  );
 }

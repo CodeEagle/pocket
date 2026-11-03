@@ -534,4 +534,70 @@ void main() {
     expect(viewState.debugSceneBuildCount, sceneBuildsAfterDpr);
     expect(currentPainter().devicePixelRatio, 2);
   });
+
+  testWidgets(
+    'unavailable runtime resize invalidates the retained scene out of OverflowBox',
+    (tester) async {
+      addTearDown(() {
+        debugPocketSelfOwnedRuntimeFactory = null;
+      });
+      final runtime = _InvalidationRuntime();
+      debugPocketSelfOwnedRuntimeFactory = (_) => runtime;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 320,
+              height: 480,
+              child: PocketView(
+                jsSource: '',
+                pakBytes: Uint8List(0),
+                showDebugFps: false,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final dynamic viewState = tester.state(find.byType(PocketView));
+      final sceneRevision = viewState.debugSceneRevision as int;
+      final sceneBuilds = viewState.debugSceneBuildCount as int;
+      expect(find.byType(OverflowBox), findsOneWidget);
+      expect(
+        tester.getSize(find.byKey(const ValueKey<String>('pocket-surface-0'))),
+        const Size(320, 480),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 160,
+              height: 240,
+              child: PocketView(
+                jsSource: '',
+                pakBytes: Uint8List(0),
+                showDebugFps: false,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(viewState.debugSceneRevision, greaterThan(sceneRevision));
+      expect(viewState.debugSceneBuildCount, greaterThan(sceneBuilds));
+      expect(find.byType(OverflowBox), findsNothing);
+      expect(
+        tester.getSize(find.byKey(const ValueKey<String>('pocket-surface-0'))),
+        const Size(160, 240),
+      );
+    },
+  );
 }

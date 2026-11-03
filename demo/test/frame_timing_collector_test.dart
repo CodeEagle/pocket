@@ -268,4 +268,119 @@ void main() {
     expect(coverage.slowestFrameCovered, isFalse);
     expect(coverage.slowestBuildStartUs, 10_000);
   });
+
+  test(
+    'rejects a missing slow frame whose buildStartUs starts within 1000us after a previous Frame interval endUs',
+    () {
+      final trace = <String, Object?>{
+        'traceEvents': <Map<String, Object?>>[
+          <String, Object?>{
+            'cat': 'Dart',
+            'name': 'Frame',
+            'ph': 'b',
+            'pid': 1,
+            'tid': 2,
+            'id': 'previous-frame',
+            'ts': 1_000,
+          },
+          <String, Object?>{
+            'cat': 'Dart',
+            'name': 'Frame',
+            'ph': 'e',
+            'pid': 1,
+            'tid': 2,
+            'id': 'previous-frame',
+            'ts': 2_000,
+          },
+        ],
+      };
+      final coveredPrevious = _timing(
+        buildStartUs: 1_000,
+        rasterFinishUs: 2_100,
+        rasterFinishWallUs: 12_100,
+        frameNumber: 1,
+        buildDurationUs: 900,
+      );
+      final missingSlow = _timing(
+        buildStartUs: 2_500,
+        rasterFinishUs: 20_000,
+        rasterFinishWallUs: 30_000,
+        frameNumber: 2,
+        buildDurationUs: 16_000,
+      );
+
+      final coverage = FrameTimingCollector.traceFrameCoverage(
+        traceReport: trace,
+        timings: <FrameTiming>[coveredPrevious, missingSlow],
+      );
+
+      expect(coverage.slowestFrameCovered, isFalse);
+      expect(coverage.completeFrameCount, 1);
+      expect(coverage.slowestBuildStartUs, 2_500);
+      expect(coverage.matchedFrameStartUs, isNull);
+      expect(coverage.matchedFrameEndUs, isNull);
+    },
+  );
+
+  test(
+    'dartFrameIntervals pairs b/e events properly when traceEvents arrive out of timestamp order',
+    () {
+      final trace = <String, Object?>{
+        'traceEvents': <Map<String, Object?>>[
+          <String, Object?>{
+            'cat': 'Dart',
+            'name': 'Frame',
+            'ph': 'e',
+            'pid': 1,
+            'tid': 2,
+            'id': 'out-of-order-frame',
+            'ts': 2_000,
+          },
+          <String, Object?>{
+            'cat': 'Dart',
+            'name': 'Frame',
+            'ph': 'b',
+            'pid': 1,
+            'tid': 2,
+            'id': 'out-of-order-frame',
+            'ts': 1_000,
+          },
+        ],
+      };
+
+      final intervals = FrameTimingCollector.dartFrameIntervals(trace);
+      expect(intervals, hasLength(1));
+      expect(intervals.single.startUs, 1_000);
+      expect(intervals.single.endUs, 2_000);
+    },
+  );
+
+  test(
+    'projectedBuildStartWallTimeUs rejects non-positive buildStartUs or projected wall time',
+    () {
+      final nonPositiveBuildStart = _timing(
+        buildStartUs: 0,
+        rasterFinishUs: 100,
+        rasterFinishWallUs: 10_000,
+      );
+      final nonPositiveProjected = _timing(
+        buildStartUs: 100,
+        rasterFinishUs: 500,
+        rasterFinishWallUs: 400,
+      );
+
+      expect(
+        FrameTimingCollector.projectedBuildStartWallTimeUs(
+          nonPositiveBuildStart,
+        ),
+        isNull,
+      );
+      expect(
+        FrameTimingCollector.projectedBuildStartWallTimeUs(
+          nonPositiveProjected,
+        ),
+        isNull,
+      );
+    },
+  );
 }

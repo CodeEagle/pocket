@@ -204,7 +204,11 @@ final class PerformanceHistory {
         rawEvents,
         maxEvents: maxLongFrameEvents,
       )) {
-        _addLongFrameEvent(event);
+        _addLongFrameEvent(
+          event,
+          attachCurrentContext: false,
+          preferExisting: true,
+        );
       }
     } on Object {
       // A malformed local log is non-fatal; the next flush replaces it with
@@ -288,25 +292,41 @@ final class PerformanceHistory {
     }
   }
 
-  Map<String, dynamic> _addLongFrameEvent(Map<String, dynamic> event) {
-    final context = event['context'] as String?;
-    final enriched = context == null && _context != null
-        ? <String, dynamic>{...event, 'context': _context}
-        : Map<String, dynamic>.from(event);
+  Map<String, dynamic> _addLongFrameEvent(
+    Map<String, dynamic> event, {
+    bool attachCurrentContext = true,
+    bool preferExisting = false,
+  }) {
     // A timing callback can first emit the native/gap portion and later merge
     // build/raster data into the same timestamp. Replace that record instead
     // of growing duplicate entries in the bounded persisted history.
-    final timestamp = enriched['timestamp'];
+    final timestamp = event['timestamp'];
     final existingIndex = _longFrameEvents.indexWhere(
       (item) => item['timestamp'] == timestamp,
     );
+    late final Map<String, dynamic> merged;
     if (existingIndex >= 0) {
-      _longFrameEvents[existingIndex] = <String, dynamic>{
-        ..._longFrameEvents[existingIndex],
-        ...enriched,
-      };
+      final existing = _longFrameEvents[existingIndex];
+      if (preferExisting) {
+        merged = <String, dynamic>{...event, ...existing};
+      } else {
+        final resolvedContext =
+            event['context'] as String? ??
+            existing['context'] as String? ??
+            (attachCurrentContext ? _context : null);
+        merged = <String, dynamic>{
+          ...existing,
+          ...event,
+          if (resolvedContext != null) 'context': resolvedContext,
+        };
+      }
+      _longFrameEvents[existingIndex] = merged;
     } else {
-      _longFrameEvents.add(enriched);
+      final context = event['context'] as String?;
+      merged = attachCurrentContext && context == null && _context != null
+          ? <String, dynamic>{...event, 'context': _context}
+          : Map<String, dynamic>.from(event);
+      _longFrameEvents.add(merged);
     }
     _longFrameEvents.sort(_compareEvents);
     if (_longFrameEvents.length > maxLongFrameEvents) {
@@ -319,7 +339,7 @@ final class PerformanceHistory {
       (item) => item['timestamp'] == timestamp,
     );
     return resultIndex < 0
-        ? Map<String, dynamic>.unmodifiable(enriched)
+        ? Map<String, dynamic>.unmodifiable(merged)
         : Map<String, dynamic>.unmodifiable(_longFrameEvents[resultIndex]);
   }
 

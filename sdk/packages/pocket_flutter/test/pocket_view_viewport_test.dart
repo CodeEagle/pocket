@@ -113,7 +113,7 @@ void main() {
     },
   );
 
-  testWidgets('keeps the FPS diagnostic inside the local safe area', (
+  testWidgets('keeps the guest tick diagnostic inside the local safe area', (
     tester,
   ) async {
     _configureDuoLikeView(tester);
@@ -134,7 +134,7 @@ void main() {
     );
     await tester.pump();
 
-    final label = find.textContaining('FPS');
+    final label = find.textContaining('Guest ticks/s');
     expect(label, findsOneWidget);
     final position = tester.widget<Positioned>(
       find.ancestor(of: label, matching: find.byType(Positioned)).first,

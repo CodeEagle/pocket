@@ -1734,6 +1734,7 @@ fn queue_buttons(host: &mut HostState, message: &serde_json::Value) -> Result<()
     } else {
         input_u32(value.get("buttons"), "input.buttons.buttons")?
     };
+    let previous = (host.buttons, host.analog, host.right_analog);
     host.buttons = buttons;
     if let Some(analog) = value.get("analog") {
         host.analog = input_u32(Some(analog), "input.buttons.analog")?;
@@ -1744,7 +1745,9 @@ fn queue_buttons(host: &mut HostState, message: &serde_json::Value) -> Result<()
     // Buttons/axes are sampled by the next GuestFrame.  Keep the existing
     // event-driven wake marker so a zero-delta host boundary still delivers
     // both a non-neutral sample and the later return-to-center sample.
-    host.external_work_pending = true;
+    if (host.buttons, host.analog, host.right_analog) != previous {
+        host.external_work_pending = true;
+    }
     Ok(())
 }
 
@@ -1785,9 +1788,12 @@ fn queue_axes(host: &mut HostState, message: &serde_json::Value) -> Result<(), S
         let (id, value) = axis_entry(entry)?;
         packed[id as usize] = value.clamp(0.0, 255.0) as u32;
     }
+    let previous = (host.analog, host.right_analog);
     host.analog = (packed[0] << 8) | packed[1];
     host.right_analog = (packed[2] << 8) | packed[3];
-    host.external_work_pending = true;
+    if (host.analog, host.right_analog) != previous {
+        host.external_work_pending = true;
+    }
     if let Some(relative) = value.get("relative").and_then(|item| item.as_array()) {
         queue_relative_axes(host, relative)?;
     }
@@ -2221,8 +2227,7 @@ fn run_virtual_frames(
             || host.external_work_pending
             || !host.axis_deltas.is_empty()
             || host.motion.is_some()
-            || host.analog != 0x8080
-            || host.right_analog != 0x8080)
+            || host.offload.as_ref().is_some_and(|offload| offload.has_replies()))
     {
         let active = host.touches.clone();
         run_guest_touch_frame(host, &active, &[])?;
@@ -6415,10 +6420,14 @@ mod smoke_tests {
             let host = pocket_create(80.0, 80.0);
             let source = CString::new(
                 r#"let previousAxes = '';
+                let guestFrames = 0;
                 globalThis.__pocketWorkState = () => ({version:1,continuous:false,
                   simulationHz:60,framesUntilTimer:null});
+                globalThis.__pocketSkipIdleFrames = (n) => n;
                 globalThis.frame = (_buttons, analog, _touches, _hits, _surfaces, rightAnalog) => {
+                  guestFrames++;
                   const axes = String(analog) + ':' + String(rightAnalog);
+                  pocket._emit(JSON.stringify({name:'analog.frame',params:{axes,guestFrames}}));
                   if (axes !== previousAxes) {
                     previousAxes = axes;
                     pocket._emit(JSON.stringify({name:'analog.seen',params:{axes}}));
@@ -6433,33 +6442,161 @@ mod smoke_tests {
             // time, so any event proves that the one-shot input wake was
             // delivered by the zero-tick path.
             let initial = frame_json_with_delta(host, 1000.0 / 60.0);
-            assert_eq!(initial["events"][0]["name"], "analog.seen");
-            assert_eq!(initial["events"][0]["params"]["axes"], "32896:32896");
+            assert_eq!(initial["events"][0]["name"], "analog.frame");
+            assert_eq!(initial["events"][1]["name"], "analog.seen");
+            assert_eq!(initial["events"][1]["params"]["axes"], "32896:32896");
+            assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
+
+            let unchanged_buttons = CString::new(
+                r#"{"method":"input.buttons","payload":{"buttons":0,"analog":32896,"rightAnalog":32896}}"#,
+            )
+            .unwrap();
+            assert_eq!(pocket_send(host, unchanged_buttons.as_ptr()), 0);
+            assert!(!(*host).external_work_pending);
+            let unchanged_buttons_frame = frame_json_with_delta(host, 0.0);
+            assert!(unchanged_buttons_frame["events"].as_array().unwrap().is_empty());
+            assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
+
+            let unchanged_axes = CString::new(
+                r#"{"method":"input.axes","payload":{"axes":[{"id":0,"value":128},{"id":1,"value":128},{"id":2,"value":128},{"id":3,"value":128}]}}"#,
+            )
+            .unwrap();
+            assert_eq!(pocket_send(host, unchanged_axes.as_ptr()), 0);
+            assert!(!(*host).external_work_pending);
+            let unchanged_axes_frame = frame_json_with_delta(host, 0.0);
+            assert!(unchanged_axes_frame["events"].as_array().unwrap().is_empty());
+            assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
 
             let moved = CString::new(
                 r#"{"method":"input.buttons","payload":{"buttons":0,"analog":4660,"rightAnalog":22136}}"#,
             )
             .unwrap();
             assert_eq!(pocket_send(host, moved.as_ptr()), 0);
+            assert!((*host).external_work_pending);
             let moved_frame = frame_json_with_delta(host, 0.0);
-            assert_eq!(moved_frame["events"][0]["name"], "analog.seen");
-            assert_eq!(moved_frame["events"][0]["params"]["axes"], "4660:22136");
+            assert_eq!(moved_frame["events"][0]["name"], "analog.frame");
+            assert_eq!(moved_frame["events"][0]["params"]["guestFrames"], 2);
+            assert_eq!(moved_frame["events"][1]["name"], "analog.seen");
+            assert_eq!(moved_frame["events"][1]["params"]["axes"], "4660:22136");
+            assert_eq!(pocket_next_wake_delay_ms(host), 0.0);
+
+            // Holding a non-neutral stick must not bypass the fixed-step clock
+            // on a zero-tick call, while a full tick does advance the guest.
+            let held_zero_tick = frame_json_with_delta(host, 0.0);
+            assert!(
+                held_zero_tick["events"].as_array().unwrap().is_empty(),
+                "held non-neutral stick must not step an extra guest frame on a zero-tick call"
+            );
+            assert_eq!(pocket_next_wake_delay_ms(host), 0.0);
+            let held_full_tick = frame_json_with_delta(host, 1000.0 / 60.0);
+            assert_eq!(held_full_tick["events"][0]["name"], "analog.frame");
+            assert_eq!(held_full_tick["events"][0]["params"]["axes"], "4660:22136");
+            assert_eq!(held_full_tick["events"][0]["params"]["guestFrames"], 3);
 
             let centered = CString::new(
                 r#"{"method":"input.buttons","payload":{"buttons":0,"analog":32896,"rightAnalog":32896}}"#,
             )
             .unwrap();
             assert_eq!(pocket_send(host, centered.as_ptr()), 0);
+            assert!((*host).external_work_pending);
             let centered_frame = frame_json_with_delta(host, 0.0);
-            assert_eq!(centered_frame["events"][0]["name"], "analog.seen");
-            assert_eq!(centered_frame["events"][0]["params"]["axes"], "32896:32896");
+            assert_eq!(centered_frame["events"][0]["name"], "analog.frame");
+            assert_eq!(centered_frame["events"][0]["params"]["guestFrames"], 4);
+            assert_eq!(centered_frame["events"][1]["name"], "analog.seen");
+            assert_eq!(centered_frame["events"][1]["params"]["axes"], "32896:32896");
+            assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
 
             let settled = frame_json_with_delta(host, 0.0);
             assert!(
                 settled["events"].as_array().unwrap().is_empty(),
                 "a settled neutral sample must not keep the ticker alive"
             );
+            assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
             pocket_destroy(host);
+        }
+    }
+
+    #[test]
+    fn queued_offload_replies_keep_scheduler_awake_across_single_delivery_frames() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NOTIFY_COUNT: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn notify() {
+            NOTIFY_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        NOTIFY_COUNT.store(0, Ordering::Relaxed);
+        let handle = pocket_create(80.0, 80.0);
+        let config = CString::new(
+            r#"{"generation":9,"session":3,"timeoutMs":5000,"methods":["compute.sum"]}"#,
+        )
+        .unwrap();
+        let source = CString::new(
+            r#"
+            if (!offload.submit(JSON.stringify({v:1,id:1,method:'compute.sum',payload:'[1,2]'}))) throw Error('submit 1');
+            if (!offload.submit(JSON.stringify({v:1,id:2,method:'compute.sum',payload:'[3,4]'}))) throw Error('submit 2');
+            globalThis.__pocketWorkState = () => ({version:1,continuous:false,simulationHz:60,framesUntilTimer:null});
+            globalThis.__pocketSkipIdleFrames = (n) => n;
+            globalThis.frame = () => {
+              const reply = offload.take();
+              if (reply) pocket._emit(JSON.stringify({name:'offload.reply',params:JSON.parse(reply)}));
+            };
+            "#,
+        )
+        .unwrap();
+        unsafe {
+            assert_eq!(
+                pocket_configure_offload(handle, config.as_ptr(), Some(notify)),
+                0
+            );
+            assert_eq!(pocket_eval(handle, source.as_ptr()), 0);
+            let initial = frame_json_with_delta(handle, 1000.0 / 60.0);
+            assert!(initial["events"].as_array().unwrap().is_empty());
+            assert_eq!(pocket_next_wake_delay_ms(handle), -1.0);
+
+            assert!(!pocket_offload_take(handle, 0).is_null());
+            assert!(!pocket_offload_take(handle, 0).is_null());
+            assert!(pocket_offload_take(handle, 0).is_null());
+
+            let reply1 =
+                CString::new(r#"{"generation":9,"session":3,"id":1,"payload":"3"}"#).unwrap();
+            let reply2 =
+                CString::new(r#"{"generation":9,"session":3,"id":2,"payload":"7"}"#).unwrap();
+            assert_eq!(pocket_offload_complete(handle, reply1.as_ptr()), 0);
+            assert_eq!(pocket_offload_complete(handle, reply2.as_ptr()), 0);
+            assert_eq!(pocket_offload_has_replies(handle), 1);
+
+            pocket_notify_external_work(handle);
+            let frame1 = frame_json_with_delta(handle, 0.0);
+            assert_eq!(frame1["events"][0]["name"], "offload.reply");
+            assert_eq!(frame1["events"][0]["params"]["id"], 1);
+            assert_eq!(frame1["events"][0]["params"]["payload"], "3");
+            assert_eq!(pocket_offload_has_replies(handle), 1);
+            assert_eq!(
+                pocket_next_wake_delay_ms(handle),
+                0.0,
+                "remaining queued replies must keep demand::capture continuous"
+            );
+
+            let frame2 = frame_json_with_delta(handle, 0.0);
+            assert_eq!(frame2["events"][0]["name"], "offload.reply");
+            assert_eq!(frame2["events"][0]["params"]["id"], 2);
+            assert_eq!(frame2["events"][0]["params"]["payload"], "7");
+            assert_eq!(pocket_offload_has_replies(handle), 0);
+            assert_eq!(pocket_next_wake_delay_ms(handle), -1.0);
+
+            let before_next_submit = NOTIFY_COUNT.load(Ordering::Relaxed);
+            assert!(
+                (*handle)
+                    .offload
+                    .as_ref()
+                    .unwrap()
+                    .submit_record(r#"{"v":1,"id":3,"method":"compute.sum","payload":"[5,6]"}"#),
+                "emptying the second reply must rearm wake_pending for subsequent submits"
+            );
+            assert_eq!(
+                NOTIFY_COUNT.load(Ordering::Relaxed),
+                before_next_submit + 1
+            );
+            pocket_destroy(handle);
         }
     }
 

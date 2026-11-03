@@ -121,10 +121,15 @@ final class FrameTimingCollector {
     final rasterFinishWallTimeUs = timing.timestampInMicroseconds(
       FramePhase.rasterFinishWallTime,
     );
-    if (rasterFinishWallTimeUs <= 0 || rasterFinishUs < buildStartUs) {
+    if (buildStartUs <= 0 ||
+        rasterFinishWallTimeUs <= 0 ||
+        rasterFinishUs < buildStartUs ||
+        timing.buildDuration.isNegative ||
+        timing.rasterDuration.isNegative) {
       return null;
     }
-    return rasterFinishWallTimeUs - (rasterFinishUs - buildStartUs);
+    final projected = rasterFinishWallTimeUs - (rasterFinishUs - buildStartUs);
+    return projected > 0 ? projected : null;
   }
 
   static bool hasSaneRawWallClock(FrameTiming timing) {
@@ -160,12 +165,20 @@ final class FrameTimingCollector {
       );
     }
 
+    final slowestBuildFinishUs =
+        slowestBuildStartUs + slowest!.buildDuration.inMicroseconds;
     TraceFrameInterval? matched;
     var matchedDistance = 1 << 62;
     for (final interval in intervals) {
       final lower = interval.startUs - allowedBuildStartOffsetUs;
-      final upper = interval.endUs + allowedBuildStartOffsetUs;
-      if (slowestBuildStartUs < lower || slowestBuildStartUs > upper) {
+      final upperStart =
+          interval.startUs + allowedBuildStartOffsetUs < interval.endUs
+          ? interval.startUs + allowedBuildStartOffsetUs
+          : interval.endUs;
+      final upperFinish = interval.endUs + allowedBuildStartOffsetUs;
+      if (slowestBuildStartUs < lower ||
+          slowestBuildStartUs > upperStart ||
+          slowestBuildFinishUs > upperFinish) {
         continue;
       }
       final distance = (slowestBuildStartUs - interval.startUs).abs();
@@ -192,9 +205,10 @@ final class FrameTimingCollector {
     final rawEvents = traceReport['traceEvents'];
     if (rawEvents is! Iterable) return const <TraceFrameInterval>[];
 
-    final open = <String, List<int>>{};
-    final intervals = <TraceFrameInterval>[];
+    final candidates = <({Map event, int timestamp, int order})>[];
+    var order = 0;
     for (final rawEvent in rawEvents) {
+      final currentOrder = order++;
       if (rawEvent is! Map ||
           rawEvent['cat'] != 'Dart' ||
           rawEvent['name'] != 'Frame') {
@@ -202,6 +216,26 @@ final class FrameTimingCollector {
       }
       final timestamp = _traceTimestamp(rawEvent['ts']);
       if (timestamp == null) continue;
+      final phase = rawEvent['ph'];
+      if (phase != 'b' && phase != 'B' && phase != 'e' && phase != 'E') {
+        continue;
+      }
+      candidates.add((
+        event: rawEvent,
+        timestamp: timestamp,
+        order: currentOrder,
+      ));
+    }
+    candidates.sort((a, b) {
+      final byTimestamp = a.timestamp.compareTo(b.timestamp);
+      return byTimestamp != 0 ? byTimestamp : a.order.compareTo(b.order);
+    });
+
+    final open = <String, List<int>>{};
+    final intervals = <TraceFrameInterval>[];
+    for (final candidate in candidates) {
+      final rawEvent = candidate.event;
+      final timestamp = candidate.timestamp;
       final phase = rawEvent['ph'];
       final key = _traceEventKey(rawEvent);
       if (phase == 'b' || phase == 'B') {

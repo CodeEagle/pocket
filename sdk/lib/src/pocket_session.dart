@@ -402,8 +402,8 @@ final class PocketSession extends ChangeNotifier {
     if (!_foregroundRequested) await plugins.deactivate(foregroundOnly: true);
   }
 
-  bool _send(String method, Map<String, dynamic> params) =>
-      !_disposed && controller.send(method: method, params: params);
+  bool _send(String method, Map<String, dynamic> params, {bool wake = true}) =>
+      !_disposed && controller.send(method: method, params: params, wake: wake);
 
   void onEvent(PocketEvent event) {
     final host = _host;
@@ -415,12 +415,17 @@ final class PocketSession extends ChangeNotifier {
     final json = sample.toJson();
     final longFrameEvents = performance.add(json);
     final snapshot = performance.snapshot();
-    _send('runtime.performance.sample', {
-      'sample': {...json, 'longFrameEvents': longFrameEvents},
-      'eventOnly': sample.frames <= 0 || sample.durationMs <= 0,
-      'minFps': (snapshot['latest'] as Map?)?['minFps'],
-      'recording': true,
-    });
+    final eventOnly = sample.frames <= 0 || sample.durationMs <= 0;
+    _send(
+      'runtime.performance.sample',
+      {
+        'sample': {...json, 'longFrameEvents': longFrameEvents},
+        'eventOnly': eventOnly,
+        'minFps': (snapshot['latest'] as Map?)?['minFps'],
+        'recording': true,
+      },
+      wake: !eventOnly,
+    );
   }
 
   void onReady(PocketViewController _) {

@@ -1,0 +1,91 @@
+diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
+--- a/engine/guest-rquickjs/src/lib.rs
++++ b/engine/guest-rquickjs/src/lib.rs
+@@ -947,6 +947,86 @@ mod tests {
+         guest.evaluate(b"globalThis.fromPackage=41;\0").unwrap();
+         guest.evaluate(b"globalThis.fromPackage++;").unwrap();
+         assert_eq!(evaluate::<i32>(&guest, "fromPackage"), 42);
+         assert!(guest.evaluate(b"globalThis.fromPackage=\0 1;\0").is_err());
+     }
+-}
++    #[test]
++    fn frame_exception_preserves_message_and_stack() {
++        let (mut guest, _) = guest(BindingProfile::Canonical);
++        guest
++            .evaluate(b"globalThis.frame=()=>{throw new Error('frame diagnostics')}")
++            .unwrap();
++        let frame = GuestFrame {
++            buttons: 0,
++            analog: 0,
++            touches: &[],
++            hits: &[],
++            touch_surfaces: &[],
++            right_analog: 0,
++            axis_deltas: &[],
++            motion: None,
++            text: &[],
++        };
++        assert_eq!(guest.frame(&frame), Err(RuntimeError::Guest));
++        let detail = guest.last_error().unwrap();
++        assert!(detail.contains("frame diagnostics"), "{detail}");
++        assert!(detail.contains("stack:"), "{detail}");
++    }
++    #[test]
++    fn pending_job_exception_preserves_message_and_stack() {
++        unsafe extern "C" fn throw_job(
++            ctx: *mut qjs::JSContext,
++            _argc: i32,
++            _argv: *mut qjs::JSValue,
++        ) -> qjs::JSValue {
++            static SOURCE: &[u8] = b"throw new Error('job diagnostics')\0";
++            static FILE: &[u8] = b"pending-job.js\0";
++            unsafe {
++                qjs::JS_Eval(
++                    ctx,
++                    SOURCE.as_ptr().cast(),
++                    SOURCE.len() as u64 - 1,
++                    FILE.as_ptr().cast(),
++                    qjs::JS_EVAL_TYPE_GLOBAL as i32,
++                )
++            }
++        }
++        let (mut guest, _) = guest(BindingProfile::Canonical);
++        guest.begin_turn(Duration::from_millis(250));
++        guest
++            .with(|ctx| unsafe {
++                assert_eq!(
++                    qjs::JS_EnqueueJob(
++                        ctx.as_raw().as_ptr(),
++                        Some(throw_job),
++                        0,
++                        std::ptr::null_mut(),
++                    ),
++                    0
++                );
++            })
++            .unwrap();
++        assert_eq!(guest.collect(), Err(RuntimeError::Guest));
++        let detail = guest.last_error().unwrap();
++        assert!(detail.contains("job diagnostics"), "{detail}");
++        assert!(detail.contains("stack:"), "{detail}");
++    }
++    #[test]
++    fn interrupted_guest_turn_is_classified_as_budget_exhaustion() {
++        let (mut guest, _) = guest(BindingProfile::Canonical);
++        guest.evaluate(b"globalThis.frame=()=>{for(;;){}}").unwrap();
++        let frame = GuestFrame {
++            buttons: 0,
++            analog: 0,
++            touches: &[],
++            hits: &[],
++            touch_surfaces: &[],
++            right_analog: 0,
++            axis_deltas: &[],
++            motion: None,
++            text: &[],
++        };
++        assert_eq!(guest.frame(&frame), Err(RuntimeError::Guest));
++        let detail = guest.last_error().unwrap();
++        assert!(detail.contains("execution interrupted by budget"), "{detail}");
++    }
++}

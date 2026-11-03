@@ -303,10 +303,12 @@ class PocketWechatHost {
 
   hide() {
     if (this.disposed) return;
+    const hadInput = Boolean(this.input);
     this.visible = false;
     this.stopScheduled();
     this.cancelPending("page inactive");
     this.imeDismiss({});
+    if (hadInput && this.wx.hideKeyboard) this.wx.hideKeyboard({ complete: () => {} });
   }
 
   declared(capability) {
@@ -342,10 +344,15 @@ class PocketWechatHost {
 
   async handleRequest(request) {
     if (!isRecord(request) || typeof request.requestId !== "string" || typeof request.capability !== "string") return;
-    // Disposal can synchronously drain a cancellation response. Do not admit
-    // requests emitted by that response into a host that is already tearing
-    // down; they cannot be completed after the WASM instance is destroyed.
+    // Disposal or page hide can synchronously drain a cancellation response. Do
+    // not admit requests emitted by that response into a host that is inactive
+    // or tearing down; reject while hidden so the guest Promise does not hang
+    // when show() later resumes.
     if (this.disposed || !this.exports || !this.host) return;
+    if (!this.visible) {
+      this.respond(request, false, null, { code: "cancelled", message: "page inactive" });
+      return;
+    }
     if (this.pending.size >= MAX_REQUESTS) {
       this.respond(request, false, null, { code: "request_quota", message: "WeChat host request limit reached" });
       return;
@@ -519,6 +526,7 @@ class PocketWechatHost {
   }
 
   openInput(value) {
+    if (this.disposed || !this.visible) return;
     const text = String(value.text ?? "");
     const requestedCursor = Number.isInteger(value.selectionExtent) ? value.selectionExtent : text.length;
     this.input = {
@@ -538,6 +546,7 @@ class PocketWechatHost {
   }
 
   updateInput(value) {
+    if (this.disposed || !this.visible) return;
     if (!this.input || (value.id !== undefined && String(value.id) !== String(this.input.id))) return;
     if (value.editingSession && value.editingSession !== this.input.editingSession) return;
     const nextText = value.text !== undefined ? String(value.text) : this.input.text;
@@ -648,6 +657,7 @@ class PocketWechatHost {
     try {
       this.stopScheduled();
       this.cancelPending("host disposed");
+      this.closeInput(true);
     } finally {
       const exports = this.exports;
       const host = this.host;

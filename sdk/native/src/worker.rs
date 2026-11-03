@@ -3326,8 +3326,17 @@ fn run_http_request(
         Err(error) => {
             let mut message = error.into_bytes();
             message.truncate(MAX_PAYLOAD);
+            let error_deadline = Instant::now() + Duration::from_secs(1);
             let _ = emit_with_backpressure(
-                state, core, handle, request, FACT_ERROR, 0, &message, deadline, &cancel,
+                state,
+                core,
+                handle,
+                request,
+                FACT_ERROR,
+                0,
+                &message,
+                error_deadline,
+                &cancel,
             );
             (STATUS_FAILED, 0)
         }
@@ -3562,7 +3571,9 @@ fn emit_with_backpressure(
         return Err("HTTP chunk exceeds 1024 bytes".to_owned());
     }
     loop {
-        check_request_alive(cancel, deadline)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err("HTTP request cancelled".to_owned());
+        }
         let seen = state.pulse.snapshot();
         let status = unsafe {
             pocket_worker_emit_request(
@@ -3583,6 +3594,9 @@ fn emit_with_backpressure(
             return Err(format!(
                 "worker rejected HTTP stream event with status {status}"
             ));
+        }
+        if Instant::now() >= deadline {
+            return Err("HTTP request timed out".to_owned());
         }
         state.pulse.wait_change(seen, Some(deadline));
     }
@@ -4473,5 +4487,143 @@ mod tests {
         assert!(timed_out, "redirect body exceeded the remaining total budget");
         assert!(started.elapsed() < Duration::from_millis(500));
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn timed_out_http_request_emits_fact_error_before_failed_finish() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let Ok(count) = stream.read(&mut chunk) else {
+                    break;
+                };
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+            }
+            thread::sleep(Duration::from_millis(250));
+        });
+
+        let descriptor = serde_json::json!({
+            "url": format!("{origin}/stall"),
+            "method": "GET",
+            "timeoutMs": 60,
+            "maxBytes": 64,
+        })
+        .to_string();
+        let descriptor_bytes = descriptor
+            .as_bytes()
+            .iter()
+            .map(|byte| byte.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            r#"
+            __pocketWorker.declareChannel(2,0,64,4,0);
+            const httpHandle=__pocketWorker.open(3,"net",new Uint8Array([{descriptor_bytes}]));
+            if(httpHandle<=0) throw new Error("HTTP open failed");
+            const httpRequest=__pocketWorker.submit(httpHandle,1,new Uint8Array(0),0);
+            if(httpRequest<=0) throw new Error("HTTP submit failed");
+            globalThis.__pocketWorkerTurn=(context,facts)=>{{
+              for(const fact of facts) {{
+                if(fact.kind===9) {{
+                  __pocketWorker.publish(2,new Uint8Array([9,...fact.data]));
+                }} else if(fact.kind===2) {{
+                  __pocketWorker.publish(2,new Uint8Array([2,fact.status & 0xff]));
+                  __pocketWorker.close(httpHandle);
+                }}
+              }}
+            }};
+            "#
+        );
+        let bytecode = compile_worker_bytecode(&source);
+        let declaration = WorkerDeclaration {
+            entry: "worker.js".into(),
+            nodes: vec![WorkerNodeDeclaration {
+                name: "net".into(),
+                kind: WorkerResourceKind::Http,
+            }],
+            channels: vec![WorkerChannelDeclaration {
+                name: "results".into(),
+                kind: WorkerChannelKind::Ring,
+                direction: WorkerChannelDirection::WorkerToUi,
+                record_bytes: 64,
+                capacity: 4,
+            }],
+        };
+        let policy = WorkerPolicy {
+            allowed_http_origins: vec![origin],
+            required_capabilities: vec!["net.http".into()],
+        };
+        let limits = WorkerLimits {
+            heap_bytes: 16 * 1024 * 1024,
+            stack_bytes: 1024 * 1024,
+            turn_budget_micros: 10_000,
+            window_micros: 1_000_000,
+            quota_micros: 900_000,
+        };
+        let trace = WorkerTrace::new(Mode::Live);
+        let ui_runtime = JsRuntime::new().unwrap();
+        let ui_context = Context::full(&ui_runtime).unwrap();
+        let mut worker = WorkerRuntime::spawn_traced(
+            &bytecode,
+            pocket_spec::BINDING_GENERATION,
+            60,
+            declaration,
+            policy,
+            limits,
+            Some(test_worker_wake),
+            Arc::clone(&trace),
+            "worker:timeout:1".to_owned(),
+        )
+        .unwrap();
+        worker.wait_ready(Duration::from_secs(2)).unwrap();
+        let mut bridge = ui_context
+            .with(|ctx| worker.attach_ui(ctx.as_raw().as_ptr()))
+            .unwrap();
+        ui_context.with(|ctx| {
+            ctx.eval::<(), _>("__pocketWorkerChannels.configure(2,0);")
+                .unwrap();
+        });
+        let outputs = collect_worker_outputs(
+            &ui_context,
+            &mut bridge,
+            &[9, 2],
+            "timeout",
+            &trace,
+            &[],
+        );
+        let error_pos = outputs
+            .iter()
+            .position(|record| record.first() == Some(&9))
+            .expect("missing FACT_ERROR record");
+        let finish_pos = outputs
+            .iter()
+            .position(|record| record.first() == Some(&2))
+            .expect("missing finish record");
+        assert!(
+            error_pos < finish_pos,
+            "FACT_ERROR must be emitted before finish: {outputs:?}"
+        );
+        let error_text = std::str::from_utf8(&outputs[error_pos][1..]).unwrap();
+        assert!(
+            error_text.contains("HTTP request timed out"),
+            "unexpected FACT_ERROR payload: {error_text:?}"
+        );
+        assert_eq!(
+            outputs[finish_pos],
+            vec![2, (STATUS_FAILED as u8)],
+            "timed-out HTTP request must finish with STATUS_FAILED"
+        );
+        worker.request_stop_and_wait();
+        bridge.detach();
+        worker.destroy_and_join().unwrap();
+        server_thread.join().unwrap();
     }
 }

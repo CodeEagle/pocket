@@ -453,22 +453,55 @@ function mergePerformancePoint(history: PerformancePoint[], sample: PerformanceP
 }
 
 function sameJank(first: PerformanceJank, second: PerformanceJank): boolean {
-  return String(first.timestamp) === String(second.timestamp) &&
-    first.scope === second.scope &&
-    first.activeGapMs === second.activeGapMs &&
-    first.durationMs === second.durationMs &&
-    first.buildMs === second.buildMs &&
-    first.rasterMs === second.rasterMs &&
-    first.nativeMs === second.nativeMs;
+  return sameTimestamp(first.timestamp, second.timestamp);
+}
+
+function mergeJankEntry(existing: PerformanceJank, item: PerformanceJank): PerformanceJank {
+  const refreshHz = item.refreshHz ?? existing.refreshHz;
+  const budgetMs = item.budgetMs ?? existing.budgetMs;
+  const durationMs = item.durationMs ?? existing.durationMs;
+  const buildMs = item.buildMs ?? existing.buildMs;
+  const rasterMs = item.rasterMs ?? existing.rasterMs;
+  const nativeMs = item.nativeMs ?? existing.nativeMs;
+  const activeGapMs = item.activeGapMs ?? existing.activeGapMs;
+  const active = item.active ?? existing.active;
+  const scope = item.scope === "flutterView" || existing.scope === "flutterView"
+    ? "flutterView"
+    : (item.scope ?? existing.scope);
+  const reason = item.reason ?? existing.reason;
+  const context = existing.context ?? item.context;
+  const page = existing.page ?? item.page;
+  const action = existing.action ?? item.action;
+  return {
+    timestamp: existing.timestamp,
+    ...(refreshHz !== undefined ? { refreshHz } : {}),
+    ...(budgetMs !== undefined ? { budgetMs } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(buildMs !== undefined ? { buildMs } : {}),
+    ...(rasterMs !== undefined ? { rasterMs } : {}),
+    ...(nativeMs !== undefined ? { nativeMs } : {}),
+    ...(activeGapMs !== undefined ? { activeGapMs } : {}),
+    ...(active !== undefined ? { active } : {}),
+    ...(scope !== undefined ? { scope } : {}),
+    ...(reason !== undefined ? { reason } : {}),
+    ...(context !== undefined ? { context } : {}),
+    ...(page !== undefined ? { page } : {}),
+    ...(action !== undefined ? { action } : {}),
+  };
 }
 
 function mergeJank(history: PerformanceJank[], sample: PerformanceJank[]): PerformanceJank[] {
-  const merged = [...history];
-  for (const item of sample) {
+  const merged: PerformanceJank[] = [];
+  for (const item of [...history, ...sample]) {
     const index = merged.findIndex((existing) => sameJank(existing, item));
-    if (index >= 0) merged[index] = item;
+    if (index >= 0) merged[index] = mergeJankEntry(merged[index]!, item);
     else merged.push(item);
   }
+  merged.sort((first, second) => {
+    const firstTime = Date.parse(String(first.timestamp));
+    const secondTime = Date.parse(String(second.timestamp));
+    return Number.isFinite(firstTime) && Number.isFinite(secondTime) ? firstTime - secondTime : 0;
+  });
   return boundedJank(merged);
 }
 
@@ -495,7 +528,7 @@ export function parsePerformanceSnapshot(value: unknown): PerformanceSnapshot {
     history,
     recording: value.recording === true,
     ...(explicitJank.length > 0 || historyJank.length > 0
-      ? { longFrameEvents: boundedJank(mergeJank(explicitJank, historyJank)) }
+      ? { longFrameEvents: boundedJank(mergeJank(historyJank, explicitJank)) }
       : {}),
     ...(contextString(value.context) !== undefined ? { context: contextString(value.context) } : {}),
   };

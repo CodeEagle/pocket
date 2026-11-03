@@ -109,7 +109,10 @@ final class PocketPerformanceSample {
   /// Wall-clock time at which this sample was emitted, in UTC.
   final DateTime timestamp;
 
-  /// Frames per second measured over [durationMs].
+  /// Guest ticker/native turns per active second over [durationMs].
+  ///
+  /// The field name is retained for compatibility. This does not count global
+  /// Flutter engine frames or physically presented display frames.
   final double fps;
 
   /// Number of ticker/native frames included in this sample.

@@ -309,6 +309,146 @@ test("stress and performance snapshots", () => {
   assert.equal(eventOnly.history.length, 2);
   assert.equal(eventOnly.longFrameEvents?.length, 2);
   assert.equal(eventOnly.longFrameEvents?.[1]?.timestamp, "event-only-frame");
+
+  // Two-phase long-frame enrichment: Phase 1 (pocketView, no buildMs/rasterMs)
+  // followed by Phase 2 (flutterView, with buildMs/rasterMs) for the same frame
+  // timestamp must merge in place without duplicating, upgrading scope to
+  // flutterView while preserving initial context, page, action, and nativeMs.
+  const phase1Sample = parsePerformancePoint({
+    timestamp: "2026-01-01T00:00:02.000Z",
+    fps: 0,
+    frames: 0,
+    durationMs: 0,
+    refreshHz: 120,
+    longFrameEvents: [{
+      timestamp: "2026-01-01T00:00:02.000Z",
+      refreshHz: 120,
+      budgetMs: 1000 / 120,
+      durationMs: 42,
+      activeGapMs: 42,
+      nativeMs: 5.5,
+      scope: "pocketView",
+      context: "page=stress;action=Run 500 nodes",
+      page: "stress",
+      action: "Run 500 nodes",
+    }],
+  });
+  const phase2Sample = parsePerformancePoint({
+    timestamp: "2026-01-01T00:00:03.000Z",
+    fps: 0,
+    frames: 0,
+    durationMs: 0,
+    refreshHz: 120,
+    longFrameEvents: [{
+      timestamp: "2026-01-01T00:00:02.000Z",
+      refreshHz: 120,
+      budgetMs: 1000 / 120,
+      durationMs: 42,
+      activeGapMs: 42,
+      buildMs: 14.2,
+      rasterMs: 9.8,
+      scope: "flutterView",
+      context: "page=performance;action=Opened performance",
+      page: "performance",
+      action: "Opened performance",
+    }],
+  });
+  const earlierSample = parsePerformancePoint({
+    timestamp: "2026-01-01T00:00:01.000Z",
+    fps: 0,
+    frames: 0,
+    durationMs: 0,
+    refreshHz: 120,
+    longFrameEvents: [{
+      timestamp: "2026-01-01T00:00:01.000Z",
+      refreshHz: 120,
+      budgetMs: 1000 / 120,
+      durationMs: 25,
+      activeGapMs: 25,
+      buildMs: 6.0,
+      rasterMs: 4.0,
+      nativeMs: 2.0,
+      scope: "flutterView",
+    }],
+  });
+  let twoPhaseSnapshot = parsePerformanceSnapshot({ latest: null, history: [], recording: true });
+  twoPhaseSnapshot = appendPerformanceSample(twoPhaseSnapshot, phase1Sample!, false);
+  twoPhaseSnapshot = appendPerformanceSample(twoPhaseSnapshot, phase2Sample!, false);
+  twoPhaseSnapshot = appendPerformanceSample(twoPhaseSnapshot, earlierSample!, false);
+  assert.equal(twoPhaseSnapshot.longFrameEvents?.length, 2);
+  assert.equal(twoPhaseSnapshot.longFrameEvents?.[0]?.timestamp, "2026-01-01T00:00:01.000Z");
+  const mergedEvent = twoPhaseSnapshot.longFrameEvents?.[1];
+  assert.equal(mergedEvent?.timestamp, "2026-01-01T00:00:02.000Z");
+  assert.equal(mergedEvent?.scope, "flutterView");
+  assert.equal(mergedEvent?.buildMs, 14.2);
+  assert.equal(mergedEvent?.rasterMs, 9.8);
+  assert.equal(mergedEvent?.nativeMs, 5.5);
+  assert.equal(mergedEvent?.context, "page=stress;action=Run 500 nodes");
+  assert.equal(mergedEvent?.page, "stress");
+  assert.equal(mergedEvent?.action, "Run 500 nodes");
+
+  // parsePerformanceSnapshot must keep enriched top-level longFrameEvents over
+  // stale unenriched point.longFrameEvents in history.
+  const snapshotWithStaleHistory = parsePerformanceSnapshot({
+    latest: {
+      timestamp: "2026-01-01T00:00:05.000Z",
+      fps: 55,
+      refreshHz: 120,
+      activeGapMs: 36,
+      longFrameEvents: [{
+        timestamp: "2026-01-01T00:00:04.500Z",
+        refreshHz: 120,
+        budgetMs: 1000 / 120,
+        durationMs: 36,
+        activeGapMs: 36,
+        nativeMs: 3.2,
+        scope: "pocketView",
+        context: "page=stress;action=Run 500 nodes",
+        page: "stress",
+        action: "Run 500 nodes",
+      }],
+    },
+    history: [{
+      timestamp: "2026-01-01T00:00:05.000Z",
+      fps: 55,
+      refreshHz: 120,
+      activeGapMs: 36,
+      longFrameEvents: [{
+        timestamp: "2026-01-01T00:00:04.500Z",
+        refreshHz: 120,
+        budgetMs: 1000 / 120,
+        durationMs: 36,
+        activeGapMs: 36,
+        nativeMs: 3.2,
+        scope: "pocketView",
+        context: "page=stress;action=Run 500 nodes",
+        page: "stress",
+        action: "Run 500 nodes",
+      }],
+    }],
+    longFrameEvents: [{
+      timestamp: "2026-01-01T00:00:04.500Z",
+      refreshHz: 120,
+      budgetMs: 1000 / 120,
+      durationMs: 36,
+      activeGapMs: 36,
+      buildMs: 11.4,
+      rasterMs: 7.9,
+      nativeMs: 3.2,
+      scope: "flutterView",
+      context: "page=stress;action=Run 500 nodes",
+      page: "stress",
+      action: "Run 500 nodes",
+    }],
+    recording: true,
+  });
+  assert.equal(snapshotWithStaleHistory.longFrameEvents?.length, 1);
+  assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.scope, "flutterView");
+  assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.buildMs, 11.4);
+  assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.rasterMs, 7.9);
+  assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.nativeMs, 3.2);
+  assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.page, "stress");
+  assert.equal(snapshotWithStaleHistory.longFrameEvents?.[0]?.action, "Run 500 nodes");
 });
 
 test("source checks and boundary integrity", () => {
@@ -331,9 +471,9 @@ test("source checks and boundary integrity", () => {
   assert.match(appSource, /setPerformance/);
   assert.match(appSource, /appendPerformanceSample/);
   assert.match(appSource, /params\.eventOnly !== true/);
-  assert.match(appSource, /FPS history/);
+  assert.match(appSource, /Frame diagnostics/);
   assert.match(appSource, /Recent 60 samples/);
-  assert.match(appSource, /Lowest FPS samples/);
+  assert.match(appSource, /Lowest guest tick samples/);
   assert.match(appSource, /Recent long frames/);
   assert.match(appSource, /UI build/);
   assert.match(appSource, /Bridge\/decode/);

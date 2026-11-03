@@ -116,8 +116,12 @@ final class PocketViewController {
   int _pendingMessageBytes = 0;
   int _generation = 0;
 
-  bool send({required String method, Map<String, dynamic> params = const {}}) {
-    return _sendEvent(method: method, params: params);
+  bool send({
+    required String method,
+    Map<String, dynamic> params = const {},
+    bool wake = true,
+  }) {
+    return _sendEvent(method: method, params: params, wake: wake);
   }
 
   /// Deliver a raw PocketJS onTextEvent record. This is separate from the
@@ -145,13 +149,18 @@ final class PocketViewController {
     required String method,
     Map<String, dynamic> params = const {},
     bool wake = true,
+    bool enqueueWhenDontWake = true,
   }) {
-    return _sendMessage(<String, dynamic>{
-      'type': 'event',
-      'id': 'dart-${DateTime.now().microsecondsSinceEpoch}',
-      'name': method,
-      'payload': params,
-    }, wake: wake);
+    return _sendMessage(
+      <String, dynamic>{
+        'type': 'event',
+        'id': 'dart-${DateTime.now().microsecondsSinceEpoch}',
+        'name': method,
+        'payload': params,
+      },
+      wake: wake,
+      enqueueWhenDontWake: enqueueWhenDontWake,
+    );
   }
 
   /// Sends a protocol message without wrapping it in the normal App event
@@ -162,11 +171,16 @@ final class PocketViewController {
     return _sendMessage(Map<String, dynamic>.from(message), wake: true);
   }
 
-  bool _sendMessage(Map<String, dynamic> message, {required bool wake}) {
+  bool _sendMessage(
+    Map<String, dynamic> message, {
+    required bool wake,
+    bool enqueueWhenDontWake = true,
+  }) {
     final runtime = _runtime;
     if (runtime == null) return false;
     final canSendImmediately = _canSendImmediately;
-    if (canSendImmediately != null && !canSendImmediately()) {
+    if ((!wake && enqueueWhenDontWake) ||
+        (canSendImmediately != null && !canSendImmediately())) {
       return _enqueueMessage(message);
     }
     runtime.send(message);
@@ -367,7 +381,7 @@ class PocketView extends StatefulWidget {
   /// Creates a trusted provider before evaluation. The runtime owns teardown.
   final PocketOffloadProvider Function()? offloadProviderFactory;
 
-  /// Shows the fixed top-right renderer FPS diagnostic when enabled. This is
+  /// Shows the fixed top-right guest tick-rate diagnostic when enabled. This is
   /// available in debug, profile and release builds; keep it false for a
   /// production surface that does not want the overlay.
   final bool showDebugFps;
@@ -500,6 +514,20 @@ final class _PocketPerformanceFrameContext {
 PocketFrame? Function(PocketRuntime runtime, double deltaMilliseconds)?
 debugPocketFrameDeltaAtOverride;
 
+@visibleForTesting
+Duration Function()? debugPocketNativeFrameDurationOverride;
+
+@visibleForTesting
+PocketRuntime Function(Size viewport)? debugPocketSelfOwnedRuntimeFactory;
+
+/// Test-only override for the bounded initial image-resource barrier.
+///
+/// Production startup uses [_PocketViewState._firstFrameResourceTimeout]. A
+/// short override keeps timeout and cancellation behavior deterministic in
+/// widget tests without sleeping on a real device.
+@visibleForTesting
+Duration? debugPocketFirstFrameResourceTimeoutOverride;
+
 class _PocketViewState extends State<PocketView>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   static final PocketDisplayGeometrySource _defaultDisplayGeometry =
@@ -629,6 +657,7 @@ class _PocketViewState extends State<PocketView>
   @visibleForTesting
   int get idleWakeCreditMicroseconds => _idleWakeCreditMicroseconds;
   bool _isDisposed = false;
+  final Completer<void> _disposeSignal = Completer<void>();
   double _firstFrameDeltaMs = 1000.0 / 60.0;
 
   void _cancelScheduledWake() {
@@ -688,6 +717,7 @@ class _PocketViewState extends State<PocketView>
   final Map<DateTime, PocketLongFrameEvent> _deliveredLongFrameEvents =
       <DateTime, PocketLongFrameEvent>{};
   final Set<DateTime> _dirtyDeliveredLongFrameTimestamps = <DateTime>{};
+  DateTime? _lastUnmatchedLongFrameTimestamp;
   bool _frameTimingListenerAttached = false;
   double? _fps;
   double? _sessionMinFps;
@@ -1018,13 +1048,37 @@ class _PocketViewState extends State<PocketView>
       final next = _pendingResize;
       _pendingResize = null;
       if (!mounted || next == null) return;
-      _resizeRuntime(next);
+      unawaited(_resizeRuntime(next));
     });
   }
 
-  void _resizeRuntime(Size size) {
+  Future<void> _flushPendingStartupResizes() async {
+    while (mounted && !_isDisposed && _pendingResize != null) {
+      final next = _pendingResize;
+      _pendingResize = null;
+      if (next == null) continue;
+      await _resizeRuntime(
+        next,
+        allowWhileLoading: true,
+        waitForInitialImages: true,
+      );
+    }
+  }
+
+  Future<void> _resizeRuntime(
+    Size size, {
+    bool allowWhileLoading = false,
+    bool waitForInitialImages = false,
+  }) async {
     final runtime = _runtime;
     if (runtime == null || !_effectiveActive || widget.runtime != null) {
+      return;
+    }
+    if (_loading && !allowWhileLoading) {
+      // Startup must not publish a post-resize DrawList before the first
+      // DrawList's image/mask resources are ready. Keep only the latest host
+      // size; [_flushPendingStartupResizes] applies it after that barrier.
+      _pendingResize = size;
       return;
     }
     _wakeTicker();
@@ -1034,6 +1088,8 @@ class _PocketViewState extends State<PocketView>
         // Flutter surface still fits that frame, but do not retry this ABI
         // lookup on every layout pass.
         _resizeUnavailable = true;
+        _markSceneNeedsBuild();
+        _scheduleSafeAreaReport();
         return;
       }
       // The resize event and the new root layout are observable immediately;
@@ -1051,15 +1107,23 @@ class _PocketViewState extends State<PocketView>
       }
       // Apply scheduling after decoded frame events and duplex egress callbacks
       // have had a chance to publish new owner-thread work.
+      PocketFrame? applied;
       _beginGuestOutputDelivery();
       try {
-        if (next != null) _applyFrame(next);
+        if (next != null) {
+          applied = next;
+          _applyFrame(next, requestResources: !waitForInitialImages);
+        }
         _drainDuplexEvents();
       } finally {
         _finishGuestOutputDelivery();
       }
+      if (waitForInitialImages && applied != null) {
+        await _requestResources(applied, waitForInitialImages: true);
+      }
       _scheduleSafeAreaReport();
     } catch (error) {
+      if (waitForInitialImages) rethrow;
       _failRuntime(error);
     }
   }
@@ -1093,15 +1157,17 @@ class _PocketViewState extends State<PocketView>
       }
       final runtime = startupRuntime =
           widget.runtime ??
-          FfiPocketRuntime.open(
-            recording: widget.recordingFactory?.call(),
-            width: runtimeViewport!.width,
-            height: runtimeViewport.height,
-            rasterDensity: pocketRasterDensity(
-              View.of(context).devicePixelRatio,
-            ),
-            tickHz: widget.tickHz,
-          );
+          (debugPocketSelfOwnedRuntimeFactory != null
+              ? debugPocketSelfOwnedRuntimeFactory!(runtimeViewport!)
+              : FfiPocketRuntime.open(
+                  recording: widget.recordingFactory?.call(),
+                  width: runtimeViewport!.width,
+                  height: runtimeViewport.height,
+                  rasterDensity: pocketRasterDensity(
+                    View.of(context).devicePixelRatio,
+                  ),
+                  tickHz: widget.tickHz,
+                ));
       if (widget.compositorSurfaces.isNotEmpty) {
         if (runtime is! PocketCompositorRuntime) {
           throw UnsupportedError(
@@ -1213,16 +1279,36 @@ class _PocketViewState extends State<PocketView>
       final visualFirst = _visualFrame(first);
       _frame = visualFirst;
       _auxiliaryFrame = visualFirst.auxiliary;
-      _loading = false;
-      widget.onReady?.call(_controller);
+      final waitForInitialImages = _imageAssetsForFrame(first).isNotEmpty;
+      if (!waitForInitialImages) {
+        // Preserve the established no-image startup ordering, including the
+        // callback occurring before the invalidation batch is opened.
+        _loading = false;
+        widget.onReady?.call(_controller);
+        if (!mounted) return;
+      }
       if (!mounted) return;
       _beginInvalidationBatch();
       try {
-        _requestResources(first);
+        // Keep the loading surface visible until image/mask resources used by
+        // the first DrawList have become paintable. Later frames continue to
+        // use the existing demand-driven, non-blocking resource path.
+        if (waitForInitialImages) {
+          await _requestResources(first, waitForInitialImages: true);
+          await _flushPendingStartupResizes();
+          if (!mounted || _isDisposed) return;
+          _loading = false;
+          widget.onReady?.call(_controller);
+        } else {
+          // Do not insert an async turn before controller events and the first
+          // ticker wake when there is no image/mask to gate.
+          unawaited(_requestResources(first));
+        }
         _handleEvents(first.events);
       } finally {
         _endInvalidationBatch();
       }
+      if (!mounted || _isDisposed) return;
       setState(() {});
       _scheduleSafeAreaReport();
       _ticker = createTicker(_onTick);
@@ -1471,6 +1557,7 @@ class _PocketViewState extends State<PocketView>
     final alreadyIdle = _idleStartedAt != null;
     _idleStartedAt ??= _lastSchedulerTimestamp;
     if (!alreadyIdle) _resumedFromIdle = false;
+    _drainUnmatchedPendingFrameTimings();
     // A demand-driven guest can stop immediately after a long active burst.
     // Flush the bounded event through the existing performance callback now;
     // no extra ticker, timer or disk write is introduced here.
@@ -1590,6 +1677,7 @@ class _PocketViewState extends State<PocketView>
         !_effectiveActive) {
       return;
     }
+    var queuedParkedLongFrame = false;
     for (final timing in timings) {
       final timingKey = _frameTimingKey(timing);
       // Flutter can deliver a timing batch again after an embedding/test
@@ -1604,10 +1692,12 @@ class _PocketViewState extends State<PocketView>
         // A Flutter frame can be expensive even when this PocketView was
         // parked and therefore has no native frame context. Preserve that
         // evidence as a global FlutterView fact, without inventing native or
-        // active-gap measurements. If it is merely an unmatched ordinary
-        // frame, retain it for the normal delayed-context handoff below.
-        if (_recordUnmatchedFrameTiming(timing)) {
+        // active-gap measurements. While actively ticking, retain the timing
+        // for the delayed-context handoff below so a slightly delayed tick
+        // context for the same vsync can still pair with it.
+        if (_idleStartedAt != null && _recordUnmatchedFrameTiming(timing)) {
           _rememberHandledFrameTiming(timingKey);
+          queuedParkedLongFrame = true;
           continue;
         }
         // The engine normally reports timings after the ticker callback. Keep
@@ -1615,14 +1705,25 @@ class _PocketViewState extends State<PocketView>
         // timing first; unrelated frames are bounded and eventually dropped.
         if (_pendingFrameTimings.length >= 16) {
           final dropped = _pendingFrameTimings.removeAt(0);
-          _pendingFrameTimingKeys.remove(_frameTimingKey(dropped));
+          final droppedKey = _frameTimingKey(dropped);
+          _pendingFrameTimingKeys.remove(droppedKey);
+          if (!_handledFrameTimingKeys.contains(droppedKey) &&
+              _recordUnmatchedFrameTiming(dropped)) {
+            _rememberHandledFrameTiming(droppedKey);
+            if (_idleStartedAt != null) queuedParkedLongFrame = true;
+          }
         }
         _pendingFrameTimings.add(timing);
         _pendingFrameTimingKeys.add(timingKey);
         continue;
       }
-      _recordFrameTiming(context, timing);
+      if (_recordFrameTiming(context, timing) && _idleStartedAt != null) {
+        queuedParkedLongFrame = true;
+      }
       _rememberHandledFrameTiming(timingKey);
+    }
+    if (queuedParkedLongFrame && _idleStartedAt != null) {
+      _emitPendingLongFrameSample();
     }
   }
 
@@ -1674,15 +1775,55 @@ class _PocketViewState extends State<PocketView>
       final timing = _pendingFrameTimings.removeAt(pendingTimingIndex);
       final timingKey = _frameTimingKey(timing);
       _pendingFrameTimingKeys.remove(timingKey);
-      if (_handledFrameTimingKeys.contains(timingKey)) return;
-      _recordFrameTiming(context, timing);
-      _rememberHandledFrameTiming(timingKey);
+      if (!_handledFrameTimingKeys.contains(timingKey)) {
+        _recordFrameTiming(context, timing);
+        _rememberHandledFrameTiming(timingKey);
+      }
+      _drainUnmatchedPendingFrameTimings(olderThan: context.vsyncTimestamp);
       return;
     }
+    _drainUnmatchedPendingFrameTimings(olderThan: context.vsyncTimestamp);
     if (_performanceFrameContexts.length >= 120) {
       _performanceFrameContexts.removeAt(0);
     }
     _performanceFrameContexts.add(context);
+  }
+
+  void _drainUnmatchedPendingFrameTimings({Duration? olderThan}) {
+    if (_pendingFrameTimings.isEmpty) return;
+    var index = 0;
+    while (index < _pendingFrameTimings.length) {
+      final timing = _pendingFrameTimings[index];
+      if (olderThan != null &&
+          _frameTimingTimestamp(timing).inMicroseconds + 2000 >=
+              olderThan.inMicroseconds) {
+        index++;
+        continue;
+      }
+      _pendingFrameTimings.removeAt(index);
+      final timingKey = _frameTimingKey(timing);
+      _pendingFrameTimingKeys.remove(timingKey);
+      if (_handledFrameTimingKeys.contains(timingKey)) continue;
+      if (_recordUnmatchedFrameTiming(timing)) {
+        _rememberHandledFrameTiming(timingKey);
+      }
+    }
+  }
+
+  DateTime _nextUnmatchedLongFrameTimestamp() {
+    var timestamp = DateTime.now().toUtc();
+    final previous = _lastUnmatchedLongFrameTimestamp;
+    if (previous != null && !timestamp.isAfter(previous)) {
+      timestamp = previous.add(const Duration(microseconds: 1));
+    }
+    while (_deliveredLongFrameEvents.containsKey(timestamp) ||
+        _performanceLongFrameEvents.any(
+          (candidate) => candidate.timestamp == timestamp,
+        )) {
+      timestamp = timestamp.add(const Duration(microseconds: 1));
+    }
+    _lastUnmatchedLongFrameTimestamp = timestamp;
+    return timestamp;
   }
 
   static double _durationMilliseconds(Duration duration) =>
@@ -1700,6 +1841,7 @@ class _PocketViewState extends State<PocketView>
   /// a duplicate timing without hiding an ordinary timing that may still pair
   /// with a delayed native context.
   bool _recordUnmatchedFrameTiming(FrameTiming timing) {
+    if (!widget.inputEnabled) return false;
     if (_performanceWindowStart == null && _idleStartedAt == null) return false;
     final buildMs = _durationMilliseconds(timing.buildDuration);
     final rasterMs = _durationMilliseconds(timing.rasterDuration);
@@ -1710,7 +1852,7 @@ class _PocketViewState extends State<PocketView>
     }
     _mergeLongFrameEvent(
       PocketLongFrameEvent(
-        timestamp: DateTime.now().toUtc(),
+        timestamp: _nextUnmatchedLongFrameTimestamp(),
         refreshHz: _refreshHz,
         budgetMs: budgetMs,
         buildMs: buildMs,
@@ -1718,24 +1860,23 @@ class _PocketViewState extends State<PocketView>
         scope: 'flutterView',
       ),
     );
-    // If the PocketView is parked, use the existing diagnostic callback to
-    // publish the global fact. This does not create a timer or ticker.
-    if (_idleStartedAt != null) _emitPendingLongFrameSample();
     return true;
   }
 
-  void _recordFrameTiming(
+  bool _recordFrameTiming(
     _PocketPerformanceFrameContext context,
     FrameTiming timing,
   ) {
     final buildMs = _durationMilliseconds(timing.buildDuration);
     final rasterMs = _durationMilliseconds(timing.rasterDuration);
     final budgetMs = 1000.0 / context.refreshHz;
-    if (!_exceedsLongFrameThreshold(buildMs, budgetMs) &&
-        !_exceedsLongFrameThreshold(rasterMs, budgetMs) &&
+    final flutterLongFrame =
+        _exceedsLongFrameThreshold(buildMs, budgetMs) ||
+        _exceedsLongFrameThreshold(rasterMs, budgetMs);
+    if (!flutterLongFrame &&
         !_exceedsLongFrameThreshold(context.nativeMs, budgetMs) &&
         !_exceedsLongFrameThreshold(context.activeGapMs, budgetMs)) {
-      return;
+      return false;
     }
     _mergeLongFrameEvent(
       PocketLongFrameEvent(
@@ -1746,16 +1887,13 @@ class _PocketViewState extends State<PocketView>
         rasterMs: rasterMs,
         nativeMs: context.nativeMs,
         activeGapMs: context.activeGapMs,
-        scope: 'flutterView',
+        scope: flutterLongFrame ? 'flutterView' : 'pocketView',
       ),
     );
     // A frame can be the final active burst before the native scheduler parks
     // the ticker. Deliver its fact from the timing callback itself instead of
     // waiting for another guest frame that may never be scheduled.
-    if (_idleStartedAt != null &&
-        !_deliveredLongFrameEvents.containsKey(context.wallClock)) {
-      _emitPendingLongFrameSample();
-    }
+    return !_deliveredLongFrameEvents.containsKey(context.wallClock);
   }
 
   void _mergeLongFrameEvent(PocketLongFrameEvent event) {
@@ -1766,12 +1904,17 @@ class _PocketViewState extends State<PocketView>
           merged.buildMs != delivered.buildMs ||
           merged.rasterMs != delivered.rasterMs) {
         _deliveredLongFrameEvents[event.timestamp] = merged;
-        _dirtyDeliveredLongFrameTimestamps.add(event.timestamp);
-        // If the view has already resumed, make the enrichment part of the
-        // current active window immediately. While parked it is held until
-        // the next existing wake turn so no diagnostic frame is scheduled.
-        if (_idleStartedAt == null && _performanceWindowStart != null) {
-          _queueDeliveredLongFrameUpdates();
+        if (_exceedsLongFrameThreshold(event.buildMs, event.budgetMs) ||
+            _exceedsLongFrameThreshold(event.rasterMs, event.budgetMs) ||
+            merged.buildMs != delivered.buildMs ||
+            merged.rasterMs != delivered.rasterMs) {
+          _dirtyDeliveredLongFrameTimestamps.add(event.timestamp);
+          // If the view has already resumed, make the enrichment part of the
+          // current active window immediately. While parked it is held until
+          // the next existing wake turn so no diagnostic frame is scheduled.
+          if (_idleStartedAt == null && _performanceWindowStart != null) {
+            _queueDeliveredLongFrameUpdates();
+          }
         }
       }
       return;
@@ -1804,8 +1947,23 @@ class _PocketViewState extends State<PocketView>
     nativeMs: next.nativeMs ?? previous.nativeMs,
     activeGapMs: next.activeGapMs ?? previous.activeGapMs,
     context: next.context ?? previous.context,
-    scope: next.scope,
+    scope: previous.scope == 'flutterView' || next.scope == 'flutterView'
+        ? 'flutterView'
+        : next.scope,
   );
+
+  void _rememberDeliveredLongFrameEvents(
+    Iterable<PocketLongFrameEvent> events,
+  ) {
+    for (final event in events) {
+      _deliveredLongFrameEvents[event.timestamp] = event;
+    }
+    while (_deliveredLongFrameEvents.length > 128) {
+      final removedKey = _deliveredLongFrameEvents.keys.first;
+      _deliveredLongFrameEvents.remove(removedKey);
+      _dirtyDeliveredLongFrameTimestamps.remove(removedKey);
+    }
+  }
 
   void _resetPerformanceWindow() {
     _performanceWindowStart = null;
@@ -1821,6 +1979,7 @@ class _PocketViewState extends State<PocketView>
     _performanceLongFrameEvents.clear();
     _deliveredLongFrameEvents.clear();
     _dirtyDeliveredLongFrameTimestamps.clear();
+    _lastUnmatchedLongFrameTimestamp = null;
     _fps = null;
   }
 
@@ -1904,36 +2063,18 @@ class _PocketViewState extends State<PocketView>
       _performanceLongFrameEvents,
       growable: false,
     );
-    final start = _performanceWindowStart;
-    final last = _performanceLastTick;
-    final durationMs = start == null || last == null
-        ? 0.0
-        : math
-              .max(
-                0.0,
-                (last - start).inMicroseconds /
-                    Duration.microsecondsPerSecond *
-                    1000.0,
-              )
-              .toDouble();
     final burstSample = PocketPerformanceSample(
       timestamp: DateTime.now().toUtc(),
-      fps: durationMs > 0 ? _performanceFrames * 1000.0 / durationMs : 0,
-      frames: _performanceFrames,
-      durationMs: durationMs,
+      fps: 0,
+      frames: 0,
+      durationMs: 0,
       maxGapMs: _performanceMaxGapMs,
       slowFrames: _performanceSlowFrames,
       nativeMsP95: _nativeDurationP95(),
       refreshHz: _refreshHz,
       longFrameEvents: events,
     );
-    _deliverPerformanceSample(burstSample, updateDebugOverlay: false);
-    for (final event in events) {
-      _deliveredLongFrameEvents[event.timestamp] = event;
-    }
-    while (_deliveredLongFrameEvents.length > 128) {
-      _deliveredLongFrameEvents.remove(_deliveredLongFrameEvents.keys.first);
-    }
+    _rememberDeliveredLongFrameEvents(events);
     _performanceLongFrameEvents.clear();
     // The active burst is complete. Start a fresh active window after the
     // next wake; idle wall-clock time must not enter its denominator.
@@ -1944,6 +2085,7 @@ class _PocketViewState extends State<PocketView>
     _performanceSlowFrames = 0;
     _performanceNativeDurationsMs.clear();
     _fps = null;
+    _deliverPerformanceSample(burstSample, updateDebugOverlay: false);
   }
 
   void _queueDeliveredLongFrameUpdates() {
@@ -1973,18 +2115,18 @@ class _PocketViewState extends State<PocketView>
       // evaluation and the initial frame are intentionally excluded.
       _performanceWindowStart = clockElapsed;
       _performanceLastTick = clockElapsed;
-      if (resumedFromIdle) _queueDeliveredLongFrameUpdates();
-      _recordActiveFrameContext(
-        timestamp: clockElapsed,
-        nativeDuration: nativeDuration,
-      );
       // A known-idle guest may not have produced a ticker callback before its
       // first later wake. In that case no pre-idle performance interval
       // exists to adjust, so establish a fresh baseline here.
       if (resumedFromIdle) {
         _resumedFromIdle = false;
         _idleStartedAt = null;
+        _queueDeliveredLongFrameUpdates();
       }
+      _recordActiveFrameContext(
+        timestamp: clockElapsed,
+        nativeDuration: nativeDuration,
+      );
       return;
     }
     final previous = _performanceLastTick;
@@ -2037,6 +2179,10 @@ class _PocketViewState extends State<PocketView>
     _sessionMinFps = previousMinimum == null
         ? fps
         : math.min(previousMinimum, fps);
+    final events = List<PocketLongFrameEvent>.of(
+      _performanceLongFrameEvents,
+      growable: false,
+    );
     final sample = PocketPerformanceSample(
       timestamp: DateTime.now().toUtc(),
       fps: fps,
@@ -2046,12 +2192,9 @@ class _PocketViewState extends State<PocketView>
       slowFrames: _performanceSlowFrames,
       nativeMsP95: _nativeDurationP95(),
       refreshHz: _refreshHz,
-      longFrameEvents: List<PocketLongFrameEvent>.of(
-        _performanceLongFrameEvents,
-        growable: false,
-      ),
+      longFrameEvents: events,
     );
-    _deliverPerformanceSample(sample);
+    _rememberDeliveredLongFrameEvents(events);
     // Keep only the current one-second window; the host owns persistent
     // history. Preserve the elapsed baseline so a long first gap in the next
     // window remains visible instead of being discarded at this boundary.
@@ -2062,6 +2205,7 @@ class _PocketViewState extends State<PocketView>
     _performanceSlowFrames = 0;
     _performanceNativeDurationsMs.clear();
     _performanceLongFrameEvents.clear();
+    _deliverPerformanceSample(sample);
   }
 
   void _onTick(Duration _) {
@@ -2087,6 +2231,7 @@ class _PocketViewState extends State<PocketView>
     final frameDelta = delta.isFinite && delta > 0 ? delta : 0.0;
     try {
       widget.onBeforeFrame?.call();
+      _controller._flushPendingMessages();
       // A pointer edge that fell back because the duplex ring was full must
       // reach the native queue before this frame boundary. Otherwise the
       // post-frame outside-editor dismiss can enqueue `textInput.dismiss`
@@ -2114,7 +2259,11 @@ class _PocketViewState extends State<PocketView>
       try {
         if (next != null) {
           if (stopwatch != null) {
-            _recordPerformanceTick(clockElapsed, stopwatch.elapsed);
+            _recordPerformanceTick(
+              clockElapsed,
+              debugPocketNativeFrameDurationOverride?.call() ??
+                  stopwatch.elapsed,
+            );
           }
           _applyFrame(next);
         }
@@ -2218,7 +2367,7 @@ class _PocketViewState extends State<PocketView>
     return rect.width > 0 && rect.height > 0;
   }
 
-  void _applyFrame(PocketFrame next) {
+  void _applyFrame(PocketFrame next, {bool requestResources = true}) {
     if (identical(_frame, next)) return;
     final visual = _visualFrame(next);
     final visualChanged = !_frameVisualEquals(_frame, visual);
@@ -2240,7 +2389,7 @@ class _PocketViewState extends State<PocketView>
       _frame = visual;
       _auxiliaryFrame = visual.auxiliary;
       if (visualChanged) _markSceneNeedsBuild();
-      _requestResources(next);
+      if (requestResources) unawaited(_requestResources(next));
       if (nextFocus != null && nextFocus != previousFocus) {
         _cancelPointerSequences();
         _dismissTextInput(reason: 'compositor.focus', rebuild: false);
@@ -2596,19 +2745,82 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  void _requestResources(PocketFrame frame) {
+  static const Duration _firstFrameResourceTimeout = Duration(seconds: 5);
+
+  Set<String> _imageAssetsForFrame(PocketFrame frame) {
+    final assets = <String>{};
+    void collect(List<PocketOp> ops) {
+      for (final op in ops) {
+        switch (op) {
+          case PocketImageOp():
+            if (op.asset.isNotEmpty) assets.add(op.asset);
+          case PocketTextureTriangleOp():
+            if (op.asset.isNotEmpty) assets.add(op.asset);
+          default:
+            break;
+        }
+      }
+    }
+
+    collect(frame.ops);
+    final auxiliary = frame.auxiliary;
+    if (auxiliary != null) collect(auxiliary.ops);
+    return assets;
+  }
+
+  Future<void> _requestResources(
+    PocketFrame frame, {
+    bool waitForInitialImages = false,
+  }) async {
     if (frame.releasedResources.isNotEmpty) _markSceneNeedsBuild();
     _releaseImages(frame.releasedResources);
     // Prefer native texture-table resources. This keeps package parsing and
     // texture admission in Rust while still allowing the old PAK fallback
     // below when an older host does not send resources.
+    final imageAssets = _imageAssetsForFrame(frame);
+    final resourceAssets = frame.resources
+        .map((resource) => resource.asset)
+        .where((asset) => asset.isNotEmpty)
+        .toSet();
+    final initialLoads = <Future<bool>>[];
+    final initialAssets = <String>{};
+    final initialAssetNames = <String>[];
     for (final resource in frame.resources) {
-      _loadImageResource(resource);
+      final load = _loadImageResource(
+        resource,
+        reportError: !waitForInitialImages,
+      );
+      if (waitForInitialImages &&
+          imageAssets.contains(resource.asset) &&
+          initialAssets.add(resource.asset)) {
+        initialLoads.add(load);
+        initialAssetNames.add(resource.asset);
+      }
     }
     final videoRequests = <String, _PocketVideoRequest>{};
+    final requestedPackageImages = <String>{};
     void collectResources(List<PocketOp> ops, double width, double height) {
       for (final op in ops) {
-        if (op is PocketImageOp) _loadImage(op.asset);
+        final imageAsset = switch (op) {
+          PocketImageOp image => image.asset,
+          PocketTextureTriangleOp texture => texture.asset,
+          _ => null,
+        };
+        if (imageAsset != null &&
+            imageAsset.isNotEmpty &&
+            !resourceAssets.contains(imageAsset) &&
+            requestedPackageImages.add(imageAsset)) {
+          final load = _loadImage(
+            imageAsset,
+            reportError: !waitForInitialImages,
+          );
+          if (waitForInitialImages && imageAssets.contains(imageAsset)) {
+            if (initialAssets.add(imageAsset)) {
+              initialLoads.add(load);
+              initialAssetNames.add(imageAsset);
+            }
+          }
+        }
         if (op is PocketVideoOp) {
           final request = _PocketVideoRequest(
             op: op,
@@ -2680,6 +2892,41 @@ class _PocketViewState extends State<PocketView>
         }
       } else {
         _loadVideo(op);
+      }
+    }
+
+    if (waitForInitialImages && initialLoads.isNotEmpty) {
+      try {
+        final results =
+            await Future.any(<Future<List<bool>>>[
+              Future.wait(initialLoads),
+              _disposeSignal.future.then((_) => const <bool>[]),
+            ]).timeout(
+              debugPocketFirstFrameResourceTimeoutOverride ??
+                  _firstFrameResourceTimeout,
+            );
+        if (!mounted || _isDisposed) return;
+        final failedAssets = <String>[];
+        for (var index = 0; index < results.length; index++) {
+          if (!results[index]) {
+            failedAssets.add(initialAssetNames[index]);
+          }
+        }
+        if (failedAssets.isNotEmpty) {
+          throw StateError(
+            'Initial Pocket image resources failed: '
+            '${failedAssets.join(', ')}',
+          );
+        }
+      } on TimeoutException {
+        _releaseImages(initialAssets);
+        throw TimeoutException(
+          'Initial Pocket image resources did not decode within '
+          '${(debugPocketFirstFrameResourceTimeoutOverride ?? _firstFrameResourceTimeout).inMilliseconds}ms',
+        );
+      } catch (_) {
+        _releaseImages(initialAssets);
+        rethrow;
       }
     }
   }
@@ -2761,19 +3008,22 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  Future<void> _loadImageResource(PocketImageResource resource) async {
+  Future<bool> _loadImageResource(
+    PocketImageResource resource, {
+    bool reportError = true,
+  }) async {
     final asset = resource.asset;
     final revision = resource.revision;
-    if (asset.isEmpty) return;
+    if (asset.isEmpty) return false;
     final loadedRevision = _imageResourceRevisions[asset];
-    if (_images.containsKey(asset) && loadedRevision == revision) return;
+    if (_images.containsKey(asset) && loadedRevision == revision) return true;
     if (loadedRevision != null && revision < loadedRevision) {
       // Frames are ordered, but do not let a late older resource overwrite a
       // newer in-place texture update if a host queues work asynchronously.
-      return;
+      return _images.containsKey(asset);
     }
     if (_loadingImages.contains(asset)) {
-      if (_loadingImageRevisions[asset] == revision) return;
+      if (_loadingImageRevisions[asset] == revision) return false;
       // A newer revision supersedes an in-flight decode for the same asset.
       // Advance the epoch before starting the replacement so the old Future
       // cannot install stale pixels or clear the new loading marker.
@@ -2793,7 +3043,7 @@ class _PocketViewState extends State<PocketView>
         _loadingImages.remove(asset);
         _loadingImageRevisions.remove(asset);
       }
-      return;
+      return false;
     }
     try {
       final decoded = await (decoder == null
@@ -2801,18 +3051,20 @@ class _PocketViewState extends State<PocketView>
           : decoder(resource));
       if (!mounted || (_imageEpochs[asset] ?? 0) != epoch) {
         decoded.dispose();
-        return;
+        return false;
       }
       _images.remove(asset)?.dispose();
       _images[asset] = decoded;
       _imageResourceRevisions[asset] = revision;
       _failedImages.remove(asset);
       _markSceneNeedsBuild();
+      return true;
     } catch (error) {
       if ((_imageEpochs[asset] ?? 0) == epoch) {
         _failedImages.add(asset);
-        if (mounted) widget.onError?.call(error);
+        if (mounted && reportError) widget.onError?.call(error);
       }
+      return false;
     } finally {
       if ((_imageEpochs[asset] ?? 0) == epoch) {
         _loadingImages.remove(asset);
@@ -2821,12 +3073,12 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  Future<void> _loadImage(String asset) async {
+  Future<bool> _loadImage(String asset, {bool reportError = true}) async {
     if (asset.isEmpty ||
         _images.containsKey(asset) ||
         _failedImages.contains(asset) ||
         !_loadingImages.add(asset)) {
-      return;
+      return _images.containsKey(asset);
     }
     final epoch = _imageEpochs[asset] ?? 0;
     ui.Codec? codec;
@@ -2846,16 +3098,18 @@ class _PocketViewState extends State<PocketView>
       decoded = await codec.getNextFrame().then((frame) => frame.image);
       if (!mounted || (_imageEpochs[asset] ?? 0) != epoch) {
         decoded.dispose();
-        return;
+        return false;
       }
       _images.remove(asset)?.dispose();
       _images[asset] = decoded;
       _markSceneNeedsBuild();
+      return true;
     } catch (error) {
       if ((_imageEpochs[asset] ?? 0) == epoch) {
         _failedImages.add(asset);
-        if (mounted) widget.onError?.call(error);
+        if (mounted && reportError) widget.onError?.call(error);
       }
+      return false;
     } finally {
       codec?.dispose();
       if ((_imageEpochs[asset] ?? 0) == epoch) {
@@ -3757,6 +4011,7 @@ class _PocketViewState extends State<PocketView>
           method: 'input.pointer',
           params: params,
           wake: false,
+          enqueueWhenDontWake: false,
         )) {
           continue;
         }
@@ -4056,6 +4311,7 @@ class _PocketViewState extends State<PocketView>
   @override
   void dispose() {
     _isDisposed = true;
+    if (!_disposeSignal.isCompleted) _disposeSignal.complete();
     WidgetsBinding.instance.removeObserver(this);
     if (_frameTimingListenerAttached) {
       SchedulerBinding.instance.removeTimingsCallback(_onFrameTimings);
@@ -4080,6 +4336,11 @@ class _PocketViewState extends State<PocketView>
     for (final image in _images.values) {
       image.dispose();
     }
+    for (final asset in _loadingImages) {
+      _imageEpochs[asset] = (_imageEpochs[asset] ?? 0) + 1;
+    }
+    _loadingImages.clear();
+    _loadingImageRevisions.clear();
     _textLayoutCache.dispose();
     for (final id in _loadingVideos) {
       _videoEpochs[id] = (_videoEpochs[id] ?? 0) + 1;
@@ -4378,7 +4639,7 @@ class _PocketViewState extends State<PocketView>
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                 child: Text(
-                  'FPS $fpsText | min $minimumText',
+                  'Guest ticks/s $fpsText | min $minimumText',
                   style: TextStyle(fontSize: 11, color: _fpsLabelColor()),
                 ),
               ),

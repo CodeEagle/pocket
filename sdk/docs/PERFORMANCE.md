@@ -1,5 +1,7 @@
 # 性能继承与测量
 
+2026-11-03 口径更正：原 Pocket 角标/兼容 `fps` 历史统计 Guest 活动 ticker/native turns，已改名 `Guest ticks/s`；Demo 根层现独立使用 Flutter `FrameTiming.vsyncStart` 统计 `Flutter FPS`。旧 `fullyLive` 集成测试绑定会自动请求后续帧，下面这类测试里的静态约 60Hz 不能证明普通运行时的自然帧率或空闲功耗。历史 UI/raster 耗时仍是相应测试负载下的测量，不能据此否定用户看到的卡顿。新口径、普通 Flutter 运行验证和开源方案比较见 [FLUTTER_FPS.md](FLUTTER_FPS.md)。
+
 2026-11-02，Apple Silicon；Flutter 3.35.7 / Dart 3.9.2 / Xcode 27.1。以下是本机测量，不是跨设备 FPS 保证。
 
 ## 已继承的优化

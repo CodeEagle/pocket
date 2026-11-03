@@ -170,7 +170,7 @@ function valueSummary(value: unknown): string {
       const latest = record.latest && typeof record.latest === "object"
         ? String((record.latest as Record<string, unknown>).fps ?? "unknown")
         : "unknown";
-      return `recording=${String(record.recording)} · samples=${history} · latestFps=${latest}`;
+      return `recording=${String(record.recording)} · samples=${history} · guestTicksPerSecond=${latest}`;
     }
     if (Array.isArray(record.plugins)) return `${record.plugins.length} plugin descriptor(s)`;
     if ("packageName" in record || "provider" in record) {
@@ -311,13 +311,7 @@ function jankFromPoint(point: PerformancePoint): PerformanceJank[] {
 }
 
 function sameJankEvent(first: PerformanceJank, second: PerformanceJank): boolean {
-  return String(first.timestamp) === String(second.timestamp) &&
-    first.scope === second.scope &&
-    first.activeGapMs === second.activeGapMs &&
-    first.durationMs === second.durationMs &&
-    first.buildMs === second.buildMs &&
-    first.rasterMs === second.rasterMs &&
-    first.nativeMs === second.nativeMs;
+  return String(first.timestamp) === String(second.timestamp);
 }
 
 function performanceScopeLabel(event: PerformanceJank): string {
@@ -329,12 +323,55 @@ function performanceScopeLabel(event: PerformanceJank): string {
 function recentPerformanceJanks(snapshot: PerformanceSnapshot): PerformanceJank[] {
   const merged: PerformanceJank[] = [];
   const add = (event: PerformanceJank): void => {
-    if (!merged.some((existing) => sameJankEvent(existing, event))) merged.push(event);
+    const index = merged.findIndex((existing) => sameJankEvent(existing, event));
+    if (index >= 0) {
+      const existing = merged[index]!;
+      const refreshHz = event.refreshHz ?? existing.refreshHz;
+      const budgetMs = event.budgetMs ?? existing.budgetMs;
+      const durationMs = event.durationMs ?? existing.durationMs;
+      const buildMs = event.buildMs ?? existing.buildMs;
+      const rasterMs = event.rasterMs ?? existing.rasterMs;
+      const nativeMs = event.nativeMs ?? existing.nativeMs;
+      const activeGapMs = event.activeGapMs ?? existing.activeGapMs;
+      const active = event.active ?? existing.active;
+      const scope = event.scope === "flutterView" || existing.scope === "flutterView"
+        ? "flutterView"
+        : (event.scope ?? existing.scope);
+      const reason = existing.reason ?? event.reason;
+      const context = existing.context ?? event.context;
+      const page = existing.page ?? event.page;
+      const action = existing.action ?? event.action;
+      merged[index] = {
+        timestamp: existing.timestamp,
+        ...(refreshHz !== undefined ? { refreshHz } : {}),
+        ...(budgetMs !== undefined ? { budgetMs } : {}),
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        ...(buildMs !== undefined ? { buildMs } : {}),
+        ...(rasterMs !== undefined ? { rasterMs } : {}),
+        ...(nativeMs !== undefined ? { nativeMs } : {}),
+        ...(activeGapMs !== undefined ? { activeGapMs } : {}),
+        ...(active !== undefined ? { active } : {}),
+        ...(scope !== undefined ? { scope } : {}),
+        ...(reason !== undefined ? { reason } : {}),
+        ...(context !== undefined ? { context } : {}),
+        ...(page !== undefined ? { page } : {}),
+        ...(action !== undefined ? { action } : {}),
+      };
+    } else {
+      merged.push(event);
+    }
   };
+  const hasExplicitEvents = (snapshot.longFrameEvents?.length ?? 0) > 0;
   for (const event of snapshot.longFrameEvents ?? []) add(event);
   for (const point of recentPerformance(snapshot)) {
-    for (const event of jankFromPoint(point)) add(event);
+    const pointEvents = hasExplicitEvents ? (point.longFrameEvents ?? []) : jankFromPoint(point);
+    for (const event of pointEvents) add(event);
   }
+  merged.sort((first, second) => {
+    const firstTime = Date.parse(String(first.timestamp));
+    const secondTime = Date.parse(String(second.timestamp));
+    return Number.isFinite(firstTime) && Number.isFinite(secondTime) ? firstTime - secondTime : 0;
+  });
   return merged.slice(-PERFORMANCE_JANK_LIMIT);
 }
 
@@ -390,7 +427,7 @@ function lowPerformanceRows(points: readonly PerformancePoint[]): { id: string; 
     .slice(0, 5)
     .map((point, index) => ({
       id: `${index}-${String(point.timestamp)}`,
-      title: `${metricNumber(point.fps)} FPS · ${timestampLabel(point.timestamp)}`,
+      title: `${metricNumber(point.fps)} guest ticks/s · ${timestampLabel(point.timestamp)}`,
       detail: `gap ${metricNumber(point.maxGapMs)} ms · slow ${metricNumber(point.slowFrames, 0)} · bridge/decode p95 ${metricNumber(point.nativeMsP95)} ms`,
     }));
 }
@@ -629,12 +666,19 @@ function App() {
           // sample arrived. Do not ask Flutter to infer app routing.
           const current = state();
           const context = typeof params.context === "string" ? params.context : sample.context;
-          const contextualEvents = sample.longFrameEvents?.map((event) => ({
-            ...event,
-            ...(event.page !== undefined ? {} : { page: current.route }),
-            ...(event.action !== undefined ? {} : { action: current.lastAction }),
-            ...(event.context !== undefined || context === undefined ? {} : { context }),
-          }));
+          const existingEvents = performance().longFrameEvents ?? [];
+          const contextualEvents = sample.longFrameEvents?.map((event) => {
+            const prior = existingEvents.find((item) => sameJankEvent(item, event));
+            const nextPage = prior?.page ?? event.page ?? current.route;
+            const nextAction = prior?.action ?? event.action ?? current.lastAction;
+            const nextContext = prior?.context ?? event.context ?? context;
+            return {
+              ...event,
+              ...(nextPage !== undefined ? { page: nextPage } : {}),
+              ...(nextAction !== undefined ? { action: nextAction } : {}),
+              ...(nextContext !== undefined ? { context: nextContext } : {}),
+            };
+          });
           const contextualSample: PerformancePoint = {
             ...sample,
             ...(sample.page !== undefined ? {} : { page: current.route }),
@@ -991,7 +1035,7 @@ function RuntimePage(props: {
       <PageIntro title="Runtime" body="Live host status and package identity." />
       <CapabilityCard title="Runtime info" capability="runtime.info" state={props.state().runtimeInfo} onRefresh={() => props.requestCapability("runtimeInfo", "runtime.info")} />
       <CapabilityCard title="Package metadata" capability="plugins.packageInfo" state={props.state().packageInfo} onRefresh={() => props.requestCapability("packageInfo", "plugins.packageInfo")} />
-      <ActionButton label="FPS history" kind="secondary" onPress={() => props.onNavigate("performance")} />
+      <ActionButton label="Frame diagnostics" kind="secondary" onPress={() => props.onNavigate("performance")} />
       <RecordingPanel host={props.host} />
       <StatusBar label="JS ↔ Flutter" detail="No Dart UI state" ok={props.state().runtimeInfo.phase !== "error"} />
     </View>
@@ -1009,18 +1053,18 @@ function PerformancePage(props: {
   const lowRows = () => lowPerformanceRows(points());
   const jankRows = () => performanceJankRows(props.performance());
   const provider = () => props.state().runtimePerformance;
-  const latestBudget = () => performanceBudget(latest());
-  const latestGap = () => performanceGap(latest());
   const latestLongFrame = () => {
     const events = recentPerformanceJanks(props.performance());
     return events[events.length - 1];
   };
+  const latestBudget = () => performanceBudget(latest()) ?? latestLongFrame()?.budgetMs;
+  const latestGap = () => performanceGap(latest()) ?? latestLongFrame()?.activeGapMs ?? latestLongFrame()?.durationMs;
   const latestBuild = () => latest()?.buildMsP95 ?? latestLongFrame()?.buildMs;
   const latestRaster = () => latest()?.rasterMsP95 ?? latestLongFrame()?.rasterMs;
   const latestBridgeDecode = () => latest()?.nativeWorkMsP95 ?? latestLongFrame()?.nativeMs;
   return (
     <View class="flex-col gap-2">
-      <PageIntro title="FPS history" body="FPS windows plus active long-frame diagnostics. Sparse rendering is not a stall." />
+      <PageIntro title="Frame diagnostics" body="Guest ticks are separate from Flutter FPS. Sparse rendering is not a stall." />
       <Card class="flex-row items-center justify-between gap-2 mx-4 p-2 rounded-xl bg-white border-slate-200">
         <View class="flex-col gap-1 flex-1">
           <Text class="text-xs text-slate-950 font-bold">Performance provider · {hostPhase(provider())}</Text>
@@ -1039,14 +1083,14 @@ function PerformancePage(props: {
           <ViewText title="Recent 60 samples" body={props.performance().recording ? "Recording" : "Provider not recording"} />
           <Badge tone={props.performance().recording ? "green" : "amber"}>{String(points().length)}</Badge>
         </Row>
-        <Show when={points().length > 0} fallback={<EmptyState title="No FPS samples" body="Open a configured host performance provider or refresh this page." />}>
+        <Show when={points().length > 0} fallback={<EmptyState title="No guest tick samples" body="Open a configured host performance provider or refresh this page." />}>
           <MiniBarChart values={performanceBars(points())} />
-          <Text class="text-xs text-slate-600">Bars use the highest FPS in the visible sample window as the full-height reference.</Text>
+          <Text class="text-xs text-slate-600">Bars show guest scheduler turns per active second, not Flutter FPS.</Text>
         </Show>
       </Card>
       <View class="flex-row gap-2 mx-4">
         <MetricCard
-          label="Latest FPS"
+          label="Guest ticks/s"
           value={metricNumber(latest()?.fps)}
           detail={latest() ? `min ${metricNumber(latest()?.minFps)} · active gap ${metricNumber(latestGap())} ms` : "No latest sample"}
           tone="purple"
@@ -1054,10 +1098,10 @@ function PerformancePage(props: {
         <Card class="flex-col gap-1 p-3 rounded-xl bg-rose-100">
           <Text class="text-xs text-rose-700">Current minimum</Text>
           <Text class="text-xl text-rose-700 font-bold">{metricNumber(minimumPerformanceFps(points()))}</Text>
-          <Text class="text-xs text-rose-700">lowest recorded FPS window</Text>
+          <Text class="text-xs text-rose-700">lowest guest tick window</Text>
         </Card>
       </View>
-      <Show when={latest()} fallback={<EmptyState title="No frame breakdown" body="The provider has not returned a current frame window." />}>
+      <Show when={latest() ?? latestLongFrame()} fallback={<EmptyState title="No frame breakdown" body="The provider has not returned a current frame window." />}>
         <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-white border-slate-200">
           <SectionHeading
             title="Latest frame breakdown"
@@ -1076,7 +1120,7 @@ function PerformancePage(props: {
           </Text>
         </Card>
       </Show>
-      <Show when={jankRows().length > 0} fallback={<EmptyState title="No recent long frames" body="No active gap exceeded the provider's refresh-rate budget. A low FPS window with gap 0 can be intentional sparse rendering." />}>
+      <Show when={jankRows().length > 0} fallback={<EmptyState title="No recent long frames" body="No active gap exceeded the provider's refresh-rate budget. A low guest tick rate with gap 0 can be intentional sparse rendering." />}>
         <Card class="flex-col gap-1 mx-4 p-2 rounded-xl bg-amber-50 border-amber-200">
           <SectionHeading title="Recent long frames" detail="Measured jank history" />
           <VirtualList
@@ -1100,7 +1144,7 @@ function PerformancePage(props: {
       </Show>
       <Show when={lowRows().length > 0} fallback={<EmptyState title="No low-frame samples" body="The provider has not returned a measurable history yet." />}>
         <Card class="flex-col gap-1 mx-4 p-2 rounded-xl bg-white border-slate-200">
-          <SectionHeading title="Lowest FPS samples" detail="Compatibility history · not jank by itself" />
+          <SectionHeading title="Lowest guest tick samples" detail="Compatibility history · not jank by itself" />
           <VirtualList
             count={lowRows().length}
             rowHeight={36}
@@ -1111,7 +1155,7 @@ function PerformancePage(props: {
               const item = lowRows()[index];
               return (
                 <View class="flex-col gap-1 px-2 py-1 bg-slate-50 border-slate-200">
-                  <Text class="text-xs text-rose-700 font-bold">{item?.title ?? "Low FPS sample"}</Text>
+                  <Text class="text-xs text-rose-700 font-bold">{item?.title ?? "Low guest tick sample"}</Text>
                   <Text class="text-xs text-slate-600">{item?.detail ?? "Provider metrics unavailable"}</Text>
                 </View>
               );

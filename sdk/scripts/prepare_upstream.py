@@ -29,6 +29,8 @@ PATCHES = (
     ("guest-rquickjs-stack-size.patch", "guest stack size"),
     ("guest-execution-budget.patch", "guest execution budget"),
     ("guest-rquickjs-bytecode.patch", "guest QuickJS bytecode"),
+    ("guest-exception-diagnostics.patch", "guest exception diagnostics"),
+    ("guest-exception-diagnostics-tests.patch", "guest exception diagnostics tests"),
     ("tex-quad-fractional-coverage.patch", "TEX_QUAD coverage"),
     ("rgba-tileset.patch", "RGBA TILESET"),
     ("rgba-filter-helpers.patch", "RGBA filter helper"),
@@ -49,8 +51,22 @@ SUPERSEDED_PATCH_MARKERS = {
     },
     "guest execution budget": {
         "engine/guest-rquickjs/src/lib.rs": (
+            # The diagnostics patch deliberately replaces several execution-
+            # budget hunks. Accept that overlap only when the complete final
+            # contract is present: every guest entry resets its own 5s/250ms
+            # turn, the host-side pending-job drain checks the same deadline,
+            # and shutdown clears both deadline and interruption state.
+            "fn initialize(\n        &mut self,\n        ops: OpContext,\n        environment: &GuestEnvironment<'_>,\n    ) -> Result<(), RuntimeError> {",
+            "self.begin_turn(Duration::from_secs(5));\n        let context = self.remember(Context::full(&runtime))?;",
+            "fn begin_turn(&self, duration: Duration) {\n        self.turn_interrupted.store(false, Ordering::Release);\n        *self.turn_deadline.lock().unwrap() = Some(Instant::now() + duration);\n    }",
+            "fn evaluate(&mut self, code: &[u8]) -> Result<(), RuntimeError> {\n        self.begin_turn(Duration::from_secs(5));",
+            "fn frame(&mut self, frame: &GuestFrame<'_>) -> Result<(), RuntimeError> {\n        self.begin_turn(Duration::from_millis(250));",
             'runtime.set_interrupt_handler(Some(Box::new(move || {',
-            'self.last_error = Some("Pocket guest turn exceeded execution budget".to_owned());',
+            'self.turn_deadline.lock().unwrap().is_some_and(|end| Instant::now() >= end)',
+            'interrupted.store(true, Ordering::Release);',
+            'while runtime.is_job_pending() {',
+            'self.turn_interrupted.store(true, Ordering::Release);\n                    self.last_error = Some(',
+            'fn shutdown(&mut self) {\n        *self.turn_deadline.lock().unwrap() = None;\n        self.turn_interrupted.store(false, Ordering::Release);',
         ),
     },
     "guest QuickJS bytecode": {

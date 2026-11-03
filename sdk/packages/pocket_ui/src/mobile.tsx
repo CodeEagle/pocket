@@ -12,7 +12,7 @@
  *   gradient is never reported as native blur or refraction.
  */
 
-import { For, Show, children as resolveChildren, createContext, createEffect, createMemo, createSignal, onCleanup, onMount, useContext, type JSX } from "solid-js";
+import { For, Show, children as resolveChildren, createContext, createEffect, createMemo, createSignal, onCleanup, useContext, type JSX } from "solid-js";
 import { CompositorSurface, Focusable, Modal, Text, View, type ViewProps } from "@pocketjs/framework/solid/components";
 import { buildLiquidGlassRecipe, type GlassShape } from "./legacy.ts";
 
@@ -370,7 +370,6 @@ export function GlassSurface(props: {
   const recipe = createMemo(() => buildLiquidGlassRecipe({ shape: props.shape ?? "rounded", focused: props.pressed === true, warp: true }));
   // Keep the shell transparent when a native surface is registered; the
   // gradient layer below is only the unsupported-host fallback.
-  const fallbackClass = props.class ?? "flex-col gap-2 p-3 rounded-xl border-slate-200";
   const payload = createMemo((): string => {
     const current = recipe();
     return JSON.stringify({
@@ -409,7 +408,7 @@ export function GlassSurface(props: {
   createEffect(() => register(payload()));
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
-    <View class={fallbackClass}>
+    <View class={props.class ?? "flex-col gap-2 p-3 rounded-xl border-slate-200"}>
       <Show when={registered()}>
         <View class="absolute inset-0 overflow-hidden rounded-xl">
           <CompositorGlass packageId={id} radius={recipe().radius} />
@@ -426,7 +425,7 @@ export function GlassSurface(props: {
 function CompositorGlass(props: { packageId: string; radius: number }): JSX.Element {
   // Kept as a tiny adapter to make the required native surface primitive
   // explicit; callers still compose ordinary children above it.
-  return CompositorSurface({ package: props.packageId, class: "absolute inset-0", style: { radius: props.radius } });
+  return <CompositorSurface package={props.packageId} class="absolute inset-0" style={{ radius: props.radius }} />;
 }
 
 /**
@@ -448,8 +447,7 @@ export function PlatformTextureSurface(props: {
 }): JSX.Element {
   const [registered, setRegistered] = createSignal(false);
   const id = `guest.texture.${nextTextureSurface++}`;
-  let mounted = false;
-  const payload = (): string => JSON.stringify({
+  const payload = createMemo((): string => JSON.stringify({
     textureId: props.textureId,
     sourceWidth: props.sourceWidth,
     sourceHeight: props.sourceHeight,
@@ -457,8 +455,8 @@ export function PlatformTextureSurface(props: {
     radius: platformTextureRadius(props.radius),
     rotationDegrees: props.rotationDegrees ?? 0,
     mirrorX: props.mirrorX ?? false,
-  });
-  const register = (): void => {
+  }));
+  const register = (_nextPayload = payload()): void => {
     const registerSurface = surfaceGlobal.pocket?.registerSurface;
     if (typeof registerSurface !== "function") {
       setRegistered(false);
@@ -471,20 +469,7 @@ export function PlatformTextureSurface(props: {
       setRegistered(false);
     }
   };
-  onMount(() => {
-    mounted = true;
-    register();
-  });
-  createEffect(() => {
-    void props.textureId;
-    void props.sourceWidth;
-    void props.sourceHeight;
-    void props.fit;
-    void props.radius;
-    void props.rotationDegrees;
-    void props.mirrorX;
-    if (mounted && registered()) register();
-  });
+  createEffect(() => register(payload()));
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
     <Show

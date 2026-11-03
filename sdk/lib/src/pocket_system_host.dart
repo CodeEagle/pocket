@@ -733,6 +733,9 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'Requested first frame belongs to a stale runtime generation',
       );
     }
+    if (instance.session.failure case final Object error) {
+      Error.throwWithStackTrace(error, StackTrace.current);
+    }
     if (!instance.isFirstVisibleFrameReady) {
       final waiter = instance.firstVisibleFrame ??= Completer<void>();
       unawaited(waiter.future.catchError((Object _) {}));
@@ -744,6 +747,9 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
           'Visible child did not produce its first Pocket frame in time',
         );
       }
+    }
+    if (instance.session.failure case final Object error) {
+      Error.throwWithStackTrace(error, StackTrace.current);
     }
     if (!_isCurrent(instance) ||
         instance.session.generation != generation ||
@@ -1239,17 +1245,21 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final failure = instance.session.failure;
     if (failure != null) {
       // A runtime can produce an Offstage first frame before its compositor
-      // slot becomes visible.  If it then fails, awaitFirstFrame is still
-      // blocked on firstVisibleFrame; completing that waiter must not depend
-      // on hasEverProducedFrame.  The attached error handler keeps this
-      // diagnostic completion from becoming an unhandled Future error.
+      // slot becomes visible, or reload into a new generation after an earlier
+      // frame. Completing both waiters on failure must not depend on
+      // hasEverProducedFrame. The attached error handlers keep these
+      // diagnostic completions from becoming unhandled Future errors.
       final visible = instance.firstVisibleFrame;
       if (visible != null && !visible.isCompleted) {
         visible.completeError(failure);
       }
+      final ready = instance.firstFrame;
+      if (ready != null && !ready.isCompleted) {
+        ready.completeError(failure);
+      }
       if (!instance.hasEverProducedFrame) {
-        final ready = instance.firstFrame;
-        if (ready != null && !ready.isCompleted) ready.completeError(failure);
+        // Initial startup failure before any frame is surfaced through
+        // awaitFirstFrame rather than system.runtime.failed.
       } else if (instance.reportedFailureGeneration != nextGeneration) {
         instance.reportedFailureGeneration = nextGeneration;
         _systemUIInstance.session.controller.send(
@@ -1412,7 +1422,9 @@ final class _RuntimeInstance {
   bool compositorVisible = false;
   bool compositorFocused = false;
   bool get isFirstVisibleFrameReady =>
-      firstFrameReady && (isSystemUI || compositorVisible);
+      firstFrameReady &&
+      session.failure == null &&
+      (isSystemUI || compositorVisible);
   bool closing = false;
   Future<void>? closeFuture;
   Object? startupError;

@@ -104,7 +104,9 @@ flowchart TD
 
 ### FPS 和耗电如何看
 
-FPS 标签与历史来自实际 ticker/桥接采样，包含 FPS、最低值、长帧、刷新率和桥接解码 p95。`nativeMsP95` 是兼容字段名，测量范围包含桥接与解码，不应解读为纯 Rust/QuickJS CPU 时间。按需停表的休眠时间会从活动性能窗口中排除。
+Demo 的 `Flutter FPS` 角标直接采集 Flutter engine `FrameTiming`，按最近一秒 `vsyncStart` 的真实间隔计算，不依赖 Pocket ticker、不封顶 60，也不主动刷帧。UI/raster 耗时单独显示；空闲保留 `last window`。可用 `--dart-define=FLUTTER_PERFORMANCE_OVERLAY=true` 开启 Flutter 官方性能图交叉查看，用 `--dart-define=FLUTTER_FPS=false` 关闭数字监控。
+
+原 SDK 角标已明确改为 `Guest ticks/s`，JS 的 **Frame diagnostics** 页面保留这条独立的 Guest 活动窗口历史。兼容字段仍叫 `fps`，它不是 Flutter 全局 FPS。`nativeMsP95` 测量范围包含桥接与解码，不应解读为纯 Rust/QuickJS CPU 时间；按需停表的休眠时间从 Guest 活动窗口中排除。测量口径、开源包比较与验证方法见 [Flutter FPS](sdk/docs/FLUTTER_FPS.md)。
 
 历史按 appId 隔离，内存/文件有界保留；JS Showcase 可查看。静态页面不持续产生变化帧时，活动帧 FPS 不是屏幕刷新率或耗电指标。需要结合 Flutter FrameTiming、UI/raster 时间、native 耗时、重绘次数以及目标设备 profile/release 数据判断。
 

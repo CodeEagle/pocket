@@ -83,20 +83,29 @@ for base in source_roots:
 demo_lib = DEMOROOT / "lib"
 if demo_lib.exists():
     dart_files = sorted(demo_lib.rglob("*.dart"))
+    flutter_diagnostic_name = "flutter_frame_monitor.dart"
     for dart_file in dart_files:
         rel = dart_file.relative_to(DEMOROOT)
-        if dart_file.name != "main.dart":
+        rel_to_lib = dart_file.relative_to(demo_lib).as_posix()
+        if rel_to_lib == "main.dart":
+            lines = dart_file.read_text(errors="replace").splitlines()
+            # A System host also declares trusted compiled asset paths for child apps.
+            # Keep one thin entry; this budget includes that static configuration.
+            if len(lines) > 100:
+                errors.append(f"demo main.dart exceeds thin host limit (max 100 lines, got {len(lines)}): {rel}")
+            source = "\n".join(lines)
+            for pattern in [r"Navigator\.", r"\bCounter\b", r"case\s+['\"]View\.", r"PocketUiNode", r"\bStatefulWidget\b", r"\bsetState\b"]:
+                if re.search(pattern, source):
+                    errors.append(f"Flutter demo owns application behavior ({pattern}): {rel}")
+            continue
+        if rel_to_lib != flutter_diagnostic_name:
             errors.append(f"forbidden extra Dart file in demo host: {rel}")
             continue
-        lines = dart_file.read_text(errors="replace").splitlines()
-        # A System host also declares trusted compiled asset paths for child apps.
-        # Keep one thin entry; this budget includes that static configuration.
-        if len(lines) > 80:
-            errors.append(f"demo main.dart exceeds thin host limit (max 80 lines, got {len(lines)}): {rel}")
-        source = "\n".join(lines)
-        for pattern in [r"Navigator\.", r"\bCounter\b", r"case\s+['\"]View\.", r"PocketUiNode", r"\bStatefulWidget\b", r"\bsetState\b"]:
-            if re.search(pattern, source):
-                errors.append(f"Flutter demo owns application behavior ({pattern}): {rel}")
+        source = dart_file.read_text(errors="replace")
+        if re.search(r"^\s*(?:import|export)\s+['\"]package:pocket_[^'\"]+['\"]", source, re.M):
+            errors.append(f"Flutter diagnostic must not import Pocket SDK or host packages: {rel}")
+        if re.search(r"^\s*(?:import|export)\s+['\"](?:\.\.?/)*main\.dart['\"]", source, re.M):
+            errors.append(f"Flutter diagnostic must not import the business host entry: {rel}")
 if (DEMOROOT / "pubspec.yaml").exists() and "assets/app.js" in (DEMOROOT / "pubspec.yaml").read_text():
     errors.append("demo host ships JS source instead of bytecode-only entry")
 

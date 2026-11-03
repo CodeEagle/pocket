@@ -215,6 +215,16 @@ Future<Offset> reveal(
   }
   final last = _pointSnapshot(tester, label);
   record('timeout', last);
+  // A real device can spend the entire settle budget inside the final pump
+  // (for example while preparing its first raster resources). The snapshot
+  // after that pump is still the required second geometry sample: accept it
+  // only when the visible target stayed within the same stability threshold.
+  final finalPoint = last.point;
+  if (previous != null &&
+      finalPoint != null &&
+      (finalPoint - previous).distance < .5) {
+    return finalPoint;
+  }
   final hadPoint = trajectory.any((sample) => sample.contains('point=('));
   final status = hadPoint ? 'visible but did not stabilize' : 'not pointable';
   fail(

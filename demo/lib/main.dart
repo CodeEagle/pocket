@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 import 'package:pocket_hardware/pocket_hardware.dart';
 
+import 'flutter_frame_monitor.dart';
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(
@@ -21,22 +23,40 @@ const showcaseConfig = PocketAppConfig(
   pluginFactories: [createHardwarePlugin],
   allowedPermissions: HardwarePermissions.all,
   additionalCapabilities: {'ui.compositor-surfaces'},
-  showFps: true,
-  compositorSurfaces: {
-    'pocket.demo.profile': 2,
-    'pocket.demo.lobby': 3,
-  },
+  // Pocket's diagnostic counts guest scheduler turns. The independent
+  // Flutter engine monitor below owns the Demo's visible FPS label.
+  showFps: false,
+  compositorSurfaces: {'pocket.demo.profile': 2, 'pocket.demo.lobby': 3},
 );
 
 final class PocketHostApp extends StatelessWidget {
-  const PocketHostApp({super.key, this.systemController, this.recordings});
+  const PocketHostApp({
+    super.key,
+    this.systemController,
+    this.recordings,
+    this.frameMonitorController,
+    this.showFlutterFps = const bool.fromEnvironment(
+      'FLUTTER_FPS',
+      defaultValue: true,
+    ),
+  });
 
   final PocketSystemHostController? systemController;
   final PocketRecordingLibrary? recordings;
+  final FlutterFrameMonitorController? frameMonitorController;
+  final bool showFlutterFps;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
     debugShowCheckedModeBanner: false,
+    showPerformanceOverlay: const bool.fromEnvironment(
+      'FLUTTER_PERFORMANCE_OVERLAY',
+    ),
+    builder: (context, child) => FlutterFrameMonitor(
+      enabled: showFlutterFps,
+      controller: frameMonitorController,
+      child: child ?? const SizedBox.shrink(),
+    ),
     home: Scaffold(
       body: PocketSystemHost(
         systemUI: showcaseConfig,

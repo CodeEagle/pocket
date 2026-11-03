@@ -300,6 +300,161 @@ void main() {
       expect(runtime.frameCalls, frameCallsAfterDiagnostic);
     },
   );
+
+  testWidgets(
+    'slow wakeup tick stays in the resumed active window without premature burst',
+    (tester) async {
+      addTearDown(() {
+        debugPocketNativeFrameDurationOverride = null;
+      });
+      final samples = <PocketPerformanceSample>[];
+      final controller = PocketViewController();
+      final runtime = _ControllableIdleRuntime(sleeping: true);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              controller: controller,
+              runtime: runtime,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              showDebugFps: false,
+              onPerformanceSample: samples.add,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(samples, isEmpty);
+
+      // Resume from idle with a slow native frame while staying active.
+      runtime.sleeping = false;
+      debugPocketNativeFrameDurationOverride = () =>
+          const Duration(milliseconds: 35);
+      controller.send(method: 'wake');
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(samples, isEmpty);
+
+      debugPocketNativeFrameDurationOverride = () =>
+          const Duration(milliseconds: 1);
+      for (var index = 0; index < 100 && samples.isEmpty; index++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(samples, hasLength(1));
+      expect(samples.single.frames, greaterThan(0));
+      expect(samples.single.fps, greaterThan(0));
+      expect(samples.single.longFrameEvents, hasLength(1));
+      expect(
+        samples.single.longFrameEvents.single.nativeMs,
+        greaterThanOrEqualTo(35),
+      );
+      expect(samples.single.longFrameEvents.single.scope, 'pocketView');
+    },
+  );
+
+  testWidgets(
+    'unfocused PocketView does not claim unmatched FrameTimings while parked',
+    (tester) async {
+      final samples = <PocketPerformanceSample>[];
+      final runtime = _IdleAfterLongFrameRuntime();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              inputEnabled: false,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              showDebugFps: false,
+              onPerformanceSample: samples.add,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(samples, hasLength(1));
+
+      final vsyncStart =
+          tester.binding.currentSystemFrameTimeStamp.inMicroseconds + 100000;
+      final state = tester.state(find.byType(PocketView));
+      (state as dynamic).debugReportFrameTimings(<ui.FrameTiming>[
+        ui.FrameTiming(
+          vsyncStart: vsyncStart,
+          buildStart: vsyncStart + 1000,
+          buildFinish: vsyncStart + 80000,
+          rasterStart: vsyncStart + 80000,
+          rasterFinish: vsyncStart + 82000,
+          rasterFinishWallTime: vsyncStart + 82000,
+        ),
+      ]);
+
+      expect(samples, hasLength(1));
+    },
+  );
+
+  testWidgets(
+    'FrameTiming arriving before its active tick context pairs instead of emitting as unmatched',
+    (tester) async {
+      addTearDown(() {
+        debugPocketNativeFrameDurationOverride = null;
+      });
+      final samples = <PocketPerformanceSample>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: _PerformanceRuntime(),
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              showDebugFps: false,
+              onPerformanceSample: samples.add,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+
+      final state = tester.state(find.byType(PocketView));
+      final nextVsync =
+          (tester.binding.currentSystemFrameTimeStamp +
+                  const Duration(milliseconds: 16))
+              .inMicroseconds;
+      (state as dynamic).debugReportFrameTimings(<ui.FrameTiming>[
+        ui.FrameTiming(
+          vsyncStart: nextVsync,
+          buildStart: nextVsync + 1000,
+          buildFinish: nextVsync + 41000,
+          rasterStart: nextVsync + 41000,
+          rasterFinish: nextVsync + 45000,
+          rasterFinishWallTime: nextVsync + 45000,
+        ),
+      ]);
+
+      debugPocketNativeFrameDurationOverride = () =>
+          const Duration(milliseconds: 30);
+      await tester.pump(const Duration(milliseconds: 16));
+      debugPocketNativeFrameDurationOverride = null;
+
+      for (var index = 0; index < 100 && samples.isEmpty; index++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(samples, hasLength(1));
+      expect(samples.single.longFrameEvents, hasLength(1));
+      final event = samples.single.longFrameEvents.single;
+      expect(event.buildMs, greaterThanOrEqualTo(40));
+      expect(event.nativeMs, greaterThanOrEqualTo(30));
+      expect(event.scope, 'flutterView');
+    },
+  );
 }
 
 class _PerformanceRuntime implements PocketRuntime {
@@ -354,6 +509,16 @@ final class _IdleAfterLongFrameRuntime extends _PerformanceRuntime
     if (deltaMilliseconds >= 100) _sleeping = true;
     return super.frame(deltaMilliseconds);
   }
+}
+
+final class _ControllableIdleRuntime extends _PerformanceRuntime
+    implements PocketRuntimeScheduling {
+  _ControllableIdleRuntime({required this.sleeping});
+
+  bool sleeping;
+
+  @override
+  double get nextWakeDelayMilliseconds => sleeping ? -1 : 0;
 }
 
 final class _IdleDeadlineRuntime extends _PerformanceRuntime

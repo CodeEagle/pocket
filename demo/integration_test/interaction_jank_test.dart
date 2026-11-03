@@ -17,8 +17,8 @@ import 'guest_interaction_test.dart' as guest;
 
 double _percentile(List<double> values, double fraction) {
   if (values.isEmpty) return 0;
-  values.sort();
-  return values[((values.length - 1) * fraction).round()];
+  final sorted = List<double>.of(values)..sort();
+  return sorted[((sorted.length - 1) * fraction).round()];
 }
 
 String _flutterMode() {
@@ -178,18 +178,10 @@ void main() {
             .session
             .performance
             .snapshot(eventLimit: 240);
-        final events = (history['longFrameEvents'] as List)
-            .where(
-              (e) => DateTime.parse(
-                (e as Map)['timestamp'] as String,
-              ).isAfter(started),
-            )
-            .where(
-              (e) => DateTime.parse(
-                (e as Map)['timestamp'] as String,
-              ).isBefore(ended),
-            )
-            .toList();
+        final events = (history['longFrameEvents'] as List).where((e) {
+          final parsed = DateTime.parse((e as Map)['timestamp'] as String);
+          return !parsed.isBefore(started) && !parsed.isAfter(ended);
+        }).toList();
         results.add({
           'scene': name,
           'refreshHz': hz > 0 ? hz : null,

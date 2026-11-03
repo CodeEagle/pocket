@@ -108,6 +108,7 @@ pub(super) fn capture(host: &mut HostState) {
         || host.motion.is_some()
         || host.analog != 0x8080
         || host.right_analog != 0x8080
+        || host.offload.as_ref().is_some_and(|offload| offload.has_replies())
     {
         Work::Continuous
     } else {
@@ -282,7 +283,9 @@ pub(super) fn before_external(host: &mut HostState) -> Result<(), String> {
     if wall_elapsed.is_some() {
         let elapsed = replay::before_external_elapsed(host, wall_elapsed)?;
         let ticks = advance(host, elapsed)?;
-        super::run_virtual_frames(host, Vec::new(), ticks)?;
+        if ticks > 0 {
+            super::run_virtual_frames(host, Vec::new(), ticks)?;
+        }
         host.demand.elapsed_credit_ms += elapsed;
     }
     invalidate(host);
