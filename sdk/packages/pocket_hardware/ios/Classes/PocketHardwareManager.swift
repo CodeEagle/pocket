@@ -77,6 +77,7 @@ final class PocketHardwareManager: NSObject,
   private lazy var motionManager = CMMotionManager()
   private lazy var altimeter = CMAltimeter()
   private var sensorGeneration: UInt64 = 0
+  private var sensorOwnerToken: String?
   private var sensorOperationId: Int?
   private var pendingSensorResult: FlutterResult?
   private var sensorTimeout: DispatchWorkItem?
@@ -107,6 +108,7 @@ final class PocketHardwareManager: NSObject,
     case "requestPermission":
       requestPermission(
         args["permission"] as? String ?? "",
+        ownerToken: args["ownerToken"] as? String,
         operationId: args["operationId"] as? Int,
         timeoutMs: args["timeoutMs"] as? Int,
         result: result
@@ -118,7 +120,11 @@ final class PocketHardwareManager: NSObject,
     case "disposeSession":
       disposeSession(result: result)
     case "cancelSensorOperation":
-      cancelSensorOperation(operationId: args["operationId"] as? Int, result: result)
+      cancelSensorOperation(
+        ownerToken: args["ownerToken"] as? String,
+        operationId: args["operationId"] as? Int,
+        result: result
+      )
     case "switchCameraLens":
       switchCameraLens(requested: args["lens"] as? String, result: result)
     case "toggleCameraFlash":
@@ -136,6 +142,7 @@ final class PocketHardwareManager: NSObject,
       connectBleDevice(id: args["deviceId"] as? String ?? "", result: result)
     case "readSensors":
       readSensors(
+        ownerToken: args["ownerToken"] as? String,
         operationId: args["operationId"] as? Int,
         timeoutMs: args["timeoutMs"] as? Int,
         result: result
@@ -237,6 +244,7 @@ final class PocketHardwareManager: NSObject,
 
   private func requestPermission(
     _ permission: String,
+    ownerToken: String? = nil,
     operationId: Int? = nil,
     timeoutMs: Int? = nil,
     result: @escaping FlutterResult
@@ -328,7 +336,7 @@ final class PocketHardwareManager: NSObject,
         let generation = self.supersedeSensorOperationOnQueue(
           code: "hardware_cancelled",
           message: "sensor request superseded"
-        )!
+        )
         let motionAvailable = self.motionManager.isDeviceMotionAvailable
         let altitudeAvailable = CMAltimeter.isRelativeAltitudeAvailable()
         guard motionAvailable || altitudeAvailable else {
@@ -364,6 +372,7 @@ final class PocketHardwareManager: NSObject,
           return
         }
 
+        self.sensorOwnerToken = ownerToken
         self.sensorOperationId = operationId
         self.pendingSensorResult = result
         let finishPermission: (_ overrideGranted: Bool?, _ overrideStatus: String?, _ errorPayload: [String: Any]?) -> Void = { [weak self] overrideGranted, overrideStatus, errorPayload in
@@ -371,11 +380,7 @@ final class PocketHardwareManager: NSObject,
             return
           }
           self.pendingSensorResult = nil
-          self.sensorOperationId = nil
-          self.sensorTimeout?.cancel()
-          self.sensorTimeout = nil
-          self.motionManager.stopDeviceMotionUpdates()
-          self.altimeter.stopRelativeAltitudeUpdates()
+          self.clearSensorOperationState()
           if let errorPayload = errorPayload {
             self.main { callback(errorPayload) }
             return
@@ -1037,23 +1042,12 @@ final class PocketHardwareManager: NSObject,
 
   // MARK: - Sensors, biometrics and location
 
-  @discardableResult
   private func supersedeSensorOperationOnQueue(
     code: String,
-    message: String,
-    matchingOperationId: Int? = nil
-  ) -> UInt64? {
-    if let matchingOperationId = matchingOperationId,
-       let currentOperationId = self.sensorOperationId,
-       currentOperationId != matchingOperationId {
-      return nil
-    }
+    message: String
+  ) -> UInt64 {
     self.sensorGeneration &+= 1
-    self.sensorOperationId = nil
-    self.sensorTimeout?.cancel()
-    self.sensorTimeout = nil
-    self.motionManager.stopDeviceMotionUpdates()
-    self.altimeter.stopRelativeAltitudeUpdates()
+    self.clearSensorOperationState()
     if let previous = self.pendingSensorResult {
       self.pendingSensorResult = nil
       self.main {
@@ -1063,14 +1057,60 @@ final class PocketHardwareManager: NSObject,
     return self.sensorGeneration
   }
 
-  private func cancelSensorOperation(operationId: Int?, result: @escaping FlutterResult) {
+  private func clearSensorOperationState() {
+    self.sensorOwnerToken = nil
+    self.sensorOperationId = nil
+    self.sensorTimeout?.cancel()
+    self.sensorTimeout = nil
+    self.motionManager.stopDeviceMotionUpdates()
+    self.altimeter.stopRelativeAltitudeUpdates()
+  }
+
+  private func sensorIdentityMatches(
+    ownerToken: String?,
+    operationId: Int?
+  ) -> Bool {
+    // A token-owned operation can only be cancelled by the complete new
+    // identity.  In particular, an old/omitted cancel or an owner-only cancel
+    // must never stop a newer plugin's provider.
+    if let currentOwnerToken = self.sensorOwnerToken {
+      guard let ownerToken = ownerToken, let operationId = operationId else {
+        return false
+      }
+      return currentOwnerToken == ownerToken && self.sensorOperationId == operationId
+    }
+    // Preserve low-level callers that predate owner tokens: an operation with
+    // no owner can still be cancelled by its legacy operationId, or by the
+    // old no-argument wildcard form.
+    if ownerToken != nil {
+      return false
+    }
+    if let operationId = operationId {
+      return self.sensorOperationId == operationId
+    }
+    return true
+  }
+
+  private func cancelSensorOperation(
+    ownerToken: String?,
+    operationId: Int?,
+    result: @escaping FlutterResult
+  ) {
     sensorQueue.addOperation { [weak self] in
       guard let self = self else { return }
-      let cancelled = self.supersedeSensorOperationOnQueue(
-        code: "hardware_cancelled",
-        message: "sensor operation cancelled",
-        matchingOperationId: operationId
-      ) != nil
+      let cancelled: Bool
+      if self.pendingSensorResult != nil && self.sensorIdentityMatches(
+        ownerToken: ownerToken,
+        operationId: operationId
+      ) {
+        _ = self.supersedeSensorOperationOnQueue(
+          code: "hardware_cancelled",
+          message: "sensor operation cancelled"
+        )
+        cancelled = true
+      } else {
+        cancelled = false
+      }
       self.main {
         result(["ok": true, "cancelled": cancelled])
       }
@@ -1094,6 +1134,7 @@ final class PocketHardwareManager: NSObject,
   }
 
   private func readSensors(
+    ownerToken: String? = nil,
     operationId: Int? = nil,
     timeoutMs: Int? = nil,
     result: @escaping FlutterResult
@@ -1103,7 +1144,7 @@ final class PocketHardwareManager: NSObject,
       let generation = self.supersedeSensorOperationOnQueue(
         code: "hardware_cancelled",
         message: "sensor read superseded"
-      )!
+      )
       let motionAvailable = self.motionManager.isDeviceMotionAvailable
       let altitudeAvailable = CMAltimeter.isRelativeAltitudeAvailable()
       guard motionAvailable || altitudeAvailable else {
@@ -1117,6 +1158,7 @@ final class PocketHardwareManager: NSObject,
           return
         }
       }
+      self.sensorOwnerToken = ownerToken
       self.sensorOperationId = operationId
       self.pendingSensorResult = result
       var motion: CMDeviceMotion?
@@ -1129,11 +1171,7 @@ final class PocketHardwareManager: NSObject,
           return
         }
         self.pendingSensorResult = nil
-        self.sensorOperationId = nil
-        self.sensorTimeout?.cancel()
-        self.sensorTimeout = nil
-        self.motionManager.stopDeviceMotionUpdates()
-        self.altimeter.stopRelativeAltitudeUpdates()
+        self.clearSensorOperationState()
         guard let sampledMotion = motion ?? self.motionManager.deviceMotion else {
           if let pressure = pressure {
             self.main { callback(["ok": true, "realSensors": true, "pressureHpa": pressure, "relativeAltitudeM": relativeAltitude as Any]) }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
 import 'package:pocket_services/pocket_services.dart';
@@ -130,6 +131,25 @@ final class MethodChannelHardwarePlatform implements HardwarePlatform {
 
 typedef HardwareWeatherFetcher = Future<Map<String, dynamic>> Function(Uri uri);
 
+String _newSensorOwnerToken() {
+  final random = math.Random.secure();
+  return List<int>.generate(16, (_) => random.nextInt(256))
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join();
+}
+
+final class _SensorOperationIdentity {
+  const _SensorOperationIdentity(this.ownerToken, this.operationId);
+
+  final String ownerToken;
+  final int operationId;
+
+  Map<String, dynamic> toNativeArguments() => <String, dynamic>{
+        'ownerToken': ownerToken,
+        'operationId': operationId,
+      };
+}
+
 /// The network side of weather remains a host-owned service.  It consumes a
 /// real location (or explicit caller coordinates) and never supplies seeded or
 /// simulated values when platform/network support is missing.
@@ -151,6 +171,11 @@ final class HardwarePlugin extends PocketPlugin {
   final HardwareTextureCallback? onTextureReleased;
   final Duration requestTimeout;
   final Set<String>? _grantedPermissions;
+  // The native iOS manager is process-wide, while a host may construct more
+  // than one HardwarePlugin (including from different isolates). A secure
+  // per-plugin token keeps an old timeout from cancelling a newer plugin's
+  // operation when both local epochs happen to start at one.
+  final String _sensorOwnerToken = _newSensorOwnerToken();
   int? _textureId;
   bool _stopped = true;
   int _previewEpoch = 0;
@@ -279,16 +304,16 @@ final class HardwarePlugin extends PocketPlugin {
       _checkPermission(permission);
       final nativePermission = _nativePermission(permission);
       if (permission == HardwarePermissions.sensors) {
-        final operationId = ++_sensorOperationEpoch;
+        final operation = _nextSensorOperation();
         return _native(
           'requestPermission',
           params: <String, dynamic>{
+            ...operation.toNativeArguments(),
             'permission': nativePermission,
-            'operationId': operationId,
             'timeoutMs': requestTimeout.inMilliseconds,
           },
           timeout: requestTimeout,
-          onTimeout: () => _cancelSensorOperation(operationId),
+          onTimeout: () => _cancelSensorOperation(operation),
         );
       }
       return _native(
@@ -371,15 +396,15 @@ final class HardwarePlugin extends PocketPlugin {
     });
     context.registerRequest(HardwareCapabilities.sensorsRead, (_) {
       _checkPermission(HardwarePermissions.sensors);
-      final operationId = ++_sensorOperationEpoch;
+      final operation = _nextSensorOperation();
       return _native(
         'readSensors',
         params: <String, dynamic>{
-          'operationId': operationId,
+          ...operation.toNativeArguments(),
           'timeoutMs': requestTimeout.inMilliseconds,
         },
         timeout: requestTimeout,
-        onTimeout: () => _cancelSensorOperation(operationId),
+        onTimeout: () => _cancelSensorOperation(operation),
       );
     });
     context.registerRequest(HardwareCapabilities.biometricAuthenticate, (
@@ -598,13 +623,15 @@ final class HardwarePlugin extends PocketPlugin {
     if (textureId != null) onTextureReleased?.call(textureId);
   }
 
-  Future<void> _cancelSensorOperation(int operationId) async {
+  _SensorOperationIdentity _nextSensorOperation() =>
+      _SensorOperationIdentity(_sensorOwnerToken, ++_sensorOperationEpoch);
+
+  Future<void> _cancelSensorOperation(
+    _SensorOperationIdentity operation,
+  ) async {
     try {
       await _platform
-          .invoke(
-            'cancelSensorOperation',
-            <String, dynamic>{'operationId': operationId},
-          )
+          .invoke('cancelSensorOperation', operation.toNativeArguments())
           .timeout(const Duration(seconds: 2));
     } catch (_) {
       // Best-effort native cleanup when the caller times out early.
