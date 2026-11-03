@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { mount } from "@pocketjs/framework/solid";
 import { onFrame } from "@pocketjs/framework/solid/lifecycle";
+import { after, simulationHz } from "@pocketjs/framework/clock";
 import { VirtualList } from "@pocketjs/framework/virtual-list";
 import {
   FocusScope,
@@ -34,7 +35,11 @@ import {
   deliverTextInputEvent,
 } from "@pocket/ui";
 import { HardwarePage, LiquidGlassPage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx";
-import { createHostBridge, hostError, type JsonValue } from "./host.ts";
+import { createHostBridge, hostError, type HostBridge, type JsonValue } from "./host.ts";
+import { RecordingPanel } from "./recording-panel.tsx";
+import { createPocketPlatformClient } from "@pocket/ui/platform";
+import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
+import { installShowcaseSystem } from "./system.ts";
 import { demoRelease } from "./release.ts";
 import { availableDisplayPanes, computeTransitionDescriptor, createDisplayGeometry, deriveResponsiveLayout } from "@pocket/ui";
 import {
@@ -272,7 +277,10 @@ function recentPerformance(snapshot: PerformanceSnapshot): PerformancePoint[] {
 
 function performanceBars(points: readonly PerformancePoint[]): number[] {
   if (points.length === 0) return [];
-  const scale = Math.max(60, ...points.map((point) => point.fps));
+  // Use the visible sample window itself as the reference. Display refresh
+  // rate and guest cadence can be 90/120/144Hz, so a 60 FPS floor would make
+  // a high-refresh chart silently under-report those samples.
+  const scale = Math.max(1, ...points.map((point) => point.fps));
   return points.map((point) => Math.max(4, Math.min(32, point.fps / scale * 32)));
 }
 
@@ -351,10 +359,16 @@ function App() {
   // Capability providers such as BLE, biometrics and location can legitimately
   // take several seconds on a real device. Keep the request map bounded, but
   // give those providers a deterministic 30-second guest-clock window.
-  const host = createHostBridge(undefined, { maxPendingRequests: 32, timeoutFrames: 1800 });
+  const host = createHostBridge(undefined, {
+    maxPendingRequests: 32,
+    timeoutFrames: 30 * simulationHz(),
+    scheduleTimeout: (frames, callback) => after(frames / simulationHz(), callback),
+  });
+  const system = installShowcaseSystem(host);
+  const platform = createPocketPlatformClient(undefined, { bridge: host });
   let requestSequence = 0;
   const routeTransitionDuration = 220;
-  const routeTransitionTickHz = 60;
+  const routeTransitionTickHz = simulationHz();
   let previousRoute: Route = initialDemoState().route;
   let pendingTransitionDirection: "forward" | "reverse" = "forward";
   const [routeTransition, setRouteTransition] = createSignal<{
@@ -420,7 +434,7 @@ function App() {
     } else {
       setRouteTransition((current) => current ? { ...current, elapsedMs, progress } : current);
     }
-  });
+  }, { continuous: () => routeTransition() !== undefined });
 
   const requestCapability = (key: CapabilityKey, capability: string, params: Record<string, JsonValue> = {}): void => {
     if (state()[key].phase === "loading") return;
@@ -508,6 +522,8 @@ function App() {
 
     onCleanup(() => {
       if (bridge.__pocketEvent === receive) bridge.__pocketEvent = previous;
+      system.dispose();
+      platform.dispose();
       host.dispose();
     });
   });
@@ -534,6 +550,8 @@ function App() {
             <Show when={state().route === "home"}>
               <HomePage
                 state={state}
+                platform={platform}
+                system={system}
                 dispatch={dispatch}
                 runtime={state().runtimeInfo}
                 onRefresh={() => requestCapability("runtimeInfo", "runtime.info")}
@@ -565,7 +583,7 @@ function App() {
               <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
             </Show>
             <Show when={state().route === "about" || state().route === "bytecode" || state().route === "updates" || state().route === "plugins" || state().route === "stress" || state().route === "performance"}>
-              <HostPages state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} />
+              <HostPages host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} />
             </Show>
           </View>
           <Show when={!wideLayout() || responsiveLayout().railSide === "right"}>
@@ -573,6 +591,10 @@ function App() {
           </Show>
         </View>
       </FocusScope>
+      <SystemAppSurfaces
+        system={system}
+        systemUIFocused={state().detailsOpen}
+      />
       <Show when={state().detailsOpen}>
         <DetailModal
           open={state().detailsOpen}
@@ -587,6 +609,8 @@ function App() {
 
 function HomePage(props: {
   state: () => DemoState;
+  platform: ReturnType<typeof createPocketPlatformClient>;
+  system: ReturnType<typeof installShowcaseSystem>;
   dispatch: (event: DemoEvent) => void;
   runtime: CapabilityState;
   onRefresh: () => void;
@@ -652,8 +676,47 @@ function HomePage(props: {
           <ActionButton label="Open Host details" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "about" })} />
         </Card>
         <StatusBar label="JS state · native pixels" detail="Ready for input" ok={props.runtime.phase !== "error"} />
+        <PlatformAppsCard platform={props.platform} system={props.system} />
       </View>
     </ScrollablePage>
+  );
+}
+
+function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatformClient>; system: ReturnType<typeof installShowcaseSystem> }): JSX.Element {
+  const [status, setStatus] = createSignal("Starting JS SystemUI");
+  onMount(() => {
+    void props.system.ready.then(
+      () => setStatus("JS SystemUI ready · independent bytecode apps"),
+      (error) => setStatus(hostError(error).message),
+    );
+  });
+  const [message, setMessage] = createSignal("No app messages yet");
+  const stopMessages = props.platform.onMessage((message) => {
+    setMessage(`Message from ${message.sourceAppId}: ${JSON.stringify(message.data)}`);
+  });
+  onCleanup(stopMessages);
+  const open = async (appId: string) => {
+    try {
+      await props.system.ready;
+      const result = await props.platform.openApp(appId, { source: "showcase" });
+      setStatus(result.cancelled ? `Cancelled: ${result.reason ?? "closed"}` : `App result: ${JSON.stringify(result.value)}`);
+    } catch (error) { setStatus(hostError(error).message); }
+  };
+  return (
+    <Card class="flex-col gap-2 mx-4 mb-4 p-4 rounded-xl bg-white border-slate-200">
+      <ViewText title="Mini Apps" body={status()} />
+      <Text class="text-xs text-slate-600">{message()}</Text>
+      <Row>
+        <ActionButton label="Open profile app" onPress={() => void open("pocket.demo.profile")} />
+        <ActionButton label="Open lobby app" kind="quiet" onPress={() => void open("pocket.demo.lobby")} />
+      </Row>
+      <ActionButton label="Prewarm lobby" kind="quiet" onPress={() => {
+        void props.system.ready.then(() => props.platform.prewarm("pocket.demo.lobby")).then(
+          () => setStatus("Lobby prewarmed; its guest clock is paused"),
+          (error) => setStatus(hostError(error).message),
+        );
+      }} />
+    </Card>
   );
 }
 
@@ -731,6 +794,7 @@ function GalleryPage(props: { state: () => DemoState; dispatch: (event: DemoEven
 }
 
 function HostPages(props: {
+  host: HostBridge;
   state: () => DemoState;
   dispatch: (event: DemoEvent) => void;
   requestCapability: (key: CapabilityKey, capability: string, params?: Record<string, JsonValue>) => void;
@@ -747,7 +811,7 @@ function HostPages(props: {
       <View class="flex-col gap-2">
       <Tabs items={hostTabs} active={route() === "performance" ? "about" : route()} onChange={switchTab} />
       <Show when={route() === "about"}>
-        <RuntimePage state={props.state} requestCapability={props.requestCapability} onNavigate={(route) => props.dispatch({ type: "navigate", route })} />
+        <RuntimePage host={props.host} state={props.state} requestCapability={props.requestCapability} onNavigate={(route) => props.dispatch({ type: "navigate", route })} />
       </Show>
       <Show when={route() === "bytecode"}>
         <BytecodePage state={props.state} requestCapability={props.requestCapability} />
@@ -770,6 +834,7 @@ function HostPages(props: {
 }
 
 function RuntimePage(props: {
+  host: HostBridge;
   state: () => DemoState;
   requestCapability: (key: CapabilityKey, capability: string) => void;
   onNavigate: (route: Route) => void;
@@ -780,6 +845,7 @@ function RuntimePage(props: {
       <CapabilityCard title="Runtime info" capability="runtime.info" state={props.state().runtimeInfo} onRefresh={() => props.requestCapability("runtimeInfo", "runtime.info")} />
       <CapabilityCard title="Package metadata" capability="plugins.packageInfo" state={props.state().packageInfo} onRefresh={() => props.requestCapability("packageInfo", "plugins.packageInfo")} />
       <ActionButton label="FPS history" kind="secondary" onPress={() => props.onNavigate("performance")} />
+      <RecordingPanel host={props.host} />
       <StatusBar label="JS ↔ Flutter" detail="No Dart UI state" ok={props.state().runtimeInfo.phase !== "error"} />
     </View>
   );
@@ -818,7 +884,7 @@ function PerformancePage(props: {
         </Row>
         <Show when={points().length > 0} fallback={<EmptyState title="No FPS samples" body="Open a configured host performance provider or refresh this page." />}>
           <MiniBarChart values={performanceBars(points())} />
-          <Text class="text-xs text-slate-600">Bars are the latest provider samples, scaled to a 60 FPS baseline.</Text>
+          <Text class="text-xs text-slate-600">Bars use the highest FPS in the visible sample window as the full-height reference.</Text>
         </Show>
       </Card>
       <View class="flex-row gap-2 mx-4">

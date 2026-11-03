@@ -8,7 +8,7 @@
 //! Protocol (one JSON command per stdin line, one JSON response per stdout
 //! line):
 //!
-//! * `{"op":"create","width":390,"height":844}`
+//! * `{"op":"create","width":390,"height":844,"compositorSurfaces":{"app.child":2}}`
 //! * `{"op":"loadBytecode","bytecodePath":".../app.qjbc","pakPath":".../app.pak"}`
 //! * `{"op":"load","sourcePath":".../app.js","pakPath":".../app.pak"}`
 //! * `{"op":"eval","source":"..."}` for source-only guests
@@ -21,9 +21,9 @@
 //! state continue to come from the guest bundle supplied by the caller.
 
 use pocket_flutter::{
-    pocket_bytecode_actual_abi, pocket_create, pocket_create_with_density_and_tick_hz,
+    pocket_bytecode_actual_abi, pocket_configure_compositor, pocket_create, pocket_create_with_density_and_tick_hz,
     pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
-    pocket_load_files, pocket_resize_viewport, pocket_send,
+    pocket_load_files, pocket_next_wake_delay_ms, pocket_resize_viewport, pocket_send,
 };
 use serde_json::{json, Value};
 use std::ffi::{c_void, CStr, CString};
@@ -105,6 +105,12 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
         .unwrap_or("");
 
     match operation {
+        "schedule" => {
+            if handle.is_null() {
+                return (false, error_response("create a native runtime before querying schedule"));
+            }
+            (false, json!({"ok": true, "nextWakeDelayMs": pocket_next_wake_delay_ms((*handle).cast())}))
+        }
         "create" => {
             let width = match finite_number(command, "width", 390.0) {
                 Ok(value) => value,
@@ -140,6 +146,14 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
             if !detail.is_empty() {
                 destroy(handle);
                 return (false, error_response(detail));
+            }
+            if let Some(applications) = command.get("compositorSurfaces") {
+                let registry = CString::new(applications.to_string()).expect("JSON has no literal NUL");
+                if pocket_configure_compositor(created, registry.as_ptr()) != 0 {
+                    let detail = last_error(*handle);
+                    destroy(handle);
+                    return (false, error_response(detail));
+                }
             }
             (false, json!({"ok": true}))
         }

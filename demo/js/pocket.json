@@ -1,24 +1,29 @@
 {
   "$schema": "https://pocketjs.dev/schema/pocket-2.json",
   "pocket": 2,
-  "id": "dev.tryjoy.pocket-host.showcase",
+  "id": "pocket.host.demo",
   "name": "pocket-host-showcase",
   "title": "PocketJS Flutter host showcase",
   "version": "0.1.0",
-  "build": 1,
   "engine": {
     "capabilities": {
-      "requires": ["text.glyphs.baked"],
+      "requires": [
+        "text.glyphs.baked",
+        "ui.compositor-surfaces"
+      ],
       "enhances": []
     }
   },
   "app": {
     "entry": "app.tsx",
-    "output": "app",
+    "output": "showcase-app",
     "framework": "solid",
     "viewport": {
       "fixed": {
-        "logical": [360, 640],
+        "logical": [
+          360,
+          640
+        ],
         "presentation": "native"
       }
     }

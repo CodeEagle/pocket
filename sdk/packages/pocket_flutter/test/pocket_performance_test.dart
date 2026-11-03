@@ -11,24 +11,24 @@ void main() {
       final timestamp = DateTime.utc(2026, 11, 2, 3, 4, 5, 6000);
       final sample = PocketPerformanceSample(
         timestamp: timestamp,
-        fps: 58.5,
-        frames: 59,
+        fps: 144,
+        frames: 144,
         durationMs: 1008.25,
         maxGapMs: 42.0,
         slowFrames: 2,
         nativeMsP95: 1.75,
-        refreshHz: 59.94,
+        refreshHz: 144,
       );
 
       expect(sample.toJson(), <String, dynamic>{
         'timestamp': timestamp.toIso8601String(),
-        'fps': 58.5,
-        'frames': 59,
+        'fps': 144,
+        'frames': 144,
         'durationMs': 1008.25,
         'maxGapMs': 42.0,
         'slowFrames': 2,
         'nativeMsP95': 1.75,
-        'refreshHz': 59.94,
+        'refreshHz': 144,
       });
     },
   );

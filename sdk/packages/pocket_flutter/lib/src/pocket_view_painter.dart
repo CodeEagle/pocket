@@ -420,25 +420,32 @@ final class PocketCanvasPainter extends CustomPainter {
             fontWeight: _fontWeightForSlot(op.fontSlot),
             height: lineHeight,
           );
-          final text =
+          TextPainter layoutLine(String value) =>
               textLayoutCache?.obtain(
-                text: op.text,
+                text: value,
                 style: textStyle,
                 textDirection: TextDirection.ltr,
               ) ??
               (TextPainter(
-                  text: TextSpan(text: op.text, style: textStyle),
+                  text: TextSpan(text: value, style: textStyle),
                   textDirection: TextDirection.ltr,
-                )
-                // Native TEXT_RUN already contains the core's line breaks.
-                // Its box width is the logical layout box, not a Dart
-                // wrapping budget; Flutter font metrics can be wider than
-                // the baked native metrics. An additional maxWidth/maxLines
-                // here would make TextPainter ellipsize/drop the final
-                // glyphs before the native clip has a chance to apply.
-                ..layout());
-          text.paint(canvas, Offset(op.x, op.y));
-          if (textLayoutCache == null) text.dispose();
+                )..layout());
+          // PocketJS supplies line breaks. Align each line inside the native
+          // box without a second wrapping pass or truncating overflowing text.
+          if (op.align == 1 || op.align == 2) {
+            final lines = op.text.split('\n');
+            final advance = op.height / lines.length;
+            for (var index = 0; index < lines.length; index++) {
+              final text = layoutLine(lines[index]);
+              final offset = (op.width - text.width) * (op.align == 1 ? .5 : 1);
+              text.paint(canvas, Offset(op.x + offset, op.y + index * advance));
+              if (textLayoutCache == null) text.dispose();
+            }
+          } else {
+            final text = layoutLine(op.text);
+            text.paint(canvas, Offset(op.x, op.y));
+            if (textLayoutCache == null) text.dispose();
+          }
         case PocketImageOp():
           final image = images[op.asset];
           if (image != null) {
@@ -644,6 +651,8 @@ bool _pocketOpEquals(
       final other = second as PocketHostSurfaceOp;
       return first.id == other.id &&
           first.kind == other.kind &&
+          first.surfaceHandle == other.surfaceHandle &&
+          first.focused == other.focused &&
           mapEquals(first.parameters, other.parameters);
     case PocketRectOp():
       return (second as PocketRectOp).color == first.color;
@@ -671,7 +680,8 @@ bool _pocketOpEquals(
       return first.text == other.text &&
           first.size == other.size &&
           first.color == other.color &&
-          first.fontSlot == other.fontSlot;
+          first.fontSlot == other.fontSlot &&
+          first.align == other.align;
     case PocketImageOp():
       final other = second as PocketImageOp;
       return first.asset == other.asset &&
@@ -740,6 +750,8 @@ int _pocketOpFingerprint(PocketOp op, Map<String, ui.Image?> images) {
       return Object.hash(
         op.id,
         op.kind,
+        op.surfaceHandle,
+        op.focused,
         op.x,
         op.y,
         op.width,
@@ -824,6 +836,7 @@ int _pocketOpFingerprint(PocketOp op, Map<String, ui.Image?> images) {
         op.size,
         op.color,
         op.fontSlot,
+        op.align,
         clipFingerprint,
       );
     case PocketImageOp():

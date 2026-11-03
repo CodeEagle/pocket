@@ -1,5 +1,4 @@
-import 'dart:typed_data';
-
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 
@@ -71,6 +70,39 @@ void main() {
     expect(endpoint.published, [64]);
   });
 
+  test('successful nonempty ingress publication notifies once', () {
+    final endpoint = _FakeEndpoint(native: true);
+    var wakeCalls = 0;
+    final channel = PocketDuplexChannel.fromRuntime(
+      _FakeRuntime(endpoint),
+      onIngressPublished: () => wakeCalls++,
+    );
+
+    expect(channel.pushToPocketJs(msgType: 10, targetId: 101), isTrue);
+    expect(wakeCalls, 1);
+    expect(channel.pushBatch(const []), 0);
+    expect(wakeCalls, 1);
+
+    endpoint.ingressUnavailable = true;
+    expect(channel.pushToPocketJs(msgType: 11, targetId: 102), isFalse);
+    expect(
+      channel.pushBatch(const [
+        PocketDuplexMessage(msgType: 12, targetId: 103),
+      ]),
+      0,
+    );
+    expect(wakeCalls, 1);
+
+    endpoint.ingressUnavailable = false;
+    expect(
+      channel.pushBatch(const [
+        PocketDuplexMessage(msgType: 13, targetId: 104),
+      ]),
+      1,
+    );
+    expect(wakeCalls, 2);
+  });
+
   test('native runtime without atomic endpoint cannot silently fall back', () {
     expect(
       () => PocketDuplexChannel.fromRuntime(_FakeRuntime(null)),
@@ -108,7 +140,11 @@ void main() {
     () {
       final endpoint = _FakeEndpoint(native: true)
         ..publishFailure = StateError('publish failed');
-      final channel = PocketDuplexChannel.fromRuntime(_FakeRuntime(endpoint));
+      var wakeCalls = 0;
+      final channel = PocketDuplexChannel.fromRuntime(
+        _FakeRuntime(endpoint),
+        onIngressPublished: () => wakeCalls++,
+      );
 
       expect(
         () => channel.pushToPocketJs(msgType: 1, targetId: 1),
@@ -116,8 +152,31 @@ void main() {
       );
       expect(channel.isClosed, isTrue);
       expect(endpoint.closed, isTrue);
+      expect(wakeCalls, 0);
     },
   );
+
+  test('wake callback errors do not close committed ingress', () {
+    final endpoint = _FakeEndpoint(native: true);
+    final previousErrorHandler = FlutterError.onError;
+    Object? reportedError;
+    FlutterError.onError = (details) {
+      reportedError = details.exception;
+    };
+    try {
+      final channel = PocketDuplexChannel.fromRuntime(
+        _FakeRuntime(endpoint),
+        onIngressPublished: () => throw StateError('wake failed'),
+      );
+
+      expect(channel.pushToPocketJs(msgType: 10, targetId: 101), isTrue);
+      expect(endpoint.published, [1]);
+      expect(channel.isClosed, isFalse);
+      expect(reportedError, isA<StateError>());
+    } finally {
+      FlutterError.onError = previousErrorHandler;
+    }
+  });
 
   test('consume failure closes channel after an egress peek', () {
     final endpoint = _FakeEndpoint(native: true)
@@ -160,6 +219,7 @@ final class _FakeEndpoint implements PocketDuplexEndpoint {
   final consumed = <int>[];
   var reserveCalls = 0;
   var closed = false;
+  var ingressUnavailable = false;
   Object? publishFailure;
   Object? consumeFailure;
 
@@ -169,7 +229,7 @@ final class _FakeEndpoint implements PocketDuplexEndpoint {
   @override
   Uint8List? reserveIngress(int maxMessages) {
     reserveCalls++;
-    if (closed || maxMessages < 1) return null;
+    if (closed || ingressUnavailable || maxMessages < 1) return null;
     final count = maxMessages > capacity - 1 ? capacity - 1 : maxMessages;
     return Uint8List(count * 16);
   }

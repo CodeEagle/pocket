@@ -42,6 +42,8 @@ Flutter 不为每个 JS 按钮、卡片或列表项创建业务 Widget。JS 组�
 
 Flutter 中确有必要的系统 Widget，例如 `TextField`、`Texture`、glass filter、诊断标签和承载绘制的容器。这些能力属于宿主适配层，业务页面仍由 JS 编写。
 
+新增能力优先进入 JS SDK：多应用栈、跨 App 返回、System UI、共享消息策略、预热/淘汰与录制控制都由 JS 决定；纯计算运行在 JS Worker。Dart 保留 Flutter/FFI、文件资源、可信权限校验及显式原生 provider 边界。Worker 调度和 IO 的确定性事实在原生执行边界捕获，Dart 不另建一套调度或事实状态机。SDK 已移除未被 Demo 使用的 Dart sum/Fibonacci isolate 实现。
+
 ## 从 TSX 到屏幕
 
 ```mermaid
@@ -92,8 +94,8 @@ flowchart TD
 | 保留分块与 `RepaintBoundary` | 普通绘制序列按 32 个 DrawOps 分块，未变化分块可复用绘制层。 | Surface/clip 顺序仍须保持；不是只重绘任意一个像素的 GPU 脏矩形系统。 |
 | 文字 LRU | 默认最多 256 个 `TextPainter` 排版结果，位置变化不必重复排版，淘汰时释放。 | 文本、样式、约束变化会失效；不是无限缓存。 |
 | 图片与资源 revision 缓存 | 按资源身份、revision / epoch 去重和复用解码结果，处理更新与释放。 | 首次解码、上传、缓存失效仍有成本。 |
-| 空闲停表 | 连续 6 帧 unchanged 后停止 Flutter ticker；100ms 有界 timer 唤醒只探测一帧，仍 unchanged 就继续停表。 | 仍有探测开销；Guest timer 唤醒存在调度粒度，不是静态页面永久零唤醒。 |
-| 输入/消息唤醒 | 指针、controller 消息、视口与生命周期等需要工作时恢复 ticker，避免等到下一次普通探测。 | 当前主要运行链仍受 Flutter UI isolate 调度影响。 |
+| 按需停表 | PocketJS 报告连续工作、最近虚拟 timer 或空闲状态；已知静态页停止 ticker 且不设周期探针，未来 deadline 使用单次 Timer。 | 普通 `onFrame` 默认连续；旧 guest/旧 native 没有契约时保守使用 vsync，不凭 unchanged 推断没有工作。 |
+| 输入/消息唤醒 | 指针、controller 消息、视口与生命周期等直接恢复 ticker；页面的运动活动提示决定后续是否继续。 | 当前主要运行链仍受 Flutter UI isolate 调度影响。 |
 | 精确帧时钟 | 使用单调调度时间和浮点毫秒 delta，空闲后补上真实 elapsed，避免每帧截断时间造成动画/定时器漂移。 | 长时间间隔有边界处理，不承诺任意后台时间都逐帧补算。 |
 | 批量二进制通讯 | 数值事件通过固定记录与批量 reserve/commit 降低 JSON 和 FFI 次数。 | 只适合协议支持的数据；复杂业务对象仍使用结构化消息。 |
 | 原生纹理 | 相机/视频等已授权内容通过 Flutter Texture/surface 组合，不把每帧视频像素当 JS JSON 传递。 | provider 必须管理纹理生命周期、权限与设备差异。 |
@@ -102,11 +104,17 @@ flowchart TD
 
 ### FPS 和耗电如何看
 
-FPS 标签与历史来自实际 ticker/桥接采样，包含 FPS、最低值、长帧、刷新率和桥接解码 p95。`nativeMsP95` 是兼容字段名，测量范围包含桥接与解码，不应解读为纯 Rust/QuickJS CPU 时间。连续空闲探测的休眠时间会从活动性能窗口中排除。
+FPS 标签与历史来自实际 ticker/桥接采样，包含 FPS、最低值、长帧、刷新率和桥接解码 p95。`nativeMsP95` 是兼容字段名，测量范围包含桥接与解码，不应解读为纯 Rust/QuickJS CPU 时间。按需停表的休眠时间会从活动性能窗口中排除。
 
 历史按 appId 隔离，内存/文件有界保留；JS Showcase 可查看。静态页面不持续产生变化帧时，活动帧 FPS 不是屏幕刷新率或耗电指标。需要结合 Flutter FrameTiming、UI/raster 时间、native 耗时、重绘次数以及目标设备 profile/release 数据判断。
 
-本仓库验证了停表、单帧探测、缓存和通讯路径，但**没有移动设备功耗仪或 Energy Log 的量化结论**。减少空闲工作是降低能耗的设计方向，不承诺固定省电百分比、恒定 60/120 FPS。历史测量环境、场景与消融见 [PERFORMANCE.md](sdk/docs/PERFORMANCE.md)，本轮实现与回归见 [AUDIT_REMEDIATION.md](sdk/docs/AUDIT_REMEDIATION.md)；历史数据不能替代当前版本实测。
+本仓库验证停表、deadline 唤醒、缓存和通讯路径，但**没有移动设备功耗仪或 Energy Log 的量化结论**。减少空闲工作是降低能耗的设计方向，不承诺固定省电百分比、恒定 60/120 FPS。历史测量环境、场景与消融见 [PERFORMANCE.md](sdk/docs/PERFORMANCE.md)，本轮计划与验证见 [字形与调度接入](sdk/docs/GLYPH_AND_SCHEDULER_IMPLEMENTATION.md)；历史数据不能替代当前版本实测。
+
+按需调度仍使用 PocketJS 的确定性虚拟时钟。宿主只快进没有连续工作、且不越过最近 timer 的空闲帧；deadline 所在帧照常执行 guest/core。动画、timeline、physics、sprite 或其他待办工作保持 vsync。`onFrame(callback, { continuous: false })` 适用于只需随真实事件帧运行的观察者，`continuous: () => moving()` 可声明惯性或转场的活动区间；回调仍在实际发生的帧运行。新定时任务继续使用 `after()`，不另建 JS 事件循环。
+
+FPS 历史度量持续请求帧期间的节奏，主动停表的时间不算掉帧。静态页面或每次事件后立即睡眠的离散更新可能显示 `--` 或保留上次读数；它不是全屏刷新率计，也不能用来量化静态页面响应延迟。持续动画/转场用 FPS 和长帧验收，离散输入另以实际事件到画面变化、唤醒和停表测试验收。
+
+确定性帧用于输入/effect 回放、快进测试和首个差异帧定位。可选录制捕获真实宿主事务、IME、双向二进制通道、外部响应及 idle/scalar 时间输入；离线回放在全新 QuickJS 实例中验证每个输出摘要。Showcase 用 `--dart-define=POCKET_RECORD=true` 启用，再在 Host → Runtime 导出或验证；默认关闭，不增加录制轮询。录制范围、SDK API、文件格式和剩余约束见 [录制与回放](sdk/docs/RECORDING_REPLAY.md)，上游契约研究见 [确定性帧](sdk/docs/DETERMINISTIC_FRAMES.md)。
 
 ## 双向通讯：三条路径各司其职
 
@@ -133,6 +141,8 @@ FPS 标签与历史来自实际 ticker/桥接采样，包含 FPS、最低值、�
 - 低层 Dart typed view 是同步借用：ingress 从 reserve 到匹配的 publish/close 前有效；egress 从 peek 到匹配的 consume/close 前有效。不得保留到相应提交/消费或关闭之后、跨 isolate 传递，或与 endpoint 释放并发使用。
 - reload 关闭旧 generation 并创建新通道；旧 endpoint 引用保持其内存生命期，不会悄悄绑定新 runtime。
 - 只有 runtime owner 可以推进 QuickJS。SPSC 不支持多个生产者直接并发写，不等同于通用 MPMC 队列。
+
+通过 `PocketViewController.duplexChannel` 成功发布 ingress 时会直接唤醒页面；帧输出回调中同步发布的消息也会保留下一次执行机会。若绕过该端点从原生或后台发布，集成方必须通知拥有 runtime 的 Dart isolate，再调用 `controller.notifyWork()`。后台线程只负责发布与通知，不能并发推进 QuickJS。已移除定期探针，不能依赖轮询替缺失的通知兜底。
 
 **lock-free 的范围是队列数据路径**。QuickJS 执行/GC、Dart 对象分配、回调、端点创建销毁及整帧渲染不因此变成 lock-free。
 
@@ -236,7 +246,7 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 bash scripts/build_native.sh ios-sim
 cd ../demo/js
 bun install
-bun run build
+bun run build:system
 cd ..
 flutter pub get
 flutter devices
@@ -295,10 +305,10 @@ Editor 检查 Host/Origin、写请求来源凭证与上传限制；文件 API �
 pocket/
 ├── README.md
 ├── sdk/
-│   ├── lib/                      # PocketApp / PocketGuest / Session / Config
+│   ├── lib/                      # PocketApp / Guest / Session / System 实例通道
 │   ├── pocket.ts                 # init / build / editor 唯一 CLI
 │   ├── packages/
-│   │   ├── pocket_ui/            # @pocket/ui：JS 公共 UI
+│   │   ├── pocket_ui/            # @pocket/ui：JS UI / SystemUI 内核 / App 客户端
 │   │   ├── pocket_flutter/       # FFI / 帧 / Canvas / 输入 / surface
 │   │   ├── pocket_services/      # 能力协议 / 插件 / 更新与存储
 │   │   └── pocket_hardware/      # 可选 iOS / Android provider
@@ -324,8 +334,11 @@ pocket/
 | 每个模块与文件职责 | [OVERVIEW](sdk/docs/OVERVIEW.md)、[FRAMEWORK_GUIDE](sdk/docs/FRAMEWORK_GUIDE.md) |
 | 双向通道、内存序、所有权与基准 | [DUPLEX_TRANSPORT](sdk/docs/DUPLEX_TRANSPORT.md) |
 | 性能历史、测量范围与消融 | [PERFORMANCE](sdk/docs/PERFORMANCE.md) |
+| Blaze 对 Rust 开发构建的适用性 | [BLAZE_BUILD_EVALUATION](sdk/docs/BLAZE_BUILD_EVALUATION.md) |
 | 哪些组件实现、哪些还缺 | [COMPONENTS](sdk/docs/COMPONENTS.md) |
 | 实际测试与设备边界 | [VALIDATION](sdk/docs/VALIDATION.md)、[AUDIT_REMEDIATION](sdk/docs/AUDIT_REMEDIATION.md) |
+| 录制回放与 Worker/IO 验收范围 | [RECORDING_REPLAY](sdk/docs/RECORDING_REPLAY.md)、[Worker 录制回放实施与验收](sdk/docs/WORKER_RECORDING_REPLAY_PLAN.md) |
+| JS SystemUI、跨 App 协作与呈现边界 | [MULTI_APP_IMPLEMENTATION](sdk/docs/MULTI_APP_IMPLEMENTATION.md) |
 | 继承了旧 Demo 哪些技术 | [PROVENANCE](sdk/docs/PROVENANCE.md)、[LEGACY_SDK_REUSE](sdk/docs/LEGACY_SDK_REUSE.md) |
 
 ## 验证与当前边界
@@ -355,8 +368,15 @@ flutter drive --no-pub --no-dds \
 
 仍需明确的能力边界：
 
-- 当前 DrawList 使用 `TEXT_RUN`；不能宣称上游 `GLYPH_RUN` 全部支持。
-- 当前系统输入走 `InputField` bridge，不等于上游 `GuestFrame.text` 硬件键盘/IME 的全部路径已接通。
+固定上游的完整能力核对与后续优先级见 [PocketJS 能力覆盖审查](sdk/docs/POCKETJS_FEATURE_PARITY.md)，包含逐项源码和实际运行证据；组件清单不代表所有上游服务都已接通。
+
+多应用平台使用 JS SystemUI 内核，管理 catalog、跨 App 打开/返回、共享存储权限、消息、前后台与有界预热/LRU；Flutter 只提供实例和呈现 primitive。官方 child `CompositorSurface` 已接可信 handle 注册、布局区域、clip、可见性和 JS 控制的焦点；有 native/C ABI 与 Flutter widget 证据，设备端合成仍需单独验收。详见 [JS SystemUI 实施](sdk/docs/MULTI_APP_IMPLEMENTATION.md) 和 [合成接入](sdk/docs/SYSTEM_COMPOSITOR_IMPLEMENTATION.md)。
+
+旧微信目录是本地 JS/WXML 展示，没有真实 Guest 加载。SDK 已接入 PocketJS QJBC/QuickJS WASM 的微信 Host：真实 Lobby 字节码在 Node WebAssembly 中通过点击计数、绘制变化、存储响应与销毁验收；微信 DevTools、真机与动态 child 合成尚未通过。该目标承载 PocketJS Guest，运行微信 WXML 小程序包的兼容层另有边界。实现与验证见 [微信 Host](sdk/docs/WECHAT_HOST_IMPLEMENTATION.md)。
+
+- 普通文本保留 `TEXT_RUN`；`GLYPH_RUN` 通过上游 glyph page 复用 image/PFB1/T8 资源链。它不扩展上游的 shaping、彩色 emoji 或旋转字形语义，参见 [字形契约](sdk/docs/GLYPH_RUN_STUDY.md)。
+- 系统输入使用 Flutter `InputField`/IME；底层 `GuestFrame.text` 已接 keyDown/keyUp、commit、composition 和选区字段，设备端中文输入与全部硬件键盘行为仍需分别验收。
+- Worker 独立 QJBC、HTTP 与 offload 已接真实执行；Worker 调度/IO facts 已通过真实 HTTP 录制、销毁原实例、关闭服务后的归档离线回放。流式多请求、配额/backpressure 与混合域的完整边界矩阵仍待补，见 [实施与验收范围](sdk/docs/WORKER_RECORDING_REPLAY_PLAN.md)。
 - JS 公共组件不是任意 Web/DOM npm 库兼容层，glass/texture 也不是任意 Flutter Widget/3D 透传。
 - 硬件 provider 实现与契约测试不等于所有真机能力验收；实体 iPhone/Android 相机、BLE、相册与各种折叠姿态需单独验证。
 - 模拟器、macOS 微基准、Debug 和真机 Profile/Release 的结果不可混用；尚无跨设备 FPS、功耗、TSAN 或完整模型检查保证。

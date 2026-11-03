@@ -40,6 +40,16 @@ final class _ApplicationPlugin extends PocketPlugin {
   }
 }
 
+Future<void> _waitForHealthy(PocketSession session) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 10));
+  while (session.stage != 'ready' && DateTime.now().isBefore(deadline)) {
+    if (session.lastError != null) break;
+    await Future<void>.delayed(const Duration(milliseconds: 25));
+  }
+  expect(session.lastError, isNull);
+  expect(session.stage, 'ready');
+}
+
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   late Directory directory;
@@ -562,7 +572,7 @@ void main() {
 
         // Let v2 complete initial ready check so session is not busy
         session.onReady(session.controller);
-        await Future<void>.delayed(const Duration(milliseconds: 1100));
+        await _waitForHealthy(session);
         expect((await session.status())['stage'], 'ready');
 
         // Invoke updates.rollback through session bridge
@@ -584,7 +594,7 @@ void main() {
 
         // Trigger onReady and advance health timer (1 second)
         session.onReady(session.controller);
-        await Future<void>.delayed(const Duration(milliseconds: 1100));
+        await _waitForHealthy(session);
 
         // Assert session.active remains 1.0.1 (not rejected by anti-downgrade)
         expect(session.active?.version, '1.0.1');

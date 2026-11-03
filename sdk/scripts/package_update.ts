@@ -48,6 +48,7 @@ export type PocketUpdatePayload = {
   entryFormat: "javascript" | "quickjs-bytecode";
   /** Stable ABI identifier emitted by the pinned QuickJS compiler/host. */
   runtimeAbi?: string;
+  worker?: Record<string, unknown>;
   pak: { sha256: string; size: number; parts: PakPart[] };
   files: ContentFile[];
   /** Present only when `--asset-dir` was supplied; omitted for compatibility. */
@@ -314,6 +315,7 @@ function collectAssets(
 }
 
 type GuestManifest = {
+  worker?: Record<string, unknown>;
   capabilities?: { requires: string[]; optional: string[] };
   permissions?: { requires: string[]; optional: string[] };
 };
@@ -343,6 +345,7 @@ function readGuestManifest(filePath: string): GuestManifest {
   return {
     capabilities: readGroup(capabilitiesValue, "capabilities"),
     permissions: readGroup(permissionsValue, "permissions"),
+    ...(value.worker === undefined ? {} : { worker: object(value.worker, "worker") }),
   };
 }
 
@@ -411,10 +414,39 @@ export function packageArtifacts(options: PackageOptions): PackageResult {
     const file = add(pak.subarray(part.offset, part.offset + part.size));
     return { offset: part.offset, sha256: file.sha256, size: part.size };
   });
-  const assets = options.assetDir === undefined ? undefined : collectAssets(options.assetDir, assetPrefix, add);
+  let assets = options.assetDir === undefined ? undefined : collectAssets(options.assetDir, assetPrefix, add);
   const guest = options.guestManifestPath === undefined
     ? undefined
     : readGuestManifest(options.guestManifestPath);
+  const metadataPath = join(dirname(resolve(entryPath)), "app.bytecode.json");
+  const metadata = existsSync(metadataPath) ? JSON.parse(readFileSync(metadataPath, "utf8")) as Record<string, unknown> : undefined;
+  const rawWorker = guest?.worker ?? metadata?.worker;
+  let worker: Record<string, unknown> | undefined;
+  if (rawWorker !== undefined) {
+    if (!rawWorker || typeof rawWorker !== "object" || Array.isArray(rawWorker)) throw new Error("package: worker descriptor must be an object");
+    const descriptor = rawWorker as Record<string, unknown>;
+    const artifact = descriptor.bytecode as Record<string, unknown> | undefined;
+    const path = artifact?.path;
+    if (descriptor.kind !== "quickjs-bytecode" || descriptor.protocolVersion !== 1 || descriptor.runtimeAbi !== options.runtimeAbi ||
+        typeof path !== "string" || path.includes("\\") || path.startsWith("/") || path.split("/").some(p => !p || p === "." || p === "..")) {
+      throw new Error("package: invalid worker bytecode descriptor/ABI/path");
+    }
+    const declared = new Set([...(guest?.capabilities?.requires ?? []), ...(guest?.capabilities?.optional ?? [])]);
+    if (!declared.has("runtime.worker") || !Array.isArray(descriptor.requiredCaps) || descriptor.requiredCaps.some(c => typeof c !== "string" || !declared.has(c))) {
+      throw new Error("package: worker capabilities must be declared in signed guest manifest");
+    }
+    const bytes = new Uint8Array(readFileSync(join(dirname(resolve(entryPath)), path)));
+    if (bytes.byteLength !== artifact.bytes || sha256Hex(bytes) !== artifact.sha256 || bytes.byteLength <= 124 ||
+        Buffer.from(bytes.subarray(0, 4)).toString() !== "PJBC") throw new Error("package: worker bytecode integrity mismatch");
+    const content = add(bytes);
+    const name = assetPrefix ? `${assetPrefix}/${path}` : path;
+    assets ??= Object.create(null) as Record<string, AssetFile>;
+    if (assets[name] && (assets[name].sha256 !== content.sha256 || assets[name].size !== content.size)) throw new Error("package: conflicting worker asset");
+    assets[name] = {sha256: content.sha256, size: content.size};
+    worker = {...descriptor, bytecode: {...artifact, path: name}};
+  } else if (guest?.capabilities?.requires.includes("runtime.worker") || existsSync(join(dirname(resolve(entryPath)), "app.worker.qjbc"))) {
+    throw new Error("package: refusing to publish a worker package without its signed descriptor");
+  }
   const payload: PocketUpdatePayload = {
     schemaVersion: 1,
     appId: options.appId,
@@ -428,6 +460,7 @@ export function packageArtifacts(options: PackageOptions): PackageResult {
     pak: { sha256: sha256Hex(pak), size: pak.byteLength, parts },
     files: stableFiles(files),
     ...(assets === undefined ? {} : { assets }),
+    ...(worker === undefined ? {} : { worker }),
     ...(guest?.capabilities === undefined ? {} : { capabilities: guest.capabilities }),
     ...(guest?.permissions === undefined ? {} : { permissions: guest.permissions }),
   };

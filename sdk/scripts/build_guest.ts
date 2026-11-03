@@ -1,4 +1,5 @@
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -34,6 +35,14 @@ export type BuildGuestResult = {
   bytecode: string;
   metadata: string;
   manifest: string;
+  /** Pinned domains.worker output compiled by the same QuickJS ABI. The
+   * source bundle is retained for diagnostics only; production assets contain
+   * the admitted bytecode envelope, never a source fallback. */
+  worker?: {
+    source: string;
+    bytecode: string;
+    metadata: string;
+  };
   tickHz: number;
 };
 
@@ -428,6 +437,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
   if (typeof transformFile !== "function") {
     throw new Error("build_guest: pinned JSX transformer does not export transformFile");
   }
+  const [{ WORKER_PROTOCOL_VERSION, WORKER_RESOURCES, workerDeclarationSchema }, { validateSchema }] = await Promise.all([
+    import("../.cache/pocketjs/contracts/spec/worker.ts"),
+    import("../.cache/pocketjs/framework/src/manifest/schema.ts"),
+  ]);
 
   const ownsOutput = options.outDir === undefined;
   const output = resolve(options.outDir ?? mkdtempSync(join(tmpdir(), "pocketjs-guest-build-")));
@@ -458,6 +471,50 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     }
     if (compilerSource !== source) copyFileSync(compilerSource, source);
     if (compilerPak !== pak) copyFileSync(compilerPak, pak);
+    const sourcePocket = readJsonObject(join(projectRoot, "pocket.json"));
+    const domains = sourcePocket?.domains;
+    const workerDeclaration = domains && typeof domains === "object" && !Array.isArray(domains)
+      ? (domains as Record<string, unknown>).worker
+      : undefined;
+    let worker: BuildGuestResult["worker"];
+    if (workerDeclaration !== undefined) {
+      const diagnostics: Parameters<typeof validateSchema>[3] = [];
+      validateSchema(workerDeclaration, workerDeclarationSchema, "/domains/worker", diagnostics);
+      if (diagnostics.length) {
+        throw new Error(diagnostics.map((item) => `${item.path}: ${item.message}`).join("; "));
+      }
+      const declaration = workerDeclaration as {
+        entry: string;
+        nodes: { name: string; kind: keyof typeof WORKER_RESOURCES }[];
+        channels?: unknown[];
+      };
+      const workerCapabilities = new Set(declaration.nodes.map((node) => WORKER_RESOURCES[node.kind].capability));
+      const sourceManifestPath = join(projectRoot, "manifest.json");
+      const sourceManifest = readJsonObject(sourceManifestPath);
+      const capabilityObject = sourceManifest?.capabilities;
+      const required = capabilityObject && typeof capabilityObject === "object" && !Array.isArray(capabilityObject)
+        ? (capabilityObject as Record<string, unknown>).requires
+        : undefined;
+      if (!Array.isArray(required)) {
+        throw new Error("build_guest: domains.worker requires manifest.json capabilities.requires");
+      }
+      for (const capability of workerCapabilities) {
+        if (!required.includes(capability)) {
+          throw new Error(`build_guest: worker node requires declared capability ${capability}`);
+        }
+      }
+      const workerSource = join(output, `${compilerBase}.worker.js`);
+      const workerBytecode = join(output, "app.worker.qjbc");
+      const workerMetadata = join(output, "app.worker.bytecode.json");
+      if (!existsSync(workerSource)) {
+        throw new Error(`pinned compiler declared domains.worker but did not produce ${compilerBase}.worker.js`);
+      }
+      runOrThrow(["cargo", "run", "--locked", "--manifest-path", join(root, "native/Cargo.toml"), "--bin", "pocketjs_bytecode", "--", "--input", workerSource, "--output", workerBytecode, "--metadata", workerMetadata, "--kind", "script", "--tick-hz", String(tickHz)], root, options.log);
+      if (!existsSync(workerBytecode) || !existsSync(workerMetadata)) {
+        throw new Error("QuickJS compiler did not produce app.worker.qjbc and app.worker.bytecode.json");
+      }
+      worker = { source: workerSource, bytecode: workerBytecode, metadata: workerMetadata };
+    }
     const bytecode = join(output, "app.qjbc");
     const metadata = join(output, "app.bytecode.json");
     // Do not duplicate the ABI generation here. pocketjs_bytecode defaults to
@@ -469,6 +526,32 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     const manifestObj = readJsonObject(guestManifest);
     const identity = resolveReleaseIdentity(projectRoot, manifestObj);
     const metadataObj = readJsonObject(metadata) ?? {};
+    let workerDescriptor: Record<string, unknown> | undefined;
+    if (worker) {
+      const workerMeta = readJsonObject(worker.metadata) ?? {};
+      const workerBytes = readFileSync(worker.bytecode);
+      workerDescriptor = {
+        kind: "quickjs-bytecode",
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        bytecode: {
+          path: "app.worker.qjbc",
+          bytes: workerBytes.byteLength,
+          sha256: createHash("sha256").update(workerBytes).digest("hex"),
+        },
+        declaration: workerDeclaration,
+        requiredCaps: Array.from(new Set(["runtime.worker", ...(workerDeclaration as {
+          nodes: { kind: keyof typeof WORKER_RESOURCES }[];
+        }).nodes.map((node) => WORKER_RESOURCES[node.kind].capability)])).sort(),
+        formatVersion: workerMeta.formatVersion,
+        sourceSha256: workerMeta.sourceSha256,
+        payloadSha256: workerMeta.payloadSha256,
+        runtimeAbi: workerMeta.runtimeAbi,
+        engineAbi: workerMeta.engineAbi,
+        bindingGeneration: workerMeta.bindingGeneration,
+        tickHz: workerMeta.tickHz,
+      };
+      metadataObj.worker = workerDescriptor;
+    }
     let metadataModified = false;
     if (metadataObj.version !== identity.version) {
       metadataObj.version = identity.version;
@@ -487,6 +570,26 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       const outputManifest = { ...manifestObj } as Record<string, unknown>;
       outputManifest.version = identity.version;
       outputManifest.build = identity.build;
+      if (workerDeclaration !== undefined) {
+        outputManifest.domains = { ...(outputManifest.domains as Record<string, unknown> | undefined), worker: workerDeclaration };
+      }
+      if (workerDescriptor) outputManifest.worker = workerDescriptor;
+      if (workerDescriptor) {
+        const capabilities = outputManifest.capabilities && typeof outputManifest.capabilities === "object"
+          ? outputManifest.capabilities as Record<string, unknown>
+          : {};
+        const requires = Array.isArray(capabilities.requires)
+          ? capabilities.requires.filter((value): value is string => typeof value === "string")
+          : [];
+        const optional = Array.isArray(capabilities.optional)
+          ? capabilities.optional.filter((value): value is string => typeof value === "string" && value !== "runtime.worker")
+          : [];
+        outputManifest.capabilities = {
+          ...capabilities,
+          requires: Array.from(new Set([...requires, "runtime.worker"])).sort(),
+          optional,
+        };
+      }
       writeFileSync(generatedManifest, `${JSON.stringify(outputManifest, null, 2)}\n`);
     }
     const assets = options.copyAssetsTo ? resolve(options.copyAssetsTo) : undefined;
@@ -494,6 +597,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       mkdirSync(assets, { recursive: true });
       copyFileSync(bytecode, join(assets, "app.qjbc"));
       copyFileSync(metadata, join(assets, "app.bytecode.json"));
+      if (worker) {
+        copyFileSync(worker.bytecode, join(assets, "app.worker.qjbc"));
+        copyFileSync(worker.metadata, join(assets, "app.worker.bytecode.json"));
+      }
       if (!manifestObj) throw new Error(`build_guest: missing or invalid guest manifest: ${guestManifest}`);
       copyFileSync(generatedManifest, join(assets, "guest-manifest.json"));
       copyFileSync(pak, join(assets, "app.pak"));
@@ -502,7 +609,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       mkdirSync(resolve(options.keepSource, ".."), { recursive: true });
       copyFileSync(source, resolve(options.keepSource));
     }
-    return { projectRoot, outDir: output, entry, source, pak, bytecode, metadata, manifest: join(projectRoot, "manifest.json"), tickHz };
+    return { projectRoot, outDir: output, entry, source, pak, bytecode, metadata, manifest: join(projectRoot, "manifest.json"), ...(worker ? { worker } : {}), tickHz };
   } finally {
     // The temporary package preload must never become application source.
     compilerEntryCleanup();

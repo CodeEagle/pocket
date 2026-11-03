@@ -20,5 +20,9 @@ bun pocket.ts build /path/to/my-app --sdk-root "$PWD" --platform=ios-sim
 - [`docs/OVERVIEW.md`](docs/OVERVIEW.md)：SDK 目录地图和运行链。
 - [`docs/FRAMEWORK_GUIDE.md`](docs/FRAMEWORK_GUIDE.md)：代码职责、能力边界和来源对照。
 - [`docs/VALIDATION.md`](docs/VALIDATION.md)：已执行验证与平台限制。
+- [`docs/MULTI_APP_IMPLEMENTATION.md`](docs/MULTI_APP_IMPLEMENTATION.md)：JS SystemUI、多应用公共能力与薄宿主职责。
+- [`docs/RECORDING_REPLAY.md`](docs/RECORDING_REPLAY.md)：可选会话录制、离线回放、导出/导入及限制。
+- [`docs/WORKER_RECORDING_REPLAY_PLAN.md`](docs/WORKER_RECORDING_REPLAY_PLAN.md)：Worker 调度、IO facts、channel 与 offload 确定性录制回放的实现及验收范围。
+- [`docs/POCKETJS_FEATURE_PARITY.md`](docs/POCKETJS_FEATURE_PARITY.md)：已接入的能力和仍待补齐的上游特性。
 
 SDK 本身没有 Showcase app，不能在 SDK 根目录直接执行无项目的 `bun run build:guest`。需要构建应用时，请使用 `bun pocket.ts build /path/to/my-app`，或在 Demo 的 [`js/`](../demo/js/) 中执行 JS 构建命令。Editor 服务可用 `bash scripts/editor_service.sh start|status|stop` 管理。

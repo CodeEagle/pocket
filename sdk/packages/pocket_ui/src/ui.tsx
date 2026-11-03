@@ -799,9 +799,9 @@ export function InputField(props: {
   });
 
   // Layout can change after Flutter adjusts the viewport for the system
-  // keyboard. Poll only while this session owns the active overlay and only
-  // emit when the measured rect differs, so an unchanged frame stays quiet.
-  onFrame(sendRectUpdate);
+  // keyboard. Observe geometry on work-driven frames while this session owns
+  // the overlay; emit only changed rects without keeping the ticker alive.
+  onFrame(sendRectUpdate, { continuous: false });
 
   onCleanup(() => {
     close();
@@ -1001,7 +1001,7 @@ export function ScrollablePage(props: {
         if (activeTextInput === input) activeTextInput = undefined;
       }
     }
-  });
+  }, { continuous: () => scroller.state() !== "idle" });
 
   return (
     <View

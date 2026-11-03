@@ -19,7 +19,7 @@ function bytecodeCapable(path: string): boolean {
   if (!existsSync(path)) return false;
   try {
     const binary = readFileSync(path).toString("latin1");
-    return binary.includes("loadBytecode") && binary.includes("pocket_load_bytecode_files");
+    return binary.includes("loadBytecode") && binary.includes("pocket_load_bytecode_files") && binary.includes("compositorSurfaces");
   } catch {
     return false;
   }
@@ -51,7 +51,7 @@ function command(op: string, values: JsonObject = {}): JsonObject {
 
 function frameFor(bytecode: string, pak: string): Frame {
   const commands = [
-    command("create", { width: 360, height: 640 }),
+    command("create", { width: 360, height: 640, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } }),
     command("loadBytecode", { bytecodePath: bytecode, pakPath: pak }),
     command("frame", { deltaMs: 16 }),
     command("quit"),

@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "pocket-demo-lobby-guest",
+      "dependencies": {
+        "@pocket/ui": "file:../../../../sdk/packages/pocket_ui",
+      },
+    },
+  },
+  "packages": {
+    "@pocket/ui": ["@pocket/ui@file:../../../../sdk/packages/pocket_ui", {}],
+  }
+}

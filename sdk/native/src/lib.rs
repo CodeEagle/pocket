@@ -5,10 +5,15 @@
 //! this library owns JavaScript execution, flexbox layout and frame timing.
 
 pub mod bytecode;
+mod demand;
 pub mod duplex;
+pub mod offload;
+mod replay;
+pub mod worker;
+mod worker_trace;
 
 use pocket_draw_ops::{DrawOps, Operation};
-use pocket_drivers::{abi, AxisDelta, MotionState};
+use pocket_drivers::{abi, AxisDelta, MotionState, TextEvent};
 use pocket_guest_rquickjs::{BindingProfile, RquickjsGuest};
 use pocket_runtime::{AssetRegistry, Guest, GuestEnvironment, GuestFrame, OpContext};
 use pocket_spec::BINDING_GENERATION;
@@ -16,7 +21,7 @@ use pocketjs_core::{damage::DamageRect, Ui};
 use rquickjs::{Coerced, Ctx, Exception, FromJs, Function, Object, Value};
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{c_char, CStr, CString};
 use std::io::Read;
 use std::ptr;
@@ -127,6 +132,12 @@ struct FrameOp {
     size: Option<f32>,
     #[serde(rename = "fontSlot", skip_serializing_if = "Option::is_none")]
     font_slot: Option<u8>,
+    #[serde(rename = "align", skip_serializing_if = "Option::is_none")]
+    text_align: Option<u8>,
+    #[serde(rename = "surfaceHandle", skip_serializing_if = "Option::is_none")]
+    surface_handle: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focused: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     radius: Option<f32>,
     /// Triangle geometry is present only for TRI/TEX_TRI records. Keeping
@@ -256,6 +267,12 @@ struct SentResource {
     revision: u64,
 }
 
+struct PendingWorker {
+    bytecode: Vec<u8>,
+    config: serde_json::Value,
+    notify: Option<unsafe extern "C" fn()>,
+}
+
 pub struct HostState {
     ops: OpContext,
     guest: RquickjsGuest,
@@ -281,13 +298,24 @@ pub struct HostState {
     /// fixed ticks.  `Ui::tick` never consumes a variable delta itself.
     tick_remainder_ms: f64,
     clock_started: bool,
+    demand: demand::Demand,
+    trace: replay::TraceClock,
+    trace_output: CString,
     viewport_width: f32,
     viewport_height: f32,
     /// Immutable pixels-per-logical-pixel contract used by core-generated
     /// bitmap resources (rounded/shadow masks and baked raster assets).
     raster_density: u32,
     auxiliary_viewport: Option<(f32, f32)>,
+    compositor_surfaces: BTreeMap<String, i32>,
     guest_loaded: bool,
+    worker_program: Option<PendingWorker>,
+    worker_runtime: Option<worker::WorkerRuntime>,
+    worker_bridge: Option<worker::WorkerUiBridge>,
+    worker_trace: Option<Arc<worker_trace::WorkerTrace>>,
+    worker_instance: u64,
+    offload: Option<Arc<offload::OffloadHost>>,
+    offload_output: CString,
     touches: Vec<TouchContact>,
     pending_touch_frames: Vec<PendingTouchFrame>,
     buttons: u32,
@@ -295,6 +323,8 @@ pub struct HostState {
     right_analog: u32,
     axis_deltas: Vec<AxisDelta>,
     motion: Option<MotionState>,
+    pending_text: Vec<TextEvent>,
+    external_work_pending: bool,
     text_metrics: Rc<RefCell<TextMetrics>>,
     sent_resources: HashMap<String, SentResource>,
     draw_cache: Option<FrameDrawCache>,
@@ -345,7 +375,8 @@ impl BinaryFrameWriter {
     }
 
     fn bytes(&mut self, value: &[u8]) -> Result<(), String> {
-        let len = u32::try_from(value.len()).map_err(|_| "binary frame field is too large".to_owned())?;
+        let len =
+            u32::try_from(value.len()).map_err(|_| "binary frame field is too large".to_owned())?;
         self.u32(len);
         self.bytes.extend_from_slice(value);
         Ok(())
@@ -403,8 +434,14 @@ impl BinaryFrameWriter {
                 self.u32(op.direction.unwrap_or(0));
             }
             3 => {
-                let points = op.points.as_ref().ok_or_else(|| "triangle points missing".to_owned())?;
-                let colors = op.colors.as_ref().ok_or_else(|| "triangle colors missing".to_owned())?;
+                let points = op
+                    .points
+                    .as_ref()
+                    .ok_or_else(|| "triangle points missing".to_owned())?;
+                let colors = op
+                    .colors
+                    .as_ref()
+                    .ok_or_else(|| "triangle colors missing".to_owned())?;
                 if points.len() != 3 || colors.len() != 3 {
                     return Err("triangle must contain three points and colors".to_owned());
                 }
@@ -417,8 +454,14 @@ impl BinaryFrameWriter {
                 }
             }
             4 => {
-                let points = op.points.as_ref().ok_or_else(|| "texture triangle points missing".to_owned())?;
-                let uvs = op.uvs.as_ref().ok_or_else(|| "texture triangle UVs missing".to_owned())?;
+                let points = op
+                    .points
+                    .as_ref()
+                    .ok_or_else(|| "texture triangle points missing".to_owned())?;
+                let uvs = op
+                    .uvs
+                    .as_ref()
+                    .ok_or_else(|| "texture triangle UVs missing".to_owned())?;
                 if points.len() != 3 || uvs.len() != 6 {
                     return Err("texture triangle must contain three points and six UVs".to_owned());
                 }
@@ -443,6 +486,7 @@ impl BinaryFrameWriter {
                     }
                     None => self.u8(0),
                 }
+                self.u8(op.text_align.unwrap_or(0));
             }
             6 => {
                 self.string(op.asset.as_deref().unwrap_or(""))?;
@@ -465,8 +509,16 @@ impl BinaryFrameWriter {
                     // hostSurface assets are the canonical descriptor JSON;
                     // the Dart decoder extracts kind/parameters exactly as
                     // it does for the legacy JSON schema.
+                    self.u32(op.surface_handle.unwrap_or(0) as u32);
+                    self.u8(u8::from(op.focused.unwrap_or(false)));
                 } else {
-                    self.u8(if op.fit.as_deref() == Some("contain") { 1 } else if op.fit.as_deref() == Some("fill") { 2 } else { 0 });
+                    self.u8(if op.fit.as_deref() == Some("contain") {
+                        1
+                    } else if op.fit.as_deref() == Some("fill") {
+                        2
+                    } else {
+                        0
+                    });
                     self.u8(1); // video autoplay is true for native surfaces
                 }
             }
@@ -489,18 +541,21 @@ fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
     let mut writer = BinaryFrameWriter::new();
     writer.u32(BINARY_FRAME_MAGIC);
     writer.u16(BINARY_FRAME_VERSION);
-    writer.u16(0);
+    writer.u16(1); // PFB1 metadata: TEXT_RUN align, SURFACE_QUAD handle/focus.
     writer.u64(frame.frame);
     writer.f32(frame.width);
     writer.f32(frame.height);
     writer.ops(&frame.ops)?;
-    let event_count = u32::try_from(frame.events.len()).map_err(|_| "too many frame events".to_owned())?;
+    let event_count =
+        u32::try_from(frame.events.len()).map_err(|_| "too many frame events".to_owned())?;
     writer.u32(event_count);
     for event in &frame.events {
-        let encoded = serde_json::to_vec(event).map_err(|error| format!("event JSON encode: {error}"))?;
+        let encoded =
+            serde_json::to_vec(event).map_err(|error| format!("event JSON encode: {error}"))?;
         writer.bytes(&encoded)?;
     }
-    let resource_count = u32::try_from(frame.resources.len()).map_err(|_| "too many frame resources".to_owned())?;
+    let resource_count =
+        u32::try_from(frame.resources.len()).map_err(|_| "too many frame resources".to_owned())?;
     writer.u32(resource_count);
     for resource in &frame.resources {
         writer.string(&resource.asset)?;
@@ -518,7 +573,8 @@ fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
             None => writer.u8(0),
         }
     }
-    let released_count = u32::try_from(frame.released_resources.len()).map_err(|_| "too many released resources".to_owned())?;
+    let released_count = u32::try_from(frame.released_resources.len())
+        .map_err(|_| "too many released resources".to_owned())?;
     writer.u32(released_count);
     for resource in &frame.released_resources {
         writer.string(resource)?;
@@ -669,6 +725,238 @@ fn checked_duplex_u16(value: f64) -> Option<u16> {
         .then_some(value as u16)
 }
 
+fn stop_worker(host: &mut HostState) {
+    if let Err(error) = stop_worker_checked(host) {
+        set_error(host, error);
+    }
+}
+
+fn stop_worker_checked(host: &mut HostState) -> Result<(), String> {
+    if let Some(runtime) = &mut host.worker_runtime {
+        runtime.request_stop_and_wait();
+    }
+    if let Some(mut bridge) = host.worker_bridge.take() {
+        bridge.detach();
+    }
+    if let Some(mut runtime) = host.worker_runtime.take() {
+        if let Err(error) = runtime.destroy_and_join() {
+            return Err(format!("worker teardown: {error}"));
+        }
+    }
+    Ok(())
+}
+
+/// Stop asynchronous producers while the UI realm and trace transaction are
+/// still alive. The caller closes the trace before freeing the native handle;
+/// this preserves cancellation and exit facts in the recording.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_stop_async(handle: *mut HostState) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    if let Err(error) = stop_worker_checked(host) {
+        set_error(host, error);
+        return -1;
+    }
+    if let Some(provider) = &host.offload {
+        provider.shutdown();
+    }
+    clear_error(host);
+    0
+}
+
+impl Drop for HostState {
+    fn drop(&mut self) {
+        stop_worker(self);
+        if let Some(provider) = self.offload.take() {
+            provider.shutdown();
+        }
+    }
+}
+
+fn ensure_async_trace(
+    host: &mut HostState,
+) -> Result<Option<Arc<worker_trace::WorkerTrace>>, String> {
+    if replay::mode(host) == replay::Mode::Live {
+        return Ok(None);
+    }
+    if let Some(lane) = &host.worker_trace {
+        return Ok(Some(lane.clone()));
+    }
+    let lane = worker_trace::WorkerTrace::new(replay::mode(host));
+    // The configure transaction began before the first async resource existed.
+    // Its empty prefix opens the same lane used by every later UI transaction.
+    lane.begin_batch(&[])?;
+    host.worker_trace = Some(lane.clone());
+    Ok(Some(lane))
+}
+
+fn start_worker(host: &mut HostState) -> Result<(), String> {
+    if host.worker_runtime.is_some() {
+        return Ok(());
+    }
+    let Some(program) = &host.worker_program else {
+        return Ok(());
+    };
+    let config = &program.config;
+    let declaration: worker::WorkerDeclaration =
+        serde_json::from_value(config["declaration"].clone()).map_err(|e| e.to_string())?;
+    let policy = worker::WorkerPolicy {
+        required_capabilities: serde_json::from_value(
+            config["policy"]["requiredCapabilities"].clone(),
+        )
+        .map_err(|e| e.to_string())?,
+        allowed_http_origins: serde_json::from_value(
+            config["policy"]["allowedHttpOrigins"].clone(),
+        )
+        .map_err(|e| e.to_string())?,
+    };
+    let integer = |field: &str| -> Result<u32, String> {
+        config["limits"][field]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| format!("invalid worker limit {field}"))
+    };
+    let limits = worker::WorkerLimits {
+        heap_bytes: integer("heapBytes")? as usize,
+        stack_bytes: integer("stackBytes")? as usize,
+        turn_budget_micros: integer("turnBudgetMicros")?,
+        window_micros: integer("windowMicros")?,
+        quota_micros: integer("quotaMicros")?,
+    };
+    let arguments = (
+        declaration,
+        policy,
+        limits,
+        if replay::is_replay(host) {
+            None
+        } else {
+            program.notify
+        },
+    );
+    host.worker_instance = host
+        .worker_instance
+        .checked_add(1)
+        .ok_or("worker instance counter exhausted")?;
+    let mut runtime = if let Some(trace) = &host.worker_trace {
+        worker::WorkerRuntime::spawn_traced(
+            &program.bytecode,
+            BINDING_GENERATION,
+            host.tick_hz,
+            arguments.0,
+            arguments.1,
+            arguments.2,
+            arguments.3,
+            trace.clone(),
+            format!(
+                "worker:{}:{}",
+                config["nativeGeneration"], host.worker_instance
+            ),
+        )
+    } else {
+        worker::WorkerRuntime::spawn(
+            &program.bytecode,
+            BINDING_GENERATION,
+            host.tick_hz,
+            arguments.0,
+            arguments.1,
+            arguments.2,
+            arguments.3,
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    if let Err(error) = runtime.wait_ready(std::time::Duration::from_secs(2)) {
+        runtime.request_stop_and_wait();
+        let _ = runtime.destroy_and_join();
+        return Err(error.to_string());
+    }
+    let attached = host
+        .guest
+        .with(|ctx| runtime.attach_ui(ctx.as_raw().as_ptr()))
+        .ok_or("UI context is not initialized")?;
+    match attached {
+        Ok(bridge) => {
+            host.worker_bridge = Some(bridge);
+            host.worker_runtime = Some(runtime);
+            Ok(())
+        }
+        Err(error) => {
+            runtime.request_stop_and_wait();
+            let _ = runtime.destroy_and_join();
+            Err(error.to_string())
+        }
+    }
+}
+
+/// Configure a real QJBC worker before loading its UI guest. The consuming
+/// package admission layer verifies the signed descriptor and origin grants.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_configure_worker(
+    handle: *mut HostState,
+    bytes: *const u8,
+    length: usize,
+    config_json: *const c_char,
+    notify: Option<unsafe extern "C" fn()>,
+) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    let result = (|| -> Result<PendingWorker, String> {
+        if host.guest_loaded || host.worker_program.is_some() {
+            return Err("worker must be configured once before guest evaluation".into());
+        }
+        if bytes.is_null() || length == 0 || length > 64 * 1024 * 1024 || config_json.is_null() {
+            return Err("invalid worker bytecode/configuration".into());
+        }
+        let json = CStr::from_ptr(config_json).to_bytes();
+        if json.len() > 64 * 1024 {
+            return Err("worker configuration exceeds 64 KiB".into());
+        }
+        let config: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+        if config["protocolVersion"] != 1
+            || config["bindingGeneration"] != BINDING_GENERATION
+            || config["tickHz"] != host.tick_hz
+            || config["nativeGeneration"]
+                .as_u64()
+                .filter(|v| *v > 0 && *v <= u32::MAX as u64)
+                .is_none()
+            || config["expectedRuntimeAbi"] != bytecode::runtime_abi()
+        {
+            return Err("worker protocol/binding/tick/ABI mismatch".into());
+        }
+        let bytecode = std::slice::from_raw_parts(bytes, length);
+        bytecode::validate(
+            bytecode,
+            bytecode::BytecodeExpectation {
+                kind: bytecode::BytecodeKind::Script,
+                binding_generation: BINDING_GENERATION,
+                tick_hz: host.tick_hz,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(PendingWorker {
+            bytecode: bytecode.to_vec(),
+            config,
+            notify,
+        })
+    })();
+    match result {
+        Ok(program) => {
+            if let Err(error) = ensure_async_trace(host) {
+                set_error(host, error);
+                return -1;
+            }
+            host.worker_program = Some(program);
+            clear_error(host);
+            0
+        }
+        Err(e) => {
+            set_error(host, e);
+            -1
+        }
+    }
+}
+
 fn checked_duplex_u32(value: f64) -> Option<u32> {
     (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
         .then_some(value as u32)
@@ -681,6 +969,10 @@ fn install_bridge(
     outbound: Rc<RefCell<Vec<serde_json::Value>>>,
     duplex: Arc<duplex::DuplexRing>,
     auxiliary: Option<(i32, f32, f32)>,
+    compositor_surfaces: &BTreeMap<String, i32>,
+    offload: Option<Arc<offload::OffloadHost>>,
+    trace_mode: replay::Mode,
+    trace_lane: Rc<RefCell<replay::ScalarLane>>,
 ) -> Result<(), String> {
     guest
         .with(|ctx| {
@@ -707,18 +999,26 @@ fn install_bridge(
             // values cross QuickJS, never a JSON envelope.  The ring remains
             // owner-thread serialized, so this closure must not be moved to a
             // worker or retained after the host is destroyed.
-            let duplex_emit_ring = duplex
-                .claim_egress_producer()
-                .ok_or_else(|| Exception::throw_type(&ctx, "duplex egress producer is already claimed"))?;
+            let duplex_emit_ring = duplex.claim_egress_producer().ok_or_else(|| {
+                Exception::throw_type(&ctx, "duplex egress producer is already claimed")
+            })?;
             let duplex_emit = Function::new(
                 ctx.clone(),
-                move |ctx: Ctx<'_>, msg_type: f64, flags: f64, target_id: f64, arg0: f64, arg1: f64| {
-                    let msg_type = checked_duplex_u16(msg_type)
-                        .ok_or_else(|| Exception::throw_type(&ctx, "duplex msgType must be a uint16"))?;
-                    let flags = checked_duplex_u16(flags)
-                        .ok_or_else(|| Exception::throw_type(&ctx, "duplex flags must be a uint16"))?;
-                    let target_id = checked_duplex_u32(target_id)
-                        .ok_or_else(|| Exception::throw_type(&ctx, "duplex targetId must be a uint32"))?;
+                move |ctx: Ctx<'_>,
+                      msg_type: f64,
+                      flags: f64,
+                      target_id: f64,
+                      arg0: f64,
+                      arg1: f64| {
+                    let msg_type = checked_duplex_u16(msg_type).ok_or_else(|| {
+                        Exception::throw_type(&ctx, "duplex msgType must be a uint16")
+                    })?;
+                    let flags = checked_duplex_u16(flags).ok_or_else(|| {
+                        Exception::throw_type(&ctx, "duplex flags must be a uint16")
+                    })?;
+                    let target_id = checked_duplex_u32(target_id).ok_or_else(|| {
+                        Exception::throw_type(&ctx, "duplex targetId must be a uint32")
+                    })?;
                     if !arg0.is_finite()
                         || !arg1.is_finite()
                         || arg0.abs() > f32::MAX as f64
@@ -729,15 +1029,13 @@ fn install_bridge(
                             "duplex arguments must be finite float32 values",
                         ));
                     }
-                    Ok::<bool, rquickjs::Error>(duplex_emit_ring.push(
-                        duplex::DuplexMessage {
-                            msg_type,
-                            flags,
-                            target_id,
-                            arg0: arg0 as f32,
-                            arg1: arg1 as f32,
-                        },
-                    ))
+                    Ok::<bool, rquickjs::Error>(duplex_emit_ring.push(duplex::DuplexMessage {
+                        msg_type,
+                        flags,
+                        target_id,
+                        arg0: arg0 as f32,
+                        arg1: arg1 as f32,
+                    }))
                 },
             )?;
             let duplex_bridge = Object::new(ctx.clone())?;
@@ -792,18 +1090,34 @@ fn install_bridge(
             let register_surface = Function::new(
                 ctx.clone(),
                 move |ctx: Ctx<'_>, package: String, kind: String, payload: String| {
-                    if package.is_empty() || package.len() > 160
+                    if package.is_empty()
+                        || package.len() > 160
                         || !matches!(kind.as_str(), "glass" | "platformTexture")
-                        || payload.len() > 8192 {
+                        || payload.len() > 8192
+                    {
                         return Err(Exception::throw_type(&ctx, "invalid compositor provider"));
                     }
                     let data: serde_json::Value = serde_json::from_str(&payload)
                         .map_err(|_| Exception::throw_type(&ctx, "invalid surface parameters"))?;
                     if !data.is_object() {
-                        return Err(Exception::throw_type(&ctx, "surface parameters must be an object"));
+                        return Err(Exception::throw_type(
+                            &ctx,
+                            "surface parameters must be an object",
+                        ));
                     }
                     let mut list = surface_nodes.borrow_mut();
-                    let existing = list.iter().position(|n| n.kind == "hostSurface" && n.video_id == package);
+                    if list.iter().any(|n| {
+                        n.kind == "hostSurface" && n.video_id == package && n.surface < 100
+                    }) {
+                        return Err(rquickjs::Error::new_from_js_message(
+                            "surface",
+                            "provider",
+                            "application surface is host-owned",
+                        ));
+                    }
+                    let existing = list
+                        .iter()
+                        .position(|n| n.kind == "hostSurface" && n.video_id == package);
                     let handle = if let Some(index) = existing {
                         list[index].surface
                     } else {
@@ -812,17 +1126,28 @@ fn install_bridge(
                         }
                         let mut next = next_surface.borrow_mut();
                         let handle = *next;
-                        *next = next.checked_add(1)
-                            .ok_or_else(|| Exception::throw_type(&ctx, "surface handles exhausted"))?;
+                        *next = next.checked_add(1).ok_or_else(|| {
+                            Exception::throw_type(&ctx, "surface handles exhausted")
+                        })?;
                         handle
                     };
-                    let descriptor = serde_json::json!({"kind": kind, "parameters": data}).to_string();
+                    let descriptor =
+                        serde_json::json!({"kind": kind, "parameters": data}).to_string();
                     let meta = NodeMeta {
-                        id: -handle, kind: "hostSurface".into(), asset: descriptor,
-                        video_id: package.clone(), fit: "fill".into(), texture: -1,
-                        surface: handle, from_pack: false,
+                        id: -handle,
+                        kind: "hostSurface".into(),
+                        asset: descriptor,
+                        video_id: package.clone(),
+                        fit: "fill".into(),
+                        texture: -1,
+                        surface: handle,
+                        from_pack: false,
                     };
-                    if let Some(index) = existing { list[index] = meta; } else { list.push(meta); }
+                    if let Some(index) = existing {
+                        list[index] = meta;
+                    } else {
+                        list.push(meta);
+                    }
                     let ui: Object = ctx.globals().get("ui")?;
                     let surfaces: Object = ui.get("__surfaces")?;
                     surfaces.set(package, handle)?;
@@ -831,14 +1156,27 @@ fn install_bridge(
             )?;
             bridge.set("registerSurface", register_surface)?;
             let release_nodes = nodes.clone();
-            bridge.set("releaseSurface", Function::new(ctx.clone(), move |ctx: Ctx<'_>, package: String| {
-                release_nodes.borrow_mut().retain(|n| !(n.kind == "hostSurface" && n.video_id == package));
-                let ui: Object = ctx.globals().get("ui")?;
-                let surfaces: Object = ui.get("__surfaces")?;
-                surfaces.remove(package)?;
-                Ok::<(), rquickjs::Error>(())
-            })?)?;
-
+            bridge.set(
+                "releaseSurface",
+                Function::new(ctx.clone(), move |ctx: Ctx<'_>, package: String| {
+                    if release_nodes.borrow().iter().any(|n| {
+                        n.kind == "hostSurface" && n.video_id == package && n.surface < 100
+                    }) {
+                        return Err(rquickjs::Error::new_from_js_message(
+                            "surface",
+                            "provider",
+                            "application surface is host-owned",
+                        ));
+                    }
+                    release_nodes
+                        .borrow_mut()
+                        .retain(|n| !(n.kind == "hostSurface" && n.video_id == package));
+                    let ui: Object = ctx.globals().get("ui")?;
+                    let surfaces: Object = ui.get("__surfaces")?;
+                    surfaces.remove(package)?;
+                    Ok::<(), rquickjs::Error>(())
+                })?,
+            )?;
 
             // Host extension, deliberately kept outside canonical `ui.*`:
             // Flutter overlays need the committed logical rectangle of a
@@ -850,6 +1188,16 @@ fn install_bridge(
                 Function::new(ctx.clone(), move |ctx, id| js_layout(ctx, &layout_ops, id))?;
             bridge.set("getLayout", get_layout)?;
             globals.set("pocket", bridge)?;
+            if let Some(provider) = offload.clone() {
+                offload::OffloadHost::install(ctx.clone(), provider, None)?;
+            } else {
+                offload::OffloadHost::install_disconnected(ctx.clone())?;
+            }
+
+            // Date.now/Math.random/performance.now tracing is an explicit
+            // record/replay debug lane. Live mode leaves every global intact;
+            // the Date constructor itself is never replaced.
+            replay::install_scalar_hooks(&ctx, trace_mode, trace_lane)?;
 
             // `CompositorSurface` is an official framework primitive.  Its
             // package prop is resolved by native-tree.ts through this map;
@@ -862,6 +1210,7 @@ fn install_bridge(
             let surfaces = Object::new(ctx.clone())?;
             surfaces.set(POCKET_FLUTTER_SURFACE_PACKAGE, POCKET_FLUTTER_SURFACE)?;
             ui.set("__surfaces", surfaces)?;
+            install_compositor_apps(&ctx, &nodes, compositor_surfaces)?;
             if let Some((root, width, height)) = auxiliary {
                 let descriptor = Object::new(ctx.clone())?;
                 descriptor.set("root", root)?;
@@ -873,6 +1222,34 @@ fn install_bridge(
         })
         .ok_or_else(|| "guest context is not initialized".to_owned())?
         .map_err(|error| error.to_string())
+}
+
+/// Extend only the trusted registry. Reinstalling the bridge would claim its
+/// single-producer duplex endpoint twice and recreate retained provider state.
+fn install_compositor_apps(
+    ctx: &Ctx<'_>,
+    nodes: &Rc<RefCell<Vec<NodeMeta>>>,
+    applications: &BTreeMap<String, i32>,
+) -> rquickjs::Result<()> {
+    let ui: Object = ctx.globals().get("ui")?;
+    let surfaces: Object = ui.get("__surfaces")?;
+    for (app_id, handle) in applications {
+        surfaces.set(app_id.as_str(), *handle)?;
+        let mut list = nodes.borrow_mut();
+        list.retain(|node| !(node.kind == "hostSurface" && node.surface == *handle));
+        list.push(NodeMeta {
+            id: -*handle,
+            kind: "hostSurface".into(),
+            asset: serde_json::json!({"kind":"application", "parameters":{"appId": app_id}})
+                .to_string(),
+            video_id: app_id.clone(),
+            fit: "fill".into(),
+            texture: -1,
+            surface: *handle,
+            from_pack: false,
+        });
+    }
+    Ok(())
 }
 
 fn auxiliary_descriptor(host: &HostState) -> Option<(i32, f32, f32)> {
@@ -964,7 +1341,7 @@ fn evaluate_guest(guest: &mut RquickjsGuest, source: &str, tick_hz: u32) -> Resu
 
 fn dispatch_guest(guest: &RquickjsGuest, function_name: &str, line: &str) -> Result<(), String> {
     guest
-        .with(|ctx| -> Result<(), String> {
+        .with_turn(|ctx| -> Result<(), String> {
             let value: Value = ctx
                 .globals()
                 .get(function_name)
@@ -990,7 +1367,7 @@ fn dispatch_duplex_event(
     message: duplex::DuplexMessage,
 ) -> Result<bool, String> {
     guest
-        .with(|ctx| -> Result<bool, String> {
+        .with_turn(|ctx| -> Result<bool, String> {
             let value: Value = ctx
                 .globals()
                 .get("__pocketDuplexEvent")
@@ -998,18 +1375,16 @@ fn dispatch_duplex_event(
             if value.is_undefined() || value.is_null() {
                 return Ok(false);
             }
-            let function = Function::from_js(&ctx, value)
-                .map_err(|error| quickjs_error(&ctx, error))?;
+            let function =
+                Function::from_js(&ctx, value).map_err(|error| quickjs_error(&ctx, error))?;
             function
-                .call::<_, ()>(
-                    (
-                        message.msg_type as u32,
-                        message.flags as u32,
-                        message.target_id,
-                        message.arg0,
-                        message.arg1,
-                    ),
-                )
+                .call::<_, ()>((
+                    message.msg_type as u32,
+                    message.flags as u32,
+                    message.target_id,
+                    message.arg0,
+                    message.arg1,
+                ))
                 .map_err(|error| quickjs_error(&ctx, error))?;
             Ok(true)
         })
@@ -1022,7 +1397,10 @@ fn dispatch_duplex_event(
 /// delivers the same `__pocketEvent` line to the guest, so a JS app does not
 /// need a second pointer protocol just because the host selected the
 /// lock-free transport.
-fn dispatch_duplex_pointer(host: &mut HostState, message: duplex::DuplexMessage) -> Result<(), String> {
+fn dispatch_duplex_pointer(
+    host: &mut HostState,
+    message: duplex::DuplexMessage,
+) -> Result<(), String> {
     const POINTER_MESSAGE_TYPE: u16 = 1;
     const POINTER_PHASE_MASK: u16 = 0x00ff;
     const POINTER_AUXILIARY_FLAG: u16 = 0x0100;
@@ -1094,7 +1472,7 @@ fn drain_duplex(host: &mut HostState) -> Result<i32, String> {
 /// official `ui.__viewport` object directly and leave their tree untouched.
 fn resize_guest_viewport(guest: &RquickjsGuest, width: f32, height: f32) -> Result<(), String> {
     guest
-        .with(|ctx| -> Result<(), String> {
+        .with_turn(|ctx| -> Result<(), String> {
             let globals = ctx.globals();
             let hook: Value = globals
                 .get("__pocketResizeViewport")
@@ -1597,6 +1975,72 @@ fn queue_motion(host: &mut HostState, message: &serde_json::Value) -> Result<(),
     Ok(())
 }
 
+// Independent raw text lane for terminal/editor-style guests using
+// onTextEvent. Flutter TextField's textInput.edit remains the sole IME lane
+// for framework TextInput, so those edits must not also enter this queue.
+fn queue_text(host: &mut HostState, message: &serde_json::Value) -> Result<(), String> {
+    let value = input_value(message);
+    let values: Vec<&serde_json::Value> = match value.as_array() {
+        Some(events) => events.iter().collect(),
+        None => vec![value],
+    };
+    if host.pending_text.len() + values.len() > 64 {
+        return Err("input.text queue exceeds 64 events".into());
+    }
+    let mut admitted = Vec::with_capacity(values.len());
+    for value in values {
+        let string = |field: &str, limit: usize| -> Result<String, String> {
+            let text = value
+                .get(field)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("input.text.{field} must be a string"))?;
+            if text.len() > limit {
+                return Err(format!("input.text.{field} is too long"));
+            }
+            Ok(text.to_owned())
+        };
+        let kind = value
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or("input.text.kind must be a string")?;
+        admitted.push(match kind {
+            "keyDown" | "keyUp" => TextEvent::Key {
+                key: string("key", 128)?,
+                pressed: kind == "keyDown",
+                repeat: value
+                    .get("repeat")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            },
+            "commit" => TextEvent::Commit(string("text", 4096)?),
+            "composition" => {
+                let text = string("text", 4096)?;
+                let length = text.encode_utf16().count() as u64;
+                let start = value
+                    .get("selectionStart")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("input.text.selectionStart must be an integer")?;
+                let end = value
+                    .get("selectionEnd")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("input.text.selectionEnd must be an integer")?;
+                if start > end || end > length {
+                    return Err("input.text selection outside UTF-16 text".into());
+                }
+                TextEvent::Composition {
+                    text,
+                    selection_start: start as u32,
+                    selection_end: end as u32,
+                }
+            }
+            "compositionEnd" => TextEvent::CompositionEnd,
+            _ => return Err("unknown input.text kind".into()),
+        });
+    }
+    host.pending_text.extend(admitted);
+    Ok(())
+}
+
 fn queue_input(host: &mut HostState, message: &serde_json::Value) -> Result<(), String> {
     let method = message
         .get("method")
@@ -1609,6 +2053,7 @@ fn queue_input(host: &mut HostState, message: &serde_json::Value) -> Result<(), 
         "input.axes" => queue_axes(host, message),
         "input.axis" | "input.axis.relative" => queue_relative_axis(host, message),
         "input.motion" => queue_motion(host, message),
+        "input.text" => queue_text(host, message),
         _ => Ok(()),
     }
 }
@@ -1631,6 +2076,16 @@ fn run_guest_touch_frame(
         hits.push(0);
         touch_surfaces.push(contact.surface);
     }
+    if let Some(worker) = &host.worker_runtime {
+        if let Some(error) = worker.last_error() {
+            return Err(format!("worker: {error}"));
+        }
+    }
+    if let Some(bridge) = &mut host.worker_bridge {
+        bridge.latch().map_err(|e| e.to_string())?;
+    }
+    host.external_work_pending = false;
+    let text = std::mem::take(&mut host.pending_text);
     let frame = GuestFrame {
         buttons: host.buttons,
         analog: host.analog,
@@ -1640,14 +2095,18 @@ fn run_guest_touch_frame(
         right_analog: host.right_analog,
         axis_deltas: &host.axis_deltas,
         motion: host.motion.as_ref(),
-        text: &[],
+        text: &text,
     };
     host.guest.frame(&frame).map_err(|error| {
         host.guest
             .last_error()
             .map(|detail| format!("{error:?}: {detail}"))
             .unwrap_or_else(|| format!("{error:?}"))
-    })
+    })?;
+    if let Some(bridge) = &mut host.worker_bridge {
+        bridge.mark_frame_consumed();
+    }
+    Ok(())
 }
 
 fn decode_draw_ops(
@@ -1655,7 +2114,7 @@ fn decode_draw_ops(
     width: f32,
     height: f32,
     nodes: &[NodeMeta],
-    ui: &Ui,
+    ui: &mut Ui,
     generic_texture_handles: &mut HashSet<i32>,
 ) -> Result<Vec<FrameOp>, String> {
     let viewport = DamageRect::new(0, 0, width as i32, height as i32);
@@ -1745,6 +2204,16 @@ fn run_virtual_frames(
         }
     }
 
+    if first_guest_turn
+        && remaining_ticks == 0
+        && (!host.pending_text.is_empty() || host.external_work_pending)
+    {
+        let active = host.touches.clone();
+        run_guest_touch_frame(host, &active, &[])?;
+        host.axis_deltas.clear();
+        host.motion = None;
+    }
+
     // A normal host frame has no edge queue and advances one or more virtual
     // frames according to the fixed-step clock.  Held touches/buttons remain
     // active for each catch-up turn; one-shot axis/motion samples were cleared
@@ -1764,6 +2233,9 @@ fn run_virtual_frames(
 }
 
 fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String> {
+    // Advance known quiescent time before delivering this boundary's input.
+    // A virtual timer's due frame still runs the ordinary guest transaction.
+    let tick_count = demand::ticks_for_delta(host, delta_ms)?;
     // Service the binary host -> guest channel before any guest/core tick.
     // The standalone FFI step calls this same helper, so callers may either
     // explicitly pump input or rely on the ordinary frame boundary.
@@ -1773,7 +2245,6 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
     // gesture pump can observe DOWN followed by UP (or CANCEL).  When there
     // are no edges, preserve the ordinary held-contact frame semantics.
     let pending = std::mem::take(&mut host.pending_touch_frames);
-    let tick_count = fixed_tick_count(host, delta_ms);
     let guest_result = run_virtual_frames(host, pending, tick_count);
     guest_result?;
     let (cache_hit, (width, height), auxiliary_size, raster_revision) = {
@@ -1834,36 +2305,42 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
             (words, auxiliary_words)
         };
         let nodes = host.nodes.borrow().clone();
-        let core = host.ops.core().map_err(|error| format!("{error:?}"))?;
-        let mut generic_texture_handles = HashSet::new();
-        let ops = decode_draw_ops(
-            &words,
-            width,
-            height,
-            &nodes,
-            &core.ui,
-            &mut generic_texture_handles,
-        )?;
-        let auxiliary = match (auxiliary_size, auxiliary_words.as_deref()) {
-            (Some((auxiliary_width, auxiliary_height)), Some(auxiliary_words)) => {
-                Some(SurfaceFrame {
-                    width: auxiliary_width,
-                    height: auxiliary_height,
-                    ops: decode_draw_ops(
-                        auxiliary_words,
-                        auxiliary_width,
-                        auxiliary_height,
-                        &nodes,
-                        &core.ui,
-                        &mut generic_texture_handles,
-                    )?,
-                })
-            }
-            (Some(_), None) => return Err("auxiliary draw list was not produced".to_owned()),
-            (None, Some(_)) => return Err("auxiliary draw list has no viewport".to_owned()),
-            (None, None) => None,
+        let (ops, auxiliary, generic_texture_handles) = {
+            // GLYPH_RUN page preparation allocates shared core textures, so
+            // both primary and auxiliary DrawLists decode through one mutable
+            // Ui borrow and one deduplicated generic-resource set.
+            let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
+            let mut generic_texture_handles = HashSet::new();
+            let ops = decode_draw_ops(
+                &words,
+                width,
+                height,
+                &nodes,
+                &mut core.ui,
+                &mut generic_texture_handles,
+            )?;
+            let auxiliary = match (auxiliary_size, auxiliary_words.as_deref()) {
+                (Some((auxiliary_width, auxiliary_height)), Some(auxiliary_words)) => {
+                    Some(SurfaceFrame {
+                        width: auxiliary_width,
+                        height: auxiliary_height,
+                        ops: decode_draw_ops(
+                            auxiliary_words,
+                            auxiliary_width,
+                            auxiliary_height,
+                            &nodes,
+                            &mut core.ui,
+                            &mut generic_texture_handles,
+                        )?,
+                    })
+                }
+                (Some(_), None) => return Err("auxiliary draw list was not produced".to_owned()),
+                (None, Some(_)) => return Err("auxiliary draw list has no viewport".to_owned()),
+                (None, None) => None,
+            };
+            let generic_texture_handles = generic_texture_handles.into_iter().collect::<Vec<_>>();
+            (ops, auxiliary, generic_texture_handles)
         };
-        let generic_texture_handles = generic_texture_handles.into_iter().collect::<Vec<_>>();
         host.draw_cache = Some(FrameDrawCache {
             words,
             auxiliary_words,
@@ -1887,7 +2364,7 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
         assets
     };
     let core = host.ops.core().map_err(|error| format!("{error:?}"))?;
-    let released_resources = host
+    let mut released_resources = host
         .sent_resources
         .iter()
         .filter_map(|(asset, sent)| {
@@ -1896,6 +2373,10 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
             (texture_released || no_longer_referenced).then(|| asset.clone())
         })
         .collect::<Vec<_>>();
+    // HashMap iteration is intentionally randomized.  Resource lifecycle
+    // facts are a transport list, not draw order, so publish them in a
+    // stable asset order for deterministic frame/replay summaries.
+    released_resources.sort();
     for asset in &released_resources {
         host.sent_resources.remove(asset);
     }
@@ -1972,8 +2453,15 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
         host.sent_resources
             .insert(asset, SentResource { texture, revision });
     }
+    // `generic_texture_handles` is collected from a HashSet because several
+    // DrawOps may sample one generated page.  Do not let its randomized
+    // iteration order leak into the frame ABI or replay digest.
+    resources.sort_by(|left, right| left.asset.cmp(&right.asset));
     let events = host.outbound.borrow_mut().drain(..).collect();
     host.frame = host.frame.wrapping_add(1);
+    drop(core);
+    drop(nodes_borrow);
+    demand::capture(host);
     Ok(BuiltFrame {
         result: FrameResult {
             frame: host.frame,
@@ -2072,7 +2560,7 @@ fn append_draw_operation(
     out: &mut Vec<FrameOp>,
     operation: &Operation<'_>,
     nodes: &[NodeMeta],
-    ui: &Ui,
+    ui: &mut Ui,
     generic_texture_handles: &mut HashSet<i32>,
 ) -> Result<(), String> {
     let words = operation.words;
@@ -2096,6 +2584,9 @@ fn append_draw_operation(
                 direction: None,
                 size: None,
                 font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
                 radius: None,
                 points: None,
                 colors: None,
@@ -2143,6 +2634,9 @@ fn append_draw_operation(
                 direction: Some(direction),
                 size: None,
                 font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
                 radius: None,
                 points: None,
                 colors: None,
@@ -2150,6 +2644,95 @@ fn append_draw_operation(
                 uv: None,
                 clip: clip_of(operation.clip),
             });
+        }
+        3 => {
+            let header = *words
+                .get(1)
+                .ok_or_else(|| "GLYPH_RUN is missing its font slot and count".to_owned())?;
+            let color = *words
+                .get(2)
+                .ok_or_else(|| "GLYPH_RUN is missing its color".to_owned())?;
+            if header & 0x0000_ff00 != 0 {
+                return Err("GLYPH_RUN has nonzero reserved font-slot bits".to_owned());
+            }
+            let slot = (header & 0xff) as u8;
+            let count = (header >> 16) as usize;
+            let expected_len = 3usize
+                .checked_add(count.checked_mul(2).ok_or_else(|| {
+                    "GLYPH_RUN glyph count overflows its record length".to_owned()
+                })?)
+                .ok_or_else(|| "GLYPH_RUN record length overflow".to_owned())?;
+            if words.len() != expected_len {
+                return Err(format!(
+                    "GLYPH_RUN has {} words for {count} glyphs; expected {expected_len}",
+                    words.len()
+                ));
+            }
+            for glyph in 0..count {
+                let gid_word = words[4 + glyph * 2];
+                if gid_word & 0xffff_0000 != 0 {
+                    return Err(format!(
+                        "GLYPH_RUN glyph {glyph} has nonzero reserved gid bits"
+                    ));
+                }
+            }
+            if count == 0 || (color >> 24) == 0 {
+                return Ok(());
+            }
+            let Some((cell_w, cell_h, glyph_count)) = ui
+                .font_atlas(slot)
+                .map(|atlas| (atlas.cell_w as f32, atlas.cell_h as f32, atlas.glyph_count))
+            else {
+                // Match the pinned upstream raster/GPUI renderer: a run whose
+                // font slot is not installed contributes no pixels.
+                return Ok(());
+            };
+            for glyph in 0..count {
+                let xy = words[3 + glyph * 2];
+                let gid = (words[4 + glyph * 2] & 0xffff) as u16;
+                if gid >= glyph_count {
+                    // Upstream renderers skip out-of-range gids as well.
+                    continue;
+                }
+                let page = ui.prepare_glyph_page(slot, gid).ok_or_else(|| {
+                    format!("GLYPH_RUN could not prepare glyph page for slot {slot}, gid {gid}")
+                })?;
+                if !page.contains(gid) {
+                    return Err(format!(
+                        "GLYPH_RUN page for slot {slot}, gid {gid} does not contain the glyph"
+                    ));
+                }
+                let handle = page.handle as i32;
+                let asset = synthetic_texture_asset(handle);
+                generic_texture_handles.insert(handle);
+                let point = unpack_point(xy);
+                out.push(FrameOp {
+                    kind: "image".into(),
+                    x: point.x,
+                    y: point.y,
+                    w: cell_w,
+                    h: cell_h,
+                    text: None,
+                    asset: Some(asset),
+                    id: None,
+                    fit: None,
+                    color: Some(argb_from_abgr(color)),
+                    from_color: None,
+                    to_color: None,
+                    direction: None,
+                    size: None,
+                    font_slot: None,
+                    text_align: None,
+                    surface_handle: None,
+                    focused: None,
+                    radius: None,
+                    points: None,
+                    colors: None,
+                    uvs: None,
+                    uv: Some(page.uv(gid).to_vec()),
+                    clip: clip_of(operation.clip),
+                });
+            }
         }
         4 => {
             let (x, y, w, h) = unpack_rect(words[2], words[3]);
@@ -2210,6 +2793,9 @@ fn append_draw_operation(
                 direction: None,
                 size: None,
                 font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
                 radius: None,
                 points: None,
                 colors: None,
@@ -2270,6 +2856,9 @@ fn append_draw_operation(
                 direction: None,
                 size: None,
                 font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
                 radius: None,
                 points: Some(points),
                 colors: Some(colors),
@@ -2363,6 +2952,9 @@ fn append_draw_operation(
                 direction: None,
                 size: None,
                 font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
                 radius: None,
                 points: Some(points),
                 colors: None,
@@ -2421,6 +3013,9 @@ fn append_draw_operation(
                 direction: None,
                 size: Some(font_slot_px(font_slot)),
                 font_slot: Some(font_slot),
+                text_align: Some(((words[1] >> 8) & 0xff).min(2) as u8),
+                surface_handle: None,
+                focused: None,
                 radius: None,
                 points: None,
                 colors: None,
@@ -2434,10 +3029,17 @@ fn append_draw_operation(
             let y = f32::from_bits(words[3]);
             let w = f32::from_bits(words[4]);
             let h = f32::from_bits(words[5]);
+            let visible =
+                pocket_draw_ops::logical_rect(words[6], words[7]).intersect(operation.clip);
+            if visible.is_empty() {
+                return Ok(());
+            }
             let surface = words[1] as i32;
             let video = nodes
                 .iter()
-                .find(|node| (node.kind == "video" || node.kind == "hostSurface") && node.surface == surface)
+                .find(|node| {
+                    (node.kind == "video" || node.kind == "hostSurface") && node.surface == surface
+                })
                 .ok_or_else(|| {
                     format!("SURFACE_QUAD surface handle {surface} has no registered video asset")
                 })?;
@@ -2447,7 +3049,12 @@ fn append_draw_operation(
                 ));
             }
             out.push(FrameOp {
-                kind: if video.kind == "hostSurface" { "hostSurface" } else { "video" }.into(),
+                kind: if video.kind == "hostSurface" {
+                    "hostSurface"
+                } else {
+                    "video"
+                }
+                .into(),
                 x,
                 y,
                 w,
@@ -2462,12 +3069,15 @@ fn append_draw_operation(
                 direction: None,
                 size: None,
                 font_slot: None,
+                text_align: None,
+                surface_handle: Some(surface),
+                focused: Some(words[8] & 1 != 0),
                 radius: None,
                 points: None,
                 colors: None,
                 uvs: None,
                 uv: None,
-                clip: clip_of(operation.clip),
+                clip: clip_of(visible),
             });
         }
         unsupported => {
@@ -2787,10 +3397,17 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
     install_text_measure(&mut ui, text_metrics.clone());
     let _ = ui.set_tick_rate(tick_hz);
     let ops = OpContext::from_ui(ui);
+    // This low-level embedding owns the complete retained UI engine. Physics
+    // is local deterministic core work, not a platform permission/provider.
+    // Enable its generated bindings before mounting the QuickJS realm; no
+    // world is created or ticked until the guest explicitly requests one.
     // This host owns the Flutter compositor/texture bridge.  Enabling the
     // capability before mounting exposes ui.setCompositorSurface to JS and
     // causes Surface nodes to produce SURFACE_QUAD DrawOps.
-    if let Err(error) = ops.set_compositor_enabled(true) {
+    if let Err(error) = ops
+        .set_physics_enabled(true)
+        .and_then(|_| ops.set_compositor_enabled(true))
+    {
         let (error_duplex, error_ingress_consumer) = new_duplex_channel();
         return Box::into_raw(Box::new(HostState {
             ops,
@@ -2807,11 +3424,22 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
             tick_hz,
             tick_remainder_ms: 0.0,
             clock_started: false,
+            demand: demand::Demand::default(),
+            trace: replay::TraceClock::default(),
+            trace_output: c_string("{\"idleMs\":[],\"scalars\":[]}"),
             viewport_width: width as f32,
             viewport_height: height as f32,
             raster_density,
             auxiliary_viewport: None,
+            compositor_surfaces: BTreeMap::new(),
             guest_loaded: false,
+            worker_program: None,
+            worker_runtime: None,
+            worker_bridge: None,
+            worker_trace: None,
+            worker_instance: 0,
+            offload: None,
+            offload_output: c_string(""),
             touches: Vec::new(),
             pending_touch_frames: Vec::new(),
             buttons: 0,
@@ -2819,6 +3447,8 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
             right_analog: 0x8080,
             axis_deltas: Vec::new(),
             motion: None,
+            pending_text: Vec::new(),
+            external_work_pending: false,
             text_metrics: text_metrics.clone(),
             sent_resources: HashMap::new(),
             draw_cache: None,
@@ -2859,11 +3489,22 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
             tick_hz,
             tick_remainder_ms: 0.0,
             clock_started: false,
+            demand: demand::Demand::default(),
+            trace: replay::TraceClock::default(),
+            trace_output: c_string("{\"idleMs\":[],\"scalars\":[]}"),
             viewport_width: width as f32,
             viewport_height: height as f32,
             raster_density,
             auxiliary_viewport: None,
+            compositor_surfaces: BTreeMap::new(),
             guest_loaded: false,
+            worker_program: None,
+            worker_runtime: None,
+            worker_bridge: None,
+            worker_trace: None,
+            worker_instance: 0,
+            offload: None,
+            offload_output: c_string(""),
             touches: Vec::new(),
             pending_touch_frames: Vec::new(),
             buttons: 0,
@@ -2871,6 +3512,8 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
             right_analog: 0x8080,
             axis_deltas: Vec::new(),
             motion: None,
+            pending_text: Vec::new(),
+            external_work_pending: false,
             text_metrics: text_metrics.clone(),
             sent_resources: HashMap::new(),
             draw_cache: None,
@@ -2898,11 +3541,22 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         tick_hz,
         tick_remainder_ms: 0.0,
         clock_started: false,
+        demand: demand::Demand::default(),
+        trace: replay::TraceClock::default(),
+        trace_output: c_string("{\"idleMs\":[],\"scalars\":[]}"),
         viewport_width: width as f32,
         viewport_height: height as f32,
         raster_density,
         auxiliary_viewport: None,
+        compositor_surfaces: BTreeMap::new(),
         guest_loaded: false,
+        worker_program: None,
+        worker_runtime: None,
+        worker_bridge: None,
+        worker_trace: None,
+        worker_instance: 0,
+        offload: None,
+        offload_output: c_string(""),
         touches: Vec::new(),
         pending_touch_frames: Vec::new(),
         buttons: 0,
@@ -2910,6 +3564,8 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         right_analog: 0x8080,
         axis_deltas: Vec::new(),
         motion: None,
+        pending_text: Vec::new(),
+        external_work_pending: false,
         text_metrics: text_metrics.clone(),
         sent_resources: HashMap::new(),
         draw_cache: None,
@@ -2926,10 +3582,160 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         outbound,
         host.duplex.clone(),
         auxiliary_descriptor(&host),
+        &host.compositor_surfaces,
+        host.offload.clone(),
+        replay::mode(&host),
+        host.trace.scalar_lane(),
     ) {
         set_error(&mut host, error);
     }
     Box::into_raw(Box::new(host))
+}
+
+/// Select the native external-clock trace mode before the first guest load or
+/// eval.  0 is live (the default), 1 records actual idle elapsed time, and 2
+/// replays intervals/scalars supplied by `pocket_trace_clock_begin_json`.
+fn refresh_trace_hooks(host: &HostState) -> Result<(), String> {
+    let mode = replay::mode(host);
+    let lane = host.trace.scalar_lane();
+    host.guest
+        .with(|ctx| {
+            replay::install_scalar_hooks(&ctx, mode, lane)
+                .map_err(|error| quickjs_error(&ctx, error))
+        })
+        .ok_or_else(|| "guest context is not initialized".to_owned())?
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_trace_clock_mode(handle: *mut HostState, mode: u32) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    let was_replay = replay::is_replay(host);
+    match replay::set_mode(host, mode).and_then(|()| {
+        if was_replay && mode == 0 {
+            demand::leave_replay(host);
+        }
+        refresh_trace_hooks(host)
+    }) {
+        Ok(()) => {
+            clear_error(host);
+            0
+        }
+        Err(error) => {
+            set_error(host, error);
+            -1
+        }
+    }
+}
+
+/// Begin one host FFI transaction. In record/live mode the scalar is ignored;
+/// replay consumes it as a one-item interval array. NaN denotes an empty
+/// array for the scalar ABI. Use the JSON entry point when a transaction can
+/// cross more than one idle external boundary.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_trace_clock_begin(handle: *mut HostState, elapsed_ms: f64) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    match replay::begin_scalar(host, elapsed_ms) {
+        Ok(()) => {
+            clear_error(host);
+            0
+        }
+        Err(error) => {
+            set_error(host, error);
+            -1
+        }
+    }
+}
+
+/// Begin one host FFI transaction with an ordered trace envelope, for example
+/// `{"idleMs":[12.5,0],"scalars":[{"kind":"mathRandom","value":0.25}]}`.
+/// A legacy bare idle array is accepted. Record/live mode intentionally
+/// ignores the payload. Replay validates and consumes each value in order.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_trace_clock_begin_json(
+    handle: *mut HostState,
+    intervals: *const c_char,
+) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    let Some(intervals) = intervals.as_ref() else {
+        set_error(host, "null trace clock begin JSON");
+        return -1;
+    };
+    let intervals = match CStr::from_ptr(intervals).to_str() {
+        Ok(intervals) => intervals,
+        Err(_) => {
+            set_error(host, "trace clock begin JSON must be UTF-8");
+            return -1;
+        }
+    };
+    match replay::begin_json(host, intervals) {
+        Ok(()) => {
+            clear_error(host);
+            0
+        }
+        Err(error) => {
+            set_error(host, error);
+            -1
+        }
+    }
+}
+
+/// End one host FFI transaction and return the sum of its intervals. The
+/// ordered values remain available through `pocket_trace_clock_last_json`;
+/// callers that need only deterministic replay should use the JSON end ABI.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_trace_clock_end(handle: *mut HostState) -> f64 {
+    let Some(host) = handle.as_mut() else {
+        return f64::NAN;
+    };
+    match replay::end(host) {
+        Ok(total) => {
+            host.trace_output = c_string(&replay::last_json(host));
+            clear_error(host);
+            total
+        }
+        Err(error) => {
+            set_error(host, error);
+            f64::NAN
+        }
+    }
+}
+
+/// End one host FFI transaction and return its ordered elapsed array as a
+/// borrowed NUL-terminated UTF-8 string. The pointer remains valid until the
+/// next trace-clock JSON/last call or host destruction.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_trace_clock_end_json(handle: *mut HostState) -> *const c_char {
+    let Some(host) = handle.as_mut() else {
+        return ptr::null();
+    };
+    match replay::end_json(host) {
+        Ok(json) => {
+            host.trace_output = c_string(&json);
+            clear_error(host);
+            host.trace_output.as_ptr()
+        }
+        Err(error) => {
+            set_error(host, error);
+            ptr::null()
+        }
+    }
+}
+
+/// Fetch the last completed ordered transaction after using the scalar end
+/// ABI. This does not open or close a transaction.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_trace_clock_last_json(handle: *mut HostState) -> *const c_char {
+    let Some(host) = handle.as_mut() else {
+        return ptr::null();
+    };
+    host.trace_output = c_string(&replay::last_json(host));
+    host.trace_output.as_ptr()
 }
 
 /// Resize a mounted PocketJS guest in place.
@@ -2969,6 +3775,7 @@ pub unsafe extern "C" fn pocket_resize_viewport(
     }
 
     let result = (|| -> Result<(), String> {
+        demand::before_external(host)?;
         {
             let mut core = host
                 .ops
@@ -3004,6 +3811,260 @@ pub unsafe extern "C" fn pocket_resize_viewport(
         }
         Err(error) => {
             set_error(host, error);
+            -1
+        }
+    }
+}
+
+/// Register a trusted asynchronous offload provider before guest evaluation.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_configure_offload(
+    handle: *mut HostState,
+    config: *const c_char,
+    notify: Option<unsafe extern "C" fn()>,
+) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    let result = (|| -> Result<Arc<offload::OffloadHost>, String> {
+        if host.guest_loaded || host.offload.is_some() || config.is_null() {
+            return Err("offload provider must be configured once before evaluation".into());
+        }
+        let bytes = CStr::from_ptr(config).to_bytes();
+        if bytes.len() > 16384 {
+            return Err("offload config exceeds 16 KiB".into());
+        }
+        let config: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        let number = |field: &str| {
+            config[field]
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| *v > 0)
+                .ok_or_else(|| format!("invalid offload {field}"))
+        };
+        let generation = number("generation")?;
+        let session = number("session")?;
+        let timeout = number("timeoutMs")?;
+        if timeout > 60000 {
+            return Err("offload timeout exceeds 60s".into());
+        }
+        let methods: Vec<String> =
+            serde_json::from_value(config["methods"].clone()).map_err(|e| e.to_string())?;
+        if methods.is_empty()
+            || methods.len() > 64
+            || methods.iter().any(|s| {
+                s.is_empty()
+                    || s.len() > 64
+                    || !s.bytes().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(&c)
+                    })
+            })
+        {
+            return Err("invalid offload method allowlist".into());
+        }
+        let timeout = std::time::Duration::from_millis(timeout as u64);
+        Ok(if let Some(trace) = ensure_async_trace(host)? {
+            offload::OffloadHost::new_traced(
+                generation,
+                session,
+                timeout,
+                methods,
+                if replay::is_replay(host) {
+                    None
+                } else {
+                    notify
+                },
+                trace,
+                format!("offload:{generation}"),
+            )
+        } else {
+            offload::OffloadHost::new(generation, session, timeout, methods, notify)
+        })
+    })();
+    match result {
+        Ok(provider) => {
+            let installed = host
+                .guest
+                .with(|ctx| offload::OffloadHost::install(ctx, provider.clone(), None));
+            match installed {
+                Some(Ok(())) => {
+                    host.offload = Some(provider);
+                    clear_error(host);
+                    0
+                }
+                _ => {
+                    provider.shutdown();
+                    set_error(host, "offload UI installation failed");
+                    -1
+                }
+            }
+        }
+        Err(e) => {
+            set_error(host, e);
+            -1
+        }
+    }
+}
+
+/// Pop one bounded provider request/cancellation on the UI owner thread.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_offload_take(
+    handle: *mut HostState,
+    cancelled: u32,
+) -> *const c_char {
+    let Some(host) = handle.as_mut() else {
+        return ptr::null();
+    };
+    let Some(provider) = &host.offload else {
+        return ptr::null();
+    };
+    let request = if cancelled == 0 {
+        provider.take_request()
+    } else {
+        provider.take_cancellation()
+    };
+    let Some(request) = request else {
+        return ptr::null();
+    };
+    host.offload_output = c_string(&serde_json::json!({
+        "generation":request.generation,"session":request.session,"id":request.id,
+        "method":request.method,"payload":request.payload,"timeoutMicros":request.timeout.as_micros() as u64,
+    }).to_string());
+    host.offload_output.as_ptr()
+}
+
+/// Observe native replies without consuming them. No periodic probe is used;
+/// Dart checks this only while handling a native provider notification.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_offload_has_replies(handle: *const HostState) -> u32 {
+    handle
+        .as_ref()
+        .and_then(|host| host.offload.as_ref())
+        .map(|provider| u32::from(provider.has_replies()))
+        .unwrap_or(0)
+}
+
+/// Completion is generation/session/id scoped; stale or duplicate results fail.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_offload_complete(
+    handle: *mut HostState,
+    record: *const c_char,
+) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    let Some(provider) = &host.offload else {
+        return -1;
+    };
+    if record.is_null() {
+        return -1;
+    }
+    let bytes = CStr::from_ptr(record).to_bytes();
+    if bytes.len() > 16384 {
+        return -1;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return -1;
+    };
+    let Some(generation) = value["generation"]
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+    else {
+        return -1;
+    };
+    let Some(session) = value["session"]
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+    else {
+        return -1;
+    };
+    let Some(id) = value["id"].as_u64() else {
+        return -1;
+    };
+    let result = match (value["payload"].as_str(), value["error"].as_str()) {
+        (Some(payload), None) => Ok(payload.to_owned()),
+        (None, Some(error)) => Err(error.to_owned()),
+        _ => return -1,
+    };
+    if provider.complete(generation, session, id, result) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Install a trusted application-to-surface registry before evaluation.
+/// JS selects layout/focus with official CompositorSurface nodes; guest code
+/// cannot register application packages through the dynamic texture bridge.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_configure_compositor(
+    handle: *mut HostState,
+    registry: *const c_char,
+) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    if host.guest_loaded || registry.is_null() {
+        set_error(
+            host,
+            "compositor registry must be configured before guest load",
+        );
+        return -1;
+    }
+    let result = (|| -> Result<BTreeMap<String, i32>, String> {
+        let bytes = CStr::from_ptr(registry).to_bytes();
+        if bytes.len() > 16384 {
+            return Err("compositor registry exceeds 16 KiB".into());
+        }
+        let map: BTreeMap<String, i32> =
+            serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        if map.len() > 62 {
+            return Err("too many compositor applications".into());
+        }
+        let mut handles = HashSet::new();
+        for (id, handle) in &map {
+            if id.is_empty()
+                || id.len() > 128
+                || !id.as_bytes()[0].is_ascii_alphanumeric()
+                || !id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+                || id == POCKET_FLUTTER_SURFACE_PACKAGE
+                || !(2..=63).contains(handle)
+                || !handles.insert(*handle)
+            {
+                return Err("invalid or duplicate compositor application handle".into());
+            }
+        }
+        Ok(map)
+    })();
+    match result {
+        Ok(map) => {
+            if !host.compositor_surfaces.is_empty() && host.compositor_surfaces != map {
+                set_error(host, "compositor registry is already configured");
+                return -1;
+            }
+            let result = host
+                .guest
+                .with(|ctx| install_compositor_apps(&ctx, &host.nodes, &map));
+            match result {
+                Some(Ok(())) => {
+                    host.compositor_surfaces = map;
+                    clear_error(host);
+                    0
+                }
+                Some(Err(e)) => {
+                    set_error(host, e.to_string());
+                    -1
+                }
+                None => {
+                    set_error(host, "guest context is not initialized");
+                    -1
+                }
+            }
+        }
+        Err(e) => {
+            set_error(host, e);
             -1
         }
     }
@@ -3087,6 +4148,10 @@ pub unsafe extern "C" fn pocket_enable_auxiliary(
         host.outbound.clone(),
         host.duplex.clone(),
         auxiliary_descriptor(host),
+        &host.compositor_surfaces,
+        host.offload.clone(),
+        replay::mode(host),
+        host.trace.scalar_lane(),
     ) {
         set_error(host, error);
         return -1;
@@ -3123,6 +4188,7 @@ fn read_application_file(path: &CStr, limit: u64, label: &str) -> Result<Vec<u8>
 }
 
 fn reset_host_for_load(host: &mut HostState) {
+    stop_worker(host);
     host.nodes.borrow_mut().clear();
     // A reload is a channel-generation boundary. Never clear cursors in an
     // Arc that may still be borrowed by a background Dart isolate.
@@ -3137,13 +4203,19 @@ fn reset_host_for_load(host: &mut HostState) {
     host.right_analog = 0x8080;
     host.axis_deltas.clear();
     host.motion = None;
+    host.pending_text.clear();
+    host.external_work_pending = false;
     host.outbound.borrow_mut().clear();
-    host.sent_resources.clear();
+    // Keep the last published keys until the next frame computes releases.
+    // That frame compares the new DrawList and generation-tagged core handles
+    // against this set, so a guest reload retires old decoded images (including
+    // glyph pages) through the same resource lifecycle as ordinary frames.
     host.draw_cache = None;
     host.frame_json_cache = None;
     host.frame = 0;
     host.tick_remainder_ms = 0.0;
     host.clock_started = false;
+    host.demand = demand::Demand::default();
     host.text_metrics.borrow_mut().clear();
 }
 
@@ -3215,7 +4287,12 @@ fn initialize_guest_for_load(
         host.outbound.clone(),
         host.duplex.clone(),
         auxiliary_descriptor(host),
-    )
+        &host.compositor_surfaces,
+        host.offload.clone(),
+        replay::mode(host),
+        host.trace.scalar_lane(),
+    )?;
+    start_worker(host)
 }
 
 /// Load already-admitted, local application files without passing a second
@@ -3282,6 +4359,14 @@ pub unsafe extern "C" fn pocket_load(
     let Some(host) = handle.as_mut() else {
         return -1;
     };
+
+    if host.guest_loaded && host.offload.is_some() {
+        set_error(
+            host,
+            "offload guest reload requires a fresh native runtime generation",
+        );
+        return -1;
+    }
     let Some(source) = source.as_ref() else {
         set_error(host, "null source");
         return -1;
@@ -3314,6 +4399,7 @@ pub unsafe extern "C" fn pocket_load(
             0
         }
         Err(error) => {
+            stop_worker(host);
             host.outbound.borrow_mut().clear();
             set_error(host, error);
             -1
@@ -3338,6 +4424,14 @@ pub unsafe extern "C" fn pocket_load_bytecode(
     let Some(host) = handle.as_mut() else {
         return -1;
     };
+
+    if host.guest_loaded && host.offload.is_some() {
+        set_error(
+            host,
+            "offload guest reload requires a fresh native runtime generation",
+        );
+        return -1;
+    }
     if bytecode.is_null() || bytecode_len == 0 {
         set_error(
             host,
@@ -3394,6 +4488,7 @@ pub unsafe extern "C" fn pocket_load_bytecode(
             0
         }
         Err(error) => {
+            stop_worker(host);
             host.outbound.borrow_mut().clear();
             set_error(host, error);
             -1
@@ -3465,11 +4560,27 @@ pub unsafe extern "C" fn pocket_eval(handle: *mut HostState, source: *const c_ch
     let Some(host) = handle.as_mut() else {
         return -1;
     };
+
+    if host.guest_loaded && host.offload.is_some() {
+        set_error(
+            host,
+            "offload guest reload requires a fresh native runtime generation",
+        );
+        return -1;
+    }
     let Some(source) = source.as_ref() else {
         set_error(host, "null source");
         return -1;
     };
     let source = CStr::from_ptr(source).to_string_lossy();
+    if let Err(error) = demand::before_external(host) {
+        set_error(host, error);
+        return -1;
+    }
+    if let Err(error) = start_worker(host) {
+        set_error(host, error);
+        return -1;
+    }
     match evaluate_guest(&mut host.guest, &source, host.tick_hz) {
         Ok(()) => {
             host.guest_loaded = true;
@@ -3481,6 +4592,7 @@ pub unsafe extern "C" fn pocket_eval(handle: *mut HostState, source: *const c_ch
         Err(error) => {
             // A failed evaluation is not a frame boundary. Do not deliver
             // requests emitted by partially executed JS on a later frame.
+            stop_worker(host);
             host.outbound.borrow_mut().clear();
             set_error(host, error);
             -1
@@ -3604,18 +4716,14 @@ pub unsafe extern "C" fn pocket_duplex_channel_retain(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn pocket_duplex_channel_release(
-    channel: *const duplex::DuplexRing,
-) {
+pub unsafe extern "C" fn pocket_duplex_channel_release(channel: *const duplex::DuplexRing) {
     if !channel.is_null() {
         Arc::decrement_strong_count(channel);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn pocket_duplex_channel_close(
-    channel: *const duplex::DuplexRing,
-) {
+pub unsafe extern "C" fn pocket_duplex_channel_close(channel: *const duplex::DuplexRing) {
     if let Some(channel) = channel.as_ref() {
         channel.close();
     }
@@ -3812,6 +4920,10 @@ pub unsafe extern "C" fn pocket_duplex_step(handle: *mut HostState) -> i32 {
         set_error(host, "duplex step requires a loaded guest");
         return -1;
     }
+    if let Err(error) = demand::before_external(host) {
+        set_error(host, error);
+        return -1;
+    }
     match drain_duplex(host) {
         Ok(processed) => {
             clear_error(host);
@@ -3820,6 +4932,43 @@ pub unsafe extern "C" fn pocket_duplex_step(handle: *mut HostState) -> i32 {
         Err(error) => {
             set_error(host, error);
             -1
+        }
+    }
+}
+
+/// Mark event-driven Worker/provider output on the native owner thread.
+/// A zero-delta host frame must keep the ticker until a real fixed guest turn
+/// consumes it. This is a notification, never a periodic polling probe.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_notify_external_work(handle: *mut HostState) {
+    if let Some(host) = handle.as_mut() {
+        if let Err(error) = demand::before_external(host) {
+            set_error(host, error);
+            return;
+        }
+        host.external_work_pending = true;
+        demand::invalidate(host);
+    }
+}
+
+/// Cached scheduler status from the last guest/core transaction. This query
+/// never pumps JS or probes for visual changes. Unknown/legacy guests keep
+/// vsync (zero), known idle guests return -1, and a timer returns its delay.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_next_wake_delay_ms(handle: *mut HostState) -> f64 {
+    handle.as_ref().map(demand::delay_ms).unwrap_or(0.0)
+}
+
+/// Stop accounting idle wall time while the embedding application is in the
+/// background. The next resumed frame establishes its normal display delta.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_set_scheduler_paused(handle: *mut HostState, paused: i32) {
+    if let Some(host) = handle.as_mut() {
+        if let Some(worker) = &host.worker_runtime {
+            worker.set_paused(paused != 0);
+        }
+        if let Err(error) = demand::set_paused(host, paused != 0) {
+            set_error(host, error);
         }
     }
 }
@@ -3918,6 +5067,10 @@ pub unsafe extern "C" fn pocket_send(handle: *mut HostState, message: *const c_c
     // falls back to this JSON entry point. Drain already-published numeric
     // records first so a fallback UP/CANCEL cannot overtake a queued DOWN.
     if host.guest_loaded {
+        if let Err(error) = demand::before_external(host) {
+            set_error(host, error);
+            return -1;
+        }
         if let Err(error) = drain_duplex(host) {
             set_error(host, error);
             return -1;
@@ -3962,10 +5115,42 @@ pub unsafe extern "C" fn pocket_destroy(handle: *mut HostState) {
 #[cfg(test)]
 mod smoke_tests {
     use super::*;
+    use rquickjs::{Context, Module, Runtime, WriteOptions, WriteOptionsEndianness};
     use std::ffi::{CStr, CString};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use rquickjs::{Context, Module, Runtime, WriteOptions, WriteOptionsEndianness};
+
+    #[test]
+    fn physics_bindings_use_the_retained_core_and_do_not_create_idle_work() {
+        let handle = pocket_create(64.0, 64.0);
+        let source = CString::new(
+            r#"
+            const world = ui.physicsCreate(1, new ArrayBuffer(0));
+            if (world <= 0) throw new Error('core physics world was not created');
+            ui.physicsDestroy(world);
+            pocket._emit(JSON.stringify({name:'physics.world.destroyed',payload:{world}}));
+            globalThis.frame = () => {};
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { pocket_eval(handle, source.as_ptr()) },
+            0,
+            "{}",
+            unsafe { CStr::from_ptr(pocket_last_error(handle)).to_string_lossy() }
+        );
+        let output = frame_json(handle);
+        assert_eq!(output["events"][0]["name"], "physics.world.destroyed");
+        assert!(!unsafe { &*handle }
+            .ops
+            .core()
+            .unwrap()
+            .ui
+            .has_pending_work());
+        unsafe {
+            pocket_destroy(handle);
+        }
+    }
 
     fn frame_json(handle: *mut HostState) -> serde_json::Value {
         let pointer = unsafe { pocket_frame(handle, 16.0) };
@@ -4000,21 +5185,439 @@ mod smoke_tests {
         pak
     }
 
+    fn test_font_atlas(
+        slot: u8,
+        cell_w: u8,
+        cell_h: u8,
+        density: u8,
+        first_codepoint: u32,
+        coverage: &[u8],
+    ) -> Vec<u8> {
+        assert!(!coverage.is_empty());
+        let count = u16::try_from(coverage.len()).unwrap();
+        let mut atlas = Vec::new();
+        atlas.extend_from_slice(&pocket_spec::font_atlas::MAGIC.to_le_bytes());
+        atlas.extend_from_slice(&pocket_spec::font_atlas::VERSION.to_le_bytes());
+        atlas.extend_from_slice(&count.to_le_bytes());
+        atlas.extend_from_slice(&[cell_w, cell_h, cell_h, cell_h, slot, 0, density, 0]);
+        for gid in 0..count {
+            atlas.extend_from_slice(&(first_codepoint + gid as u32).to_le_bytes());
+            atlas.extend_from_slice(&gid.to_le_bytes());
+            atlas.extend_from_slice(&[cell_w, 0]);
+        }
+        let samples = cell_w as usize * cell_h as usize * density as usize * density as usize;
+        for alpha in coverage {
+            atlas.extend(std::iter::repeat_n(*alpha, samples));
+        }
+        atlas
+    }
+
+    fn pak_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        assert!(!entries.is_empty());
+        let directory_offset = 32usize;
+        let names_offset = directory_offset + entries.len() * 24;
+        let names_len = entries.iter().map(|(key, _)| key.len()).sum::<usize>();
+        let first_blob_offset = (names_offset + names_len + 15) & !15;
+        let mut records = Vec::with_capacity(entries.len());
+        let mut name_offset = 0usize;
+        let mut blob_offset = first_blob_offset;
+        for (key, blob) in entries {
+            records.push((blob_offset, blob.len(), name_offset, key.len()));
+            name_offset += key.len();
+            blob_offset = (blob_offset + blob.len() + 15) & !15;
+        }
+        let mut pak = vec![0u8; blob_offset];
+        pak[0..4].copy_from_slice(&PAK_MAGIC.to_le_bytes());
+        pak[4..6].copy_from_slice(&1u16.to_le_bytes());
+        pak[8..12].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+        pak[12..16].copy_from_slice(&(directory_offset as u32).to_le_bytes());
+        pak[16..20].copy_from_slice(&(names_offset as u32).to_le_bytes());
+        pak[20..24].copy_from_slice(&(first_blob_offset as u32).to_le_bytes());
+        let pak_len = pak.len() as u32;
+        pak[24..28].copy_from_slice(&pak_len.to_le_bytes());
+        for (index, ((key, blob), (blob_offset, blob_len, name_offset, name_len))) in
+            entries.iter().zip(records).enumerate()
+        {
+            let entry = directory_offset + index * 24;
+            pak[entry + 4..entry + 8].copy_from_slice(&(blob_offset as u32).to_le_bytes());
+            pak[entry + 8..entry + 12].copy_from_slice(&(blob_len as u32).to_le_bytes());
+            pak[entry + 12..entry + 16].copy_from_slice(&(name_offset as u32).to_le_bytes());
+            pak[entry + 16..entry + 18].copy_from_slice(&(name_len as u16).to_le_bytes());
+            pak[names_offset + name_offset..names_offset + name_offset + name_len]
+                .copy_from_slice(key.as_bytes());
+            pak[blob_offset..blob_offset + blob_len].copy_from_slice(blob);
+        }
+        pak
+    }
+
+    fn one_entry_pak(key: &str, blob: &[u8]) -> Vec<u8> {
+        pak_entries(&[(key, blob)])
+    }
+
+    fn test_glyph_run(slot: u8, color: u32, cells: &[(i16, i16, u32)]) -> Vec<u32> {
+        let mut words = vec![3, ((cells.len() as u32) << 16) | slot as u32, color];
+        for &(x, y, gid) in cells {
+            words.push((u32::from(y as u16) << 16) | u32::from(x as u16));
+            words.push(gid);
+        }
+        words
+    }
+
+    #[test]
+    fn glyph_run_decoder_projects_tinted_coverage_pages_and_skips_upstream_noops() {
+        let mut ui = Ui::new();
+        assert!(ui.load_font_atlas(&test_font_atlas(0, 3, 2, 2, 32, &[64, 128, 224])));
+        let mut words = vec![5, (10 << 16) | 5, (20 << 16) | 30];
+        words.extend(test_glyph_run(0, 0x8040_2010, &[(-2, 7, 0), (8, 9, 1)]));
+        words.push(6);
+        let mut handles = HashSet::new();
+        let ops = decode_draw_ops(&words, 100.0, 100.0, &[], &mut ui, &mut handles).unwrap();
+
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].kind, "image");
+        assert_eq!(ops[0].x, -2.0);
+        assert_eq!(ops[0].y, 7.0);
+        assert_eq!((ops[0].w, ops[0].h), (3.0, 2.0));
+        assert_eq!(ops[0].color, Some(0x8010_2040));
+        assert_eq!(ops[0].clip.x, 5.0);
+        assert_eq!(ops[0].clip.y, 10.0);
+        assert_eq!(ops[0].clip.w, 30.0);
+        assert_eq!(ops[0].clip.h, 20.0);
+        assert_eq!(
+            ops[0].asset, ops[1].asset,
+            "same-page glyphs share one texture"
+        );
+        assert!(ops[0].uv.as_ref().unwrap()[0] < ops[1].uv.as_ref().unwrap()[0]);
+        assert_eq!(handles.len(), 1);
+        assert!(referenced_image_assets(&ops).contains(ops[0].asset.as_ref().unwrap()));
+
+        let handle = *handles.iter().next().unwrap();
+        let texture = ui.texture(handle).unwrap();
+        assert_eq!(texture.psm, pocket_spec::psm::PSM_T8);
+        assert_eq!((texture.w, texture.h), (32, 8));
+        assert_eq!(texture.pixels[1 * texture.w as usize + 1], 64);
+        assert_eq!(texture.pixels[1 * texture.w as usize + 9], 128);
+        let palette = texture.palette.unwrap();
+        assert_eq!(&palette[64 * 4..64 * 4 + 4], &[255, 255, 255, 64]);
+
+        let mut ignored = vec![3, (1 << 16) | 7, 0xffff_ffff, 0, 0]; // missing font slot
+        ignored.extend([3, 0, 0xffff_ffff]); // valid empty run
+        ignored.extend(test_glyph_run(0, 0xffff_ffff, &[(1, 2, 99)])); // invalid gid
+        assert!(
+            decode_draw_ops(&ignored, 100.0, 100.0, &[], &mut ui, &mut handles)
+                .unwrap()
+                .is_empty()
+        );
+
+        let reserved_slot = [3, 0x0000_0100, 0];
+        assert!(
+            decode_draw_ops(&reserved_slot, 100.0, 100.0, &[], &mut ui, &mut handles)
+                .unwrap_err()
+                .contains("reserved font-slot bits")
+        );
+        let reserved_gid = [3, 1 << 16, 0xffff_ffff, 0, 0x0001_0000];
+        assert!(
+            decode_draw_ops(&reserved_gid, 100.0, 100.0, &[], &mut ui, &mut handles)
+                .unwrap_err()
+                .contains("reserved gid bits")
+        );
+        let truncated = [3, 1 << 16, 0xffff_ffff, 0];
+        assert!(
+            decode_draw_ops(&truncated, 100.0, 100.0, &[], &mut ui, &mut handles)
+                .unwrap_err()
+                .contains("draw list decode")
+        );
+    }
+
+    #[test]
+    fn glyph_run_pages_cross_slots_reuse_a_to_b_to_a_and_replace_on_font_revision() {
+        let mut ui = Ui::new();
+        let slot0_coverage = (50..100).collect::<Vec<u8>>();
+        assert!(ui.load_font_atlas(&test_font_atlas(0, 64, 64, 1, 32, &slot0_coverage)));
+        assert!(ui.load_font_atlas(&test_font_atlas(1, 4, 4, 1, 32, &[180])));
+        let mut words = test_glyph_run(0, 0xffff_ffff, &[(0, 0, 0), (64, 0, 49), (128, 0, 0)]);
+        words.extend(test_glyph_run(1, 0xffff_ffff, &[(0, 70, 0)]));
+        let mut handles = HashSet::new();
+        let ops = decode_draw_ops(&words, 256.0, 256.0, &[], &mut ui, &mut handles).unwrap();
+        assert_eq!(ops.len(), 4);
+        assert_eq!(ops[0].asset, ops[2].asset, "A→B→A reuses the first page");
+        assert_ne!(ops[0].asset, ops[1].asset, "gid 49 is on another page");
+        assert_ne!(
+            ops[0].asset, ops[3].asset,
+            "different font slots own different pages"
+        );
+        assert_ne!(
+            ops[0].uv, ops[1].uv,
+            "page-local UVs reflect different page sizes"
+        );
+        assert_eq!(handles.len(), 3);
+        let old_handle = handles
+            .iter()
+            .copied()
+            .find(|handle| synthetic_texture_asset(*handle) == ops[0].asset.as_deref().unwrap())
+            .unwrap();
+        let old_revision = ui.font_atlas_revision(0);
+
+        assert!(ui.load_font_atlas(&test_font_atlas(0, 64, 64, 1, 32, &[200; 50])));
+        assert_ne!(ui.font_atlas_revision(0), old_revision);
+        let replacement_words = test_glyph_run(0, 0xffff_ffff, &[(4, 5, 0)]);
+        let mut replacement_handles = HashSet::new();
+        let replacement = decode_draw_ops(
+            &replacement_words,
+            256.0,
+            256.0,
+            &[],
+            &mut ui,
+            &mut replacement_handles,
+        )
+        .unwrap();
+        assert_eq!(replacement.len(), 1);
+        assert_ne!(replacement[0].asset, ops[0].asset);
+        assert!(!referenced_image_assets(&replacement).contains(ops[0].asset.as_ref().unwrap()));
+        assert!(
+            ui.texture(old_handle).is_none(),
+            "replaced pages invalidate old handles"
+        );
+        let new_handle = *replacement_handles.iter().next().unwrap();
+        let new_texture = ui.texture(new_handle).unwrap();
+        assert_eq!(new_texture.pixels[new_texture.w as usize + 1], 200);
+    }
+
+    #[test]
+    fn guest_glyph_run_exports_real_page_resources_and_releases_replaced_pages() {
+        let handle = pocket_create(64.0, 64.0);
+        let source = CString::new(
+            r#"let mounted = false;
+            globalThis.frame = function() {
+                if (mounted) return;
+                mounted = true;
+                const text = ui.createNode(1);
+                ui.setText(text, 'AB');
+                ui.setProp(text, 1, 48);
+                ui.setProp(text, 2, 12);
+                ui.setProp(text, 96, 0x80402010);
+                ui.setProp(text, 100, 1);
+                ui.insertBefore(1, text, 0);
+            };"#,
+        )
+        .unwrap();
+        let first_pak = one_entry_pak(
+            "ui:font.0",
+            &test_font_atlas(0, 4, 6, 2, 'A' as u32, &[64, 192]),
+        );
+        let bytecode = compile_test_bytecode(source.as_bytes());
+        let load_result = unsafe {
+            pocket_load_bytecode(
+                handle,
+                bytecode.as_ptr(),
+                bytecode.len(),
+                first_pak.as_ptr(),
+                first_pak.len(),
+            )
+        };
+        assert_eq!(load_result, 0, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+        });
+
+        let first = frame_json(handle);
+        let ops = first["ops"].as_array().unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(ops.iter().all(|op| op["type"] == "image"));
+        assert!(ops.iter().all(|op| op["w"] == 4.0 && op["h"] == 6.0));
+        assert!(ops.iter().all(|op| op["color"] == 0x8010_2040u64));
+        let first_asset = ops[0]["asset"].as_str().unwrap().to_owned();
+        assert_eq!(ops[1]["asset"], first_asset);
+        let first_uv = ops[0]["uv"].as_array().unwrap();
+        assert!((first_uv[0].as_f64().unwrap() - 1.0 / 32.0).abs() < 1.0e-6);
+        assert!((first_uv[2].as_f64().unwrap() - 9.0 / 32.0).abs() < 1.0e-6);
+        let resources = first["resources"].as_array().unwrap();
+        assert_eq!(
+            resources.len(),
+            1,
+            "a same-page run exports one shared resource"
+        );
+        let resource = &resources[0];
+        assert_eq!(resource["asset"], first_asset);
+        assert_eq!(resource["psm"], pocket_spec::psm::PSM_T8);
+        let width = resource["width"].as_u64().unwrap() as usize;
+        assert_eq!((width, resource["height"].as_u64().unwrap()), (32, 16));
+        let pixels = resource["pixels"].as_array().unwrap();
+        assert_eq!(pixels[width + 1], 64);
+        assert_eq!(pixels[width + 11], 192);
+        let palette = resource["palette"].as_array().unwrap();
+        assert_eq!(
+            palette[64 * 4..64 * 4 + 4],
+            [255, 255, 255, 64].map(serde_json::Value::from)
+        );
+
+        let cached = frame_json(handle);
+        assert!(cached["resources"].as_array().unwrap().is_empty());
+        let second_pak = one_entry_pak(
+            "ui:font.0",
+            &test_font_atlas(0, 4, 6, 2, 'A' as u32, &[220, 240]),
+        );
+        let reload_result = unsafe {
+            pocket_load(
+                handle,
+                source.as_ptr(),
+                second_pak.as_ptr(),
+                second_pak.len(),
+            )
+        };
+        assert_eq!(reload_result, 0, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+        });
+        let replaced = frame_json(handle);
+        assert!(replaced["releasedResources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|asset| asset == &first_asset));
+        let replacement_resource = &replaced["resources"].as_array().unwrap()[0];
+        assert_ne!(replacement_resource["asset"], first_asset);
+        let replacement_pixels = replacement_resource["pixels"].as_array().unwrap();
+        let replacement_width = replacement_resource["width"].as_u64().unwrap() as usize;
+        assert_eq!(replacement_pixels[replacement_width + 1], 220);
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn fresh_hosts_publish_stable_resource_and_release_order_without_reordering_ops() {
+        let source = CString::new(
+            r#"
+            const nodes = [];
+            let mounted = false;
+            let cleared = false;
+            globalThis.frame = function() {
+                if (mounted || cleared) return;
+                mounted = true;
+                for (let slot = 0; slot < 3; slot++) {
+                    const node = ui.createNode(1);
+                    ui.setText(node, 'A');
+                    ui.setProp(node, 1, 64);
+                    ui.setProp(node, 2, 16);
+                    ui.setProp(node, 97, slot);
+                    ui.setProp(node, 100, 1);
+                    ui.insertBefore(1, node, 0);
+                    nodes.push(node);
+                }
+            };
+            globalThis.clear = function() {
+                for (const node of nodes) ui.destroyNode(node);
+                nodes.length = 0;
+                cleared = true;
+            };
+            "#,
+        )
+        .unwrap();
+        let clear = CString::new("globalThis.clear();").unwrap();
+        let font0 = test_font_atlas(0, 4, 6, 2, 'A' as u32, &[64]);
+        let font1 = test_font_atlas(1, 4, 6, 2, 'A' as u32, &[128]);
+        let font2 = test_font_atlas(2, 4, 6, 2, 'A' as u32, &[192]);
+        let pak = pak_entries(&[
+            ("ui:font.0", &font0),
+            ("ui:font.1", &font1),
+            ("ui:font.2", &font2),
+        ]);
+        let mut expected_ops = None;
+        let expected_assets = vec![
+            "pocket.texture.0".to_owned(),
+            "pocket.texture.1".to_owned(),
+            "pocket.texture.2".to_owned(),
+        ];
+        for iteration in 0..16 {
+            let handle = pocket_create(128.0, 64.0);
+            let load_result =
+                unsafe { pocket_load(handle, source.as_ptr(), pak.as_ptr(), pak.len()) };
+            assert_eq!(load_result, 0, "iteration {iteration}: {}", unsafe {
+                CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+            });
+
+            let first = frame_json(handle);
+            let resources = first["resources"].as_array().unwrap();
+            let assets = resources
+                .iter()
+                .map(|resource| resource["asset"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(assets, expected_assets, "iteration {iteration}");
+            if let Some(previous) = expected_ops.as_ref() {
+                assert_eq!(
+                    first["ops"], *previous,
+                    "DrawOps changed at iteration {iteration}"
+                );
+            } else {
+                expected_ops = Some(first["ops"].clone());
+            }
+
+            assert_eq!(unsafe { pocket_eval(handle, clear.as_ptr()) }, 0);
+            let cleared_frame = frame_json(handle);
+            assert!(cleared_frame["resources"].as_array().unwrap().is_empty());
+            assert_eq!(
+                cleared_frame["releasedResources"],
+                serde_json::json!(expected_assets),
+                "release order changed at iteration {iteration}"
+            );
+            unsafe { pocket_destroy(handle) };
+        }
+    }
+
+    fn compile_test_worker_bytecode(source: &[u8]) -> Vec<u8> {
+        use rquickjs::qjs;
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let payload = context.with(|ctx| unsafe {
+            let input = CString::new(source).unwrap();
+            let name = CString::new("worker-fixture.js").unwrap();
+            let value = qjs::JS_Eval(
+                ctx.as_raw().as_ptr(),
+                input.as_ptr(),
+                source.len() as _,
+                name.as_ptr(),
+                (qjs::JS_EVAL_TYPE_GLOBAL
+                    | qjs::JS_EVAL_FLAG_STRICT
+                    | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32,
+            );
+            assert_ne!(qjs::JS_VALUE_GET_NORM_TAG(value), qjs::JS_TAG_EXCEPTION);
+            let mut length = 0;
+            let buffer = qjs::JS_WriteObject(
+                ctx.as_raw().as_ptr(),
+                &mut length,
+                value,
+                (qjs::JS_WRITE_OBJ_BYTECODE
+                    | qjs::JS_WRITE_OBJ_STRIP_SOURCE
+                    | qjs::JS_WRITE_OBJ_STRIP_DEBUG) as i32,
+            );
+            assert!(!buffer.is_null());
+            let bytes = std::slice::from_raw_parts(buffer, length as usize).to_vec();
+            qjs::js_free(ctx.as_raw().as_ptr(), buffer.cast());
+            qjs::JS_FreeValue(ctx.as_raw().as_ptr(), value);
+            bytes
+        });
+        bytecode::encode(
+            bytecode::BytecodeKind::Script,
+            bytecode::DEFAULT_FLAGS,
+            BINDING_GENERATION,
+            DEFAULT_TICK_HZ,
+            source,
+            &payload,
+        )
+        .unwrap()
+    }
+
     fn compile_test_bytecode(source: &[u8]) -> Vec<u8> {
         let runtime = Runtime::new().unwrap();
         let context = Context::full(&runtime).unwrap();
-        let payload = context
-            .with(|ctx| {
-                let module = Module::declare(ctx, "fixture.js", source.to_vec()).unwrap();
-                module
-                    .write(WriteOptions {
-                        endianness: WriteOptionsEndianness::Little,
-                        strip_source: true,
-                        strip_debug: true,
-                        ..Default::default()
-                    })
-                    .unwrap()
-            });
+        let payload = context.with(|ctx| {
+            let module = Module::declare(ctx, "fixture.js", source.to_vec()).unwrap();
+            module
+                .write(WriteOptions {
+                    endianness: WriteOptionsEndianness::Little,
+                    strip_source: true,
+                    strip_debug: true,
+                    ..Default::default()
+                })
+                .unwrap()
+        });
         bytecode::encode(
             bytecode::BytecodeKind::Module,
             bytecode::DEFAULT_FLAGS,
@@ -4034,9 +5637,7 @@ mod smoke_tests {
         let bytecode_env = std::env::var_os("POCKET_TEST_ASSETS")
             .map(PathBuf::from)
             .map(|path| path.join("app.qjbc"));
-        if let (Some(source), Some(pak), Some(bytecode)) =
-            (source_env, pak_env, bytecode_env)
-        {
+        if let (Some(source), Some(pak), Some(bytecode)) = (source_env, pak_env, bytecode_env) {
             if source.is_file() && pak.is_file() && bytecode.is_file() {
                 return PackageFixture {
                     root: None,
@@ -4074,7 +5675,8 @@ mod smoke_tests {
     #[test]
     fn retained_host_surfaces_preserve_clip_update_and_release() {
         let handle = pocket_create(320.0, 480.0);
-        let source = CString::new(r#"
+        let source = CString::new(
+            r#"
             const surface = pocket.registerSurface('test.glass', 'glass', '{"radius":18}');
             const node = ui.createNode(3);
             ui.setProp(node, 1, 100); ui.setProp(node, 2, 60);
@@ -4086,21 +5688,179 @@ mod smoke_tests {
                 if (tick === 2) pocket.registerSurface('test.glass', 'glass', '{"radius":28}');
                 if (tick === 3) { ui.destroyNode(node); pocket.releaseSurface('test.glass'); }
             };
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
         // The first 16ms sample primes the fixed 60Hz accumulator.
         let _ = frame_json(handle);
         let first = frame_json(handle);
-        let op = first["ops"].as_array().unwrap().iter().find(|op| op["type"] == "hostSurface").unwrap();
+        let op = first["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "hostSurface")
+            .unwrap();
         assert_eq!(op["id"], "test.glass");
         assert_eq!(op["w"], 100.0);
         assert!(op["clip"].is_object());
         let second = frame_json(handle);
-        let op = second["ops"].as_array().unwrap().iter().find(|op| op["type"] == "hostSurface").unwrap();
-        let descriptor: serde_json::Value = serde_json::from_str(op["asset"].as_str().unwrap()).unwrap();
+        let op = second["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "hostSurface")
+            .unwrap();
+        let descriptor: serde_json::Value =
+            serde_json::from_str(op["asset"].as_str().unwrap()).unwrap();
         assert_eq!(descriptor["parameters"]["radius"], 28);
         let third = frame_json(handle);
-        assert!(!third["ops"].as_array().unwrap().iter().any(|op| op["type"] == "hostSurface"));
+        assert!(!third["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|op| op["type"] == "hostSurface"));
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn host_surface_projection_uses_inline_clip_for_nested_and_fully_clipped_nodes() {
+        let handle = pocket_create(80.0, 80.0);
+        let source = CString::new(
+            r#"
+            const surface = pocket.registerSurface('test.clip', 'glass', '{"radius":18}');
+
+            const outer = ui.createNode(0);
+            ui.setProp(outer, 1, 30);
+            ui.setProp(outer, 2, 25);
+            ui.setProp(outer, 30, 1);
+
+            const inner = ui.createNode(0);
+            ui.setProp(inner, 1, 20);
+            ui.setProp(inner, 2, 10);
+            ui.setProp(inner, 30, 1);
+
+            const partiallyVisible = ui.createNode(3);
+            ui.setProp(partiallyVisible, 1, 30);
+            ui.setProp(partiallyVisible, 2, 100);
+            ui.setProp(partiallyVisible, 21, 0);
+            ui.setProp(partiallyVisible, 128, -5);
+            ui.setCompositorSurface(partiallyVisible, surface, 0);
+
+            const fullyClippedParent = ui.createNode(0);
+            ui.setProp(fullyClippedParent, 1, 10);
+            ui.setProp(fullyClippedParent, 2, 10);
+            ui.setProp(fullyClippedParent, 24, 1);
+            ui.setProp(fullyClippedParent, 25, 0);
+            ui.setProp(fullyClippedParent, 28, 40);
+            ui.setProp(fullyClippedParent, 30, 1);
+            const fullyClipped = ui.createNode(3);
+            ui.setProp(fullyClipped, 1, 30);
+            ui.setProp(fullyClipped, 2, 100);
+            ui.setProp(fullyClipped, 21, 0);
+            ui.setProp(fullyClipped, 128, 20);
+            ui.setCompositorSurface(fullyClipped, surface, 0);
+
+            ui.insertBefore(inner, partiallyVisible, 0);
+            ui.insertBefore(outer, inner, 0);
+            ui.insertBefore(fullyClippedParent, fullyClipped, 0);
+            ui.insertBefore(1, outer, 0);
+            ui.insertBefore(1, fullyClippedParent, 0);
+            globalThis.frame = function() {};
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+
+        let frame = frame_json(handle);
+        let host_ops = frame["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["type"] == "hostSurface")
+            .collect::<Vec<_>>();
+        assert_eq!(host_ops.len(), 1, "fully clipped surface is omitted");
+        let op = host_ops[0];
+        assert_eq!(op["id"], "test.clip");
+        assert_eq!(
+            op["x"], -5.0,
+            "the unclipped full bound keeps its negative origin"
+        );
+        assert_eq!(op["y"], 0.0);
+        assert_eq!(op["w"], 30.0);
+        assert_eq!(
+            op["h"], 100.0,
+            "full geometry is preserved for surface optics"
+        );
+        assert_eq!(op["clip"]["x"], 0.0);
+        assert_eq!(op["clip"]["y"], 0.0);
+        assert_eq!(op["clip"]["w"], 20.0);
+        assert_eq!(op["clip"]["h"], 10.0, "nested overflow clips are retained");
+
+        // The real tree above exercises nested scissors. SURFACE_QUAD also
+        // carries inline visible bounds when no SCISSOR accompanies it, so
+        // verify the host intersects that contract with a viewport-only clip.
+        let nodes = [NodeMeta {
+            id: -7,
+            kind: "hostSurface".into(),
+            asset: r#"{"kind":"glass","parameters":{"radius":18}}"#.into(),
+            video_id: "test.clip".into(),
+            fit: "fill".into(),
+            texture: -1,
+            surface: 7,
+            from_pack: false,
+        }];
+        let mut words = vec![
+            10,
+            7,
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            30.0f32.to_bits(),
+            100.0f32.to_bits(),
+            0,
+            (25 << 16) | 30,
+            0,
+        ];
+        let operation = Operation {
+            opcode: 10,
+            words: &words,
+            clip: DamageRect::new(0, 0, 80, 80),
+        };
+        let mut projected = Vec::new();
+        append_draw_operation(
+            &mut projected,
+            &operation,
+            &nodes,
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].w, 30.0);
+        assert_eq!(projected[0].h, 100.0);
+        assert_eq!(projected[0].clip.w, 30.0);
+        assert_eq!(projected[0].clip.h, 25.0);
+
+        words[6] = (90 << 16) | 90;
+        words[7] = (10 << 16) | 10;
+        let fully_clipped_operation = Operation {
+            opcode: 10,
+            words: &words,
+            clip: DamageRect::new(0, 0, 80, 80),
+        };
+        let mut projected = Vec::new();
+        append_draw_operation(
+            &mut projected,
+            &fully_clipped_operation,
+            &nodes,
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(
+            projected.is_empty(),
+            "inline bounds outside the viewport draw nothing"
+        );
         unsafe { pocket_destroy(handle) };
     }
 
@@ -4213,7 +5973,10 @@ mod smoke_tests {
         let reservation = producer.reserve(1).unwrap();
         unsafe {
             ptr::write(
-                producer.payload_ptr(reservation).unwrap().cast::<duplex::DuplexMessage>(),
+                producer
+                    .payload_ptr(reservation)
+                    .unwrap()
+                    .cast::<duplex::DuplexMessage>(),
                 duplex::DuplexMessage {
                     msg_type: 9,
                     ..duplex::DuplexMessage::default()
@@ -4222,7 +5985,10 @@ mod smoke_tests {
         }
         assert!(producer.commit(reservation));
         assert_eq!(unsafe { pocket_duplex_step(handle) }, 0);
-        assert_eq!(unsafe { (&*handle).duplex_ingress_consumer.peek().unwrap().msg_type }, 9);
+        assert_eq!(
+            unsafe { (&*handle).duplex_ingress_consumer.peek().unwrap().msg_type },
+            9
+        );
 
         let failing = CString::new(
             "globalThis.__pocketDuplexEvent = function() { throw new Error('duplex failure'); };
@@ -4231,9 +5997,15 @@ mod smoke_tests {
         .unwrap();
         assert_eq!(unsafe { pocket_eval(handle, failing.as_ptr()) }, 0);
         assert_eq!(unsafe { pocket_duplex_step(handle) }, -1);
-        assert_eq!(unsafe { (&*handle).duplex_ingress_consumer.peek().unwrap().msg_type }, 9);
+        assert_eq!(
+            unsafe { (&*handle).duplex_ingress_consumer.peek().unwrap().msg_type },
+            9
+        );
         let error = unsafe { CStr::from_ptr(pocket_last_error(handle)) }.to_string_lossy();
-        assert!(error.contains("duplex failure"), "unexpected error: {error}");
+        assert!(
+            error.contains("duplex failure"),
+            "unexpected error: {error}"
+        );
         unsafe { pocket_destroy(handle) };
     }
 
@@ -4247,7 +6019,9 @@ mod smoke_tests {
         .unwrap();
         assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
         let producer = unsafe { (&*handle).duplex.claim_ingress_producer().unwrap() };
-        let reservation = producer.reserve((duplex::RING_CAPACITY - 1) as u32).unwrap();
+        let reservation = producer
+            .reserve((duplex::RING_CAPACITY - 1) as u32)
+            .unwrap();
         for index in 0..reservation.count() {
             unsafe {
                 ptr::write(
@@ -4264,24 +6038,36 @@ mod smoke_tests {
             }
         }
         assert!(producer.commit(reservation));
-        assert_eq!(unsafe { pocket_duplex_step(handle) }, (duplex::RING_CAPACITY - 1) as i32);
+        assert_eq!(
+            unsafe { pocket_duplex_step(handle) },
+            (duplex::RING_CAPACITY - 1) as i32
+        );
         let consumer = unsafe { (&*handle).duplex.claim_egress_consumer().unwrap() };
         let (payload, count) = consumer.peek(1).unwrap();
         assert_eq!(count, 1);
-        assert_eq!(unsafe { (*payload.cast::<duplex::DuplexMessage>()).msg_type }, 99);
+        assert_eq!(
+            unsafe { (*payload.cast::<duplex::DuplexMessage>()).msg_type },
+            99
+        );
 
         // The egress queue is full. A subsequent JS emit must fail without
         // changing the first published record.
         let reservation = producer.reserve(1).unwrap();
         unsafe {
             ptr::write(
-                producer.payload_ptr(reservation).unwrap().cast::<duplex::DuplexMessage>(),
+                producer
+                    .payload_ptr(reservation)
+                    .unwrap()
+                    .cast::<duplex::DuplexMessage>(),
                 duplex::DuplexMessage::default(),
             );
         }
         assert!(producer.commit(reservation));
         assert_eq!(unsafe { pocket_duplex_step(handle) }, 1);
-        assert_eq!(unsafe { (*payload.cast::<duplex::DuplexMessage>()).msg_type }, 99);
+        assert_eq!(
+            unsafe { (*payload.cast::<duplex::DuplexMessage>()).msg_type },
+            99
+        );
         assert!(consumer.consume(1));
         unsafe { pocket_destroy(handle) };
     }
@@ -4324,7 +6110,10 @@ mod smoke_tests {
         let output = unsafe { pocket_duplex_egress_peek(endpoint, 1, &mut output_count) };
         assert!(!output.is_null());
         assert_eq!(output_count, 1);
-        assert_eq!(unsafe { (*output.cast::<duplex::DuplexMessage>()).msg_type }, 21);
+        assert_eq!(
+            unsafe { (*output.cast::<duplex::DuplexMessage>()).msg_type },
+            21
+        );
         assert_eq!(unsafe { pocket_duplex_egress_consume(endpoint, 1) }, 1);
 
         unsafe {
@@ -4362,7 +6151,10 @@ mod smoke_tests {
         // fixture. The old endpoint retains its old Arc and may finish its
         // in-flight publish, while the host receives a fresh channel.
         unsafe { reset_host_for_load(&mut *handle) };
-        assert_eq!(unsafe { pocket_duplex_ingress_publish(old_endpoint, old_count) }, 1);
+        assert_eq!(
+            unsafe { pocket_duplex_ingress_publish(old_endpoint, old_count) },
+            1
+        );
         let new_channel = unsafe { pocket_duplex_channel_acquire(handle) };
         let new_endpoint = unsafe { pocket_duplex_endpoint_acquire(handle) };
         assert!(!new_channel.is_null());
@@ -4373,7 +6165,10 @@ mod smoke_tests {
         let new_payload = unsafe { pocket_duplex_ingress_reserve(new_endpoint, 1, &mut new_count) };
         assert!(!new_payload.is_null());
         assert_eq!(new_count, 1);
-        assert_eq!(unsafe { pocket_duplex_ingress_publish(new_endpoint, new_count) }, 1);
+        assert_eq!(
+            unsafe { pocket_duplex_ingress_publish(new_endpoint, new_count) },
+            1
+        );
 
         unsafe {
             pocket_destroy(handle);
@@ -4620,6 +6415,511 @@ mod smoke_tests {
         assert_eq!(phases, vec!["down", "up"]);
         unsafe {
             pocket_duplex_endpoint_release(endpoint);
+            pocket_destroy(handle);
+        }
+    }
+    #[test]
+    fn raw_text_edges_reach_real_guest_once_even_at_zero_delta() {
+        let handle = pocket_create(80.0, 80.0);
+        let source = CString::new(r#"globalThis.__pocketEvent=function(){}; globalThis.frame=function(){
+            if (arguments[8].length) pocket._emit(JSON.stringify({method:'text.edge',params:{events:arguments[8]}}));
+        };"#).unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        frame_json(handle);
+        let message = CString::new(r#"{"method":"input.text","params":[{"kind":"keyDown","key":"A","repeat":true},{"kind":"composition","text":"中😀","selectionStart":1,"selectionEnd":3},{"kind":"compositionEnd"},{"kind":"commit","text":"中😀"},{"kind":"keyUp","key":"A"}]}"#).unwrap();
+        assert_eq!(unsafe { pocket_send(handle, message.as_ptr()) }, 0);
+        let pointer = unsafe { pocket_frame(handle, 0.0) };
+        let frame: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
+        let events = frame["events"][0]["params"]["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("actual frame: {frame}"));
+        assert_eq!(events.len(), 5);
+        assert_eq!(events[0]["repeat"], true);
+        assert_eq!(events[1]["text"], "中😀");
+        assert_eq!(events[1]["selectionEnd"], 3);
+        assert!(frame_json(handle)["events"].as_array().unwrap().is_empty());
+        let bad = serde_json::json!({"method":"input.text","params":[{"kind":"commit","text":"valid"},{"kind":"composition","text":"😀","selectionStart":0,"selectionEnd":3}]});
+        assert!(queue_text(unsafe { &mut *handle }, &bad).is_err());
+        assert!(
+            unsafe { &*handle }.pending_text.is_empty(),
+            "batch admission is atomic"
+        );
+        for _ in 0..64 {
+            queue_text(
+                unsafe { &mut *handle },
+                &serde_json::json!({"params":{"kind":"compositionEnd"}}),
+            )
+            .unwrap();
+        }
+        assert!(queue_text(
+            unsafe { &mut *handle },
+            &serde_json::json!({"params":{"kind":"compositionEnd"}})
+        )
+        .is_err());
+        unsafe {
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn production_worker_ffi_wakes_a_zero_delta_ui_turn_and_releases_its_channel() {
+        use std::sync::{Condvar, Mutex};
+        use std::time::{Duration, Instant};
+        static WAKE: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
+        unsafe extern "C" fn notify() {
+            let mut epoch = WAKE.0.lock().unwrap();
+            *epoch += 1;
+            WAKE.1.notify_all();
+        }
+        let worker = compile_test_worker_bytecode(br#"
+            __pocketWorker.declareChannel(1,1,16,1,0);
+            globalThis.__pocketWorkerTurn=(context,facts)=>{
+                if(context.sequence===1) __pocketWorker.timer(1,context.nowMicros+50000,0);
+                for(const fact of facts) if(fact.kind===6) __pocketWorker.publish(1,new Uint8Array([42]));
+            };
+        "#);
+        let config = CString::new(serde_json::json!({
+            "protocolVersion":1,"nativeGeneration":1,"bindingGeneration":BINDING_GENERATION,
+            "tickHz":DEFAULT_TICK_HZ,"expectedRuntimeAbi":bytecode::runtime_abi(),
+            "declaration":{"entry":"worker.js","nodes":[],"channels":[
+                {"name":"results","kind":"snapshot","direction":"worker-to-ui","recordBytes":16,"capacity":1}
+            ]},
+            "policy":{"requiredCapabilities":["runtime.worker"],"allowedHttpOrigins":[]},
+            "limits":{"heapBytes":16777216,"stackBytes":1048576,"turnBudgetMicros":10000,"windowMicros":100000,"quotaMicros":50000}
+        }).to_string()).unwrap();
+        let handle = pocket_create(80.0, 80.0);
+        assert_eq!(
+            unsafe {
+                pocket_configure_worker(
+                    handle,
+                    worker.as_ptr(),
+                    worker.len(),
+                    config.as_ptr(),
+                    Some(notify),
+                )
+            },
+            0,
+            "{}",
+            unsafe { &*handle }.last_error
+        );
+        let ui = CString::new(r#"
+            __pocketWorkerChannels.configure(1,1);
+            let delivered=false;
+            globalThis.frame=()=>{
+                const records=__pocketWorkerChannels.observe(1);
+                if(!delivered && records.length) {
+                    delivered=true;
+                    pocket._emit(JSON.stringify({method:'worker.result',params:{value:records[0][0]}}));
+                }
+            };
+        "#).unwrap();
+        assert_eq!(
+            unsafe { pocket_eval(handle, ui.as_ptr()) },
+            0,
+            "{}",
+            unsafe { &*handle }.last_error
+        );
+        let mut seen = *WAKE.0.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let first = frame_json(handle);
+        let mut delivered = first["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["params"]["value"] == 42);
+        while !delivered {
+            let guard = WAKE.0.lock().unwrap();
+            let (guard, timeout) = WAKE
+                .1
+                .wait_timeout_while(
+                    guard,
+                    deadline.saturating_duration_since(Instant::now()),
+                    |epoch| *epoch == seen,
+                )
+                .unwrap();
+            seen = *guard;
+            assert!(
+                !timeout.timed_out(),
+                "worker output did not wake UI: {:?}",
+                unsafe { &*handle }
+                    .worker_runtime
+                    .as_ref()
+                    .and_then(|worker| worker.last_error())
+            );
+            drop(guard);
+            // This is the Dart listener's owner-thread handoff, never a call
+            // into HostState from the worker thread. No periodic frame probe.
+            unsafe {
+                pocket_notify_external_work(handle);
+            }
+            let pointer = unsafe { pocket_frame(handle, 0.0) };
+            assert!(
+                unsafe { &*handle }.last_error.is_empty(),
+                "{}",
+                unsafe { &*handle }.last_error
+            );
+            let frame: serde_json::Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
+            delivered = frame["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["params"]["value"] == 42);
+        }
+        assert!(!unsafe { &*handle }
+            .worker_bridge
+            .as_ref()
+            .unwrap()
+            .has_pending_output());
+        unsafe {
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn ending_offline_replay_closes_its_provider_broker() {
+        let handle = pocket_create(80.0, 80.0);
+        let config = CString::new(
+            r#"{"generation":9,"session":3,"timeoutMs":5000,"methods":["compute.sum"]}"#,
+        )
+        .unwrap();
+        let empty = CString::new(r#"{"idleMs":[],"scalars":[]}"#).unwrap();
+        unsafe {
+            assert_eq!(pocket_trace_clock_mode(handle, 2), 0);
+            assert_eq!(pocket_trace_clock_begin_json(handle, empty.as_ptr()), 0);
+            assert_eq!(pocket_configure_offload(handle, config.as_ptr(), None), 0);
+            assert!(!pocket_trace_clock_end_json(handle).is_null());
+            assert_eq!(pocket_trace_clock_mode(handle, 0), 0);
+            assert!(!(*handle)
+                .offload
+                .as_ref()
+                .unwrap()
+                .submit_record(r#"{"v":1,"id":1,"method":"compute.sum","payload":"[2,3]"}"#,));
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn production_offload_recording_replays_without_host_provider() {
+        let config = CString::new(
+            r#"{"generation":9,"session":3,"timeoutMs":5000,"methods":["compute.sum"]}"#,
+        )
+        .unwrap();
+        let source = CString::new(r#"
+            if(!offload.submit(JSON.stringify({v:1,id:1,method:'compute.sum',payload:'[2,3]'}))) throw Error('submit');
+            globalThis.frame=()=>{const reply=offload.take();if(reply)pocket._emit(JSON.stringify({method:'sum',params:JSON.parse(reply)}));};
+        "#).unwrap();
+        let empty = CString::new(r#"{"idleMs":[],"scalars":[]}"#).unwrap();
+        struct Host(*mut HostState);
+        impl Drop for Host {
+            fn drop(&mut self) {
+                unsafe {
+                    pocket_destroy(self.0);
+                }
+            }
+        }
+        let run = |handle: *mut HostState, operation, recording| unsafe {
+            let status = match operation {
+                0 => pocket_configure_offload(handle, config.as_ptr(), None),
+                1 => pocket_eval(handle, source.as_ptr()),
+                2 if recording => {
+                    let request = pocket_offload_take(handle, 0);
+                    assert!(!request.is_null());
+                    let request: serde_json::Value =
+                        serde_json::from_slice(CStr::from_ptr(request).to_bytes()).unwrap();
+                    assert_eq!(request["method"], "compute.sum");
+                    let result =
+                        CString::new(r#"{"generation":9,"session":3,"id":1,"payload":"5"}"#)
+                            .unwrap();
+                    assert_eq!(pocket_offload_complete(handle, result.as_ptr()), 0);
+                    0
+                }
+                2 => 0, // Replay facts executor completes the original broker.
+                3 => {
+                    let output = pocket_frame(handle, 0.0);
+                    assert!(!output.is_null(), "{}", (*handle).last_error);
+                    return Some(
+                        serde_json::from_slice::<serde_json::Value>(
+                            CStr::from_ptr(output).to_bytes(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                4 => pocket_stop_async(handle),
+                _ => unreachable!(),
+            };
+            assert_eq!(status, 0, "{}", (*handle).last_error);
+            None
+        };
+        let finish = |handle| unsafe {
+            let output = pocket_trace_clock_end_json(handle);
+            assert!(!output.is_null(), "{}", (*handle).last_error);
+            CStr::from_ptr(output).to_str().unwrap().to_owned()
+        };
+        let original = Host(pocket_create(80.0, 80.0));
+        assert_eq!(unsafe { pocket_trace_clock_mode(original.0, 1) }, 0);
+        let mut tape = Vec::new();
+        for operation in 0..5 {
+            assert_eq!(
+                unsafe { pocket_trace_clock_begin_json(original.0, empty.as_ptr()) },
+                0
+            );
+            let frame = run(original.0, operation, true);
+            if operation == 3 {
+                assert_eq!(
+                    frame.as_ref().unwrap()["events"][0]["params"]["payload"],
+                    "5"
+                );
+            }
+            tape.push((operation, finish(original.0), frame));
+        }
+        assert_eq!(unsafe { pocket_trace_clock_mode(original.0, 0) }, 0);
+        drop(original);
+        for _ in 0..3 {
+            let replay = Host(pocket_create(80.0, 80.0));
+            assert_eq!(unsafe { pocket_trace_clock_mode(replay.0, 2) }, 0);
+            for (operation, expected, frame) in &tape {
+                let input = CString::new(expected.as_str()).unwrap();
+                assert_eq!(
+                    unsafe { pocket_trace_clock_begin_json(replay.0, input.as_ptr()) },
+                    0,
+                    "{}",
+                    unsafe { &*replay.0 }.last_error
+                );
+                assert_eq!(&run(replay.0, *operation, false), frame);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&finish(replay.0)).unwrap(),
+                    serde_json::from_str::<serde_json::Value>(expected).unwrap()
+                );
+            }
+            assert_eq!(unsafe { pocket_trace_clock_mode(replay.0, 0) }, 0);
+        }
+    }
+
+    #[test]
+    fn production_worker_recording_replays_timers_and_latches_after_destroy() {
+        use std::sync::{Condvar, Mutex};
+        use std::time::{Duration, Instant};
+        static WAKE: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
+        unsafe extern "C" fn notify() {
+            let mut epoch = WAKE.0.lock().unwrap();
+            *epoch += 1;
+            WAKE.1.notify_all();
+        }
+        struct OwnedHost(*mut HostState);
+        impl Drop for OwnedHost {
+            fn drop(&mut self) {
+                unsafe {
+                    pocket_destroy(self.0);
+                }
+            }
+        }
+        let worker = compile_test_worker_bytecode(br#"
+            __pocketWorker.declareChannel(1,1,16,1,0);
+            globalThis.__pocketWorkerTurn=(context,facts)=>{
+                if(context.sequence===1) __pocketWorker.timer(1,context.nowMicros+50000,0);
+                for(const fact of facts) if(fact.kind===6) {
+                    __pocketWorker.publish(1,new Uint8Array([42,Math.floor(Math.random()*256),Date.now()%256]));
+                }
+            };
+        "#);
+        let config = CString::new(serde_json::json!({
+            "protocolVersion":1,"nativeGeneration":1,"bindingGeneration":BINDING_GENERATION,
+            "tickHz":DEFAULT_TICK_HZ,"expectedRuntimeAbi":bytecode::runtime_abi(),
+            "declaration":{"entry":"worker.js","nodes":[],"channels":[
+                {"name":"results","kind":"snapshot","direction":"worker-to-ui","recordBytes":16,"capacity":1}
+            ]},
+            "policy":{"requiredCapabilities":["runtime.worker"],"allowedHttpOrigins":[]},
+            "limits":{"heapBytes":16777216,"stackBytes":1048576,"turnBudgetMicros":10000,"windowMicros":100000,"quotaMicros":50000}
+        }).to_string()).unwrap();
+        let ui = CString::new(r#"
+            __pocketWorkerChannels.configure(1,1);
+            globalThis.frame=()=>{
+                for (const bytes of __pocketWorkerChannels.observe(1)) {
+                    pocket._emit(JSON.stringify({method:'worker.result',params:{bytes:Array.from(bytes)}}));
+                }
+            };
+        "#).unwrap();
+        let command = |handle: *mut HostState, operation: u8, recording: bool| {
+            let status = unsafe {
+                match operation {
+                    0 => pocket_configure_worker(
+                        handle,
+                        worker.as_ptr(),
+                        worker.len(),
+                        config.as_ptr(),
+                        if recording { Some(notify) } else { None },
+                    ),
+                    1 => pocket_eval(handle, ui.as_ptr()),
+                    2 => {
+                        pocket_notify_external_work(handle);
+                        0
+                    }
+                    3 => pocket_stop_async(handle),
+                    _ => unreachable!(),
+                }
+            };
+            assert_eq!(status, 0, "{}", unsafe { &*handle }.last_error);
+            if operation == 1 || operation == 2 {
+                let pointer = unsafe { pocket_frame(handle, 0.0) };
+                assert!(!pointer.is_null(), "{}", unsafe { &*handle }.last_error);
+                assert!(
+                    unsafe { &*handle }.last_error.is_empty(),
+                    "{}",
+                    unsafe { &*handle }.last_error
+                );
+                Some(
+                    serde_json::from_str::<serde_json::Value>(
+                        unsafe { CStr::from_ptr(pointer) }.to_str().unwrap(),
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            }
+        };
+        let trace_end = |handle| {
+            let pointer = unsafe { pocket_trace_clock_end_json(handle) };
+            assert!(!pointer.is_null(), "{}", unsafe { &*handle }.last_error);
+            unsafe { CStr::from_ptr(pointer) }
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        let empty = CString::new(r#"{"idleMs":[],"scalars":[]}"#).unwrap();
+        let original = OwnedHost(pocket_create(80.0, 80.0));
+        assert_eq!(unsafe { pocket_trace_clock_mode(original.0, 1) }, 0);
+        let mut tape = Vec::new();
+        let mut delivered = false;
+        let mut seen = *WAKE.0.lock().unwrap();
+        for operation in [0, 1] {
+            assert_eq!(
+                unsafe { pocket_trace_clock_begin_json(original.0, empty.as_ptr()) },
+                0
+            );
+            let frame = command(original.0, operation, true);
+            if let Some(frame) = &frame {
+                delivered |= frame["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["params"]["bytes"][0] == 42);
+            }
+            tape.push((operation, trace_end(original.0), frame));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !delivered {
+            let guard = WAKE.0.lock().unwrap();
+            let (guard, timeout) = WAKE
+                .1
+                .wait_timeout_while(
+                    guard,
+                    deadline.saturating_duration_since(Instant::now()),
+                    |epoch| *epoch == seen,
+                )
+                .unwrap();
+            seen = *guard;
+            assert!(
+                !timeout.timed_out(),
+                "recording worker failed to produce its timed channel value"
+            );
+            drop(guard);
+            assert_eq!(
+                unsafe { pocket_trace_clock_begin_json(original.0, empty.as_ptr()) },
+                0
+            );
+            let frame = command(original.0, 2, true).unwrap();
+            delivered = frame["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["params"]["bytes"][0] == 42);
+            tape.push((2, trace_end(original.0), Some(frame)));
+        }
+        assert_eq!(
+            unsafe { pocket_trace_clock_begin_json(original.0, empty.as_ptr()) },
+            0
+        );
+        command(original.0, 3, true);
+        tape.push((3, trace_end(original.0), None));
+        assert_eq!(unsafe { pocket_trace_clock_mode(original.0, 0) }, 0);
+        drop(original);
+
+        for _ in 0..3 {
+            let replay = OwnedHost(pocket_create(80.0, 80.0));
+            assert_eq!(unsafe { pocket_trace_clock_mode(replay.0, 2) }, 0);
+            for (operation, expected_trace, expected_frame) in &tape {
+                let input = CString::new(expected_trace.as_str()).unwrap();
+                assert_eq!(
+                    unsafe { pocket_trace_clock_begin_json(replay.0, input.as_ptr()) },
+                    0,
+                    "{}",
+                    unsafe { &*replay.0 }.last_error
+                );
+                assert_eq!(&command(replay.0, *operation, false), expected_frame);
+                let actual = trace_end(replay.0);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&actual).unwrap(),
+                    serde_json::from_str::<serde_json::Value>(expected_trace).unwrap()
+                );
+            }
+            assert_eq!(unsafe { pocket_trace_clock_mode(replay.0, 0) }, 0);
+        }
+    }
+
+    #[test]
+    fn trusted_compositor_registry_reaches_real_core_and_cannot_be_replaced() {
+        let handle = pocket_create(80.0, 80.0);
+        for invalid in [
+            r#"{"app.a":1}"#,
+            r#"{"app.a":2,"app.b":2}"#,
+            r#"{"../app":2}"#,
+        ] {
+            assert_eq!(
+                unsafe {
+                    pocket_configure_compositor(handle, CString::new(invalid).unwrap().as_ptr())
+                },
+                -1
+            );
+        }
+        assert_eq!(
+            unsafe {
+                pocket_configure_compositor(
+                    handle,
+                    CString::new(r#"{"app.a":2}"#).unwrap().as_ptr(),
+                )
+            },
+            0,
+            "{}",
+            unsafe { &*handle }.last_error
+        );
+        let source = CString::new(r#"const child=ui.createNode(3); ui.setProp(child,1,40);ui.setProp(child,2,40);
+            ui.setCompositorSurface(child,ui.__surfaces['app.a'],1);ui.insertBefore(1,child,0);
+            let blocked=0;try{pocket.registerSurface('app.a','glass','{}')}catch(e){blocked++}
+            try{pocket.releaseSurface('app.a')}catch(e){blocked++} if(blocked!==2)throw Error('registry escaped');
+            globalThis.frame=function(){};"#).unwrap();
+        assert_eq!(
+            unsafe { pocket_eval(handle, source.as_ptr()) },
+            0,
+            "{}",
+            unsafe { &*handle }.last_error
+        );
+        let frame = frame_json(handle);
+        let op = frame["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "hostSurface")
+            .unwrap();
+        assert_eq!(op["surfaceHandle"], 2);
+        assert_eq!(op["focused"], true);
+        assert_eq!(op["id"], "app.a");
+        assert_eq!(
+            unsafe { pocket_configure_compositor(handle, CString::new("{}").unwrap().as_ptr()) },
+            -1
+        );
+        unsafe {
             pocket_destroy(handle);
         }
     }

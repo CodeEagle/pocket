@@ -34,8 +34,29 @@ final class PocketGuest extends StatelessWidget {
 
 @visibleForTesting
 final class PocketGuestSession extends StatefulWidget {
-  const PocketGuestSession({super.key, required this.config});
+  const PocketGuestSession({
+    super.key,
+    required this.config,
+    this.session,
+    this.onFirstFrame,
+    this.hostSurfaceBuilder,
+    this.hostSurfaceResidents = const {},
+    this.inputEnabled = true,
+    this.viewport,
+  });
   final PocketAppConfig config;
+  final PocketHostSurfaceBuilder? hostSurfaceBuilder;
+  final Set<int> hostSurfaceResidents;
+  final bool inputEnabled;
+  final Size? viewport;
+
+  /// Optional host-owned Session.  When supplied, this widget only attaches
+  /// its PocketView and never disposes the Session.
+  final PocketSession? session;
+
+  /// Called after the real PocketView reports its first ready frame.
+  final VoidCallback? onFirstFrame;
+
   @override
   State<PocketGuestSession> createState() => PocketGuestSessionState();
 }
@@ -45,6 +66,7 @@ typedef _PocketGuestSession = PocketGuestSession;
 @visibleForTesting
 final class PocketGuestSessionState extends State<PocketGuestSession> {
   late PocketSession session;
+  bool _ownsSession = false;
   Object? startupError;
 
   @override
@@ -54,13 +76,16 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
   }
 
   void _startSession() {
-    final created = PocketSession(config: widget.config);
+    final supplied = widget.session;
+    final created = supplied ?? PocketSession(config: widget.config);
+    final ownsCreated = supplied == null;
+    _ownsSession = ownsCreated;
     session = created;
     created.addListener(_changed);
     unawaited(
       created.initialize().catchError((Object error) {
         created.removeListener(_changed);
-        created.dispose();
+        if (ownsCreated) created.dispose();
         if (mounted && identical(session, created)) {
           setState(() => startupError = error);
         }
@@ -71,9 +96,10 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
   @override
   void didUpdateWidget(covariant PocketGuestSession oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.config != widget.config) {
+    if (oldWidget.config != widget.config ||
+        !identical(oldWidget.session, widget.session)) {
       session.removeListener(_changed);
-      session.dispose();
+      if (_ownsSession) session.dispose();
       startupError = null;
       _startSession();
     }
@@ -86,7 +112,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
   @override
   void dispose() {
     session.removeListener(_changed);
-    session.dispose();
+    if (_ownsSession) session.dispose();
     super.dispose();
   }
 
@@ -101,7 +127,18 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
     return PocketView(
       key: ValueKey(epoch),
       controller: session.controller,
+      recordingFactory: config.recordingFactory,
+      active: session.foreground,
+      inputEnabled: widget.inputEnabled,
+      viewport: widget.viewport,
+      hostSurfaceBuilder: widget.hostSurfaceBuilder,
+      hostSurfaceResidents: widget.hostSurfaceResidents,
+      compositorSurfaces: config.compositorSurfaces,
+      workerProgram: session.workerProgram,
+      offloadProviderFactory: config.offloadProviderFactory,
+      tickHz: session.tickHz,
       bytecodeAsset: config.bytecodeAsset,
+      bytecodeMetadataAsset: config.metadataAsset,
       pakAsset: config.pakAsset,
       showDebugFps: config.showFps,
       packageSource: session.active?.source,
@@ -109,7 +146,10 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
         if (epoch == session.generation) session.onPerformanceSample(sample);
       },
       onReady: (controller) {
-        if (epoch == session.generation) session.onReady(controller);
+        if (epoch == session.generation) {
+          session.onReady(controller);
+          widget.onFirstFrame?.call();
+        }
       },
       onEvent: (event) {
         if (epoch == session.generation) session.onEvent(event);

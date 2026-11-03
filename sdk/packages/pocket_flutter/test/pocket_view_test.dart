@@ -12,6 +12,8 @@ class _TestMockRuntime implements PocketRuntime {
   final List<PocketEvent> queuedEvents = <PocketEvent>[];
   final List<Map<String, dynamic>> messages = <Map<String, dynamic>>[];
   bool _sentInitial = false;
+  int frameCalls = 0;
+  final List<int> frameDeltas = <int>[];
 
   final PocketFrame _baseFrame = const PocketFrame(
     width: 320,
@@ -47,7 +49,11 @@ class _TestMockRuntime implements PocketRuntime {
   PocketFrame load(String source, Uint8List pak) => _nextFrame();
 
   @override
-  PocketFrame frame(int deltaMilliseconds) => _nextFrame();
+  PocketFrame frame(int deltaMilliseconds) {
+    frameCalls++;
+    frameDeltas.add(deltaMilliseconds);
+    return _nextFrame();
+  }
 
   @override
   bool resizeViewport(double width, double height) => false;
@@ -67,19 +73,73 @@ class _TestMockRuntime implements PocketRuntime {
   void dispose() {}
 }
 
+final class _ScheduledTestRuntime extends _TestMockRuntime
+    implements PocketRuntimeScheduling {
+  _ScheduledTestRuntime({
+    required this.nextWakeDelayMilliseconds,
+    this.afterFrameDelayMilliseconds,
+  });
+
+  double nextWakeDelayMilliseconds;
+  double? afterFrameDelayMilliseconds;
+
+  @override
+  PocketFrame frame(int deltaMilliseconds) {
+    final frame = super.frame(deltaMilliseconds);
+    final next = afterFrameDelayMilliseconds;
+    if (next != null) nextWakeDelayMilliseconds = next;
+    return frame;
+  }
+}
+
 final class _ViewDuplexRuntime extends _TestMockRuntime
-    implements PocketBinaryDuplexRuntime {
+    implements PocketBinaryDuplexRuntime, PocketRuntimeScheduling {
   _ViewDuplexRuntime(this.endpoint, {PocketEvent? initialEvent})
     : super(initialEvent: initialEvent);
 
   final _ViewDuplexEndpoint endpoint;
+  final List<PocketDuplexMessage> consumedIngress = <PocketDuplexMessage>[];
   bool alive = true;
+  double nextWakeDelayMilliseconds = 0;
+  bool consumeIngressOnFrame = false;
+  PocketDuplexMessage? egressOnNextFrame;
+  PocketFrame? lastFrame;
 
   @override
   PocketDuplexEndpoint? get duplexEndpoint => endpoint;
 
   @override
   int duplexStep() => 0;
+
+  @override
+  PocketFrame frame(int deltaMilliseconds) {
+    final frame = super.frame(deltaMilliseconds);
+    final egress = egressOnNextFrame;
+    if (egress != null) {
+      endpoint.enqueue(egress);
+      egressOnNextFrame = null;
+      nextWakeDelayMilliseconds = -1;
+    }
+    final consumedNow = consumeIngressOnFrame
+        ? List<PocketDuplexMessage>.of(endpoint.ingress)
+        : const <PocketDuplexMessage>[];
+    consumedIngress.addAll(consumedNow);
+    if (consumeIngressOnFrame) endpoint.ingress.clear();
+    if (consumedNow.isEmpty) {
+      lastFrame = frame;
+      return frame;
+    }
+    final responseFrame = PocketFrame(
+      width: 320,
+      height: 480,
+      ops: const <PocketOp>[
+        PocketRectOp(x: 0, y: 0, width: 320, height: 480, color: 0xff45a070),
+      ],
+      events: const <PocketEvent>[],
+    );
+    lastFrame = responseFrame;
+    return responseFrame;
+  }
 
   @override
   bool get duplexRuntimeAlive => alive;
@@ -157,6 +217,37 @@ final class _ViewDuplexEndpoint implements PocketDuplexEndpoint {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  Future<void> mountView(
+    WidgetTester tester,
+    PocketRuntime runtime, {
+    PocketViewController? controller,
+    Key? viewKey,
+    bool active = true,
+    ValueChanged<PocketViewController>? onReady,
+    PocketPerformanceSampleCallback? onPerformanceSample,
+  }) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            key: viewKey,
+            controller: controller,
+            active: active,
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            showDebugFps: false,
+            onReady: onReady,
+            onPerformanceSample: onPerformanceSample,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+  }
+
   testWidgets('PocketView owns the duplex generation and drains egress', (
     tester,
   ) async {
@@ -194,6 +285,129 @@ void main() {
 
     await tester.pumpWidget(const SizedBox.shrink());
     expect(endpoint.closed, isTrue);
+  });
+
+  testWidgets('public duplex ingress and notifyWork wake an idle guest', (
+    tester,
+  ) async {
+    final endpoint = _ViewDuplexEndpoint();
+    final runtime = _ViewDuplexRuntime(endpoint);
+    final controller = PocketViewController();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            controller: controller,
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            showDebugFps: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    runtime.nextWakeDelayMilliseconds = -1;
+    await tester.pump(const Duration(milliseconds: 16));
+    final state = tester.state(find.byType(PocketView)) as dynamic;
+    expect(state.isTickerActive, isFalse);
+    final channel = controller.duplexChannel!;
+
+    var callsBeforePublish = runtime.frameCalls;
+    expect(channel.pushToPocketJs(msgType: 9, targetId: 1), isTrue);
+    expect(state.isTickerActive, isTrue);
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(runtime.frameCalls, callsBeforePublish + 1);
+    expect(state.isTickerActive, isFalse);
+
+    callsBeforePublish = runtime.frameCalls;
+    expect(
+      channel.pushBatch(const [PocketDuplexMessage(msgType: 10, targetId: 2)]),
+      1,
+    );
+    expect(state.isTickerActive, isTrue);
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(runtime.frameCalls, callsBeforePublish + 1);
+    expect(state.isTickerActive, isFalse);
+
+    callsBeforePublish = runtime.frameCalls;
+    controller.notifyWork();
+    expect(state.isTickerActive, isTrue);
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(runtime.frameCalls, callsBeforePublish + 1);
+    expect(state.isTickerActive, isFalse);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(endpoint.closed, isTrue);
+  });
+
+  testWidgets('duplex response published during output delivery gets a turn', (
+    tester,
+  ) async {
+    final endpoint = _ViewDuplexEndpoint();
+    final runtime = _ViewDuplexRuntime(endpoint);
+    runtime.consumeIngressOnFrame = true;
+    runtime.nextWakeDelayMilliseconds = 100;
+    final controller = PocketViewController();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            controller: controller,
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            showDebugFps: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 16));
+
+    final state = tester.state(find.byType(PocketView)) as dynamic;
+    expect(state.isTickerActive, isFalse);
+    expect(state.hasScheduledWake, isTrue);
+    runtime.egressOnNextFrame = const PocketDuplexMessage(
+      msgType: 9,
+      targetId: 7,
+    );
+
+    controller.addDuplexListener((_) {
+      expect(
+        controller.duplexChannel!.pushToPocketJs(msgType: 10, targetId: 42),
+        isTrue,
+      );
+    });
+    var wakePumps = 0;
+    while (endpoint.ingress.isEmpty && wakePumps < 10) {
+      await tester.pump(const Duration(milliseconds: 16));
+      wakePumps++;
+    }
+
+    // No host input is sent after the timer wake: the inline duplex response
+    // itself must preserve the next frame.
+    expect(wakePumps, greaterThan(0));
+    expect(endpoint.ingress, hasLength(1));
+    expect(state.isTickerActive, isTrue);
+    await tester.pump(const Duration(milliseconds: 16));
+
+    // The fake native frame has already captured `-1` before Flutter drains
+    // the egress event. Its inline response must keep the ticker alive for a
+    // fresh frame that can consume the newly published ingress record.
+    expect(runtime.consumedIngress, hasLength(1));
+    expect(runtime.consumedIngress.single.msgType, 10);
+    expect(runtime.consumedIngress.single.targetId, 42);
+    expect(runtime.lastFrame!.ops.single, isA<PocketRectOp>());
+    expect((runtime.lastFrame!.ops.single as PocketRectOp).color, 0xff45a070);
+    expect(state.isTickerActive, isFalse);
+
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('PocketView defaults pointer edges to the duplex channel', (
@@ -614,11 +828,197 @@ void main() {
     },
   );
 
+  testWidgets('known static idle parks with no recurring runtime calls', (
+    tester,
+  ) async {
+    final runtime = _ScheduledTestRuntime(
+      nextWakeDelayMilliseconds: -1,
+      afterFrameDelayMilliseconds: -1,
+    );
+    await mountView(tester, runtime);
+
+    final state = tester.state(find.byType(PocketView)) as dynamic;
+    // The initial display.viewport host message may request one frame.
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(state.isTickerActive, isFalse);
+    expect(state.hasScheduledWake, isFalse);
+    final callsAfterParking = runtime.frameCalls;
+    await tester.pump(const Duration(minutes: 5));
+    expect(runtime.frameCalls, callsAfterParking);
+    expect(state.isTickerActive, isFalse);
+  });
+
+  testWidgets('discrete event wakes do not sample intentional idle gaps', (
+    tester,
+  ) async {
+    final runtime = _ScheduledTestRuntime(nextWakeDelayMilliseconds: -1);
+    final controller = PocketViewController();
+    final samples = <PocketPerformanceSample>[];
+    await mountView(
+      tester,
+      runtime,
+      controller: controller,
+      onPerformanceSample: samples.add,
+    );
+
+    final state = tester.state(find.byType(PocketView)) as dynamic;
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(state.isTickerActive, isFalse);
+    // Each discrete message gets one guest frame, then intentional idle time.
+    // That cadence is not a sustained FPS window and must not report the gaps.
+    for (var index = 0; index < 80; index++) {
+      controller.send(method: 'discrete.update');
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(state.isTickerActive, isFalse);
+    }
+    expect(samples, isEmpty);
+  });
+
+  testWidgets('known timer deadline wakes once and then parks again', (
+    tester,
+  ) async {
+    final runtime = _ScheduledTestRuntime(
+      nextWakeDelayMilliseconds: -1,
+      afterFrameDelayMilliseconds: 100,
+    );
+    await mountView(tester, runtime);
+
+    await tester.pump(const Duration(milliseconds: 16));
+    final state = tester.state(find.byType(PocketView)) as dynamic;
+    expect(state.isTickerActive, isFalse);
+    expect(state.hasScheduledWake, isTrue);
+    final callsBeforeDeadline = runtime.frameCalls;
+    runtime.afterFrameDelayMilliseconds = -1;
+    await tester.pump(const Duration(milliseconds: 99));
+    expect(runtime.frameCalls, callsBeforeDeadline);
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+    expect(runtime.frameCalls, callsBeforeDeadline + 1);
+    expect(state.isTickerActive, isFalse);
+    expect(state.hasScheduledWake, isFalse);
+
+    await tester.pump(const Duration(seconds: 2));
+    expect(runtime.frameCalls, callsBeforeDeadline + 1);
+  });
+
+  testWidgets('continuous and legacy runtimes stay on vsync', (tester) async {
+    final continuous = _ScheduledTestRuntime(nextWakeDelayMilliseconds: 0);
+    await mountView(tester, continuous);
+    final continuousState = tester.state(find.byType(PocketView)) as dynamic;
+    expect(continuousState.isTickerActive, isTrue);
+    for (var index = 0; index < 3; index++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(continuous.frameCalls, greaterThanOrEqualTo(3));
+
+    final legacy = _TestMockRuntime();
+    await mountView(tester, legacy, viewKey: const ValueKey('legacy'));
+    final legacyState = tester.state(find.byType(PocketView)) as dynamic;
+    expect(legacyState.isTickerActive, isTrue);
+    for (var index = 0; index < 3; index++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(legacy.frameCalls, greaterThanOrEqualTo(3));
+  });
+
+  testWidgets('host response and pointer input wake a known-idle guest', (
+    tester,
+  ) async {
+    final runtime = _ScheduledTestRuntime(
+      nextWakeDelayMilliseconds: -1,
+      afterFrameDelayMilliseconds: -1,
+    );
+    final controller = PocketViewController();
+    await mountView(tester, runtime, controller: controller);
+
+    final state = tester.state(find.byType(PocketView)) as dynamic;
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(state.isTickerActive, isFalse);
+    final framesBeforeResponse = runtime.frameCalls;
+    controller.sendRaw(<String, dynamic>{
+      'type': 'response',
+      'id': 'request-1',
+      'result': true,
+    });
+    expect(state.isTickerActive, isTrue);
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(runtime.frameCalls, framesBeforeResponse + 1);
+    expect(state.isTickerActive, isFalse);
+
+    await tester.tap(find.byType(PocketView));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(runtime.frameCalls, greaterThan(framesBeforeResponse + 1));
+  });
+
   testWidgets(
-    'ticker pauses after 6 consecutive unchanged frames and wakes on interaction or message',
+    'inactive prewarm permits one load frame then parks timers and queues sends',
     (tester) async {
-      final runtime = _TestMockRuntime();
+      final runtime = _ScheduledTestRuntime(
+        nextWakeDelayMilliseconds: -1,
+        afterFrameDelayMilliseconds: -1,
+      );
       final controller = PocketViewController();
+      var ready = false;
+      await mountView(
+        tester,
+        runtime,
+        controller: controller,
+        active: false,
+        onReady: (_) => ready = true,
+      );
+      expect(ready, isTrue);
+      final state = tester.state(find.byType(PocketView)) as dynamic;
+      expect(runtime.frameCalls, 0);
+      expect(state.isTickerActive, isFalse);
+      expect(state.hasScheduledWake, isFalse);
+      final startupPending = controller.pendingMessageCount;
+
+      final params = <String, dynamic>{
+        'sequence': 1,
+        'nested': <String, dynamic>{'value': 'before-mutation'},
+      };
+      expect(controller.send(method: 'hidden.one', params: params), isTrue);
+      (params['nested'] as Map<String, dynamic>)['value'] = 'after-mutation';
+      expect(
+        controller.sendRaw(<String, dynamic>{
+          'type': 'response',
+          'id': 'hidden-two',
+          'result': <String, dynamic>{'sequence': 2},
+        }),
+        isTrue,
+      );
+      expect(runtime.messages, isEmpty);
+      expect(controller.pendingMessageCount, startupPending + 2);
+      final oversized = List<String>.filled(
+        PocketViewController.maxPendingMessageBytes,
+        'x',
+      ).join();
+      expect(
+        controller.send(
+          method: 'hidden.oversized',
+          params: <String, dynamic>{'value': oversized},
+        ),
+        isFalse,
+      );
+
+      final remaining =
+          PocketViewController.maxPendingMessages -
+          controller.pendingMessageCount;
+      for (var index = 0; index < remaining; index++) {
+        expect(
+          controller.send(
+            method: 'hidden.$index',
+            params: <String, dynamic>{'index': index},
+          ),
+          isTrue,
+        );
+      }
+      expect(
+        controller.pendingMessageCount,
+        PocketViewController.maxPendingMessages,
+      );
+      expect(controller.send(method: 'hidden.full', params: const {}), isFalse);
+      expect(runtime.messages, isEmpty);
 
       await tester.pumpWidget(
         MaterialApp(
@@ -628,6 +1028,7 @@ void main() {
             child: PocketView(
               controller: controller,
               runtime: runtime,
+              active: true,
               jsSource: '',
               pakBytes: Uint8List(0),
               showDebugFps: false,
@@ -635,119 +1036,265 @@ void main() {
           ),
         ),
       );
-      await tester.pump();
-
-      dynamic state = tester.state(find.byType(PocketView));
-      expect(state.isTickerActive, isTrue);
-
-      // Now override delta function to return null (unchanged frames)
-      debugPocketFrameDeltaAtOverride = (rt, delta) => null;
-
-      try {
-        // Pump 5 unchanged frames
-        for (var i = 0; i < 5; i++) {
-          await tester.pump(const Duration(milliseconds: 16));
-          expect(state.idleTicks, i + 1);
-          expect(state.isTickerActive, isTrue);
-        }
-
-        // 6th unchanged frame pauses ticker
-        await tester.pump(const Duration(milliseconds: 16));
-        expect(state.idleTicks, greaterThanOrEqualTo(6));
-        expect(state.isTickerActive, isFalse);
-
-        // A quiet guest still needs a bounded wake for a future QuickJS
-        // timeout. The ticker may be stopped again after the wake, but it
-        // must not remain permanently dormant.
-        await tester.pump(const Duration(milliseconds: 100));
-        // The timer probe stays asleep when no frame changed. External
-        // controller messages below still restart the normal active ticker.
-        expect(state.isTickerActive, isFalse);
-        expect(state.idleTicks, greaterThanOrEqualTo(6));
-
-        // Sending a message via controller wakes the ticker
-        controller.send(method: 'test.wake');
-        expect(state.idleTicks, 0);
-        expect(state.isTickerActive, isTrue);
-
-        // Allow it to pause again
-        for (var i = 0; i < 6; i++) {
-          await tester.pump(const Duration(milliseconds: 16));
-        }
-        expect(state.isTickerActive, isFalse);
-
-        // Dispatching pointer tap wakes the ticker
-        await tester.tap(find.byType(PocketView));
-        expect(state.idleTicks, 0);
-        expect(state.isTickerActive, isTrue);
-      } finally {
-        debugPocketFrameDeltaAtOverride = null;
-      }
+      expect(runtime.messages, isNotEmpty);
+      final hiddenMessages = runtime.messages
+          .where(
+            (message) =>
+                message['name'] == 'hidden.one' ||
+                message['name']?.toString().startsWith('hidden.') == true ||
+                message['id'] == 'hidden-two',
+          )
+          .toList(growable: false);
+      expect(
+        hiddenMessages,
+        hasLength(PocketViewController.maxPendingMessages - startupPending),
+      );
+      expect(hiddenMessages.first['name'], 'hidden.one');
+      expect(
+        (hiddenMessages.first['payload'] as Map<String, dynamic>)['nested'],
+        <String, dynamic>{'value': 'before-mutation'},
+      );
+      expect(hiddenMessages[1]['type'], 'response');
+      expect(controller.pendingMessageCount, 0);
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(state.isTickerActive, isFalse);
     },
   );
 
+  testWidgets('controller appActive gate composes with widget and OS gates', (
+    tester,
+  ) async {
+    final runtime = _ScheduledTestRuntime(
+      nextWakeDelayMilliseconds: -1,
+      afterFrameDelayMilliseconds: -1,
+    );
+    final controller = PocketViewController();
+    await mountView(tester, runtime, controller: controller);
+    final state = tester.state(find.byType(PocketView)) as dynamic;
+    await tester.pump(const Duration(milliseconds: 16));
+    final callsBeforeHide = runtime.frameCalls;
+    final messagesBeforeHide = runtime.messages.length;
+
+    controller.setAppActive(false);
+    expect(state.isTickerActive, isFalse);
+    expect(
+      controller.send(method: 'controller.hidden', params: const {}),
+      isTrue,
+    );
+    await tester.pump(const Duration(seconds: 1));
+    expect(runtime.frameCalls, callsBeforeHide);
+    expect(runtime.messages, hasLength(messagesBeforeHide));
+
+    controller.setAppActive(true);
+    expect(
+      runtime.messages.where(
+        (message) => message['name'] == 'controller.hidden',
+      ),
+      hasLength(1),
+    );
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(runtime.frameCalls, callsBeforeHide + 1);
+    expect(state.isTickerActive, isFalse);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    controller.setAppActive(false);
+    controller.setAppActive(true);
+    expect(state.isTickerActive, isFalse);
+    await tester.pump(const Duration(seconds: 1));
+    expect(runtime.frameCalls, callsBeforeHide + 1);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(runtime.frameCalls, callsBeforeHide + 2);
+    expect(runtime.frameDeltas.last, lessThan(100));
+  });
+
+  testWidgets('detaching a hidden generation drops its queued messages', (
+    tester,
+  ) async {
+    final controller = PocketViewController();
+    final oldRuntime = _ScheduledTestRuntime(nextWakeDelayMilliseconds: -1);
+    await mountView(tester, oldRuntime, controller: controller, active: false);
+    expect(controller.send(method: 'old-generation'), isTrue);
+    expect(controller.pendingMessageCount, greaterThan(0));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(controller.pendingMessageCount, 0);
+
+    final newRuntime = _ScheduledTestRuntime(nextWakeDelayMilliseconds: -1);
+    await mountView(tester, newRuntime, controller: controller);
+    expect(
+      newRuntime.messages.where(
+        (message) => message['name'] == 'old-generation',
+      ),
+      isEmpty,
+    );
+  });
+
   testWidgets(
-    'repeated idle probes exclude all sleep from the performance window',
+    'hidden duplex ingress remains writable but is consumed on resume',
     (tester) async {
-      final runtime = _TestMockRuntime();
-      final samples = <PocketPerformanceSample>[];
+      final endpoint = _ViewDuplexEndpoint();
+      final runtime = _ViewDuplexRuntime(endpoint)
+        ..consumeIngressOnFrame = true
+        ..nextWakeDelayMilliseconds = -1;
+      final controller = PocketViewController();
+      await mountView(tester, runtime, controller: controller, active: false);
+      final channel = controller.duplexChannel;
+      expect(channel, isNotNull);
+      expect(channel!.pushToPocketJs(msgType: 22, targetId: 7), isTrue);
+      controller.notifyWork();
+      await tester.pump(const Duration(seconds: 1));
+      expect(runtime.consumedIngress, isEmpty);
+
       await tester.pumpWidget(
         MaterialApp(
           home: SizedBox(
             width: 320,
             height: 480,
             child: PocketView(
+              controller: controller,
               runtime: runtime,
+              active: true,
               jsSource: '',
               pakBytes: Uint8List(0),
               showDebugFps: false,
-              onPerformanceSample: samples.add,
             ),
           ),
         ),
       );
-      await tester.pump();
-
-      var calls = 0;
-      var sleeping = true;
-      debugPocketFrameDeltaAtOverride = (rt, _) {
-        calls++;
-        // Remain unchanged across multiple timer probes, then resume drawing.
-        if (calls >= 9 && sleeping) return null;
-        return rt.frame(0);
-      };
-      try {
-        for (var index = 0; index < 8; index++) {
-          await tester.pump(const Duration(milliseconds: 16));
-        }
-        for (var index = 0; index < 6; index++) {
-          await tester.pump(const Duration(milliseconds: 16));
-        }
-        final state = tester.state(find.byType(PocketView)) as dynamic;
-        expect(state.isTickerActive, isFalse);
-
-        // Earlier sleep intervals must survive multiple unsuccessful probes.
-        // Resetting the idle baseline on every probe depresses the first FPS
-        // sample even though no display work was requested during this time.
-        for (var probe = 0; probe < 4; probe++) {
-          await tester.pump(const Duration(milliseconds: 250));
-          await tester.pump();
-          expect(state.isTickerActive, isFalse);
-        }
-        sleeping = false;
-        await tester.pump(const Duration(milliseconds: 100));
-        await tester.pump();
-        expect(state.isTickerActive, isTrue);
-        for (var index = 0; index < 90; index++) {
-          await tester.pump(const Duration(milliseconds: 16));
-        }
-        expect(samples, isNotEmpty);
-        expect(samples.first.fps, greaterThan(45));
-        expect(samples.first.maxGapMs, lessThan(50));
-        expect(samples.last.slowFrames, 0);
-      } finally {
-        debugPocketFrameDeltaAtOverride = null;
-      }
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(runtime.consumedIngress, hasLength(1));
+      expect(runtime.consumedIngress.single.msgType, 22);
     },
   );
+
+  testWidgets('hidden prewarm closes IME and buffers its dismiss response', (
+    tester,
+  ) async {
+    final runtime = _TestMockRuntime(
+      initialEvent: const PocketEvent(
+        id: 'open-hidden-input',
+        method: 'textInput.open',
+        params: <String, dynamic>{
+          'id': 'hidden-field',
+          'editingSession': 'hidden-session',
+          'rect': <String, double>{'x': 20, 'y': 40, 'w': 180, 'h': 42},
+          'text': '',
+        },
+      ),
+    );
+    final controller = PocketViewController();
+    await mountView(tester, runtime, controller: controller, active: false);
+    expect(find.byType(EditableText), findsNothing);
+    expect(runtime.messages, isEmpty);
+    expect(controller.pendingMessageCount, greaterThanOrEqualTo(1));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            controller: controller,
+            runtime: runtime,
+            active: true,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            showDebugFps: false,
+          ),
+        ),
+      ),
+    );
+    // The queued dismiss is delivered before the first resumed turn.
+    expect(
+      runtime.messages.where(
+        (message) => message['name'] == 'textInput.dismiss',
+      ),
+      hasLength(1),
+    );
+  });
+
+  testWidgets('pause and runtime replacement cancel stale deadline timers', (
+    tester,
+  ) async {
+    final pausedRuntime = _ScheduledTestRuntime(
+      nextWakeDelayMilliseconds: -1,
+      afterFrameDelayMilliseconds: 100,
+    );
+    await mountView(tester, pausedRuntime);
+    await tester.pump(const Duration(milliseconds: 16));
+    final pausedState = tester.state(find.byType(PocketView)) as dynamic;
+    expect(pausedState.hasScheduledWake, isTrue);
+    final callsBeforePause = pausedRuntime.frameCalls;
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    expect(pausedState.hasScheduledWake, isFalse);
+    await tester.pump(const Duration(seconds: 1));
+    expect(pausedRuntime.frameCalls, callsBeforePause);
+
+    pausedRuntime.afterFrameDelayMilliseconds = -1;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(pausedRuntime.frameCalls, callsBeforePause + 1);
+    expect(pausedState.isTickerActive, isFalse);
+
+    final oldGeneration = _ScheduledTestRuntime(
+      nextWakeDelayMilliseconds: -1,
+      afterFrameDelayMilliseconds: 100,
+    );
+    await mountView(tester, oldGeneration, viewKey: const ValueKey('old'));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(
+      (tester.state(find.byType(PocketView)) as dynamic).hasScheduledWake,
+      isTrue,
+    );
+    final newGeneration = _ScheduledTestRuntime(
+      nextWakeDelayMilliseconds: -1,
+      afterFrameDelayMilliseconds: -1,
+    );
+    await mountView(tester, newGeneration, viewKey: const ValueKey('new'));
+    await tester.pump(const Duration(milliseconds: 16));
+    final oldCallsAfterReplacement = oldGeneration.frameCalls;
+    final newCallsAfterParking = newGeneration.frameCalls;
+    await tester.pump(const Duration(seconds: 1));
+    expect(oldGeneration.frameCalls, oldCallsAfterReplacement);
+    expect(newGeneration.frameCalls, newCallsAfterParking);
+  });
+
+  testWidgets('known idle time stays out of FPS gap accounting', (
+    tester,
+  ) async {
+    final runtime = _ScheduledTestRuntime(
+      nextWakeDelayMilliseconds: 0,
+      afterFrameDelayMilliseconds: -1,
+    );
+    final samples = <PocketPerformanceSample>[];
+    final controller = PocketViewController();
+    await mountView(
+      tester,
+      runtime,
+      controller: controller,
+      onPerformanceSample: samples.add,
+    );
+
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(runtime.frameCalls, greaterThanOrEqualTo(1));
+    expect(
+      (tester.state(find.byType(PocketView)) as dynamic).isTickerActive,
+      isFalse,
+    );
+
+    await tester.pump(const Duration(seconds: 5));
+    runtime.afterFrameDelayMilliseconds = 0;
+    controller.send(method: 'resume-animation');
+    await tester.pump(const Duration(milliseconds: 16));
+    for (var index = 0; index < 75; index++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(samples, isNotEmpty);
+    expect(samples.first.fps, greaterThan(45));
+    expect(samples.first.maxGapMs, lessThan(50));
+    expect(samples.last.slowFrames, 0);
+  });
 }

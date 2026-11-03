@@ -1,6 +1,7 @@
 # Pocket integration
 
 - Flutter owns only the rendering surface, input/IME, lifecycle, resource decoding and explicitly registered native capability transport. Business UI, state, routing and component composition belong in JS.
+- For new capabilities, implement all logic that can run in JS in the JS SDK. Keep Dart limited to necessary Flutter/FFI/resource IO boundaries; app policy, recording controls and orchestration must not acquire another Dart state machine. Capture native Worker/IO facts at the official native execution boundaries when JS cannot observe them accurately.
 - Reuse the pinned PocketJS compiler and engine. Do not invent a second layout engine, mock runtime fallback or success placeholder.
 - Work inside `/Volumes/ORICO/Development/Github/pocket`. `sdk/` is the reusable implementation and `demo/` is the only Showcase consumer. The Demo Flutter project is first-layer (`demo/lib`, `demo/ios`, `demo/android`, `demo/pubspec.yaml`); its JS/TS project is the single `demo/js/` folder. Preserve the original parent Flutter demo and the source archive; do not use the old `pocket_host` directory as a second implementation or edit it during normal work.
 - Keep upstream provenance and reproducible bootstrap. Generated caches and binaries are not source.

@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_host/main.dart';
 
 import 'guest_interaction_test.dart' as guest;
@@ -28,10 +29,32 @@ void main() {
     );
     final startedAt = DateTime.now().toUtc();
     Timer? stallTimer;
+    Timer? transitionTimer;
 
     try {
       await tester.pumpWidget(const PocketHostApp());
       await guest.waitFor(tester, '00');
+      final controller = tester
+          .widget<PocketView>(find.byType(PocketView))
+          .controller!;
+      // FPS history measures intervals while the guest requests continuous
+      // frames. A discrete event that parks after its output has no FPS cadence
+      // to measure, so keep the real JS route transition active throughout the
+      // warm-up, stall, and recovery windows.
+      controller.send(
+        method: 'demo.navigate',
+        params: const <String, dynamic>{'route': 'mobile'},
+      );
+      await guest.waitFor(tester, 'Flutter widget vocabulary');
+      var nextRoute = 'transitions';
+      transitionTimer = Timer.periodic(const Duration(milliseconds: 80), (_) {
+        controller.send(
+          method: 'demo.navigate',
+          params: <String, dynamic>{'route': nextRoute},
+        );
+        nextRoute = nextRoute == 'mobile' ? 'transitions' : 'mobile';
+      });
+      await guest.waitFor(tester, 'Route motion');
       final before = await _waitForFpsLabel(tester);
       expect(before.minFps, greaterThan(0));
 
@@ -60,6 +83,14 @@ void main() {
         lessThan(baselineMin),
         reason: 'real UI stalls should lower the renderer minimum FPS',
       );
+      transitionTimer.cancel();
+      transitionTimer = null;
+      controller.send(
+        method: 'demo.navigate',
+        params: const <String, dynamic>{'route': 'home'},
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await guest.waitFor(tester, '00');
 
       // FPS history is a Runtime-page entry, not a bottom navigation item.
       await guest.tapGuest(tester, 'Host');
@@ -95,6 +126,7 @@ void main() {
       expect(guest.texts(tester), isNot(contains('No FPS samples')));
     } finally {
       stallTimer?.cancel();
+      transitionTimer?.cancel();
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     }

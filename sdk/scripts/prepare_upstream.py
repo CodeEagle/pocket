@@ -32,7 +32,55 @@ PATCHES = (
     ("tex-quad-fractional-coverage.patch", "TEX_QUAD coverage"),
     ("rgba-tileset.patch", "RGBA TILESET"),
     ("rgba-filter-helpers.patch", "RGBA filter helper"),
+    ("demand-scheduler.patch", "demand scheduler"),
+    ("offload-cancel.patch", "offload provider cancellation"),
 )
+
+# Later patches can intentionally supersede one earlier diff hunk. The
+# per-file patcher still requires every other file section to match in either
+# direction; these markers are only for that declared overlap.
+SUPERSEDED_PATCH_MARKERS = {
+    "guest stack size": {
+        "engine/guest-rquickjs/src/lib.rs": (
+            "// Keep QuickJS's stack guard bounded while allowing the generated",
+            "// Solid mount graph to resolve its initial reactive styles.",
+            "runtime.set_max_stack_size(4 * 1024 * 1024);",
+        ),
+    },
+    "guest execution budget": {
+        "engine/guest-rquickjs/src/lib.rs": (
+            'runtime.set_interrupt_handler(Some(Box::new(move || {',
+            'self.last_error = Some("Pocket guest turn exceeded execution budget".to_owned());',
+        ),
+    },
+    "guest QuickJS bytecode": {
+        "engine/guest-rquickjs/src/lib.rs": (
+            "pub fn evaluate_bytecode(&mut self, bytecode: &[u8], tick_hz: u32)",
+            "qjs::JS_ReadObject(",
+            "qjs::JS_EvalFunction(ctx.as_raw().as_ptr(), value)",
+        ),
+    },
+    "demand scheduler": {
+        "framework/src/offload.ts": (
+            "const eventDriven = () =>",
+            "registerServicePump(() => next.step(), () => next.needsPump());",
+        ),
+    },
+}
+
+FINAL_CONTRACTS = {
+    "framework/src/services.ts": (
+        "export function registerServicePump(pump: ServicePump, pending: PendingWork = () => true): () => void {",
+        "export function hasPendingServiceWork(): boolean",
+        "type PendingWork = () => boolean;",
+    ),
+    "framework/src/offload.ts": (
+        "const eventDriven = () =>",
+        "registerServicePump(() => next.step(), () => next.needsPump());",
+        "ops as OffloadOps & { cancel?:",
+        "if (item.sent) (ops as OffloadOps",
+    ),
+}
 
 
 def extract_archive() -> None:
@@ -68,69 +116,138 @@ def extract_archive() -> None:
     MARKER.write_text(REVISION + "\n", encoding="utf-8")
 
 
+def patch_sections(patch_bytes: bytes) -> list[tuple[str, bytes]]:
+    """Split a unified diff into independently verifiable file sections."""
+    lines = patch_bytes.splitlines(keepends=True)
+    starts: list[int] = []
+    for index, line in enumerate(lines):
+        if line.startswith(b"diff --git "):
+            starts.append(index)
+        elif line.startswith(b"--- ") and (
+            index + 1 < len(lines) and lines[index + 1].startswith(b"+++ ")
+        ):
+            if not starts or not any(
+                lines[position].startswith(b"diff --git ")
+                for position in range(starts[-1], index + 1)
+            ):
+                starts.append(index)
+    if not starts:
+        raise SystemExit("Patch has no unified-diff file sections")
+
+    sections: list[tuple[str, bytes]] = []
+    for slot, start in enumerate(starts):
+        end = starts[slot + 1] if slot + 1 < len(starts) else len(lines)
+        section = b"".join(lines[start:end])
+        target: str | None = None
+        for line in lines[start:end]:
+            if line.startswith(b"+++ b/"):
+                target = line[6:].decode("utf-8").strip()
+                break
+            if line.startswith(b"--- a/"):
+                target = line[6:].decode("utf-8").strip()
+        if target is None:
+            raise SystemExit("Patch section does not identify a target file")
+        sections.append((target, section))
+    return sections
+
+
+def run_patch(target: str, section: bytes, *, reverse: bool = False, dry_run: bool = True) -> subprocess.CompletedProcess[bytes]:
+    # GNU patch otherwise auto-detects a reversed diff even when --reverse was
+    # explicitly requested. That makes an unapplied patch look "already
+    # present" and let the bootstrap skip it. --forward disables that fallback
+    # for both directions, so a successful dry run proves the requested
+    # direction actually matches.
+    command = ["patch", "--batch", "--fuzz=0", "--forward", "-p1"]
+    if reverse:
+        command.append("--reverse")
+    if dry_run:
+        command.append("--dry-run")
+    result = subprocess.run(
+        command,
+        cwd=CACHE,
+        input=section,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    # `patch` still exits zero when --forward skips a previously applied hunk
+    # (and with --batch it can also skip a missing file). Treat those reports
+    # as a failed directional match instead of trusting its status alone.
+    output = result.stdout.lower()
+    skipped = (
+        b"ignored" in output
+        or b"previously applied" in output
+        or b"no file to patch" in output
+        or b"skipping" in output
+        or b" failed" in output
+    )
+    if result.returncode == 0 and skipped:
+        return subprocess.CompletedProcess(result.args, 1, result.stdout, result.stderr)
+    return result
+
+
+def file_has_markers(target_name: str, markers: tuple[str, ...]) -> bool:
+    target = CACHE / target_name
+    if not target.is_file():
+        return False
+    content = target.read_text(encoding="utf-8")
+    return all(marker in content for marker in markers)
+
+
 def apply_patch(filename: str, label: str) -> None:
     patch_path = ROOT / "native" / "patches" / filename
     if not patch_path.is_file():
         raise SystemExit(f"Missing required {label} patch: {patch_path}")
-    command = ["patch", "--batch", "--fuzz=0", "-p1"]
     patch_bytes = patch_path.read_bytes()
-    forward = subprocess.run(
-        [*command, "--forward", "--dry-run"],
-        cwd=CACHE,
-        input=patch_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    if forward.returncode == 0:
-        subprocess.run([*command, "--forward"], cwd=CACHE, input=patch_bytes, check=True)
-        print(f"PocketJS {label}: applied")
-        return
-    reverse = subprocess.run(
-        [*command, "--reverse", "--dry-run"],
-        cwd=CACHE,
-        input=patch_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    if reverse.returncode == 0:
-        print(f"PocketJS {label}: already present")
-        return
-    # Another pinned contract patch may have inserted lines between this
-    # patch's context lines. In that case reverse dry-run cannot recognize a
-    # complete application; verify every non-empty added line before failing.
-    patch_text = patch_bytes.decode("utf-8")
-    sections: dict[str, list[str]] = {}
-    current_target: str | None = None
-    for line in patch_text.splitlines():
-        if line.startswith("+++ b/"):
-            current_target = line[6:].strip()
-            if current_target not in sections:
-                sections[current_target] = []
-        elif line.startswith("+") and not line.startswith("+++"):
-            added_line = line[1:]
-            if added_line and current_target:
-                sections[current_target].append(added_line)
+    superseded = SUPERSEDED_PATCH_MARKERS.get(label, {})
+    applied = 0
+    already = 0
+    for target, section in patch_sections(patch_bytes):
+        reverse = run_patch(target, section, reverse=True)
+        if reverse.returncode == 0:
+            already += 1
+            continue
 
-    if sections:
-        all_matched = True
-        for target_name, added_lines in sections.items():
-            if not added_lines:
-                continue
-            target = CACHE / target_name
-            if not target.is_file():
-                all_matched = False
-                break
-            body = target.read_text(encoding="utf-8")
-            if not all(added_line in body for added_line in added_lines):
-                all_matched = False
-                break
-        if all_matched:
-            print(f"PocketJS {label}: already present (content check)")
-            return
-    detail = forward.stdout.decode("utf-8", errors="replace").strip()
-    raise SystemExit(f"{label} patch overlaps the pinned source; refusing overwrite:\n{detail}")
+        forward = run_patch(target, section)
+        if forward.returncode == 0:
+            result = run_patch(target, section, dry_run=False)
+            if result.returncode != 0:
+                detail = result.stdout.decode("utf-8", errors="replace").strip()
+                raise SystemExit(f"{label} patch failed while applying {target}:\n{detail}")
+            reverse = run_patch(target, section, reverse=True)
+            if reverse.returncode != 0:
+                detail = reverse.stdout.decode("utf-8", errors="replace").strip()
+                raise SystemExit(f"{label} patch did not verify after applying {target}:\n{detail}")
+            applied += 1
+            continue
+
+        markers = superseded.get(target)
+        if markers and file_has_markers(target, markers):
+            already += 1
+            print(f"PocketJS {label}: accepted superseded hunk in {target} by explicit contract markers")
+            continue
+
+        detail = forward.stdout.decode("utf-8", errors="replace").strip()
+        raise SystemExit(
+            f"{label} patch is neither fully applicable nor fully present in {target}; "
+            f"refusing a partial match:\n{detail}"
+        )
+
+    if applied and already:
+        print(f"PocketJS {label}: applied {applied} file section(s), verified {already} already-present section(s)")
+    elif applied:
+        print(f"PocketJS {label}: applied")
+    else:
+        print(f"PocketJS {label}: already present in {already} file section(s)")
+
+
+def verify_final_contracts() -> None:
+    for target, markers in FINAL_CONTRACTS.items():
+        if not file_has_markers(target, markers):
+            raise SystemExit(
+                f"Pinned PocketJS integration contract is incomplete in {target}; "
+                "recheck prepare_upstream patches against the pinned revision"
+            )
 
 
 def main() -> None:
@@ -140,6 +257,7 @@ def main() -> None:
         print(f"PocketJS {REVISION}: cache ready")
     for filename, label in PATCHES:
         apply_patch(filename, label)
+    verify_final_contracts()
 
 
 if __name__ == "__main__":

@@ -6,6 +6,9 @@ import 'package:pocket_services/pocket_services.dart';
 typedef PocketPluginFactory =
     PocketPlugin Function(PocketViewController controller);
 
+/// A fresh provider is owned and closed by each native guest generation.
+typedef PocketOffloadProviderFactory = PocketOffloadProvider Function();
+
 /// Public-key-only signed update configuration. No signing key enters an app.
 final class PocketUpdateConfig {
   const PocketUpdateConfig({
@@ -70,6 +73,10 @@ final class PocketAppConfig {
     this.allowedPermissions = const {},
     this.pluginFactories = const [],
     this.additionalCapabilities = const {},
+    this.recordingFactory,
+    this.compositorSurfaces = const {},
+    this.workerHttpOrigins = const {},
+    this.offloadProviderFactory,
   });
   final String appId;
   final String bytecodeAsset;
@@ -83,9 +90,51 @@ final class PocketAppConfig {
   final List<PocketPluginFactory> pluginFactories;
   final Set<String> additionalCapabilities;
 
+  /// Trusted application handles (2..63) available to SystemUI CompositorSurface.
+  final Map<String, int> compositorSurfaces;
+
+  /// Exact trusted HTTP(S) origins granted to worker HTTP nodes.
+  final Set<String> workerHttpOrigins;
+
+  /// Trusted async methods exposed through the official io.offload protocol.
+  /// No provider or network permission is enabled by default.
+  final PocketOffloadProviderFactory? offloadProviderFactory;
+
+  /// Creates a bounded debug recorder before each new native guest loads.
+  /// Keep the callback stable across parent rebuilds, as with plugin factories.
+  final PocketRecordingController Function()? recordingFactory;
+
+  /// Attach compiled providers without changing the app's assets or policy.
+  PocketAppConfig withPlugins(Iterable<PocketPluginFactory> factories) =>
+      PocketAppConfig(
+        appId: appId,
+        bytecodeAsset: bytecodeAsset,
+        pakAsset: pakAsset,
+        metadataAsset: metadataAsset,
+        manifestAsset: manifestAsset,
+        updates: updates,
+        showFps: showFps,
+        allowedPermissions: allowedPermissions,
+        pluginFactories: List<PocketPluginFactory>.unmodifiable(factories),
+        additionalCapabilities: additionalCapabilities,
+        recordingFactory: recordingFactory,
+        compositorSurfaces: compositorSurfaces,
+        workerHttpOrigins: workerHttpOrigins,
+        offloadProviderFactory: offloadProviderFactory,
+      );
+
   void validate() {
     if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$').hasMatch(appId)) {
       throw const FormatException('Invalid Pocket application ID');
+    }
+    final handles = <int>{};
+    for (final entry in compositorSurfaces.entries) {
+      if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$').hasMatch(entry.key) ||
+          entry.value < 2 ||
+          entry.value > 63 ||
+          !handles.add(entry.value)) {
+        throw const FormatException('Invalid compositor application registry');
+      }
     }
     updates?.validate();
   }
@@ -102,6 +151,10 @@ final class PocketAppConfig {
           manifestAsset == other.manifestAsset &&
           updates == other.updates &&
           showFps == other.showFps &&
+          recordingFactory == other.recordingFactory &&
+          offloadProviderFactory == other.offloadProviderFactory &&
+          mapEquals(compositorSurfaces, other.compositorSurfaces) &&
+          setEquals(workerHttpOrigins, other.workerHttpOrigins) &&
           setEquals(allowedPermissions, other.allowedPermissions) &&
           listEquals(pluginFactories, other.pluginFactories) &&
           setEquals(additionalCapabilities, other.additionalCapabilities);
@@ -115,6 +168,12 @@ final class PocketAppConfig {
     manifestAsset,
     updates,
     showFps,
+    recordingFactory,
+    offloadProviderFactory,
+    Object.hashAllUnordered(workerHttpOrigins),
+    Object.hashAllUnordered(
+      compositorSurfaces.entries.map((e) => Object.hash(e.key, e.value)),
+    ),
     Object.hashAllUnordered(allowedPermissions),
     Object.hashAll(pluginFactories),
     Object.hashAllUnordered(additionalCapabilities),

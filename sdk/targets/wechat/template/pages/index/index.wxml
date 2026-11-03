@@ -1,0 +1,28 @@
+<view class="page">
+  <canvas
+    id="pocket-canvas"
+    type="2d"
+    class="canvas"
+    style="width: {{screenWidth}}px; height: {{screenHeight}}px;"
+    bindtouchstart="onTouchStart"
+    bindtouchmove="onTouchMove"
+    bindtouchend="onTouchEnd"
+    bindtouchcancel="onTouchCancel"
+  ></canvas>
+  <input
+    wx:if="{{input.visible}}"
+    class="ime"
+    type="text"
+    value="{{input.text}}"
+    placeholder="{{input.placeholder}}"
+    focus="{{input.focus}}"
+    confirm-type="{{input.confirmType}}"
+    cursor-spacing="{{input.cursorSpacing}}"
+    cursor="{{input.cursor}}"
+    style="{{input.style}}"
+    bindinput="onImeInput"
+    bindconfirm="onImeConfirm"
+    bindblur="onImeBlur"
+  />
+  <view wx:if="{{error}}" class="error">{{error}}</view>
+</view>

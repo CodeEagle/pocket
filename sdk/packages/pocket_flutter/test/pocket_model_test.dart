@@ -150,6 +150,34 @@ void main() {
     expect(frame.auxiliary!.ops.single, isA<PocketRectOp>());
   });
 
+  test('PFB1 metadata preserves text alignment and compositor focus/handle', () {
+    final binary = _BinaryFrameBuilder()
+      ..u32(0x31424650)..u16(1)..u16(1)..u64(1)..f32(320)..f32(480)..u32(2);
+    void common(int kind) {
+      binary..u8(kind)..f32(10)..f32(20)..f32(100)..f32(40)
+        ..f32(0)..f32(0)..f32(320)..f32(480);
+    }
+    common(5);
+    binary..string('中😀\nright')..f32(16)..u32(0xffffffff)..u8(0)..u8(2);
+    common(7);
+    binary..string('app.a')..string('{"kind":"application","parameters":{"appId":"app.a"}}')..u32(2)..u8(1)
+      ..u32(0)..u32(0)..u32(0)..u8(0);
+    final frame = PocketFrame.fromBinary(binary.build());
+    expect((frame.ops[0] as PocketTextOp).align, 2);
+    final surface = frame.ops[1] as PocketHostSurfaceOp;
+    expect(surface.surfaceHandle, 2);
+    expect(surface.focused, isTrue);
+    final unknown = binary.build();
+    unknown[6] = 2;
+    expect(() => PocketFrame.fromBinary(unknown), throwsFormatException);
+    final json = PocketFrame.fromJson(jsonEncode({'width':320,'height':480,'ops':[
+      {'type':'text','x':0,'y':0,'w':100,'h':20,'text':'center','align':1},
+      {'type':'hostSurface','x':0,'y':0,'w':100,'h':20,'id':'app.a','surfaceHandle':2,'focused':true,
+       'asset':jsonEncode({'kind':'application','parameters':{}})}]}));
+    expect((json.ops[0] as PocketTextOp).align, 1);
+    expect((json.ops[1] as PocketHostSurfaceOp).focused, isTrue);
+  });
+
   test('rejects truncated and trailing compact binary frames', () {
     expect(
       () => PocketFrame.fromBinary(Uint8List.fromList(<int>[0, 1, 2])),

@@ -19,6 +19,7 @@
     "updates:serve": "bun ../../sdk/scripts/serve_updates.ts --root .pocket-updates/public",
     "run": "cd .. && flutter run",
     "editor": "bash ../../sdk/scripts/editor_service.sh start",
-    "profile:macos": "bash scripts/profile_macos.sh"
+    "profile:macos": "bash scripts/profile_macos.sh",
+    "build:system": "bun scripts/build_mini_apps.ts && bun run build"
   }
 }

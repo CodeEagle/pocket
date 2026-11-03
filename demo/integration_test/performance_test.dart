@@ -12,6 +12,7 @@ import 'package:pocket_host/main.dart';
 import 'guest_interaction_test.dart' as guest;
 
 double percentile(List<double> values, double fraction) {
+  if (values.isEmpty) return 0;
   values.sort();
   return values[((values.length - 1) * fraction).round()];
 }
@@ -28,27 +29,47 @@ Future<Map<String, Object>> sample(
   if (animate) {
     driver = Ticker((_) => controller.send(method: 'demo.increment'))..start();
   }
+  var nativeFrames = 0;
+  final previousProbe = debugPocketFrameDeltaAtOverride;
+  debugPocketFrameDeltaAtOverride = (runtime, delta) {
+    nativeFrames++;
+    return previousProbe == null
+        ? pocketFrameDeltaAt(runtime, delta)
+        : previousProbe(runtime, delta);
+  };
   final timings = <FrameTiming>[];
   void collect(List<FrameTiming> values) => timings.addAll(values);
   SchedulerBinding.instance.addTimingsCallback(collect);
   PocketCanvasPainter.resetPaintInvocationCount();
   final clock = Stopwatch()..start();
-  await Future<void>.delayed(const Duration(seconds: 4));
-  clock.stop();
+  try {
+    await Future<void>.delayed(
+      const Duration(
+        seconds: int.fromEnvironment('POCKET_PERF_SECONDS', defaultValue: 4),
+      ),
+    );
+  } finally {
+    clock.stop();
+    driver?.dispose();
+    debugPocketFrameDeltaAtOverride = previousProbe;
+    SchedulerBinding.instance.removeTimingsCallback(collect);
+  }
   final paints = PocketCanvasPainter.paintInvocationCount;
   final drawOps = PocketCanvasPainter.drawOpInvocationCount;
-  driver?.dispose();
-  SchedulerBinding.instance.removeTimingsCallback(collect);
-  expect(
-    timings.length,
-    greaterThan(10),
-    reason: 'must collect actual engine frame timings',
-  );
-  // FrameTiming timestamps avoid treating callback batching as dropped frames.
-  final elapsed =
-      (timings.last.timestampInMicroseconds(FramePhase.vsyncStart) -
-          timings.first.timestampInMicroseconds(FramePhase.vsyncStart)) /
-      1000000;
+  if (animate) {
+    expect(
+      timings.length,
+      greaterThan(10),
+      reason: 'dynamic scene must render real engine frames',
+    );
+  }
+  // An idle event-driven surface is allowed to emit no frames. Do not force a
+  // ticker merely to make a static page report the display refresh rate.
+  final elapsed = timings.length < 2
+      ? 0.0
+      : (timings.last.timestampInMicroseconds(FramePhase.vsyncStart) -
+                timings.first.timestampInMicroseconds(FramePhase.vsyncStart)) /
+            1000000;
   final build = timings
       .map((frame) => frame.buildDuration.inMicroseconds / 1000)
       .toList();
@@ -66,9 +87,15 @@ Future<Map<String, Object>> sample(
         : 'debug',
     'refreshHz': refresh,
     'frames': timings.length,
-    'observedHz': (timings.length - 1) / elapsed,
+    'observedHz': elapsed <= 0 ? 0 : (timings.length - 1) / elapsed,
+    'nativeFrameCalls': nativeFrames,
+    'nativeFramesPerSecond':
+        nativeFrames / (clock.elapsedMicroseconds / 1000000),
     'buildMsP50': percentile(build, .5),
     'buildMsP95': percentile(build, .95),
+    'buildMsP99': percentile(build, .99),
+    'rasterMsP50': percentile(raster, .5),
+    'rasterMsP99': percentile(raster, .99),
     'rasterMsP95': percentile(raster, .95),
     'overBudgetFrames': timings
         .where(

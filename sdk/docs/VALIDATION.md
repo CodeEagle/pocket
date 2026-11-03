@@ -1,5 +1,86 @@
 # 验证记录
 
+2026-11-03 的 GLYPH_RUN、按需调度与本轮回归结果见 [字形与调度接入](GLYPH_AND_SCHEDULER_IMPLEMENTATION.md)；下文保留 11-02 的历史验证，旧的“GLYPH_RUN 未接通”不再代表当前状态。完整能力缺口见 [能力覆盖](POCKETJS_FEATURE_PARITY.md)，旧多应用平台/微信 Host 的独立核查见 [平台对照](MINI_APP_PLATFORM_PARITY.md)。
+
+## 2026-11-03：Worker/IO 真实录制与归档离线回放
+
+| 实际命令 / 日志 | 结果与范围 |
+| --- | --- |
+| `cargo test --locked --manifest-path sdk/native/Cargo.toml`；`/tmp/pocket-worker-recording-rust-verified.log` | 68 lib + 6 duplex passed；1 手动吞吐基准 ignored。包含真实 Worker HTTP/timer/random/Date/channel 及 offload submit/timeout/cancel/session/late completion。 |
+| 定向 `cargo test --locked --lib worker::tests::official_worker_records_http_timer_and_duplex_channels_then_replays_offline -- --exact`，在 `sdk/native` 连续执行 10 次；`/tmp/pocket-worker-recording-http-repeat10.log` | 10/10；每次 0.13–0.28s。真实 QJBC、HTTP、双向 channel、timer/scalars、活动 HTTP stub 清理和 stop/turn.end/worker.exit 的严格顺序。它是功能重复测试，不是性能基准。 |
+| 上述最终 lib test binary，`offload::tests::callback_reply_probe_outside_batch_does_not_create_host_trace_event --exact --nocapture` 连续 50 次，每次 15s 超时；`/tmp/pocket-offload-shutdown-repeat-verified.log` | 50/50，每次实际运行 1 test；验证 idle deadline 线程关闭没有丢失唤醒。没有用 Cargo exit 0 或 0 tests 当作通过。 |
+| `cargo build --locked --manifest-path sdk/native/Cargo.toml --lib --bin pocket_probe --bin pocket_worker_probe`；`/tmp/pocket-worker-recording-native-build-verified.log` | 最新 debug dylib 与实际探针构建通过。 |
+| `bun sdk/scripts/tests/worker_recording_fixture.ts /tmp/pocket-worker-recording-fixture-20261103`；`/tmp/pocket-worker-recording-fixture-build.log` | 真实 `buildGuest` 生成 UI 与独立 Worker QJBC/metadata，使用相同固定上游及 ABI。 |
+| SDK：设置 `POCKET_NATIVE_LIBRARY=.../sdk/native/target/debug/libpocket_flutter.dylib`、`POCKET_RECORDING_WORKER_FIXTURE_DIR=/tmp/pocket-worker-recording-fixture-20261103` 后 `flutter test test/recording_worker_ffi_test.dart`；`/tmp/pocket-worker-recording-http-ffi-verified.log` | 2 passed，0 skipped。真实 HTTP body/end 被 channel 送回 UI；原实例销毁、server 关闭后导出 archive，两次独立 isolate 离线回放 matched，HTTP 请求数仍为 1；seq/payload 篡改拒绝。纯 UI capture stop 后继续运行也通过。 |
+| bridge：设置相同 `POCKET_NATIVE_LIBRARY` 后 `flutter test --no-pub --concurrency=2`；`/tmp/pocket-recording-bridge-final-verified.log` | 最终源码全套 104 passed，3m32s；包含真实 FFI、offload 三次无 provider 回放、纯 UI 旧格式、duplex、输入/IME、字形和停表唤醒。新增实际 controller 归档删除 frame/clock 的拒绝回归也包含在内。 |
+| SDK：设置上述 native/fixture 两个环境变量后 `flutter test --no-pub --concurrency=2`；`/tmp/pocket-recording-sdk-final-verified.log` | 56 passed，2m34s；真实 Worker FFI 不再 skip，新增生产 Session+recording admission 使用真实 QJBC/metadata 验证 ready、SHA、ABI、声明和 grants。 |
+| SDK `flutter analyze --no-pub`；`/tmp/pocket-recording-sdk-analyze-verified.log` | No issues found；新增测试的冗余 import 已移除。 |
+| `bash sdk/scripts/build_native.sh ios-sim`；`/tmp/pocket-worker-recording-ios-verified.log` | iOS arm64 + simulator arm64 release static archive 构建与 XCFramework 包装通过；这不是 iOS 设备上 Worker HTTP/功耗验收。 |
+| `bash sdk/scripts/build_native.sh android`；`/tmp/pocket-worker-recording-android-verified.log` | Android arm64 release `.so` 构建及 SDK jniLibs 安装通过；未把构建成功当作设备运行或功耗验收。 |
+| `bash sdk/scripts/build_native.sh macos`；`/tmp/pocket-worker-recording-macos-verified.log` | macOS arm64 release 库、正式静态 archive 与 `pocket_probe` 构建通过。 |
+| Demo JS：`POCKET_NATIVE_PROBE=.../sdk/native/target/debug/pocket_probe bun tests/native_guest_probe.ts --required`；`/tmp/pocket-native-guest-current-verified.log` | 最新 native 实际加载 QJBC，ABI、host response、pointer/input/stress 通过；100/500 节点分别 541/1761 DrawOps。 |
+
+这一轮修复了实际运行中暴露的 replay 跨 actor 顺序、core lock 下等待、Host stop 后活动 turn 收尾、HTTP stub 清理和 broker shutdown 丢失唤醒；CPU guard 使用线程 CPU 时间，等待 trace 的墙钟时间不再冒充 JS 运算。独立审查还用真实 controller 证明删除 frame summary 会出现假匹配；现在缺少必要摘要或 clock envelope 的旧格式仍可解析，但回放明确 unverified/rejected，不能返回 matched。生产 Live 不启用录制 gate/trace payload。高刷新率设备、物理能耗与完整流式/配额/背压/混合域矩阵仍未验收，详见 [实施计划](WORKER_RECORDING_REPLAY_PLAN.md)。
+
+## 2026-11-03：JS 优先边界与微信 WASM 实际执行
+
+新增产品策略留在 JS；原生 Worker runner/offload broker 捕获 JS 无法准确观测的执行事实。移除了默认 Dart provider 中未被使用的 sum/Fibonacci isolate 路径，纯计算复用 JS Worker，Dart provider 保留明确授权的原生 IO。没有为此增加另一套 JS 计算包装器或 Dart 调度器。
+
+| 实际命令 / 日志 | 结果与范围 |
+| --- | --- |
+| `node sdk/targets/wechat/tests/qjbc_pointer.mjs /private/tmp/pocketjs-wechat-lobby-final-20261103`；`/tmp/pocket-wechat-independent-proof-final.log` | 主代理独立执行真实 QuickJS WASM、Lobby QJBC/PAK，通过 pointer down/up 改变 count/visits、像素摘要及 storage response/dispose。WASM 2,647,634 bytes，Brotli 774,428 bytes，SHA-256 `fdc1e31b98fbafe5bf7c1f6e68d43e5e380eab7c4c121f4b948af5456c22dd79`。Node 执行不是微信 DevTools 或真机验收。 |
+| `bun test --timeout 120000 sdk/scripts/tests/build_wechat_admission.test.ts`；`/tmp/pocket-wechat-admission-independent.log` | 3 pass，6 expect；Worker/System 在构建前明确拒绝，单 Guest 继续进入真实 Guest 构建校验。当前微信目标为单 Guest，不支持动态 System 子应用、Worker HTTP 或 offload。 |
+| bridge `flutter test test/pocket_offload_runtime_test.dart`；`/tmp/pocket-js-first-offload-test.log` | 4 pass；保留 HTTP redirect/cancel/error 边界，并确认默认 provider 不接管 JS 纯计算。 |
+| SDK `flutter analyze --no-pub`；`/tmp/pocket-js-first-sdk-analyze-final.log` | No issues found。 |
+| SDK `flutter test test/system_host_test.dart --plain-name 'recording preserves an offload factory without creating a provider'`；`/tmp/pocket-js-first-config-test-final.log` | 1 pass；录制配置保留显式 provider factory，attach 不提前启动 provider。 |
+| `python3 sdk/scripts/check_architecture.py`、`git diff --check` | 通过；Demo Dart 入口保持薄宿主，SDK 不引用 Demo 内部实现。 |
+
+Worker/IO 归档回放的新证据见 [实施与验收范围](WORKER_RECORDING_REPLAY_PLAN.md)。下方旧的纯 UI 录制通过数不能作为新增异步域已验收的依据。
+
+## 2026-11-03：宿主录制与离线回放闭环
+
+当前实现与边界见 [录制回放](RECORDING_REPLAY.md)。复用三名既有 GPT-5.6 Luna Max 子代理，分别负责 native 时钟、Dart 事务/库层测试和 JS 上游适配/独立审查；均已完成，未升级模型。主代理集成 SDK、归档和 JS 控件，统一串行执行 Flutter 验收。没有新建第二个 JS 调度器或 Dart 平台策略。
+
+| 实际命令 / 日志 | 结果与范围 |
+| --- | --- |
+| `cargo test --locked --manifest-path sdk/native/Cargo.toml`；`/tmp/pocket-recording-native-final-tests.log` | 43 lib + 6 duplex = 49 passed；1 manual throughput ignored。包含严格 scalar/idle 重放、mode0 恢复、缓存函数可继续调用、资源顺序和录制配额。 |
+| `bash sdk/scripts/build_native.sh macos` / `ios-sim` / `android`；`/tmp/pocket-recording-native-{macos,ios,android}.log` | 三个构建目标通过；Android 为 arm64。Android 录制回放尚未做设备执行，不能把编译成功算作真机验收。 |
+| bridge：`POCKET_NATIVE_LIBRARY=.../native/target/debug/libpocket_flutter.dylib flutter test --no-pub`；`/tmp/pocket-recording-bridge-final-tests.log` | 全套 83 passed，含真实 FFI、调度、输入、绘制和录制异常路径。随后新增 signed-zero 回归，录制专项与 analyze 见下行；两组有重叠，不能相加算总数。 |
+| bridge：`flutter test --no-pub test/pocket_recording_test.dart test/pocket_recording_ffi_test.dart`（同一 native 环境）；`/tmp/pocket-recording-final-ffi.log`、`/tmp/pocket-recording-bridge-final-analyze.log` | 16 passed；覆盖 signed-zero、严格时钟、原始 RPC 字段、duplex 成功/非法提交、资产篡改、超额、深层事件、停止后继续执行与 enabled/disabled 摘要消融；analyze 无问题。 |
+| SDK：`flutter test --no-pub` / `flutter analyze --no-pub`；`/tmp/pocket-recording-sdk-final-{tests,analyze}.log` | 44 passed；analyze 无问题。库层覆盖未启动/空/超额会话拒绝、非法附件不提前 stop、资源 SHA/软链/文件名/单文件大小边界。 |
+| Demo：`flutter test --no-pub` / `flutter analyze --no-pub`；`/tmp/pocket-recording-demo-final-{tests,analyze}.log` | 20 passed；analyze 无问题。 |
+| Services：`flutter test --no-pub`；`/tmp/pocket-recording-services-final-tests.log` | 27 passed。 |
+| SDK：`bun test --timeout 60000`；`/tmp/pocket-recording-sdk-final-bun.log` | 51 pass、0 fail、424 `expect()`，14 files。录制 case 内运行真实上游 clock/effects/devtools fixture，并在删除 Web TextEncoder 后验证。 |
+| Demo JS：`bun run build:system`、`POCKET_BUILD_GUEST=0 bash scripts/test_guest.sh`；`/tmp/pocket-recording-demo-final-{build,guest}.log` | Showcase/Profile/Lobby 真实 QJBC+PAK；JS 改字节码消融和 native pointer/response/input/stress probe 通过，100/500 节点为 541/1761 DrawOps。 |
+| Duo：`flutter drive --no-pub --no-dds --driver=test_driver/integration_test.dart --target=integration_test/recording_replay_test.dart -d 4D366210-290E-46DB-8BC6-3C5233700409`；`/tmp/pocket-recording-duo-verified.log` | 2 个业务 case passed；最终 `+3` 含 tearDownAll。场景一三应用共 388 个事务/124 个帧摘要，全部 matched；销毁所有原 Session/native handles 后离线回放，再导出/导入通过。场景二实际点击 JS status/stop/replay/export，并重新导入该导出归档通过。 |
+| `python3 sdk/scripts/check_architecture.py`、`git diff --check` | 通过；SDK 不依赖 Demo。 |
+
+Duo 输入场景使用真实 Flutter TextInputClient 与 TestTextInput，包含中文/emoji、selection/composing；它不是本轮实际系统键盘按键测试，之前的系统键盘生命周期证据见下文。回放不启动硬件、网络或平台管理 provider，验证的是宿主边界输入下的 Guest 输出，不是相机视频或 Flutter/GPU 像素录像。
+
+验收中实际修复：资源 HashMap 顺序使相同帧摘要漂移；QuickJS 的只读 `performance.now` 被 Proxy 违反 invariant；停止后缓存的时钟 wrapper 失效；JSON f64 单 ULP 漂移；上游 Tape 合法的可选 undefined 被拒绝；QuickJS 没有 Web TextEncoder；原始 duplex 失败事务无法忠实回放；诊断超额/深层事件不应覆盖业务结果。每项均用真实 native 或设备路径补了闭环，未用 catch、浮点容忍或只比节点数量掩盖问题。
+
+消融保留一份 native 宿主事务 trace，移除未发布且重复的 JS host observer；官方 input tape 只作附件，不再次驱动 native。默认不开录制，不复制 duplex 诊断 payload、不包装时钟、不建 recorder/轮询；停止后恢复 mode0。开启/关闭消融比较完整帧摘要，不以一次 debug 计时换算功耗或生产性能收益。
+
+## 2026-11-03：录制实施前的集成验证
+
+以下只汇总本轮可读日志和子代理验证回报；Duo 日志中的 `tearDownAll` 不计为业务 case，没有从日志补算未显示的通过数。模拟器结果不等同于真机功耗、稳定性或持续 FPS 结论。
+
+| 范围 / 证据 | 结果 |
+| --- | --- |
+| SDK Dart tests + analyze：`/tmp/pocket-sdk-current-final-tests.log`、`/tmp/pocket-sdk-current-final-analyze.log` | 33 项通过；`No issues found`。 |
+| Demo Dart tests + analyze：`/tmp/pocket-demo-current-final-tests.log`、`/tmp/pocket-demo-system-final-analyze.log` | 20 项通过；`No issues found`。 |
+| `pocket_services`：`/tmp/pocket-services-final-tests.log` | 27 项通过。 |
+| Flutter bridge：`/tmp/pocket-bridge-post-fix-tests.log` | 68 项通过；覆盖真实 FFI、停表/deadline、外部响应唤醒竞态、输入和 T8 字形绘制。 |
+| JS SDK/System Bun：`/tmp/pocket-sdk-system-final-bun.log` | 50 pass、0 fail、418 `expect()` calls，跨 13 个文件。 |
+| demand scheduler：`/tmp/pocket-demand-current-final-tests.log` | 11 个 JS 行为测试通过、54 `expect()`；真实 JSX→QJBC/PAK→native 消融中，按需路径 deadline 回调 1 次、continuous 路径 300 次，均在虚拟 frame 300 执行；最终 wake delay 分别为 `-1` 与 `0`。 |
+| PocketJS 固定上游虚拟时钟：`/tmp/pocket-deterministic-clock-test.log` | 9 pass、0 fail、26 `expect()`；仅覆盖 clock、`after()`、effect FIFO/下一次 drain 和 trace，不代表完整模拟器/WASM。 |
+| Demo JS 全流程：`/tmp/pocket-demo-guest-current-final.log` | reducer、平台中立 hardware contract、JS→frame 消融、Guest build、静态 native probe 均完成；100/500 节点 probe 为 541/1761 DrawOps。 |
+| Duo SystemUI：`/tmp/pocket-duo-js-system-closure.log` | 3 个业务 case 通过；最终 `+4` 含 1 个 `tearDownAll`。真实 guest A/B、共享 identity、结果/消息、失败回收和 prewarm 复用均在此范围内。一次 debug 模拟器消融记录 `cold=203ms`、`warm=105ms`、`residents=2`、`reused=true`。 |
+| Duo 系统键盘：`/tmp/pocket-duo-system-keyboard-final.log` | 1 个业务 case 通过；最终 `+2` 含 1 个 `tearDownAll`，验证真实系统键盘与 viewport resize。 |
+| Native Rust | 本轮子代理验证回报为 31 unit + 6 duplex = 37 passed、1 manual throughput ignored。可读 `/tmp/pocket-native-tests.log` 是较早的 30 unit + 6 duplex = 36 passed、1 ignored；不把旧日志冒称本轮 37。 |
+
+真实 Duo 回归发现：外部 `host.response` 在 credited zero tick 后，Promise continuation 会失去唤醒。修复使用 QuickJS pending-job hint，让下一次真实 fixed tick 保持唤醒并 drain pending jobs；没有虚构 tick 数或第二事件循环。`cold=203ms`/`warm=105ms` 是复用同一 instance 的一次 debug 模拟器功能消融，只说明路径行为，不声称真机省电或稳定性能收益；本轮不设 60 FPS 上限，也没有物理能耗证明。
+
 日期：2026-11-02；macOS Apple Silicon，Flutter 3.35.7 / Dart 3.9.2 / Rust 1.93.1 / Xcode 27.2（iOS 27.1 Duo 模拟器）。当前 Demo 路径约定为 `../demo/lib`、`../demo/assets` 和 `../demo/js`（相对于 SDK）；文中旧的 `host/`、`guest/` 仅保留为迁移来源说明。
 
 ## 真实运行链
@@ -62,7 +143,9 @@
 - 修复 Dart extension 递归导致 Stack Overflow，添加回归测试并经 macOS/iOS 真链路验证。
 - 切包前使旧 generation 失效，取消旧定时器/迟到响应；只有首帧及短运行健康确认后才晋升缓存指针。
 
-## 尚未验证或未接通
+## 尚未验证或未接通（截至 2026-11-02 的历史快照）
+
+本节保留 11-02 的原始边界记录；其中 GLYPH_RUN 与按需调度已由上面的 2026-11-03 最终验证更新，不能把下面旧句子当作当前结论。
 
 Android provider 的静态 manifest/minSdk、Dart channel contract 和 JS capability
 声明已通过；Android debug APK 已构建成功并包含 arm64 原生运行库。Android 真机硬件、iOS 真机、硬件键盘/IME 的 `GuestFrame.text`、

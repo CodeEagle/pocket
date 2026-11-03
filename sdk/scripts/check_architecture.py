@@ -89,8 +89,10 @@ if demo_lib.exists():
             errors.append(f"forbidden extra Dart file in demo host: {rel}")
             continue
         lines = dart_file.read_text(errors="replace").splitlines()
-        if len(lines) > 50:
-            errors.append(f"demo main.dart exceeds thin host limit (max 50 lines, got {len(lines)}): {rel}")
+        # A System host also declares trusted compiled asset paths for child apps.
+        # Keep one thin entry; this budget includes that static configuration.
+        if len(lines) > 80:
+            errors.append(f"demo main.dart exceeds thin host limit (max 80 lines, got {len(lines)}): {rel}")
         source = "\n".join(lines)
         for pattern in [r"Navigator\.", r"\bCounter\b", r"case\s+['\"]View\.", r"PocketUiNode", r"\bStatefulWidget\b", r"\bsetState\b"]:
             if re.search(pattern, source):

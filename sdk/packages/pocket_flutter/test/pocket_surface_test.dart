@@ -111,7 +111,7 @@ void main() {
       expect(find.byType(BackdropFilter), findsOneWidget);
       expect(find.byType(Texture), findsNothing);
       final surface = tester.widget<Positioned>(
-        find.byKey(const ValueKey('surface-glass')),
+        find.byKey(const ValueKey('surface-glass-glass')),
       );
       expect(
         surface.height,
@@ -120,13 +120,13 @@ void main() {
       final stack = tester.widget<Stack>(
         find
             .ancestor(
-              of: find.byKey(const ValueKey('surface-glass')),
+              of: find.byKey(const ValueKey('surface-glass-glass')),
               matching: find.byType(Stack),
             )
             .first,
       );
       final index = stack.children.indexWhere(
-        (w) => w.key == const ValueKey('surface-glass'),
+        (w) => w.key == const ValueKey('surface-glass-glass'),
       );
       expect(index, greaterThan(0));
       expect(index, lessThan(stack.children.length - 1));
@@ -135,7 +135,9 @@ void main() {
       expect(find.byType(Texture), findsOneWidget);
       expect(find.byType(RotatedBox), findsOneWidget);
       expect(find.byType(Transform), findsOneWidget);
-      final cameraSurface = find.byKey(const ValueKey('surface-camera'));
+      final cameraSurface = find.byKey(
+        const ValueKey('surface-platformTexture-camera'),
+      );
       expect(cameraSurface, findsOneWidget);
       final cameraRadiusClip = find.descendant(
         of: cameraSurface,

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -55,6 +56,73 @@ mount(() => <MobileButton label="Installed package" onPress={() => {}} />);
     // The package manager's source directory is restored after the build; the
     // compiler's transformed copy never leaks into the consumer project.
     expect(readFileSync(join(installed, "src/mobile.tsx"), "utf8")).toContain("<");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}, BUILD_GUEST_TEST_TIMEOUT_MS);
+
+test("build_guest preserves domains.worker as an admitted QuickJS bytecode artifact", async () => {
+  const project = mkdtempSync(join(tmpdir(), "pocket-build-worker-domain-"));
+  const output = join(project, "out");
+  const assets = join(project, "assets");
+  try {
+    writeFileSync(join(project, "pocket.json"), JSON.stringify({
+      app: { entry: "app.tsx" },
+      domains: { worker: {
+        entry: "worker.ts",
+        nodes: [{ name: "localHttp", kind: "http" }],
+        channels: [{ name: "results", kind: "ring", direction: "worker-to-ui", recordBytes: 64, capacity: 2 }],
+      } },
+    }));
+    writeFileSync(join(project, "manifest.json"), JSON.stringify({ capabilities: { requires: ["net.http"] } }));
+    writeFileSync(join(project, "app.tsx"), "export default function App(){ return <text value='worker build'/>; }\n");
+    writeFileSync(join(project, "worker.ts"), `import { io } from "@pocketjs/framework/io";
+const timer = io.timer(1000);
+void timer.next();
+`);
+
+    const result = await buildGuest({ projectRoot: project, outDir: output, copyAssetsTo: assets });
+    expect(result.worker).toBeDefined();
+    expect(existsSync(result.worker!.source)).toBe(true);
+    expect(existsSync(result.worker!.bytecode)).toBe(true);
+    const workerMeta = JSON.parse(readFileSync(result.worker!.metadata, "utf8")) as Record<string, unknown>;
+    expect(workerMeta.entryFormat).toBe("quickjs-bytecode");
+    expect(workerMeta.kind).toBe("script");
+    expect(workerMeta.bytecodeBytes).toBe(readFileSync(result.worker!.bytecode).byteLength);
+
+    const appMeta = JSON.parse(readFileSync(result.metadata, "utf8")) as Record<string, unknown>;
+    const descriptor = appMeta.worker as Record<string, unknown>;
+    const bytecodeDescriptor = descriptor.bytecode as Record<string, unknown>;
+    expect(descriptor.protocolVersion).toBe(1);
+    expect(descriptor.kind).toBe("quickjs-bytecode");
+    expect(bytecodeDescriptor.path).toBe("app.worker.qjbc");
+    expect(bytecodeDescriptor.bytes).toBe(readFileSync(result.worker!.bytecode).byteLength);
+    expect(bytecodeDescriptor.sha256).toBe(
+      createHash("sha256").update(readFileSync(result.worker!.bytecode)).digest("hex"),
+    );
+    expect(descriptor.requiredCaps).toEqual(["net.http", "runtime.worker"]);
+    expect(descriptor.declaration).toEqual((JSON.parse(readFileSync(join(project, "pocket.json"), "utf8")) as any).domains.worker);
+    expect(existsSync(join(assets, "app.worker.qjbc"))).toBe(true);
+    const outputManifest = JSON.parse(readFileSync(join(assets, "guest-manifest.json"), "utf8")) as Record<string, any>;
+    expect(outputManifest.domains.worker.entry).toBe("worker.ts");
+    expect(outputManifest.worker.bytecode.sha256).toBe(bytecodeDescriptor.sha256);
+    expect(outputManifest.capabilities.requires).toContain("runtime.worker");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}, BUILD_GUEST_TEST_TIMEOUT_MS);
+
+test("build_guest rejects worker nodes whose capability is not required by the guest manifest", async () => {
+  const project = mkdtempSync(join(tmpdir(), "pocket-build-worker-capability-"));
+  try {
+    writeFileSync(join(project, "pocket.json"), JSON.stringify({
+      app: { entry: "app.tsx" },
+      domains: { worker: { entry: "worker.ts", nodes: [{ name: "remote", kind: "http" }] } },
+    }));
+    writeFileSync(join(project, "manifest.json"), JSON.stringify({ capabilities: { requires: [] } }));
+    writeFileSync(join(project, "app.tsx"), "export default function App(){ return <text value='capability check'/>; }\n");
+    writeFileSync(join(project, "worker.ts"), "export {};\n");
+    await expect(buildGuest({ projectRoot: project, outDir: join(project, "out") })).rejects.toThrow(/worker node requires declared capability net\.http/);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 
-final class _IdleProbeRuntime implements PocketRuntime {
+final class _LegacyTickerRuntime implements PocketRuntime {
   static const _frame = PocketFrame(
     width: 320,
     height: 480,
@@ -81,11 +81,12 @@ void main() {
           await tester.pump(const Duration(milliseconds: 16));
         }
 
-        // The bounded idle wake timer restarts the ticker during this single
-        // scheduler jump. The monotonic frame timestamp passed to native must
-        // carry the elapsed 250ms into that first resumed frame; if the
-        // ticker-restart baseline were used, only one ~16ms guest tick would
-        // run and this event would still be pending.
+        // The virtual timer deadline wakes the guest during this scheduler
+        // jump. The monotonic frame timestamp passed to native must carry the
+        // elapsed 250ms into that turn; if the ticker-restart baseline were
+        // used, only one ~16ms guest tick would run and the event would stay
+        // pending. Libraries without the optional scheduler snapshot remain
+        // on vsync and retain the same elapsed-time contract.
         await tester.pump(const Duration(milliseconds: 250));
         // A zero-duration pump handles Flutter versions that deliver the
         // Timer callback at the end of the jump and schedule the resumed
@@ -104,46 +105,46 @@ void main() {
     skip: libraryPath == null,
   );
 
-  testWidgets(
-    'idle timer probes one frame instead of restarting a six-frame burst',
-    (tester) async {
-      final runtime = _IdleProbeRuntime();
-      final calls = <double>[];
-      final previous = debugPocketFrameDeltaAtOverride;
-      debugPocketFrameDeltaAtOverride = (_, delta) {
-        calls.add(delta);
-        return null;
-      };
-      addTearDown(() {
-        debugPocketFrameDeltaAtOverride = previous;
-        runtime.dispose();
-      });
+  testWidgets('legacy runtime without a scheduling snapshot stays on vsync', (
+    tester,
+  ) async {
+    final runtime = _LegacyTickerRuntime();
+    final calls = <double>[];
+    final previous = debugPocketFrameDeltaAtOverride;
+    debugPocketFrameDeltaAtOverride = (_, delta) {
+      calls.add(delta);
+      return null;
+    };
+    addTearDown(() {
+      debugPocketFrameDeltaAtOverride = previous;
+      runtime.dispose();
+    });
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: SizedBox(
-            width: 320,
-            height: 480,
-            child: PocketView(
-              runtime: runtime,
-              jsSource: '',
-              pakBytes: Uint8List(0),
-            ),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
           ),
         ),
-      );
-      await tester.pump();
-      for (var index = 0; index < 7; index++) {
-        await tester.pump(const Duration(milliseconds: 16));
-      }
-      expect(calls.length, greaterThanOrEqualTo(6));
-      final beforeProbe = calls.length;
+      ),
+    );
+    await tester.pump();
+    for (var index = 0; index < 7; index++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(calls.length, greaterThanOrEqualTo(6));
+    final state = tester.state(find.byType(PocketView)) as dynamic;
+    expect(state.isTickerActive, isTrue);
+    expect(state.hasScheduledWake, isFalse);
 
-      // The stopped ticker wakes after the bounded idle interval. A timer
-      // probe must issue one native call and immediately sleep again when the
-      // frame is unchanged; the old implementation issued six calls here.
-      await tester.pump(const Duration(milliseconds: 100));
-      expect(calls.length - beforeProbe, lessThanOrEqualTo(1));
-    },
-  );
+    final beforeNextVsync = calls.length;
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(calls.length, beforeNextVsync + 1);
+    expect(state.isTickerActive, isTrue);
+  });
 }

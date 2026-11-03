@@ -327,7 +327,7 @@ iOS 真机和模拟器构建目前复制到同一个插件静态库位置；切�
 | 真 JS 执行与薄宿主 | 已实现并真实验证 | native 引擎仍承担布局/命中；不是只传图片的远程渲染 |
 | QuickJS 预编译字节码 | 已实现并验证 | 绑定引擎 ABI，不能跨任意 QuickJS 版本；不是机器码 |
 | 普通布局、文本、按钮、页面状态 | 已实现并验证典型路径 | 不能外推完整组件和样式规范 |
-| DrawList 十类指令 | 部分覆盖 | `GLYPH_RUN` 未接；当前文本经 `TEXT_RUN` |
+| DrawList 十类指令 | 已有宿主投影，具体视觉语义仍按专项验收 | `GLYPH_RUN` 复用 glyph page/image/T8；普通文字保留 `TEXT_RUN`。不等于完整 Unicode shaping 或任意 surface provider。 |
 | 图片/纹理/资源 | 有实现和部分路径 | SVG 示例编译有记录，Sprite/DeepZoom 等缺专项视觉验收 |
 | `SURFACE_QUAD` / host surfaces | 已实现受限通用 bridge | Native registration 和 Dart renderer 只允许 `glass`、`platformTexture`；视频是后者的 Texture provider，不宣称任意 compositor/原生 view |
 | JS mobile UI / transitions / glass | 已有 guest 页面、纯 JS descriptors 和 surface bridge；source/unit checks 有记录 | guest visual 仍需按设备验收；Impeller 才是折射 shader，非 Impeller 明确为磨砂 fallback |
@@ -398,9 +398,9 @@ Kit 的底层是本工程主要来源。**不能说“绘制没继承”，也�
 | 引擎 `runtime` 的 tileset op 23、`core/upload_tileset_tile` 与通用纹理导出 | Native TILESET/DeepZoom 所需部分代码存在 | 当前没有 DeepZoom fixture/设备验收；Dart PAK fallback 只解析 IMG，不含 TILESET 目录/淘汰路径 |
 | native/Flutter 视频与 `SURFACE_QUAD` | retained host-surface bridge、`glass` provider 和 `platformTexture`/video_player Texture 已在代码中 | 当前无真实视频专项；provider allow-list 只有 `glass`/`platformTexture`，不能把 Surface 名称当作任意 compositor、3D 或原生视图支持 |
 | Auxiliary 相关路径 | 第二逻辑 surface/Canvas 已存在 | 没有物理外屏承诺；缺完整组件/交互/资源回收验证 |
-| 字体/文本资源路径 | PAK 字体指标、TEXT_RUN 与 Flutter 文本绘制 | GLYPH_RUN 缺失；native 文本按显式换行处理，宽度感知换行应由 guest 契约完成；多语言与字体一致性待验 |
+| 字体/文本资源路径 | PAK 字体指标、TEXT_RUN 与 Flutter 文本绘制；GLYPH_RUN 经真实 atlas page 绘制 | native 文本按显式换行处理，宽度感知换行应由 guest 契约完成；多语言、shaping 与字体一致性仍按上游能力和设备验收。 |
 | Button/Axis/Motion 输入协议 | native 已有按钮、轴、相对轴、motion 数据解析/注入 | 当前没有把手柄/陀螺仪 provider 接到这些协议；`HardwarePlugin` 的 sensors 等能力不是 gamepad/motion 注入的替代 |
-| 上游 physics op 52–56 | 引擎源码中有协议/实现 | 当前 `create_host` 没有启用 physics，不能宣称物理已支持 |
+| 上游 physics op 52–56 | 本轮已在 guest 初始化前启用真实 core 绑定 | 世界创建/销毁及空闲状态有 native 回归；复杂碰撞、事件与 Showcase 场景仍需专项验收。 |
 | `pocket_host.dart`、`pocket_stream.dart`、`pocket_plugin.dart`、package/update 模块 | 已抽取/裁剪到 **`packages/pocket_services`**，`PocketSession` 完成示例接线 | 不再从 renderer 包统一导出 Kit API；stream 无实际 provider，通用 SDK/全部原测试未等价迁入 |
 | `pocket_game_container.dart`、`pocket_navigation.dart`、`pocket_game_config.dart` | 部分启动/更新职责由 `pocket_sdk/PocketSession` 接管，guest manifest 独立描述能力 | 游戏容器、GameConfig、通用导航 bridge 不整套迁入；业务路由留在 JS，需要的生命周期语义单独复用 |
 | `editor/` Pocket Studio scaffold | 当前已引入本地多文件编辑、guest scaffold、qjbc/PAK 构建、签名发布和管理 UI；见 `docs/EDITOR_REUSE.md` | 没有复制旧 editor 的 page-graph/WASM preview、故事/阅读器业务模板或 COS；不是远程多用户生产平台 |

@@ -393,6 +393,7 @@ function nativeInputFingerprint(sdk: string): string {
   const inputs = [
     join(sdk, "native/src"),
     join(sdk, "native/Cargo.toml"),
+    join(sdk, "native/build.rs"),
     join(sdk, "native/Cargo.lock"),
     join(sdk, "native/patches"),
     join(sdk, "scripts/build_native.sh"),

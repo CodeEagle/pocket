@@ -7,6 +7,9 @@ import 'pocket_stream.dart';
 
 abstract class PocketPlugin {
   PocketPluginDescriptor get descriptor;
+  /// Trusted, resource-free coordination may finish while its caller is
+  /// hidden. Hardware/stream providers retain the default foreground policy.
+  bool get backgroundSafe => false;
   void register(PocketPluginContext context) {}
   FutureOr<void> activate(PocketPluginContext context) {}
   FutureOr<void> deactivate(PocketPluginContext context) {}
@@ -701,9 +704,10 @@ final class PocketPluginManager {
     }
   }
 
-  Future<void> deactivate() async {
+  Future<void> deactivate({bool foregroundOnly = false}) async {
     for (final state in _plugins.values.toList(growable: false).reversed) {
       if (!state.active) continue;
+      if (foregroundOnly && state.plugin.backgroundSafe) continue;
       state.context.revoke();
       host.revokeCapabilities(state.plugin.descriptor.capabilities.keys);
       await state.plugin.deactivate(state.context);

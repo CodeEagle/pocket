@@ -11,6 +11,11 @@
     "./legacy": "./src/legacy.ts",
     "./responsive": "./src/responsive.ts",
     "./display": "./src/display.ts",
-    "./graphics": "./src/graphics.ts"
+    "./graphics": "./src/graphics.ts",
+    "./host": "./src/host.ts",
+    "./platform": "./src/platform.ts",
+    "./system": "./src/system.ts",
+    "./recording": "./src/recording.ts",
+    "./system-surfaces": "./src/system-surfaces.tsx"
   }
 }

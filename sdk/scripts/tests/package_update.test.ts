@@ -299,3 +299,30 @@ test("adb reverse requires an explicit selected serial", () => {
   expect(() => adbReverseCommand(8787)).toThrow(/--device\/-s/);
 });
 
+
+
+test("signed worker bytes/declaration survive publication and tampering is rejected", () => {
+  const dir = tempDirectory();
+  try {
+    const input = writeFixture(join(dir, "input"), 10);
+    const entry = join(dir, "input", "app.qjbc");
+    writeFileSync(entry, Buffer.from("PJBC-ui-fixture"));
+    const bytes = Buffer.concat([Buffer.from("PJBC"), Buffer.alloc(128, 7)]);
+    writeFileSync(join(dir, "input", "app.worker.qjbc"), bytes);
+    const worker = {kind:"quickjs-bytecode", protocolVersion:1, runtimeAbi:"fixture-abi", bindingGeneration:12, tickHz:60,
+      bytecode:{path:"app.worker.qjbc",bytes:bytes.length,sha256:sha256Hex(bytes)},
+      declaration:{entry:"worker.ts",nodes:[],channels:[]},requiredCaps:["runtime.worker"]};
+    const manifest = join(dir, "input", "guest-manifest.json");
+    writeFileSync(manifest, JSON.stringify({worker,capabilities:{requires:["runtime.worker"],optional:[]}}));
+    const options = {appId:"fixture-app",version:"1.0.0",build:1,bytecodePath:entry,runtimeAbi:"fixture-abi",
+      pakPath:input.pak,outDir:join(dir,"out"),keyFile:fixtureKey,guestManifestPath:manifest};
+    const result = packageArtifacts(options);
+    expect(result.payload.worker).toEqual(worker);
+    expect(result.payload.assets?.["app.worker.qjbc"]).toEqual({sha256:sha256Hex(bytes),size:bytes.length});
+    expect(result.payload.files.some(f=>f.sha256===sha256Hex(bytes))).toBe(true);
+    writeFileSync(join(dir, "input", "app.worker.qjbc"), Buffer.alloc(bytes.length, 1));
+    expect(()=>packageArtifacts(options)).toThrow("worker bytecode integrity mismatch");
+    writeFileSync(manifest,JSON.stringify({capabilities:{requires:["runtime.worker"]}}));
+    expect(()=>packageArtifacts(options)).toThrow("without its signed descriptor");
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});

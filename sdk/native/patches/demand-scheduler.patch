@@ -1,0 +1,1194 @@
+--- a/engine/guest-rquickjs/src/lib.rs
++++ b/engine/guest-rquickjs/src/lib.rs
+@@ -61,6 +61,17 @@
+     }
+     pub fn with<R>(&self, f: impl for<'js> FnOnce(Ctx<'js>) -> R) -> Option<R> {
+         self.context.as_ref().map(|ctx| ctx.with(f))
++    }
++    /// Enter a bounded host-driven guest turn before calling into QuickJS.
++    /// Use this for external dispatch and scheduler queries that can arrive
++    /// after an arbitrary idle interval; `with` remains for inspection paths.
++    pub fn with_turn<R>(&self, f: impl for<'js> FnOnce(Ctx<'js>) -> R) -> Option<R> {
++        self.begin_turn(Duration::from_millis(250));
++        self.with(f)
+     }
++    /// Whether QuickJS has Promise jobs waiting for a guest turn.
++    pub fn has_pending_jobs(&self) -> bool {
++        self.runtime.as_ref().is_some_and(|runtime| runtime.is_job_pending())
++    }
+     fn remember<T, E: std::fmt::Display>(
+         &mut self,
+--- a/engine/core/src/anim.rs
++++ b/engine/core/src/anim.rs
+@@ -267,6 +267,13 @@
+             spring_v: 0.0,
+         });
+         a
++    }
++
++    /// Whether a tick can advance a live track or publish a completion.
++    pub fn has_pending_work(&self) -> bool {
++        self.tracks.iter().any(|track| track.alive)
++            || !self.completions.is_empty()
++            || !self.pending_completions.is_empty()
+     }
+ 
+     /// Spawn a track (killing any live track on the same node+prop first).
+--- a/engine/core/src/font_stream.rs
++++ b/engine/core/src/font_stream.rs
+@@ -40,6 +40,12 @@
+     pub advance: u8,
+     evictions: u64,
+     rejected: u64,
++}
++
++impl Stream {
++    fn has_pending_work(&self, atlas: &Atlas) -> bool {
++        self.wanted.iter().any(|cp| atlas.lookup(*cp).is_none() && !self.absent.contains(cp))
++    }
+ }
+ fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
+@@ -346,6 +352,14 @@
+ }
+ 
+ impl crate::text::Fonts {
++    pub(crate) fn has_pending_stream_work(&self) -> bool {
++        (0..crate::spec::MAX_FONT_SLOTS).any(|slot| {
++            self.atlas(slot as u8)
++                .and_then(|atlas| atlas.stream.as_ref().map(|stream| stream.has_pending_work(atlas)))
++                .unwrap_or(false)
++        })
++    }
++
+     pub(crate) fn stream_begin(&self, frame: u64) {
+         for slot in 0..crate::spec::MAX_FONT_SLOTS {
+             if let Some(a) = self.atlas(slot as u8) {
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -474,6 +474,42 @@
+         self.tick_hz
+     }
+ 
++    /// True when at least one retained subsystem needs another core frame.
++    /// This is deliberately conservative: a live physics world or animated
++    /// sprite keeps the host awake even when its next visible change is small.
++    pub fn has_pending_work(&self) -> bool {
++        let layout_pending = self.layout.needs()
++            || self.auxiliary.as_ref().is_some_and(|surface| surface.layout.needs());
++        let inspector_moving = self.inspect_drawn.zip(self.inspect_rect)
++            .is_some_and(|(drawn, target)| drawn != target)
++            || self.auxiliary.as_ref().and_then(|surface| surface.inspect_drawn)
++                .zip(self.inspect_rect).is_some_and(|(drawn, target)| drawn != target);
++        if self.paused {
++            return self.step_pending || layout_pending || inspector_moving;
++        }
++        layout_pending
++            || self.step_pending
++            || self.anims.has_pending_work()
++            || self.timelines.iter().any(|timeline| timeline.alive)
++            || !self.physics.is_idle()
++            || self.tree.slots.iter().any(|node| node.alive && node.sprite_frames > 1)
++            || self.fonts.has_pending_stream_work()
++            || inspector_moving
++    }
++
++    /// Account for virtual core frames skipped by a host that proved the UI
++    /// idle. The method refuses while any clock-sensitive subsystem is live.
++    pub fn skip_idle_ticks(&mut self, ticks: u64) -> bool {
++        if self.paused || self.step_pending || self.has_pending_work() {
++            return false;
++        }
++        if ticks > 0 {
++            self.ticked = true;
++            self.frame = self.frame.wrapping_add(ticks);
++        }
++        true
++    }
++
+     /// Monotonic token for texture/font/style contents consumed by renderers.
+     pub fn raster_revision(&self) -> u64 {
+         self.raster_revision
+--- a/framework/src/actions.ts
++++ b/framework/src/actions.ts
+@@ -147,7 +147,7 @@
+           }
+         }
+       }
+-    });
++    }, { continuous: () => held.size > 0 });
+   }
+ 
+   return {
+--- a/framework/src/agent-layer.tsx
++++ b/framework/src/agent-layer.tsx
+@@ -771,7 +771,8 @@
+       dotShown = busy;
+       jump(dot, "opacity", busy ? 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(frameCount * 0.15)) : 0);
+     }
+-  });
++  }, { continuous: () => phase() === "listening" || phase() === "working" || !!job || jobs.length > 0 ||
++    (host.hasPendingRequests?.() ?? false) });
+ 
+   // -- buttons and the stylus while the overlay is open ----------------------
+   const ALL = 0xffff;
+@@ -884,7 +885,7 @@
+       return;
+     }
+     if (p === "offline") close();
+-  });
++  }, { continuous: false });
+ 
+   // -- the panel's text, wrapped in the agent's slot -------------------------
+   const BODY_W = CARD.w - 28;
+--- a/framework/src/agent.ts
++++ b/framework/src/agent.ts
+@@ -38,6 +38,8 @@
+   setDisplay?(mode: string): boolean;
+   /** Hosts with the stage's SELECT Home hint. */
+   homeHint?(on: boolean): void;
++  /** True while a host-side request or response needs the frame pump. */
++  hasPendingRequests?(): boolean;
+ }
+ 
+ export function agentHost(): AgentHostOps | null {
+--- a/framework/src/classic.ts
++++ b/framework/src/classic.ts
+@@ -282,6 +282,8 @@
+   /** Diameter in logical px. Default 22. */
+   size?: number;
+   color?: string;
++  /** Whether this spinner is currently displayed. Defaults to true. */
++  active?: boolean | (() => boolean);
+ }
+ 
+ /** Eight bars on a circle; every four virtual frames the bright bar
+@@ -293,7 +295,8 @@
+   const radius = size / 2 - barH / 2;
+   const [phase, setPhase] = createSignal(0);
+   let frames = 0;
+-  onFrame(() => { if (++frames % 4 === 0) setPhase((p) => (p + 1) % 8); });
++  const active = () => typeof props.active === "function" ? props.active() : props.active ?? true;
++  onFrame(() => { if (++frames % 4 === 0) setPhase((p) => (p + 1) % 8); }, { continuous: active });
+   const frame = View({ get style() { return { width: size, height: size, rotate: phase() * 45 }; } });
+   const bars = Array.from({ length: 8 }, (_, i) => {
+     const angle = i * 45, rad = (angle * Math.PI) / 180;
+@@ -364,13 +367,14 @@
+     props.onWindow?.(first, visibleRows(), velocity);
+     // The d-pad's way to the next page: focus within two rows of the end.
+     if (index !== null && index >= props.count - 2) requestMore();
+-  });
++  }, { continuous: () => !!handle && handle.scroller.state() !== "idle" ||
++    !!props.onLoadMore && hasMore() && !loading() && focused() !== null && focused()! >= props.count - 2 });
+ 
+   const loadingRow = () => View({ class: "relative items-center justify-center flex-row gap-2 bg-white",
+     style: { width: -1, height: props.rowHeight },
+     get children() {
+       return [
+-        View({ get style() { return { display: loading() ? 0 : 1 }; }, get children() { return ClassicSpinner({ size: 18 }); } }),
++        View({ get style() { return { display: loading() ? 0 : 1 }; }, get children() { return ClassicSpinner({ size: 18, active: loading }); } }),
+         Text({ class: "text-sm font-bold", style: { textColor: CLASSIC.dim }, get children() { return loading() ? props.loadingLabel ?? "Loading…" : ""; } }),
+         View({ style: { posType: 1, insetL: 0, insetB: 0, insetR: 0, height: 1, bgColor: CLASSIC.rowLine } }),
+       ];
+--- a/framework/src/clock.ts
++++ b/framework/src/clock.ts
+@@ -62,6 +62,11 @@
+  *  costs one extra scan. */
+ let nextDue = Infinity;
+ 
++function recomputeNextDue(): void {
++  nextDue = Infinity;
++  for (const timer of timers) if (timer.at < nextDue) nextDue = timer.at;
++}
++
+ /** Snap an arbitrary rate to the nearest exact divisor of TICKS_PER_SECOND. */
+ export function normalizeHz(raw: number): number {
+   if (!Number.isFinite(raw) || raw <= 0) return TICKS_PER_SECOND;
+@@ -110,8 +115,34 @@
+   if (t.at < nextDue) nextDue = t.at;
+   return () => {
+     const i = timers.indexOf(t);
+-    if (i >= 0) timers.splice(i, 1);
++    if (i >= 0) {
++      timers.splice(i, 1);
++      if (t.at <= nextDue) recomputeNextDue();
++    }
+   };
++}
++
++/** Frames until the earliest live timer deadline; null means no timer exists. */
++export function framesUntilNextTimer(): number | null {
++  if (nextDue === Infinity) return null;
++  return Math.max(0, nextDue - virtualFrame());
++}
++
++/**
++ * Advance clock frames without firing callbacks. A caller may skip only the
++ * frames strictly before the earliest timer deadline; the due frame must run
++ * through the normal frame pump so callback order and side effects are kept.
++ */
++export function __skipIdleClockFrames(requested: number): number {
++  if (!Number.isSafeInteger(requested) || requested <= 0) return 0;
++  const distance = framesUntilNextTimer();
++  const beforeTimer = distance === null ? requested : Math.max(0, distance - 1);
++  const current = virtualFrame();
++  const safeRange = Number.MAX_SAFE_INTEGER - current;
++  const skipped = Math.min(requested, beforeTimer, safeRange);
++  if (skipped <= 0) return 0;
++  frame = frame < 0 ? skipped - 1 : frame + skipped;
++  return skipped;
+ }
+ 
+ /** Fresh clock for a fresh mount; latches the host's `__simHz` policy. */
+@@ -134,7 +165,6 @@
+   if (timers.length === 0 || frame < nextDue) return;
+   const due = timers.filter((t) => t.at <= frame).sort((a, b) => a.at - b.at || a.seq - b.seq);
+   if (due.length > 0) timers = timers.filter((t) => t.at > frame);
+-  nextDue = Infinity;
+-  for (const t of timers) if (t.at < nextDue) nextDue = t.at;
++  recomputeNextDue();
+   for (const t of due) t.cb();
+ }
+--- a/framework/src/components-octane.tsx
++++ b/framework/src/components-octane.tsx
+@@ -372,7 +372,7 @@
+     if (ready) return;
+     if (!resolveActive(props.when)) return;
+     if (++elapsed.current >= reveal) setReady(true);
+-  });
++  }, { continuous: () => !ready && resolveActive(props.when) });
+   const active = resolveActive(props.when);
+   const body = (!active
+     ? null
+--- a/framework/src/components-vue-vapor.ts
++++ b/framework/src/components-vue-vapor.ts
+@@ -677,9 +677,9 @@
+         if (++elapsed >= reveal) ready.value = true;
+       }
+       renderLazy();
+-    });
++    }, { continuous: () => !ready.value && active() });
+   } else {
+-    onFrame(renderLazy);
++    onFrame(renderLazy, { continuous: false });
+   }
+ 
+   renderLazy();
+@@ -776,7 +776,7 @@
+     if (externalPage === currentPage) return;
+     currentPage = externalPage;
+     renderCurrent(currentPage, true);
+-  });
++  }, { continuous: false });
+   onScopeDispose(() => roots.forEach((root) => root.dispose()));
+   return viewport;
+ }, NO_FALLTHROUGH);
+--- a/framework/src/components.ts
++++ b/framework/src/components.ts
+@@ -543,7 +543,7 @@
+     onFrame(() => {
+       if (ready() || !active()) return; // count only while active; latch once ready
+       if (++elapsed >= reveal) setReady(true);
+-    });
++    }, { continuous: () => !ready() && active() });
+   }
+ 
+   const fallback = (): SolidJSX.Element =>
+--- a/framework/src/deepzoom.ts
++++ b/framework/src/deepzoom.ts
+@@ -404,7 +404,10 @@
+     syncWindow();
+   };
+ 
++  let heldButtons = 0;
++  let gestureActive = false;
+   onFrame((buttons) => {
++    heldButtons = bind ? buttons : 0;
+     syncLiveViewport();
+     if (doc !== props.doc) initDoc(props.doc); // app swapped pages
+ 
+@@ -416,6 +419,7 @@
+     const dt = ticksPerFrame();
+ 
+     const gesture = props.gestureSource?.() ?? null;
++    gestureActive = gesture !== null;
+     if (gesture) {
+       // Gesture deltas live in screen/logical pixels. Move the center in the
+       // opposite document direction so the content tracks the finger.
+@@ -516,7 +520,9 @@
+     hot.prop(activeWorld, "scale", zoom / lv.scale);
+ 
+     props.onView?.({ zoom, minZoom, maxZoom, level, centerX: cx, centerY: cy });
+-  });
++  }, { continuous: () => queue.length > 0 || vx !== 0 || vy !== 0 || gestureActive ||
++    !!(heldButtons & (BTN.LEFT | BTN.RIGHT | BTN.UP | BTN.DOWN | BTN.LTRIGGER | BTN.RTRIGGER)) ||
++    (bind && (analogX() !== 0 || analogY() !== 0)) });
+ 
+   onCleanup(() => {
+     clearActive();
+--- a/framework/src/effects.ts
++++ b/framework/src/effects.ts
+@@ -99,6 +99,11 @@
+   queue = [];
+ }
+ 
++/** Pending effects need a frame boundary to consume any delivered result. */
++export function hasPendingEffects(): boolean {
++  return pending.size > 0 || queue.length > 0;
++}
++
+ /**
+  * Apply queued deliveries, FIFO. Called by the frame pump after the clock
+  * advances and before app hooks — deliveries are the first thing frame n's
+--- a/framework/src/fonts.ts
++++ b/framework/src/fonts.ts
+@@ -252,10 +252,12 @@
+   };
+   // Validate configuration before registering the pump or starting any I/O.
+   for (const r of options.resident ?? []) prepare(r.text, r.slot, true);
+-  const unregister = registerServicePump(step);
++  const hasPendingWork = () => !dead && (opening || requests.size > 0 || [...batches].some(b => b.state.status === "pending"));
++  const unregister = registerServicePump(step, hasPendingWork);
+   return {
+     prepareText: (text: string, options: { slot: number }) => prepare(text, options.slot),
+     status: () => ({ ...status }),
++    hasPendingWork,
+     stats: () => JSON.parse(host.fontStreamStats!()) as {
+       resident: number; bytes: number; pending: number; evictions: number; rejected: number; unsupported: number;
+     },
+--- a/framework/src/frame-dispatch.ts
++++ b/framework/src/frame-dispatch.ts
+@@ -7,6 +7,44 @@
+ import type { NodeMirror } from "./native-tree.ts";
+ 
+ export type FrameCallback = (buttons: number) => void;
++
++export interface FrameWorkOptions {
++  /** Keep host frames flowing while this callback is useful. Defaults to true. */
++  continuous?: boolean | (() => boolean);
++  /** Optionally gate callback delivery and its continuous-work hint. */
++  active?: boolean | (() => boolean);
++}
++
++type FrameWorkHint = { active: () => boolean; scope: "app" | "system" };
++const workHints = new Set<FrameWorkHint>();
++let appFramesSuspended = false;
++
++/** Register an independently-owned callback's scheduler hint. */
++export function registerFrameWorkHint(
++  active: () => boolean,
++  scope: "app" | "system" = "app",
++): () => void {
++  const hint = { active, scope };
++  workHints.add(hint);
++  return () => workHints.delete(hint);
++}
++
++/** Unknown or throwing predicates keep the runtime awake for safety. */
++export function hasContinuousFrameWork(): boolean {
++  for (const hint of workHints) {
++    if (hint.scope === "app" && appFramesSuspended) continue;
++    try {
++      if (hint.active()) return true;
++    } catch {
++      return true;
++    }
++  }
++  return false;
++}
++
++export function setAppFramesSuspended(suspended: boolean): void {
++  appFramesSuspended = suspended;
++}
+ 
+ /** The registrations one frame runs, frozen when the frame starts. */
+ export interface FrameSnapshot {
+@@ -20,23 +58,48 @@
+ export class FrameRegistry {
+   private readonly callbacks = new Set<FrameCallback>();
+   private readonly placed = new Map<FrameCallback, NodeMirror>();
++  private readonly workDisposers = new Map<FrameCallback, () => void>();
+   // Rebuilt after a registration changes and never mutated once built, so a
+   // frame holding it keeps the set it started with.
+   private snapshot: FrameSnapshot | null = null;
+ 
+   /** Register `callback`; with `placement` its press joins the document-order
+    *  queue at that node instead of running in registration order. */
+-  add(callback: FrameCallback, placement?: NodeMirror): () => void {
+-    if (placement) this.placed.set(callback, placement);
+-    else this.callbacks.add(callback);
++  add(callback: FrameCallback, placement?: NodeMirror, options: FrameWorkOptions = {}, scope: "app" | "system" = "app"): () => void {
++    const activeOption = options.active;
++    const continuousOption = options.continuous;
++    const active = typeof activeOption === "function"
++      ? activeOption
++      : () => activeOption ?? true;
++    const continuous = typeof continuousOption === "function"
++      ? continuousOption
++      : () => continuousOption ?? true;
++    const gated = activeOption === undefined
++      ? callback
++      : (buttons: number) => { if (active()) callback(buttons); };
++    if (placement) this.placed.set(gated, placement);
++    else this.callbacks.add(gated);
+     this.snapshot = null;
++    // Known-passive hooks remain in the dispatch registry, but need no entry
++    // in the global scheduler scan. Keep dynamic predicates observable.
++    if (continuousOption !== false && activeOption !== false && !this.workDisposers.has(gated)) {
++      const unregisterWork = registerFrameWorkHint(() => active() && continuous(), scope);
++      this.workDisposers.set(gated, unregisterWork);
++    }
+     return () => {
+-      const removed = this.callbacks.delete(callback);
+-      if (this.placed.delete(callback) || removed) this.snapshot = null;
++      const removed = this.callbacks.delete(gated);
++      if (this.placed.delete(gated) || removed) this.snapshot = null;
++      const disposeWork = this.workDisposers.get(gated);
++      if (disposeWork) {
++        disposeWork();
++        this.workDisposers.delete(gated);
++      }
+     };
+   }
+ 
+   clear(): void {
++    for (const dispose of this.workDisposers.values()) dispose();
++    this.workDisposers.clear();
+     this.callbacks.clear();
+     this.placed.clear();
+     this.snapshot = null;
+--- a/framework/src/frame-octane.tsx
++++ b/framework/src/frame-octane.tsx
+@@ -8,30 +8,45 @@
+ 
+ import { useEffect, useEffectEvent, useRef, useState } from "octane";
+ import { __resetAnalog } from "./analog.ts";
++import { registerFrameWorkHint, type FrameWorkOptions } from "./frame-dispatch.ts";
+ 
+ export { __setAnalog, analogRaw, analogX, analogY, rightAnalogRaw, rightAnalogX, rightAnalogY } from "./analog.ts";
+ 
+ type FrameCallback = (buttons: number) => void;
+ 
+ const callbacks = new Set<FrameCallback>();
++const disposeWork = new Map<FrameCallback, () => void>();
++const activeCallbacks = new Map<FrameCallback, () => boolean>();
+ let buttonHandlerBlockDepth = 0;
+ 
+ export function resetFrameHooks(): void {
+   callbacks.clear();
++  for (const dispose of disposeWork.values()) dispose();
++  disposeWork.clear();
++  activeCallbacks.clear();
+   buttonHandlerBlockDepth = 0;
+   __resetAnalog();
+ }
+ 
+ export function runFrameHooks(buttons: number): void {
+-  for (const cb of [...callbacks]) cb(buttons);
++  for (const cb of [...callbacks]) if (activeCallbacks.get(cb)?.() ?? true) cb(buttons);
+ }
+ 
+-export function useFrame(callback: FrameCallback): void {
++export function useFrame(callback: FrameCallback, options: FrameWorkOptions = {}): void {
+   const stable = useEffectEvent(callback);
+   useEffect(() => {
+     callbacks.add(stable);
++    const activeOption = options.active;
++    const continuousOption = options.continuous;
++    const active: () => boolean = typeof activeOption === "function" ? activeOption : () => activeOption ?? true;
++    const continuous: () => boolean = typeof continuousOption === "function" ? continuousOption : () => continuousOption ?? true;
++    activeCallbacks.set(stable, active);
++    disposeWork.set(stable, registerFrameWorkHint(() => active() && continuous()));
+     return () => {
+       callbacks.delete(stable);
++      activeCallbacks.delete(stable);
++      disposeWork.get(stable)?.();
++      disposeWork.delete(stable);
+     };
+   }, []);
+ }
+@@ -69,8 +84,13 @@
+   });
+   useEffect(() => {
+     callbacks.add(handler);
++    activeCallbacks.set(handler, () => true);
++    disposeWork.set(handler, registerFrameWorkHint(() => false));
+     return () => {
+       callbacks.delete(handler);
++      activeCallbacks.delete(handler);
++      disposeWork.get(handler)?.();
++      disposeWork.delete(handler);
+     };
+   }, []);
+ }
+@@ -102,6 +122,6 @@
+       shown.current = next;
+       setIndex(next);
+     }
+-  });
++  }, { continuous: () => frames.length > 1 });
+   return frames[index % frames.length];
+ }
+--- a/framework/src/frame-vue-vapor.ts
++++ b/framework/src/frame-vue-vapor.ts
+@@ -7,11 +7,13 @@
+ import type { i32 } from "./numeric-microts.ts";
+ import type { NodeMirror } from "./native-tree.ts";
+ import type { DeferredPress } from "./input.ts";
+-import { dispatchFrame, FrameRegistry, type FrameCallback, type RunPress } from "./frame-dispatch.ts";
++import { dispatchFrame, FrameRegistry, type FrameCallback, type FrameWorkOptions, type RunPress } from "./frame-dispatch.ts";
+ import { flushLifecycleHooks, resetLifecycleHooks } from "./lifecycle-vue-aot.ts";
+ import { reactModelRegions } from "./model-reactive.ts";
+ import { resumeModelTasks, resetModelTaskClock } from "./model-tasks.ts";
+ import { pollModelAnimations } from "./model-animation.ts";
++
++export type { FrameWorkOptions } from "./frame-dispatch.ts";
+ 
+ export { __setAnalog, analogRaw, analogX, analogY, rightAnalogRaw, rightAnalogX, rightAnalogY } from "./analog.ts";
+ 
+@@ -43,14 +45,14 @@
+   finally { __endAxisFrame(); __endMotionFrame(); }
+ }
+ 
+-function registerFrame(callback: FrameCallback, placement?: NodeMirror): () => void {
+-  const dispose = registry.add(callback, placement);
++function registerFrame(callback: FrameCallback, placement?: NodeMirror, options: FrameWorkOptions = {}): () => void {
++  const dispose = registry.add(callback, placement, options);
+   onScopeDispose(dispose, true);
+   return dispose;
+ }
+ 
+-export function onFrame(callback: FrameCallback): void {
+-  registerFrame(callback);
++export function onFrame(callback: FrameCallback, options: FrameWorkOptions = {}): void {
++  registerFrame(callback, undefined, options);
+ }
+ 
+ export interface ButtonPressOptions {
+@@ -69,7 +71,7 @@
+     const active = typeof options.active === "function" ? options.active() : options.active ?? true;
+     if (active) callback(delta);
+   };
+-  return registerFrame(listener, placement);
++  return registerFrame(listener, placement, { continuous: false });
+ }
+ 
+ export interface MotionOptions { active?: boolean | (() => boolean); minQuality?: MotionMinQualityName }
+@@ -82,7 +84,7 @@
+     const active = typeof options.active === "function" ? options.active() : options.active ?? true;
+     if (active) (callback as (...payload: number[]) => void)(...payload);
+   };
+-  return registerFrame(listener, placement);
++  return registerFrame(listener, placement, { continuous: false });
+ }
+ 
+ export function pushButtonHandlerBlock(): () => void {
+@@ -110,7 +112,7 @@
+     if (!active) return;
+     if (buttonHandlerBlockDepth > 0 && !opts.allowWhenBlocked) return;
+     callback(pressed, buttons);
+-  }, placement);
++  }, placement, { continuous: false });
+ }
+ 
+ export interface SpriteAnimationOptions {
+@@ -125,6 +127,6 @@
+   const frame = shallowRef(0);
+   onFrame(() => {
+     frame.value = (frame.value + 1) % (frames.length * frameStep);
+-  });
++  }, { continuous: () => frames.length > 1 });
+   return computed(() => frames[Math.floor(frame.value / frameStep) % frames.length]);
+ }
+--- a/framework/src/frame.ts
++++ b/framework/src/frame.ts
+@@ -11,12 +11,14 @@
+ import type { i32 } from "./numeric-microts.ts";
+ import type { NodeMirror } from "./native-tree.ts";
+ import type { DeferredPress } from "./input.ts";
+-import { dispatchFrame, FrameRegistry, type FrameCallback, type FrameSnapshot, type RunPress } from "./frame-dispatch.ts";
++import { dispatchFrame, FrameRegistry, setAppFramesSuspended, type FrameCallback, type FrameSnapshot, type FrameWorkOptions, type RunPress } from "./frame-dispatch.ts";
+ import { RowContext, nodeRow, withRowSnapshot } from "./solid-row.ts";
+ import { flushLifecycleHooks, resetLifecycleHooks } from "./lifecycle-solid-aot.ts";
+ import { reactModelRegions } from "./model-reactive.ts";
+ import { resumeModelTasks, resetModelTaskClock } from "./model-tasks.ts";
+ import { pollModelAnimations } from "./model-animation.ts";
++
++export type { FrameWorkOptions } from "./frame-dispatch.ts";
+ 
+ export { __setAnalog, analogRaw, analogX, analogY, rightAnalogRaw, rightAnalogX, rightAnalogY } from "./analog.ts";
+ 
+@@ -37,6 +39,7 @@
+  *  deliveries are not affected. */
+ export function suspendApp(suspended: boolean): void {
+   appSuspended = suspended;
++  setAppFramesSuspended(suspended);
+ }
+ 
+ export function isAppSuspended(): boolean {
+@@ -65,6 +68,7 @@
+   registry.clear();
+   systemRegistry.clear();
+   appSuspended = false;
++  setAppFramesSuspended(false);
+   merged = null;
+   buttonHandlerBlockDepth = 0;
+   __resetAnalog();
+@@ -87,9 +91,10 @@
+   } finally { __endAxisFrame(); __endMotionFrame(); }
+ }
+ 
+-function registerFrame(callback: FrameCallback, placement?: NodeMirror): () => void {
++function registerFrame(callback: FrameCallback, placement?: NodeMirror, options: FrameWorkOptions = {}): () => void {
+   const row = useContext(RowContext);
+-  const target = useContext(SystemFrameContext) ? systemRegistry : registry;
++  const isSystem = useContext(SystemFrameContext);
++  const target = isSystem ? systemRegistry : registry;
+   // Outside a list row there is no snapshot to take, so the wrapper calls
+   // straight through instead of allocating a closure every frame. It stays a
+   // distinct function so registering one callback twice still runs it twice.
+@@ -98,12 +103,12 @@
+     : row
+       ? buttons => withRowSnapshot(row, () => callback(buttons))
+       : buttons => callback(buttons);
+-  const dispose = target.add(wrapped, placement);
++  const dispose = target.add(wrapped, placement, options, isSystem ? "system" : "app");
+   onCleanup(dispose);
+   return dispose;
+ }
+ 
+-export function onFrame(callback: FrameCallback): void { registerFrame(callback); }
++export function onFrame(callback: FrameCallback, options: FrameWorkOptions = {}): void { registerFrame(callback, undefined, options); }
+ 
+ export interface AxisDeltaOptions { active?: boolean | (() => boolean) }
+ 
+@@ -114,7 +119,7 @@
+     if (delta === 0) return;
+     const active = typeof options.active === "function" ? options.active() : options.active ?? true;
+     if (active) callback(delta);
+-  }, placement);
++  }, placement, { continuous: false });
+ }
+ 
+ export interface MotionOptions { active?: boolean | (() => boolean); minQuality?: MotionMinQualityName }
+@@ -127,7 +132,7 @@
+     if (!payload) return;
+     const active = typeof options.active === "function" ? options.active() : options.active ?? true;
+     if (active) (callback as (...payload: number[]) => void)(...payload);
+-  }, placement);
++  }, placement, { continuous: false });
+ }
+ export interface ButtonPressOptions {
+   /**
+@@ -175,7 +180,7 @@
+     if (!active) return;
+     if (buttonHandlerBlockDepth > 0 && !opts.allowWhenBlocked) return;
+     if (pressed & mask) callback(pressed, buttons);
+-  }, placement);
++  }, placement, { continuous: false });
+ }
+ 
+ export interface SpriteAnimationOptions {
+@@ -189,8 +194,9 @@
+   }
+   const frameStep = Math.max(1, Math.floor(opts.frameStep ?? 1));
+   const [frame, setFrame] = createSignal(0);
++  if (frames.length === 1) return () => frames[0]!;
+   onFrame(() => {
+     setFrame((frame() + 1) % (frames.length * frameStep));
+-  });
++  }, { active: () => frames.length > 1 });
+   return () => frames[Math.floor(frame() / frameStep) % frames.length];
+ }
+--- a/framework/src/gesture-core.ts
++++ b/framework/src/gesture-core.ts
+@@ -704,6 +704,18 @@
+   }
+ }
+ 
++/** A live long-press recognizer needs virtual frames until it fires or dies. */
++export function hasPendingGestureWork(): boolean {
++  for (const track of tracks) {
++    if (!track.used || track.claimedBy) continue;
++    for (const rec of track.owners) {
++      const flags = rec.flags[track.slot];
++      if ((flags & OBSERVING) && !(flags & (TAP_DEAD | LONGPRESS_FIRED)) && rec.opts.onLongPress) return true;
++    }
++  }
++  return false;
++}
++
+ function cancelContactsFor(rec: Recognizer): void {
+   for (const t of tracks) {
+     if (t.used && rec.flags[t.slot] & OBSERVING) fireCancel(rec, t);
+--- a/framework/src/index-octane.ts
++++ b/framework/src/index-octane.ts
+@@ -38,6 +38,7 @@
+ import { entries as pakEntries, get as pakGet, hasPack, loadPack } from "./pak.ts";
+ import { STYLE_IDS as DEFAULT_STYLE_IDS } from "./styles.generated.ts";
+ import { ENUMS, SCREEN_H, SCREEN_W } from "../../contracts/spec/spec.ts";
++import "./work-state.ts";
+ 
+ export interface RenderOptions {
+   /** web/wasm/test hosts inject their ops here; omit on PSP (globalThis.ui). */
+--- a/framework/src/index-vue-vapor.ts
++++ b/framework/src/index-vue-vapor.ts
+@@ -42,6 +42,7 @@
+ import { entries as pakEntries, get as pakGet, hasPack, loadPack } from "./pak.ts";
+ import { STYLE_IDS as DEFAULT_STYLE_IDS } from "./styles.generated.ts";
+ import { ENUMS, SCREEN_H, SCREEN_W } from "../../contracts/spec/spec.ts";
++import "./work-state.ts";
+ 
+ /** Gesture recognition for one frame's deferred presses; shared across frames. */
+ const runDeferredGestures = (defer: DeferredPress): void => withDeferredPress(defer, __runGestures);
+--- a/framework/src/index.ts
++++ b/framework/src/index.ts
+@@ -57,6 +57,7 @@
+ import { entries as pakEntries, get as pakGet, hasPack, loadPack } from "./pak.ts";
+ import { STYLE_IDS as DEFAULT_STYLE_IDS } from "./styles.generated.ts";
+ import { ENUMS, SCREEN_H, SCREEN_W } from "../../contracts/spec/spec.ts";
++import "./work-state.ts";
+ 
+ export interface RenderOptions {
+   /** web/wasm/test hosts inject their ops here; omit on PSP (globalThis.ui). */
+--- a/framework/src/keyboard-touch.ts
++++ b/framework/src/keyboard-touch.ts
+@@ -72,6 +72,12 @@
+     release,
+     cancel() { for (const id of holds.keys()) release(id, true); },
+     tracking: () => cursorOwner !== undefined,
++    hasPendingWork() {
++      for (const hold of holds.values()) {
++        if (!hold.cancelled && !hold.consumed && (hold.kind === "space" || hold.kind === "backspace")) return true;
++      }
++      return false;
++    },
+     holdingSpace() {
+       for (const hold of holds.values()) if (hold.kind === "space" && !hold.cancelled) return true;
+       return false;
+--- a/framework/src/kinetics.ts
++++ b/framework/src/kinetics.ts
+@@ -34,11 +34,16 @@
+ export function bindDpadScroll(s: Scroller, o: DpadScrollOptions = {}): void {
+   const step = o.stepPx ?? 6;
+   const nubStep = o.nubPx ?? 10;
++  let hasScrollInput = false;
+   onFrame((buttons) => {
+-    if (o.active && !o.active()) return;
++    if (o.active && !o.active()) {
++      hasScrollInput = false;
++      return;
++    }
++    const nub = analogY();
++    hasScrollInput = !!(buttons & (BTN.UP | BTN.DOWN)) || nub !== 0;
+     if (buttons & BTN.UP) s.nudge(-step);
+     if (buttons & BTN.DOWN) s.nudge(step);
+-    const nub = analogY();
+     if (nub !== 0) s.nudge(nub * nubStep);
+-  });
++  }, { continuous: () => hasScrollInput });
+ }
+--- a/framework/src/kinetics.vue-vapor.ts
++++ b/framework/src/kinetics.vue-vapor.ts
+@@ -30,11 +30,16 @@
+ export function bindDpadScroll(s: Scroller, o: DpadScrollOptions = {}): void {
+   const step = o.stepPx ?? 6;
+   const nubStep = o.nubPx ?? 10;
++  let hasScrollInput = false;
+   onFrame((buttons) => {
+-    if (o.active && !o.active()) return;
++    if (o.active && !o.active()) {
++      hasScrollInput = false;
++      return;
++    }
++    const nub = analogY();
++    hasScrollInput = !!(buttons & (BTN.UP | BTN.DOWN)) || nub !== 0;
+     if (buttons & BTN.UP) s.nudge(-step);
+     if (buttons & BTN.DOWN) s.nudge(step);
+-    const nub = analogY();
+     if (nub !== 0) s.nudge(nub * nubStep);
+-  });
++  }, { continuous: () => hasScrollInput || s.state() !== "idle" });
+ }
+--- a/framework/src/lifecycle-vue-vapor.ts
++++ b/framework/src/lifecycle-vue-vapor.ts
+@@ -12,6 +12,7 @@
+   rightAnalogX,
+   rightAnalogY,
+   type ButtonPressOptions,
++  type FrameWorkOptions,
+   type AxisDeltaOptions,
+   type MotionOptions,
+   type SpriteAnimationOptions,
+--- a/framework/src/lifecycle.ts
++++ b/framework/src/lifecycle.ts
+@@ -14,6 +14,7 @@
+   rightAnalogX,
+   rightAnalogY,
+   type ButtonPressOptions,
++  type FrameWorkOptions,
+   type AxisDeltaOptions,
+   type MotionOptions,
+   type SpriteAnimationOptions,
+--- a/framework/src/media-service.ts
++++ b/framework/src/media-service.ts
+@@ -47,7 +47,7 @@
+         snapshot.phase = "error"; snapshot.error = String(reply.message);
+       }
+     });
+-  });
++  }, () => active !== undefined && snapshot.phase === "playing");
+   return {
+     subscribe(deliver: (event: ServiceMessage) => void) { listeners.add(deliver); return () => listeners.delete(deliver); },
+     send(message: ServiceMessage, deliver: (reply: ServiceMessage) => void) {
+--- a/framework/src/model-animation.ts
++++ b/framework/src/model-animation.ts
+@@ -6,6 +6,8 @@
+ export { createNodeRef, type NodeSlot } from "./model-node-ref.ts";
+ export type ModelAnimationResult = "ended" | "replaced" | "dropped";
+ const pending = new Map<number, RequestId>();
++
++export function hasPendingModelAnimations(): boolean { return pending.size > 0; }
+ 
+ export function installModelAnimationCommands(): void { registerModelCommandHandler((region, op, args, request) => {
+   if (op === "log") { console.log(...args); return; }
+--- a/framework/src/model-tasks.ts
++++ b/framework/src/model-tasks.ts
+@@ -69,6 +69,10 @@
+     if ([...this.tasks.values()].some(task => task.status === "live")) return;
+     this.frame = 0; this.now = 0;
+   }
++  hasPendingWork(): boolean {
++    for (const task of this.tasks.values()) if (task.status === "live") return true;
++    return false;
++  }
+   command(op: string, args: unknown[]): void {
+     if (op === "log" && !this.region.development) return;
+     const values = copy(args);
+@@ -218,6 +222,12 @@
+ export function disposeModelTasks(region: ModelRegion): void {
+   for (const runtime of taskRuntimes) if (runtime.region === region) runtime.dispose();
+ }
++/** Live tasks include frame waits, services and animation completion waits. */
++export function hasPendingModelTasks(): boolean {
++  if (deliveries.length > 0) return true;
++  for (const runtime of taskRuntimes) if (runtime.hasPendingWork()) return true;
++  return false;
++}
+ export function resumeModelTasks(frame = virtualFrame() + 1, now = virtualNow() * 1000): void {
+   lastBoundary = { frame, now };
+   if (taskRuntimes.size === 0 && deliveries.length === 0) return;
+--- a/framework/src/offload.ts
++++ b/framework/src/offload.ts
+@@ -91,6 +91,6 @@
+   if (!ops) throw new Error("Host does not implement io.offload");
+   const next = createOffloadClient(ops);
+   if (provider === "local") localClient = next; else client = next;
+-  registerServicePump(() => next.step());
++  registerServicePump(() => next.step(), () => next.pending() > 0);
+   return next;
+ }
+--- a/framework/src/osk.tsx
++++ b/framework/src/osk.tsx
+@@ -392,7 +392,7 @@
+         setPressedPos(buttons & BTN.CIRCLE && untrack(focusShown) ? { row: lastPos.row, col: lastPos.col } : null);
+       }
+       previous = buttons;
+-    });
++    }, { continuous: () => !!(previous & BTN.SQUARE) });
+   }
+ 
+   // -- contact adapter -------------------------------------------------------
+@@ -483,7 +483,7 @@
+       onUp: (c) => release(c.id, false),
+       onCancel: (c) => release(c.id, true),
+     });
+-    onFrame(() => touch.step(virtualNow()));
++    onFrame(() => touch.step(virtualNow()), { continuous: touch.hasPendingWork });
+   }
+ 
+   const resolveTouch = (x: number, y: number): OskKeyRect | null => {
+--- a/framework/src/resource-cache.ts
++++ b/framework/src/resource-cache.ts
+@@ -35,6 +35,7 @@
+   candidate(): Job | undefined;
+   speculative(): { priority: number; cancel(): void } | undefined;
+   completion(): { order: number; run(): void } | undefined;
++  hasPendingWork(): boolean;
+   cancel(): void;
+   dispose(): void;
+ }
+@@ -142,6 +143,13 @@
+           if (previous.status === "ready" && next.status === "ready" && previous.value !== next.value) config.dispose?.(previous.value);
+         } };
+       },
++      hasPendingWork() {
++        for (const entry of entries.values()) {
++          if (entry.result || entry.busy) return true;
++          if (entry.desired && (entry.stale || entry.state.status !== "ready") && entry.attempts < retry.attempts) return true;
++        }
++        return false;
++      },
+       cancel,
+       dispose() { if (dead) return; dead = true; clear(); collections.delete(collection); },
+     };
+@@ -209,10 +217,16 @@
+       },
+       cancel, clear, dispose: collection.dispose,
+       stats: () => ({ entries: entries.size, cost, ready: [...entries.values()].reduce((n, e) => n + (e.state.status === "ready" ? 1 : 0), 0) }),
++      hasPendingWork: () => collection.hasPendingWork(),
+     };
+   }
+   return {
+     createCache,
++    hasPendingWork() {
++      if (active > 0) return true;
++      for (const collection of collections) if (collection.hasPendingWork()) return true;
++      return false;
++    },
+     /** Call once per UI frame after planning demand, also while offline. */
+     step() {
+       if (disposed || stepping) return;
+--- a/framework/src/resource-view.ts
++++ b/framework/src/resource-view.ts
+@@ -24,6 +24,7 @@
+   cancel(): void;
+   dispose(): void;
+   stats(): { entries: number; cost: number; ready: number; views: number; demands: number };
++  hasPendingWork(): boolean;
+ }
+ 
+ function owner() {
+@@ -39,7 +40,7 @@
+ export function createResourceRuntime(options: ResourceSchedulerOptions) {
+   owner();
+   const scheduler = createResourceScheduler(options);
+-  const collections = new Set<{ plan(): void; flush(): void; dispose(): void }>();
++  const collections = new Set<{ plan(): void; flush(): void; dispose(): void; hasPendingWork(): boolean }>();
+   let dead = false, stepping = false;
+ 
+   function createCollection<I, R extends ResourceBytes, T>(config: ResourceCollectionOptions<I, R, T>): ResourceCollection<I, T> {
+@@ -51,7 +52,7 @@
+     const views = new Set<View>();
+     const lanes = new Map<string, { read: Accessor<number>; notify(): void }>();
+     const dirty = new Set<string>();
+-    let disposed = false;
++    let disposed = false, planComplete = false;
+     const cache = scheduler.createCache({ ...config, changed(input) { dirty.add(config.key(input)); } });
+ 
+     function flush() {
+@@ -97,6 +98,7 @@
+     }
+     const collection = {
+       plan() {
++        planComplete = true;
+         // Validate every view before replacing any of this collection's demand.
+         const planned = [...views].map(view => ({ view, wanted: validate(untrack(view.plan)) }));
+         for (const { view, wanted } of planned) {
+@@ -113,6 +115,7 @@
+         for (const view of [...views]) view.dispose();
+         cache.dispose(); dirty.clear(); lanes.clear(); collections.delete(collection);
+       },
++      hasPendingWork() { return !disposed && (!planComplete || cache.hasPendingWork()); },
+     };
+     collections.add(collection);
+     function update(action: () => void) { batch(() => { action(); flush(); }); }
+@@ -149,6 +152,7 @@
+       clear: () => update(cache.clear), cancel: () => update(cache.cancel),
+       dispose: () => update(collection.dispose),
+       stats: () => ({ ...cache.stats(), views: views.size, demands: lanes.size }),
++      hasPendingWork: () => !disposed && (!planComplete || cache.hasPendingWork()),
+     };
+   }
+   function step() {
+@@ -162,14 +166,20 @@
+       });
+     } finally { stepping = false; }
+   }
++  function hasPendingWork() {
++    if (dead) return false;
++    if (scheduler.hasPendingWork()) return true;
++    for (const collection of collections) if (collection.hasPendingWork()) return true;
++    return false;
++  }
+   function dispose() {
+     if (dead) return;
+     dead = true;
+     batch(() => { for (const collection of [...collections]) collection.dispose(); scheduler.dispose(); });
+   }
+   onCleanup(dispose);
+-  onMount(() => { if (!dead) onFrame(step); });
+-  return { createCollection, step, dispose, stats: scheduler.stats,
++  onMount(() => { if (!dead) onFrame(step, { continuous: hasPendingWork }); });
++  return { createCollection, step, dispose, stats: scheduler.stats, hasPendingWork,
+     cancel() { batch(() => { scheduler.cancel(); for (const collection of collections) collection.flush(); }); },
+   };
+ }
+--- a/framework/src/service-client.ts
++++ b/framework/src/service-client.ts
+@@ -96,7 +96,7 @@
+       }).catch(() => {}).finally(() => { eventsBusy = false; });
+     }
+     for (const [id, work] of pending) if (frame >= work.deadline) fail(id, "Service operation timed out");
+-  });
++  }, () => !disposed && (pending.size > 0 || listeners.size > 0));
+   return {
+     transport,
+     subscribe(deliver) { listeners.add(deliver); return () => listeners.delete(deliver); },
+--- a/framework/src/services.ts
++++ b/framework/src/services.ts
+@@ -2,21 +2,34 @@
+ // scoped and differ between Solid, Vue Vapor and Octane; module Promise
+ // delivery is realm scoped and must not depend on any of them.
+ //
+-// The set is normally empty. A module registers only while it has pending
+-// work, so the idle frame cost is one empty-set iteration and no native op.
++// Most apps keep the map empty. Unknown pumps report pending work by default;
++// modules with a precise idle state can opt out of continuous scheduling.
+ 
+ type ServicePump = () => void;
++type PendingWork = () => boolean;
+ 
+-const pumps = new Set<ServicePump>();
++const pumps = new Map<ServicePump, PendingWork>();
+ 
+-export function registerServicePump(pump: ServicePump): () => void {
+-  pumps.add(pump);
++export function registerServicePump(pump: ServicePump, pending: PendingWork = () => true): () => void {
++  pumps.set(pump, pending);
+   return () => pumps.delete(pump);
++}
++
++/** Unknown pumps count as work until their owner unregisters them. */
++export function hasPendingServiceWork(): boolean {
++  for (const pending of pumps.values()) {
++    try {
++      if (pending()) return true;
++    } catch {
++      return true;
++    }
++  }
++  return false;
+ }
+ 
+ export function runServicePumps(): void {
+   if (pumps.size === 0) return;
+-  // A pump may remove itself while running; Set iteration safely advances to
++  // A pump may remove itself while running; Map iteration safely advances to
+   // the next entry without a snapshot allocation on this per-frame path.
+-  for (const pump of pumps) pump();
++  for (const pump of pumps.keys()) pump();
+ }
+--- a/framework/src/system.ts
++++ b/framework/src/system.ts
+@@ -85,7 +85,7 @@
+       } else {
+         held = 0;
+       }
+-    });
++    }, { continuous: () => held > 0 });
+   }
+ 
+   const Overlay = surface === "auxiliary" ? AuxiliaryPortal : Portal;
+--- a/framework/src/text-layout.ts
++++ b/framework/src/text-layout.ts
+@@ -235,7 +235,7 @@
+         fail(error instanceof Error ? error.message : "Malformed layout");
+       }
+     });
+-  });
++  }, () => !disposed && (stage !== "idle" || request !== 0 || needsLayout));
+   function chooseUpload(): "replace" | "edit" | "open" {
+     const options = { key, revision, slot, width };
+     if (resident) {
+--- a/framework/src/text.ts
++++ b/framework/src/text.ts
+@@ -143,6 +143,9 @@
+       }
+       scheduler.step();
+     },
++    hasPendingWork() {
++      return facePending || !!faceRequest || demandsDirty || scheduler.hasPendingWork();
++    },
+     stats: cache.stats,
+     dispose() { dead = true; if (faceRequest) io.cancel(faceRequest); scheduler.dispose(); owners.clear(); },
+   };
+@@ -154,7 +157,7 @@
+   if (!resources) {
+     resources = createTextResources({ io: offload(), local: createBakedFontCoverage(), measure: (s, slot) => getOps().measureText(s, slot),
+       upload: (mask, w, h) => uploadCoverage(mask, w, h, 0xffffffff), free: h => getOps().freeTexture?.(h) });
+-    registerServicePump(() => resources!.step());
++    registerServicePump(() => resources!.step(), () => resources!.hasPendingWork());
+   }
+   return resources;
+ }
+--- a/framework/src/virtual-list.ts
++++ b/framework/src/virtual-list.ts
+@@ -323,7 +323,13 @@
+       const max = Math.max(0, total() - props.height);
+       if (o > max - (props.nearEndPx ?? DEFAULT_NEAR_PX)) props.onNearEnd();
+     }
+-  });
++  }, { continuous: () => {
++    const o = offset();
++    const nearStart = props.onNearStart && o < (props.nearStartPx ?? DEFAULT_NEAR_PX);
++    const max = Math.max(0, total() - props.height);
++    const nearEnd = props.onNearEnd && o > max - (props.nearEndPx ?? DEFAULT_NEAR_PX);
++    return scroller.state() !== "idle" || !!nearStart || !!nearEnd;
++  } });
+ 
+   // Stick-to-bottom: follow appends while the INTENT was at the PREVIOUS
+   // end (the im rule — at-bottom is judged before the append grew the range,
+--- /dev/null
++++ b/framework/src/work-state.ts
+@@ -0,0 +1,50 @@
++// Native hosts query this after each guest turn to decide whether the next
++// frame is event-driven, continuous, or can sleep until an `after()` deadline.
++
++import { __skipIdleClockFrames, framesUntilNextTimer, simulationHz } from "./clock.ts";
++import { hasContinuousFrameWork } from "./frame-dispatch.ts";
++import { hasPendingEffects } from "./effects.ts";
++import { hasPendingModelAnimations } from "./model-animation.ts";
++import { hasPendingModelTasks } from "./model-tasks.ts";
++import { hasPendingServiceWork } from "./services.ts";
++import { hasPendingGestureWork } from "./gesture-core.ts";
++
++export interface PocketWorkState {
++  version: 1;
++  continuous: boolean;
++  framesUntilTimer: number | null;
++  simulationHz: number;
++}
++
++export function getPocketWorkState(): PocketWorkState {
++  return {
++    version: 1,
++    continuous:
++      hasContinuousFrameWork() ||
++      hasPendingEffects() ||
++      hasPendingModelTasks() ||
++      hasPendingModelAnimations() ||
++      hasPendingServiceWork() ||
++      hasPendingGestureWork(),
++    framesUntilTimer: framesUntilNextTimer(),
++    simulationHz: simulationHz(),
++  };
++}
++
++/**
++ * Fast-forward only clock-only idle frames. Active JS work refuses the skip;
++ * the clock helper caps it before the earliest timer callback is due.
++ */
++export function skipPocketIdleFrames(requested: number): number {
++  if (getPocketWorkState().continuous) return 0;
++  return __skipIdleClockFrames(requested);
++}
++
++type SchedulerGlobals = typeof globalThis & {
++  __pocketWorkState?: () => PocketWorkState;
++  __pocketSkipIdleFrames?: (frames: number) => number;
++};
++
++const schedulerGlobals = globalThis as SchedulerGlobals;
++schedulerGlobals.__pocketWorkState = getPocketWorkState;
++schedulerGlobals.__pocketSkipIdleFrames = skipPocketIdleFrames;

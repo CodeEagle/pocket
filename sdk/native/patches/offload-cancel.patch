@@ -1,0 +1,43 @@
+diff --git a/framework/src/offload.ts b/framework/src/offload.ts
+--- a/framework/src/offload.ts
++++ b/framework/src/offload.ts
+@@ -27,0 +28,10 @@
++  const eventDriven = () => (ops as OffloadOps & { eventDriven?: boolean }).eventDriven === true;
++  const needsPump = () => {
++    if (disposed) return false;
++    if (!eventDriven()) return pending.size > 0;
++    const session = ops.session();
++    for (const item of pending.values()) {
++      if (!item.sent || item.session !== session) return true;
++    }
++    return false;
++  };
+@@ -31,0 +42 @@
++    needsPump,
+@@ -49 +60,6 @@
+-    cancel(id: number) { pending.delete(id); },
++    cancel(id: number) {
++      const item = pending.get(id);
++      if (!item) return;
++      pending.delete(id);
++      if (item.sent) (ops as OffloadOps & { cancel?: (id: number, session: number) => void }).cancel?.(id, item.session);
++    },
+@@ -71 +87,4 @@
+-        if (!delivered && (frame >= item.deadline || (item.sent && item.session !== session))) {
++        if (!delivered && session <= 0) {
++          delivered = true;
++          finish(id, { ok: false, error: "Provider unavailable" });
++        } else if (!delivered && ((!eventDriven() && frame >= item.deadline) || (item.sent && item.session !== session))) {
+@@ -79 +98,8 @@
+-    dispose() { disposed = true; pending.clear(); },
++    dispose() {
++      if (disposed) return;
++      disposed = true;
++      for (const [id, item] of pending) {
++        if (item.sent) (ops as OffloadOps & { cancel?: (id: number, session: number) => void }).cancel?.(id, item.session);
++      }
++      pending.clear();
++    },
+@@ -94 +120 @@
+-  registerServicePump(() => next.step(), () => next.pending() > 0);
++  registerServicePump(() => next.step(), () => next.needsPump());

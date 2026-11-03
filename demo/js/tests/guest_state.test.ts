@@ -152,6 +152,16 @@ test("stress and performance snapshots", () => {
   assert.equal(parsedPerformance.history.length, 2);
   assert.equal(parsedPerformance.recording, true);
   assert.equal(parsePerformancePoint({ fps: 60 }), undefined);
+  assert.equal(
+    parsePerformancePoint({
+      timestamp: "high-refresh",
+      fps: 144,
+      maxGapMs: 7,
+      slowFrames: 0,
+      nativeMsP95: 1,
+    })?.fps,
+    144,
+  );
 
   const performanceLoading = apply(initial, {
     type: "capabilityStart",
@@ -185,7 +195,6 @@ test("stress and performance snapshots", () => {
 test("source checks and boundary integrity", () => {
   const appSource = readFileSync(join(root, "app.tsx"), "utf8");
   const uiSource = readFileSync(join(root, "../../sdk/packages/pocket_ui/src/ui.tsx"), "utf8");
-  const hostSource = readFileSync(join(root, "host.ts"), "utf8");
   const releaseSource = readFileSync(join(root, "release.ts"), "utf8");
   const guestManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {
     capabilities?: { requires?: string[]; optional?: string[] };
@@ -204,6 +213,8 @@ test("source checks and boundary integrity", () => {
   assert.match(appSource, /Recent 60 samples/);
   assert.match(appSource, /Lowest FPS samples/);
   assert.match(appSource, /nativeMsP95/);
+  assert.match(appSource, /const scale = Math\.max\(1, \.\.\.points\.map/);
+  assert.doesNotMatch(appSource, /scaled to a 60 FPS baseline/);
   assert.match(appSource, /plugins\.list/);
   assert.match(appSource, /updates\.rollback/);
   assert.match(appSource, /updates\.changed/);
@@ -245,14 +256,15 @@ test("source checks and boundary integrity", () => {
   assert.match(uiSource, /textInput\.closed/);
   assert.match(uiSource, /getLayout/);
   assert.match(uiSource, /deliverTextInputEvent/);
-  assert.match(uiSource, /onFrame\(sendRectUpdate\)/);
+  // Rect delivery and scrolling are exercised by the compiled native probe;
+  // a specific onFrame call spelling is not an interaction assertion.
   assert.match(uiSource, /lastRect/);
   assert.match(uiSource, /activeTextInput = session/);
   assert.doesNotMatch(uiSource, /function Keyboard/);
   assert.match(appSource, /deliverTextInputEvent/);
   assert.doesNotMatch(appSource, /OSK/);
-  assert.match(hostSource, /host\.request/);
-  assert.match(hostSource, /host\.response/);
+  // Request/response and limits are exercised below through the shared SDK
+  // bridge; moving it out of the consumer is not a protocol change.
   assert.match(releaseSource, /demoRelease/);
   assert.ok(guestManifest.capabilities?.optional?.includes("updates.apply"));
   assert.ok(guestManifest.capabilities?.optional?.includes("plugins.packageInfo"));
@@ -296,4 +308,37 @@ test("host bridge communication and limits", async () => {
     return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "timeout");
   });
   boundedBridge.dispose();
+});
+
+test("host request deadlines can sleep and cancel without frame polling", async () => {
+  const callbacks = new Set<() => void>();
+  const packets: string[] = [];
+  const bridge = createHostBridge(line => { packets.push(line); return true; }, {
+    timeoutFrames: 1800,
+    scheduleTimeout: (frames, callback) => {
+      assert.equal(frames, 1800);
+      callbacks.add(callback);
+      return () => { callbacks.delete(callback); };
+    },
+  });
+  const response = bridge.request("runtime.info");
+  // Legacy tick() callers must not count down a separately scheduled timer.
+  for (let n = 0; n < 2000; n++) bridge.tick();
+  assert.equal(callbacks.size, 1);
+  const requestId = JSON.parse(packets[0]!).payload.requestId;
+  bridge.handle({ type: "response", requestId, result: { ready: true } });
+  assert.deepEqual(await response, { ready: true });
+  assert.equal(callbacks.size, 0);
+
+  const timedOut = assert.rejects(bridge.request("runtime.info"), (error: unknown) => {
+    return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "timeout");
+  });
+  const fire = [...callbacks][0]!;
+  callbacks.delete(fire); // a one-shot timer consumes its own registration
+  fire();
+  await timedOut;
+  const disposed = assert.rejects(bridge.request("runtime.info"), /disposed/i);
+  bridge.dispose();
+  await disposed;
+  assert.equal(callbacks.size, 0);
 });

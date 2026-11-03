@@ -10,6 +10,7 @@ import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_services/pocket_services.dart';
 
 import 'pocket_config.dart';
+import 'pocket_worker.dart';
 import 'package_info_plugin.dart';
 import 'performance_history.dart';
 
@@ -25,6 +26,9 @@ final class PocketSession extends ChangeNotifier {
   String get appId => config.appId;
   Set<String> get capabilities => {
     'text.glyphs.baked',
+    'runtime.worker',
+    if (config.offloadProviderFactory != null) 'io.offload',
+    if (config.workerHttpOrigins.isNotEmpty) 'net.http',
     'runtime.info',
     'runtime.performance',
     'plugins.list',
@@ -43,8 +47,68 @@ final class PocketSession extends ChangeNotifier {
   PocketUpdateCoordinator? _updates;
   PocketHost? _host;
   PocketPluginManager? _plugins;
+  PocketCapabilityAvailability? _negotiatedCapabilities;
+  Future<void> _bridgeOperation = Future<void>.value();
+  bool _foreground = true;
+  bool _foregroundRequested = true;
+  bool _firstFrameReady = false;
+
+  /// App visibility, distinct from the Flutter process lifecycle. Hidden apps
+  /// retain their realm but stop their clock and release active capabilities.
+  bool get foreground => _foreground;
+
+  Future<void> _serializeBridge(Future<void> Function() operation) {
+    final next = _bridgeOperation.then((_) => operation());
+    // A failed operation must reach its caller without poisoning later close,
+    // recovery or activation work.
+    _bridgeOperation = next.catchError((Object _) {});
+    return next;
+  }
+
+  Future<void> setForeground(bool value) {
+    if (_disposed) return Future<void>.error(StateError('Session is closed'));
+    _foregroundRequested = value;
+    if (!value) {
+      _foreground = false;
+      controller.setAppActive(false);
+      _healthTimer?.cancel();
+      _startupTimer?.cancel();
+      notifyListeners();
+    }
+    return _serializeBridge(() async {
+      if (_disposed) return;
+      final plugins = _plugins;
+      if (!value) {
+        await plugins?.deactivate(foregroundOnly: true);
+        return;
+      }
+      if (!_foregroundRequested) return;
+      final negotiated = _negotiatedCapabilities;
+      if (plugins != null && negotiated != null && !_foreground) {
+        final granted = await plugins.activate(negotiated);
+        if (!granted.satisfied) {
+          throw StateError(
+            'Missing capabilities on resume: '
+            '${granted.missingRequired.join(', ')}',
+          );
+        }
+      }
+      if (_disposed || !_foregroundRequested) return;
+      _foreground = true;
+      controller.setAppActive(true);
+      if (_firstFrameReady) {
+        onReady(controller);
+      } else if (ready) {
+        _watchStartup();
+      }
+      notifyListeners();
+    });
+  }
+
   PocketGuestManifest _embeddedManifest = const PocketGuestManifest();
   Map<String, dynamic> _metadata = {};
+  PocketWorkerProgram? workerProgram;
+  int get tickHz => (_metadata['tickHz'] as num?)?.toInt() ?? 60;
   int _embeddedBuild = 0;
   String _embeddedVersion = 'embedded';
   PocketCancellationToken? _download;
@@ -69,6 +133,7 @@ final class PocketSession extends ChangeNotifier {
   /// loading. Keeping the future lets [close] wait for that work and prevents
   /// a second caller from constructing a second plugin/update generation.
   Future<void> initialize() {
+    if (_disposed) return Future<void>.error(StateError('Session is closed'));
     final existing = _initializeFuture;
     if (existing != null) return existing;
     final future = _initialize();
@@ -207,10 +272,14 @@ final class PocketSession extends ChangeNotifier {
     'lastError': lastError,
   };
 
-  Future<void> _configureBridge(PocketPreparedPackage? package) async {
+  Future<void> _configureBridge(PocketPreparedPackage? package) =>
+      _serializeBridge(() => _configureBridgeUnlocked(package));
+
+  Future<void> _configureBridgeUnlocked(PocketPreparedPackage? package) async {
     final oldPlugins = _plugins;
     final oldHost = _host;
     _plugins = null;
+    _negotiatedCapabilities = null;
     _host = null;
     await oldPlugins?.dispose();
     oldHost?.dispose();
@@ -229,6 +298,14 @@ final class PocketSession extends ChangeNotifier {
           ...provider.descriptor.capabilities.keys,
       },
       send: _send,
+      builtInCapabilities: {
+        'text.glyphs.baked',
+        'runtime.worker',
+        if (config.offloadProviderFactory != null) 'io.offload',
+        if (config.workerHttpOrigins.isNotEmpty) 'net.http',
+        if (config.additionalCapabilities.contains('ui.compositor-surfaces'))
+          'ui.compositor-surfaces',
+      },
       sendRaw: controller.sendRaw,
     );
     final plugins = PocketPluginManager(
@@ -262,12 +339,59 @@ final class PocketSession extends ChangeNotifier {
       optional: manifest.optionalCapabilities,
       requestedPermissions: manifest.declaredPermissions,
     );
+    _negotiatedCapabilities = negotiated;
     final granted = await plugins.activate(negotiated);
     if (!granted.satisfied) {
       throw StateError(
         'Missing capabilities: ${granted.missingRequired.join(', ')}',
       );
     }
+    final descriptor = package == null
+        ? _metadata['worker']
+        : package.package.manifest.payload.worker;
+    workerProgram = null;
+    if (descriptor != null) {
+      final worker = Map<String, dynamic>.from(descriptor as Map);
+      final bytecodeDescriptor = Map<String, dynamic>.from(
+        worker['bytecode'] as Map,
+      );
+      final relative = bytecodeDescriptor['path'] as String;
+      if (relative.startsWith('/') ||
+          relative.contains('\\') ||
+          relative.split('/').any((p) => p.isEmpty || p == '.' || p == '..')) {
+        throw const FormatException('Invalid worker asset path');
+      }
+      final Uint8List bytes;
+      if (package != null) {
+        final file = package.source.pathForAsset(relative);
+        if (file == null)
+          throw const FormatException(
+            'Signed package is missing worker bytecode',
+          );
+        bytes = await File(file).readAsBytes();
+      } else {
+        final separator = config.metadataAsset.lastIndexOf('/');
+        final base = separator < 0
+            ? ''
+            : config.metadataAsset.substring(0, separator + 1);
+        bytes = (await rootBundle.load('$base$relative')).buffer.asUint8List();
+      }
+      workerProgram = PocketWorkerArtifact.verify(
+        appMetadataJson: jsonEncode({'worker': worker}),
+        bytecode: bytes,
+        actualRuntimeAbi: _metadata['runtimeAbi'] as String,
+        expectedBindingGeneration: (_metadata['bindingGeneration'] as num)
+            .toInt(),
+        expectedTickHz: tickHz,
+        admittedCapabilities: granted.granted,
+        allowedHttpOrigins: config.workerHttpOrigins,
+      ).program;
+    } else if (manifest.requiredCapabilities.contains('runtime.worker')) {
+      throw const FormatException(
+        'Guest requires runtime.worker but has no worker descriptor',
+      );
+    }
+    if (!_foregroundRequested) await plugins.deactivate(foregroundOnly: true);
   }
 
   bool _send(String method, Map<String, dynamic> params) =>
@@ -291,11 +415,14 @@ final class PocketSession extends ChangeNotifier {
   }
 
   void onReady(PocketViewController _) {
+    _firstFrameReady = true;
     _startupTimer?.cancel();
+    if (!_disposed) notifyListeners();
+    if (!_foreground || _disposed) return;
     final mountedGeneration = generation;
     // A successful first frame and a short live-frame period precede promotion.
     _healthTimer = Timer(const Duration(seconds: 1), () async {
-      if (_disposed || generation != mountedGeneration) return;
+      if (_disposed || !_foreground || generation != mountedGeneration) return;
       try {
         final package = active;
         _promotion = package != null
@@ -432,6 +559,7 @@ final class PocketSession extends ChangeNotifier {
     final previous = active;
     // Invalidate old callbacks before awaiting plugin teardown or registration.
     generation++;
+    _firstFrameReady = false;
     try {
       await _configureBridge(next);
       if (_disposed) return;
@@ -462,6 +590,7 @@ final class PocketSession extends ChangeNotifier {
 
   void _watchStartup() {
     _startupTimer?.cancel();
+    if (!_foreground || _disposed) return;
     final expectedGeneration = generation;
     _startupTimer = Timer(const Duration(seconds: 15), () {
       if (_disposed || generation != expectedGeneration) return;
@@ -502,6 +631,8 @@ final class PocketSession extends ChangeNotifier {
           await _mount(embeddedFallback);
         } else {
           _busy = false;
+          failure = error;
+          notifyListeners();
         }
         return;
       }
@@ -539,6 +670,7 @@ final class PocketSession extends ChangeNotifier {
       _shutdown ?? Future<void>.value(),
       if (_initializeFuture != null) _initializeFuture!,
       if (_promotion != null) _promotion!,
+      _bridgeOperation,
     ];
     return Future.wait<void>(pending).then<void>((_) {});
   }
@@ -547,6 +679,9 @@ final class PocketSession extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _foregroundRequested = false;
+    _foreground = false;
+    controller.setAppActive(false);
     _mountTimer?.cancel();
     _healthTimer?.cancel();
     _startupTimer?.cancel();
@@ -554,10 +689,12 @@ final class PocketSession extends ChangeNotifier {
     final plugins = _plugins;
     _host?.dispose();
     _updates?.dispose();
-    _shutdown = Future.wait<void>([
-      if (plugins != null) plugins.dispose(),
-      performance.dispose(),
-    ]).then((_) {});
+    _shutdown = _bridgeOperation.then((_) async {
+      await Future.wait<void>([
+        if (plugins != null) plugins.dispose(),
+        performance.dispose(),
+      ]);
+    });
     unawaited(
       _shutdown!.catchError((Object error) {
         lastError = '$error';

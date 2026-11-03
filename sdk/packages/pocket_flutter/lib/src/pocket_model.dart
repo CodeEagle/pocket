@@ -124,6 +124,7 @@ sealed class PocketOp {
           size: _number(json['size'], fallback: _fontSlotSize(fontSlot)),
           color: _color(json['color']),
           fontSlot: fontSlot,
+          align: (json['align'] as num?)?.toInt() ?? 0,
           clip: clip,
         );
       case 'image':
@@ -152,6 +153,8 @@ sealed class PocketOp {
           height: height,
           clip: clip,
           id: '${json['id'] ?? ''}',
+          surfaceHandle: (json['surfaceHandle'] as num?)?.toInt() ?? 0,
+          focused: json['focused'] == true,
           kind: '${descriptor['kind']}',
           parameters: Map<String, dynamic>.from(
             descriptor['parameters'] as Map,
@@ -279,6 +282,7 @@ class PocketTextOp extends PocketOp {
     required this.size,
     required this.color,
     this.fontSlot,
+    this.align = 0,
     super.clip,
   });
 
@@ -286,6 +290,9 @@ class PocketTextOp extends PocketOp {
   final double size;
   final int color;
   final int? fontSlot;
+
+  /// PocketJS TextAlign: 0 left, 1 center, 2 right; never rewrap native lines.
+  final int align;
 }
 
 class PocketImageOp extends PocketOp {
@@ -499,7 +506,10 @@ class PocketFrame {
       throw const FormatException('Invalid Pocket binary frame magic');
     }
     final version = reader.u16();
-    reader.u16(); // flags reserved for future ABI revisions.
+    final flags = reader.u16();
+    if (flags & ~1 != 0) {
+      throw FormatException('Unsupported Pocket binary frame flags: $flags');
+    }
     if (version != 1) {
       throw FormatException(
         'Unsupported Pocket binary frame version: $version',
@@ -508,7 +518,7 @@ class PocketFrame {
     reader.u64(); // native frame sequence is diagnostic only on the Dart side.
     final width = reader.f32();
     final height = reader.f32();
-    final ops = _binaryOps(reader, reader.count('ops'));
+    final ops = _binaryOps(reader, reader.count('ops'), flags);
     final events = <PocketEvent>[];
     final eventCount = reader.count('events');
     for (var index = 0; index < eventCount; index++) {
@@ -555,7 +565,7 @@ class PocketFrame {
       auxiliary = PocketSurfaceFrame(
         width: reader.f32(),
         height: reader.f32(),
-        ops: _binaryOps(reader, reader.count('auxiliary ops')),
+        ops: _binaryOps(reader, reader.count('auxiliary ops'), flags),
       );
     }
     reader.finish();
@@ -579,7 +589,7 @@ class PocketFrame {
   final PocketSurfaceFrame? auxiliary;
 }
 
-List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count) {
+List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
   final result = <PocketOp>[];
   for (var index = 0; index < count; index++) {
     final type = reader.u8();
@@ -669,6 +679,8 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count) {
         final size = reader.f32();
         final color = reader.u32();
         final fontSlot = reader.u8() == 0 ? null : reader.u8();
+        final align = flags & 1 == 0 ? 0 : reader.u8();
+        if (align > 2) throw const FormatException('Invalid text alignment');
         result.add(
           PocketTextOp(
             x: x,
@@ -679,6 +691,7 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count) {
             size: size,
             color: color,
             fontSlot: fontSlot,
+            align: align,
             clip: clip,
           ),
         );
@@ -703,6 +716,8 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count) {
       case 7:
         final id = reader.string('surface id');
         final descriptor = reader.string('surface descriptor');
+        final surfaceHandle = flags & 1 == 0 ? 0 : (reader.u32().toSigned(32));
+        final focused = flags & 1 != 0 && reader.u8() != 0;
         final decoded = jsonDecode(descriptor);
         if (decoded is! Map || decoded['parameters'] is! Map) {
           throw const FormatException('Invalid binary host surface descriptor');
@@ -715,6 +730,8 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count) {
             height: height,
             clip: clip,
             id: id,
+            surfaceHandle: surfaceHandle,
+            focused: focused,
             kind: '${decoded['kind']}',
             parameters: Map<String, dynamic>.from(decoded['parameters'] as Map),
           ),
@@ -962,7 +979,11 @@ class PocketHostSurfaceOp extends PocketOp {
     required this.id,
     required this.kind,
     required this.parameters,
+    this.surfaceHandle = 0,
+    this.focused = false,
   });
+  final int surfaceHandle;
+  final bool focused;
   final String id;
   final String kind;
   final Map<String, dynamic> parameters;

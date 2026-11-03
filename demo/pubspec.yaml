@@ -34,3 +34,5 @@ flutter:
     - assets/app.bytecode.json
     - assets/guest-manifest.json
     - assets/app.pak
+    - assets/apps/profile/
+    - assets/apps/lobby/

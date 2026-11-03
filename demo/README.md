@@ -4,7 +4,7 @@
 
 先看两个入口：
 
-- [`lib/main.dart`](lib/main.dart)：最薄 Flutter host，只配置并启动 `PocketApp`。
+- [`lib/main.dart`](lib/main.dart)：薄 Flutter host，配置 `PocketSystemHost` 与可信应用目录；多应用策略在 JS SystemUI。
 - [`js/app.tsx`](js/app.tsx)：Showcase 的 JS 入口，负责页面、状态、路由、移动 UI、转场、Liquid Glass 和硬件能力演示。
 
 运行 Demo：
@@ -33,10 +33,12 @@ flutter build apk --debug
 ```sh
 cd /Volumes/ORICO/Development/Github/pocket/demo/js
 bun install
-bun run build
+bun run build:system
 ```
 
 Flutter 产物和平台工程在 `demo/` 第一层；JS 测试和更新脚本放在 `js/` 下，设备截图与测试产物放在 `artifacts/`。要开发可复用能力，请返回 [`../sdk/README.md`](../sdk/README.md)，不要在 Demo 里复制 SDK 实现。
+
+录制会话时使用 `flutter run --dart-define=POCKET_RECORD=true -d <device-id>`，在 JS 的 Host → Runtime 页面查看状态、停止并验证回放或导出。录制包含各应用的宿主输入、IME、外部结果和二进制通道；导出资产可在原实例销毁后离线导入回放。默认关闭，配额、SDK 接口与当前边界见 [录制回放](../sdk/docs/RECORDING_REPLAY.md)。
 
 要启用本机 Editor 热更（已有本机签名配置时）：
 

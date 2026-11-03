@@ -1,0 +1,31 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "pocket.demo.profile",
+  "name": "pocket-demo-profile",
+  "title": "Pocket Demo Profile",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "text.glyphs.baked",
+        "platform.apps.open",
+        "platform.apps.return",
+        "platform.storage.get",
+        "platform.storage.set"
+      ],
+      "enhances": []
+    }
+  },
+  "app": {
+    "entry": "app.tsx",
+    "output": "profile-app",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [360, 640],
+        "presentation": "native"
+      }
+    }
+  }
+}

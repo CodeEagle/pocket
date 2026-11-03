@@ -1,0 +1,42 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-system-1.json",
+  "pocketSystem": 1,
+  "id": "pocket.host.demo.system",
+  "name": "pocket-host-demo-system",
+  "title": "PocketJS Flutter host showcase",
+  "version": "0.1.0",
+  "roles": {
+    "systemUI": "pocket.host.demo"
+  },
+  "applications": {
+    "installPolicy": {
+      "model": "managed",
+      "mutable": false
+    },
+    "backgroundExecution": "suspend",
+    "catalog": [
+      {
+        "package": "pocket.host.demo",
+        "manifest": "pocket.json",
+        "required": true
+      },
+      {
+        "package": "pocket.demo.profile",
+        "manifest": "apps/profile/pocket.json",
+        "required": true
+      },
+      {
+        "package": "pocket.demo.lobby",
+        "manifest": "apps/lobby/pocket.json",
+        "required": true
+      }
+    ]
+  },
+  "installation": {
+    "installedPackages": [
+      "pocket.host.demo",
+      "pocket.demo.profile",
+      "pocket.demo.lobby"
+    ]
+  }
+}

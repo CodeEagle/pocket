@@ -82,6 +82,7 @@ final class PerformanceHistory {
         'maxGapMs': latest?['maxGapMs'],
         'slowFrames': latest?['slowFrames'],
         'nativeMsP95': latest?['nativeMsP95'],
+        'refreshHz': latest?['refreshHz'],
       },
       'history': List<Map<String, dynamic>>.unmodifiable(history),
       'logPath': logPath,

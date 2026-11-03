@@ -203,6 +203,7 @@ final class PocketPackageManifest {
     this.runtimeAbi,
     this.assets = const <String, PocketManifestAsset>{},
     this.guestManifest = const PocketGuestManifest(),
+    this.worker,
   });
 
   factory PocketPackageManifest.fromJson(Object? value) {
@@ -244,6 +245,7 @@ final class PocketPackageManifest {
           : null,
       assets: Map<String, PocketManifestAsset>.unmodifiable(assets),
       guestManifest: PocketGuestManifest.fromJson(guestJson),
+      worker: json['worker'] == null ? null : Map<String, dynamic>.unmodifiable(_object(json['worker'], 'worker descriptor')),
     );
   }
 
@@ -260,6 +262,9 @@ final class PocketPackageManifest {
   final List<PocketManifestFile> files;
   final Map<String, PocketManifestAsset> assets;
   final PocketGuestManifest guestManifest;
+
+  /// Signed worker bytecode/declaration, linked to a verified loose asset.
+  final Map<String, dynamic>? worker;
 
   bool get isBytecode =>
       entryFormat == 'quickjs-bytecode' || entryFormat == 'bytecode';
@@ -283,6 +288,7 @@ final class PocketPackageManifest {
       'files': files.map((file) => file.toJson()).toList(growable: false),
       if (sortedAssets.isNotEmpty) 'assets': sortedAssets,
       ...guestManifest.toJson(),
+      if (worker != null) 'worker': worker,
     };
   }
 
@@ -405,6 +411,27 @@ final class PocketPackageManifest {
           code: 'manifest-assets',
         );
       }
+    }
+    final descriptor = worker;
+    if (descriptor != null) {
+      final bytecode = _object(descriptor['bytecode'], 'worker bytecode');
+      final name = _string(bytecode['path'], 'worker bytecode path');
+      _validateAssetName(name);
+      final hash = _string(bytecode['sha256'], 'worker bytecode sha256');
+      final bytes = _int(bytecode['bytes'], 'worker bytecode bytes');
+      final asset = assets[name];
+      final required = descriptor['requiredCaps'];
+      final declared = {...guestManifest.requiredCapabilities, ...guestManifest.optionalCapabilities};
+      if (!isBytecode || descriptor['kind'] != 'quickjs-bytecode' ||
+          descriptor['protocolVersion'] != 1 || descriptor['runtimeAbi'] != runtimeAbi ||
+          asset == null || asset.sha256 != hash || asset.size != bytes || bytes <= 124 ||
+          bytes > 64 * 1024 * 1024 || required is! List ||
+          required.any((c) => c is! String || !declared.contains(c)) ||
+          !declared.contains('runtime.worker')) {
+        throw const PocketPackageException('worker descriptor is not bound to admitted bytecode/assets/capabilities', code: 'manifest-worker');
+      }
+    } else if (guestManifest.requiredCapabilities.contains('runtime.worker')) {
+      throw const PocketPackageException('required worker descriptor is missing', code: 'manifest-worker');
     }
     final total = byHash.values.fold<int>(0, (sum, file) => sum + file.size);
     if (total > maxTotalBytes ||

@@ -1,4 +1,4 @@
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 
 /// Native binary endpoint for the fixed-size Pocket duplex transport.
 ///
@@ -79,30 +79,48 @@ final class PocketDuplexChannel {
   PocketDuplexChannel._({
     required PocketDuplexEndpoint endpoint,
     required PocketBinaryDuplexRuntime? runtime,
+    required void Function()? onIngressPublished,
   }) : _endpoint = endpoint,
        _runtime = runtime,
+       _onIngressPublished = onIngressPublished,
        isNativeZeroCopy = endpoint.isNativeZeroCopy;
 
   /// Creates a channel over the runtime's atomic native endpoint.
   ///
   /// There is intentionally no implicit in-memory fallback. Use
   /// [PocketDuplexChannel.inMemory] explicitly for tests/non-native hosts.
-  factory PocketDuplexChannel.fromRuntime(PocketBinaryDuplexRuntime runtime) {
+  /// [onIngressPublished] runs once after each successful nonempty ingress
+  /// publish, after the borrowed slot has been released.
+  factory PocketDuplexChannel.fromRuntime(
+    PocketBinaryDuplexRuntime runtime, {
+    void Function()? onIngressPublished,
+  }) {
     final endpoint = runtime.duplexEndpoint;
     if (endpoint == null) {
       throw UnsupportedError(
         'Pocket native runtime does not expose the lock-free duplex endpoint',
       );
     }
-    return PocketDuplexChannel._(endpoint: endpoint, runtime: runtime);
+    return PocketDuplexChannel._(
+      endpoint: endpoint,
+      runtime: runtime,
+      onIngressPublished: onIngressPublished,
+    );
   }
 
   /// Explicit deterministic endpoint for tests and non-native hosts.
-  factory PocketDuplexChannel.inMemory() =>
-      PocketDuplexChannel._(endpoint: _MemoryDuplexEndpoint(), runtime: null);
+  /// [onIngressPublished] follows the same successful-publish contract as
+  /// [PocketDuplexChannel.fromRuntime].
+  factory PocketDuplexChannel.inMemory({void Function()? onIngressPublished}) =>
+      PocketDuplexChannel._(
+        endpoint: _MemoryDuplexEndpoint(),
+        runtime: null,
+        onIngressPublished: onIngressPublished,
+      );
 
   final PocketDuplexEndpoint _endpoint;
   final PocketBinaryDuplexRuntime? _runtime;
+  final void Function()? _onIngressPublished;
   bool _closed = false;
   bool _ingressReserved = false;
   bool _egressPeeked = false;
@@ -145,12 +163,13 @@ final class PocketDuplexChannel {
         arg1,
       );
       _endpoint.publishIngress(1);
-      return true;
     } catch (error, stack) {
       _closeAndRethrow(error, stack);
     } finally {
       _ingressReserved = false;
     }
+    _notifyIngressPublished();
+    return true;
   }
 
   /// Writes as many records as the endpoint can reserve in one publish pair.
@@ -178,11 +197,12 @@ final class PocketDuplexChannel {
       _closeAndRethrow(error, stack);
     }
     if (view == null || view.isEmpty) return 0;
+    var accepted = 0;
     try {
       if (view.length % messageByteSize != 0) {
         throw StateError('native ingress view is not message aligned');
       }
-      final accepted = view.length ~/ messageByteSize;
+      accepted = view.length ~/ messageByteSize;
       if (accepted > pending.length) {
         throw StateError('native ingress view exceeds requested batch');
       }
@@ -192,12 +212,13 @@ final class PocketDuplexChannel {
         _writeMessage(bytes, index * messageByteSize, pending[index]);
       }
       _endpoint.publishIngress(accepted);
-      return accepted;
     } catch (error, stack) {
       _closeAndRethrow(error, stack);
     } finally {
       _ingressReserved = false;
     }
+    if (accepted > 0) _notifyIngressPublished();
+    return accepted;
   }
 
   /// Runs the QuickJS owner-thread drain. Background producers must not call it.
@@ -250,6 +271,26 @@ final class PocketDuplexChannel {
     if (_closed) return;
     _closed = true;
     _endpoint.close();
+  }
+
+  void _notifyIngressPublished() {
+    final callback = _onIngressPublished;
+    if (callback == null) return;
+    try {
+      callback();
+    } catch (error, stackTrace) {
+      // Publication has already committed. Report a wake callback failure
+      // without closing the endpoint or making the caller retry published
+      // records.
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'pocket_flutter',
+          context: ErrorDescription('while waking a published duplex ingress'),
+        ),
+      );
+    }
   }
 
   void _ensureOpen() {

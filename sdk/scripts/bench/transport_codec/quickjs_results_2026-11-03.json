@@ -1,0 +1,111 @@
+{
+  "probe": "/Volumes/ORICO/Development/Github/pocket/sdk/native/target/aarch64-apple-darwin/release/pocket_probe",
+  "iterations": 6000,
+  "samples": 7,
+  "warmup": 2000,
+  "results": [
+    {
+      "case": "request",
+      "iterations_per_sample": 6000,
+      "json_bytes": 112,
+      "json_roundtrip": {
+        "median_ns_pair": 3000,
+        "samples_ns_pair": [
+          2833.3333333333335,
+          2833.3333333333335,
+          2833.3333333333335,
+          3000,
+          3000,
+          3000,
+          3000
+        ],
+        "sink": 3
+      },
+      "protobuf_bytes": 48,
+      "protobuf_encode_decode_and_map": {
+        "median_ns_pair": 21833.333333333332,
+        "samples_ns_pair": [
+          21166.666666666668,
+          21333.333333333332,
+          21500,
+          21833.333333333332,
+          22166.666666666668,
+          22333.333333333332,
+          22333.333333333332
+        ],
+        "sink": 3
+      },
+      "sample_count": 7,
+      "warmup_iterations": 2000
+    },
+    {
+      "case": "response",
+      "iterations_per_sample": 6000,
+      "json_bytes": 327,
+      "json_roundtrip": {
+        "median_ns_pair": 5833.333333333333,
+        "samples_ns_pair": [
+          5666.666666666667,
+          5666.666666666667,
+          5666.666666666667,
+          5833.333333333333,
+          5833.333333333333,
+          5833.333333333333,
+          5833.333333333333
+        ],
+        "sink": 4
+      },
+      "protobuf_bytes": 289,
+      "protobuf_encode_decode_and_map": {
+        "median_ns_pair": 99000,
+        "samples_ns_pair": [
+          97666.66666666669,
+          98000,
+          99000,
+          99000,
+          99000,
+          99166.66666666669,
+          100833.33333333331
+        ],
+        "sink": 4
+      },
+      "sample_count": 7,
+      "warmup_iterations": 2000
+    },
+    {
+      "case": "pointer",
+      "iterations_per_sample": 6000,
+      "json_bytes": 123,
+      "json_roundtrip": {
+        "median_ns_pair": 3666.6666666666665,
+        "samples_ns_pair": [
+          3500,
+          3666.6666666666665,
+          3666.6666666666665,
+          3666.6666666666665,
+          3666.6666666666665,
+          3666.6666666666665,
+          3833.3333333333335
+        ],
+        "sink": 4
+      },
+      "production_pointer_duplex_bytes": 16,
+      "protobuf_bytes": 61,
+      "protobuf_encode_decode_and_map": {
+        "median_ns_pair": 22666.666666666668,
+        "samples_ns_pair": [
+          22500,
+          22666.666666666668,
+          22666.666666666668,
+          22666.666666666668,
+          22666.666666666668,
+          22833.333333333332,
+          23000
+        ],
+        "sink": 4
+      },
+      "sample_count": 7,
+      "warmup_iterations": 2000
+    }
+  ]
+}

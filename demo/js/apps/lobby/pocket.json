@@ -1,0 +1,30 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "pocket.demo.lobby",
+  "name": "pocket-demo-lobby",
+  "title": "Pocket Demo Lobby",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "text.glyphs.baked",
+        "platform.apps.return",
+        "platform.storage.get",
+        "platform.messages.send"
+      ],
+      "enhances": []
+    }
+  },
+  "app": {
+    "entry": "app.tsx",
+    "output": "lobby-app",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [360, 640],
+        "presentation": "native"
+      }
+    }
+  }
+}

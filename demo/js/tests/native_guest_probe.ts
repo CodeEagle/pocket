@@ -42,7 +42,7 @@ function bytecodeCapable(path: string): boolean {
   if (!existsSync(path)) return false;
   try {
     const binary = readFileSync(path).toString("latin1");
-    return binary.includes("loadBytecode") && binary.includes("pocket_load_bytecode_files");
+    return binary.includes("loadBytecode") && binary.includes("pocket_load_bytecode_files") && binary.includes("compositorSurfaces");
   } catch {
     return false;
   }
@@ -86,10 +86,10 @@ function hostResponse(
 function bootstrap(width = 360, height = 640): JsonObject[] {
   const runtimeAbi = String(metadata.runtimeAbi);
   return [
-    { op: "create", width, height },
+    { op: "create", width, height, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } },
     { op: "loadBytecode", bytecodePath, pakPath },
     { op: "frame", deltaMs: 16 },
-    hostResponse("guest-1", "runtime.info", {
+    hostResponse(bootRequestId("runtime.info"), "runtime.info", {
       entryFormat: "quickjs-bytecode",
       runtimeAbi,
       version: "embedded",
@@ -97,17 +97,17 @@ function bootstrap(width = 360, height = 640): JsonObject[] {
       source: "embedded",
       entryBytes: metadata.bytecodeBytes,
     }),
-    hostResponse("guest-2", "plugins.list", {
+    hostResponse(bootRequestId("plugins.list"), "plugins.list", {
       plugins: [{ id: "probe.plugin", version: "1.0.0", kind: "capability" }],
     }),
-    hostResponse("guest-3", "plugins.packageInfo", {
+    hostResponse(bootRequestId("plugins.packageInfo"), "plugins.packageInfo", {
       provider: "package_info_plus",
       appName: "Pocket Host",
       packageName: "dev.tryjoy.pocket-host",
       version: "0.1.0",
       buildNumber: "1",
     }),
-    hostResponse("guest-4", "updates.status", {
+    hostResponse(bootRequestId("updates.status"), "updates.status", {
       configured: false,
       stage: "not_configured",
       activeVersion: "embedded",
@@ -115,6 +115,14 @@ function bootstrap(width = 360, height = 640): JsonObject[] {
       availableVersion: null,
       versions: [],
       lastError: null,
+    }),
+    // This single-instance probe deliberately has no System runtime adapter.
+    // Reject that capability explicitly rather than leaving a stray RPC alive.
+    event("host.response", {
+      requestId: bootRequestId("system.runtime.configure"),
+      capability: "system.runtime.configure",
+      ok: false,
+      error: { code: "capability_unavailable", message: "single-instance native probe" },
     }),
     { op: "frame", deltaMs: 16 },
   ];
@@ -171,6 +179,20 @@ function frameEvents(frame: Frame, name: string): FrameEvent[] {
   return (frame.events ?? []).filter((item) => item.name === name);
 }
 
+// Discover real request IDs from actual bytecode execution. Adding an unrelated
+// bootstrap capability must not redirect a synthetic response to another RPC.
+const bootRequests = framesOf(runProbe([
+  { op: "create", width: 360, height: 640, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } },
+  { op: "loadBytecode", bytecodePath, pakPath },
+  { op: "frame", deltaMs: 16 },
+  { op: "quit" },
+])).flatMap((frame) => frameEvents(frame, "host.request"));
+function bootRequestId(capability: string): string {
+  const packet = bootRequests.find((request) => request.payload?.capability === capability);
+  assert.equal(typeof packet?.payload?.requestId, "string", `missing bootstrap RPC ${capability}`);
+  return packet!.payload!.requestId as string;
+}
+
 // First exercise each host result on the page that renders it. This also gives
 // the pointer test measured coordinates rather than embedding Dart hit boxes.
 const resultResponses = runProbe([
@@ -201,7 +223,7 @@ const homePoint = labelCenter(gallery, "Home");
 const plusPoint = labelCenter(readyHome, "+1");
 const checkPoint = labelCenter(resultFrames[4], "Check");
 
-const pointerAndStressResponses = runProbe([
+const pointerCommands: JsonObject[] = [
   ...bootstrap(),
   event("demo.increment"),
   { op: "frame", deltaMs: 16 },
@@ -227,8 +249,16 @@ const pointerAndStressResponses = runProbe([
   { op: "frame", deltaMs: 16 },
   event("input.pointer", { phase: "up", id: 0, x: checkPoint.x, y: checkPoint.y }),
   { op: "frame", deltaMs: 16 },
+];
+const checkRequests = framesOf(runProbe([...pointerCommands, { op: "quit" }]))
+  .flatMap((frame) => frameEvents(frame, "host.request"));
+const checkRequest = checkRequests.find((item) => item.payload?.capability === "updates.check");
+assert.equal(typeof checkRequest?.payload?.requestId, "string", "Check must emit a correlated request ID");
+const checkRequestId = checkRequest!.payload!.requestId as string;
+const pointerAndStressResponses = runProbe([
+  ...pointerCommands,
   event("host.response", {
-    requestId: "guest-5",
+    requestId: checkRequestId,
     capability: "updates.check",
     ok: false,
     error: { code: "capability_unavailable", message: "updates are not configured in probe" },
@@ -258,7 +288,7 @@ const updateRequestFrame = pointerFrames[13];
 const updateRequests = frameEvents(updateRequestFrame, "host.request");
 const updateRequest = updateRequests.find((item) => item.payload?.capability === "updates.check");
 assert.ok(updateRequest, "native pointer Check did not produce host.request updates.check");
-assert.equal(updateRequest.payload?.requestId, "guest-5", "updates.check request id drifted from the bounded bridge sequence");
+assert.equal(updateRequest.payload?.requestId, checkRequestId, "host.response must correlate with the observed updates.check request");
 assert.match(textOf(pointerFrames[16]), /capability_unavailable/, "host.response error was not rendered by the updates capability lane");
 assert.match(textOf(pointerFrames[16]), /not configured/, "host.response error detail was not rendered");
 
@@ -551,8 +581,8 @@ assert.ok(
 
 const initialEvents = frameEvents(resultFrames[0], "host.request");
 assert.deepEqual(
-  initialEvents.map((item) => item.payload?.capability),
-  ["runtime.info", "plugins.list", "plugins.packageInfo", "updates.status"],
+  initialEvents.map((item) => item.payload?.capability).sort(),
+  ["runtime.info", "plugins.list", "plugins.packageInfo", "updates.status", "system.runtime.configure"].sort(),
   "initial guest host.request capability set drifted",
 );
 const loadResponse = checked(resultResponses[1], "pocket_load_bytecode_files");

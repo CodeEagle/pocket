@@ -1,0 +1,10 @@
+{
+  "pages": ["pages/index/index"],
+  "window": {
+    "navigationBarTitleText": "PocketJS",
+    "navigationStyle": "custom",
+    "backgroundColor": "#10151d"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}
