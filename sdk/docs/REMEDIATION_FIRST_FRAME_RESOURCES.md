@@ -69,6 +69,21 @@ loading/resize state, retaining PocketJS geometry and the existing renderer.
   repeated Push/Back. Those probes are not evidence that the phone-specific
   problem is resolved. The diagnostic patch preserves the thrown message/stack
   when available; it does not add an unhandled-Promise-rejection tracker.
+- The combined iPhone Duo simulator drive passed both interaction flows:
+  two sensor taps followed by Home/+1, and repeated Push/Back. The sensor test
+  observed actual native frame events for two distinct requests (`guest-13`
+  and `guest-14`) and joined them to the existing recording's response entries
+  (251 and 440). Both were structured `hardware_unsupported` results, with no
+  session failure or last error. A simulator cannot verify successful hardware
+  sampling or the real phone's first OS-authorization path.
+- Recording frame summaries retain event counts/digests, not request payloads.
+  The test therefore uses the existing frame-delta test seam as a pass-through
+  observer of real native requests, while recorded `send` entries verify the
+  matching responses. It neither fabricates native results nor extends the
+  production recording schema. Identical consecutive UI text alone is not
+  accepted as proof of a second invocation. The result card is revealed before
+  reading paint output, since viewport culling legitimately hides offscreen
+  text.
 - A phone `flutter drive` attempt did not reach test execution because the
   wireless VM Service was unreachable. Flutter 3.35.7 starts drive targets
   paused by default, so this left a white test launch surface. This is distinct
@@ -80,3 +95,20 @@ loading/resize state, retaining PocketJS geometry and the existing renderer.
 Raw logs and negative-control evidence are kept under the ignored local
 `demo/artifacts/regressions/first-open-20261103/` directory. A successful install
 or launch is not recorded as a passed device regression test.
+
+Commands used for the final targeted checks:
+
+```sh
+# From sdk/packages/pocket_flutter
+flutter test --no-pub test/pocket_view_first_frame_test.dart
+
+# From demo (the simulator target runs Debug)
+flutter drive --debug --no-pub --no-start-paused \
+  -d 4D366210-290E-46DB-8BC6-3C5233700409 \
+  --driver test_driver/integration_test.dart \
+  --target integration_test/first_open_regression_test.dart
+
+# From repository root
+python3 sdk/scripts/check_architecture.py
+git diff --check
+```

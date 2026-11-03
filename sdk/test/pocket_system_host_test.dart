@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/src/pocket_compositor.dart';
+import 'package:pocket_flutter/src/pocket_memory_limits.dart';
 import 'package:pocket_sdk/src/pocket_app.dart' show PocketGuestSession;
 import 'package:pocket_sdk/src/pocket_config.dart';
 import 'package:pocket_sdk/src/pocket_system_host.dart';
@@ -31,6 +32,7 @@ void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   const rootId = 'system.test.root';
   const childId = 'system.test.child';
+  const emptyMemoryChildId = 'system.test.empty-memory-child';
   late Directory directory;
 
   setUp(() {
@@ -439,4 +441,169 @@ void main() {
       }
     },
   );
+
+  testWidgets('runtime memory requests cannot exceed trusted host limits', (
+    tester,
+  ) async {
+    final controller = PocketSystemHostController();
+    late PocketHostRegistry rootRegistry;
+    const childLimits = PocketMemoryLimits(
+      heapLimitBytes: 128 * 1024,
+      maxPakBytes: 8 * 1024 * 1024,
+    );
+
+    try {
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: Center(
+            child: SizedBox.shrink(
+              child: PocketSystemHost(
+                systemUI: PocketAppConfig(
+                  appId: rootId,
+                  bytecodeAsset: 'test/root.qjbc',
+                  pakAsset: 'test/root.pak',
+                  metadataAsset: 'test/root.metadata.json',
+                  manifestAsset: 'test/root.manifest.json',
+                  additionalCapabilities: const {'ui.compositor-surfaces'},
+                  compositorSurfaces: const <String, int>{
+                    childId: 2,
+                    emptyMemoryChildId: 3,
+                  },
+                  pluginFactories: <PocketPluginFactory>[
+                    (_) => _RegistryCapturePlugin((registry) {
+                      rootRegistry = registry;
+                    }),
+                  ],
+                ),
+                applications: const <String, PocketAppConfig>{
+                  childId: PocketAppConfig(
+                    appId: childId,
+                    bytecodeAsset: 'test/child.qjbc',
+                    pakAsset: 'test/child.pak',
+                    metadataAsset: 'test/child.metadata.json',
+                    manifestAsset: 'test/child.manifest.json',
+                    memoryLimits: childLimits,
+                  ),
+                  emptyMemoryChildId: PocketAppConfig(
+                    appId: emptyMemoryChildId,
+                    bytecodeAsset: 'test/child.qjbc',
+                    pakAsset: 'test/child.pak',
+                    metadataAsset: 'test/child.metadata.json',
+                    manifestAsset: 'test/child.manifest.json',
+                    memoryLimits: childLimits,
+                  ),
+                },
+                controller: controller,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await waitFor(
+        tester,
+        controller,
+        (entry) => entry.isSystemUI && entry.ready,
+      );
+      await invokeSystem(
+        tester,
+        rootRegistry,
+        'system.runtime.configure',
+        <String, dynamic>{
+          'systemUI': rootId,
+          'grants': <Map<String, Object?>>[
+            {'appId': rootId, 'sharedNamespaces': <String>[]},
+            {'appId': childId, 'sharedNamespaces': <String>[]},
+            {'appId': emptyMemoryChildId, 'sharedNamespaces': <String>[]},
+          ],
+        },
+      );
+
+      final createRegistration = rootRegistry.registrationFor(
+        'system.runtime.create',
+      )!;
+      await expectLater(
+        Future<Object?>.sync(
+          () => createRegistration.request!(<String, dynamic>{
+            'appId': childId,
+            'memory': <String, dynamic>{
+              'heapLimitBytes': childLimits.heapLimitBytes! + 1,
+            },
+          }),
+        ),
+        throwsA(
+          isA<PocketCapabilityException>().having(
+            (error) => error.code,
+            'code',
+            'memory_limit_denied',
+          ),
+        ),
+      );
+      expect(
+        controller.instances.where((entry) => entry.appId == childId),
+        isEmpty,
+        reason:
+            'an over-limit request must be rejected before runtime creation',
+      );
+
+      final admitted = Map<String, dynamic>.from(
+        await invokeSystem(
+              tester,
+              rootRegistry,
+              'system.runtime.create',
+              <String, dynamic>{
+                'appId': childId,
+                'memory': <String, dynamic>{
+                  'heapLimitBytes': 64 * 1024,
+                  'maxPakBytes': 1,
+                },
+              },
+            )
+            as Map,
+      );
+      expect(admitted['memory'], <String, int>{
+        'heapLimitBytes': 64 * 1024,
+        'maxPakBytes': 1,
+      });
+      final admittedInstance = await waitFor(
+        tester,
+        controller,
+        (entry) => entry.appId == childId && entry.ready,
+      );
+      expect(
+        admittedInstance.session.memoryLimits,
+        equals(
+          const PocketMemoryLimits(heapLimitBytes: 64 * 1024, maxPakBytes: 1),
+        ),
+      );
+
+      final defaulted = Map<String, dynamic>.from(
+        await invokeSystem(
+              tester,
+              rootRegistry,
+              'system.runtime.create',
+              <String, dynamic>{'appId': emptyMemoryChildId},
+            )
+            as Map,
+      );
+      expect(defaulted['memory'], <String, int>{
+        'heapLimitBytes': childLimits.heapLimitBytes!,
+        'maxPakBytes': childLimits.maxPakBytes!,
+      });
+      final defaultedInstance = await waitFor(
+        tester,
+        controller,
+        (entry) => entry.appId == emptyMemoryChildId && entry.ready,
+      );
+      expect(defaultedInstance.session.memoryLimits, equals(childLimits));
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      controller.dispose();
+    }
+  });
 }

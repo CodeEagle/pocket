@@ -31,28 +31,28 @@ export interface MobileTheme {
 
 export const MOBILE_THEME_LIGHT: MobileTheme = {
   name: "light",
-  canvas: "bg-slate-50",
+  canvas: "bg-[#F5F6FA]",
   surface: "bg-white",
-  surfaceMuted: "bg-slate-200",
-  ink: "text-slate-950",
-  muted: "text-slate-600",
-  accent: "bg-blue-600",
-  accentPressed: "bg-blue-500",
-  border: "border-slate-200",
-  danger: "bg-rose-600",
+  surfaceMuted: "bg-[#EEF1F6]",
+  ink: "text-[#17233B]",
+  muted: "text-[#7C8799]",
+  accent: "bg-[#315DEB]",
+  accentPressed: "bg-[#2748C5]",
+  border: "border-[#E5E9F2]",
+  danger: "bg-[#B4233A]",
 };
 
 export const MOBILE_THEME_DARK: MobileTheme = {
   name: "dark",
-  canvas: "bg-[#0d1726]",
-  surface: "bg-[#172235]",
-  surfaceMuted: "bg-[#22314a]",
+  canvas: "bg-[#0E1728]",
+  surface: "bg-[#17233B]",
+  surfaceMuted: "bg-[#22314A]",
   ink: "text-white",
-  muted: "text-slate-300",
-  accent: "bg-cyan-600",
-  accentPressed: "bg-cyan-500",
-  border: "border-slate-600",
-  danger: "bg-rose-600",
+  muted: "text-[#B9C5D8]",
+  accent: "bg-[#315DEB]",
+  accentPressed: "bg-[#466DFF]",
+  border: "border-[#30405A]",
+  danger: "bg-[#B4233A]",
 };
 
 type ThemeSource = MobileTheme | (() => MobileTheme);
@@ -81,12 +81,11 @@ export function MobileScaffold(props: {
   // a bounded fill so a themed page also paints its empty tail.
   const theme = useMobileThemeAccessor();
   const resolvedChildren = resolveChildren(() => props.children);
-  const fillsViewport = () => props.class === undefined;
   return (
     <View class="flex-col w-full" style={{ grow: 1 }}>
-      <View class={props.class ?? (theme().name === "dark" ? "flex-col w-full bg-[#0d1726]" : "flex-col w-full bg-slate-50")} style={{ grow: 1 }}>
+      <View class={props.class ?? (theme().name === "dark" ? "flex-col w-full bg-[#0E1728]" : "flex-col w-full bg-[#F5F6FA]")} style={{ grow: 1 }}>
         {props.appBar}
-        <View class="flex-col w-full" style={{ grow: fillsViewport() ? 1 : 0 }}>{resolvedChildren()}</View>
+        {resolvedChildren()}
         {props.bottomBar}
       </View>
     </View>
@@ -102,14 +101,14 @@ export function MobileAppBar(props: {
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
   const dark = () => props.dark === true || theme().name === "dark";
-  const titleClass = () => dark() ? "text-lg text-white font-bold" : "text-lg text-slate-950 font-bold";
-  const subtitleClass = () => dark() ? "text-xs text-slate-300" : "text-xs text-slate-600";
   return (
-    <View class={dark() ? "flex-row items-center gap-2 w-full px-4 py-3 bg-[#0d1726]" : "flex-row items-center gap-2 w-full px-4 py-3 bg-white border-slate-200"}>
+    <View class={dark()
+      ? "flex-row items-center gap-2 w-full h-[56] px-4 bg-[#0E1728]"
+      : "flex-row items-center gap-2 w-full h-[56] px-4 bg-white border-[#E5E9F2]"}>
       {props.leading}
       <View class="flex-col gap-1 flex-1">
-        <Text class={titleClass()}>{props.title}</Text>
-        {props.subtitle ? <Text class={subtitleClass()}>{props.subtitle}</Text> : null}
+        <Text class={dark() ? "text-base text-white font-bold" : "text-base text-[#17233B] font-bold"}>{props.title}</Text>
+        {props.subtitle ? <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.subtitle}</Text> : null}
       </View>
       {props.trailing}
     </View>
@@ -126,29 +125,22 @@ export interface MobileCardProps {
   glassPressed?: boolean;
 }
 
-function surfaceClass(theme: MobileTheme): string {
-  return theme.name === "dark"
-    ? "flex-col gap-2 p-3 rounded-xl bg-[#172235] border-slate-600"
-    : "flex-col gap-2 p-3 rounded-xl bg-white border-slate-200";
-}
-
 export function MobileCard(props: MobileCardProps): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const titleClass = () => theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-slate-950 font-bold";
-  const detailClass = () => theme().name === "dark" ? "text-xs text-slate-300" : "text-xs text-slate-600";
-  const cardClass = () => props.class ?? surfaceClass(theme());
   const content = (
-    <View class={cardClass()}>
-      {props.title ? <Text class={titleClass()}>{props.title}</Text> : null}
-      {props.detail ? <Text class={detailClass()}>{props.detail}</Text> : null}
+    <View class={props.class ?? (theme().name === "dark"
+      ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
+      : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]")}>
+      {props.title ? <Text class={theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text> : null}
+      {props.detail ? <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
       {props.children}
     </View>
   );
   if (!props.glass) return content;
   return (
     <GlassSurface shape={props.glassShape ?? "rounded"} pressed={props.glassPressed} class={props.class}>
-      {props.title ? <Text class={titleClass()}>{props.title}</Text> : null}
-      {props.detail ? <Text class={detailClass()}>{props.detail}</Text> : null}
+      {props.title ? <Text class={theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text> : null}
+      {props.detail ? <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
       {props.children}
     </GlassSurface>
   );
@@ -165,38 +157,30 @@ export interface MobileButtonProps {
   disabled?: boolean;
 }
 
-function buttonClass(theme: MobileTheme, kind: MobileButtonProps["kind"], compact: boolean): string {
-  const filledLight = compact ? "px-2 py-1 rounded-lg bg-blue-600 focus:bg-blue-500" : "px-4 py-3 h-[48] rounded-lg bg-blue-600 focus:bg-blue-500";
-  const filledDark = compact ? "px-2 py-1 rounded-lg bg-cyan-600 focus:bg-cyan-500" : "px-4 py-3 h-[48] rounded-lg bg-cyan-600 focus:bg-cyan-500";
-  const outlinedLight = compact ? "px-2 py-1 rounded-lg bg-transparent border-slate-200" : "px-4 py-3 h-[48] rounded-lg bg-transparent border-slate-200";
-  const outlinedDark = compact ? "px-2 py-1 rounded-lg bg-transparent border-slate-600" : "px-4 py-3 h-[48] rounded-lg bg-transparent border-slate-600";
-  const text = compact ? "px-2 py-1 rounded-lg bg-transparent" : "px-4 py-3 h-[48] rounded-lg bg-transparent";
-  const danger = compact ? "px-2 py-1 rounded-lg bg-rose-600 focus:bg-rose-500" : "px-4 py-3 h-[48] rounded-lg bg-rose-600 focus:bg-rose-500";
-  const dark = theme.name === "dark";
-  if (kind === "outlined") return dark ? outlinedDark : outlinedLight;
-  if (kind === "text") return text;
-  if (kind === "danger") return danger;
-  return dark ? filledDark : filledLight;
-}
-
 export function MobileButton(props: MobileButtonProps): JSX.Element {
   const theme = useMobileThemeAccessor();
   const kind = () => props.kind ?? "filled";
-  const buttonClassName = () => props.disabled
-    ? `${props.class ?? buttonClass(theme(), kind(), props.compact === true)} opacity-50`
-    : props.class ?? buttonClass(theme(), kind(), props.compact === true);
-  const textClass = () => kind() === "filled" || kind() === "danger"
-    ? "text-xs text-white font-bold"
-    : theme().name === "dark" ? "text-xs text-white font-bold" : "text-xs text-slate-950 font-bold";
   return (
     <Focusable
-      class={buttonClassName()}
-      style={props.style}
+      class={props.class ?? (kind() === "outlined"
+        ? (theme().name === "dark"
+          ? (props.compact ? "px-3 h-[44] items-center justify-center rounded-xl bg-transparent border-[#30405A] focus:bg-[#22314A]" : "px-4 h-[44] items-center justify-center rounded-xl bg-transparent border-[#30405A] focus:bg-[#22314A]")
+          : (props.compact ? "px-3 h-[44] items-center justify-center rounded-xl bg-transparent border-[#D6DCE7] focus:bg-[#F7F8FC]" : "px-4 h-[44] items-center justify-center rounded-xl bg-transparent border-[#D6DCE7] focus:bg-[#F7F8FC]"))
+        : kind() === "text"
+          ? (theme().name === "dark"
+            ? (props.compact ? "px-3 h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#22314A]" : "px-4 h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#22314A]")
+            : (props.compact ? "px-3 h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#EEF1F6]" : "px-4 h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#EEF1F6]"))
+          : kind() === "danger"
+            ? (props.compact ? "px-3 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238]" : "px-4 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238]")
+            : (props.compact ? "px-3 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5]" : "px-4 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5]") )}
+      style={props.disabled
+        ? { ...(props.style ?? {}), opacity: props.style?.opacity ?? 0.5 }
+        : { ...(props.style ?? {}), opacity: props.style?.opacity ?? 1 }}
       debugName={props.debugName}
       focusable={!props.disabled}
       onPress={props.disabled ? undefined : props.onPress}
     >
-      <Text class={textClass()}>{props.label}</Text>
+      <Text class={kind() === "filled" || kind() === "danger" ? "text-xs text-white font-bold" : theme().name === "dark" ? "text-xs text-white font-bold" : "text-xs text-[#17233B] font-bold"}>{props.label}</Text>
     </Focusable>
   );
 }
@@ -231,14 +215,23 @@ export const MobileOutlinedButton = (props: MobileButtonAliasProps): JSX.Element
 export const MobileTextButton = (props: MobileButtonAliasProps): JSX.Element => mobileButtonAlias(props, "text");
 
 export function MobileBadge(props: { label: string; tone?: "accent" | "success" | "warning" | "danger" }): JSX.Element {
-  const cls = () => (props.tone ?? "accent") === "success"
-    ? "px-2 py-1 rounded-lg bg-emerald-400"
-    : (props.tone ?? "accent") === "warning"
-      ? "px-2 py-1 rounded-lg bg-amber-300"
-      : (props.tone ?? "accent") === "danger"
-        ? "px-2 py-1 rounded-lg bg-rose-400"
-        : "px-2 py-1 rounded-lg bg-cyan-300";
-  return <View class={cls()}><Text class="text-xs text-slate-950 font-bold">{props.label}</Text></View>;
+  return (
+    <View class={(props.tone ?? "accent") === "success"
+      ? "px-2 py-1 rounded-xl bg-[#E5F7EE]"
+      : (props.tone ?? "accent") === "warning"
+        ? "px-2 py-1 rounded-xl bg-[#FFF4DD]"
+        : (props.tone ?? "accent") === "danger"
+          ? "px-2 py-1 rounded-xl bg-[#FDECEF]"
+          : "px-2 py-1 rounded-xl bg-[#E8EDFF]"}>
+      <Text class={(props.tone ?? "accent") === "success"
+        ? "text-xs text-[#147A52] font-bold"
+        : (props.tone ?? "accent") === "warning"
+          ? "text-xs text-[#936211] font-bold"
+          : (props.tone ?? "accent") === "danger"
+            ? "text-xs text-[#B4233A] font-bold"
+            : "text-xs text-[#315DEB] font-bold"}>{props.label}</Text>
+    </View>
+  );
 }
 
 export function MobileListTile(props: {
@@ -250,19 +243,18 @@ export function MobileListTile(props: {
   selected?: boolean;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const tileClass = () => props.selected
-    ? "flex-row items-center gap-2 px-3 py-2 rounded-lg bg-blue-100"
-    : theme().name === "dark"
-      ? "flex-row items-center gap-2 px-3 py-2 rounded-lg bg-[#172235]"
-      : "flex-row items-center gap-2 px-3 py-2 rounded-lg bg-white";
-  const titleClass = () => theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-slate-950 font-bold";
-  const detailClass = () => theme().name === "dark" ? "text-xs text-slate-300" : "text-xs text-slate-600";
   const body = (
-    <View class={tileClass()}>
+    <View class={props.selected
+      ? (theme().name === "dark"
+        ? "flex-row items-center gap-3 px-3 py-3 rounded-xl bg-[#253B73]"
+        : "flex-row items-center gap-3 px-3 py-3 rounded-xl bg-[#E8EDFF]")
+      : theme().name === "dark"
+        ? "flex-row items-center gap-3 px-3 py-3 rounded-xl bg-[#17233B] border-[#30405A]"
+        : "flex-row items-center gap-3 px-3 py-3 rounded-xl bg-white border-[#E5E9F2]"}>
       {props.leading}
       <View class="flex-col gap-1 flex-1">
-        <Text class={titleClass()}>{props.title}</Text>
-        {props.detail ? <Text class={detailClass()}>{props.detail}</Text> : null}
+        <Text class={props.selected && theme().name !== "dark" ? "text-sm text-[#315DEB] font-bold" : theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text>
+        {props.detail ? <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
       </View>
       {props.trailing}
     </View>
@@ -276,11 +268,8 @@ export function MobileSegmentedControl(props: {
   onChange: (id: string) => void;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const containerClass = () => theme().name === "dark"
-    ? "flex-row gap-1 p-1 rounded-lg bg-[#22314a]"
-    : "flex-row gap-1 p-1 rounded-lg bg-slate-200";
   return (
-    <View class={containerClass()}>
+    <View class={theme().name === "dark" ? "flex-row gap-1 p-1 rounded-xl bg-[#22314A]" : "flex-row gap-1 p-1 rounded-xl bg-[#EEF1F6]"}>
       <For each={props.items}>
         {(item) => <MobileButton label={item.label} compact kind={props.active === item.id ? "filled" : "text"} onPress={() => props.onChange(item.id)} />}
       </For>
@@ -290,27 +279,18 @@ export function MobileSegmentedControl(props: {
 
 export function MobileSwitch(props: { value: boolean; onChange: (value: boolean) => void; label?: string }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const shellClass = () => theme().name === "dark"
-    ? "flex-row items-center gap-2 px-2 py-1 rounded-lg bg-[#22314a]"
-    : "flex-row items-center gap-2 px-2 py-1 rounded-lg bg-slate-200";
-  const labelClass = () => theme().name === "dark" ? "text-white text-xs font-bold" : "text-slate-950 text-xs font-bold";
-  const trackClass = () => props.value ? "w-8 h-4 rounded-lg bg-emerald-500" : "w-8 h-4 rounded-lg bg-slate-400";
-  const thumbClass = () => props.value ? "w-4 h-4 rounded-full bg-white translate-x-4" : "w-4 h-4 rounded-full bg-white translate-x-0";
   return (
-    <Focusable onPress={() => props.onChange(!props.value)} class={shellClass()}>
-      <View class={trackClass()}>
-        <View class={thumbClass()} />
+    <Focusable onPress={() => props.onChange(!props.value)} class={theme().name === "dark" ? "flex-row items-center gap-3 h-[44] px-3 rounded-xl bg-[#22314A]" : "flex-row items-center gap-3 h-[44] px-3 rounded-xl bg-[#EEF1F6]"}>
+      <View class={props.value ? "w-10 h-5 rounded-xl bg-[#315DEB]" : "w-10 h-5 rounded-xl bg-[#AAB4C4]"}>
+        <View class={props.value ? "w-5 h-5 rounded-full bg-white translate-x-5" : "w-5 h-5 rounded-full bg-white translate-x-0"} />
       </View>
-      {props.label ? <Text class={labelClass()}>{props.label}</Text> : null}
+      {props.label ? <Text class={theme().name === "dark" ? "text-white text-xs font-bold" : "text-[#17233B] text-xs font-bold"}>{props.label}</Text> : null}
     </Focusable>
   );
 }
 
 export function MobileStepper(props: { value: number; min?: number; max?: number; step?: number; onChange: (value: number) => void }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const trackClass = () => theme().name === "dark" ? "flex-1 h-2 rounded-lg bg-[#22314a]" : "flex-1 h-2 rounded-lg bg-slate-200";
-  const fillClass = () => theme().name === "dark" ? "h-2 rounded-lg bg-cyan-600" : "h-2 rounded-lg bg-blue-600";
-  const valueClass = () => theme().name === "dark" ? "text-white text-xs font-bold" : "text-slate-950 text-xs font-bold";
   const min = props.min ?? 0;
   const max = props.max ?? 100;
   const step = props.step ?? 1;
@@ -319,22 +299,25 @@ export function MobileStepper(props: { value: number; min?: number; max?: number
   return (
     <View class="flex-row items-center gap-2">
       <MobileTextButton label="−" compact onPress={() => set(props.value - step)} />
-      <View class={trackClass()}><View class={fillClass()} style={{ width: -1, scaleX: ratio(), originX: 0 }} /></View>
+      <View class={theme().name === "dark" ? "flex-1 h-2 rounded-xl bg-[#22314A]" : "flex-1 h-2 rounded-xl bg-[#EEF1F6]"}><View class="h-2 rounded-xl bg-[#315DEB]" style={{ width: -1, scaleX: ratio(), originX: 0 }} /></View>
       <MobileTextButton label="+" compact onPress={() => set(props.value + step)} />
-      <Text class={valueClass()}>{String(props.value)}</Text>
+      <Text class={theme().name === "dark" ? "text-white text-xs font-bold" : "text-[#17233B] text-xs font-bold"}>{String(props.value)}</Text>
     </View>
   );
 }
 
 export function MobileDialog(props: { open: boolean | (() => boolean); title: string; body?: string; children?: JSX.Element; onClose: () => void }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const titleClass = () => theme().name === "dark" ? "text-lg text-white font-bold" : "text-lg text-slate-950 font-bold";
-  const bodyClass = () => theme().name === "dark" ? "text-xs text-slate-300" : "text-xs text-slate-600";
   return (
     <Show when={typeof props.open === "function" ? props.open() : props.open}>
-      <Modal open>
-        <Text class={titleClass()}>{props.title}</Text>
-        {props.body ? <Text class={bodyClass()}>{props.body}</Text> : null}
+      <Modal
+        open
+        panelClass={theme().name === "dark"
+          ? "flex-col gap-3 w-[328] p-4 rounded-xl shadow-lg bg-[#17233B] border-[#30405A]"
+          : "flex-col gap-3 w-[328] p-4 rounded-xl shadow-lg bg-white border-[#E5E9F2]"}
+      >
+        <Text class={theme().name === "dark" ? "text-lg text-white font-bold" : "text-lg text-[#17233B] font-bold"}>{props.title}</Text>
+        {props.body ? <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.body}</Text> : null}
         {props.children}
         <MobileTextButton label="Close" onPress={props.onClose} />
       </Modal>
@@ -408,7 +391,7 @@ export function GlassSurface(props: {
   createEffect(() => register(payload()));
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
-    <View class={props.class ?? "flex-col gap-2 p-3 rounded-xl border-slate-200"}>
+    <View class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"}>
       <Show when={registered()}>
         <View class="absolute inset-0 overflow-hidden rounded-xl">
           <CompositorGlass packageId={id} radius={recipe().radius} />
@@ -417,7 +400,7 @@ export function GlassSurface(props: {
       <Show when={!registered()}>
         <View class="absolute inset-0 overflow-hidden rounded-xl" style={{ gradFrom: recipe().bgColors[0], gradTo: recipe().bgColors[2], gradDir: 1, radius: recipe().radius, shadow: recipe().shadowBlur > 20 ? 2 : 1 }} />
       </Show>
-      <View class="relative flex-col gap-2">{props.children}</View>
+      <View class="relative flex-col gap-3">{props.children}</View>
     </View>
   );
 }
@@ -474,7 +457,7 @@ export function PlatformTextureSurface(props: {
   return (
     <Show
       when={registered()}
-      fallback={<View class={props.class ?? "flex-col items-center justify-center rounded-xl bg-slate-200"} style={{ radius: platformTextureRadius(props.radius) }}><Text class="text-xs text-slate-600">Texture provider unavailable</Text></View>}
+      fallback={<View class={props.class ?? "flex-col items-center justify-center rounded-xl bg-[#EEF1F6]"} style={{ radius: platformTextureRadius(props.radius) }}><Text class="text-xs text-[#7C8799]">Texture provider unavailable</Text></View>}
     >
       <View class={props.class ?? "relative overflow-hidden rounded-xl"} style={{ radius: platformTextureRadius(props.radius) }}>
         <CompositorSurface package={id} class="absolute inset-0" style={{ radius: platformTextureRadius(props.radius) }} />

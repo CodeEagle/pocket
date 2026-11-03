@@ -174,14 +174,11 @@ Future<Offset> reveal(
   // Scrolling and settling are separate budgets. A fling can keep moving the
   // target for seconds after the final drag, so its 0.5px stability check must
   // not consume the finite number of attempts reserved for revealing content.
-  for (
-    var attempt = 0;
-    attempt < (scroll ? _revealDragAttempts : 0);
-    attempt++
-  ) {
-    final snapshot = _pointSnapshot(tester, label);
-    record('before-drag-$attempt', snapshot);
-    if (snapshot.point != null) break;
+  // A real viewport resize can also cull a target that was visible at the
+  // first sample; retries below spend only the remaining drag budget and never
+  // reset or extend the settle clock.
+  var dragAttempts = 0;
+  Future<void> dragOnce() async {
     final box = tester.renderObject<RenderBox>(activePocketViewFinder());
     final gesture = await tester.startGesture(
       box.localToGlobal(Offset(box.size.width * .35, box.size.height * .72)),
@@ -192,7 +189,19 @@ Future<Offset> reveal(
     }
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 100));
+  }
+
+  Future<void> performDragAttempt(_PointSnapshot snapshot) async {
+    final attempt = dragAttempts++;
+    record('before-drag-$attempt', snapshot);
+    await dragOnce();
     record('after-drag-$attempt', _pointSnapshot(tester, label));
+  }
+
+  while (dragAttempts < (scroll ? _revealDragAttempts : 0)) {
+    final snapshot = _pointSnapshot(tester, label);
+    if (snapshot.point != null) break;
+    await performDragAttempt(snapshot);
   }
 
   Offset? previous;
@@ -210,6 +219,14 @@ Future<Offset> reveal(
       previous = point;
     } else {
       previous = null;
+      // The first visible sample can become stale when a real resize or
+      // safe-area reflow culls the target on the next frame. Recover with a
+      // real drag instead of waiting on an impossible stable sample or using
+      // the old coordinate. The settle deadline remains unchanged.
+      if (scroll && dragAttempts < _revealDragAttempts) {
+        await performDragAttempt(snapshot);
+        continue;
+      }
     }
     await tester.pump(_revealSamplePeriod);
   }
@@ -229,7 +246,7 @@ Future<Offset> reveal(
   final status = hadPoint ? 'visible but did not stabilize' : 'not pointable';
   fail(
     'No visible guest target: $label ($status; '
-    'dragAttempts=${scroll ? _revealDragAttempts : 0}; '
+    'dragAttempts=$dragAttempts/${scroll ? _revealDragAttempts : 0}; '
     'settleBudgetMs=${_revealSettleBudget.inMilliseconds}); '
     'actual=${texts(tester)}; trajectory=${trajectory.join(' | ')}',
   );

@@ -5,6 +5,7 @@ import { after, simulationHz } from "@pocketjs/framework/clock";
 import { VirtualList } from "@pocketjs/framework/virtual-list";
 import {
   FocusScope,
+  Focusable,
   Image,
   Lazy,
   Named,
@@ -38,6 +39,7 @@ import { HardwarePage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx"
 import { createHostBridge, hostError, type HostBridge, type JsonValue } from "@pocket/ui/host";
 import { RecordingPanel } from "./recording-panel.tsx";
 import { createPocketPlatformClient } from "@pocket/ui/platform";
+import { createPlatformExperience, isUnsupportedPlatformError } from "@pocket/ui/platform-experience";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
 import { installShowcaseSystem } from "./system.ts";
 import { demoRelease } from "./release.ts";
@@ -85,15 +87,15 @@ const componentCards = [
 ];
 
 const componentDetails: Record<string, string> = {
-  View: "The official retained view primitive carries layout and hit bounds to the native core.",
-  Text: "Text is emitted as an official TEXT_RUN and painted by the Flutter surface.",
-  Image: "Image resolves the local PAK asset and emits an official TEX_QUAD.",
-  Focusable: "Focusable marks a guest View for the official input resolver.",
-  Grid: "Grid combines official flex wrapping with focus-grid traversal when columns are supplied.",
-  For: "Solid's list helper keeps collection rendering in JavaScript.",
-  Lazy: "Lazy gates a subtree in JavaScript; no Dart visibility flag is needed.",
-  Modal: "Modal is the official Portal overlay, controlled by this guest signal.",
-  TextField: "TextField is a guest input shell bound to Flutter's system text overlay and the app-owned draft signal.",
+  View: "Flexible layout and spacing.",
+  Text: "Typography drawn by Flutter.",
+  Image: "Local images from the app bundle.",
+  Focusable: "Tap and keyboard interactions.",
+  Grid: "Responsive rows and columns.",
+  For: "Reactive lists owned by JavaScript.",
+  Lazy: "Mount content only when needed.",
+  Modal: "A guest-controlled overlay.",
+  TextField: "Native keyboard. State stays in JS.",
 };
 
 const hostTabs = [
@@ -474,19 +476,28 @@ function App() {
   // MobileUiPage owns the theme choice in JS state. Keep the canvas itself in
   // the same palette so a dark mobile page never exposes the light Screen
   // behind a resized/scrolling subtree.
-  const mobileDark = () => state().route === "mobile" && state().mobileDark;
+  const mobileDark = () => isShowcaseRoute(state().route) && state().mobileDark;
   const responsiveLayout = () => deriveResponsiveLayout(displayGeometry());
   const wideLayout = () => responsiveLayout().mode === "wide";
+  const contentPaneWidth = (): number => {
+    const layout = responsiveLayout();
+    if (!layout.division) {
+      // Match NavigationBar's existing 104px rail and trailing safe inset.
+      // A regular wide window has no physical division but still reserves it.
+      return Math.max(0, displayGeometry().width - (layout.navigation === "rail" ? 104 + layout.insets.right : 0));
+    }
+    const panes = availableDisplayPanes(displayGeometry());
+    const pane = layout.railSide === "right" ? panes[0] : panes[panes.length - 1];
+    return pane?.width ?? displayGeometry().width;
+  };
   const contentPaneStyle = () => {
     const layout = responsiveLayout();
     if (!layout.division) return { grow: 1 };
-    const panes = availableDisplayPanes(displayGeometry());
-    const pane = layout.railSide === "right" ? panes[0] : panes[panes.length - 1];
     // The first pane starts after the outer left safe-area inset.  When the
     // rail is on the right the content is the first pane and must carry that
     // offset; when the rail is on the left the rail itself owns the offset.
     return {
-      width: pane?.width ?? displayGeometry().width,
+      width: contentPaneWidth(),
       grow: 0,
       marginL: layout.railSide === "right" ? layout.insets.left : 0,
     };
@@ -508,6 +519,27 @@ function App() {
   });
   const system = installShowcaseSystem(host);
   const platform = createPocketPlatformClient(undefined, { bridge: host });
+  const experience = createPlatformExperience(host);
+  let systemUiKey = "";
+  const syncSystemUi = (force = false): void => {
+    const dark = mobileDark();
+    const key = `${state().route}:${dark}`;
+    if (!force && key === systemUiKey) return;
+    systemUiKey = key;
+    void experience.systemUi.set({
+      statusBarColor: 0x00000000,
+      statusBarIconBrightness: dark ? "light" : "dark",
+      statusBarBrightness: dark ? "dark" : "light",
+      systemNavigationBarColor: dark ? 0xff0e1728 : 0xfff5f6fa,
+      systemNavigationBarIconBrightness: dark ? "light" : "dark",
+    }).catch((error: unknown) => {
+      if (!isUnsupportedPlatformError(error)) console.warn("system UI", hostError(error).code);
+    });
+  };
+  createEffect(() => syncSystemUi());
+  const removeExperienceLifecycle = platform.onLifecycle((event) => {
+    if (event.state === "onResume" || event.state === "onDidAppear") syncSystemUi(true);
+  });
   let requestSequence = 0;
   let lastPublishedPerformanceContext = "";
   const routeTransitionDuration = 220;
@@ -626,7 +658,8 @@ function App() {
   onMount(() => {
     const previous = bridge.__pocketEvent;
     const receive = (line: string): void => {
-      host.handle(line);
+      // The previous sink installed by createHostBridge owns transport
+      // delivery. Forward once below; equal sensor readings are real events.
       const message = decode(line);
       if (!message) return;
       const method = message.method ?? message.name ?? "";
@@ -728,13 +761,23 @@ function App() {
     onCleanup(() => {
       if (bridge.__pocketEvent === receive) bridge.__pocketEvent = previous;
       system.dispose();
+      removeExperienceLifecycle();
+      experience.dispose();
       platform.dispose();
       host.dispose();
     });
   });
 
+  // The retained Flutter host consumed MediaQuery.padding.top before its page
+  // body. PocketView reports the equivalent logical inset through
+  // display.viewport; consume it once at the SystemUI shell so every route
+  // (including the Home header and mobile AppBar) starts below the status bar
+  // without teaching each page its own safe-area state.
   return (
-    <Screen class={mobileDark() ? "w-full h-full flex-col bg-[#0d1726] overflow-hidden" : "w-full h-full flex-col bg-slate-50 overflow-hidden"}>
+    <Screen
+      class={mobileDark() ? "w-full h-full flex-col bg-[#0E1728] overflow-hidden" : "w-full h-full flex-col bg-[#F5F6FA] overflow-hidden"}
+      style={{ paddingT: responsiveLayout().insets.top }}
+    >
       <Show when={!isShowcaseRoute(state().route)}>
         <Header
           title={demoTitle}
@@ -766,14 +809,14 @@ function App() {
                   if (!layout.division) return undefined;
                   const panes = availableDisplayPanes(displayGeometry());
                   const pane = layout.railSide === "right" ? panes[0] : panes[panes.length - 1];
-                  // Home's hero owns `mx-4`; keep its explicit width inside the
+                  // Home's hero owns `mx-5`; keep its explicit width inside the
                   // selected pane instead of letting margins cross the hinge.
-                  return pane ? Math.max(0, pane.width - 32) : undefined;
+                  return pane ? Math.max(0, pane.width - 40) : undefined;
                 }}
               />
             </Show>
             <Show when={state().route === "gallery"}>
-              <GalleryPage state={state} dispatch={dispatch} />
+              <GalleryPage state={state} dispatch={dispatch} contentWidth={contentPaneWidth} />
             </Show>
             <Show when={state().route === "mobile"}>
               <ScrollablePage><MobileUiPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
@@ -782,7 +825,7 @@ function App() {
               <ScrollablePage><TransitionsPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
             </Show>
             <Show when={state().route === "hardware"}>
-              <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
+              <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} host={host} experience={experience} /></ScrollablePage>
             </Show>
             <Show when={state().route === "about" || state().route === "bytecode" || state().route === "updates" || state().route === "plugins" || state().route === "stress" || state().route === "performance"}>
               <HostPages host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} />
@@ -821,97 +864,112 @@ function HomePage(props: {
 }): JSX.Element {
   const wide = () => props.wide?.() === true;
   const contentWidth = () => props.contentWidth?.();
-  const panelLayout = () => wide() ? "flex-row gap-3 mx-4" : "flex-col gap-3 mx-4";
+  const panelLayout = () => wide() ? "flex-row gap-3 mx-5" : "flex-col gap-3 mx-5";
   const panelClass = () => wide()
-    ? "flex-1 flex-col gap-2 p-4 rounded-xl bg-white border-slate-200"
-    : "flex-col gap-2 mx-4 p-4 rounded-xl bg-white border-slate-200";
+    ? "flex-1 flex-col gap-3 p-4 rounded-xl bg-white"
+    : "flex-col gap-3 p-4 rounded-xl bg-white";
   return (
     <ScrollablePage>
-      <View class="flex-col gap-3">
+      <View class="flex-col gap-3 pb-5">
         <View
-          class="flex-col gap-2 mx-4 mt-3 p-4 rounded-xl bg-[#10233f]"
+          class="flex-col gap-2 mx-5 mt-4 p-4 rounded-xl bg-[#315deb]"
           style={contentWidth() === undefined ? undefined : { width: contentWidth()! }}
         >
-          <Row>
-            <Text class="text-xs text-blue-200 font-bold">POCKET HOST LAB</Text>
-            <Badge tone="green">EMBEDDED</Badge>
-          </Row>
-          <Text class="text-lg text-white font-bold">One runtime, one source of truth</Text>
-          <Text class="text-xs text-blue-100">Native surface · JS-owned state</Text>
+          <View class="flex-row items-center gap-2">
+            <View class="w-[6] h-[6] rounded-full bg-[#a9f2ce]" />
+            <Text class="text-xs text-blue-100 font-bold">POCKET SHOWCASE</Text>
+          </View>
+          <Text class="text-2xl text-white font-bold">Made to feel native.</Text>
+          <Text class="text-sm text-blue-100">Small building blocks. Real possibilities.</Text>
         </View>
-        <View class="flex-row gap-2 mx-4">
-          <MetricCard label="Runtime" value={props.runtime.phase === "ready" ? "Ready" : "Waiting"} detail="Native host" tone="blue" />
-          <MetricCard label="Input" value={props.state().draft ? "Ready" : "Draft"} detail="System keyboard" tone="green" />
+        <HomeExplore wide={wide} dispatch={props.dispatch} />
+        <View class="flex-row items-center justify-between mx-5">
+          <Text class="text-sm text-slate-950 font-bold">Playground</Text>
+          <Text class="text-xs text-slate-500">Try it live</Text>
         </View>
-        <Show when={wide()}><HomeExplore wide={wide} dispatch={props.dispatch} /></Show>
         <View class={panelLayout()}>
         <Card class={panelClass()}>
-          <ViewText title="Input round-trip" body="The field opens the system keyboard." />
+          <ViewText title="Input round-trip" body="Your system keyboard, right here." />
           <InputField
             value={() => props.state().draft}
             onInput={(value) => props.dispatch({ type: "draft", value })}
             onSubmit={(value) => props.dispatch({ type: "draft", value })}
+            appearance={{ fillColor: "#f5f6fa", borderColor: "#e4e8f0", focusedBorderColor: "#315deb", borderRadius: 10, paddingVertical: 11 }}
           />
-          <Text class="text-sm text-blue-700">Draft: {props.state().draft || "(empty)"}</Text>
+          <Text class="text-xs text-slate-500">Draft: {props.state().draft || "(empty)"}</Text>
         </Card>
         <Named name="CounterCard">
           <Card class={panelClass()}>
-            <Row>
-              <ViewText title="Counter" body="State stays in JS" />
-              <Badge tone="green">LIVE</Badge>
-            </Row>
-            <Text class="text-xl text-slate-950 font-bold">{String(props.state().count).padStart(2, "0")}</Text>
-            <Row>
-              <ActionButton label="−" kind="quiet" onPress={() => props.dispatch({ type: "decrement" })} />
-              <ActionButton label="+1" onPress={() => props.dispatch({ type: "increment" })} />
-              <Text class="text-xs text-slate-500">{props.state().lastAction}</Text>
-            </Row>
+            <View class="flex-row items-center justify-between gap-3">
+              <ViewText title="Counter" body={props.state().lastAction} />
+              <View class="flex-row items-center gap-3">
+                <ActionButton label="−" kind="quiet" onPress={() => props.dispatch({ type: "decrement" })} />
+                <Text class="text-2xl text-slate-950 font-bold">{String(props.state().count).padStart(2, "0")}</Text>
+                <ActionButton label="+1" onPress={() => props.dispatch({ type: "increment" })} />
+              </View>
+            </View>
           </Card>
         </Named>
         </View>
-        <Show when={!wide()}><HomeExplore wide={wide} dispatch={props.dispatch} /></Show>
-        <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-slate-100 border-slate-200">
-          <Row>
-            <ViewText title="Runtime" body={props.runtime.phase === "ready" ? "Connected to the native host" : "Waiting for the native host"} />
-            <Badge tone={props.runtime.phase === "error" ? "rose" : props.runtime.phase === "ready" ? "green" : "amber"}>{props.runtime.phase.toUpperCase()}</Badge>
-          </Row>
-          <ActionButton label="Open Host details" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "about" })} />
-        </Card>
-        <StatusBar label="JS state · native pixels" detail="Ready for input" ok={props.runtime.phase !== "error"} />
         <PlatformAppsCard platform={props.platform} system={props.system} />
+        <View class="flex-row items-center justify-between mx-5 px-1 py-2">
+          <View class="flex-row items-center gap-2">
+            <View class={props.runtime.phase === "error" ? "w-[6] h-[6] rounded-full bg-rose-500" : "w-[6] h-[6] rounded-full bg-emerald-500"} />
+            <Text class="text-xs text-slate-500">{props.runtime.phase === "ready" ? "Runtime ready" : props.runtime.phase === "error" ? "Runtime unavailable" : "Connecting"}</Text>
+          </View>
+          <ActionButton label="Open Host details" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "about" })} />
+        </View>
       </View>
     </ScrollablePage>
   );
 }
 
+function miniAppResultSummary(value: JsonValue | undefined): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return valueSummary(value ?? null);
+  const profile = value.profile ?? value.userInfo;
+  const person = profile && typeof profile === "object" && !Array.isArray(profile) ? profile : undefined;
+  const result = value.lobby && typeof value.lobby === "object" && !Array.isArray(value.lobby) ? value.lobby : value;
+  const parts: string[] = [];
+  if (typeof person?.name === "string") parts.push(person.name);
+  if (typeof result.visits === "number") parts.push(`visits=${result.visits}`);
+  if (typeof result.count === "number") parts.push(`count=${result.count}`);
+  return parts.length > 0 ? parts.join(" · ") : valueSummary(value);
+}
+
 function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatformClient>; system: ReturnType<typeof installShowcaseSystem> }): JSX.Element {
-  const [status, setStatus] = createSignal("Starting JS SystemUI");
+  const [status, setStatus] = createSignal("Preparing apps...");
   onMount(() => {
     void props.system.ready.then(
-      () => setStatus("JS SystemUI ready · independent bytecode apps"),
+      () => setStatus("Ready to explore"),
       (error) => setStatus(hostError(error).message),
     );
   });
   const [message, setMessage] = createSignal("No app messages yet");
   const stopMessages = props.platform.onMessage((message) => {
-    setMessage(`Message from ${message.sourceAppId}: ${JSON.stringify(message.data)}`);
+    setMessage(`Message from ${message.sourceAppId}: · ${miniAppResultSummary(message.data)}`);
   });
   onCleanup(stopMessages);
   const open = async (appId: string) => {
     try {
       await props.system.ready;
       const result = await props.platform.openApp(appId, { source: "showcase" });
-      setStatus(result.cancelled ? `Cancelled: ${result.reason ?? "closed"}` : `App result: ${JSON.stringify(result.value)}`);
+      setStatus(result.cancelled ? `Cancelled: ${result.reason ?? "closed"}` : `App result: · ${miniAppResultSummary(result.value)}`);
     } catch (error) { setStatus(hostError(error).message); }
   };
   return (
-    <Card class="flex-col gap-2 mx-4 mb-4 p-4 rounded-xl bg-white border-slate-200">
-      <ViewText title="Mini Apps" body={status()} />
-      <Text class="text-xs text-slate-600">{message()}</Text>
-      <Row>
+    <Card class="flex-col gap-3 mx-5 p-4 rounded-xl bg-white">
+      <View class="flex-row items-center justify-between">
+        <ViewText title="Mini Apps" body="A little more to explore." />
+        <Badge tone="cyan">2 APPS</Badge>
+      </View>
+      <View class="flex-col gap-2">
         <ActionButton label="Open profile app" onPress={() => void open("pocket.demo.profile")} />
         <ActionButton label="Open lobby app" kind="quiet" onPress={() => void open("pocket.demo.lobby")} />
-      </Row>
+      </View>
+      <For each={summaryLines(status())}>{(line) => <Text class="text-xs text-slate-500">{line}</Text>}</For>
+      <Show when={message() !== "No app messages yet"}>
+        <For each={summaryLines(message())}>{(line) => <Text class="text-xs text-slate-500">{line}</Text>}</For>
+      </Show>
       <ActionButton label="Prewarm lobby" kind="quiet" onPress={() => {
         void props.system.ready.then(() => props.platform.prewarm("pocket.demo.lobby")).then(
           () => setStatus("Lobby prewarmed; its guest clock is paused"),
@@ -923,71 +981,81 @@ function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatf
 }
 
 function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) => void }): JSX.Element {
-  const featureClass = (kind: "primary" | "quiet") => {
-    if (props.wide()) {
-      return kind === "primary"
-        ? "flex-1 h-[88] flex-col items-center justify-center rounded-xl bg-blue-600 focus:bg-blue-500 px-4"
-        : "flex-1 h-[88] flex-col items-center justify-center rounded-xl bg-slate-200 focus:bg-slate-300 px-4";
-    }
-    return kind === "primary"
-      ? "w-[160] h-[72] flex-col items-center justify-center rounded-xl bg-blue-600 focus:bg-blue-500 px-3"
-      : "w-[160] h-[72] flex-col items-center justify-center rounded-xl bg-slate-200 focus:bg-slate-300 px-3";
-  };
+  const features = [
+    { title: "Mobile UI", detail: "Components", route: "mobile" as const },
+    { title: "Transitions", detail: "Motion", route: "transitions" as const },
+    { title: "Hardware", detail: "Device APIs", route: "hardware" as const },
+  ];
   return (
-    <>
-      <SectionHeading title="Explore" detail="Choose a lane" />
-      <View class="flex-row flex-wrap gap-2 mx-4">
-        <ActionButton class={featureClass("primary")} label="Mobile UI" kind="primary" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
-        <ActionButton class={featureClass("quiet")} label="Transitions" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "transitions" })} />
-        <ActionButton class={featureClass("quiet")} label="Hardware" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "hardware" })} />
-      </View>
-    </>
+    <View class="flex-row gap-3 mx-5">
+      <For each={features}>{(feature) => (
+        <Focusable class="flex-1 flex-col gap-2 h-[104] p-3 rounded-xl bg-white focus:bg-blue-50" onPress={() => props.dispatch({ type: "navigate", route: feature.route })}>
+          <View class="w-[30] h-[30] items-center justify-center rounded-lg bg-blue-50">
+            <Show when={feature.route === "mobile"}><Image class="w-[20] h-[20]" src="icons/components.svg" /></Show>
+            <Show when={feature.route === "transitions"}><Image class="w-[20] h-[20]" src="icons/motion.svg" /></Show>
+            <Show when={feature.route === "hardware"}><Image class="w-[20] h-[20]" src="icons/hardware.svg" /></Show>
+          </View>
+          <Text class="text-xs text-slate-950 font-bold">{feature.title}</Text>
+          <Text class="text-xs text-slate-500">{feature.detail}</Text>
+        </Focusable>
+      )}</For>
+    </View>
   );
 }
 
-function GalleryPage(props: { state: () => DemoState; dispatch: (event: DemoEvent) => void }): JSX.Element {
+function GalleryPage(props: {
+  state: () => DemoState;
+  dispatch: (event: DemoEvent) => void;
+  contentWidth: () => number;
+}): JSX.Element {
+  const tileWidth = () => Math.max(0, (props.contentWidth() - 40 - 12) / 2);
   return (
     <ScrollablePage>
-      <View class="flex-col gap-2">
-      <PageIntro title="Official building blocks" body="A focused set of components mounted in this sample." />
-      <Image class="w-[24] h-[24] mx-4 rounded-lg" src="pocket-mark.svg" />
-      <Text class="text-xs text-slate-600 px-4">Tap a tile for the guest-owned detail modal.</Text>
+      <View class="flex-col gap-4 pb-5">
+      <PageIntro title="Official building blocks" body="The essentials, ready to explore." />
       <TileGrid>
         <For each={componentCards}>
           {(card) => (
-            <ActionButton
-              class="flex-col gap-1 p-2 rounded-xl bg-white border-slate-200"
-              label={card}
-              kind="quiet"
+            <Focusable
+              class="flex-col gap-3 h-[112] p-4 rounded-xl bg-white focus:bg-blue-50"
+              style={{ width: tileWidth() }}
               onPress={() => props.dispatch({ type: "select", component: card })}
-            />
+            >
+              <View class="w-[28] h-[28] items-center justify-center rounded-lg bg-blue-50">
+                <Text class="text-xs text-blue-600 font-bold">{card.slice(0, 2)}</Text>
+              </View>
+              <View class="flex-row items-center justify-between">
+                <Text class="text-sm text-slate-950 font-bold">{card}</Text>
+                <Text class="text-sm text-slate-400">›</Text>
+              </View>
+            </Focusable>
           )}
         </For>
       </TileGrid>
-      <Card class="flex-col gap-2 mx-4 p-4 rounded-xl bg-white border-slate-200">
+      <Card class="flex-col gap-3 mx-5 p-4 rounded-xl bg-white">
         <Row>
-          <ViewText title="Lazy panel" body="Toggle a JS-owned subtree" />
+          <ViewText title="Lazy panel" body="Content, when you need it." />
           <ActionButton label={props.state().lazyVisible ? "Hide" : "Show"} kind="secondary" onPress={() => props.dispatch({ type: "toggleLazy" })} />
         </Row>
         <Lazy when={() => props.state().lazyVisible}>
           {() => (
             <View class="flex-col gap-1 p-2 rounded-lg bg-purple-600">
               <Text class="text-xs text-white font-bold">Lazy subtree is mounted</Text>
-              <Text class="text-xs text-purple-100">No native visibility flag participates.</Text>
+              <Text class="text-xs text-purple-100">Only mounted while visible.</Text>
               <MiniBarChart values={[8, 14, 10, 22, 18, 28, 24]} />
             </View>
           )}
         </Lazy>
       </Card>
-      <Card class="flex-col gap-2 mx-4 p-4 rounded-xl bg-white border-slate-200">
-        <ViewText title="Showcase lanes" body="Explore mobile controls, motion, and devices." />
+      <Card class="flex-col gap-3 mx-5 p-4 rounded-xl bg-white">
+        <ViewText title="Go a little further" body="Components, motion and device APIs." />
         <View class="flex-row flex-wrap gap-2">
           <ActionButton label="Mobile UI" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
           <ActionButton label="Transitions" kind="secondary" onPress={() => props.dispatch({ type: "navigate", route: "transitions" })} />
           <ActionButton label="Hardware" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "hardware" })} />
         </View>
       </Card>
-      <EmptyState title="Not mounted here" body="Advanced media and auxiliary surfaces are outside this showcase." />
+      <EmptyState title="Not mounted here" body="More capabilities live under Host." />
       </View>
     </ScrollablePage>
   );
@@ -1184,9 +1252,9 @@ function BytecodePage(props: {
     <View class="flex-col gap-3">
       <PageIntro title="Bytecode" body="QuickJS runtime and bundle identity." />
       <CapabilityCard title="QuickJS runtime" capability="runtime.info" state={props.state().runtimeInfo} onRefresh={() => props.requestCapability("runtimeInfo", "runtime.info")} />
-      <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-[#172235]">
-        <ViewText title="What this proves" body="A real host response is visible here when configured. An error or missing capability remains visible as an error." />
-        <Text class="text-xs text-cyan-200">Current response: {capabilitySummary(props.state().runtimeInfo)}</Text>
+      <Card class="flex-col gap-2 mx-4 p-4 rounded-xl bg-white">
+        <ViewText title="Package response" body="Reported by the active runtime." />
+        <For each={summaryLines(capabilitySummary(props.state().runtimeInfo))}>{(line) => <Text class="text-xs text-slate-500">{line}</Text>}</For>
       </Card>
     </View>
   );

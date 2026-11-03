@@ -18,17 +18,25 @@
       {
         "package": "pocket.host.demo",
         "manifest": "pocket.json",
-        "required": true
+        "required": true,
+        "memory": {
+          "heapLimitBytes": 134217728,
+          "maxPakBytes": 8388608
+        }
       },
       {
         "package": "pocket.demo.profile",
         "manifest": "apps/profile/pocket.json",
-        "required": true
+        "required": true,
+        "memoryPolicy": "UI_MINI"
       },
       {
         "package": "pocket.demo.lobby",
         "manifest": "apps/lobby/pocket.json",
-        "required": true
+        "required": true,
+        "memory": {
+          "maxPakBytes": 8388608
+        }
       }
     ]
   },

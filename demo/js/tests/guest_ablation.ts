@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 
 type JsonObject = Record<string, unknown>;
 type ProbeResponse = { ok?: boolean; error?: string; runtimeAbi?: string; frame?: Frame };
-type Frame = { ops?: Array<{ type?: string; text?: string }> };
+type Frame = {
+  events?: Array<{ name?: string; payload?: JsonObject }>;
+  ops?: Array<{ type?: string; text?: string }>;
+};
 
 const root = resolve(import.meta.dir, "..");
 const sdkRoot = resolve(root, "..", "..", "sdk");
@@ -48,14 +51,15 @@ assert.equal(typeof metadata.tickHz, "number");
 function command(op: string, values: JsonObject = {}): JsonObject {
   return { op, ...values };
 }
+const initialSystemUiParams: JsonObject = {
+  statusBarBrightness: "light",
+  statusBarColor: 0x00000000,
+  statusBarIconBrightness: "dark",
+  systemNavigationBarColor: 0xfff5f6fa,
+  systemNavigationBarIconBrightness: "dark",
+};
 
-function frameFor(bytecode: string, pak: string): Frame {
-  const commands = [
-    command("create", { width: 360, height: 640, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } }),
-    command("loadBytecode", { bytecodePath: bytecode, pakPath: pak }),
-    command("frame", { deltaMs: 16 }),
-    command("quit"),
-  ];
+function runProbe(commands: JsonObject[]): ProbeResponse[] {
   const result = spawnSync(probe!, {
     input: `${commands.map((item) => JSON.stringify(item)).join("\n")}\n`,
     encoding: "utf8",
@@ -66,10 +70,53 @@ function frameFor(bytecode: string, pak: string): Frame {
   assert.equal(result.status, 0, `guest_ablation probe failed: ${result.stderr || result.stdout}`);
   const output = String(result.stdout ?? "").trim();
   assert.ok(output, "guest_ablation probe returned no responses");
-  const responses = output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as ProbeResponse);
+  return output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as ProbeResponse);
+}
+
+function frameFor(bytecode: string, pak: string): Frame {
+  const baseCommands = [
+    command("create", { width: 360, height: 640, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } }),
+    command("loadBytecode", { bytecodePath: bytecode, pakPath: pak }),
+    command("frame", { deltaMs: 16 }),
+  ];
+
+  // Discover the real initial platform request from bytecode execution before
+  // replying in a fresh probe. The response is correlated by its actual
+  // requestId, and the bar style is part of the boot contract.
+  const discovery = runProbe([...baseCommands, command("quit")]);
+  const discoveryFrame = discovery.find((response) => response.frame)?.frame;
+  assert.ok(discoveryFrame, "guest_ablation discovery frame is missing JSON");
+  const systemUiRequest = (discoveryFrame.events ?? []).find(
+    (event) => event.name === "host.request" && event.payload?.capability === "platform.systemUi.set",
+  );
+  assert.ok(systemUiRequest, "guest_ablation must emit the initial platform.systemUi.set request");
+  assert.equal(typeof systemUiRequest.payload?.requestId, "string", "system UI request must have a requestId");
+  assert.deepEqual(
+    systemUiRequest.payload?.params,
+    initialSystemUiParams,
+    "guest_ablation platform.systemUi.set must use the light showcase bar style",
+  );
+
+  const responses = runProbe([
+    ...baseCommands,
+    command("send", {
+      message: {
+        type: "event",
+        name: "host.response",
+        payload: {
+          requestId: systemUiRequest.payload!.requestId,
+          capability: "platform.systemUi.set",
+          ok: true,
+          result: { applied: true },
+        },
+      },
+    }),
+    command("frame", { deltaMs: 16 }),
+    command("quit"),
+  ]);
   assert.equal(responses[1]?.ok, true, `QuickJS bytecode load failed: ${responses[1]?.error ?? "unknown error"}`);
   assert.equal(responses[1]?.runtimeAbi, metadata.runtimeAbi, "ablation runtime ABI does not match guest metadata");
-  const frameResponse = responses.find((response) => response.frame);
+  const frameResponse = responses.filter((response) => response.frame).at(-1);
   assert.equal(frameResponse?.ok, true, `guest_ablation frame failed: ${frameResponse?.error ?? "unknown error"}`);
   assert.ok(frameResponse?.frame, "guest_ablation frame response is missing JSON");
   return frameResponse.frame;
@@ -100,7 +147,7 @@ try {
   const generatedPak = join(originalBuild, "app.pak");
   assert.ok(existsSync(generatedSource) && existsSync(generatedPak), "build_guest did not produce app.js/app.pak");
   const original = readFileSync(generatedSource, "utf8");
-  const marker = "One runtime, one source of truth";
+  const marker = "Made to feel native";
   const replacement = "Ablated guest source is live";
   assert.ok(original.includes(marker), "generated guest bundle must contain the ablation marker");
   const alteredSource = join(alteredBuild, "app.js");

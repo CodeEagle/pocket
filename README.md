@@ -44,6 +44,8 @@ Flutter 中确有必要的系统 Widget，例如 `TextField`、`Texture`、glass
 
 新增能力优先进入 JS SDK：多应用栈、跨 App 返回、System UI、共享消息策略、预热/淘汰与录制控制都由 JS 决定；纯计算运行在 JS Worker。Dart 保留 Flutter/FFI、文件资源、可信权限校验及显式原生 provider 边界。Worker 调度和 IO 的确定性事实在原生执行边界捕获，Dart 不另建一套调度或事实状态机。SDK 已移除未被 Demo 使用的 Dart sum/Fibonacci isolate 实现。
 
+小程序可在 JS catalog 中声明 `memory` 或旧 Demo 的 `memoryPolicy` 档位。宿主只允许在批准的额度内缩小预算，原生层通过 QuickJS 分配器执行每个 realm 的堆硬限制，并在加载前检查 PAK 大小；录制回放保留同一预算。它不代表进程 RSS、图片/GPU 或所有 Worker 合计的内存上限，配置与边界见 [小程序内存限制](sdk/docs/APP_MEMORY_LIMITS.md)。
+
 ## 从 TSX 到屏幕
 
 ```mermaid
@@ -172,6 +174,8 @@ Guest 使用 `host.request` 携带 requestId、capability 和参数，Host 返�
 权限经过三层：**宿主允许范围 → Guest manifest 声明/协商 → 平台系统授权**。方法可以有各自必需/可选权限。例如天气查询使用给定经纬度只需 network，省略坐标并实际调用 GPS 时还需 location；不能凭系统已经授权就绕过 Guest 的权限范围。
 
 消费工程通过 `pluginFactories` 显式注册 Dart capability provider（`PocketPlugin` 实例）；iOS/Android 原生插件由 Flutter 包依赖及平台 plugin registry 注册。Guest 更新不能安装 Swift/Kotlin/Dart 原生代码。切换 Guest、回退、关闭时，SDK 撤销能力并清理插件。核心 SDK 不强制依赖硬件插件。
+
+持续数据使用 `@pocket/ui/streams` 复用现有流协议与 HostBridge，原生传感器和 BLE 通知由 callback 推送，取消/离开页面释放 producer；流缓冲、并发数和 pending read 有界。硬件包提供传感器 watch、BLE characteristic read/write/notifications，页面与字节解析仍在 JS。可选 `pocket_platform` 只承接系统栏、触觉和 URL 入口；Deep Link **默认关闭**，脚手架只有显式 `--deep-link-scheme=pocketapp` 才配置原生 scheme，JS 决定如何路由。插件可附带有界数据 schema，`pocket.ts types` 根据真实 descriptor 和已注册能力生成 TS 客户端；缺失类型保持 `unknown`。
 
 ## JS UI、系统输入与设备适配
 
@@ -308,12 +312,13 @@ pocket/
 ├── README.md
 ├── sdk/
 │   ├── lib/                      # PocketApp / Guest / Session / System 实例通道
-│   ├── pocket.ts                 # init / build / editor 唯一 CLI
+│   ├── pocket.ts                 # init / build / editor / types 唯一 CLI
 │   ├── packages/
 │   │   ├── pocket_ui/            # @pocket/ui：JS UI / SystemUI 内核 / App 客户端
 │   │   ├── pocket_flutter/       # FFI / 帧 / Canvas / 输入 / surface
 │   │   ├── pocket_services/      # 能力协议 / 插件 / 更新与存储
-│   │   └── pocket_hardware/      # 可选 iOS / Android provider
+│   │   ├── pocket_hardware/      # 可选 iOS / Android 硬件、持续流/GATT
+│   │   └── pocket_platform/      # 可选系统栏/触觉；Deep Link 默认关闭
 │   ├── native/                   # Rust runtime / PFB1 / duplex / 字节码工具
 │   ├── editor/                   # 本地 Studio 服务
 │   ├── scripts/                  # 上游准备 / 构建 / 签包 / 验证
@@ -341,6 +346,9 @@ pocket/
 | 实际测试与设备边界 | [VALIDATION](sdk/docs/VALIDATION.md)、[AUDIT_REMEDIATION](sdk/docs/AUDIT_REMEDIATION.md) |
 | 录制回放与 Worker/IO 验收范围 | [RECORDING_REPLAY](sdk/docs/RECORDING_REPLAY.md)、[Worker 录制回放实施与验收](sdk/docs/WORKER_RECORDING_REPLAY_PLAN.md) |
 | JS SystemUI、跨 App 协作与呈现边界 | [MULTI_APP_IMPLEMENTATION](sdk/docs/MULTI_APP_IMPLEMENTATION.md) |
+| 小程序内存档位、真实堆限制与资源包准入 | [APP_MEMORY_LIMITS](sdk/docs/APP_MEMORY_LIMITS.md) |
+| 可选 Deep Link、系统栏、触觉与类型生成 | [PLATFORM_EXPERIENCE](sdk/docs/PLATFORM_EXPERIENCE.md)、[PLUGIN_TYPES](sdk/docs/PLUGIN_TYPES.md) |
+| JS 持续流与硬件 GATT | [JS_HOST_STREAMS](sdk/docs/JS_HOST_STREAMS.md)、[HARDWARE_STREAMS](sdk/docs/HARDWARE_STREAMS.md) |
 | 继承了旧 Demo 哪些技术 | [PROVENANCE](sdk/docs/PROVENANCE.md)、[LEGACY_SDK_REUSE](sdk/docs/LEGACY_SDK_REUSE.md) |
 
 ## 验证与当前边界

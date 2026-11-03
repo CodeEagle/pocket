@@ -1,0 +1,69 @@
+{
+  "protocolVersion": 1,
+  "runtimeDependency": {
+    "package": "@pocket/ui/host",
+    "version": "0.1.0"
+  },
+  "host": {
+    "available": [
+      { "name": "device.info", "kind": "request", "description": "device metadata" },
+      { "name": "legacy.echo", "kind": "request" },
+      { "name": "sensor.readings", "kind": "stream", "description": "sensor values" }
+    ]
+  },
+  "plugins": [
+    {
+      "protocolVersion": 1,
+      "id": "sensor.plugin",
+      "version": "1.0.0",
+      "types": {
+        "Reading": {
+          "type": "object",
+          "properties": {
+            "unit": { "type": "enum", "values": ["c", "f"] },
+            "value": { "type": "number" }
+          },
+          "required": ["value"]
+        }
+      },
+      "capabilities": [
+        {
+          "name": "sensor.readings",
+          "kind": "stream",
+          "schema": {
+            "parameters": {
+              "type": "object",
+              "properties": { "sampleRate": { "type": "integer" } },
+              "required": ["sampleRate"]
+            },
+            "streamItem": { "type": "ref", "ref": "Reading" }
+          }
+        },
+        {
+          "name": "device.info",
+          "kind": "request",
+          "schema": {
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "includeBattery": { "type": "boolean" },
+                "serial": { "type": "string" }
+              },
+              "required": ["serial"]
+            },
+            "result": {
+              "type": "object",
+              "properties": {
+                "battery": { "type": "integer" },
+                "model": { "type": "string" }
+              },
+              "required": ["model"]
+            }
+          }
+        },
+        { "name": "legacy.echo", "kind": "request" },
+        { "name": "platform.unavailable", "kind": "request" }
+      ]
+    }
+  ]
+}

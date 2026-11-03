@@ -140,6 +140,10 @@ void main() {
           // Mobile UI's app-bar Back is also a real guest pointer target. It
           // pops the route stack and must return to the Transitions page.
           await guest.tapGuest(tester, 'Back');
+          // The route's scroll offset is retained across the pop. Reveal the
+          // button before waiting for its draw op; waitFor only samples the
+          // current painted frame and cannot defeat draw-op culling.
+          await guest.reveal(tester, 'Push Mobile');
           await guest.waitFor(tester, 'Push Mobile');
           final paintedTransitions = guest.texts(tester);
           cycleReport['afterBack'] = _snapshot(

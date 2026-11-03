@@ -69,6 +69,15 @@ navigation or a rail while treating a central division as a layout landmark.
 `MobileScaffold` does not silently subscribe to host events; an app opts into
 the adapter where it owns navigation and page composition.
 
+The retained Flutter showcase used the same rule at its host boundary: its
+top shell read `MediaQuery.paddingOf(context).top` and reserved that height
+before painting the header (`../../pocketjs_flutter_demo/lib/ui/mini_app_host_page.dart:107-133`).
+The current JS SystemUI applies the equivalent `deriveResponsiveLayout(...).insets.top`
+once on its root `Screen` (`demo/js/app.tsx`); individual pages and
+`MobileScaffold` do not add another top inset. This keeps Home/Header,
+MobileAppBar, and compositor child surfaces in one coordinate space while
+preserving the existing bottom safe-area handling in `NavigationBar`.
+
 ## Liquid Glass boundary
 
 The public style ABI can draw gradients and rings but cannot honestly provide
@@ -96,4 +105,39 @@ primitive. There is one mobile button implementation (`MobileButton`) with named
 one theme context, and one GlassSurface adapter. The old UIKit is not copied
 as a second runtime library, and no static “38 components” catalogue is
 claimed. Unimplemented upstream primitives stay outside this showcase.
+
+## Home visual reuse note
+
+The Home visual refresh continues to reuse the old syslib vocabulary and the
+JS-owned component logic; it changes only the hero styling and layer hierarchy.
+The shell header, Home input and Counter behavior, navigation labels, measured
+pointer bounds, geometry/safe-area handling, and page-scroll contract remain
+the same. The Dart-side change is likewise limited to the existing Flutter
+frame-monitor HUD's visual layout and painter; it does not add business UI,
+routing, state, or frame-statistics logic.
+
+The Showcase now uses one blue accent (`#315DEB`), light canvas
+(`#F5F6FA`), dark ink (`#17233B`), white cards and consistent 44px button
+targets. Home, Gallery, Mobile UI, Transitions and Hardware reuse the public
+JS components instead of adding Flutter business widgets. Small filled SVG
+icons are baked by the pinned PocketJS asset compiler; their explicit shape
+fills and root dimensions follow that compiler's supported SVG subset.
+
+The visual ablation removes the duplicate Home branding/status panels, the
+oversized FPS slab and full-cell selected navigation backgrounds. It keeps
+the actual input, counter, app opening/results, recording and host request
+paths. Hardware results are separate readable text rows rather than one long
+JSON line. Flutter's independent FPS monitor retains its original engine
+samples and history; only the badge presentation changes. An embedded
+viewport uses a compact top badge so it does not obscure bottom navigation.
+
+The 2026-11-03 iPhone 18 Pro simulator debug run used a measured 60 Hz display.
+Continuous counter updates observed 60 Hz, with build p95 4.595 ms, raster p95
+1.369 ms and no over-budget frames in the four-second sample. Home and the
+500-node static scene made zero native frame calls while idle. The independent
+Flutter monitor measured 60 FPS normally and about 20 FPS with an intentional
+45 ms build stall. These are simulator regression measurements, not high-refresh
+hardware or battery-power validation. Real pointer navigation, Gallery/Hardware,
+system IME and fixed-chrome scrolling passed; the separately rerun three-app
+recording case also passed with its actual memory budgets and strict replay.
 

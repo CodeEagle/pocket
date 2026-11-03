@@ -910,6 +910,70 @@ mod tests {
     }
 
     #[test]
+    fn replay_matches_record_after_external_credit_enters_a_new_idle_period() {
+        unsafe {
+            let source = CString::new(
+                r#"let frames=0,due=null;
+                globalThis.frame=()=>{
+                  frames++;
+                  if(due!==null&&frames>=due) due=null;
+                  pocket._emit(JSON.stringify({name:'tick',payload:{frames}}));
+                };
+                globalThis.__pocketWorkState=()=>({version:1,continuous:false,
+                  simulationHz:60,framesUntilTimer:due===null?null:due-frames});
+                globalThis.__pocketSkipIdleFrames=n=>{
+                  const limit=due===null?n:Math.max(0,due-frames-1);
+                  const skipped=Math.max(0,Math.min(n,limit));
+                  frames+=skipped; return skipped;
+                };
+                globalThis.__pocketEvent=()=>{due=frames+2;};"#,
+            )
+            .unwrap();
+            let empty = CString::new(r#"{"idleMs":[],"scalars":[]}"#).unwrap();
+            let message = CString::new(r#"{"type":"event","name":"wake"}"#).unwrap();
+
+            let recorded = pocket_create(64.0, 64.0);
+            assert_eq!(pocket_trace_clock_mode(recorded, 1), 0);
+            assert_eq!(pocket_eval(recorded, source.as_ptr()), 0);
+            let _ = c_string(pocket_frame(recorded, 0.0));
+            assert_eq!(pocket_trace_clock_begin_json(recorded, empty.as_ptr()), 0);
+            std::thread::sleep(std::time::Duration::from_millis(110));
+            assert_eq!(pocket_send(recorded, message.as_ptr()), 0);
+            let trace = c_string(pocket_trace_clock_end_json(recorded));
+            let trace_value: Value = serde_json::from_str(&trace).unwrap();
+            assert!(trace_value["idleMs"][0].as_f64().unwrap() >= 100.0);
+            // This frame consumes only part of the settled external credit;
+            // the live capture then starts a fresh idle period and clears the
+            // remainder before the next fixed tick.
+            let _ = c_string(pocket_frame(recorded, 16.0));
+            let recorded_next: Value =
+                serde_json::from_str(&c_string(pocket_frame(recorded, 50.0))).unwrap();
+            assert_eq!(recorded_next["events"][0]["name"], "tick");
+
+            let replayed = pocket_create(64.0, 64.0);
+            assert_eq!(pocket_trace_clock_mode(replayed, 2), 0);
+            assert_eq!(pocket_eval(replayed, source.as_ptr()), 0);
+            let _ = c_string(pocket_frame(replayed, 0.0));
+            let trace_input = CString::new(trace).unwrap();
+            assert_eq!(
+                pocket_trace_clock_begin_json(replayed, trace_input.as_ptr()),
+                0
+            );
+            assert_eq!(pocket_send(replayed, message.as_ptr()), 0);
+            let replay_trace: Value =
+                serde_json::from_str(&c_string(pocket_trace_clock_end_json(replayed))).unwrap();
+            assert_eq!(replay_trace, trace_value);
+            let _ = c_string(pocket_frame(replayed, 16.0));
+            let replayed_next: Value =
+                serde_json::from_str(&c_string(pocket_frame(replayed, 50.0))).unwrap();
+            assert_eq!(replayed_next, recorded_next);
+
+            pocket_destroy(recorded);
+            pocket_destroy(replayed);
+        }
+    }
+
+    #[test]
     fn replay_zero_tick_keeps_promise_continuation_until_real_tick() {
         unsafe {
             let source = CString::new(

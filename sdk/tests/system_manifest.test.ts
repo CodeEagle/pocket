@@ -58,6 +58,53 @@ describe("PocketSystemV1 build validation", () => {
       "pocket.demo.profile",
       "pocket.demo.lobby",
     ]);
+    expect(result.value.contract.applications.catalog[0]?.memory).toEqual({
+      heapLimitBytes: 134217728,
+      maxPakBytes: 8388608,
+    });
+    expect(result.value.contract.applications.catalog[1]?.memory).toEqual({
+      heapLimitBytes: 134217728,
+    });
+    expect(result.value.contract.applications.catalog[1]?.memoryPolicy).toBe("UI_MINI");
+    expect(result.value.contract.applications.catalog[2]?.memory).toEqual({
+      maxPakBytes: 8388608,
+    });
+  });
+
+  test("preserves normalized memory requests in a resolved target plan", async () => {
+    const result = await resolveSystemDocument(systemDocument, {
+      appRoot: demoJsRoot,
+      target: POCKET_FLUTTER_TARGET_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+    expect(result.plan.systemUI.memory).toEqual({
+      heapLimitBytes: 134217728,
+      maxPakBytes: 8388608,
+    });
+    expect(result.plan.applications[0]?.memory).toEqual({ heapLimitBytes: 134217728 });
+    expect(result.plan.applications[0]?.memoryPolicy).toBe("UI_MINI");
+  });
+
+  test("rejects malformed memory values, unknown fields, and tier conflicts", async () => {
+    const invalid = clone(systemDocument);
+    invalid.applications.catalog[0].memory = { heapLimitBytes: 0 };
+    const invalidResult = await validateSystemDocument(invalid, { appRoot: demoJsRoot });
+    expect(invalidResult.ok).toBe(false);
+    if (!invalidResult.ok) expect(invalidResult.diagnostics.map((item) => item.code)).toContain("system.invalidMemoryBudget");
+
+    const unknown = clone(systemDocument);
+    unknown.applications.catalog[0].memory = { maxPakBytes: 1, gcThreshold: 2 };
+    const unknownResult = await validateSystemDocument(unknown, { appRoot: demoJsRoot });
+    expect(unknownResult.ok).toBe(false);
+    if (!unknownResult.ok) expect(unknownResult.diagnostics.map((item) => item.code)).toContain("system.invalidMemoryBudget");
+
+    const conflict = clone(systemDocument);
+    conflict.applications.catalog[0].memoryPolicy = "UI_MINI";
+    conflict.applications.catalog[0].memory = { heapLimitBytes: 64 * 1024 };
+    const conflictResult = await validateSystemDocument(conflict, { appRoot: demoJsRoot });
+    expect(conflictResult.ok).toBe(false);
+    if (!conflictResult.ok) expect(conflictResult.diagnostics.map((item) => item.code)).toContain("system.memoryPolicyMismatch");
   });
 
   test("uses the official schema validator before semantic checks", async () => {

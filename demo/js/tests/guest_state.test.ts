@@ -623,11 +623,13 @@ test("tracked app.qjbc renders performance state through native probe", () => {
     { op: "frame", deltaMs: 16 },
     { op: "quit" },
   ]).flatMap((r) => (r.frame ? [r.frame] : []));
-  const perfReq = navFrames
+  const perfRequests = navFrames
     .flatMap((f) => (f.events ?? []).filter((e: any) => e.name === "host.request"))
     .filter((e: any) => e.payload?.capability === "runtime.performance")
-    .at(-1);
-  assert.ok(perfReq?.payload?.requestId, "performance request was not emitted by tracked app.qjbc");
+    .map((e: any) => e.payload?.requestId)
+    .filter((requestId: unknown): requestId is string => typeof requestId === "string");
+  const perfRequestIds = [...new Set(perfRequests)];
+  assert.ok(perfRequestIds.length > 0, "performance request was not emitted by tracked app.qjbc");
   const renderedFrames = runProbeCommands([
     ...baseCommands,
     sendResponse(requestIdFor("runtime.info"), "runtime.info", {
@@ -664,8 +666,7 @@ test("tracked app.qjbc renders performance state through native probe", () => {
     { op: "frame", deltaMs: 16 },
     sendEvent("demo.navigate", { route: "performance" }),
     { op: "frame", deltaMs: 16 },
-    sendResponse(String(perfReq.payload.requestId), "runtime.performance", mixedProbeResult),
-    sendResponse("guest-7", "runtime.performance", mixedProbeResult),
+    ...perfRequestIds.map((requestId) => sendResponse(requestId, "runtime.performance", mixedProbeResult)),
     { op: "frame", deltaMs: 16 },
     { op: "frame", deltaMs: 16 },
     { op: "frame", deltaMs: 16 },

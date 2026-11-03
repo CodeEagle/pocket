@@ -19,6 +19,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { buildGuest, resolveReleaseIdentity } from "./scripts/build_guest.ts";
+import { patchDeepLinkPlatforms, resolvePlatformExperience, type PlatformExperienceOptions } from "./scripts/platform_scaffold.ts";
 
 // `pocket.ts` is the SDK entrypoint itself.  Keep the default rooted at this
 // directory so a consumer can run `bun /path/to/pocket/sdk/pocket.ts init`
@@ -128,6 +129,10 @@ const hardwareCapabilities = [
   "hardware.bluetooth.scan",
   "hardware.bluetooth.connect",
   "hardware.sensors.read",
+  "hardware.sensors.watch",
+  "hardware.bluetooth.read",
+  "hardware.bluetooth.write",
+  "hardware.bluetooth.notifications",
   "hardware.biometrics.authenticate",
   "hardware.location.current",
   "hardware.weather.current",
@@ -144,11 +149,72 @@ const hardwarePermissions = [
   "hardware.network",
 ];
 
+const pocketStaticArchiveOutputMarker = "# POCKET_STATIC_XCFRAMEWORK_OUTPUTS_BEGIN";
+const pocketStaticArchiveOutputEndMarker = "# POCKET_STATIC_XCFRAMEWORK_OUTPUTS_END";
+const pocketStaticArchiveOutputOld = "${PODS_XCFRAMEWORKS_BUILD_DIR}/pocket_flutter/PocketFlutter.framework";
+const pocketStaticArchiveOutputNew = "${PODS_XCFRAMEWORKS_BUILD_DIR}/pocket_flutter/libpocket_flutter.a";
+
+const pocketStaticArchiveOutputBlock = [
+  pocketStaticArchiveOutputMarker,
+  'pocket_static_xcframework_output_path = File.join(__dir__, "Pods", "Target Support Files", "pocket_flutter", "pocket_flutter-xcframeworks-output-files.xcfilelist")',
+  "if File.file?(pocket_static_xcframework_output_path)",
+  `  pocket_static_xcframework_output_old = "${pocketStaticArchiveOutputOld}"`,
+  `  pocket_static_xcframework_output_new = "${pocketStaticArchiveOutputNew}"`,
+  "  pocket_static_xcframework_output_lines = File.read(pocket_static_xcframework_output_path).lines",
+  "  pocket_static_xcframework_output_changed = false",
+  "  pocket_static_xcframework_output_lines.map! do |line|",
+  "    if line.chomp == pocket_static_xcframework_output_old",
+  "      pocket_static_xcframework_output_changed = true",
+  "      if line.end_with?(\"\\r\\n\")",
+  "        \"#{pocket_static_xcframework_output_new}\\r\\n\"",
+  "      elsif line.end_with?(\"\\n\")",
+  "        \"#{pocket_static_xcframework_output_new}\\n\"",
+  "      else",
+  "        pocket_static_xcframework_output_new",
+  "      end",
+  "    else",
+  "      line",
+  "    end",
+  "  end",
+  "  if pocket_static_xcframework_output_changed",
+  "    File.write(pocket_static_xcframework_output_path, pocket_static_xcframework_output_lines.join)",
+  "  end",
+  "end",
+  pocketStaticArchiveOutputEndMarker,
+].join("\n");
+
+function assertSupportedPostInstallHook(podfile: string): void {
+  const headers = podfile.match(/^[ \t]*post_install\b[^\r\n]*$/gm) ?? [];
+  if (headers.length === 0) return;
+  const supported = /^[ \t]*post_install[ \t]+do[ \t]*\|[ \t]*installer[ \t]*\|[ \t]*(?:#.*)?$/;
+  if (headers.length !== 1 || !supported.test(headers[0]!)) {
+    fail("unsupported post_install hook shape; manual integration required");
+  }
+}
+
+/** Add the static XCFramework output correction immediately after the supported hook header. */
+function addPocketStaticArchiveOutputPatch(podfile: string): string {
+  if (podfile.includes(pocketStaticArchiveOutputMarker)) return podfile;
+
+  const header = /^[ \t]*post_install[ \t]+do[ \t]*\|[ \t]*installer[ \t]*\|[ \t]*(?:#.*)?(?=\r?$)/m.exec(podfile);
+  if (!header) fail("unsupported post_install hook shape; manual integration required");
+  const lineEnd = podfile.indexOf("\n", header.index);
+  if (lineEnd < 0) fail("post_install hook has no body line; manual integration required");
+  const newline = lineEnd > 0 && podfile[lineEnd - 1] === "\r" ? "\r\n" : "\n";
+  const indentation = header[0]!.match(/^[ \t]*/)?.[0] ?? "";
+  const indentedBlock = pocketStaticArchiveOutputBlock
+    .split("\n")
+    .map((blockLine) => `${indentation}  ${blockLine}`)
+    .join(newline);
+  return `${podfile.slice(0, lineEnd + 1)}${indentedBlock}${newline}${podfile.slice(lineEnd + 1)}`;
+}
+
 /** @internal Exported for scaffold regression tests; not an app SDK API. */
 export function patchIosMinimum(iosDirectory: string, hardware = false): void {
   const podfile = join(iosDirectory, "Podfile");
   if (existsSync(podfile)) {
     const text = readFileSync(podfile, "utf8");
+    assertSupportedPostInstallHook(text);
     let updated = /^platform :ios,.*$/m.test(text)
       ? text.replace(/^platform :ios,.*$/m, "platform :ios, '15.0'")
       : `platform :ios, '15.0'\n${text}`;
@@ -163,13 +229,14 @@ export function patchIosMinimum(iosDirectory: string, hardware = false): void {
         return line;
       },
     );
-    if (/post_install do \|installer\|/.test(updated)) {
+    if (/^[ \t]*post_install[ \t]+do[ \t]*\|[ \t]*installer[ \t]*\|/m.test(updated)) {
       if (!deploymentSeen && !updated.includes(deploymentMarker)) {
         updated = updated.replace(/(\s+flutter_additional_ios_build_settings\(target\)\s*\n)/, `$1${deploymentLine}`);
       }
     } else {
       updated += `\npost_install do |installer|\n  installer.pods_project.targets.each do |target|\n${deploymentLine}  end\nend\n`;
     }
+    updated = addPocketStaticArchiveOutputPatch(updated);
     writeFileSync(podfile, updated);
   }
   const project = join(iosDirectory, "Runner.xcodeproj/project.pbxproj");
@@ -462,7 +529,7 @@ function scaffoldTest(flutterDirectory: string, appId: string): void {
   );
 }
 
-function createFlutterHost(project: string, sdk: string, appId: string, hardware: boolean): void {
+function createFlutterHost(project: string, sdk: string, appId: string, hardware: boolean, platform: ReturnType<typeof resolvePlatformExperience>): void {
   const flutterDirectory = join(project, "flutter");
   mkdirSync(flutterDirectory, { recursive: true });
   const flutter = process.env.FLUTTER_BIN ?? "flutter";
@@ -494,16 +561,25 @@ function createFlutterHost(project: string, sdk: string, appId: string, hardware
   const sdkPath = relative(realpathSync(flutterDirectory), realpathSync(sdkPackage)).replaceAll("\\", "/") || ".";
   const hardwarePath = relative(realpathSync(flutterDirectory), realpathSync(join(sdk, "packages/pocket_hardware"))).replaceAll("\\", "/");
   const hardwareDependency = hardware ? `\n  pocket_hardware:\n    path: ${hardwarePath}` : "";
-  writeFileSync(join(flutterDirectory, "pubspec.yaml"), `name: ${name}\ndescription: PocketJS Flutter host generated by the local SDK.\npublish_to: none\nversion: 0.1.0+1\n\nenvironment:\n  sdk: ^3.9.2\n  flutter: '>=3.35.0'\n\ndependencies:\n  flutter:\n    sdk: flutter\n  pocket_sdk:\n    path: ${sdkPath}${hardwareDependency}\n\ndev_dependencies:\n  flutter_lints: ^5.0.0\n  flutter_test:\n    sdk: flutter\n\nflutter:\n  uses-material-design: true\n  assets:\n    - assets/app.qjbc\n    - assets/app.bytecode.json\n    - assets/guest-manifest.json\n    - assets/app.pak\n`);
-  mkdirSync(join(flutterDirectory, "assets"), { recursive: true });
-  const hardwareImport = hardware ? "import 'package:pocket_hardware/pocket_hardware.dart';\n" : "";
-  const hardwareConfig = hardware
-    ? "pluginFactories: [createHardwarePlugin],\n    allowedPermissions: HardwarePermissions.all,\n    "
+  const platformDependency = platform.platformExperience
+    ? `\n  pocket_platform:\n    path: ${relative(realpathSync(flutterDirectory), realpathSync(join(sdk, "packages/pocket_platform"))).replaceAll("\\", "/")}`
     : "";
+  writeFileSync(join(flutterDirectory, "pubspec.yaml"), `name: ${name}\ndescription: PocketJS Flutter host generated by the local SDK.\npublish_to: none\nversion: 0.1.0+1\n\nenvironment:\n  sdk: ^3.9.2\n  flutter: '>=3.35.0'\n\ndependencies:\n  flutter:\n    sdk: flutter\n  pocket_sdk:\n    path: ${sdkPath}${hardwareDependency}${platformDependency}\n\ndev_dependencies:\n  flutter_lints: ^5.0.0\n  flutter_test:\n    sdk: flutter\n\nflutter:\n  uses-material-design: true\n  assets:\n    - assets/app.qjbc\n    - assets/app.bytecode.json\n    - assets/guest-manifest.json\n    - assets/app.pak\n`);
+  mkdirSync(join(flutterDirectory, "assets"), { recursive: true });
+  const hardwareImport = (hardware ? "import 'package:pocket_hardware/pocket_hardware.dart';\n" : "") +
+    (platform.platformExperience ? "import 'package:pocket_platform/pocket_platform.dart';\n" : "");
+  const factories = [...(hardware ? ["createHardwarePlugin"] : []), ...(platform.platformExperience ? ["createPlatformPlugin"] : []), ...(platform.deepLinkScheme ? ["createDeepLinkPlugin"] : [])];
+  const hardwareConfig = (factories.length ? `pluginFactories: [${factories.join(", ")}],\n    ` : "") +
+    (hardware ? "allowedPermissions: HardwarePermissions.all,\n    " : "");
   const hardwareFactory = hardware
     ? "\nPocketPlugin createHardwarePlugin(PocketViewController controller) => HardwarePlugin(\n  onTextureRegistered: controller.authorizePlatformTexture,\n  onTextureReleased: controller.revokePlatformTexture,\n);\n"
     : "";
-  writeFileSync(join(flutterDirectory, "lib/main.dart"), `${hardwareImport}import 'package:flutter/material.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  WidgetsFlutterBinding.ensureInitialized();\n  runApp(PocketApp(config: PocketAppConfig(\n    appId: '${appId.replaceAll("'", "\\'")}',\n    ${hardwareConfig})));\n}\n${hardwareFactory}`);
+  const platformFactory = (platform.platformExperience
+    ? "\nPocketPlugin createPlatformPlugin(PocketViewController controller) => PocketPlatformPlugin();\n"
+    : "") + (platform.deepLinkScheme
+    ? `\nPocketPlugin createDeepLinkPlugin(PocketViewController controller) => PocketDeepLinkPlugin(deepLinkScheme: '${platform.deepLinkScheme}');\n`
+    : "");
+  writeFileSync(join(flutterDirectory, "lib/main.dart"), `${hardwareImport}import 'package:flutter/material.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  WidgetsFlutterBinding.ensureInitialized();\n  runApp(PocketApp(config: PocketAppConfig(\n    appId: '${appId.replaceAll("'", "\\'")}',\n    ${hardwareConfig})));\n}\n${hardwareFactory}${platformFactory}`);
   scaffoldTest(flutterDirectory, appId);
   // `flutter create --no-pub` does not materialize ios/Podfile. Resolve the
   // generated local SDK dependency once so the iOS policy can be applied to
@@ -515,9 +591,10 @@ function createFlutterHost(project: string, sdk: string, appId: string, hardware
   patchAndroidHardwareManifest(androidDirectory, hardware);
   patchAndroidMinimum(androidDirectory);
   patchIosSceneLifecycle(iosDirectory);
+  patchDeepLinkPlatforms(flutterDirectory, platform.deepLinkScheme);
 }
 
-export async function initProject(directory: string, options: { sdkRoot?: string; appId?: string; name?: string; version?: string; hardware?: boolean } = {}): Promise<string> {
+export async function initProject(directory: string, options: { sdkRoot?: string; appId?: string; name?: string; version?: string; hardware?: boolean } & PlatformExperienceOptions = {}): Promise<string> {
   const project = resolve(directory);
   const sdk = resolve(options.sdkRoot ?? sdkRoot);
   if (existsSync(project) && readdirSync(project).length > 0) fail(`init target must be empty: ${project}`);
@@ -527,11 +604,15 @@ export async function initProject(directory: string, options: { sdkRoot?: string
   const name = options.name?.trim() || id;
   const version = options.version ?? "0.1.0";
   const hardware = options.hardware === true;
+  const platform = resolvePlatformExperience(options);
   if (!projectIdPattern.test(id)) fail(`project id is unsafe: ${id}`);
   if (!appIdPattern.test(appId)) fail(`app id is unsafe: ${appId}`);
   if (!versionPattern.test(version)) fail(`version is unsafe: ${version}`);
 
-  writeJson(join(project, "editor.json"), { id, appId, name, title: name, version, build: 1, tickHz: 60, entry: "app.tsx", framework: "solid", hardware });
+  writeJson(join(project, "editor.json"), { id, appId, name, title: name, version, build: 1, tickHz: 60, entry: "app.tsx", framework: "solid", hardware,
+    ...(platform.platformExperience ? { platformExperience: true } : {}),
+    ...(platform.deepLinkScheme ? { deepLinkScheme: platform.deepLinkScheme } : {}),
+  });
   writeJson(join(project, "pocket.json"), {
     $schema: "https://pocketjs.dev/schema/pocket-2.json",
     pocket: 2,
@@ -546,7 +627,11 @@ export async function initProject(directory: string, options: { sdkRoot?: string
   writeJson(join(project, "manifest.json"), {
     $schema: "https://pocketjs.dev/schema/pocket-guest-manifest.json",
     protocolVersion: 1,
-    capabilities: { requires: ["text.glyphs.baked"], optional: hardware ? hardwareCapabilities : [] },
+    capabilities: { requires: ["text.glyphs.baked"], optional: [
+      ...(hardware ? hardwareCapabilities : []),
+      ...(platform.platformExperience ? ["platform.systemUi.set", "platform.haptics.perform"] : []),
+      ...(platform.deepLinkScheme ? ["platform.links.initial", "platform.links.latest", "platform.links.events"] : []),
+    ] },
     permissions: { optional: hardware ? hardwarePermissions : [] },
   });
   writeJson(join(project, "package.json"), {
@@ -562,12 +647,12 @@ export async function initProject(directory: string, options: { sdkRoot?: string
   cpSync(starterApp, join(project, "app.tsx"), { force: true });
   const uiSource = sdkUiPackage(sdk);
   copyTree(uiSource, join(project, "vendor/pocket-ui"));
-  createFlutterHost(project, sdk, appId, hardware);
+  createFlutterHost(project, sdk, appId, hardware, platform);
   writeFileSync(join(project, "README.md"), `# ${name}\n\nGenerated by the local PocketJS SDK.\n\n- Edit \`app.tsx\` and files under \`vendor/pocket-ui\` only when intentionally vendoring the UI package.\n- Build real QuickJS bytecode with \`bun ${sdk}/pocket.ts build .\`.\n- Open the project in Pocket Studio with \`bun ${sdk}/pocket.ts editor .\`.\n- The Flutter host is in \`flutter/\`; run \`flutter pub get\` there after the SDK is available.\n${hardware ? "- Hardware mode is enabled for the compiled iOS/Android provider; review Info.plist and AndroidManifest runtime declarations and request permissions only from an explicit guest action.\n" : ""}`);
   return project;
 }
 
-function projectConfig(project: string): { appId: string; version: string; build: number; tickHz: number; hardware: boolean } {
+function projectConfig(project: string): { appId: string; version: string; build: number; tickHz: number; hardware: boolean; deepLinkScheme?: string } {
   const editorPath = join(project, "editor.json");
   const pocketPath = join(project, "pocket.json");
   const manifestPath = join(project, "manifest.json");
@@ -589,11 +674,13 @@ function projectConfig(project: string): { appId: string; version: string; build
   const build = identity.build;
   const tickHz = typeof editor?.tickHz === "number" ? editor.tickHz : 60;
   const hardware = editor?.hardware === true;
+  if (editor?.deepLinkScheme !== undefined && typeof editor.deepLinkScheme !== "string") fail("editor.deepLinkScheme must be a string");
+  const platform = resolvePlatformExperience({ platformExperience: editor?.platformExperience === true, deepLinkScheme: editor?.deepLinkScheme as string | undefined });
   if (typeof appId !== "string" || !appIdPattern.test(appId)) fail(`unsafe appId in ${project}`);
   if (typeof version !== "string" || !versionPattern.test(version)) fail(`unsafe version in ${project}`);
   if (!Number.isSafeInteger(build) || build < 1) fail(`unsafe build in ${project}`);
   if (!Number.isInteger(tickHz) || tickHz < 1 || tickHz > 120) fail(`unsafe tickHz in ${project}`);
-  return { appId, version, build, tickHz, hardware };
+  return { appId, version, build, tickHz, hardware, deepLinkScheme: platform.deepLinkScheme };
 }
 
 export async function buildProject(directory: string, options: { outDir?: string; sdkRoot?: string; platform?: NativePlatform } = {}): Promise<{ project: string; output: string; qjbc: string; pak: string; metadata: string }> {
@@ -617,6 +704,7 @@ export async function buildProject(directory: string, options: { outDir?: string
       patchIosSceneLifecycle(iosDirectory);
     }
   }
+  patchDeepLinkPlatforms(join(project, "flutter"), config.deepLinkScheme);
   const output = resolve(options.outDir ?? join(project, "build/pocket"));
   mkdirSync(output, { recursive: true });
   const staging = mkdtempSync(join(tmpdir(), "pocket-sdk-build-"));
@@ -679,8 +767,20 @@ async function runEditor(directory: string, options: { port?: number; workspace?
   });
 }
 
+/** Generate data-only plugin contracts; never execute a consumer or install native code. */
+export async function exportPluginTypes(inputPath: string, outputPath: string): Promise<void> {
+  const source = resolve(inputPath);
+  if (lstatSync(source).size > 256 * 1024) fail("plugin descriptor export exceeds 256 KiB");
+  const { generatePluginTypesReport } = await import("./scripts/plugin_types.ts");
+  const generated = generatePluginTypesReport(readJson(source));
+  const output = resolve(outputPath);
+  mkdirSync(dirname(output), { recursive: true });
+  writeFileSync(output, generated.source);
+  console.log(JSON.stringify({ output, capabilities: generated.includedCapabilities, unavailable: generated.unavailableCapabilities }, null, 2));
+}
+
 function usage(): never {
-  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR]");
+  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR]");
   process.exit(1);
 }
 
@@ -696,8 +796,10 @@ if (import.meta.main) {
       const name = takeFlag(args, "name");
       const version = takeFlag(args, "version");
       const hardware = takeBooleanFlag(args, "hardware");
+      const platformExperience = takeBooleanFlag(args, "platform-experience");
+      const deepLinkScheme = takeFlag(args, "deep-link-scheme");
       ensureNoArgs(args);
-      console.log(`pocket init: ${await initProject(directory, { sdkRoot: sdk, appId, name, version, hardware })}`);
+      console.log(`pocket init: ${await initProject(directory, { sdkRoot: sdk, appId, name, version, hardware, platformExperience, deepLinkScheme })}`);
     } else if (command === "build") {
       const directory = takePosition(args, "project directory");
       const out = takeFlag(args, "out");
@@ -707,6 +809,12 @@ if (import.meta.main) {
       if (platform !== undefined && platform !== "ios-sim" && platform !== "ios" && platform !== "macos" && platform !== "android") fail("--platform must be ios-sim, ios, macos, or android");
       ensureNoArgs(args);
       await buildProject(directory, { outDir: out, sdkRoot: sdk, platform });
+    } else if (command === "types") {
+      const input = takePosition(args, "plugin descriptor JSON");
+      const output = takeFlag(args, "out");
+      if (!output) fail("types requires --out=plugin-types.ts");
+      ensureNoArgs(args);
+      await exportPluginTypes(input, output);
     } else if (command === "editor") {
       const directory = takePosition(args, "project directory");
       const portValue = takeFlag(args, "port");

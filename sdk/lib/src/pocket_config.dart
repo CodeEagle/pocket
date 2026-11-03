@@ -77,12 +77,14 @@ final class PocketAppConfig {
     this.compositorSurfaces = const {},
     this.workerHttpOrigins = const {},
     this.offloadProviderFactory,
+    this.memoryLimits = const PocketMemoryLimits(),
   });
   final String appId;
   final String bytecodeAsset;
   final String pakAsset;
   final String metadataAsset;
   final String manifestAsset;
+  final PocketMemoryLimits memoryLimits;
   final PocketUpdateConfig? updates;
 
   final bool showFps;
@@ -104,7 +106,7 @@ final class PocketAppConfig {
   /// Keep the callback stable across parent rebuilds, as with plugin factories.
   final PocketRecordingController Function()? recordingFactory;
 
-  /// Copy this config while replacing the two composable declaration lists.
+  /// Copy this config while replacing extensions or the memory allowance.
   ///
   /// The constructor below is the single field-preserving copy boundary used
   /// by host composition and plugin attachment. Omitted lists retain their
@@ -112,6 +114,8 @@ final class PocketAppConfig {
   PocketAppConfig copyWith({
     Iterable<PocketPluginFactory>? pluginFactories,
     Iterable<String>? additionalCapabilities,
+    PocketMemoryLimits? memoryLimits,
+    PocketRecordingController Function()? recordingFactory,
   }) => PocketAppConfig(
     appId: appId,
     bytecodeAsset: bytecodeAsset,
@@ -127,10 +131,11 @@ final class PocketAppConfig {
     additionalCapabilities: additionalCapabilities == null
         ? this.additionalCapabilities
         : Set<String>.unmodifiable(additionalCapabilities),
-    recordingFactory: recordingFactory,
+    recordingFactory: recordingFactory ?? this.recordingFactory,
     compositorSurfaces: compositorSurfaces,
     workerHttpOrigins: workerHttpOrigins,
     offloadProviderFactory: offloadProviderFactory,
+    memoryLimits: memoryLimits ?? this.memoryLimits,
   );
 
   /// Attach compiled providers without changing the app's assets or policy.
@@ -151,6 +156,7 @@ final class PocketAppConfig {
       }
     }
     updates?.validate();
+    memoryLimits.validate();
   }
 
   @override
@@ -164,6 +170,7 @@ final class PocketAppConfig {
           metadataAsset == other.metadataAsset &&
           manifestAsset == other.manifestAsset &&
           updates == other.updates &&
+          memoryLimits == other.memoryLimits &&
           showFps == other.showFps &&
           recordingFactory == other.recordingFactory &&
           offloadProviderFactory == other.offloadProviderFactory &&
@@ -181,6 +188,7 @@ final class PocketAppConfig {
     metadataAsset,
     manifestAsset,
     updates,
+    memoryLimits,
     showFps,
     recordingFactory,
     offloadProviderFactory,

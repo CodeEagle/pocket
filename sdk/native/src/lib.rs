@@ -276,6 +276,11 @@ struct PendingWorker {
 pub struct HostState {
     ops: OpContext,
     guest: RquickjsGuest,
+    /// Immutable per-runtime memory admission policy.  A configured heap
+    /// limit is passed to every QuickJS realm initialization, including
+    /// reloads; it is deliberately not mutable after construction so an
+    /// active realm cannot be downgraded while it is executing.
+    memory_limits: MemoryLimits,
     nodes: Rc<RefCell<Vec<NodeMeta>>>,
     outbound: Rc<RefCell<Vec<serde_json::Value>>>,
     /// One lock-free SPSC channel per runtime. Reload closes this generation
@@ -336,6 +341,17 @@ pub struct HostState {
     frame_json_serialized_bytes: u64,
     frame_json_cache_hits: u64,
     draw_decode_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MemoryLimits {
+    /// `None` preserves the legacy 16 MiB script/DOM budget plus the PAK
+    /// bytes reserved by `guest_heap_limit`.  A configured value is the
+    /// complete QuickJS runtime budget and already includes `globalThis.__pak`.
+    heap_limit_bytes: Option<usize>,
+    /// Optional package admission limit.  It is checked against the actual
+    /// PAK byte length before native assets or a guest realm are mounted.
+    max_pak_bytes: Option<usize>,
 }
 
 /// Compact, little-endian frame transport used by the production Flutter
@@ -1273,11 +1289,11 @@ fn guest_environment<'a>(
     host: &HostState,
     pak: &'a [u8],
     assets: Option<&'a AssetRegistry>,
-) -> GuestEnvironment<'a> {
+) -> Result<GuestEnvironment<'a>, String> {
     let auxiliary_viewport = host
         .auxiliary_viewport
         .map(|(width, height)| [width as u32, height as u32]);
-    GuestEnvironment {
+    Ok(GuestEnvironment {
         host: "flutter-canvas-poc",
         host_abi: BINDING_GENERATION,
         tick_hz: host.tick_hz,
@@ -1292,10 +1308,10 @@ fn guest_environment<'a>(
             })
             .unwrap_or(0),
         raster_density: host.raster_density,
-        heap_limit: guest_heap_limit(pak.len()),
+        heap_limit: guest_heap_limit(host, pak.len())?,
         pak,
         assets,
-    }
+    })
 }
 
 /// Convert a QuickJS exception into a useful host diagnostic.  rquickjs's
@@ -3210,13 +3226,95 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
 const PAK_MAGIC: u32 = 0x4b50_4344;
 const FONT_ATLAS_MAGIC: u32 = 0x4146_4344;
 const BASE_GUEST_HEAP_LIMIT: usize = 16 * 1024 * 1024;
+/// A configured QuickJS limit must leave enough room for the runtime and
+/// bridge bootstrap.  This is a configuration guard, not a promise about
+/// process RSS or native/GPU allocations.
+const MIN_CONFIGURED_HEAP_LIMIT_BYTES: u64 = 64 * 1024;
+/// Keep the public constructor bounded on 32-bit and mobile targets.  The
+/// value is intentionally capped at the public SDK contract's 2 GiB ceiling
+/// rather than accepting an accidental near-`usize::MAX` allocation request.
+const MAX_CONFIGURED_HEAP_LIMIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// The configured admission ceiling is independent from the legacy local-file
+/// loader's 256 MiB bound.  A caller may choose a larger policy ceiling while
+/// still being subject to the existing package/file admission path.
+const MAX_CONFIGURED_PAK_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The QuickJS guest owns an immutable copy of `pak` as `globalThis.__pak`.
 /// Keep the original script/DOM budget while reserving room for that package
 /// copy; otherwise a valid image/font-heavy bundle can fail during mount with
 /// only the opaque `RuntimeError::Guest` at the FFI boundary.
-fn guest_heap_limit(pak_len: usize) -> usize {
-    BASE_GUEST_HEAP_LIMIT.saturating_add(pak_len)
+fn validate_memory_limits(
+    heap_limit_bytes: u64,
+    max_pak_bytes: u64,
+) -> Result<MemoryLimits, String> {
+    let heap_limit_bytes = if heap_limit_bytes == 0 {
+        None
+    } else {
+        if heap_limit_bytes < MIN_CONFIGURED_HEAP_LIMIT_BYTES
+            || heap_limit_bytes > MAX_CONFIGURED_HEAP_LIMIT_BYTES
+        {
+            return Err(format!(
+                "memory_limits.heapLimitBytes must be 0 or between {} and {} bytes (got {})",
+                MIN_CONFIGURED_HEAP_LIMIT_BYTES,
+                MAX_CONFIGURED_HEAP_LIMIT_BYTES,
+                heap_limit_bytes
+            ));
+        }
+        Some(usize::try_from(heap_limit_bytes).map_err(|_| {
+            format!(
+                "memory_limits.heapLimitBytes {} does not fit in native usize",
+                heap_limit_bytes
+            )
+        })?)
+    };
+
+    let max_pak_bytes = if max_pak_bytes == 0 {
+        None
+    } else {
+        if max_pak_bytes > MAX_CONFIGURED_PAK_LIMIT_BYTES {
+            return Err(format!(
+                "memory_limits.maxPakBytes must be 0 or at most {} bytes (got {})",
+                MAX_CONFIGURED_PAK_LIMIT_BYTES, max_pak_bytes
+            ));
+        }
+        Some(usize::try_from(max_pak_bytes).map_err(|_| {
+            format!(
+                "memory_limits.maxPakBytes {} does not fit in native usize",
+                max_pak_bytes
+            )
+        })?)
+    };
+
+    Ok(MemoryLimits {
+        heap_limit_bytes: heap_limit_bytes,
+        max_pak_bytes,
+    })
+}
+
+fn guest_heap_limit(host: &HostState, pak_len: usize) -> Result<usize, String> {
+    if let Some(max_pak_bytes) = host.memory_limits.max_pak_bytes {
+        if pak_len > max_pak_bytes {
+            return Err(format!(
+                "pak admission: {} bytes exceeds memory_limits.maxPakBytes {}",
+                pak_len, max_pak_bytes
+            ));
+        }
+    }
+    if let Some(heap_limit_bytes) = host.memory_limits.heap_limit_bytes {
+        if pak_len > heap_limit_bytes {
+            return Err(format!(
+                "pak admission: {} bytes exceeds memory_limits.heapLimitBytes {} (configured heap includes __pak)",
+                pak_len, heap_limit_bytes
+            ));
+        }
+        return Ok(heap_limit_bytes);
+    }
+    BASE_GUEST_HEAP_LIMIT.checked_add(pak_len).ok_or_else(|| {
+        format!(
+            "legacy guest heap limit overflow for PAK of {} bytes",
+            pak_len
+        )
+    })
 }
 
 fn parse_pak_font_metrics(pak: &[u8]) -> Result<TextMetrics, String> {
@@ -3338,7 +3436,14 @@ fn install_text_measure(ui: &mut Ui, metrics: Rc<RefCell<TextMetrics>>) {
 /// sequentially from one Dart isolate.
 #[no_mangle]
 pub extern "C" fn pocket_create(width: f64, height: f64) -> *mut HostState {
-    pocket_create_with_density_and_tick_hz(width, height, 1, DEFAULT_TICK_HZ)
+    pocket_create_with_memory_limits(
+        width,
+        height,
+        1,
+        DEFAULT_TICK_HZ,
+        0,
+        0,
+    )
 }
 
 /// Create an engine instance with an explicit core raster density.
@@ -3354,7 +3459,14 @@ pub extern "C" fn pocket_create_with_density(
     height: f64,
     raster_density: u32,
 ) -> *mut HostState {
-    pocket_create_with_density_and_tick_hz(width, height, raster_density, DEFAULT_TICK_HZ)
+    pocket_create_with_memory_limits(
+        width,
+        height,
+        raster_density,
+        DEFAULT_TICK_HZ,
+        0,
+        0,
+    )
 }
 
 /// Create a host with explicit core/guest tick rate.
@@ -3370,42 +3482,83 @@ pub extern "C" fn pocket_create_with_density_and_tick_hz(
     raster_density: u32,
     tick_hz: u32,
 ) -> *mut HostState {
+    pocket_create_with_memory_limits(
+        width,
+        height,
+        raster_density,
+        tick_hz,
+        0,
+        0,
+    )
+}
+
+/// Create an engine instance with an immutable per-runtime memory policy.
+///
+/// `heap_limit_bytes` is the complete QuickJS heap budget, including the
+/// package bytes exposed as `globalThis.__pak`. `max_pak_bytes` is an
+/// admission ceiling checked before native package assets or a guest realm
+/// are mounted. A zero value means that the corresponding policy is absent;
+/// it never means an unlimited QuickJS heap. The legacy 16 MiB plus PAK
+/// behavior is retained when both values are zero.
+#[no_mangle]
+pub extern "C" fn pocket_create_with_memory_limits(
+    width: f64,
+    height: f64,
+    raster_density: u32,
+    tick_hz: u32,
+    heap_limit_bytes: u64,
+    max_pak_bytes: u64,
+) -> *mut HostState {
+    let memory_limits = match validate_memory_limits(heap_limit_bytes, max_pak_bytes) {
+        Ok(memory_limits) => memory_limits,
+        Err(error) => return create_error_host(width, height, error),
+    };
     if !(1..=4).contains(&raster_density) {
         // Creation failures in this ABI return a destroyable opaque handle so
         // callers can retrieve the diagnostic through pocket_last_error. Build
         // a density-1 fallback only to carry that error; it must not escape as
         // a usable runtime because last_error is non-empty.
-        let handle = create_host(width, height, 1, DEFAULT_TICK_HZ);
-        if !handle.is_null() {
-            unsafe {
-                set_error(
-                    &mut *handle,
-                    format!(
-                        "raster density must be an integer from 1 through 4 (got {raster_density})"
-                    ),
-                );
-            }
-        }
-        return handle;
+        return create_error_host(
+            width,
+            height,
+            format!(
+                "raster density must be an integer from 1 through 4 (got {raster_density})"
+            ),
+        );
     }
     if !(1..=MAX_HOST_TICK_HZ).contains(&tick_hz) {
-        let handle = create_host(width, height, 1, DEFAULT_TICK_HZ);
-        if !handle.is_null() {
-            unsafe {
-                set_error(
-                    &mut *handle,
-                    format!(
-                        "tick rate must be an integer from 1 through {MAX_HOST_TICK_HZ} (got {tick_hz})"
-                    ),
-                );
-            }
-        }
-        return handle;
+        return create_error_host(
+            width,
+            height,
+            format!(
+                "tick rate must be an integer from 1 through {MAX_HOST_TICK_HZ} (got {tick_hz})"
+            ),
+        );
     }
-    create_host(width, height, raster_density, tick_hz)
+    create_host(width, height, raster_density, tick_hz, memory_limits)
 }
 
-fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *mut HostState {
+fn create_error_host(width: f64, height: f64, error: impl Into<String>) -> *mut HostState {
+    let handle = create_host(
+        width,
+        height,
+        1,
+        DEFAULT_TICK_HZ,
+        MemoryLimits::default(),
+    );
+    if !handle.is_null() {
+        unsafe { set_error(&mut *handle, error) };
+    }
+    handle
+}
+
+fn create_host(
+    width: f64,
+    height: f64,
+    raster_density: u32,
+    tick_hz: u32,
+    memory_limits: MemoryLimits,
+) -> *mut HostState {
     let width = width.max(1.0).min(65535.0) as u32;
     let height = height.max(1.0).min(65535.0) as u32;
     let text_metrics = Rc::new(RefCell::new(TextMetrics::default()));
@@ -3433,6 +3586,7 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         return Box::into_raw(Box::new(HostState {
             ops,
             guest: RquickjsGuest::new(BindingProfile::Canonical),
+            memory_limits,
             nodes: Rc::new(RefCell::new(Vec::new())),
             outbound: Rc::new(RefCell::new(Vec::new())),
             duplex: error_duplex,
@@ -3489,7 +3643,9 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         auxiliary_viewport: None,
         auxiliary_root: 0,
         raster_density,
-        heap_limit: BASE_GUEST_HEAP_LIMIT,
+        heap_limit: memory_limits
+            .heap_limit_bytes
+            .unwrap_or(BASE_GUEST_HEAP_LIMIT),
         pak: &[],
         assets: None,
     };
@@ -3498,6 +3654,7 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
         return Box::into_raw(Box::new(HostState {
             ops,
             guest,
+            memory_limits,
             nodes: Rc::new(RefCell::new(Vec::new())),
             outbound: Rc::new(RefCell::new(Vec::new())),
             duplex: error_duplex,
@@ -3550,6 +3707,7 @@ fn create_host(width: f64, height: f64, raster_density: u32, tick_hz: u32) -> *m
     let mut host = HostState {
         ops,
         guest,
+        memory_limits,
         nodes: nodes.clone(),
         outbound: outbound.clone(),
         duplex,
@@ -4100,7 +4258,13 @@ pub unsafe extern "C" fn pocket_enable_auxiliary(
     host.auxiliary_viewport = Some(requested);
     host.draw_cache = None;
     host.frame_json_cache = None;
-    let environment = guest_environment(host, &[], None);
+    let environment = match guest_environment(host, &[], None) {
+        Ok(environment) => environment,
+        Err(error) => {
+            set_error(host, error);
+            return -1;
+        }
+    };
     if let Err(error) = host.guest.initialize(host.ops.clone(), &environment) {
         let detail = host.guest.last_error().unwrap_or("no guest detail");
         set_error(
@@ -4241,7 +4405,7 @@ fn initialize_guest_for_load(
     pak: &[u8],
     assets: &AssetRegistry,
 ) -> Result<(), String> {
-    let environment = guest_environment(host, pak, Some(assets));
+    let environment = guest_environment(host, pak, Some(assets))?;
     host.guest
         .initialize(host.ops.clone(), &environment)
         .map_err(|error| {
@@ -4353,6 +4517,10 @@ pub unsafe extern "C" fn pocket_load(
     let source = CStr::from_ptr(source).to_string_lossy();
     let pak = std::slice::from_raw_parts(pak, pak_len);
     let result = (|| {
+        // Admit against the immutable runtime policy before resetting the
+        // current guest or installing any native package assets. A rejected
+        // reload therefore leaves the existing realm and frame state intact.
+        let _ = guest_heap_limit(host, pak.len())?;
         reset_host_for_load(host);
         let assets = install_host_assets(host, pak)?;
         initialize_guest_for_load(host, pak, &assets)?;
@@ -4437,6 +4605,10 @@ pub unsafe extern "C" fn pocket_load_bytecode(
         }
     };
     let result = (|| {
+        // Keep package admission before reset/asset mount for bytecode loads as
+        // well; reloads must preserve the configured policy and old realm on
+        // an oversized package.
+        let _ = guest_heap_limit(host, pak.len())?;
         reset_host_for_load(host);
         let assets = install_host_assets(host, pak)?;
         initialize_guest_for_load(host, pak, &assets)?;

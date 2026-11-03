@@ -11,6 +11,7 @@ import 'package:pocket_services/pocket_services.dart';
 /// package can provide or load native code.
 const String hardwarePluginId = 'flutter.hardware';
 const String hardwareMethodChannelName = 'com.pocketnexus.host/hardware';
+const String hardwareEventsChannelName = 'com.pocketnexus.host/hardware/events';
 
 abstract final class HardwarePermissions {
   static const String camera = 'hardware.camera';
@@ -46,7 +47,12 @@ abstract final class HardwareCapabilities {
   static const String photosDelete = 'hardware.photos.delete';
   static const String bluetoothScan = 'hardware.bluetooth.scan';
   static const String bluetoothConnect = 'hardware.bluetooth.connect';
+  static const String bluetoothRead = 'hardware.bluetooth.read';
+  static const String bluetoothWrite = 'hardware.bluetooth.write';
+  static const String bluetoothNotifications =
+      'hardware.bluetooth.notifications';
   static const String sensorsRead = 'hardware.sensors.read';
+  static const String sensorsWatch = 'hardware.sensors.watch';
   static const String biometricAuthenticate =
       'hardware.biometrics.authenticate';
   static const String locationCurrent = 'hardware.location.current';
@@ -64,7 +70,11 @@ abstract final class HardwareCapabilities {
     photosDelete,
     bluetoothScan,
     bluetoothConnect,
+    bluetoothRead,
+    bluetoothWrite,
+    bluetoothNotifications,
     sensorsRead,
+    sensorsWatch,
     biometricAuthenticate,
     locationCurrent,
     weatherCurrent,
@@ -83,6 +93,25 @@ abstract interface class HardwarePlatform {
   ]);
 }
 
+/// Optional extension implemented by a platform boundary that can deliver
+/// long-lived native hardware events. Existing [HardwarePlatform] fakes remain
+/// valid and simply report streaming as unavailable when this interface is not
+/// implemented.
+abstract interface class HardwareStreamingPlatform {
+  /// One process-local broadcast source for all native hardware streams.
+  /// Events are maps containing `streamId` and one of `data`, `error`, or
+  /// `done`; consumers must route only their own stream id.
+  Stream<Object?> get hardwareEvents;
+
+  Future<Map<String, dynamic>> startHardwareStream(
+    Map<String, dynamic> arguments,
+  );
+
+  Future<Map<String, dynamic>> stopHardwareStream(
+    Map<String, dynamic> arguments,
+  );
+}
+
 final class HardwarePlatformException implements Exception {
   const HardwarePlatformException(this.code, this.message);
 
@@ -93,11 +122,41 @@ final class HardwarePlatformException implements Exception {
   String toString() => 'HardwarePlatformException($code): $message';
 }
 
-final class MethodChannelHardwarePlatform implements HardwarePlatform {
-  MethodChannelHardwarePlatform({MethodChannel? channel})
-      : channel = channel ?? const MethodChannel(hardwareMethodChannelName);
+final class MethodChannelHardwarePlatform
+    implements HardwarePlatform, HardwareStreamingPlatform {
+  MethodChannelHardwarePlatform({MethodChannel? channel, EventChannel? events})
+    : channel = channel ?? const MethodChannel(hardwareMethodChannelName),
+      events = events ?? const EventChannel(hardwareEventsChannelName),
+      _usesSharedEvents = events == null;
+
+  static Stream<Object?>? _sharedHardwareEvents;
 
   final MethodChannel channel;
+  final EventChannel events;
+  final bool _usesSharedEvents;
+  Stream<Object?>? _hardwareEvents;
+
+  @override
+  Stream<Object?> get hardwareEvents {
+    if (_usesSharedEvents) {
+      return _sharedHardwareEvents ??= events
+          .receiveBroadcastStream()
+          .asBroadcastStream();
+    }
+    return _hardwareEvents ??= events
+        .receiveBroadcastStream()
+        .asBroadcastStream();
+  }
+
+  @override
+  Future<Map<String, dynamic>> startHardwareStream(
+    Map<String, dynamic> arguments,
+  ) => invoke('startHardwareStream', arguments);
+
+  @override
+  Future<Map<String, dynamic>> stopHardwareStream(
+    Map<String, dynamic> arguments,
+  ) => invoke('stopHardwareStream', arguments);
 
   @override
   Future<Map<String, dynamic>> invoke(
@@ -133,9 +192,10 @@ typedef HardwareWeatherFetcher = Future<Map<String, dynamic>> Function(Uri uri);
 
 String _newSensorOwnerToken() {
   final random = math.Random.secure();
-  return List<int>.generate(16, (_) => random.nextInt(256))
-      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-      .join();
+  return List<int>.generate(
+    16,
+    (_) => random.nextInt(256),
+  ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
 }
 
 final class _SensorOperationIdentity {
@@ -145,10 +205,48 @@ final class _SensorOperationIdentity {
   final int operationId;
 
   Map<String, dynamic> toNativeArguments() => <String, dynamic>{
-        'ownerToken': ownerToken,
-        'operationId': operationId,
-      };
+    'ownerToken': ownerToken,
+    'operationId': operationId,
+  };
 }
+
+final class _HardwareStreamBinding {
+  _HardwareStreamBinding(this.streamId, this.controller, this._stop);
+
+  final String streamId;
+  final StreamController<Object?> controller;
+  final Future<void> Function() _stop;
+  StreamSubscription<Object?>? eventsSubscription;
+  Future<void>? startFuture;
+
+  Future<void> stop() => _stop();
+}
+
+const PocketPluginSchema _bleSelectorSchema = PocketPluginSchema.object(
+  properties: <String, PocketPluginSchema>{
+    'deviceId': PocketPluginSchema.string(),
+    'serviceUuid': PocketPluginSchema.string(),
+    'characteristicUuid': PocketPluginSchema.string(),
+  },
+  required: <String>{'deviceId', 'serviceUuid', 'characteristicUuid'},
+);
+
+const PocketPluginSchema _bleWriteSchema = PocketPluginSchema.object(
+  properties: <String, PocketPluginSchema>{
+    'deviceId': PocketPluginSchema.string(),
+    'serviceUuid': PocketPluginSchema.string(),
+    'characteristicUuid': PocketPluginSchema.string(),
+    'value': PocketPluginSchema.array(PocketPluginSchema.integer()),
+    'withResponse': PocketPluginSchema.boolean(),
+  },
+  required: <String>{'deviceId', 'serviceUuid', 'characteristicUuid', 'value'},
+);
+
+const PocketPluginSchema _sensorWatchSchema = PocketPluginSchema.object(
+  properties: <String, PocketPluginSchema>{
+    'samplingHz': PocketPluginSchema.integer(),
+  },
+);
 
 /// The network side of weather remains a host-owned service.  It consumes a
 /// real location (or explicit caller coordinates) and never supplies seeded or
@@ -161,9 +259,9 @@ final class HardwarePlugin extends PocketPlugin {
     this.onTextureReleased,
     this.requestTimeout = const Duration(seconds: 16),
     Set<String>? grantedPermissions,
-  })  : _platform = platform ?? MethodChannelHardwarePlatform(),
-        _weatherFetcher = weatherFetcher ?? _fetchOpenMeteo,
-        _grantedPermissions = grantedPermissions;
+  }) : _platform = platform ?? MethodChannelHardwarePlatform(),
+       _weatherFetcher = weatherFetcher ?? _fetchOpenMeteo,
+       _grantedPermissions = grantedPermissions;
 
   final HardwarePlatform _platform;
   final HardwareWeatherFetcher _weatherFetcher;
@@ -182,15 +280,20 @@ final class HardwarePlugin extends PocketPlugin {
   int _sensorOperationEpoch = 0;
   Future<void> _cameraTail = Future<void>.value();
   PocketPluginContext? _activeContext;
+  String? _trustedSessionId;
+  final Map<String, _HardwareStreamBinding> _activeHardwareStreams =
+      <String, _HardwareStreamBinding>{};
 
   void _checkPermission(String permission) {
-    if (_grantedPermissions != null && !_grantedPermissions.contains(permission)) {
+    if (_grantedPermissions != null &&
+        !_grantedPermissions.contains(permission)) {
       throw PocketCapabilityException(
         'permission_denied',
         'permission $permission is not granted',
       );
     }
-    if (_activeContext != null && !_activeContext!.grantedPermissions.contains(permission)) {
+    if (_activeContext != null &&
+        !_activeContext!.grantedPermissions.contains(permission)) {
       throw PocketCapabilityException(
         'permission_denied',
         'permission $permission is not granted',
@@ -200,101 +303,199 @@ final class HardwarePlugin extends PocketPlugin {
 
   @override
   PocketPluginDescriptor get descriptor => const PocketPluginDescriptor(
-        id: hardwarePluginId,
-        version: '1.0.0',
-        description:
-            'Compiled host camera, photos, BLE, sensors, biometrics, location and weather provider',
+    id: hardwarePluginId,
+    version: '1.0.0',
+    description:
+        'Compiled host camera, photos, BLE, sensors, biometrics, location and weather provider',
+    permissions: const <String>{},
+    optionalPermissions: HardwarePermissions.all,
+    limits: PocketPluginLimits(
+      maxConcurrentRequests: 4,
+      maxResponseBytes: 512 * 1024,
+    ),
+    capabilities: <String, PocketPluginCapability>{
+      HardwareCapabilities.permissions: PocketPluginCapability(
+        name: HardwareCapabilities.permissions,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{},
+      ),
+      HardwareCapabilities.requestPermission: PocketPluginCapability(
+        name: HardwareCapabilities.requestPermission,
+        kind: PocketCapabilityKind.request,
         permissions: const <String>{},
         optionalPermissions: HardwarePermissions.all,
-        limits: PocketPluginLimits(
-          maxConcurrentRequests: 4,
-          maxResponseBytes: 512 * 1024,
-          maxStreamEvents: 256,
+      ),
+      HardwareCapabilities.cameraPreviewStart: PocketPluginCapability(
+        name: HardwareCapabilities.cameraPreviewStart,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.camera},
+      ),
+      HardwareCapabilities.cameraPreviewStop: PocketPluginCapability(
+        name: HardwareCapabilities.cameraPreviewStop,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.camera},
+      ),
+      HardwareCapabilities.cameraLensSwitch: PocketPluginCapability(
+        name: HardwareCapabilities.cameraLensSwitch,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.camera},
+      ),
+      HardwareCapabilities.cameraFlashToggle: PocketPluginCapability(
+        name: HardwareCapabilities.cameraFlashToggle,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.camera},
+      ),
+      HardwareCapabilities.cameraCapture: PocketPluginCapability(
+        name: HardwareCapabilities.cameraCapture,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.camera},
+      ),
+      HardwareCapabilities.photosList: PocketPluginCapability(
+        name: HardwareCapabilities.photosList,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.photos},
+      ),
+      HardwareCapabilities.photosDelete: PocketPluginCapability(
+        name: HardwareCapabilities.photosDelete,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.photos},
+      ),
+      HardwareCapabilities.bluetoothScan: PocketPluginCapability(
+        name: HardwareCapabilities.bluetoothScan,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.bluetooth},
+      ),
+      HardwareCapabilities.bluetoothConnect: PocketPluginCapability(
+        name: HardwareCapabilities.bluetoothConnect,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.bluetooth},
+      ),
+      HardwareCapabilities.bluetoothRead: PocketPluginCapability(
+        name: HardwareCapabilities.bluetoothRead,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.bluetooth},
+        schema: PocketPluginCapabilitySchema(
+          parameters: _bleSelectorSchema,
+          result: PocketPluginSchema.object(
+            properties: <String, PocketPluginSchema>{
+              'ok': PocketPluginSchema.boolean(),
+              'realBle': PocketPluginSchema.boolean(),
+              'device': PocketPluginSchema.string(),
+              'deviceId': PocketPluginSchema.string(),
+              'serviceUuid': PocketPluginSchema.string(),
+              'characteristicUuid': PocketPluginSchema.string(),
+              'value': PocketPluginSchema.array(PocketPluginSchema.integer()),
+              'bytesRead': PocketPluginSchema.integer(),
+            },
+          ),
         ),
-        capabilities: <String, PocketPluginCapability>{
-          HardwareCapabilities.permissions: PocketPluginCapability(
-            name: HardwareCapabilities.permissions,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{},
+      ),
+      HardwareCapabilities.bluetoothWrite: PocketPluginCapability(
+        name: HardwareCapabilities.bluetoothWrite,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.bluetooth},
+        schema: PocketPluginCapabilitySchema(
+          parameters: _bleWriteSchema,
+          result: PocketPluginSchema.object(
+            properties: <String, PocketPluginSchema>{
+              'ok': PocketPluginSchema.boolean(),
+              'realBle': PocketPluginSchema.boolean(),
+              'device': PocketPluginSchema.string(),
+              'deviceId': PocketPluginSchema.string(),
+              'serviceUuid': PocketPluginSchema.string(),
+              'characteristicUuid': PocketPluginSchema.string(),
+              'bytesWritten': PocketPluginSchema.integer(),
+              'written': PocketPluginSchema.boolean(),
+              'withResponse': PocketPluginSchema.boolean(),
+            },
           ),
-          HardwareCapabilities.requestPermission: PocketPluginCapability(
-            name: HardwareCapabilities.requestPermission,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{},
-            optionalPermissions: HardwarePermissions.all,
+        ),
+      ),
+      HardwareCapabilities.bluetoothNotifications: PocketPluginCapability(
+        name: HardwareCapabilities.bluetoothNotifications,
+        kind: PocketCapabilityKind.stream,
+        permissions: const <String>{HardwarePermissions.bluetooth},
+        schema: PocketPluginCapabilitySchema(
+          parameters: _bleSelectorSchema,
+          streamItem: PocketPluginSchema.object(
+            properties: <String, PocketPluginSchema>{
+              'realBle': PocketPluginSchema.boolean(),
+              'device': PocketPluginSchema.string(),
+              'deviceId': PocketPluginSchema.string(),
+              'serviceUuid': PocketPluginSchema.string(),
+              'characteristicUuid': PocketPluginSchema.string(),
+              'value': PocketPluginSchema.array(PocketPluginSchema.integer()),
+              'timestampMs': PocketPluginSchema.integer(),
+            },
           ),
-          HardwareCapabilities.cameraPreviewStart: PocketPluginCapability(
-            name: HardwareCapabilities.cameraPreviewStart,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.camera},
+        ),
+      ),
+      HardwareCapabilities.sensorsRead: PocketPluginCapability(
+        name: HardwareCapabilities.sensorsRead,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.sensors},
+      ),
+      HardwareCapabilities.sensorsWatch: PocketPluginCapability(
+        name: HardwareCapabilities.sensorsWatch,
+        kind: PocketCapabilityKind.stream,
+        permissions: const <String>{HardwarePermissions.sensors},
+        schema: PocketPluginCapabilitySchema(
+          parameters: _sensorWatchSchema,
+          streamItem: PocketPluginSchema.object(
+            properties: <String, PocketPluginSchema>{
+              'realSensors': PocketPluginSchema.boolean(),
+              'sensor': PocketPluginSchema.string(),
+              'sensorType': PocketPluginSchema.integer(),
+              'values': PocketPluginSchema.array(PocketPluginSchema.number()),
+              'x': PocketPluginSchema.number(),
+              'y': PocketPluginSchema.number(),
+              'z': PocketPluginSchema.number(),
+              'timestampNs': PocketPluginSchema.integer(),
+              'accelX': PocketPluginSchema.number(),
+              'accelY': PocketPluginSchema.number(),
+              'accelZ': PocketPluginSchema.number(),
+              'gravityX': PocketPluginSchema.number(),
+              'gravityY': PocketPluginSchema.number(),
+              'gravityZ': PocketPluginSchema.number(),
+              'gyroX': PocketPluginSchema.number(),
+              'gyroY': PocketPluginSchema.number(),
+              'gyroZ': PocketPluginSchema.number(),
+              'pitch': PocketPluginSchema.number(),
+              'roll': PocketPluginSchema.number(),
+              'yaw': PocketPluginSchema.number(),
+              'pressureHpa': PocketPluginSchema.number(),
+              'relativeAltitudeM': PocketPluginSchema.number(),
+              'magneticX': PocketPluginSchema.number(),
+              'magneticY': PocketPluginSchema.number(),
+              'magneticZ': PocketPluginSchema.number(),
+              'timestamp': PocketPluginSchema.string(),
+            },
           ),
-          HardwareCapabilities.cameraPreviewStop: PocketPluginCapability(
-            name: HardwareCapabilities.cameraPreviewStop,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.camera},
-          ),
-          HardwareCapabilities.cameraLensSwitch: PocketPluginCapability(
-            name: HardwareCapabilities.cameraLensSwitch,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.camera},
-          ),
-          HardwareCapabilities.cameraFlashToggle: PocketPluginCapability(
-            name: HardwareCapabilities.cameraFlashToggle,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.camera},
-          ),
-          HardwareCapabilities.cameraCapture: PocketPluginCapability(
-            name: HardwareCapabilities.cameraCapture,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.camera},
-          ),
-          HardwareCapabilities.photosList: PocketPluginCapability(
-            name: HardwareCapabilities.photosList,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.photos},
-          ),
-          HardwareCapabilities.photosDelete: PocketPluginCapability(
-            name: HardwareCapabilities.photosDelete,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.photos},
-          ),
-          HardwareCapabilities.bluetoothScan: PocketPluginCapability(
-            name: HardwareCapabilities.bluetoothScan,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.bluetooth},
-          ),
-          HardwareCapabilities.bluetoothConnect: PocketPluginCapability(
-            name: HardwareCapabilities.bluetoothConnect,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.bluetooth},
-          ),
-          HardwareCapabilities.sensorsRead: PocketPluginCapability(
-            name: HardwareCapabilities.sensorsRead,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.sensors},
-          ),
-          HardwareCapabilities.biometricAuthenticate: PocketPluginCapability(
-            name: HardwareCapabilities.biometricAuthenticate,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.biometrics},
-          ),
-          HardwareCapabilities.locationCurrent: PocketPluginCapability(
-            name: HardwareCapabilities.locationCurrent,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.location},
-          ),
-          HardwareCapabilities.weatherCurrent: PocketPluginCapability(
-            name: HardwareCapabilities.weatherCurrent,
-            kind: PocketCapabilityKind.request,
-            permissions: const <String>{HardwarePermissions.network},
-            optionalPermissions: const <String>{HardwarePermissions.location},
-          ),
-        },
-      );
+        ),
+      ),
+      HardwareCapabilities.biometricAuthenticate: PocketPluginCapability(
+        name: HardwareCapabilities.biometricAuthenticate,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.biometrics},
+      ),
+      HardwareCapabilities.locationCurrent: PocketPluginCapability(
+        name: HardwareCapabilities.locationCurrent,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.location},
+      ),
+      HardwareCapabilities.weatherCurrent: PocketPluginCapability(
+        name: HardwareCapabilities.weatherCurrent,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.network},
+        optionalPermissions: const <String>{HardwarePermissions.location},
+      ),
+    },
+  );
 
   @override
   void register(PocketPluginContext context) {
     _activeContext = context;
+    _trustedSessionId = _sessionIdentity(context);
     context.registerRequest(HardwareCapabilities.permissions, (_) {
       return _native('checkPermissions');
     });
@@ -309,6 +510,7 @@ final class HardwarePlugin extends PocketPlugin {
           'requestPermission',
           params: <String, dynamic>{
             ...operation.toNativeArguments(),
+            ..._trustedSessionArguments(),
             'permission': nativePermission,
             'timeoutMs': requestTimeout.inMilliseconds,
           },
@@ -375,7 +577,10 @@ final class HardwarePlugin extends PocketPlugin {
       );
       return _native(
         'startBleScan',
-        params: <String, dynamic>{'timeoutMs': timeoutMs},
+        params: <String, dynamic>{
+          'timeoutMs': timeoutMs,
+          ..._trustedSessionArguments(),
+        },
         timeout: Duration(milliseconds: timeoutMs + 3000),
       );
     });
@@ -390,8 +595,37 @@ final class HardwarePlugin extends PocketPlugin {
       }
       return _native(
         'connectBleDevice',
-        params: <String, dynamic>{'deviceId': deviceId},
+        params: <String, dynamic>{
+          'deviceId': deviceId,
+          ..._trustedSessionArguments(),
+        },
         timeout: const Duration(seconds: 15),
+      );
+    });
+    context.registerRequest(HardwareCapabilities.bluetoothRead, (params) {
+      _checkPermission(HardwarePermissions.bluetooth);
+      return _native(
+        'readBleCharacteristic',
+        params: _bleRequestArguments(params, includeWithResponse: false),
+        timeout: const Duration(seconds: 10),
+      );
+    });
+    context.registerRequest(HardwareCapabilities.bluetoothWrite, (params) {
+      _checkPermission(HardwarePermissions.bluetooth);
+      return _native(
+        'writeBleCharacteristic',
+        params: _bleRequestArguments(params, requireValue: true),
+        timeout: const Duration(seconds: 10),
+      );
+    });
+    context.registerStream(HardwareCapabilities.bluetoothNotifications, (
+      remote,
+    ) {
+      _checkPermission(HardwarePermissions.bluetooth);
+      return _openHardwareStream(
+        remote,
+        kind: 'ble.notifications',
+        params: _bleRequestArguments(remote.params, includeWithResponse: false),
       );
     });
     context.registerRequest(HardwareCapabilities.sensorsRead, (_) {
@@ -401,10 +635,27 @@ final class HardwarePlugin extends PocketPlugin {
         'readSensors',
         params: <String, dynamic>{
           ...operation.toNativeArguments(),
+          ..._trustedSessionArguments(),
           'timeoutMs': requestTimeout.inMilliseconds,
         },
         timeout: requestTimeout,
         onTimeout: () => _cancelSensorOperation(operation),
+      );
+    });
+    context.registerStream(HardwareCapabilities.sensorsWatch, (remote) {
+      _checkPermission(HardwarePermissions.sensors);
+      return _openHardwareStream(
+        remote,
+        kind: 'sensors',
+        params: <String, dynamic>{
+          'samplingHz': _boundedInt(
+            remote.params['samplingHz'],
+            field: 'samplingHz',
+            fallback: 10,
+            min: 1,
+            max: 60,
+          ),
+        },
       );
     });
     context.registerRequest(HardwareCapabilities.biometricAuthenticate, (
@@ -442,21 +693,26 @@ final class HardwarePlugin extends PocketPlugin {
   @override
   FutureOr<void> activate(PocketPluginContext context) {
     _activeContext = context;
+    _trustedSessionId = _sessionIdentity(context);
   }
 
   @override
   Future<void> deactivate(PocketPluginContext context) async {
+    await _stopAllHardwareStreams();
     _activeContext = null;
     await _stopPreviewBestEffort();
     await _disposeNativeSessionBestEffort();
+    _trustedSessionId = null;
     _stopped = true;
   }
 
   @override
   Future<void> dispose() async {
+    await _stopAllHardwareStreams();
     _activeContext = null;
     await _stopPreviewBestEffort();
     await _disposeNativeSessionBestEffort();
+    _trustedSessionId = null;
     _stopped = true;
   }
 
@@ -514,18 +770,12 @@ final class HardwarePlugin extends PocketPlugin {
     final lens = params['lens'];
     if (lens != null) _validateLens(lens);
     if (_stopped) {
-      return <String, dynamic>{
-        'stopped': true,
-        'lens': lens ?? 'back',
-      };
+      return <String, dynamic>{'stopped': true, 'lens': lens ?? 'back'};
     }
     final epoch = ++_previewEpoch;
     return _serializeCamera(() async {
       if (_stopped || epoch != _previewEpoch) {
-        return <String, dynamic>{
-          'stopped': true,
-          'lens': lens ?? 'back',
-        };
+        return <String, dynamic>{'stopped': true, 'lens': lens ?? 'back'};
       }
       final result = await _native(
         'switchCameraLens',
@@ -538,10 +788,7 @@ final class HardwarePlugin extends PocketPlugin {
           onTextureReleased?.call(surfaceId);
         }
         await _native('stopCameraPreview', timeout: requestTimeout);
-        return <String, dynamic>{
-          'stopped': true,
-          'lens': lens ?? 'back',
-        };
+        return <String, dynamic>{'stopped': true, 'lens': lens ?? 'back'};
       }
       if (surfaceId != null) {
         _registerTexture(surfaceId);
@@ -584,11 +831,255 @@ final class HardwarePlugin extends PocketPlugin {
 
   Future<void> _disposeNativeSessionBestEffort() async {
     try {
-      await _native('disposeSession', timeout: requestTimeout);
+      await _native(
+        'disposeSession',
+        params: <String, dynamic>{
+          ..._trustedSessionArguments(),
+          'sensorOwnerToken': _sensorOwnerToken,
+        },
+        timeout: requestTimeout,
+      );
     } catch (_) {
       // The provider can already be gone during a host cutover.  The native
       // side still receives this call whenever its channel is alive, while a
       // failed cleanup must not prevent the next guest from mounting.
+    }
+  }
+
+  String _sessionIdentity(PocketPluginContext context) =>
+      '${context.appId}:${context.sessionId}';
+
+  Map<String, dynamic> _trustedSessionArguments() {
+    final sessionId = _trustedSessionId;
+    if (sessionId == null || sessionId.isEmpty) {
+      throw const PocketCapabilityException(
+        'plugin_revoked',
+        'hardware plugin has no active trusted session',
+      );
+    }
+    return <String, dynamic>{'sessionId': sessionId};
+  }
+
+  Map<String, dynamic> _bleRequestArguments(
+    Map<String, dynamic> params, {
+    bool requireValue = false,
+    bool includeWithResponse = true,
+  }) {
+    final deviceId = _string(params, 'deviceId');
+    final serviceUuid = _string(params, 'serviceUuid');
+    final characteristicUuid = _string(params, 'characteristicUuid');
+    if (deviceId.trim().isEmpty ||
+        serviceUuid.trim().isEmpty ||
+        characteristicUuid.trim().isEmpty) {
+      throw const PocketCapabilityException(
+        'invalid_argument',
+        'deviceId, serviceUuid, and characteristicUuid must not be empty',
+      );
+    }
+    final result = <String, dynamic>{
+      'deviceId': deviceId,
+      'serviceUuid': serviceUuid,
+      'characteristicUuid': characteristicUuid,
+      ..._trustedSessionArguments(),
+    };
+    if (includeWithResponse) {
+      final withResponse = params['withResponse'];
+      if (withResponse != null && withResponse is! bool) {
+        throw const PocketCapabilityException(
+          'invalid_argument',
+          'withResponse must be a boolean',
+        );
+      }
+      result['withResponse'] = withResponse ?? true;
+    }
+    if (requireValue) {
+      final value = params['value'];
+      if (value is! List || value.any((item) => item is! num || item is bool)) {
+        throw const PocketCapabilityException(
+          'invalid_argument',
+          'value must be an array of bytes',
+        );
+      }
+      final bytes = <int>[];
+      for (final item in value) {
+        final number = (item as num);
+        if (!number.isFinite || number % 1 != 0 || number < 0 || number > 255) {
+          throw const PocketCapabilityException(
+            'invalid_argument',
+            'value bytes must be integers between 0 and 255',
+          );
+        }
+        bytes.add(number.toInt());
+      }
+      if (bytes.length > 512) {
+        throw const PocketCapabilityException(
+          'invalid_argument',
+          'value must not exceed 512 bytes',
+        );
+      }
+      result['value'] = bytes;
+    }
+    return result;
+  }
+
+  Stream<Object?> _openHardwareStream(
+    PocketHostStreamContext remote, {
+    required String kind,
+    required Map<String, dynamic> params,
+  }) {
+    final streamingPlatform = _platform is HardwareStreamingPlatform
+        ? _platform as HardwareStreamingPlatform
+        : null;
+    if (streamingPlatform == null) {
+      return Stream<Object?>.error(
+        const PocketCapabilityException(
+          'hardware_streaming_unsupported',
+          'native hardware event streaming is unavailable',
+        ),
+      );
+    }
+    final guestStreamId = remote.streamId;
+    final trustedSessionId = _trustedSessionId;
+    if (trustedSessionId == null || trustedSessionId.isEmpty) {
+      return Stream<Object?>.error(
+        const PocketCapabilityException(
+          'plugin_revoked',
+          'hardware plugin has no active trusted session',
+        ),
+      );
+    }
+    // Native stream ids are never guest-controlled bare ids. Prefixing with
+    // both the provider and trusted host session prevents a stale stream from
+    // one guest/session from colliding with a later stream on the process-wide
+    // EventChannel. The guest still sees only its own original stream id via
+    // PocketHost's stream bridge.
+    final streamId = '$hardwarePluginId:$trustedSessionId:$guestStreamId';
+    final existing = _activeHardwareStreams[streamId];
+    if (existing != null) {
+      return Stream<Object?>.error(
+        const PocketCapabilityException(
+          'hardware_stream_exists',
+          'hardware stream id is already active',
+        ),
+      );
+    }
+
+    late final _HardwareStreamBinding binding;
+    final controller = StreamController<Object?>(sync: true);
+    var cleaned = false;
+    Future<void> stop({bool closeController = true}) async {
+      if (cleaned) return;
+      cleaned = true;
+      _activeHardwareStreams.remove(streamId);
+      await binding.eventsSubscription?.cancel();
+      binding.eventsSubscription = null;
+      try {
+        await streamingPlatform.stopHardwareStream(<String, dynamic>{
+          'streamId': streamId,
+          ..._trustedSessionArguments(),
+        });
+      } catch (_) {
+        // The stream is already being torn down. Native cleanup is best effort
+        // after a revoked MethodChannel or an already-disconnected device.
+      }
+      if (closeController && !controller.isClosed) {
+        await controller.close();
+      }
+    }
+
+    binding = _HardwareStreamBinding(streamId, controller, stop);
+    _activeHardwareStreams[streamId] = binding;
+    controller.onListen = () {
+      if (cleaned || _activeContext == null || _activeContext!.isRevoked) {
+        controller.addError(
+          const PocketCapabilityException(
+            'plugin_revoked',
+            'hardware plugin is revoked',
+          ),
+        );
+        unawaited(stop());
+        return;
+      }
+      // Subscribe before asking native to start. Native may emit its first
+      // sample immediately after start; the platform implementation also
+      // bounds packets while the EventChannel sink is attaching.
+      binding.eventsSubscription = streamingPlatform.hardwareEvents.listen(
+        (event) {
+          if (cleaned || event is! Map) return;
+          final packet = Map<String, dynamic>.from(event);
+          if ('${packet['streamId'] ?? ''}' != streamId) return;
+          final errorValue = packet['error'];
+          if (errorValue != null) {
+            final errorMap = errorValue is Map
+                ? Map<String, dynamic>.from(errorValue)
+                : <String, dynamic>{'message': '$errorValue'};
+            controller.addError(
+              PocketCapabilityException(
+                '${errorMap['code'] ?? 'hardware_stream_error'}',
+                '${errorMap['message'] ?? 'hardware stream failed'}',
+              ),
+            );
+            unawaited(stop());
+            return;
+          }
+          if (packet['done'] == true) {
+            unawaited(stop());
+            return;
+          }
+          if (packet.containsKey('data') && !controller.isClosed) {
+            controller.add(packet['data']);
+          }
+        },
+        onError: (Object error, StackTrace stack) {
+          if (cleaned || controller.isClosed) return;
+          controller.addError(_asStreamException(error), stack);
+          unawaited(stop());
+        },
+        onDone: () {
+          if (cleaned) return;
+          unawaited(stop());
+        },
+      );
+      final startArguments = <String, dynamic>{
+        ...params,
+        'kind': kind,
+        'streamId': streamId,
+        ..._trustedSessionArguments(),
+      };
+      binding.startFuture = streamingPlatform
+          .startHardwareStream(startArguments)
+          .then(
+            (response) {
+              if (response['ok'] == false && !controller.isClosed) {
+                controller.addError(
+                  PocketCapabilityException(
+                    '${response['errorCode'] ?? response['code'] ?? 'hardware_stream_error'}',
+                    '${response['error'] ?? response['message'] ?? 'hardware stream failed'}',
+                  ),
+                );
+                unawaited(stop());
+              }
+            },
+            onError: (Object error, StackTrace stack) {
+              if (!controller.isClosed) {
+                controller.addError(_asStreamException(error), stack);
+              }
+              unawaited(stop());
+            },
+          );
+    };
+    controller.onCancel = () => stop();
+    return controller.stream;
+  }
+
+  Object _asStreamException(Object error) => error is HardwarePlatformException
+      ? PocketCapabilityException(error.code, error.message)
+      : error;
+
+  Future<void> _stopAllHardwareStreams() async {
+    final active = _activeHardwareStreams.values.toList(growable: false);
+    for (final binding in active) {
+      await binding.stop();
     }
   }
 
@@ -712,8 +1203,10 @@ final class HardwarePlugin extends PocketPlugin {
         'coordinates are outside the valid range',
       );
     }
-    final uri =
-        Uri.https('api.open-meteo.com', '/v1/forecast', <String, String>{
+    final uri = Uri.https('api.open-meteo.com', '/v1/forecast', <
+      String,
+      String
+    >{
       'latitude': '$latitude',
       'longitude': '$longitude',
       'current':
@@ -863,14 +1356,14 @@ final class HardwarePlugin extends PocketPlugin {
   }
 
   static String _nativePermission(String permission) => switch (permission) {
-        HardwarePermissions.camera => 'camera',
-        HardwarePermissions.photos => 'photos',
-        HardwarePermissions.bluetooth => 'bluetooth',
-        HardwarePermissions.sensors => 'sensors',
-        HardwarePermissions.biometrics => 'biometrics',
-        HardwarePermissions.location => 'location',
-        HardwarePermissions.microphone => 'microphone',
-        HardwarePermissions.network => 'network',
-        _ => permission,
-      };
+    HardwarePermissions.camera => 'camera',
+    HardwarePermissions.photos => 'photos',
+    HardwarePermissions.bluetooth => 'bluetooth',
+    HardwarePermissions.sensors => 'sensors',
+    HardwarePermissions.biometrics => 'biometrics',
+    HardwarePermissions.location => 'location',
+    HardwarePermissions.microphone => 'microphone',
+    HardwarePermissions.network => 'network',
+    _ => permission,
+  };
 }

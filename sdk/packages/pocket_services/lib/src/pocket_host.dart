@@ -106,14 +106,19 @@ final class PocketHostRegistry {
 }
 
 final class PocketHostStreamContext {
-  const PocketHostStreamContext({required this.capability, required this.port});
+  const PocketHostStreamContext({
+    required this.capability,
+    required this.port,
+    Stream<Object?>? incoming,
+  }) : _incoming = incoming;
 
   final String capability;
   final PocketDuplexStream port;
+  final Stream<Object?>? _incoming;
   String get streamId => port.streamId;
   String? get topic => port.topic;
   Map<String, dynamic> get params => port.parameters;
-  Stream<Object?> get incoming => port.data;
+  Stream<Object?> get incoming => _incoming ?? port.data;
 }
 
 final class PocketCapabilityException implements Exception {
@@ -160,7 +165,8 @@ final class PocketHost {
   late final StreamSubscription<PocketDuplexStream> _incomingSubscription;
   final Set<String> _revoked = <String>{};
   final Set<String> _requests = <String>{};
-  final Set<String> _activeStreams = <String>{};
+  final Map<String, PocketDuplexStream> _activeStreams =
+      <String, PocketDuplexStream>{};
   PocketCapabilityAvailability? _availability;
   bool _disposed = false;
   int _generation = 0;
@@ -227,17 +233,17 @@ final class PocketHost {
   }
 
   void revokeCapabilities(Iterable<String> capabilities) {
-    _revoked.addAll(capabilities);
+    final revokedSet = capabilities.toSet();
+    _revoked.addAll(revokedSet);
     final availability = _availability;
     if (availability != null) {
-      final revokedSet = capabilities.toSet();
       final newGranted = Set<String>.from(availability.granted)
         ..removeAll(revokedSet);
       final newMissingRequired = Set<String>.from(availability.missingRequired)
         ..addAll(revokedSet.where(availability.required.contains));
-      final newUnavailableOptional =
-          Set<String>.from(availability.unavailableOptional)
-            ..addAll(revokedSet.where(availability.optional.contains));
+      final newUnavailableOptional = Set<String>.from(
+        availability.unavailableOptional,
+      )..addAll(revokedSet.where(availability.optional.contains));
       _availability = PocketCapabilityAvailability(
         required: availability.required,
         optional: availability.optional,
@@ -246,14 +252,12 @@ final class PocketHost {
         unavailableOptional: Set<String>.unmodifiable(newUnavailableOptional),
       );
     }
-    for (final streamId in _activeStreams.toList(growable: false)) {
-      // The bridge owns stream lifecycle; a cancellation packet is enough to
-      // close the remote side even when a provider is being torn down.
-      send('stream.cancel', <String, dynamic>{
-        'streamId': streamId,
-        'reason': 'capability revoked',
-      });
-      _activeStreams.remove(streamId);
+    for (final port in _activeStreams.values.toList(growable: false)) {
+      if (revokedSet.contains(port.topic)) {
+        // Close locally too: notifying the Guest alone leaves the native
+        // producer running until the next event or eventual session teardown.
+        port.cancel('capability revoked');
+      }
     }
   }
 
@@ -261,21 +265,23 @@ final class PocketHost {
     _revoked.removeAll(capabilities);
     final availability = _availability;
     if (availability != null) {
-      final toRestore = capabilities.where(
-        (c) =>
-            (availability.required.contains(c) ||
-                availability.optional.contains(c)) &&
-            _isProviderAvailable(c),
-      ).toSet();
+      final toRestore = capabilities
+          .where(
+            (c) =>
+                (availability.required.contains(c) ||
+                    availability.optional.contains(c)) &&
+                _isProviderAvailable(c),
+          )
+          .toSet();
       if (toRestore.isNotEmpty) {
         final newGranted = Set<String>.from(availability.granted)
           ..addAll(toRestore);
-        final newMissingRequired =
-            Set<String>.from(availability.missingRequired)
-              ..removeAll(toRestore);
-        final newUnavailableOptional =
-            Set<String>.from(availability.unavailableOptional)
-              ..removeAll(toRestore);
+        final newMissingRequired = Set<String>.from(
+          availability.missingRequired,
+        )..removeAll(toRestore);
+        final newUnavailableOptional = Set<String>.from(
+          availability.unavailableOptional,
+        )..removeAll(toRestore);
         _availability = PocketCapabilityAvailability(
           required: availability.required,
           optional: availability.optional,
@@ -369,22 +375,83 @@ final class PocketHost {
       port.cancel('capability_unavailable');
       return;
     }
-    _activeStreams.add(port.streamId);
-    final output = handler(
-      PocketHostStreamContext(capability: capability, port: port),
-    );
-    final subscription = output.listen(
-      (value) {
-        if (isAllowed(capability)) port.send(value);
-      },
-      onError: (Object error, StackTrace _) => port.close(_safeError(error)),
-      onDone: () {
+    _activeStreams[port.streamId] = port;
+    StreamSubscription<Object?>? source;
+    StreamSubscription<Object?>? lifetime;
+    var ended = false;
+    void stop() {
+      if (ended) return;
+      ended = true;
+      if (identical(_activeStreams[port.streamId], port)) {
         _activeStreams.remove(port.streamId);
-        port.close();
-      },
-      cancelOnError: true,
+      }
+      unawaited(source?.cancel() ?? Future<void>.value());
+      unawaited(lifetime?.cancel() ?? Future<void>.value());
+    }
+
+    void fail(Object error) {
+      if (ended) return;
+      streams.fail(port, <String, dynamic>{
+        'code': error is PocketCapabilityException
+            ? error.code
+            : 'provider_error',
+        'message': error is PocketCapabilityException
+            ? error.message
+            : _safeError(error),
+      });
+      stop();
+    }
+
+    // One inbound subscription is shared by the provider and the lifecycle
+    // observer. Previously the observer consumed a single-subscription stream,
+    // preventing a genuinely bidirectional provider from listening at all.
+    final incoming = port.data.asBroadcastStream(
+      onCancel: (subscription) => unawaited(subscription.cancel()),
     );
-    port.data.listen((_) {}, onDone: () => unawaited(subscription.cancel()));
+    lifetime = incoming.listen(
+      (_) {},
+      onError: (Object _, StackTrace __) => stop(),
+      onDone: stop,
+    );
+    try {
+      final output = handler(
+        PocketHostStreamContext(
+          capability: capability,
+          port: port,
+          incoming: incoming,
+        ),
+      );
+      source = output.listen(
+        (value) {
+          if (ended) return;
+          if (!isAllowed(capability)) {
+            port.cancel('capability revoked');
+            stop();
+            return;
+          }
+          try {
+            _assertJsonSafe(value);
+            if (!port.send(value)) {
+              port.cancel('transport_unavailable');
+              stop();
+            }
+          } catch (error) {
+            fail(error);
+          }
+        },
+        onError: (Object error, StackTrace _) => fail(error),
+        onDone: () {
+          if (ended) return;
+          port.close();
+          stop();
+        },
+        cancelOnError: true,
+      );
+      // A synchronous source can complete or fail during listen().
+      if (ended) unawaited(source.cancel());
+    } catch (error) {
+      fail(error);
+    }
   }
 
   void _respond(String requestId, Object? result) {

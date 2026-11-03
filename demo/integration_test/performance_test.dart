@@ -131,7 +131,10 @@ void main() {
     // Machine-readable output is intentionally printed once, outside sampling.
     // ignore: avoid_print
     print('POCKET_PERF ${jsonEncode(results)}');
-    binding.reportData = {'performance': results};
+    binding.reportData = <String, dynamic>{
+      ...?binding.reportData,
+      'performance': results,
+    };
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
   });

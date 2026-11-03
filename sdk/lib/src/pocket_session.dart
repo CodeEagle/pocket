@@ -23,6 +23,8 @@ final class PocketSession extends ChangeNotifier {
   }
 
   final PocketAppConfig config;
+  PocketMemoryLimits? _memoryLimits;
+  PocketMemoryLimits get memoryLimits => _memoryLimits ?? config.memoryLimits;
   String get appId => config.appId;
   Set<String> get capabilities => {
     'text.glyphs.baked',
@@ -243,6 +245,7 @@ final class PocketSession extends ChangeNotifier {
     if (active != null && active!.package.manifest.payload.worker != null)
       'worker': active!.package.manifest.payload.worker,
     'entryFormat': 'quickjs-bytecode',
+    'memory': memoryLimits.toJson(),
     'glassRenderer': ui.ImageFilter.isShaderFilterSupported
         ? 'refractive'
         : 'frosted',
@@ -342,6 +345,7 @@ final class PocketSession extends ChangeNotifier {
     }
     final manifest =
         package?.package.manifest.payload.guestManifest ?? _embeddedManifest;
+    _memoryLimits = config.memoryLimits.admit(manifest.memoryLimits);
     final negotiated = plugins.negotiate(
       required: manifest.requiredCapabilities,
       optional: manifest.optionalCapabilities,
@@ -393,6 +397,13 @@ final class PocketSession extends ChangeNotifier {
         expectedTickHz: (worker['tickHz'] as num?)?.toInt() ?? tickHz,
         admittedCapabilities: granted.granted,
         allowedHttpOrigins: config.workerHttpOrigins,
+        limits: PocketWorkerLimits(
+          // Workers are independent realms, not an escape from the app's
+          // approved per-realm heap cap. Keep their smaller default budget.
+          heapBytes: memoryLimits.heapLimitBytes == null
+              ? 16 * 1024 * 1024
+              : memoryLimits.heapLimitBytes!.clamp(64 * 1024, 16 * 1024 * 1024),
+        ),
       ).program;
     } else if (manifest.requiredCapabilities.contains('runtime.worker')) {
       throw const FormatException(

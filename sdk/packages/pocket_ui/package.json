@@ -13,6 +13,8 @@
     "./display": "./src/display.ts",
     "./graphics": "./src/graphics.ts",
     "./host": "./src/host.ts",
+    "./streams": "./src/streams.ts",
+    "./platform-experience": "./src/platform-experience.ts",
     "./platform": "./src/platform.ts",
     "./system": "./src/system.ts",
     "./recording": "./src/recording.ts",

@@ -28,6 +28,29 @@ String _flutterMode() {
   return 'unknown';
 }
 
+Map<String, Object?> _runtimeDeviceMetadata(WidgetTester tester) {
+  final physicalSize = tester.view.physicalSize;
+  final devicePixelRatio = tester.view.devicePixelRatio;
+  final logicalSize = devicePixelRatio > 0
+      ? <String, double>{
+          'width': physicalSize.width / devicePixelRatio,
+          'height': physicalSize.height / devicePixelRatio,
+        }
+      : null;
+  final refreshRate = tester.view.display.refreshRate;
+  return <String, Object?>{
+    'platform': defaultTargetPlatform.name,
+    'operatingSystem': Platform.operatingSystem,
+    'physicalSize': <String, double>{
+      'width': physicalSize.width,
+      'height': physicalSize.height,
+    },
+    'logicalSize': logicalSize,
+    'devicePixelRatio': devicePixelRatio,
+    'refreshRateHz': refreshRate > 0 ? refreshRate : null,
+  };
+}
+
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
@@ -54,6 +77,7 @@ void main() {
       );
       await guest.waitFor(tester, '00');
       await Future<void>.delayed(const Duration(seconds: 1));
+      final deviceMetadata = _runtimeDeviceMetadata(tester);
       if (widgetTraceEnabled) {
         debugProfileBuildsEnabled = true;
         debugProfileLayoutsEnabled = true;
@@ -272,6 +296,7 @@ void main() {
       }
       final report = <String, dynamic>{
         'interactionPerformance': results,
+        'device': deviceMetadata,
         'traceEnabled': traceEnabled,
         'widgetTraceEnabled': widgetTraceEnabled,
         'mode': _flutterMode(),
@@ -286,7 +311,7 @@ void main() {
             'schema': 'pocket.interaction-scenario',
             'version': 1,
             'scenes': [for (final result in results) result['scene']],
-            'device': 'iPhone Duo simulator',
+            'device': deviceMetadata,
           },
         );
         final manifest = File(output['path'] as String);

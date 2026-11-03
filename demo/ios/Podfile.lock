@@ -11,6 +11,8 @@ PODS:
     - Flutter
   - pocket_hardware (0.1.0):
     - Flutter
+  - pocket_platform (0.1.0):
+    - Flutter
   - video_player_avfoundation (0.0.1):
     - Flutter
     - FlutterMacOS
@@ -22,6 +24,7 @@ DEPENDENCIES:
   - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
   - pocket_flutter (from `.symlinks/plugins/pocket_flutter/ios`)
   - pocket_hardware (from `.symlinks/plugins/pocket_hardware/ios`)
+  - pocket_platform (from `.symlinks/plugins/pocket_platform/ios`)
   - video_player_avfoundation (from `.symlinks/plugins/video_player_avfoundation/darwin`)
 
 EXTERNAL SOURCES:
@@ -37,6 +40,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/pocket_flutter/ios"
   pocket_hardware:
     :path: ".symlinks/plugins/pocket_hardware/ios"
+  pocket_platform:
+    :path: ".symlinks/plugins/pocket_platform/ios"
   video_player_avfoundation:
     :path: ".symlinks/plugins/video_player_avfoundation/darwin"
 
@@ -47,8 +52,9 @@ SPEC CHECKSUMS:
   path_provider_foundation: bb55f6dbba17d0dccd6737fe6f7f34fbd0376880
   pocket_flutter: 90650a735fd0ba3015755831a54d436ccb641324
   pocket_hardware: eec608321410b48324570aa8478df221b2ecdafa
+  pocket_platform: 58f4c3df8a027cfa4c256b4bf8d92d3aead19fc3
   video_player_avfoundation: dd410b52df6d2466a42d28550e33e4146928280a
 
-PODFILE CHECKSUM: 22923aa53c35b8897d12638a7cd17721624df60b
+PODFILE CHECKSUM: 4d0a843cca43ac963eb4aa1d43663f2e7da06ef8
 
 COCOAPODS: 1.16.2

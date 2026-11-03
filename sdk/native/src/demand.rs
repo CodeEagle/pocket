@@ -88,6 +88,14 @@ pub(super) fn capture(host: &mut HostState) {
         invalidate(host);
         return;
     }
+    // Replay has no wall-clock anchor, so this logical marker is the
+    // equivalent of the live branch's `idle_anchor.is_none()` check below.
+    // Preserve credit while an already-idle guest remains idle, but clear
+    // credit when an external boundary (or a continuous frame) starts a new
+    // idle period. Otherwise replay can carry elapsed time across the same
+    // Continuous -> Idle transition that record mode resets, dropping a
+    // later fixed tick even though the DrawList is unchanged.
+    let was_replay_idle = host.demand.trace_idle_pending;
     // An externally dispatched response can queue a QuickJS Promise job
     // without advancing a virtual frame. Keep the view awake until a real
     // fixed tick runs `Guest::frame` and drains that job queue.
@@ -116,6 +124,9 @@ pub(super) fn capture(host: &mut HostState) {
     };
     if replay::is_replay(host) {
         host.demand.idle_anchor = None;
+        if matches!(host.demand.work, Work::Idle { .. }) && !was_replay_idle {
+            host.demand.elapsed_credit_ms = 0.0;
+        }
         host.demand.trace_idle_pending = matches!(host.demand.work, Work::Idle { .. });
     } else {
         host.demand.trace_idle_pending = false;
@@ -309,7 +320,7 @@ pub(super) fn set_paused(host: &mut HostState, paused: bool) -> Result<(), Strin
 mod tests {
     use super::super::{
         pocket_create, pocket_destroy, pocket_eval, pocket_frame, pocket_next_wake_delay_ms,
-        pocket_send,
+        pocket_send, pocket_trace_clock_mode,
     };
     use super::*;
     use std::ffi::{CStr, CString};
@@ -438,6 +449,39 @@ mod tests {
             );
             let output = frame(host, delay);
             assert_eq!(output["events"][0]["payload"]["virtual"], 420);
+            pocket_destroy(host);
+        }
+    }
+
+    #[test]
+    fn replay_capture_clears_credit_when_entering_a_new_idle_period() {
+        unsafe {
+            let host = pocket_create(64.0, 64.0);
+            assert_eq!(pocket_trace_clock_mode(host, 2), 0);
+            let source = CString::new(TIMER_GUEST).unwrap();
+            assert_eq!(pocket_eval(host, source.as_ptr()), 0);
+            frame(host, 0.0);
+            assert!(matches!(
+                host.as_ref().unwrap().demand.work,
+                Work::Idle { .. }
+            ));
+            assert!(host.as_ref().unwrap().demand.trace_idle_pending);
+
+            // A continued idle period retains credit, matching the live
+            // `idle_anchor` path. This protects a pending external settlement
+            // from being cleared merely by another demand snapshot.
+            host.as_mut().unwrap().demand.elapsed_credit_ms = 7.0;
+            capture(&mut *host);
+            assert_eq!(host.as_ref().unwrap().demand.elapsed_credit_ms, 7.0);
+
+            // `invalidate` models the external/continuous boundary. The next
+            // idle capture starts a fresh period and must discard stale credit
+            // exactly as the live branch does when it creates a new anchor.
+            invalidate(&mut *host);
+            host.as_mut().unwrap().demand.elapsed_credit_ms = 7.0;
+            capture(&mut *host);
+            assert_eq!(host.as_ref().unwrap().demand.elapsed_credit_ms, 0.0);
+            assert!(host.as_ref().unwrap().demand.trace_idle_pending);
             pocket_destroy(host);
         }
     }

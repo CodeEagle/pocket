@@ -39,6 +39,19 @@ final class PocketStreamBridge {
 
   Stream<PocketDuplexStream> get incoming => _incomingController.stream;
 
+  /// Reports a provider failure on the existing wire, then closes its local
+  /// port. A remote failure must not be disguised as a successful stream end.
+  bool fail(PocketDuplexStream port, Map<String, dynamic> error) {
+    final state = _states[port.streamId];
+    if (state == null || !identical(state.port, port)) return false;
+    final sent = send('stream.error', <String, dynamic>{
+      'streamId': port.streamId,
+      'error': error,
+    });
+    state.finish();
+    return sent;
+  }
+
   PocketDuplexStream open({
     String? topic,
     Map<String, dynamic> parameters = const <String, dynamic>{},

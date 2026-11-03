@@ -284,6 +284,18 @@ void main() {
       await manager.dispose();
       host.dispose();
       expect(
+        platform.callArguments[0]['sessionId'],
+        'test.pocket_hardware:session-1',
+      );
+      expect(
+        platform.callArguments[1]['sessionId'],
+        'test.pocket_hardware:session-1',
+      );
+      expect(
+        platform.callArguments[2]['sessionId'],
+        'test.pocket_hardware:session-1',
+      );
+      expect(
         platform.calls,
         containsAllInOrder(<String>[
           'startBleScan',

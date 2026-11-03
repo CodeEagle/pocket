@@ -1,5 +1,7 @@
 # 旧 Demo 中的 SDK 能力复用
 
+> 历史基线记录：当前状态请先看 [2026-11-03 源码复核与待选迁移项](LEGACY_REUSE_REVIEW_20261103.md)。下文部分“已迁 / 尚缺”结论已被后续实现或消融调整，不能直接用作当前能力清单。
+
 来源：`/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/mini_apps` 与 `native`。
 审查日期：2026-11-02。明确排除旧仓库的 `pocket_host/`。
 本记录区分公共 SDK 能力与消费端示例；登录、天气页面和账号数据属于 Demo，不能作为 SDK 能力迁移完成的依据。

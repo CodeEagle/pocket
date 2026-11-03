@@ -128,6 +128,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       key: ValueKey(epoch),
       controller: session.controller,
       recordingFactory: config.recordingFactory,
+      memoryLimits: session.memoryLimits,
       active: session.foreground,
       inputEnabled: widget.inputEnabled,
       viewport: widget.viewport,

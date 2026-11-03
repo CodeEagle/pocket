@@ -33,6 +33,449 @@ final class PocketPermissionRequest {
 typedef PocketPermissionRequestHandler =
     FutureOr<Set<String>> Function(PocketPermissionRequest request);
 
+/// The deliberately small, JSON-only schema vocabulary advertised by a
+/// plugin descriptor.  A schema is metadata for generated client types; it is
+/// not an authorization grant and does not change the host's runtime checks.
+enum PocketPluginSchemaType {
+  string,
+  integer,
+  number,
+  boolean,
+  nullValue,
+  object,
+  array,
+  enumValue,
+  reference,
+  unknown,
+}
+
+/// A bounded serializable type node used by plugin descriptors.
+///
+/// Object properties which are absent from [required] are optional in the
+/// generated TypeScript type.  References point to a name in the owning
+/// [PocketPluginDescriptor.types] map.  No Dart code or raw TypeScript is
+/// accepted by this model.
+final class PocketPluginSchema {
+  const PocketPluginSchema({
+    required this.type,
+    this.properties = const <String, PocketPluginSchema>{},
+    this.required = const <String>{},
+    this.items,
+    this.enumValues = const <Object?>[],
+    this.ref,
+  });
+
+  const PocketPluginSchema.string() : this(type: PocketPluginSchemaType.string);
+  const PocketPluginSchema.integer()
+    : this(type: PocketPluginSchemaType.integer);
+  const PocketPluginSchema.number() : this(type: PocketPluginSchemaType.number);
+  const PocketPluginSchema.boolean()
+    : this(type: PocketPluginSchemaType.boolean);
+  const PocketPluginSchema.nullValue()
+    : this(type: PocketPluginSchemaType.nullValue);
+  const PocketPluginSchema.unknown()
+    : this(type: PocketPluginSchemaType.unknown);
+  const PocketPluginSchema.array(PocketPluginSchema items)
+    : this(type: PocketPluginSchemaType.array, items: items);
+  const PocketPluginSchema.object({
+    Map<String, PocketPluginSchema> properties =
+        const <String, PocketPluginSchema>{},
+    Set<String> required = const <String>{},
+  }) : this(
+         type: PocketPluginSchemaType.object,
+         properties: properties,
+         required: required,
+       );
+  const PocketPluginSchema.enumValue(List<Object?> values)
+    : this(type: PocketPluginSchemaType.enumValue, enumValues: values);
+  const PocketPluginSchema.reference(String name)
+    : this(type: PocketPluginSchemaType.reference, ref: name);
+
+  static const int maxDepth = 16;
+  static const int maxNodes = 256;
+  static const int maxProperties = 64;
+  static const int maxEnumValues = 64;
+  static const int maxStringLength = 256;
+
+  final PocketPluginSchemaType type;
+  final Map<String, PocketPluginSchema> properties;
+  final Set<String> required;
+  final PocketPluginSchema? items;
+  final List<Object?> enumValues;
+  final String? ref;
+
+  Map<String, dynamic> toJson() {
+    validate();
+    return _toJsonUnchecked();
+  }
+
+  factory PocketPluginSchema.fromJson(Object? value) {
+    final map = _schemaMap(value, 'schema');
+    final rawType = map['type'];
+    if (rawType == null && map['\$ref'] is String) {
+      _rejectSchemaFields(map, const <String>{'\$ref'}, 'schema');
+      return PocketPluginSchema.reference(map['\$ref'] as String)..validate();
+    }
+    if (rawType is! String) {
+      throw const FormatException('plugin schema type must be a string');
+    }
+    final type = _schemaTypeFromWire(rawType);
+    switch (type) {
+      case PocketPluginSchemaType.object:
+        _rejectSchemaFields(map, const <String>{
+          'type',
+          'properties',
+          'required',
+        }, 'schema');
+        final rawProperties = map['properties'];
+        final properties = <String, PocketPluginSchema>{};
+        if (rawProperties != null) {
+          final propertyMap = _schemaMap(rawProperties, 'schema.properties');
+          for (final entry in propertyMap.entries) {
+            properties[entry.key] = PocketPluginSchema.fromJson(entry.value);
+          }
+        }
+        final rawRequired = map['required'];
+        final required = <String>{};
+        if (rawRequired != null) {
+          if (rawRequired is! List) {
+            throw const FormatException(
+              'plugin schema required must be an array',
+            );
+          }
+          for (final item in rawRequired) {
+            if (item is! String) {
+              throw const FormatException(
+                'plugin schema required names must be strings',
+              );
+            }
+            required.add(item);
+          }
+        }
+        return PocketPluginSchema.object(
+          properties: properties,
+          required: required,
+        )..validate();
+      case PocketPluginSchemaType.array:
+        _rejectSchemaFields(map, const <String>{'type', 'items'}, 'schema');
+        return PocketPluginSchema.array(
+          PocketPluginSchema.fromJson(map['items']),
+        )..validate();
+      case PocketPluginSchemaType.enumValue:
+        _rejectSchemaFields(map, const <String>{'type', 'values'}, 'schema');
+        final values = map['values'];
+        if (values is! List) {
+          throw const FormatException(
+            'plugin enum schema values must be an array',
+          );
+        }
+        return PocketPluginSchema.enumValue(List<Object?>.from(values))
+          ..validate();
+      case PocketPluginSchemaType.reference:
+        _rejectSchemaFields(map, const <String>{'type', 'ref'}, 'schema');
+        final name = map['ref'];
+        if (name is! String) {
+          throw const FormatException(
+            'plugin reference schema ref must be a string',
+          );
+        }
+        return PocketPluginSchema.reference(name)..validate();
+      case PocketPluginSchemaType.string:
+        _rejectSchemaFields(map, const <String>{'type'}, 'schema');
+        return const PocketPluginSchema.string();
+      case PocketPluginSchemaType.integer:
+        _rejectSchemaFields(map, const <String>{'type'}, 'schema');
+        return const PocketPluginSchema.integer();
+      case PocketPluginSchemaType.number:
+        _rejectSchemaFields(map, const <String>{'type'}, 'schema');
+        return const PocketPluginSchema.number();
+      case PocketPluginSchemaType.boolean:
+        _rejectSchemaFields(map, const <String>{'type'}, 'schema');
+        return const PocketPluginSchema.boolean();
+      case PocketPluginSchemaType.nullValue:
+        _rejectSchemaFields(map, const <String>{'type'}, 'schema');
+        return const PocketPluginSchema.nullValue();
+      case PocketPluginSchemaType.unknown:
+        _rejectSchemaFields(map, const <String>{'type'}, 'schema');
+        return const PocketPluginSchema.unknown();
+    }
+  }
+
+  /// Validates the local schema grammar and resource bounds.  Descriptor
+  /// validation additionally checks that every reference resolves.
+  void validate() {
+    final state = _SchemaValidationState();
+    _validateSchema(this, state, 'schema');
+  }
+
+  Map<String, dynamic> _toJsonUnchecked() {
+    switch (type) {
+      case PocketPluginSchemaType.object:
+        return <String, dynamic>{
+          'type': 'object',
+          if (properties.isNotEmpty)
+            'properties': <String, dynamic>{
+              for (final key in properties.keys.toList()..sort())
+                key: properties[key]!._toJsonUnchecked(),
+            },
+          if (required.isNotEmpty) 'required': required.toList()..sort(),
+        };
+      case PocketPluginSchemaType.array:
+        return <String, dynamic>{
+          'type': 'array',
+          'items': items!._toJsonUnchecked(),
+        };
+      case PocketPluginSchemaType.enumValue:
+        return <String, dynamic>{'type': 'enum', 'values': enumValues};
+      case PocketPluginSchemaType.reference:
+        return <String, dynamic>{'type': 'ref', 'ref': ref};
+      case PocketPluginSchemaType.string:
+        return <String, dynamic>{'type': 'string'};
+      case PocketPluginSchemaType.integer:
+        return <String, dynamic>{'type': 'integer'};
+      case PocketPluginSchemaType.number:
+        return <String, dynamic>{'type': 'number'};
+      case PocketPluginSchemaType.boolean:
+        return <String, dynamic>{'type': 'boolean'};
+      case PocketPluginSchemaType.nullValue:
+        return <String, dynamic>{'type': 'null'};
+      case PocketPluginSchemaType.unknown:
+        return <String, dynamic>{'type': 'unknown'};
+    }
+  }
+}
+
+Map<String, dynamic> _schemaMap(Object? value, String field) {
+  if (value is! Map) throw FormatException('$field must be an object');
+  final result = <String, dynamic>{};
+  for (final entry in value.entries) {
+    if (entry.key is! String) {
+      throw FormatException('$field keys must be strings');
+    }
+    result[entry.key as String] = entry.value;
+  }
+  return result;
+}
+
+PocketPluginSchemaType _schemaTypeFromWire(String value) {
+  switch (value) {
+    case 'string':
+      return PocketPluginSchemaType.string;
+    case 'integer':
+      return PocketPluginSchemaType.integer;
+    case 'number':
+      return PocketPluginSchemaType.number;
+    case 'boolean':
+      return PocketPluginSchemaType.boolean;
+    case 'null':
+      return PocketPluginSchemaType.nullValue;
+    case 'object':
+      return PocketPluginSchemaType.object;
+    case 'array':
+      return PocketPluginSchemaType.array;
+    case 'enum':
+      return PocketPluginSchemaType.enumValue;
+    case 'ref':
+      return PocketPluginSchemaType.reference;
+    case 'unknown':
+      return PocketPluginSchemaType.unknown;
+    default:
+      throw FormatException('unsupported plugin schema type: $value');
+  }
+}
+
+void _rejectSchemaFields(
+  Map<String, dynamic> map,
+  Set<String> allowed,
+  String field,
+) {
+  final unknown = map.keys.where((key) => !allowed.contains(key)).toList()
+    ..sort();
+  if (unknown.isNotEmpty) {
+    throw FormatException('$field has unknown fields: ${unknown.join(', ')}');
+  }
+}
+
+final class _SchemaValidationState {
+  int nodes = 0;
+}
+
+void _validateSchema(
+  PocketPluginSchema schema,
+  _SchemaValidationState state,
+  String path, [
+  int depth = 0,
+]) {
+  if (depth > PocketPluginSchema.maxDepth) {
+    throw ArgumentError(
+      '$path exceeds schema depth ${PocketPluginSchema.maxDepth}',
+    );
+  }
+  state.nodes++;
+  if (state.nodes > PocketPluginSchema.maxNodes) {
+    throw ArgumentError(
+      'plugin schema exceeds ${PocketPluginSchema.maxNodes} nodes',
+    );
+  }
+  switch (schema.type) {
+    case PocketPluginSchemaType.object:
+      if (schema.properties.length > PocketPluginSchema.maxProperties) {
+        throw ArgumentError(
+          '$path exceeds ${PocketPluginSchema.maxProperties} properties',
+        );
+      }
+      if (schema.items != null ||
+          schema.enumValues.isNotEmpty ||
+          schema.ref != null) {
+        throw ArgumentError('$path object schema has incompatible fields');
+      }
+      for (final entry in schema.properties.entries) {
+        if (entry.key.isEmpty ||
+            entry.key.length > PocketPluginSchema.maxStringLength ||
+            entry.key.contains('\u0000')) {
+          throw ArgumentError('$path has an invalid property name');
+        }
+        _validateSchema(
+          entry.value,
+          state,
+          '$path.properties.${entry.key}',
+          depth + 1,
+        );
+      }
+      if (!schema.properties.keys.toSet().containsAll(schema.required)) {
+        throw ArgumentError('$path.required contains an undeclared property');
+      }
+      break;
+    case PocketPluginSchemaType.array:
+      if (schema.items == null ||
+          schema.properties.isNotEmpty ||
+          schema.required.isNotEmpty ||
+          schema.enumValues.isNotEmpty ||
+          schema.ref != null) {
+        throw ArgumentError('$path array schema has incompatible fields');
+      }
+      _validateSchema(schema.items!, state, '$path.items', depth + 1);
+      break;
+    case PocketPluginSchemaType.enumValue:
+      if (schema.enumValues.isEmpty ||
+          schema.enumValues.length > PocketPluginSchema.maxEnumValues ||
+          schema.properties.isNotEmpty ||
+          schema.required.isNotEmpty ||
+          schema.items != null ||
+          schema.ref != null) {
+        throw ArgumentError('$path enum schema is invalid');
+      }
+      for (final value in schema.enumValues) {
+        if (value is! String &&
+            value is! num &&
+            value is! bool &&
+            value != null) {
+          throw ArgumentError('$path enum values must be JSON primitives');
+        }
+        if (value is double && !value.isFinite) {
+          throw ArgumentError('$path enum values must be finite');
+        }
+        if (value is String &&
+            value.length > PocketPluginSchema.maxStringLength) {
+          throw ArgumentError('$path enum string is too long');
+        }
+      }
+      break;
+    case PocketPluginSchemaType.reference:
+      if (schema.ref == null ||
+          !RegExp(r'^[A-Za-z][A-Za-z0-9_]{0,63}$').hasMatch(schema.ref!) ||
+          schema.properties.isNotEmpty ||
+          schema.required.isNotEmpty ||
+          schema.items != null ||
+          schema.enumValues.isNotEmpty) {
+        throw ArgumentError('$path reference schema is invalid');
+      }
+      break;
+    case PocketPluginSchemaType.string:
+    case PocketPluginSchemaType.integer:
+    case PocketPluginSchemaType.number:
+    case PocketPluginSchemaType.boolean:
+    case PocketPluginSchemaType.nullValue:
+    case PocketPluginSchemaType.unknown:
+      if (schema.properties.isNotEmpty ||
+          schema.required.isNotEmpty ||
+          schema.items != null ||
+          schema.enumValues.isNotEmpty ||
+          schema.ref != null) {
+        throw ArgumentError('$path primitive schema has incompatible fields');
+      }
+  }
+}
+
+void _collectSchemaReferences(
+  PocketPluginSchema schema,
+  Set<String> references,
+) {
+  switch (schema.type) {
+    case PocketPluginSchemaType.reference:
+      references.add(schema.ref!);
+    case PocketPluginSchemaType.object:
+      for (final child in schema.properties.values) {
+        _collectSchemaReferences(child, references);
+      }
+    case PocketPluginSchemaType.array:
+      _collectSchemaReferences(schema.items!, references);
+    case PocketPluginSchemaType.string:
+    case PocketPluginSchemaType.integer:
+    case PocketPluginSchemaType.number:
+    case PocketPluginSchemaType.boolean:
+    case PocketPluginSchemaType.nullValue:
+    case PocketPluginSchemaType.enumValue:
+    case PocketPluginSchemaType.unknown:
+      break;
+  }
+}
+
+/// Schemas for one capability's request parameters, request result, or
+/// stream item.  Existing descriptors may omit this object entirely.
+final class PocketPluginCapabilitySchema {
+  const PocketPluginCapabilitySchema({
+    this.parameters,
+    this.result,
+    this.streamItem,
+  });
+
+  final PocketPluginSchema? parameters;
+  final PocketPluginSchema? result;
+  final PocketPluginSchema? streamItem;
+
+  bool get isEmpty =>
+      parameters == null && result == null && streamItem == null;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    if (parameters != null) 'parameters': parameters!.toJson(),
+    if (result != null) 'result': result!.toJson(),
+    if (streamItem != null) 'streamItem': streamItem!.toJson(),
+  };
+
+  factory PocketPluginCapabilitySchema.fromJson(Object? value) {
+    final map = _schemaMap(value, 'capability.schema');
+    final allowed = const <String>{'parameters', 'result', 'streamItem'};
+    final unknown = map.keys.where((key) => !allowed.contains(key));
+    if (unknown.isNotEmpty) {
+      throw FormatException(
+        'unknown capability schema fields: ${unknown.join(', ')}',
+      );
+    }
+    return PocketPluginCapabilitySchema(
+      parameters: map.containsKey('parameters')
+          ? PocketPluginSchema.fromJson(map['parameters'])
+          : null,
+      result: map.containsKey('result')
+          ? PocketPluginSchema.fromJson(map['result'])
+          : null,
+      streamItem: map.containsKey('streamItem')
+          ? PocketPluginSchema.fromJson(map['streamItem'])
+          : null,
+    );
+  }
+}
+
 final class PocketPluginCapability {
   const PocketPluginCapability({
     required this.name,
@@ -40,6 +483,7 @@ final class PocketPluginCapability {
     this.description = '',
     this.permissions,
     this.optionalPermissions = const <String>{},
+    this.schema,
   });
 
   final String name;
@@ -47,6 +491,7 @@ final class PocketPluginCapability {
   final String description;
   final Set<String>? permissions;
   final Set<String> optionalPermissions;
+  final PocketPluginCapabilitySchema? schema;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'name': name,
@@ -56,6 +501,7 @@ final class PocketPluginCapability {
       'permissions': permissions!.toList()..sort(),
     if (optionalPermissions.isNotEmpty)
       'optionalPermissions': optionalPermissions.toList()..sort(),
+    if (schema != null && !schema!.isEmpty) 'schema': schema!.toJson(),
   };
 }
 
@@ -108,6 +554,7 @@ final class PocketPluginDescriptor {
     this.optionalPermissions = const <String>{},
     this.limits = const PocketPluginLimits(),
     this.description = '',
+    this.types = const <String, PocketPluginSchema>{},
   });
 
   static const int currentProtocolVersion = 1;
@@ -121,21 +568,83 @@ final class PocketPluginDescriptor {
   final PocketPluginLimits limits;
   final Map<String, PocketPluginCapability> capabilities;
   final String description;
+  final Map<String, PocketPluginSchema> types;
 
-  Map<String, dynamic> toJson() => <String, dynamic>{
-    'protocolVersion': protocolVersion,
-    'id': id,
-    'version': version,
-    'kind': kind,
-    if (permissions.isNotEmpty) 'permissions': permissions.toList()..sort(),
-    if (optionalPermissions.isNotEmpty)
-      'optionalPermissions': optionalPermissions.toList()..sort(),
-    if (!limits.isEmpty) 'limits': limits.toJson(),
-    if (description.isNotEmpty) 'description': description,
-    'capabilities': capabilities.values
-        .map((item) => item.toJson())
-        .toList(growable: false),
-  };
+  Map<String, dynamic> toJson() {
+    validateSchemas();
+    return <String, dynamic>{
+      'protocolVersion': protocolVersion,
+      'id': id,
+      'version': version,
+      'kind': kind,
+      if (permissions.isNotEmpty) 'permissions': permissions.toList()..sort(),
+      if (optionalPermissions.isNotEmpty)
+        'optionalPermissions': optionalPermissions.toList()..sort(),
+      if (!limits.isEmpty) 'limits': limits.toJson(),
+      if (description.isNotEmpty) 'description': description,
+      if (types.isNotEmpty)
+        'types': <String, dynamic>{
+          for (final name in types.keys.toList()..sort())
+            name: types[name]!._toJsonUnchecked(),
+        },
+      'capabilities': capabilities.values
+          .map((item) => item.toJson())
+          .toList(growable: false),
+    };
+  }
+
+  /// Validates schema metadata without changing permission or lifecycle
+  /// semantics.  Called at serialization and plugin admission boundaries.
+  void validateSchemas() {
+    if (types.length > 128) {
+      throw ArgumentError('plugin schema type count exceeds 128');
+    }
+    for (final entry in types.entries) {
+      if (!RegExp(r'^[A-Za-z][A-Za-z0-9_]{0,63}$').hasMatch(entry.key)) {
+        throw ArgumentError.value(
+          entry.key,
+          'plugin.types',
+          'invalid type name',
+        );
+      }
+      entry.value.validate();
+    }
+    final references = <String>{};
+    for (final entry in types.entries) {
+      _collectSchemaReferences(entry.value, references);
+    }
+    for (final capability in capabilities.values) {
+      final schema = capability.schema;
+      if (schema == null) continue;
+      for (final node in <PocketPluginSchema?>[
+        schema.parameters,
+        schema.result,
+        schema.streamItem,
+      ]) {
+        if (node != null) _collectSchemaReferences(node, references);
+      }
+    }
+    final missing = references.difference(types.keys.toSet());
+    if (missing.isNotEmpty) {
+      throw ArgumentError(
+        'plugin schema references are not declared: ${missing.toList()..sort()}',
+      );
+    }
+    final encoded = utf8.encode(
+      jsonEncode(<String, dynamic>{
+        'types': <String, dynamic>{
+          for (final name in types.keys.toList()..sort())
+            name: types[name]!._toJsonUnchecked(),
+        },
+        'capabilities': capabilities.values
+            .map((item) => item.toJson())
+            .toList(growable: false),
+      }),
+    );
+    if (encoded.length > 64 * 1024) {
+      throw ArgumentError('plugin schema metadata exceeds 64KiB');
+    }
+  }
 }
 
 final class PocketPluginBudget {
@@ -858,6 +1367,7 @@ final class PocketPluginManager {
         }
       }
     }
+    descriptor.validateSchemas();
   }
 }
 

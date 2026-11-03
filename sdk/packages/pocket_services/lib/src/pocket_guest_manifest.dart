@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'package:pocket_flutter/src/pocket_memory_limits.dart'
+    show PocketMemoryLimits;
 
 /// The small, signed capability contract carried by a guest package.
 ///
@@ -11,6 +13,7 @@ final class PocketGuestManifest {
     this.optionalCapabilities = const <String>{},
     this.requiredPermissions = const <String>{},
     this.optionalPermissions = const <String>{},
+    this.memoryLimits = const PocketMemoryLimits(),
   });
 
   factory PocketGuestManifest.fromJson(Object? value) {
@@ -52,6 +55,9 @@ final class PocketGuestManifest {
       optionalCapabilities: Set<String>.unmodifiable(optionalCapabilities),
       requiredPermissions: Set<String>.unmodifiable(requiredPermissions),
       optionalPermissions: Set<String>.unmodifiable(optionalPermissions),
+      memoryLimits: json.containsKey('memory')
+          ? PocketMemoryLimits.fromJson(json['memory'])
+          : const PocketMemoryLimits(),
     );
   }
 
@@ -62,6 +68,7 @@ final class PocketGuestManifest {
   final Set<String> optionalCapabilities;
   final Set<String> requiredPermissions;
   final Set<String> optionalPermissions;
+  final PocketMemoryLimits memoryLimits;
 
   Set<String> get declaredCapabilities => <String>{
     ...requiredCapabilities,
@@ -74,6 +81,7 @@ final class PocketGuestManifest {
   };
 
   Map<String, dynamic> toJson() => <String, dynamic>{
+    if (!memoryLimits.isEmpty) 'memory': memoryLimits.toJson(),
     'capabilities': <String, dynamic>{
       'requires': requiredCapabilities.toList()..sort(),
       'optional': optionalCapabilities.toList()..sort(),

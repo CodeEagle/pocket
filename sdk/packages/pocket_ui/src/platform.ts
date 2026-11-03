@@ -40,7 +40,9 @@ export function createPocketPlatformClient(send?: HostSend, options: { bridge?: 
   const target = globalThis as typeof globalThis & { __pocketEvent?: (line: string) => void };
   const previous = target.__pocketEvent;
   const receive = (line: string) => {
-    host.handle(line);
+    // Modern bridges own the event sink below this forwarding wrapper.
+    // Request-only injected bridges retain the explicit compatibility path.
+    if (typeof host.onEvent !== "function") host.handle(line);
     let event: Record<string, unknown> | undefined;
     try { event = JSON.parse(line); } catch { /* Other guest handlers may own this packet. */ }
     if (!disposed && event) {

@@ -6,11 +6,44 @@ const MAX_MAILBOX_MESSAGES = 32;
 const MAX_COMPLETED_REQUESTS = 256;
 const SYSTEM_UI_INSTANCE_ID = "system-ui";
 
+/** Compatibility names retained from the original mini-app memory tiers. */
+export const POCKET_MEMORY_POLICIES = [
+  "UI_MINI",
+  "GAME_STANDARD",
+  "VIDEO_GAME_PRO",
+  "VIDEO_GAME_ULTRA",
+] as const;
+export type PocketMemoryPolicy = (typeof POCKET_MEMORY_POLICIES)[number];
+
+/** A SystemUI budget request; the trusted host still owns the final grant. */
+export interface PocketMemoryBudget {
+  heapLimitBytes?: number;
+  maxPakBytes?: number;
+}
+
+export const POCKET_MEMORY_POLICY_BUDGETS: Readonly<Record<PocketMemoryPolicy, PocketMemoryBudget>> = Object.freeze({
+  // The legacy native/VRAM numbers are intentionally not projected into
+  // maxPakBytes: the host cannot promise those old off-heap semantics.
+  UI_MINI: Object.freeze({ heapLimitBytes: 128 * 1024 * 1024 }),
+  GAME_STANDARD: Object.freeze({ heapLimitBytes: 512 * 1024 * 1024 }),
+  VIDEO_GAME_PRO: Object.freeze({ heapLimitBytes: 1024 * 1024 * 1024 }),
+  VIDEO_GAME_ULTRA: Object.freeze({ heapLimitBytes: 2 * 1024 * 1024 * 1024 }),
+});
+
+const MIN_HEAP_LIMIT_BYTES = 64 * 1024;
+const MAX_HEAP_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
+const MIN_PAK_BYTES = 1;
+const MAX_PAK_BYTES = 512 * 1024 * 1024;
+
 export interface PocketSystemCatalogEntry {
   package: string;
   manifest: string;
   required: boolean;
   presentation?: JsonObject;
+  /** Explicit app budget requested by the SystemUI manifest. */
+  memory?: PocketMemoryBudget;
+  /** Optional compatibility policy; it maps to the explicit memory budget. */
+  memoryPolicy?: PocketMemoryPolicy;
 }
 
 /** The upstream pocket.system.json v1 shape consumed by the host. */
@@ -114,6 +147,8 @@ export interface PocketSystemSnapshot {
     required: boolean;
     installed: boolean;
     running: boolean;
+    memory?: PocketMemoryBudget;
+    memoryPolicy?: PocketMemoryPolicy;
     presentation?: JsonObject;
   }[];
   stack: readonly PocketSystemStackSnapshot[];
@@ -294,6 +329,79 @@ function objectSnapshot(value: unknown, field: string): JsonObject {
   return result as JsonObject;
 }
 
+function readPositiveSafeInteger(value: unknown, field: string, minimum: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    throw new PocketSystemError(
+      "invalid_memory_budget",
+      `${field} must be a safe integer from ${minimum} through ${maximum}`,
+    );
+  }
+  return value as number;
+}
+
+function readMemoryPolicy(value: unknown, field: string): PocketMemoryPolicy {
+  if (typeof value !== "string" || !(POCKET_MEMORY_POLICIES as readonly string[]).includes(value)) {
+    throw new PocketSystemError(
+      "invalid_memory_policy",
+      `${field} must be one of ${POCKET_MEMORY_POLICIES.join(", ")}`,
+    );
+  }
+  return value as PocketMemoryPolicy;
+}
+
+function parseMemoryBudget(
+  value: unknown,
+  policyValue: unknown,
+  appId: string,
+): { memory?: PocketMemoryBudget; memoryPolicy?: PocketMemoryPolicy } {
+  if (value === undefined && policyValue === undefined) return {};
+  const memoryPolicy = policyValue === undefined
+    ? undefined
+    : readMemoryPolicy(policyValue, `${appId}.memoryPolicy`);
+  let memory: PocketMemoryBudget | undefined;
+  if (value !== undefined) {
+    if (!isRecord(value)) {
+      throw new PocketSystemError("invalid_memory_budget", `${appId}.memory must be an object`);
+    }
+    const unknown = Object.keys(value).filter((key) => key !== "heapLimitBytes" && key !== "maxPakBytes");
+    if (unknown.length > 0) {
+      throw new PocketSystemError(
+        "invalid_memory_budget",
+        `${appId}.memory has unknown field ${unknown[0]}`,
+      );
+    }
+    const parsed: PocketMemoryBudget = {};
+    if (Object.prototype.hasOwnProperty.call(value, "heapLimitBytes")) {
+      parsed.heapLimitBytes = readPositiveSafeInteger(
+        value.heapLimitBytes,
+        `${appId}.memory.heapLimitBytes`,
+        MIN_HEAP_LIMIT_BYTES,
+        MAX_HEAP_LIMIT_BYTES,
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "maxPakBytes")) {
+      parsed.maxPakBytes = readPositiveSafeInteger(
+        value.maxPakBytes,
+        `${appId}.memory.maxPakBytes`,
+        MIN_PAK_BYTES,
+        MAX_PAK_BYTES,
+      );
+    }
+    memory = Object.freeze(parsed);
+  }
+  if (memoryPolicy !== undefined) {
+    const expected = POCKET_MEMORY_POLICY_BUDGETS[memoryPolicy];
+    if (memory?.heapLimitBytes !== undefined && memory.heapLimitBytes !== expected.heapLimitBytes) {
+      throw new PocketSystemError(
+        "memory_policy_mismatch",
+        `${appId}.memory does not match ${appId}.memoryPolicy=${memoryPolicy}`,
+      );
+    }
+    memory = Object.freeze({ ...expected, ...memory });
+  }
+  return { memory, memoryPolicy };
+}
+
 function parseManifest(input: PocketSystemV1): {
   systemId: string;
   systemUI: string;
@@ -335,6 +443,14 @@ function parseManifest(input: PocketSystemV1): {
     if (!isRecord(value) || !nonEmptyString(value.package) || !nonEmptyString(value.manifest)) {
       throw new PocketSystemError("invalid_system_manifest", "every catalog entry needs package and manifest");
     }
+    const unknownFields = Object.keys(value).filter((key) =>
+      !["package", "manifest", "required", "presentation", "memory", "memoryPolicy"].includes(key));
+    if (unknownFields.length > 0) {
+      throw new PocketSystemError(
+        "invalid_system_manifest",
+        `catalog entry ${value.package} has unknown field ${unknownFields[0]}`,
+      );
+    }
     if (typeof value.required !== "boolean") {
       throw new PocketSystemError("invalid_system_manifest", "every catalog entry needs a required boolean");
     }
@@ -342,11 +458,14 @@ function parseManifest(input: PocketSystemV1): {
     if (catalog.has(appId)) {
       throw new PocketSystemError("duplicate_catalog_package", "catalog package is duplicated: " + appId);
     }
+    const parsedMemory = parseMemoryBudget(value.memory, value.memoryPolicy, appId);
     catalog.set(appId, {
       package: appId,
       manifest: value.manifest,
       required: value.required,
       installed: false,
+      ...(parsedMemory.memory ? { memory: parsedMemory.memory } : {}),
+      ...(parsedMemory.memoryPolicy ? { memoryPolicy: parsedMemory.memoryPolicy } : {}),
       ...(isRecord(value.presentation)
         ? { presentation: jsonSnapshot(value.presentation, "catalog.presentation") as JsonObject }
         : {}),
@@ -506,7 +625,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.target = globalThis as typeof globalThis & { __pocketEvent?: (line: string) => void };
     this.previousEvent = this.target.__pocketEvent;
     this.receiveEvent = (line: string): void => {
-      this.bridge.handle(line);
+      if (typeof this.bridge.onEvent !== "function") this.bridge.handle(line);
       const event = eventOf(line);
       if (event?.name === "system.request") {
         void this.enqueue(async () => {
@@ -556,6 +675,8 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       required: entry.required,
       installed: entry.installed,
       running: this.instanceForApp.has(entry.package),
+      ...(entry.memory ? { memory: { ...entry.memory } } : {}),
+      ...(entry.memoryPolicy ? { memoryPolicy: entry.memoryPolicy } : {}),
       ...(entry.presentation ? { presentation: jsonSnapshot(entry.presentation, "snapshot.presentation") as JsonObject } : {}),
     }));
     return Object.freeze({
@@ -1182,7 +1303,19 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
 
   private async createRuntime(appId: string, prewarmed: boolean): Promise<RuntimeRecord> {
     this.assertActive();
-    const created = await this.hostObject("system.runtime.create", { appId });
+    const catalogEntry = this.catalog.get(appId);
+    const createParams: JsonObject = { appId };
+    if (catalogEntry?.memory) {
+      const memory: JsonObject = {};
+      if (catalogEntry.memory.heapLimitBytes !== undefined) {
+        memory.heapLimitBytes = catalogEntry.memory.heapLimitBytes;
+      }
+      if (catalogEntry.memory.maxPakBytes !== undefined) {
+        memory.maxPakBytes = catalogEntry.memory.maxPakBytes;
+      }
+      createParams.memory = memory;
+    }
+    const created = await this.hostObject("system.runtime.create", createParams);
     this.assertActive();
     const instanceId = created.instanceId;
     if (!nonEmptyString(instanceId) || instanceId === SYSTEM_UI_INSTANCE_ID) {

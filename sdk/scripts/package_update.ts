@@ -17,6 +17,10 @@ const PAK_MAGIC = 0x4b504344;
 const PAK_VERSION = 1;
 const PAK_HEADER_SIZE = 32;
 const PAK_ENTRY_SIZE = 24;
+const MIN_HEAP_LIMIT_BYTES = 64 * 1024;
+const MAX_HEAP_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
+const MIN_PAK_BYTES = 1;
+const MAX_PAK_BYTES = 512 * 1024 * 1024;
 
 export type ContentFile = {
   sha256: string;
@@ -34,6 +38,11 @@ export type PakPart = {
   offset: number;
   sha256: string;
   size: number;
+};
+
+export type PocketMemoryBudget = {
+  heapLimitBytes?: number;
+  maxPakBytes?: number;
 };
 
 export type PocketUpdatePayload = {
@@ -56,6 +65,8 @@ export type PocketUpdatePayload = {
   /** Signed guest capability declaration; it is metadata, not executable code. */
   capabilities?: { requires: string[]; optional: string[] };
   permissions?: { requires: string[]; optional: string[] };
+  /** Signed guest memory declaration; the host remains the final authority. */
+  memory?: PocketMemoryBudget;
 };
 
 export type SignedManifest = {
@@ -318,6 +329,7 @@ type GuestManifest = {
   worker?: Record<string, unknown>;
   capabilities?: { requires: string[]; optional: string[] };
   permissions?: { requires: string[]; optional: string[] };
+  memory?: PocketMemoryBudget;
 };
 
 function readGuestManifest(filePath: string): GuestManifest {
@@ -333,8 +345,11 @@ function readGuestManifest(filePath: string): GuestManifest {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`package: ${field} must be an object`);
     return value as Record<string, unknown>;
   };
-  const capabilitiesValue = value.capabilities ?? (value.guest as Record<string, unknown> | undefined)?.capabilities;
-  const permissionsValue = value.permissions ?? (value.guest as Record<string, unknown> | undefined)?.permissions;
+  const nestedGuest = value.guest && typeof value.guest === "object" && !Array.isArray(value.guest)
+    ? value.guest as Record<string, unknown>
+    : undefined;
+  const capabilitiesValue = value.capabilities ?? nestedGuest?.capabilities;
+  const permissionsValue = value.permissions ?? nestedGuest?.permissions;
   const readGroup = (value: unknown, field: string): { requires: string[]; optional: string[] } | undefined => {
     if (value === undefined) return undefined;
     const group = object(value, field);
@@ -342,9 +357,33 @@ function readGuestManifest(filePath: string): GuestManifest {
     const optional = readNames(group.optional, `${field}.optional`).filter((name) => !requires.includes(name));
     return { requires, optional };
   };
+  const readMemory = (value: unknown, field: string): PocketMemoryBudget | undefined => {
+    if (value === undefined) return undefined;
+    const memory = object(value, field);
+    const unknown = Object.keys(memory).filter((key) => key !== "heapLimitBytes" && key !== "maxPakBytes");
+    if (unknown.length > 0) throw new Error(`package: ${field} has unknown field ${unknown[0]}`);
+    const readLimit = (key: "heapLimitBytes" | "maxPakBytes", minimum: number, maximum: number): number | undefined => {
+      if (!Object.prototype.hasOwnProperty.call(memory, key)) return undefined;
+      const limit = memory[key];
+      if (!Number.isSafeInteger(limit) || (limit as number) < minimum || (limit as number) > maximum) {
+        throw new Error(`package: ${field}.${key} must be a safe integer from ${minimum} through ${maximum}`);
+      }
+      return limit as number;
+    };
+    const heapLimitBytes = readLimit("heapLimitBytes", MIN_HEAP_LIMIT_BYTES, MAX_HEAP_LIMIT_BYTES);
+    const maxPakBytes = readLimit("maxPakBytes", MIN_PAK_BYTES, MAX_PAK_BYTES);
+    return {
+      ...(heapLimitBytes === undefined ? {} : { heapLimitBytes }),
+      ...(maxPakBytes === undefined ? {} : { maxPakBytes }),
+    };
+  };
+  const memoryValue = Object.prototype.hasOwnProperty.call(value, "memory")
+    ? value.memory
+    : nestedGuest?.memory;
   return {
     capabilities: readGroup(capabilitiesValue, "capabilities"),
     permissions: readGroup(permissionsValue, "permissions"),
+    memory: readMemory(memoryValue, "memory"),
     ...(value.worker === undefined ? {} : { worker: object(value.worker, "worker") }),
   };
 }
@@ -463,6 +502,7 @@ export function packageArtifacts(options: PackageOptions): PackageResult {
     ...(worker === undefined ? {} : { worker }),
     ...(guest?.capabilities === undefined ? {} : { capabilities: guest.capabilities }),
     ...(guest?.permissions === undefined ? {} : { permissions: guest.permissions }),
+    ...(guest?.memory === undefined ? {} : { memory: guest.memory }),
   };
   const payloadBytes = encoder.encode(JSON.stringify(payload));
   const envelope = signPayload(payloadBytes, loadPrivateKey(options.keyFile));

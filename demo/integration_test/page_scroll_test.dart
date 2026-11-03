@@ -22,14 +22,11 @@ void main() {
           child: SizedBox(width: 390, height: 600, child: PocketHostApp()),
         ),
       );
-      await guest.waitFor(tester, '00');
-      await guest.waitFor(tester, 'Counter');
+      await guest.waitFor(tester, 'Input round-trip');
+      await _waitForHostInsets(tester);
 
-      final homeIntroBefore = _textPoint(
-        tester,
-        'One runtime, one source of truth',
-      );
-      final homeAnchorBefore = _textPoint(tester, 'Counter');
+      final homeIntroBefore = _textPoint(tester, 'Made to feel native.');
+      final homeAnchorBefore = _textPoint(tester, 'Input round-trip');
       final headerBefore = _textPoint(tester, 'Pocket Host Lab');
       final homeNavBefore = _textPoint(tester, 'Home');
       expect(homeIntroBefore, isNotNull);
@@ -37,18 +34,13 @@ void main() {
       expect(headerBefore, isNotNull);
       expect(homeNavBefore, isNotNull);
 
-      await _dragUpAcrossViewport(tester);
-      await tester.pump(const Duration(milliseconds: 120));
       // The native frame culls text outside the viewport. The bottom marker
       // is therefore expected to appear only after the real drag reaches it.
-      await _waitForPaintedText(tester, 'Ready for input');
+      await _dragUntilPaintedText(tester, 'Runtime ready');
 
-      final homeIntroAfter = _textPoint(
-        tester,
-        'One runtime, one source of truth',
-      );
-      final nativeBoundaryAfter = _textPoint(tester, 'Ready for input');
-      final homeAnchorAfter = _textPoint(tester, 'Counter');
+      final homeIntroAfter = _textPoint(tester, 'Made to feel native.');
+      final nativeBoundaryAfter = _textPoint(tester, 'Runtime ready');
+      final homeAnchorAfter = _textPoint(tester, 'Input round-trip');
       final headerAfter = _textPoint(tester, 'Pocket Host Lab');
       final homeNavAfter = _textPoint(tester, 'Home');
       expect(nativeBoundaryAfter, isNotNull);
@@ -62,7 +54,7 @@ void main() {
       _expectScrolledOrCulled(
         before: homeAnchorBefore!,
         after: homeAnchorAfter,
-        label: 'Home counter anchor',
+        label: 'Home input card anchor',
       );
       expect(
         headerAfter!.y,
@@ -95,6 +87,7 @@ void main() {
       // The 360pt preview deliberately clips the lower Home controls. Its
       // fixed navigation, not the off-screen counter, is the ready marker.
       await guest.waitFor(tester, 'Home');
+      await _waitForHostInsets(tester);
       await guest.tapGuest(tester, 'Gallery');
       await guest.waitFor(tester, 'Official building blocks');
       final galleryIntroBefore = _textPoint(tester, 'Official building blocks');
@@ -110,9 +103,7 @@ void main() {
         reason: 'compact Gallery must begin with its bottom card clipped',
       );
 
-      await _dragUpAcrossViewport(tester);
-      await tester.pump(const Duration(milliseconds: 120));
-      await _waitForPaintedText(tester, 'Not mounted here');
+      await _dragUntilPaintedText(tester, 'Not mounted here');
       final galleryIntroAfter = _textPoint(tester, 'Official building blocks');
       final galleryBottomAfter = _textPoint(tester, 'Not mounted here');
       final galleryHeaderAfter = _textPoint(tester, 'Pocket Host Lab');
@@ -153,6 +144,18 @@ void main() {
   });
 }
 
+Future<void> _waitForHostInsets(WidgetTester tester) async {
+  // JS receives the host's display.viewport facts after its initial frame.
+  // Establish the inset-aware baseline before measuring scroll movement.
+  final top = MediaQuery.paddingOf(tester.element(find.byType(PocketView))).top;
+  for (var attempt = 0; attempt < 100; attempt++) {
+    final header = _textPoint(tester, 'Pocket Host Lab');
+    if (header != null && header.y >= top - 2) return;
+    await tester.pump(const Duration(milliseconds: 30));
+  }
+  fail('Guest header never applied the host top inset $top');
+}
+
 Future<void> _dragUpAcrossViewport(WidgetTester tester) async {
   final view = find.byType(PocketView);
   expect(view, findsOneWidget);
@@ -181,6 +184,17 @@ Future<void> _dragUpAcrossViewport(WidgetTester tester) async {
   for (var index = 0; index < 30; index++) {
     await tester.pump(const Duration(milliseconds: 16));
   }
+}
+
+Future<void> _dragUntilPaintedText(WidgetTester tester, String value) async {
+  // Card grids have a content-dependent extent. Exercise actual pointer
+  // scrolling until the bottom marker is visible rather than assuming one
+  // fling covers every supported page layout.
+  for (var attempt = 0; attempt < 8; attempt++) {
+    await _dragUpAcrossViewport(tester);
+    if (_textPoint(tester, value) != null) return;
+  }
+  await _waitForPaintedText(tester, value);
 }
 
 void _expectBottomContentVisible({

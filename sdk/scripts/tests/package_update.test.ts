@@ -79,6 +79,7 @@ test("package emits signed exact payload and PAK parts reconstruct byte-for-byte
       jsPath: input.js, pakPath: input.pak, outDir: out, keyFile: fixtureKey,
     });
     expect(result.payload.schemaVersion).toBe(1);
+    expect(result.payload.memory).toBeUndefined();
     expect(result.payload.entry.size).toBe(readFileSync(input.js).byteLength);
     expect(result.payload.pak.sha256).toBe(sha256Hex(input.sourcePak));
     expect(result.payload.pak.parts[0].offset).toBe(0);
@@ -96,6 +97,69 @@ test("package emits signed exact payload and PAK parts reconstruct byte-for-byte
     // to entry data; these are explicit metadata parts, not fixed chunks.
     expect(result.pakParts.some((part) => part.kind === "metadata")).toBe(true);
     expect(result.pakParts.some((part) => part.kind === "blob")).toBe(true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("package preserves validated guest memory in the signed payload, including nested declarations", () => {
+  const dir = tempDirectory();
+  try {
+    const input = writeFixture(join(dir, "input"), 10);
+    const keyPath = join(dir, "generated-key.json");
+    const generated = generateDevKey(keyPath, "memory-payload-test");
+    const guestManifest = join(dir, "input", "guest-manifest.json");
+    const memory = { heapLimitBytes: 128 * 1024, maxPakBytes: 8 * 1024 * 1024 };
+    writeFileSync(guestManifest, JSON.stringify({ memory }));
+    const result = packageArtifacts({
+      appId: "fixture-app", version: "1.0.0", build: 1,
+      jsPath: input.js, pakPath: input.pak, outDir: join(dir, "out"), keyFile: keyPath,
+      guestManifestPath: guestManifest,
+    });
+    expect(result.payload.memory).toEqual(memory);
+    expect(JSON.parse(readFileSync(join(dir, "out", "payload.json"), "utf8")).memory).toEqual(memory);
+    const envelope = JSON.parse(readFileSync(join(dir, "out", "signed-manifest.json"), "utf8"));
+    expect([...verifySignedManifest(envelope, generated.publicKeyPem)]).toEqual([...result.payloadBytes]);
+
+    writeFileSync(guestManifest, JSON.stringify({ guest: { memory: { maxPakBytes: 1 } } }));
+    const nested = packageArtifacts({
+      appId: "fixture-app", version: "1.0.1", build: 2,
+      jsPath: input.js, pakPath: input.pak, outDir: join(dir, "nested-out"), keyFile: keyPath,
+      guestManifestPath: guestManifest,
+    });
+    expect(nested.payload.memory).toEqual({ maxPakBytes: 1 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("package rejects malformed guest memory declarations", () => {
+  const dir = tempDirectory();
+  try {
+    const input = writeFixture(join(dir, "input"), 10);
+    const keyPath = join(dir, "generated-key.json");
+    generateDevKey(keyPath, "memory-validation-test");
+    const guestManifest = join(dir, "input", "guest-manifest.json");
+    let outputIndex = 0;
+    const expectInvalid = (memory: unknown, nested = false): void => {
+      writeFileSync(guestManifest, JSON.stringify(nested ? { guest: { memory } } : { memory }));
+      expect(() => packageArtifacts({
+        appId: "fixture-app", version: "1.0.0", build: 1,
+        jsPath: input.js, pakPath: input.pak, outDir: join(dir, `out-${outputIndex++}`), keyFile: keyPath,
+        guestManifestPath: guestManifest,
+      })).toThrow(/package: memory/);
+    };
+
+    expectInvalid(null);
+    expectInvalid({ heapLimitBytes: 0 });
+    expectInvalid({ heapLimitBytes: -1 });
+    expectInvalid({ heapLimitBytes: 2 * 1024 * 1024 * 1024 + 1 });
+    expectInvalid({ heapLimitBytes: 64 * 1024 + 0.5 });
+    expectInvalid({ maxPakBytes: null });
+    expectInvalid({ maxPakBytes: 0 });
+    expectInvalid({ maxPakBytes: 512 * 1024 * 1024 + 1 });
+    expectInvalid({ gcThreshold: 2 });
+    expectInvalid({ maxPakBytes: "8MiB" }, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

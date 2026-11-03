@@ -18,7 +18,7 @@ export function FlutterDivider(props: {
 } = {}): JSX.Element {
   const height = () => props.height ?? 1;
   const color = () => props.color;
-  return <View class="w-full bg-slate-200" style={{ height: height(), bgColor: color() ?? 0xffe2e8f0 }} />;
+  return <View class="w-full bg-[#E5E9F2]" style={{ height: height(), bgColor: color() ?? "#E5E9F2" }} />;
 }
 
 export function FlutterLinearProgressIndicator(props: {
@@ -32,11 +32,11 @@ export function FlutterLinearProgressIndicator(props: {
   const backgroundColor = () => props.backgroundColor;
   return (
     <View
-      class="w-full h-2 rounded-lg bg-slate-200"
-      style={{ bgColor: backgroundColor() ?? 0xffe2e8f0 }}
+      class="w-full h-2 rounded-lg bg-[#E8EDFF]"
+      style={{ bgColor: backgroundColor() ?? "#E8EDFF" }}
     >
       <View
-        class="h-2 rounded-lg bg-blue-600"
+        class="h-2 rounded-lg bg-[#315DEB]"
         style={{
           width: -1,
           scaleX: value(),
@@ -44,7 +44,7 @@ export function FlutterLinearProgressIndicator(props: {
           // origin keeps a determinate progress bar growing from its start
           // edge instead of shrinking toward the middle.
           originX: -0.5,
-          bgColor: color() ?? 0xff2563eb,
+          bgColor: color() ?? "#315DEB",
         }}
       />
     </View>
@@ -63,9 +63,9 @@ export function FlutterChip(props: {
   // important when a parent swaps handlers without replacing the node.
   const onPress = () => props.onPress?.();
   const body = (
-    <View class={selected() ? "flex-row items-center gap-1 px-3 py-2 rounded-lg bg-blue-100" : "flex-row items-center gap-1 px-3 py-2 rounded-lg bg-slate-200"}>
+    <View class={selected() ? "flex-row items-center gap-1 px-3 h-[44] rounded-lg bg-[#E8EDFF]" : "flex-row items-center gap-1 px-3 h-[44] rounded-lg bg-[#EEF1F6]"}>
       {props.leading}
-      <Text class={selected() ? "text-xs text-blue-950 font-bold" : "text-xs text-slate-950 font-bold"}>{props.label}</Text>
+      <Text class={selected() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#17233B] font-bold"}>{props.label}</Text>
     </View>
   );
   return <Show when={hasPress()} fallback={body}><Focusable onPress={onPress}>{body}</Focusable></Show>;
@@ -82,13 +82,13 @@ export function FlutterIconButton(props: {
   const onPress = () => disabled() ? undefined : props.onPress?.();
   return (
     <Focusable
-      class={disabled() ? "flex-col items-center justify-center w-[40] h-[40] rounded-full bg-slate-200 opacity-50" : "flex-col items-center justify-center w-[40] h-[40] rounded-full bg-slate-200 focus:bg-blue-100"}
+      class={disabled() ? "flex-col items-center justify-center w-[44] h-[44] rounded-full bg-[#EEF1F6] opacity-50" : "flex-col items-center justify-center w-[44] h-[44] rounded-full bg-[#EEF1F6] focus:bg-[#E8EDFF]"}
       focusable={!disabled()}
       debugName={props.tooltip}
       onPress={onPress}
       style={props.style}
     >
-      <Text class="text-sm text-slate-950 font-bold">{props.icon}</Text>
+      <Text class="text-sm text-[#17233B] font-bold">{props.icon}</Text>
     </Focusable>
   );
 }
@@ -104,11 +104,11 @@ export function FlutterFloatingActionButton(props: {
   const extended = () => props.label !== undefined;
   const className = () => disabled()
     ? extended()
-      ? "flex-row items-center gap-2 px-4 py-3 h-[48] rounded-xl bg-blue-300 opacity-50"
-      : "flex-col items-center justify-center w-[48] h-[48] rounded-full bg-blue-300 opacity-50"
+      ? "flex-row items-center justify-center gap-2 px-4 h-[44] rounded-xl bg-[#E8EDFF] opacity-50"
+      : "flex-col items-center justify-center w-[44] h-[44] rounded-full bg-[#E8EDFF] opacity-50"
     : extended()
-      ? "flex-row items-center gap-2 px-4 py-3 h-[48] rounded-xl bg-blue-600 focus:bg-blue-500"
-      : "flex-col items-center justify-center w-[48] h-[48] rounded-full bg-blue-600 focus:bg-blue-500";
+      ? "flex-row items-center justify-center gap-2 px-4 h-[44] rounded-xl bg-[#315DEB] focus:bg-[#2748C5]"
+      : "flex-col items-center justify-center w-[44] h-[44] rounded-full bg-[#315DEB] focus:bg-[#2748C5]";
   const onPress = () => disabled() ? undefined : props.onPress?.();
   return (
     <Focusable
@@ -117,8 +117,8 @@ export function FlutterFloatingActionButton(props: {
       debugName={props.tooltip}
       onPress={onPress}
     >
-      <Show when={props.icon}><Text class="text-sm text-white font-bold">{props.icon}</Text></Show>
-      <Show when={props.label}><Text class="text-xs text-white font-bold">{props.label}</Text></Show>
+      <Show when={props.icon}><Text class={disabled() ? "text-sm text-[#17233B] font-bold" : "text-sm text-white font-bold"}>{props.icon}</Text></Show>
+      <Show when={props.label}><Text class={disabled() ? "text-xs text-[#17233B] font-bold" : "text-xs text-white font-bold"}>{props.label}</Text></Show>
     </Focusable>
   );
 }
@@ -133,9 +133,9 @@ export function FlutterNavigationDestination(props: {
   const hasPress = () => typeof props.onPress === "function";
   const onPress = () => props.onPress?.();
   const body = (
-    <View class={selected() ? "flex-col items-center gap-1 px-3 py-2 rounded-lg bg-blue-100" : "flex-col items-center gap-1 px-3 py-2 rounded-lg bg-transparent"}>
-      <Text class={selected() ? "text-sm text-blue-700 font-bold" : "text-sm text-slate-600"}>{props.icon}</Text>
-      <Text class={selected() ? "text-xs text-blue-950 font-bold" : "text-xs text-slate-600"}>{props.label}</Text>
+    <View class={selected() ? "flex-col items-center justify-center gap-1 px-3 h-[44] rounded-lg bg-[#E8EDFF]" : "flex-col items-center justify-center gap-1 px-3 h-[44] rounded-lg bg-transparent"}>
+      <Text class={selected() ? "text-sm text-[#315DEB] font-bold" : "text-sm text-[#7C8799]"}>{props.icon}</Text>
+      <Text class={selected() ? "text-xs text-[#17233B] font-bold" : "text-xs text-[#7C8799]"}>{props.label}</Text>
     </View>
   );
   return <Show when={hasPress()} fallback={body}><Focusable onPress={onPress}>{body}</Focusable></Show>;

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'pocket_memory_limits.dart';
 import 'dart:typed_data';
 
 const int pocketRecordingSchemaVersion = 2;
@@ -24,10 +25,12 @@ final class PocketRecordingMetadata {
     required this.density,
     required this.tickHz,
     this.engineAbi,
+    this.memoryLimits = const PocketMemoryLimits(),
     Map<String, String> contentHashes = const <String, String>{},
   }) : contentHashes = Map<String, String>.unmodifiable(
          Map<String, String>.from(contentHashes),
        ) {
+    memoryLimits.validate();
     _validateFinite(width, 'metadata.width');
     _validateFinite(height, 'metadata.height');
     if (width <= 0 || height <= 0) {
@@ -66,6 +69,7 @@ final class PocketRecordingMetadata {
       'tickHz',
       'engineAbi',
       'contentHashes',
+      'memory',
     }, 'metadata');
     final engineAbi = map['engineAbi'];
     if (engineAbi != null && engineAbi is! String) {
@@ -90,6 +94,9 @@ final class PocketRecordingMetadata {
       tickHz: _integer(map['tickHz'], 'metadata.tickHz'),
       engineAbi: engineAbi as String?,
       contentHashes: contentHashes,
+      memoryLimits: map.containsKey('memory')
+          ? PocketMemoryLimits.fromJson(map['memory'])
+          : const PocketMemoryLimits(),
     );
   }
 
@@ -98,6 +105,7 @@ final class PocketRecordingMetadata {
   final int density;
   final int tickHz;
   final String? engineAbi;
+  final PocketMemoryLimits memoryLimits;
   final Map<String, String> contentHashes;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -107,6 +115,7 @@ final class PocketRecordingMetadata {
     'tickHz': tickHz,
     'engineAbi': engineAbi,
     'contentHashes': contentHashes,
+    if (!memoryLimits.isEmpty) 'memory': memoryLimits.toJson(),
   };
 }
 
@@ -526,6 +535,7 @@ final class PocketRecordingController {
       tickHz: _metadata!.tickHz,
       engineAbi: _metadata!.engineAbi,
       contentHashes: hashes,
+      memoryLimits: _metadata!.memoryLimits,
     );
   }
 

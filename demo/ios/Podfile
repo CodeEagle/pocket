@@ -36,8 +36,35 @@ target 'Runner' do
 end
 
 post_install do |installer|
+  # POCKET_STATIC_XCFRAMEWORK_OUTPUTS_BEGIN
+  pocket_static_xcframework_output_path = File.join(__dir__, "Pods", "Target Support Files", "pocket_flutter", "pocket_flutter-xcframeworks-output-files.xcfilelist")
+  if File.file?(pocket_static_xcframework_output_path)
+    pocket_static_xcframework_output_old = "${PODS_XCFRAMEWORKS_BUILD_DIR}/pocket_flutter/PocketFlutter.framework"
+    pocket_static_xcframework_output_new = "${PODS_XCFRAMEWORKS_BUILD_DIR}/pocket_flutter/libpocket_flutter.a"
+    pocket_static_xcframework_output_lines = File.read(pocket_static_xcframework_output_path).lines
+    pocket_static_xcframework_output_changed = false
+    pocket_static_xcframework_output_lines.map! do |line|
+      if line.chomp == pocket_static_xcframework_output_old
+        pocket_static_xcframework_output_changed = true
+        if line.end_with?("\r\n")
+          "#{pocket_static_xcframework_output_new}\r\n"
+        elsif line.end_with?("\n")
+          "#{pocket_static_xcframework_output_new}\n"
+        else
+          pocket_static_xcframework_output_new
+        end
+      else
+        line
+      end
+    end
+    if pocket_static_xcframework_output_changed
+      File.write(pocket_static_xcframework_output_path, pocket_static_xcframework_output_lines.join)
+    end
+  end
+  # POCKET_STATIC_XCFRAMEWORK_OUTPUTS_END
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+      target.build_configurations.each { |config| config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'; config.build_settings['ARCHS'] = 'arm64' }
     # Xcode 27's simulator SDK rejects older Pod deployment targets as well.
     target.build_configurations.each do |config|
       minimum = config.build_settings['IPHONEOS_DEPLOYMENT_TARGET']

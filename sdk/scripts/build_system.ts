@@ -14,6 +14,12 @@ import {
   loadPocketFlutterPlatformContracts,
   POCKET_FLUTTER_TARGET_ID,
 } from "./flutter_target.ts";
+import {
+  POCKET_MEMORY_POLICIES,
+  POCKET_MEMORY_POLICY_BUDGETS,
+  type PocketMemoryBudget,
+  type PocketMemoryPolicy,
+} from "../packages/pocket_ui/src/system.ts";
 
 const sdkRoot = resolve(import.meta.dir, "..");
 const upstreamRoot = join(sdkRoot, ".cache/pocketjs");
@@ -72,6 +78,17 @@ export interface ValidatedSystemPackage {
   readonly manifest: PocketManifestV2;
 }
 
+type PocketSystemCatalogEntryWithMemory = PocketSystemPackageV1 & {
+  readonly memory?: PocketMemoryBudget;
+  readonly memoryPolicy?: PocketMemoryPolicy;
+};
+
+type PocketSystemWithMemory = Omit<PocketSystemV1, "applications"> & {
+  readonly applications: Omit<PocketSystemV1["applications"], "catalog"> & {
+    readonly catalog: readonly PocketSystemCatalogEntryWithMemory[];
+  };
+};
+
 /**
  * A schema-valid official PocketSystemV1 contract plus its checked package
  * inputs. This result is not a ResolvedSystemPlan: no host profile, target
@@ -80,7 +97,7 @@ export interface ValidatedSystemPackage {
 export interface ValidatedSystemContract {
   readonly kind: "validated-pocket-system-contract";
   /** Canonical field ordering using the official PocketSystemV1 shape. */
-  readonly contract: PocketSystemV1;
+  readonly contract: PocketSystemWithMemory;
   readonly packages: readonly ValidatedSystemPackage[];
 }
 
@@ -101,16 +118,174 @@ export interface ResolveSystemOptions extends ValidateSystemOptions {
 export type ResolvedSystemDocument =
   | {
       readonly ok: true;
-      readonly plan: ResolvedSystemPlan;
+      readonly plan: ResolvedSystemPlanWithMemory;
       readonly compositorSurfaces?: Readonly<Record<string, number>>;
     }
   | { readonly ok: false; readonly diagnostics: readonly ContractDiagnostic[] };
+
+type ResolvedSystemPackageWithMemory = ResolvedSystemPackage & {
+  readonly memory?: PocketMemoryBudget;
+  readonly memoryPolicy?: PocketMemoryPolicy;
+};
+
+type ResolvedSystemPlanWithMemory = Omit<ResolvedSystemPlan, "systemUI" | "applications"> & {
+  readonly systemUI: ResolvedSystemPackageWithMemory;
+  readonly applications: readonly ResolvedSystemPackageWithMemory[];
+};
 
 function diagnostic(code: string, path: string, message: string): ContractDiagnostic {
   return { code, path, message };
 }
 
-function normalizeContract(system: PocketSystemV1): PocketSystemV1 {
+const MIN_HEAP_LIMIT_BYTES = 64 * 1024;
+const MAX_HEAP_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
+const MIN_PAK_BYTES = 1;
+const MAX_PAK_BYTES = 512 * 1024 * 1024;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readMemoryInteger(
+  value: unknown,
+  path: string,
+  minimum: number,
+  maximum: number,
+  diagnostics: ContractDiagnostic[],
+): number | undefined {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    diagnostics.push(diagnostic(
+      "system.invalidMemoryBudget",
+      path,
+      `must be a safe integer from ${minimum} through ${maximum}`,
+    ));
+    return undefined;
+  }
+  return value as number;
+}
+
+function readMemoryPolicy(
+  value: unknown,
+  path: string,
+  diagnostics: ContractDiagnostic[],
+): PocketMemoryPolicy | undefined {
+  if (typeof value !== "string" || !(POCKET_MEMORY_POLICIES as readonly string[]).includes(value)) {
+    diagnostics.push(diagnostic(
+      "system.invalidMemoryPolicy",
+      path,
+      `must be one of ${POCKET_MEMORY_POLICIES.join(", ")}`,
+    ));
+    return undefined;
+  }
+  return value as PocketMemoryPolicy;
+}
+
+function parseMemoryExtension(
+  entry: Record<string, unknown>,
+  entryPath: string,
+  diagnostics: ContractDiagnostic[],
+): { memory?: PocketMemoryBudget; memoryPolicy?: PocketMemoryPolicy } {
+  const hasMemory = Object.prototype.hasOwnProperty.call(entry, "memory");
+  const hasMemoryPolicy = Object.prototype.hasOwnProperty.call(entry, "memoryPolicy");
+  if (!hasMemory && !hasMemoryPolicy) return {};
+
+  const policy = hasMemoryPolicy
+    ? readMemoryPolicy(entry.memoryPolicy, `${entryPath}/memoryPolicy`, diagnostics)
+    : undefined;
+  let memory: PocketMemoryBudget | undefined;
+  if (hasMemory) {
+    if (!isRecord(entry.memory)) {
+      diagnostics.push(diagnostic(
+        "system.invalidMemoryBudget",
+        `${entryPath}/memory`,
+        "must be an object when provided",
+      ));
+    } else {
+      const unknown = Object.keys(entry.memory).filter((key) => key !== "heapLimitBytes" && key !== "maxPakBytes");
+      for (const key of unknown) {
+        diagnostics.push(diagnostic(
+          "system.invalidMemoryBudget",
+          `${entryPath}/memory/${key}`,
+          "unknown memory field",
+        ));
+      }
+      const parsed: PocketMemoryBudget = {};
+      if (Object.prototype.hasOwnProperty.call(entry.memory, "heapLimitBytes")) {
+        const value = readMemoryInteger(
+          entry.memory.heapLimitBytes,
+          `${entryPath}/memory/heapLimitBytes`,
+          MIN_HEAP_LIMIT_BYTES,
+          MAX_HEAP_LIMIT_BYTES,
+          diagnostics,
+        );
+        if (value !== undefined) parsed.heapLimitBytes = value;
+      }
+      if (Object.prototype.hasOwnProperty.call(entry.memory, "maxPakBytes")) {
+        const value = readMemoryInteger(
+          entry.memory.maxPakBytes,
+          `${entryPath}/memory/maxPakBytes`,
+          MIN_PAK_BYTES,
+          MAX_PAK_BYTES,
+          diagnostics,
+        );
+        if (value !== undefined) parsed.maxPakBytes = value;
+      }
+      memory = parsed;
+    }
+  }
+  if (policy !== undefined) {
+    const expected = POCKET_MEMORY_POLICY_BUDGETS[policy];
+    if (memory?.heapLimitBytes !== undefined && memory.heapLimitBytes !== expected.heapLimitBytes) {
+      diagnostics.push(diagnostic(
+        "system.memoryPolicyMismatch",
+        `${entryPath}/memory/heapLimitBytes`,
+        `must match ${entryPath}/memoryPolicy=${policy}`,
+      ));
+    }
+    memory = { ...expected, ...memory };
+  }
+  return { memory, memoryPolicy: policy };
+}
+
+interface SanitizedSystemInput {
+  readonly value: unknown;
+  readonly memoryByPackage: ReadonlyMap<string, { memory?: PocketMemoryBudget; memoryPolicy?: PocketMemoryPolicy }>;
+  readonly diagnostics: readonly ContractDiagnostic[];
+}
+
+/** Remove only this SDK extension before the pinned upstream schema validator. */
+function sanitizeSystemMemory(input: unknown): SanitizedSystemInput {
+  const diagnostics: ContractDiagnostic[] = [];
+  const memoryByPackage = new Map<string, { memory?: PocketMemoryBudget; memoryPolicy?: PocketMemoryPolicy }>();
+  if (!isRecord(input) || !isRecord(input.applications) || !Array.isArray(input.applications.catalog)) {
+    return { value: input, memoryByPackage, diagnostics };
+  }
+  const catalog = input.applications.catalog.map((rawEntry, index) => {
+    if (!isRecord(rawEntry)) return rawEntry;
+    const packageId = typeof rawEntry.package === "string" ? rawEntry.package : `index-${index}`;
+    const parsed = parseMemoryExtension(
+      rawEntry,
+      `/applications/catalog/${index}`,
+      diagnostics,
+    );
+    if (typeof rawEntry.package === "string") memoryByPackage.set(packageId, parsed);
+    const { memory: _memory, memoryPolicy: _memoryPolicy, ...baseEntry } = rawEntry;
+    return baseEntry;
+  });
+  return {
+    value: {
+      ...input,
+      applications: { ...input.applications, catalog },
+    },
+    memoryByPackage,
+    diagnostics,
+  };
+}
+
+function normalizeContract(
+  system: PocketSystemV1,
+  memoryByPackage: ReadonlyMap<string, { memory?: PocketMemoryBudget; memoryPolicy?: PocketMemoryPolicy }>,
+): PocketSystemWithMemory {
   return {
     $schema: system.$schema,
     pocketSystem: system.pocketSystem,
@@ -129,6 +304,12 @@ function normalizeContract(system: PocketSystemV1): PocketSystemV1 {
         package: entry.package,
         manifest: entry.manifest,
         required: entry.required,
+        ...(memoryByPackage.get(entry.package)?.memory
+          ? { memory: { ...memoryByPackage.get(entry.package)!.memory } }
+          : {}),
+        ...(memoryByPackage.get(entry.package)?.memoryPolicy
+          ? { memoryPolicy: memoryByPackage.get(entry.package)!.memoryPolicy }
+          : {}),
         ...(entry.presentation
           ? {
               presentation: {
@@ -142,6 +323,32 @@ function normalizeContract(system: PocketSystemV1): PocketSystemV1 {
     installation: {
       installedPackages: [...system.installation.installedPackages],
     },
+  };
+}
+
+function upstreamSystemDocument(system: PocketSystemWithMemory): PocketSystemV1 {
+  return sanitizeSystemMemory(system).value as PocketSystemV1;
+}
+
+function attachMemoryToPlan(
+  plan: ResolvedSystemPlan,
+  contract: PocketSystemWithMemory,
+): ResolvedSystemPlanWithMemory {
+  const memoryByPackage = new Map(
+    contract.applications.catalog.map((entry) => [entry.package, entry]),
+  );
+  const attach = (entry: ResolvedSystemPackage): ResolvedSystemPackageWithMemory => {
+    const memory = memoryByPackage.get(entry.package);
+    return {
+      ...entry,
+      ...(memory?.memory ? { memory: { ...memory.memory } } : {}),
+      ...(memory?.memoryPolicy ? { memoryPolicy: memory.memoryPolicy } : {}),
+    };
+  };
+  return {
+    ...plan,
+    systemUI: attach(plan.systemUI),
+    applications: plan.applications.map(attach),
   };
 }
 
@@ -172,12 +379,18 @@ export async function validateSystemDocument(
   options: ValidateSystemOptions,
 ): Promise<SystemContractValidationResult> {
   const api = await upstreamManifestApi();
-  const systemResult = api.validatePocketSystem(input);
-  if (!systemResult.ok) return { ok: false, diagnostics: systemResult.diagnostics };
+  const sanitized = sanitizeSystemMemory(input);
+  const systemResult = api.validatePocketSystem(sanitized.value);
+  if (!systemResult.ok) {
+    return {
+      ok: false,
+      diagnostics: [...sanitized.diagnostics, ...systemResult.diagnostics],
+    };
+  }
 
   const system = systemResult.value;
   const appRoot = resolve(options.appRoot);
-  const diagnostics: ContractDiagnostic[] = [];
+  const diagnostics: ContractDiagnostic[] = [...sanitized.diagnostics];
   const catalogByPackage = new Map<string, PocketSystemPackageV1>();
   const catalogByManifest = new Map<string, PocketSystemPackageV1>();
   const installed = new Set(system.installation.installedPackages);
@@ -326,7 +539,7 @@ export async function validateSystemDocument(
     ok: true,
     value: {
       kind: "validated-pocket-system-contract",
-      contract: normalizeContract(system),
+      contract: normalizeContract(system, sanitized.memoryByPackage),
       packages: checkedPackages,
     },
   };
@@ -384,18 +597,20 @@ export async function resolveSystemDocument(
   const flutterTarget = options.target === POCKET_FLUTTER_TARGET_ID;
   const registry = flutterTarget ? await loadPocketFlutterPlatformContracts() : undefined;
   const resolution = api.validateAndResolveSystemPlan(
-    validation.value.contract,
+    upstreamSystemDocument(validation.value.contract),
     { target: options.target, packages },
     registry,
   ) as SystemResolutionResult;
-  if (!resolution.ok || !flutterTarget) return resolution;
+  if (!resolution.ok) return resolution;
+  const plan = attachMemoryToPlan(resolution.plan, validation.value.contract);
+  if (!flutterTarget) return { ...resolution, plan };
 
   const compositorSurfaces = deriveCompositorSurfaceRegistry(
     validation.value,
-    resolution.plan,
+    plan,
   );
   if (!compositorSurfaces.ok) return compositorSurfaces;
-  return { ...resolution, compositorSurfaces: compositorSurfaces.value };
+  return { ...resolution, plan, compositorSurfaces: compositorSurfaces.value };
 }
 
 const FIRST_APPLICATION_SURFACE_HANDLE = 2;

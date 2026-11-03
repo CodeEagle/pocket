@@ -349,6 +349,13 @@ packages:
       relative: true
     source: path
     version: "0.1.0"
+  pocket_platform:
+    dependency: "direct main"
+    description:
+      path: "../sdk/packages/pocket_platform"
+      relative: true
+    source: path
+    version: "0.1.0"
   pocket_sdk:
     dependency: "direct main"
     description:

@@ -11,6 +11,8 @@ bun /Volumes/ORICO/Development/Github/pocket/sdk/pocket.ts init /path/to/my-pock
   --sdk-root /Volumes/ORICO/Development/Github/pocket/sdk \
   --app-id com.example.myapp
 # 需要硬件 provider 时，把上面的命令追加：--hardware
+# 需要系统栏/触觉时追加：--platform-experience（Deep Link 仍关闭）
+# 需要自定义 URL scheme 时显式追加：--deep-link-scheme=pocketapp
 ```
 
 `init` 只复制 SDK 的公共 `packages/pocket_ui` 到工程的
@@ -29,6 +31,50 @@ Android 工程的 `minSdk` 同时至少为 API 24（`pocket_flutter` 的 Android
 32-bit ABI。默认 init 不启用硬件 provider，也不会由 CLI 主动 patch 应用 manifest；如果
 应用已经依赖 `pocket_hardware`，Flutter plugin 的库 manifest 可能仍合并静态权限
 声明，但不会在启动时请求系统授权。
+
+`--platform-experience` 添加独立 `pocket_platform` 包和显式 factory，提供系统栏与触觉；
+默认项目不依赖该包。Deep Link 是另一层选择：只有 `--deep-link-scheme=pocketapp`
+才生成 URL scheme、iOS SceneDelegate 转发、Android intent filter，以及 optional links
+能力。普通 Showcase 也保持关闭。独立 `PocketDeepLinkPlugin` 与原生静态声明必须同时接入，
+Guest 不能自行启用或改 scheme。这里只支持自定义 scheme，不宣称 Universal Links。
+
+链接 provider 保留有界的原生 URL 事实，允许 App 从后台恢复时接收链接；系统栏/触觉
+provider 则按前后台正常撤销。两者复用同一平台包，业务路由和 App 打开策略仍由 JS 决定。
+
+JS 消费已有 HostBridge，无需另一套消息循环：
+
+```ts
+import { createPlatformExperience } from '@pocket/ui/platform-experience';
+import { createPocketStreamAdapter } from '@pocket/ui/streams';
+
+const experience = createPlatformExperience(host); // 不自动订阅链接
+await experience.haptics.perform({ type: 'selection' });
+await experience.systemUi.set({ statusBarIconBrightness: 'light' });
+const streams = createPocketStreamAdapter(host, { maxActiveStreams: 4 });
+const sensors = streams.open('hardware.sensors.watch', { samplingHz: 10 });
+const remove = sensors.onData(sample => { /* 更新 JS 页面状态 */ });
+// 离开页面时释放订阅；整个消费者退出时 dispose adapter。
+remove();
+sensors.cancel('page_left');
+streams.dispose();
+experience.dispose();
+```
+
+流复用现有 `stream.open/data/batch/end/cancel/error` 协议；原生 callback 推送数据，
+不由 JS/Dart 定时查询。缓冲、活跃流、待处理读取均有上限。空闲 deadline 使用宿主已有的
+Guest 虚拟时钟调度，调用者须像标准 Demo 一样为 HostBridge 提供 `scheduleTimeout`；
+仅使用手动 `tick` 的外部桥不会自行唤醒停表 Guest。
+
+类型生成也从真实注册表出发：将 `PocketPluginDescriptor.toJson()` 与
+`PocketHost.capabilitiesJson()` 组合成数据导出，再执行：
+
+```sh
+bun /path/to/pocket/sdk/pocket.ts types plugins.json --out=plugin-types.ts
+```
+
+未注册的 capability 不生成客户端，缺失 schema 的旧能力保持 `unknown`，不猜测类型。
+详见 [插件类型契约](PLUGIN_TYPES.md)、[平台体验](PLATFORM_EXPERIENCE.md)、
+[JS 持续流](JS_HOST_STREAMS.md) 与 [硬件持续流/GATT](HARDWARE_STREAMS.md)。
 
 生成的 `app.tsx` 直接使用公共适配器，不复制 showcase 的布局逻辑：
 
@@ -94,9 +140,14 @@ bytecode metadata 和 guest manifest；字节码 ABI 不匹配时拒绝启动，
 | `bytecodeAsset` / `pakAsset` / `metadataAsset` / `manifestAsset` | 默认分别为 `assets/app.qjbc`、`assets/app.pak`、`assets/app.bytecode.json`、`assets/guest-manifest.json`，可按项目调整。 |
 | `updates` | `PocketUpdateConfig` 签名更新源；客户端只放 Ed25519 公钥。 |
 | `allowedPermissions` | 宿主允许的权限集合；guest manifest 只能进一步收窄。硬件通过独立包和 pluginFactories 显式注册。 |
+| `memoryLimits` | 每个 realm 的 QuickJS 堆硬上限和 PAK 大小准入上限。 |
 | `pluginFactories` | `PocketPlugin Function(PocketViewController)` 列表；每次验证通过的 guest generation 都创建新的插件实例。 |
 | `additionalCapabilities` | 宿主明确增加的 capability 名称。 |
 | `showFps` | 显示 FPS 诊断标签并采集有界性能窗口。 |
+
+JS SystemUI catalog 用 `memory` / `memoryPolicy` 选择额度，Guest 只能在宿主
+`PocketMemoryLimits` 批准范围内缩小预算。真实堆限制、旧 Demo 档位和录制回放配置见
+[小程序内存限制](APP_MEMORY_LIMITS.md)。
 
 可选硬件由消费工程显式依赖 `pocket_hardware`；核心 `pocket_sdk` 不依赖或导出该插件。
 移除原 `enableHardware` 开关，统一使用已有插件工厂，避免两套注册状态：

@@ -20,6 +20,7 @@ import 'pocket_model.dart';
 import 'pocket_package.dart';
 import 'pocket_performance.dart';
 import 'pocket_recording.dart';
+import 'pocket_memory_limits.dart';
 import 'pocket_runtime.dart';
 import 'pocket_text_cache.dart';
 import 'pocket_worker_runtime.dart';
@@ -324,6 +325,7 @@ class PocketView extends StatefulWidget {
     super.key,
     this.runtime,
     this.recordingFactory,
+    this.memoryLimits = const PocketMemoryLimits(),
     this.controller,
     this.active = true,
     this.inputEnabled = true,
@@ -364,6 +366,7 @@ class PocketView extends StatefulWidget {
   /// Supplying it opts into bounded recording; an injected runtime must be
   /// configured for recording by its owner instead.
   final PocketRecordingController Function()? recordingFactory;
+  final PocketMemoryLimits memoryLimits;
 
   /// Whether this surface is eligible to advance its guest. The effective
   /// gate also requires [PocketViewController.appActive] and a resumed OS
@@ -852,6 +855,9 @@ class _PocketViewState extends State<PocketView>
   @override
   void didUpdateWidget(covariant PocketView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.memoryLimits != widget.memoryLimits) {
+      throw StateError('Remount PocketView to change memory limits');
+    }
     if (!identical(oldWidget.recordingFactory, widget.recordingFactory)) {
       throw StateError('Remount PocketView to change its recording factory');
     }
@@ -1168,6 +1174,7 @@ class _PocketViewState extends State<PocketView>
               ? debugPocketSelfOwnedRuntimeFactory!(runtimeViewport!)
               : FfiPocketRuntime.open(
                   recording: widget.recordingFactory?.call(),
+                  memoryLimits: widget.memoryLimits,
                   width: runtimeViewport!.width,
                   height: runtimeViewport.height,
                   rasterDensity: pocketRasterDensity(
@@ -1175,6 +1182,13 @@ class _PocketViewState extends State<PocketView>
                   ),
                   tickHz: widget.tickHz,
                 ));
+      if (!widget.memoryLimits.isEmpty &&
+          (runtime is! FfiPocketRuntime ||
+              runtime.memoryLimits != widget.memoryLimits)) {
+        throw UnsupportedError(
+          'An injected runtime must enforce the requested memory limits at creation',
+        );
+      }
       if (widget.compositorSurfaces.isNotEmpty) {
         if (runtime is! PocketCompositorRuntime) {
           throw UnsupportedError(

@@ -8,6 +8,7 @@ export 'package:pocket_flutter/pocket_flutter.dart'
         PocketHostSurfaceBuilder,
         PocketWorkerProgram,
         PocketWorkerLimits,
+        PocketMemoryLimits,
         PocketOffloadProvider,
         PocketBoundedOffloadProvider,
         PocketOffloadKey,

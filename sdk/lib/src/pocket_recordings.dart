@@ -34,19 +34,7 @@ final class PocketRecordingLibrary {
     final cacheKey = (config, controls);
     final existing = _configured[cacheKey];
     if (existing != null) return existing;
-    final configured = PocketAppConfig(
-      appId: config.appId,
-      bytecodeAsset: config.bytecodeAsset,
-      pakAsset: config.pakAsset,
-      metadataAsset: config.metadataAsset,
-      manifestAsset: config.manifestAsset,
-      updates: config.updates,
-      compositorSurfaces: config.compositorSurfaces,
-      workerHttpOrigins: config.workerHttpOrigins,
-      offloadProviderFactory: config.offloadProviderFactory,
-      showFps: config.showFps,
-      allowedPermissions: config.allowedPermissions,
-      additionalCapabilities: config.additionalCapabilities,
+    final configured = config.copyWith(
       pluginFactories: [
         ...config.pluginFactories,
         if (controls) (_) => _RecordingPlugin(this),

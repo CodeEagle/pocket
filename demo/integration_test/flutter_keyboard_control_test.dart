@@ -135,7 +135,10 @@ void main() {
 
       // ignore: avoid_print
       print('FLUTTER_KEYBOARD_CONTROL ${jsonEncode(results)}');
-      binding.reportData = <String, dynamic>{'flutterKeyboardControl': results};
+      binding.reportData = <String, dynamic>{
+        ...?binding.reportData,
+        'flutterKeyboardControl': results,
+      };
     } finally {
       timingCollector.dispose();
       await tester.pumpWidget(const SizedBox.shrink());

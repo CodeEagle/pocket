@@ -9,6 +9,7 @@ import 'dart:io';
 import 'package:flutter/widgets.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pocket_services/pocket_services.dart';
+import 'package:pocket_flutter/src/pocket_memory_limits.dart';
 
 import 'pocket_app.dart' show PocketGuestSession, PocketGuestSessionState;
 import 'pocket_config.dart';
@@ -18,6 +19,18 @@ import 'pocket_recordings.dart';
 import 'pocket_session.dart';
 
 const Duration _platformRequestTimeout = Duration(seconds: 30);
+
+String _runtimeFailureCode(Object error, {String fallback = 'runtime_failed'}) {
+  if (error is PocketCapabilityException) return error.code;
+  final message = error.toString().toLowerCase();
+  if (message.contains('memory_limits.') ||
+      message.contains('out of memory') ||
+      message.contains('allocation failed')) {
+    return 'memory_limit_exceeded';
+  }
+  return fallback;
+}
+
 const int _maxPendingPlatformRequests = 64;
 const String _systemInstanceId = 'system-ui';
 const String _compositorSurfacesCapability = 'ui.compositor-surfaces';
@@ -631,6 +644,17 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'App ID is not present in the trusted host map: $appId',
       );
     }
+    var admittedConfig = trustedConfig;
+    if (params.containsKey('memory')) {
+      try {
+        final memory = trustedConfig.memoryLimits.admit(
+          PocketMemoryLimits.fromJson(params['memory']),
+        );
+        admittedConfig = trustedConfig.copyWith(memoryLimits: memory);
+      } on FormatException catch (error) {
+        throw PocketCapabilityException('memory_limit_denied', error.message);
+      }
+    }
     if (_applications.length + 1 >= widget.maxInstances) {
       throw const PocketCapabilityException(
         'instance_limit',
@@ -648,12 +672,12 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final instance = _RuntimeInstance(
       instanceId: instanceId,
       appId: appId,
-      config: trustedConfig,
+      config: admittedConfig,
       isSystemUI: false,
       ownerGeneration: ownerGeneration,
     );
     final capturedConfig =
-        widget.recordings?.attach(trustedConfig) ?? trustedConfig;
+        widget.recordings?.attach(admittedConfig) ?? admittedConfig;
     final childConfig = capturedConfig.withPlugins(<PocketPluginFactory>[
       ...capturedConfig.pluginFactories,
       (_) => _PlatformProxyPlugin(this, instance, ownerGeneration),
@@ -683,7 +707,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         );
       }
       if (instance.session.failure case final error?) {
-        throw PocketCapabilityException('startup_failed', '$error');
+        throw PocketCapabilityException(
+          _runtimeFailureCode(error, fallback: 'startup_failed'),
+          '$error',
+        );
       }
       if (mounted) setState(() {});
       if (!_isCurrent(instance) ||
@@ -697,6 +724,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'instanceId': instanceId,
         'appId': appId,
         'generation': instance.session.generation,
+        if (!instance.session.memoryLimits.isEmpty)
+          'memory': instance.session.memoryLimits.toJson(),
       };
     } on Object catch (error) {
       await _closeInstance(
@@ -704,7 +733,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         removeFromTree: identical(_applications[instance.instanceId], instance),
       );
       if (error is PocketCapabilityException) rethrow;
-      throw PocketCapabilityException('startup_failed', '$error');
+      throw PocketCapabilityException(
+        _runtimeFailureCode(error, fallback: 'startup_failed'),
+        '$error',
+      );
     }
   }
 
@@ -1268,9 +1300,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
             'instanceId': instance.instanceId,
             'appId': instance.appId,
             'error': <String, Object?>{
-              'code': failure is PocketCapabilityException
-                  ? failure.code
-                  : 'runtime_failed',
+              'code': _runtimeFailureCode(failure),
               'message': '$failure',
             },
           },

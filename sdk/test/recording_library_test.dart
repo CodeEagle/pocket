@@ -6,32 +6,69 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 
 void main() {
-  test(
-    'attach caches configurations and withPlugins preserves the factory',
-    () {
-      final library = PocketRecordingLibrary();
-      final config = PocketAppConfig(appId: 'library.cache');
+  test('attach preserves policy, memory, and recording factory overrides', () {
+    final library = PocketRecordingLibrary();
+    final offload = () => PocketBoundedOffloadProvider(session: 17);
+    const limits = PocketMemoryLimits(
+      heapLimitBytes: 128 * 1024,
+      maxPakBytes: 8 * 1024 * 1024,
+    );
+    final config = PocketAppConfig(
+      appId: 'library.cache',
+      bytecodeAsset: 'assets/cache.qjbc',
+      pakAsset: 'assets/cache.pak',
+      metadataAsset: 'assets/cache.bytecode.json',
+      manifestAsset: 'assets/cache-manifest.json',
+      updates: const PocketUpdateConfig(
+        url: 'https://updates.example.test/cache.json',
+        keyId: 'cache-key',
+        publicKey: 'cache-public-key',
+        namespace: 'cache',
+      ),
+      showFps: true,
+      allowedPermissions: const {'network'},
+      additionalCapabilities: const {'runtime.info'},
+      compositorSurfaces: const {'child.surface': 2},
+      workerHttpOrigins: const {'https://worker.example.test'},
+      offloadProviderFactory: offload,
+      memoryLimits: limits,
+    );
 
-      final first = library.attach(config);
-      final second = library.attach(config);
-      expect(identical(first, second), isTrue);
-      expect(first.recordingFactory, isNotNull);
+    final first = library.attach(config);
+    final second = library.attach(config);
+    expect(identical(first, second), isTrue);
+    expect(first.recordingFactory, isNotNull);
+    expect(first.bytecodeAsset, config.bytecodeAsset);
+    expect(first.pakAsset, config.pakAsset);
+    expect(first.metadataAsset, config.metadataAsset);
+    expect(first.manifestAsset, config.manifestAsset);
+    expect(first.updates, config.updates);
+    expect(first.showFps, isTrue);
+    expect(first.allowedPermissions, config.allowedPermissions);
+    expect(first.additionalCapabilities, config.additionalCapabilities);
+    expect(first.compositorSurfaces, config.compositorSurfaces);
+    expect(first.workerHttpOrigins, config.workerHttpOrigins);
+    expect(identical(first.offloadProviderFactory, offload), isTrue);
+    expect(first.pluginFactories, isEmpty);
+    expect(first.memoryLimits, limits);
 
-      final customFactory = () => PocketRecordingController(enabled: false);
-      final customConfig = PocketAppConfig(
-        appId: 'factory.preserved',
-        recordingFactory: customFactory,
-      );
-      final configured = customConfig.withPlugins(
-        const <PocketPluginFactory>[],
-      );
-      expect(identical(configured.recordingFactory, customFactory), isTrue);
-      expect(
-        identical(configured.recordingFactory, customConfig.recordingFactory),
-        isTrue,
-      );
-    },
-  );
+    final customFactory = () => PocketRecordingController(enabled: false);
+    final customConfig = PocketAppConfig(
+      appId: 'factory.preserved',
+      recordingFactory: customFactory,
+    );
+    final configured = customConfig.withPlugins(const <PocketPluginFactory>[]);
+    expect(identical(configured.recordingFactory, customFactory), isTrue);
+    expect(
+      identical(configured.recordingFactory, customConfig.recordingFactory),
+      isTrue,
+    );
+    final replacementFactory = () => PocketRecordingController(enabled: false);
+    final replaced = customConfig.copyWith(
+      recordingFactory: replacementFactory,
+    );
+    expect(identical(replaced.recordingFactory, replacementFactory), isTrue);
+  });
 
   test('maxRuntimes overflow is explicit and replay is rejected', () async {
     final library = PocketRecordingLibrary(maxRuntimes: 1);

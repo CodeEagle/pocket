@@ -32,9 +32,10 @@ export interface HeaderProps {
 
 export function Header(props: HeaderProps): JSX.Element {
   return (
-    <View class="flex-row items-center justify-between h-[56] px-4 bg-white border-slate-200">
-      <View class="flex-col justify-center">
-        <Text class="text-base text-slate-950 font-bold">{props.title}</Text>
+    <View class="flex-row items-center justify-between h-[56] px-4 bg-white border-[#E5E9F2]">
+      <View class="flex-col justify-center gap-1">
+        {props.eyebrow ? <Text class="text-xs text-[#7C8799] font-bold">{props.eyebrow}</Text> : null}
+        <Text class="text-base text-[#17233B] font-bold">{props.title}</Text>
       </View>
       {props.badge ? <Badge tone="cyan">{props.badge}</Badge> : null}
     </View>
@@ -43,20 +44,18 @@ export function Header(props: HeaderProps): JSX.Element {
 
 export function PageIntro(props: { title: string; body: string }): JSX.Element {
   return (
-    <View class="flex-col gap-1 px-4 pt-3">
-      <Text class="text-xl text-slate-950 font-bold">{props.title}</Text>
-      <Text class="text-xs text-slate-600">{props.body}</Text>
+    <View class="flex-col gap-1 px-4 pt-4 pb-2">
+      <Text class="text-xl text-[#17233B] font-bold">{props.title}</Text>
+      <Text class="text-sm text-[#7C8799]">{props.body}</Text>
     </View>
   );
 }
 
 export function SectionHeading(props: { title: string; detail?: string; dark?: boolean }): JSX.Element {
-  const titleClass = props.dark ? "text-sm text-white font-bold" : "text-sm text-slate-950 font-bold";
-  const detailClass = props.dark ? "text-xs text-cyan-200" : "text-xs text-slate-500";
   return (
-    <View class="flex-row items-center justify-between px-4 pt-3">
-      <Text class={titleClass}>{props.title}</Text>
-      {props.detail ? <Text class={detailClass}>{props.detail}</Text> : null}
+    <View class="flex-row items-center justify-between px-4 pt-4 pb-2">
+      <Text class={props.dark ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text>
+      {props.detail ? <Text class={props.dark ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
     </View>
   );
 }
@@ -69,34 +68,30 @@ export interface ActionButtonProps extends ViewProps {
   disabled?: boolean;
 }
 
-function actionClass(kind: ActionButtonProps["kind"]): string {
-  switch (kind) {
-    case "secondary": return "px-3 py-2 rounded-lg bg-blue-500 focus:bg-blue-600";
-    case "quiet": return "px-3 py-2 rounded-lg bg-slate-200 focus:bg-slate-300";
-    case "danger": return "px-3 py-2 rounded-lg bg-rose-600 focus:bg-rose-500";
-    default: return "px-3 py-2 rounded-lg bg-blue-600 focus:bg-blue-500";
-  }
-}
-
 export function ActionButton(props: ActionButtonProps): JSX.Element {
-  const buttonClass = () => props.disabled
-    ? `${props.class ?? actionClass(props.kind)} opacity-50`
-    : props.class ?? actionClass(props.kind);
   return (
     <Focusable
-      class={buttonClass()}
-      style={props.style}
+      class={props.class ?? (props.kind === "secondary"
+        ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF]"
+        : props.kind === "quiet"
+          ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#EEF1F6] focus:bg-[#E4E9F2]"
+          : props.kind === "danger"
+            ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238]"
+            : "px-4 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5]")}
+      style={props.disabled
+        ? { ...(props.style ?? {}), opacity: props.style?.opacity ?? 0.5 }
+        : { ...(props.style ?? {}), opacity: props.style?.opacity ?? 1 }}
       debugName={props.debugName}
       focusable={!props.disabled}
       onPress={props.disabled ? undefined : props.onPress}
     >
       {props.icon ? (
         <View class="flex-col items-center justify-center gap-1">
-          <Text class={props.kind === "quiet" ? "text-sm text-slate-700 font-bold" : "text-sm text-white font-bold"}>{props.icon}</Text>
-          <Text class={props.kind === "quiet" ? "text-xs text-slate-800 font-bold" : "text-xs text-white font-bold"}>{props.label}</Text>
+          <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-sm text-[#315DEB] font-bold" : "text-sm text-white font-bold"}>{props.icon}</Text>
+          <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-xs text-[#17233B] font-bold" : "text-xs text-white font-bold"}>{props.label}</Text>
         </View>
       ) : (
-        <Text class={props.kind === "quiet" ? "text-xs text-slate-800 font-bold" : "text-xs text-white font-bold"}>
+        <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-sm text-[#315DEB] font-bold" : "text-sm text-white font-bold"}>
           {props.label}
         </Text>
       )}
@@ -108,49 +103,57 @@ export function ActionButton(props: ActionButtonProps): JSX.Element {
 export const Button = ActionButton;
 
 export function Badge(props: { children?: JSX.Element; tone?: "cyan" | "green" | "amber" | "rose" }): JSX.Element {
-  const cls = props.tone === "green"
-    ? "px-2 py-1 rounded-lg bg-emerald-500"
-    : props.tone === "amber"
-      ? "px-2 py-1 rounded-lg bg-amber-400"
-      : props.tone === "rose"
-        ? "px-2 py-1 rounded-lg bg-rose-500"
-        : "px-2 py-1 rounded-lg bg-cyan-500";
-  return <View class={cls}><Text class="text-xs text-slate-950 font-bold">{props.children}</Text></View>;
+  return (
+    <View class={props.tone === "green"
+      ? "px-2 py-1 rounded-xl bg-[#E5F7EE]"
+      : props.tone === "amber"
+        ? "px-2 py-1 rounded-xl bg-[#FFF4DD]"
+        : props.tone === "rose"
+          ? "px-2 py-1 rounded-xl bg-[#FDECEF]"
+          : "px-2 py-1 rounded-xl bg-[#E8EDFF]"}>
+      <Text class={props.tone === "green"
+        ? "text-xs text-[#147A52] font-bold"
+        : props.tone === "amber"
+          ? "text-xs text-[#936211] font-bold"
+          : props.tone === "rose"
+            ? "text-xs text-[#B4233A] font-bold"
+            : "text-xs text-[#315DEB] font-bold"}>{props.children}</Text>
+    </View>
+  );
 }
 
 export function EmptyState(props: { title: string; body: string; action?: JSX.Element }): JSX.Element {
   return (
-    <View class="flex-col items-center gap-2 p-4 rounded-xl bg-slate-100 border-slate-200">
-      <Text class="text-sm text-slate-950 font-bold">{props.title}</Text>
-      <Text class="text-xs text-slate-600">{props.body}</Text>
+    <View class="flex-col items-center gap-2 p-4 rounded-xl bg-[#F1F3F8] border-[#E5E9F2]">
+      <Text class="text-sm text-[#17233B] font-bold">{props.title}</Text>
+      <Text class="text-xs text-[#7C8799]">{props.body}</Text>
       {props.action}
     </View>
   );
 }
 
 export function MetricCard(props: { label: string; value: string; detail?: string; tone?: "blue" | "purple" | "green" }): JSX.Element {
-  const cls = props.tone === "purple"
-    ? "flex-1 flex-col gap-1 p-3 rounded-xl bg-purple-100"
-    : props.tone === "green"
-      ? "flex-1 flex-col gap-1 p-3 rounded-xl bg-emerald-100"
-      : "flex-1 flex-col gap-1 p-3 rounded-xl bg-blue-100";
   return (
-    <View class={cls}>
-      <Text class="text-xs text-slate-600">{props.label}</Text>
-      <Text class="text-xl text-slate-950 font-bold">{props.value}</Text>
-      {props.detail ? <Text class="text-xs text-slate-600">{props.detail}</Text> : null}
+    <View class={props.tone === "purple"
+      ? "flex-1 flex-col gap-1 p-3 rounded-xl bg-[#F3EEFF] border-[#E5E9F2]"
+      : props.tone === "green"
+        ? "flex-1 flex-col gap-1 p-3 rounded-xl bg-[#E9F8F0] border-[#E5E9F2]"
+        : "flex-1 flex-col gap-1 p-3 rounded-xl bg-[#EEF2FF] border-[#E5E9F2]"}>
+      <Text class="text-xs text-[#7C8799]">{props.label}</Text>
+      <Text class="text-xl text-[#17233B] font-bold">{props.value}</Text>
+      {props.detail ? <Text class="text-xs text-[#7C8799]">{props.detail}</Text> : null}
     </View>
   );
 }
 
 export function StatusBar(props: { label: string; detail: string; ok?: boolean }): JSX.Element {
   return (
-    <View class="flex-row items-center justify-between px-3 py-2 rounded-lg bg-[#172235]">
+    <View class="flex-row items-center justify-between px-3 py-2 rounded-xl bg-[#17233B] border-[#30405A]">
       <View class="flex-row items-center gap-2">
         <View class={props.ok === false ? "w-2 h-2 rounded-full bg-rose-500" : "w-2 h-2 rounded-full bg-emerald-500"} />
         <Text class="text-xs text-white font-bold">{props.label}</Text>
       </View>
-      <Text class="text-xs text-slate-300">{props.detail}</Text>
+      <Text class="text-xs text-[#B9C5D8]">{props.detail}</Text>
     </View>
   );
 }
@@ -210,7 +213,7 @@ export function NavigationBar(props: {
         : padding.right,
     };
   };
-  const hostRoute = props.route !== "home" && props.route !== "gallery";
+  const hostRoute = () => props.route !== "home" && props.route !== "gallery";
   const items = [
     { id: "home" as const, label: "Home", icon: "⌂" },
     // Keep the old Gallery route as the compatibility alias for the UI page.
@@ -218,23 +221,26 @@ export function NavigationBar(props: {
     { id: "about" as const, label: "Host", icon: "☷" },
   ];
   return (
-    <View style={navStyle()} class={rail() ? "flex-col items-center gap-2 h-full px-2 py-3 bg-white border-slate-200" : "flex-row items-center gap-1 px-2 bg-white border-slate-200"}>
+    <View style={navStyle()} class={rail()
+      ? "flex-col items-center gap-2 h-full px-2 py-3 bg-white border-[#E5E9F2]"
+      : "flex-row items-center gap-1 px-2 py-1 bg-white border-[#E5E9F2]"}>
       <For each={items}>
-        {(item) => (
-          <ActionButton
-            label={item.label}
-            icon={item.icon}
-            class={rail()
-              ? (props.route === item.id || (hostRoute && item.id === "about")
-                ? "w-[88] h-[64] items-center justify-center rounded-lg bg-blue-600 focus:bg-blue-500"
-                : "w-[88] h-[64] items-center justify-center rounded-lg bg-slate-100 focus:bg-slate-200")
-              : (props.route === item.id || (hostRoute && item.id === "about")
-                ? "flex-1 h-[48] items-center justify-center rounded-lg bg-blue-600 focus:bg-blue-500"
-                : "flex-1 h-[48] items-center justify-center rounded-lg bg-slate-100 focus:bg-slate-200")}
-            kind={props.route === item.id || (hostRoute && item.id === "about") ? "primary" : "quiet"}
-            onPress={() => props.onNavigate(item.id)}
-          />
-        )}
+        {(item) => {
+          const active = () => props.route === item.id || (hostRoute() && item.id === "about");
+          return (
+            <Focusable
+              class={rail()
+                ? "w-[88] h-[64] flex-col items-center justify-center gap-1 rounded-xl bg-transparent focus:bg-[#F7F8FC]"
+                : "flex-1 h-[56] flex-col items-center justify-center gap-1 rounded-xl bg-transparent focus:bg-[#F7F8FC]"}
+              onPress={() => props.onNavigate(item.id)}
+            >
+              <View class={active() ? "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-[#E8EDFF]" : "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-transparent"}>
+                <Text class={active() ? "text-sm text-[#315DEB] font-bold" : "text-sm text-[#7C8799] font-bold"}>{item.icon}</Text>
+              </View>
+              <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#7C8799] font-bold"}>{item.label}</Text>
+            </Focusable>
+          );
+        }}
       </For>
     </View>
   );
@@ -247,14 +253,17 @@ export interface TabItem {
 
 export function Tabs(props: { items: readonly TabItem[]; active: string; onChange: (id: string) => void }): JSX.Element {
   return (
-    <View class="flex-row gap-1 px-4 py-2 bg-slate-100">
+    <View class="flex-row flex-wrap gap-1 px-4 py-2 bg-transparent">
       <For each={props.items}>
         {(item) => (
-          <ActionButton
-            label={item.label}
-            kind={props.active === item.id ? "primary" : "quiet"}
+          <Focusable
+            class={props.active === item.id
+              ? "w-[68] h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF]"
+              : "w-[68] h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#EEF1F6]"}
             onPress={() => props.onChange(item.id)}
-          />
+          >
+            <Text class={props.active === item.id ? "text-sm text-[#315DEB] font-bold" : "text-sm text-[#7C8799] font-bold"}>{item.label}</Text>
+          </Focusable>
         )}
       </For>
     </View>
@@ -363,15 +372,15 @@ const defaultInputFieldAppearance: Required<InputFieldAppearance> = {
   // ABGR, while the Flutter bridge accepts the same CSS spelling and converts
   // it to an ARGB Color. Passing raw integers here would swap red/blue in the
   // JS shell even though the Flutter overlay looked correct.
-  textColor: "#283444",
-  placeholderColor: "#667485",
+  textColor: "#17233B",
+  placeholderColor: "#7C8799",
   fillColor: "#ffffff",
-  borderColor: "#9aa5b2",
-  focusedBorderColor: "#2676cb",
-  borderRadius: 8,
+  borderColor: "#D6DCE7",
+  focusedBorderColor: "#315DEB",
+  borderRadius: 12,
   fontSize: 14,
   paddingHorizontal: 12,
-  paddingVertical: 8,
+  paddingVertical: 10,
 };
 
 function normalizeInputColor(
@@ -554,13 +563,6 @@ export function InputField(props: {
       paddingT: current.paddingVertical,
       paddingB: current.paddingVertical,
     };
-  };
-  const shellTextClass = () => {
-    switch (appearance().fontSize) {
-      case 12: return "text-xs";
-      case 16: return "text-base";
-      default: return "text-sm";
-    }
   };
   const shellTextStyle = () => ({
     textColor: props.value() ? appearance().textColor : appearance().placeholderColor,
@@ -816,9 +818,9 @@ export function InputField(props: {
       debugName="SystemTextInput"
       onPress={open}
       style={shellStyle()}
-      class="w-full"
+      class="w-full rounded-xl"
     >
-      <Text class={shellTextClass()} style={shellTextStyle()}>
+      <Text class={appearance().fontSize === 12 ? "text-xs" : appearance().fontSize === 16 ? "text-base" : "text-sm"} style={shellTextStyle()}>
         {props.value() || props.placeholder || "Tap to type"}
       </Text>
     </Focusable>
@@ -1045,7 +1047,7 @@ export function MiniBarChart(props: { values: readonly number[] }): JSX.Element 
   return (
     <View class="flex-row items-end gap-1 h-[32]">
       <For each={props.values}>
-        {(value) => <View class="w-2 rounded bg-cyan-500" style={{ height: Math.max(4, value) }} />}
+        {(value) => <View class="w-2 rounded-xl bg-[#315DEB]" style={{ height: Math.max(4, value) }} />}
       </For>
     </View>
   );
@@ -1058,16 +1060,15 @@ export interface ListItem {
 }
 
 export function List(props: { items: readonly ListItem[]; tone?: "light" | "dark" }): JSX.Element {
-  const rowClass = props.tone === "dark" ? "flex-col gap-1 px-3 py-2 bg-[#172235]" : "flex-col gap-1 px-3 py-2 bg-white border-slate-200";
-  const titleClass = props.tone === "dark" ? "text-xs text-white font-bold" : "text-xs text-slate-950 font-bold";
-  const detailClass = props.tone === "dark" ? "text-xs text-slate-300" : "text-xs text-slate-600";
   return (
-    <View class="flex-col gap-1 mx-4">
+    <View class="flex-col gap-1 mx-4 rounded-xl">
       <For each={props.items}>
         {(item) => (
-          <View class={rowClass}>
-            <Text class={titleClass}>{item.title}</Text>
-            {item.detail ? <Text class={detailClass}>{item.detail}</Text> : null}
+          <View class={props.tone === "dark"
+            ? "flex-col gap-1 px-3 py-3 bg-[#17233B] border-[#30405A]"
+            : "flex-col gap-1 px-3 py-3 bg-white border-[#E5E9F2]"}>
+            <Text class={props.tone === "dark" ? "text-xs text-white font-bold" : "text-xs text-[#17233B] font-bold"}>{item.title}</Text>
+            {item.detail ? <Text class={props.tone === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{item.detail}</Text> : null}
           </View>
         )}
       </For>
@@ -1076,19 +1077,19 @@ export function List(props: { items: readonly ListItem[]; tone?: "light" | "dark
 }
 
 export function ViewText(props: { title: string; body: string }): JSX.Element {
-  return <View class="flex-col gap-1"><Text class="text-sm text-slate-950 font-bold">{props.title}</Text><Text class="text-xs text-slate-600">{props.body}</Text></View>;
+  return <View class="flex-col gap-1"><Text class="text-sm text-[#17233B] font-bold">{props.title}</Text><Text class="text-xs text-[#7C8799]">{props.body}</Text></View>;
 }
 
 export function Card(props: { children?: JSX.Element; class?: string }): JSX.Element {
-  return <View class={props.class ?? "flex-col gap-2 p-3 rounded-xl bg-white border-slate-200"}>{props.children}</View>;
+  return <View class={props.class ?? "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"}>{props.children}</View>;
 }
 
 export function Row(props: { children?: JSX.Element; class?: string }): JSX.Element {
-  return <View class={props.class ?? "flex-row items-center gap-2"}>{props.children}</View>;
+  return <View class={props.class ?? "flex-row items-center gap-3"}>{props.children}</View>;
 }
 
 export function TileGrid(props: { children?: JSX.Element }): JSX.Element {
-  return <Grid columns={2} gap={6} class="flex-row flex-wrap">{props.children}</Grid>;
+  return <Grid columns={2} gap={12} class="flex-row flex-wrap mx-5">{props.children}</Grid>;
 }
 
 /** A reusable modal panel; its overlay is only for component details. */
@@ -1100,8 +1101,8 @@ export function DetailModal(props: {
 }): JSX.Element {
   return (
     <Modal open={props.open}>
-      <Text class="text-lg text-slate-950 font-bold">{props.title}</Text>
-      <Text class="text-xs text-slate-600">{props.body}</Text>
+      <Text class="text-lg text-[#17233B] font-bold">{props.title}</Text>
+      <Text class="text-xs text-[#7C8799]">{props.body}</Text>
       <ActionButton label="Close" kind="quiet" onPress={props.onClose} />
     </Modal>
   );

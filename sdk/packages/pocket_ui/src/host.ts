@@ -6,9 +6,10 @@
  *   event/host.request  { requestId, capability, params }
  *   event/host.response { requestId, capability, ok, result?, error? }
  *
- * The native runtime exposes `pocket._emit` for outbound packets and invokes
- * `__pocketDeliver` for response packets.  Keeping this adapter in the guest
- * means UI code only deals with promises and never knows about Dart objects.
+ * The native runtime exposes `pocket._emit` for outbound packets and routes
+ * event envelopes through `__pocketEvent` (with raw response compatibility on
+ * `__pocketDeliver`). Keeping this adapter in the guest means UI code only
+ * deals with promises and never knows about Dart objects.
  */
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -28,9 +29,31 @@ export interface HostResponse {
   error?: HostErrorShape | string;
 }
 
+/** A guest event delivered by the native host event sink. */
+export interface HostEvent {
+  readonly id: string;
+  readonly method: string;
+  readonly params: JsonObject;
+  /** The decoded packet, retained for capability-specific adapters. */
+  readonly raw: Record<string, unknown>;
+}
+
+export type HostEventListener = (event: HostEvent) => void;
+
 export interface HostBridge {
   request<T extends JsonValue = JsonValue>(capability: string, params?: JsonObject): Promise<T>;
   handle(packet: string | Record<string, unknown>): boolean;
+  /**
+   * Emit a host event on the same Pocket event transport used by requests.
+   * Optional keeps existing injected bridges source-compatible.
+   */
+  emit?(method: string, params?: JsonObject): boolean;
+  /** Subscribe to host-originated events. Optional for legacy request-only bridges. */
+  onEvent?(listener: HostEventListener): () => void;
+  /** Subscribe to the deterministic guest clock used for bounded operations. */
+  onTick?(listener: () => void): () => void;
+  /** Official guest-clock deadline scheduling, which wakes an idle runtime. */
+  scheduleTimeout?(frames: number, callback: () => void): () => void;
   /** Advance bounded request deadlines on the deterministic guest clock. */
   tick(): void;
   dispose(): void;
@@ -98,6 +121,22 @@ function responseFrom(packet: Record<string, unknown>): HostResponse | undefined
   };
 }
 
+function eventFrom(packet: Record<string, unknown>): HostEvent | undefined {
+  const type = typeof packet.type === "string" ? packet.type : "";
+  const method = type === "event"
+    ? (typeof packet.name === "string" ? packet.name : typeof packet.method === "string" ? packet.method : "")
+    : (typeof packet.method === "string" ? packet.method : typeof packet.name === "string" ? packet.name : "");
+  if (!method || method === "host.response") return undefined;
+  const nested = packet.payload ?? packet.params;
+  const params = isObject(nested) ? nested as JsonObject : {};
+  return {
+    id: typeof packet.id === "string" ? packet.id : "",
+    method,
+    params,
+    raw: packet,
+  };
+}
+
 function errorOf(response: HostResponse): HostRequestError {
   if (typeof response.error === "string") return new HostRequestError(response.requestId, "host_error", response.error);
   return new HostRequestError(
@@ -119,6 +158,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   const globalObject = globalThis as typeof globalThis & {
     pocket?: { _emit?: (line: string) => boolean };
     __pocketDeliver?: (line: string) => void;
+    __pocketEvent?: (line: string) => void;
   };
   const send: HostSend = sendOverride ?? ((line) => {
     const emit = globalObject.pocket?._emit;
@@ -141,20 +181,32 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   let nextId = 1;
   let disposed = false;
   const previousDeliver = globalObject.__pocketDeliver;
+  const previousEvent = globalObject.__pocketEvent;
+  const eventListeners = new Set<HostEventListener>();
+  const tickListeners = new Set<() => void>();
+  const dispatchEvent = (event: HostEvent): boolean => {
+    if (eventListeners.size === 0) return false;
+    for (const listener of [...eventListeners]) listener(event);
+    return true;
+  };
 
   const handle = (packet: string | Record<string, unknown>): boolean => {
     if (disposed) return false;
     const decoded = decode(packet);
     if (!decoded) return false;
     const response = responseFrom(decoded);
-    if (!response) return false;
-    const entry = pending.get(response.requestId);
-    if (!entry) return false;
-    pending.delete(response.requestId);
-    entry.cancelTimeout?.();
-    if (!response.ok || response.error !== undefined) entry.reject(errorOf(response));
-    else entry.resolve(response.result === undefined ? null : response.result);
-    return true;
+    if (response) {
+      const entry = pending.get(response.requestId);
+      if (!entry) return false;
+      pending.delete(response.requestId);
+      entry.cancelTimeout?.();
+      if (!response.ok || response.error !== undefined) entry.reject(errorOf(response));
+      else entry.resolve(response.result === undefined ? null : response.result);
+      return true;
+    }
+    const event = eventFrom(decoded);
+    if (!event) return false;
+    return dispatchEvent(event);
   };
 
   const tick = (): void => {
@@ -166,13 +218,36 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       pending.delete(requestId);
       entry.reject(new HostRequestError(requestId, "timeout", "Host response timed out"));
     }
+    for (const listener of [...tickListeners]) listener();
   };
 
   const deliver = (line: string): void => {
     handle(line);
     previousDeliver?.(line);
   };
+  const eventDeliver = (line: string): void => {
+    handle(line);
+    previousEvent?.(line);
+  };
   globalObject.__pocketDeliver = deliver;
+  globalObject.__pocketEvent = eventDeliver;
+
+  const emit = (method: string, params: JsonObject = {}): boolean => {
+    if (disposed) return false;
+    if (typeof method !== "string" || method.length === 0) return false;
+    if (!isJsonObject(params)) return false;
+    let line: string;
+    try {
+      line = JSON.stringify({ type: "event", name: method, payload: params });
+    } catch {
+      return false;
+    }
+    try {
+      return send(line);
+    } catch {
+      return false;
+    }
+  };
 
   const bridge: HostBridge = {
     request<T extends JsonValue = JsonValue>(capability: string, params: JsonObject = {}): Promise<T> {
@@ -217,19 +292,37 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
 
     handle,
 
-    tick,
+    emit,
 
+    onEvent(listener: HostEventListener): () => void {
+      if (disposed) return () => {};
+      eventListeners.add(listener);
+      return () => eventListeners.delete(listener);
+    },
+
+    onTick(listener: () => void): () => void {
+      if (disposed) return () => {};
+      tickListeners.add(listener);
+      return () => tickListeners.delete(listener);
+    },
+
+    ...(options.scheduleTimeout ? { scheduleTimeout: options.scheduleTimeout } : {}),
+
+    tick,
 
     dispose(): void {
       if (disposed) return;
       disposed = true;
-      globalObject.__pocketDeliver = previousDeliver;
+      if (globalObject.__pocketDeliver === deliver) globalObject.__pocketDeliver = previousDeliver;
+      if (globalObject.__pocketEvent === eventDeliver) globalObject.__pocketEvent = previousEvent;
       const error = new Error("Host bridge disposed");
       for (const entry of pending.values()) {
         entry.cancelTimeout?.();
         entry.reject(error);
       }
       pending.clear();
+      eventListeners.clear();
+      tickListeners.clear();
     },
   };
   return bridge;

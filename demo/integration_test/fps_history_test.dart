@@ -43,7 +43,7 @@ void main() {
         method: 'demo.navigate',
         params: const <String, dynamic>{'route': 'mobile'},
       );
-      await guest.waitFor(tester, 'Flutter widget vocabulary');
+      await guest.waitFor(tester, 'Flutter widgets');
       var nextRoute = 'transitions';
       transitionTimer = Timer.periodic(const Duration(milliseconds: 80), (_) {
         controller.send(
@@ -55,7 +55,10 @@ void main() {
       await guest.waitFor(tester, 'Route motion');
       final before = await _waitForFlutterFps(tester, monitor);
       expect(before, greaterThan(0));
-      expect(find.byKey(const ValueKey('flutter-frame-monitor-hud')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('flutter-frame-monitor-hud')),
+        findsOneWidget,
+      );
 
       // Leave the real renderer alive long enough to emit a warm-up sample.
       await Future<void>.delayed(const Duration(seconds: 2));

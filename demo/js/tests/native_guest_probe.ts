@@ -71,6 +71,14 @@ assert.equal(typeof metadata.runtimeAbi, "string", "bytecode metadata must decla
 assert.equal(typeof metadata.bindingGeneration, "number", "bytecode metadata must declare bindingGeneration");
 assert.equal(typeof metadata.tickHz, "number", "bytecode metadata must declare tickHz");
 
+const initialSystemUiParams: JsonObject = {
+  statusBarBrightness: "light",
+  statusBarColor: 0x00000000,
+  statusBarIconBrightness: "dark",
+  systemNavigationBarColor: 0xfff5f6fa,
+  systemNavigationBarIconBrightness: "dark",
+};
+
 function event(name: string, payload: JsonObject = {}): JsonObject {
   return { op: "send", message: { type: "event", name, payload } };
 }
@@ -89,6 +97,9 @@ function bootstrap(width = 360, height = 640): JsonObject[] {
     { op: "create", width, height, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } },
     { op: "loadBytecode", bytecodePath, pakPath },
     { op: "frame", deltaMs: 16 },
+    hostResponse(bootRequestId("platform.systemUi.set"), "platform.systemUi.set", {
+      applied: true,
+    }),
     hostResponse(bootRequestId("runtime.info"), "runtime.info", {
       entryFormat: "quickjs-bytecode",
       runtimeAbi,
@@ -279,18 +290,59 @@ assert.ok(pointerFrames.length >= 20, "native probe must return pointer and stre
 assert.match(textOf(pointerFrames[2]), /01/, "demo.increment did not reach the retained frame");
 assert.match(textOf(pointerFrames[3]), /native guest/, "demo.setText did not reach the retained frame");
 assert.match(textOf(pointerFrames[4]), /Official building blocks/, "guest route did not reach Gallery");
-assert.match(textOf(pointerFrames[6]), /One runtime, one source of truth/, "native pointer Home navigation did not reach the guest route");
+assert.match(textOf(pointerFrames[6]), /Made to feel native/, "native pointer Home navigation did not reach the guest route");
 assert.match(textOf(pointerFrames[8]), /02/, "native pointer +1 did not update JS state");
 assert.match(textOf(pointerFrames[8]), /Incremented in JS/, "native pointer +1 did not dispatch the JS action");
-assert.match(textOf(pointerFrames[10]), /Lazy subtree is mounted/, "guest lazy state did not render its subtree");
+
+// The refreshed Gallery is taller than the probe viewport, so the Lazy card is
+// below the initial clip. Toggle it through the guest event, then use the
+// official page-scroller gesture to reveal the actual mounted subtree.
+const lazyResponses = runProbe([
+  ...bootstrap(),
+  event("demo.navigate", { route: "gallery" }),
+  { op: "frame", deltaMs: 16 },
+  event("demo.toggleLazy"),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "down", id: 0, x: 180, y: 500 }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "move", id: 0, x: 180, y: 180 }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "up", id: 0, x: 180, y: 180 }),
+  { op: "frame", deltaMs: 16 },
+  { op: "frame", deltaMs: 16 },
+  { op: "quit" },
+]);
+assert.ok(
+  framesOf(lazyResponses).some((frame) => textOf(frame).includes("Lazy subtree is mounted")),
+  "guest lazy state did not render its subtree after the Gallery scroll",
+);
 
 const updateRequestFrame = pointerFrames[13];
 const updateRequests = frameEvents(updateRequestFrame, "host.request");
 const updateRequest = updateRequests.find((item) => item.payload?.capability === "updates.check");
 assert.ok(updateRequest, "native pointer Check did not produce host.request updates.check");
 assert.equal(updateRequest.payload?.requestId, checkRequestId, "host.response must correlate with the observed updates.check request");
-assert.match(textOf(pointerFrames[16]), /capability_unavailable/, "host.response error was not rendered by the updates capability lane");
-assert.match(textOf(pointerFrames[16]), /not configured/, "host.response error detail was not rendered");
+const updateErrorResponses = runProbe([
+  ...pointerCommands,
+  event("host.response", {
+    requestId: checkRequestId,
+    capability: "updates.check",
+    ok: false,
+    error: { code: "capability_unavailable", message: "updates are not configured in probe" },
+  }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "down", id: 0, x: 180, y: 500 }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "move", id: 0, x: 180, y: 180 }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "up", id: 0, x: 180, y: 180 }),
+  { op: "frame", deltaMs: 16 },
+  { op: "frame", deltaMs: 16 },
+  { op: "quit" },
+]);
+const updateErrorFrame = framesOf(updateErrorResponses).find((frame) => textOf(frame).includes("capability_unavailable"));
+assert.ok(updateErrorFrame, "host.response error was not rendered by the updates capability lane");
+assert.match(textOf(updateErrorFrame), /not configured/, "host.response error detail was not rendered");
 
 const stress100 = pointerFrames[18];
 const stress500 = pointerFrames[19];
@@ -330,7 +382,7 @@ const mobileRootBackground = (mobileDarkFrame.ops ?? []).find((op) =>
 );
 assert.equal(
   mobileRootBackground?.color,
-  0xff0d1726,
+  0xff0e1728,
   "mobileDark must drive the root Screen canvas color, not only child labels",
 );
 
@@ -356,7 +408,7 @@ const liveNarrow = liveResizeFrames.at(-1);
 assert.ok(liveWide && liveNarrow, "native resize probe did not return both orientation frames");
 for (const [label, frame] of [["wide", liveWide], ["narrow", liveNarrow]] as const) {
   const rendered = textOf(frame!);
-  assert.match(rendered, /One runtime, one source of truth/, `${label} resize dropped the JS content pane`);
+  assert.match(rendered, /Made to feel native/, `${label} resize dropped the JS content pane`);
   assert.match(rendered, /Draft: \(empty\)/, `${label} resize dropped the input panel`);
   assert.match(rendered, /01/, `${label} resize lost the JS counter state`);
   assert.equal(
@@ -430,8 +482,10 @@ const scrollResponses = runProbe([
   { op: "quit" },
 ]);
 const scrollFrames = framesOf(scrollResponses);
-const beforeScrollDraft = textOp(scrollFrames[1]!, "Draft: (empty)");
-const afterScrollDraft = textOp(scrollFrames.at(-1)!, "Draft: (empty)");
+const draftFrames = scrollFrames.filter((frame) => textOp(frame, "Draft: (empty)"));
+assert.ok(draftFrames.length >= 2, "scroll probe could not locate the Home draft label");
+const beforeScrollDraft = textOp(draftFrames[0]!, "Draft: (empty)");
+const afterScrollDraft = textOp(draftFrames.at(-1)!, "Draft: (empty)");
 assert.ok(beforeScrollDraft && afterScrollDraft, "scroll probe could not locate the Home draft label");
 assert.equal(typeof beforeScrollDraft.y, "number", "pre-scroll draft must have a y bound");
 assert.equal(typeof afterScrollDraft.y, "number", "post-scroll draft must have a y bound");
@@ -580,9 +634,18 @@ assert.ok(
 );
 
 const initialEvents = frameEvents(resultFrames[0], "host.request");
+const initialSystemUiRequest = initialEvents.find(
+  (item) => item.payload?.capability === "platform.systemUi.set",
+);
+assert.ok(initialSystemUiRequest, "initial guest host.request must include platform.systemUi.set");
+assert.deepEqual(
+  initialSystemUiRequest.payload?.params,
+  initialSystemUiParams,
+  "initial platform.systemUi.set must use the light showcase bar style",
+);
 assert.deepEqual(
   initialEvents.map((item) => item.payload?.capability).sort(),
-  ["runtime.info", "runtime.performance", "plugins.list", "plugins.packageInfo", "updates.status", "system.runtime.configure"].sort(),
+  ["platform.systemUi.set", "runtime.info", "runtime.performance", "plugins.list", "plugins.packageInfo", "updates.status", "system.runtime.configure"].sort(),
   "initial guest host.request capability set drifted",
 );
 const loadResponse = checked(resultResponses[1], "pocket_load_bytecode_files");

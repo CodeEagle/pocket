@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -5,6 +7,25 @@ import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_host/main.dart';
 
 import 'guest_interaction_test.dart' as guest;
+
+double _logicalViewInsetBottom(WidgetTester tester) {
+  final rawInset = tester.view.viewInsets.bottom;
+  final devicePixelRatio = tester.view.devicePixelRatio;
+  // FlutterView.viewInsets is reported in physical pixels, including during
+  // the animated IME transition. Mirror PocketView's production conversion;
+  // a value below logical height is still physical while the keyboard rises.
+  if (!devicePixelRatio.isFinite || devicePixelRatio <= 0) return rawInset;
+  return rawInset / devicePixelRatio;
+}
+
+double _keyboardAvailableBottom(WidgetTester tester, Rect surfaceBounds) {
+  final devicePixelRatio = tester.view.devicePixelRatio;
+  final logicalHeight = devicePixelRatio <= 0
+      ? tester.view.physicalSize.height
+      : tester.view.physicalSize.height / devicePixelRatio;
+  final keyboardTop = logicalHeight - _logicalViewInsetBottom(tester);
+  return math.min(surfaceBounds.bottom, keyboardTop);
+}
 
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -39,6 +60,9 @@ void main() {
     Rect? firstKeyboardInputBounds;
     Rect? firstKeyboardInputTextRect;
     var inputAlignmentSamples = 0;
+    var maxInputTextMovement = 0.0;
+    var inputObscuredByKeyboard = false;
+    double? keyboardAvailableBottom;
 
     // Keep the real production frame seam under observation while this test
     // runs. The ring is intentionally bounded so a long-lived device test
@@ -233,15 +257,19 @@ void main() {
       const scrollSyncAnchors = <String>{
         'Input round-trip',
         'Tap to type',
+        'Draft: (empty)',
         'Counter',
       };
+      const adjacentPageAnchors = <String>['Counter', 'Draft: (empty)'];
       final referenceSurfaceBounds = tester.getRect(find.byType(PocketView));
       final referenceScrollRects = _guestTextGlobalRects(
         tester,
         scrollSyncAnchors,
       );
       final referenceInputTextRect = referenceScrollRects['Tap to type'];
-      expect(referenceInputTextRect, isNotNull);
+      if (referenceInputTextRect == null) {
+        fail('The reference guest input rect was not painted');
+      }
       var synchronizedPageSamples = 0;
       var movedPageSamples = 0;
       Rect? firstKeyboardSurfaceBounds;
@@ -267,6 +295,12 @@ void main() {
             'editors=${find.byType(EditableText).evaluate().length}, '
             'guest=${guest.texts(tester)}',
       );
+      final keyboardSurfaceBounds = tester.getRect(find.byType(PocketView));
+      final availableBottom = _keyboardAvailableBottom(
+        tester,
+        keyboardSurfaceBounds,
+      );
+      keyboardAvailableBottom = availableBottom;
       final editor = tester.state<EditableTextState>(find.byType(EditableText));
       for (var i = 0; i < 60; i++) {
         final previousAnchorCount = keyboardAnchorFrames.length;
@@ -280,6 +314,16 @@ void main() {
         expect(tester.view.viewInsets.bottom, greaterThan(0));
         final inputBounds = tester.getRect(find.byType(TextField));
         final surfaceBounds = tester.getRect(find.byType(PocketView));
+        final frameAvailableBottom = _keyboardAvailableBottom(
+          tester,
+          surfaceBounds,
+        );
+        keyboardAvailableBottom = math.min(
+          keyboardAvailableBottom ?? frameAvailableBottom,
+          frameAvailableBottom,
+        );
+        inputObscuredByKeyboard =
+            referenceInputTextRect.bottom > keyboardAvailableBottom + 1;
         firstKeyboardInputBounds ??= inputBounds;
         firstKeyboardSurfaceBounds ??= surfaceBounds;
         firstKeyboardInset = tester.view.viewInsets.bottom;
@@ -309,7 +353,7 @@ void main() {
         );
         lastKeyboardScrollRects = currentScrollRects;
         final currentInputTextRect = currentScrollRects['Tap to type'];
-        if (currentInputTextRect != null && referenceInputTextRect != null) {
+        if (currentInputTextRect != null) {
           inputAlignmentSamples++;
           firstKeyboardInputTextRect ??= currentInputTextRect;
           // The Flutter hint is the only native overlay for this JS-owned
@@ -335,6 +379,10 @@ void main() {
               currentInputTextRect.left - referenceInputTextRect.left;
           final inputTextDeltaY =
               currentInputTextRect.top - referenceInputTextRect.top;
+          maxInputTextMovement = math.max(
+            maxInputTextMovement,
+            inputTextDeltaY.abs(),
+          );
           final textStepX =
               currentInputTextRect.left - firstKeyboardInputTextRect.left;
           final textStepY =
@@ -353,8 +401,6 @@ void main() {
           );
           final inputTitle = currentScrollRects['Input round-trip'];
           final referenceInputTitle = referenceScrollRects['Input round-trip'];
-          final counter = currentScrollRects['Counter'];
-          final referenceCounter = referenceScrollRects['Counter'];
           if (inputTitle != null && referenceInputTitle != null) {
             expect(
               inputTitle.left - referenceInputTitle.left,
@@ -367,23 +413,31 @@ void main() {
               reason: 'Input card title must scroll with its editor',
             );
           }
-          if (counter != null && referenceCounter != null) {
+          // A keyboard can cull the lower Counter card as the viewport
+          // shrinks. Require an independently painted JS anchor that is
+          // visible in this frame, preferring Counter and falling back to
+          // the input card's Draft line. Either anchor must share the exact
+          // scroll delta with the input text; missing anchors do not count.
+          var hasAdjacentPageAnchor = false;
+          for (final label in adjacentPageAnchors) {
+            final current = currentScrollRects[label];
+            final reference = referenceScrollRects[label];
+            if (current == null || reference == null) continue;
             expect(
-              counter.left - referenceCounter.left,
+              current.left - reference.left,
               closeTo(inputTextDeltaX, 2),
               reason:
                   'Adjacent page content must keep the same horizontal offset',
             );
             expect(
-              counter.top - referenceCounter.top,
+              current.top - reference.top,
               closeTo(inputTextDeltaY, 2),
               reason: 'Adjacent page content must scroll with its editor',
             );
+            hasAdjacentPageAnchor = true;
+            break;
           }
-          if (inputTitle != null &&
-              referenceInputTitle != null &&
-              counter != null &&
-              referenceCounter != null) {
+          if (hasAdjacentPageAnchor) {
             synchronizedPageSamples++;
           }
           if (inputTextDeltaY.abs() > 2) movedPageSamples++;
@@ -476,13 +530,30 @@ void main() {
             'Input card and adjacent page content must be sampled with the '
             'same scroll delta; samples=$synchronizedPageSamples',
       );
-      expect(
-        movedPageSamples,
-        greaterThan(5),
-        reason:
-            'The JS page must scroll above the keyboard with the input; '
-            'movedSamples=$movedPageSamples',
-      );
+      if (inputObscuredByKeyboard) {
+        expect(
+          maxInputTextMovement,
+          greaterThan(5),
+          reason:
+              'An obscured input must move above the keyboard by more than '
+              '5px; movement=$maxInputTextMovement, '
+              'input=$referenceInputTextRect, '
+              'keyboardAvailableBottom=$keyboardAvailableBottom',
+        );
+        expect(
+          movedPageSamples,
+          greaterThan(5),
+          reason:
+              'The JS page must scroll above an obscured input; '
+              'movedSamples=$movedPageSamples',
+        );
+      } else {
+        debugPrint(
+          'Keyboard left the raw input visible; no page movement required: '
+          'input=$referenceInputTextRect '
+          'keyboardAvailableBottom=$keyboardAvailableBottom',
+        );
+      }
       for (final anchors in keyboardAnchorFrames) {
         for (final label in fixedLayoutAnchors) {
           final before = referenceAnchors[label];

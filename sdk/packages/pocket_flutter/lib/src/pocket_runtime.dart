@@ -8,6 +8,7 @@ import 'package:ffi/ffi.dart';
 
 import 'pocket_duplex.dart';
 import 'pocket_model.dart';
+import 'pocket_memory_limits.dart';
 import 'pocket_offload_runtime.dart';
 import 'pocket_recording.dart';
 import 'pocket_worker_runtime.dart';
@@ -232,6 +233,10 @@ typedef _CreateDensityTickNative =
     Pointer<Void> Function(Double, Double, Uint32, Uint32);
 typedef _CreateDensityTickDart =
     Pointer<Void> Function(double, double, int, int);
+typedef _CreateMemoryNative =
+    Pointer<Void> Function(Double, Double, Uint32, Uint32, Uint64, Uint64);
+typedef _CreateMemoryDart =
+    Pointer<Void> Function(double, double, int, int, int, int);
 typedef _EvalNative = Int32 Function(Pointer<Void>, Pointer<Utf8> source);
 typedef _EvalDart = int Function(Pointer<Void>, Pointer<Utf8> source);
 typedef _LoadNative =
@@ -404,6 +409,7 @@ final class FfiPocketRuntime
     required DynamicLibrary library,
     required Pointer<Void> handle,
     PocketRecordingController? recording,
+    this.memoryLimits = const PocketMemoryLimits(),
   }) : _library = library,
        _handle = handle,
        _recordingController = recording?.enabled == true ? recording : null,
@@ -420,6 +426,7 @@ final class FfiPocketRuntime
        );
 
   final DynamicLibrary _library;
+  final PocketMemoryLimits memoryLimits;
   final Pointer<Void> _handle;
   final PocketRecordingController? _recordingController;
   final _EvalDart _eval;
@@ -493,7 +500,9 @@ final class FfiPocketRuntime
     int rasterDensity = 1,
     int tickHz = 60,
     PocketRecordingController? recording,
+    PocketMemoryLimits memoryLimits = const PocketMemoryLimits(),
   }) {
+    memoryLimits.validate();
     if (rasterDensity < 1 || rasterDensity > 4) {
       throw RangeError.range(rasterDensity, 1, 4, 'rasterDensity');
     }
@@ -507,6 +516,7 @@ final class FfiPocketRuntime
       height,
       rasterDensity,
       tickHz,
+      memoryLimits,
     );
     if (handle.address == 0) {
       throw const PocketRuntimeException(
@@ -520,6 +530,7 @@ final class FfiPocketRuntime
       library: library,
       handle: handle,
       recording: recording,
+      memoryLimits: memoryLimits,
     );
     final error = runtime.lastError;
     if (error != null && error.isNotEmpty) {
@@ -536,6 +547,7 @@ final class FfiPocketRuntime
             density: rasterDensity,
             tickHz: tickHz,
             engineAbi: runtime.actualAbi,
+            memoryLimits: memoryLimits,
           ),
         );
         recording.bindBeforeFinish(runtime._captureStopBoundary);
@@ -553,7 +565,26 @@ final class FfiPocketRuntime
     double height,
     int rasterDensity,
     int tickHz,
+    PocketMemoryLimits memoryLimits,
   ) {
+    if (!memoryLimits.isEmpty) {
+      try {
+        return library.lookupFunction<_CreateMemoryNative, _CreateMemoryDart>(
+          'pocket_create_with_memory_limits',
+        )(
+          width,
+          height,
+          rasterDensity,
+          tickHz,
+          memoryLimits.heapLimitBytes ?? 0,
+          memoryLimits.maxPakBytes ?? 0,
+        );
+      } on ArgumentError {
+        throw UnsupportedError(
+          'Native library does not support memory limits; rebuild the Pocket native SDK',
+        );
+      }
+    }
     if (tickHz != 60) {
       return library
           .lookupFunction<_CreateDensityTickNative, _CreateDensityTickDart>(
@@ -2434,8 +2465,24 @@ final class PocketReplayRunner {
               height: recording.metadata.height,
               rasterDensity: recording.metadata.density,
               tickHz: recording.metadata.tickHz,
+              memoryLimits: recording.metadata.memoryLimits,
             )
           : factory(recording.metadata);
+      if (runtime.memoryLimits != recording.metadata.memoryLimits) {
+        return PocketReplayResult(
+          matched: false,
+          replayable: true,
+          entriesReplayed: 0,
+          framesCompared: 0,
+          firstMismatch: PocketReplayMismatch(
+            entryIndex: -1,
+            transaction: 'runtime.open',
+            reason: 'runtime memory limits mismatch',
+            expected: recording.metadata.memoryLimits.toJson(),
+            actual: runtime.memoryLimits.toJson(),
+          ),
+        );
+      }
       final hasTraceClock = recording.entries.any(
         (entry) => entry.result['traceClock'] != null,
       );

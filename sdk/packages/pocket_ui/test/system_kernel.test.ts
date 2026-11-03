@@ -18,8 +18,18 @@ const manifest: PocketSystemV1 = {
     backgroundExecution: "suspend",
     catalog: [
       { package: SYSTEM_UI, manifest: "pocket.json", required: true },
-      { package: PROFILE, manifest: "apps/profile/pocket.json", required: true },
-      { package: LOBBY, manifest: "apps/lobby/pocket.json", required: true },
+      {
+        package: PROFILE,
+        manifest: "apps/profile/pocket.json",
+        required: true,
+        memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 },
+      },
+      {
+        package: LOBBY,
+        manifest: "apps/lobby/pocket.json",
+        required: true,
+        memoryPolicy: "UI_MINI",
+      },
       { package: NOTES, manifest: "apps/notes/pocket.json", required: false },
       { package: EXTRA, manifest: "apps/extra/pocket.json", required: false },
     ],
@@ -162,6 +172,44 @@ test("Pocket System kernel protocol runs in an isolated Bun process", () => {
   assert.match(stdout, /SYSTEM_KERNEL_FIXTURE_OK/);
 });
 
+test("memory budget requests reject invalid fields and policy mismatches", () => {
+  const invalid = {
+    ...manifest,
+    applications: {
+      ...manifest.applications,
+      catalog: manifest.applications.catalog.map((entry) =>
+        entry.package === PROFILE
+          ? { ...entry, memory: { heapLimitBytes: 0 } }
+          : entry,
+      ),
+    },
+  } as PocketSystemV1;
+  assert.throws(
+    () => installPocketSystem(invalid, { bridge: new TestHost(), policies }),
+    /safe integer/,
+  );
+
+  const mismatchedPolicy = {
+    ...manifest,
+    applications: {
+      ...manifest.applications,
+      catalog: manifest.applications.catalog.map((entry) =>
+        entry.package === PROFILE
+          ? {
+              ...entry,
+              memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 },
+              memoryPolicy: "UI_MINI",
+            }
+          : entry,
+      ),
+    },
+  } as PocketSystemV1;
+  assert.throws(
+    () => installPocketSystem(mismatchedPolicy, { bridge: new TestHost(), policies }),
+    /does not match/,
+  );
+});
+
 test("caller cancelling its own foreground child call via system.app.cancel", async () => {
   const { host, kernel, invoke } = createEnv(5);
   await kernel.ready;
@@ -175,6 +223,11 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
     params: { appId: PROFILE },
   });
   assert.equal(openProfile.ok, true);
+  assert.deepEqual(
+    host.calls.find((call) => call.capability === "system.runtime.create")?.params,
+    { appId: PROFILE, memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 } },
+    "runtime.create forwards the catalog budget request",
+  );
   const profileInstance = kernel.snapshot().residents.find((r) => r.appId === PROFILE)!.instanceId;
   const profileGen = host.generations.get(profileInstance)!;
 
@@ -187,6 +240,11 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
     params: { appId: LOBBY },
   });
   assert.equal(openLobby.ok, true);
+  assert.deepEqual(
+    host.calls.find((call) => call.capability === "system.runtime.create" && call.params.appId === LOBBY)?.params,
+    { appId: LOBBY, memory: { heapLimitBytes: 128 * 1024 * 1024 } },
+    "compatibility memory policy maps to a heap-only request",
+  );
   const lobbyLaunchId = ((openLobby.value as JsonObject).requestId) as string;
   const lobbyInstance = kernel.snapshot().residents.find((r) => r.appId === LOBBY)!.instanceId;
   assert.deepEqual(kernel.snapshot().stack.map((f) => f.appId), [SYSTEM_UI, PROFILE, LOBBY]);

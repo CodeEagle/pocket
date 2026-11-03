@@ -508,115 +508,129 @@ final class _FlutterFrameMonitorState extends State<FlutterFrameMonitor> {
     if (!widget.enabled) return widget.child;
     _controller.setDisplayRefreshRateHz(View.of(context).display.refreshRate);
 
-    return Stack(
-      fit: StackFit.expand,
-      children: <Widget>[
-        widget.child,
-        Positioned.fill(
-          child: IgnorePointer(
-            child: SafeArea(
-              child: Align(
-                alignment: Alignment.topRight,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 6, right: 6),
-                  child: RepaintBoundary(
-                    key: const ValueKey<String>('flutter-frame-monitor-hud'),
-                    child: CustomPaint(
-                      key: _hudPaintKey,
-                      size: const Size(360, 44),
-                      painter: _hudPainter,
+    final mediaQuery = MediaQuery.of(context);
+    final viewSize = mediaQuery.size;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final layoutSize = constraints.biggest;
+        // An embedded preview can inherit the physical view's bottom inset
+        // while ending above that view's bottom edge. Keep the badge out of
+        // the preview content unless this layer actually fills the view.
+        final coversFullView =
+            layoutSize.width.isFinite &&
+            layoutSize.height.isFinite &&
+            (layoutSize.width - viewSize.width).abs() <= 0.5 &&
+            (layoutSize.height - viewSize.height).abs() <= 0.5;
+        final useBottomBadge =
+            coversFullView && mediaQuery.viewPadding.bottom > 0;
+        final hudAlignment = useBottomBadge
+            ? Alignment.bottomLeft
+            : Alignment.topRight;
+        final hudPadding = useBottomBadge
+            ? const EdgeInsets.only(left: 12, bottom: 6)
+            : const EdgeInsets.only(top: 6, right: 6);
+
+        return Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            widget.child,
+            Positioned.fill(
+              child: IgnorePointer(
+                child: SafeArea(
+                  top: !useBottomBadge,
+                  right: !useBottomBadge,
+                  bottom: false,
+                  left: false,
+                  child: Align(
+                    alignment: hudAlignment,
+                    child: Padding(
+                      padding: hudPadding,
+                      child: RepaintBoundary(
+                        key: const ValueKey<String>(
+                          'flutter-frame-monitor-hud',
+                        ),
+                        child: CustomPaint(
+                          key: _hudPaintKey,
+                          size: const Size(106, 22),
+                          painter: _hudPainter,
+                        ),
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 }
 
 final class _FlutterFrameMonitorPainter extends CustomPainter {
   _FlutterFrameMonitorPainter({required this.controller})
-    : _firstLinePainter = _makeTextPainter(_firstLineStyle),
-      _secondLinePainter = _makeTextPainter(_secondLineStyle);
+    : _textPainter = _makeTextPainter(_textStyle);
 
   final FlutterFrameMonitorController controller;
-  final TextPainter _firstLinePainter;
-  final TextPainter _secondLinePainter;
-  String? _firstLineText;
-  String? _secondLineText;
+  final TextPainter _textPainter;
+  String? _text;
   double _lastTextWidth = -1;
   bool _disposed = false;
 
-  static const TextStyle _firstLineStyle = TextStyle(
-    color: Colors.white,
-    fontSize: 11,
-    fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
-  );
-  static const TextStyle _secondLineStyle = TextStyle(
-    color: Color(0xffcbd5e1),
+  static const TextStyle _textStyle = TextStyle(
+    color: Color(0xff334155),
     fontSize: 10,
+    fontWeight: FontWeight.w600,
     fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
   );
 
   void dispose() {
     if (_disposed) return;
     _disposed = true;
-    _firstLinePainter.dispose();
-    _secondLinePainter.dispose();
+    _textPainter.dispose();
   }
 
   @override
   void paint(Canvas canvas, Size size) {
     if (_disposed) return;
     final window = controller.latest;
-    final fps = window.fps == null ? '--' : window.fps!.toStringAsFixed(1);
-    final windowText = window.isEmpty ? '--' : '${window.frameCount} frames';
-    final display = window.displayRefreshRateHz == null
-        ? '--'
-        : window.displayRefreshRateHz!.toStringAsFixed(0);
-    final firstText =
-        'Flutter FPS $fps · last window $windowText · display ${display}Hz';
-    final secondText =
-        'UI avg ${_formatMs(window.uiMs)} ms · '
-        'raster avg ${_formatMs(window.rasterMs)} ms · '
-        'phase overbudget ${window.jankCount}';
-    final textWidth = size.width > 16 ? size.width - 16 : 0.0;
+    final fps = window.fps?.toStringAsFixed(0);
+    final text = fps == null ? 'Flutter idle' : 'Flutter $fps FPS';
+    final textWidth = size.width > 26 ? size.width - 26 : 0.0;
 
     final textWidthChanged = _lastTextWidth != textWidth;
-    final firstTextChanged = _firstLineText != firstText;
-    final secondTextChanged = _secondLineText != secondText;
-    if (firstTextChanged) {
-      _firstLineText = firstText;
-      _firstLinePainter.text = TextSpan(
-        text: firstText,
-        style: _firstLineStyle,
-      );
-    }
-    if (secondTextChanged) {
-      _secondLineText = secondText;
-      _secondLinePainter.text = TextSpan(
-        text: secondText,
-        style: _secondLineStyle,
-      );
+    final textChanged = _text != text;
+    if (textChanged) {
+      _text = text;
+      _textPainter.text = TextSpan(text: text, style: _textStyle);
     }
     _lastTextWidth = textWidth;
-    if (firstTextChanged || textWidthChanged) {
-      _firstLinePainter.layout(maxWidth: textWidth);
-    }
-    if (secondTextChanged || textWidthChanged) {
-      _secondLinePainter.layout(maxWidth: textWidth);
+    if (textChanged || textWidthChanged) {
+      _textPainter.layout(maxWidth: textWidth);
     }
 
-    final background = Paint()..color = const Color(0xcc101827);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(6)),
-      background,
+    final shape = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      Radius.circular(size.height / 2),
     );
-    _firstLinePainter.paint(canvas, const Offset(8, 5));
-    _secondLinePainter.paint(canvas, const Offset(8, 23));
+    final background = Paint()..color = const Color(0xfff8fafc);
+    canvas.drawRRect(shape, background);
+    final border = Paint()
+      ..color = const Color(0xffcbd5e1)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    canvas.drawRRect(shape.deflate(0.5), border);
+
+    final dot = Paint()
+      ..color = window.fps == null
+          ? const Color(0xff16a34a)
+          : const Color(0xff2563eb);
+    canvas.drawCircle(Offset(10, size.height / 2), 3, dot);
+    _textPainter.paint(
+      canvas,
+      Offset(18, (size.height - _textPainter.height) / 2),
+    );
   }
 
   @override
@@ -632,9 +646,6 @@ final class _FlutterFrameMonitorPainter extends CustomPainter {
       ellipsis: '…',
     );
   }
-
-  static String _formatMs(double? value) =>
-      value == null ? '--' : value.toStringAsFixed(2);
 }
 
 final class _FlutterFrameMonitorDispatcher {

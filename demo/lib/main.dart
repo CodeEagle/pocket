@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 import 'package:pocket_hardware/pocket_hardware.dart';
+import 'package:pocket_platform/pocket_platform.dart';
 
 import 'flutter_frame_monitor.dart';
 
@@ -20,12 +21,16 @@ void main() {
 const showcaseConfig = PocketAppConfig(
   appId: 'pocket.host.demo',
   updates: PocketUpdateConfig.fromEnvironment(),
-  pluginFactories: [createHardwarePlugin],
+  pluginFactories: [createHardwarePlugin, createPlatformPlugin],
   allowedPermissions: HardwarePermissions.all,
   additionalCapabilities: {'ui.compositor-surfaces'},
   // Pocket's diagnostic counts guest scheduler turns. The independent
   // Flutter engine monitor below owns the Demo's visible FPS label.
   showFps: false,
+  memoryLimits: PocketMemoryLimits(
+    heapLimitBytes: 128 * 1024 * 1024,
+    maxPakBytes: 8 * 1024 * 1024,
+  ),
   compositorSurfaces: {'pocket.demo.profile': 2, 'pocket.demo.lobby': 3},
 );
 
@@ -63,6 +68,7 @@ final class PocketHostApp extends StatelessWidget {
         applications: const {
           'pocket.demo.profile': PocketAppConfig(
             appId: 'pocket.demo.profile',
+            memoryLimits: PocketMemoryLimits(heapLimitBytes: 128 * 1024 * 1024),
             bytecodeAsset: 'assets/apps/profile/app.qjbc',
             pakAsset: 'assets/apps/profile/app.pak',
             metadataAsset: 'assets/apps/profile/app.bytecode.json',
@@ -70,6 +76,7 @@ final class PocketHostApp extends StatelessWidget {
           ),
           'pocket.demo.lobby': PocketAppConfig(
             appId: 'pocket.demo.lobby',
+            memoryLimits: PocketMemoryLimits(maxPakBytes: 8 * 1024 * 1024),
             bytecodeAsset: 'assets/apps/lobby/app.qjbc',
             pakAsset: 'assets/apps/lobby/app.pak',
             metadataAsset: 'assets/apps/lobby/app.bytecode.json',
@@ -83,9 +90,11 @@ final class PocketHostApp extends StatelessWidget {
   );
 }
 
-/// Optional native provider, linked only by consumers that depend on its package.
 PocketPlugin createHardwarePlugin(PocketViewController controller) =>
     HardwarePlugin(
       onTextureRegistered: controller.authorizePlatformTexture,
       onTextureReleased: controller.revokePlatformTexture,
     );
+
+PocketPlugin createPlatformPlugin(PocketViewController controller) =>
+    PocketPlatformPlugin();

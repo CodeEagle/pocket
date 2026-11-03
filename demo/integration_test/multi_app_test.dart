@@ -130,11 +130,12 @@ void main() {
         await guest.waitForContaining(tester, 'visits=1');
         await guest.tapGuest(tester, 'Return visits to Showcase');
         // Profile awaits B's result and returns it to SystemUI, without a Dart stack.
+        await guest.reveal(tester, 'Prewarm lobby');
         await guest.waitForContaining(tester, 'App result:');
         await guest.waitForContaining(tester, 'Lin Mei');
         await guest.waitForContaining(tester, 'Message from pocket.demo.lobby');
         expect(
-          guest.texts(tester).any((text) => text.contains('"visits":1')),
+          guest.texts(tester).any((text) => text.contains('visits=1')),
           isTrue,
         );
         expect(
@@ -164,6 +165,7 @@ void main() {
         await guest.waitFor(tester, 'Pocket Lobby');
         final cold = await _instance(tester, host, _lobby, presented: true);
         await guest.tapGuest(tester, 'Return visits to Showcase');
+        await guest.reveal(tester, 'Prewarm lobby');
         await guest.waitForContaining(tester, 'App result:');
         await guest.tapGuest(tester, 'Prewarm lobby');
         await guest.waitForContaining(tester, 'Lobby prewarmed');
@@ -191,6 +193,7 @@ void main() {
           'Pocket SystemUI prewarm ablation: cold=${coldMs}ms warm=${warmMs}ms residents=${host.instances.length} reused=${opened.instanceId == warm.instanceId}',
         );
         await guest.tapGuest(tester, 'Return visits to Showcase');
+        await guest.reveal(tester, 'Prewarm lobby');
         await guest.waitForContaining(tester, 'App result:');
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());

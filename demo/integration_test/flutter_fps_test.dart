@@ -63,7 +63,10 @@ void main() {
         'testBindingHeartbeat': true,
       };
       // ignore: avoid_print
-      print('Flutter-only FPS verification: ${jsonEncode(binding.reportData)}');
+      print(
+        'Flutter-only FPS verification: '
+        '${jsonEncode(binding.reportData!['flutterOnlyFps'])}',
+      );
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
