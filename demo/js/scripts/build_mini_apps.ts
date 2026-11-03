@@ -25,7 +25,6 @@ export async function buildMiniApps(): Promise<BuildGuestResult[]> {
       projectRoot: app.projectRoot,
       copyAssetsTo: assets,
       keepSource: resolve(app.projectRoot, ".pocket-build/app.js"),
-      target: "pocket-flutter",
     }));
     console.log(`build_mini_apps: wrote ${assets}`);
   }

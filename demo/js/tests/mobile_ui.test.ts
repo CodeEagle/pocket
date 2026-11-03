@@ -33,7 +33,7 @@ function test(name: string, fn: () => void | Promise<void>): void {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("transition modes and liquid glass recipes", () => {
+test("transition modes and shared glass recipe library", () => {
   assert.deepEqual(TRANSITION_MODES, [
     "IOS_SPRING_PARALLAX",
     "SHARED_AXIS_Z",
@@ -219,7 +219,9 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   const docsSource = readFileSync(join(sdkRoot, "docs/UI_REUSE.md"), "utf8");
   const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as { permissions?: { optional?: string[] } };
 
-  for (const label of ["Mobile UI", "Transitions", "Glass", "Hardware"]) assert.match(appSource, new RegExp(label));
+  for (const label of ["Mobile UI", "Transitions", "Hardware"]) assert.match(appSource, new RegExp(label));
+  assert.doesNotMatch(appSource, /LiquidGlassPage|route === "glass"|route: "glass"|label="Liquid Glass"/);
+  assert.doesNotMatch(pageSource, /LiquidGlassPage|Liquid Glass|buildLiquidGlassRecipe|glassShapes|GlassSurface/);
   for (const label of ["MobileAppBar", "MobileCard", "MobileListTile", "MobileSwitch", "MobileStepper", "MobileDialog", "InputField", "GlassSurface", "FilledButton", "ElevatedButton", "hardware.camera.preview.start", "hardware.weather.current"]) {
     assert.match(pageSource + mobileSource + uiSource, new RegExp(label.replace(".", "\\.")));
   }
@@ -230,6 +232,8 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(mobileSource, /<View class="flex-col w-full"/);
   assert.doesNotMatch(mobileSource, /"flex-1 w-full " \+ props\.class/);
   assert.match(pageSource, /computeTransitionDescriptor/);
+  assert.match(pageSource, /TRANSITION_MODES\.filter/);
+  assert.match(pageSource, /LIQUID_GLASS_MORPH/);
   assert.match(appSource, /routeTransitionDuration/);
   assert.match(appSource, /setRouteTransition/);
   assert.match(appSource, /onFrame\(\(\) =>/);

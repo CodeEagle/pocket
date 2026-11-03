@@ -6,7 +6,7 @@
 //! single JSON document suitable for archiving in a profiling artifact.
 
 use pocket_flutter::{
-    pocket_bytecode_actual_abi, pocket_create_with_density_and_tick_hz, pocket_destroy,
+    pocket_bytecode_runtime_abi, pocket_create_with_density_and_tick_hz, pocket_destroy,
     pocket_frame, pocket_frame_delta, pocket_last_error, pocket_load_bytecode_files, pocket_send,
 };
 use serde_json::{json, Value};
@@ -292,7 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("pak file does not exist: {}", args.pak.display()).into());
     }
     let runtime_abi = unsafe {
-        CStr::from_ptr(pocket_bytecode_actual_abi())
+        CStr::from_ptr(pocket_bytecode_runtime_abi())
             .to_string_lossy()
             .into_owned()
     };

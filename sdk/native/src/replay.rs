@@ -114,15 +114,16 @@ pub(super) struct TraceClock {
     replayed: Vec<f64>,
     replay_index: usize,
     scalar_lane: Rc<RefCell<ScalarLane>>,
-    last_scalars: Vec<ScalarSample>,
     /// As with the scalar lane, an interval quota failure invalidates the
     /// recording but must not change the production guest transaction.
     failure: Option<String>,
-    /// Retained so scalar `end` callers can fetch the exact ordered record
-    /// with `pocket_trace_clock_last_json` afterwards.
-    last_completed: Vec<f64>,
-    last_worker_events: Option<Vec<WorkerTraceEvent>>,
-    last_offload_events: Option<Vec<WorkerTraceEvent>>,
+}
+
+struct FinishedTrace {
+    idle_ms: Vec<f64>,
+    scalars: Vec<ScalarSample>,
+    worker_events: Option<Vec<WorkerTraceEvent>>,
+    offload_events: Option<Vec<WorkerTraceEvent>>,
 }
 
 impl Default for TraceClock {
@@ -134,11 +135,7 @@ impl Default for TraceClock {
             replayed: Vec::new(),
             replay_index: 0,
             scalar_lane: Rc::new(RefCell::new(ScalarLane::default())),
-            last_scalars: Vec::new(),
             failure: None,
-            last_completed: Vec::new(),
-            last_worker_events: None,
-            last_offload_events: None,
         }
     }
 }
@@ -161,10 +158,6 @@ impl TraceClock {
 
     fn clear_data(&mut self) {
         self.clear_transaction();
-        self.last_completed.clear();
-        self.last_scalars.clear();
-        self.last_worker_events = None;
-        self.last_offload_events = None;
     }
 
     fn begin(
@@ -175,10 +168,6 @@ impl TraceClock {
         if self.transaction_open {
             return Err("trace clock transaction already open".to_owned());
         }
-        self.last_completed.clear();
-        self.last_scalars.clear();
-        self.last_worker_events = None;
-        self.last_offload_events = None;
         self.recorded.clear();
         self.replayed.clear();
         self.replay_index = 0;
@@ -241,7 +230,7 @@ impl TraceClock {
         }
     }
 
-    fn finish(&mut self) -> Result<Vec<f64>, String> {
+    fn finish(&mut self) -> Result<(Vec<f64>, Vec<ScalarSample>), String> {
         if !self.transaction_open {
             return Err("trace clock transaction is not open".to_owned());
         }
@@ -285,22 +274,8 @@ impl TraceClock {
             Mode::Record => self.recorded.clone(),
             Mode::Replay => self.replayed.clone(),
         };
-        self.last_completed = values.clone();
-        self.last_scalars = scalar_values;
         self.clear_transaction();
-        Ok(values)
-    }
-
-    fn last_json(&self) -> String {
-        serde_json::to_string(&OutputEnvelope {
-            idle_ms: &self.last_completed,
-            scalars: &self.last_scalars,
-            version: (self.last_worker_events.is_some() || self.last_offload_events.is_some())
-                .then_some(2),
-            worker_events: self.last_worker_events.as_deref(),
-            offload_events: self.last_offload_events.as_deref(),
-        })
-        .unwrap_or_else(|_| "{\"idleMs\":[],\"scalars\":[]}".to_owned())
+        Ok((values, scalar_values))
     }
 
     pub(super) fn scalar_lane(&self) -> Rc<RefCell<ScalarLane>> {
@@ -460,30 +435,6 @@ pub(super) fn set_mode(host: &mut HostState, raw_mode: u32) -> Result<(), String
     stopped
 }
 
-pub(super) fn begin_scalar(host: &mut HostState, elapsed_ms: f64) -> Result<(), String> {
-    let (replayed, scalars) = if mode(host) == Mode::Replay {
-        // NaN is the scalar ABI's unambiguous representation of an empty
-        // interval array. JSON cannot encode NaN, hence this is scalar-only.
-        if elapsed_ms.is_nan() {
-            (Vec::new(), Vec::new())
-        } else {
-            validate_elapsed(elapsed_ms)?;
-            (vec![elapsed_ms], Vec::new())
-        }
-    } else {
-        // Record explicitly ignores the scalar input, as does live mode.
-        (Vec::new(), Vec::new())
-    };
-    host.trace.begin(replayed, scalars)?;
-    if let Some(lane) = &host.worker_trace {
-        if let Err(error) = lane.begin_batch(&[]) {
-            host.trace.clear_transaction();
-            return Err(error);
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn begin_json(host: &mut HostState, input: &str) -> Result<(), String> {
     let parsed = if mode(host) == Mode::Replay {
         parse_intervals(input)?
@@ -544,24 +495,23 @@ pub(super) fn before_external_elapsed(
     host.trace.before_external(wall_elapsed)
 }
 
-pub(super) fn end(host: &mut HostState) -> Result<f64, String> {
-    let values = finish_transaction(host)?;
-    let mut total = 0.0;
-    for value in values {
-        total += value;
-        if !total.is_finite() {
-            return Err("trace clock elapsed sum is not finite".to_owned());
-        }
-    }
-    Ok(total)
-}
-
 pub(super) fn end_json(host: &mut HostState) -> Result<String, String> {
-    finish_transaction(host)?;
-    Ok(host.trace.last_json())
+    let finished = finish_transaction(host)?;
+    serde_json::to_string(&OutputEnvelope {
+        idle_ms: &finished.idle_ms,
+        scalars: &finished.scalars,
+        version: (finished.worker_events.is_some() || finished.offload_events.is_some())
+            .then_some(2),
+        worker_events: finished.worker_events.as_deref(),
+        offload_events: finished.offload_events.as_deref(),
+    })
+    .map_err(|error| format!("trace clock envelope serialization failed: {error}"))
 }
 
-fn finish_transaction(host: &mut HostState) -> Result<Vec<f64>, String> {
+fn finish_transaction(host: &mut HostState) -> Result<FinishedTrace, String> {
+    // Finish the clock first, but retain its result until the Worker lane has
+    // been closed.  A scalar/interval quota failure must not leave an async
+    // batch open for the next transaction.
     let clock_result = host.trace.finish();
     let worker_result = host.worker_trace.as_ref().map(|lane| lane.finish_batch());
     let events = match worker_result {
@@ -576,13 +526,13 @@ fn finish_transaction(host: &mut HostState) -> Result<Vec<f64>, String> {
     {
         return Err("async trace facts have no configured owner".to_owned());
     }
-    host.trace.last_worker_events = host.worker_program.as_ref().map(|_| worker);
-    host.trace.last_offload_events = host.offload.as_ref().map(|_| offload);
-    clock_result
-}
-
-pub(super) fn last_json(host: &HostState) -> String {
-    host.trace.last_json()
+    let (idle_ms, scalars) = clock_result?;
+    Ok(FinishedTrace {
+        idle_ms,
+        scalars,
+        worker_events: host.worker_program.as_ref().map(|_| worker),
+        offload_events: host.offload.as_ref().map(|_| offload),
+    })
 }
 
 /// Called by the explicit debug-only JS wrappers for Date.now,
@@ -735,8 +685,8 @@ mod tests {
     use super::*;
     use crate::{
         pocket_create, pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_send,
-        pocket_set_scheduler_paused, pocket_trace_clock_begin, pocket_trace_clock_begin_json,
-        pocket_trace_clock_end, pocket_trace_clock_end_json, pocket_trace_clock_mode,
+        pocket_set_scheduler_paused, pocket_trace_clock_begin_json, pocket_trace_clock_end_json,
+        pocket_trace_clock_mode,
     };
     use std::ffi::{CStr, CString};
 
@@ -747,14 +697,13 @@ mod tests {
         clock.begin(Vec::new(), Vec::new()).unwrap();
         clock.before_external(Some(12.5)).unwrap();
         clock.before_external(Some(0.0)).unwrap();
-        assert_eq!(clock.finish().unwrap(), vec![12.5, 0.0]);
-        assert_eq!(clock.last_json(), "{\"idleMs\":[12.5,0.0],\"scalars\":[]}");
+        assert_eq!(clock.finish().unwrap().0, vec![12.5, 0.0]);
 
         clock.mode = Mode::Replay;
         clock.begin(vec![12.5, 0.0], Vec::new()).unwrap();
         assert_eq!(clock.before_external(None).unwrap(), 12.5);
         assert_eq!(clock.before_external(None).unwrap(), 0.0);
-        assert_eq!(clock.finish().unwrap(), vec![12.5, 0.0]);
+        assert_eq!(clock.finish().unwrap().0, vec![12.5, 0.0]);
     }
 
     #[test]
@@ -782,7 +731,7 @@ mod tests {
         // the recorder can start a fresh transaction afterwards.
         clock.begin(Vec::new(), Vec::new()).unwrap();
         assert_eq!(clock.before_external(Some(1.0)).unwrap(), 1.0);
-        assert_eq!(clock.finish().unwrap(), vec![1.0]);
+        assert_eq!(clock.finish().unwrap().0, vec![1.0]);
     }
 
     fn c_string(pointer: *const std::ffi::c_char) -> String {
@@ -1026,7 +975,6 @@ mod tests {
             let host = pocket_create(64.0, 64.0);
             assert_eq!(pocket_trace_clock_mode(host, 99), -1);
             assert_eq!(pocket_trace_clock_mode(host, 2), 0);
-            assert_eq!(pocket_trace_clock_begin(host, -1.0), -1);
             assert_eq!(
                 pocket_trace_clock_begin_json(host, CString::new("{}").unwrap().as_ptr()),
                 -1
@@ -1037,7 +985,6 @@ mod tests {
             // replay divergence and closes the transaction for recovery.
             assert!(pocket_trace_clock_end_json(host).is_null());
             assert!(!c_string(pocket_last_error(host)).is_empty());
-            assert!(pocket_trace_clock_end(host).is_nan());
             pocket_destroy(host);
         }
     }

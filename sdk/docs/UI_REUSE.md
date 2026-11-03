@@ -36,12 +36,16 @@ retained frame and host capability messages.
 ## What is mounted
 
 `demo/js/mobile-pages.tsx` (or `demo/js/app.tsx`) adds real JS-owned pages for Mobile UI, Transitions,
-Liquid Glass, and Hardware. The Mobile UI page exercises themed AppBar/Card/
-ListTile/buttons, segmented controls, a switch, a stepper, and an official
-Modal. Transitions samples all four source-backed descriptors and pushes/pops
-the guest route stack; App route changes drive an on-frame 220ms incoming
-transition for these showcase routes. Existing Home, Gallery, Runtime,
-Updates, Plugins, Stress, FPS, and system-input paths remain intact.
+and Hardware. The Demo's former Liquid Glass page and entry are temporarily
+removed; `GlassSurface` and the shared glass surface bridge remain SDK
+capabilities covered by standalone tests. The Mobile UI page exercises themed
+AppBar/Card/ListTile/buttons, segmented controls, a switch, a stepper, and an
+official Modal. Transitions samples the three Demo-available descriptors and
+pushes/pops the guest route stack; the shared Liquid Glass descriptor remains
+available in the SDK but is not a selectable Demo option. App route changes
+drive an on-frame 220ms incoming transition for these showcase routes. Existing
+Home, Gallery, Runtime, Updates, Plugins, Stress, FPS, and system-input paths
+remain intact.
 
 Hardware uses the registered host plugin contract. The page sends actual
 requests for permissions, camera preview/capture, photos, BLE, sensors,
@@ -80,7 +84,7 @@ pocket.registerSurface(packageId, "glass", JSON.stringify({
 
 When registered, the guest mounts an official `CompositorSurface` beneath its
 children and releases it on cleanup. If the bridge is unavailable, it shows a
-gradient recipe and labels the page as a fallback; it does not call that
+gradient recipe and labels the surface as a fallback; it does not call that
 fallback native glass. The actual shader/effect implementation remains a
 generic renderer concern, not a Dart business widget.
 

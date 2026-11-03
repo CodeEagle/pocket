@@ -21,7 +21,7 @@
 //! state continue to come from the guest bundle supplied by the caller.
 
 use pocket_flutter::{
-    pocket_bytecode_actual_abi, pocket_configure_compositor, pocket_create, pocket_create_with_density_and_tick_hz,
+    pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_create, pocket_create_with_density_and_tick_hz,
     pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
     pocket_load_files, pocket_next_wake_delay_ms, pocket_resize_viewport, pocket_send,
 };
@@ -214,7 +214,7 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
             if result != 0 {
                 return (false, native_error(*handle, "pocket_load_bytecode_files"));
             }
-            let abi = CStr::from_ptr(pocket_bytecode_actual_abi())
+            let abi = CStr::from_ptr(pocket_bytecode_runtime_abi())
                 .to_string_lossy()
                 .into_owned();
             (false, json!({"ok": true, "runtimeAbi": abi}))

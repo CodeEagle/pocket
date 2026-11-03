@@ -582,7 +582,7 @@ assert.ok(
 const initialEvents = frameEvents(resultFrames[0], "host.request");
 assert.deepEqual(
   initialEvents.map((item) => item.payload?.capability).sort(),
-  ["runtime.info", "plugins.list", "plugins.packageInfo", "updates.status", "system.runtime.configure"].sort(),
+  ["runtime.info", "runtime.performance", "plugins.list", "plugins.packageInfo", "updates.status", "system.runtime.configure"].sort(),
   "initial guest host.request capability set drifted",
 );
 const loadResponse = checked(resultResponses[1], "pocket_load_bytecode_files");

@@ -3355,12 +3355,7 @@ fn perform_http(
         let remaining = deadline
             .saturating_duration_since(Instant::now())
             .max(Duration::from_millis(1));
-        let agent = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout_connect(remaining)
-            .timeout_read(remaining)
-            .timeout_write(remaining)
-            .build();
+        let agent = http_agent(remaining);
         let mut request = agent
             .request(&method, url.as_str())
             .set("accept-encoding", "identity");
@@ -3496,6 +3491,23 @@ fn perform_http(
     Ok(offset as u64)
 }
 
+/// Build one HTTP hop with a single remaining deadline budget.
+///
+/// The per-operation socket limits protect connect/read/write calls, while
+/// `timeout` is required to bound the complete request including response-body
+/// reads. Without the overall limit one blocking read can cross the Worker
+/// deadline, or a peer can keep each individual read below its limit while the
+/// response as a whole exceeds the deadline.
+fn http_agent(remaining: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(remaining)
+        .timeout_read(remaining)
+        .timeout_write(remaining)
+        .timeout(remaining)
+        .build()
+}
+
 fn request_header_allowed(name: &str) -> bool {
     !matches!(
         name,
@@ -3585,6 +3597,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::OnceLock;
+    use std::thread;
 
     struct TestWake {
         epoch: Mutex<u64>,
@@ -4333,5 +4346,132 @@ mod tests {
         assert!(parse_http_descriptor(denied, &grants).is_err());
         let invalid_method = br#"{"url":"http://127.0.0.1:4000/data","method":"TRACE"}"#;
         assert!(parse_http_descriptor(invalid_method, &grants).is_err());
+    }
+
+    #[test]
+    fn http_agent_enforces_total_budget_for_headers_and_body() {
+        fn delayed_server(
+            header_delay: Duration,
+            body_delays: Vec<Duration>,
+        ) -> (String, JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let thread = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 512];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    if count == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                thread::sleep(header_delay);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_delays.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.flush();
+                for delay in body_delays {
+                    thread::sleep(delay);
+                    let _ = stream.write_all(b"x");
+                    let _ = stream.flush();
+                }
+            });
+            (format!("http://{address}/delayed"), thread)
+        }
+
+        // Each delay is below the 300 ms per-read budget, but the headers plus
+        // body take 360 ms in total. The old agent (without timeout()) reads
+        // the byte successfully; the fixed agent aborts at the total budget.
+        let (headers_url, headers_thread) = delayed_server(
+            Duration::from_millis(180),
+            vec![Duration::from_millis(180)],
+        );
+        let headers_started = Instant::now();
+        let response = http_agent(Duration::from_millis(300))
+            .get(&headers_url)
+            .call()
+            .expect("headers should arrive before the total budget");
+        assert!(headers_started.elapsed() < Duration::from_millis(280));
+        let mut reader = response.into_reader();
+        let mut byte = [0u8; 1];
+        assert!(reader.read(&mut byte).is_err(), "body exceeded the total budget");
+        assert!(
+            headers_started.elapsed() < Duration::from_millis(500),
+            "body timeout did not interrupt promptly"
+        );
+        headers_thread.join().unwrap();
+    }
+
+    #[test]
+    fn http_agent_keeps_remaining_budget_across_redirect_hops() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let thread = thread::spawn(move || {
+            let (mut redirect, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = redirect.read(&mut request);
+            thread::sleep(Duration::from_millis(100));
+            let _ = redirect.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: /slow\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            let _ = redirect.flush();
+
+            let (mut slow, _) = listener.accept().unwrap();
+            let _ = slow.read(&mut request);
+            let _ = slow.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n",
+            );
+            let _ = slow.flush();
+            for _ in 0..3 {
+                thread::sleep(Duration::from_millis(80));
+                let _ = slow.write_all(b"x");
+                let _ = slow.flush();
+            }
+        });
+
+        let started = Instant::now();
+        let budget = Duration::from_millis(300);
+        let url = format!("http://{address}/redirect");
+        let first = http_agent(budget).get(&url).call();
+        let location = match first {
+            Ok(response) if response.status() == 302 => response
+                .header("location")
+                .expect("redirect response should include Location")
+                .to_owned(),
+            Err(ureq::Error::Status(302, response)) => response
+                .header("location")
+                .expect("redirect response should include Location")
+                .to_owned(),
+            other => panic!("expected a manual redirect response, got {other:?}"),
+        };
+        let remaining = budget
+            .checked_sub(started.elapsed())
+            .unwrap_or(Duration::from_millis(1));
+        let second_url = format!("http://{address}{location}");
+        let response = http_agent(remaining)
+            .get(&second_url)
+            .call()
+            .expect("redirect target headers should arrive before the body timeout");
+        let mut reader = response.into_reader();
+        let mut byte = [0u8; 1];
+        let mut timed_out = false;
+        for _ in 0..3 {
+            match reader.read(&mut byte) {
+                Ok(1) => {}
+                Ok(0) | Err(_) => {
+                    timed_out = true;
+                    break;
+                }
+                Ok(_) => unreachable!(),
+            }
+        }
+        assert!(timed_out, "redirect body exceeded the remaining total budget");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        thread.join().unwrap();
     }
 }

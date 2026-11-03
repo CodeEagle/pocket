@@ -16,13 +16,6 @@ final class PocketRecordingFormatException extends FormatException {
   ]);
 }
 
-final class PocketRecordingLimitException implements Exception {
-  const PocketRecordingLimitException(this.message);
-  final String message;
-  @override
-  String toString() => 'PocketRecordingLimitException: $message';
-}
-
 /// Dimensions and build identity attached to a runtime recording.
 final class PocketRecordingMetadata {
   PocketRecordingMetadata({
@@ -443,7 +436,6 @@ final class PocketRecordingController {
   bool get isRecording => enabled && _started && !_finished && !isIncomplete;
   bool get isIncomplete => _incompleteReason != null;
   PocketRecording? get recording => _recording;
-  PocketRecording? get completed => _recording;
   int get entryCount => _entries.length;
   int get recordedBytes => _bytes;
   int get bytes => _bytes;

@@ -1741,6 +1741,10 @@ fn queue_buttons(host: &mut HostState, message: &serde_json::Value) -> Result<()
     if let Some(right_analog) = value.get("rightAnalog") {
         host.right_analog = input_u32(Some(right_analog), "input.buttons.rightAnalog")?;
     }
+    // Buttons/axes are sampled by the next GuestFrame.  Keep the existing
+    // event-driven wake marker so a zero-delta host boundary still delivers
+    // both a non-neutral sample and the later return-to-center sample.
+    host.external_work_pending = true;
     Ok(())
 }
 
@@ -1783,6 +1787,7 @@ fn queue_axes(host: &mut HostState, message: &serde_json::Value) -> Result<(), S
     }
     host.analog = (packed[0] << 8) | packed[1];
     host.right_analog = (packed[2] << 8) | packed[3];
+    host.external_work_pending = true;
     if let Some(relative) = value.get("relative").and_then(|item| item.as_array()) {
         queue_relative_axes(host, relative)?;
     }
@@ -2215,7 +2220,9 @@ fn run_virtual_frames(
         && (!host.pending_text.is_empty()
             || host.external_work_pending
             || !host.axis_deltas.is_empty()
-            || host.motion.is_some())
+            || host.motion.is_some()
+            || host.analog != 0x8080
+            || host.right_analog != 0x8080)
     {
         let active = host.touches.clone();
         run_guest_touch_frame(host, &active, &[])?;
@@ -3638,27 +3645,6 @@ pub unsafe extern "C" fn pocket_trace_clock_mode(handle: *mut HostState, mode: u
     }
 }
 
-/// Begin one host FFI transaction. In record/live mode the scalar is ignored;
-/// replay consumes it as a one-item interval array. NaN denotes an empty
-/// array for the scalar ABI. Use the JSON entry point when a transaction can
-/// cross more than one idle external boundary.
-#[no_mangle]
-pub unsafe extern "C" fn pocket_trace_clock_begin(handle: *mut HostState, elapsed_ms: f64) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    match replay::begin_scalar(host, elapsed_ms) {
-        Ok(()) => {
-            clear_error(host);
-            0
-        }
-        Err(error) => {
-            set_error(host, error);
-            -1
-        }
-    }
-}
-
 /// Begin one host FFI transaction with an ordered trace envelope, for example
 /// `{"idleMs":[12.5,0],"scalars":[{"kind":"mathRandom","value":0.25}]}`.
 /// A legacy bare idle array is accepted. Record/live mode intentionally
@@ -3694,30 +3680,9 @@ pub unsafe extern "C" fn pocket_trace_clock_begin_json(
     }
 }
 
-/// End one host FFI transaction and return the sum of its intervals. The
-/// ordered values remain available through `pocket_trace_clock_last_json`;
-/// callers that need only deterministic replay should use the JSON end ABI.
-#[no_mangle]
-pub unsafe extern "C" fn pocket_trace_clock_end(handle: *mut HostState) -> f64 {
-    let Some(host) = handle.as_mut() else {
-        return f64::NAN;
-    };
-    match replay::end(host) {
-        Ok(total) => {
-            host.trace_output = c_string(&replay::last_json(host));
-            clear_error(host);
-            total
-        }
-        Err(error) => {
-            set_error(host, error);
-            f64::NAN
-        }
-    }
-}
-
-/// End one host FFI transaction and return its ordered elapsed array as a
+/// End one host FFI transaction and return its ordered trace envelope as a
 /// borrowed NUL-terminated UTF-8 string. The pointer remains valid until the
-/// next trace-clock JSON/last call or host destruction.
+/// next trace-clock JSON call or host destruction.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_trace_clock_end_json(handle: *mut HostState) -> *const c_char {
     let Some(host) = handle.as_mut() else {
@@ -3734,17 +3699,6 @@ pub unsafe extern "C" fn pocket_trace_clock_end_json(handle: *mut HostState) -> 
             ptr::null()
         }
     }
-}
-
-/// Fetch the last completed ordered transaction after using the scalar end
-/// ABI. This does not open or close a transaction.
-#[no_mangle]
-pub unsafe extern "C" fn pocket_trace_clock_last_json(handle: *mut HostState) -> *const c_char {
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    host.trace_output = c_string(&replay::last_json(host));
-    host.trace_output.as_ptr()
 }
 
 /// Resize a mounted PocketJS guest in place.
@@ -4558,12 +4512,6 @@ pub extern "C" fn pocket_bytecode_runtime_abi() -> *const c_char {
         .as_ptr()
 }
 
-/// Alias with an explicit name for hosts that call the value `actualAbi`.
-#[no_mangle]
-pub extern "C" fn pocket_bytecode_actual_abi() -> *const c_char {
-    pocket_bytecode_runtime_abi()
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn pocket_eval(handle: *mut HostState, source: *const c_char) -> i32 {
     let Some(host) = handle.as_mut() else {
@@ -4903,20 +4851,6 @@ pub extern "C" fn pocket_duplex_capacity() -> u32 {
     (duplex::RING_CAPACITY - 1) as u32
 }
 
-/// The old raw-ring ABI is intentionally disabled. In particular, returning
-/// a pointer here would let Dart overwrite atomic cursors and violate SPSC.
-#[no_mangle]
-pub unsafe extern "C" fn pocket_duplex_get_ring(
-    handle: *mut HostState,
-    out_byte_size: *mut u32,
-) -> *mut u8 {
-    if let Some(out_byte_size) = out_byte_size.as_mut() {
-        *out_byte_size = 0;
-    }
-    let _ = handle;
-    ptr::null_mut()
-}
-
 /// Drain host-written duplex records on the runtime owner thread and invoke
 /// `globalThis.__pocketDuplexEvent` for each one.  A missing JS handler leaves
 /// ingress queued; a throwing handler leaves the current record uncommitted.
@@ -5162,7 +5096,11 @@ mod smoke_tests {
     }
 
     fn frame_json(handle: *mut HostState) -> serde_json::Value {
-        let pointer = unsafe { pocket_frame(handle, 16.0) };
+        frame_json_with_delta(handle, 16.0)
+    }
+
+    fn frame_json_with_delta(handle: *mut HostState, delta_ms: f64) -> serde_json::Value {
+        let pointer = unsafe { pocket_frame(handle, delta_ms) };
         assert!(!pointer.is_null());
         let text = unsafe { CStr::from_ptr(pointer) }.to_str().unwrap();
         serde_json::from_str(text).unwrap()
@@ -6468,6 +6406,60 @@ mod smoke_tests {
         .is_err());
         unsafe {
             pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn analog_samples_and_center_release_reach_zero_delta_guest_frames() {
+        unsafe {
+            let host = pocket_create(80.0, 80.0);
+            let source = CString::new(
+                r#"let previousAxes = '';
+                globalThis.__pocketWorkState = () => ({version:1,continuous:false,
+                  simulationHz:60,framesUntilTimer:null});
+                globalThis.frame = (_buttons, analog, _touches, _hits, _surfaces, rightAnalog) => {
+                  const axes = String(analog) + ':' + String(rightAnalog);
+                  if (axes !== previousAxes) {
+                    previousAxes = axes;
+                    pocket._emit(JSON.stringify({name:'analog.seen',params:{axes}}));
+                  }
+                };"#,
+            )
+            .unwrap();
+            assert_eq!(pocket_eval(host, source.as_ptr()), 0);
+
+            // Establish the idle scheduler state and consume the initial
+            // neutral sample. Subsequent input boundaries use no elapsed
+            // time, so any event proves that the one-shot input wake was
+            // delivered by the zero-tick path.
+            let initial = frame_json_with_delta(host, 1000.0 / 60.0);
+            assert_eq!(initial["events"][0]["name"], "analog.seen");
+            assert_eq!(initial["events"][0]["params"]["axes"], "32896:32896");
+
+            let moved = CString::new(
+                r#"{"method":"input.buttons","payload":{"buttons":0,"analog":4660,"rightAnalog":22136}}"#,
+            )
+            .unwrap();
+            assert_eq!(pocket_send(host, moved.as_ptr()), 0);
+            let moved_frame = frame_json_with_delta(host, 0.0);
+            assert_eq!(moved_frame["events"][0]["name"], "analog.seen");
+            assert_eq!(moved_frame["events"][0]["params"]["axes"], "4660:22136");
+
+            let centered = CString::new(
+                r#"{"method":"input.buttons","payload":{"buttons":0,"analog":32896,"rightAnalog":32896}}"#,
+            )
+            .unwrap();
+            assert_eq!(pocket_send(host, centered.as_ptr()), 0);
+            let centered_frame = frame_json_with_delta(host, 0.0);
+            assert_eq!(centered_frame["events"][0]["name"], "analog.seen");
+            assert_eq!(centered_frame["events"][0]["params"]["axes"], "32896:32896");
+
+            let settled = frame_json_with_delta(host, 0.0);
+            assert!(
+                settled["events"].as_array().unwrap().is_empty(),
+                "a settled neutral sample must not keep the ticker alive"
+            );
+            pocket_destroy(host);
         }
     }
 

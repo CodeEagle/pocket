@@ -104,24 +104,38 @@ final class PocketAppConfig {
   /// Keep the callback stable across parent rebuilds, as with plugin factories.
   final PocketRecordingController Function()? recordingFactory;
 
+  /// Copy this config while replacing the two composable declaration lists.
+  ///
+  /// The constructor below is the single field-preserving copy boundary used
+  /// by host composition and plugin attachment. Omitted lists retain their
+  /// existing instances; supplied iterables are snapshotted.
+  PocketAppConfig copyWith({
+    Iterable<PocketPluginFactory>? pluginFactories,
+    Iterable<String>? additionalCapabilities,
+  }) => PocketAppConfig(
+    appId: appId,
+    bytecodeAsset: bytecodeAsset,
+    pakAsset: pakAsset,
+    metadataAsset: metadataAsset,
+    manifestAsset: manifestAsset,
+    updates: updates,
+    showFps: showFps,
+    allowedPermissions: allowedPermissions,
+    pluginFactories: pluginFactories == null
+        ? this.pluginFactories
+        : List<PocketPluginFactory>.unmodifiable(pluginFactories),
+    additionalCapabilities: additionalCapabilities == null
+        ? this.additionalCapabilities
+        : Set<String>.unmodifiable(additionalCapabilities),
+    recordingFactory: recordingFactory,
+    compositorSurfaces: compositorSurfaces,
+    workerHttpOrigins: workerHttpOrigins,
+    offloadProviderFactory: offloadProviderFactory,
+  );
+
   /// Attach compiled providers without changing the app's assets or policy.
   PocketAppConfig withPlugins(Iterable<PocketPluginFactory> factories) =>
-      PocketAppConfig(
-        appId: appId,
-        bytecodeAsset: bytecodeAsset,
-        pakAsset: pakAsset,
-        metadataAsset: metadataAsset,
-        manifestAsset: manifestAsset,
-        updates: updates,
-        showFps: showFps,
-        allowedPermissions: allowedPermissions,
-        pluginFactories: List<PocketPluginFactory>.unmodifiable(factories),
-        additionalCapabilities: additionalCapabilities,
-        recordingFactory: recordingFactory,
-        compositorSurfaces: compositorSurfaces,
-        workerHttpOrigins: workerHttpOrigins,
-        offloadProviderFactory: offloadProviderFactory,
-      );
+      copyWith(pluginFactories: factories);
 
   void validate() {
     if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$').hasMatch(appId)) {

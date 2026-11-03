@@ -147,6 +147,11 @@ final class PocketSystemInstanceSnapshot {
   final bool ready;
   final bool firstFrameReady;
   final bool foreground;
+
+  /// Whether this runtime has a compositor presentation. The resident
+  /// SystemUI is the compositor root and remains presented beneath child
+  /// surfaces; child runtimes are presented only while their visible slot has
+  /// a non-empty clip. This is not a topmost/foreground indicator.
   final bool isPresented;
   final bool compositorFocused;
 }
@@ -1233,13 +1238,18 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     }
     final failure = instance.session.failure;
     if (failure != null) {
+      // A runtime can produce an Offstage first frame before its compositor
+      // slot becomes visible.  If it then fails, awaitFirstFrame is still
+      // blocked on firstVisibleFrame; completing that waiter must not depend
+      // on hasEverProducedFrame.  The attached error handler keeps this
+      // diagnostic completion from becoming an unhandled Future error.
+      final visible = instance.firstVisibleFrame;
+      if (visible != null && !visible.isCompleted) {
+        visible.completeError(failure);
+      }
       if (!instance.hasEverProducedFrame) {
         final ready = instance.firstFrame;
         if (ready != null && !ready.isCompleted) ready.completeError(failure);
-        final visible = instance.firstVisibleFrame;
-        if (visible != null && !visible.isCompleted) {
-          visible.completeError(failure);
-        }
       } else if (instance.reportedFailureGeneration != nextGeneration) {
         instance.reportedFailureGeneration = nextGeneration;
         _systemUIInstance.session.controller.send(
@@ -1366,6 +1376,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
           ready: instance.session.ready,
           firstFrameReady: instance.firstFrameReady,
           foreground: instance.session.foreground,
+          // SystemUI owns the compositor root for the lifetime of the host;
+          // its presentation remains true while child surfaces are layered
+          // above it. A child is presented only when its visible slot is
+          // non-empty. Foreground/focus carry the separate interaction state.
           isPresented: instance.isSystemUI || instance.compositorVisible,
           compositorFocused: instance.compositorFocused,
         ),
@@ -1429,24 +1443,11 @@ PocketAppConfig _ensureSystemCaps(PocketAppConfig config) {
   if (config.additionalCapabilities.contains(_compositorSurfacesCapability)) {
     return config;
   }
-  return PocketAppConfig(
-    appId: config.appId,
-    bytecodeAsset: config.bytecodeAsset,
-    pakAsset: config.pakAsset,
-    metadataAsset: config.metadataAsset,
-    manifestAsset: config.manifestAsset,
-    updates: config.updates,
-    showFps: config.showFps,
-    allowedPermissions: config.allowedPermissions,
-    pluginFactories: config.pluginFactories,
+  return config.copyWith(
     additionalCapabilities: <String>{
       ...config.additionalCapabilities,
       _compositorSurfacesCapability,
     },
-    recordingFactory: config.recordingFactory,
-    compositorSurfaces: config.compositorSurfaces,
-    workerHttpOrigins: config.workerHttpOrigins,
-    offloadProviderFactory: config.offloadProviderFactory,
   );
 }
 

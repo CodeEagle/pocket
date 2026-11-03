@@ -5,7 +5,7 @@
 先看两个入口：
 
 - [`lib/main.dart`](lib/main.dart)：薄 Flutter host，配置 `PocketSystemHost` 与可信应用目录；多应用策略在 JS SystemUI。
-- [`js/app.tsx`](js/app.tsx)：Showcase 的 JS 入口，负责页面、状态、路由、移动 UI、转场、Liquid Glass 和硬件能力演示。
+- [`js/app.tsx`](js/app.tsx)：Showcase 的 JS 入口，负责页面、状态、路由、移动 UI、转场和硬件能力演示。液体玻璃演示入口暂时移除，SDK 组件仍保留。
 
 运行 Demo：
 

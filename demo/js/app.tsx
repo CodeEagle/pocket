@@ -34,8 +34,8 @@ import {
   ViewText,
   deliverTextInputEvent,
 } from "@pocket/ui";
-import { HardwarePage, LiquidGlassPage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx";
-import { createHostBridge, hostError, type HostBridge, type JsonValue } from "./host.ts";
+import { HardwarePage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx";
+import { createHostBridge, hostError, type HostBridge, type JsonValue } from "@pocket/ui/host";
 import { RecordingPanel } from "./recording-panel.tsx";
 import { createPocketPlatformClient } from "@pocket/ui/platform";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
@@ -44,6 +44,7 @@ import { demoRelease } from "./release.ts";
 import { availableDisplayPanes, computeTransitionDescriptor, createDisplayGeometry, deriveResponsiveLayout } from "@pocket/ui";
 import {
   PERFORMANCE_HISTORY_LIMIT,
+  PERFORMANCE_JANK_LIMIT,
   initialDemoState,
   appendPerformanceSample,
   parsePerformancePoint,
@@ -53,6 +54,7 @@ import {
   type CapabilityState,
   type DemoEvent,
   type DemoState,
+  type PerformanceJank,
   type PerformancePoint,
   type PerformanceSnapshot,
   type Route,
@@ -120,7 +122,7 @@ function paramsOf(message: BridgeMessage): Record<string, unknown> {
 function routeOf(value: unknown): Route | undefined {
   const route = String(value ?? "");
   // `gallery` remains the old probe's compatibility spelling for UI.
-  if (route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "glass" || route === "hardware") return route;
+  if (route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware") return route;
   if (route === "ui") return "gallery";
   return undefined;
 }
@@ -275,6 +277,100 @@ function recentPerformance(snapshot: PerformanceSnapshot): PerformancePoint[] {
   return snapshot.history.slice(-PERFORMANCE_HISTORY_LIMIT);
 }
 
+function performanceBudget(point: PerformancePoint | undefined): number | undefined {
+  if (!point) return undefined;
+  if (point.frameBudgetMs !== undefined && point.frameBudgetMs > 0) return point.frameBudgetMs;
+  if (point.refreshHz !== undefined && point.refreshHz > 0) return 1000 / point.refreshHz;
+  return undefined;
+}
+
+function performanceGap(point: PerformancePoint | undefined): number | undefined {
+  if (!point) return undefined;
+  return point.activeGapMs ?? point.maxGapMs;
+}
+
+function jankFromPoint(point: PerformancePoint): PerformanceJank[] {
+  if (point.longFrameEvents && point.longFrameEvents.length > 0) return point.longFrameEvents;
+  const gap = performanceGap(point);
+  const budget = performanceBudget(point);
+  const slowFrames = point.activeGapCount ?? point.slowFrames ?? 0;
+  // Legacy samples already carry a provider-side slow-frame count. For newer
+  // samples without that count, only classify a gap with the actual display
+  // budget; a sparse guest that reports FPS 4.28 and gap 0 is not a jank.
+  const exceedsBudget = gap !== undefined && budget !== undefined && gap > budget * 1.5;
+  if (gap === undefined || (!exceedsBudget && slowFrames <= 0)) return [];
+  return [{
+    timestamp: point.timestamp,
+    ...(gap !== undefined ? { durationMs: gap, activeGapMs: gap } : {}),
+    ...(budget !== undefined ? { budgetMs: budget } : {}),
+    reason: "window aggregate",
+    ...(point.context !== undefined ? { context: point.context } : {}),
+    ...(point.page !== undefined ? { page: point.page } : {}),
+    ...(point.action !== undefined ? { action: point.action } : {}),
+  }];
+}
+
+function sameJankEvent(first: PerformanceJank, second: PerformanceJank): boolean {
+  return String(first.timestamp) === String(second.timestamp) &&
+    first.scope === second.scope &&
+    first.activeGapMs === second.activeGapMs &&
+    first.durationMs === second.durationMs &&
+    first.buildMs === second.buildMs &&
+    first.rasterMs === second.rasterMs &&
+    first.nativeMs === second.nativeMs;
+}
+
+function performanceScopeLabel(event: PerformanceJank): string {
+  if (event.scope === "flutterView") return "Flutter view";
+  if (event.scope === "pocketView") return "Pocket view";
+  return event.scope ?? "Frame path";
+}
+
+function recentPerformanceJanks(snapshot: PerformanceSnapshot): PerformanceJank[] {
+  const merged: PerformanceJank[] = [];
+  const add = (event: PerformanceJank): void => {
+    if (!merged.some((existing) => sameJankEvent(existing, event))) merged.push(event);
+  };
+  for (const event of snapshot.longFrameEvents ?? []) add(event);
+  for (const point of recentPerformance(snapshot)) {
+    for (const event of jankFromPoint(point)) add(event);
+  }
+  return merged.slice(-PERFORMANCE_JANK_LIMIT);
+}
+
+function performanceContextLabel(point: PerformanceJank): string {
+  const page = point.page;
+  const action = point.action;
+  if (page && action) return `${page} · ${action}`;
+  if (page) return page;
+  if (action) return action;
+  return point.context ?? "Host frame sampler";
+}
+
+function performanceJankRows(snapshot: PerformanceSnapshot): { id: string; title: string; detail: string; context: string }[] {
+  return recentPerformanceJanks(snapshot)
+    .slice()
+    .reverse()
+    .map((event, index) => {
+      const gap = event.activeGapMs ?? event.durationMs;
+      const metric = gap === undefined ? "long frame" : `${metricNumber(gap)} ms active gap`;
+      const budgetMs = event.budgetMs;
+      const budget = budgetMs === undefined ? "budget unavailable" : `budget ${metricNumber(budgetMs)} ms`;
+      const breakdown = [
+        event.buildMs === undefined ? "build —" : `build ${metricNumber(event.buildMs)} ms`,
+        event.rasterMs === undefined ? "raster —" : `raster ${metricNumber(event.rasterMs)} ms`,
+      ].join(" · ");
+      const bridge = event.nativeMs === undefined ? "bridge/decode —" : `bridge/decode ${metricNumber(event.nativeMs)} ms`;
+      const reason = event.reason ? ` · ${event.reason}` : "";
+      return {
+        id: `${index}-${String(event.timestamp)}-${String(gap ?? "long")}`,
+        title: `${metric} · ${timestampLabel(event.timestamp)}${reason}`,
+        detail: `${budget} · ${breakdown}`,
+        context: `${bridge} · ${performanceScopeLabel(event)} · ${performanceContextLabel(event)}`,
+      };
+    });
+}
+
 function performanceBars(points: readonly PerformancePoint[]): number[] {
   if (points.length === 0) return [];
   // Use the visible sample window itself as the reference. Display refresh
@@ -295,7 +391,7 @@ function lowPerformanceRows(points: readonly PerformancePoint[]): { id: string; 
     .map((point, index) => ({
       id: `${index}-${String(point.timestamp)}`,
       title: `${metricNumber(point.fps)} FPS · ${timestampLabel(point.timestamp)}`,
-      detail: `gap ${metricNumber(point.maxGapMs)} ms · slow ${metricNumber(point.slowFrames, 0)} · native p95 ${metricNumber(point.nativeMsP95)} ms`,
+      detail: `gap ${metricNumber(point.maxGapMs)} ms · slow ${metricNumber(point.slowFrames, 0)} · bridge/decode p95 ${metricNumber(point.nativeMsP95)} ms`,
     }));
 }
 
@@ -367,6 +463,7 @@ function App() {
   const system = installShowcaseSystem(host);
   const platform = createPocketPlatformClient(undefined, { bridge: host });
   let requestSequence = 0;
+  let lastPublishedPerformanceContext = "";
   const routeTransitionDuration = 220;
   const routeTransitionTickHz = simulationHz();
   let previousRoute: Route = initialDemoState().route;
@@ -379,16 +476,32 @@ function App() {
     progress: number;
   } | undefined>(undefined);
 
+  const publishPerformanceContext = (): void => {
+    const current = state();
+    const context = `page=${current.route} · action=${current.lastAction}`;
+    if (context === lastPublishedPerformanceContext) return;
+    lastPublishedPerformanceContext = context;
+    // Context is diagnostic-only host state. Routing and action policy stay in
+    // JS; the host merely attaches this bounded string to future long frames.
+    void host.request<JsonValue>("runtime.performance", { context }).catch(() => {
+      // Older hosts may ignore the optional context parameter. Realtime
+      // samples still receive page/action labels below from the JS signal.
+    });
+  };
+
   const dispatch = (event: DemoEvent): void => {
     if (event.type === "navigate" && event.route !== state().route) pendingTransitionDirection = "forward";
     if (event.type === "popRoute" && state().routeStack.length > 1) pendingTransitionDirection = "reverse";
     setState((current) => reduceDemoState(current, event));
+    if (event.type !== "capabilityStart" && event.type !== "capabilitySuccess" && event.type !== "capabilityFailure") {
+      publishPerformanceContext();
+    }
   };
 
   const navigate = (route: Route): void => dispatch({ type: "navigate", route });
 
   const isShowcaseRoute = (route: Route): boolean =>
-    route === "mobile" || route === "transitions" || route === "glass" || route === "hardware";
+    route === "mobile" || route === "transitions" || route === "hardware";
 
   const nowMs = (): number =>
     typeof globalThis.performance !== "undefined" && typeof globalThis.performance.now === "function"
@@ -495,12 +608,50 @@ function App() {
       } else if (method === "runtime.performance.sample") {
         const rawSample = params.sample ?? params.result ?? params;
         const sampleRecord = rawSample && typeof rawSample === "object" && !Array.isArray(rawSample)
-          ? { ...(rawSample as Record<string, unknown>), ...(params.minFps === undefined ? {} : { minFps: params.minFps }) }
+          ? {
+            ...(rawSample as Record<string, unknown>),
+            ...(params.minFps === undefined ? {} : { minFps: params.minFps }),
+            // The host may send the bounded long-frame delta separately as
+            // `jank` to avoid repeating the persisted history in each sample.
+            ...(
+              (rawSample as Record<string, unknown>).longFrameEvents === undefined &&
+              params.longFrameEvents === undefined &&
+              params.jank !== undefined
+                ? { longFrameEvents: params.jank }
+                : {}
+            ),
+          }
           : rawSample;
         const sample = parsePerformancePoint(sampleRecord);
         if (sample) {
+          // The native provider owns measured durations; JS owns the user
+          // context that explains which page/action was active when the
+          // sample arrived. Do not ask Flutter to infer app routing.
+          const current = state();
+          const context = typeof params.context === "string" ? params.context : sample.context;
+          const contextualEvents = sample.longFrameEvents?.map((event) => ({
+            ...event,
+            ...(event.page !== undefined ? {} : { page: current.route }),
+            ...(event.action !== undefined ? {} : { action: current.lastAction }),
+            ...(event.context !== undefined || context === undefined ? {} : { context }),
+          }));
+          const contextualSample: PerformancePoint = {
+            ...sample,
+            ...(sample.page !== undefined ? {} : { page: current.route }),
+            ...(sample.action !== undefined ? {} : { action: current.lastAction }),
+            ...(sample.context !== undefined || typeof params.context !== "string"
+              ? {}
+              : { context: params.context }),
+            ...(contextualEvents === undefined ? {} : {
+              longFrameEvents: contextualEvents,
+            }),
+          };
           setPerformance((current) => {
-            const next = appendPerformanceSample(current, sample);
+            // A host event-only burst has no cadence window (frames/duration
+            // are zero), so its fps=0 marker must not poison latest/history.
+            // Its explicit long-frame events still belong in the diagnostics
+            // list and are merged by the state model.
+            const next = appendPerformanceSample(current, contextualSample, params.eventOnly !== true);
             return {
               ...next,
               recording: typeof params.recording === "boolean" ? params.recording : current.recording,
@@ -516,6 +667,7 @@ function App() {
     // capability, the resulting host error is rendered rather than replaced
     // with a success placeholder.
     requestCapability("runtimeInfo", "runtime.info");
+    publishPerformanceContext();
     requestCapability("pluginsList", "plugins.list");
     requestCapability("packageInfo", "plugins.packageInfo");
     requestCapability("updatesStatus", "updates.status");
@@ -575,9 +727,6 @@ function App() {
             </Show>
             <Show when={state().route === "transitions"}>
               <ScrollablePage><TransitionsPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
-            </Show>
-            <Show when={state().route === "glass"}>
-              <ScrollablePage><LiquidGlassPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
             </Show>
             <Show when={state().route === "hardware"}>
               <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
@@ -737,7 +886,6 @@ function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) 
       <View class="flex-row flex-wrap gap-2 mx-4">
         <ActionButton class={featureClass("primary")} label="Mobile UI" kind="primary" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
         <ActionButton class={featureClass("quiet")} label="Transitions" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "transitions" })} />
-        <ActionButton class={featureClass("quiet")} label="Liquid Glass" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "glass" })} />
         <ActionButton class={featureClass("quiet")} label="Hardware" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "hardware" })} />
       </View>
     </>
@@ -779,11 +927,10 @@ function GalleryPage(props: { state: () => DemoState; dispatch: (event: DemoEven
         </Lazy>
       </Card>
       <Card class="flex-col gap-2 mx-4 p-4 rounded-xl bg-white border-slate-200">
-        <ViewText title="Showcase lanes" body="Explore mobile controls, motion, glass, and devices." />
+        <ViewText title="Showcase lanes" body="Explore mobile controls, motion, and devices." />
         <View class="flex-row flex-wrap gap-2">
           <ActionButton label="Mobile UI" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
           <ActionButton label="Transitions" kind="secondary" onPress={() => props.dispatch({ type: "navigate", route: "transitions" })} />
-          <ActionButton label="Liquid Glass" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "glass" })} />
           <ActionButton label="Hardware" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "hardware" })} />
         </View>
       </Card>
@@ -860,10 +1007,20 @@ function PerformancePage(props: {
   const points = () => recentPerformance(props.performance());
   const latest = () => props.performance().latest;
   const lowRows = () => lowPerformanceRows(points());
+  const jankRows = () => performanceJankRows(props.performance());
   const provider = () => props.state().runtimePerformance;
+  const latestBudget = () => performanceBudget(latest());
+  const latestGap = () => performanceGap(latest());
+  const latestLongFrame = () => {
+    const events = recentPerformanceJanks(props.performance());
+    return events[events.length - 1];
+  };
+  const latestBuild = () => latest()?.buildMsP95 ?? latestLongFrame()?.buildMs;
+  const latestRaster = () => latest()?.rasterMsP95 ?? latestLongFrame()?.rasterMs;
+  const latestBridgeDecode = () => latest()?.nativeWorkMsP95 ?? latestLongFrame()?.nativeMs;
   return (
     <View class="flex-col gap-2">
-      <PageIntro title="FPS history" body="Host frame samples and low-frame events." />
+      <PageIntro title="FPS history" body="FPS windows plus active long-frame diagnostics. Sparse rendering is not a stall." />
       <Card class="flex-row items-center justify-between gap-2 mx-4 p-2 rounded-xl bg-white border-slate-200">
         <View class="flex-col gap-1 flex-1">
           <Text class="text-xs text-slate-950 font-bold">Performance provider · {hostPhase(provider())}</Text>
@@ -891,18 +1048,59 @@ function PerformancePage(props: {
         <MetricCard
           label="Latest FPS"
           value={metricNumber(latest()?.fps)}
-          detail={latest() ? `min ${metricNumber(latest()?.minFps)} · gap ${metricNumber(latest()?.maxGapMs)} ms` : "No latest sample"}
+          detail={latest() ? `min ${metricNumber(latest()?.minFps)} · active gap ${metricNumber(latestGap())} ms` : "No latest sample"}
           tone="purple"
         />
         <Card class="flex-col gap-1 p-3 rounded-xl bg-rose-100">
           <Text class="text-xs text-rose-700">Current minimum</Text>
           <Text class="text-xl text-rose-700 font-bold">{metricNumber(minimumPerformanceFps(points()))}</Text>
-          <Text class="text-xs text-rose-700">lowest recorded FPS</Text>
+          <Text class="text-xs text-rose-700">lowest recorded FPS window</Text>
         </Card>
       </View>
+      <Show when={latest()} fallback={<EmptyState title="No frame breakdown" body="The provider has not returned a current frame window." />}>
+        <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-white border-slate-200">
+          <SectionHeading
+            title="Latest frame breakdown"
+            detail={latestBudget() === undefined ? "refresh budget unavailable" : `budget ${metricNumber(latestBudget())} ms`}
+          />
+          <Row>
+            <ViewText title="UI build" body={latestBuild() === undefined ? "—" : `${metricNumber(latestBuild())} ms${latest()?.buildMsP95 === undefined ? " long frame" : " p95"}`} />
+            <ViewText title="Raster" body={latestRaster() === undefined ? "—" : `${metricNumber(latestRaster())} ms${latest()?.rasterMsP95 === undefined ? " long frame" : " p95"}`} />
+          </Row>
+          <Row>
+            <ViewText title="Bridge/decode" body={latestBridgeDecode() === undefined ? "—" : `${metricNumber(latestBridgeDecode())} ms${latest()?.nativeWorkMsP95 === undefined ? " long frame" : " p95"}`} />
+            <ViewText title="Active gap" body={latestGap() === undefined ? "—" : `${metricNumber(latestGap())} ms`} />
+          </Row>
+          <Text class="text-xs text-slate-600">
+            Compatibility bridge p95: {metricNumber(latest()?.nativeMsP95)} ms · refresh {latest()?.refreshHz === undefined ? "—" : `${metricNumber(latest()?.refreshHz)} Hz`}
+          </Text>
+        </Card>
+      </Show>
+      <Show when={jankRows().length > 0} fallback={<EmptyState title="No recent long frames" body="No active gap exceeded the provider's refresh-rate budget. A low FPS window with gap 0 can be intentional sparse rendering." />}>
+        <Card class="flex-col gap-1 mx-4 p-2 rounded-xl bg-amber-50 border-amber-200">
+          <SectionHeading title="Recent long frames" detail="Measured jank history" />
+          <VirtualList
+            count={jankRows().length}
+            rowHeight={64}
+            height={192}
+            focusRows={false}
+            overscan={12}
+            renderRow={(index) => {
+              const item = jankRows()[index];
+              return (
+                <View class="flex-col gap-1 px-2 py-1 bg-amber-50 border-amber-200">
+                  <Text class="text-xs text-amber-800 font-bold">{item?.title ?? "Long frame"}</Text>
+                  <Text class="text-xs text-slate-600">{item?.detail ?? "Frame timing breakdown unavailable"}</Text>
+                  <Text class="text-xs text-slate-600">{item?.context ?? "Host frame sampler"}</Text>
+                </View>
+              );
+            }}
+          />
+        </Card>
+      </Show>
       <Show when={lowRows().length > 0} fallback={<EmptyState title="No low-frame samples" body="The provider has not returned a measurable history yet." />}>
         <Card class="flex-col gap-1 mx-4 p-2 rounded-xl bg-white border-slate-200">
-          <SectionHeading title="Lowest FPS samples" detail="Provider history" />
+          <SectionHeading title="Lowest FPS samples" detail="Compatibility history · not jank by itself" />
           <VirtualList
             count={lowRows().length}
             rowHeight={36}

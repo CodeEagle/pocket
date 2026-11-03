@@ -76,8 +76,9 @@ Flutter 绘制的是 native 投影的操作与资源；并非每个 JS 组件都
 `MobileButton`/filled/outlined/text aliases、`MobileBadge`、`MobileListTile`、
 `MobileSegmentedControl`、`MobileSwitch`、`MobileStepper`、`MobileDialog`，并复用官方
 `View`/`Text`/`Focusable`/`Modal`。`guest/mobile-pages.tsx` 将它们接到 Mobile UI、
-Transitions、Glass、Hardware 四个可操作页面；`guest/app.tsx` 负责 route stack 和
-约 220ms 的 JS-owned transition tick。
+Transitions、Hardware 三个可操作页面；Demo 的 Liquid Glass 页面/路由已暂时移除，
+但 SDK 的 `GlassSurface` 与共享 surface bridge 仍保留；`guest/app.tsx` 负责 route
+stack 和约 220ms 的 JS-owned transition tick。
 
 `guest/legacy.ts` 的 `computeTransitionDescriptor` 提供
 `IOS_SPRING_PARALLAX`、`SHARED_AXIS_Z`、`LIQUID_GLASS_MORPH`、`PORTAL_EXPAND` 四种

@@ -480,6 +480,22 @@ final class _PocketCanvasGeometry {
   final Offset origin;
 }
 
+final class _PocketPerformanceFrameContext {
+  const _PocketPerformanceFrameContext({
+    required this.vsyncTimestamp,
+    required this.wallClock,
+    required this.refreshHz,
+    required this.nativeMs,
+    this.activeGapMs,
+  });
+
+  final Duration vsyncTimestamp;
+  final DateTime wallClock;
+  final double refreshHz;
+  final double nativeMs;
+  final double? activeGapMs;
+}
+
 @visibleForTesting
 PocketFrame? Function(PocketRuntime runtime, double deltaMilliseconds)?
 debugPocketFrameDeltaAtOverride;
@@ -520,6 +536,17 @@ class _PocketViewState extends State<PocketView>
   final PocketTextLayoutCache _textLayoutCache = PocketTextLayoutCache();
   final Map<String, VideoPlayerController> _videos =
       <String, VideoPlayerController>{};
+  // These notifiers are invalidation tokens only. The frame and editor fields
+  // below remain the single source of truth; no second canvas or input model
+  // is stored here.
+  final ValueNotifier<int> _sceneRevision = ValueNotifier<int>(0);
+  final ValueNotifier<int> _editorRevision = ValueNotifier<int>(0);
+  double? _renderDevicePixelRatio;
+  int _invalidationBatchDepth = 0;
+  bool _sceneInvalidationPending = false;
+  bool _editorInvalidationPending = false;
+  int _sceneBuildCount = 0;
+  int _editorBuildCount = 0;
   final Set<String> _loadingImages = <String>{};
   final Map<String, int> _loadingImageRevisions = <String, int>{};
   final Map<String, int> _imageEpochs = <String, int>{};
@@ -651,10 +678,25 @@ class _PocketViewState extends State<PocketView>
   double _performanceMaxGapMs = 0;
   int _performanceSlowFrames = 0;
   final List<double> _performanceNativeDurationsMs = <double>[];
+  final List<_PocketPerformanceFrameContext> _performanceFrameContexts =
+      <_PocketPerformanceFrameContext>[];
+  final List<FrameTiming> _pendingFrameTimings = <FrameTiming>[];
+  final Set<int> _pendingFrameTimingKeys = <int>{};
+  final Set<int> _handledFrameTimingKeys = <int>{};
+  final List<PocketLongFrameEvent> _performanceLongFrameEvents =
+      <PocketLongFrameEvent>[];
+  final Map<DateTime, PocketLongFrameEvent> _deliveredLongFrameEvents =
+      <DateTime, PocketLongFrameEvent>{};
+  final Set<DateTime> _dirtyDeliveredLongFrameTimestamps = <DateTime>{};
+  bool _frameTimingListenerAttached = false;
   double? _fps;
   double? _sessionMinFps;
   double _refreshHz = 60;
   final GlobalKey _hostKey = GlobalKey(debugLabel: 'pocket-host');
+  // Keep the scene widget instance stable across unrelated parent setState
+  // calls (notably the optional FPS label). The notifier below still rebuilds
+  // this widget when the retained scene actually changes.
+  Widget? _retainedSceneWidget;
   late final PocketDisplayGeometrySource _displayGeometry =
       widget.displayGeometry ?? _defaultDisplayGeometry;
   late final PocketDisplayGeometryUpdate _displayGeometryListener =
@@ -671,10 +713,74 @@ class _PocketViewState extends State<PocketView>
   bool get _effectiveActive =>
       widget.active && _controller.appActive && !_lifecyclePaused;
 
+  @visibleForTesting
+  int get debugSceneRevision => _sceneRevision.value;
+
+  @visibleForTesting
+  int get debugEditorRevision => _editorRevision.value;
+
+  @visibleForTesting
+  int get debugSceneBuildCount => _sceneBuildCount;
+
+  @visibleForTesting
+  int get debugEditorBuildCount => _editorBuildCount;
+
+  void _beginInvalidationBatch() {
+    _invalidationBatchDepth++;
+  }
+
+  void _endInvalidationBatch() {
+    if (_invalidationBatchDepth == 0) return;
+    _invalidationBatchDepth--;
+    if (_invalidationBatchDepth != 0) return;
+    final scenePending = _sceneInvalidationPending;
+    final editorPending = _editorInvalidationPending;
+    _sceneInvalidationPending = false;
+    _editorInvalidationPending = false;
+    if (_isDisposed) return;
+    if (scenePending) {
+      _sceneRevision.value++;
+      // A scene rebuild recreates the editor ValueListenableBuilder with the
+      // current fields, so avoid a second editor-only build for this turn.
+      return;
+    }
+    if (editorPending) _editorRevision.value++;
+  }
+
+  void _markSceneNeedsBuild() {
+    if (_isDisposed) return;
+    if (_invalidationBatchDepth != 0) {
+      _sceneInvalidationPending = true;
+      return;
+    }
+    _sceneRevision.value++;
+  }
+
+  void _markEditorNeedsBuild() {
+    if (_isDisposed) return;
+    if (_invalidationBatchDepth != 0) {
+      _editorInvalidationPending = true;
+      return;
+    }
+    _editorRevision.value++;
+  }
+
+  void _syncRenderDevicePixelRatio() {
+    final ratio = View.maybeOf(context)?.devicePixelRatio;
+    if (ratio == null || !ratio.isFinite || ratio <= 0) return;
+    final previous = _renderDevicePixelRatio;
+    _renderDevicePixelRatio = ratio;
+    // View.of depends on FlutterView identity, not individual metrics. A
+    // retained scene needs an explicit refresh when only the pixel grid
+    // changes; keyboard metrics at the same DPR must keep the scene intact.
+    if (previous != null && previous != ratio) _markSceneNeedsBuild();
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _syncFrameTimingListener();
     _startDisplayGeometry();
   }
 
@@ -723,6 +829,17 @@ class _PocketViewState extends State<PocketView>
       _cancelPointerSequences();
       _dismissTextInput(reason: 'focus.lost', rebuild: false);
     }
+    if (oldWidget.inputEnabled != widget.inputEnabled ||
+        oldWidget.viewport != widget.viewport ||
+        oldWidget.enableDuplexPointerInput != widget.enableDuplexPointerInput ||
+        !listEquals(oldWidget.fontFamilyFallback, widget.fontFamilyFallback) ||
+        !identical(oldWidget.hostSurfaceBuilder, widget.hostSurfaceBuilder) ||
+        !setEquals(
+          oldWidget.hostSurfaceResidents,
+          widget.hostSurfaceResidents,
+        )) {
+      _markSceneNeedsBuild();
+    }
     if (oldWidget.viewport != widget.viewport &&
         _isUsableSize(widget.viewport)) {
       _scheduleResize(widget.viewport!);
@@ -740,6 +857,7 @@ class _PocketViewState extends State<PocketView>
       _resumedFromIdle = false;
       _idleStartedAt = null;
     }
+    _syncFrameTimingListener();
   }
 
   void _onControllerActivityChanged() {
@@ -828,6 +946,7 @@ class _PocketViewState extends State<PocketView>
     // guest when its view becomes visible again.
     MediaQuery.maybeOf(context);
     ModalRoute.of(context);
+    _syncRenderDevicePixelRatio();
     _wakeTicker();
     _scheduleStartIfReady();
     _scheduleSafeAreaReport();
@@ -836,6 +955,7 @@ class _PocketViewState extends State<PocketView>
   @override
   void didChangeMetrics() {
     super.didChangeMetrics();
+    _syncRenderDevicePixelRatio();
     // viewPadding can change on rotation, multi-window moves, or a system
     // bar transition. Report it after layout so the host rectangle and its
     // intersection with the FlutterView are current. The report also carries
@@ -1083,7 +1203,7 @@ class _PocketViewState extends State<PocketView>
       _controller._attach(
         runtime,
         () {
-          if (mounted) setState(() {});
+          _markSceneNeedsBuild();
         },
         onMessageSent: _wakeTicker,
         duplexChannel: _duplexChannel,
@@ -1096,8 +1216,13 @@ class _PocketViewState extends State<PocketView>
       _loading = false;
       widget.onReady?.call(_controller);
       if (!mounted) return;
-      _requestResources(first);
-      _handleEvents(first.events);
+      _beginInvalidationBatch();
+      try {
+        _requestResources(first);
+        _handleEvents(first.events);
+      } finally {
+        _endInvalidationBatch();
+      }
       setState(() {});
       _scheduleSafeAreaReport();
       _ticker = createTicker(_onTick);
@@ -1346,6 +1471,10 @@ class _PocketViewState extends State<PocketView>
     final alreadyIdle = _idleStartedAt != null;
     _idleStartedAt ??= _lastSchedulerTimestamp;
     if (!alreadyIdle) _resumedFromIdle = false;
+    // A demand-driven guest can stop immediately after a long active burst.
+    // Flush the bounded event through the existing performance callback now;
+    // no extra ticker, timer or disk write is introduced here.
+    _emitPendingLongFrameSample();
   }
 
   /// Applies the native scheduling snapshot after a completed guest turn.
@@ -1369,8 +1498,28 @@ class _PocketViewState extends State<PocketView>
     }
 
     _cancelScheduledWake();
+    // Park before publishing the diagnostic burst. The callback can send a
+    // synchronous guest message, and _wakeTicker must observe the parked
+    // ticker so that ingress gets a real turn instead of being followed by
+    // this stale deadline.
+    final ticker = _ticker;
+    ticker?.stop();
     _markRuntimeSleeping();
-    _ticker?.stop();
+    if (_isDisposed ||
+        !_effectiveActive ||
+        !mounted ||
+        !identical(_runtime, runtime)) {
+      _cancelScheduledWake();
+      ticker?.stop();
+      return;
+    }
+    // _markRuntimeSleeping can synchronously publish a sample and restart the
+    // ticker through _wakeTicker. In that case the newly queued ingress owns
+    // the next frame; never arm the pre-callback deadline as well.
+    if (ticker?.isActive == true) {
+      _cancelScheduledWake();
+      return;
+    }
     if (delayMs < 0) return;
 
     final scheduledRuntime = runtime;
@@ -1424,6 +1573,240 @@ class _PocketViewState extends State<PocketView>
   bool get _performanceCollectionEnabled =>
       widget.showDebugFps || widget.onPerformanceSample != null;
 
+  void _syncFrameTimingListener() {
+    final shouldAttach = _performanceCollectionEnabled;
+    if (shouldAttach && !_frameTimingListenerAttached) {
+      SchedulerBinding.instance.addTimingsCallback(_onFrameTimings);
+      _frameTimingListenerAttached = true;
+    } else if (!shouldAttach && _frameTimingListenerAttached) {
+      SchedulerBinding.instance.removeTimingsCallback(_onFrameTimings);
+      _frameTimingListenerAttached = false;
+    }
+  }
+
+  void _onFrameTimings(List<FrameTiming> timings) {
+    if (timings.isEmpty ||
+        !_performanceCollectionEnabled ||
+        !_effectiveActive) {
+      return;
+    }
+    for (final timing in timings) {
+      final timingKey = _frameTimingKey(timing);
+      // Flutter can deliver a timing batch again after an embedding/test
+      // boundary. Keep the handoff bounded and do not duplicate a fact that
+      // was already paired or emitted as an unmatched global-view event.
+      if (_handledFrameTimingKeys.contains(timingKey) ||
+          _pendingFrameTimingKeys.contains(timingKey)) {
+        continue;
+      }
+      final context = _takeFrameContext(_frameTimingTimestamp(timing));
+      if (context == null) {
+        // A Flutter frame can be expensive even when this PocketView was
+        // parked and therefore has no native frame context. Preserve that
+        // evidence as a global FlutterView fact, without inventing native or
+        // active-gap measurements. If it is merely an unmatched ordinary
+        // frame, retain it for the normal delayed-context handoff below.
+        if (_recordUnmatchedFrameTiming(timing)) {
+          _rememberHandledFrameTiming(timingKey);
+          continue;
+        }
+        // The engine normally reports timings after the ticker callback. Keep
+        // a small handoff queue for test bindings/platforms that report the
+        // timing first; unrelated frames are bounded and eventually dropped.
+        if (_pendingFrameTimings.length >= 16) {
+          final dropped = _pendingFrameTimings.removeAt(0);
+          _pendingFrameTimingKeys.remove(_frameTimingKey(dropped));
+        }
+        _pendingFrameTimings.add(timing);
+        _pendingFrameTimingKeys.add(timingKey);
+        continue;
+      }
+      _recordFrameTiming(context, timing);
+      _rememberHandledFrameTiming(timingKey);
+    }
+  }
+
+  @visibleForTesting
+  void debugReportFrameTimings(List<FrameTiming> timings) {
+    _onFrameTimings(timings);
+  }
+
+  Duration _frameTimingTimestamp(FrameTiming timing) => Duration(
+    microseconds: timing.timestampInMicroseconds(ui.FramePhase.vsyncStart),
+  );
+
+  int _frameTimingKey(FrameTiming timing) =>
+      timing.timestampInMicroseconds(ui.FramePhase.vsyncStart);
+
+  void _rememberHandledFrameTiming(int key) {
+    if (_handledFrameTimingKeys.length >= 256) {
+      _handledFrameTimingKeys.remove(_handledFrameTimingKeys.first);
+    }
+    _handledFrameTimingKeys.add(key);
+  }
+
+  _PocketPerformanceFrameContext? _takeFrameContext(Duration timestamp) {
+    var bestIndex = -1;
+    var bestDistance = 2000;
+    for (var index = 0; index < _performanceFrameContexts.length; index++) {
+      final distance =
+          (_performanceFrameContexts[index].vsyncTimestamp.inMicroseconds -
+                  timestamp.inMicroseconds)
+              .abs();
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    }
+    if (bestIndex < 0) return null;
+    return _performanceFrameContexts.removeAt(bestIndex);
+  }
+
+  void _queueFrameContext(_PocketPerformanceFrameContext context) {
+    final pendingTimingIndex = _pendingFrameTimings.indexWhere(
+      (timing) =>
+          (_frameTimingTimestamp(timing).inMicroseconds -
+                  context.vsyncTimestamp.inMicroseconds)
+              .abs() <=
+          2000,
+    );
+    if (pendingTimingIndex >= 0) {
+      final timing = _pendingFrameTimings.removeAt(pendingTimingIndex);
+      final timingKey = _frameTimingKey(timing);
+      _pendingFrameTimingKeys.remove(timingKey);
+      if (_handledFrameTimingKeys.contains(timingKey)) return;
+      _recordFrameTiming(context, timing);
+      _rememberHandledFrameTiming(timingKey);
+      return;
+    }
+    if (_performanceFrameContexts.length >= 120) {
+      _performanceFrameContexts.removeAt(0);
+    }
+    _performanceFrameContexts.add(context);
+  }
+
+  static double _durationMilliseconds(Duration duration) =>
+      duration.inMicroseconds / Duration.microsecondsPerMillisecond;
+
+  bool _exceedsLongFrameThreshold(double? value, double budgetMs) =>
+      value != null && value > budgetMs * 1.5;
+
+  /// Records a global Flutter frame that arrived without a PocketView context.
+  ///
+  /// This is intentionally limited to an already-started/parked performance
+  /// window. Startup frames and a newly reset collection window remain
+  /// excluded until the first real PocketView ticker callback establishes the
+  /// baseline. Returning whether a fact was emitted lets the caller suppress
+  /// a duplicate timing without hiding an ordinary timing that may still pair
+  /// with a delayed native context.
+  bool _recordUnmatchedFrameTiming(FrameTiming timing) {
+    if (_performanceWindowStart == null && _idleStartedAt == null) return false;
+    final buildMs = _durationMilliseconds(timing.buildDuration);
+    final rasterMs = _durationMilliseconds(timing.rasterDuration);
+    final budgetMs = 1000.0 / _refreshHz;
+    if (!_exceedsLongFrameThreshold(buildMs, budgetMs) &&
+        !_exceedsLongFrameThreshold(rasterMs, budgetMs)) {
+      return false;
+    }
+    _mergeLongFrameEvent(
+      PocketLongFrameEvent(
+        timestamp: DateTime.now().toUtc(),
+        refreshHz: _refreshHz,
+        budgetMs: budgetMs,
+        buildMs: buildMs,
+        rasterMs: rasterMs,
+        scope: 'flutterView',
+      ),
+    );
+    // If the PocketView is parked, use the existing diagnostic callback to
+    // publish the global fact. This does not create a timer or ticker.
+    if (_idleStartedAt != null) _emitPendingLongFrameSample();
+    return true;
+  }
+
+  void _recordFrameTiming(
+    _PocketPerformanceFrameContext context,
+    FrameTiming timing,
+  ) {
+    final buildMs = _durationMilliseconds(timing.buildDuration);
+    final rasterMs = _durationMilliseconds(timing.rasterDuration);
+    final budgetMs = 1000.0 / context.refreshHz;
+    if (!_exceedsLongFrameThreshold(buildMs, budgetMs) &&
+        !_exceedsLongFrameThreshold(rasterMs, budgetMs) &&
+        !_exceedsLongFrameThreshold(context.nativeMs, budgetMs) &&
+        !_exceedsLongFrameThreshold(context.activeGapMs, budgetMs)) {
+      return;
+    }
+    _mergeLongFrameEvent(
+      PocketLongFrameEvent(
+        timestamp: context.wallClock,
+        refreshHz: context.refreshHz,
+        budgetMs: budgetMs,
+        buildMs: buildMs,
+        rasterMs: rasterMs,
+        nativeMs: context.nativeMs,
+        activeGapMs: context.activeGapMs,
+        scope: 'flutterView',
+      ),
+    );
+    // A frame can be the final active burst before the native scheduler parks
+    // the ticker. Deliver its fact from the timing callback itself instead of
+    // waiting for another guest frame that may never be scheduled.
+    if (_idleStartedAt != null &&
+        !_deliveredLongFrameEvents.containsKey(context.wallClock)) {
+      _emitPendingLongFrameSample();
+    }
+  }
+
+  void _mergeLongFrameEvent(PocketLongFrameEvent event) {
+    final delivered = _deliveredLongFrameEvents[event.timestamp];
+    if (delivered != null) {
+      final merged = _mergeLongFrameEventValues(delivered, event);
+      if (merged.scope != delivered.scope ||
+          merged.buildMs != delivered.buildMs ||
+          merged.rasterMs != delivered.rasterMs) {
+        _deliveredLongFrameEvents[event.timestamp] = merged;
+        _dirtyDeliveredLongFrameTimestamps.add(event.timestamp);
+        // If the view has already resumed, make the enrichment part of the
+        // current active window immediately. While parked it is held until
+        // the next existing wake turn so no diagnostic frame is scheduled.
+        if (_idleStartedAt == null && _performanceWindowStart != null) {
+          _queueDeliveredLongFrameUpdates();
+        }
+      }
+      return;
+    }
+    final index = _performanceLongFrameEvents.indexWhere(
+      (candidate) => candidate.timestamp == event.timestamp,
+    );
+    if (index >= 0) {
+      _performanceLongFrameEvents[index] = _mergeLongFrameEventValues(
+        _performanceLongFrameEvents[index],
+        event,
+      );
+      return;
+    }
+    if (_performanceLongFrameEvents.length >= 64) {
+      _performanceLongFrameEvents.removeAt(0);
+    }
+    _performanceLongFrameEvents.add(event);
+  }
+
+  PocketLongFrameEvent _mergeLongFrameEventValues(
+    PocketLongFrameEvent previous,
+    PocketLongFrameEvent next,
+  ) => PocketLongFrameEvent(
+    timestamp: next.timestamp,
+    refreshHz: next.refreshHz,
+    budgetMs: next.budgetMs,
+    buildMs: next.buildMs ?? previous.buildMs,
+    rasterMs: next.rasterMs ?? previous.rasterMs,
+    nativeMs: next.nativeMs ?? previous.nativeMs,
+    activeGapMs: next.activeGapMs ?? previous.activeGapMs,
+    context: next.context ?? previous.context,
+    scope: next.scope,
+  );
+
   void _resetPerformanceWindow() {
     _performanceWindowStart = null;
     _performanceLastTick = null;
@@ -1431,6 +1814,13 @@ class _PocketViewState extends State<PocketView>
     _performanceMaxGapMs = 0;
     _performanceSlowFrames = 0;
     _performanceNativeDurationsMs.clear();
+    _performanceFrameContexts.clear();
+    _pendingFrameTimings.clear();
+    _pendingFrameTimingKeys.clear();
+    _handledFrameTimingKeys.clear();
+    _performanceLongFrameEvents.clear();
+    _deliveredLongFrameEvents.clear();
+    _dirtyDeliveredLongFrameTimestamps.clear();
     _fps = null;
   }
 
@@ -1441,17 +1831,157 @@ class _PocketViewState extends State<PocketView>
     return sorted[index];
   }
 
+  void _recordActiveFrameContext({
+    required Duration timestamp,
+    required Duration nativeDuration,
+    double? activeGapMs,
+  }) {
+    final nativeMs = _durationMilliseconds(nativeDuration);
+    final context = _PocketPerformanceFrameContext(
+      vsyncTimestamp: timestamp,
+      wallClock: DateTime.now().toUtc(),
+      refreshHz: _refreshHz,
+      nativeMs: nativeMs,
+      activeGapMs: activeGapMs,
+    );
+    _queueFrameContext(context);
+    // FrameTiming is reported asynchronously and is not available on every
+    // embedding/test binding. Native/active-gap evidence is still a valid
+    // long-frame event; a later FrameTiming callback merges build/raster data
+    // into this same timestamp when it exists.
+    final budgetMs = 1000.0 / _refreshHz;
+    if (_exceedsLongFrameThreshold(nativeMs, budgetMs) ||
+        _exceedsLongFrameThreshold(activeGapMs, budgetMs)) {
+      _mergeLongFrameEvent(
+        PocketLongFrameEvent(
+          timestamp: context.wallClock,
+          refreshHz: _refreshHz,
+          budgetMs: budgetMs,
+          nativeMs: nativeMs,
+          activeGapMs: activeGapMs,
+          scope: 'pocketView',
+        ),
+      );
+      if (_idleStartedAt != null &&
+          !_deliveredLongFrameEvents.containsKey(context.wallClock)) {
+        _emitPendingLongFrameSample();
+      }
+    }
+  }
+
+  void _deliverPerformanceSample(
+    PocketPerformanceSample sample, {
+    bool updateDebugOverlay = true,
+  }) {
+    final callback = widget.onPerformanceSample;
+    if (callback != null) {
+      try {
+        callback(sample);
+      } catch (error, stackTrace) {
+        // Diagnostics must never stop the render ticker or turn a callback
+        // failure into a runtime rollback. Keep it in Flutter's diagnostics
+        // channel instead of invoking the runtime error callback.
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'pocket_flutter',
+            context: ErrorDescription(
+              'while delivering PocketView.onPerformanceSample',
+            ),
+          ),
+        );
+      }
+    }
+    if (updateDebugOverlay && widget.showDebugFps && mounted) {
+      setState(() {});
+    }
+  }
+
+  void _emitPendingLongFrameSample() {
+    if (_performanceLongFrameEvents.isEmpty) return;
+    final events = List<PocketLongFrameEvent>.of(
+      _performanceLongFrameEvents,
+      growable: false,
+    );
+    final start = _performanceWindowStart;
+    final last = _performanceLastTick;
+    final durationMs = start == null || last == null
+        ? 0.0
+        : math
+              .max(
+                0.0,
+                (last - start).inMicroseconds /
+                    Duration.microsecondsPerSecond *
+                    1000.0,
+              )
+              .toDouble();
+    final burstSample = PocketPerformanceSample(
+      timestamp: DateTime.now().toUtc(),
+      fps: durationMs > 0 ? _performanceFrames * 1000.0 / durationMs : 0,
+      frames: _performanceFrames,
+      durationMs: durationMs,
+      maxGapMs: _performanceMaxGapMs,
+      slowFrames: _performanceSlowFrames,
+      nativeMsP95: _nativeDurationP95(),
+      refreshHz: _refreshHz,
+      longFrameEvents: events,
+    );
+    _deliverPerformanceSample(burstSample, updateDebugOverlay: false);
+    for (final event in events) {
+      _deliveredLongFrameEvents[event.timestamp] = event;
+    }
+    while (_deliveredLongFrameEvents.length > 128) {
+      _deliveredLongFrameEvents.remove(_deliveredLongFrameEvents.keys.first);
+    }
+    _performanceLongFrameEvents.clear();
+    // The active burst is complete. Start a fresh active window after the
+    // next wake; idle wall-clock time must not enter its denominator.
+    _performanceWindowStart = null;
+    _performanceLastTick = null;
+    _performanceFrames = 0;
+    _performanceMaxGapMs = 0;
+    _performanceSlowFrames = 0;
+    _performanceNativeDurationsMs.clear();
+    _fps = null;
+  }
+
+  void _queueDeliveredLongFrameUpdates() {
+    if (_dirtyDeliveredLongFrameTimestamps.isEmpty) return;
+    for (final timestamp in List<DateTime>.of(
+      _dirtyDeliveredLongFrameTimestamps,
+    )) {
+      final event = _deliveredLongFrameEvents.remove(timestamp);
+      _dirtyDeliveredLongFrameTimestamps.remove(timestamp);
+      if (event == null) continue;
+      if (_performanceLongFrameEvents.length >= 64) {
+        _performanceLongFrameEvents.removeAt(0);
+      }
+      _performanceLongFrameEvents.add(event);
+    }
+  }
+
   void _recordPerformanceTick(Duration elapsed, Duration nativeDuration) {
     final clockElapsed = elapsed;
+    // `_idleStartedAt` is the authoritative marker that the scheduler parked
+    // after the previous active turn. `_wakeTicker` may run while the ticker
+    // is still active (for example when an external callback arrives at the
+    // park boundary), so `_resumedFromIdle` alone can miss this transition.
+    final resumedFromIdle = _resumedFromIdle || _idleStartedAt != null;
     if (_performanceWindowStart == null) {
       // This baseline is created after runtime loading, so startup
       // evaluation and the initial frame are intentionally excluded.
       _performanceWindowStart = clockElapsed;
       _performanceLastTick = clockElapsed;
+      if (resumedFromIdle) _queueDeliveredLongFrameUpdates();
+      _recordActiveFrameContext(
+        timestamp: clockElapsed,
+        nativeDuration: nativeDuration,
+      );
       // A known-idle guest may not have produced a ticker callback before its
       // first later wake. In that case no pre-idle performance interval
       // exists to adjust, so establish a fresh baseline here.
-      if (_resumedFromIdle) {
+      if (resumedFromIdle) {
         _resumedFromIdle = false;
         _idleStartedAt = null;
       }
@@ -1467,7 +1997,7 @@ class _PocketViewState extends State<PocketView>
               1000.0,
         )
         .toDouble();
-    if (_resumedFromIdle) {
+    if (resumedFromIdle) {
       // Idle sleep is intentional and must not be reported as a dropped
       // display frame. Keep the active performance window continuous by
       // removing the sleep interval from its elapsed denominator.
@@ -1483,6 +2013,11 @@ class _PocketViewState extends State<PocketView>
     _performanceMaxGapMs = math.max(_performanceMaxGapMs, gapMs).toDouble();
     final frameBudgetMs = 1000.0 / _refreshHz;
     if (gapMs > frameBudgetMs * 1.5) _performanceSlowFrames++;
+    _recordActiveFrameContext(
+      timestamp: clockElapsed,
+      nativeDuration: nativeDuration,
+      activeGapMs: gapMs,
+    );
     _performanceLastTick = clockElapsed;
     _performanceFrames++;
     _performanceNativeDurationsMs.add(
@@ -1511,28 +2046,12 @@ class _PocketViewState extends State<PocketView>
       slowFrames: _performanceSlowFrames,
       nativeMsP95: _nativeDurationP95(),
       refreshHz: _refreshHz,
+      longFrameEvents: List<PocketLongFrameEvent>.of(
+        _performanceLongFrameEvents,
+        growable: false,
+      ),
     );
-    final callback = widget.onPerformanceSample;
-    if (callback != null) {
-      try {
-        callback(sample);
-      } catch (error, stackTrace) {
-        // Diagnostics must never stop the render ticker or turn a callback
-        // failure into a runtime rollback. Keep it in Flutter's diagnostics
-        // channel instead of invoking the runtime error callback.
-        FlutterError.reportError(
-          FlutterErrorDetails(
-            exception: error,
-            stack: stackTrace,
-            library: 'pocket_flutter',
-            context: ErrorDescription(
-              'while delivering PocketView.onPerformanceSample',
-            ),
-          ),
-        );
-      }
-    }
-    if (widget.showDebugFps && mounted) setState(() {});
+    _deliverPerformanceSample(sample);
     // Keep only the current one-second window; the host owns persistent
     // history. Preserve the elapsed baseline so a long first gap in the next
     // window remains visible instead of being discarded at this boundary.
@@ -1542,6 +2061,7 @@ class _PocketViewState extends State<PocketView>
     _performanceMaxGapMs = 0;
     _performanceSlowFrames = 0;
     _performanceNativeDurationsMs.clear();
+    _performanceLongFrameEvents.clear();
   }
 
   void _onTick(Duration _) {
@@ -1624,6 +2144,64 @@ class _PocketViewState extends State<PocketView>
     );
   }
 
+  bool _surfaceVisualEquals(
+    double firstWidth,
+    double firstHeight,
+    List<PocketOp> firstOps,
+    double secondWidth,
+    double secondHeight,
+    List<PocketOp> secondOps,
+  ) {
+    if (firstWidth != secondWidth ||
+        firstHeight != secondHeight ||
+        firstOps.length != secondOps.length) {
+      return false;
+    }
+    if (identical(firstOps, secondOps)) return true;
+    for (var index = 0; index < firstOps.length; index++) {
+      final left = firstOps[index];
+      final right = secondOps[index];
+      // Resource completion/release invalidates the scene separately. Both
+      // frames use the current image table here; avoid allocating two
+      // identical image snapshots for every geometry-only guest output.
+      if (!_pocketOpEquals(left, right, _images, _images)) {
+        return false;
+      }
+      // The shared painter equality predates the optional video fit field;
+      // include it here so a texture policy change still invalidates Flutter.
+      if (left is PocketVideoOp &&
+          right is PocketVideoOp &&
+          left.fit != right.fit) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool _frameVisualEquals(PocketFrame first, PocketFrame second) {
+    return first.width == second.width &&
+        first.height == second.height &&
+        _surfaceVisualEquals(
+          first.width,
+          first.height,
+          first.ops,
+          second.width,
+          second.height,
+          second.ops,
+        ) &&
+        ((first.auxiliary == null && second.auxiliary == null) ||
+            (first.auxiliary != null &&
+                second.auxiliary != null &&
+                _surfaceVisualEquals(
+                  first.auxiliary!.width,
+                  first.auxiliary!.height,
+                  first.auxiliary!.ops,
+                  second.auxiliary!.width,
+                  second.auxiliary!.height,
+                  second.auxiliary!.ops,
+                )));
+  }
+
   static bool _isVisibleApplicationSurface(
     PocketHostSurfaceOp op,
     PocketFrame frame,
@@ -1643,6 +2221,7 @@ class _PocketViewState extends State<PocketView>
   void _applyFrame(PocketFrame next) {
     if (identical(_frame, next)) return;
     final visual = _visualFrame(next);
+    final visualChanged = !_frameVisualEquals(_frame, visual);
     int? focusedApplication(PocketFrame frame) {
       for (final op in frame.ops.whereType<PocketHostSurfaceOp>()) {
         if (op.kind == 'application' &&
@@ -1656,16 +2235,21 @@ class _PocketViewState extends State<PocketView>
 
     final previousFocus = focusedApplication(_frame);
     final nextFocus = focusedApplication(visual);
-    _frame = visual;
-    _auxiliaryFrame = visual.auxiliary;
-    _requestResources(next);
-    if (nextFocus != null && nextFocus != previousFocus) {
-      _cancelPointerSequences();
-      _dismissTextInput(reason: 'compositor.focus', rebuild: false);
+    _beginInvalidationBatch();
+    try {
+      _frame = visual;
+      _auxiliaryFrame = visual.auxiliary;
+      if (visualChanged) _markSceneNeedsBuild();
+      _requestResources(next);
+      if (nextFocus != null && nextFocus != previousFocus) {
+        _cancelPointerSequences();
+        _dismissTextInput(reason: 'compositor.focus', rebuild: false);
+      }
+      _handleEvents(next.events);
+    } finally {
+      _endInvalidationBatch();
     }
-    _handleEvents(next.events);
     _scheduleSafeAreaReport();
-    if (mounted) setState(() {});
   }
 
   void _scheduleSafeAreaReport() {
@@ -2013,6 +2597,7 @@ class _PocketViewState extends State<PocketView>
   }
 
   void _requestResources(PocketFrame frame) {
+    if (frame.releasedResources.isNotEmpty) _markSceneNeedsBuild();
     _releaseImages(frame.releasedResources);
     // Prefer native texture-table resources. This keeps package parsing and
     // texture admission in Rust while still allowing the old PAK fallback
@@ -2222,7 +2807,7 @@ class _PocketViewState extends State<PocketView>
       _images[asset] = decoded;
       _imageResourceRevisions[asset] = revision;
       _failedImages.remove(asset);
-      setState(() {});
+      _markSceneNeedsBuild();
     } catch (error) {
       if ((_imageEpochs[asset] ?? 0) == epoch) {
         _failedImages.add(asset);
@@ -2265,7 +2850,7 @@ class _PocketViewState extends State<PocketView>
       }
       _images.remove(asset)?.dispose();
       _images[asset] = decoded;
-      setState(() {});
+      _markSceneNeedsBuild();
     } catch (error) {
       if ((_imageEpochs[asset] ?? 0) == epoch) {
         _failedImages.add(asset);
@@ -2321,7 +2906,7 @@ class _PocketViewState extends State<PocketView>
         }
         return;
       }
-      setState(() {});
+      _markSceneNeedsBuild();
     } catch (error) {
       await video?.dispose();
       if ((_videoEpochs[op.id] ?? 0) == epoch) {
@@ -2845,7 +3430,7 @@ class _PocketViewState extends State<PocketView>
       _textInputMaxLines = 1;
       _textInputMinLines = null;
     }
-    if (mounted) setState(() {});
+    _markEditorNeedsBuild();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
           _textInputId != id ||
@@ -2963,7 +3548,7 @@ class _PocketViewState extends State<PocketView>
       _textInputClipRect = _textInputClipRectFromParams(params);
       metadataChanged = true;
     }
-    if (metadataChanged && mounted) setState(() {});
+    if (metadataChanged) _markEditorNeedsBuild();
   }
 
   void _onTextInputChanged() {
@@ -3089,7 +3674,12 @@ class _PocketViewState extends State<PocketView>
     _textInputFontWeight = FontWeight.normal;
     _textInputPaddingHorizontal = 12;
     _textInputPaddingVertical = 8;
-    if (rebuild && mounted) setState(() {});
+    // `rebuild` used to suppress the parent setState while a caller was about
+    // to apply another frame. The editor now has its own invalidation lane;
+    // every mounted close must remove the overlay, including rebuild:false
+    // compositor/lifecycle paths. The argument remains for call-site intent
+    // and compatibility with those paths.
+    if (mounted) _markEditorNeedsBuild();
   }
 
   void _handleGestureRegions(PocketEvent event) {
@@ -3467,6 +4057,10 @@ class _PocketViewState extends State<PocketView>
   void dispose() {
     _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
+    if (_frameTimingListenerAttached) {
+      SchedulerBinding.instance.removeTimingsCallback(_onFrameTimings);
+      _frameTimingListenerAttached = false;
+    }
     unawaited(_stopDisplayGeometry());
     _cancelScheduledWake();
     _idleStartedAt = null;
@@ -3480,6 +4074,8 @@ class _PocketViewState extends State<PocketView>
     _guestGestureRegions.clear();
     _dismissTextInput(reason: 'runtime.dispose', rebuild: false);
     _closeTextInput(rebuild: false);
+    _sceneRevision.dispose();
+    _editorRevision.dispose();
     _detachRuntime(fallback: widget.runtime);
     for (final image in _images.values) {
       image.dispose();
@@ -3647,81 +4243,53 @@ class _PocketViewState extends State<PocketView>
         ),
       );
     }
-    final content = LayoutBuilder(
-      builder: (context, constraints) {
-        // A null viewport is the live host-viewport mode. During a keyboard
-        // resize Flutter rebuilds this widget before the post-frame native
-        // resize has returned the new PocketFrame. Fitting the old frame into
-        // the new, shorter constraints here applies a temporary contain scale
-        // (and Center adds a horizontal offset), which makes the whole page
-        // wobble while the IME animates. Keep the old logical frame at 1:1 and
-        // clip it from the top-left until the resize frame arrives. A supplied
-        // viewport remains the fixed preview mode and keeps its contain fit.
-        // Injected runtimes retain their established fixed-frame preview
-        // semantics. Only a self-owned runtime with no explicit viewport can
-        // follow changing host constraints.
-        final automaticViewport =
-            widget.runtime == null &&
-            widget.viewport == null &&
-            !_resizeUnavailable;
-        final primarySize = automaticViewport
-            ? Size(_frame.width, _frame.height)
-            : _fitSurfaceSize(_frame.width, _frame.height, constraints);
-        Widget placeSurface(Widget surface, Size surfaceSize) {
-          if (!automaticViewport) return Center(child: surface);
-          return ClipRect(
-            child: OverflowBox(
-              alignment: Alignment.topLeft,
-              // Null OverflowBox bounds inherit the keyboard-shortened
-              // parent constraints and would compress the old frame again.
-              // Keep the logical surface at its exact frame size; ClipRect
-              // supplies the temporary viewport until native returns resize.
-              minWidth: surfaceSize.width,
-              maxWidth: surfaceSize.width,
-              minHeight: surfaceSize.height,
-              maxHeight: surfaceSize.height,
-              child: surface,
-            ),
-          );
-        }
+    final content = _retainedSceneWidget ??= ValueListenableBuilder<int>(
+      valueListenable: _sceneRevision,
+      builder: (context, _, __) {
+        _sceneBuildCount++;
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            // A null viewport is the live host-viewport mode. During a keyboard
+            // resize Flutter rebuilds this widget before the post-frame native
+            // resize has returned the new PocketFrame. Fitting the old frame into
+            // the new, shorter constraints here applies a temporary contain scale
+            // (and Center adds a horizontal offset), which makes the whole page
+            // wobble while the IME animates. Keep the old logical frame at 1:1 and
+            // clip it from the top-left until the resize frame arrives. A supplied
+            // viewport remains the fixed preview mode and keeps its contain fit.
+            // Injected runtimes retain their established fixed-frame preview
+            // semantics. Only a self-owned runtime with no explicit viewport can
+            // follow changing host constraints.
+            final automaticViewport =
+                widget.runtime == null &&
+                widget.viewport == null &&
+                !_resizeUnavailable;
+            final primarySize = automaticViewport
+                ? Size(_frame.width, _frame.height)
+                : _fitSurfaceSize(_frame.width, _frame.height, constraints);
+            Widget placeSurface(Widget surface, Size surfaceSize) {
+              if (!automaticViewport) return Center(child: surface);
+              return ClipRect(
+                child: OverflowBox(
+                  alignment: Alignment.topLeft,
+                  // Null OverflowBox bounds inherit the keyboard-shortened
+                  // parent constraints and would compress the old frame again.
+                  // Keep the logical surface at its exact frame size; ClipRect
+                  // supplies the temporary viewport until native returns resize.
+                  minWidth: surfaceSize.width,
+                  maxWidth: surfaceSize.width,
+                  minHeight: surfaceSize.height,
+                  maxHeight: surfaceSize.height,
+                  child: surface,
+                ),
+              );
+            }
 
-        final auxiliary = _auxiliaryFrame;
-        if (auxiliary == null || auxiliary.ops.isEmpty) {
-          return Builder(
-            builder: (surfaceContext) => placeSurface(
-              _buildSurface(
-                width: _frame.width,
-                height: _frame.height,
-                ops: _frame.ops,
-                size: primarySize,
-                devicePixelRatio: View.of(surfaceContext).devicePixelRatio,
-                surface: 0,
-                allowHostArena: Scrollable.maybeOf(surfaceContext) != null,
-              ),
-              primarySize,
-            ),
-          );
-        }
-        // Auxiliary output remains the original scrollable preview layout.
-        // Its vertical SingleChildScrollView intentionally gives the Column an
-        // unbounded height; do not put the live-mode OverflowBox there because
-        // OverflowBoxFit.max would inherit an infinite parent extent.
-        final auxiliarySize = _fitSurfaceSize(
-          auxiliary.width,
-          auxiliary.height,
-          constraints,
-        );
-        // The auxiliary output is an independent logical surface. Keep it
-        // below the primary in a scrollable host layout so both canvases
-        // remain real, fully sized DrawList targets even when their aspect
-        // ratios do not fit the parent side by side.
-        return SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Builder(
-                builder: (surfaceContext) => Center(
-                  child: _buildSurface(
+            final auxiliary = _auxiliaryFrame;
+            if (auxiliary == null || auxiliary.ops.isEmpty) {
+              return Builder(
+                builder: (surfaceContext) => placeSurface(
+                  _buildSurface(
                     width: _frame.width,
                     height: _frame.height,
                     ops: _frame.ops,
@@ -3730,24 +4298,64 @@ class _PocketViewState extends State<PocketView>
                     surface: 0,
                     allowHostArena: Scrollable.maybeOf(surfaceContext) != null,
                   ),
+                  primarySize,
                 ),
-              ),
-              const SizedBox(height: 8),
-              Builder(
-                builder: (surfaceContext) => Center(
-                  child: _buildSurface(
-                    width: auxiliary.width,
-                    height: auxiliary.height,
-                    ops: auxiliary.ops,
-                    size: auxiliarySize,
-                    devicePixelRatio: View.of(surfaceContext).devicePixelRatio,
-                    surface: 1,
-                    allowHostArena: Scrollable.maybeOf(surfaceContext) != null,
+              );
+            }
+            // Auxiliary output remains the original scrollable preview layout.
+            // Its vertical SingleChildScrollView intentionally gives the Column an
+            // unbounded height; do not put the live-mode OverflowBox there because
+            // OverflowBoxFit.max would inherit an infinite parent extent.
+            final auxiliarySize = _fitSurfaceSize(
+              auxiliary.width,
+              auxiliary.height,
+              constraints,
+            );
+            // The auxiliary output is an independent logical surface. Keep it
+            // below the primary in a scrollable host layout so both canvases
+            // remain real, fully sized DrawList targets even when their aspect
+            // ratios do not fit the parent side by side.
+            return SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Builder(
+                    builder: (surfaceContext) => Center(
+                      child: _buildSurface(
+                        width: _frame.width,
+                        height: _frame.height,
+                        ops: _frame.ops,
+                        size: primarySize,
+                        devicePixelRatio: View.of(
+                          surfaceContext,
+                        ).devicePixelRatio,
+                        surface: 0,
+                        allowHostArena:
+                            Scrollable.maybeOf(surfaceContext) != null,
+                      ),
+                    ),
                   ),
-                ),
+                  const SizedBox(height: 8),
+                  Builder(
+                    builder: (surfaceContext) => Center(
+                      child: _buildSurface(
+                        width: auxiliary.width,
+                        height: auxiliary.height,
+                        ops: auxiliary.ops,
+                        size: auxiliarySize,
+                        devicePixelRatio: View.of(
+                          surfaceContext,
+                        ).devicePixelRatio,
+                        surface: 1,
+                        allowHostArena:
+                            Scrollable.maybeOf(surfaceContext) != null,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -3831,6 +4439,117 @@ class _PocketViewState extends State<PocketView>
         width: sourceWidth,
         height: sourceHeight,
         child: VideoPlayer(video),
+      ),
+    );
+  }
+
+  Widget _buildTextInputOverlay({
+    required double scaleX,
+    required double scaleY,
+  }) {
+    _editorBuildCount++;
+    final textInputId = _textInputId;
+    final textInputRect = _textInputRect;
+    final textInputClipRect = _textInputClipRect;
+    final textInputController = _textInputController;
+    final textInputFocusNode = _textInputFocusNode;
+    if (!widget.inputEnabled ||
+        textInputId == null ||
+        textInputRect == null ||
+        textInputController == null ||
+        textInputFocusNode == null) {
+      return const SizedBox.shrink();
+    }
+    final textInputLineHeight = _textInputLineHeight();
+    final textInputField = Material(
+      type: MaterialType.transparency,
+      child: TextField(
+        key: ValueKey<String>('pocket-text-input-$textInputId'),
+        controller: textInputController,
+        focusNode: textInputFocusNode,
+        keyboardType: _textInputKeyboardType,
+        textInputAction: _textInputAction,
+        obscureText: _textInputObscure,
+        autocorrect: _textInputAutocorrect,
+        enableSuggestions: !_textInputObscure,
+        maxLines: _textInputMaxLines,
+        minLines: _textInputMinLines,
+        scrollPadding: EdgeInsets.zero,
+        onEditingComplete: () {},
+        onSubmitted: (_) => _submitTextInput(),
+        // A down-outside callback would close the overlay before the
+        // surrounding Pocket surface can deliver its matching up edge.
+        // Keep down as a no-op and dismiss after the complete tap.
+        onTapOutside: _onTextInputTapOutside,
+        onTapUpOutside: _onTextInputTapUpOutside,
+        style: TextStyle(
+          color: _textInputTextColor,
+          fontSize: _textInputFontSize,
+          fontWeight: _textInputFontWeight,
+          height: textInputLineHeight,
+        ),
+        cursorColor: _textInputFocusedBorderColor,
+        decoration: InputDecoration(
+          isDense: true,
+          filled: true,
+          fillColor: _textInputFillColor,
+          hintText: _textInputHintText,
+          hintStyle: TextStyle(
+            color: _textInputHintColor,
+            fontSize: _textInputFontSize,
+            fontWeight: _textInputFontWeight,
+            height: textInputLineHeight,
+          ),
+          contentPadding: EdgeInsets.symmetric(
+            horizontal: _textInputPaddingHorizontal,
+            vertical: _textInputPaddingVertical,
+          ),
+          border: OutlineInputBorder(
+            // Material 3 adds OutlineInputBorder.gapPadding to the
+            // horizontal origin even without a floating label.
+            gapPadding: 0,
+            borderRadius: BorderRadius.circular(_textInputBorderRadius),
+            borderSide: BorderSide(color: _textInputBorderColor),
+          ),
+          enabledBorder: OutlineInputBorder(
+            gapPadding: 0,
+            borderRadius: BorderRadius.circular(_textInputBorderRadius),
+            borderSide: BorderSide(color: _textInputBorderColor),
+          ),
+          focusedBorder: OutlineInputBorder(
+            gapPadding: 0,
+            borderRadius: BorderRadius.circular(_textInputBorderRadius),
+            borderSide: BorderSide(
+              color: _textInputFocusedBorderColor,
+              width: 1,
+            ),
+          ),
+        ),
+      ),
+    );
+    // Keep the TextField in one stable Element tree even when the page scrolls
+    // it outside the viewport. Only the editor ValueListenableBuilder above
+    // rebuilds this branch; value-only IME edits never reach it.
+    final overlayBounds = textInputClipRect ?? textInputRect;
+    return Positioned(
+      key: ValueKey<String>('pocket-text-overlay-$textInputId'),
+      left: overlayBounds.left * scaleX,
+      top: overlayBounds.top * scaleY,
+      width: overlayBounds.width * scaleX,
+      height: overlayBounds.height * scaleY,
+      child: ClipRect(
+        child: Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            Positioned(
+              left: (textInputRect.left - overlayBounds.left) * scaleX,
+              top: (textInputRect.top - overlayBounds.top) * scaleY,
+              width: textInputRect.width * scaleX,
+              height: textInputRect.height * scaleY,
+              child: textInputField,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -4141,114 +4860,13 @@ class _PocketViewState extends State<PocketView>
         }
       }
     }
-    final textInputId = _textInputId;
-    final textInputRect = _textInputRect;
-    final textInputClipRect = _textInputClipRect;
-    final textInputController = _textInputController;
-    final textInputFocusNode = _textInputFocusNode;
-    final textInputLineHeight = _textInputLineHeight();
-    if (surface == 0 &&
-        widget.inputEnabled &&
-        textInputId != null &&
-        textInputRect != null &&
-        textInputController != null &&
-        textInputFocusNode != null) {
-      final textInputField = Material(
-        type: MaterialType.transparency,
-        child: TextField(
-          key: ValueKey<String>('pocket-text-input-$textInputId'),
-          controller: textInputController,
-          focusNode: textInputFocusNode,
-          keyboardType: _textInputKeyboardType,
-          textInputAction: _textInputAction,
-          obscureText: _textInputObscure,
-          autocorrect: _textInputAutocorrect,
-          enableSuggestions: !_textInputObscure,
-          maxLines: _textInputMaxLines,
-          minLines: _textInputMinLines,
-          scrollPadding: EdgeInsets.zero,
-          onEditingComplete: () {},
-          onSubmitted: (_) => _submitTextInput(),
-          // A down-outside callback would close the overlay before the
-          // surrounding Pocket surface can deliver its matching up edge.
-          // Keep down as a no-op and dismiss after the complete tap.
-          onTapOutside: _onTextInputTapOutside,
-          onTapUpOutside: _onTextInputTapUpOutside,
-          style: TextStyle(
-            color: _textInputTextColor,
-            fontSize: _textInputFontSize,
-            fontWeight: _textInputFontWeight,
-            height: textInputLineHeight,
-          ),
-          cursorColor: _textInputFocusedBorderColor,
-          decoration: InputDecoration(
-            isDense: true,
-            filled: true,
-            fillColor: _textInputFillColor,
-            hintText: _textInputHintText,
-            hintStyle: TextStyle(
-              color: _textInputHintColor,
-              fontSize: _textInputFontSize,
-              fontWeight: _textInputFontWeight,
-              height: textInputLineHeight,
-            ),
-            contentPadding: EdgeInsets.symmetric(
-              horizontal: _textInputPaddingHorizontal,
-              vertical: _textInputPaddingVertical,
-            ),
-            border: OutlineInputBorder(
-              // Material 3 adds OutlineInputBorder.gapPadding to the
-              // input's horizontal origin even when there is no floating
-              // label. JS owns the shell geometry, so keep the native text
-              // origin aligned with its 12px content padding.
-              gapPadding: 0,
-              borderRadius: BorderRadius.circular(_textInputBorderRadius),
-              borderSide: BorderSide(color: _textInputBorderColor),
-            ),
-            enabledBorder: OutlineInputBorder(
-              gapPadding: 0,
-              borderRadius: BorderRadius.circular(_textInputBorderRadius),
-              borderSide: BorderSide(color: _textInputBorderColor),
-            ),
-            focusedBorder: OutlineInputBorder(
-              gapPadding: 0,
-              borderRadius: BorderRadius.circular(_textInputBorderRadius),
-              borderSide: BorderSide(
-                color: _textInputFocusedBorderColor,
-                width: 1,
-              ),
-            ),
-          ),
-        ),
-      );
-      // Keep the TextField in one stable Element tree even when the page
-      // scrolls it fully outside the viewport. Removing it on an empty
-      // intersection would dispose EditableText, close the platform keyboard,
-      // and recreate the controller on the next scroll frame. The outer
-      // viewport remains the clip; the child retains its full input geometry
-      // relative to that viewport.
-      final overlayBounds = textInputClipRect ?? textInputRect;
+    if (surface == 0 && widget.inputEnabled) {
       sceneChildren.add(
-        Positioned(
-          key: ValueKey<String>('pocket-text-overlay-$textInputId'),
-          left: overlayBounds.left * scaleX,
-          top: overlayBounds.top * scaleY,
-          width: overlayBounds.width * scaleX,
-          height: overlayBounds.height * scaleY,
-          child: ClipRect(
-            child: Stack(
-              fit: StackFit.expand,
-              children: <Widget>[
-                Positioned(
-                  left: (textInputRect.left - overlayBounds.left) * scaleX,
-                  top: (textInputRect.top - overlayBounds.top) * scaleY,
-                  width: textInputRect.width * scaleX,
-                  height: textInputRect.height * scaleY,
-                  child: textInputField,
-                ),
-              ],
-            ),
-          ),
+        ValueListenableBuilder<int>(
+          key: const ValueKey<String>('pocket-editor-overlay-builder'),
+          valueListenable: _editorRevision,
+          builder: (context, _, __) =>
+              _buildTextInputOverlay(scaleX: scaleX, scaleY: scaleY),
         ),
       );
     }

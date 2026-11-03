@@ -7,3 +7,7 @@ export * from "./responsive.ts";
 export * from "./display.ts";
 export * from "./graphics.ts";
 export * from "./flutter-widgets.tsx";
+
+// Preload compositor composition with the public UI entry so the pinned
+// compiler collects its class literals before bundling subpath imports.
+export * from "./system-surfaces.tsx";

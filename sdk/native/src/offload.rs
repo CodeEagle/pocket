@@ -478,10 +478,7 @@ impl OffloadHost {
             "offload.provider.take",
             |state, _expected, trace_enabled| {
                 let request = pop_request(state);
-                if state.request_queue.is_empty()
-                    && state.cancellations.is_empty()
-                    && state.replies.is_empty()
-                {
+                if work_queues_empty(state) {
                     self.inner.rearm_wake();
                 }
                 let trace_request = if trace_enabled {
@@ -508,10 +505,7 @@ impl OffloadHost {
                 if request.is_some() {
                     self.inner.changed.notify_all();
                 }
-                if state.request_queue.is_empty()
-                    && state.cancellations.is_empty()
-                    && state.replies.is_empty()
-                {
+                if work_queues_empty(state) {
                     self.inner.rearm_wake();
                 }
                 let trace_request = if trace_enabled {
@@ -599,12 +593,23 @@ impl OffloadHost {
                 TraceActor::Ui,
                 "offload.reply.take",
                 |state, _expected, _trace_enabled| {
-                    while let Some(reply) = state.replies.pop_front() {
-                        if reply.session == state.session {
-                            return Ok(Some(reply.record));
+                    let mut selected = None;
+                    while let Some(queued) = state.replies.pop_front() {
+                        if queued.session == state.session {
+                            selected = Some(queued.record);
+                            break;
                         }
                     }
-                    Ok(None)
+                    // The callback gate is level-triggered. A reply can keep
+                    // it armed after the provider queues have been drained;
+                    // rearm only while holding the broker lock, after this
+                    // dequeue has made all three queues empty. This closes
+                    // the window where a later submit/cancel is coalesced
+                    // behind an already-consumed reply notification.
+                    if work_queues_empty(state) {
+                        self.inner.rearm_wake();
+                    }
+                    Ok(selected)
                 },
                 |record| json!({"record": record}),
             )
@@ -1249,6 +1254,10 @@ fn notify_once(pending: &AtomicBool, notify: Option<Notify>) {
     }
 }
 
+fn work_queues_empty(state: &BrokerState) -> bool {
+    state.request_queue.is_empty() && state.cancellations.is_empty() && state.replies.is_empty()
+}
+
 fn rearm_wake(pending: &AtomicBool) {
     pending.store(false, Ordering::Release);
 }
@@ -1410,6 +1419,12 @@ mod tests {
         NOTIFICATION_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
+    static REPLY_DRAIN_NOTIFICATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn count_reply_drain_notification() {
+        REPLY_DRAIN_NOTIFICATION_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn test_host(generation: u32, session: u32, timeout: Duration) -> Arc<OffloadHost> {
         OffloadHost::new(
             generation,
@@ -1534,6 +1549,70 @@ mod tests {
 
         drop(context);
         host.shutdown();
+    }
+
+    #[test]
+    fn reply_drain_rearms_wake_for_later_submit_and_cancel() {
+        REPLY_DRAIN_NOTIFICATION_COUNT.store(0, Ordering::Relaxed);
+        let host = OffloadHost::new(
+            9,
+            17,
+            Duration::from_secs(30),
+            ["compute.sum".to_owned()],
+            Some(count_reply_drain_notification),
+        );
+
+        // A completion leaves a reply as the only queued work. Draining that
+        // final reply must reopen the level-triggered callback gate.
+        assert!(host.submit_record(r#"{"v":1,"id":1,"method":"compute.sum","payload":"[]"}"#));
+        assert_eq!(host.take_request().unwrap().id, 1);
+        assert!(host.complete(9, 17, 1, Ok("one".to_owned())));
+        assert!(host.take_reply().is_some());
+        assert!(host.submit_record(r#"{"v":1,"id":2,"method":"compute.sum","payload":"[]"}"#));
+        assert_eq!(REPLY_DRAIN_NOTIFICATION_COUNT.load(Ordering::Relaxed), 3);
+        assert_eq!(host.take_request().unwrap().id, 2);
+
+        // A dispatched cancellation still occupies its own queue. Draining it
+        // must also rearm the gate before another request is admitted.
+        assert!(host.cancel(17, 2));
+        assert_eq!(host.take_cancellation().unwrap().id, 2);
+        assert!(host.submit_record(r#"{"v":1,"id":3,"method":"compute.sum","payload":"[]"}"#));
+        assert_eq!(REPLY_DRAIN_NOTIFICATION_COUNT.load(Ordering::Relaxed), 5);
+        assert_eq!(host.take_request().unwrap().id, 3);
+
+        // With multiple replies, only the final dequeue rearms the callback.
+        assert!(host.submit_record(r#"{"v":1,"id":4,"method":"compute.sum","payload":"[]"}"#));
+        assert_eq!(host.take_request().unwrap().id, 4);
+        assert!(host.complete(9, 17, 3, Ok("three".to_owned())));
+        assert!(host.complete(9, 17, 4, Ok("four".to_owned())));
+        assert!(host.take_reply().is_some());
+        assert!(host.take_reply().is_some());
+        assert!(host.submit_record(r#"{"v":1,"id":5,"method":"compute.sum","payload":"[]"}"#));
+        assert_eq!(REPLY_DRAIN_NOTIFICATION_COUNT.load(Ordering::Relaxed), 8);
+
+        host.shutdown();
+
+        // A session switch normally removes stale replies before this API is
+        // reached. Exercise the defensive stale-reply drain directly as well:
+        // it must reopen the gate when the stale queue entry is the last work.
+        REPLY_DRAIN_NOTIFICATION_COUNT.store(0, Ordering::Relaxed);
+        let stale_host = OffloadHost::new(
+            9,
+            17,
+            Duration::from_secs(30),
+            ["compute.sum".to_owned()],
+            Some(count_reply_drain_notification),
+        );
+        stale_host.inner.wake_pending.store(true, Ordering::Release);
+        stale_host.inner.lock_state().replies.push_back(Reply {
+            session: 99,
+            id: 1,
+            record: "stale".to_owned(),
+        });
+        assert!(stale_host.take_reply().is_none());
+        assert!(stale_host.submit_record(r#"{"v":1,"id":1,"method":"compute.sum","payload":"[]"}"#));
+        assert_eq!(REPLY_DRAIN_NOTIFICATION_COUNT.load(Ordering::Relaxed), 1);
+        stale_host.shutdown();
     }
 
     #[test]

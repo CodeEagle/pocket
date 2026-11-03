@@ -4,6 +4,10 @@ import 'package:integration_test/integration_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_host/main.dart';
 
+const _revealDragAttempts = 12;
+const _revealSettleBudget = Duration(seconds: 4);
+const _revealSamplePeriod = Duration(milliseconds: 50);
+
 Iterable<CustomPaint> painters(WidgetTester tester) =>
     tester.widgetList<CustomPaint>(
       find.byWidgetPredicate(
@@ -56,31 +60,93 @@ Finder activePocketViewFinder() {
 
 /// Only target the visible part of a DrawOp. A text record can survive
 /// clipping even when its original center is outside the scroller viewport.
-Offset? pointFor(WidgetTester tester, String label) {
+final class _PointSnapshot {
+  const _PointSnapshot({
+    this.point,
+    this.rawRect,
+    this.clipRect,
+    this.visibleRect,
+    this.visibleHeightFraction,
+  });
+
+  final Offset? point;
+  final Rect? rawRect;
+  final Rect? clipRect;
+  final Rect? visibleRect;
+  final double? visibleHeightFraction;
+}
+
+_PointSnapshot _pointSnapshot(WidgetTester tester, String label) {
+  _PointSnapshot? best;
+  var bestVisibleArea = -1.0;
   for (final widget in painters(tester).toList().reversed) {
     final painter = widget.painter! as PocketCanvasPainter;
     final box = tester.renderObject<RenderBox>(find.byWidget(widget));
     for (final op in painter.ops.whereType<PocketTextOp>()) {
       if (op.text != label) continue;
-      var rect = Rect.fromLTWH(op.x, op.y, op.width, op.height);
-      final clip = op.clip;
-      if (clip != null) {
-        rect = rect.intersect(
-          Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height),
-        );
+      final rawRect = Rect.fromLTWH(op.x, op.y, op.width, op.height);
+      final clipRect = op.clip == null
+          ? null
+          : Rect.fromLTWH(
+              op.clip!.x,
+              op.clip!.y,
+              op.clip!.width,
+              op.clip!.height,
+            );
+      var visibleRect = rawRect;
+      if (clipRect != null) {
+        visibleRect = visibleRect.intersect(clipRect);
       }
-      rect = rect.intersect(Rect.fromLTWH(0, 0, painter.width, painter.height));
-      if (rect.isEmpty || rect.height < op.height * .5) continue;
-      return box.localToGlobal(
-        Offset(
-          rect.center.dx * box.size.width / painter.width,
-          rect.center.dy * box.size.height / painter.height,
+      visibleRect = visibleRect.intersect(
+        Rect.fromLTWH(0, 0, painter.width, painter.height),
+      );
+      final visibleHeightFraction = op.height <= 0
+          ? 0.0
+          : visibleRect.height / op.height;
+      final snapshot = _PointSnapshot(
+        rawRect: rawRect,
+        clipRect: clipRect,
+        visibleRect: visibleRect,
+        visibleHeightFraction: visibleHeightFraction,
+      );
+      final visibleArea = visibleRect.isEmpty
+          ? 0.0
+          : visibleRect.width * visibleRect.height;
+      if (best == null || visibleArea > bestVisibleArea) {
+        best = snapshot;
+        bestVisibleArea = visibleArea;
+      }
+      if (visibleRect.isEmpty || visibleRect.height < op.height * .5) {
+        continue;
+      }
+      return _PointSnapshot(
+        point: box.localToGlobal(
+          Offset(
+            visibleRect.center.dx * box.size.width / painter.width,
+            visibleRect.center.dy * box.size.height / painter.height,
+          ),
         ),
+        rawRect: rawRect,
+        clipRect: clipRect,
+        visibleRect: visibleRect,
+        visibleHeightFraction: visibleHeightFraction,
       );
     }
   }
-  return null;
+  return best ?? const _PointSnapshot();
 }
+
+Offset? pointFor(WidgetTester tester, String label) =>
+    _pointSnapshot(tester, label).point;
+
+String _formatOffset(Offset? point) => point == null
+    ? 'none'
+    : '(${point.dx.toStringAsFixed(1)},${point.dy.toStringAsFixed(1)})';
+
+String _formatRect(Rect? rect) => rect == null
+    ? 'none'
+    : '(${rect.left.toStringAsFixed(1)},${rect.top.toStringAsFixed(1)},'
+          '${rect.right.toStringAsFixed(1)},${rect.bottom.toStringAsFixed(1)})';
 
 /// Reveal content through real drags, including after the window gets shorter.
 Future<Offset> reveal(
@@ -88,21 +154,34 @@ Future<Offset> reveal(
   String label, {
   bool scroll = true,
 }) async {
-  for (var attempt = 0; attempt < (scroll ? 12 : 6); attempt++) {
-    final point = pointFor(tester, label);
-    if (point != null) {
-      // Initial native geometry and route transitions can move a painted
-      // button before the next frame. Never send down at its old location
-      // and up after reflow; wait for the same visible target to settle.
-      await tester.pump(const Duration(milliseconds: 50));
-      final settled = pointFor(tester, label);
-      if (settled != null && (settled - point).distance < .5) return settled;
-      continue;
-    }
-    if (!scroll) {
-      await tester.pump(const Duration(milliseconds: 50));
-      continue;
-    }
+  final trajectory = <String>[];
+  final revealClock = Stopwatch()..start();
+  void record(String phase, _PointSnapshot snapshot) {
+    // Retain both the initial drag samples and the latest settling samples;
+    // otherwise twelve drags would fill the diagnostic buffer before the
+    // inertia/stability phase could explain a failure.
+    if (trajectory.length >= 24) trajectory.removeAt(12);
+    trajectory.add(
+      '${revealClock.elapsedMilliseconds}ms/$phase '
+      'point=${_formatOffset(snapshot.point)} '
+      'raw=${_formatRect(snapshot.rawRect)} '
+      'clip=${_formatRect(snapshot.clipRect)} '
+      'visible=${_formatRect(snapshot.visibleRect)} '
+      'height=${snapshot.visibleHeightFraction?.toStringAsFixed(2) ?? 'none'}',
+    );
+  }
+
+  // Scrolling and settling are separate budgets. A fling can keep moving the
+  // target for seconds after the final drag, so its 0.5px stability check must
+  // not consume the finite number of attempts reserved for revealing content.
+  for (
+    var attempt = 0;
+    attempt < (scroll ? _revealDragAttempts : 0);
+    attempt++
+  ) {
+    final snapshot = _pointSnapshot(tester, label);
+    record('before-drag-$attempt', snapshot);
+    if (snapshot.point != null) break;
     final box = tester.renderObject<RenderBox>(activePocketViewFinder());
     final gesture = await tester.startGesture(
       box.localToGlobal(Offset(box.size.width * .35, box.size.height * .72)),
@@ -113,8 +192,37 @@ Future<Offset> reveal(
     }
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 100));
+    record('after-drag-$attempt', _pointSnapshot(tester, label));
   }
-  fail('No visible guest target: $label; actual=${texts(tester)}');
+
+  Offset? previous;
+  final settleClock = Stopwatch()..start();
+  while (settleClock.elapsed < _revealSettleBudget) {
+    final snapshot = _pointSnapshot(tester, label);
+    record('settle', snapshot);
+    final point = snapshot.point;
+    if (point != null) {
+      // Initial native geometry and route transitions can move a painted
+      // button before the next frame. Never send down at its old location
+      // and up after reflow; wait for two samples within the existing 0.5px
+      // threshold.
+      if (previous != null && (point - previous).distance < .5) return point;
+      previous = point;
+    } else {
+      previous = null;
+    }
+    await tester.pump(_revealSamplePeriod);
+  }
+  final last = _pointSnapshot(tester, label);
+  record('timeout', last);
+  final hadPoint = trajectory.any((sample) => sample.contains('point=('));
+  final status = hadPoint ? 'visible but did not stabilize' : 'not pointable';
+  fail(
+    'No visible guest target: $label ($status; '
+    'dragAttempts=${scroll ? _revealDragAttempts : 0}; '
+    'settleBudgetMs=${_revealSettleBudget.inMilliseconds}); '
+    'actual=${texts(tester)}; trajectory=${trajectory.join(' | ')}',
+  );
 }
 
 Future<void> tapGuest(

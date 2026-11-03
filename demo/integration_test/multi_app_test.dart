@@ -7,6 +7,8 @@ import 'package:pocket_sdk/pocket_sdk.dart';
 
 import 'guest_interaction_test.dart' as guest;
 
+final _surfaceFacts = <int, List<String>>{};
+
 const _showcase = 'pocket.host.demo';
 const _profile = 'pocket.demo.profile';
 const _lobby = 'pocket.demo.lobby';
@@ -28,7 +30,7 @@ Future<PocketSystemInstanceSnapshot> _instance(
     if (matches.isNotEmpty) return matches.single;
   }
   fail(
-    'No ready instance $appId; facts=${host.instances.map((e) => '${e.appId}:${e.instanceId}:${e.ready}:${e.firstFrameReady}:${e.isPresented}:foreground=${e.foreground}:pending=${e.session.controller.pendingMessageCount}').toList()}; texts=${guest.texts(tester)}',
+    'No ready instance $appId; facts=${host.instances.map((e) => '${e.appId}:${e.instanceId}:${e.ready}:${e.firstFrameReady}:${e.isPresented}:foreground=${e.foreground}:pending=${e.session.controller.pendingMessageCount}').toList()}; surfaces=$_surfaceFacts; texts=${guest.texts(tester)}',
   );
 }
 
@@ -65,6 +67,21 @@ void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
 
+  setUp(() {
+    _surfaceFacts.clear();
+    debugPocketFrameDeltaAtOverride = (runtime, delta) {
+      final frame = pocketFrameDeltaAt(runtime, delta);
+      if (frame != null) {
+        _surfaceFacts[identityHashCode(runtime)] = [
+          for (final op in frame.ops.whereType<PocketHostSurfaceOp>())
+            '${op.kind}:${op.surfaceHandle}:${op.x},${op.y},${op.width},${op.height}:focus=${op.focused}',
+        ];
+      }
+      return frame;
+    };
+  });
+  tearDown(() => debugPocketFrameDeltaAtOverride = null);
+
   testWidgets(
     'JS SystemUI opens real A/B guests, shares identity, returns results and messages',
     (tester) async {
@@ -91,8 +108,12 @@ void main() {
         );
         expect(
           host.instances.singleWhere((e) => e.appId == _showcase).isPresented,
-          isFalse,
+          isTrue,
+          reason:
+              'SystemUI remains the compositor root beneath its child surface',
         );
+
+        expect(profile.compositorFocused, isTrue);
 
         await guest.tapGuest(tester, 'Lin Mei (VIP 7)');
         await guest.tapGuest(tester, 'Save identity & open Lobby');

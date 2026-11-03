@@ -89,8 +89,8 @@ collection、scene bounds；safe area/边距可能不对称，iOS 27.1 的 `Rese
 - 每个姿态记录 PocketView RenderBox size、`display.viewport` 的 width/height、四个 safeArea
   值和首个/最后一个 DrawList frame；确认页面不因旧逻辑整体 contain 缩小、横向居中或跳回
   另一套业务路由。
-- 检查 JS mobile UI 的 toolbar、Tab、输入框、glass card 和 Hardware 页在不对称左右 inset
-  下仍可点击；折叠中部不放关键按钮或文本。当前 showcase 仍是全 JS 页面，原生只提供壳、
+- 检查 JS mobile UI 的 toolbar、Tab、输入框和 Hardware 页在不对称左右 inset 下仍可点击；
+  折叠中部不放关键按钮或文本。当前 showcase 仍是全 JS 页面，原生只提供壳、
   renderer、IME 和明确 capability bridge。
 
 ## 可复核的模拟器操作

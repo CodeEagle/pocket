@@ -7,11 +7,12 @@ import {
   appendPerformanceSample,
   initialDemoState,
   parsePerformancePoint,
+  parsePerformanceJank,
   parsePerformanceSnapshot,
   reduceDemoState,
   type DemoState,
 } from "../state.ts";
-import { createHostBridge } from "../host.ts";
+import { createHostBridge } from "@pocket/ui/host";
 
 function test(name: string, fn: () => void | Promise<void>): void {
   try {
@@ -139,17 +140,66 @@ test("stress and performance snapshots", () => {
   assert.equal(stress.stress.durationMs, 2);
 
   const performanceResult = {
-    latest: { timestamp: "t2", fps: 48, minFps: 42, maxGapMs: 31, slowFrames: 2, nativeMsP95: 4.5 },
+    latest: {
+      timestamp: "t2",
+      fps: 48,
+      minFps: 42,
+      maxGapMs: 31,
+      activeGapMs: 31,
+      slowFrames: 2,
+      nativeMsP95: 4.5,
+      refreshHz: 120,
+      frameBudgetMs: 1000 / 120,
+      buildMsP95: 4.2,
+      rasterMsP95: 6.1,
+      nativeWorkMsP95: 2.4,
+      longFrameCount: 1,
+    },
     history: [
       { timestamp: "t1", fps: 60, maxGapMs: 17, slowFrames: 0, nativeMsP95: 2.1 },
-      { timestamp: "t2", fps: 48, maxGapMs: 31, slowFrames: 2, nativeMsP95: 4.5 },
+      {
+        timestamp: "t2",
+        fps: 48,
+        maxGapMs: 31,
+        activeGapMs: 31,
+        slowFrames: 2,
+        nativeMsP95: 4.5,
+        refreshHz: 120,
+        frameBudgetMs: 1000 / 120,
+        buildMsP95: 4.2,
+        rasterMsP95: 6.1,
+        nativeWorkMsP95: 2.4,
+      },
     ],
+    longFrameEvents: [{
+      timestamp: "t2-frame-1",
+      refreshHz: 120,
+      budgetMs: 1000 / 120,
+      durationMs: 31,
+      activeGapMs: 31,
+      buildMs: 4.2,
+      rasterMs: 6.1,
+      nativeMs: 2.4,
+      scope: "flutterView",
+      context: "host sample",
+      page: "stress",
+      action: "Run 500 nodes",
+    }],
     recording: true,
   };
   const parsedPerformance = parsePerformanceSnapshot(performanceResult);
   assert.equal(parsedPerformance.latest?.fps, 48);
   assert.equal(parsedPerformance.latest?.minFps, 42);
+  assert.equal(parsedPerformance.latest?.refreshHz, 120);
+  assert.equal(parsedPerformance.latest?.buildMsP95, 4.2);
+  assert.equal(parsedPerformance.latest?.rasterMsP95, 6.1);
+  assert.equal(parsedPerformance.latest?.nativeWorkMsP95, 2.4);
+  assert.equal(parsedPerformance.latest?.longFrameCount, 1);
   assert.equal(parsedPerformance.history.length, 2);
+  assert.equal(parsedPerformance.longFrameEvents?.length, 1);
+  assert.equal(parsedPerformance.longFrameEvents?.[0]?.activeGapMs, 31);
+  assert.equal(parsedPerformance.longFrameEvents?.[0]?.nativeMs, 2.4);
+  assert.equal(parsedPerformance.longFrameEvents?.[0]?.scope, "flutterView");
   assert.equal(parsedPerformance.recording, true);
   assert.equal(parsePerformancePoint({ fps: 60 }), undefined);
   assert.equal(
@@ -159,9 +209,28 @@ test("stress and performance snapshots", () => {
       maxGapMs: 7,
       slowFrames: 0,
       nativeMsP95: 1,
+      refreshHz: 144,
     })?.fps,
     144,
   );
+  const sparse = parsePerformancePoint({
+    timestamp: "sparse",
+    fps: 4.28,
+    maxGapMs: 0,
+    activeGapMs: 0,
+    slowFrames: 0,
+    nativeMsP95: 1,
+    refreshHz: 60,
+  });
+  assert.equal(sparse?.activeGapMs, 0);
+  assert.equal(sparse?.longFrameEvents, undefined);
+  assert.equal(parsePerformanceJank({
+    timestamp: "idle-event",
+    refreshHz: 120,
+    budgetMs: 1000 / 120,
+    nativeMs: 40,
+    active: false,
+  }), undefined);
 
   const performanceLoading = apply(initial, {
     type: "capabilityStart",
@@ -190,6 +259,56 @@ test("stress and performance snapshots", () => {
   assert.equal(rolling.history.length, 60);
   assert.equal(rolling.history[0]?.timestamp, "5");
   assert.equal(rolling.latest?.timestamp, "64");
+
+  const appended = appendPerformanceSample(parsedPerformance, {
+    timestamp: "t3",
+    fps: 58,
+    refreshHz: 120,
+    budgetMs: 1000 / 120,
+    activeGapMs: 24,
+    longFrameEvents: [{
+      timestamp: "t3-frame-1",
+      refreshHz: 120,
+      budgetMs: 1000 / 120,
+      durationMs: 24,
+      activeGapMs: 24,
+      buildMs: 3,
+      rasterMs: 4,
+      nativeMs: 1,
+    }],
+  });
+  assert.equal(appended.latest?.timestamp, "t3");
+  assert.equal(appended.longFrameEvents?.length, 2);
+  assert.equal(appended.longFrameEvents?.[1]?.nativeMs, 1);
+
+  // Event-only bursts have no cadence window. They must add the real long
+  // frame while preserving the last FPS point instead of replacing it with
+  // an fps=0 sample.
+  const eventOnlySample = parsePerformancePoint({
+    timestamp: "event-only-sample",
+    fps: 0,
+    frames: 0,
+    durationMs: 0,
+    refreshHz: 120,
+    longFrameEvents: [{
+      timestamp: "event-only-frame",
+      refreshHz: 120,
+      budgetMs: 1000 / 120,
+      durationMs: 316,
+      activeGapMs: 316,
+      buildMs: 12,
+      rasterMs: 8,
+      nativeMs: 4,
+      scope: "pocketView",
+    }],
+  });
+  assert.ok(eventOnlySample);
+  const eventOnly = appendPerformanceSample(parsedPerformance, eventOnlySample!, false);
+  assert.equal(eventOnly.latest?.timestamp, "t2");
+  assert.equal(eventOnly.latest?.fps, 48);
+  assert.equal(eventOnly.history.length, 2);
+  assert.equal(eventOnly.longFrameEvents?.length, 2);
+  assert.equal(eventOnly.longFrameEvents?.[1]?.timestamp, "event-only-frame");
 });
 
 test("source checks and boundary integrity", () => {
@@ -205,14 +324,27 @@ test("source checks and boundary integrity", () => {
   assert.match(appSource, /runtime\.info/);
   assert.match(appSource, /runtime\.performance/);
   assert.match(appSource, /runtime\.performance\.sample/);
+  assert.match(appSource, /host\.request<JsonValue>\("runtime\.performance", \{ context \}\)/);
+  assert.match(appSource, /page=\$\{current\.route\}/);
   assert.match(appSource, /ScrollablePage/);
   assert.match(appSource, /createSignal<PerformanceSnapshot>/);
   assert.match(appSource, /setPerformance/);
   assert.match(appSource, /appendPerformanceSample/);
+  assert.match(appSource, /params\.eventOnly !== true/);
   assert.match(appSource, /FPS history/);
   assert.match(appSource, /Recent 60 samples/);
   assert.match(appSource, /Lowest FPS samples/);
+  assert.match(appSource, /Recent long frames/);
+  assert.match(appSource, /UI build/);
+  assert.match(appSource, /Bridge\/decode/);
+  assert.match(appSource, /Flutter view/);
+  assert.match(appSource, /scope/);
+  assert.match(appSource, /active gap/);
+  assert.match(appSource, /Sparse rendering is not a stall/);
   assert.match(appSource, /nativeMsP95/);
+  assert.match(appSource, /nativeWorkMsP95/);
+  assert.match(appSource, /refreshHz/);
+  assert.match(appSource, /PERFORMANCE_JANK_LIMIT/);
   assert.match(appSource, /const scale = Math\.max\(1, \.\.\.points\.map/);
   assert.doesNotMatch(appSource, /scaled to a 60 FPS baseline/);
   assert.match(appSource, /plugins\.list/);

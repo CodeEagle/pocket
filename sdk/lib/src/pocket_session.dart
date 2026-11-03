@@ -322,10 +322,16 @@ final class PocketSession extends ChangeNotifier {
     _host = host;
     _plugins = plugins;
     registry.registerRequest('runtime.info', (_) => runtimeInfo());
-    registry.registerRequest(
-      'runtime.performance',
-      (_) => performance.snapshot(),
-    );
+    registry.registerRequest('runtime.performance', (params) {
+      if (params.containsKey('context')) {
+        final context = params['context'];
+        if (context != null && context is! String) {
+          throw const FormatException('Performance context must be a string');
+        }
+        performance.setContext(context as String?);
+      }
+      return performance.snapshot();
+    });
     registry.registerRequest('plugins.list', (_) => plugins.manifest());
     registry.registerRequest('updates.status', (_) => status());
     registry.registerRequest('updates.check', (_) => _check());
@@ -407,10 +413,11 @@ final class PocketSession extends ChangeNotifier {
   void onPerformanceSample(PocketPerformanceSample sample) {
     if (_disposed) return;
     final json = sample.toJson();
-    performance.add(json);
+    final longFrameEvents = performance.add(json);
     final snapshot = performance.snapshot();
     _send('runtime.performance.sample', {
-      'sample': json,
+      'sample': {...json, 'longFrameEvents': longFrameEvents},
+      'eventOnly': sample.frames <= 0 || sample.durationMs <= 0,
       'minFps': (snapshot['latest'] as Map?)?['minFps'],
       'recording': true,
     });

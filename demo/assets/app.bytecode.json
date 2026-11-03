@@ -1,14 +1,14 @@
 {
   "bindingGeneration": 12,
-  "bytecodeBytes": 316982,
+  "bytecodeBytes": 326375,
   "engineAbi": "5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
   "entryFormat": "quickjs-bytecode",
   "formatVersion": 1,
   "headerBytes": 124,
   "kind": "script",
-  "payloadSha256": "3155f4b51d51824ccb3c009b27b3c08a4fc5a769fb7b6571e2cb949bdff895f9",
+  "payloadSha256": "c7efe9deee38da4c8a39c2ddcec514900fbd84a8ec5365a79fee21a139f5ea6e",
   "runtimeAbi": "quickjs-bytecode-v1:5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
-  "sourceSha256": "e43b993b60e0c54b6903fa3e5b3de0cd73d22942001c3c53b2a4a00badeb2cd0",
+  "sourceSha256": "8c61ac3471d3a8cbd337047c5e2226506646a00b819842ec937dd8ba3392ad44",
   "tickHz": 60,
   "version": "0.1.0",
   "build": 1

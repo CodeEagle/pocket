@@ -64,7 +64,7 @@ Native 执行真实 guest，PocketJS 产生布局和 DrawList，Dart 解码为 `
 
 ### 2.4 插件与更新
 
-JS 通过 `demo/js/host.ts` 发出带 requestId 的 `host.request`；`sdk/lib/src/pocket_session.dart` 转交服务注册表，校验声明能力与宿主授权后调用 handler，将结构化结果送回 JS。SDK 默认接入 `package_info_plus`；Showcase 显式依赖并通过 pluginFactories 注册 `pocket_hardware` 的 `HardwarePlugin`，后者覆盖相机/照片、BLE、传感器、生物识别、位置和天气的结构化请求，并拒绝 unsupported/timeout/late result。`demo/test/hardware_plugin_test.dart` 直接验证公开 provider package，真实 iOS MethodChannel 场景由 Demo 集成测试覆盖。
+JS 通过 `sdk/packages/pocket_ui/src/host.ts` 发出带 requestId 的 `host.request`；`sdk/lib/src/pocket_session.dart` 转交服务注册表，校验声明能力与宿主授权后调用 handler，将结构化结果送回 JS。SDK 默认接入 `package_info_plus`；Showcase 显式依赖并通过 pluginFactories 注册 `pocket_hardware` 的 `HardwarePlugin`，后者覆盖相机/照片、BLE、传感器、生物识别、位置和天气的结构化请求，并拒绝 unsupported/timeout/late result。`demo/test/hardware_plugin_test.dart` 直接验证公开 provider package，真实 iOS MethodChannel 场景由 Demo 集成测试覆盖。
 
 更新经过检查 manifest、验签、ABI/摘要校验、下载缓存、启动候选包、健康确认、晋升健康版本；失败则恢复可用版本。切包会替换 runtime，并对 renderer/host request 回调做 generation 隔离，丢弃旧会话响应；`PocketSession.onError` 会取消延迟挂载/健康 timer，`dispose` 也会取消 timer，避免旧候选覆盖回退。它不下载或热替换 Flutter 原生插件二进制。
 
@@ -138,11 +138,11 @@ pocket_host/
 
 | 文件 | 做什么 | 修改时注意 |
 | --- | --- | --- |
-| `app.tsx` | Solid 应用入口，Home/Gallery/Host 分类与 Runtime、Bytecode、Updates、Plugins、Stress、FPS history、Mobile UI、Transitions、Glass、Hardware 页面；连接能力响应、输入事件、状态和 220ms JS-owned route transition | 新页面与业务交互优先加在这里；移动组件、硬件、玻璃和转场页已拆至 `mobile-pages.tsx`，旧能力页仍在此入口 |
+| `app.tsx` | Solid 应用入口，Home/Gallery/Host 分类与 Runtime、Bytecode、Updates、Plugins、Stress、FPS history、Mobile UI、Transitions、Hardware 页面；连接能力响应、输入事件、状态和 220ms JS-owned route transition | 新页面与业务交互优先加在这里；移动组件、硬件和转场页已拆至 `mobile-pages.tsx`，SDK 玻璃 surface 能力不作为 Demo 页面入口，旧能力页仍在此入口 |
 | `state.ts` | 路由、计数、draft、能力 loading/error/result、压力节点和性能历史的数据结构与纯 reducer | 业务状态的唯一应用层归属；不要在 Dart 再保存一份路由/计数 |
-| `host.ts` | requestId、Promise、响应解析、超时 tick、dispose 的 JS 能力客户端 | 不负责授予权限；宿主必须独立验证权限 |
+| `packages/pocket_ui/src/host.ts` | requestId、Promise、响应解析、超时 tick、dispose 的 JS 能力客户端 | 不负责授予权限；宿主必须独立验证权限 |
 | `packages/pocket_ui/src/ui.tsx` | Header、Button、Badge、Card、Tabs、List、Modal 等组合；`InputField` 系统输入会话；`ScrollablePage` 手势、测量和滚动；MiniBarChart | `@pocket/ui` 的 canonical source；应用页面、状态和路由仍由 guest 持有 |
-| `packages/pocket_ui/src/mobile.tsx` / `guest/mobile-pages.tsx` | `MobileThemeProvider`、Scaffold/AppBar/Card/ListTile、controls/dialog、系统 `InputField`，以及 mobile/transitions/glass/hardware 页面；`GlassSurface` 和 `PlatformTextureSurface` 只注册 `glass`/`platformTexture` | JS 拥有组合和状态；原生 surface provider 只接受这两个 kind，不等于任意 compositor 或任意原生 Widget |
+| `packages/pocket_ui/src/mobile.tsx` / `guest/mobile-pages.tsx` | `MobileThemeProvider`、Scaffold/AppBar/Card/ListTile、controls/dialog、系统 `InputField`，以及 mobile/transitions/hardware 页面；`GlassSurface` 和 `PlatformTextureSurface` 只注册 `glass`/`platformTexture`，前者仍是 SDK 能力而非 Demo 页面 | JS 拥有组合和状态；原生 surface provider 只接受这两个 kind，不等于任意 compositor 或任意原生 Widget |
 | `packages/pocket_ui/src/legacy.ts` | 纯 JS `computeTransitionDescriptor`（四种转场）和 `buildLiquidGlassRecipe`（SDF/参数/采样） | 是来源适配的数学/描述器，不宣称旧 UIKit 的全部渲染实现已迁入 |
 | `packages/pocket_ui/src/display.ts` | `createDisplayGeometry()` 订阅现有 `display.viewport` 事件并返回 Solid signal；串接既有 `globalThis.__pocketEvent`，不新增 transport 或逐帧 polling | 显示数据由 PocketView 发送；旧 host 没有事件时只使用 fallback，不自行猜测 Duo/折叠屏机型 |
 | `packages/pocket_ui/src/responsive.ts` | `DisplayGeometry` 解析、`reservedInsets`、`availableDisplayRect`/`availableDisplayPanes`、`displayPane` 和 `deriveResponsiveLayout`；根据 safe area、division/occlusion 选择 narrow/wide、bottom/rail 与 pane | pane/frame 已是 guest canvas 坐标；JS 负责响应式布局，不能把 division 当作全局 safe-area 或在 Flutter 再建一套布局引擎 |
@@ -330,7 +330,7 @@ iOS 真机和模拟器构建目前复制到同一个插件静态库位置；切�
 | DrawList 十类指令 | 已有宿主投影，具体视觉语义仍按专项验收 | `GLYPH_RUN` 复用 glyph page/image/T8；普通文字保留 `TEXT_RUN`。不等于完整 Unicode shaping 或任意 surface provider。 |
 | 图片/纹理/资源 | 有实现和部分路径 | SVG 示例编译有记录，Sprite/DeepZoom 等缺专项视觉验收 |
 | `SURFACE_QUAD` / host surfaces | 已实现受限通用 bridge | Native registration 和 Dart renderer 只允许 `glass`、`platformTexture`；视频是后者的 Texture provider，不宣称任意 compositor/原生 view |
-| JS mobile UI / transitions / glass | 已有 guest 页面、纯 JS descriptors 和 surface bridge；source/unit checks 有记录 | guest visual 仍需按设备验收；Impeller 才是折射 shader，非 Impeller 明确为磨砂 fallback |
+| JS mobile UI / transitions / glass SDK | 已有 mobile UI/转场 guest 页面、纯 JS descriptors 和 glass/platformTexture surface bridge；Liquid Glass 的 SDK recipe/surface 保留，但 Demo 的独立页面/选项已暂时移除；source/unit checks 有记录 | guest visual 仍需按设备验收；Impeller 才是折射 shader，非 Impeller 明确为磨砂 fallback |
 | Flutter 系统键盘 | 当前输入 bridge 已验证 | 上游 `GuestFrame.text` 原始硬件键盘/IME 通道未接通 |
 | 页面滚动和输入自动显露 | 主要页面已验证 | 嵌套 VirtualList 边缘交接、复杂惯性待验 |
 | JS UI 库 | 已有 `@pocket/ui` 公开源码包，导出基础组合、mobile、display geometry 与 responsive panes；应用仍由 guest 页面和状态组合 | 未完整移植旧 Demo 展示集；包源可被 CLI vendoring/编译，不代表所有组件和设备布局已验收 |
@@ -367,7 +367,7 @@ iOS 真机和模拟器构建目前复制到同一个插件静态库位置；切�
 | `tools/compile_pocket_syslib_aot.py` | 生成 PJCA 源码封装与预构建 VDOM，并写入 Dart runner | 有意排除；当前使用真实 QuickJS qjbc，不能混淆两种“AOT” |
 | `mini_apps/syslib/pocket_syslib_ota.js` | semver、ABI gate 和版本管理概念；部分 SHA 校验仅检查字符串长度 | 可借用纯版本逻辑；当前真实签名/摘要/缓存/回滚继续以 services 为准 |
 | `mini_apps/pocketjs_runtime_bundle.js` | Navigator/plugin registry/deep-link API，依赖旧 `globalThis.pocket_*` hooks | 当前统一为 `host.request`；深链和插件工作流尚未迁入 |
-| `mini_apps/pocketjs_uikit.js` | tag 清单与 Liquid Glass/SDF 等数学描述 | 样式数学可参考；当前 Liquid Glass 展示和 JS 组合组件已迁入，Flutter 只提供通用光学绘制面 |
+| `mini_apps/pocketjs_uikit.js` | tag 清单与 Liquid Glass/SDF 等数学描述 | 样式数学可参考；SDK 的 Liquid Glass recipe/surface bridge 和 JS 组合组件已迁入，Demo 的独立 Liquid Glass 展示暂时不暴露；Flutter 只提供通用光学绘制面 |
 | `web_wasm_preview/`、`pocketjs_super_app_demo.html`、`wechat_host/` | 独立浏览器/WXML 展示或模拟宿主 | 不属于当前 Flutter 目标，暂时排除；其运行结果不能作为 Flutter/QuickJS 验证 |
 
 旧 renderer 中还有一些需要避免原样继承的包装：`Lazy` 只是容器、`ScrollRail` 是视觉进度条、`WrapLines` 逐行 Text、`WrapTextPage` 是分页样式卡片。名称不能替代懒加载、滚动控制、宽度感知换行或真正分页。
@@ -455,7 +455,7 @@ Kit 的底层是本工程主要来源。**不能说“绘制没继承”，也�
 | --- | --- | --- |
 | 新业务页、导航、计数/表单状态 | `demo/js/app.tsx`、`demo/js/state.ts` | reducer + 真实 pointer/导航/返回状态 |
 | 新 UI 组合 | 先查两个 Demo 和 `packages/pocket_ui/src/ui.tsx`，再通过 `@pocket/ui` 使用 | 用 JS 组合；进入 Gallery，确认点击/焦点/布局 |
-| mobile UI / 转场 / glass | `packages/pocket_ui/src/mobile.tsx`、`demo/js/mobile-pages.tsx`、`packages/pocket_ui/src/legacy.ts`、`packages/pocket_flutter/lib/src/pocket_surface.dart` | `tests/mobile_ui.test.ts` + `pocket_surface_test.dart`；再做真实 iOS visual/Impeller 验收 |
+| mobile UI / 转场 / SDK glass | `packages/pocket_ui/src/mobile.tsx`、`demo/js/mobile-pages.tsx`、`packages/pocket_ui/src/legacy.ts`、`packages/pocket_flutter/lib/src/pocket_surface.dart` | `tests/mobile_ui.test.ts` + `pocket_surface_test.dart`；Demo 只验收可见的 mobile/transition 页面，SDK glass 再做真实 iOS visual/Impeller 验收 |
 | 显示几何/响应式 panes | `packages/pocket_ui/src/display.ts`、`packages/pocket_ui/src/responsive.ts`、`demo/js/app.tsx` | display.viewport 事件、division/occlusion、窄宽布局和真实 Duo 开合；不要添加机型硬编码 |
 | 输入框或页面滚动问题 | `packages/pocket_ui/src/ui.tsx` 与 `packages/pocket_flutter/lib/src/pocket_view.dart` 对照；先读 INPUT_REUSE/SCROLL_REUSE | 系统键盘、真实拖动、视口逐帧，不用业务延时掩盖框架问题 |
 | 新宿主能力/Flutter 插件 | `pocket_services`、`pocket_sdk`、`pocket_hardware`、guest manifest/client；消费应用只在配置中启用 provider | 真原生调用、权限拒绝、错误和卸载/切包；原生 plugin 由 pubspec/CocoaPods 自动注册 |

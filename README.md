@@ -178,7 +178,7 @@ Guest 使用 `host.request` 携带 requestId、capability 和参数，Host 返�
 - **系统输入**：`InputField` 发出 `textInput.open/update/close`，宿主使用 Flutter `TextField/EditableText` 和系统键盘；JS 持有业务值。保留 selection、composing 和字段实例，rect-only 更新不重复覆盖编辑状态。
 - **跟随页面滚动**：JS `ScrollablePage` 根据键盘视口同步 ensureVisible，字段几何、页面内容与 clip 同步变化。被裁掉的字段区域不会吞掉 Guest 点击。
 - **Duo/折叠与安全区**：宿主回传本地 viewport、安全区、键盘重叠和可用平台几何；JS 通过 `createDisplayGeometry` / `availableDisplayPanes` 选择可用 pane，而不是根据机型名写死页面尺寸。平台不提供额外几何时使用普通视口信息。
-- **Liquid Glass**：JS 声明样式与 surface，宿主保持 clip/paint order。支持 shader filter 时走折射 shader；不支持或加载失败时采用 frosted blur/tint fallback。两种视觉效果不等价。
+- **Liquid Glass**：SDK 保留 JS 样式与 surface 接口；Demo 演示入口暂时移除。宿主保持 clip/paint order，支持 shader filter 时走折射 shader；不支持或加载失败时采用 frosted blur/tint fallback。两种视觉效果不等价。
 - **硬件**：独立 `pocket_hardware` 提供 iOS/Android 的权限、相机/照片、BLE、传感器、生物识别、位置/天气等能力。设备不支持、拒绝授权、超时都返回结构化失败，不伪造成功数据。
 
 相机/视频由受控 `platformTexture` provider 承载；当前 surface kind 只支持 `glass` 与 `platformTexture`，并非任意原生 View、3D 或 compositor 的通用桥。更多细节见 [UI 复用](sdk/docs/UI_REUSE.md)、[输入复用](sdk/docs/INPUT_REUSE.md)、[Duo 适配](sdk/docs/DUO_ADAPTATION.md)、[硬件复用](sdk/docs/HARDWARE_REUSE.md)。

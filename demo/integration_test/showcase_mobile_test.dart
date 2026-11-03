@@ -37,94 +37,66 @@ Future<void> tap(WidgetTester tester, String label, {bool scroll = true}) =>
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
-  testWidgets(
-    'portrait showcase: mobile controls, navigation and optical surfaces',
-    (tester) async {
-      try {
-        await tester.pumpWidget(
-          Align(
-            alignment: Alignment.topLeft,
-            child: RepaintBoundary(
-              key: captureKey,
-              child: const SizedBox(
-                width: 390,
-                height: 780,
-                child: PocketHostApp(),
-              ),
+  testWidgets('portrait showcase: mobile controls and navigation', (
+    tester,
+  ) async {
+    try {
+      await tester.pumpWidget(
+        Align(
+          alignment: Alignment.topLeft,
+          child: RepaintBoundary(
+            key: captureKey,
+            child: const SizedBox(
+              width: 390,
+              height: 780,
+              child: PocketHostApp(),
             ),
           ),
-        );
-        await guest.waitFor(tester, '00');
-        await capture(tester, '01-home');
-        await tap(tester, 'Mobile UI');
-        await guest.waitFor(tester, 'Scaffold + AppBar');
-        await capture(tester, '02-mobile-light');
-        await tap(tester, 'Dark');
-        await guest.waitFor(tester, 'Light');
-        await capture(tester, '03-mobile-dark');
-        await tap(tester, 'Controls');
-        await tap(tester, 'Enabled');
-        await guest.waitFor(tester, 'Disabled');
-        await tap(tester, 'Show dialog');
-        await guest.waitFor(tester, 'JS-owned dialog');
-        await capture(tester, '04-dialog');
-        await tap(tester, 'Close');
-        await tap(tester, 'Overview');
-        await tap(tester, 'Transitions');
-        await guest.waitFor(tester, 'Push Mobile');
-        await capture(tester, '05-transitions');
-        await tap(tester, 'Push Mobile');
-        await guest.waitFor(tester, 'Scaffold + AppBar');
-        await tap(tester, 'Gallery', scroll: false);
-        await tap(tester, 'Liquid Glass');
-        await guest.waitFor(tester, 'Glass region');
-        for (
-          var i = 0;
-          i < 60 && find.byType(BackdropFilter).evaluate().isEmpty;
-          i++
-        ) {
-          await tester.pump(const Duration(milliseconds: 50));
-        }
-        expect(
-          find.byType(BackdropFilter),
-          findsWidgets,
-          reason:
-              'JS glass must reach native SURFACE_QUAD and actual Flutter backdrop',
-        );
-        if (ui.ImageFilter.isShaderFilterSupported) {
-          for (
-            var i = 0;
-            i < 60 &&
-                find
-                    .byKey(const ValueKey('pocket-glass-refractive'))
-                    .evaluate()
-                    .isEmpty;
-            i++
-          ) {
-            await tester.pump(const Duration(milliseconds: 50));
-          }
-          expect(
-            find.byKey(const ValueKey('pocket-glass-refractive')),
-            findsWidgets,
-          );
-        }
-        expect(find.byKey(const ValueKey('pocket-glass-failed')), findsNothing);
-        await capture(tester, '06-liquid-glass');
-        await tap(tester, 'pill');
-        await capture(tester, '07-liquid-pill');
-        await tap(tester, 'Home', scroll: false);
-        await guest.waitFor(tester, '00');
-        expect(
-          find.byType(BackdropFilter),
-          findsNothing,
-          reason:
-              'leaving a JS glass component releases its compositor surface',
-        );
-        expect(tester.takeException(), isNull);
-      } finally {
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-      }
-    },
-  );
+        ),
+      );
+      await guest.waitFor(tester, '00');
+      await capture(tester, '01-home');
+      expect(guest.texts(tester), isNot(contains('Liquid Glass')));
+      await tap(tester, 'Mobile UI');
+      await guest.waitFor(tester, 'Scaffold + AppBar');
+      await capture(tester, '02-mobile-light');
+      await tap(tester, 'Dark');
+      await guest.waitFor(tester, 'Light');
+      await capture(tester, '03-mobile-dark');
+      await tap(tester, 'Controls');
+      await tap(tester, 'Enabled');
+      await guest.waitFor(tester, 'Disabled');
+      await tap(tester, 'Show dialog');
+      await guest.waitFor(tester, 'JS-owned dialog');
+      await capture(tester, '04-dialog');
+      await tap(tester, 'Close');
+      await tap(tester, 'Overview');
+      await tap(tester, 'Transitions');
+      await guest.waitFor(tester, 'Push Mobile');
+      expect(guest.texts(tester), isNot(contains('Glass morph')));
+      await capture(tester, '05-transitions');
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }
+  });
+
+  testWidgets('Home and Gallery omit the deferred Glass entry', (tester) async {
+    try {
+      await tester.pumpWidget(
+        const Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(width: 390, height: 780, child: PocketHostApp()),
+        ),
+      );
+      await guest.waitFor(tester, '00');
+      expect(guest.texts(tester), isNot(contains('Liquid Glass')));
+      await tap(tester, 'Gallery');
+      await guest.waitFor(tester, 'Official building blocks');
+      expect(guest.texts(tester), isNot(contains('Liquid Glass')));
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }
+  });
 }

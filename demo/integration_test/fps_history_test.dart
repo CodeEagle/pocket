@@ -97,8 +97,9 @@ void main() {
       await guest.waitFor(tester, 'Runtime');
       await showcase.tap(tester, 'FPS history');
       await _waitForGuestHistory(tester);
-      expect(guest.texts(tester), contains('FPS history'));
-      expect(guest.texts(tester), contains('Recent 60 samples'));
+      // Route scroll offset may leave the intro above the viewport. Assert
+      // the visible data section, then verify fresh persisted facts below.
+      expect(guest.texts(tester), contains('Latest FPS'));
       expect(guest.texts(tester), isNot(contains('No FPS samples')));
 
       // Replacing the real app triggers PocketSession.dispose(), which queues
@@ -113,6 +114,27 @@ void main() {
         reason:
             'the persisted window must contain a real low-FPS/slow-frame sample with a large gap',
       );
+      final document = jsonDecode(await historyFile.readAsString()) as Map;
+      final longFrames = (document['longFrameEvents'] as List? ?? const [])
+          .whereType<Map>()
+          .where((event) => _atOrAfter(event['timestamp'], startedAt))
+          .toList();
+      expect(
+        longFrames,
+        isNotEmpty,
+        reason: 'real UI stalls must persist individual long-frame facts',
+      );
+      expect(
+        longFrames.any((event) {
+          final budget = event['budgetMs'] as num;
+          return event['active'] == true &&
+              ['buildMs', 'rasterMs', 'nativeMs', 'activeGapMs'].any(
+                (field) =>
+                    event[field] is num && (event[field] as num) > budget * 1.5,
+              );
+        }),
+        isTrue,
+      );
 
       // A fresh host instance must read the same on-disk history and expose it
       // through the real JS runtime.performance capability.
@@ -122,7 +144,7 @@ void main() {
       await guest.waitFor(tester, 'Runtime');
       await showcase.tap(tester, 'FPS history');
       await _waitForGuestHistory(tester);
-      expect(guest.texts(tester), contains('FPS history'));
+      expect(guest.texts(tester), contains('Latest FPS'));
       expect(guest.texts(tester), isNot(contains('No FPS samples')));
     } finally {
       stallTimer?.cancel();
@@ -157,8 +179,7 @@ _FpsLabel? _readFpsLabel(WidgetTester tester) {
 Future<void> _waitForGuestHistory(WidgetTester tester) async {
   for (var index = 0; index < 200; index++) {
     final painted = guest.texts(tester);
-    if (painted.contains('Recent 60 samples') &&
-        !painted.contains('No FPS samples')) {
+    if (painted.contains('Latest FPS') && !painted.contains('No FPS samples')) {
       return;
     }
     await tester.pump(const Duration(milliseconds: 50));

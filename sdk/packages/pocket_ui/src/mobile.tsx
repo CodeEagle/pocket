@@ -12,7 +12,7 @@
  *   gradient is never reported as native blur or refraction.
  */
 
-import { For, Show, children as resolveChildren, createContext, createEffect, createSignal, onCleanup, onMount, useContext, type JSX } from "solid-js";
+import { For, Show, children as resolveChildren, createContext, createEffect, createMemo, createSignal, onCleanup, onMount, useContext, type JSX } from "solid-js";
 import { CompositorSurface, Focusable, Modal, Text, View, type ViewProps } from "@pocketjs/framework/solid/components";
 import { buildLiquidGlassRecipe, type GlassShape } from "./legacy.ts";
 
@@ -367,11 +367,11 @@ export function GlassSurface(props: {
 }): JSX.Element {
   const [registered, setRegistered] = createSignal(false);
   const id = `guest.glass.${nextGlassSurface++}`;
-  const recipe = () => buildLiquidGlassRecipe({ shape: props.shape ?? "rounded", focused: props.pressed === true, warp: true });
+  const recipe = createMemo(() => buildLiquidGlassRecipe({ shape: props.shape ?? "rounded", focused: props.pressed === true, warp: true }));
   // Keep the shell transparent when a native surface is registered; the
   // gradient layer below is only the unsupported-host fallback.
   const fallbackClass = props.class ?? "flex-col gap-2 p-3 rounded-xl border-slate-200";
-  const payload = (): string => {
+  const payload = createMemo((): string => {
     const current = recipe();
     return JSON.stringify({
       radius: current.radius,
@@ -388,32 +388,25 @@ export function GlassSurface(props: {
       pressed: props.pressed === true,
       shape: current.shape,
     });
-  };
-  let mounted = false;
-  const register = (): void => {
+  });
+  const register = (nextPayload: string): void => {
     const registerSurface = surfaceGlobal.pocket?.registerSurface;
     if (typeof registerSurface !== "function") {
       setRegistered(false);
       return;
     }
     try {
-      const ok = registerSurface(id, "glass", payload()) !== false;
+      const ok = registerSurface(id, "glass", nextPayload) !== false;
       setRegistered(ok);
     } catch {
       setRegistered(false);
     }
   };
-  onMount(() => {
-    mounted = true;
-    register();
-  });
   // The host updates an existing package id in place. This keeps shape and
   // pressed/focus controls interactive without remounting the surface node.
-  createEffect(() => {
-    void props.shape;
-    void props.pressed;
-    if (mounted && registered()) register();
-  });
+  // The string memo suppresses equal payloads. One effect owns registration;
+  // it does not subscribe to the registered signal it updates.
+  createEffect(() => register(payload()));
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
     <View class={fallbackClass}>

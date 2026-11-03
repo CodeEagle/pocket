@@ -15,6 +15,7 @@ export 'package:pocket_flutter/pocket_flutter.dart'
         PocketOffloadCompletion,
         PocketOffloadCancellationToken,
         PocketEvent,
+        PocketLongFrameEvent,
         PocketPerformanceSample,
         PocketDuplexMessage,
         PocketDuplexEvent,
@@ -31,7 +32,6 @@ export 'package:pocket_flutter/pocket_flutter.dart'
         PocketReplayRunner,
         PocketRecordingReplay,
         PocketRecordingFormatException,
-        PocketRecordingLimitException,
         replayPocketRecording;
 export 'package:pocket_services/pocket_services.dart'
     show

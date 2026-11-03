@@ -1,7 +1,6 @@
 import { For, Show, createSignal, onCleanup, type JSX } from "solid-js";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import {
-  GlassSurface,
   InputField,
   MobileAppBar,
   MobileBadge,
@@ -27,12 +26,10 @@ import {
 } from "@pocket/ui";
 import {
   TRANSITION_MODES,
-  buildLiquidGlassRecipe,
   computeTransitionDescriptor,
-  type GlassShape,
   type TransitionMode,
 } from "@pocket/ui";
-import type { JsonValue } from "./host.ts";
+import type { JsonValue } from "@pocket/ui/host";
 import type { CapabilityKey, CapabilityState, DemoEvent, DemoState, HardwareCapability, HardwarePermission } from "./state.ts";
 
 export type MobilePageProps = {
@@ -133,10 +130,14 @@ const transitionLabels: Record<TransitionMode, string> = {
   PORTAL_EXPAND: "Portal expand",
 };
 
+// Keep the shared transition enum intact, but do not expose the deferred
+// glass mode as a selectable Demo route-motion option.
+const demoTransitionModes = TRANSITION_MODES.filter((id) => id !== "LIQUID_GLASS_MORPH");
+
 export function TransitionsPage(props: MobilePageProps): JSX.Element {
   const [progress, setProgress] = createSignal(0.55);
   const descriptor = () => computeTransitionDescriptor(props.state().transitionMode, progress(), false, 360);
-  const modeItems = TRANSITION_MODES.map((id) => ({ id, label: transitionLabels[id].slice(0, 10) }));
+  const modeItems = demoTransitionModes.map((id) => ({ id, label: transitionLabels[id].slice(0, 10) }));
   return (
     <MobileThemeProvider>
       <MobileScaffold class="flex-col gap-2 p-2 bg-slate-50">
@@ -165,35 +166,6 @@ export function TransitionsPage(props: MobilePageProps): JSX.Element {
     </MobileThemeProvider>
   );
 }
-const glassShapes: readonly GlassShape[] = ["rounded", "pill", "circle"];
-
-export function LiquidGlassPage(props: MobilePageProps): JSX.Element {
-  const [shape, setShape] = createSignal<GlassShape>("rounded");
-  const [pressed, setPressed] = createSignal(false);
-  const recipe = () => buildLiquidGlassRecipe({ shape: shape(), focused: pressed(), warp: true });
-  return (
-    <MobileThemeProvider>
-      <MobileScaffold class="flex-col gap-2 p-2 bg-slate-50">
-        <MobileAppBar title="Liquid Glass" subtitle="Native bridge or fallback" leading={<MobileButton label="Back" kind="text" compact onPress={() => props.dispatch({ type: "popRoute" })} />} trailing={<MobileBadge label="glass bridge" tone="accent" />} />
-        <MobileCard title="Surface parameters" detail="Recipe values are sent to the host.">
-          <MobileSegmentedControl items={glassShapes.map((id) => ({ id, label: id }))} active={shape()} onChange={(id) => setShape(id as GlassShape)} />
-          <MobileSwitch value={pressed()} label="Pressed / focused" onChange={setPressed} />
-          <Text class="text-xs text-slate-600">blurSigma {recipe().blurSigma} · tint {recipe().tintOpacity.toFixed(2)} · sample refraction {recipe().sample.totalRefraction.toFixed(3)}</Text>
-        </MobileCard>
-        <View class="relative mx-2 h-[160] overflow-hidden rounded-xl bg-gradient-to-r from-purple-700 via-cyan-500 to-amber-300">
-          <View class="absolute inset-3 rounded-xl bg-[#fef08a80]" />
-          <GlassSurface shape={shape()} pressed={pressed()} class="relative flex-col gap-2 p-4 rounded-xl border-slate-200">
-            <Text class="text-lg text-slate-950 font-bold">Glass region</Text>
-            <Text class="text-xs text-slate-700">Registered bridge uses blur/refraction.</Text>
-            <Text class="text-xs text-slate-700">Fallback is a gradient only.</Text>
-            <MobileButton label="Open hardware surface lane" kind="outlined" onPress={() => props.dispatch({ type: "navigate", route: "hardware" })} />
-          </GlassSurface>
-        </View>
-      </MobileScaffold>
-    </MobileThemeProvider>
-  );
-}
-
 const hardwarePermissions: readonly { name: HardwarePermission; label: string }[] = [
   { name: "hardware.camera", label: "Camera" },
   { name: "hardware.photos", label: "Photos" },

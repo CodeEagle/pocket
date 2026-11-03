@@ -128,13 +128,6 @@ void main() {
     await guest.waitForContaining(tester, '500 retained nodes');
     await Future<void>.delayed(const Duration(seconds: 1));
     results.add(await sample(tester, 'stress_500_idle'));
-    await guest.tapGuest(tester, 'Gallery');
-    await guest.tapGuest(tester, 'Liquid Glass');
-    await guest.waitFor(tester, 'Glass region');
-    // Separate steady optical rendering from first-use shader compilation and
-    // screenshot readback, both of which can lower a short-lived FPS label.
-    await Future<void>.delayed(const Duration(seconds: 3));
-    results.add(await sample(tester, 'liquid_glass_idle'));
     // Machine-readable output is intentionally printed once, outside sampling.
     // ignore: avoid_print
     print('POCKET_PERF ${jsonEncode(results)}');

@@ -342,6 +342,10 @@ class PocketWechatHost {
 
   async handleRequest(request) {
     if (!isRecord(request) || typeof request.requestId !== "string" || typeof request.capability !== "string") return;
+    // Disposal can synchronously drain a cancellation response. Do not admit
+    // requests emitted by that response into a host that is already tearing
+    // down; they cannot be completed after the WASM instance is destroyed.
+    if (this.disposed || !this.exports || !this.host) return;
     if (this.pending.size >= MAX_REQUESTS) {
       this.respond(request, false, null, { code: "request_quota", message: "WeChat host request limit reached" });
       return;
@@ -351,8 +355,7 @@ class PocketWechatHost {
       return;
     }
     const generation = this.generation;
-    const record = { id: request.requestId, request, generation, timer: 0, cancelled: false, controller: createAbortController() };
-    record.abort = () => record.controller.abort();
+    const record = { request, generation, timer: 0, cancelled: false, controller: createAbortController() };
     this.pending.set(request.requestId, record);
     record.timer = setTimeout(() => {
       if (!this.pending.delete(request.requestId)) return;
@@ -453,44 +456,15 @@ class PocketWechatHost {
     throw this.error("unsupported", `Unsupported WeChat storage operation: ${operation}`);
   }
 
-  respond(arg1, arg2, arg3, arg4) {
-    let requestId;
-    let capability;
-    let ok;
-    let result;
-    let error;
-
-    if (typeof arg1 === "object" && arg1 !== null) {
-      requestId = arg1.requestId;
-      capability = arg1.capability;
-      ok = Boolean(arg2);
-      result = arg3;
-      error = arg4;
-    } else {
-      requestId = String(arg1 || "");
-      if (typeof arg4 === "boolean") {
-        ok = arg4;
-        result = arg2;
-        error = arg3;
-      } else if (typeof arg2 === "boolean") {
-        ok = arg2;
-        result = arg3;
-        error = arg4;
-      } else {
-        ok = false;
-        result = arg2;
-        error = arg3;
-      }
-    }
-    const errorShape = typeof error === "string" ? { code: "cancelled", message: error } : error;
+  respond(request, ok, result, error) {
     const packet = JSON.stringify({
       type: "event",
       name: "host.response",
       payload: {
-        requestId,
-        ...(capability ? { capability } : {}),
+        requestId: request.requestId,
+        capability: request.capability,
         ok,
-        ...(ok ? { result: result === undefined ? null : result } : { error: errorShape }),
+        ...(ok ? { result: result === undefined ? null : result } : { error }),
       },
     });
     this.deliverResponse(packet);
@@ -651,11 +625,15 @@ class PocketWechatHost {
     for (const entry of entries) {
       if (entry.timer) clearTimeout(entry.timer);
       entry.cancelled = true;
-      if (typeof entry.abort === "function") entry.abort();
-      else if (entry.controller) entry.controller.abort();
+      try {
+        entry.controller.abort();
+      } catch (_) {
+        // A provider's abort hook is untrusted. Continue cancelling every
+        // request and always reach the native destroy in dispose().
+      }
       if (!this.disposed && this.exports && this.host) {
         try {
-          this.respond(entry.id, null, reason || "cancelled", false);
+          this.respond(entry.request, false, null, { code: "cancelled", message: reason || "cancelled" });
         } catch (_) {}
       }
     }
@@ -663,19 +641,21 @@ class PocketWechatHost {
 
   dispose() {
     if (this.disposed) return;
+    // Close admission before invoking any abort hook. The existing lifetime
+    // flag also prevents cancellation responses from reentering a dying guest.
+    this.disposed = true;
     this.visible = false;
     try {
       this.stopScheduled();
       this.cancelPending("host disposed");
     } finally {
-      if (this.exports && this.host) {
-        this.exports.web_destroy(this.host);
-        this.host = 0;
-      }
-      this.disposed = true;
+      const exports = this.exports;
+      const host = this.host;
+      this.host = 0;
       this.outbound.length = 0;
       this.instance = null;
       this.exports = null;
+      if (exports && host) exports.web_destroy(host);
     }
   }
 }

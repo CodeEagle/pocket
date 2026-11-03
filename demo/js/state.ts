@@ -19,7 +19,6 @@ export type Route =
   | "performance"
   | "mobile"
   | "transitions"
-  | "glass"
   | "hardware";
 
 export type { TransitionMode } from "@pocket/ui";
@@ -108,22 +107,75 @@ export interface CameraPreviewState {
 
 export type PerformanceTimestamp = string | number;
 
+/**
+ * A long-frame event emitted by the host's real frame-timing sampler.
+ *
+ * The event intentionally keeps the four possible sources separate.  A low
+ * FPS window is not enough to call a frame a jank event: a guest may only
+ * render when dirty, which produces a low average FPS while its active gaps
+ * remain zero.  `budgetMs` is the budget for the display refresh rate
+ * observed by the host, not a JS-side 60 Hz assumption.
+ */
+export interface PerformanceJank {
+  timestamp: PerformanceTimestamp;
+  refreshHz?: number;
+  /** Canonical host field for one display frame budget. */
+  budgetMs?: number;
+  durationMs?: number;
+  buildMs?: number;
+  rasterMs?: number;
+  /** Bridge/decode path duration; this is not pure Rust/native CPU time. */
+  nativeMs?: number;
+  activeGapMs?: number;
+  active?: boolean;
+  /** Host measurement scope, for example flutterView or pocketView. */
+  scope?: string;
+  reason?: string;
+  context?: string;
+  page?: string;
+  action?: string;
+}
+
 export interface PerformancePoint {
   timestamp: PerformanceTimestamp;
   fps: number;
   minFps?: number;
-  maxGapMs: number;
-  slowFrames: number;
-  nativeMsP95: number;
+  /** Compatibility aggregate retained for existing FPS history providers. */
+  maxGapMs?: number;
+  /** Compatibility aggregate retained for existing FPS history providers. */
+  slowFrames?: number;
+  /** Compatibility bridge/native path metric; not pure native work. */
+  nativeMsP95?: number;
+  refreshHz?: number;
+  frameBudgetMs?: number;
+  buildMsP95?: number;
+  rasterMsP95?: number;
+  nativeWorkMsP95?: number;
+  activeGapMs?: number;
+  activeGapCount?: number;
+  /** Canonical host list of active long-frame events. */
+  longFrameEvents?: PerformanceJank[];
+  longFrameCount?: number;
+  /** Compatibility count accepted from older providers. */
+  longFrames?: number;
+  /** Host diagnostic context. Page/action context is attached in JS. */
+  context?: string;
+  page?: string;
+  action?: string;
 }
 
 export interface PerformanceSnapshot {
   latest: PerformancePoint | null;
   history: PerformancePoint[];
   recording: boolean;
+  /** Canonical persisted host list of active long-frame events. */
+  longFrameEvents?: PerformanceJank[];
+  /** Host diagnostic context, if the provider exposes one. */
+  context?: string;
 }
 
 export const PERFORMANCE_HISTORY_LIMIT = 60;
+export const PERFORMANCE_JANK_LIMIT = 60;
 
 export interface DemoState {
   route: Route;
@@ -198,35 +250,181 @@ function timestampOf(value: unknown): PerformanceTimestamp | undefined {
   return undefined;
 }
 
+function positiveNumber(value: unknown, maximum = 3600000): number | undefined {
+  const number = finiteNumber(value);
+  return number !== undefined && number > 0 && number <= maximum ? number : undefined;
+}
+
+function firstNumber(value: Record<string, unknown>, keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const number = finiteNumber(value[key]);
+    if (number !== undefined) return number;
+  }
+  return undefined;
+}
+
+function firstPositiveNumber(value: Record<string, unknown>, keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const number = positiveNumber(value[key]);
+    if (number !== undefined) return number;
+  }
+  return undefined;
+}
+
+function hasNegativeNumber(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.some((key) => {
+    const number = finiteNumber(value[key]);
+    return number !== undefined && number < 0;
+  });
+}
+
+function contextString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Parse one explicit long-frame record, accepting the native aliases. */
+export function parsePerformanceJank(
+  value: unknown,
+  fallbackTimestamp?: PerformanceTimestamp,
+  fallbackRefreshHz?: number,
+): PerformanceJank | undefined {
+  if (!isRecord(value)) return undefined;
+  const timestamp = timestampOf(value.timestamp) ?? timestampOf(value.at) ?? fallbackTimestamp;
+  if (timestamp === undefined) return undefined;
+  const refreshHz = firstPositiveNumber(value, ["refreshHz", "displayHz"]) ?? fallbackRefreshHz;
+  const budgetMs = firstPositiveNumber(value, ["budgetMs", "frameBudgetMs"])
+    ?? (refreshHz !== undefined ? 1000 / refreshHz : undefined);
+  const durationMs = firstPositiveNumber(value, ["durationMs", "frameDurationMs", "elapsedMs"]);
+  const buildMs = firstNumber(value, ["buildMs", "uiBuildMs", "buildDurationMs"]);
+  const rasterMs = firstNumber(value, ["rasterMs", "uiRasterMs", "rasterDurationMs"]);
+  const nativeMs = firstNumber(value, ["nativeMs", "nativeWorkMs", "nativeDurationMs", "nativeWork"]);
+  const activeGapMs = firstNumber(value, ["activeGapMs", "gapMs", "frameGapMs"]);
+  const active = typeof value.active === "boolean" ? value.active : undefined;
+  const scope = contextString(value.scope);
+  // The host persists only active-frame facts. An explicit idle marker must
+  // never become a user-visible jank event after transport or replay.
+  if (active === false) return undefined;
+  if (hasNegativeNumber(value, [
+    "durationMs", "frameDurationMs", "elapsedMs", "buildMs", "uiBuildMs",
+    "buildDurationMs", "rasterMs", "uiRasterMs", "rasterDurationMs", "nativeMs",
+    "nativeWorkMs", "nativeDurationMs", "nativeWork", "activeGapMs", "gapMs",
+    "frameGapMs",
+  ])) return undefined;
+  const reason = contextString(value.reason ?? value.kind ?? value.phase);
+  const context = contextString(value.context);
+  const page = contextString(value.page ?? value.route);
+  const action = contextString(value.action ?? value.lastAction);
+  // Do not turn an arbitrary `jank` marker into a fake event. Require at
+  // least one measured duration/gap or an explicit reason from the provider.
+  if (
+    durationMs === undefined &&
+    buildMs === undefined &&
+    rasterMs === undefined &&
+    nativeMs === undefined &&
+    activeGapMs === undefined &&
+    reason === undefined
+  ) return undefined;
+  return {
+    timestamp,
+    ...(refreshHz !== undefined ? { refreshHz } : {}),
+    ...(budgetMs !== undefined ? { budgetMs } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(buildMs !== undefined && buildMs >= 0 ? { buildMs } : {}),
+    ...(rasterMs !== undefined && rasterMs >= 0 ? { rasterMs } : {}),
+    ...(nativeMs !== undefined && nativeMs >= 0 ? { nativeMs } : {}),
+    ...(activeGapMs !== undefined && activeGapMs >= 0 ? { activeGapMs } : {}),
+    ...(active !== undefined ? { active } : {}),
+    ...(scope !== undefined ? { scope } : {}),
+    ...(reason !== undefined ? { reason } : {}),
+    ...(context !== undefined ? { context } : {}),
+    ...(page !== undefined ? { page } : {}),
+    ...(action !== undefined ? { action } : {}),
+  };
+}
+
+function jankItems(value: unknown): unknown[] {
+  if (isRecord(value)) {
+    const nested = value.longFrameEvents ?? value.events ?? value.items;
+    if (nested !== undefined) return jankItems(nested);
+  }
+  if (Array.isArray(value)) return value;
+  return value === undefined || value === null ? [] : [value];
+}
+
+function parsedJank(value: Record<string, unknown>, timestamp: PerformanceTimestamp, refreshHz?: number): PerformanceJank[] {
+  const source = value.longFrameEvents ?? value.jank ?? value.longFrames ?? value.longFrame;
+  return jankItems(source).flatMap((item) => {
+    const parsed = parsePerformanceJank(item, timestamp, refreshHz);
+    return parsed ? [parsed] : [];
+  });
+}
+
 /** Parse only provider-produced samples with all required measurements. */
 export function parsePerformancePoint(value: unknown): PerformancePoint | undefined {
   if (!isRecord(value)) return undefined;
   const timestamp = timestampOf(value.timestamp);
   const fps = finiteNumber(value.fps);
-  const maxGapMs = finiteNumber(value.maxGapMs);
-  const slowFrames = finiteNumber(value.slowFrames);
+  if (timestamp === undefined || fps === undefined || fps < 0) return undefined;
+  if (hasNegativeNumber(value, [
+    "minFps", "maxGapMs", "activeGapMs", "maxActiveGapMs", "slowFrames",
+    "activeGapCount", "nativeMsP95", "refreshHz", "displayHz", "frameBudgetMs",
+    "budgetMs", "buildMsP95", "uiBuildMsP95", "rasterMsP95", "uiRasterMsP95",
+    "nativeWorkMsP95", "nativeWorkP95Ms", "longFrames", "longFrameCount",
+  ])) return undefined;
+  const refreshHz = firstPositiveNumber(value, ["refreshHz", "displayHz"]);
+  const frameBudgetMs = firstPositiveNumber(value, ["frameBudgetMs", "budgetMs"])
+    ?? (refreshHz !== undefined ? 1000 / refreshHz : undefined);
+  const activeGapMs = firstNumber(value, ["activeGapMs", "maxActiveGapMs"]);
+  const maxGapMs = finiteNumber(value.maxGapMs) ?? activeGapMs;
+  const jank = parsedJank(value, timestamp, refreshHz);
+  const slowFrames = finiteNumber(value.slowFrames)
+    ?? finiteNumber(value.activeGapCount)
+    ?? finiteNumber(value.longFrames)
+    ?? (jank.length > 0 ? jank.length : undefined);
   const nativeMsP95 = finiteNumber(value.nativeMsP95);
+  const buildMsP95 = firstNumber(value, ["buildMsP95", "uiBuildMsP95"]);
+  const rasterMsP95 = firstNumber(value, ["rasterMsP95", "uiRasterMsP95"]);
+  const nativeWorkMsP95 = firstNumber(value, ["nativeWorkMsP95", "nativeWorkP95Ms"]);
+  const activeGapCount = finiteNumber(value.activeGapCount);
+  const longFrames = finiteNumber(value.longFrames) ?? (jank.length > 0 ? jank.length : undefined);
+  const longFrameCount = finiteNumber(value.longFrameCount) ?? (jank.length > 0 ? jank.length : undefined);
+  // Legacy hosts must continue to parse, while newer hosts may omit the
+  // compatibility aggregates once the explicit breakdown is available.
+  const hasExplicitMetrics =
+    refreshHz !== undefined ||
+    frameBudgetMs !== undefined ||
+    activeGapMs !== undefined ||
+    buildMsP95 !== undefined ||
+    rasterMsP95 !== undefined ||
+    nativeWorkMsP95 !== undefined ||
+    jank.length > 0;
   if (
-    timestamp === undefined ||
-    fps === undefined ||
-    maxGapMs === undefined ||
-    slowFrames === undefined ||
-    nativeMsP95 === undefined ||
-    fps < 0 ||
-    maxGapMs < 0 ||
-    slowFrames < 0 ||
-    nativeMsP95 < 0
-  ) {
-    return undefined;
-  }
+    !hasExplicitMetrics &&
+    (maxGapMs === undefined || slowFrames === undefined || nativeMsP95 === undefined)
+  ) return undefined;
   const minFps = finiteNumber(value.minFps);
   return {
     timestamp,
     fps,
     ...(minFps !== undefined && minFps >= 0 ? { minFps } : {}),
-    maxGapMs,
-    slowFrames,
-    nativeMsP95,
+    ...(maxGapMs !== undefined && maxGapMs >= 0 ? { maxGapMs } : {}),
+    ...(slowFrames !== undefined && slowFrames >= 0 ? { slowFrames } : {}),
+    ...(nativeMsP95 !== undefined && nativeMsP95 >= 0 ? { nativeMsP95 } : {}),
+    ...(refreshHz !== undefined ? { refreshHz } : {}),
+    ...(frameBudgetMs !== undefined ? { frameBudgetMs } : {}),
+    ...(buildMsP95 !== undefined && buildMsP95 >= 0 ? { buildMsP95 } : {}),
+    ...(rasterMsP95 !== undefined && rasterMsP95 >= 0 ? { rasterMsP95 } : {}),
+    ...(nativeWorkMsP95 !== undefined && nativeWorkMsP95 >= 0 ? { nativeWorkMsP95 } : {}),
+    ...(activeGapMs !== undefined && activeGapMs >= 0 ? { activeGapMs } : {}),
+    ...(activeGapCount !== undefined && activeGapCount >= 0 ? { activeGapCount } : {}),
+    ...(longFrames !== undefined && longFrames >= 0 ? { longFrames } : {}),
+    ...(longFrameCount !== undefined && longFrameCount >= 0 ? { longFrameCount } : {}),
+    ...(jank.length > 0 ? { longFrameEvents: jank } : {}),
+    ...(contextString(value.context) !== undefined ? { context: contextString(value.context) } : {}),
+    ...(contextString(value.page ?? value.route) !== undefined ? { page: contextString(value.page ?? value.route) } : {}),
+    ...(contextString(value.action ?? value.lastAction) !== undefined ? { action: contextString(value.action ?? value.lastAction) } : {}),
   };
 }
 
@@ -240,12 +438,38 @@ function boundedHistory(history: PerformancePoint[]): PerformancePoint[] {
     : history.slice(history.length - PERFORMANCE_HISTORY_LIMIT);
 }
 
+function boundedJank(history: PerformanceJank[]): PerformanceJank[] {
+  return history.length <= PERFORMANCE_JANK_LIMIT
+    ? history
+    : history.slice(history.length - PERFORMANCE_JANK_LIMIT);
+}
+
 function mergePerformancePoint(history: PerformancePoint[], sample: PerformancePoint): PerformancePoint[] {
   const previous = history[history.length - 1];
   if (previous && sameTimestamp(previous.timestamp, sample.timestamp)) {
     return [...history.slice(0, -1), sample];
   }
   return [...history, sample];
+}
+
+function sameJank(first: PerformanceJank, second: PerformanceJank): boolean {
+  return String(first.timestamp) === String(second.timestamp) &&
+    first.scope === second.scope &&
+    first.activeGapMs === second.activeGapMs &&
+    first.durationMs === second.durationMs &&
+    first.buildMs === second.buildMs &&
+    first.rasterMs === second.rasterMs &&
+    first.nativeMs === second.nativeMs;
+}
+
+function mergeJank(history: PerformanceJank[], sample: PerformanceJank[]): PerformanceJank[] {
+  const merged = [...history];
+  for (const item of sample) {
+    const index = merged.findIndex((existing) => sameJank(existing, item));
+    if (index >= 0) merged[index] = item;
+    else merged.push(item);
+  }
+  return boundedJank(merged);
 }
 
 /** Convert the host's runtime.performance result without inventing values. */
@@ -258,21 +482,42 @@ export function parsePerformanceSnapshot(value: unknown): PerformanceSnapshot {
         return point ? [point] : [];
       }))
     : [];
+  const explicitJank = jankItems(value.longFrameEvents ?? value.jank ?? value.longFrames).flatMap((item) => {
+    const parsed = parsePerformanceJank(item);
+    return parsed ? [parsed] : [];
+  });
+  const historyJank = [
+    ...history.flatMap((point) => point.longFrameEvents ?? []),
+    ...(latest?.longFrameEvents ?? []),
+  ];
   return {
     latest: latest ?? null,
     history,
     recording: value.recording === true,
+    ...(explicitJank.length > 0 || historyJank.length > 0
+      ? { longFrameEvents: boundedJank(mergeJank(explicitJank, historyJank)) }
+      : {}),
+    ...(contextString(value.context) !== undefined ? { context: contextString(value.context) } : {}),
   };
 }
 
 export function appendPerformanceSample(
   snapshot: PerformanceSnapshot,
   sample: PerformancePoint,
+  recordFps = true,
 ): PerformanceSnapshot {
+  const longFrameEvents = mergeJank(snapshot.longFrameEvents ?? [], sample.longFrameEvents ?? []);
   return {
-    latest: sample,
-    history: boundedHistory(mergePerformancePoint(snapshot.history, sample)),
+    // Event-only host bursts intentionally carry fps=0/frames=0 because no
+    // cadence window was observed. Keep those diagnostics without replacing
+    // the last real FPS point or adding a poisoned history entry.
+    latest: recordFps ? sample : snapshot.latest,
+    history: recordFps ? boundedHistory(mergePerformancePoint(snapshot.history, sample)) : snapshot.history,
     recording: snapshot.recording,
+    ...(longFrameEvents.length > 0
+      ? { longFrameEvents }
+      : {}),
+    ...(snapshot.context !== undefined ? { context: snapshot.context } : {}),
   };
 }
 

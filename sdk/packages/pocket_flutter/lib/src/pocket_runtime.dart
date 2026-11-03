@@ -821,7 +821,7 @@ final class FfiPocketRuntime
       _actualAbiLookedUp = true;
       try {
         _actualAbi = _library.lookupFunction<_AbiNative, _AbiDart>(
-          'pocket_bytecode_actual_abi',
+          'pocket_bytecode_runtime_abi',
         );
       } on Object {
         _actualAbi = null;
