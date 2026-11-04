@@ -91,6 +91,26 @@ if (result.granted) {
 
 Android 12+ 蓝牙使用 scan/connect 权限；较早 Android 的扫描按需使用定位权限。依赖固定为 `permission_handler 12.0.1`、`device_info_plus 11.5.0`，与当前 Flutter 3.35 / Android 工具链保持兼容。`device_info_plus` 只提供 SDK 版本事实，由 `permission_handler` 执行请求。Android 私有照片与普通运动传感器不需要系统授权弹窗；iOS 照片保存使用 add-only 权限。平台权限声明、iOS usage descriptions 和 permission_handler 编译宏仍需与所选能力一致。
 
+## 独立模块的组合边界
+
+`--weather --location` 注册两个独立能力，不会使天气插件持有定位插件。独立天气包只声明网络策略，需要显式传入完整经纬度；缺少坐标返回 `invalid_argument`。业务需要当前位置时，由 JS 按顺序调用：
+
+```ts
+const position = await host.request<{ latitude: number; longitude: number }>(
+  'hardware.location.current',
+);
+const weather = await host.request('hardware.weather.current', {
+  latitude: position.latitude,
+  longitude: position.longitude,
+});
+```
+
+定位的系统授权仍通过 `permissions.request('hardware.location')` 显式发起。旧聚合包保留无坐标天气请求的兼容行为。
+
+定位和生物识别的 native pending 请求由真实会话及具体操作拥有。其他会话的 `disposeSession` 不取消当前操作；原操作已取消或替换后，迟到的系统回调不能完成新请求。定位不再保留“授权成功后重试请求”的旧分支，权限申请统一由 `permission_handler` 完成。
+
+Android 生物识别保留当前已有的 API 28+ 支持范围，直接以 `BiometricPrompt` 的真实认证回调为准，删除仅检查指纹注册情况的手工预检和 `USE_FINGERPRINT` 声明，避免其误拒支持其他生物识别方式的设备。`BiometricPrompt.authenticate` 使用 `USE_BIOMETRIC`，未注册、硬件不可用、取消等情况由系统回调返回，见 [Android 官方 API](https://developer.android.com/reference/android/hardware/biometrics/BiometricPrompt)。
+
 ## 来源与消融
 
 实施前检查 retained parent（排除 `pocket_host/`）：
@@ -116,3 +136,14 @@ Android 12+ 蓝牙使用 scan/connect 权限；较早 Android 的扫描按需使
 - iOS 五个独立 pod 的 Simulator Release 编译通过；传感器 2 项原生测试通过。当前本机 Xcode 不接受 lint 中 Flutter pod 的旧 deployment target 11；手动指定项目使用的 `IPHONEOS_DEPLOYMENT_TARGET=15.0` 验证通过。
 
 以上不等同于真实设备相机、BLE 或授权弹窗联调。
+
+### 后续消融验收
+
+在同一保留来源上进一步适配独立模块，删除 iOS 定位授权成功后的重复请求/超时分支、Android 指纹手工预检和无用权限声明；没有新增 Dart 授权队列或业务编排。定位清理共用完成路径，回调通过原生请求对象的 identity 与可信 sessionId 归属检查隔离，不另存递增 generation 状态。
+
+- core 6 项、兼容聚合包 11 项回归通过；core 静态分析通过。新增用例验证 weather-only 无定位依赖及定位/认证请求、清理携带同一可信会话。
+- 脚手架与权限配置 6 项测试（50 assertions）通过，生物识别仅声明 `USE_BIOMETRIC` 且重复修补不变。
+- Android 定位、生物识别 Kotlin 编译通过；iOS Simulator Debug Runner 构建包含两模块并通过。
+- iPhone 18 Pro 模拟器上 `hardware_native_test.dart` 与 `hardware_sensor_regression_test.dart` 共 2 项集成测试通过。前者读取真实 permission_handler 状态及独立 channel 返回值，后者验证真实 JS 点击两次传感器读取、返回首页并更新计数的帧变化。集成测试没有申请系统权限，也没有将模拟器缺少硬件转成成功。
+
+操作回调隔离的真机竞态及系统生物识别交互仍未实测；上述编译和模拟器结果不能代替这些验证。

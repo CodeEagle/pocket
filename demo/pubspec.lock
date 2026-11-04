@@ -449,7 +449,7 @@ packages:
     source: path
     version: "0.1.0"
   pocket_permissions:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       path: "../sdk/packages/pocket_permissions"
       relative: true

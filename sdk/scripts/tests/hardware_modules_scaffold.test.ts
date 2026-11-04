@@ -89,6 +89,13 @@ test("feature platform declarations are minimal and idempotent", () => {
     expect(androidOnce).not.toContain("ACCESS_FINE_LOCATION");
     patchAndroidHardwareManifest(android, false, false, ["camera"], ["hardware.camera", "hardware.photos"]);
     expect(readFileSync(androidManifest, "utf8")).toBe(androidOnce);
+    patchAndroidHardwareManifest(android, false, false, ["biometrics"]);
+    const biometrics = readFileSync(androidManifest, "utf8");
+    expect(biometrics).toContain("android.permission.USE_BIOMETRIC");
+    expect(biometrics).not.toContain("android.permission.USE_FINGERPRINT");
+    patchAndroidHardwareManifest(android, false, false, ["biometrics"]);
+    expect(readFileSync(androidManifest, "utf8")).toBe(biometrics);
+
 
     patchIosMinimum(ios, false, ["camera"]);
     const iosOnce = [readFileSync(plistPath, "utf8"), readFileSync(podfilePath, "utf8")];

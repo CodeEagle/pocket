@@ -18,6 +18,8 @@ dependencies:
     path: ../sdk/packages/pocket_platform
 
 dev_dependencies:
+  pocket_permissions:
+    path: ../sdk/packages/pocket_permissions
   pocket_flutter:
     path: ../sdk/packages/pocket_flutter
   pocket_services:

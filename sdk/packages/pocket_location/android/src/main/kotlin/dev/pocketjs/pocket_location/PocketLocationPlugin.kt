@@ -21,12 +21,14 @@ import java.util.Locale
 class PocketLocationPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     companion object {
         private const val CHANNEL_NAME = "com.pocketnexus.host/hardware/location"
+        private const val LEGACY_SESSION_ID = "legacy"
     }
 
     private var applicationContext: Context? = null
     private var channel: MethodChannel? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingLocationResult: MethodChannel.Result? = null
+    private var pendingLocationSessionId: String? = null
     private var locationTimeout: Runnable? = null
     private var locationListener: LocationListener? = null
     private var locationProvider: String? = null
@@ -39,16 +41,17 @@ class PocketLocationPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        finishLocation(error("plugin_revoked", "plugin detached"))
+        disposeNativeResources("plugin detached")
         channel?.setMethodCallHandler(null)
         channel = null
         applicationContext = null
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        val args = call.arguments.asStringMap()
         when (call.method) {
-            "getCurrentLocation" -> getCurrentLocation(result)
-            "disposeSession" -> disposeSession(result)
+            "getCurrentLocation" -> getCurrentLocation(args["sessionId"], result)
+            "disposeSession" -> disposeSession(args["sessionId"], result)
             else -> result.success(error("hardware_unsupported", "unknown location method: ${call.method}"))
         }
     }
@@ -71,7 +74,7 @@ class PocketLocationPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-    private fun getCurrentLocation(result: MethodChannel.Result) {
+    private fun getCurrentLocation(sessionIdValue: Any?, result: MethodChannel.Result) {
         val context = applicationContext
         if (context == null) {
             result.success(error("hardware_not_ready", "Android context is not attached"))
@@ -115,12 +118,16 @@ class PocketLocationPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         "horizontalAccuracyM" to location.accuracy.toDouble(),
                         "timestamp" to formatTimestamp(location.time),
                     ),
+                    this,
                 )
             }
 
             override fun onProviderDisabled(providerName: String) {
                 if (providerName == locationProvider) {
-                    finishLocation(error("hardware_location_error", "location provider was disabled"))
+                    finishLocation(
+                        error("hardware_location_error", "location provider was disabled"),
+                        this,
+                    )
                 }
             }
 
@@ -130,31 +137,37 @@ class PocketLocationPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         locationListener = listener
         locationProvider = provider
         pendingLocationResult = result
+        pendingLocationSessionId = normalizeSessionId(sessionIdValue)
         try {
             manager.requestLocationUpdates(provider, 1000L, 0f, listener, Looper.getMainLooper())
         } catch (security: SecurityException) {
-            pendingLocationResult = null
-            locationListener = null
-            locationProvider = null
-            result.success(error("hardware_permission_denied", security.message ?: "location permission is not granted"))
+            finishLocation(
+                error("hardware_permission_denied", security.message ?: "location permission is not granted"),
+                listener,
+            )
             return
         } catch (failure: Exception) {
-            pendingLocationResult = null
-            locationListener = null
-            locationProvider = null
-            result.success(error("hardware_location_error", failure.message ?: "location request failed"))
+            finishLocation(
+                error("hardware_location_error", failure.message ?: "location request failed"),
+                listener,
+            )
             return
         }
         val timeout = Runnable {
-            finishLocation(error("hardware_location_timeout", "no location fix was received"))
+            finishLocation(
+                error("hardware_location_timeout", "no location fix was received"),
+                listener,
+            )
         }
         locationTimeout = timeout
         mainHandler.postDelayed(timeout, 30_000L)
     }
 
-    private fun finishLocation(value: Map<String, Any?>) {
+    private fun finishLocation(value: Map<String, Any?>, expectedListener: LocationListener? = null) {
+        if (expectedListener != null && locationListener !== expectedListener) return
         val callback = pendingLocationResult ?: return
         pendingLocationResult = null
+        pendingLocationSessionId = null
         locationTimeout?.let(mainHandler::removeCallbacks)
         locationTimeout = null
         val context = applicationContext
@@ -174,10 +187,29 @@ class PocketLocationPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     // endregion
 
-    private fun disposeSession(result: MethodChannel.Result) {
-        finishLocation(error("plugin_revoked", "hardware session disposed"))
-        result.success(ok("disposed" to true))
+    private fun disposeSession(sessionIdValue: Any?, result: MethodChannel.Result) {
+        val ownerSessionId = normalizeSessionId(sessionIdValue)
+        cancelLocation("hardware session disposed", ownerSessionId, includeAll = false)
+        result.success(ok("disposed" to true, "sessionId" to ownerSessionId))
     }
+
+    private fun disposeNativeResources(reason: String) {
+        cancelLocation(reason, ownerSessionId = null, includeAll = true)
+    }
+
+    private fun cancelLocation(reason: String, ownerSessionId: String?, includeAll: Boolean) {
+        if (!includeAll && pendingLocationSessionId != ownerSessionId) return
+        val listener = locationListener
+        if (listener != null) {
+            finishLocation(error("plugin_revoked", reason), listener)
+        }
+    }
+
+    private fun normalizeSessionId(value: Any?): String =
+        (value as? String)?.trim()?.takeIf { it.isNotEmpty() } ?: LEGACY_SESSION_ID
+
+    private fun Any?.asStringMap(): Map<String, Any?> =
+        (this as? Map<*, *>)?.entries?.associate { (key, value) -> key.toString() to value } ?: emptyMap()
 
     private fun ok(vararg values: Pair<String, Any?>): Map<String, Any?> {
         val result = LinkedHashMap<String, Any?>()

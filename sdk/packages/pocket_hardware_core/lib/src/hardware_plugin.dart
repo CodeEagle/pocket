@@ -675,7 +675,8 @@ class HardwareCapabilityPlugin extends PocketPlugin {
   PocketPluginDescriptor get descriptor {
     final full = _fullDescriptor;
     final selectedPermissions = <String>{
-      if (includeLegacyPermissions) ...HardwarePermissions.all,
+      if (includeLegacyPermissions)
+        ..._selectedOptionalPermissions(HardwarePermissions.all),
       for (final entry in full.capabilities.entries)
         if (_enabled(entry.key) &&
             entry.key != HardwareCapabilities.requestPermission)
@@ -683,7 +684,7 @@ class HardwareCapabilityPlugin extends PocketPlugin {
       for (final entry in full.capabilities.entries)
         if (_enabled(entry.key) &&
             entry.key != HardwareCapabilities.requestPermission)
-          ...entry.value.optionalPermissions,
+          ..._selectedOptionalPermissions(entry.value.optionalPermissions),
     };
     final capabilities = <String, PocketPluginCapability>{
       for (final entry in full.capabilities.entries)
@@ -695,7 +696,7 @@ class HardwareCapabilityPlugin extends PocketPlugin {
                   permissions: const {},
                   optionalPermissions: selectedPermissions,
                 )
-              : entry.value,
+              : _selectedCapability(entry.value),
     };
     return PocketPluginDescriptor(
       id: pluginId,
@@ -704,6 +705,34 @@ class HardwareCapabilityPlugin extends PocketPlugin {
       limits: full.limits,
       optionalPermissions: selectedPermissions,
       capabilities: capabilities,
+    );
+  }
+
+  Set<String> _selectedOptionalPermissions(Set<String> permissions) =>
+      Set<String>.unmodifiable(
+        permissions.where(
+          (permission) =>
+              permission != HardwarePermissions.location ||
+              features.contains(HardwareFeature.location),
+        ),
+      );
+
+  PocketPluginCapability _selectedCapability(
+    PocketPluginCapability capability,
+  ) {
+    final optionalPermissions = _selectedOptionalPermissions(
+      capability.optionalPermissions,
+    );
+    if (optionalPermissions.length == capability.optionalPermissions.length) {
+      return capability;
+    }
+    return PocketPluginCapability(
+      name: capability.name,
+      kind: capability.kind,
+      description: capability.description,
+      permissions: capability.permissions,
+      optionalPermissions: optionalPermissions,
+      schema: capability.schema,
     );
   }
 
@@ -885,7 +914,10 @@ class HardwareCapabilityPlugin extends PocketPlugin {
       }
       return _native(
         'authenticateBiometrics',
-        params: <String, dynamic>{'reason': reason},
+        params: <String, dynamic>{
+          'reason': reason,
+          ..._trustedSessionArguments(),
+        },
         timeout: const Duration(seconds: 30),
       );
     });
@@ -893,6 +925,7 @@ class HardwareCapabilityPlugin extends PocketPlugin {
       _checkPermission(HardwarePermissions.location);
       return _native(
         'getCurrentLocation',
+        params: _trustedSessionArguments(),
         timeout: const Duration(seconds: 30),
       );
     });
@@ -1392,10 +1425,17 @@ class HardwareCapabilityPlugin extends PocketPlugin {
     late final double longitude;
     var realGps = false;
     if (suppliedLatitude == null || suppliedLongitude == null) {
+      if (!features.contains(HardwareFeature.location)) {
+        throw const PocketCapabilityException(
+          'invalid_argument',
+          'latitude and longitude are required when the location provider is not selected',
+        );
+      }
       _checkPermission(HardwarePermissions.location);
       final location = await _native(
         'getCurrentLocation',
         params: <String, dynamic>{
+          ..._trustedSessionArguments(),
           if (params['accuracy'] != null) 'accuracy': params['accuracy'],
         },
         timeout: const Duration(seconds: 30),

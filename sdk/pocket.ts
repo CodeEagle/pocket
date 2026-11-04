@@ -249,7 +249,6 @@ const hardwareModuleDefinitions: Record<HardwareModule, HardwareModuleDefinition
     runtimePermissions: [],
     androidPermissions: [
       '<uses-permission android:name="android.permission.USE_BIOMETRIC" />',
-      '<uses-permission android:name="android.permission.USE_FINGERPRINT" android:maxSdkVersion="27" />',
     ],
     iosUsageKeys: ["NSFaceIDUsageDescription"],
     iosMacros: [],
@@ -563,7 +562,6 @@ const androidHardwarePermissions: readonly string[] = [
   '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
   '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
   '<uses-permission android:name="android.permission.USE_BIOMETRIC" />',
-  '<uses-permission android:name="android.permission.USE_FINGERPRINT" android:maxSdkVersion="27" />',
 ];
 
 /** @internal Exported for scaffold regression tests; not an app SDK API. */

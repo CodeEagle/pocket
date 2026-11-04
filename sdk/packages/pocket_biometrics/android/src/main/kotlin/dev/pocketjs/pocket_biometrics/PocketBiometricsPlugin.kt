@@ -1,9 +1,7 @@
 package dev.pocketjs.pocket_biometrics
 
 import android.app.Activity
-import android.app.KeyguardManager
 import android.content.Context
-import android.content.pm.PackageManager
 import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
 import android.os.CancellationSignal
@@ -17,6 +15,11 @@ import io.flutter.plugin.common.MethodChannel
 import java.util.LinkedHashMap
 import java.util.concurrent.Executor
 
+internal fun biometricSessionMatches(
+    requestedSessionId: String?,
+    pendingSessionId: String?,
+): Boolean = requestedSessionId == null || requestedSessionId == pendingSessionId
+
 /** Android BiometricPrompt transport for the independent biometrics group. */
 class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware {
     companion object {
@@ -28,6 +31,7 @@ class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, A
     private var channel: MethodChannel? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingBiometricResult: MethodChannel.Result? = null
+    private var pendingBiometricSessionId: String? = null
     private var biometricPrompt: BiometricPrompt? = null
     private var biometricCancellation: CancellationSignal? = null
 
@@ -68,11 +72,12 @@ class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, A
         when (call.method) {
             "authenticateBiometrics" -> authenticateBiometrics(
                 args["reason"] as? String ?: "Authenticate to continue",
+                args["sessionId"] as? String,
                 result,
             )
             "disposeSession" -> {
-                cancelBiometric("hardware session disposed")
-                result.success(ok("disposed" to true))
+                val disposed = cancelBiometric("hardware session disposed", args["sessionId"] as? String)
+                result.success(ok("disposed" to disposed))
             }
             else -> result.success(error("hardware_unsupported", "unknown biometric method: ${call.method}"))
         }
@@ -80,31 +85,11 @@ class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, A
 
     // region Biometrics
 
-    private enum class BiometricAvailability { AVAILABLE, UNAVAILABLE }
-
-    private fun biometricAvailability(context: Context): BiometricAvailability {
-        if (Build.VERSION.SDK_INT < 28) return BiometricAvailability.UNAVAILABLE
-        val packageManager = context.packageManager
-        val hasBiometricFeature = packageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT) ||
-            packageManager.hasSystemFeature("android.hardware.biometrics.face") ||
-            packageManager.hasSystemFeature("android.hardware.biometrics.iris")
-        if (!hasBiometricFeature) return BiometricAvailability.UNAVAILABLE
-        val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-        if (keyguard != null && !keyguard.isDeviceSecure) return BiometricAvailability.UNAVAILABLE
-        if (Build.VERSION.SDK_INT >= 23 && packageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)) {
-            try {
-                val fingerprint = context.getSystemService(Context.FINGERPRINT_SERVICE) as? android.hardware.fingerprint.FingerprintManager
-                if (fingerprint != null && (!fingerprint.isHardwareDetected || !fingerprint.hasEnrolledFingerprints())) {
-                    return BiometricAvailability.UNAVAILABLE
-                }
-            } catch (_: SecurityException) {
-                return BiometricAvailability.UNAVAILABLE
-            }
-        }
-        return BiometricAvailability.AVAILABLE
-    }
-
-    private fun authenticateBiometrics(reason: String, result: MethodChannel.Result) {
+    private fun authenticateBiometrics(
+        reason: String,
+        sessionId: String?,
+        result: MethodChannel.Result,
+    ) {
         if (reason.trim().isEmpty()) {
             result.success(error("invalid_argument", "biometric reason must not be empty"))
             return
@@ -115,7 +100,10 @@ class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, A
             result.success(error("hardware_not_ready", "an attached Activity is required for biometrics"))
             return
         }
-        if (biometricAvailability(context) != BiometricAvailability.AVAILABLE) {
+        // BiometricPrompt owns hardware/enrollment/lockout checks. Manual
+        // fingerprint and keyguard probes incorrectly reject face/iris devices
+        // before the prompt can report their real state.
+        if (Build.VERSION.SDK_INT < 28) {
             result.success(error("hardware_unsupported", "biometric authentication is unavailable"))
             return
         }
@@ -123,13 +111,16 @@ class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, A
             result.success(error("hardware_busy", "biometric authentication is already running"))
             return
         }
+        val cancellationSignal = CancellationSignal()
         pendingBiometricResult = result
+        pendingBiometricSessionId = sessionId
+        biometricCancellation = cancellationSignal
         try {
             val prompt = BiometricPrompt.Builder(hostActivity)
                 .setTitle("Pocket")
                 .setDescription(reason)
                 .setNegativeButton("Cancel", hostActivity.mainExecutor) { _, _ ->
-                    finishBiometric(
+                    finishBiometric(cancellationSignal,
                         ok(
                             "authenticated" to false,
                             "realBiometrics" to true,
@@ -141,13 +132,11 @@ class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, A
                 }
                 .build()
             biometricPrompt = prompt
-            val cancellationSignal: CancellationSignal = CancellationSignal()
-            biometricCancellation = cancellationSignal
             val executor: Executor = hostActivity.mainExecutor
             val callback: BiometricPrompt.AuthenticationCallback =
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                        finishBiometric(
+                        finishBiometric(cancellationSignal,
                             ok(
                                 "authenticated" to true,
                                 "realBiometrics" to true,
@@ -162,7 +151,7 @@ class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, A
                     }
 
                     override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                        finishBiometric(
+                        finishBiometric(cancellationSignal,
                             ok(
                                 "authenticated" to false,
                                 "realBiometrics" to true,
@@ -175,32 +164,46 @@ class PocketBiometricsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, A
                 }
             prompt.authenticate(cancellationSignal, executor, callback)
         } catch (security: SecurityException) {
-            pendingBiometricResult = null
-            biometricPrompt = null
-            biometricCancellation = null
-            result.success(error("hardware_permission_denied", security.message ?: "biometric permission is not granted"))
+            finishBiometric(
+                cancellationSignal,
+                error("hardware_permission_denied", security.message ?: "biometric permission is not granted"),
+            )
         } catch (failure: Throwable) {
-            pendingBiometricResult = null
-            biometricPrompt = null
-            biometricCancellation = null
-            result.success(error("hardware_biometric_failed", failure.message ?: "biometric prompt failed"))
+            finishBiometric(
+                cancellationSignal,
+                error("hardware_biometric_failed", failure.message ?: "biometric prompt failed"),
+            )
         }
     }
 
-    private fun finishBiometric(value: Map<String, Any?>) {
-        val callback = pendingBiometricResult ?: return
+    private fun finishBiometric(cancellation: CancellationSignal, value: Map<String, Any?>) {
+        if (biometricCancellation !== cancellation) return
+        val callback = pendingBiometricResult
         pendingBiometricResult = null
+        pendingBiometricSessionId = null
         biometricPrompt = null
         biometricCancellation = null
+        if (callback == null) return
         mainHandler.post { callback.success(value) }
     }
 
     // endregion
 
-    private fun cancelBiometric(reason: String) {
+    private fun cancelBiometric(reason: String, sessionId: String? = null): Boolean {
         val cancellation = biometricCancellation
-        finishBiometric(error("plugin_revoked", reason))
+        val pendingSessionId = pendingBiometricSessionId
+        if (cancellation != null && !biometricSessionMatches(sessionId, pendingSessionId)) {
+            return false
+        }
+        if (cancellation != null) {
+            finishBiometric(cancellation, error("plugin_revoked", reason))
+        } else {
+            biometricPrompt = null
+            biometricCancellation = null
+            pendingBiometricSessionId = null
+        }
         cancellation?.cancel()
+        return true
     }
 
     private fun ok(vararg values: Pair<String, Any?>): Map<String, Any?> {
