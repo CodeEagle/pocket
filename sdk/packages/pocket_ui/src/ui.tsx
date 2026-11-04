@@ -21,7 +21,7 @@ import {
   type ViewProps,
 } from "@pocketjs/framework/solid/components";
 import { createDisplayGeometry } from "./display.ts";
-import { availableDisplayPanes, deriveResponsiveLayout, type DisplayGeometry } from "./responsive.ts";
+import { availableDisplayPanes, bottomBarInsets, deriveResponsiveLayout, type DisplayGeometry } from "./responsive.ts";
 
 export interface HeaderProps {
   eyebrow?: string;
@@ -162,82 +162,48 @@ export type NavigationRoute = "home" | "gallery" | "about";
 
 export function NavigationBar(props: {
   route: string;
-  onNavigate: (route: NavigationRoute) => void;
+  onNavigate: (route: "home" | "gallery" | "about") => void;
   wide?: boolean | (() => boolean);
   geometry?: DisplayGeometry | (() => DisplayGeometry);
 }): JSX.Element {
-  const wide = () => typeof props.wide === "function" ? props.wide() : props.wide === true;
-  const layout = () => {
-    if (props.geometry) {
-      const geometry = typeof props.geometry === "function" ? props.geometry() : props.geometry;
-      return deriveResponsiveLayout(geometry);
-    }
-    return {
-      mode: wide() ? "wide" as const : "narrow" as const,
-      navigation: wide() ? "rail" as const : "bottom" as const,
-      railSide: "right" as const,
-      insets: { top: 0, right: 0, bottom: 0, left: 0 },
-    };
-  };
-  const rail = () => layout().navigation === "rail";
   const navStyle = () => {
-    const resolved = layout();
-    const padding = resolved.insets;
-    if (!rail()) {
-      // Let the children and bottom inset determine the outer extent. A fixed
-      // 56px shell plus paddingB would put controls under the home indicator.
-      return { paddingL: padding.left, paddingR: padding.right, paddingB: padding.bottom };
-    }
-    const panes = props.geometry
-      ? availableDisplayPanes(typeof props.geometry === "function" ? props.geometry() : props.geometry)
-      : [];
-    const pane = panes.length > 1
-      ? (resolved.railSide === "right" ? panes[panes.length - 1]! : panes[0]!)
+    const geometry = props.geometry
+      ? (typeof props.geometry === "function" ? props.geometry() : props.geometry)
       : undefined;
-    const divisionGap = resolved.division?.frame.width ?? 0;
-    const splitDisplay = pane !== undefined;
+    const padding = geometry
+      ? bottomBarInsets(geometry)
+      : { top: 0, right: 0, bottom: 0, left: 0 };
+    // Let the children and bottom inset determine the outer extent. A fixed
+    // 56px shell plus paddingB would put controls under the home indicator.
     return {
-      width: pane?.width ?? 104,
-      paddingT: padding.top,
+      paddingL: padding.left,
+      paddingR: padding.right,
       paddingB: padding.bottom,
-      // A split pane already excludes the outer safe-area inset. Applying
-      // padding.right/left again would move the rail outside the display
-      // rect; only the hinge gap (and, for a left rail, the leading inset)
-      // belongs in the sibling extent. The no-division fallback keeps the
-      // outer trailing inset when the rail is laid out beside a flex pane.
-      marginL: splitDisplay
-        ? (resolved.railSide === "right" ? divisionGap : padding.left)
-        : 0,
-      marginR: splitDisplay
-        ? (resolved.railSide === "left" ? divisionGap : 0)
-        : padding.right,
     };
   };
   const hostRoute = () => props.route !== "home" && props.route !== "gallery";
   const items = [
     { id: "home" as const, label: "Home", icon: "⌂" },
-    // Keep the old Gallery route as the compatibility alias for the UI page.
     { id: "gallery" as const, label: "Gallery", icon: "▦" },
     { id: "about" as const, label: "Host", icon: "☷" },
   ];
   return (
-    <View style={navStyle()} class={rail()
-      ? "flex-col items-center gap-2 h-full px-2 py-3 bg-white border-[#E5E9F2]"
-      : "flex-row items-center gap-1 px-2 py-1 bg-white border-[#E5E9F2]"}>
+    <View
+      style={navStyle()}
+      class="flex-row items-center w-full shrink-0 px-2 py-1 bg-white border-[#E5E9F2]"
+    >
       <For each={items}>
         {(item) => {
           const active = () => props.route === item.id || (hostRoute() && item.id === "about");
           return (
             <Focusable
-              class={rail()
-                ? "w-[88] h-[64] flex-col items-center justify-center gap-1 rounded-xl bg-transparent focus:bg-[#F7F8FC]"
-                : "flex-1 h-[56] flex-col items-center justify-center gap-1 rounded-xl bg-transparent focus:bg-[#F7F8FC]"}
+              class="flex-1 h-[56] flex-col items-center justify-center gap-1 rounded-xl bg-transparent focus:bg-[#F7F8FC]"
               onPress={() => props.onNavigate(item.id)}
             >
               <View class={active() ? "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-[#E8EDFF]" : "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-transparent"}>
-                <Text class={active() ? "text-sm text-[#315DEB] font-bold" : "text-sm text-[#7C8799] font-bold"}>{item.icon}</Text>
+                <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#647084] font-bold"}>{item.icon}</Text>
               </View>
-              <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#7C8799] font-bold"}>{item.label}</Text>
+              <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#647084] font-bold"}>{item.label}</Text>
             </Focusable>
           );
         }}
@@ -245,6 +211,9 @@ export function NavigationBar(props: {
     </View>
   );
 }
+
+export const TabBar = NavigationBar;
+export const BottomNavigationBar = NavigationBar;
 
 export interface TabItem {
   id: string;

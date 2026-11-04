@@ -191,6 +191,46 @@ export function reservedInsets(geometry: DisplayGeometry): DisplayInsets {
 }
 
 /**
+ * Insets for a full-width horizontal bottom TabBar / NavigationBar.
+ *
+ * Matching the retained parent's BottomNavigationBar contract, the bar spans
+ * the full bottom width and consumes `bottom` safe-area padding for the home
+ * indicator. Top-corner occlusions (such as Duo's top-right status cluster,
+ * which UIKit conservatively projects into `safeArea.right`) do not reach the
+ * bottom edge and must not shift or squish the bottom tabs horizontally. Only
+ * an active occlusion that actually intersects the bottom bar band reserves
+ * horizontal space in the bottom bar.
+ */
+export function bottomBarInsets(geometry: DisplayGeometry): DisplayInsets {
+  const base = reservedInsets(geometry);
+  const bottomBandTop = Math.max(0, geometry.height - (64 + base.bottom));
+  let left = 0;
+  let right = 0;
+  for (const region of activeRegions(geometry)) {
+    if (region.kind !== "occlusion") continue;
+    const expandedLeft = region.frame.left - region.margins.left;
+    const expandedTop = region.frame.top - region.margins.top;
+    const expandedWidth = region.frame.width + region.margins.left + region.margins.right;
+    const expandedHeight = region.frame.height + region.margins.top + region.margins.bottom;
+    const intersectsBottomBand = expandedTop + expandedHeight > bottomBandTop;
+    if (!intersectsBottomBand) continue;
+    if (expandedLeft <= 1 && expandedWidth < geometry.width * 0.6) {
+      left = Math.max(left, expandedLeft + expandedWidth);
+    }
+    const rightDistance = geometry.width - (expandedLeft + expandedWidth);
+    if (rightDistance <= 1 && expandedWidth < geometry.width * 0.6) {
+      right = Math.max(right, geometry.width - expandedLeft);
+    }
+  }
+  return {
+    top: 0,
+    right,
+    bottom: base.bottom,
+    left,
+  };
+}
+
+/**
  * Derive a navigation mode from both the viewport and ReservedRegion data.
  * A vertical active division opts into a rail even when a test window is
  * narrower than the ordinary 720px breakpoint. The rail is placed away from

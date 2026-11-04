@@ -129,3 +129,26 @@ CLI，应先以 `xcrun simctl help` 为准，再把确切参数写入这里。�
 真实回归曾捕获“旧 951pt native frame + 新 466pt FlutterView”形成的 569pt 右 inset。现在同时等待 native geometry、FlutterView 与自动 viewport 的 PocketJS frame 尺寸一致后发布事件；最终回归没有再出现异常 inset，并增加设备断言。固定预览视口继续保留原来的缩放/坐标映射。区域 ID 使用 UIKit ID 的 Hashable identity，避免把 `String(describing:)` 的重复 `ID()` 当稳定标识。
 
 `@pocket/ui` 提供 `createDisplayGeometry()`、`deriveResponsiveLayout()`、`availableDisplayPanes()`；监听、safe-area/occlusion 与 division 解释属于公共库，应用使用相同结果组合导航和页面。完整旋转、多窗口与物理 Duo 的姿态矩阵仍未完成，不能由这条开合测试推断全部通过。
+
+## 2026-11-04 底部 TabBar 统一与 iPhone Duo 开合修复
+
+### 问题根因
+
+1. **并非 UIKit `UITabBar`**：Showcase 导航由 JS guest 组件 `sdk/packages/pocket_ui/src/ui.tsx:NavigationBar`（导出别名 `TabBar` / `BottomNavigationBar`）绘制在 Flutter 画布上。
+2. **展开态变成右侧竖向窄条 + 右侧 84pt 空白**：原实现于 `width >= 720` 或存在纵向 `division` 时切换为竖向 `rail`（`width: 104, marginR: 84`），与需要保持底部水平等分 `TabBar` 的产品预期不一致。
+3. **展开后折叠缩到左下角约 104pt 小方块**：
+   - 展开切回折叠时 `<NavigationBar>` 未重新挂载，内联 `style` 从 `{ width: 104, marginR: 84, ... }` 变为 `{ paddingL, paddingR, paddingB }`；而 PocketJS `setStyleObject`（`sdk/.cache/pocketjs/framework/src/native-tree.ts:704-722`）仅覆盖新传入键、不清理被省略的旧键，导致 `node.overrides` 中残留 `width: 104` 与 `marginR: 84`，压过 `w-full`。
+   - 同时 iPhone Duo 将右上角状态区域（`13:12` + 圆环）保守投影为全局 `safeArea.right = 84`，底部栏直接消费 `paddingR: 84`，在残留的 `104pt` 宽度内仅剩 `20pt` 内容区，导致 `Home` / `Gallery` / `Host` 挤在左下角。
+
+### 来源复用与改动
+
+- **复用来源**：`/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/lib/render/pocket_ui_components.dart:2239-2345` 的 `BottomNavigationBar` 契约（底部固定高度 + `bottom` 安全区填充 + `Expanded` 等分水平排布）。
+- **`sdk/packages/pocket_ui/src/responsive.ts`**：新增并导出 `bottomBarInsets(geometry)`。底部 `TabBar` 消费 `bottom` 安全区（`34pt`），仅当 active occlusion 实际与底部栏高度带相交（`top + height > geometry.height - (64 + base.bottom)`）时才保留水平边距，避免右上角局部状态区投影的 `safeArea.right = 84` 挤压底部 TabBar。
+- **`sdk/packages/pocket_ui/src/ui.tsx`**：`NavigationBar`（并导出 `TabBar` / `BottomNavigationBar` 别名）在所有姿态下统一渲染为底部全宽水平等分 `TabBar`（`flex-row items-center w-full shrink-0` + 子项 `flex-1`），内联 `style` 仅设置 `{ paddingL, paddingR, paddingB }`，不再写入 `width` 或 `marginR`。
+- **`demo/js/app.tsx`**：移除主壳的左右 `rail` 分支，统一为单列 `flex-1 flex-col h-full overflow-hidden`（上方路由视口 `flex-1 w-full h-full overflow-hidden` + 底部 `<NavigationBar>`）。
+
+### 验证记录
+
+- `bun sdk/packages/pocket_ui/test/navigation_bar_native.test.ts`：覆盖 `390×844`、`720×844`、窄宽切换及 iPhone Duo `951×669`（展开）→ `466×678`（折叠）→ `951×669`（再展开）全链路 native 布局断言，三枚 Tab 等宽、同线且底部安全区生效。
+- `bun test tests/mobile_ui.test.ts tests/guest_state.test.ts` 与 `bun tests/guest_ablation.ts --required`（于 `demo/js`）：通过。
+- 使用 `pocket_probe` 加载重建后的 `demo/assets/app.qjbc` + `demo/assets/app.pak` 注入真实 `duo_geometry.json` 采样：展开态（`951×669`）Tab 中心点 `159 / 475.5 / 792.5`（`y: 616`），折叠态（`466×678`）Tab 中心点 `78 / 232.5 / 388.5`（`y: 625`），往返切换无宽度残留且页面纵向拖拽滚动正常。

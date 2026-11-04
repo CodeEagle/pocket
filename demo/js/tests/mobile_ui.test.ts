@@ -10,6 +10,7 @@ import {
 } from "@pocket/ui/legacy";
 import {
   availableDisplayPanes,
+  bottomBarInsets,
   deriveResponsiveLayout,
   displayPane,
   parseDisplayGeometry,
@@ -117,6 +118,9 @@ test("display geometry and duo responsive layouts", () => {
   assert.equal(deriveResponsiveLayout(realDuoClosed).mode, "narrow");
   assert.equal(deriveResponsiveLayout(realDuoClosed).navigation, "bottom");
   assert.equal(reservedInsets(realDuoClosed).right, 84);
+  assert.deepEqual(bottomBarInsets(realDuoWide), { top: 0, right: 0, bottom: 34, left: 0 });
+  assert.deepEqual(bottomBarInsets(realDuoFolded), { top: 0, right: 0, bottom: 34, left: 0 });
+  assert.deepEqual(bottomBarInsets(realDuoClosed), { top: 0, right: 0, bottom: 34, left: 0 });
 
   const transientKeyboardGeometry = parseDisplayGeometry({
     width: 951,
@@ -245,7 +249,8 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.doesNotMatch(appSource, /badge="JS-owned"/);
   assert.match(appSource, /contentWidth/);
   assert.match(appSource, /mobileDark/);
-  assert.match(appSource, /flex-1 flex-row h-full overflow-hidden/);
+  assert.match(appSource, /flex-1 flex-col h-full overflow-hidden/);
+  assert.match(uiSource, /export const TabBar = NavigationBar/);
   assert.match(appSource, /createDisplayGeometry/);
   assert.match(displaySource, /display\.viewport/);
   assert.match(displaySource, /onCleanup/);

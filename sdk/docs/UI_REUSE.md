@@ -71,12 +71,20 @@ the adapter where it owns navigation and page composition.
 
 The retained Flutter showcase used the same rule at its host boundary: its
 top shell read `MediaQuery.paddingOf(context).top` and reserved that height
-before painting the header (`../../pocketjs_flutter_demo/lib/ui/mini_app_host_page.dart:107-133`).
-The current JS SystemUI applies the equivalent `deriveResponsiveLayout(...).insets.top`
-once on its root `Screen` (`demo/js/app.tsx`); individual pages and
-`MobileScaffold` do not add another top inset. This keeps Home/Header,
-MobileAppBar, and compositor child surfaces in one coordinate space while
-preserving the existing bottom safe-area handling in `NavigationBar`.
+before painting the header (`../../pocketjs_flutter_demo/lib/ui/mini_app_host_page.dart:107-133`),
+while its `BottomNavigationBar` (`../../pocketjs_flutter_demo/lib/render/pocket_ui_components.dart:2239-2345`)
+occupied full width at the bottom with `Expanded` equal-width tab items and
+bottom safe-area padding. The current JS SystemUI applies the equivalent
+`deriveResponsiveLayout(...).insets.top` once on its root `Screen`
+(`demo/js/app.tsx`); individual pages and `MobileScaffold` do not add another
+top inset. `NavigationBar` (also exported as `TabBar` and
+`BottomNavigationBar` from `@pocket/ui`) remains a full-width horizontal
+bottom TabBar across narrow, wide, and iPhone Duo folded/unfolded postures,
+using `bottomBarInsets()` (`packages/pocket_ui/src/responsive.ts`) so
+top-corner occlusions (such as iPhone Duo's top-right status cluster projected
+into `safeArea.right = 84`) do not shrink or shift the bottom tabs. This keeps
+Home/Header, MobileAppBar, and compositor child surfaces in one coordinate
+space.
 
 ## Liquid Glass boundary
 

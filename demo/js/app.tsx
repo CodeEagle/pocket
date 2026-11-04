@@ -479,29 +479,10 @@ function App() {
   const mobileDark = () => isShowcaseRoute(state().route) && state().mobileDark;
   const responsiveLayout = () => deriveResponsiveLayout(displayGeometry());
   const wideLayout = () => responsiveLayout().mode === "wide";
-  const contentPaneWidth = (): number => {
-    const layout = responsiveLayout();
-    if (!layout.division) {
-      // Match NavigationBar's existing 104px rail and trailing safe inset.
-      // A regular wide window has no physical division but still reserves it.
-      return Math.max(0, displayGeometry().width - (layout.navigation === "rail" ? 104 + layout.insets.right : 0));
-    }
-    const panes = availableDisplayPanes(displayGeometry());
-    const pane = layout.railSide === "right" ? panes[0] : panes[panes.length - 1];
-    return pane?.width ?? displayGeometry().width;
-  };
-  const contentPaneStyle = () => {
-    const layout = responsiveLayout();
-    if (!layout.division) return { grow: 1 };
-    // The first pane starts after the outer left safe-area inset.  When the
-    // rail is on the right the content is the first pane and must carry that
-    // offset; when the rail is on the left the rail itself owns the offset.
-    return {
-      width: contentPaneWidth(),
-      grow: 0,
-      marginL: layout.railSide === "right" ? layout.insets.left : 0,
-    };
-  };
+  const contentPaneWidth = (): number => Math.max(0, displayGeometry().width);
+  const contentPaneStyle = () => ({
+    grow: 1,
+  });
   // Performance samples arrive independently of the application reducer. This
   // keeps a 1 Hz/host-driven metric stream from rebuilding Home/Stress trees.
   const [performance, setPerformance] = createSignal<PerformanceSnapshot>({
@@ -785,44 +766,31 @@ function App() {
         />
       </Show>
       <FocusScope class="flex-1 flex-col overflow-hidden" autoFocus restoreFocus>
-        {/* Keep FocusScope's own props static: the official FocusScope
-            implementation forwards props through an object spread, so a
-            dynamic flex direction there freezes at mount. The ordinary View
-            below owns the responsive row/column class and remains reactive
-            across a live Duo resize. */}
-        <View class={wideLayout() ? "flex-1 flex-row h-full overflow-hidden" : "flex-1 flex-col h-full overflow-hidden"}>
-          <Show when={wideLayout() && responsiveLayout().railSide === "left"}>
-            <NavigationBar route={state().route} onNavigate={navigate} wide={wideLayout} geometry={() => displayGeometry()} />
-          </Show>
-          <View class={responsiveLayout().division ? "h-full overflow-hidden" : "flex-1 h-full overflow-hidden"} style={{ ...contentPaneStyle(), translateX: transitionDescriptor().inTx, translateY: transitionDescriptor().inTy, scale: transitionDescriptor().inScale }}>
+        {/* Keep FocusScope's own props static and mount a single bottom
+            NavigationBar TabBar below the active route viewport across both
+            folded and unfolded Duo postures. */}
+        <View class="flex-1 flex-col h-full overflow-hidden">
+          <View class="flex-1 w-full h-full overflow-hidden" style={{ ...contentPaneStyle(), translateX: transitionDescriptor().inTx, translateY: transitionDescriptor().inTy, scale: transitionDescriptor().inScale }}>
             <Show when={state().route === "home"}>
               <HomePage
                 state={state}
-                platform={platform}
-                system={system}
                 dispatch={dispatch}
+                onOpenApp={openApp}
+                onOpenDetails={() => dispatch({ type: "details", open: true })}
                 runtime={state().runtimeInfo}
                 onRefresh={() => requestCapability("runtimeInfo", "runtime.info")}
                 wide={wideLayout}
-                contentWidth={() => {
-                  const layout = responsiveLayout();
-                  if (!layout.division) return undefined;
-                  const panes = availableDisplayPanes(displayGeometry());
-                  const pane = layout.railSide === "right" ? panes[0] : panes[panes.length - 1];
-                  // Home's hero owns `mx-5`; keep its explicit width inside the
-                  // selected pane instead of letting margins cross the hinge.
-                  return pane ? Math.max(0, pane.width - 40) : undefined;
-                }}
+                contentWidth={() => undefined}
               />
             </Show>
             <Show when={state().route === "gallery"}>
-              <GalleryPage state={state} dispatch={dispatch} contentWidth={contentPaneWidth} />
+              <ScrollablePage><GalleryPage dispatch={dispatch} /></ScrollablePage>
             </Show>
             <Show when={state().route === "mobile"}>
-              <ScrollablePage><MobileUiPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
+              <ScrollablePage><MobileUiPage state={state} dispatch={dispatch} /></ScrollablePage>
             </Show>
             <Show when={state().route === "transitions"}>
-              <ScrollablePage><TransitionsPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
+              <ScrollablePage><TransitionsPage state={state} dispatch={dispatch} /></ScrollablePage>
             </Show>
             <Show when={state().route === "hardware"}>
               <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} host={host} experience={experience} /></ScrollablePage>
@@ -831,9 +799,7 @@ function App() {
               <HostPages host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} />
             </Show>
           </View>
-          <Show when={!wideLayout() || responsiveLayout().railSide === "right"}>
-            <NavigationBar route={state().route} onNavigate={navigate} wide={wideLayout} geometry={() => displayGeometry()} />
-          </Show>
+          <NavigationBar route={state().route} onNavigate={navigate} wide={wideLayout} geometry={() => displayGeometry()} />
         </View>
       </FocusScope>
       <SystemAppSurfaces
