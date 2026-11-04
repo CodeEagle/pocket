@@ -16,10 +16,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { existsSync } from "node:fs";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { resolveNativeProbePath } from "../scripts/native_probe_path.ts";
+import { servePreviewMedia } from "./preview_media_assets.ts";
 
 export type PreviewArtifactPaths = {
   /** Absolute path to the current Editor qjbc artifact. */
@@ -43,6 +45,8 @@ export type PreviewArtifactPaths = {
   applications?: Record<string, PreviewArtifactPaths>;
   /** Optional package identity for an installed child artifact. */
   appId?: string;
+  /** Source directory used for loose preview media (for a child app). */
+  projectDirectory?: string;
   revision?: number;
   /** Completed-build identity; callers keep it unchanged while building. */
   generation?: string | number;
@@ -71,6 +75,8 @@ export type PreviewManagerOptions = {
   probePath?: string;
   width?: number;
   height?: number;
+  /** Logical safe-area insets for the root preview viewport. */
+  safeArea?: Partial<PreviewSafeArea>;
   rasterDensity?: number;
   tickHz?: number;
   commandTimeoutMs?: number;
@@ -80,6 +86,14 @@ export type PreviewManagerOptions = {
   idleDisposeMs?: number;
   /** Override the checked-in browser projection file for an embedding build. */
   clientPath?: string;
+};
+
+/** Safe-area coordinates are in the same logical pixels as a PreviewFrame. */
+export type PreviewSafeArea = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
 };
 
 export type PreviewFrame = {
@@ -119,12 +133,8 @@ export type PreviewStatus = {
 };
 
 type JsonRecord = Record<string, unknown>;
+const EMPTY_PREVIEW_SAFE_AREA: PreviewSafeArea = { top: 0, right: 0, bottom: 0, left: 0 };
 const editorRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const defaultProbeCandidates = [
-  join(editorRoot, "native/target/aarch64-apple-darwin/release/pocket_probe"),
-  join(editorRoot, "native/target/release/pocket_probe"),
-  join(editorRoot, "native/target/debug/pocket_probe"),
-];
 const maxInputBytes = 64 * 1024;
 const maxFrameBytes = 64 * 1024 * 1024;
 
@@ -154,6 +164,64 @@ function finiteNonNegative(value: unknown, label: string, maximum = 1024): numbe
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0 || number > maximum) throw new Error(`${label} must be a finite number in [0, ${maximum}]`);
   return number;
+}
+
+function normalizeSafeArea(value: unknown, fallback: PreviewSafeArea = EMPTY_PREVIEW_SAFE_AREA): PreviewSafeArea {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { ...fallback };
+  const record = value as Record<string, unknown>;
+  const inset = (key: keyof PreviewSafeArea): number => {
+    const number = Number(record[key]);
+    return Number.isFinite(number) && number >= 0 ? Math.min(32000, number) : fallback[key];
+  };
+  return { top: inset("top"), right: inset("right"), bottom: inset("bottom"), left: inset("left") };
+}
+
+function sameSafeArea(left: PreviewSafeArea, right: PreviewSafeArea): boolean {
+  return left.top === right.top && left.right === right.right &&
+    left.bottom === right.bottom && left.left === right.left;
+}
+
+function boundedSafeArea(area: PreviewSafeArea, width: number, height: number): PreviewSafeArea {
+  return {
+    top: Math.min(Math.max(0, area.top), height),
+    right: Math.min(Math.max(0, area.right), width),
+    bottom: Math.min(Math.max(0, area.bottom), height),
+    left: Math.min(Math.max(0, area.left), width),
+  };
+}
+
+function surfaceSafeArea(
+  slot: SurfaceSlot | undefined,
+  rootWidth: number,
+  rootHeight: number,
+  rootArea: PreviewSafeArea,
+): PreviewSafeArea {
+  const area = boundedSafeArea(rootArea, rootWidth, rootHeight);
+  if (!slot || slot.w <= 0 || slot.h <= 0) return area;
+  // A slot already clipped below/inside the root safe rectangle receives no
+  // duplicate padding. A slot spanning the full root inherits every inset.
+  const topEdge = Math.max(0, Math.min(slot.h, area.top - slot.y));
+  const leftEdge = Math.max(0, Math.min(slot.w, area.left - slot.x));
+  const bottomBoundary = rootHeight - area.bottom;
+  const rightBoundary = rootWidth - area.right;
+  const bottomEdge = Math.max(0, Math.min(slot.h, slot.y + slot.h - Math.max(slot.y, bottomBoundary)));
+  const rightEdge = Math.max(0, Math.min(slot.w, slot.x + slot.w - Math.max(slot.x, rightBoundary)));
+  return { top: topEdge, right: rightEdge, bottom: bottomEdge, left: leftEdge };
+}
+
+async function sendDisplayViewport(
+  probe: NativeProbe,
+  width: number,
+  height: number,
+  safeArea: PreviewSafeArea,
+): Promise<void> {
+  await probe.checked({
+    op: "send",
+    message: {
+      method: "display.viewport",
+      params: { width, height, safeArea: boundedSafeArea(safeArea, width, height) },
+    },
+  });
 }
 
 function integerIn(value: unknown, label: string, min: number, max: number): number {
@@ -302,6 +370,11 @@ async function discoverChildArtifacts(
         pakPath,
         metadataPath: join(directory, "app.bytecode.json"),
         appId: entry.package,
+        // Loose media is owned by the source package, not by its generated
+        // qjbc/pak snapshot. Keep this directory alongside the child
+        // artifact so the browser route can serve the same `assets/...`
+        // contract that the native host receives.
+        projectDirectory: resolve(projectDirectory, entry.manifest, ".."),
       };
       break;
     }
@@ -316,6 +389,7 @@ function routeName(request: Request, explicit?: string): string {
   if (pathname.endsWith("/input")) return "input";
   if (pathname.endsWith("/snapshot")) return "snapshot";
   if (pathname.endsWith("/status")) return "status";
+  if (pathname.endsWith("/media")) return "media";
   return "page";
 }
 
@@ -430,9 +504,14 @@ type PreviewRuntime = {
    * surface rather than inheriting the browser/root viewport. */
   viewportWidth: number;
   viewportHeight: number;
+  safeArea: PreviewSafeArea;
   frame?: PreviewFrame;
   resources: Map<string, JsonRecord>;
   initialEvents: JsonRecord[];
+  /** Video commands are transient native frame events. Keep them until the
+   * composite frame is published because pumpRuntime may settle several
+   * native frames before tickNow emits the browser projection. */
+  pendingVideoEvents: JsonRecord[];
   needsPump: boolean;
   pumping: number;
 };
@@ -476,6 +555,11 @@ function eventPayload(event: JsonRecord): JsonRecord | undefined {
 
 function eventName(event: JsonRecord): string {
   return typeof event.name === "string" ? event.name : typeof event.method === "string" ? event.method : "";
+}
+
+function isVideoPlaybackEvent(event: JsonRecord): boolean {
+  const name = eventName(event);
+  return name === "video.play" || name === "video.pause" || name === "video.release";
 }
 
 function hostError(code: string, message: string): JsonRecord {
@@ -558,6 +642,8 @@ class PreviewSession {
   private nextInstanceId = 0;
   private nextSystemRequestId = 0;
   private childArtifacts: Record<string, PreviewArtifactPaths> = {};
+  /** Root source directory used for browser-served loose media. */
+  private mediaProjectDirectory?: string;
   private starting?: Promise<void>;
   private tickTimer?: ReturnType<typeof setTimeout>;
   private tickDeadlineAt?: number;
@@ -585,6 +671,7 @@ class PreviewSession {
   private error?: string;
   private width: number;
   private height: number;
+  private safeArea: PreviewSafeArea;
   private tickHz: number;
 
   constructor(manager: PreviewManagerImpl, id: string) {
@@ -592,6 +679,11 @@ class PreviewSession {
     this.id = id;
     this.width = manager.options.width ?? 390;
     this.height = manager.options.height ?? 844;
+    this.safeArea = boundedSafeArea(
+      normalizeSafeArea(manager.options.safeArea),
+      this.width,
+      this.height,
+    );
     this.tickHz = manager.options.tickHz ?? 60;
   }
 
@@ -623,7 +715,8 @@ class PreviewSession {
   private async resolvedArtifacts(): Promise<ResolvedPreviewProject> {
     const artifacts = await this.manager.resolveArtifacts(this.id);
     if (!artifacts) throw new Error(`no preview artifacts were supplied for project ${this.id}`);
-    const projectDirectory = await resolveValue(this.manager.options.projectDirectory, this.id);
+    const configuredProjectDirectory = await resolveValue(this.manager.options.projectDirectory, this.id);
+    const projectDirectory = configuredProjectDirectory ?? artifacts.projectDirectory;
     const result: PreviewProject = {
       ...artifacts,
       bytecodePath: artifacts.bytecodePath ?? artifacts.bytecode,
@@ -632,6 +725,7 @@ class PreviewSession {
       metadataPath: artifacts.metadataPath ?? artifacts.metadata,
       ...(projectDirectory ? { projectDirectory } : {}),
     };
+    this.mediaProjectDirectory = projectDirectory;
     this.systemCatalog = await systemCatalogFromProject(projectDirectory);
     this.childArtifacts = (await discoverChildArtifacts(projectDirectory, this.systemCatalog, artifacts.applications)) ?? {};
     if (Object.keys(this.childArtifacts).length > 0) result.applications = this.childArtifacts;
@@ -662,6 +756,39 @@ class PreviewSession {
       }
     }
     return { ...result, artifactFingerprint: fingerprints.join(";") };
+  }
+
+  /**
+   * Resolve the browser's scoped asset name to the source package that owns
+   * it. Native child DrawOps are namespaced by `compositeFrame`; keeping the
+   * namespace in the URL lets the route reject an arbitrary child/package
+   * path instead of trusting a query parameter to select a directory.
+   */
+  private async mediaSource(asset: string): Promise<{ directory: string; logicalAsset: string } | undefined> {
+    const artifacts = await this.resolvedArtifacts();
+    const root = this.mediaProjectDirectory ?? artifacts.projectDirectory;
+    if (!root || typeof asset !== "string" || !asset) return undefined;
+    if (asset.startsWith("pocket.runtime.")) {
+      const children = Object.entries(this.childArtifacts)
+        .sort(([left], [right]) => right.length - left.length);
+      for (const [appId, child] of children) {
+        const prefix = `pocket.runtime.${appId}.`;
+        if (!asset.startsWith(prefix)) continue;
+        const catalogEntry = this.systemCatalog?.catalog.find((entry) => entry.package === appId);
+        const directory = child.projectDirectory ??
+          (catalogEntry ? resolve(root, catalogEntry.manifest, "..") : resolve(root, "apps", appId));
+        return { directory, logicalAsset: asset.slice(prefix.length) };
+      }
+      return undefined;
+    }
+    return { directory: root, logicalAsset: asset };
+  }
+
+  async serveMedia(request: Request, asset: string | null): Promise<Response> {
+    if (!asset) return failure("media asset is required", 400);
+    const source = await this.mediaSource(asset);
+    if (!source) return failure("preview media scope is unavailable", 404);
+    return servePreviewMedia(request, source.directory, source.logicalAsset);
   }
 
   async ensureStarted(): Promise<void> {
@@ -696,6 +823,11 @@ class PreviewSession {
         } else {
           await probe.checked({ op: "load", sourcePath: artifacts.sourcePath, pakPath: artifacts.pakPath });
         }
+        // The native resize ABI intentionally remains width/height-only. Send
+        // the richer safe-area fact over the existing guest event lane before
+        // the first pump so the first admitted frame uses the same geometry as
+        // a Flutter host (and never briefly mounts under the notch).
+        await sendDisplayViewport(probe, this.width, this.height, this.safeArea);
         this.probe = probe;
         this.rootRuntime = {
           appId: this.systemCatalog?.systemUI ?? (artifacts.appId ?? this.id),
@@ -705,8 +837,10 @@ class PreviewSession {
           artifacts,
           viewportWidth: this.width,
           viewportHeight: this.height,
+          safeArea: { ...this.safeArea },
           resources: new Map(),
           initialEvents: [],
+          pendingVideoEvents: [],
           needsPump: false,
           pumping: 0,
         };
@@ -945,6 +1079,17 @@ class PreviewSession {
         if (Buffer.byteLength(frameJson) > maxFrameBytes) throw new Error(`native preview frame for ${runtime.appId} exceeds the safety limit`);
         const frame = asFrame(response.frame);
         runtime.frame = frame;
+        for (const event of frame.events) {
+          if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+          if (!isVideoPlaybackEvent(event as JsonRecord)) continue;
+          runtime.pendingVideoEvents.push(event as JsonRecord);
+        }
+        // A guest can emit several control edges while native settles one
+        // input boundary. Keep enough history for the browser to observe the
+        // latest policy without allowing a malicious guest to grow it.
+        if (runtime.pendingVideoEvents.length > 128) {
+          runtime.pendingVideoEvents.splice(0, runtime.pendingVideoEvents.length - 128);
+        }
         if (runtime.initialEvents.length === 0) {
           runtime.initialEvents = frame.events.filter((event): event is JsonRecord =>
             !!event && typeof event === "object" && !Array.isArray(event) && eventName(event as JsonRecord) === "host.request",
@@ -1059,9 +1204,9 @@ class PreviewSession {
     if (capability === "platform.messages.send" || capability === "platform.messages.receive") {
       return { supported: false, reason: "System catalog is required for app messaging in the preview" };
     }
-    // Hardware, video and other native-only plugins remain explicitly
-    // non-emulated. Return a real failure so an app cannot wait forever or
-    // mistake the browser projection for device capability success.
+    // Hardware and other native-only plugins remain explicitly non-emulated.
+    // Video DrawOps are a browser media projection, but native video/plugin
+    // capability requests still require their real host adapter.
     throw new Error(`unsupported preview capability: ${capability}`);
   }
 
@@ -1342,6 +1487,14 @@ class PreviewSession {
     const initialSlot = this.preferredViewportSlots(this.rootRuntime?.frame).get(appId);
     const initialWidth = initialSlot ? Math.max(1, Math.round(initialSlot.w)) : this.width;
     const initialHeight = initialSlot ? Math.max(1, Math.round(initialSlot.h)) : this.height;
+    const rootWidth = this.rootRuntime?.viewportWidth ?? this.width;
+    const rootHeight = this.rootRuntime?.viewportHeight ?? this.height;
+    const initialSafeArea = surfaceSafeArea(
+      initialSlot,
+      rootWidth,
+      rootHeight,
+      this.rootRuntime?.safeArea ?? this.safeArea,
+    );
     const runtime: PreviewRuntime = {
       appId,
       instanceId: `pocket-app-${++this.nextInstanceId}`,
@@ -1350,8 +1503,10 @@ class PreviewSession {
       artifacts,
       viewportWidth: initialWidth,
       viewportHeight: initialHeight,
+      safeArea: initialSafeArea,
       resources: new Map(),
       initialEvents: [],
+      pendingVideoEvents: [],
       needsPump: false,
       pumping: 0,
     };
@@ -1366,6 +1521,7 @@ class PreviewSession {
       });
       if (artifacts.bytecodePath) await probe.checked({ op: "loadBytecode", bytecodePath: artifacts.bytecodePath, pakPath: artifacts.pakPath });
       else await probe.checked({ op: "load", sourcePath: artifacts.sourcePath, pakPath: artifacts.pakPath });
+      await sendDisplayViewport(probe, initialWidth, initialHeight, initialSafeArea);
       this.childRuntimes.set(appId, runtime);
       return runtime;
     } catch (error) {
@@ -1414,15 +1570,26 @@ class PreviewSession {
    * sdk/docs/EDITOR_PREVIEW_RENDERING.md. */
   private async syncChildViewports(frame: PreviewFrame): Promise<Set<PreviewRuntime>> {
     const resized = new Set<PreviewRuntime>();
+    const rootWidth = Math.max(1, Number(frame.width));
+    const rootHeight = Math.max(1, Number(frame.height));
+    const rootArea = this.rootRuntime?.safeArea ?? this.safeArea;
     for (const [appId, slot] of this.preferredViewportSlots(frame)) {
       const runtime = this.childRuntimes.get(appId);
       if (!runtime) continue;
       const width = Math.max(1, Math.round(slot.w));
       const height = Math.max(1, Math.round(slot.h));
-      if (runtime.viewportWidth === width && runtime.viewportHeight === height) continue;
-      await runtime.probe.checked({ op: "resize", width, height });
+      const safeArea = surfaceSafeArea(slot, rootWidth, rootHeight, rootArea);
+      const sizeChanged = runtime.viewportWidth !== width || runtime.viewportHeight !== height;
+      const safeAreaChanged = !sameSafeArea(runtime.safeArea, safeArea);
+      if (!sizeChanged && !safeAreaChanged) continue;
+      if (sizeChanged) await runtime.probe.checked({ op: "resize", width, height });
+      // Native resize emits a width/height-only fact. Always follow it with
+      // the slot's safe-area projection, including when only the root insets
+      // changed while the child kept the same physical size.
+      await sendDisplayViewport(runtime.probe, width, height, safeArea);
       runtime.viewportWidth = width;
       runtime.viewportHeight = height;
+      runtime.safeArea = safeArea;
       runtime.needsPump = true;
       resized.add(runtime);
     }
@@ -1475,7 +1642,11 @@ class PreviewSession {
       const child = this.childRuntimes.get(slot.appId);
       if (!child?.frame) continue;
       const prefix = `pocket.runtime.${slot.appId}.`;
-      childOps.set(slot.handle, child.frame.ops.map((op) => transformedChildOp(op, slot, child.frame!, prefix)));
+      const runtimeToken = `${child.instanceId}:${child.generation}`;
+      childOps.set(slot.handle, child.frame.ops.map((op) => {
+        const transformed = transformedChildOp(op, slot, child.frame!, prefix);
+        return op.type === "video" ? { ...transformed, runtimeToken } : transformed;
+      }));
       for (const value of child.resources.values()) {
         const asset = value.asset;
         if (typeof asset !== "string" || !asset) continue;
@@ -1501,6 +1672,22 @@ class PreviewSession {
       const asset = resource.asset;
       if (typeof asset === "string") releasedResources.delete(asset);
     }
+    // Child runtimes execute their own JS media controller. Forward only the
+    // existing video command events to the browser projection, tagging the
+    // owning app so IDs may safely repeat across runtime instances. Host
+    // requests remain private to this adapter and are handled above.
+    const rootEvents = (root.events.length > 0 ? root.events : (this.rootRuntime?.initialEvents ?? []))
+      .filter((event) => !isVideoPlaybackEvent(event));
+    // Playback edges are consumed by native while it settles an input and can
+    // disappear from the final settled frame. The runtime queues above retain
+    // them until this exact browser publication boundary. Include every live
+    // child, even when its host surface is currently culled, so JS intent is
+    // not lost during coverage/scroll transitions.
+    const rootVideoEvents = this.rootRuntime?.pendingVideoEvents ?? [];
+    const childVideoEvents = [...this.childRuntimes.entries()].flatMap(([appId, child]) => {
+      const runtimeToken = `${child.instanceId}:${child.generation}`;
+      return child.pendingVideoEvents.map((event) => ({ ...event, runtime: appId, runtimeToken }));
+    });
     const { inputBounds: _nativeInputBounds, ...rootFrame } = root;
     return {
       ...rootFrame,
@@ -1520,7 +1707,7 @@ class PreviewSession {
           previous.height !== resource.height || previous.psm !== resource.psm;
       }),
       releasedResources: [...releasedResources],
-      events: root.events.length > 0 ? root.events : (this.rootRuntime?.initialEvents ?? []),
+      events: [...rootEvents, ...rootVideoEvents, ...childVideoEvents],
     };
   }
 
@@ -1733,6 +1920,8 @@ class PreviewSession {
         }
       }
       this.emit({ type: "frame", revision: this.artifactRevision ?? null, frame: this.frame });
+      runtime.pendingVideoEvents.length = 0;
+      for (const child of this.childRuntimes.values()) child.pendingVideoEvents.length = 0;
     }
     await this.schedule();
   }
@@ -1764,11 +1953,21 @@ class PreviewSession {
       } else if (kind === "resize") {
         this.width = finitePositive(input.width, "width");
         this.height = finitePositive(input.height, "height");
+        // A resize without an explicit safeArea is an intentional zero-inset
+        // profile (for example the tablet/desktop picker), not permission to
+        // retain the previous phone notch/home-indicator values.
+        this.safeArea = boundedSafeArea(
+          normalizeSafeArea(input.safeArea),
+          this.width,
+          this.height,
+        );
         await probe.checked({ op: "resize", width: this.width, height: this.height });
         if (this.rootRuntime) {
           this.rootRuntime.viewportWidth = this.width;
           this.rootRuntime.viewportHeight = this.height;
+          this.rootRuntime.safeArea = { ...this.safeArea };
         }
+        await sendDisplayViewport(probe, this.width, this.height, this.safeArea);
       } else if (kind === "pointer") {
         const phase = input.phase;
         if (!["down", "move", "up", "cancel"].includes(String(phase))) throw new Error("pointer phase must be down, move, up, or cancel");
@@ -1852,7 +2051,31 @@ class PreviewSession {
         await target.probe.checked({ op: "send", message: { method: "input.text", params: admitted } });
       } else if (kind === "message") {
         const message = asRecord(input.message, "message");
-        await probe.checked({ op: "send", message });
+        // Browser media diagnostics use the same guest event lane as the
+        // Flutter decoder. Composite child frames carry a private runtime
+        // tag so the state is delivered to the owning child probe; the tag
+        // itself is not part of the guest-facing `video.state` payload.
+        const messageName = typeof message.name === "string" ? message.name : "";
+        const messagePayload = message.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
+          ? message.payload as JsonRecord
+          : undefined;
+        const runtimeId = messageName === "video.state" && typeof messagePayload?.runtime === "string"
+          ? messagePayload.runtime
+          : undefined;
+        if (runtimeId) {
+          const target = this.childRuntimes.get(runtimeId);
+          const runtimeToken = typeof messagePayload?.runtimeToken === "string" ? messagePayload.runtimeToken : "";
+          // A decoder can finish or report an error after its child runtime
+          // was destroyed. Treat that diagnostic as an acknowledged stale
+          // fact; never poison the session or deliver it to a newly-created
+          // child with the same app id.
+          if (!target || runtimeToken !== `${target.instanceId}:${target.generation}`) return;
+          const { runtime: _runtime, runtimeToken: _runtimeToken, ...guestPayload } = messagePayload!;
+          await target.probe.checked({ op: "send", message: { ...message, payload: guestPayload } });
+          target.needsPump = true;
+        } else {
+          await probe.checked({ op: "send", message });
+        }
       } else {
         throw new Error("preview input type must be pointer, text, key, resize, or message");
       }
@@ -1933,7 +2156,7 @@ class PreviewSession {
       nextWakeDelayMs: this.nextWakeDelay,
       lastFrame: this.frame?.frame ?? null,
       transport: "native-probe-full-frames",
-      unsupported: ["video", "native hardware/plugins"],
+      unsupported: ["native hardware/plugins"],
       ...(this.error ? { error: this.error } : {}),
     };
   }
@@ -1979,18 +2202,7 @@ class PreviewManagerImpl implements PreviewManager {
 
   async findProbe(): Promise<string> {
     if (!this.probePathPromise) {
-      this.probePathPromise = (async () => {
-        const configured = this.options.probePath ?? process.env.POCKET_NATIVE_PROBE;
-        const candidates = configured ? [configured] : defaultProbeCandidates;
-        for (const candidate of candidates) {
-          if (existsSync(candidate)) {
-            const resolved = await realpath(candidate);
-            const item = await stat(resolved);
-            if (item.isFile()) return resolved;
-          }
-        }
-        throw new Error(`pocket_probe was not found; build sdk/native/target/{debug,release}/pocket_probe or set POCKET_NATIVE_PROBE`);
-      })();
+      this.probePathPromise = Promise.resolve(resolveNativeProbePath(editorRoot, this.options.probePath ?? process.env.POCKET_NATIVE_PROBE));
     }
     return this.probePathPromise;
   }
@@ -2051,6 +2263,11 @@ class PreviewManagerImpl implements PreviewManager {
     let session: PreviewSession | undefined;
     try {
       session = this.session(projectId);
+      if (route === "media" && (request.method === "GET" || request.method === "HEAD")) {
+        // Media is an ordinary loose project asset. It must not start a
+        // native runtime merely because a browser decoder asks for bytes.
+        return await session.serveMedia(request, new URL(request.url).searchParams.get("asset"));
+      }
       if (route === "page" && request.method === "GET") {
         const page = await this.document(projectId);
         session.armIdleCleanup();
@@ -2102,6 +2319,7 @@ export const previewProtocol = {
   pointer: "{type:'pointer',phase:'down|move|up|cancel',id,x,y,surface?}",
   text: "{type:'text',events:[{kind:'keyDown|keyUp|commit|composition|compositionEnd',...}]} ",
   wheel: "browser wheel is translated to a real pointer drag; native probe has no wheel method",
-  resize: "{type:'resize',width,height}",
+  resize: "{type:'resize',width,height,safeArea?:{top,right,bottom,left}}",
+  media: "GET|HEAD /api/projects/:id/preview/media?asset=<scope-prefixed assets/...>",
 } as const;
 

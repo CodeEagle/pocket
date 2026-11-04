@@ -3,12 +3,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startEditor } from "../server.ts";
+import { DEFAULT_DEVICE } from "@open-wxa/wxa-runner-core";
 
 test("Editor exposes local WeChat targets and guards mutation requests", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "pocket-wechat-route-"));
   const server = await startEditor({ port: 0, workspace });
   const origin = `http://127.0.0.1:${server.port}`;
   try {
+    const profileResponse = await fetch(`${origin}/api/preview/device`);
+    expect(profileResponse.status).toBe(200);
+    const profile = await profileResponse.json() as any;
+    expect(profile.screenWidth).toBe(DEFAULT_DEVICE.screenWidth);
+    expect(profile.screenHeight).toBe(DEFAULT_DEVICE.screenHeight);
+    expect(profile.safeArea).toEqual({ top: DEFAULT_DEVICE.statusBarHeight, right: 0, bottom: DEFAULT_DEVICE.safeAreaBottom, left: 0 });
     const create = await fetch(`${origin}/api/projects`, { method: "POST", headers: { "content-type": "application/json", "x-pocket-editor": "1" },
       body: JSON.stringify({ id: "wechat-guest", name: "Wechat guest", version: "0.1.0", tickHz: 60 }) });
     expect(create.status).toBe(201);

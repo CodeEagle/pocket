@@ -1,9 +1,14 @@
 # Pocket Studio editor reuse
 
-`editor/` is the local scaffold service for `pocket_host`. It keeps the useful
+`editor/` is the local scaffold service for Pocket SDK consumers. It keeps the useful
 PocketJS Kit editor workflow (project list, local project creation, source and
 configuration editing, build diagnostics, preview artifacts and signed
 publishing) while removing the Kit server's dependency on the old checkout.
+
+For the current Showcase editing, native Canvas web preview, simulator/device
+deployment and browser preview workflow on port 8791, see
+[EDITOR_STUDIO.md](EDITOR_STUDIO.md). The provenance and signed-update details
+below describe the earlier 8790 workflow, which remains available.
 
 ## Provenance and deliberate ablation
 
@@ -215,3 +220,96 @@ decoded signed payload. The pinned native compiler can be prebuilt with:
 cargo build --locked --manifest-path native/Cargo.toml --bin pocketjs_bytecode
 ```
 
+
+## Floating editor error notice (2026-11-04)
+
+Reviewed the retained parent `pocketjs_flutter_demo/pocketjs_super_app_demo.html`
+(lines 852–853 and 959–976): its toast uses fixed positioning, a bounded width,
+a border and shadow. Adapted that presentation to the existing editor
+`#notice` in `sdk/editor/client/editor.css`, anchored 16px from the top/right.
+The screenshot's lowercase `preview stream reconnecting` comes through
+`preview.error` into `editor.js`'s existing `showNotice`; the embedded preview's
+separate status output prefixes the text with `PocketJS`.
+
+Retained the single alert node, message handling and clearing behavior. Removed
+the in-flow margin and both responsive margin overrides; no toast queue, timer
+or duplicate notification state was added. Long messages wrap and scroll inside
+the viewport-bounded notice.
+
+Validation: a temporary Playwright Chromium probe executed the production
+`showNotice`/`clearNotice` in the existing inline browser fixture at widths
+1280, 620 and 320. All 39 assertions passed, including unchanged workspace
+position/height and document scroll dimensions for normal and very long
+messages, top/right placement and the existing iframe lifecycle checks. An
+ablation restoring the old in-flow positioning reproduced workspace top
+0 → 52.9375px and document height 1061 → 1114px. Temporary probes were removed.
+
+## Preview header cleanup (2026-11-04)
+
+Rechecked the retained parent outside `pocket_host/`; it has no matching editor
+header to migrate. Adapted the existing `sdk/editor/client/index.html`,
+`editor.css` and `editor.js` controls rather than adding a toolbar framework.
+The header now has two groups of rows: preview state/size/build/refresh/source,
+then device and WeChat run controls. Removed the redundant eyebrow, internal
+API URL display and its writes, and two always-visible explanatory rows.
+The WeChat project name remains available as the group label's title.
+Capture, region labels, copy link, bezel and the combined capability note live
+in one native `details` menu. Existing action IDs and state/transport behavior
+are retained; no additional JS menu state was introduced.
+
+Validation: existing WeChat UI and Playwright iframe lifecycle tests passed
+(2 tests, 41 assertions). A temporary browser probe additionally opened/closed
+the menu at 1280/768/375/320px, checked its viewport bounds and document width,
+and ran the same lifecycle interactions (30 assertions). Reviewed the 1280px
+rendered screenshot; removed the temporary probe. This verifies editor UI and
+iframe lifecycle, not native device deployment or guest rendering changes.
+
+## Shared tools and preview targets (2026-11-04)
+
+Revisited the retained parent outside `pocket_host/`: there is no multi-platform
+editor header to reuse. Kept the existing production controls and transport
+handlers, adapting only their grouping and presentation in the client.
+The common toolbar now contains viewport, Build, Refresh, Capture, Region IDs
+and Device frame with matching button sizes. Source and copy link remain in
+More. Flutter and WeChat have individual target groups with local status and
+Open/Run/Stop actions; device deployment stays in its own group. The shared
+`.preview-target` layout wraps as groups are added, without creating a platform
+registry, parallel state machine, or entries for unsupported platforms.
+
+Region IDs and Device frame both use `aria-pressed` toggle buttons and the same
+active treatment. The frame toggle retains its existing persisted boolean and
+presentation handler. Capture, region messages and copied links remain Flutter
+capabilities, explicitly identified by tooltips/link wording; this layout does
+not claim those capabilities exist for other platforms. The displayed frame
+option continues to affect both supported preview surfaces.
+
+Removed redundant target-specific flex styling and updated the preview-page
+acceptance selectors for the earlier URL removal and toolbar relocation.
+Validation: WeChat UI, inline Chromium lifecycle and real pinned compiler/native
+preview-page acceptance passed. The real guest acceptance exercised region
+messages, clipboard URL and screenshot download. A temporary Chromium probe
+also verified frame toggling/active state, menu bounds and no horizontal page
+overflow at widths 1440/1280/768/375/320; inspected the 1280px screenshot and
+removed the probe. This validates the current Flutter/WeChat UI; additional
+platform runtimes still need their own implementations and acceptance coverage.
+
+## Notice severity and dismissal (2026-11-04)
+
+Reused the retained parent's color classification and timed-toast behavior from
+`pocketjs_flutter_demo/pocketjs_super_app_demo.html:959–976`. Adapted the existing
+single editor alert instead of introducing a queue or another notification
+layer. `showNotice(message, tone)` defaults to error; explicit success covers
+screenshot/link completion, and info covers save/build/selection guidance.
+Errors persist, success hides after 3.5s, and info after 5s. Every notification
+can be dismissed by clicking its body or the labeled close button (also
+keyboard accessible). The existing clear path cancels the sole timer, so a
+previous message cannot dismiss a replacement. Success/info use `role=status`;
+errors use `role=alert`. Fixed positioning and bounded internal overflow remain.
+
+Validation: a temporary Playwright probe executed production JS and checked
+both auto-hide durations, error persistence after replacement, body/button/
+keyboard dismissal, long-message bounds at 320px and unchanged page dimensions
+(31 assertions including existing iframe lifecycle). Reviewed the rendered
+success notice and removed the probe. Real pinned PocketJS preview acceptance
+also checks that a screenshot download produces a success notice and that the
+close button dismisses it.

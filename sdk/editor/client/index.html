@@ -2,87 +2,196 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Pocket Studio</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d111a">
+  <title>Pocket Preview — Workspace</title>
   <link rel="stylesheet" href="/editor.css">
 </head>
 <body>
-  <aside class="sidebar">
-    <div class="brand"><span class="brand-mark">P</span><span><strong>Pocket Studio</strong><small>local guest workspace</small></span></div>
-    <div class="sidebar-heading"><span>Projects</span><button id="new-project" class="icon-button" title="Create project">+</button></div>
-    <nav id="projects" aria-label="Projects"></nav>
-    <div class="sidebar-foot"><span class="status-dot"></span> Local only<small>No source leaves this machine.</small></div>
-  </aside>
-  <main>
-    <header class="topbar">
-      <div><div class="eyebrow">POCKET HOST / EDITOR</div><h1 id="project-title">Select a project</h1><p id="project-subtitle">Create a scaffold backed by the pinned PocketJS compiler.</p></div>
-      <div class="top-actions"><span id="save-status" class="status-text">Ready</span><button id="save" class="secondary" disabled>Save</button><button id="build" class="secondary" disabled>Build qjbc + PAK</button><button id="publish" class="primary" disabled>Publish signed update</button></div>
-    </header>
-    <div id="notice" class="notice" role="alert" hidden></div>
-    <div class="workspace">
-      <section class="panel preview-panel" aria-label="Canvas and WeChat previews">
-        <div class="panel-header preview-header"><h2>Preview</h2><label><select id="viewport-picker" aria-label="Preview viewport"><option value="mobile">Mobile · 390 × 844</option><option value="tablet">Tablet · 768 × 1023</option><option value="desktop">Desktop · 1023 × 768</option></select></label><button id="refresh-preview" type="button">Refresh preview</button></div>
-                <div class="wechat-validation-controls" aria-label="WeChat validation controls">
-                  <span id="wechat-project-label" class="wechat-project-label">Whole app</span>
+  <div class="app-shell">
+    <div class="main-shell">
+      <div id="notice" class="notice" role="status" hidden>
+        <span id="notice-icon" class="notice-icon" aria-hidden="true"></span>
+        <span id="notice-message"></span>
+        <button id="notice-close" class="notice-close" type="button" aria-label="Dismiss notification" title="Dismiss notification">×</button>
+      </div>
+
+      <main class="workspace" id="workspace">
+        <section class="preview-column" aria-label="Preview and project tools">
+          <section class="panel preview-panel" aria-labelledby="preview-title">
+            <div class="panel-header preview-header">
+              <h2 id="preview-title">Preview</h2>
+              <div class="preview-actions" role="group" aria-label="Shared preview tools">
+                <label class="viewport-select-label"><span class="sr-only">Preview size</span><select id="viewport-picker" aria-label="Preview viewport"><option value="mobile">Mobile</option><option value="tablet">Tablet · 768 × 1023</option><option value="desktop">Desktop · 1023 × 768</option></select></label>
+                <button id="build" class="button secondary small-button" type="button" disabled>Build</button>
+                <button id="refresh-preview" class="button secondary small-button" type="button" disabled>Refresh</button>
+                <button id="capture-preview" class="button secondary small-button" type="button" title="Capture the Flutter preview" disabled>Capture</button>
+                <button id="toggle-regions" class="button secondary small-button" type="button" aria-pressed="false" title="Show region IDs in the Flutter preview" disabled>Region IDs</button>
+                <button id="preview-bezel-toggle" class="button secondary small-button" type="button" aria-pressed="false" title="Show device frames for supported previews">Device frame</button>
+                <details class="preview-options">
+                  <summary class="button secondary small-button">More</summary>
+                  <div class="preview-options-content">
+                    <button id="source-toggle" class="button secondary small-button" type="button" disabled>Source</button>
+                    <button id="copy-preview-link" class="button secondary small-button" type="button" disabled>Copy Flutter link</button>
+                    <p id="wechat-validation-hint" class="field-help">Build prepares the Flutter package. Each platform has its own preview controls. Hardware and platform capabilities require a device.</p>
+                  </div>
+                </details>
+              </div>
+            </div>
+            <div class="preview-toolbar" role="group" aria-label="Preview targets">
+              <div class="preview-target" aria-label="Flutter preview controls">
+                <span class="control-label">Flutter</span>
+                <span id="preview-state" class="live-chip"><i></i>Waiting</span>
+                <button id="preview-open" class="button secondary small-button" type="button" title="Open preview in a new tab" aria-label="Open preview in a new tab" disabled>Open</button>
+              </div>
+              <div class="preview-target wechat-validation-controls" aria-label="WeChat validation controls">
+                  <span id="wechat-project-label" class="control-label">WeChat</span>
                   <span id="wechat-state" class="meta-chip" aria-live="polite">Idle</span>
-                  <button id="wechat-start" class="button secondary small-button" type="button" disabled>Run WeChat</button>
-                  <button id="wechat-stop" class="button quiet small-button" type="button" hidden>Stop WeChat</button>
+                  <button id="wechat-start" class="button secondary small-button" type="button" disabled>Run</button>
+                  <button id="wechat-stop" class="button quiet small-button" type="button" hidden>Stop</button>
                   <a id="wechat-open" class="button secondary small-button" href="#" target="_blank" rel="noopener" hidden>Open</a>
                 </div>
-            <p id="wechat-validation-hint" class="wechat-validation-hint field-help">WeChat 整个 App 验证；硬件能力仍需真机验证</p>
+              <div class="preview-target preview-device-controls" aria-label="Device preview controls">
+                  <span class="control-label">Device</span><label class="device-select-label"><span class="sr-only">Target device</span><select id="device-picker" aria-label="Deployment target" disabled><option value="">Loading devices…</option></select></label>
+                  <button id="deploy" class="button secondary small-button" type="button" disabled>Run</button>
+                  <button id="deploy-cancel" class="button quiet small-button" type="button" hidden>Stop</button>
+                </div>
+            </div>
             <div id="preview-stage-wrap" class="preview-stage-wrap">
               <div id="preview-surfaces" class="preview-surfaces">
-                <div id="preview-stage" class="preview-stage viewport-mobile">
+                <div class="preview-surface-slot">
+                  <div id="preview-stage" class="preview-stage viewport-mobile">
+                  <div id="preview-phone-shell" class="preview-phone-shell" aria-hidden="true" inert hidden>
+                    <div class="preview-phone-statusbar">
+                      <span class="preview-phone-statusbar-time">9:41</span>
+                      <span class="preview-phone-statusbar-icons" aria-hidden="true">
+                        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx=".8"/><rect x="4.6" y="5" width="3" height="6" rx=".8"/><rect x="9.2" y="2.6" width="3" height="8.4" rx=".8"/><rect x="13.8" y="0" width="3" height="11" rx=".8"/></svg>
+                        <svg width="16" height="12" viewBox="0 0 16 12" fill="currentColor"><path d="M8 11.2 5.45 8.65A3.6 3.6 0 0 1 10.55 8.65ZM2.77 5.97A7.4 7.4 0 0 1 13.23 5.97L11.68 7.52A5.2 5.2 0 0 0 4.32 7.52ZM.08 3.28A11.2 11.2 0 0 1 15.92 3.28L14.36 4.84A9 9 0 0 0 1.64 4.84Z"/></svg>
+                        <svg width="25" height="12" viewBox="0 0 25 12"><rect x=".5" y=".5" width="21.5" height="11" rx="3.2" fill="none" stroke="currentColor" stroke-opacity=".4"/><rect x="2" y="2" width="18.5" height="8" rx="1.8" fill="currentColor"/><path d="M23.4 4v4a2.2 2.2 0 0 0 0-4z" fill="currentColor" fill-opacity=".45"/></svg>
+                      </span>
+                    </div>
+                    <div class="preview-phone-notch"></div>
+                    <div class="preview-phone-home-indicator"></div>
+                  </div>
                   <div id="preview-empty" class="preview-empty"><div class="empty-icon">⌁</div><strong>Preview appears here</strong><span>Build, then refresh preview.</span></div>
                   <iframe id="preview-frame" title="Pocket guest web preview" src="about:blank" hidden></iframe>
+                  </div>
+                  <div class="preview-surface-label" aria-hidden="true"><strong>Flutter</strong><span>Native Canvas · <em id="preview-device-label">—</em></span></div>
                 </div>
                 <section id="wechat-preview-pane" class="wechat-preview-pane" hidden>
-                  <div class="wechat-preview-viewport">
-                    <div id="wechat-preview-empty" class="preview-empty"><div class="empty-icon">⌁</div><strong>WeChat preview</strong><span>Run WeChat to load the whole app.</span></div>
-                    <iframe id="wechat-preview-frame" title="Pocket WeChat preview" src="about:blank" hidden></iframe>
+                  <div id="wechat-preview-shell" class="wechat-preview-device-shell">
+                    <div class="wechat-preview-viewport">
+                      <div id="wechat-preview-empty" class="preview-empty"><div class="empty-icon">⌁</div><strong>WeChat preview</strong><span>Run WeChat to load the whole app.</span></div>
+                      <iframe id="wechat-preview-frame" title="Pocket WeChat preview" src="about:blank" hidden></iframe>
+                    </div>
                   </div>
+                  <div class="preview-surface-label" aria-hidden="true"><strong>微信小程序</strong><span>WeChat WASM · <em id="wechat-device-label">—</em></span></div>
                 </section>
               </div>
               <button id="resize-preview-height" class="preview-height-resizer" type="button" role="separator" aria-orientation="horizontal" aria-label="Resize preview height" aria-valuemin="240" aria-valuemax="1200" aria-valuenow="668" tabindex="0"><span aria-hidden="true"></span></button>
             </div>
-      </section>
+          </section>
 
-      <section class="panel source-panel">
-        <div class="panel-header"><div><span class="eyebrow">GUEST SOURCE</span><div class="file-heading"><h2 id="active-file">app.tsx</h2><select id="file-picker" aria-label="Guest source file" disabled></select></div></div><span id="source-bytes" class="pill">—</span></div>
-        <textarea id="source" spellcheck="false" aria-label="Guest app.tsx source" placeholder="Create or select a project to edit its guest source."></textarea>
-        <div class="source-foot"><span>Solid TSX · JavaScript owns the UI</span><span id="source-revision">revision —</span></div>
-      </section>
-      <section class="right-column">
-        <section class="panel config-panel">
-          <div class="panel-header"><div><span class="eyebrow">PROJECT CONFIG</span><h2>Build settings</h2></div><span id="build-state" class="pill">Not built</span></div>
-          <div class="form-grid">
-            <label>Display name<input id="config-name" autocomplete="off"></label>
-            <label>App ID<input id="config-app-id" autocomplete="off"></label>
-            <label>Version<input id="config-version" autocomplete="off"></label>
-            <label>Build<input id="config-build" type="number" min="0" step="1"></label>
-            <label>Tick rate<input id="config-tick" type="number" min="1" max="120" step="1"></label>
-          </div>
+          <section class="panel test-publish-panel" aria-labelledby="test-publish-title">
+            <div class="test-publish-card">
+              <div class="test-publish-copy">
+                <div class="eyebrow">TEST PACKAGE / HOT UPDATE</div>
+                <strong id="test-publish-title">Publish a simulator test package</strong>
+                <span>Signs the built revision with a monotonic test build; source and release config stay unchanged.</span>
+              </div>
+              <button id="publish-test" class="button primary" type="button" disabled>Publish test package</button>
+            </div>
+            <div id="test-publish-info" class="test-publish-info" hidden></div>
+          </section>
+
+          <details class="editor-tools" id="editor-tools">
+            <summary><span>Project, source, device &amp; diagnostics</span><span class="advanced-summary">Advanced tools are tucked away until needed</span></summary>
+            <div class="editor-tools-content">
+              <section class="panel project-panel" id="sidebar" aria-labelledby="project-panel-title" hidden>
+                <div class="panel-header compact-header">
+                  <div><div class="eyebrow">PROJECT</div><h2 id="project-panel-title">Project selection</h2><p id="project-subtitle">Create an SDK starter, edit its guest UI, and preview it locally.</p></div>
+                  <div class="project-panel-status"><span id="project-state" class="state-chip">No project</span></div>
+                </div>
+                <div class="project-picker-body">
+                  <div class="sidebar-heading"><span id="project-title">Select a project</span><button id="new-project" class="icon-button" type="button" title="Create project" aria-label="Create project">+</button></div>
+                  <nav id="projects" class="project-list" aria-label="Projects"></nav>
+                  <div class="project-panel-actions"><span class="field-help">Local workspace</span></div>
+                </div>
+              </section>
+
+              <section class="panel config-panel" aria-labelledby="config-title">
+                <div class="panel-header compact-header">
+                  <div><div class="eyebrow">PROJECT CONFIG</div><h2 id="config-title">Build settings</h2></div>
+                  <span id="build-state" class="meta-chip">Not built</span>
+                </div>
+                <div class="form-grid config-grid">
+                  <label>Display name<input id="config-name" autocomplete="off" disabled></label>
+                  <label>App ID<input id="config-app-id" autocomplete="off" disabled></label>
+                  <label>Version<input id="config-version" autocomplete="off" disabled></label>
+                  <label>Build<input id="config-build" type="number" min="0" step="1" disabled></label>
+                  <label>Tick rate<input id="config-tick" type="number" min="1" max="120" step="1" disabled></label>
+                </div>
+              </section>
+
+              <section class="panel deploy-panel" aria-labelledby="deploy-title">
+                <div class="panel-header compact-header">
+                  <div><div class="eyebrow">DEVICE TARGET</div><h2 id="deploy-title">Deploy a build</h2></div>
+                  <span id="deploy-state" class="meta-chip">No target</span>
+                </div>
+                <div class="deploy-body">
+                  <p id="device-help" class="field-help">Save and build before deploying to an emulator or connected device.</p>
+                  <pre id="deploy-log" class="deploy-log" aria-live="polite">No deployment yet.</pre>
+                </div>
+              </section>
+
+              <section class="panel output-panel" aria-labelledby="output-title">
+                <div class="panel-header compact-header">
+                  <div><div class="eyebrow">BUILD OUTPUT</div><h2 id="output-title">Diagnostics</h2></div>
+                  <button id="clear-log" class="text-button" type="button">Clear</button>
+                </div>
+                <div id="artifacts" class="artifact-list"><span class="muted">Build output will appear after a real QuickJS build.</span></div>
+                <details class="advanced-panel" id="advanced-panel">
+                  <summary><span>Advanced</span><span class="advanced-summary">Signed release</span></summary>
+                  <div class="advanced-content">
+                    <div class="publish-heading"><div><div class="eyebrow">SIGNED RELEASE</div><strong>Publish this built revision</strong><span>Creates the configured release update for a host to consume.</span></div><div class="publish-actions"><span id="runtime-abi" class="meta-chip">ABI —</span><button id="publish" class="button secondary" type="button" disabled>Publish release</button></div></div>
+                    <div id="publish-info" class="publish-info" hidden></div>
+                    <span id="publish-status" class="publish-status">Not published</span>
+                  </div>
+                </details>
+                <pre id="log" class="build-log" aria-live="polite">No project selected.</pre>
+              </section>
+            </div>
+          </details>
         </section>
-        <section class="panel artifacts-panel">
-          <div class="panel-header"><div><span class="eyebrow">ARTIFACTS</span><h2>Native package outputs</h2></div><span id="runtime-abi" class="pill">ABI —</span></div>
-          <div id="artifacts" class="artifact-list"><span class="muted">Build the project to produce real QuickJS bytecode.</span></div>
-          <div id="publish-info" class="publish-info" hidden></div>
-        </section>
-        <section class="panel log-panel">
-          <div class="panel-header"><div><span class="eyebrow">BUILD LOG</span><h2>Diagnostics</h2></div><button id="clear-log" class="text-button">Clear view</button></div>
-          <pre id="log" aria-live="polite">No project selected.</pre>
-        </section>
-      </section>
+      </main>
     </div>
-  </main>
+  </div>
+
+  <dialog id="source-dialog" class="source-dialog" aria-labelledby="source-dialog-title">
+    <div class="source-dialog-header"><div><div class="eyebrow">GUEST SOURCE</div><h2 id="source-dialog-title">Edit source</h2></div><button id="source-close" class="icon-button" type="button" aria-label="Close source editor">×</button></div>
+    <section class="panel source-panel" aria-labelledby="source-panel-title">
+      <div class="panel-header source-header">
+        <div>
+          <div class="eyebrow">SOURCE FILE</div>
+          <div class="file-heading"><h2 id="source-panel-title">app.tsx</h2><select id="file-picker" aria-label="Guest source file" disabled></select></div>
+        </div>
+        <div class="source-header-actions"><button id="refresh-source" class="text-button" type="button" disabled>Refresh files</button><button id="save" class="button secondary small-button" type="button" disabled>Save</button><span id="save-status" class="status-text">Ready</span><span id="source-bytes" class="meta-chip">—</span></div>
+      </div>
+      <textarea id="source" spellcheck="false" aria-label="Guest source file" placeholder="Select a project to edit its guest source." disabled></textarea>
+      <div class="source-foot"><span>Solid TSX · UI lives in JavaScript</span><span id="source-revision">revision —</span></div>
+    </section>
+  </dialog>
+
   <dialog id="create-dialog">
     <form id="create-form" method="dialog">
-      <div class="eyebrow">NEW LOCAL PROJECT</div><h2>Start from the host showcase</h2><p>The complete guest source and manifest are copied into the editor workspace, then you can replace <code>app.tsx</code>.</p>
+      <div class="eyebrow">NEW SDK PROJECT</div>
+      <h2>Start with a Pocket starter</h2>
+      <p>This creates an editable SDK starter project. It is intentionally minimal so you can shape the UI yourself.</p>
       <label>Folder ID<input name="id" required pattern="[a-z][a-z0-9-]{0,47}" value="my-pocket-app" autocomplete="off"></label>
       <label>Display name<input name="name" required value="My Pocket App" autocomplete="off"></label>
-      <label>App ID<input name="appId" required value="pocket.host.demo" autocomplete="off"></label>
+      <label>App ID<input name="appId" required value="pocket.app" autocomplete="off"></label>
       <div class="form-grid"><label>Version<input name="version" value="0.1.0"></label><label>Tick rate<input name="tickHz" type="number" min="1" max="120" value="60"></label></div>
-      <div class="dialog-actions"><button type="button" id="cancel-create" class="secondary">Cancel</button><button class="primary" type="submit">Create project</button></div>
+      <div class="dialog-actions"><button type="button" id="cancel-create" class="button secondary">Cancel</button><button class="button primary" type="submit">Create project</button></div>
     </form>
   </dialog>
   <script type="module" src="/editor.js"></script>

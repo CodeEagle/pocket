@@ -4,6 +4,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
+import { previewDevice } from "../preview_device.ts";
 
 const clientRoot = resolve(import.meta.dir, "../client");
 const html = readFileSync(join(clientRoot, "index.html"), "utf8");
@@ -55,6 +56,7 @@ test("Editor keeps Canvas and WeChat previews visible together and cleans the in
           // render can be replayed without changing the shipped client.
           return new Response(`${script}\nwindow.__pocketTestRenderWechat = renderWechatState;`, { headers: { "content-type": "text/javascript; charset=utf-8" } });
         }
+        if (path === "/api/preview/device") return json(previewDevice);
         if (path === "/health") return json({ csrfToken: "inline-test", projectId: projects[0]!.id });
         if (path === "/api/devices") return json([]);
         if (path === "/api/projects") return json(projects);
@@ -119,6 +121,27 @@ test("Editor keeps Canvas and WeChat previews visible together and cleans the in
     expect(desktopWechat).not.toBeNull();
     expect(desktopWechat!.x).toBeGreaterThan(desktopCanvas!.x + 1);
     expect(Math.abs(desktopWechat!.y - desktopCanvas!.y)).toBeLessThanOrEqual(1);
+    await page.locator("#preview-phone-shell").waitFor({ state: "visible" });
+    expect(await page.locator("#preview-frame").evaluate((frame) => [frame.style.width, frame.style.height])).toEqual(["375px", "812px"]);
+    const shell = await page.locator("#preview-phone-shell").boundingBox();
+    expect(Math.abs(shell!.width - desktopCanvas!.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(shell!.height - desktopCanvas!.height)).toBeLessThanOrEqual(1);
+    expect(await page.locator("#preview-phone-shell").evaluate((element) => getComputedStyle(element).pointerEvents)).toBe("none");
+    await page.locator("#viewport-picker").selectOption("tablet");
+    await page.locator("#preview-phone-shell").waitFor({ state: "hidden" });
+    await page.locator("#viewport-picker").selectOption("mobile");
+    await page.locator("#preview-phone-shell").waitFor({ state: "visible" });
+    const bezelToggle = page.locator("#preview-bezel-toggle");
+    expect(await page.locator("#preview-stage").evaluate((element) => element.classList.contains("preview-bezel-enabled"))).toBe(false);
+    expect(await page.locator(".preview-surface-label strong").allTextContents()).toEqual(["Flutter", "微信小程序"]);
+    await page.waitForTimeout(250);
+    const screenBeforeToggle = await page.locator("#preview-stage").boundingBox();
+    await bezelToggle.click();
+    expect(await page.locator("#preview-stage").evaluate((element) => element.classList.contains("preview-bezel-enabled"))).toBe(true);
+    expect(await page.locator("#wechat-preview-shell").evaluate((element) => element.classList.contains("preview-bezel-enabled"))).toBe(true);
+    expect(await page.locator("#preview-stage").boundingBox()).toEqual(screenBeforeToggle);
+    expect(await page.evaluate(() => localStorage.getItem("pocket.editor.previewShowBezel"))).toBe("1");
+    await bezelToggle.click();
 
     const firstUrl = await page.locator("#wechat-preview-frame").getAttribute("src");
     const firstDatasetUrl = await page.locator("#wechat-preview-frame").evaluate((frame) => frame.dataset.url);

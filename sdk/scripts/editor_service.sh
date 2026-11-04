@@ -11,10 +11,16 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 SERVER="$ROOT/editor/server.ts"
-WORKSPACE="$ROOT/.pocket-build/editor-workspace"
-LOG="$ROOT/.pocket-build/editor-service.log"
 HOST=${POCKET_EDITOR_HOST:-127.0.0.1}
 PORT=${POCKET_EDITOR_PORT:-8790}
+WORKSPACE="$ROOT/.pocket-build/editor-workspace"
+LOG="$ROOT/.pocket-build/editor-service.log"
+if [ "$PORT" != 8790 ]; then
+  WORKSPACE="${WORKSPACE}-${PORT}"
+  LOG="$ROOT/.pocket-build/editor-service-${PORT}.log"
+fi
+PROJECT_ROOT=${POCKET_EDITOR_PROJECT_ROOT:-}
+FLUTTER_ROOT=${POCKET_EDITOR_FLUTTER_ROOT:-}
 BUN=${POCKET_EDITOR_BUN:-$(command -v bun 2>/dev/null || true)}
 LAUNCH_PATH=${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 LAUNCH_HOME=${HOME:-}
@@ -59,6 +65,9 @@ PATH_HASH=$(printf '%s' "$ROOT" | shasum -a 256 | awk '{print substr($1, 1, 16)}
 LABEL="com.pocket.editor.${PATH_HASH}.${PORT}"
 HEALTH_URL="http://${HOST}:${PORT}/health"
 RUNTIME_LOG="/tmp/pocket-editor-${PATH_HASH}.log"
+if [ "$PORT" != 8790 ]; then
+  RUNTIME_LOG="/tmp/pocket-editor-${PATH_HASH}-${PORT}.log"
+fi
 
 job_loaded() {
   launchctl list "$LABEL" >/dev/null 2>&1
@@ -124,6 +133,10 @@ start_service() {
     -- /usr/bin/env \
       "PATH=$LAUNCH_PATH" \
       "HOME=$LAUNCH_HOME" \
+      "POCKET_EDITOR_PROJECT_ROOT=$PROJECT_ROOT" \
+      "POCKET_EDITOR_FLUTTER_ROOT=$FLUTTER_ROOT" \
+      "POCKET_EDITOR_UPDATE_HOST=${POCKET_EDITOR_UPDATE_HOST:-}" \
+      "POCKET_EDITOR_UPDATE_PORT=${POCKET_EDITOR_UPDATE_PORT:-}" \
       "$BUN" "$SERVER" \
       --host="$HOST" \
       --port="$PORT" \

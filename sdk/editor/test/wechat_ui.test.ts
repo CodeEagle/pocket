@@ -7,15 +7,17 @@ const html = readFileSync(join(clientRoot, "index.html"), "utf8");
 const script = readFileSync(join(clientRoot, "editor.js"), "utf8");
 const css = readFileSync(join(clientRoot, "editor.css"), "utf8");
 
-test("editor exposes the non-popup WeChat validation controls alongside the local project editor", () => {
+test("editor exposes the non-popup WeChat validation controls alongside Canvas/device preview", () => {
   for (const id of ["wechat-project-label", "wechat-state", "wechat-start", "wechat-stop", "wechat-open", "wechat-validation-hint"]) {
     expect(html).toContain(`id="${id}"`);
   }
-  expect(html).toContain("Whole app");
+  expect(html).toContain('class="control-label">WeChat</span>');
   expect(html).toContain("Run WeChat");
-  expect(html).toContain("WeChat 整个 App 验证；硬件能力仍需真机验证");
+  expect(html).toContain("Hardware and platform capabilities require a device.");
   expect(html).not.toContain("wechat-target-picker");
   expect(html).toContain('id="wechat-open" class="button secondary small-button" href="#" target="_blank" rel="noopener" hidden');
+  expect(html).toContain('id="preview-frame"');
+  expect(html).toContain('id="device-picker"');
   expect(script).toContain('return `/api/projects/${encodeURIComponent(projectId)}/wechat`;');
   expect(script).toContain('method: "POST"');
   expect(script).toContain('body: JSON.stringify({ targetId })');
@@ -25,5 +27,5 @@ test("editor exposes the non-popup WeChat validation controls alongside the loca
   expect(script).toContain("pollWechat");
   expect(script).toContain("generation !== wechatGeneration");
   expect(css).toContain(".wechat-validation-controls");
-  expect(css).toContain(".wechat-validation-hint");
+  expect(css).toContain(".preview-options-content");
 });

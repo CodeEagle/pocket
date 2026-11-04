@@ -1,0 +1,55 @@
+import { networkInterfaces } from "node:os";
+import { isIP } from "node:net";
+
+function privateIPv4(address: string): boolean {
+  if (isIP(address) !== 4) return false;
+  const [a, b] = address.split(".").map(Number);
+  return a === 10 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168);
+}
+
+/** Prefer a physical LAN interface over virtual bridges; never advertise loopback. */
+export function chooseUpdateHost(interfaces = networkInterfaces()): string {
+  const candidates = Object.entries(interfaces).flatMap(([name, entries]) =>
+    (entries ?? []).filter(entry => !entry.internal && entry.family === "IPv4" && privateIPv4(entry.address))
+      .map(entry => ({ name, address: entry.address })));
+  candidates.sort((a, b) => Number(!/^(en\d|eth\d|wi-?fi|ethernet|wlan\d)/i.test(a.name)) -
+    Number(!/^(en\d|eth\d|wi-?fi|ethernet|wlan\d)/i.test(b.name)));
+  if (!candidates[0]) throw new Error("No LAN IPv4 for device updates; connect to a LAN or set POCKET_EDITOR_UPDATE_HOST to a local LAN IPv4");
+  return candidates[0].address;
+}
+
+/** Published artifacts only. Editor APIs and signing material have no route here. */
+export function startUpdateEndpoint(options: {
+  hostname: string;
+  port: number;
+  read: (path: string) => Promise<Response>;
+}): { origin: string; stop: () => void } {
+  if (!privateIPv4(options.hostname) && options.hostname !== "127.0.0.1") {
+    throw new Error("Device update host must be a local private IPv4 address");
+  }
+  if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) {
+    throw new Error("Device update port must be between 0 and 65535");
+  }
+  const server = Bun.serve({
+    hostname: options.hostname, port: options.port,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (!['GET', 'HEAD'].includes(request.method)) return new Response("Method not allowed", { status: 405, headers: { allow: "GET, HEAD", "cache-control": "no-store" } });
+      const parts = path.split("/");
+      if (!/^\/updates\/[a-z][a-z0-9-]{0,47}\/.+/.test(path) || path.includes("%") ||
+        parts.slice(1).some(part => !part || part === "." || part === ".." || !/^[A-Za-z0-9_.-]+$/.test(part))) {
+        return new Response("Not found", { status: 404, headers: { "cache-control": "no-store" } });
+      }
+      try {
+        const response = await options.read(path);
+        const headers = new Headers(response.headers);
+        headers.set("cache-control", "no-store");
+        headers.set("x-content-type-options", "nosniff");
+        return new Response(request.method === 'HEAD' ? null : response.body, { status: response.status, headers });
+      } catch {
+        return new Response("Not found", { status: 404, headers: { "cache-control": "no-store" } });
+      }
+    },
+  });
+  return { origin: `http://${options.hostname}:${server.port}`, stop: () => { void server.stop(true); } };
+}

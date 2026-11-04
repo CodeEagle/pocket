@@ -7,7 +7,8 @@
  * postMessage contract for captures and annotation rectangles:
  *
  * parent -> iframe
- *   {source:'pocket-editor', type:'preview.resize', width, height}
+ *   {source:'pocket-editor', type:'preview.resize', width, height,
+ *    safeArea:{top,right,bottom,left}}
  *   {source:'pocket-editor', type:'preview.capture', requestId, scale?}
  *   {source:'pocket-editor', type:'preview.regions', enabled:true|false}
  *   {source:'pocket-editor', type:'preview.annotation', requestId, rect,
@@ -46,6 +47,12 @@
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
+  }
+
+  function safeArea(value) {
+    const record = value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    const inset = (key) => clamp(number(record?.[key], 0), 0, MAX_DIMENSION);
+    return { top: inset("top"), right: inset("right"), bottom: inset("bottom"), left: inset("left") };
   }
 
   function argb(value) {
@@ -165,6 +172,51 @@
     context.drawImage(image.canvas, sx, sy, sw, sh, number(op.x, 0), number(op.y, 0), number(op.w, 0), number(op.h, 0));
   }
 
+  function videoKey(op) {
+    return `${String(op?.asset ?? "")}\u0000${String(op?.id ?? "")}`;
+  }
+
+  function drawVideo(context, state, op) {
+    const element = state?.element;
+    if (!element || state.disposed || element.readyState < 2 || element.videoWidth <= 0 || element.videoHeight <= 0) return;
+    const x = number(op.x, 0);
+    const y = number(op.y, 0);
+    const width = Math.max(0, number(op.w, 0));
+    const height = Math.max(0, number(op.h, 0));
+    if (width <= 0 || height <= 0) return;
+    const sourceWidth = element.videoWidth;
+    const sourceHeight = element.videoHeight;
+    const fit = op.fit === "contain" || op.fit === "fill" ? op.fit : "cover";
+    let sx = 0;
+    let sy = 0;
+    let sw = sourceWidth;
+    let sh = sourceHeight;
+    let dx = x;
+    let dy = y;
+    let dw = width;
+    let dh = height;
+    if (fit !== "fill") {
+      const sourceRatio = sourceWidth / sourceHeight;
+      const destinationRatio = width / height;
+      if (fit === "cover") {
+        if (sourceRatio > destinationRatio) {
+          sw = sourceHeight * destinationRatio;
+          sx = (sourceWidth - sw) / 2;
+        } else if (sourceRatio < destinationRatio) {
+          sh = sourceWidth / destinationRatio;
+          sy = (sourceHeight - sh) / 2;
+        }
+      } else if (sourceRatio > destinationRatio) {
+        dh = width / sourceRatio;
+        dy = y + (height - dh) / 2;
+      } else if (sourceRatio < destinationRatio) {
+        dw = height * sourceRatio;
+        dx = x + (width - dw) / 2;
+      }
+    }
+    context.drawImage(element, sx, sy, sw, sh, dx, dy, dw, dh);
+  }
+
   function drawTriangle(context, op, image) {
     const points = Array.isArray(op.points) ? op.points : [];
     if (points.length !== 3) return;
@@ -229,7 +281,7 @@
     return (index >= 7 && index <= 13) || index === 15 || index === 20 ? 700 : 400;
   }
 
-  function drawFrame(context, frame, resources) {
+  function drawFrame(context, frame, resources, videos) {
     const width = number(frame.width, 1);
     const height = number(frame.height, 1);
     context.clearRect(0, 0, width, height);
@@ -277,17 +329,18 @@
         drawImage(context, resources.get(String(op.asset ?? "")), op);
       } else if (kind === "triangle" || kind === "textureTriangle") {
         drawTriangle(context, op, resources.get(String(op.asset ?? "")));
-      } else if (kind === "hostSurface" || kind === "video") {
-        // Native host surfaces/video have no browser-side provider. Do not
-        // paint a fabricated rectangle or screenshot; the frame/status event
-        // remains available to the parent for an explicit capability adapter.
+      } else if (kind === "video") {
+        drawVideo(context, videos?.get(videoKey(op)), op);
+      } else if (kind === "hostSurface") {
+        // Generic native host surfaces have no browser-side provider. Do not
+        // paint a fabricated rectangle or screenshot.
       }
       context.restore();
     }
   }
 
   function visibleRegion(op, width, height) {
-    if (!op || typeof op !== "object" || op.type === "hostSurface" || op.type === "video") return null;
+    if (!op || typeof op !== "object" || op.type === "hostSurface") return null;
     const x = Number(op.x);
     const y = Number(op.y);
     const w = Number(op.w);
@@ -453,6 +506,16 @@
     root.style.cssText += ";display:flex;flex-direction:column;align-items:stretch;min-height:100%;background:#0b1020;color:#e5e7eb";
     canvas.style.cssText += ";display:block;width:100%;height:auto;max-width:100%;background:#fff;touch-action:none;outline:none;image-rendering:auto";
     const resources = new Map();
+    // Browser videos are real HTMLMediaElements used as Canvas sources. The
+    // maps retain only bounded intent/retired identities when a DrawOp is
+    // culled; the decoder element itself follows native visibility lifetime.
+    const videos = new Map();
+    const videoIntents = new Map();
+    const pendingVideoIntents = new Map();
+    const releasedVideoIds = new Set();
+    const videoScopes = new Set();
+    const activeVideoIdentities = new Set();
+    const MAX_VIDEO_IDENTITIES = 128;
     let frame = null;
     let stream = null;
     let closed = false;
@@ -479,6 +542,334 @@
       // The editor and preview are same-origin.  Never broadcast captures or
       // FrameResults to an arbitrary embedding origin.
       global.parent?.postMessage({ source: SOURCE, version: VERSION, type, projectId, ...payload }, global.location.origin);
+    }
+
+    function mediaUrl(asset) {
+      const base = String(options.basePath || `/api/projects/${encodeURIComponent(projectId)}/preview`).replace(/\/+$/, "");
+      return `${base}/media?asset=${encodeURIComponent(asset)}`;
+    }
+
+    function scopeForAsset(asset) {
+      for (const scope of videoScopes) {
+        if (asset.startsWith(`pocket.runtime.${scope}.`)) return scope;
+      }
+      if (asset.startsWith("pocket.runtime.")) {
+        const rest = asset.slice("pocket.runtime.".length);
+        const assetMarker = rest.indexOf(".assets/");
+        if (assetMarker > 0) return rest.slice(0, assetMarker);
+      }
+      return asset.startsWith("assets/") ? "" : undefined;
+    }
+
+    function assetMatchesScope(asset, scope) {
+      return scope === "" ? asset.startsWith("assets/") : asset.startsWith(`pocket.runtime.${scope}.`);
+    }
+
+    function scopedVideoId(scope, id) {
+      return `${scope}\u0000${id}`;
+    }
+
+    function trimVideoIdentityMaps() {
+      while (videoIntents.size > MAX_VIDEO_IDENTITIES) {
+        const stale = [...videoIntents.keys()].find((key) => !videos.has(key));
+        if (stale === undefined) break;
+        videoIntents.delete(stale);
+      }
+      while (pendingVideoIntents.size > MAX_VIDEO_IDENTITIES) {
+        pendingVideoIntents.delete(pendingVideoIntents.keys().next().value);
+      }
+      while (releasedVideoIds.size > MAX_VIDEO_IDENTITIES) {
+        const stale = [...releasedVideoIds].find((identity) => !activeVideoIdentities.has(identity));
+        if (stale === undefined) break;
+        releasedVideoIds.delete(stale);
+      }
+      while (videoScopes.size > MAX_VIDEO_IDENTITIES) videoScopes.delete(videoScopes.values().next().value);
+    }
+
+    function eventPayload(event) {
+      const payload = event?.payload ?? event?.params;
+      return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+    }
+
+    function videoCommandMatches(entry, id, scope) {
+      return entry && entry.id === id && assetMatchesScope(entry.asset, scope);
+    }
+
+    function logicalVideoAsset(state) {
+      if (!state?.scope) return state?.asset ?? "";
+      const prefix = `pocket.runtime.${state.scope}.`;
+      return state.asset.startsWith(prefix) ? state.asset.slice(prefix.length) : state.asset;
+    }
+
+    function sendVideoState(state, nextState, error) {
+      if (closed) return;
+      if (!state || state.reportedState === nextState && state.reportedError === String(error ?? "")) return;
+      state.reportedState = nextState;
+      state.reportedError = String(error ?? "");
+      const playing = !state.element.paused && !state.element.ended;
+      const payload = {
+        id: state.id,
+        asset: logicalVideoAsset(state),
+        state: nextState,
+        playing,
+        visible: state.visible === true && !state.disposed,
+        active: state.visible === true && !state.disposed,
+        controllers: videos.size,
+        loading: [...videos.values()].filter((entry) => !entry.disposed && entry.element.readyState < 2).length,
+        ...(state.scope ? { runtime: state.scope } : {}),
+        ...(state.runtimeToken ? { runtimeToken: state.runtimeToken } : {}),
+        ...(error ? { error: String(error) } : {}),
+      };
+      void input({
+        type: "message",
+        message: { type: "event", name: "video.state", payload },
+      });
+    }
+
+    function reportVideoFailure(state, phase, error) {
+      if (state.disposed || state.errorReported) return;
+      state.errorReported = true;
+      const detail = String(error?.message || error || "media error");
+      status.textContent = `Video ${phase} failed: ${state.asset}`;
+      sendVideoState(state, "error", detail);
+      announce("preview.error", { error: `video ${phase} failed (${state.id}): ${detail}`, video: { id: state.id, asset: state.asset, phase } });
+    }
+
+    function cancelVideoFrameCallback(state) {
+      if (state.callbackId === null) return;
+      try { state.element.cancelVideoFrameCallback?.(state.callbackId); } catch { /* callback already delivered */ }
+      state.callbackId = null;
+    }
+
+    function scheduleVideoFrameCallback(state) {
+      if (state.disposed || state.callbackId !== null || state.element.paused) return;
+      if (typeof state.element.requestVideoFrameCallback !== "function") return;
+      state.callbackId = state.element.requestVideoFrameCallback(() => {
+        state.callbackId = null;
+        if (state.disposed || state.element.paused) return;
+        renderCurrentFrame();
+        scheduleVideoFrameCallback(state);
+      });
+    }
+
+    function disposeVideo(state) {
+      if (!state || state.disposed) return;
+      sendVideoState(state, "disposed");
+      state.disposed = true;
+      cancelVideoFrameCallback(state);
+      try { state.element.pause(); } catch { /* already detached */ }
+      for (const [type, listener] of state.listeners) {
+        try { state.element.removeEventListener(type, listener); } catch { /* already detached */ }
+      }
+      state.listeners.length = 0;
+      try {
+        state.element.removeAttribute("src");
+        state.element.load?.();
+      } catch { /* best effort resource cancellation */ }
+      try { state.element.remove(); } catch { /* test DOM may not implement remove */ }
+    }
+
+    function createVideo(op, key, scope) {
+      const element = document.createElement("video");
+      element.muted = true;
+      element.defaultMuted = true;
+      element.playsInline = true;
+      element.preload = "auto";
+      element.loop = true;
+      element.controls = false;
+      element.setAttribute?.("aria-hidden", "true");
+      element.style.cssText = "position:absolute;left:-10000px;top:-10000px;width:1px;height:1px;opacity:0;pointer-events:none";
+      root.appendChild(element);
+      const state = {
+        key,
+        id: String(op.id),
+        asset: String(op.asset),
+        scope,
+        runtimeToken: typeof op.runtimeToken === "string" && op.runtimeToken ? op.runtimeToken : undefined,
+        element,
+        desired: undefined,
+        visible: true,
+        disposed: false,
+        callbackId: null,
+        errorReported: false,
+        playRequested: false,
+        reportedState: undefined,
+        reportedError: "",
+        listeners: [],
+      };
+      const onLoaded = () => {
+        if (state.disposed) return;
+        sendVideoState(state, "ready");
+        renderCurrentFrame();
+        if (state.desired === true && state.visible) scheduleVideoFrameCallback(state);
+      };
+      const onPlaying = () => {
+        if (!state.disposed) sendVideoState(state, "playing");
+      };
+      const onPause = () => {
+        if (!state.disposed && state.element.readyState >= 2) sendVideoState(state, "paused");
+      };
+      const onTimeUpdate = () => {
+        if (!state.disposed && !state.element.paused && typeof state.element.requestVideoFrameCallback !== "function") renderCurrentFrame();
+      };
+      const onError = () => reportVideoFailure(state, "load", state.element.error || "media source unavailable");
+      for (const [type, listener] of [
+        ["loadeddata", onLoaded], ["canplay", onLoaded], ["playing", onPlaying],
+        ["pause", onPause], ["timeupdate", onTimeUpdate], ["error", onError],
+      ]) {
+        element.addEventListener(type, listener);
+        state.listeners.push([type, listener]);
+      }
+      videos.set(key, state);
+      sendVideoState(state, "loading");
+      element.src = mediaUrl(state.asset);
+      element.load?.();
+      return state;
+    }
+
+    function applyVideoDesired(state, desired) {
+      if (!state || state.disposed) return;
+      state.desired = desired === true;
+      if (!state.visible || state.desired !== true) {
+        state.playRequested = false;
+        cancelVideoFrameCallback(state);
+        try { state.element.pause(); } catch { /* already paused */ }
+        if (state.element.readyState >= 2) sendVideoState(state, "paused");
+        return;
+      }
+      if (state.playRequested) {
+        scheduleVideoFrameCallback(state);
+        return;
+      }
+      state.playRequested = true;
+      let result;
+      try { result = state.element.play(); } catch (error) {
+        state.playRequested = false;
+        reportVideoFailure(state, "play", error);
+        return;
+      }
+      Promise.resolve(result).then(() => {
+        if (state.disposed || state.desired !== true || !state.visible) return;
+        sendVideoState(state, "playing");
+        scheduleVideoFrameCallback(state);
+        renderCurrentFrame();
+      }).catch((error) => {
+        if (state.disposed || state.desired !== true) return;
+        state.playRequested = false;
+        reportVideoFailure(state, "play", error);
+      });
+    }
+
+    function matchingVideoEntries(id, scope) {
+      const entries = [];
+      for (const state of videos.values()) if (videoCommandMatches(state, id, scope)) entries.push(state);
+      for (const entry of videoIntents.values()) if (videoCommandMatches(entry, id, scope) && !entries.some((state) => state.key === entry.key)) entries.push(entry);
+      return entries;
+    }
+
+    function applyVideoCommand(event) {
+      const name = typeof event?.name === "string" ? event.name : typeof event?.method === "string" ? event.method : "";
+      if (name !== "video.play" && name !== "video.pause" && name !== "video.release") return;
+      const payload = eventPayload(event);
+      const id = typeof payload.id === "string" && payload.id ? payload.id : undefined;
+      if (!id) return;
+      const scope = typeof event.runtime === "string" && event.runtime ? event.runtime : "";
+      if (scope) videoScopes.add(scope);
+      const identity = scopedVideoId(scope, id);
+      const entries = matchingVideoEntries(id, scope);
+      if (name === "video.release") {
+        releasedVideoIds.add(identity);
+        pendingVideoIntents.delete(identity);
+        for (const entry of entries) {
+          if (videos.get(entry.key) === entry) {
+            disposeVideo(entry);
+            videos.delete(entry.key);
+          }
+          videoIntents.delete(entry.key);
+        }
+        return;
+      }
+      releasedVideoIds.delete(identity);
+      const desired = name === "video.play";
+      pendingVideoIntents.set(identity, desired);
+      for (const entry of entries) {
+        const intent = { key: entry.key, id: entry.id, asset: entry.asset, desired };
+        videoIntents.set(entry.key, intent);
+      }
+    }
+
+    function pendingIntentFor(op, scope) {
+      const identity = scopedVideoId(scope ?? "", String(op.id));
+      if (scope !== undefined && pendingVideoIntents.has(identity)) {
+        const desired = pendingVideoIntents.get(identity);
+        pendingVideoIntents.delete(identity);
+        return desired;
+      }
+      for (const [candidate, desired] of pendingVideoIntents) {
+        const separator = candidate.indexOf("\u0000");
+        const candidateScope = candidate.slice(0, separator);
+        const candidateId = candidate.slice(separator + 1);
+        if (candidateId === String(op.id) && assetMatchesScope(String(op.asset), candidateScope)) {
+          pendingVideoIntents.delete(candidate);
+          return desired;
+        }
+      }
+      return undefined;
+    }
+
+    function syncVideoOps(ops) {
+      const seen = new Set();
+      activeVideoIdentities.clear();
+      for (const op of Array.isArray(ops) ? ops : []) {
+        if (!op || typeof op !== "object" || op.type !== "video" || typeof op.id !== "string" || typeof op.asset !== "string" || !op.asset) continue;
+        const scope = scopeForAsset(op.asset);
+        if (scope !== undefined && scope) videoScopes.add(scope);
+        const identity = scope === undefined ? undefined : scopedVideoId(scope, String(op.id));
+        if (identity !== undefined) {
+          if (activeVideoIdentities.size >= MAX_VIDEO_IDENTITIES && !activeVideoIdentities.has(identity)) continue;
+          activeVideoIdentities.add(identity);
+        }
+        const key = videoKey(op);
+        if (identity !== undefined && releasedVideoIds.has(identity)) continue;
+        let state = videos.get(key);
+        const runtimeToken = typeof op.runtimeToken === "string" && op.runtimeToken ? op.runtimeToken : undefined;
+        if (state && runtimeToken && state.runtimeToken && state.runtimeToken !== runtimeToken) {
+          disposeVideo(state);
+          videos.delete(key);
+          state = undefined;
+        }
+        if (!state) state = createVideo(op, key, scope);
+        if (runtimeToken) state.runtimeToken = runtimeToken;
+        state.visible = true;
+        const prior = videoIntents.get(key);
+        const pending = pendingIntentFor(op, scope);
+        const desired = pending ?? prior?.desired ?? state.desired ?? (op.autoplay !== false);
+        const intent = { key, id: String(op.id), asset: String(op.asset), desired };
+        videoIntents.set(key, intent);
+        state.desired = desired;
+        applyVideoDesired(state, desired);
+        seen.add(key);
+      }
+      for (const [key, state] of [...videos]) {
+        if (seen.has(key)) continue;
+        const scope = scopeForAsset(state.asset);
+        if (scope !== undefined && state.desired !== undefined) pendingVideoIntents.set(scopedVideoId(scope, state.id), state.desired);
+        disposeVideo(state);
+        videos.delete(key);
+      }
+      trimVideoIdentityMaps();
+    }
+
+    function resetVideoProjection(clearIntent = false) {
+      for (const state of videos.values()) disposeVideo(state);
+      videos.clear();
+      activeVideoIdentities.clear();
+      if (clearIntent) {
+        videoIntents.clear();
+        pendingVideoIntents.clear();
+        releasedVideoIds.clear();
+        videoScopes.clear();
+      }
     }
 
     async function sendInputPayload(payload) {
@@ -600,16 +991,16 @@
     function resize() {
       // The Editor parent owns the logical viewport for an embedded preview.
       // Its CSS box can be a scaled device frame (for example 288×623 while
-      // the selected logical device is 390×844), so observing it here would
+      // the selected logical device is 375×812), so observing it here would
       // silently replace the requested runtime dimensions.
       if (embedded) return;
       const rect = canvas.getBoundingClientRect();
-      const width = clamp(Math.round(rect.width || options.width || 390), 1, MAX_DIMENSION);
-      const ratio = frame && frame.width > 0 ? frame.height / frame.width : 844 / 390;
+      const width = clamp(Math.round(rect.width || options.width || 375), 1, MAX_DIMENSION);
+      const ratio = frame && frame.width > 0 ? frame.height / frame.width : 812 / 375;
       const height = clamp(Math.round((options.height || width * ratio)), 1, MAX_DIMENSION);
       if (frame && (frame.width !== width || frame.height !== height)) {
         finishWheel();
-        void input({ type: "resize", width, height });
+        void input({ type: "resize", width, height, safeArea: safeArea(null) });
       }
     }
 
@@ -617,7 +1008,10 @@
       // A fresh probe/runtime starts its frame counter over. Any browser
       // contact captured by the previous generation is no longer known to
       // native input, so discard it before accepting new moves.
-      if (frame && Number(next.frame) < Number(frame.frame)) resetPointerContacts();
+      if (frame && Number(next.frame) < Number(frame.frame)) {
+        resetPointerContacts();
+        resetVideoProjection(true);
+      }
       frame = next;
       for (const resource of Array.isArray(next.resources) ? next.resources : []) {
         if (!resource || typeof resource !== "object") continue;
@@ -630,6 +1024,8 @@
       for (const asset of Array.isArray(next.releasedResources) ? next.releasedResources : []) {
         if (typeof asset === "string") resources.delete(asset);
       }
+      for (const event of Array.isArray(next.events) ? next.events : []) applyVideoCommand(event);
+      syncVideoOps(next.ops);
       renderCurrentFrame();
       const tokens = (Array.isArray(next.presentationTokens) ? next.presentationTokens : [])
         .filter(token => typeof token === "string" && !presentedTokens.has(token));
@@ -652,7 +1048,7 @@
       status.textContent = `PocketJS native preview · frame ${next.frame} · ${next.width}×${next.height} · full FrameResult transport`;
       announce("preview.frame", { frame: next });
       const requests = Array.isArray(next.events) ? next.events.filter((event) => event && event.name === "host.request") : [];
-      const unsupportedOps = Array.isArray(next.ops) ? next.ops.filter((op) => op && (op.type === "hostSurface" || op.type === "video")) : [];
+      const unsupportedOps = Array.isArray(next.ops) ? next.ops.filter((op) => op && op.type === "hostSurface") : [];
       if (requests.length) {
         status.textContent = `PocketJS preview · ${requests.length} host request(s) pending (no fake plugin response)`;
         announce("preview.host-request", { requests });
@@ -671,8 +1067,8 @@
           });
         }
       } else if (unsupportedOps.length) {
-        status.textContent = `PocketJS preview · ${unsupportedOps.length} native surface/video op(s) unavailable in browser`;
-        announce("preview.unsupported", { capabilities: ["hostSurface", "video"], count: unsupportedOps.length });
+        status.textContent = `PocketJS preview · ${unsupportedOps.length} native surface op(s) unavailable in browser`;
+        announce("preview.unsupported", { capabilities: ["hostSurface"], count: unsupportedOps.length });
       }
       resize();
     }
@@ -683,8 +1079,8 @@
     // layout must use its host slot's native viewport (preview.ts). Enlarging
     // the backing store improves sharpness but cannot fix a wrong viewport.
     // Cause, ablation and regression coverage: sdk/docs/EDITOR_PREVIEW_RENDERING.md.
-    function logicalWidth() { return Math.max(1, Math.round(number(frame?.width, options.width || 390))); }
-    function logicalHeight() { return Math.max(1, Math.round(number(frame?.height, options.height || 844))); }
+    function logicalWidth() { return Math.max(1, Math.round(number(frame?.width, options.width || 375))); }
+    function logicalHeight() { return Math.max(1, Math.round(number(frame?.height, options.height || 812))); }
 
     function renderCurrentFrame() {
       if (!frame) return;
@@ -700,7 +1096,7 @@
       // Explicit logical aspect avoids rounded backing pixels changing CSS size.
       canvas.style.aspectRatio = `${width} / ${height}`;
       context.setTransform(backingWidth / width, 0, 0, backingHeight / height, 0, 0);
-      drawFrame(context, frame, resources);
+      drawFrame(context, frame, resources, videos);
       if (regionsEnabled) drawRegionOverlay(context, frame);
     }
 
@@ -1019,7 +1415,10 @@
         finishWheel();
         const width = clamp(Math.round(number(message.width, logicalWidth())), 1, MAX_DIMENSION);
         const height = clamp(Math.round(number(message.height, logicalHeight())), 1, MAX_DIMENSION);
-        void input({ type: "resize", width, height });
+        // Missing insets deliberately mean zero. This prevents a prior phone
+        // profile's notch/home-indicator padding from leaking into tablet or
+        // desktop selections.
+        void input({ type: "resize", width, height, safeArea: safeArea(message.safeArea) });
       } else if (message.type === "preview.regions") {
         regionsEnabled = message.enabled === true;
         renderCurrentFrame();
@@ -1087,6 +1486,7 @@
     connect();
     return { canvas, input, close: async () => {
       closed = true;
+      resetVideoProjection(true);
       cancelPointerContacts();
       stream?.close();
       global.removeEventListener("blur", cancelPointerContacts);

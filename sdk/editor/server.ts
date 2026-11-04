@@ -32,13 +32,20 @@ import {
   type PublicKeyConfig,
 } from "../scripts/package_update.ts";
 import { buildGuest } from "../scripts/build_guest.ts";
+import { createStudioCodex, type StudioExecutionContext, type StudioScope } from "./codex.ts";
 import { createPreviewManager } from "./preview.ts";
+import { previewDevice } from "./preview_device.ts";
+import { createEditorDeviceManager, type DeploymentSnapshot } from "./devices.ts";
 import { createWechatPreviewManager } from "./wechat.ts";
+import { chooseUpdateHost, startUpdateEndpoint } from "./update_endpoint.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const projectIdPattern = /^[a-z][a-z0-9-]{0,47}$/;
+const pocketNamePattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const appIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const versionPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+const outputPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const frameworkPattern = /^(solid|vue-vapor|octane)$/;
 const maxSourceBytes = 16 * 1024 * 1024;
 const maxJsonBytes = 256 * 1024;
 const maxAssetBytes = 32 * 1024 * 1024;
@@ -51,12 +58,14 @@ export type EditorConfig = {
   version: string;
   build: number;
   tickHz: number;
-  entry: "app.tsx";
-  framework: "solid";
+  entry: string;
+  output: string;
+  framework: string;
 };
 
 export type ArtifactInfo = {
   revision: number;
+  generation?: string;
   appJs: string;
   bytecode: string;
   metadata: string;
@@ -84,6 +93,9 @@ export type EditorStatus = {
     keyId: string;
     runtimeAbi: string;
     payloadSha256: string;
+    version?: string;
+    build?: number;
+    channel?: "test" | "release";
   };
 };
 
@@ -107,9 +119,14 @@ type BuildRunner = (input: {
 export type StartEditorOptions = {
   host?: string;
   port?: number;
+  /** Optional LAN interface for the read-only device update listener. */
+  updateHost?: string;
+  updatePort?: number;
   workspace?: string;
   /** Edit/build one explicit external SDK project instead of copying guest/. */
   projectRoot?: string;
+  /** Trusted Flutter consumer directory, bound to the configured JS project. */
+  flutterRoot?: string;
   /** Used by service tests; production always uses the real runner below. */
   buildRunner?: BuildRunner;
 };
@@ -446,7 +463,7 @@ async function validateProjectInputTree(projectDir: string): Promise<void> {
       const filePath = join(directory, entry.name);
       const relativePath = relative(projectDir, filePath).replaceAll("\\", "/");
 
-      if (!insideAssets && ignoredProjectInputDirectories.has(entry.name)) {
+      if (!insideAssets && (ignoredProjectInputDirectories.has(entry.name) || /^\.pocket-ui-backup-[A-Za-z0-9]+$/.test(entry.name))) {
         // node_modules is an explicit package-manager dependency boundary; a
         // symlinked package tree there is allowed and is handled by
         // build_guest. Build/cache directories are not dependency boundaries,
@@ -528,7 +545,11 @@ async function copyTree(source: string, destination: string): Promise<void> {
 }
 
 function defaultConfig(id: string, input: Record<string, unknown>): EditorConfig {
-  const name = typeof input.name === "string" && input.name.trim() ? input.name.trim() : id;
+  const requestedName = typeof input.name === "string" && input.name.trim()
+    ? input.name.trim()
+    : typeof input.title === "string" && input.title.trim()
+      ? input.title.trim()
+      : id;
   // The current Flutter HostSession is intentionally a single app host. A
   // project can still opt into another app id explicitly, but a fresh
   // scaffold is immediately consumable by that host without extra edits.
@@ -536,7 +557,10 @@ function defaultConfig(id: string, input: Record<string, unknown>): EditorConfig
   const version = typeof input.version === "string" && versionPattern.test(input.version) ? input.version : "0.1.0";
   const build = Number.isSafeInteger(Number(input.build)) && Number(input.build) >= 1 ? Number(input.build) : 1;
   const tickHz = Number.isSafeInteger(input.tickHz) && Number(input.tickHz) >= 1 && Number(input.tickHz) <= 120 ? Number(input.tickHz) : 60;
-  return { id, appId, name, title: name, version, build, tickHz, entry: "app.tsx", framework: "solid" };
+  const entry = input.entry === undefined ? "app.tsx" : asString(input.entry, "entry", 256).trim();
+  const output = input.output === undefined ? "app" : asString(input.output, "output", 128).trim();
+  const framework = input.framework === undefined ? "solid" : asString(input.framework, "framework", 32).trim();
+  return { id, appId, name: requestedName, title: requestedName, version, build, tickHz, entry, output, framework };
 }
 
 function validateConfig(id: string, input: Record<string, unknown>): EditorConfig {
@@ -545,6 +569,8 @@ function validateConfig(id: string, input: Record<string, unknown>): EditorConfi
   if (typeof input.version !== "undefined" && !versionPattern.test(config.version)) throw new Error("version contains unsafe characters");
   if (typeof input.name !== "undefined") config.name = asString(input.name, "name", 160).trim();
   if (!config.name) throw new Error("name must not be empty");
+  if (typeof input.title !== "undefined") config.title = asString(input.title, "title", 160).trim();
+  if (!config.title) throw new Error("title must not be empty");
   if (typeof input.appId === "string" && !appIdPattern.test(input.appId)) throw new Error("appId contains unsafe characters");
   if (typeof input.version === "string" && !versionPattern.test(input.version)) throw new Error("version contains unsafe characters");
   if (input.build !== undefined && (!Number.isSafeInteger(Number(input.build)) || Number(input.build) < 1)) {
@@ -553,32 +579,48 @@ function validateConfig(id: string, input: Record<string, unknown>): EditorConfi
     throw err;
   }
   if (input.tickHz !== undefined && (!Number.isSafeInteger(input.tickHz) || Number(input.tickHz) < 1 || Number(input.tickHz) > 120)) throw new Error("tickHz must be an integer from 1 through 120");
+  if (!config.entry || isAbsolute(config.entry) || config.entry.includes("\0") || config.entry.split(/[\\/]+/).includes("..")) throw new Error("entry must be a project-relative path");
+  if (!outputPattern.test(config.output)) throw new Error("output contains unsafe characters");
+  if (!frameworkPattern.test(config.framework)) throw new Error("framework is unsupported");
   config.appId = typeof input.appId === "string" ? input.appId : config.appId;
   config.version = typeof input.version === "string" ? input.version : config.version;
   config.build = input.build === undefined ? config.build : Number(input.build);
   config.tickHz = input.tickHz === undefined ? config.tickHz : Number(input.tickHz);
-  config.title = config.name;
+  config.title = typeof input.title === "string" ? input.title.trim() : config.name;
   return config;
 }
 
 async function loadConfig(projectDir: string, id: string): Promise<EditorConfig> {
   const editorPath = safeProjectFile(projectDir, "editor.json", { allowConfig: true });
-  // Validate both configuration files before reading either one. An editor
-  // config is authoritative when present, but a malformed legacy pocket.json
-  // must still not become an unguarded read through a project symlink.
+  // Editor release identity is authoritative when present, while the Pocket
+  // app object remains the runtime source for entry/output/framework. Both
+  // config paths are validated before either one is read.
   const pocketPath = safeProjectFile(projectDir, "pocket.json", { allowConfig: true });
   const editor = await readJsonFile<Record<string, unknown>>(editorPath, {});
-  if (Object.keys(editor).length > 0) return validateConfig(id, editor);
   const pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {});
   const app = isObject(pocket.app) ? pocket.app : {};
+  const release = [editor, pocket].find((value) => Object.hasOwn(value, "version") || Object.hasOwn(value, "build")) ?? {};
   return validateConfig(id, {
+    ...editor,
     id,
-    appId: pocket.id,
-    name: pocket.title ?? pocket.name,
-    version: pocket.version,
-    build: pocket.build,
-    tickHz: 60,
-    entry: app.entry,
+    // pocket.json is the runtime contract; use its app identity and app
+    // fields when present, while editor.json remains authoritative for the
+    // release identity (version/build).
+    appId: typeof editor.appId === "string" ? editor.appId : pocket.id,
+    name: typeof pocket.title === "string" && pocket.title.trim()
+      ? pocket.title
+      : typeof editor.title === "string" && editor.title.trim()
+        ? editor.title
+        : typeof editor.name === "string" && editor.name.trim()
+          ? editor.name
+          : pocket.name,
+    title: typeof pocket.title === "string" && pocket.title.trim() ? pocket.title : editor.title ?? editor.name ?? pocket.name,
+    version: release.version,
+    build: release.build,
+    tickHz: editor.tickHz ?? 60,
+    entry: typeof app.entry === "string" ? app.entry : editor.entry,
+    output: typeof app.output === "string" ? app.output : editor.output,
+    framework: typeof app.framework === "string" ? app.framework : editor.framework,
   });
 }
 
@@ -586,20 +628,21 @@ async function writeConfig(projectDir: string, config: EditorConfig): Promise<vo
   // Validate both destinations before mutating either one. A malformed
   // external project must not get a partial config update when its second
   // config file is a symlink.
-  safeProjectFile(projectDir, "editor.json", { allowConfig: true });
+  const editorPath = safeProjectFile(projectDir, "editor.json", { allowConfig: true });
   const pocketPath = safeProjectFile(projectDir, "pocket.json", { allowConfig: true });
+  const editor = await readJsonFile<Record<string, unknown>>(editorPath, {});
   const pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {
     $schema: "https://pocketjs.dev/schema/pocket-2.json",
     pocket: 2,
     app: { entry: "app.tsx", output: "app", framework: "solid" },
   });
   pocket.id = config.appId;
-  pocket.name = config.name;
+  pocket.name = typeof pocket.name === "string" && pocketNamePattern.test(pocket.name) ? pocket.name : config.id;
   pocket.title = config.title;
   pocket.version = config.version;
   const app = isObject(pocket.app) ? pocket.app : {};
-  pocket.app = { ...app, entry: "app.tsx", output: "app", framework: "solid" };
-  await writeProjectFile(projectDir, "editor.json", JSON.stringify(config, null, 2) + "\n", { allowConfig: true });
+  pocket.app = { ...app, entry: config.entry, output: config.output, framework: config.framework };
+  await writeProjectFile(projectDir, "editor.json", JSON.stringify({ ...editor, ...config }, null, 2) + "\n", { allowConfig: true });
   await writeProjectFile(projectDir, "pocket.json", JSON.stringify(pocket, null, 2) + "\n", { allowConfig: true });
 }
 
@@ -769,7 +812,9 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
       build: config.build,
     };
     await writeFile(join(buildDir, "guest-manifest.json"), JSON.stringify(artifactManifest, null, 2) + "\n");
+    const generation = randomUUID();
     const buildInfo = {
+      generation,
       id,
       revision,
       appId: config.appId,
@@ -786,6 +831,7 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
     state.builtRevision = revision;
     state.artifacts = {
       revision,
+      generation,
       appJs: `/api/projects/${id}/artifacts/app.js`,
       bytecode: `/api/projects/${id}/artifacts/app.qjbc`,
       metadata: `/api/projects/${id}/artifacts/app.bytecode.json`,
@@ -857,19 +903,28 @@ async function publishProject(
   config: EditorConfig,
   state: EditorState,
   origin: string,
+  channel: "test" | "release" = "release",
 ): Promise<PackageResult> {
   if (state.builtRevision !== state.revision || !state.artifacts) throw new Error("build the current source before publishing");
   const buildDir = join(workspace.builds, id, String(state.builtRevision));
   const releaseDir = join(workspace.updates, id);
   await mkdir(releaseDir, { recursive: true });
-  const keyPath = join(workspace.keys, "editor-dev-key.json");
-  await mkdir(workspace.keys, { recursive: true });
-  if (!existsSync(keyPath)) generateDevKey(keyPath, `editor-${id}`);
+  const { keyPath, key } = await editorUpdateTrust(workspace, id);
+  const previous = await readJsonFile<Record<string, unknown>>(join(releaseDir, "payload.json"), {});
+  const counterPath = join(workspace.states, `${id}-test-release.json`);
+  const counter = await readJsonFile<{ build?: number }>(counterPath, {});
   const metadata = await readJsonFile<Record<string, unknown>>(join(buildDir, "app.bytecode.json"));
+  // Test packages must advance beyond both the installed built-in package and
+  // earlier published test packages. Do not weaken the host's replay checks.
+  const build = channel === "test" ? Math.max(config.build, Number(previous.build ?? 0), Number(metadata.build ?? 0), Number(counter.build ?? 0)) + 1 : config.build;
+  if (!Number.isSafeInteger(build) || build < 0) throw new Error("test package build is outside the safe integer range");
+  const version = channel === "test" ? `${config.version}-test.${build}` : config.version;
+  const projectAssets = join(projectDirectory(workspace, id), "assets");
+  const hasProjectAssets = existsSync(projectAssets) && (await readdir(projectAssets)).length > 0;
   const result = packageArtifacts({
     appId: config.appId,
-    version: config.version,
-    build: config.build,
+    version,
+    build,
     bytecodePath: join(buildDir, "app.qjbc"),
     entryFormat: "quickjs-bytecode",
     runtimeAbi: String(metadata.runtimeAbi),
@@ -877,8 +932,9 @@ async function publishProject(
     outDir: releaseDir,
     keyFile: keyPath,
     guestManifestPath: join(buildDir, "guest-manifest.json"),
+    ...(hasProjectAssets ? { assetDir: projectAssets, assetPrefix: "assets" } : {}),
   });
-  const key = await readJsonFile<PublicKeyConfig & { publicKeyPem?: string }>(keyPath);
+  if (channel === "test") await writeFile(counterPath, JSON.stringify({ build }) + "\n");
   let safeOrigin = origin;
   try {
     const parsed = new URL(origin);
@@ -892,6 +948,7 @@ async function publishProject(
     POCKET_UPDATE_URL: manifestUrl,
     POCKET_UPDATE_KEY_ID: key.keyId,
     POCKET_UPDATE_PUBLIC_KEY: key.publicKeyBase64,
+    POCKET_STORE_NAMESPACE: `editor_${id}`,
   }, null, 2) + "\n");
   const archive = join(workspace.updates, `${id}.tar.gz`);
   await runProcess(["tar", "-czf", archive, "-C", releaseDir, "."], root, (line) => pushLog(state, line));
@@ -904,9 +961,20 @@ async function publishProject(
     keyId: result.envelope.keyId,
     runtimeAbi: String(metadata.runtimeAbi),
     payloadSha256: sha256Hex(result.payloadBytes),
+    version, build, channel,
   };
   await saveState(workspace, id, state);
   return result;
+}
+
+async function editorUpdateTrust(workspace: Workspace, id: string): Promise<{ keyPath: string; key: PublicKeyConfig }> {
+  const keyPath = join(workspace.keys, "editor-dev-key.json");
+  await mkdir(workspace.keys, { recursive: true });
+  if (!existsSync(keyPath)) generateDevKey(keyPath, `editor-${id}`);
+  // The signing helper owns the private key file. Only public fields leave
+  // this function or enter Flutter's compile-time configuration.
+  const stored = await readJsonFile<PublicKeyConfig>(keyPath);
+  return { keyPath, key: { keyId: stored.keyId, publicKeyBase64: stored.publicKeyBase64 } };
 }
 
 async function listAssets(projectDir: string): Promise<string[]> {
@@ -1070,20 +1138,73 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   };
   await Promise.all([mkdir(workspace.projects, { recursive: true }), mkdir(workspace.builds, { recursive: true }), mkdir(workspace.updates, { recursive: true }), mkdir(workspace.keys, { recursive: true }), mkdir(workspace.states, { recursive: true })]);
   const states = new Map<string, EditorState>();
+  const stateLoads = new Map<string, Promise<EditorState>>();
+  const projectWrites = new Set<string>();
   const runner = options.buildRunner ?? realBuild;
   const getState = async (id: string): Promise<EditorState> => {
-    let state = states.get(id);
-    if (!state) {
-      state = await loadState(workspace, id);
-      states.set(id, state);
+    const cached = states.get(id);
+    if (cached) return cached;
+    let loading = stateLoads.get(id);
+    if (!loading) {
+      loading = loadState(workspace, id).then((state) => {
+        states.set(id, state);
+        return state;
+      }).finally(() => stateLoads.delete(id));
+      stateLoads.set(id, loading);
     }
-    return state;
+    return loading;
   };
   const projectDir = (id: string) => projectDirectory(workspace, id);
-
   await mkdir(join(workspace.root, "wechat-preview"), { recursive: true });
   const wechat = createWechatPreviewManager({ projectDirectory: projectDir, workspaceRoot: join(workspace.root, "wechat-preview") });
+  const sdkRoot = root;
+  const sdkRootStat = lstatIfExists(sdkRoot);
+  if (!sdkRootStat?.isDirectory() || sdkRootStat.isSymbolicLink()) throw new Error("editor SDK root must be a real directory");
+  const flutterRoot = options.flutterRoot ?? process.env.POCKET_EDITOR_FLUTTER_ROOT;
+  if (flutterRoot && !workspace.projectRoot) throw new Error("a Flutter consumer must be bound to an explicit JS project root");
+  const readPublishedUpdate = async (path: string): Promise<Response> => {
+    const parts = path.split("/").filter(Boolean);
+    if (parts[0] !== "updates" || parts.length < 3) return failure("not found", 404);
+    const id = asProjectId(parts[1]);
+    const file = safeArtifactFile(workspace.updates, `${id}/${parts.slice(2).join("/")}`);
+    return new Response(await readFile(file), { headers: { "content-type": contentType(file), "cache-control": "no-store" } });
+  };
+  let deviceUpdates: ReturnType<typeof startUpdateEndpoint> | undefined;
+  const deviceUpdateOrigin = (): string => {
+    if (!deviceUpdates) {
+      const hostname = options.updateHost ?? (process.env.POCKET_EDITOR_UPDATE_HOST || chooseUpdateHost());
+      if (hostname === "127.0.0.1") throw new Error("Physical device updates require a LAN address, not loopback");
+      const port = options.updatePort ?? Number(process.env.POCKET_EDITOR_UPDATE_PORT || server.port);
+      deviceUpdates = startUpdateEndpoint({ hostname, port, read: readPublishedUpdate });
+      console.log(`Device updates listening at ${deviceUpdates.origin} (published packages only)`);
+    }
+    return deviceUpdates.origin;
+  };
+  const devices = createEditorDeviceManager({
+    projectDirectory: (id) => projectDir(asProjectId(id)),
+    flutterDirectory: (id) => id === workspace.projectId && flutterRoot ? resolve(flutterRoot) : undefined,
+    commandDirectory: root,
+    updateConfig: async (id, device) => {
+      // A phone's loopback points to the phone. Publish only signed update
+      // artifacts on a LAN interface; the Editor APIs stay on loopback.
+      const local = device.kind === "ios-simulator" || ["macos", "linux", "windows"].includes(device.platform);
+      const origin = local ? `http://127.0.0.1:${server.port}` : deviceUpdateOrigin();
+      const { key } = await editorUpdateTrust(workspace, id);
+      return { url: `${origin}/updates/${id}/latest.json`, keyId: key.keyId, publicKey: key.publicKeyBase64,
+        namespace: `editor_${id}`, ...(!local ? { debugHttpHost: new URL(origin).hostname } : {}) };
+    },
+  });
+  const deploymentWriting = (id: string) => devices.isBusy(id) && !devices.listDeployments().some((job) => job.projectId === id && job.state === "running");
+  const publicDeployment = (job: DeploymentSnapshot) => ({
+    id: job.id, projectId: job.projectId, deviceId: job.device.id,
+    status: job.state === "canceled" ? "cancelled" : job.state,
+    logs: job.logs.map((entry) => `[${entry.phase}] ${entry.line}`),
+    error: job.error, startedAt: job.startedAt, finishedAt: job.finishedAt,
+  });
   const preview = createPreviewManager({
+    width: previewDevice.screenWidth,
+    height: previewDevice.screenHeight,
+    safeArea: previewDevice.safeArea,
     projectDirectory: (id) => projectDir(asProjectId(id)),
     // Editor preview keeps a fixed 2x native raster for crisp core-generated
     // rounded/shadow masks on desktop Retina displays. This affects texture
@@ -1100,11 +1221,54 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         pakPath: safeArtifactFile(workspace.builds, `${folder}/app.pak`),
         metadataPath: safeArtifactFile(workspace.builds, `${folder}/app.bytecode.json`),
         revision: state.builtRevision,
-        generation: state.finishedAt ?? `legacy:${state.builtRevision}`,
+        generation: state.artifacts.generation ?? state.finishedAt ?? `legacy:${state.builtRevision}`,
         tickHz: config.tickHz,
       };
     },
   });
+  const codex = createStudioCodex({
+    projectDirectory: (id) => {
+      const directory = projectDir(asProjectId(id));
+      safeProjectFile(directory, "pocket.json", { allowConfig: true, mustExist: true });
+      return directory;
+    },
+    resolveContext: (id, scope): StudioExecutionContext => {
+      const projectDirectory = projectDir(asProjectId(id));
+      safeProjectFile(projectDirectory, "pocket.json", { allowConfig: true, mustExist: true });
+      if (scope === "project") {
+        return {
+          scope,
+          cwd: projectDirectory,
+          writableRoots: [projectDirectory],
+          developerInstructions: `You are editing the currently selected Pocket Studio JS project. Keep UI, routing and app logic in JS. Modify only this project and its files under ${projectDirectory}; preserve user changes. Do not create subagents, read credentials, run deployment, publish, or change files outside this writable root. Explain changes and test results. An attached screenshot may contain a selected region described with pixel coordinates; inspect that region before editing.`,
+        };
+      }
+      // The browser may choose only the scope name. The SDK root is fixed to
+      // this server's checked-in SDK directory; no client path is accepted.
+      return {
+        scope: "sdk" as StudioScope,
+        cwd: sdkRoot,
+        writableRoots: [projectDirectory, sdkRoot],
+        developerInstructions: `You are editing the Pocket SDK source together with the currently selected Pocket Studio project. The only writable roots are the selected project (${projectDirectory}) and the fixed SDK source (${sdkRoot}); preserve user changes and keep any edits within those roots. Keep application UI, routing and component composition in the JS project, and keep SDK changes limited to the requested integration. Do not modify other managed project sources or read/edit Studio private signing material. Do not create subagents, read credentials, run deployment, publish, use network access, or change files outside these writable roots. Explain changes and test results. An attached screenshot may contain a selected region described with pixel coordinates; inspect that region before editing.`,
+      };
+    },
+    onChanged: async (id) => {
+      const state = await getState(id);
+      state.revision += 1;
+      state.publish = undefined;
+      pushLog(state, `Codex turn finished; inspect files and rebuild (revision ${state.revision})`);
+      await saveState(workspace, id, state);
+    },
+  });
+  const sdkScopeBlocked = (id: string): boolean =>
+    [...projectWrites].some((projectId) => projectId !== id) ||
+    [...states.keys()].some((projectId) => wechat.isBuilding(projectId)) ||
+    [...states.entries()].some(([projectId, state]) => projectId !== id && state.busy) ||
+    // Match deploymentWriting: a running device is a read/preview target and
+    // must not block SDK edits; only phases that still mutate/build the app
+    // share the SDK/project write boundary.
+    devices.listDeployments().some((job) => ["queued", "building", "starting", "stopping"].includes(job.state));
+
   const server = Bun.serve({
     hostname: options.host ?? "127.0.0.1",
     port: options.port ?? Number(process.env.POCKET_EDITOR_PORT ?? 8790),
@@ -1116,20 +1280,30 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       if (securityError) return securityError;
       const path = url.pathname;
       const method = request.method.toUpperCase();
+      let releaseProjectWrite: (() => void) | undefined;
       try {
+        if (path === "/api/preview/device" && method === "GET") return json(previewDevice);
         if (path === "/health" && method === "GET") return json({ ok: true, service: "pocket-editor", csrfToken, workspace: workspace.root, ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}) });
-        if (path === "/" && method === "GET") return new Response(await readFile(join(root, "editor/client/index.html")), { headers: { "content-type": "text/html; charset=utf-8" } });
-        if (["/editor.css", "/editor.js"].includes(path) && method === "GET") {
-          const file = join(root, "editor/client", path.slice(1));
-          return new Response(await readFile(file), { headers: { "content-type": contentType(file) } });
+        if (path === "/" && method === "GET") {
+          const clientRoot = join(root, "editor/client");
+          const indexFile = join(clientRoot, "index.html");
+          const cssFile = join(clientRoot, "editor.css");
+          const jsFile = join(clientRoot, "editor.js");
+          const [index, cssStat, jsStat] = await Promise.all([readFile(indexFile), stat(cssFile), stat(jsFile)]);
+          const versionedIndex = index.toString()
+            .replace(/\/editor\.css(?=["'])/, `/editor.css?v=${Math.trunc(cssStat.mtimeMs)}`)
+            .replace(/\/editor\.js(?=["'])/, `/editor.js?v=${Math.trunc(jsStat.mtimeMs)}`);
+          return new Response(versionedIndex, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "SAMEORIGIN", "content-security-policy": "frame-ancestors 'self'" } });
         }
+        if (/^\/[A-Za-z0-9_-]+\.(?:css|js)$/.test(path) && method === "GET") {
+          const file = join(root, "editor/client", path.slice(1));
+          return new Response(await readFile(file), { headers: { "content-type": contentType(file), "cache-control": "no-store" } });
+        }
+        if (path === "/api/codex/status" && method === "GET") return json(await codex.status());
+        if (path === "/api/codex/models" && method === "GET") return json(await codex.models());
+        if (path === "/api/devices" && method === "GET") return json({ devices: await devices.listDevices() });
         if (path.startsWith("/updates/")) {
-          const updateParts = path.split("/").filter(Boolean);
-          if (updateParts.length < 3) return failure("not found", 404);
-          const updateId = asProjectId(updateParts[1]);
-          const relPath = updateParts.slice(2).join("/");
-          const releasePath = safeArtifactFile(workspace.updates, `${updateId}/${relPath}`);
-          return new Response(await readFile(releasePath), { headers: { "content-type": contentType(releasePath), "cache-control": "no-store" } });
+          return await readPublishedUpdate(path);
         }
         if (path.startsWith("/releases/") && method === "GET") {
           const match = path.match(/^\/releases\/([a-z][a-z0-9-]{0,47})\.tar\.gz$/);
@@ -1155,13 +1329,19 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         const id = parts[2] ? asProjectId(parts[2]) : "";
         const exists = existsSync(projectDir(id));
         if (!exists) return failure("project not found", 404);
+        // Reserve before any awaited validation/body parsing. Manager-level
+        // reservations alone cannot exclude a simultaneous source/AI request.
+        // Preview input and cancellation remain available during long tasks.
+        if (["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") {
+          if (projectWrites.has(id)) return failure("Another project operation is starting; retry when it completes", 409);
+          projectWrites.add(id);
+          releaseProjectWrite = () => projectWrites.delete(id);
+        }
         const state = await getState(id);
+        if (codex.isBusy(id) && ["PUT", "POST", "PATCH"].includes(method) && !["codex", "preview"].includes(parts[3])) return failure("Codex is editing this project; wait or cancel its turn before saving/building", 409);
         if (wechat.isBuilding(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("WeChat build is using this project; stop it before editing/building", 409);
+        if (deploymentWriting(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("Device build is using this project; wait or cancel it before editing/building", 409);
         if (parts[0] === "api" && parts[1] === "projects") {
-          if (parts.length === 3 && method === "GET") {
-            const config = await loadConfig(projectDir(id), id);
-            return json({ ...config, status: publicStatus(id, state) });
-          }
           if (parts[3] === "preview") {
             // Existing SSE clients retain their loaded runtime during a build.
             // New subscriptions/input must not load a partly copied snapshot.
@@ -1179,10 +1359,47 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             }
             return failure("method not allowed", 405);
           }
+          if (parts[3] === "deploy") {
+            if (parts.length === 4 && method === "GET") return json({ jobs: devices.listDeployments().filter((job) => job.projectId === id).map(publicDeployment) });
+            if (parts.length === 4 && method === "POST") {
+              if (state.busy) return failure("Editor build is still running", 409);
+              await validateProjectInputTree(projectDir(id));
+              const body = await parseJsonBody(request);
+              return json(publicDeployment(await devices.startDeployment({ projectId: id, deviceId: asString(body.deviceId, "deviceId", 200) })), 202);
+            }
+            if (parts.length === 5 && ["GET", "DELETE"].includes(method)) {
+              const job = devices.getStatus(parts[4]);
+              if (job.projectId !== id) return failure("deployment not found", 404);
+              return json(publicDeployment(method === "DELETE" ? await devices.cancel(job.id) : job));
+            }
+          }
+          if (parts[3] === "codex" && parts[4] === "turn") {
+            if (parts.length === 5 && method === "POST") {
+              if (state.busy) return failure("build is still running", 409);
+              const body = await parseJsonBody(request, 12 * 1024 * 1024);
+              await validateProjectInputTree(projectDir(id));
+              // Keep this admission check immediately before start(): the
+              // latter reserves its SDK/project lock synchronously before its
+              // first await. Checking before the tree scan would leave a
+              // window for another project operation to begin.
+              if (body.scope === "sdk" && sdkScopeBlocked(id)) return failure("SDK scope waits for other project writes, builds, or deployments to finish", 409);
+              return json(await codex.start(id, body), 202);
+            }
+            if (parts.length === 6 && method === "GET") return json(codex.get(id, parts[5]));
+            if (parts.length === 6 && method === "DELETE") return json(await codex.cancel(id, parts[5]));
+          }
+          if (parts.length === 3 && method === "GET") {
+            const config = await loadConfig(projectDir(id), id);
+            return json({ ...config, status: publicStatus(id, state) });
+          }
           if (parts[3] === "config") {
             if (method === "GET") return json(await loadConfig(projectDir(id), id));
             if (method === "PUT") {
-              const config = validateConfig(id, await parseJsonBody(request));
+              const current = await loadConfig(projectDir(id), id);
+              const body = await parseJsonBody(request);
+              const merged = { ...current, ...body };
+              if (body.name !== undefined && body.title === undefined) merged.title = body.name;
+              const config = validateConfig(id, merged);
               await writeConfig(projectDir(id), config);
               state.revision += 1;
               state.error = undefined;
@@ -1285,11 +1502,12 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             return json({ status: publicStatus(id, state) }, 202);
           }
           if ((parts[3] === "publish" || parts[3] === "package") && method === "POST") {
-            await parseJsonBody(request);
+            const body = await parseJsonBody(request);
+            if (body.channel !== undefined && !["test", "release"].includes(body.channel as string)) return failure("publish channel must be test or release", 400);
             if (state.busy) return failure("build is still running", 409);
             const config = await loadConfig(projectDir(id), id);
             const boundOrigin = `http://127.0.0.1:${server.port}`;
-            const result = await publishProject(workspace, id, config, state, boundOrigin);
+            const result = await publishProject(workspace, id, config, state, boundOrigin, body.channel === "test" ? "test" : "release");
             return json({
               status: publicStatus(id, state),
               manifest: result.envelope,
@@ -1312,13 +1530,18 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         const message = error instanceof Error ? error.message : String(error);
         const status = (error as unknown as { status?: number })?.status ?? (message.includes("not found") ? 404 : 400);
         return failure(message, status);
+      } finally {
+        releaseProjectWrite?.();
       }
     },
   });
   const stop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
+    codex.dispose();
     void preview.dispose();
+    void devices.dispose();
     wechat.dispose();
+    deviceUpdates?.stop();
     return stop(closeActiveConnections);
   }) as typeof server.stop;
   return server;
@@ -1335,15 +1558,17 @@ if (import.meta.main) {
     return value;
   };
   const projectRoot = option("project-root");
+  const flutterRoot = option("flutter-root");
   const workspace = option("workspace");
   const host = option("host");
   const portValue = option("port");
   if (args.length > 0) throw new Error(`unknown editor option ${args[0]}`);
   const port = portValue === undefined ? undefined : Number(portValue);
   if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) throw new Error("--port must be an integer from 0 through 65535");
-  const server = await startEditor({ projectRoot, workspace, host, port });
+  const server = await startEditor({ projectRoot, flutterRoot, workspace, host, port });
   console.log(`Pocket Studio listening at http://${server.hostname}:${server.port}`);
   console.log(`workspace: ${resolve(workspace ?? process.env.POCKET_EDITOR_WORKSPACE ?? join(root, ".pocket-build/editor-workspace"))}`);
   if (projectRoot) console.log(`project: ${resolve(projectRoot)}`);
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { void server.stop(true); });
 }
 

@@ -9,21 +9,21 @@
   "dependencies": {
     "@pocket/ui": "workspace:*"
   },
+  "devDependencies": {
+    "@open-wxa/wxa-runner-core": "0.12.3",
+    "playwright": "1.64.1"
+  },
   "description": "Embeddable PocketJS bytecode host SDK for Flutter applications.",
   "scripts": {
     "check:architecture": "python3 scripts/check_architecture.py",
     "test": "bun test --timeout 60000",
     "test:demand": "bun test tests/demand_scheduler.test.ts && bun tests/demand_scheduler_native_probe.ts",
     "test:packages": "bun test scripts/tests/package_update.test.ts",
-    "test:editor": "bun test editor/test/editor_server.test.ts",
+    "test:editor": "bun test editor/test/*.test.ts",
     "test:editor:live": "bun editor/test/editor_live_probe.ts",
     "editor": "bun editor/server.ts",
     "init": "bun pocket.ts init",
     "build": "bun pocket.ts build",
     "preview:wechat": "bun scripts/preview_wechat.ts"
-  },
-  "devDependencies": {
-    "@open-wxa/wxa-runner-core": "0.12.3",
-    "playwright": "1.64.1"
   }
 }

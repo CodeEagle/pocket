@@ -1,0 +1,18 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket.editor.counter-acceptance",
+  "name": "Pocket Editor Counter Acceptance Fixture",
+  "version": "0.1.0",
+  "app": {
+    "entry": "app.tsx",
+    "output": "app",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [390, 360],
+        "presentation": "native"
+      }
+    }
+  }
+}

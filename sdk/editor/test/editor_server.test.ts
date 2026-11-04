@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
+import { createPublicKey } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pack } from "../../.cache/pocketjs/framework/compiler/pak.ts";
 import { startEditor } from "../server.ts";
+import { verifySignedManifest } from "../../scripts/package_update.ts";
 
 function temporaryWorkspace(): string {
   return mkdtempSync(join(tmpdir(), "pocket-editor-service-"));
@@ -48,7 +50,8 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
   try {
     const index = await request(server, "/");
     expect(index.response.status).toBe(200);
-    expect(new TextDecoder().decode(new Uint8Array(index.value))).toContain("Pocket Studio");
+    expect(index.response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(new TextDecoder().decode(new Uint8Array(index.value))).toContain("Pocket Preview");
     const editorScript = await request(server, "/editor.js");
     expect(editorScript.response.status).toBe(200);
     expect(new TextDecoder().decode(new Uint8Array(editorScript.value))).toContain("publishProject");
@@ -211,6 +214,27 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     const archive = await request(server, "/releases/fixture-app.tar.gz");
     expect(archive.response.status).toBe(200);
     expect(new Uint8Array(archive.value).byteLength).toBeGreaterThan(100);
+    // Test publishing must remain admissible after an embedded build or a
+    // previous test package, while preserving the consumer's release config.
+    for (const expectedBuild of [3, 4]) {
+      const testing = await request(server, "/api/projects/fixture-app/publish", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "test" }),
+      });
+      expect(testing.response.status).toBe(200);
+      expect(testing.value.status.publish.build).toBe(expectedBuild);
+      const signed = (await request(server, "/updates/fixture-app/latest.json")).value;
+      const publicPem = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(hostConfig.value.POCKET_UPDATE_PUBLIC_KEY, "base64")]), format: "der", type: "spki" }).export({ format: "pem", type: "spki" });
+      const verified = JSON.parse(new TextDecoder().decode(verifySignedManifest(signed, publicPem)));
+      expect(verified.build).toBe(expectedBuild);
+      expect(verified.version).toBe(`0.2.0-test.${expectedBuild}`);
+      expect(verified.entry.sha256).toBe(payload.entry.sha256);
+    }
+    const unchangedConfig = await request(server, "/api/projects/fixture-app/config");
+    expect(unchangedConfig.value.build).toBe(2);
+    expect(unchangedConfig.value.version).toBe("0.2.0");
+    await request(server, "/api/projects/fixture-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const afterRelease = await request(server, "/api/projects/fixture-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "test" }) });
+    expect(afterRelease.value.status.publish.build).toBe(5);
   } finally {
     server.stop(true);
     rmSync(workspace, { recursive: true, force: true });
@@ -421,6 +445,19 @@ test("editor enforces security boundaries against CSRF, Host header poisoning, a
     });
     expect(unauthenticatedJson.response.status).toBe(403);
     expect(unauthenticatedJson.value.error).toContain("missing CSRF token or editor credential");
+
+    // Studio process-launch/input routes inherit the same boundary; reject
+    // before discovery, model requests or any native input can execute.
+    for (const endpoint of ["deploy", "codex/turn", "preview/input"]) {
+      const missingProof = await unauthenticatedRequest(server, `/api/projects/sec-app/${endpoint}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+      });
+      expect(missingProof.response.status).toBe(403);
+      const foreignOrigin = await request(server, `/api/projects/sec-app/${endpoint}`, {
+        method: "POST", headers: { "content-type": "application/json", origin: "https://evil.example" }, body: "{}",
+      });
+      expect(foreignOrigin.response.status).toBe(403);
+    }
 
     // 2. Content-Type: text/plain POST to /api/projects is rejected with 415
     const plainText = await request(server, "/api/projects", {
@@ -744,7 +781,7 @@ test("editor rejects dangling and parent symlinks across project write boundarie
       body: JSON.stringify({ appId: "pocket.host.demo", name: "Blocked", version: "0.2.0", build: 2, tickHz: 60 }),
     });
     expect(pocketRejected.response.status).toBe(400);
-    expect(JSON.parse(readFileSync(pocketVictim, "utf8")).name).toBe("Boundary App");
+    expect(readFileSync(pocketVictim, "utf8")).toBe(pocketContents);
     rmSync(pocketPath, { force: true });
     writeFileSync(pocketPath, pocketContents);
 
