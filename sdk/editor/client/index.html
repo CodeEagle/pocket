@@ -26,6 +26,16 @@
         <div class="source-foot"><span>Solid TSX · JavaScript owns the UI</span><span id="source-revision">revision —</span></div>
       </section>
       <section class="right-column">
+        <section class="panel">
+                <div class="wechat-validation-controls" aria-label="WeChat validation controls">
+                  <span id="wechat-project-label" class="wechat-project-label">Whole app</span>
+                  <span id="wechat-state" class="meta-chip" aria-live="polite">Idle</span>
+                  <button id="wechat-start" class="button secondary small-button" type="button" disabled>Run WeChat</button>
+                  <button id="wechat-stop" class="button quiet small-button" type="button" hidden>Stop WeChat</button>
+                  <a id="wechat-open" class="button secondary small-button" href="#" target="_blank" rel="noopener" hidden>Open</a>
+                </div>
+            <p id="wechat-validation-hint" class="wechat-validation-hint field-help">WeChat 整个 App 验证；硬件能力仍需真机验证</p>
+        </section>
         <section class="panel config-panel">
           <div class="panel-header"><div><span class="eyebrow">PROJECT CONFIG</span><h2>Build settings</h2></div><span id="build-state" class="pill">Not built</span></div>
           <div class="form-grid">

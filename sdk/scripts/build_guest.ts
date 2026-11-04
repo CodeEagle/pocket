@@ -18,6 +18,8 @@ export type BuildGuestOptions = {
   /** Override pocket.json's app entry (must stay inside projectRoot). */
   entry?: string;
   tickHz?: number;
+  /** Integer raster density used while baking glyphs and image assets. */
+  rasterDensity?: number;
   /** Copy the four runtime assets to a host asset directory. */
   copyAssetsTo?: string;
   /** Keep a diagnostic copy of the generated JavaScript source. */
@@ -50,6 +52,13 @@ export type GuestReleaseIdentity = {
   version: string;
   build: number;
 };
+
+function checkedRasterDensity(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 4) {
+    throw new Error(`build_guest: rasterDensity must be an integer from 1 through 4 (got ${value})`);
+  }
+  return value;
+}
 
 const DEFAULT_RELEASE_IDENTITY: GuestReleaseIdentity = { version: "0.1.0", build: 1 };
 
@@ -401,6 +410,7 @@ export function parseBuildGuestArgs(args: string[]): BuildGuestOptions {
     else if (arg.startsWith("--outdir=")) result.outDir = arg.slice("--outdir=".length);
     else if (arg.startsWith("--entry=")) result.entry = arg.slice("--entry=".length);
     else if (arg.startsWith("--tick-hz=")) result.tickHz = Number(arg.slice("--tick-hz=".length));
+    else if (arg.startsWith("--density=")) result.rasterDensity = checkedRasterDensity(Number(arg.slice("--density=".length)));
     else if (arg.startsWith("--copy-assets-to=")) result.copyAssetsTo = arg.slice("--copy-assets-to=".length);
     else if (arg.startsWith("--keep-source=")) result.keepSource = arg.slice("--keep-source=".length);
     else throw new Error(`build_guest: unknown option ${arg}`);
@@ -452,6 +462,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     if (!Number.isInteger(tickHz) || tickHz < 1 || tickHz > 120) {
       throw new Error(`POCKET_TICK_HZ must be an integer from 1 through 120 (got ${tickHz})`);
     }
+    const rasterDensity = checkedRasterDensity(options.rasterDensity ?? 1);
     const entry = projectEntry(projectRoot, options.entry);
     const preparedUi = await prepareUiPackage(projectRoot, entry, options.log);
     uiCleanup = preparedUi.cleanup;
@@ -459,7 +470,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     compilerEntryCleanup = compilerEntry.cleanup;
     report(`build_guest: compiler=${compiler}`, options.log);
     report(`build_guest: source=${entry}`, options.log);
-    runOrThrow(["bun", compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, "--strict-classes"], root, options.log);
+    runOrThrow(["bun", compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes"], root, options.log);
 
     const compilerBase = compilerEntry.path.replace(/^.*[\\/]/, "").replace(/\.(?:tsx?|vue)$/, "");
     const compilerSource = join(output, `${compilerBase}.js`);

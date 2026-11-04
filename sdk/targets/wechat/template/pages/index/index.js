@@ -12,7 +12,12 @@ Page({
     const base = wx.getWindowInfo ? wx.getWindowInfo() : wx.getSystemInfoSync();
     this._width = Math.max(1, Math.floor(base.windowWidth));
     this._height = Math.max(1, Math.floor(base.windowHeight));
-    this._dpr = Math.min(4, Math.max(1, Math.floor(base.pixelRatio || 1)));
+    const browserRatio = typeof wx.__pocketBrowserDevicePixelRatio === "function"
+      ? wx.__pocketBrowserDevicePixelRatio()
+      : wx.__pocketBrowserDevicePixelRatio;
+    this._dpr = Number.isFinite(Number(browserRatio)) && Number(browserRatio) > 0
+      ? Number(browserRatio)
+      : Math.max(0.25, Number(base.pixelRatio) || 1);
     this._setCanvasSize(this._width, this._height);
     if (wx.onKeyboardHeightChange) {
       this._keyboardListener = ({ height = 0 } = {}) => {
@@ -29,6 +34,10 @@ Page({
         if (!size) return;
         this._width = Math.max(1, Math.floor(size.windowWidth));
         this._height = Math.max(1, Math.floor(size.windowHeight));
+        const browserRatio = typeof wx.__pocketBrowserDevicePixelRatio === "function"
+          ? wx.__pocketBrowserDevicePixelRatio()
+          : wx.__pocketBrowserDevicePixelRatio;
+        if (Number.isFinite(Number(browserRatio)) && Number(browserRatio) > 0) this._dpr = Number(browserRatio);
         this._setCanvasSize(this._width, Math.max(1, this._height - this._keyboardHeight));
         this._host?.resize(this._width, Math.max(1, this._height - this._keyboardHeight));
         this._host?.wake();

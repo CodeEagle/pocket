@@ -123,6 +123,22 @@ impl Guest for WechatGuest {
             let get_layout = Function::new(ctx.clone(), LayoutFunction { host: self.host })?;
             pocket.set("getLayout", get_layout)?;
             globals.set("pocket", pocket)?;
+            // SystemUI receives the trusted compositor registry from the
+            // generated catalog. Child Guests deliberately do not receive it;
+            // only the root is allowed to decide which package owns a surface.
+            let host = unsafe { &*(self.host as *const WasmHost) };
+            if host.app_index.get() == 0 && !crate::wechat_assets::SYSTEM_SURFACES.is_empty() {
+                let ui = match globals.get::<_, Object>("ui") {
+                    Ok(value) => value,
+                    Err(_) => Object::new(ctx.clone())?,
+                };
+                let surfaces = Object::new(ctx.clone())?;
+                for (app_id, handle) in crate::wechat_assets::SYSTEM_SURFACES.iter().copied() {
+                    surfaces.set(app_id, handle)?;
+                }
+                ui.set("__surfaces", surfaces)?;
+                globals.set("ui", ui)?;
+            }
             Ok(())
         });
         if !matches!(installed, Some(Ok(()))) {
@@ -290,18 +306,81 @@ pub extern "C" fn web_wechat_skip_idle_frames(host: &WasmHost, requested: u32) -
 
 #[no_mangle]
 pub unsafe extern "C" fn web_wechat_boot(host: &WasmHost, scale: u32) -> i32 {
+    web_wechat_boot_index(host, scale, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn web_wechat_app_count() -> u32 {
+    wechat_assets::APPS.len() as u32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn web_wechat_boot_index(host: &WasmHost, scale: u32, index: u32) -> i32 {
+    let Some(app) = wechat_assets::APPS.get(index as usize) else {
+        host.result.borrow_mut().clear();
+        host.result.borrow_mut().extend_from_slice(b"invalid WeChat Guest app index");
+        return -1;
+    };
+    host.app_index.set(index as usize);
     host.result.borrow_mut().clear();
-    let identity = b"wechat";
+    let identity = wechat_assets::APP_IDS.get(index as usize).copied().unwrap_or("wechat");
     if crate::browser::web_set_identity(host, identity.as_ptr(), identity.len(), BINDING_GENERATION) != 0 {
         return -1;
     }
-    crate::browser::web_boot(
-        host,
-        wechat_assets::APP_QJBC.as_ptr(),
-        wechat_assets::APP_QJBC.len(),
-        wechat_assets::APP_PAK.as_ptr(),
-        wechat_assets::APP_PAK.len(),
-        wechat_assets::TICK_HZ,
-        scale,
-    )
+    crate::browser::web_boot(host, app.qjbc.as_ptr(), app.qjbc.len(), app.pak.as_ptr(), app.pak.len(), app.tick_hz, scale)
+}
+
+/// Return the topmost generated compositor surface at a logical point. Zero
+/// means the SystemUI/root surface owns the point; a negative value indicates
+/// that the core was busy or the point could not be inspected.
+#[no_mangle]
+pub extern "C" fn web_wechat_hit_surface(host: &WasmHost, x: f32, y: f32) -> i32 {
+    let Ok(mut ops) = host.ops.try_borrow_mut() else { return -1; };
+    let Ok(mut core) = ops.core_mut() else { return -1; };
+    // Ask the retained UI tree first so a painted SystemUI button (for
+    // example the top-right close control) wins over a full-screen child.
+    // NodeType::Surface is the pinned core enum value 3.
+    // Bounds-only hit testing is intentional here: a compositor Surface has
+    // no ink of its own, so the normal paint hit test can pass through it to
+    // its shell wrapper. The bounds twin still lets a real SystemUI close
+    // button claim its own rectangle before the child surface.
+    let hit = core.hit_test_bounds(x, y);
+    if core.node_type(hit) != Some(3) { return 0; }
+    let frames = core.compositor_surface_frames();
+    for frame in frames.iter().rev() {
+        let [left, top, width, height] = frame.clip;
+        if frame.focused && x >= left && y >= top && x < left + width && y < top + height {
+            return frame.handle as i32;
+        }
+    }
+    0
+}
+
+/// Retain the pinned upload validation/allocation path while recording the
+/// actual pixel density of a child raster. The compositor samples its source
+/// rectangle in logical units, so a high-resolution upload must carry density.
+#[no_mangle]
+pub unsafe extern "C" fn web_wechat_upload_surface(
+    host: &WasmHost,
+    handle: i32,
+    pointer: *const u8,
+    length: usize,
+    width: u32,
+    height: u32,
+    density: u32,
+) -> i32 {
+    if pointer.is_null() || !(1..=4).contains(&density)
+        || width % density != 0 || height % density != 0
+    {
+        return -1;
+    }
+    let uploaded = crate::web_upload_surface(host, handle, pointer, length, width, height);
+    if uploaded >= 0 {
+        if let Some(Some(raster)) = host.surfaces.borrow_mut().get_mut(uploaded as usize) {
+            raster.width = width / density;
+            raster.height = height / density;
+            raster.density = density;
+        }
+    }
+    uploaded
 }

@@ -88,7 +88,7 @@ const componentCards = [
 
 const componentDetails: Record<string, string> = {
   View: "Flexible layout and spacing.",
-  Text: "Typography drawn by Flutter.",
+  Text: "Typography drawn by the active host.",
   Image: "Local images from the app bundle.",
   Focusable: "Tap and keyboard interactions.",
   Grid: "Responsive rows and columns.",
@@ -129,15 +129,32 @@ function routeOf(value: unknown): Route | undefined {
   return undefined;
 }
 
+function capabilityUnavailable(state: CapabilityState): boolean {
+  return !!state.result && typeof state.result === "object" &&
+    (state.result as Record<string, unknown>).supported === false;
+}
+
+function hostLabel(state: CapabilityState): string {
+  const result = state.result && typeof state.result === "object" ? state.result as Record<string, unknown> : {};
+  const provider = result.provider ?? result.host;
+  return typeof provider === "string" && provider.length > 0 ? provider : "Pocket host";
+}
+
+function supportsRecording(state: CapabilityState): boolean {
+  const result = state.result && typeof state.result === "object" ? state.result as Record<string, unknown> : {};
+  const features = result.features as Record<string, unknown> | undefined;
+  return features?.recording !== false;
+}
+
 function hostPhase(state: CapabilityState): string {
   if (state.phase === "idle") return "Not requested";
   if (state.phase === "loading") return "Loading";
-  if (state.phase === "ready") return "Ready";
+  if (state.phase === "ready") return capabilityUnavailable(state) ? "Unavailable" : "Ready";
   return "Error";
 }
 
 function toneForPhase(state: CapabilityState): "cyan" | "green" | "amber" | "rose" {
-  if (state.phase === "ready") return "green";
+  if (state.phase === "ready") return capabilityUnavailable(state) ? "amber" : "green";
   if (state.phase === "error") return "rose";
   if (state.phase === "loading") return "amber";
   return "cyan";
@@ -148,6 +165,9 @@ function valueSummary(value: unknown): string {
   if (typeof value === "string") return value;
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
+    if (record.supported === false) {
+      return String(record.reason ?? "This capability is unavailable in the active host.");
+    }
     if ("entryFormat" in record || "runtimeAbi" in record) {
       const entry = String(record.entryFormat ?? "entry unknown");
       const abi = String(record.runtimeAbi ?? "ABI unknown");
@@ -734,7 +754,7 @@ function App() {
     };
     bridge.__pocketEvent = receive;
 
-    // These are real requests. If the Flutter host has not registered a
+    // These are real requests. If the active host has not registered a
     // capability, the resulting host error is rendered rather than replaced
     // with a success placeholder.
     requestCapability("runtimeInfo", "runtime.info");
@@ -766,7 +786,7 @@ function App() {
       <Show when={!isShowcaseRoute(state().route)}>
         <Header
           title={demoTitle}
-          subtitle={`${demoRelease} · Solid guest · Flutter canvas`}
+          subtitle={`${demoRelease} · Solid guest · ${hostLabel(state().runtimeInfo)}`}
         />
       </Show>
       <FocusScope class="flex-1 flex-col overflow-hidden" autoFocus restoreFocus>
@@ -1085,8 +1105,10 @@ function RuntimePage(props: {
       <CapabilityCard title="Runtime info" capability="runtime.info" state={props.state().runtimeInfo} onRefresh={() => props.requestCapability("runtimeInfo", "runtime.info")} />
       <CapabilityCard title="Package metadata" capability="plugins.packageInfo" state={props.state().packageInfo} onRefresh={() => props.requestCapability("packageInfo", "plugins.packageInfo")} />
       <ActionButton label="Frame diagnostics" kind="secondary" onPress={() => props.onNavigate("performance")} />
-      <RecordingPanel host={props.host} status={props.recordingStatus} />
-      <StatusBar label="JS ↔ Flutter" detail="No Dart UI state" ok={props.state().runtimeInfo.phase !== "error"} />
+      <Show when={supportsRecording(props.state().runtimeInfo)} fallback={<EmptyState title="Deterministic replay unavailable" body="The active host does not provide recording and replay." />}>
+        <RecordingPanel host={props.host} status={props.recordingStatus} />
+      </Show>
+      <StatusBar label={`JS ↔ ${hostLabel(props.state().runtimeInfo)}`} detail="UI state stays in JS" ok={props.state().runtimeInfo.phase !== "error"} />
     </View>
   );
 }
@@ -1113,7 +1135,7 @@ function PerformancePage(props: {
   const latestBridgeDecode = () => latest()?.nativeWorkMsP95 ?? latestLongFrame()?.nativeMs;
   return (
     <View class="flex-col gap-2">
-      <PageIntro title="Frame diagnostics" body="Guest ticks are separate from Flutter FPS. Sparse rendering is not a stall." />
+      <PageIntro title="Frame diagnostics" body="Guest ticks are separate from display FPS. Sparse rendering is not a stall." />
       <Card class="flex-row items-center justify-between gap-2 mx-4 p-2 rounded-xl bg-white border-slate-200">
         <View class="flex-col gap-1 flex-1">
           <Text class="text-xs text-slate-950 font-bold">Performance provider · {hostPhase(provider())}</Text>
@@ -1134,7 +1156,7 @@ function PerformancePage(props: {
         </Row>
         <Show when={points().length > 0} fallback={<EmptyState title="No guest tick samples" body="Open a configured host performance provider or refresh this page." />}>
           <MiniBarChart values={performanceBars(points())} />
-          <Text class="text-xs text-slate-600">Bars show guest scheduler turns per active second, not Flutter FPS.</Text>
+          <Text class="text-xs text-slate-600">Bars show guest scheduler turns per active second, not display FPS.</Text>
         </Show>
       </Card>
       <View class="flex-row gap-2 mx-4">
@@ -1265,6 +1287,8 @@ function UpdatesPage(props: {
           />
         </Card>
       </Show>
+      <Show when={!capabilityUnavailable(props.state().updatesStatus)}
+        fallback={<EmptyState title="Updates not configured" body="This host runs the embedded package. Pocket package updates are not enabled." />}>
       <Row class="mx-4">
         <ActionButton label="Check" onPress={() => props.requestCapability("updatesCheck", "updates.check")} />
         <ActionButton label="Apply" kind="secondary" onPress={() => props.requestCapability("updatesApply", "updates.apply")} />
@@ -1275,6 +1299,7 @@ function UpdatesPage(props: {
         { id: "apply", title: "updates.apply", detail: capabilitySummary(props.state().updatesApply) },
         { id: "rollback", title: "updates.rollback", detail: capabilitySummary(props.state().updatesRollback) },
       ]} />
+      </Show>
     </View>
   );
 }
@@ -1303,7 +1328,7 @@ function StressPage(props: { state: () => DemoState; runStress: (nodes: number) 
       <PageIntro title="Stress" body="Measure JS node pressure at two sizes." />
       <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-white border-slate-200">
         <Row>
-          <ViewText title="Retained node pressure" body="No Dart handler or duplicate state" />
+          <ViewText title="Retained node pressure" body="Guest-owned UI state" />
           <Badge tone="amber">JS</Badge>
         </Row>
         <Row>

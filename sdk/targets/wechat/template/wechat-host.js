@@ -1,8 +1,17 @@
+const { PocketWechatSystem, wechatBuiltinCapability, isWechatBuiltinCapability } = require("./wechat-system.js");
 const MAX_OUTBOUND = 32;
 const MAX_REQUESTS = 32;
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_STORAGE_ITEM_BYTES = 1024 * 1024;
-const MAX_CANVAS_DIMENSION = 1365;
+// WeChat's native Canvas2D node is limited to 1365px per dimension.  The
+// browser adapter used by `preview_wechat.ts` is not that native node: it
+// uploads the same RGBA buffer to a regular browser canvas, whose backing
+// store can retain the device density of a Retina display.  Keep the native
+// limit as the default and opt into the browser limit through an explicit
+// adapter marker; this prevents a browser-only workaround from changing the
+// generated device package's memory contract.
+const NATIVE_CANVAS_DIMENSION = 1365;
+const BROWSER_CANVAS_DIMENSION = 4096;
 const capabilityHandlers = Object.create(null);
 let permissionHandler = null;
 
@@ -64,6 +73,8 @@ function createAbortController() {
 
 class PocketWechatHost {
   constructor(options) {
+    this.headless = !!options.headless;
+    this.system = options.system || null;
     this.wx = options.wx;
     this.config = options.config;
     this.canvas = options.canvas;
@@ -75,6 +86,7 @@ class PocketWechatHost {
     this.exports = null;
     this.host = 0;
     this.scale = 1;
+    this.devicePixelRatio = 1;
     this.logicalWidth = 1;
     this.logicalHeight = 1;
     this.width = 1;
@@ -82,6 +94,7 @@ class PocketWechatHost {
     this.scheduledIdle = null;
     this.imageData = null;
     this.outbound = [];
+    this.contacts = [];
     this.pending = new Map();
     this.raf = 0;
     this.rafUsesCanvas = false;
@@ -94,6 +107,43 @@ class PocketWechatHost {
     this.inputRevision = 0;
     this.generation = 1;
     this.lastClockUs = 0;
+    if (!this.system && this.config.system) {
+      this.system = new PocketWechatSystem(this, (app, system) => new PocketWechatHost({
+        wx: this.wx, canvas: {}, context: null, headless: true, system,
+        config: { ...app, enginePath: this.config.enginePath },
+        isActive: () => this.visible && !this.disposed,
+        onInput: this.onInput, onError: this.onError,
+      }));
+    }
+  }
+
+  canvasDimensionLimit() {
+    return this.wx && this.wx.__pocketBrowserPreview === true
+      ? BROWSER_CANVAS_DIMENSION
+      : NATIVE_CANVAS_DIMENSION;
+  }
+
+  currentDevicePixelRatio(fallback = 1) {
+    const provider = this.wx && this.wx.__pocketBrowserDevicePixelRatio;
+    let value;
+    try {
+      value = typeof provider === "function" ? provider() : provider;
+    } catch (_) {
+      value = undefined;
+    }
+    if (!(Number.isFinite(Number(value)) && Number(value) > 0)) value = fallback;
+    return Math.min(4, Math.max(0.25, Number(value)));
+  }
+
+  pixelScale(width, height, devicePixelRatio) {
+    const dimensionLimit = this.canvasDimensionLimit();
+    const requested = this.currentDevicePixelRatio(devicePixelRatio || 1);
+    // The engine and its raster resources use integer density. Ceiling a
+    // fractional browser ratio avoids a 1x backing store on 1.25/1.5x
+    // displays; the dimension limit remains the final admission gate.
+    return Math.min(4, Math.max(1, Math.ceil(requested)),
+      Math.floor(dimensionLimit / Math.max(1, Math.floor(width))),
+      Math.floor(dimensionLimit / Math.max(1, Math.floor(height))));
   }
 
   clockNowUs() {
@@ -108,9 +158,10 @@ class PocketWechatHost {
     this.logicalHeight = Math.max(1, Math.floor(height));
     this.width = this.logicalWidth;
     this.height = this.logicalHeight;
-    const scale = Math.min(4, Math.max(1, Math.floor(devicePixelRatio || 1)),
-      Math.floor(MAX_CANVAS_DIMENSION / this.logicalWidth), Math.floor(MAX_CANVAS_DIMENSION / this.logicalHeight));
-    if (scale < 1) throw new Error("PocketJS Canvas2D viewport exceeds WeChat's 1365px dimension limit.");
+    const dimensionLimit = this.canvasDimensionLimit();
+    this.devicePixelRatio = this.currentDevicePixelRatio(devicePixelRatio || 1);
+    const scale = this.pixelScale(this.logicalWidth, this.logicalHeight, this.devicePixelRatio);
+    if (scale < 1) throw new Error(`PocketJS Canvas2D viewport exceeds the ${dimensionLimit}px surface limit.`);
     this.scale = scale;
     this.configureCanvas();
 
@@ -126,17 +177,41 @@ class PocketWechatHost {
     this.exports = this.instance.exports;
     this.host = this.exports.web_create(this.logicalWidth, this.logicalHeight, this.scale, 0, 0);
     if (!this.host) throw new Error("PocketJS WASM could not allocate its runtime host.");
-    this.check(this.exports.web_wechat_boot(this.host, this.scale), "PocketJS QuickJS guest did not boot.");
-    this.draw();
-    this.drainOutbound();
+    this.check(this.exports.web_wechat_boot_index
+      ? this.exports.web_wechat_boot_index(this.host, this.scale, this.config.index || 0)
+      : this.exports.web_wechat_boot(this.host, this.scale), "PocketJS QuickJS guest did not boot.");
     this.visible = !!this.isActive();
+    this.reportViewport();
+    this.draw();
+    if (this.visible) this.drainOutbound();
     this.schedule();
   }
 
+  reportViewport() {
+    if (!this.exports || this.disposed || !this.visible) return;
+    const info = this.wx.getWindowInfo ? this.wx.getWindowInfo() : this.wx.getSystemInfoSync?.() || {};
+    const safe = info.safeArea || {};
+    const top = Math.max(0, Number(safe.top) || Number(info.statusBarHeight) || 0);
+    const right = Math.max(0, (Number(info.screenWidth) || this.logicalWidth) - (Number(safe.right) || this.logicalWidth));
+    const bottom = Math.max(0, (Number(info.screenHeight) || this.logicalHeight) - (Number(safe.bottom) || this.logicalHeight));
+    const regions = [];
+    if (this.wx.getMenuButtonBoundingClientRect) {
+      const capsule = this.wx.getMenuButtonBoundingClientRect();
+      if (capsule?.width > 0 && capsule?.height > 0) regions.push({ id: "wechat-capsule", kind: "occlusion", active: true,
+        frame: { left: capsule.left, top: capsule.top, width: capsule.width, height: capsule.height }, margins: { top: 0, left: 8, right: 0, bottom: 8 } });
+    }
+    if (this.headless) regions.push({ id: "mini-app-close", kind: "occlusion", active: true,
+      frame: { left: this.logicalWidth - right - 52, top: top + 8, width: 44, height: 44 }, margins: { top: 0, left: 8, right: 0, bottom: 8 } });
+    this.deliverGuestEvent("display.viewport", { width: this.logicalWidth, height: this.logicalHeight,
+      safeArea: { top, right, bottom, left: Math.max(0, Number(safe.left) || 0) }, keyboardInset: 0, reservedRegions: regions }, false);
+  }
+
   configureCanvas() {
+    if (this.headless) return;
     const width = this.logicalWidth * this.scale;
     const height = this.logicalHeight * this.scale;
-    if (width > MAX_CANVAS_DIMENSION || height > MAX_CANVAS_DIMENSION) throw new Error("PocketJS Canvas2D output exceeds WeChat's 1365px dimension limit.");
+    const dimensionLimit = this.canvasDimensionLimit();
+    if (width > dimensionLimit || height > dimensionLimit) throw new Error(`PocketJS Canvas2D output exceeds the ${dimensionLimit}px surface limit.`);
     this.canvas.width = width;
     this.canvas.height = height;
     this.imageData = this.context.createImageData(width, height);
@@ -144,7 +219,12 @@ class PocketWechatHost {
 
   resize(width, height) {
     if (!this.exports || this.disposed) return;
-    const maxLogical = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / (this.scale || 1)));
+    // A running WASM host cannot change Ui::raster_density without resetting
+    // the Guest (which would lose JS state). Re-read the browser ratio for
+    // diagnostics, but keep the boot density for this generation; a future
+    // runtime generation will pick up a monitor change automatically.
+    this.devicePixelRatio = this.currentDevicePixelRatio(this.devicePixelRatio || this.scale || 1);
+    const maxLogical = Math.max(1, Math.floor(this.canvasDimensionLimit() / (this.scale || 1)));
     const nextWidth = Math.min(maxLogical, Math.max(1, Math.floor(Number(width) || this.width || this.logicalWidth || 1)));
     const nextHeight = Math.min(maxLogical, Math.max(1, Math.floor(Number(height) || this.height || this.logicalHeight || 1)));
     const changed = nextWidth !== this.logicalWidth || nextHeight !== this.logicalHeight;
@@ -157,6 +237,7 @@ class PocketWechatHost {
     this.stopScheduled();
     const resizeFn = this.exports.web_resize_viewport || this.exports.web_resize;
     this.check(resizeFn.call(this.exports, this.host, nextWidth, nextHeight), "PocketJS viewport resize failed.");
+    this.reportViewport();
     this.draw();
     this.drainOutbound();
     this.schedule();
@@ -197,11 +278,12 @@ class PocketWechatHost {
   inputFrame(contacts) {
     if (!this.exports || this.disposed || !this.visible) return;
     this.stopScheduled();
-    this.advance(contacts);
-    this.schedule();
+    if (this.system && this.system.root === this) this.system.input(contacts);
+    else { this.advance(contacts); this.schedule(); }
   }
 
-  advance(contacts = []) {
+  advance(contacts = this.contacts) {
+    this.contacts = contacts.filter(contact => !contact.cancelled);
     const facts = JSON.stringify({ buttons: 0, analog: 0x8080, rightAnalog: 0x8080, contacts, axisDeltas: [] });
     this.withBytes(facts, (pointer, length) => this.check(
       this.exports.web_advance(this.host, pointer, length, 1), "PocketJS guest frame failed.",
@@ -212,9 +294,10 @@ class PocketWechatHost {
   }
 
   draw() {
+    if (this.headless) { this.system?.childFrame(this); return; }
     if (!this.exports || !this.imageData || !this.context) return;
-    const pointer = this.exports.web_pixels(this.host);
-    const length = this.exports.web_pixels_len(this.host);
+    const pointer = this.system ? this.system.composite() : this.exports.web_pixels(this.host);
+    const length = this.system ? this.logicalWidth * this.logicalHeight * this.scale * this.scale * 4 : this.exports.web_pixels_len(this.host);
     if (!pointer || length !== this.imageData.data.length) return;
     this.imageData.data.set(new Uint8ClampedArray(this.exports.memory.buffer, pointer, length));
     this.context.putImageData(this.imageData, 0, 0);
@@ -242,7 +325,7 @@ class PocketWechatHost {
         this.running = false;
         this.raf = 0;
         if (!this.visible || this.disposed) return;
-        this.advance([]);
+        this.advance();
         this.schedule();
       });
       return;
@@ -260,7 +343,7 @@ class PocketWechatHost {
       if (frames > 1 && !this.disposed && this.exports && this.host) {
         this.exports.web_wechat_skip_idle_frames(this.host, frames - 1);
       }
-      this.advance([]);
+      this.advance();
       this.schedule();
     }, delay);
   }
@@ -268,7 +351,7 @@ class PocketWechatHost {
   wake() {
     if (!this.exports || this.disposed || !this.visible) return;
     this.stopScheduled();
-    this.advance([]);
+    this.advance();
     this.schedule();
   }
 
@@ -298,13 +381,16 @@ class PocketWechatHost {
   show() {
     if (this.disposed || !this.exports) return;
     this.visible = true;
+    this.reportViewport();
     this.wake();
   }
 
   hide() {
     if (this.disposed) return;
     const hadInput = Boolean(this.input);
+    this.contacts = [];
     this.visible = false;
+    if (this.system?.root === this) this.system.suspend();
     this.stopScheduled();
     this.cancelPending("page inactive");
     this.imeDismiss({});
@@ -361,6 +447,7 @@ class PocketWechatHost {
       this.respond(request, false, null, { code: "permission_denied", message: `Capability is not declared: ${request.capability}` });
       return;
     }
+    const systemTransport = this.system && this.system.handles(request.capability);
     const generation = this.generation;
     const record = { request, generation, timer: 0, cancelled: false, controller: createAbortController() };
     this.pending.set(request.requestId, record);
@@ -372,7 +459,9 @@ class PocketWechatHost {
     }, REQUEST_TIMEOUT_MS);
     try {
       const authorize = permissionHandler;
-      if (typeof authorize === "function") {
+      if (systemTransport || isWechatBuiltinCapability(request.capability)) {
+        // JS SystemUI owns app policy; the host only carries its transport.
+      } else if (typeof authorize === "function") {
         const allowed = await authorize(request.capability, request.params || {}, {
           wx: this.wx,
           signal: record.controller.signal,
@@ -382,7 +471,9 @@ class PocketWechatHost {
         throw this.error("unconfigured", `No WeChat handler is configured for ${request.capability}`);
       }
       if (record.cancelled || generation !== this.generation) return;
-      const result = await this.dispatchCapability(request.capability, request.params || {}, record.controller.signal);
+      const result = systemTransport
+        ? await this.system.request(this, request, record.controller.signal)
+        : await this.dispatchCapability(request.capability, request.params || {}, record.controller.signal);
       if (!this.pending.delete(request.requestId) || generation !== this.generation || record.cancelled) return;
       clearTimeout(record.timer);
       this.respond(request, true, result, null);
@@ -403,6 +494,7 @@ class PocketWechatHost {
   }
 
   async dispatchCapability(capability, params, signal) {
+    if (isWechatBuiltinCapability(capability)) return wechatBuiltinCapability(this, capability, params);
     if (capability.startsWith("platform.storage.")) return this.storage(capability, params);
     const handler = capabilityHandlers[capability];
     if (typeof handler !== "function") throw this.error("unconfigured", `No WeChat handler is configured for ${capability}`);
@@ -486,7 +578,7 @@ class PocketWechatHost {
     this.wake();
   }
 
-  deliverGuestEvent(method, params) {
+  deliverGuestEvent(method, params, wake = true) {
     if (!this.exports || this.disposed) return;
     const methodBytes = this.allocBytes(method);
     const paramsBytes = this.allocBytes(JSON.stringify(params || {}));
@@ -503,7 +595,7 @@ class PocketWechatHost {
       this.exports.web_free(paramsBytes.pointer, paramsBytes.length);
     }
     this.drainOutbound();
-    this.wake();
+    if (wake) this.wake();
   }
 
   inputStyle(value) {
@@ -527,6 +619,11 @@ class PocketWechatHost {
 
   openInput(value) {
     if (this.disposed || !this.visible) return;
+    if (this.system) {
+      const previous = this.system.imeOwner;
+      if (previous && previous !== this) previous.closeInput(true);
+      this.system.imeOwner = this;
+    }
     const text = String(value.text ?? "");
     const requestedCursor = Number.isInteger(value.selectionExtent) ? value.selectionExtent : text.length;
     this.input = {
@@ -570,11 +667,13 @@ class PocketWechatHost {
   closeInput(hideKeyboard) {
     if (!this.input) return;
     this.input = null;
+    if (this.system?.imeOwner === this) this.system.imeOwner = null;
     this.onInput({ visible: false });
     if (hideKeyboard && this.wx.hideKeyboard) this.wx.hideKeyboard({ complete: () => {} });
   }
 
   imeEdit(detail) {
+    if (this.system?.root === this && this.system.imeOwner && this.system.imeOwner !== this) return this.system.imeOwner.imeEdit(detail);
     if (!this.input) return;
     this.inputRevision += 1;
     const text = String(detail.value ?? "");
@@ -596,6 +695,7 @@ class PocketWechatHost {
   }
 
   imeSubmit(detail) {
+    if (this.system?.root === this && this.system.imeOwner && this.system.imeOwner !== this) return this.system.imeOwner.imeSubmit(detail);
     if (!this.input) return;
     const text = String(detail.value ?? this.input.text ?? "");
     this.deliverGuestEvent("textInput.submit", {
@@ -613,9 +713,11 @@ class PocketWechatHost {
   }
 
   imeDismiss(detail) {
+    if (this.system?.root === this && this.system.imeOwner && this.system.imeOwner !== this) return this.system.imeOwner.imeDismiss(detail);
     if (!this.input) return;
     const input = this.input;
     this.input = null;
+    if (this.system?.imeOwner === this) this.system.imeOwner = null;
     this.onInput({ visible: false });
     this.deliverGuestEvent("textInput.dismiss", {
       id: input.id,
@@ -657,6 +759,7 @@ class PocketWechatHost {
     try {
       this.stopScheduled();
       this.cancelPending("host disposed");
+      if (this.system?.root === this) this.system.dispose();
       this.closeInput(true);
     } finally {
       const exports = this.exports;

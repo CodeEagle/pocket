@@ -160,6 +160,48 @@ export function StatusBar(props: { label: string; detail: string; ok?: boolean }
 
 export type NavigationRoute = "home" | "gallery" | "about";
 
+/**
+ * Navigation icons are deliberately composed from host primitives instead of
+ * Unicode glyphs. The bundled font is a text font and does not guarantee the
+ * miscellaneous-symbol code points used by the old tab bar; on a target with
+ * no fallback font those code points rendered as empty boxes. These small
+ * geometric marks are therefore stable across Flutter, WeChat and native
+ * probe hosts and inherit the selected-tab colour through one explicit style.
+ */
+function NavigationIcon(props: { kind: "home" | "gallery" | "host"; active: boolean }): JSX.Element {
+  const color = () => props.active ? "#315DEB" : "#7C8799";
+  if (props.kind === "home") {
+    return (
+      <View class="relative w-[20] h-[20]">
+        <View class="absolute left-[4] top-[8] w-[12] h-[9] rounded-sm" style={{ bgColor: color() }} />
+        <View class="absolute left-[5] top-[3] w-[10] h-[10] rounded-sm" style={{ bgColor: color(), rotate: 45 }} />
+        <View class="absolute left-[8] top-[10] w-[4] h-[7] rounded-sm bg-white" />
+      </View>
+    );
+  }
+  if (props.kind === "gallery") {
+    return (
+      <View class="flex-col gap-[2] w-[20] h-[20] items-center justify-center">
+        <View class="flex-row gap-[2]">
+          <View class="w-[6] h-[6] rounded-sm" style={{ bgColor: color() }} />
+          <View class="w-[6] h-[6] rounded-sm" style={{ bgColor: color() }} />
+        </View>
+        <View class="flex-row gap-[2]">
+          <View class="w-[6] h-[6] rounded-sm" style={{ bgColor: color() }} />
+          <View class="w-[6] h-[6] rounded-sm" style={{ bgColor: color() }} />
+        </View>
+      </View>
+    );
+  }
+  return (
+    <View class="flex-col gap-[3] w-[20] h-[20] items-center justify-center">
+      <View class="w-[14] h-[3] rounded-full" style={{ bgColor: color() }} />
+      <View class="w-[14] h-[3] rounded-full" style={{ bgColor: color() }} />
+      <View class="w-[14] h-[3] rounded-full" style={{ bgColor: color() }} />
+    </View>
+  );
+}
+
 export function NavigationBar(props: {
   route: string;
   onNavigate: (route: "home" | "gallery" | "about") => void;
@@ -183,9 +225,9 @@ export function NavigationBar(props: {
   };
   const hostRoute = () => props.route !== "home" && props.route !== "gallery";
   const items = [
-    { id: "home" as const, label: "Home", icon: "⌂" },
-    { id: "gallery" as const, label: "Gallery", icon: "▦" },
-    { id: "about" as const, label: "Host", icon: "☷" },
+    { id: "home" as const, label: "Home", kind: "home" as const },
+    { id: "gallery" as const, label: "Gallery", kind: "gallery" as const },
+    { id: "about" as const, label: "Host", kind: "host" as const },
   ];
   return (
     <View
@@ -201,7 +243,7 @@ export function NavigationBar(props: {
               onPress={() => props.onNavigate(item.id)}
             >
               <View class={active() ? "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-[#E8EDFF]" : "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-transparent"}>
-                <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#647084] font-bold"}>{item.icon}</Text>
+                <NavigationIcon kind={item.kind} active={active()} />
               </View>
               <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#647084] font-bold"}>{item.label}</Text>
             </Focusable>

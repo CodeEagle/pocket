@@ -20,6 +20,7 @@ function fakeHost(): Fake {
     web_alloc: () => 1,
     web_free: () => {},
     web_wechat_deliver: () => 0,
+    web_wechat_guest_event: () => 0,
     web_destroy: () => { host.destroyCalls += 1; },
   } as any;
   host.host = 1;
@@ -137,4 +138,32 @@ test("resize keeps the startup scale invariant while hide and show remain reusab
   host.show();
   expect(host.visible).toBe(true);
   expect(wakeCount).toBe(1);
+});
+
+test("scheduled frames retain an active touch until the real release or cancellation", () => {
+  const host = fakeHost();
+  const facts: any[] = [];
+  host.exports.web_advance = (_handle: number, pointer: number, length: number) => {
+    facts.push(JSON.parse(new TextDecoder().decode(new Uint8Array(host.exports.memory.buffer, pointer, length))));
+    return 0;
+  };
+  host.exports.web_present = () => 0;
+  host.draw = () => {};
+  host.drainOutbound = () => {};
+  const contact = { surface: 0, id: 1, x: 50, y: 70, cancelled: false };
+  host.advance([contact]);
+  host.advance();
+  host.advance([]);
+  host.advance();
+  host.advance([{ ...contact, cancelled: true }]);
+  host.advance();
+  expect(facts.map(frame => frame.contacts)).toEqual([[contact], [contact], [], [], [{ ...contact, cancelled: true }], []]);
+});
+
+test("the page IME transport reaches the focused child runtime", () => {
+  const host = fakeHost();
+  const edits: any[] = [];
+  host.system = { root: host, imeOwner: { imeEdit: (detail: unknown) => edits.push(detail) } } as any;
+  host.imeEdit({ value: "selected account", cursor: 16 });
+  expect(edits).toEqual([{ value: "selected account", cursor: 16 }]);
 });

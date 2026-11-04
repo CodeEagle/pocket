@@ -32,6 +32,7 @@ import {
   type PublicKeyConfig,
 } from "../scripts/package_update.ts";
 import { buildGuest } from "../scripts/build_guest.ts";
+import { createWechatPreviewManager } from "./wechat.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const projectIdPattern = /^[a-z][a-z0-9-]{0,47}$/;
@@ -1079,6 +1080,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   };
   const projectDir = (id: string) => projectDirectory(workspace, id);
 
+  await mkdir(join(workspace.root, "wechat-preview"), { recursive: true });
+  const wechat = createWechatPreviewManager({ projectDirectory: projectDir, workspaceRoot: join(workspace.root, "wechat-preview") });
   const server = Bun.serve({
     hostname: options.host ?? "127.0.0.1",
     port: options.port ?? Number(process.env.POCKET_EDITOR_PORT ?? 8790),
@@ -1130,10 +1133,22 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         const exists = existsSync(projectDir(id));
         if (!exists) return failure("project not found", 404);
         const state = await getState(id);
+        if (wechat.isBuilding(id) && ["PUT", "POST", "PATCH"].includes(method)) return failure("WeChat build is using this project; stop it before editing/building", 409);
         if (parts[0] === "api" && parts[1] === "projects") {
           if (parts.length === 3 && method === "GET") {
             const config = await loadConfig(projectDir(id), id);
             return json({ ...config, status: publicStatus(id, state) });
+          }
+          if (parts[3] === "wechat" && parts.length === 4) {
+            if (method === "GET") return json(await wechat.status(id));
+            if (method === "DELETE") return json(await wechat.stop(id));
+            if (method === "POST") {
+              if (state.busy) return failure("Editor build is still running", 409);
+              await validateProjectInputTree(projectDir(id));
+              const body = await parseJsonBody(request);
+              return json(await wechat.start(id, asString(body.targetId, "targetId", 200)), 202);
+            }
+            return failure("method not allowed", 405);
           }
           if (parts[3] === "config") {
             if (method === "GET") return json(await loadConfig(projectDir(id), id));
@@ -1271,6 +1286,11 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       }
     },
   });
+  const stop = server.stop.bind(server);
+  server.stop = ((closeActiveConnections?: boolean) => {
+    wechat.dispose();
+    return stop(closeActiveConnections);
+  }) as typeof server.stop;
   return server;
 }
 

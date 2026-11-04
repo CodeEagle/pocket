@@ -13,6 +13,15 @@ let projectFiles = [];
 let polling = null;
 let dirty = false;
 let csrfToken = "";
+const WECHAT_STATES = new Set(["idle", "building", "running", "error", "stopped"]);
+const MAX_WECHAT_POLL_ATTEMPTS = 600;
+const WECHAT_POLL_DELAY_MS = 500;
+let wechatState = { state: "idle", url: "", error: "", logs: [] };
+let wechatPollTimer = null;
+let wechatGeneration = 0;
+let startingWechat = false;
+let stoppingWechat = false;
+
 
 async function api(path, options = {}) {
   const isForm = typeof FormData !== "undefined" && options.body instanceof FormData;
@@ -98,6 +107,188 @@ async function loadFile(filePath) {
   markDirty(false);
 }
 
+function updateWechatActionStates() {
+  const busy = startingWechat || stoppingWechat || wechatState.state === "building";
+  $("wechat-start").disabled = !currentId || busy || wechatState.state === "running";
+  $("wechat-stop").hidden = !["building", "running"].includes(wechatState.state);
+  $("wechat-stop").disabled = startingWechat || stoppingWechat;
+  const link = $("wechat-open");
+  link.hidden = wechatState.state !== "running" || !wechatState.url;
+  if (!link.hidden) link.href = wechatState.url;
+  else link.removeAttribute("href");
+}
+
+function wechatPath(projectId) {
+  return `/api/projects/${encodeURIComponent(projectId)}/wechat`;
+}
+
+function readWechatState(payload) {
+  const value = payload && typeof payload === "object" && payload.state && typeof payload.state === "object"
+    ? payload.state
+    : payload;
+  const state = WECHAT_STATES.has(value?.state) ? value.state : "idle";
+  const logs = Array.isArray(value?.logs) ? value.logs.map((entry) => String(entry)) : [];
+  return {
+    state,
+    targetId: typeof value?.targetId === "string" ? value.targetId : "",
+    url: typeof value?.url === "string" ? value.url : "",
+    error: typeof value?.error === "string" ? value.error : "",
+    logs,
+  };
+}
+
+function readWechatProjectLabel(payload) {
+  const target = Array.isArray(payload?.targets) ? payload.targets[0] : null;
+  const label = typeof target?.label === "string" ? target.label : "";
+  const appId = typeof target?.appId === "string" ? target.appId : "";
+  return label || appId || (currentId ? "Whole app" : "Select a project");
+}
+
+function renderWechatTargets(payload = {}) {
+  const projectLabel = $("wechat-project-label");
+  if (projectLabel) projectLabel.textContent = readWechatProjectLabel(payload);
+}
+
+function renderWechatState(nextState = wechatState) {
+  wechatState = readWechatState(nextState);
+  const chip = $("wechat-state");
+  if (chip) {
+    const labels = { idle: "Idle", building: "Building…", running: "Running", error: "Error", stopped: "Stopped" };
+    const kind = wechatState.state === "running" ? "good" : wechatState.state === "error" ? "bad" : "";
+    chip.textContent = labels[wechatState.state] || "Idle";
+    chip.className = `meta-chip${kind ? ` ${kind}` : ""}`;
+    const detail = wechatState.error || wechatState.logs.at(-1) || "";
+    if (detail) chip.title = detail;
+    else chip.removeAttribute("title");
+    chip.setAttribute("aria-label", `WeChat ${chip.textContent}${detail ? `: ${detail}` : ""}`);
+  }
+  updateWechatActionStates();
+}
+
+function stopWechatPolling() {
+  if (wechatPollTimer) clearTimeout(wechatPollTimer);
+  wechatPollTimer = null;
+}
+
+function invalidateWechatRequests() {
+  wechatGeneration += 1;
+  stopWechatPolling();
+  startingWechat = false;
+  stoppingWechat = false;
+}
+
+function resetWechatPresentation() {
+  wechatState = { state: "idle", url: "", error: "", logs: [] };
+  renderWechatTargets();
+  renderWechatState();
+}
+
+async function loadWechat(projectId, generation) {
+  try {
+    const response = await api(wechatPath(projectId));
+    if (currentId !== projectId || generation !== wechatGeneration) return;
+    renderWechatTargets(response);
+    renderWechatState(response);
+    if (wechatState.state === "building") void pollWechat(0, projectId, generation);
+  } catch (error) {
+    if (currentId !== projectId || generation !== wechatGeneration) return;
+    renderWechatTargets();
+    renderWechatState({ state: "error", error: (error instanceof Error ? error.message : String(error)), logs: [] });
+    showNotice(error);
+  }
+}
+
+async function pollWechat(attempt = 0, projectId = currentId, generation = wechatGeneration) {
+  if (!projectId || currentId !== projectId || generation !== wechatGeneration) return;
+  wechatPollTimer = null;
+  if (attempt > MAX_WECHAT_POLL_ATTEMPTS) {
+    renderWechatState({ ...wechatState, state: "error", error: "WeChat validation timed out." });
+    showNotice("WeChat validation timed out.");
+    return;
+  }
+  try {
+    const response = await api(wechatPath(projectId));
+    if (currentId !== projectId || generation !== wechatGeneration) return;
+    renderWechatTargets(response);
+    renderWechatState(response);
+    if (wechatState.state === "building") {
+      wechatPollTimer = setTimeout(() => void pollWechat(attempt + 1, projectId, generation), WECHAT_POLL_DELAY_MS);
+    } else if (wechatState.state === "error" && wechatState.error) {
+      showNotice(wechatState.error);
+    }
+  } catch (error) {
+    if (currentId !== projectId || generation !== wechatGeneration) return;
+    stopWechatPolling();
+    renderWechatState({ ...wechatState, state: "error", error: (error instanceof Error ? error.message : String(error)) });
+    showNotice(error);
+  }
+}
+
+async function startWechat() {
+  const projectId = currentId;
+  const generation = wechatGeneration;
+  const targetId = "main";
+  if (!projectId || startingWechat || stoppingWechat || wechatState.state === "building" || wechatState.state === "running") return;
+  clearNotice();
+  startingWechat = true;
+  renderWechatState({ state: "building", logs: [] });
+  try {
+    const response = await api(wechatPath(projectId), {
+      method: "POST",
+      body: JSON.stringify({ targetId }),
+    });
+    if (currentId !== projectId || generation !== wechatGeneration) return;
+    renderWechatTargets(response);
+    renderWechatState(response);
+    if (wechatState.state === "building") void pollWechat(0, projectId, generation);
+  } catch (error) {
+    if (currentId !== projectId || generation !== wechatGeneration) return;
+    renderWechatState({ state: "error", error: (error instanceof Error ? error.message : String(error)), logs: [] });
+    showNotice(error);
+  } finally {
+    if (currentId === projectId && generation === wechatGeneration) {
+      startingWechat = false;
+      updateWechatActionStates();
+    }
+  }
+}
+
+async function stopWechat() {
+  const projectId = currentId;
+  if (!projectId || stoppingWechat || !["building", "running"].includes(wechatState.state)) return;
+  const generation = ++wechatGeneration;
+  clearNotice();
+  stopWechatPolling();
+  stoppingWechat = true;
+  updateWechatActionStates();
+  try {
+    const response = await api(wechatPath(projectId), { method: "DELETE" });
+    if (currentId !== projectId || generation !== wechatGeneration) return;
+    renderWechatState(response);
+    if (wechatState.state === "building") void pollWechat(0, projectId, generation);
+  } catch (error) {
+    if (currentId !== projectId || generation !== wechatGeneration) return;
+    showNotice(error);
+  } finally {
+    if (currentId === projectId && generation === wechatGeneration) {
+      stoppingWechat = false;
+      updateWechatActionStates();
+    }
+  }
+}
+
+async function refreshFiles({ preserveDraft = dirty } = {}) {
+  if (!currentId) return;
+  const filesResponse = await api(`/api/projects/${encodeURIComponent(currentId)}/files`);
+  const files = filesResponse.files || filesResponse;
+  renderFilePicker(files);
+  if (preserveDraft) {
+    showNotice("The server refreshed the file list. Your unsaved draft is still open; use Refresh files again to discard it.");
+    return;
+  }
+  await loadFile(projectFiles.includes(currentFile) ? currentFile : projectFiles[0]);
+}
+
 function renderArtifacts(status) {
   const artifacts = $("artifacts");
   artifacts.replaceChildren();
@@ -166,8 +357,10 @@ function beginPolling() {
 
 async function selectProject(id) {
   if (dirty && currentId !== id && !window.confirm("Discard unsaved guest source changes?")) return;
+  invalidateWechatRequests();
   clearNotice();
   currentId = id;
+  resetWechatPresentation();
   currentFile = "app.tsx";
   markDirty(false);
   renderProjects();
@@ -189,6 +382,7 @@ async function selectProject(id) {
     await loadFile(projectFiles.includes("app.tsx") ? "app.tsx" : projectFiles[0]);
     setEnabled(true);
     renderStatus(status);
+    await loadWechat(id, wechatGeneration);
   } catch (error) { showNotice(error); }
 }
 
@@ -286,4 +480,7 @@ document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void saveProject().catch(() => {}); }
 });
 
-void loadProjects().catch(showNotice);
+$("wechat-start").addEventListener("click", () => { void startWechat(); });
+$("wechat-stop").addEventListener("click", () => { void stopWechat(); });
+window.addEventListener("beforeunload", stopWechatPolling);
+loadProjects().catch(showNotice);

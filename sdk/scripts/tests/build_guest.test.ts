@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildGuest, resolveReleaseIdentity } from "../build_guest.ts";
+import { buildGuest, parseBuildGuestArgs, resolveReleaseIdentity } from "../build_guest.ts";
 import { buildProject } from "../../pocket.ts";
 
 // These tests exercise the full pinned JSX compiler and the Rust QuickJS
@@ -11,6 +11,13 @@ import { buildProject } from "../../pocket.ts";
 // than a cold native build (and becomes especially flaky when the editor or
 // another package test is compiling concurrently).
 const BUILD_GUEST_TEST_TIMEOUT_MS = 120_000;
+
+test("build_guest validates and forwards the bounded raster density option", () => {
+  expect(parseBuildGuestArgs(["--density=3"]).rasterDensity).toBe(3);
+  expect(() => parseBuildGuestArgs(["--density=0"])).toThrow(/1 through 4/);
+  expect(() => parseBuildGuestArgs(["--density=5"])).toThrow(/1 through 4/);
+  expect(() => parseBuildGuestArgs(["--density=2.5"])).toThrow(/1 through 4/);
+});
 
 function linkPackageFiles(source: string, target: string): void {
   mkdirSync(target, { recursive: true });

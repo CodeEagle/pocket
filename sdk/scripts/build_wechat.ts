@@ -2,7 +2,7 @@ import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -23,14 +23,25 @@ const WASM_BINDINGS_ABI_SHA256 = "ea0b38213d704c274012a42c3303dc93030ba0ad717ec9
 const WASM_BINDINGS_PATCH_SHA256 = "cb8c7613b08821ad8e5f1d15e5ad3db6d718873c8e26d6ab93538bbbe7ae725e";
 const WASI_NOTICE_SHA256 = "0a0e814a210338c57b9d65eb516546045c0ca8caa308bf29aa3736236b08346b";
 const MAX_WECHAT_PACKAGE_BYTES = 2 * 1024 * 1024;
+// Static glyph/image resources cover every density admitted by the runtime.
+const MAX_WECHAT_RASTER_DENSITY = 4;
 const WASM_LINK_STACK_BYTES = 1024 * 1024;
 const QUICKJS_STACK_LIMIT_BYTES = 512 * 1024;
+
+function checkedRasterDensity(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_WECHAT_RASTER_DENSITY) {
+    throw new Error(`build_wechat: rasterDensity must be an integer from 1 through 4 (got ${value})`);
+  }
+  return value;
+}
 
 export type BuildWechatOptions = {
   projectRoot: string;
   outDir: string;
   entry?: string;
   tickHz?: number;
+  /** Resource sampling ceiling, independent of the runtime screen scale. */
+  rasterDensity?: number;
   log?: (line: string) => void;
 };
 
@@ -61,6 +72,98 @@ function pocketDeclaresWorker(projectRoot: string): boolean {
     && typeof domains === "object"
     && !Array.isArray(domains)
     && Object.hasOwn(domains, "worker");
+}
+
+type WechatSystemTarget = {
+  appId: string;
+  root: string;
+  systemUI: boolean;
+  manifestPath: string;
+};
+
+function readObject(path: string, label: string): Record<string, unknown> {
+  let value: unknown;
+  try { value = JSON.parse(readFileSync(path, "utf8")); }
+  catch (error) { throw new Error(`build_wechat: invalid ${label}: ${error instanceof Error ? error.message : String(error)}`); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`build_wechat: ${label} must be a JSON object`);
+  return value as Record<string, unknown>;
+}
+
+function safeSystemPath(root: string, value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\0") || value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) {
+    throw new Error(`build_wechat: ${label} must be a relative path`);
+  }
+  const parts = value.split(/[\\/]+/);
+  if (parts.some((part) => !part || part === "." || part === "..")) throw new Error(`build_wechat: ${label} contains an unsafe path segment`);
+  let current = root;
+  for (const part of parts) {
+    current = join(current, part);
+    const info = lstatSync(current, { throwIfNoEntry: false });
+    if (!info) throw new Error(`build_wechat: ${label} is missing: ${current}`);
+    if (info.isSymbolicLink()) throw new Error(`build_wechat: ${label} contains a symlink: ${current}`);
+  }
+  return resolve(current);
+}
+
+function packageId(root: string, label: string): string {
+  const pocketPath = join(root, "pocket.json");
+  const info = lstatSync(pocketPath, { throwIfNoEntry: false });
+  if (!info || info.isSymbolicLink() || !info.isFile()) throw new Error(`build_wechat: ${label} pocket.json is missing or not a regular file`);
+  const pocket = readObject(pocketPath, `${label} pocket.json`);
+  if (typeof pocket.id !== "string" || pocket.id.length === 0) throw new Error(`build_wechat: ${label} pocket.json requires a non-empty id`);
+  return pocket.id;
+}
+
+function discoverSystemTargets(projectRoot: string): { systemId: string; targets: WechatSystemTarget[] } {
+  const systemPath = join(projectRoot, "pocket.system.json");
+  const systemInfo = lstatSync(systemPath, { throwIfNoEntry: false });
+  if (!systemInfo || systemInfo.isSymbolicLink() || !systemInfo.isFile()) throw new Error("build_wechat: pocket.system.json must be a regular file");
+  const system = readObject(systemPath, "pocket.system.json");
+  const roles = system.roles;
+  const systemUI = roles && typeof roles === "object" && !Array.isArray(roles) && typeof (roles as Record<string, unknown>).systemUI === "string"
+    ? (roles as Record<string, unknown>).systemUI as string : "";
+  const applications = system.applications;
+  const catalog = applications && typeof applications === "object" && !Array.isArray(applications) && Array.isArray((applications as Record<string, unknown>).catalog)
+    ? (applications as Record<string, unknown>).catalog as unknown[] : undefined;
+  if (!systemUI || !catalog || catalog.length === 0) throw new Error("build_wechat: pocket.system.json requires roles.systemUI and applications.catalog");
+  const installation = system.installation;
+  const installed = installation && typeof installation === "object" && !Array.isArray(installation) && Array.isArray((installation as Record<string, unknown>).installedPackages)
+    ? new Set((installation as Record<string, unknown>).installedPackages.filter((value): value is string => typeof value === "string"))
+    : undefined;
+  if (installed && !installed.has(systemUI)) throw new Error("build_wechat: installation.installedPackages must include roles.systemUI");
+  const systemId = packageId(projectRoot, "SystemUI");
+  if (systemId !== systemUI) throw new Error(`build_wechat: roles.systemUI ${systemUI} does not match root package ${systemId}`);
+  const targets: WechatSystemTarget[] = [];
+  const seen = new Set<string>();
+  let foundSystemUI = false;
+  for (const raw of catalog) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("build_wechat: applications.catalog contains an invalid entry");
+    const item = raw as Record<string, unknown>;
+    if (typeof item.package !== "string" || typeof item.manifest !== "string" || !item.package || seen.has(item.package)) {
+      throw new Error("build_wechat: applications.catalog entries require unique package and manifest");
+    }
+    seen.add(item.package);
+    const manifestPath = safeSystemPath(projectRoot, item.manifest, `${item.package} manifest`);
+    if (!manifestPath.endsWith(`${sep}pocket.json`) && !manifestPath.endsWith("/pocket.json")) throw new Error(`build_wechat: ${item.package} manifest must be pocket.json`);
+    const targetRoot = dirname(manifestPath);
+    const targetInfo = lstatSync(targetRoot, { throwIfNoEntry: false });
+    if (!targetInfo || targetInfo.isSymbolicLink() || !targetInfo.isDirectory()) throw new Error(`build_wechat: ${item.package} manifest parent is not a real directory`);
+    const appId = packageId(targetRoot, item.package);
+    if (appId !== item.package) throw new Error(`build_wechat: catalog package ${item.package} does not match pocket.json id ${appId}`);
+    const guestManifest = join(targetRoot, "manifest.json");
+    const guestInfo = lstatSync(guestManifest, { throwIfNoEntry: false });
+    if (!guestInfo || guestInfo.isSymbolicLink() || !guestInfo.isFile()) throw new Error(`build_wechat: ${item.package} manifest.json is missing or not a regular file`);
+    if (installed && !installed.has(item.package)) continue;
+    const isSystemUI = item.package === systemUI;
+    if (isSystemUI) foundSystemUI = true;
+    targets.push({ appId, root: targetRoot, systemUI: isSystemUI, manifestPath });
+  }
+  if (!foundSystemUI) throw new Error("build_wechat: applications.catalog must include roles.systemUI");
+  const rootTarget = targets.find((target) => target.systemUI);
+  if (!rootTarget || resolve(rootTarget.root) !== resolve(projectRoot)) throw new Error("build_wechat: roles.systemUI must be the project root");
+  const ordered = [rootTarget, ...targets.filter((target) => !target.systemUI)];
+  if (ordered.length - 1 > 62) throw new Error("build_wechat: at most 62 installed child Guests are supported (surface handles 2 through 63)");
+  return { systemId, targets: ordered };
 }
 
 function replaceOnce(source: string, before: string, after: string, label: string): string {
@@ -215,6 +318,7 @@ function prepareWechatUi(projectRoot: string, temporaryProject: string): void {
       "make native IME delivery reachable from the guest QJBC realm");
     writeFileSync(uiSource, source);
   }
+
 }
 
 function registrySysRoot(): string {
@@ -330,7 +434,15 @@ function findLlvmAr(): string {
   throw new Error("build_wechat: wasm32-unknown-unknown needs an LLVM-compatible llvm-ar/emar (set POCKET_WECHAT_LLVM_AR)");
 }
 
-function patchPinnedWorkspace(workspace: string, qjbc: string, pak: string, tickHz: number, sysOverlay: string, bytecodeModule: string): void {
+type WechatGuestArtifact = { appId: string; qjbc: string; pak: string; tickHz: number };
+
+function patchPinnedWorkspace(
+  workspace: string,
+  artifacts: WechatGuestArtifact[],
+  systemSurfaces: Array<{ appId: string; handle: number }>,
+  sysOverlay: string,
+  bytecodeModule: string,
+): void {
   workspaceMembers(workspace);
   const rootCargo = join(workspace, "Cargo.toml");
   let rootManifest = readFileSync(rootCargo, "utf8");
@@ -345,10 +457,20 @@ function patchPinnedWorkspace(workspace: string, qjbc: string, pak: string, tick
   const src = join(workspace, "programs/web/wasm/src");
   cpSync(join(TARGET_ROOT, "src/wechat_guest.rs"), join(src, "wechat_guest.rs"));
   cpSync(bytecodeModule, join(src, "bytecode.rs"));
+  if (!artifacts.length) throw new Error("build_wechat: no Guest artifacts were produced");
+  const appDefinitions = artifacts.map((artifact) =>
+    `    WechatApp { qjbc: include_bytes!(${JSON.stringify(artifact.qjbc)}), pak: include_bytes!(${JSON.stringify(artifact.pak)}), tick_hz: ${artifact.tickHz} },\n`).join("");
+  const surfaceDefinitions = systemSurfaces.map((surface) => `    (${JSON.stringify(surface.appId)}, ${surface.handle}),\n`).join("");
+  const appIdDefinitions = artifacts.map((artifact) => `    ${JSON.stringify(artifact.appId)},\n`).join("");
   writeFileSync(join(src, "wechat_assets.rs"),
-    `pub const APP_QJBC: &[u8] = include_bytes!(${JSON.stringify(qjbc)});\n` +
-    `pub const APP_PAK: &[u8] = include_bytes!(${JSON.stringify(pak)});\n` +
-    `pub const TICK_HZ: u32 = ${tickHz};\n`);
+    `pub struct WechatApp { pub qjbc: &'static [u8], pub pak: &'static [u8], pub tick_hz: u32 }\n` +
+    `pub static APPS: &[WechatApp] = &[\n${appDefinitions}];\n` +
+    `pub const APP_QJBC: &[u8] = include_bytes!(${JSON.stringify(artifacts[0]!.qjbc)});\n` +
+    `pub const APP_PAK: &[u8] = include_bytes!(${JSON.stringify(artifacts[0]!.pak)});\n` +
+    `pub const TICK_HZ: u32 = ${artifacts[0]!.tickHz};\n` +
+    `pub static APP_IDS: &[&str] = &[\n${appIdDefinitions}];\n` +
+    `pub static SYSTEM_SURFACES: &[(&str, u32)] = &[\n${surfaceDefinitions}];\n`);
+
 
   const libPath = join(src, "lib.rs");
   let lib = readFileSync(libPath, "utf8");
@@ -367,7 +489,9 @@ function patchPinnedWorkspace(workspace: string, qjbc: string, pak: string, tick
         }`,
     "preserve detailed Guest errors during WeChat boot");
   lib = replaceOnce(lib, "    runtime: RefCell<Option<Runtime>>,", "    runtime: RefCell<Option<Runtime>>,\n    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,", "owned QuickJS handle");
+  lib = replaceOnce(lib, "    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,", "    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,\n    pub(crate) app_index: Cell<usize>,", "WeChat Guest app index");
   lib = replaceOnce(lib, "        runtime: RefCell::new(None),", "        runtime: RefCell::new(None),\n        quickjs: Rc::new(RefCell::new(None)),", "QuickJS state initialization");
+  lib = replaceOnce(lib, "        quickjs: Rc::new(RefCell::new(None)),", "        quickjs: Rc::new(RefCell::new(None)),\n        app_index: Cell::new(0),", "WeChat Guest app index initialization");
   lib = replaceOnce(lib, "RefCell::new((\"web\".into(), BINDING_GENERATION))", "RefCell::new((\"wechat\".into(), BINDING_GENERATION))", "WeChat host identity");
   writeFileSync(libPath, lib);
 
@@ -468,14 +592,24 @@ fn turn_deadline_expired(deadline: TurnDeadline) -> bool {
   guest = replaceOnce(guest,
     "Some(Instant::now() + duration);",
     "Some(turn_deadline_after(duration));", "guest deadline creation");
-  guest = replaceOnce(guest,
-    `runtime.set_interrupt_handler(Some(Box::new(move || {
+  const uninstrumentedInterrupt = `runtime.set_interrupt_handler(Some(Box::new(move || {
             deadline.lock().unwrap().is_some_and(|end| Instant::now() >= end)
-        })));`,
-    `runtime.set_interrupt_handler(Some(Box::new(move || {
+        })));`;
+  if (guest.includes(uninstrumentedInterrupt)) {
+    guest = replaceOnce(guest,
+      uninstrumentedInterrupt,
+      `runtime.set_interrupt_handler(Some(Box::new(move || {
             deadline.lock().unwrap().is_some_and(|end| turn_deadline_expired(end))
         })));`,
-    "QuickJS interrupt deadline");
+      "QuickJS interrupt deadline");
+  } else {
+    // The pinned diagnostics patch already records interrupt state; adapt
+    // only its exact clock expression rather than dropping that provenance.
+    guest = replaceOnce(guest,
+      "            let expired = deadline.lock().unwrap().is_some_and(|end| Instant::now() >= end);",
+      "            let expired = deadline.lock().unwrap().is_some_and(|end| turn_deadline_expired(end));",
+      "QuickJS interrupt deadline (diagnostics-patched source)");
+  }
   guest = replaceOnce(guest,
     "self.turn_deadline.lock().unwrap().is_some_and(|end| Instant::now() >= end)",
     "self.turn_deadline.lock().unwrap().is_some_and(|end| turn_deadline_expired(end))",
@@ -509,18 +643,28 @@ function directoryBytes(root: string): number {
   }, 0);
 }
 
-function writeConsumer(output: string, sourceProject: string, tickHz: number, wasm: Buffer, qjbcMetadata: Record<string, unknown>): void {
-  const files = ["app.js", "app.json", "app.wxss", "sitemap.json", "wechat-host.js"];
+type WechatConsumerOptions = {
+  appId: string;
+  tickHz: number;
+  rasterDensity: number;
+  wasm: Buffer;
+  qjbcMetadata: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  system?: { systemUI: string; apps: Array<{ appId: string; index: number; surfaceHandle?: number; requires?: string[]; optional?: string[]; tickHz?: number; metadata?: Record<string, unknown> }> };
+};
+
+function writeConsumer(output: string, sourceProject: string, options: WechatConsumerOptions): void {
+  const files = ["app.js", "app.json", "app.wxss", "sitemap.json", "wechat-host.js", "wechat-system.js"];
   cpSync(join(TARGET_ROOT, "template/pages"), join(output, "pages"), { recursive: true });
   for (const file of files) cpSync(join(TARGET_ROOT, "template", file), join(output, file));
   mkdirSync(join(output, "engine"), { recursive: true });
-  const compressed = brotliCompressSync(wasm, {
+  const compressed = brotliCompressSync(options.wasm, {
     params: {
       [zlibConstants.BROTLI_PARAM_QUALITY]: 9,
       [zlibConstants.BROTLI_PARAM_MODE]: zlibConstants.BROTLI_MODE_GENERIC,
     },
   });
-  if (!brotliDecompressSync(compressed).equals(wasm)) throw new Error("build_wechat: Brotli output did not round trip");
+  if (!brotliDecompressSync(compressed).equals(options.wasm)) throw new Error("build_wechat: Brotli output did not round trip");
   if (compressed.byteLength > MAX_WECHAT_PACKAGE_BYTES) {
     throw new Error(`build_wechat: compressed engine is ${compressed.byteLength} bytes, above WeChat's 2 MiB per-package limit`);
   }
@@ -530,15 +674,18 @@ function writeConsumer(output: string, sourceProject: string, tickHz: number, wa
   const manifest = JSON.parse(readFileSync(join(sourceProject, "manifest.json"), "utf8")) as {
     capabilities?: { requires?: string[]; optional?: string[] };
   };
-  const appId = typeof pocket.id === "string" && pocket.id ? pocket.id : "pocket.guest";
+  const appId = options.appId || (typeof pocket.id === "string" && pocket.id ? pocket.id : "pocket.guest");
   const requires = Array.isArray(manifest.capabilities?.requires) ? manifest.capabilities!.requires! : [];
   const optional = Array.isArray(manifest.capabilities?.optional) ? manifest.capabilities!.optional! : [];
   writeFileSync(join(output, "pocket.config.js"), `module.exports = ${JSON.stringify({
     appId,
-    tickHz,
+    tickHz: options.tickHz,
+    rasterDensity: options.rasterDensity,
     enginePath: "engine/pocketjs.wasm.br",
     requires,
     optional,
+    ...(options.metadata ? { metadata: options.metadata } : {}),
+    ...(options.system ? { system: options.system } : {}),
   }, null, 2)};\n`);
   writeFileSync(join(output, "project.config.json"), `${JSON.stringify({
     appid: "touristappid",
@@ -550,19 +697,22 @@ function writeConsumer(output: string, sourceProject: string, tickHz: number, wa
   writeFileSync(join(output, "build-info.json"), `${JSON.stringify({
     target: "wechat-host-qjbc",
     appId,
-    composition: "single-guest-primary-surface",
+    composition: options.system ? "system-multi-guest-primary-surface" : "single-guest-primary-surface",
     upstreamRevision: UPSTREAM_REVISION,
     rquickjs: "0.12.2",
-    quickjsBytecode: qjbcMetadata,
-    engineBytes: wasm.byteLength,
+    rasterDensity: options.rasterDensity,
+    quickjsBytecode: options.qjbcMetadata,
+    engineBytes: options.wasm.byteLength,
     compressedEngineBytes: compressed.byteLength,
-    engineSha256: createHash("sha256").update(wasm).digest("hex"),
+    engineSha256: createHash("sha256").update(options.wasm).digest("hex"),
     compressedEngineSha256: createHash("sha256").update(compressed).digest("hex"),
     hostRuntime: "WXWebAssembly + Canvas2D",
   }, null, 2)}\n`);
   writeFileSync(join(output, "README.md"), `# PocketJS WeChat Mini Program consumer\n\n` +
 `Open this directory as a Mini Program in WeChat DevTools, replace touristappid with the registered app id, and run on a physical device before distribution. The generated engine is ${compressed.byteLength} bytes Brotli-compressed and embeds the app's admitted QuickJS 0.12.2 bytecode and PAK.\n\n` +
-`This target hosts one PocketJS Guest on one primary surface. It does not host PocketSystem dynamic child compositing.\n\n` +
+ (options.system
+  ? `This target embeds the complete PocketSystem catalog: SystemUI ${options.system.systemUI} at index 0 and ${options.system.apps.filter((app) => app.appId !== options.system!.systemUI).length} child Guests. The WeChat host creates one Canvas host per catalog entry and uses system surface handles 2 through 63.\n\n`
+  : `This target hosts one PocketJS Guest on one primary surface.\n\n`) +
 `Requirements: WeChat base library 2.14.0 or newer for WXWebAssembly with Brotli .wasm.br package paths; Canvas2D uses the type=2d API (2.9.0 or newer). The app's Canvas2D surface must stay within 1365 by 1365 pixels.\n\n` +
 `Only manifest-declared platform.storage capabilities are serviced by the built-in app-scoped wx storage adapter. Other host.request capabilities return permission_denied or unconfigured unless registered through wechat-host.js.\n`);
   const packageBytes = directoryBytes(output);
@@ -572,42 +722,80 @@ function writeConsumer(output: string, sourceProject: string, tickHz: number, wa
 }
 
 export async function buildWechat(options: BuildWechatOptions): Promise<{ outDir: string; wasmBytes: number; brotliBytes: number }> {
+  const rasterDensity = checkedRasterDensity(options.rasterDensity ?? MAX_WECHAT_RASTER_DENSITY);
   const projectRoot = resolve(options.projectRoot);
   const output = resolve(options.outDir);
   if (!existsSync(join(projectRoot, "pocket.json")) || !existsSync(join(projectRoot, "manifest.json"))) {
     throw new Error("build_wechat: projectRoot must contain pocket.json and manifest.json");
   }
-  if (existsSync(join(projectRoot, "pocket.system.json"))) {
-    throw new Error("build_wechat: this target embeds one Guest on one primary surface; PocketSystem dynamic child compositing is not supported");
-  }
-  if (pocketDeclaresWorker(projectRoot)) {
-    throw new Error("build_wechat: this target hosts one Guest only; domains.worker (Worker/HTTP/io.offload) is not supported");
+  const system = existsSync(join(projectRoot, "pocket.system.json")) ? discoverSystemTargets(projectRoot) : undefined;
+  const singlePocket = readObject(join(projectRoot, "pocket.json"), "Guest pocket.json");
+  const singleId = typeof singlePocket.id === "string" && singlePocket.id ? singlePocket.id : "pocket.guest";
+  const targets = system?.targets ?? [{ appId: singleId, root: projectRoot, systemUI: true, manifestPath: join(projectRoot, "pocket.json") }];
+  for (const target of targets) {
+    if (pocketDeclaresWorker(target.root)) {
+      throw new Error(`build_wechat: ${target.appId} declares domains.worker; Worker/HTTP/io.offload are not supported by the complete WeChat target`);
+    }
   }
   if (existsSync(output) && readdirSync(output).length > 0) throw new Error(`build_wechat: output directory is not empty: ${output}`);
   mkdirSync(output, { recursive: true });
 
   const tempRoot = mkdtempSync(join(tmpdir(), "pocketjs-wechat-build-"));
-  const guestOutput = join(tempRoot, "guest");
   const upstream = join(SDK_ROOT, ".cache/pocketjs");
-  const temporaryProject = join(tempRoot, "project");
   try {
     const marker = readFileSync(join(upstream, ".pocketjs-revision"), "utf8").trim();
     if (marker !== UPSTREAM_REVISION) throw new Error(`build_wechat: expected pinned PocketJS ${UPSTREAM_REVISION}, found ${marker}`);
     const bytecodeModule = join(tempRoot, "bytecode.rs");
     cpSync(join(SDK_ROOT, "native/src/bytecode.rs"), bytecodeModule);
-    copyProject(projectRoot, temporaryProject);
-    prepareWechatUi(projectRoot, temporaryProject);
-    const requestedEntry = options.entry || JSON.parse(readFileSync(join(projectRoot, "pocket.json"), "utf8")).app?.entry || "app.tsx";
-    const sourceEntry = relative(projectRoot, resolve(projectRoot, requestedEntry));
-    const guest = await buildGuest({ projectRoot: temporaryProject, entry: sourceEntry, outDir: guestOutput, tickHz: options.tickHz });
-    report(`build_wechat: Guest artifacts ready (QJBC=${guest.bytecode}, PAK=${guest.pak})`, options.log);
+    const artifacts: Array<WechatGuestArtifact & { metadata: Record<string, unknown> }> = [];
+    for (const [index, target] of targets.entries()) {
+      const guestOutput = join(tempRoot, "guest", String(index));
+      const temporaryProject = join(tempRoot, "project", String(index));
+      copyProject(target.root, temporaryProject);
+      prepareWechatUi(target.root, temporaryProject);
+      const pocket = readObject(join(target.root, "pocket.json"), `${target.appId} pocket.json`);
+      const app = pocket.app && typeof pocket.app === "object" && !Array.isArray(pocket.app) ? pocket.app as Record<string, unknown> : {};
+      const requestedEntry = index === 0 && options.entry ? options.entry : (typeof app.entry === "string" && app.entry ? app.entry : "app.tsx");
+      const sourceEntry = relative(target.root, resolve(target.root, requestedEntry));
+      const guest = await buildGuest({ projectRoot: temporaryProject, entry: sourceEntry, outDir: guestOutput, tickHz: options.tickHz, rasterDensity });
+      const metadata = readObject(guest.metadata, `${target.appId} bytecode metadata`);
+      artifacts.push({ appId: target.appId, qjbc: guest.bytecode, pak: guest.pak, tickHz: guest.tickHz, metadata });
+      report(`build_wechat: Guest ${target.appId} artifacts ready (QJBC=${guest.bytecode}, PAK=${guest.pak})`, options.log);
+    }
+    const systemSurfaces = system ? targets.filter((target) => !target.systemUI).map((target, offset) => ({ appId: target.appId, handle: offset + 2 })) : [];
+    const systemOptions = system ? {
+      systemUI: system.systemId,
+      apps: targets.map((target, index) => {
+        const manifest = readObject(join(target.root, "manifest.json"), `${target.appId} manifest.json`);
+        const packageInfo = readObject(join(target.root, "pocket.json"), `${target.appId} pocket.json`);
+        const capabilities = manifest.capabilities && typeof manifest.capabilities === "object" && !Array.isArray(manifest.capabilities) ? manifest.capabilities as Record<string, unknown> : {};
+        const requires = Array.isArray(capabilities.requires) ? capabilities.requires.filter((value): value is string => typeof value === "string") : [];
+        const optional = Array.isArray(capabilities.optional) ? capabilities.optional.filter((value): value is string => typeof value === "string") : [];
+        const surface = systemSurfaces.find((entry) => entry.appId === target.appId);
+        const packageMetadata = {
+          id: packageInfo.id,
+          name: packageInfo.name,
+          title: packageInfo.title,
+          version: packageInfo.version,
+        };
+        return {
+          appId: target.appId,
+          index,
+          ...(surface ? { surfaceHandle: surface.handle } : {}),
+          requires,
+          optional,
+          tickHz: artifacts[index]!.tickHz,
+          metadata: { package: packageMetadata, qjbc: artifacts[index]!.metadata },
+        };
+      }),
+    } : undefined;
 
     const supportRoot = await ensureRquickjsSupportCache();
     const sysOverlay = join(tempRoot, "rquickjs-sys-0.12.2-wechat");
     patchRquickjsSys(registrySysRoot(), supportRoot, sysOverlay);
     const workspace = join(tempRoot, "pocketjs");
     copyWorkspace(upstream, workspace);
-    patchPinnedWorkspace(workspace, guest.bytecode, guest.pak, guest.tickHz, sysOverlay, bytecodeModule);
+    patchPinnedWorkspace(workspace, artifacts, systemSurfaces, sysOverlay, bytecodeModule);
     const ar = findLlvmAr();
     const cargoEnv = {
       AR: ar,
@@ -621,8 +809,24 @@ export async function buildWechat(options: BuildWechatOptions): Promise<{ outDir
     const wasmPath = join(workspace, "target/wasm32-unknown-unknown/release/pocketjs_wasm.wasm");
     const wasm = readFileSync(wasmPath);
     if (!wasm.subarray(0, 4).equals(Buffer.from([0, 0x61, 0x73, 0x6d]))) throw new Error("build_wechat: generated engine is not a WebAssembly module");
-    const metadata = JSON.parse(readFileSync(guest.metadata, "utf8")) as Record<string, unknown>;
-    writeConsumer(output, projectRoot, guest.tickHz, wasm, metadata);
+    const qjbcMetadata = system
+      ? { entryFormat: "multi-guest", apps: artifacts.map(({ appId, metadata }) => ({ appId, ...metadata })) }
+      : artifacts[0]!.metadata;
+    writeConsumer(output, projectRoot, {
+      appId: targets[0]!.appId,
+      tickHz: artifacts[0]!.tickHz,
+      rasterDensity,
+      wasm,
+      qjbcMetadata,
+      metadata: {
+        package: (() => {
+          const packageInfo = readObject(join(targets[0]!.root, "pocket.json"), `${targets[0]!.appId} pocket.json`);
+          return { id: packageInfo.id, name: packageInfo.name, title: packageInfo.title, version: packageInfo.version };
+        })(),
+        qjbc: artifacts[0]!.metadata,
+      },
+      system: systemOptions,
+    });
     return {
       outDir: output,
       wasmBytes: wasm.byteLength,
@@ -634,17 +838,18 @@ export async function buildWechat(options: BuildWechatOptions): Promise<{ outDir
   }
 }
 
-export function parseBuildWechatArgs(args: string[]): Pick<BuildWechatOptions, "projectRoot" | "outDir" | "entry" | "tickHz"> {
-  const options: { projectRoot?: string; outDir?: string; entry?: string; tickHz?: number } = {};
+export function parseBuildWechatArgs(args: string[]): Pick<BuildWechatOptions, "projectRoot" | "outDir" | "entry" | "tickHz" | "rasterDensity"> {
+  const options: { projectRoot?: string; outDir?: string; entry?: string; tickHz?: number; rasterDensity?: number } = {};
   for (const arg of args) {
     if (arg.startsWith("--project-root=")) options.projectRoot = arg.slice("--project-root=".length);
     else if (arg.startsWith("--outdir=")) options.outDir = arg.slice("--outdir=".length);
     else if (arg.startsWith("--entry=")) options.entry = arg.slice("--entry=".length);
     else if (arg.startsWith("--tick-hz=")) options.tickHz = Number(arg.slice("--tick-hz=".length));
+    else if (arg.startsWith("--density=")) options.rasterDensity = checkedRasterDensity(Number(arg.slice("--density=".length)));
     else throw new Error(`build_wechat: unknown option ${arg}`);
   }
   if (!options.projectRoot || !options.outDir) throw new Error("usage: bun sdk/scripts/build_wechat.ts --project-root=<consumer> --outdir=<new-miniprogram-dir>");
-  return options as Pick<BuildWechatOptions, "projectRoot" | "outDir" | "entry" | "tickHz">;
+  return options as Pick<BuildWechatOptions, "projectRoot" | "outDir" | "entry" | "tickHz" | "rasterDensity">;
 }
 
 if (import.meta.main) {
