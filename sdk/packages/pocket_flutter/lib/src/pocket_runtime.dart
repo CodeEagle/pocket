@@ -3349,7 +3349,17 @@ final class PocketReplayRunner {
         }
         final escaped = value['__pocketEscapedMap'];
         if (escaped is Map) {
-          return Map<String, dynamic>.from(escaped);
+          final restoredEscaped = <String, dynamic>{};
+          for (final entry in escaped.entries) {
+            if (entry.key is! String) {
+              throw const FormatException('message key is not string');
+            }
+            restoredEscaped[entry.key as String] = _restoreRecordedMessage(
+              entry.value,
+              depth + 1,
+            );
+          }
+          return restoredEscaped;
         }
       }
       final result = <String, dynamic>{};

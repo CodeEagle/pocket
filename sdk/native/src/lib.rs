@@ -5441,6 +5441,8 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
     }
 }
 
+const MAX_INBOUND_BINARY_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+
 #[no_mangle]
 pub unsafe extern "C" fn pocket_send_binary(
     handle: *mut HostState,
@@ -5454,7 +5456,7 @@ pub unsafe extern "C" fn pocket_send_binary(
         set_error(host, "null or empty binary message");
         return -1;
     }
-    if message_len > MAX_BRIDGE_MESSAGE_BYTES {
+    if message_len > MAX_INBOUND_BINARY_MESSAGE_BYTES {
         set_error(host, "binary message exceeds maximum bridge limit");
         return -1;
     }

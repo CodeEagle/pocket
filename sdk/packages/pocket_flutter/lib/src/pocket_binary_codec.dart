@@ -22,9 +22,9 @@ const int _tagObject = 0x08;
 
 const int _maxNestingDepth = 16;
 const int _maxDecodeNestingDepth = 128;
-const int _defaultMaxMessageBytes = 64 * 1024;
-const int _maxOutboundEventBytes = 1024 * 1024;
-const int _maxCollectionEntries = 100000;
+const int _defaultMaxMessageBytes = 4 * 1024 * 1024;
+const int _maxOutboundEventBytes = 4 * 1024 * 1024;
+const int _maxCollectionEntries = 1000000;
 
 /// Decoded binary offload record from `pocket_offload_take_binary`.
 final class PocketBinaryOffloadRecord {

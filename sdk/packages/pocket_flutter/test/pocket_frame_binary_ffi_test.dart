@@ -84,15 +84,24 @@ void main() {
       try {
         runtime.eval('''
           const handler = function(packet) {
+            if (packet.name === "host.large") {
+              if (typeof packet.payload.text !== "string" || packet.payload.text.length !== 70000) {
+                throw new Error("expected 70000-char payload");
+              }
+              return;
+            }
             if (!(packet.payload.bytes instanceof Uint8Array)) {
               throw new Error("expected Uint8Array during send/replay");
+            }
+            if (!(packet.payload.__pocketEscapedMap.innerBytes instanceof Uint8Array)) {
+              throw new Error("expected nested Uint8Array inside __pocketEscapedMap");
             }
             pocket._emitValue({
               type: "event",
               name: "guest.large",
               payload: {
                 items: Array(8000).fill(7),
-                sum: packet.payload.bytes[0] + packet.payload.bytes[1],
+                sum: packet.payload.bytes[0] + packet.payload.bytes[1] + packet.payload.__pocketEscapedMap.innerBytes[0],
               },
             });
           };
@@ -102,9 +111,19 @@ void main() {
         ''');
         runtime.send(<String, dynamic>{
           'type': 'event',
+          'name': 'host.large',
+          'payload': <String, dynamic>{
+            'text': 'x' * 70000,
+          },
+        });
+        runtime.send(<String, dynamic>{
+          'type': 'event',
           'name': 'host.bytes',
           'payload': <String, dynamic>{
-            'bytes': Uint8List.fromList(<int>[12, 30]),
+            'bytes': Uint8List.fromList(<int>[12, 20]),
+            '__pocketEscapedMap': <String, dynamic>{
+              'innerBytes': Uint8List.fromList(<int>[10]),
+            },
           },
         });
         final frame = runtime.frameAt(16);

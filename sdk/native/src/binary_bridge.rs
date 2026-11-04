@@ -30,7 +30,7 @@ pub const TAG_ARRAY: u8 = 0x07;
 pub const TAG_OBJECT: u8 = 0x08;
 
 const MAX_DEPTH: usize = 32;
-const MAX_NODES: usize = 16384;
+const MAX_NODES: usize = 1_000_000;
 const MAX_SAFE_JS_INT: f64 = 9_007_199_254_740_991.0;
 
 #[derive(Debug, Default)]
