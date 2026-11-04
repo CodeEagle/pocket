@@ -354,20 +354,23 @@ test("HostBridge uses pocket._emitValue directly and marks __pocketEvent/__pocke
     assert.equal(globalObject.__pocketEvent?.__binaryCapable, true);
     assert.equal(globalObject.__pocketDeliver?.__binaryCapable, true);
 
-    const requestPromise = host.request("binary.echo", { count: 7 });
+    const requestPromise = host.request<{ echoed: number; bytes: Uint8Array }>(
+      "binary.echo",
+      { count: 7, bytes: new Uint8Array([1, 2, 3]) },
+    );
     assert.equal(emittedObjects.length, 1);
     assert.equal(emittedObjects[0]?.name, "host.request");
     const requestPayload = emittedObjects[0]?.payload as Record<string, unknown>;
     assert.equal(requestPayload.capability, "binary.echo");
 
-    assert.equal(host.emit?.("guest.telemetry", { ok: true }), true);
+    assert.equal(host.emit?.("guest.telemetry", { ok: true, bytes: new Uint8Array([4, 5]) }), true);
     assert.equal(emittedObjects.length, 2);
     assert.equal(emittedObjects[1]?.name, "guest.telemetry");
 
     let receivedBytes: Uint8Array | undefined;
     host.onEvent?.((ev) => {
-      if (ev.method === "host.binary") {
-        receivedBytes = (ev.params as unknown as { bytes: Uint8Array }).bytes;
+      if (ev.method === "host.binary" && ev.params.bytes instanceof Uint8Array) {
+        receivedBytes = ev.params.bytes;
       }
     });
 
@@ -380,6 +383,10 @@ test("HostBridge uses pocket._emitValue directly and marks __pocketEvent/__pocke
     assert.equal(legacyStringCalls, 1);
     assert.deepEqual((lastLegacyParsed?.payload as { bytes?: unknown } | undefined)?.bytes, [9, 8, 7]);
 
+    const streams = createPocketStreamAdapter(host, { idPrefix: "bin-stream" });
+    const binStream = streams.open<Uint8Array>("binary.stream", { seed: new Uint8Array([6]) });
+    assert.equal(binStream.send(new Uint8Array([11, 22])), true);
+
     globalObject.__pocketDeliver?.({
       type: "event",
       name: "host.response",
@@ -387,10 +394,13 @@ test("HostBridge uses pocket._emitValue directly and marks __pocketEvent/__pocke
         requestId: requestPayload.requestId,
         capability: "binary.echo",
         ok: true,
-        result: { echoed: 7 },
+        result: { echoed: 7, bytes: new Uint8Array([3, 2, 1]) },
       },
     });
-    assert.deepEqual(await requestPromise, { echoed: 7 });
+    const echoResult = await requestPromise;
+    assert.equal(echoResult.echoed, 7);
+    assert.deepEqual(Array.from(echoResult.bytes), [3, 2, 1]);
+    streams.dispose();
   } finally {
     host.dispose();
     globalObject.pocket = previousPocket;

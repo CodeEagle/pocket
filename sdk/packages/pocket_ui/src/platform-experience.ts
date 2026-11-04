@@ -1,4 +1,4 @@
-import type { HostBridge, JsonObject, JsonValue } from "./host.ts";
+import type { BridgeObject, BridgeValue, HostBridge } from "./host.ts";
 import {
   createPocketStreamAdapter,
   type PocketStream,
@@ -7,32 +7,32 @@ import {
   type PocketStreamError,
 } from "./streams.ts";
 
-export interface PlatformLinkSubscription<T extends JsonValue = JsonValue> {
+export interface PlatformLinkSubscription<T extends BridgeValue = BridgeValue> {
   readonly stream: PocketStream<T>;
   unsubscribe(): void;
   close(): void;
 }
 
 export interface PlatformLinks {
-  initial<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T>;
-  latest<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T>;
-  subscribe<T extends JsonValue = JsonValue>(
+  initial<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T>;
+  latest<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T>;
+  subscribe<T extends BridgeValue = BridgeValue>(
     listener: (value: T) => void,
     options?: PlatformLinkSubscriptionOptions,
   ): PlatformLinkSubscription<T>;
 }
 
 export interface PlatformSystemUi {
-  set<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T>;
+  set<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T>;
 }
 
 export interface PlatformHaptics {
-  perform<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T>;
+  perform<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T>;
 }
 
 export interface PlatformLinkSubscriptionOptions {
   /** Params passed to the explicit `platform.links.events` stream open. */
-  params?: JsonObject;
+  params?: BridgeObject;
   /** Optional per-subscription stream bound/deadline. */
   stream?: PocketStreamOpenOptions;
   /** Reuse a caller-owned adapter instead of creating one lazily. */
@@ -51,19 +51,19 @@ export interface PlatformExperience {
   readonly systemUi: PlatformSystemUi;
   readonly haptics: PlatformHaptics;
   /** Alias for links.initial(). */
-  initial<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T>;
+  initial<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T>;
   /** Alias for links.latest(). */
-  latest<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T>;
+  latest<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T>;
   /** Explicitly subscribe to deep-link events; this never selects an app or route. */
-  subscribeLinks<T extends JsonValue = JsonValue>(
+  subscribeLinks<T extends BridgeValue = BridgeValue>(
     listener: (value: T) => void,
     options?: PlatformLinkSubscriptionOptions,
   ): PlatformLinkSubscription<T>;
   /** Alias for systemUi.set(). */
-  setSystemUi<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T>;
+  setSystemUi<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T>;
   /** Alias for haptics.perform(). */
-  performHaptic<T extends JsonValue = JsonValue>(
-    params?: JsonObject,
+  performHaptic<T extends BridgeValue = BridgeValue>(
+    params?: BridgeObject,
   ): Promise<T>;
   dispose(): void;
 }
@@ -84,7 +84,7 @@ export function isUnsupportedPlatformError(error: unknown): boolean {
   return typeof code === "string" && unsupportedCodes.has(code);
 }
 
-function emptyParams(params: JsonObject | undefined): JsonObject {
+function emptyParams(params: BridgeObject | undefined): BridgeObject {
   return params ?? {};
 }
 
@@ -101,34 +101,34 @@ class PlatformExperienceImpl implements PlatformExperience {
     this.host = host;
     this.suppliedStreams = options.streams ?? options.streamAdapter;
     this.links = {
-      initial: <T extends JsonValue = JsonValue>(params?: JsonObject) =>
+      initial: <T extends BridgeValue = BridgeValue>(params?: BridgeObject) =>
         host.request<T>("platform.links.initial", emptyParams(params)),
-      latest: <T extends JsonValue = JsonValue>(params?: JsonObject) =>
+      latest: <T extends BridgeValue = BridgeValue>(params?: BridgeObject) =>
         host.request<T>("platform.links.latest", emptyParams(params)),
-      subscribe: <T extends JsonValue = JsonValue>(
+      subscribe: <T extends BridgeValue = BridgeValue>(
         listener: (value: T) => void,
         options?: PlatformLinkSubscriptionOptions,
       ) => this.subscribeLinks<T>(listener, options),
     };
     this.systemUi = {
-      set: <T extends JsonValue = JsonValue>(params?: JsonObject) =>
+      set: <T extends BridgeValue = BridgeValue>(params?: BridgeObject) =>
         host.request<T>("platform.systemUi.set", emptyParams(params)),
     };
     this.haptics = {
-      perform: <T extends JsonValue = JsonValue>(params?: JsonObject) =>
+      perform: <T extends BridgeValue = BridgeValue>(params?: BridgeObject) =>
         host.request<T>("platform.haptics.perform", emptyParams(params)),
     };
   }
 
-  initial<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T> {
+  initial<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T> {
     return this.links.initial<T>(params);
   }
 
-  latest<T extends JsonValue = JsonValue>(params?: JsonObject): Promise<T> {
+  latest<T extends BridgeValue = BridgeValue>(params?: BridgeObject): Promise<T> {
     return this.links.latest<T>(params);
   }
 
-  subscribeLinks<T extends JsonValue = JsonValue>(
+  subscribeLinks<T extends BridgeValue = BridgeValue>(
     listener: (value: T) => void,
     options: PlatformLinkSubscriptionOptions = {},
   ): PlatformLinkSubscription<T> {
@@ -177,14 +177,14 @@ class PlatformExperienceImpl implements PlatformExperience {
     return { stream, unsubscribe, close: unsubscribe };
   }
 
-  setSystemUi<T extends JsonValue = JsonValue>(
-    params?: JsonObject,
+  setSystemUi<T extends BridgeValue = BridgeValue>(
+    params?: BridgeObject,
   ): Promise<T> {
     return this.systemUi.set<T>(params);
   }
 
-  performHaptic<T extends JsonValue = JsonValue>(
-    params?: JsonObject,
+  performHaptic<T extends BridgeValue = BridgeValue>(
+    params?: BridgeObject,
   ): Promise<T> {
     return this.haptics.perform<T>(params);
   }

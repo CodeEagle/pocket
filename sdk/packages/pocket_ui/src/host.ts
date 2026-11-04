@@ -15,6 +15,8 @@
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
+export type BridgeValue = JsonPrimitive | Uint8Array | BridgeValue[] | { [key: string]: BridgeValue };
+export type BridgeObject = { [key: string]: BridgeValue };
 
 export interface HostErrorShape {
   code: string;
@@ -25,7 +27,7 @@ export interface HostResponse {
   requestId: string;
   capability: string;
   ok: boolean;
-  result?: JsonValue;
+  result?: BridgeValue;
   error?: HostErrorShape | string;
 }
 
@@ -33,7 +35,7 @@ export interface HostResponse {
 export interface HostEvent {
   readonly id: string;
   readonly method: string;
-  readonly params: JsonObject;
+  readonly params: BridgeObject;
   /** The decoded packet, retained for capability-specific adapters. */
   readonly raw: Record<string, unknown>;
 }
@@ -41,13 +43,13 @@ export interface HostEvent {
 export type HostEventListener = (event: HostEvent) => void;
 
 export interface HostBridge {
-  request<T extends JsonValue = JsonValue>(capability: string, params?: JsonObject): Promise<T>;
+  request<T extends BridgeValue = BridgeValue>(capability: string, params?: BridgeObject): Promise<T>;
   handle(packet: string | Record<string, unknown>): boolean;
   /**
    * Emit a host event on the same Pocket event transport used by requests.
    * Optional keeps existing injected bridges source-compatible.
    */
-  emit?(method: string, params?: JsonObject): boolean;
+  emit?(method: string, params?: BridgeObject): boolean;
   /** Subscribe to host-originated events. Optional for legacy request-only bridges. */
   onEvent?(listener: HostEventListener): () => void;
   /** Subscribe to the deterministic guest clock used for bounded operations. */
@@ -74,10 +76,10 @@ class HostRequestError extends Error {
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return value !== null && typeof value === "object" && !Array.isArray(value) && !ArrayBuffer.isView(value);
 }
 
-function isJsonObject(value: unknown): value is JsonObject {
+function isJsonObject(value: unknown): value is BridgeObject {
   return isObject(value);
 }
 
@@ -116,7 +118,7 @@ function responseFrom(packet: Record<string, unknown>): HostResponse | undefined
     requestId: nested.requestId,
     capability,
     ok,
-    result: nested.result as JsonValue | undefined,
+    result: nested.result as BridgeValue | undefined,
     error,
   };
 }
@@ -128,7 +130,7 @@ function eventFrom(packet: Record<string, unknown>): HostEvent | undefined {
     : (typeof packet.method === "string" ? packet.method : typeof packet.name === "string" ? packet.name : "");
   if (!method || method === "host.response") return undefined;
   const nested = packet.payload ?? packet.params;
-  const params = isObject(nested) ? nested as JsonObject : {};
+  const params = isObject(nested) ? nested as BridgeObject : {};
   return {
     id: typeof packet.id === "string" ? packet.id : "",
     method,
@@ -212,7 +214,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     throw new RangeError("timeoutFrames must be an integer between 1 and 3600");
   }
   const pending = new Map<string, {
-    resolve: (value: JsonValue) => void;
+    resolve: (value: BridgeValue) => void;
     reject: (error: Error) => void;
     remainingFrames: number;
     cancelTimeout?: () => void;
@@ -273,7 +275,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   globalObject.__pocketDeliver = deliver;
   globalObject.__pocketEvent = eventDeliver;
 
-  const emit = (method: string, params: JsonObject = {}): boolean => {
+  const emit = (method: string, params: BridgeObject = {}): boolean => {
     if (disposed) return false;
     if (typeof method !== "string" || method.length === 0) return false;
     if (!isJsonObject(params)) return false;
@@ -285,7 +287,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   };
 
   const bridge: HostBridge = {
-    request<T extends JsonValue = JsonValue>(capability: string, params: JsonObject = {}): Promise<T> {
+    request<T extends BridgeValue = BridgeValue>(capability: string, params: BridgeObject = {}): Promise<T> {
       if (disposed) return Promise.reject(new Error("Host bridge is disposed"));
       if (!capability) return Promise.reject(new TypeError("Host capability must be non-empty"));
       if (!isJsonObject(params)) return Promise.reject(new TypeError("Host capability params must be an object"));
@@ -298,7 +300,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       };
       return new Promise<T>((resolve, reject) => {
         const entry = {
-          resolve: resolve as (value: JsonValue) => void,
+          resolve: resolve as (value: BridgeValue) => void,
           reject,
           remainingFrames: timeoutFrames,
           cancelTimeout: undefined as (() => void) | undefined,

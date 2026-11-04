@@ -1,4 +1,4 @@
-import type { HostBridge, HostEvent, JsonObject, JsonValue } from "./host.ts";
+import type { BridgeObject, BridgeValue, HostBridge, HostEvent } from "./host.ts";
 
 /** Terminal states for a Pocket host stream. */
 export type PocketStreamState =
@@ -6,7 +6,7 @@ export type PocketStreamState =
 
 export interface PocketStreamClose {
   readonly state: PocketStreamState;
-  readonly reason?: JsonValue;
+  readonly reason?: BridgeValue;
   readonly error?: PocketStreamError;
 }
 
@@ -14,13 +14,13 @@ export interface PocketStreamClose {
 export class PocketStreamError extends Error {
   readonly code: string;
   readonly streamId?: string;
-  readonly reason?: JsonValue;
+  readonly reason?: BridgeValue;
 
   constructor(
     code: string,
     message: string,
     streamId?: string,
-    reason?: JsonValue,
+    reason?: BridgeValue,
   ) {
     super(message);
     this.name = "PocketStreamError";
@@ -30,7 +30,7 @@ export class PocketStreamError extends Error {
   }
 }
 
-export type PocketStreamDataListener<T extends JsonValue> = (value: T) => void;
+export type PocketStreamDataListener<T extends BridgeValue> = (value: T) => void;
 export type PocketStreamErrorListener = (error: PocketStreamError) => void;
 export type PocketStreamEndListener = (close: PocketStreamClose) => void;
 
@@ -54,21 +54,22 @@ export interface PocketStreamAdapterOptions {
   idPrefix?: string;
 }
 
-type StreamEventSender = (method: string, params: JsonObject) => boolean;
-type StreamClosedCallback = (stream: PocketStream<JsonValue>) => void;
+type StreamEventSender = (method: string, params: BridgeObject) => boolean;
+type StreamClosedCallback = (stream: PocketStream<BridgeValue>) => void;
 
 function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return value !== null && typeof value === "object" && !Array.isArray(value) && !ArrayBuffer.isView(value);
 }
 
-function isJsonValue(value: unknown): value is JsonValue {
+function isJsonValue(value: unknown): value is BridgeValue {
   const ancestors = new Set<object>();
   let nodes = 0;
   const visit = (item: unknown, depth: number): boolean => {
     if (++nodes > 16384 || depth > 32) return false;
     if (item === null || typeof item === "string" || typeof item === "boolean") return true;
     if (typeof item === "number") return Number.isFinite(item);
-    if (typeof item !== "object" || ancestors.has(item)) return false;
+    if (item instanceof Uint8Array) return true;
+    if (typeof item !== "object" || ArrayBuffer.isView(item) || ancestors.has(item)) return false;
     ancestors.add(item);
     const values = Array.isArray(item) ? item : Object.values(item);
     const valid = values.every((child) => visit(child, depth + 1));
@@ -78,10 +79,10 @@ function isJsonValue(value: unknown): value is JsonValue {
   return visit(value, 0);
 }
 
-function jsonObject(value: unknown, message: string): JsonObject {
+function jsonObject(value: unknown, message: string): BridgeObject {
   if (!isObject(value) || !Object.values(value).every(isJsonValue))
     throw new TypeError(message);
-  return value as JsonObject;
+  return value as BridgeObject;
 }
 
 function boundedInteger(
@@ -100,7 +101,7 @@ function boundedInteger(
 }
 
 function reasonMessage(
-  reason: JsonValue | undefined,
+  reason: BridgeValue | undefined,
   fallback: string,
 ): string {
   if (typeof reason === "string" && reason.length > 0) return reason;
@@ -129,7 +130,7 @@ function remoteError(
       typeof value.message === "string" && value.message.length > 0
         ? value.message
         : "Remote host stream failed";
-    return new PocketStreamError(code, message, streamId, value as JsonObject);
+    return new PocketStreamError(code, message, streamId, value as BridgeObject);
   }
   return new PocketStreamError(
     fallbackCode,
@@ -138,7 +139,7 @@ function remoteError(
   );
 }
 
-interface StreamReadWaiter<T extends JsonValue> {
+interface StreamReadWaiter<T extends BridgeValue> {
   resolve: (value: T | undefined) => void;
   reject: (error: PocketStreamError) => void;
 }
@@ -147,11 +148,11 @@ interface StreamReadWaiter<T extends JsonValue> {
  * One bounded duplex stream.  Data is delivered through callbacks, `read`, or
  * an async iterator; all three consume the same bounded queue.
  */
-export class PocketStream<T extends JsonValue = JsonValue> {
+export class PocketStream<T extends BridgeValue = BridgeValue> {
   readonly id: string;
   readonly streamId: string;
   readonly topic?: string;
-  readonly params: JsonObject;
+  readonly params: BridgeObject;
   readonly closed: Promise<PocketStreamClose>;
 
   private readonly sendEvent: StreamEventSender;
@@ -172,7 +173,7 @@ export class PocketStream<T extends JsonValue = JsonValue> {
   constructor(
     id: string,
     topic: string | undefined,
-    params: JsonObject,
+    params: BridgeObject,
     sendEvent: StreamEventSender,
     onClosed: StreamClosedCallback,
     maxBufferedMessages: number,
@@ -285,7 +286,7 @@ export class PocketStream<T extends JsonValue = JsonValue> {
       throw new TypeError("Stream data must be JSON serializable");
     if (values.length === 0) return true;
     this.touch();
-    const events: JsonValue[] = values.map((data) => ({
+    const events: BridgeValue[] = values.map((data) => ({
       method: "stream.data",
       params: { streamId: this.id, data },
     }));
@@ -304,19 +305,19 @@ export class PocketStream<T extends JsonValue = JsonValue> {
   }
 
   /** End the stream and optionally provide a host-readable reason. */
-  end(reason?: JsonValue): boolean {
+  end(reason?: BridgeValue): boolean {
     return this.finishWith("stream.end", "ended", reason);
   }
 
-  close(reason?: JsonValue): boolean {
+  close(reason?: BridgeValue): boolean {
     return this.end(reason);
   }
 
-  cancel(reason?: JsonValue): boolean {
+  cancel(reason?: BridgeValue): boolean {
     return this.finishWith("stream.cancel", "cancelled", reason);
   }
 
-  dispose(reason: JsonValue = "disposed"): boolean {
+  dispose(reason: BridgeValue = "disposed"): boolean {
     if (this.terminal) return false;
     const accepted = this.sendEvent("stream.cancel", {
       streamId: this.id,
@@ -377,7 +378,7 @@ export class PocketStream<T extends JsonValue = JsonValue> {
   }
 
   /** @internal Called by the adapter for host-originated terminal packets. */
-  receiveEnd(reason?: JsonValue): void {
+  receiveEnd(reason?: BridgeValue): void {
     if (this.terminal) return;
     this.touch();
     const close: PocketStreamClose =
@@ -432,11 +433,11 @@ export class PocketStream<T extends JsonValue = JsonValue> {
   private finishWith(
     method: "stream.end" | "stream.cancel",
     state: "ended" | "cancelled",
-    reason?: JsonValue,
+    reason?: BridgeValue,
   ): boolean {
     if (this.terminal) return false;
     this.touch();
-    const params: JsonObject = { streamId: this.id };
+    const params: BridgeObject = { streamId: this.id };
     if (reason !== undefined) params.reason = reason;
     const accepted = this.sendEvent(method, params);
     if (!accepted) {
@@ -504,7 +505,7 @@ export class PocketStream<T extends JsonValue = JsonValue> {
     this.errorListeners.clear();
     this.endListeners.clear();
     this.resolveClosed(close);
-    this.onClosed(this as unknown as PocketStream<JsonValue>);
+    this.onClosed(this as unknown as PocketStream<BridgeValue>);
   }
 
   private drainDataListener(listener: PocketStreamDataListener<T>): void {
@@ -538,25 +539,25 @@ export type PocketIncomingStreamListener = (stream: PocketStream) => void;
  * `pocket._emit` request transport; it does not create a second bus or poll.
  */
 export interface PocketStreamAdapter {
-  open<T extends JsonValue = JsonValue>(
+  open<T extends BridgeValue = BridgeValue>(
     topic: string,
-    params?: JsonObject,
+    params?: BridgeObject,
     options?: PocketStreamOpenOptions,
   ): PocketStream<T>;
   /** Compatibility spelling used by older JS service wrappers. */
-  openStream<T extends JsonValue = JsonValue>(
+  openStream<T extends BridgeValue = BridgeValue>(
     topic: string,
-    params?: JsonObject,
+    params?: BridgeObject,
     options?: PocketStreamOpenOptions,
   ): PocketStream<T>;
-  stream<T extends JsonValue = JsonValue>(
+  stream<T extends BridgeValue = BridgeValue>(
     topic: string,
-    params?: JsonObject,
+    params?: BridgeObject,
     options?: PocketStreamOpenOptions,
   ): PocketStream<T>;
   onStream(listener: PocketIncomingStreamListener): () => void;
   get(streamId: string): PocketStream | undefined;
-  dispose(reason?: JsonValue): void;
+  dispose(reason?: BridgeValue): void;
 }
 
 const DEFAULT_BUFFER = 64;
@@ -632,9 +633,9 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
       this.removeTick = host.onTick(() => this.advanceFrames());
   }
 
-  open<T extends JsonValue = JsonValue>(
+  open<T extends BridgeValue = BridgeValue>(
     topic: string,
-    params: JsonObject = {},
+    params: BridgeObject = {},
     options: PocketStreamOpenOptions = {},
   ): PocketStream<T> {
     if (this.disposed)
@@ -702,7 +703,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
       this.host.scheduleTimeout,
     );
     this.streams.set(id, stream as unknown as PocketStream);
-    const openParams: JsonObject = { streamId: id, topic };
+    const openParams: BridgeObject = { streamId: id, topic };
     if (Object.keys(normalizedParams).length > 0) {
       openParams.params = normalizedParams;
     }
@@ -721,17 +722,17 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
     return stream;
   }
 
-  stream<T extends JsonValue = JsonValue>(
+  stream<T extends BridgeValue = BridgeValue>(
     topic: string,
-    params: JsonObject = {},
+    params: BridgeObject = {},
     options: PocketStreamOpenOptions = {},
   ): PocketStream<T> {
     return this.open<T>(topic, params, options);
   }
 
-  openStream<T extends JsonValue = JsonValue>(
+  openStream<T extends BridgeValue = BridgeValue>(
     topic: string,
-    params: JsonObject = {},
+    params: BridgeObject = {},
     options: PocketStreamOpenOptions = {},
   ): PocketStream<T> {
     return this.open<T>(topic, params, options);
@@ -747,7 +748,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
     return this.streams.get(streamId);
   }
 
-  dispose(reason: JsonValue = "adapter_disposed"): void {
+  dispose(reason: BridgeValue = "adapter_disposed"): void {
     if (this.disposed) return;
     this.disposed = true;
     this.removeEvent();
@@ -781,7 +782,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
               : "";
         if (!method) continue;
         const nested = item.params ?? item.payload;
-        const params = isObject(nested) ? (nested as JsonObject) : {};
+        const params = isObject(nested) ? (nested as BridgeObject) : {};
         this.handle({ id: event.id, method, params, raw: item });
       }
       return;
@@ -832,7 +833,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
     }
   }
 
-  private openIncoming(streamId: string, params: JsonObject): void {
+  private openIncoming(streamId: string, params: BridgeObject): void {
     if (streamId.startsWith(`${this.idPrefix}-`)) {
       this.sendEvent("stream.cancel", {
         streamId,
@@ -851,7 +852,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
       return;
     }
     const topic = typeof params.topic === "string" ? params.topic : undefined;
-    let streamParams: JsonObject;
+    let streamParams: BridgeObject;
     try {
       streamParams =
         params.params === undefined
@@ -870,7 +871,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
       });
       return;
     }
-    const stream = new PocketStream<JsonValue>(
+    const stream = new PocketStream<BridgeValue>(
       streamId,
       topic,
       streamParams,

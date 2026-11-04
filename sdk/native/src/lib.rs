@@ -1095,7 +1095,7 @@ fn install_bridge(
                     } else {
                         let Ok(binary) = binary_bridge::encode_js_message(
                             raw,
-                            remaining_budget,
+                            MAX_BRIDGE_MESSAGE_BYTES.min(remaining_budget),
                             MAX_BRIDGE_BATCH_EVENTS,
                         ) else {
                             return Ok(false);
@@ -1109,7 +1109,9 @@ fn install_bridge(
                     }
                     let remaining_budget =
                         MAX_BRIDGE_QUEUED_BYTES.saturating_sub(queued_bytes.get());
-                    if queue.len() >= MAX_BRIDGE_QUEUED_EVENTS || cost > remaining_budget {
+                    if queue.len() >= MAX_BRIDGE_QUEUED_EVENTS
+                        || cost > MAX_BRIDGE_MESSAGE_BYTES.min(remaining_budget)
+                    {
                         return Ok(false);
                     }
                     queue.push(OutboundEvent { binary });

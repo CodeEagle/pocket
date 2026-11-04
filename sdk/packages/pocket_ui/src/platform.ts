@@ -1,11 +1,11 @@
 import { after, simulationHz } from "@pocketjs/framework/clock";
-import { createHostBridge, forwardHostPacket, type HostBridge, type HostSend, type JsonObject, type JsonValue } from "./host.ts";
+import { createHostBridge, forwardHostPacket, type BridgeObject, type BridgeValue, type HostBridge, type HostSend } from "./host.ts";
 
 export interface AppResult {
   requestId: string;
   appId: string;
   cancelled: boolean;
-  value: JsonValue;
+  value: BridgeValue;
   reason?: string;
 }
 
@@ -14,14 +14,14 @@ export interface AppMessage {
   sourceAppId: string;
   targetAppId: string;
   topic: string;
-  data: JsonValue;
+  data: BridgeValue;
 }
 
 export interface AppLaunch {
   requestId: string;
   targetAppId: string;
   result: Promise<AppResult>;
-  cancel(): Promise<JsonValue>;
+  cancel(): Promise<BridgeValue>;
 }
 
 /** One platform client per guest. It shares the existing host RPC/event wire;
@@ -35,7 +35,7 @@ export function createPocketPlatformClient(send?: HostSend, options: { bridge?: 
   // A fast callee may close before the open RPC response reaches its caller.
   const earlyResults = new Map<string, AppResult>();
   const messageListeners = new Set<(message: AppMessage) => void>();
-  const lifecycleListeners = new Set<(event: JsonObject) => void>();
+  const lifecycleListeners = new Set<(event: BridgeObject) => void>();
   let disposed = false;
   const target = globalThis as typeof globalThis & {
     __pocketEvent?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
@@ -65,7 +65,7 @@ export function createPocketPlatformClient(send?: HostSend, options: { bridge?: 
         } else if (name === "platform.message") {
           for (const listener of [...messageListeners]) listener(value as AppMessage);
         } else if (name === "platform.lifecycle" || name === "platform.launch") {
-          for (const listener of [...lifecycleListeners]) listener(value as JsonObject);
+          for (const listener of [...lifecycleListeners]) listener(value as BridgeObject);
         }
       }
     }
@@ -74,11 +74,11 @@ export function createPocketPlatformClient(send?: HostSend, options: { bridge?: 
   receive.__binaryCapable = true;
   target.__pocketEvent = receive;
 
-  const request = (name: string, params: JsonObject = {}) => host.request(name, params);
-  const launchApp = async (appId: string, argumentsValue: JsonValue = null): Promise<AppLaunch> => {
+  const request = (name: string, params: BridgeObject = {}) => host.request(name, params);
+  const launchApp = async (appId: string, argumentsValue: BridgeValue = null): Promise<AppLaunch> => {
     if (disposed) throw new Error("Platform client is disposed");
     if (pending.size >= 32) throw new Error("Too many pending app results");
-    const opened = await request("platform.apps.open", { appId, arguments: argumentsValue }) as JsonObject;
+    const opened = await request("platform.apps.open", { appId, arguments: argumentsValue }) as BridgeObject;
     if (disposed) throw new Error("Platform client is disposed");
     if (typeof opened.requestId !== "string" || !opened.requestId) {
       throw new Error("Host returned an invalid launch token");
@@ -100,23 +100,23 @@ export function createPocketPlatformClient(send?: HostSend, options: { bridge?: 
   return {
     listApps: () => request("platform.apps.list"),
     launchApp,
-    openApp: async (appId: string, argumentsValue: JsonValue = null) =>
+    openApp: async (appId: string, argumentsValue: BridgeValue = null) =>
       (await launchApp(appId, argumentsValue)).result,
-    returnResult: (value: JsonValue = null) => request("platform.apps.return", { value }),
+    returnResult: (value: BridgeValue = null) => request("platform.apps.return", { value }),
     prewarm: (appId: string) => request("platform.apps.prewarm", { appId }),
     storage: {
       get: (key: string, namespace?: string) => request("platform.storage.get", { key, ...(namespace ? { namespace } : {}) }),
-      set: (key: string, value: JsonValue, namespace?: string) => request("platform.storage.set", { key, value, ...(namespace ? { namespace } : {}) }),
+      set: (key: string, value: BridgeValue, namespace?: string) => request("platform.storage.set", { key, value, ...(namespace ? { namespace } : {}) }),
       remove: (key: string, namespace?: string) => request("platform.storage.remove", { key, ...(namespace ? { namespace } : {}) }),
       keys: (namespace?: string) => request("platform.storage.keys", namespace ? { namespace } : {}),
     },
-    sendMessage: (appId: string, data: JsonValue, topic = "default") => request("platform.messages.send", { appId, data, topic }),
+    sendMessage: (appId: string, data: BridgeValue, topic = "default") => request("platform.messages.send", { appId, data, topic }),
     receiveMessages: () => request("platform.messages.receive"),
     onMessage(listener: (message: AppMessage) => void) {
       messageListeners.add(listener);
       return () => { messageListeners.delete(listener); };
     },
-    onLifecycle(listener: (event: JsonObject) => void) {
+    onLifecycle(listener: (event: BridgeObject) => void) {
       lifecycleListeners.add(listener);
       return () => { lifecycleListeners.delete(listener); };
     },
