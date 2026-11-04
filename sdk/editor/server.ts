@@ -32,6 +32,7 @@ import {
   type PublicKeyConfig,
 } from "../scripts/package_update.ts";
 import { buildGuest } from "../scripts/build_guest.ts";
+import { createPreviewManager } from "./preview.ts";
 import { createWechatPreviewManager } from "./wechat.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1082,6 +1083,28 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
 
   await mkdir(join(workspace.root, "wechat-preview"), { recursive: true });
   const wechat = createWechatPreviewManager({ projectDirectory: projectDir, workspaceRoot: join(workspace.root, "wechat-preview") });
+  const preview = createPreviewManager({
+    projectDirectory: (id) => projectDir(asProjectId(id)),
+    // Editor preview keeps a fixed 2x native raster for crisp core-generated
+    // rounded/shadow masks on desktop Retina displays. This affects texture
+    // sampling only: logical viewport geometry, Canvas DPR, and external image
+    // resolution remain unchanged; do not recreate the runtime on DPR changes.
+    rasterDensity: 2,
+    artifacts: async (id) => {
+      const state = await getState(asProjectId(id));
+      if (!state.artifacts || state.builtRevision == null) throw new Error("Build this project before opening preview");
+      const folder = `${id}/${state.builtRevision}`;
+      const config = await loadConfig(projectDir(id), id);
+      return {
+        bytecodePath: safeArtifactFile(workspace.builds, `${folder}/app.qjbc`),
+        pakPath: safeArtifactFile(workspace.builds, `${folder}/app.pak`),
+        metadataPath: safeArtifactFile(workspace.builds, `${folder}/app.bytecode.json`),
+        revision: state.builtRevision,
+        generation: state.finishedAt ?? `legacy:${state.builtRevision}`,
+        tickHz: config.tickHz,
+      };
+    },
+  });
   const server = Bun.serve({
     hostname: options.host ?? "127.0.0.1",
     port: options.port ?? Number(process.env.POCKET_EDITOR_PORT ?? 8790),
@@ -1133,11 +1156,17 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         const exists = existsSync(projectDir(id));
         if (!exists) return failure("project not found", 404);
         const state = await getState(id);
-        if (wechat.isBuilding(id) && ["PUT", "POST", "PATCH"].includes(method)) return failure("WeChat build is using this project; stop it before editing/building", 409);
+        if (wechat.isBuilding(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("WeChat build is using this project; stop it before editing/building", 409);
         if (parts[0] === "api" && parts[1] === "projects") {
           if (parts.length === 3 && method === "GET") {
             const config = await loadConfig(projectDir(id), id);
             return json({ ...config, status: publicStatus(id, state) });
+          }
+          if (parts[3] === "preview") {
+            // Existing SSE clients retain their loaded runtime during a build.
+            // New subscriptions/input must not load a partly copied snapshot.
+            if (state.busy && !["status", "snapshot"].includes(parts[4] ?? "")) return failure("Build in progress; retry preview when the build completes", 409);
+            return preview.handle(request, id);
           }
           if (parts[3] === "wechat" && parts.length === 4) {
             if (method === "GET") return json(await wechat.status(id));
@@ -1288,6 +1317,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   });
   const stop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
+    void preview.dispose();
     wechat.dispose();
     return stop(closeActiveConnections);
   }) as typeof server.stop;

@@ -48,6 +48,43 @@ wx.WXWebAssembly = { instantiate: async function(path, imports) {
   writeFileSync(join(runnerRoot, "app.js"), adapter + app);
 }
 
+/** Embed the official phone surface without the standalone runner's stage/toolbar. */
+export function wechatEmbedDocument(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pocket WeChat preview</title><style>
+html,body,#wxa-root { margin:0!important; width:100%; height:100%; overflow:hidden!important; background:transparent!important; }
+.wxa-stage { position:relative!important; width:100%!important; height:100%!important; min-height:0!important; padding:0!important; gap:0!important; display:block!important; }
+.wxa-toolbar { display:none!important; }
+.wxa-device-slot { position:absolute!important; inset:0!important; width:100%!important; height:100%!important; }
+.wxa-device { box-shadow:none!important; }
+</style></head><body><div id="wxa-root"></div><script>
+(() => {
+  let device;
+  function layout() {
+    if (!device) return;
+    const width = device.offsetWidth, height = device.offsetHeight;
+    if (!width || !height) return;
+    const scale = Math.min(innerWidth / width, innerHeight / height);
+    device.style.setProperty('transform', 'scale(' + scale + ')', 'important');
+    device.style.setProperty('left', ((innerWidth - width * scale) / 2) + 'px', 'important');
+    device.style.setProperty('top', ((innerHeight - height * scale) / 2) + 'px', 'important');
+  }
+  const observer = new MutationObserver(() => {
+    const next = document.querySelector('.wxa-device');
+    if (next && next !== device) {
+      device = next;
+      new ResizeObserver(layout).observe(device);
+      // Runner resize/scale controls may write inline transforms; our embedding
+      // owns presentation only, so reapply after its resize handlers finish.
+      addEventListener('resize', () => requestAnimationFrame(layout));
+      layout();
+    }
+  });
+  observer.observe(document.getElementById('wxa-root'), {childList:true, subtree:true});
+})();
+</script><script src="/__wxa__/runtime/host.js"></script></body></html>`;
+}
+
 export async function startWechatPreview(options: { projectRoot?: string; miniprogramRoot?: string; outDir: string; port?: number }) {
   const output = resolve(options.outDir);
   if (existsSync(output) && readdirSync(output).length) throw new Error("Preview output directory must be empty");
@@ -61,7 +98,12 @@ export async function startWechatPreview(options: { projectRoot?: string; minipr
   const runnerRoot = join(output, "runner");
   prepareWechatRunner(artifacts, runnerRoot);
   const server = new DevServer({ projectPath: runnerRoot, host: "127.0.0.1", port: options.port ?? 0,
-    watch: false, forwardConsole: true, baseLibVersion: "3.7.0" });
+    watch: false, forwardConsole: true, baseLibVersion: "3.7.0",
+    middlewares: [{ path: "/pocket-embed", handler(_request, response) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      response.end(wechatEmbedDocument());
+    } }],
+  });
   try { return { server, url: await server.start() }; }
   catch (error) { await server.close().catch(() => {}); throw error; }
 }

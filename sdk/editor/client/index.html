@@ -20,13 +20,8 @@
     </header>
     <div id="notice" class="notice" role="alert" hidden></div>
     <div class="workspace">
-      <section class="panel source-panel">
-        <div class="panel-header"><div><span class="eyebrow">GUEST SOURCE</span><div class="file-heading"><h2 id="active-file">app.tsx</h2><select id="file-picker" aria-label="Guest source file" disabled></select></div></div><span id="source-bytes" class="pill">—</span></div>
-        <textarea id="source" spellcheck="false" aria-label="Guest app.tsx source" placeholder="Create or select a project to edit its guest source."></textarea>
-        <div class="source-foot"><span>Solid TSX · JavaScript owns the UI</span><span id="source-revision">revision —</span></div>
-      </section>
-      <section class="right-column">
-        <section class="panel">
+      <section class="panel preview-panel" aria-label="Canvas and WeChat previews">
+        <div class="panel-header preview-header"><h2>Preview</h2><label><select id="viewport-picker" aria-label="Preview viewport"><option value="mobile">Mobile · 390 × 844</option><option value="tablet">Tablet · 768 × 1023</option><option value="desktop">Desktop · 1023 × 768</option></select></label><button id="refresh-preview" type="button">Refresh preview</button></div>
                 <div class="wechat-validation-controls" aria-label="WeChat validation controls">
                   <span id="wechat-project-label" class="wechat-project-label">Whole app</span>
                   <span id="wechat-state" class="meta-chip" aria-live="polite">Idle</span>
@@ -35,7 +30,29 @@
                   <a id="wechat-open" class="button secondary small-button" href="#" target="_blank" rel="noopener" hidden>Open</a>
                 </div>
             <p id="wechat-validation-hint" class="wechat-validation-hint field-help">WeChat 整个 App 验证；硬件能力仍需真机验证</p>
-        </section>
+            <div id="preview-stage-wrap" class="preview-stage-wrap">
+              <div id="preview-surfaces" class="preview-surfaces">
+                <div id="preview-stage" class="preview-stage viewport-mobile">
+                  <div id="preview-empty" class="preview-empty"><div class="empty-icon">⌁</div><strong>Preview appears here</strong><span>Build, then refresh preview.</span></div>
+                  <iframe id="preview-frame" title="Pocket guest web preview" src="about:blank" hidden></iframe>
+                </div>
+                <section id="wechat-preview-pane" class="wechat-preview-pane" hidden>
+                  <div class="wechat-preview-viewport">
+                    <div id="wechat-preview-empty" class="preview-empty"><div class="empty-icon">⌁</div><strong>WeChat preview</strong><span>Run WeChat to load the whole app.</span></div>
+                    <iframe id="wechat-preview-frame" title="Pocket WeChat preview" src="about:blank" hidden></iframe>
+                  </div>
+                </section>
+              </div>
+              <button id="resize-preview-height" class="preview-height-resizer" type="button" role="separator" aria-orientation="horizontal" aria-label="Resize preview height" aria-valuemin="240" aria-valuemax="1200" aria-valuenow="668" tabindex="0"><span aria-hidden="true"></span></button>
+            </div>
+      </section>
+
+      <section class="panel source-panel">
+        <div class="panel-header"><div><span class="eyebrow">GUEST SOURCE</span><div class="file-heading"><h2 id="active-file">app.tsx</h2><select id="file-picker" aria-label="Guest source file" disabled></select></div></div><span id="source-bytes" class="pill">—</span></div>
+        <textarea id="source" spellcheck="false" aria-label="Guest app.tsx source" placeholder="Create or select a project to edit its guest source."></textarea>
+        <div class="source-foot"><span>Solid TSX · JavaScript owns the UI</span><span id="source-revision">revision —</span></div>
+      </section>
+      <section class="right-column">
         <section class="panel config-panel">
           <div class="panel-header"><div><span class="eyebrow">PROJECT CONFIG</span><h2>Build settings</h2></div><span id="build-state" class="pill">Not built</span></div>
           <div class="form-grid">
