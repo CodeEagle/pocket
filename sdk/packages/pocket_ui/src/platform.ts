@@ -1,5 +1,5 @@
 import { after, simulationHz } from "@pocketjs/framework/clock";
-import { createHostBridge, type HostBridge, type HostSend, type JsonObject, type JsonValue } from "./host.ts";
+import { createHostBridge, forwardHostPacket, type HostBridge, type HostSend, type JsonObject, type JsonValue } from "./host.ts";
 
 export interface AppResult {
   requestId: string;
@@ -69,10 +69,7 @@ export function createPocketPlatformClient(send?: HostSend, options: { bridge?: 
         }
       }
     }
-    if (previous) {
-      if (previous.__binaryCapable === true || typeof packet === "string") previous(packet);
-      else previous(JSON.stringify(packet));
-    }
+    forwardHostPacket(previous, packet);
   };
   receive.__binaryCapable = true;
   target.__pocketEvent = receive;

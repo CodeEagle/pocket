@@ -1,4 +1,5 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
+import { forwardHostPacket } from "./host.ts";
 import {
   EMPTY_DISPLAY_GEOMETRY,
   parseDisplayGeometry,
@@ -54,12 +55,7 @@ function subscribeDisplayBridge(bridge: DisplayGeometryBridge, listener: Display
           // An observer must not prevent the remaining bridge subscribers.
         }
       }
-      if (!previous) return;
-      if (previous.__binaryCapable === true || typeof packet === "string") {
-        previous(packet);
-      } else {
-        previous(JSON.stringify(packet));
-      }
+      forwardHostPacket(previous, packet);
     };
     receive.__binaryCapable = true;
     state = { previous, receive, listeners };

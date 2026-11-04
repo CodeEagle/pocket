@@ -1,4 +1,4 @@
-import type { HostBridge, JsonObject, JsonValue } from "./host.ts";
+import { forwardHostPacket, type HostBridge, type JsonObject, type JsonValue } from "./host.ts";
 
 const MAX_JSON_BYTES = 64 * 1024;
 const MAX_PENDING_CALLS = 32;
@@ -648,13 +648,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         });
       }
       try {
-        if (this.previousEvent) {
-          if (this.previousEvent.__binaryCapable === true || typeof packet === "string") {
-            this.previousEvent(packet);
-          } else {
-            this.previousEvent(JSON.stringify(packet));
-          }
-        }
+        forwardHostPacket(this.previousEvent, packet);
       } catch {
         // Keep the host event lane alive if an earlier subscriber fails.
       }

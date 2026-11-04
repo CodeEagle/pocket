@@ -158,6 +158,28 @@ export type HostPacketHandler = ((packet: string | Record<string, unknown>) => v
   __binaryCapable?: boolean;
 };
 
+export function stringifyHostPacket(packet: Record<string, unknown>): string {
+  return JSON.stringify(packet, (_key, value) => {
+    if (value instanceof Uint8Array) return Array.from(value);
+    if (ArrayBuffer.isView(value)) {
+      return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    }
+    return value;
+  });
+}
+
+export function forwardHostPacket(
+  handler: HostPacketHandler | undefined,
+  packet: string | Record<string, unknown>,
+): void {
+  if (!handler) return;
+  if (handler.__binaryCapable === true || typeof packet === "string") {
+    handler(packet);
+    return;
+  }
+  handler(stringifyHostPacket(packet));
+}
+
 export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOptions = {}): HostBridge {
   const globalObject = globalThis as typeof globalThis & {
     pocket?: {
@@ -178,7 +200,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
         return emitValue(packet) === true;
       }
     }
-    const line = JSON.stringify(packet);
+    const line = stringifyHostPacket(packet);
     return send(line);
   };
   const maxPendingRequests = options.maxPendingRequests ?? 32;
@@ -238,26 +260,14 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     for (const listener of [...tickListeners]) listener();
   };
 
-  const forwardPacket = (
-    handler: HostPacketHandler | undefined,
-    packet: string | Record<string, unknown>,
-  ): void => {
-    if (!handler) return;
-    if (handler.__binaryCapable === true || typeof packet === "string") {
-      handler(packet);
-      return;
-    }
-    handler(JSON.stringify(packet));
-  };
-
   const deliver: HostPacketHandler = (packet: string | Record<string, unknown>): void => {
     handle(packet);
-    forwardPacket(previousDeliver, packet);
+    forwardHostPacket(previousDeliver, packet);
   };
   deliver.__binaryCapable = true;
   const eventDeliver: HostPacketHandler = (packet: string | Record<string, unknown>): void => {
     handle(packet);
-    forwardPacket(previousEvent, packet);
+    forwardHostPacket(previousEvent, packet);
   };
   eventDeliver.__binaryCapable = true;
   globalObject.__pocketDeliver = deliver;

@@ -330,9 +330,11 @@ test("HostBridge uses pocket._emitValue directly and marks __pocketEvent/__pocke
 
   const emittedObjects: Record<string, unknown>[] = [];
   let legacyStringCalls = 0;
+  let lastLegacyParsed: Record<string, unknown> | undefined;
 
   const legacyPrevious = (line: string | Record<string, unknown>) => {
     assert.equal(typeof line, "string");
+    lastLegacyParsed = JSON.parse(line as string) as Record<string, unknown>;
     legacyStringCalls += 1;
   };
   globalObject.__pocketEvent = legacyPrevious;
@@ -376,6 +378,7 @@ test("HostBridge uses pocket._emitValue directly and marks __pocketEvent/__pocke
     });
     assert.deepEqual(Array.from(receivedBytes ?? []), [9, 8, 7]);
     assert.equal(legacyStringCalls, 1);
+    assert.deepEqual((lastLegacyParsed?.payload as { bytes?: unknown } | undefined)?.bytes, [9, 8, 7]);
 
     globalObject.__pocketDeliver?.({
       type: "event",
