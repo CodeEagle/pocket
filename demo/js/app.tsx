@@ -490,6 +490,7 @@ function App() {
     history: [],
     recording: false,
   });
+  const [recordingStatus, setRecordingStatus] = createSignal<Record<string, unknown> | undefined>(undefined);
   // Capability providers such as BLE, biometrics and location can legitimately
   // take several seconds on a real device. Keep the request map bounded, but
   // give those providers a deterministic 30-second guest-clock window.
@@ -651,6 +652,9 @@ function App() {
       } else if (method === "demo.navigate") {
         const route = routeOf(params.route);
         if (route) navigate(route);
+      } else if (method === "diagnostics.recording.started") {
+        setRecordingStatus(params);
+        navigate("about");
       } else if (method === "demo.increment") {
         dispatch({ type: "increment" });
       } else if (method === "demo.decrement") {
@@ -774,9 +778,9 @@ function App() {
             <Show when={state().route === "home"}>
               <HomePage
                 state={state}
+                platform={platform}
+                system={system}
                 dispatch={dispatch}
-                onOpenApp={openApp}
-                onOpenDetails={() => dispatch({ type: "details", open: true })}
                 runtime={state().runtimeInfo}
                 onRefresh={() => requestCapability("runtimeInfo", "runtime.info")}
                 wide={wideLayout}
@@ -784,19 +788,19 @@ function App() {
               />
             </Show>
             <Show when={state().route === "gallery"}>
-              <ScrollablePage><GalleryPage dispatch={dispatch} /></ScrollablePage>
+              <GalleryPage state={state} dispatch={dispatch} contentWidth={contentPaneWidth} />
             </Show>
             <Show when={state().route === "mobile"}>
-              <ScrollablePage><MobileUiPage state={state} dispatch={dispatch} /></ScrollablePage>
+              <ScrollablePage><MobileUiPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
             </Show>
             <Show when={state().route === "transitions"}>
-              <ScrollablePage><TransitionsPage state={state} dispatch={dispatch} /></ScrollablePage>
+              <ScrollablePage><TransitionsPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
             </Show>
             <Show when={state().route === "hardware"}>
               <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} host={host} experience={experience} /></ScrollablePage>
             </Show>
             <Show when={state().route === "about" || state().route === "bytecode" || state().route === "updates" || state().route === "plugins" || state().route === "stress" || state().route === "performance"}>
-              <HostPages host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} />
+              <HostPages host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} recordingStatus={recordingStatus} />
             </Show>
           </View>
           <NavigationBar route={state().route} onNavigate={navigate} wide={wideLayout} geometry={() => displayGeometry()} />
@@ -1034,6 +1038,7 @@ function HostPages(props: {
   requestCapability: (key: CapabilityKey, capability: string, params?: Record<string, JsonValue>) => void;
   runStress: (nodes: number) => void;
   performance: () => PerformanceSnapshot;
+  recordingStatus?: () => Record<string, unknown> | undefined;
 }): JSX.Element {
   const route = () => props.state().route;
   const switchTab = (id: string): void => {
@@ -1045,7 +1050,7 @@ function HostPages(props: {
       <View class="flex-col gap-2">
       <Tabs items={hostTabs} active={route() === "performance" ? "about" : route()} onChange={switchTab} />
       <Show when={route() === "about"}>
-        <RuntimePage host={props.host} state={props.state} requestCapability={props.requestCapability} onNavigate={(route) => props.dispatch({ type: "navigate", route })} />
+        <RuntimePage host={props.host} state={props.state} requestCapability={props.requestCapability} onNavigate={(route) => props.dispatch({ type: "navigate", route })} recordingStatus={props.recordingStatus} />
       </Show>
       <Show when={route() === "bytecode"}>
         <BytecodePage state={props.state} requestCapability={props.requestCapability} />
@@ -1072,6 +1077,7 @@ function RuntimePage(props: {
   state: () => DemoState;
   requestCapability: (key: CapabilityKey, capability: string) => void;
   onNavigate: (route: Route) => void;
+  recordingStatus?: () => Record<string, unknown> | undefined;
 }): JSX.Element {
   return (
     <View class="flex-col gap-3">
@@ -1079,7 +1085,7 @@ function RuntimePage(props: {
       <CapabilityCard title="Runtime info" capability="runtime.info" state={props.state().runtimeInfo} onRefresh={() => props.requestCapability("runtimeInfo", "runtime.info")} />
       <CapabilityCard title="Package metadata" capability="plugins.packageInfo" state={props.state().packageInfo} onRefresh={() => props.requestCapability("packageInfo", "plugins.packageInfo")} />
       <ActionButton label="Frame diagnostics" kind="secondary" onPress={() => props.onNavigate("performance")} />
-      <RecordingPanel host={props.host} />
+      <RecordingPanel host={props.host} status={props.recordingStatus} />
       <StatusBar label="JS ↔ Flutter" detail="No Dart UI state" ok={props.state().runtimeInfo.phase !== "error"} />
     </View>
   );

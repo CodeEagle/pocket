@@ -118,7 +118,7 @@ Demo 的 `Flutter FPS` 角标直接采集 Flutter engine `FrameTiming`，按最�
 
 FPS 历史度量持续请求帧期间的节奏，主动停表的时间不算掉帧。静态页面或每次事件后立即睡眠的离散更新可能显示 `--` 或保留上次读数；它不是全屏刷新率计，也不能用来量化静态页面响应延迟。持续动画/转场用 FPS 和长帧验收，离散输入另以实际事件到画面变化、唤醒和停表测试验收。
 
-确定性帧用于输入/effect 回放、快进测试和首个差异帧定位。可选录制捕获真实宿主事务、IME、双向二进制通道、外部响应及 idle/scalar 时间输入；离线回放在全新 QuickJS 实例中验证每个输出摘要。Showcase 用 `--dart-define=POCKET_RECORD=true` 启用，再在 Host → Runtime 导出或验证；默认关闭，不增加录制轮询。录制范围、SDK API、文件格式和剩余约束见 [录制与回放](sdk/docs/RECORDING_REPLAY.md)，上游契约研究见 [确定性帧](sdk/docs/DETERMINISTIC_FRAMES.md)。
+确定性帧用于输入/effect 回放、快进测试和首个差异帧定位。可选录制捕获真实宿主事务、IME、双向二进制通道、外部响应及 idle/scalar 时间输入；离线回放在全新 QuickJS 实例中验证每个输出摘要。录制在启动时默认处于空闲关闭状态，由客户端在 Host → Runtime 点击 `Start recording` 按需开启，再执行停止验证或导出，不增加后台录制轮询（自动化测试仍可用 `--dart-define=POCKET_RECORD=true` 在首帧前开启）。录制范围、SDK API、文件格式和剩余约束见 [录制与回放](sdk/docs/RECORDING_REPLAY.md)，上游契约研究见 [确定性帧](sdk/docs/DETERMINISTIC_FRAMES.md)。
 
 ## 双向通讯：三条路径各司其职
 

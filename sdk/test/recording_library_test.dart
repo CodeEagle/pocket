@@ -70,8 +70,38 @@ void main() {
     expect(identical(replaced.recordingFactory, replacementFactory), isTrue);
   });
 
+  test('recording is idle by default until explicitly started', () async {
+    final library = PocketRecordingLibrary();
+    expect(library.isRecording, isFalse);
+    expect(library.status()['enabled'], isFalse);
+    expect(library.status()['recording'], isFalse);
+    expect(library.status()['stopped'], isFalse);
+    expect(library.status()['runtimes'], isEmpty);
+
+    final configured = library.attach(PocketAppConfig(appId: 'library.idle'));
+    final idleController = configured.recordingFactory!.call();
+    expect(idleController.enabled, isFalse);
+    expect(library.status()['runtimes'], isEmpty);
+
+    // Stopping while idle leaves the library in its idle state.
+    expect(library.stop(), isEmpty);
+    expect(library.status()['stopped'], isFalse);
+    await expectLater(library.replay(), throwsA(isA<StateError>()));
+    await expectLater(library.export(), throwsA(isA<StateError>()));
+
+    final started = library.start();
+    expect(library.isRecording, isTrue);
+    expect(started['enabled'], isTrue);
+    expect(started['recording'], isTrue);
+    expect(started['stopped'], isFalse);
+
+    final activeController = configured.recordingFactory!.call();
+    expect(activeController.enabled, isTrue);
+    expect(library.status()['runtimes'], hasLength(1));
+  });
+
   test('maxRuntimes overflow is explicit and replay is rejected', () async {
-    final library = PocketRecordingLibrary(maxRuntimes: 1);
+    final library = PocketRecordingLibrary(maxRuntimes: 1)..start();
     final firstConfig = library.attach(PocketAppConfig(appId: 'library.first'));
     final first = firstConfig.recordingFactory!.call();
     first.start(_metadata());
@@ -90,7 +120,7 @@ void main() {
   });
 
   test('an unstarted factory is incomplete after library stop', () async {
-    final library = PocketRecordingLibrary();
+    final library = PocketRecordingLibrary()..start();
     final configured = library.attach(
       PocketAppConfig(appId: 'library.unstarted'),
     );
@@ -121,7 +151,7 @@ void main() {
   test(
     'asset quota makes capture incomplete and rejects replay/export',
     () async {
-      final library = PocketRecordingLibrary();
+      final library = PocketRecordingLibrary()..start();
       final configured = library.attach(
         PocketAppConfig(appId: 'library.asset-quota'),
       );
@@ -294,7 +324,7 @@ PocketRecordingMetadata _metadata() => PocketRecordingMetadata(
 );
 
 PocketRecordingLibrary _startedLibrary(String appId) {
-  final library = PocketRecordingLibrary();
+  final library = PocketRecordingLibrary()..start();
   final configured = library.attach(PocketAppConfig(appId: appId));
   configured.recordingFactory!.call().start(_metadata());
   return library;

@@ -107,7 +107,7 @@ void main() {
       ).readAsBytes();
       const allowedOrigin = 'https://worker-recording.example';
 
-      final library = PocketRecordingLibrary();
+      final library = PocketRecordingLibrary()..start();
       final config = library.attach(
         const PocketAppConfig(
           appId: 'worker.recording.session',

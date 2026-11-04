@@ -11,6 +11,7 @@ import {
   parsePerformanceJank,
   parsePerformanceSnapshot,
   reduceDemoState,
+  formatRecordingStatus,
   type DemoState,
 } from "../state.ts";
 import { createHostBridge } from "@pocket/ui/host";
@@ -770,6 +771,36 @@ test("source checks and boundary integrity", () => {
   assert.ok(guestManifest.capabilities?.optional?.includes("updates.apply"));
   assert.ok(guestManifest.capabilities?.optional?.includes("plugins.packageInfo"));
   assert.ok(guestManifest.capabilities?.optional?.includes("runtime.performance"));
+  assert.ok(guestManifest.capabilities?.optional?.includes("diagnostics.recording.start"));
+  const recordingPanelSource = readFileSync(join(root, "recording-panel.tsx"), "utf8");
+  assert.match(recordingPanelSource, /label="Start recording"/);
+  assert.match(recordingPanelSource, /label="Stop recording"/);
+  assert.doesNotMatch(recordingPanelSource, /POCKET_RECORD=true/);
+  assert.match(appSource, /diagnostics\.recording\.started/);
+  assert.equal(
+    formatRecordingStatus({ enabled: false, recording: false, stopped: false, incomplete: false, runtimes: [] }),
+    "Idle · 0 guests · 0 transactions",
+  );
+  assert.equal(
+    formatRecordingStatus({
+      enabled: true,
+      recording: true,
+      stopped: false,
+      incomplete: false,
+      runtimes: [{ id: "1-pocket.host.demo", entries: 4 }],
+    }),
+    "Recording · 1 guests · 4 transactions",
+  );
+  assert.equal(
+    formatRecordingStatus({
+      enabled: true,
+      recording: false,
+      stopped: true,
+      incomplete: false,
+      runtimes: [{ id: "1-pocket.host.demo", entries: 9 }],
+    }),
+    "Stopped · 1 guests · 9 transactions",
+  );
 });
 
 test("host bridge communication and limits", async () => {

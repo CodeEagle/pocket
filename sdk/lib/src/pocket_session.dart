@@ -20,6 +20,19 @@ final class PocketSession extends ChangeNotifier {
   PocketSession({required this.config})
     : performance = PerformanceHistory(namespace: config.appId) {
     config.validate();
+    _sessionsByController[controller] = this;
+  }
+
+  static final Expando<PocketSession> _sessionsByController =
+      Expando<PocketSession>('PocketSession.controller');
+
+  /// Schedules a recorded runtime generation remount when the client starts
+  /// recording through `diagnostics.recording.start`.
+  static void restartControllerForRecording(
+    PocketViewController controller,
+    Map<String, dynamic> Function() statusProvider,
+  ) {
+    _sessionsByController[controller]?._restartForRecording(statusProvider);
   }
 
   final PocketAppConfig config;
@@ -128,6 +141,19 @@ final class PocketSession extends ChangeNotifier {
   Timer? _startupTimer;
   Future<void>? _shutdown;
   Future<void>? _initializeFuture;
+  Map<String, dynamic> Function()? _pendingRecordingStartedStatus;
+
+  void _restartForRecording(Map<String, dynamic> Function() statusProvider) {
+    if (_disposed) return;
+    _pendingRecordingStartedStatus = statusProvider;
+    _mountTimer?.cancel();
+    // Allow the guest to receive the diagnostics.recording.start response
+    // before replacing its runtime generation with a freshly recorded realm.
+    _mountTimer = Timer(
+      const Duration(milliseconds: 20),
+      () => _mount(active),
+    );
+  }
 
   /// Initializes this session at most once.
   ///
@@ -442,6 +468,11 @@ final class PocketSession extends ChangeNotifier {
   void onReady(PocketViewController _) {
     _firstFrameReady = true;
     _startupTimer?.cancel();
+    final recordingStarted = _pendingRecordingStartedStatus;
+    _pendingRecordingStartedStatus = null;
+    if (recordingStarted != null && !_disposed) {
+      _send('diagnostics.recording.started', recordingStarted());
+    }
     if (!_disposed) notifyListeners();
     if (!_foreground || _disposed) return;
     final mountedGeneration = generation;

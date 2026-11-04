@@ -64,7 +64,7 @@ void main() {
   ) async {
     final host = PocketSystemHostController();
     final recordings = const bool.fromEnvironment('POCKET_PERF_RECORD')
-        ? PocketRecordingLibrary()
+        ? (PocketRecordingLibrary()..start())
         : null;
     final results = <Map<String, Object?>>[];
     final timingCollector = FrameTimingCollector();

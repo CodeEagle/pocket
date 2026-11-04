@@ -51,7 +51,7 @@ Worker QJBC 作为普通 SHA-256 content-addressed asset 保存，配置 entry �
 
 ## SDK 接入
 
-薄宿主单入口：
+薄宿主单入口（默认启动时不开启录制，由客户端按需触发 `diagnostics.recording.start` 或由宿主显式调用 `recordings.start()`）：
 
 ```dart
 final recordings = PocketRecordingLibrary();
@@ -61,6 +61,9 @@ PocketSystemHost(
   applications: trustedApps,
   recordings: recordings,
 );
+
+// 客户端通过 diagnostics.recording.start 开启录制（重新挂载当前 generation 保证从加载前完整捕获），
+// 或在测试中通过 recordings.start() / PocketRecordingLibrary(recordOnStart: true) 启动。
 
 // 在已完成的事务边界冻结当前 recording 前缀。
 recordings.stop();
@@ -73,7 +76,7 @@ final again = await PocketRecordingLibrary.replayArchive(
 
 普通单应用可在挂载前调用 `recordings.attach(config, controls: true)`，再把返回的配置交给 `PocketGuest`。需要自行管理存储的嵌入方可使用 `PocketAppConfig.recordingFactory`，返回新的 `PocketRecordingController`。底层入口是 `FfiPocketRuntime.open(recording: controller)` 和 `replayPocketRecording(recording, assets: ...)`。
 
-录制工厂在每个新 runtime 前调用；父 widget 重建应保留同一配置/工厂。切换录制应重新挂载，不在已有堆中途开始。library 与已有自定义 recordingFactory 不能同时接管同一 runtime。
+录制工厂在每个新 runtime 前调用；父 widget 重建应保留同一配置/工厂。`PocketRecordingLibrary` 默认处于空闲状态（`recordOnStart: false`），为未开启录制的会话创建零开销的 `PocketRecordingController(enabled: false)`。客户端触发 `diagnostics.recording.start` 时，library 清空上一轮缓冲、开启录制，并由 `PocketSession` 重新挂载当前可信 SystemUI generation，从 `loadBytecode` 起完整捕获确定性事务并在 `onReady` 派发 `diagnostics.recording.started`。library 与已有自定义 recordingFactory 不能同时接管同一 runtime。
 
 显式 `recordings.stop()` / controller finish 是 capture stop：如已配置 Worker/offload，先记录 `captureStop` trace cut，再切回 mode 0；原 App 的 Guest、Worker 和 provider 继续运行。纯 UI capture stop 只切换时钟，不增加 entry，因此新纯 UI recording 仍可保持 v1。离线回放遇到 `captureStop` 时先验证同一 trace cut，再结束回放的异步执行域；它不恢复真实网络或 provider。若 runtime 在 capture 仍开启时真实 dispose，则记录 `asyncStop`，由 native 同步停 Worker/关闭 offload，再关闭 Dart provider 并销毁 native realm；回放重做 `asyncStop`，不会创建真实 provider。
 
@@ -83,17 +86,18 @@ final again = await PocketRecordingLibrary.replayArchive(
 
 ```sh
 cd demo
-flutter run --dart-define=POCKET_RECORD=true -d DEVICE_ID
+flutter run -d DEVICE_ID
 ```
 
-业务页面仍由 JS 构建。进入 Host → Runtime 的 Deterministic replay 卡片：
+业务页面仍由 JS 构建。录制不在启动时自动开启，而是由客户端自己在页面内决定何时启动。进入 Host → Runtime 的 Deterministic replay 卡片：
 
-1. 操作页面、输入文字、打开小程序。
-2. `Recording status` 查看是否录制及各 realm 的事务数。
-3. `Stop & verify replay` 冻结窗口，在新 isolate 中重建 guest 验证。
-4. `Export recording` 保存归档，并附带 SystemUI 的上游 input tape。
+1. 点击 `Start recording` 开启新录制窗口（当前可信会话会重新挂载并在就绪后回到 Runtime 页显示录制状态）。
+2. 操作页面、输入文字、打开小程序。
+3. `Recording status` 查看是否录制及各 realm 的事务数。
+4. `Stop recording` 仅停止捕获，或点击 `Stop & verify replay` 冻结窗口并在新 isolate 中重建 guest 验证。
+5. `Export recording` 保存归档，并附带 SystemUI 的上游 input tape。
 
-默认运行不创建 recorder 或诊断 provider，没有录制轮询。capture stop 后原 App 可以继续运行；新录制窗口通过重新启动/挂载产生。导出前先 stop，避免把归档自身的大 payload 再录进 trace。
+默认启动时 recorder 处于 idle 状态（`enabled: false, recording: false`），不采集 trace 或保留 bytecode/PAK 资产，也没有录制轮询；自动化测试仍可通过 `PocketRecordingLibrary(recordOnStart: true)` 或 `--dart-define=POCKET_RECORD=true` 在首帧前开启。capture stop 后原 App 可以继续运行；再次点击 `Start recording` 会开启新的录制窗口。导出前先 stop，避免把归档自身的大 payload 再录进 trace。
 
 ## 文件与配额
 

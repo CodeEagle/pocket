@@ -772,3 +772,18 @@ export function reduceDemoState(state: DemoState, event: DemoEvent): DemoState {
   }
 }
 
+
+export function formatRecordingStatus(result: Record<string, unknown>): string {
+  const runtimes = Array.isArray(result.runtimes) ? result.runtimes : [];
+  const entries = runtimes.reduce(
+    (sum, runtime) =>
+      sum +
+      (runtime && typeof runtime === "object" && !Array.isArray(runtime) && typeof runtime.entries === "number"
+        ? runtime.entries
+        : 0),
+    0,
+  );
+  const active = result.recording === true || (result.enabled === true && !result.stopped);
+  const stateLabel = result.stopped ? "Stopped" : active ? "Recording" : "Idle";
+  return `${stateLabel} · ${runtimes.length} guests · ${entries} transactions${result.incomplete ? " · incomplete" : ""}`;
+}

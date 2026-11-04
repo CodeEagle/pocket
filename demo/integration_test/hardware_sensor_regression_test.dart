@@ -565,7 +565,7 @@ void main() {
     tester,
   ) async {
     final host = PocketSystemHostController();
-    final recordings = PocketRecordingLibrary();
+    final recordings = PocketRecordingLibrary()..start();
     final report = <String, Object?>{
       'flow':
           'Home -> Hardware -> Connectivity -> Read sensors x2 -> Home -> +1',

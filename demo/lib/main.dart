@@ -9,9 +9,9 @@ void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(
     PocketHostApp(
-      recordings: const bool.fromEnvironment('POCKET_RECORD')
-          ? PocketRecordingLibrary()
-          : null,
+      recordings: PocketRecordingLibrary(
+        recordOnStart: const bool.fromEnvironment('POCKET_RECORD'),
+      ),
     ),
   );
 }

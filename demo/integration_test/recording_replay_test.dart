@@ -91,7 +91,7 @@ void main() {
   testWidgets(
     'real QJBC input, composing and nested apps replay after disposal',
     (tester) async {
-      final library = PocketRecordingLibrary();
+      final library = PocketRecordingLibrary()..start();
       tester.testTextInput.register();
       Directory? exported;
       var preserveExported = false;
@@ -247,7 +247,7 @@ void main() {
     },
   );
 
-  testWidgets('JS debug controls stop, verify and export their real guest', (
+  testWidgets('JS debug controls start, stop, verify and export their real guest', (
     tester,
   ) async {
     final library = PocketRecordingLibrary();
@@ -258,6 +258,8 @@ void main() {
       await guest.tapGuest(tester, 'Open Host details');
       await guest.waitFor(tester, 'Runtime');
       await guest.tapGuest(tester, 'Recording status');
+      await guest.waitForContaining(tester, 'Idle · 0 guests');
+      await guest.tapGuest(tester, 'Start recording');
       await guest.waitForContaining(tester, 'Recording · 1 guests');
       await guest.tapGuest(tester, 'Stop & verify replay');
       await guest.waitForContaining(tester, 'Replay matched · 1 native guests');

@@ -633,6 +633,47 @@ assert.ok(
   "unmounting the input page did not emit textInput.close",
 );
 
+// Client-controlled recording: starting recording is triggered from the JS
+// guest rather than automatically at boot, and the remounted generation
+// restores the Runtime view with the active recording status.
+const recordingBootFrames = framesOf(runProbe([
+  ...bootstrap(360, 1100),
+  event("demo.navigate", { route: "about" }),
+  { op: "frame", deltaMs: 16 },
+  { op: "quit" },
+]));
+const runtimeFrame = recordingBootFrames.at(-1)!;
+const startRecordingPoint = labelCenter(runtimeFrame, "Start recording");
+const recordingStartFrames = framesOf(runProbe([
+  ...bootstrap(360, 1100),
+  event("demo.navigate", { route: "about" }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "down", id: 0, ...startRecordingPoint }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "up", id: 0, ...startRecordingPoint }),
+  { op: "frame", deltaMs: 16 },
+  event("diagnostics.recording.started", {
+    enabled: true,
+    recording: true,
+    stopped: false,
+    incomplete: false,
+    runtimes: [{ id: "1-pocket.host.demo", appId: "pocket.host.demo", entries: 3 }],
+  }),
+  { op: "frame", deltaMs: 16 },
+  { op: "quit" },
+]));
+assert.ok(
+  recordingStartFrames.some((frame) =>
+    frameEvents(frame, "host.request").some((item) => item.payload?.capability === "diagnostics.recording.start"),
+  ),
+  "tapping Start recording must emit diagnostics.recording.start",
+);
+assert.match(
+  textOf(recordingStartFrames.at(-1)!),
+  /Recording · 1 guests · 3 transactions/,
+  "diagnostics.recording.started must render active recording status on Runtime page",
+);
+
 const initialEvents = frameEvents(resultFrames[0], "host.request");
 const initialSystemUiRequest = initialEvents.find(
   (item) => item.payload?.capability === "platform.systemUi.set",

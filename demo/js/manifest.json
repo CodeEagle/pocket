@@ -9,6 +9,7 @@
     "optional": [
       "runtime.info",
       "runtime.performance",
+      "diagnostics.recording.start",
       "diagnostics.recording.status",
       "diagnostics.recording.stop",
       "diagnostics.recording.export",

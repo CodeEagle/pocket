@@ -108,7 +108,7 @@ void main() {
         '${assets.path}/app.worker.qjbc',
       ).readAsBytes();
 
-      final recordings = PocketRecordingLibrary(maxRuntimes: 1);
+      final recordings = PocketRecordingLibrary(maxRuntimes: 1)..start();
       final config = recordings.attach(
         PocketAppConfig(
           appId: 'worker.recording.fixture',

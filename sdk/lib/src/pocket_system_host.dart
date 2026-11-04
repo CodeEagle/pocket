@@ -172,6 +172,7 @@ final class PocketSystemInstanceSnapshot {
 final class _PocketSystemHostState extends State<PocketSystemHost>
     with WidgetsBindingObserver {
   late PocketSystemHostController _controller;
+  late final PocketRecordingLibrary? _recordings;
   late final _RuntimeInstance _systemUIInstance;
   final LinkedHashMap<String, _RuntimeInstance> _applications =
       LinkedHashMap<String, _RuntimeInstance>();
@@ -212,9 +213,14 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     _controller = widget.controller ?? PocketSystemHostController();
     _controller._attach(this);
 
+    _recordings =
+        widget.recordings ??
+        (widget.systemUI.recordingFactory == null
+            ? PocketRecordingLibrary()
+            : null);
+
     final rootConfig =
-        widget.recordings?.attach(widget.systemUI, controls: true) ??
-        widget.systemUI;
+        _recordings?.attach(widget.systemUI, controls: true) ?? widget.systemUI;
     final systemConfig = _ensureSystemCaps(rootConfig)
         .withPlugins(<PocketPluginFactory>[
           ...rootConfig.pluginFactories,
@@ -676,8 +682,11 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       isSystemUI: false,
       ownerGeneration: ownerGeneration,
     );
-    final capturedConfig =
-        widget.recordings?.attach(admittedConfig) ?? admittedConfig;
+    final capturedConfig = widget.recordings != null
+        ? widget.recordings!.attach(admittedConfig)
+        : _recordings != null && admittedConfig.recordingFactory == null
+        ? _recordings.attach(admittedConfig)
+        : admittedConfig;
     final childConfig = capturedConfig.withPlugins(<PocketPluginFactory>[
       ...capturedConfig.pluginFactories,
       (_) => _PlatformProxyPlugin(this, instance, ownerGeneration),

@@ -8,11 +8,13 @@ import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_services/pocket_services.dart';
 
 import 'pocket_config.dart';
+import 'pocket_session.dart';
 
 /// Explicit debug capture of every native generation, including hidden apps.
 /// Business scheduling stays in SystemUI; this only groups diagnostic files.
 final class PocketRecordingLibrary {
-  PocketRecordingLibrary({this.maxRuntimes = 8}) {
+  PocketRecordingLibrary({this.maxRuntimes = 8, bool recordOnStart = false})
+    : _recording = recordOnStart {
     if (maxRuntimes < 1 || maxRuntimes > 32) {
       throw RangeError.range(maxRuntimes, 1, 32, 'maxRuntimes');
     }
@@ -22,8 +24,12 @@ final class PocketRecordingLibrary {
   final Map<String, PocketRecordingController> _captures = {};
   final Map<String, String> _appIds = {};
   final Map<(PocketAppConfig, bool), PocketAppConfig> _configured = {};
+  bool _recording;
   bool _stopped = false;
   String? _incompleteReason;
+
+  /// Whether this library is currently capturing native guest transactions.
+  bool get isRecording => _recording && !_stopped;
 
   /// Apply before mounting an app. Controls are granted only to a trusted
   /// debug UI; ordinary child apps can be captured without export authority.
@@ -37,7 +43,7 @@ final class PocketRecordingLibrary {
     final configured = config.copyWith(
       pluginFactories: [
         ...config.pluginFactories,
-        if (controls) (_) => _RecordingPlugin(this),
+        if (controls) (controller) => _RecordingPlugin(this, controller),
       ],
       recordingFactory: () => _create(config.appId),
     );
@@ -46,7 +52,7 @@ final class PocketRecordingLibrary {
   }
 
   PocketRecordingController _create(String appId) {
-    if (_stopped) return PocketRecordingController(enabled: false);
+    if (!isRecording) return PocketRecordingController(enabled: false);
     if (_captures.length >= maxRuntimes) {
       _incompleteReason = 'maxRuntimes exceeded';
       return PocketRecordingController(enabled: false);
@@ -58,8 +64,25 @@ final class PocketRecordingLibrary {
     return capture;
   }
 
+  /// Begin a fresh recording session. Any previous capture state is cleared so
+  /// the next mounted runtime generation records from its initial bytecode load.
+  Map<String, dynamic> start() {
+    for (final capture in _captures.values) {
+      if (capture.isStarted && !capture.isFinished) {
+        capture.finish();
+      }
+    }
+    _captures.clear();
+    _appIds.clear();
+    _incompleteReason = null;
+    _recording = true;
+    _stopped = false;
+    return status();
+  }
+
   Map<String, dynamic> status() => {
-    'enabled': true,
+    'enabled': _recording,
+    'recording': isRecording,
     'stopped': _stopped,
     'incomplete':
         _incompleteReason != null ||
@@ -84,6 +107,9 @@ final class PocketRecordingLibrary {
   /// running. Disposing a runtime during capture records its separate native
   /// async-stop transaction.
   Map<String, PocketRecording> stop() {
+    if (!_recording) {
+      return const <String, PocketRecording>{};
+    }
     _stopped = true;
     if (_captures.values.any((capture) => !capture.isStarted)) {
       _incompleteReason ??= 'A guest recorder did not finish starting';
@@ -309,8 +335,9 @@ Future<Map<String, dynamic>> _replayCapturedGuests(
 }
 
 final class _RecordingPlugin extends PocketPlugin {
-  _RecordingPlugin(this.library);
+  _RecordingPlugin(this.library, this.controller);
   final PocketRecordingLibrary library;
+  final PocketViewController controller;
 
   @override
   bool get backgroundSafe => true;
@@ -320,7 +347,7 @@ final class _RecordingPlugin extends PocketPlugin {
     id: 'pocket.debug.recording',
     version: '1.0.0',
     capabilities: {
-      for (final name in ['status', 'stop', 'export', 'replay'])
+      for (final name in ['start', 'status', 'stop', 'export', 'replay'])
         'diagnostics.recording.$name': PocketPluginCapability(
           name: 'diagnostics.recording.$name',
           kind: PocketCapabilityKind.request,
@@ -330,6 +357,11 @@ final class _RecordingPlugin extends PocketPlugin {
 
   @override
   void register(PocketPluginContext context) {
+    context.registerRequest('diagnostics.recording.start', (_) {
+      final status = library.start();
+      PocketSession.restartControllerForRecording(controller, library.status);
+      return status;
+    });
     context.registerRequest(
       'diagnostics.recording.status',
       (_) => library.status(),

@@ -929,7 +929,6 @@ export function ScrollablePage(props: {
   };
   createDisplayGeometry({ onChange: syncViewportResize });
 
-  let endedOnThisTurn = false;
   createGesture({
     axis: "y",
     // Keep the node hit fact when a host provides it, but retain the official
@@ -945,40 +944,28 @@ export function ScrollablePage(props: {
       },
     },
     panSlop: 1,
-    onDown: () => {
-      endedOnThisTurn = false;
-      scroller.stop();
-    },
+    onDown: () => scroller.stop(),
     onPanStart: () => scroller.beginDrag(),
     onPanMove: (contact) => scroller.drag(-contact.fdy),
-    onPanEnd: (contact) => {
-      endedOnThisTurn = true;
-      scroller.endDrag(-contact.vy);
-    },
+    onPanEnd: (contact) => scroller.endDrag(-contact.vy),
     onUp: () => {
       if (scroller.state() === "idle") {
         const max = Math.max(0, contentHeight() - viewportHeight());
         const current = scroller.offset();
         if (current < 0 || current > max) {
-          endedOnThisTurn = true;
           scroller.beginDrag();
           scroller.endDrag(0);
         }
       }
     },
     onCancel: () => {
-      endedOnThisTurn = true;
       if (scroller.state() === "idle") scroller.beginDrag();
       scroller.endDrag(0);
     },
   });
   bindDpadScroll(scroller);
   onFrame(() => {
-    if (endedOnThisTurn) {
-      endedOnThisTurn = false;
-    } else {
-      scroller.step();
-    }
+    scroller.step();
     const currentOffset = scroller.offset();
     const scrolled = currentOffset !== previousOffset;
     previousOffset = currentOffset;
