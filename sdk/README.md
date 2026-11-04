@@ -15,6 +15,7 @@ bun pocket.ts build /path/to/my-app --sdk-root "$PWD" --platform=ios-sim
 硬件是可选 `--hardware`；系统栏/触觉是可选 `--platform-experience`。
 Deep Link 默认关闭，只有显式 `init ... --deep-link-scheme=pocketapp` 才加入包依赖与原生 scheme。
 已注册插件的 TS 客户端可用 `bun pocket.ts types plugins.json --out=plugin-types.ts` 生成。
+HTTP Dio 是独立可选包 `pocket_dio`，可通过 `init ... --dio` 加入；需配置可信 origin 白名单。完整清单与接入见 [`docs/OPTIONAL_PLUGINS.md`](docs/OPTIONAL_PLUGINS.md)。
 
 生成的 Flutter 工程使用 `PocketApp`；已有 Flutter 工程可嵌入 `PocketGuest`。JS 页面从 `@pocket/ui` 导入。运行期加载真实 QuickJS 字节码和 PAK，签名更新在激活前校验，原生插件随宿主编译，不由 JS 下载。
 
