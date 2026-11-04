@@ -13,6 +13,7 @@ bun pocket.ts build /path/to/my-app --sdk-root "$PWD" --platform=ios-sim
 ```
 
 硬件是可选 `--hardware`；系统栏/触觉是可选 `--platform-experience`。
+硬件还可按相机、蓝牙、传感器、定位、生物识别和天气独立选择；系统权限复用 Flutter `permission_handler`，见 [`docs/HARDWARE_MODULES.md`](docs/HARDWARE_MODULES.md)。
 Deep Link 默认关闭，只有显式 `init ... --deep-link-scheme=pocketapp` 才加入包依赖与原生 scheme。
 已注册插件的 TS 客户端可用 `bun pocket.ts types plugins.json --out=plugin-types.ts` 生成。
 HTTP Dio 是独立可选包 `pocket_dio`，可通过 `init ... --dio` 加入；需配置可信 origin 白名单。完整清单与接入见 [`docs/OPTIONAL_PLUGINS.md`](docs/OPTIONAL_PLUGINS.md)。

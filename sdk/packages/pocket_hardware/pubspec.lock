@@ -65,6 +65,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.2"
+  device_info_plus:
+    dependency: transitive
+    description:
+      name: device_info_plus
+      sha256: "98f28b42168cc509abc92f88518882fd58061ea372d7999aecc424345c7bff6a"
+      url: "https://pub.dev"
+    source: hosted
+    version: "11.5.0"
+  device_info_plus_platform_interface:
+    dependency: transitive
+    description:
+      name: device_info_plus_platform_interface
+      sha256: e1ea89119e34903dca74b883d0dd78eb762814f97fb6c76f35e9ff74d261a18f
+      url: "https://pub.dev"
+    source: hosted
+    version: "7.0.3"
   fake_async:
     dependency: transitive
     description:
@@ -81,6 +97,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.2.0"
+  file:
+    dependency: transitive
+    description:
+      name: file
+      sha256: a3b4f84adafef897088c160faf7dfffb7696046cb13ae90b508c2cbc95d3b8d4
+      url: "https://pub.dev"
+    source: hosted
+    version: "7.0.1"
   flutter:
     dependency: "direct main"
     description: flutter
@@ -192,6 +216,54 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.9.1"
+  permission_handler:
+    dependency: transitive
+    description:
+      name: permission_handler
+      sha256: bc917da36261b00137bbc8896bf1482169cd76f866282368948f032c8c1caae1
+      url: "https://pub.dev"
+    source: hosted
+    version: "12.0.1"
+  permission_handler_android:
+    dependency: transitive
+    description:
+      name: permission_handler_android
+      sha256: "1e3bc410ca1bf84662104b100eb126e066cb55791b7451307f9708d4007350e6"
+      url: "https://pub.dev"
+    source: hosted
+    version: "13.0.1"
+  permission_handler_apple:
+    dependency: transitive
+    description:
+      name: permission_handler_apple
+      sha256: "82d31c9b321c45785ccd73bce9c63af17037116193b4000b998a4363059adb6e"
+      url: "https://pub.dev"
+    source: hosted
+    version: "9.6.5"
+  permission_handler_html:
+    dependency: transitive
+    description:
+      name: permission_handler_html
+      sha256: "6ea98b3f17f60d3b527f2647ed2ab4dc0f6bfe25b22cb1c363f5d8f62252f6ac"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.4+1"
+  permission_handler_platform_interface:
+    dependency: transitive
+    description:
+      name: permission_handler_platform_interface
+      sha256: ed86a61c190258fdd65de395ea0632822e3415c1faec38eae0c31b479c28a531
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.4.1"
+  permission_handler_windows:
+    dependency: transitive
+    description:
+      name: permission_handler_windows
+      sha256: f411872409a099a7f4826f80cb98cb903317be890cbf8a2e6d062024cd88e4fb
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.2.3"
   plugin_platform_interface:
     dependency: transitive
     description:
@@ -200,6 +272,27 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.8"
+  pocket_biometrics:
+    dependency: "direct main"
+    description:
+      path: "../pocket_biometrics"
+      relative: true
+    source: path
+    version: "0.1.0"
+  pocket_bluetooth:
+    dependency: "direct main"
+    description:
+      path: "../pocket_bluetooth"
+      relative: true
+    source: path
+    version: "0.1.0"
+  pocket_camera:
+    dependency: "direct main"
+    description:
+      path: "../pocket_camera"
+      relative: true
+    source: path
+    version: "0.1.0"
   pocket_flutter:
     dependency: transitive
     description:
@@ -207,10 +300,45 @@ packages:
       relative: true
     source: path
     version: "0.1.0"
+  pocket_hardware_core:
+    dependency: "direct main"
+    description:
+      path: "../pocket_hardware_core"
+      relative: true
+    source: path
+    version: "0.1.0"
+  pocket_location:
+    dependency: "direct main"
+    description:
+      path: "../pocket_location"
+      relative: true
+    source: path
+    version: "0.1.0"
+  pocket_permissions:
+    dependency: "direct main"
+    description:
+      path: "../pocket_permissions"
+      relative: true
+    source: path
+    version: "0.1.0"
+  pocket_sensors:
+    dependency: "direct main"
+    description:
+      path: "../pocket_sensors"
+      relative: true
+    source: path
+    version: "0.1.0"
   pocket_services:
     dependency: "direct main"
     description:
       path: "../pocket_services"
+      relative: true
+    source: path
+    version: "0.1.0"
+  pocket_weather:
+    dependency: "direct main"
+    description:
+      path: "../pocket_weather"
       relative: true
     source: path
     version: "0.1.0"
@@ -339,6 +467,30 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.1.1"
+  win32:
+    dependency: transitive
+    description:
+      name: win32
+      sha256: d7cb55e04cd34096cd3a79b3330245f54cb96a370a1c27adb3c84b917de8b08e
+      url: "https://pub.dev"
+    source: hosted
+    version: "5.15.0"
+  win32_registry:
+    dependency: transitive
+    description:
+      name: win32_registry
+      sha256: "6f1b564492d0147b330dd794fee8f512cec4977957f310f9951b5f9d83618dae"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.0"
+  yaml:
+    dependency: transitive
+    description:
+      name: yaml
+      sha256: f67cdd8e07d3c6329146aaef1ba043542b3134c12489f553ca9a7435d1068aea
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.4"
 sdks:
   dart: ">=3.9.2 <4.0.0"
   flutter: ">=3.35.0"

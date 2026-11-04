@@ -149,6 +149,206 @@ const hardwarePermissions = [
   "hardware.network",
 ];
 
+type HardwareModule = "camera" | "bluetooth" | "sensors" | "location" | "biometrics" | "weather";
+
+type HardwareModuleDefinition = {
+  packageName: string;
+  importPath: string;
+  factoryName: string;
+  className: string;
+  capabilities: readonly string[];
+  permissions: readonly string[];
+  runtimePermissions: readonly string[];
+  androidPermissions: readonly string[];
+  iosUsageKeys: readonly string[];
+  iosMacros: readonly string[];
+};
+
+const runtimePermissionKeys = new Set([
+  "hardware.camera",
+  "hardware.photos",
+  "hardware.bluetooth",
+  "hardware.sensors",
+  "hardware.location",
+  "hardware.microphone",
+]);
+
+const hardwareModuleDefinitions: Record<HardwareModule, HardwareModuleDefinition> = {
+  camera: {
+    packageName: "pocket_camera",
+    importPath: "package:pocket_camera/pocket_camera.dart",
+    factoryName: "createCameraPlugin",
+    className: "PocketCameraPlugin",
+    capabilities: [
+      "hardware.camera.preview.start", "hardware.camera.preview.stop",
+      "hardware.camera.lens.switch", "hardware.camera.flash.toggle",
+      "hardware.camera.capture", "hardware.photos.list", "hardware.photos.delete",
+    ],
+    permissions: ["hardware.camera", "hardware.photos"],
+    runtimePermissions: ["hardware.camera", "hardware.photos"],
+    androidPermissions: ['<uses-permission android:name="android.permission.CAMERA" />'],
+    iosUsageKeys: ["NSCameraUsageDescription", "NSPhotoLibraryAddUsageDescription"],
+    iosMacros: ["PERMISSION_CAMERA", "PERMISSION_PHOTOS_ADD_ONLY"],
+  },
+  bluetooth: {
+    packageName: "pocket_bluetooth",
+    importPath: "package:pocket_bluetooth/pocket_bluetooth.dart",
+    factoryName: "createBluetoothPlugin",
+    className: "PocketBluetoothPlugin",
+    capabilities: [
+      "hardware.bluetooth.scan", "hardware.bluetooth.connect",
+      "hardware.bluetooth.read", "hardware.bluetooth.write", "hardware.bluetooth.notifications",
+    ],
+    permissions: ["hardware.bluetooth"],
+    runtimePermissions: ["hardware.bluetooth"],
+    androidPermissions: [
+      '<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />',
+      '<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />',
+      '<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />',
+      '<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />',
+      '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+      '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+    ],
+    iosUsageKeys: ["NSBluetoothAlwaysUsageDescription", "NSBluetoothPeripheralUsageDescription"],
+    iosMacros: ["PERMISSION_BLUETOOTH"],
+  },
+  sensors: {
+    packageName: "pocket_sensors",
+    importPath: "package:pocket_sensors/pocket_sensors.dart",
+    factoryName: "createSensorsPlugin",
+    className: "PocketSensorsPlugin",
+    capabilities: ["hardware.sensors.read", "hardware.sensors.watch"],
+    permissions: ["hardware.sensors"],
+    runtimePermissions: ["hardware.sensors"],
+    androidPermissions: [],
+    iosUsageKeys: ["NSMotionUsageDescription"],
+    iosMacros: ["PERMISSION_SENSORS"],
+  },
+  location: {
+    packageName: "pocket_location",
+    importPath: "package:pocket_location/pocket_location.dart",
+    factoryName: "createLocationPlugin",
+    className: "PocketLocationPlugin",
+    capabilities: ["hardware.location.current"],
+    permissions: ["hardware.location"],
+    runtimePermissions: ["hardware.location"],
+    androidPermissions: [
+      '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+      '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+    ],
+    iosUsageKeys: ["NSLocationWhenInUseUsageDescription"],
+    iosMacros: ["PERMISSION_LOCATION"],
+  },
+  biometrics: {
+    packageName: "pocket_biometrics",
+    importPath: "package:pocket_biometrics/pocket_biometrics.dart",
+    factoryName: "createBiometricsPlugin",
+    className: "PocketBiometricsPlugin",
+    capabilities: ["hardware.biometrics.authenticate"],
+    permissions: ["hardware.biometrics"],
+    runtimePermissions: [],
+    androidPermissions: [
+      '<uses-permission android:name="android.permission.USE_BIOMETRIC" />',
+      '<uses-permission android:name="android.permission.USE_FINGERPRINT" android:maxSdkVersion="27" />',
+    ],
+    iosUsageKeys: ["NSFaceIDUsageDescription"],
+    iosMacros: [],
+  },
+  weather: {
+    packageName: "pocket_weather",
+    importPath: "package:pocket_weather/pocket_weather.dart",
+    factoryName: "createWeatherPlugin",
+    className: "PocketWeatherPlugin",
+    capabilities: ["hardware.weather.current"],
+    permissions: ["hardware.network"],
+    runtimePermissions: [],
+    androidPermissions: ['<uses-permission android:name="android.permission.INTERNET" />'],
+    iosUsageKeys: [],
+    iosMacros: [],
+  },
+};
+
+const hardwareModuleNames = Object.keys(hardwareModuleDefinitions) as HardwareModule[];
+
+type HardwareSelection = {
+  hardware: boolean;
+  modules: HardwareModule[];
+  capabilities: string[];
+  permissions: string[];
+  runtimePermissions: string[];
+  explicitPermissions: string[];
+  permissionsExplicit: boolean;
+};
+
+function parseHardwareModules(raw: unknown, label: string): HardwareModule[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string" || !hardwareModuleNames.includes(item as HardwareModule))) {
+    fail(`${label} must be an array of supported hardware modules`);
+  }
+  return [...new Set(raw as HardwareModule[])];
+}
+
+function parsePermissionKeys(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  return validatePermissionKeys(values, "--permissions");
+}
+
+function validatePermissionKeys(values: Iterable<unknown>, label: string): string[] {
+  const normalized = [...values];
+  if (normalized.some((value) => typeof value !== "string" || !runtimePermissionKeys.has(value))) {
+    fail(`${label} accepts only runtime policy keys: ${[...runtimePermissionKeys].sort().join(", ")}`);
+  }
+  return [...new Set(normalized as string[])];
+}
+
+function hardwareSelection(hardware: boolean, modules: Iterable<HardwareModule>, explicitPermissions: Iterable<string>): HardwareSelection {
+  const selectedModules = [...new Set(modules)];
+  const explicit = [...new Set(explicitPermissions)];
+  if (hardware) {
+    return {
+      hardware: true,
+      modules: [],
+      capabilities: [...hardwareCapabilities],
+      permissions: [...hardwarePermissions],
+      runtimePermissions: [...runtimePermissionKeys],
+      explicitPermissions: explicit,
+      permissionsExplicit: explicit.length > 0,
+    };
+  }
+  const capabilities = new Set<string>();
+  const permissions = new Set<string>(explicit);
+  const runtimePermissions = new Set<string>(explicit);
+  for (const module of selectedModules) {
+    const definition = hardwareModuleDefinitions[module];
+    for (const capability of definition.capabilities) capabilities.add(capability);
+    for (const permission of definition.permissions) permissions.add(permission);
+    for (const permission of definition.runtimePermissions) runtimePermissions.add(permission);
+  }
+  return {
+    hardware: false,
+    modules: selectedModules,
+    capabilities: [...capabilities],
+    permissions: [...permissions],
+    runtimePermissions: [...runtimePermissions].filter((permission) => runtimePermissionKeys.has(permission)),
+    explicitPermissions: explicit,
+    permissionsExplicit: explicit.length > 0,
+  };
+}
+
+function shouldRegisterPermissionPlugin(selection: HardwareSelection): boolean {
+  if (selection.hardware) return selection.permissionsExplicit;
+  const promptingRuntimePermissions = selection.runtimePermissions.filter(
+    (permission) => permission !== "hardware.sensors",
+  );
+  // Android exposes no dangerous sensor runtime permission. Keep a
+  // sensors-only (or sensors+weather) scaffold free of permission_handler;
+  // an explicit --permissions hardware.sensors opt-in still installs the
+  // provider for iOS motion permission requests.
+  if (promptingRuntimePermissions.length === 0 && selection.explicitPermissions.length === 0) return false;
+  return true;
+}
+
 const pocketStaticArchiveOutputMarker = "# POCKET_STATIC_XCFRAMEWORK_OUTPUTS_BEGIN";
 const pocketStaticArchiveOutputEndMarker = "# POCKET_STATIC_XCFRAMEWORK_OUTPUTS_END";
 const pocketStaticArchiveOutputOld = "${PODS_XCFRAMEWORKS_BUILD_DIR}/pocket_flutter/PocketFlutter.framework";
@@ -210,7 +410,12 @@ function addPocketStaticArchiveOutputPatch(podfile: string): string {
 }
 
 /** @internal Exported for scaffold regression tests; not an app SDK API. */
-export function patchIosMinimum(iosDirectory: string, hardware = false): void {
+export function patchIosMinimum(
+  iosDirectory: string,
+  hardware = false,
+  modules: readonly HardwareModule[] = [],
+  permissionKeys: readonly string[] = [],
+): void {
   const podfile = join(iosDirectory, "Podfile");
   if (existsSync(podfile)) {
     const text = readFileSync(podfile, "utf8");
@@ -249,10 +454,15 @@ export function patchIosMinimum(iosDirectory: string, hardware = false): void {
     if (!/\n\s+ARCHS = arm64;/.test(projectText)) projectText = projectText.replace(/(\n\s+buildSettings = \{\n)/g, "$1\t\t\t\tARCHS = arm64;\n");
     writeFileSync(project, projectText);
   }
-  if (hardware) patchHardwareIosUsageDescriptions(iosDirectory);
+  if (hardware) patchHardwareIosUsageDescriptions(iosDirectory, hardwareModuleNames, ["hardware.microphone"]);
+  else if (modules.length > 0 || permissionKeys.length > 0) patchHardwareIosUsageDescriptions(iosDirectory, modules, permissionKeys);
 }
 
-function patchHardwareIosUsageDescriptions(iosDirectory: string): void {
+function patchHardwareIosUsageDescriptions(
+  iosDirectory: string,
+  modules: readonly HardwareModule[],
+  permissionKeys: readonly string[] = [],
+): void {
   const plist = join(iosDirectory, "Runner/Info.plist");
   if (!existsSync(plist)) return;
   let text = readFileSync(plist, "utf8");
@@ -267,12 +477,68 @@ function patchHardwareIosUsageDescriptions(iosDirectory: string): void {
     NSFaceIDUsageDescription: "This app uses Face ID only after the guest requests biometric authentication.",
     NSMotionUsageDescription: "This app reads motion and barometer sensors only after the guest requests them.",
   };
+  const selectedKeys = new Set(modules.flatMap((module) => hardwareModuleDefinitions[module].iosUsageKeys));
+  for (const permission of permissionKeys) {
+    if (permission === "hardware.camera") selectedKeys.add("NSCameraUsageDescription");
+    if (permission === "hardware.photos") {
+      selectedKeys.add("NSPhotoLibraryAddUsageDescription");
+    }
+    if (permission === "hardware.bluetooth") {
+      selectedKeys.add("NSBluetoothAlwaysUsageDescription");
+      selectedKeys.add("NSBluetoothPeripheralUsageDescription");
+    }
+    if (permission === "hardware.location") selectedKeys.add("NSLocationWhenInUseUsageDescription");
+    if (permission === "hardware.microphone") selectedKeys.add("NSMicrophoneUsageDescription");
+    if (permission === "hardware.sensors") selectedKeys.add("NSMotionUsageDescription");
+  }
   let additions = "";
   for (const [key, value] of Object.entries(entries)) {
+    if (!selectedKeys.has(key)) continue;
     if (new RegExp(`<key>${key}</key>`).test(text)) continue;
     additions += `\t<key>${key}</key>\n\t<string>${value}</string>\n`;
   }
-  if (additions) text = text.replace(/\n<\/dict>\s*<\/plist>\s*$/s, `\n${additions}</dict>\n</plist>\n`);
+  if (additions) text = text.replace(/\s*<\/dict>\s*<\/plist>\s*$/s, `\n${additions}</dict>\n</plist>\n`);
+  const macros = new Set(modules.flatMap((module) => hardwareModuleDefinitions[module].iosMacros));
+  for (const permission of permissionKeys) {
+    if (permission === "hardware.camera") macros.add("PERMISSION_CAMERA");
+    if (permission === "hardware.photos") macros.add("PERMISSION_PHOTOS_ADD_ONLY");
+    if (permission === "hardware.bluetooth") macros.add("PERMISSION_BLUETOOTH");
+    if (permission === "hardware.location") macros.add("PERMISSION_LOCATION");
+    if (permission === "hardware.microphone") macros.add("PERMISSION_MICROPHONE");
+    if (permission === "hardware.sensors") macros.add("PERMISSION_SENSORS");
+  }
+  if (macros.size > 0) {
+    const podfile = join(iosDirectory, "Podfile");
+    if (existsSync(podfile)) {
+      let podText = readFileSync(podfile, "utf8");
+      const missing = [...macros].filter((macro) => !podText.includes(`${macro}=1`));
+      if (missing.length > 0) {
+        const definitions = missing.map((macro) => `'${macro}=1'`).join(", ");
+        const setting = (indent: string): string =>
+          `${indent}target.build_configurations.each { |config| config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']; config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] += [${definitions}] }\n`;
+        const flutterLine = /^[ \t]*flutter_additional_ios_build_settings\(target\)\s*$/m.exec(podText);
+        if (flutterLine) {
+          const indent = flutterLine[0].match(/^[ \t]*/)?.[0] ?? "      ";
+          podText = podText.replace(flutterLine[0], `${flutterLine[0]}\n${setting(indent)}`);
+        } else {
+          const targetLoop = /^[ \t]*installer\.pods_project\.targets\.each do \|target\|[^\n]*\n/m.exec(podText);
+          if (targetLoop) {
+            const indent = targetLoop[0].match(/^[ \t]*/)?.[0] ?? "  ";
+            podText = podText.replace(targetLoop[0], `${targetLoop[0]}${setting(`${indent}  `)}`);
+          } else {
+            const postInstall = /^[ \t]*post_install[ \t]+do[ \t]*\|[ \t]*installer[ \t]*\|[^\n]*\n/m.exec(podText);
+            if (postInstall) {
+              const indent = postInstall[0].match(/^[ \t]*/)?.[0] ?? "";
+              const targetIndent = `${indent}  `;
+              const block = `${targetIndent}installer.pods_project.targets.each do |target|\n${setting(`${targetIndent}  `)}${targetIndent}end\n`;
+              podText = podText.replace(postInstall[0], `${postInstall[0]}${block}`);
+            }
+          }
+        }
+        writeFileSync(podfile, podText);
+      }
+    }
+  }
   writeFileSync(plist, text);
 }
 
@@ -301,8 +567,14 @@ const androidHardwarePermissions: readonly string[] = [
 ];
 
 /** @internal Exported for scaffold regression tests; not an app SDK API. */
-export function patchAndroidHardwareManifest(androidDirectory: string, hardware = false, dio = false): void {
-  if (!hardware && !dio) return;
+export function patchAndroidHardwareManifest(
+  androidDirectory: string,
+  hardware = false,
+  dio = false,
+  modules: readonly HardwareModule[] = [],
+  permissionKeys: readonly string[] = [],
+): void {
+  if (!hardware && !dio && modules.length === 0 && permissionKeys.length === 0) return;
   const manifest = join(androidDirectory, "app/src/main/AndroidManifest.xml");
   if (!existsSync(manifest)) return;
   const before = readFileSync(manifest, "utf8");
@@ -312,7 +584,17 @@ export function patchAndroidHardwareManifest(androidDirectory: string, hardware 
   let text = before;
   const permissions = hardware
     ? androidHardwarePermissions
-    : androidHardwarePermissions.slice(0, 1);
+    : [
+        ...(dio ? androidHardwarePermissions.slice(0, 1) : []),
+        ...modules.flatMap((module) => hardwareModuleDefinitions[module].androidPermissions),
+        ...permissionKeys.flatMap((permission) => {
+          if (permission === "hardware.camera") return ['<uses-permission android:name="android.permission.CAMERA" />'];
+          if (permission === "hardware.bluetooth") return hardwareModuleDefinitions.bluetooth.androidPermissions;
+          if (permission === "hardware.location") return hardwareModuleDefinitions.location.androidPermissions;
+          if (permission === "hardware.microphone") return ['<uses-permission android:name="android.permission.RECORD_AUDIO" />'];
+          return [];
+        }),
+      ];
   const additions = permissions.filter((permission) => {
     const name = permission.match(/android:name="([^"]+)"/)?.[1];
     return name !== undefined && !new RegExp(`android:name=["']${name.replaceAll(".", "\\.")}['"]`).test(text);
@@ -532,7 +814,15 @@ function scaffoldTest(flutterDirectory: string, appId: string): void {
   );
 }
 
-function createFlutterHost(project: string, sdk: string, appId: string, hardware: boolean, dio: boolean, platform: ReturnType<typeof resolvePlatformExperience>): void {
+function createFlutterHost(
+  project: string,
+  sdk: string,
+  appId: string,
+  selection: HardwareSelection,
+  dio: boolean,
+  platform: ReturnType<typeof resolvePlatformExperience>,
+): void {
+  const hardware = selection.hardware;
   const flutterDirectory = join(project, "flutter");
   mkdirSync(flutterDirectory, { recursive: true });
   const flutter = process.env.FLUTTER_BIN ?? "flutter";
@@ -562,8 +852,26 @@ function createFlutterHost(project: string, sdk: string, appId: string, hardware
   // canonical roots or a generated /tmp project points at /private/Volumes.
   const sdkPackage = sdk;
   const sdkPath = relative(realpathSync(flutterDirectory), realpathSync(sdkPackage)).replaceAll("\\", "/") || ".";
-  const hardwarePath = relative(realpathSync(flutterDirectory), realpathSync(join(sdk, "packages/pocket_hardware"))).replaceAll("\\", "/");
-  const hardwareDependency = hardware ? `\n  pocket_hardware:\n    path: ${hardwarePath}` : "";
+  const packagePath = (packageName: string): string => {
+    const packageDirectory = join(sdk, "packages", packageName);
+    if (!existsSync(packageDirectory) || !lstatSync(packageDirectory).isDirectory()) {
+      fail(`hardware support requested but the SDK package is missing: ${packageDirectory}`);
+    }
+    return relative(realpathSync(flutterDirectory), realpathSync(packageDirectory)).replaceAll("\\", "/");
+  };
+  const hardwareDependency = hardware
+    ? `\n  pocket_hardware:\n    path: ${packagePath("pocket_hardware")}`
+    : "";
+  const moduleDependencies = selection.modules
+    .map((module) => `\n  ${hardwareModuleDefinitions[module].packageName}:\n    path: ${packagePath(hardwareModuleDefinitions[module].packageName)}`)
+    .join("");
+  // Permission access is a separate optional provider.  Runtime-capable
+  // modules get the smallest matching allowlist automatically; weather and
+  // biometrics have no permission_handler runtime policy and add nothing.
+  const permissionPlugin = shouldRegisterPermissionPlugin(selection);
+  const permissionsDependency = permissionPlugin
+    ? `\n  pocket_permissions:\n    path: ${packagePath("pocket_permissions")}`
+    : "";
   const dioPackage = join(sdk, "packages/pocket_dio");
   if (dio && (!existsSync(dioPackage) || !lstatSync(dioPackage).isDirectory())) {
     fail(`Dio support requested but the SDK package is missing: ${dioPackage}`);
@@ -573,22 +881,49 @@ function createFlutterHost(project: string, sdk: string, appId: string, hardware
   const platformDependency = platform.platformExperience
     ? `\n  pocket_platform:\n    path: ${relative(realpathSync(flutterDirectory), realpathSync(join(sdk, "packages/pocket_platform"))).replaceAll("\\", "/")}`
     : "";
-  writeFileSync(join(flutterDirectory, "pubspec.yaml"), `name: ${name}\ndescription: PocketJS Flutter host generated by the local SDK.\npublish_to: none\nversion: 0.1.0+1\n\nenvironment:\n  sdk: ^3.9.2\n  flutter: '>=3.35.0'\n\ndependencies:\n  flutter:\n    sdk: flutter\n  pocket_sdk:\n    path: ${sdkPath}${hardwareDependency}${dioDependency}${platformDependency}\n\ndev_dependencies:\n  flutter_lints: ^5.0.0\n  flutter_test:\n    sdk: flutter\n\nflutter:\n  uses-material-design: true\n  assets:\n    - assets/app.qjbc\n    - assets/app.bytecode.json\n    - assets/guest-manifest.json\n    - assets/app.pak\n`);
+  // Compose feature-specific path dependencies in the generated host. This
+  // keeps source-only init deterministic even when Flutter is unavailable.
+  writeFileSync(join(flutterDirectory, "pubspec.yaml"), `name: ${name}\ndescription: PocketJS Flutter host generated by the local SDK.\npublish_to: none\nversion: 0.1.0+1\n\nenvironment:\n  sdk: ^3.9.2\n  flutter: '>=3.35.0'\n\ndependencies:\n  flutter:\n    sdk: flutter\n  pocket_sdk:\n    path: ${sdkPath}${hardwareDependency}${moduleDependencies}${dioDependency}${permissionsDependency}${platformDependency}\n\ndev_dependencies:\n  flutter_lints: ^5.0.0\n  flutter_test:\n    sdk: flutter\n\nflutter:\n  uses-material-design: true\n  assets:\n    - assets/app.qjbc\n    - assets/app.bytecode.json\n    - assets/guest-manifest.json\n    - assets/app.pak\n`);
   mkdirSync(join(flutterDirectory, "assets"), { recursive: true });
+  const moduleImports = selection.modules
+    .map((module) => `import '${hardwareModuleDefinitions[module].importPath}';\n`)
+    .join("");
   const hardwareImport = (hardware ? "import 'package:pocket_hardware/pocket_hardware.dart';\n" : "") +
+    moduleImports +
     (dio ? "import 'package:pocket_dio/pocket_dio.dart';\n" : "") +
+    (permissionPlugin ? "import 'package:pocket_permissions/pocket_permissions.dart';\n" : "") +
     (platform.platformExperience ? "import 'package:pocket_platform/pocket_platform.dart';\n" : "");
-  const factories = [...(hardware ? ["createHardwarePlugin"] : []), ...(dio ? ["createDioPlugin"] : []), ...(platform.platformExperience ? ["createPlatformPlugin"] : []), ...(platform.deepLinkScheme ? ["createDeepLinkPlugin"] : [])];
+  const factories = [
+    ...(hardware ? ["createHardwarePlugin"] : []),
+    ...selection.modules.map((module) => hardwareModuleDefinitions[module].factoryName),
+    ...(dio ? ["createDioPlugin"] : []),
+    ...(permissionPlugin ? ["createPermissionsPlugin"] : []),
+    ...(platform.platformExperience ? ["createPlatformPlugin"] : []),
+    ...(platform.deepLinkScheme ? ["createDeepLinkPlugin"] : []),
+  ];
+  const featurePermissionValues = [...new Set([
+    ...selection.permissions,
+    ...(dio ? ["network"] : []),
+  ])].sort();
+  const featurePermissionLiteral = `const {${featurePermissionValues.map((permission) => `'${permission}'`).join(", ")}}`;
   const allowedPermissions = hardware && dio
     ? "allowedPermissions: {...HardwarePermissions.all, 'network'},\n    "
     : hardware
       ? "allowedPermissions: HardwarePermissions.all,\n    "
-      : dio
-        ? "allowedPermissions: const {'network'},\n    "
-        : "";
+      : (featurePermissionValues.length > 0 ? `allowedPermissions: ${featurePermissionLiteral},\n    ` : "");
   const hardwareConfig = (factories.length ? `pluginFactories: [${factories.join(", ")}],\n    ` : "") + allowedPermissions;
   const hardwareFactory = hardware
     ? "\nPocketPlugin createHardwarePlugin(PocketViewController controller) => HardwarePlugin(\n  onTextureRegistered: controller.authorizePlatformTexture,\n  onTextureReleased: controller.revokePlatformTexture,\n);\n"
+    : "";
+  const moduleFactories = selection.modules.map((module) => {
+    const definition = hardwareModuleDefinitions[module];
+    if (module === "camera") {
+      return `\nPocketPlugin ${definition.factoryName}(PocketViewController controller) => ${definition.className}(\n  onTextureRegistered: controller.authorizePlatformTexture,\n  onTextureReleased: controller.revokePlatformTexture,\n);\n`;
+    }
+    return `\nPocketPlugin ${definition.factoryName}(PocketViewController controller) => ${definition.className}();\n`;
+  }).join("");
+  const permissionFactory = permissionPlugin
+    ? `\nPocketPlugin createPermissionsPlugin(PocketViewController controller) => PocketPermissionsPlugin(allowedPermissions: const {${(hardware ? selection.explicitPermissions : selection.runtimePermissions).sort().map((permission) => `'${permission}'`).join(", ")}});\n`
     : "";
   const dioFactory = dio
     ? "\n// allowedOrigins is intentionally empty; configure the consumer's explicit HTTPS origins before using dio.request.\nPocketPlugin createDioPlugin(PocketViewController controller) => PocketDioPlugin(allowedOrigins: const {});\n"
@@ -598,7 +933,7 @@ function createFlutterHost(project: string, sdk: string, appId: string, hardware
     : "") + (platform.deepLinkScheme
     ? `\nPocketPlugin createDeepLinkPlugin(PocketViewController controller) => PocketDeepLinkPlugin(deepLinkScheme: '${platform.deepLinkScheme}');\n`
     : "");
-  writeFileSync(join(flutterDirectory, "lib/main.dart"), `${hardwareImport}import 'package:flutter/material.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  WidgetsFlutterBinding.ensureInitialized();\n  runApp(PocketApp(config: PocketAppConfig(\n    appId: '${appId.replaceAll("'", "\\'")}',\n    ${hardwareConfig})));\n}\n${hardwareFactory}${dioFactory}${platformFactory}`);
+  writeFileSync(join(flutterDirectory, "lib/main.dart"), `${hardwareImport}import 'package:flutter/material.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  WidgetsFlutterBinding.ensureInitialized();\n  runApp(PocketApp(config: PocketAppConfig(\n    appId: '${appId.replaceAll("'", "\\'")}',\n    ${hardwareConfig})));\n}\n${hardwareFactory}${moduleFactories}${dioFactory}${permissionFactory}${platformFactory}`);
   scaffoldTest(flutterDirectory, appId);
   // `flutter create --no-pub` does not materialize ios/Podfile. Resolve the
   // generated local SDK dependency once so the iOS policy can be applied to
@@ -606,14 +941,23 @@ function createFlutterHost(project: string, sdk: string, appId: string, hardware
   // Flutter installed.
   const iosDirectory = join(flutterDirectory, "ios");
   const androidDirectory = join(flutterDirectory, "android");
-  if (prepareFlutterDependencies(flutterDirectory, false)) patchIosMinimum(iosDirectory, hardware);
-  patchAndroidHardwareManifest(androidDirectory, hardware, dio);
+  if (prepareFlutterDependencies(flutterDirectory, false)) patchIosMinimum(iosDirectory, hardware, selection.modules, selection.runtimePermissions);
+  patchAndroidHardwareManifest(androidDirectory, hardware, dio, selection.modules, selection.runtimePermissions);
   patchAndroidMinimum(androidDirectory);
   patchIosSceneLifecycle(iosDirectory);
   patchDeepLinkPlatforms(flutterDirectory, platform.deepLinkScheme);
 }
 
-export async function initProject(directory: string, options: { sdkRoot?: string; appId?: string; name?: string; version?: string; hardware?: boolean; dio?: boolean } & PlatformExperienceOptions = {}): Promise<string> {
+export async function initProject(directory: string, options: {
+  sdkRoot?: string;
+  appId?: string;
+  name?: string;
+  version?: string;
+  hardware?: boolean;
+  dio?: boolean;
+  hardwareModules?: Iterable<HardwareModule>;
+  permissions?: Iterable<string>;
+} & PlatformExperienceOptions = {}): Promise<string> {
   const project = resolve(directory);
   const sdk = resolve(options.sdkRoot ?? sdkRoot);
   if (existsSync(project) && readdirSync(project).length > 0) fail(`init target must be empty: ${project}`);
@@ -624,12 +968,17 @@ export async function initProject(directory: string, options: { sdkRoot?: string
   const version = options.version ?? "0.1.0";
   const hardware = options.hardware === true;
   const dio = options.dio === true;
+  const modules = parseHardwareModules(options.hardwareModules === undefined ? undefined : [...options.hardwareModules], "hardwareModules");
+  const explicitPermissions = validatePermissionKeys(options.permissions ?? [], "permissions");
+  const selection = hardwareSelection(hardware, modules, explicitPermissions);
   const platform = resolvePlatformExperience(options);
   if (!projectIdPattern.test(id)) fail(`project id is unsafe: ${id}`);
   if (!appIdPattern.test(appId)) fail(`app id is unsafe: ${appId}`);
   if (!versionPattern.test(version)) fail(`version is unsafe: ${version}`);
 
   writeJson(join(project, "editor.json"), { id, appId, name, title: name, version, build: 1, tickHz: 60, entry: "app.tsx", framework: "solid", hardware, dio,
+    ...(selection.modules.length > 0 ? { hardwareModules: selection.modules } : {}),
+    ...(explicitPermissions.length > 0 ? { permissions: explicitPermissions } : {}),
     ...(platform.platformExperience ? { platformExperience: true } : {}),
     ...(platform.deepLinkScheme ? { deepLinkScheme: platform.deepLinkScheme } : {}),
   });
@@ -648,12 +997,15 @@ export async function initProject(directory: string, options: { sdkRoot?: string
     $schema: "https://pocketjs.dev/schema/pocket-guest-manifest.json",
     protocolVersion: 1,
     capabilities: { requires: ["text.glyphs.baked"], optional: [
-      ...(hardware ? hardwareCapabilities : []),
+      ...selection.capabilities,
+      ...(shouldRegisterPermissionPlugin(selection)
+        ? ["permissions.status", "permissions.request", "permissions.openSettings"]
+        : []),
       ...(dio ? ["dio.request"] : []),
       ...(platform.platformExperience ? ["platform.systemUi.set", "platform.haptics.perform"] : []),
       ...(platform.deepLinkScheme ? ["platform.links.initial", "platform.links.latest", "platform.links.events"] : []),
     ] },
-    permissions: { optional: [...(hardware ? hardwarePermissions : []), ...(dio ? ["network"] : [])] },
+    permissions: { optional: [...selection.permissions, ...(dio ? ["network"] : [])] },
   });
   writeJson(join(project, "package.json"), {
     name: id,
@@ -668,12 +1020,21 @@ export async function initProject(directory: string, options: { sdkRoot?: string
   cpSync(starterApp, join(project, "app.tsx"), { force: true });
   const uiSource = sdkUiPackage(sdk);
   copyTree(uiSource, join(project, "vendor/pocket-ui"));
-  createFlutterHost(project, sdk, appId, hardware, dio, platform);
+  createFlutterHost(project, sdk, appId, selection, dio, platform);
   writeFileSync(join(project, "README.md"), `# ${name}\n\nGenerated by the local PocketJS SDK.\n\n- Edit \`app.tsx\` and files under \`vendor/pocket-ui\` only when intentionally vendoring the UI package.\n- Build real QuickJS bytecode with \`bun ${sdk}/pocket.ts build .\`.\n- Open the project in Pocket Studio with \`bun ${sdk}/pocket.ts editor .\`.\n- The Flutter host is in \`flutter/\`; run \`flutter pub get\` there after the SDK is available.\n${hardware ? "- Hardware mode is enabled for the compiled iOS/Android provider; review Info.plist and AndroidManifest runtime declarations and request permissions only from an explicit guest action.\n" : ""}`);
   return project;
 }
 
-function projectConfig(project: string): { appId: string; version: string; build: number; tickHz: number; hardware: boolean; dio: boolean; deepLinkScheme?: string } {
+function projectConfig(project: string): {
+  appId: string;
+  version: string;
+  build: number;
+  tickHz: number;
+  hardware: boolean;
+  dio: boolean;
+  selection: HardwareSelection;
+  deepLinkScheme?: string;
+} {
   const editorPath = join(project, "editor.json");
   const pocketPath = join(project, "pocket.json");
   const manifestPath = join(project, "manifest.json");
@@ -696,13 +1057,19 @@ function projectConfig(project: string): { appId: string; version: string; build
   const tickHz = typeof editor?.tickHz === "number" ? editor.tickHz : 60;
   const hardware = editor?.hardware === true;
   const dio = editor?.dio === true;
+  const modules = parseHardwareModules(editor?.hardwareModules, "editor.hardwareModules");
+  const permissionsValue = editor?.permissions;
+  const permissions = permissionsValue === undefined
+    ? []
+    : (Array.isArray(permissionsValue) ? validatePermissionKeys(permissionsValue, "editor.permissions") : fail("editor.permissions must be an array of runtime policy keys"));
+  const selection = hardwareSelection(hardware, modules, permissions);
   if (editor?.deepLinkScheme !== undefined && typeof editor.deepLinkScheme !== "string") fail("editor.deepLinkScheme must be a string");
   const platform = resolvePlatformExperience({ platformExperience: editor?.platformExperience === true, deepLinkScheme: editor?.deepLinkScheme as string | undefined });
   if (typeof appId !== "string" || !appIdPattern.test(appId)) fail(`unsafe appId in ${project}`);
   if (typeof version !== "string" || !versionPattern.test(version)) fail(`unsafe version in ${project}`);
   if (!Number.isSafeInteger(build) || build < 1) fail(`unsafe build in ${project}`);
   if (!Number.isInteger(tickHz) || tickHz < 1 || tickHz > 120) fail(`unsafe tickHz in ${project}`);
-  return { appId, version, build, tickHz, hardware, dio, deepLinkScheme: platform.deepLinkScheme };
+  return { appId, version, build, tickHz, hardware, dio, selection, deepLinkScheme: platform.deepLinkScheme };
 }
 
 export async function buildProject(directory: string, options: { outDir?: string; sdkRoot?: string; platform?: NativePlatform } = {}): Promise<{ project: string; output: string; qjbc: string; pak: string; metadata: string }> {
@@ -715,14 +1082,14 @@ export async function buildProject(directory: string, options: { outDir?: string
   // archive preparation and is harmless when the Android project has not been
   // materialized yet.
   const androidDirectory = join(project, "flutter/android");
-  patchAndroidHardwareManifest(androidDirectory, config.hardware, config.dio);
+  patchAndroidHardwareManifest(androidDirectory, config.hardware, config.dio, config.selection.modules, config.selection.runtimePermissions);
   patchAndroidMinimum(androidDirectory);
   if (options.platform) {
     prepareNative(sdk, options.platform);
     if (options.platform === "ios-sim" || options.platform === "ios") {
       const flutterDirectory = join(project, "flutter");
       const iosDirectory = join(flutterDirectory, "ios");
-      if (prepareFlutterDependencies(flutterDirectory, true)) patchIosMinimum(iosDirectory, config.hardware);
+      if (prepareFlutterDependencies(flutterDirectory, true)) patchIosMinimum(iosDirectory, config.hardware, config.selection.modules, config.selection.runtimePermissions);
       patchIosSceneLifecycle(iosDirectory);
     }
   }
@@ -802,7 +1169,7 @@ export async function exportPluginTypes(inputPath: string, outputPath: string): 
 }
 
 function usage(): never {
-  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--dio] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR]");
+  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--camera] [--bluetooth] [--sensors] [--location] [--biometrics] [--weather] [--permissions=POLICY_KEYS] [--dio] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR]");
   process.exit(1);
 }
 
@@ -818,11 +1185,13 @@ if (import.meta.main) {
       const name = takeFlag(args, "name");
       const version = takeFlag(args, "version");
       const hardware = takeBooleanFlag(args, "hardware");
+      const hardwareModules = hardwareModuleNames.filter((module) => takeBooleanFlag(args, module));
+      const permissions = parsePermissionKeys(takeFlag(args, "permissions"));
       const dio = takeBooleanFlag(args, "dio");
       const platformExperience = takeBooleanFlag(args, "platform-experience");
       const deepLinkScheme = takeFlag(args, "deep-link-scheme");
       ensureNoArgs(args);
-      console.log(`pocket init: ${await initProject(directory, { sdkRoot: sdk, appId, name, version, hardware, dio, platformExperience, deepLinkScheme })}`);
+      console.log(`pocket init: ${await initProject(directory, { sdkRoot: sdk, appId, name, version, hardware, hardwareModules, permissions, dio, platformExperience, deepLinkScheme })}`);
     } else if (command === "build") {
       const directory = takePosition(args, "project directory");
       const out = takeFlag(args, "out");

@@ -1,0 +1,18 @@
+name: pocket_camera
+description: Independently selectable PocketJS camera capability provider.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.9.2
+  flutter: '>=3.35.0'
+dependencies:
+  pocket_hardware_core:
+    path: ../pocket_hardware_core
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.pocketjs.pocket_camera
+        pluginClass: PocketCameraPlugin
+      ios:
+        pluginClass: PocketCameraPlugin

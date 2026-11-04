@@ -204,6 +204,7 @@ void main() {
         expect(platform.stopArguments.single, <String, dynamic>{
           'streamId':
               'flutter.hardware:test.hardware.streams:stream-session:sensor-stream-1',
+          'kind': 'sensors',
           'sessionId': 'test.hardware.streams:stream-session',
         });
         expect(

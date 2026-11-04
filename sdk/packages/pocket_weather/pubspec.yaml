@@ -1,0 +1,10 @@
+name: pocket_weather
+description: Independently selectable PocketJS weather capability provider.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.9.2
+  flutter: '>=3.35.0'
+dependencies:
+  pocket_hardware_core:
+    path: ../pocket_hardware_core

@@ -14,6 +14,7 @@
     "./graphics": "./src/graphics.ts",
     "./host": "./src/host.ts",
     "./dio": "./src/dio.ts",
+    "./permissions": "./src/permissions.ts",
     "./streams": "./src/streams.ts",
     "./platform-experience": "./src/platform-experience.ts",
     "./platform": "./src/platform.ts",

@@ -64,6 +64,15 @@ post_install do |installer|
   # POCKET_STATIC_XCFRAMEWORK_OUTPUTS_END
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    # The compatibility hardware provider delegates OS permissions to permission_handler.
+    target.build_configurations.each do |config|
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] += [
+        'PERMISSION_CAMERA=1', 'PERMISSION_PHOTOS_ADD_ONLY=1',
+        'PERMISSION_BLUETOOTH=1', 'PERMISSION_LOCATION=1',
+        'PERMISSION_MICROPHONE=1', 'PERMISSION_SENSORS=1',
+      ]
+    end
       target.build_configurations.each { |config| config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'; config.build_settings['ARCHS'] = 'arm64' }
     # Xcode 27's simulator SDK rejects older Pod deployment targets as well.
     target.build_configurations.each do |config|

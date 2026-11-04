@@ -1,12 +1,34 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:pocket_flutter/src/pocket_model.dart' show PocketEvent;
 import 'package:pocket_services/pocket_services.dart';
 
 import 'package:pocket_hardware/pocket_hardware.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  Future<Object?> Function(MethodCall)? permissionHandler;
+  setUp(() {
+    permissionHandler = null;
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('flutter.baseflow.com/permissions/methods'),
+          (call) async {
+            if (permissionHandler != null) return permissionHandler!(call);
+            if (call.method == 'requestPermissions') {
+              return {for (final id in call.arguments as List) id as int: 1};
+            }
+            return 1;
+          },
+        );
+  });
+  tearDown(() {
+    debugDefaultTargetPlatformOverride = null;
+  });
   test('descriptor exposes only compiled hardware capabilities', () {
     final descriptor = HardwarePlugin().descriptor;
     expect(descriptor.id, hardwarePluginId);
@@ -186,13 +208,6 @@ void main() {
     'Android-shaped provider responses use the same platform-neutral contract',
     () async {
       final fake = _FakeHardwarePlatform(<String, Map<String, dynamic>>{
-        'checkPermissions': <String, dynamic>{
-          'ok': true,
-          'platform': 'android',
-          'permissions': <String, dynamic>{
-            'camera': <String, dynamic>{'supported': true, 'granted': true},
-          },
-        },
         'startCameraPreview': <String, dynamic>{
           'ok': true,
           'platform': 'android',
@@ -215,7 +230,7 @@ void main() {
           'android-permissions',
         );
         expect(harness.last['ok'], isTrue);
-        expect((harness.last['result'] as Map)['platform'], 'android');
+        expect((harness.last['result'] as Map)['permissions'], isA<Map>());
 
         await harness.request(
           HardwareCapabilities.cameraPreviewStart,
@@ -270,13 +285,6 @@ void main() {
           'state': 'poweredOn',
           'devices': const <Map<String, dynamic>>[],
         },
-        'requestPermission': <String, dynamic>{
-          'ok': true,
-          'permission': 'sensors',
-          'granted': true,
-          'status': 'granted',
-          'realHardware': true,
-        },
         'readSensors': <String, dynamic>{
           'ok': true,
           'realSensors': true,
@@ -316,7 +324,10 @@ void main() {
         expect(harness.last['ok'], isTrue);
         expect((harness.last['result'] as Map)['granted'], isTrue);
 
-        await harness.request(HardwareCapabilities.sensorsRead, 'sensor-read-1');
+        await harness.request(
+          HardwareCapabilities.sensorsRead,
+          'sensor-read-1',
+        );
         expect(harness.last['ok'], isTrue);
         final sensorResult = harness.last['result'] as Map<String, dynamic>;
         expect(sensorResult['realSensors'], isTrue);
@@ -325,10 +336,7 @@ void main() {
         expect(sensorResult['gyroZ'], 0.001);
         expect(sensorResult['pitch'], 0.19);
         expect(sensorResult['pressureHpa'], 1013.25);
-        expect(
-          fake.calls,
-          equals(<String>['startBleScan', 'requestPermission', 'readSensors']),
-        );
+        expect(fake.calls, equals(<String>['startBleScan', 'readSensors']));
       } finally {
         await harness.dispose();
       }
@@ -493,33 +501,27 @@ void main() {
     }
   });
 
-  test('a timed-out permission probe ignores a late native result', () async {
-    final fake = _DelayedPermissionPlatform();
-    final harness = await _Harness.create(
-      HardwarePlugin(
-        platform: fake,
-        requestTimeout: const Duration(milliseconds: 10),
-      ),
-    );
-    try {
-      await harness.request(
-        HardwareCapabilities.permissions,
-        'timeout-permission',
-      );
-      expect(harness.last['ok'], isFalse);
-      expect((harness.last['error'] as Map)['code'], 'hardware_timeout');
-      fake.check.complete(<String, dynamic>{
-        'ok': true,
-        'permissions': <String, dynamic>{
-          'camera': <String, dynamic>{'granted': true},
-        },
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(harness.last['ok'], isFalse);
-    } finally {
-      await harness.dispose();
-    }
-  });
+  test(
+    'permission status uses permission_handler without the hardware queue',
+    () async {
+      final fake = _FakeHardwarePlatform({});
+      final harness = await _Harness.create(HardwarePlugin(platform: fake));
+      try {
+        await harness.request(
+          HardwareCapabilities.permissions,
+          'permission-status',
+        );
+        expect(harness.last['ok'], isTrue);
+        expect(
+          ((harness.last['result'] as Map)['permissions'] as Map)['camera'],
+          containsPair('granted', true),
+        );
+        expect(fake.calls, isEmpty);
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
 }
 
 HardwarePlugin _weatherPlugin(_FakeHardwarePlatform fake) => HardwarePlugin(
@@ -559,20 +561,6 @@ final class _DelayedHardwarePlatform implements HardwarePlatform {
   ]) {
     calls.add(method);
     if (method == 'startCameraPreview') return start.future;
-    return Future<Map<String, dynamic>>.value(<String, dynamic>{'ok': true});
-  }
-}
-
-final class _DelayedPermissionPlatform implements HardwarePlatform {
-  final Completer<Map<String, dynamic>> check =
-      Completer<Map<String, dynamic>>();
-
-  @override
-  Future<Map<String, dynamic>> invoke(
-    String method, [
-    Map<String, dynamic> arguments = const <String, dynamic>{},
-  ]) {
-    if (method == 'checkPermissions') return check.future;
     return Future<Map<String, dynamic>>.value(<String, dynamic>{'ok': true});
   }
 }

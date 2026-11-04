@@ -1,5 +1,7 @@
 # Hardware capability reuse
 
+> 拆分更新：当前按需包、权限接入、原生源码映射及验证见 [HARDWARE_MODULES.md](HARDWARE_MODULES.md)。本文保留迁移时的来源记录；下文旧 `pocket_hardware/android`、`ios` 实现已分别移动到独立能力包。
+
 当前可复用包位于 `../packages/pocket_hardware`，Demo 的真实能力页面和集成测试位于
 `../demo/js`、`../demo/integration_test`。文中的旧 `host/` 路径是来源记录，不是第二套宿主实现。
 

@@ -1,4 +1,6 @@
 PODS:
+  - device_info_plus (0.0.1):
+    - Flutter
   - Flutter (1.0.0)
   - integration_test (0.0.1):
     - Flutter
@@ -7,27 +9,45 @@ PODS:
   - path_provider_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
+  - permission_handler_apple (9.4.8):
+    - Flutter
+  - pocket_biometrics (0.1.0):
+    - Flutter
+  - pocket_bluetooth (0.1.0):
+    - Flutter
+  - pocket_camera (0.1.0):
+    - Flutter
   - pocket_flutter (0.1.0):
     - Flutter
-  - pocket_hardware (0.1.0):
+  - pocket_location (0.1.0):
     - Flutter
   - pocket_platform (0.1.0):
+    - Flutter
+  - pocket_sensors (0.1.0):
     - Flutter
   - video_player_avfoundation (0.0.1):
     - Flutter
     - FlutterMacOS
 
 DEPENDENCIES:
+  - device_info_plus (from `.symlinks/plugins/device_info_plus/ios`)
   - Flutter (from `Flutter`)
   - integration_test (from `.symlinks/plugins/integration_test/ios`)
   - package_info_plus (from `.symlinks/plugins/package_info_plus/ios`)
   - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
+  - permission_handler_apple (from `.symlinks/plugins/permission_handler_apple/ios`)
+  - pocket_biometrics (from `.symlinks/plugins/pocket_biometrics/ios`)
+  - pocket_bluetooth (from `.symlinks/plugins/pocket_bluetooth/ios`)
+  - pocket_camera (from `.symlinks/plugins/pocket_camera/ios`)
   - pocket_flutter (from `.symlinks/plugins/pocket_flutter/ios`)
-  - pocket_hardware (from `.symlinks/plugins/pocket_hardware/ios`)
+  - pocket_location (from `.symlinks/plugins/pocket_location/ios`)
   - pocket_platform (from `.symlinks/plugins/pocket_platform/ios`)
+  - pocket_sensors (from `.symlinks/plugins/pocket_sensors/ios`)
   - video_player_avfoundation (from `.symlinks/plugins/video_player_avfoundation/darwin`)
 
 EXTERNAL SOURCES:
+  device_info_plus:
+    :path: ".symlinks/plugins/device_info_plus/ios"
   Flutter:
     :path: Flutter
   integration_test:
@@ -36,25 +56,41 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/package_info_plus/ios"
   path_provider_foundation:
     :path: ".symlinks/plugins/path_provider_foundation/darwin"
+  permission_handler_apple:
+    :path: ".symlinks/plugins/permission_handler_apple/ios"
+  pocket_biometrics:
+    :path: ".symlinks/plugins/pocket_biometrics/ios"
+  pocket_bluetooth:
+    :path: ".symlinks/plugins/pocket_bluetooth/ios"
+  pocket_camera:
+    :path: ".symlinks/plugins/pocket_camera/ios"
   pocket_flutter:
     :path: ".symlinks/plugins/pocket_flutter/ios"
-  pocket_hardware:
-    :path: ".symlinks/plugins/pocket_hardware/ios"
+  pocket_location:
+    :path: ".symlinks/plugins/pocket_location/ios"
   pocket_platform:
     :path: ".symlinks/plugins/pocket_platform/ios"
+  pocket_sensors:
+    :path: ".symlinks/plugins/pocket_sensors/ios"
   video_player_avfoundation:
     :path: ".symlinks/plugins/video_player_avfoundation/darwin"
 
 SPEC CHECKSUMS:
+  device_info_plus: 21fcca2080fbcd348be798aa36c3e5ed849eefbe
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
   package_info_plus: af8e2ca6888548050f16fa2f1938db7b5a5df499
   path_provider_foundation: bb55f6dbba17d0dccd6737fe6f7f34fbd0376880
+  permission_handler_apple: 92d754bbaa7361d436db2d6c3c1c2a0fdcec462e
+  pocket_biometrics: 2e7c072a5db793043bb4f28208ec8df27f0050de
+  pocket_bluetooth: cef2f12075521219d7e23e9d1c99ec17ad3c33d7
+  pocket_camera: fbc0eb13c16d99746a518717ab5b32dad2918703
   pocket_flutter: 90650a735fd0ba3015755831a54d436ccb641324
-  pocket_hardware: eec608321410b48324570aa8478df221b2ecdafa
+  pocket_location: 909b23f2d0d3a40f2de46afdcbb20f3a88680a17
   pocket_platform: 58f4c3df8a027cfa4c256b4bf8d92d3aead19fc3
+  pocket_sensors: b09cc052f37e0b9a175a452c7b7ae654f6ad3f04
   video_player_avfoundation: dd410b52df6d2466a42d28550e33e4146928280a
 
-PODFILE CHECKSUM: 4d0a843cca43ac963eb4aa1d43663f2e7da06ef8
+PODFILE CHECKSUM: fb49eb0e0db7f3c380b8000b2ecb7c377049e058
 
 COCOAPODS: 1.16.2

@@ -5,12 +5,16 @@
 | 包 / 插件 | 启用方式 | 当前能力 |
 | --- | --- | --- |
 | `PackageInfoPlugin` / `flutter.package_info_plus` | `pocket_sdk` 默认注册 | `plugins.packageInfo`，宿主应用元信息 |
-| `pocket_hardware` / `flutter.hardware` | 显式依赖并注册 `HardwarePlugin`；CLI `--hardware` | 相机预览/拍摄/镜头/闪光灯、相册、BLE 扫描/连接/读写/通知、传感器读数/流、生物识别、定位、天气、权限请求 |
+| `pocket_hardware` / `flutter.hardware` | 兼容聚合入口；CLI `--hardware` | 全部硬件能力；新消费者可按下述独立包选择 |
+| `pocket_permissions` / `flutter.permission_handler` | 显式注册 `PocketPermissionsPlugin` | 复用 Flutter permission_handler 的系统权限查询、申请与打开设置 |
+| `pocket_camera`、`pocket_bluetooth`、`pocket_sensors`、`pocket_location`、`pocket_biometrics`、`pocket_weather` | 分别注册 `PocketCameraPlugin` 等 | 仅相应领域的能力；独立原生包不依赖其余硬件包 |
 | `pocket_platform` / `flutter.platform` | 显式依赖并注册 `PocketPlatformPlugin`；CLI `--platform-experience` | `platform.systemUi.set`、`platform.haptics.perform` |
 | `pocket_platform` / `flutter.links` | 注册带 scheme 的 `PocketDeepLinkPlugin` 并配置原生 scheme；CLI `--deep-link-scheme=...` | `platform.links.initial/latest/events` |
 | `pocket_dio` / `dart.dio` | 显式依赖并注册 `PocketDioPlugin`；CLI `--dio` | `dio.request`，有界 HTTP 请求 |
 
 系统运行时、平台代理与调试录制还使用内部插件。OTA 下载使用 `pocket_services` 的 `http`；Worker 的 `net.http` 使用原有 Worker IO 通道。这两者不要求安装 Dio。Dio 不替换这两个已工作的实现。
+
+硬件拆分、权限边界与接入示例见 [HARDWARE_MODULES.md](HARDWARE_MODULES.md)。
 
 ## Dio 接入
 

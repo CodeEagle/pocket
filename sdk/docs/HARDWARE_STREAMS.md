@@ -59,7 +59,11 @@ for clients that only need the legacy service inventory.
 valid. `MethodChannelHardwarePlatform` lazily exposes one cached broadcast
 `EventChannel` source:
 
-`com.pocketnexus.host/hardware/events`
+`com.pocketnexus.host/hardware/sensors/events` and
+`com.pocketnexus.host/hardware/bluetooth/events`
+
+The default adapter merges only the selected providers. Camera, location and
+biometrics do not expose event channels.
 
 The source is subscribed before `startHardwareStream` is invoked. Dart derives
 the native id as `flutter.hardware:<trusted-app-id>:<trusted-session-id>:<guest-stream-id>`;
@@ -80,10 +84,13 @@ from OS sensor callbacks; BLE notifications come from the discovered connected
 characteristic and forward the real byte array.
 
 `startHardwareStream` receives `{kind, streamId, sessionId, ...params}` and
-`stopHardwareStream` receives `{streamId, sessionId}`. Dart derives the trusted
+`stopHardwareStream` receives `{kind, streamId, sessionId}`. The retained
+`kind` is required for both calls (`sensors` or `ble.notifications`); missing
+or unknown kinds are rejected before native dispatch. Dart derives the trusted
 session value from `PocketPluginContext.appId` and `.sessionId`; guest stream
 parameters cannot replace it. One-shot BLE read/write, BLE scan, and sensor
-read/permission calls use the same trusted session value. Native owner checks
+reads use the same trusted session value. OS permission requests use the
+separate permission_handler provider. Native owner checks
 reject cross-session characteristic access, late callbacks, disconnected
 peripherals, permission loss, duplicate stream IDs, and cancelled/disposed
 streams. GATT queues are serial per peripheral: a timeout or disconnect fences

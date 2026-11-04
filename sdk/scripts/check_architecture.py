@@ -56,6 +56,23 @@ if re.search(r"^  pocket_hardware:", (SDKROOT / "pubspec.yaml").read_text(), re.
 if "package:pocket_hardware/" in (SDKROOT / "lib/pocket_sdk.dart").read_text():
     errors.append("core SDK must not re-export optional hardware")
 
+hardware_modules = {"camera", "bluetooth", "sensors", "location", "biometrics", "weather"}
+optional_packages = {f"pocket_{name}" for name in hardware_modules} | {"pocket_permissions", "pocket_dio"}
+for package in optional_packages:
+    if re.search(rf"^  {package}:", (SDKROOT / "pubspec.yaml").read_text(), re.M):
+        errors.append(f"core SDK must not statically depend on optional {package}")
+for name in hardware_modules:
+    package = SDKROOT / f"packages/pocket_{name}"
+    dependencies = (package / "pubspec.yaml").read_text()
+    for other in hardware_modules - {name}:
+        if re.search(rf"^  pocket_{other}:", dependencies, re.M):
+            errors.append(f"pocket_{name} must not pull in unrelated pocket_{other}")
+    if re.search(r"^  pocket_hardware:", dependencies, re.M):
+        errors.append(f"pocket_{name} must not depend on the hardware aggregate")
+for base in ("pocket_hardware_core", "pocket_hardware"):
+    if re.search(r"^  plugin:", (SDKROOT / f"packages/{base}/pubspec.yaml").read_text(), re.M):
+        errors.append(f"{base} must not retain a second native hardware implementation")
+
 sdk_production = [SDKROOT / "lib", SDKROOT / "packages"]
 source_roots = [*sdk_production, SDKROOT / "native/src", SDKROOT / "scripts", DEMO_JS, DEMOROOT / "lib"]
 source_suffixes = {".dart", ".ts", ".tsx", ".rs"}

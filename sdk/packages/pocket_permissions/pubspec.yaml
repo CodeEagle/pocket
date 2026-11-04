@@ -1,0 +1,22 @@
+name: pocket_permissions
+description: Optional real OS permission provider for PocketJS hosts.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.2
+  flutter: '>=3.35.0'
+
+dependencies:
+  device_info_plus: 11.5.0
+  flutter:
+    sdk: flutter
+  permission_handler: 12.0.1
+  permission_handler_platform_interface: ^4.3.0
+  pocket_services:
+    path: ../pocket_services
+
+dev_dependencies:
+  flutter_lints: ^5.0.0
+  flutter_test:
+    sdk: flutter

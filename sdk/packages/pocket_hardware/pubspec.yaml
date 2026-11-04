@@ -12,17 +12,24 @@ dependencies:
     sdk: flutter
   pocket_services:
     path: ../pocket_services
+  pocket_permissions:
+    path: ../pocket_permissions
+  pocket_hardware_core:
+    path: ../pocket_hardware_core
+  pocket_camera:
+    path: ../pocket_camera
+  pocket_bluetooth:
+    path: ../pocket_bluetooth
+  pocket_sensors:
+    path: ../pocket_sensors
+  pocket_location:
+    path: ../pocket_location
+  pocket_biometrics:
+    path: ../pocket_biometrics
+  pocket_weather:
+    path: ../pocket_weather
 
 dev_dependencies:
   flutter_lints: ^5.0.0
   flutter_test:
     sdk: flutter
-
-flutter:
-  plugin:
-    platforms:
-      android:
-        package: dev.pocketjs.pocket_hardware
-        pluginClass: PocketHardwarePlugin
-      ios:
-        pluginClass: PocketHardwarePlugin

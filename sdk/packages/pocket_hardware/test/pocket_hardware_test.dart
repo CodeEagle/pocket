@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:pocket_hardware/pocket_hardware.dart';
 import 'package:pocket_services/pocket_services.dart';
 
@@ -127,7 +129,7 @@ final class _SharedSensorPlatform implements HardwarePlatform {
         Map<String, dynamic>.from(arguments),
       ),
     );
-    if (method == 'readSensors' || method == 'requestPermission') {
+    if (method == 'readSensors') {
       _sensorRequestCount += 1;
       final pending = _PendingSensorOperation(
         arguments['ownerToken'] as String?,
@@ -156,9 +158,6 @@ final class _SharedSensorPlatform implements HardwarePlatform {
             pending.complete(<String, dynamic>{
               'ok': true,
               'realSensors': true,
-              'permission': 'sensors',
-              'granted': true,
-              'status': 'granted',
               'accelX': 0.12,
             });
           }
@@ -193,9 +192,41 @@ final class _SharedSensorPlatform implements HardwarePlatform {
   }
 }
 
+int _permissionStatus = 1;
+final _permissionCalls = <String>[];
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  const permissionChannel = MethodChannel(
+    'flutter.baseflow.com/permissions/methods',
+  );
+  setUp(() {
+    // iOS motion has an OS grant; Android aliases are tested by pocket_permissions.
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    _permissionStatus = 1;
+    _permissionCalls.clear();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(permissionChannel, (call) async {
+          _permissionCalls.add(call.method);
+          if (call.method == 'requestPermissions') {
+            return <int, int>{
+              for (final value in call.arguments as List)
+                value as int: _permissionStatus,
+            };
+          }
+          return _permissionStatus;
+        });
+  });
+  tearDown(() {
+    debugDefaultTargetPlatformOverride = null;
+  });
+  tearDown(
+    () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(permissionChannel, null),
+  );
+
   test(
-    'HardwarePlugin dispatches BLE scan, sensor permission, and numeric sensor read before disposeSession',
+    'aggregate routes scan/read to hardware and OS permission to permission_handler',
     () async {
       final platform = _RecordingHardwarePlatform(
         <String, Map<String, dynamic>>{
@@ -204,13 +235,6 @@ void main() {
             'realBle': true,
             'state': 'poweredOn',
             'devices': const <Map<String, dynamic>>[],
-          },
-          'requestPermission': <String, dynamic>{
-            'ok': true,
-            'permission': 'sensors',
-            'granted': true,
-            'status': 'granted',
-            'realHardware': true,
           },
           'readSensors': <String, dynamic>{
             'ok': true,
@@ -299,7 +323,6 @@ void main() {
         platform.calls,
         containsAllInOrder(<String>[
           'startBleScan',
-          'requestPermission',
           'readSensors',
           'disposeSession',
         ]),
@@ -308,7 +331,7 @@ void main() {
   );
 
   test(
-    'readSensors waits across a >3s first-time OS authorization prompt and returns numeric data',
+    'readSensors retains its long native deadline and returns numeric data',
     () async {
       final platform = _RecordingHardwarePlatform(
         <String, Map<String, dynamic>>{},
@@ -386,15 +409,6 @@ void main() {
             'accelX': 0.42,
           };
         }
-        if (method == 'requestPermission') {
-          return <String, dynamic>{
-            'ok': true,
-            'permission': 'sensors',
-            'granted': false,
-            'status': 'denied',
-            'realHardware': true,
-          };
-        }
         return <String, dynamic>{'ok': true, 'cancelled': true};
       };
 
@@ -448,6 +462,7 @@ void main() {
         equals(platform.callArguments[0]['ownerToken']),
       );
 
+      _permissionStatus = 0;
       final deniedPerm =
           await manager.invoke(
                 HardwareCapabilities.requestPermission,
@@ -558,91 +573,37 @@ void main() {
   );
 
   test(
-    'sensor timeout from plugin A cannot cancel plugin B permission in mixed FIFO',
+    'sensor timeout cannot cancel or enqueue a permission_handler request',
     () async {
       final platform = _SharedSensorPlatform();
       final managerA = await _createManager(
-        'fifo-mixed-a',
+        'independent-a',
         platform,
         requestTimeout: const Duration(milliseconds: 40),
       );
-      final managerB = await _createManager(
-        'fifo-mixed-b',
-        platform,
-        requestTimeout: const Duration(milliseconds: 300),
-      );
-
+      final managerB = await _createManager('independent-b', platform);
       try {
-        Object? errorA;
-        Object? errorB;
-        StackTrace? errorBStack;
-        final aRead = managerA.manager.invoke(HardwareCapabilities.sensorsRead);
-        final bPermission =
-            Future<void>.delayed(const Duration(milliseconds: 20))
-                .then<Object?>((_) {
-                  return managerB.manager.invoke(
-                    HardwareCapabilities.requestPermission,
-                    const <String, dynamic>{
-                      'permission': HardwarePermissions.sensors,
-                    },
-                  );
-                })
-                .then<Object?>(
-                  (value) => value,
-                  onError: (Object error, StackTrace stack) {
-                    errorB = error;
-                    errorBStack = stack;
-                    return null;
-                  },
-                );
-        try {
-          await aRead;
-        } catch (error) {
-          errorA = error;
-        }
-        await platform.secondSensorStarted.future;
-        final permissionResult = await bPermission;
-        expect(errorB, isNull, reason: 'B failed: $errorB\n$errorBStack');
-        expect(permissionResult, isA<Map<String, dynamic>>());
-        final permission = permissionResult! as Map<String, dynamic>;
-
-        expect(
-          errorA,
-          isA<PocketCapabilityException>().having(
-            (error) => error.code,
-            'A error',
-            'hardware_timeout',
-          ),
+        final read = managerA.manager.invoke(HardwareCapabilities.sensorsRead);
+        final failed = expectLater(
+          read,
+          throwsA(isA<PocketCapabilityException>()),
         );
-        expect(permission['ok'], isTrue);
+        final permission =
+            await managerB.manager.invoke(
+                  HardwareCapabilities.requestPermission,
+                  {'permission': HardwarePermissions.sensors},
+                )
+                as Map;
         expect(permission['granted'], isTrue);
-        await platform.lateFirstResultDelivered.future;
-
-        final sensorCalls = platform.calls
-            .where(
-              (call) =>
-                  call.method == 'readSensors' ||
-                  call.method == 'requestPermission' ||
-                  call.method == 'cancelSensorOperation',
-            )
-            .toList(growable: false);
+        await failed;
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(_permissionCalls, ['requestPermissions']);
         expect(
-          sensorCalls.map((call) => call.method),
-          equals(<String>[
-            'readSensors',
-            'requestPermission',
-            'cancelSensorOperation',
-          ]),
+          platform.calls
+              .where((call) => call.method != 'disposeSession')
+              .map((call) => call.method),
+          ['readSensors', 'cancelSensorOperation'],
         );
-        final ownerA = sensorCalls[0].arguments['ownerToken'];
-        final ownerB = sensorCalls[1].arguments['ownerToken'];
-        expect(ownerA, isA<String>());
-        expect(ownerB, isA<String>());
-        expect(ownerA, isNot(equals(ownerB)));
-        expect(sensorCalls[0].arguments['operationId'], 1);
-        expect(sensorCalls[1].arguments['operationId'], 1);
-        expect(sensorCalls[2].arguments['ownerToken'], ownerA);
-        expect(sensorCalls[2].arguments['operationId'], 1);
       } finally {
         await managerA.dispose();
         await managerB.dispose();
