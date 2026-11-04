@@ -258,6 +258,7 @@ function isRecoverableInputFailure(message: string): boolean {
     message.startsWith("pointer y") ||
     message.startsWith("text ") ||
     message.startsWith("unsupported text event") ||
+    message.includes("textInput") ||
     message.startsWith("preview input type") ||
     message.includes("input.pointer") ||
     message.includes("input.text");
@@ -508,10 +509,11 @@ type PreviewRuntime = {
   frame?: PreviewFrame;
   resources: Map<string, JsonRecord>;
   initialEvents: JsonRecord[];
-  /** Video commands are transient native frame events. Keep them until the
-   * composite frame is published because pumpRuntime may settle several
-   * native frames before tickNow emits the browser projection. */
-  pendingVideoEvents: JsonRecord[];
+  /** Browser lifecycle edges are transient native frame events. Keep video
+   * and text-input edges together until the composite frame is published
+   * because pumpRuntime may settle several native frames before tickNow emits
+   * the browser projection. */
+  pendingBrowserEvents: JsonRecord[];
   needsPump: boolean;
   pumping: number;
 };
@@ -560,6 +562,11 @@ function eventName(event: JsonRecord): string {
 function isVideoPlaybackEvent(event: JsonRecord): boolean {
   const name = eventName(event);
   return name === "video.play" || name === "video.pause" || name === "video.release";
+}
+
+function isTextInputLifecycleEvent(event: JsonRecord): boolean {
+  const name = eventName(event);
+  return name === "textInput.open" || name === "textInput.update" || name === "textInput.close";
 }
 
 function hostError(code: string, message: string): JsonRecord {
@@ -618,6 +625,43 @@ function transformedChildOp(
   return transformed;
 }
 
+function transformedTextInputEvent(
+  event: JsonRecord,
+  slot: SurfaceSlot,
+  child: PreviewFrame,
+  runtimeToken: string,
+): JsonRecord {
+  const payload = eventPayload(event);
+  if (!payload) return { ...event, runtime: slot.appId, runtimeToken };
+  const scaleX = slot.w / Math.max(1, child.width);
+  const scaleY = slot.h / Math.max(1, child.height);
+  const rect = (value: unknown): JsonRecord | undefined => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const source = value as JsonRecord;
+    const x = Number(source.x);
+    const y = Number(source.y);
+    const width = Number(source.width ?? source.w);
+    const height = Number(source.height ?? source.h);
+    if (![x, y, width, height].every(Number.isFinite)) return undefined;
+    return {
+      ...source,
+      x: x * scaleX + slot.x,
+      y: y * scaleY + slot.y,
+      width: width * scaleX,
+      height: height * scaleY,
+    };
+  };
+  const transformed: JsonRecord = { ...event, runtime: slot.appId, runtimeToken };
+  const nextPayload: JsonRecord = { ...payload };
+  const nextRect = rect(payload.rect);
+  if (nextRect) nextPayload.rect = nextRect;
+  const nextClip = rect(payload.clip);
+  if (nextClip) nextPayload.clip = nextClip;
+  transformed.payload = nextPayload;
+  if (event.params !== undefined && event.payload === undefined) transformed.params = nextPayload;
+  return transformed;
+}
+
 type Subscriber = { controller: ReadableStreamDefaultController<Uint8Array>; closed: boolean; browserPresentation: boolean };
 
 class PreviewSession {
@@ -640,6 +684,9 @@ class PreviewSession {
   private systemCatalog?: SystemCatalog;
   private systemConfigured = false;
   private nextInstanceId = 0;
+  /** Root runtime identity changes on every probe rebuild so late browser
+   * text-input edits cannot enter a fresh guest with a reused field id. */
+  private rootGeneration = 0;
   private nextSystemRequestId = 0;
   private childArtifacts: Record<string, PreviewArtifactPaths> = {};
   /** Root source directory used for browser-served loose media. */
@@ -832,7 +879,7 @@ class PreviewSession {
         this.rootRuntime = {
           appId: this.systemCatalog?.systemUI ?? (artifacts.appId ?? this.id),
           instanceId: "system-ui",
-          generation: 1,
+          generation: ++this.rootGeneration,
           probe,
           artifacts,
           viewportWidth: this.width,
@@ -840,7 +887,7 @@ class PreviewSession {
           safeArea: { ...this.safeArea },
           resources: new Map(),
           initialEvents: [],
-          pendingVideoEvents: [],
+          pendingBrowserEvents: [],
           needsPump: false,
           pumping: 0,
         };
@@ -1081,14 +1128,15 @@ class PreviewSession {
         runtime.frame = frame;
         for (const event of frame.events) {
           if (!event || typeof event !== "object" || Array.isArray(event)) continue;
-          if (!isVideoPlaybackEvent(event as JsonRecord)) continue;
-          runtime.pendingVideoEvents.push(event as JsonRecord);
+          const browserEvent = event as JsonRecord;
+          if (!isVideoPlaybackEvent(browserEvent) && !isTextInputLifecycleEvent(browserEvent)) continue;
+          runtime.pendingBrowserEvents.push(browserEvent);
         }
         // A guest can emit several control edges while native settles one
         // input boundary. Keep enough history for the browser to observe the
         // latest policy without allowing a malicious guest to grow it.
-        if (runtime.pendingVideoEvents.length > 128) {
-          runtime.pendingVideoEvents.splice(0, runtime.pendingVideoEvents.length - 128);
+        if (runtime.pendingBrowserEvents.length > 128) {
+          runtime.pendingBrowserEvents.splice(0, runtime.pendingBrowserEvents.length - 128);
         }
         if (runtime.initialEvents.length === 0) {
           runtime.initialEvents = frame.events.filter((event): event is JsonRecord =>
@@ -1506,7 +1554,7 @@ class PreviewSession {
       safeArea: initialSafeArea,
       resources: new Map(),
       initialEvents: [],
-      pendingVideoEvents: [],
+      pendingBrowserEvents: [],
       needsPump: false,
       pumping: 0,
     };
@@ -1605,7 +1653,8 @@ class PreviewSession {
     const slots = this.surfaceSlots(root);
     const byHandle = new Map(slots.map((slot) => [slot.handle, slot]));
     const focusedSlot = slots.find((slot) => slot.focused);
-    const focusedChild = focusedSlot ? this.childRuntimes.get(focusedSlot.appId)?.frame : undefined;
+    const focusedChildRuntime = focusedSlot ? this.childRuntimes.get(focusedSlot.appId) : undefined;
+    const focusedChild = focusedChildRuntime?.frame;
     // Pointer coordinates are carried over the native 10-bit touch wire. A
     // child can have a larger logical frame than that wire, so expose the
     // largest root-space rectangle that maps to an accepted child coordinate.
@@ -1672,22 +1721,42 @@ class PreviewSession {
       const asset = resource.asset;
       if (typeof asset === "string") releasedResources.delete(asset);
     }
-    // Child runtimes execute their own JS media controller. Forward only the
-    // existing video command events to the browser projection, tagging the
-    // owning app so IDs may safely repeat across runtime instances. Host
-    // requests remain private to this adapter and are handled above.
+    // Child runtimes execute their own JS media/text controllers. Forward only
+    // browser lifecycle edges, tagging the owning app so IDs may safely repeat
+    // across runtime instances. Host requests remain private to this adapter
+    // and are handled above.
+    const rootRuntimeToken = this.rootRuntime
+      ? `${this.rootRuntime.instanceId}:${this.rootRuntime.generation}`
+      : undefined;
     const rootEvents = (root.events.length > 0 ? root.events : (this.rootRuntime?.initialEvents ?? []))
-      .filter((event) => !isVideoPlaybackEvent(event));
-    // Playback edges are consumed by native while it settles an input and can
-    // disappear from the final settled frame. The runtime queues above retain
-    // them until this exact browser publication boundary. Include every live
-    // child, even when its host surface is currently culled, so JS intent is
-    // not lost during coverage/scroll transitions.
-    const rootVideoEvents = this.rootRuntime?.pendingVideoEvents ?? [];
+      .filter((event) => !isVideoPlaybackEvent(event) && !isTextInputLifecycleEvent(event))
+      .map((event) => rootRuntimeToken ? { ...event, runtimeToken: rootRuntimeToken } : event);
+    // Playback/text edges are consumed by native while it settles an input and
+    // can disappear from the final settled frame. The shared runtime queue
+    // retains them until this exact browser publication boundary. Include
+    // every live child for video, even when its surface is culled, so media
+    // intent is not lost during coverage/scroll transitions.
+    const rootBrowserEvents = (this.rootRuntime?.pendingBrowserEvents ?? [])
+      .map((event) => rootRuntimeToken ? { ...event, runtimeToken: rootRuntimeToken } : event);
     const childVideoEvents = [...this.childRuntimes.entries()].flatMap(([appId, child]) => {
       const runtimeToken = `${child.instanceId}:${child.generation}`;
-      return child.pendingVideoEvents.map((event) => ({ ...event, runtime: appId, runtimeToken }));
+      return child.pendingBrowserEvents
+        .filter((event) => isVideoPlaybackEvent(event))
+        .map((event) => ({ ...event, runtime: appId, runtimeToken }));
     });
+    // Only the focused child owns the single browser text editor overlay. Keep
+    // its lifecycle edges ordered with the root frame and tag the runtime
+    // identity so a destroyed/recreated child cannot consume late DOM edits.
+    const childTextInputEvents = focusedSlot && focusedChild
+      ? (focusedChildRuntime?.pendingBrowserEvents ?? [])
+        .filter((event) => isTextInputLifecycleEvent(event))
+        .map((event) => transformedTextInputEvent(
+          event,
+          focusedSlot,
+          focusedChild,
+          focusedChildRuntime ? `${focusedChildRuntime.instanceId}:${focusedChildRuntime.generation}` : "",
+        ))
+      : [];
     const { inputBounds: _nativeInputBounds, ...rootFrame } = root;
     return {
       ...rootFrame,
@@ -1707,7 +1776,7 @@ class PreviewSession {
           previous.height !== resource.height || previous.psm !== resource.psm;
       }),
       releasedResources: [...releasedResources],
-      events: [...rootEvents, ...rootVideoEvents, ...childVideoEvents],
+      events: [...rootEvents, ...rootBrowserEvents, ...childVideoEvents, ...childTextInputEvents],
     };
   }
 
@@ -1920,8 +1989,8 @@ class PreviewSession {
         }
       }
       this.emit({ type: "frame", revision: this.artifactRevision ?? null, frame: this.frame });
-      runtime.pendingVideoEvents.length = 0;
-      for (const child of this.childRuntimes.values()) child.pendingVideoEvents.length = 0;
+      runtime.pendingBrowserEvents.length = 0;
+      for (const child of this.childRuntimes.values()) child.pendingBrowserEvents.length = 0;
     }
     await this.schedule();
   }
@@ -2073,6 +2142,24 @@ class PreviewSession {
           const { runtime: _runtime, runtimeToken: _runtimeToken, ...guestPayload } = messagePayload!;
           await target.probe.checked({ op: "send", message: { ...message, payload: guestPayload } });
           target.needsPump = true;
+        } else if (typeof input.runtime === "string" && input.runtime) {
+          // Browser text-input events carry their owning child runtime on the
+          // outer request. Validate its instance generation before dispatching
+          // so a late DOM edit cannot enter a newly-created child with the
+          // same catalog app id.
+          const target = this.childRuntimes.get(input.runtime);
+          const runtimeToken = typeof input.runtimeToken === "string" ? input.runtimeToken : "";
+          if (!target || runtimeToken !== `${target.instanceId}:${target.generation}`) return;
+          await target.probe.checked({ op: "send", message });
+          target.needsPump = true;
+        } else if (typeof input.runtimeToken === "string" && input.runtimeToken) {
+          // Root SystemUI uses a stable instance name but a monotonically
+          // increasing generation across probe rebuilds. Keep the same stale
+          // edit protection as child video/text events without adding a
+          // second root routing protocol.
+          if (!this.rootRuntime || input.runtimeToken !== `${this.rootRuntime.instanceId}:${this.rootRuntime.generation}`) return;
+          await this.rootRuntime.probe.checked({ op: "send", message });
+          this.rootRuntime.needsPump = true;
         } else {
           await probe.checked({ op: "send", message });
         }

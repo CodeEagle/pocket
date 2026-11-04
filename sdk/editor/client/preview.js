@@ -503,7 +503,7 @@
     document.body.style.width = "100%";
     document.body.style.height = "100%";
     document.body.style.overflow = "hidden";
-    root.style.cssText += ";display:flex;flex-direction:column;align-items:stretch;min-height:100%;background:#0b1020;color:#e5e7eb";
+    root.style.cssText += ";display:flex;flex-direction:column;align-items:stretch;min-height:100%;position:relative;background:#0b1020;color:#e5e7eb";
     canvas.style.cssText += ";display:block;width:100%;height:auto;max-width:100%;background:#fff;touch-action:none;outline:none;image-rendering:auto";
     const resources = new Map();
     // Browser videos are real HTMLMediaElements used as Canvas sources. The
@@ -537,6 +537,15 @@
     let wheelTail = null;
     let resizeTimer = 0;
     const embedded = global.parent !== global;
+    // Framework InputField sessions are host events, not raw key streams. The
+    // browser owns one real editable control for the active session so the
+    // platform supplies selection, paste and IME/composition facts. The
+    // control is intentionally kept separate from the Canvas projection: the
+    // canvas remains the visual shell while this element is the edit surface.
+    let activeTextInput = null;
+    let textInputElement = null;
+    let textInputListenersInstalled = false;
+    let suppressTextInputBlur = false;
 
     function announce(type, payload) {
       // The editor and preview are same-origin.  Never broadcast captures or
@@ -925,6 +934,373 @@
       return enqueueInput(() => sendInputPayload(payload), onFailure, guard, pointerMoveKey(payload));
     }
 
+    function textInputPayload(event) {
+      const payload = event?.payload ?? event?.params;
+      return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+    }
+
+    function textInputEventName(event) {
+      return typeof event?.name === "string" ? event.name : typeof event?.method === "string" ? event.method : "";
+    }
+
+    function textInputNumber(value, fallback) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+    }
+
+    function textInputOffset(value, fallback, length, allowUnset = false) {
+      const parsed = textInputNumber(value, fallback);
+      if (allowUnset && parsed < 0) return -1;
+      return clamp(parsed, 0, length);
+    }
+
+    function textInputIdentity(payload) {
+      const id = payload && payload.id !== undefined && payload.id !== null ? String(payload.id) : "";
+      const editingSession = typeof payload?.editingSession === "string" ? payload.editingSession : "";
+      return { id, editingSession };
+    }
+
+    function textInputElementStyle(element) {
+      element.setAttribute("aria-hidden", "true");
+      element.setAttribute("autocomplete", "off");
+      element.setAttribute("autocorrect", "off");
+      element.setAttribute("autocapitalize", "off");
+      element.setAttribute("spellcheck", "false");
+      element.setAttribute("wrap", "off");
+      element.rows = 1;
+      // The DrawOps shell remains the visible control. The real DOM editor
+      // stays transparent while retaining a native caret/selection/IME target.
+      element.style.cssText = [
+        "position:absolute",
+        "display:none",
+        "box-sizing:border-box",
+        "margin:0",
+        "padding:0",
+        "border:0",
+        "outline:0",
+        "resize:none",
+        "overflow:hidden",
+        "background:transparent",
+        "color:transparent",
+        "caret-color:transparent",
+        "z-index:10",
+        "font:inherit",
+        "line-height:normal",
+        "white-space:pre",
+      ].join(";");
+    }
+
+    function ensureTextInputElement() {
+      if (textInputElement) return textInputElement;
+      textInputElement = document.createElement("textarea");
+      textInputElement.id = "pocket-preview-text-input";
+      textInputElement.tabIndex = 0;
+      textInputElementStyle(textInputElement);
+      root.appendChild(textInputElement);
+      textInputListenersInstalled = false;
+      return textInputElement;
+    }
+
+    function textInputLogicalRect(payload) {
+      const rect = payload?.rect;
+      if (!rect || typeof rect !== "object" || Array.isArray(rect)) return null;
+      const x = number(rect.x, NaN);
+      const y = number(rect.y, NaN);
+      const width = number(rect.width ?? rect.w, NaN);
+      const height = number(rect.height ?? rect.h, NaN);
+      if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+      return { x, y, width, height };
+    }
+
+    function textInputLayout() {
+      const state = activeTextInput;
+      const element = textInputElement;
+      if (!state || !element) return;
+      const rect = textInputLogicalRect(state.params);
+      if (!rect) return;
+      const canvasRect = canvas.getBoundingClientRect();
+      const rootRect = root.getBoundingClientRect();
+      const width = Math.max(1, logicalWidth());
+      const height = Math.max(1, logicalHeight());
+      const scaleX = canvasRect.width / width;
+      const scaleY = canvasRect.height / height;
+      element.style.left = `${canvasRect.left - rootRect.left + rect.x * scaleX}px`;
+      element.style.top = `${canvasRect.top - rootRect.top + rect.y * scaleY}px`;
+      element.style.width = `${Math.max(1, rect.width * scaleX)}px`;
+      element.style.height = `${Math.max(1, rect.height * scaleY)}px`;
+      element.style.display = "block";
+    }
+
+    function textInputSelection(element) {
+      const length = element.value.length;
+      const selectionStart = textInputOffset(element.selectionStart, length, length);
+      const selectionEnd = textInputOffset(element.selectionEnd, selectionStart, length);
+      const composition = activeTextInput?.composition;
+      const composingBase = composition ? textInputOffset(composition.start, -1, length, true) : -1;
+      const composingExtent = composition ? textInputOffset(composition.end, -1, length, true) : -1;
+      return {
+        text: element.value,
+        selectionBase: selectionStart,
+        selectionExtent: Math.max(selectionStart, selectionEnd),
+        composingBase,
+        composingExtent: Math.max(composingBase, composingExtent),
+      };
+    }
+
+    function sameTextInputValue(left, right) {
+      return !!left && !!right && left.text === right.text &&
+        left.selectionBase === right.selectionBase &&
+        left.selectionExtent === right.selectionExtent &&
+        left.composingBase === right.composingBase &&
+        left.composingExtent === right.composingExtent;
+    }
+
+    function textInputRoute(state) {
+      const route = {};
+      if (state?.runtime) route.runtime = state.runtime;
+      if (state?.runtimeToken) route.runtimeToken = state.runtimeToken;
+      return route;
+    }
+
+    function sendTextInputEvent(name, state, value) {
+      if (!state || !state.id || !state.editingSession) return Promise.resolve();
+      const next = value || textInputSelection(textInputElement);
+      // Flutter increments the native revision before every edit/submit/close
+      // callback. The guest's editingSession/jsRevision guards rely on the
+      // same monotonic edge even though this browser host has no Dart layer.
+      state.revision = Math.max(state.revision + 1, 1);
+      state.lastSent = { ...next };
+      return input({
+        type: "message",
+        ...textInputRoute(state),
+        message: {
+          type: "event",
+          name,
+          payload: {
+            id: state.id,
+            editingSession: state.editingSession,
+            revision: state.revision,
+            jsRevision: state.jsRevision,
+            source: "native",
+            ...next,
+          },
+        },
+      });
+    }
+
+    function applyTextInputValue(state, params, force = false) {
+      const element = ensureTextInputElement();
+      if (!Object.prototype.hasOwnProperty.call(params, "text") &&
+        !Object.prototype.hasOwnProperty.call(params, "selectionBase") &&
+        !Object.prototype.hasOwnProperty.call(params, "selectionExtent") &&
+        !Object.prototype.hasOwnProperty.call(params, "composingBase") &&
+        !Object.prototype.hasOwnProperty.call(params, "composingExtent")) return;
+      const text = typeof params.text === "string" ? params.text : element.value;
+      const selectionStart = textInputOffset(params.selectionBase, text.length, text.length);
+      const selectionEnd = textInputOffset(params.selectionExtent, selectionStart, text.length);
+      const composingStart = textInputOffset(params.composingBase, -1, text.length, true);
+      const composingEnd = textInputOffset(params.composingExtent, -1, text.length, true);
+      if (force || element.value !== text) element.value = text;
+      try {
+        element.setSelectionRange(selectionStart, Math.max(selectionStart, selectionEnd));
+      } catch { /* test DOMs may omit selection APIs */ }
+      state.composition = composingStart >= 0 && composingEnd >= composingStart
+        ? { start: composingStart, end: composingEnd }
+        : null;
+      state.lastSent = textInputSelection(element);
+    }
+
+    function closeTextInputElement(state = activeTextInput) {
+      if (!state || activeTextInput !== state) return;
+      suppressTextInputBlur = true;
+      try { textInputElement?.blur?.(); } catch { /* already detached */ }
+      suppressTextInputBlur = false;
+      if (textInputElement) textInputElement.style.display = "none";
+      try { textInputElement?.remove?.(); } catch { /* test DOM may not implement remove */ }
+      textInputElement = null;
+      textInputListenersInstalled = false;
+      activeTextInput = null;
+    }
+
+    function openTextInput(event, params) {
+      const identity = textInputIdentity(params);
+      if (!identity.id) return;
+      const runtime = typeof event?.runtime === "string" ? event.runtime : "";
+      const runtimeToken = typeof event?.runtimeToken === "string" ? event.runtimeToken : "";
+      if (activeTextInput &&
+        (activeTextInput.id !== identity.id ||
+          activeTextInput.editingSession !== identity.editingSession ||
+          activeTextInput.runtime !== runtime ||
+          activeTextInput.runtimeToken !== runtimeToken)) {
+        // A new host session replaces the old native editor. Preserve the
+        // Flutter close edge for the old guest before dropping its DOM node.
+        void sendTextInputEvent("textInput.closed", activeTextInput);
+        closeTextInputElement();
+      }
+      const state = activeTextInput ?? {
+        id: identity.id,
+        editingSession: identity.editingSession,
+        runtime,
+        runtimeToken,
+        revision: Math.max(0, textInputNumber(params.revision, 0)),
+        jsRevision: Math.max(0, textInputNumber(params.jsRevision, 0)),
+        params: {},
+        composition: null,
+        lastSent: null,
+      };
+      state.id = identity.id;
+      state.editingSession = identity.editingSession;
+      state.runtime = runtime;
+      state.runtimeToken = runtimeToken;
+      state.revision = Math.max(state.revision, textInputNumber(params.revision, state.revision));
+      state.jsRevision = Math.max(state.jsRevision, textInputNumber(params.jsRevision, state.jsRevision));
+      state.params = { ...params };
+      activeTextInput = state;
+      applyTextInputValue(state, params, true);
+      textInputLayout();
+      const element = ensureTextInputElement();
+      if (!textInputListenersInstalled) installTextInputListeners();
+      // Only open/focus claims focus. Frame updates must never steal focus from
+      // a user selection or an IME candidate window.
+      try { element.focus?.({ preventScroll: true }); } catch { try { element.focus?.(); } catch { /* best effort */ } }
+    }
+
+    function updateTextInput(event, params) {
+      const identity = textInputIdentity(params);
+      const state = activeTextInput;
+      if (!state) {
+        // A fresh browser/SSE subscriber can receive the guest's next
+        // full-value update without having seen the original open edge. A
+        // value-bearing update has enough identity and geometry to recover
+        // the native editor; a rect-only update must remain non-focusing.
+        if (identity.id && identity.editingSession && textInputLogicalRect(params) && typeof params.text === "string") {
+          openTextInput(event, params);
+        }
+        return;
+      }
+      if (!identity.id || state.id !== identity.id ||
+        (identity.editingSession && state.editingSession !== identity.editingSession) ||
+        (typeof event?.runtime === "string" && event.runtime !== state.runtime) ||
+        (typeof event?.runtimeToken === "string" && event.runtimeToken !== state.runtimeToken)) return;
+      const incomingRevision = textInputNumber(params.revision, state.revision);
+      const incomingJsRevision = textInputNumber(params.jsRevision, state.jsRevision);
+      const isJsCommand = params.force === true && params.source === "js" || params.source === "programmatic";
+      const hasValue = ["text", "selectionBase", "selectionExtent", "composingBase", "composingExtent"]
+        .some((key) => Object.prototype.hasOwnProperty.call(params, key));
+      const staleNativeValue = hasValue && incomingRevision < state.revision && !isJsCommand;
+      const staleJsValue = hasValue && incomingJsRevision < state.jsRevision;
+      state.revision = Math.max(state.revision, incomingRevision);
+      if (incomingJsRevision >= state.jsRevision) state.jsRevision = incomingJsRevision;
+      state.params = { ...state.params, ...params };
+      // Rect-only updates deliberately leave value, selection and composing
+      // untouched. A stale native echo may still move/style the overlay, but
+      // only a current forced JS command may replace browser edit facts.
+      if (hasValue && !staleNativeValue && !staleJsValue) {
+        applyTextInputValue(state, params, isJsCommand || typeof params.text === "string");
+      }
+      textInputLayout();
+    }
+
+    function handleTextInputEvent(event) {
+      const name = textInputEventName(event);
+      if (name !== "textInput.open" && name !== "textInput.update" && name !== "textInput.close") return;
+      const params = textInputPayload(event);
+      if (!params) return;
+      if (name === "textInput.open") openTextInput(event, params);
+      else if (name === "textInput.update") updateTextInput(event, params);
+      else {
+        const identity = textInputIdentity(params);
+        const state = activeTextInput;
+        if (state && identity.id === state.id &&
+          (!identity.editingSession || identity.editingSession === state.editingSession) &&
+          (!event.runtime || event.runtime === state.runtime) &&
+          (!event.runtimeToken || event.runtimeToken === state.runtimeToken)) {
+          closeTextInputElement(state);
+        }
+      }
+    }
+
+    function sendTextInputEdit() {
+      const state = activeTextInput;
+      const element = textInputElement;
+      if (!state || !element) return;
+      const value = textInputSelection(element);
+      if (sameTextInputValue(state.lastSent, value)) return;
+      void sendTextInputEvent("textInput.edit", state, value);
+    }
+
+    function submitTextInput() {
+      const state = activeTextInput;
+      const element = textInputElement;
+      if (!state || !element) return;
+      const value = textInputSelection(element);
+      void sendTextInputEvent("textInput.submit", state, {
+        ...value,
+        action: typeof state.params.action === "string" ? state.params.action : "done",
+      });
+      closeTextInputElement(state);
+    }
+
+    function dismissTextInput() {
+      const state = activeTextInput;
+      const element = textInputElement;
+      if (!state || !element) return;
+      void sendTextInputEvent("textInput.closed", state);
+      closeTextInputElement(state);
+    }
+
+    function installTextInputListeners() {
+      if (textInputListenersInstalled) return;
+      const element = ensureTextInputElement();
+      element.addEventListener("input", () => {
+        if (!activeTextInput) return;
+        sendTextInputEdit();
+      });
+      element.addEventListener("compositionstart", (event) => {
+        if (!activeTextInput) return;
+        const text = String(event.data || "");
+        const end = textInputOffset(element.selectionEnd, element.value.length, element.value.length);
+        const start = Math.max(0, end - text.length);
+        activeTextInput.composition = { start, end };
+        sendTextInputEdit();
+      });
+      element.addEventListener("compositionupdate", (event) => {
+        if (!activeTextInput) return;
+        const text = String(event.data || "");
+        const end = textInputOffset(element.selectionEnd, element.value.length, element.value.length);
+        const start = Math.max(0, end - text.length);
+        activeTextInput.composition = { start, end };
+        sendTextInputEdit();
+      });
+      element.addEventListener("compositionend", () => {
+        if (!activeTextInput) return;
+        activeTextInput.composition = null;
+        sendTextInputEdit();
+      });
+      element.addEventListener("select", sendTextInputEdit);
+      element.addEventListener("keyup", (event) => {
+        if (!activeTextInput) return;
+        if (event.key === "Enter") return;
+        sendTextInputEdit();
+      });
+      element.addEventListener("keydown", (event) => {
+        if (!activeTextInput) return;
+        if (event.key === "Enter" && !event.isComposing) {
+          event.preventDefault();
+          submitTextInput();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          dismissTextInput();
+        }
+      });
+      element.addEventListener("blur", () => {
+        if (!suppressTextInputBlur && activeTextInput) dismissTextInput();
+      });
+      textInputListenersInstalled = true;
+    }
+
+    installTextInputListeners();
+
     function nextPointerSlot() {
       for (let slot = 0; slot < MAX_POINTER_CONTACTS; slot += 1) {
         if (!reservedPointerSlots.has(slot)) {
@@ -1011,6 +1387,7 @@
       if (frame && Number(next.frame) < Number(frame.frame)) {
         resetPointerContacts();
         resetVideoProjection(true);
+        closeTextInputElement();
       }
       frame = next;
       for (const resource of Array.isArray(next.resources) ? next.resources : []) {
@@ -1027,6 +1404,27 @@
       for (const event of Array.isArray(next.events) ? next.events : []) applyVideoCommand(event);
       syncVideoOps(next.ops);
       renderCurrentFrame();
+      // The compositor exposes a child input rectangle only while a child
+      // surface owns focus. Do not leave a root editor targeting SystemUI (or
+      // a child editor targeting a vanished surface) active across that focus
+      // hand-off; the guest receives the same close edge as Flutter's host.
+      const childFocused = !!next.inputBounds;
+      if (activeTextInput && (!!activeTextInput.runtime !== childFocused)) {
+        void sendTextInputEvent("textInput.closed", activeTextInput);
+        closeTextInputElement();
+      }
+      for (const event of Array.isArray(next.events) ? next.events : []) {
+        // A composite frame may retain the previous runtime's lifecycle edge
+        // beside the newly focused surface. Only the focused runtime may
+        // claim the one browser editor for this frame.
+        const name = textInputEventName(event);
+        if (name === "textInput.open" || name === "textInput.update" || name === "textInput.close") {
+          const eventRuntime = typeof event?.runtime === "string" ? event.runtime : "";
+          if (childFocused !== Boolean(eventRuntime)) continue;
+        }
+        handleTextInputEvent(event);
+      }
+      textInputLayout();
       const tokens = (Array.isArray(next.presentationTokens) ? next.presentationTokens : [])
         .filter(token => typeof token === "string" && !presentedTokens.has(token));
       if (tokens.length) {
@@ -1191,6 +1589,9 @@
     canvas.addEventListener("pointercancel", (event) => endPointer(event, "cancel"));
     canvas.addEventListener("lostpointercapture", (event) => endPointer(event, "cancel"));
     canvas.addEventListener("keydown", (event) => {
+      // A real textarea owns all framework text input while it is open. The
+      // canvas path remains the raw GuestFrame input.text compatibility lane.
+      if (activeTextInput) return;
       void input({ type: "text", events: [{ kind: "keyDown", key: event.key, repeat: event.repeat }] });
       if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
         void input({ type: "text", events: [{ kind: "commit", text: event.key }] });
@@ -1198,17 +1599,21 @@
       if (["Backspace", "Delete", "Enter", "Tab", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) event.preventDefault();
     });
     canvas.addEventListener("keyup", (event) => {
+      if (activeTextInput) return;
       void input({ type: "text", events: [{ kind: "keyUp", key: event.key, repeat: false }] });
     });
     canvas.addEventListener("compositionstart", (event) => {
+      if (activeTextInput) return;
       const text = String(event.data || "");
       void input({ type: "text", events: [{ kind: "composition", text, selectionStart: 0, selectionEnd: text.length }] });
     });
     canvas.addEventListener("compositionupdate", (event) => {
+      if (activeTextInput) return;
       const text = String(event.data || "");
       void input({ type: "text", events: [{ kind: "composition", text, selectionStart: 0, selectionEnd: text.length }] });
     });
     canvas.addEventListener("compositionend", (event) => {
+      if (activeTextInput) return;
       const text = String(event.data || "");
       const events = [{ kind: "compositionEnd" }];
       if (text) events.push({ kind: "commit", text });
@@ -1470,15 +1875,21 @@
     }
     function onDensityChange() {
       renderCurrentFrame();
+      textInputLayout();
       watchDensity();
     }
     watchDensity();
-    global.addEventListener("resize", renderCurrentFrame);
+    const onPreviewResize = () => {
+      renderCurrentFrame();
+      textInputLayout();
+    };
+    global.addEventListener("resize", onPreviewResize);
 
     if (!embedded && typeof ResizeObserver === "function") {
       const observer = new ResizeObserver(() => {
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(resize, 50);
+        textInputLayout();
       });
       observer.observe(canvas);
     }
@@ -1486,12 +1897,15 @@
     connect();
     return { canvas, input, close: async () => {
       closed = true;
+      closeTextInputElement();
+      textInputElement?.remove?.();
+      textInputElement = null;
       resetVideoProjection(true);
       cancelPointerContacts();
       stream?.close();
       global.removeEventListener("blur", cancelPointerContacts);
       densityQuery?.removeEventListener("change", onDensityChange);
-      global.removeEventListener("resize", renderCurrentFrame);
+      global.removeEventListener("resize", onPreviewResize);
       await inputTail;
       resetPointerContacts();
     }, getFrame: () => frame };
