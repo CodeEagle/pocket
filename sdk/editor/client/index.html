@@ -33,7 +33,19 @@
                   <div class="preview-options-content">
                     <button id="source-toggle" class="button secondary small-button" type="button" disabled>Source</button>
                     <button id="copy-preview-link" class="button secondary small-button" type="button" disabled>Copy Flutter link</button>
-                    <p id="wechat-validation-hint" class="field-help">Build prepares the Flutter package. Each platform has its own preview controls. Hardware and platform capabilities require a device.</p>
+                    <div class="preview-plugin-settings">
+                      <span class="control-label">Preview plugins · Flutter</span>
+                      <label class="preview-plugin-option">
+                        <input id="web-bluetooth-toggle" type="checkbox" aria-describedby="web-bluetooth-help">
+                        <span id="bluetooth-provider-label">Web Bluetooth</span>
+                      </label>
+                      <select id="bluetooth-provider" aria-label="Bluetooth provider" hidden>
+                        <option value="local">Native macOS · nearby scan</option>
+                        <option value="web">Web Bluetooth · device chooser</option>
+                      </select>
+                      <p id="web-bluetooth-help" class="field-help">Authorize a device with Request, then use Scan BLE in the app.</p>
+                    </div>
+                    <p id="wechat-validation-hint" class="field-help">Build prepares the Flutter package. Each platform has its own preview controls. Browser hardware is available through optional web plugins; platform-specific validation uses a device.</p>
                   </div>
                 </details>
               </div>
@@ -74,7 +86,7 @@
                     <div class="preview-phone-home-indicator"></div>
                   </div>
                   <div id="preview-empty" class="preview-empty"><div class="empty-icon">⌁</div><strong>Preview appears here</strong><span>Build, then refresh preview.</span></div>
-                  <iframe id="preview-frame" title="Pocket guest web preview" src="about:blank" hidden></iframe>
+                  <iframe id="preview-frame" title="Pocket guest web preview" allow="bluetooth" src="about:blank" hidden></iframe>
                   </div>
                   <div class="preview-surface-label" aria-hidden="true"><strong>Flutter</strong><span>Native Canvas · <em id="preview-device-label">—</em></span></div>
                 </div>

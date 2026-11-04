@@ -324,3 +324,9 @@ dialog label input { padding: 9px; }
   .preview-target { width: 100%; }
   .preview-target.preview-device-controls { margin-left: 0; flex-basis: auto; }
 }
+
+.preview-plugin-settings { display: grid; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.preview-plugin-option { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-size: 11px; cursor: pointer; }
+.preview-plugin-option input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+.preview-plugin-option:has(input:disabled) { color: var(--muted); cursor: not-allowed; }
+.preview-plugin-settings .field-help { padding: 0; border: 0; }

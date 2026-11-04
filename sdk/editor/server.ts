@@ -34,6 +34,7 @@ import {
 import { buildGuest } from "../scripts/build_guest.ts";
 import { createStudioCodex, type StudioExecutionContext, type StudioScope } from "./codex.ts";
 import { createPreviewManager } from "./preview.ts";
+import { createLocalBluetoothProvider } from "./local_bluetooth.ts";
 import { previewDevice } from "./preview_device.ts";
 import { createEditorDeviceManager, type DeploymentSnapshot } from "./devices.ts";
 import { createWechatPreviewManager } from "./wechat.ts";
@@ -1201,7 +1202,9 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     logs: job.logs.map((entry) => `[${entry.phase}] ${entry.line}`),
     error: job.error, startedAt: job.startedAt, finishedAt: job.finishedAt,
   });
+  const localBluetooth = process.platform === "darwin" ? createLocalBluetoothProvider() : undefined;
   const preview = createPreviewManager({
+    localBluetooth,
     width: previewDevice.screenWidth,
     height: previewDevice.screenHeight,
     safeArea: previewDevice.safeArea,
@@ -1283,7 +1286,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       let releaseProjectWrite: (() => void) | undefined;
       try {
         if (path === "/api/preview/device" && method === "GET") return json(previewDevice);
-        if (path === "/health" && method === "GET") return json({ ok: true, service: "pocket-editor", csrfToken, workspace: workspace.root, ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}) });
+        if (path === "/health" && method === "GET") return json({ ok: true, service: "pocket-editor", csrfToken, bluetooth: { local: !!localBluetooth }, workspace: workspace.root, ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}) });
         if (path === "/" && method === "GET") {
           const clientRoot = join(root, "editor/client");
           const indexFile = join(clientRoot, "index.html");

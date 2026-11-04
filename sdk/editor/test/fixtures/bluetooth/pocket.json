@@ -1,0 +1,1 @@
+{"pocket":2,"id":"dev.pocket.editor.bluetooth-acceptance","name":"Bluetooth acceptance","version":"0.1.0","app":{"entry":"app.tsx","output":"app","framework":"solid","viewport":{"fixed":{"logical":[390,480],"presentation":"native"}}}}

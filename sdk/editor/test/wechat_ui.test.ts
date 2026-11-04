@@ -13,7 +13,7 @@ test("editor exposes the non-popup WeChat validation controls alongside Canvas/d
   }
   expect(html).toContain('class="control-label">WeChat</span>');
   expect(html).toContain("Run WeChat");
-  expect(html).toContain("Hardware and platform capabilities require a device.");
+  expect(html).toContain("Browser hardware is available through optional web plugins; platform-specific validation uses a device.");
   expect(html).not.toContain("wechat-target-picker");
   expect(html).toContain('id="wechat-open" class="button secondary small-button" href="#" target="_blank" rel="noopener" hidden');
   expect(html).toContain('id="preview-frame"');

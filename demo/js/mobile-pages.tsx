@@ -541,10 +541,15 @@ function capabilityLines(
     lines.push(
       `${result.photos.length} saved photo${result.photos.length === 1 ? "" : "s"}`,
     );
-  if (Array.isArray(result.devices))
-    lines.push(
-      `${result.devices.length} device${result.devices.length === 1 ? "" : "s"} found`,
-    );
+  if (Array.isArray(result.devices)) {
+    const count = result.devices.length;
+    const suffix = count === 1 ? "" : "s";
+    lines.push(result.scanMode === "authorized-devices"
+      ? `${count} authorized device${suffix}`
+      : result.scanMode === "chooser"
+        ? `${count} selected device${suffix}`
+        : `${count} device${suffix} found`);
+  }
   if (
     typeof result.textureId === "number" &&
     typeof result.width === "number" &&
@@ -664,7 +669,7 @@ function compactIdentifier(value: string): string {
 
 function bluetoothDevicesFrom(
   state: CapabilityState,
-): { id: string; name: string }[] {
+): { id: string; name: string; rssi?: number }[] {
   const result = objectResult(state);
   const items = Array.isArray(result?.devices) ? result.devices : [];
   return items.flatMap((item, index) => {
@@ -676,6 +681,7 @@ function bluetoothDevicesFrom(
       {
         id,
         name: compactText(String(value.name ?? `Device ${index + 1}`), 28),
+        ...(typeof value.rssi === "number" && Number.isFinite(value.rssi) ? { rssi: value.rssi } : {}),
       },
     ];
   });
@@ -1121,7 +1127,7 @@ export function HardwarePage(props: MobilePageProps): JSX.Element {
             {(device) => (
               <MobileListTile
                 title={device.name}
-                detail={compactIdentifier(device.id)}
+                detail={`${compactIdentifier(device.id)}${device.rssi === undefined ? "" : ` · ${device.rssi} dBm`}`}
                 trailing={
                   <MobileButton
                     label="Connect"

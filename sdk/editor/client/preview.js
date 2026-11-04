@@ -519,6 +519,22 @@
     let frame = null;
     let stream = null;
     let closed = false;
+    let webBluetoothEnabled = (() => {
+      try { return new URL(global.location.href).searchParams.get("webBluetooth") === "1"; } catch { return false; }
+    })();
+    let bluetoothProvider = (() => {
+      try { return new URL(global.location.href).searchParams.get("bluetoothProvider") === "local" ? "local" : "web"; } catch { return "web"; }
+    })();
+    const webBluetoothClientId = (() => {
+      try {
+        const created = global.crypto?.randomUUID?.() || `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        return created;
+      } catch {
+        return `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      }
+    })();
+    let webBluetoothPlugin = null;
+    let connectionGeneration = 0;
     const presentedTokens = new Set();
     let inputTail = Promise.resolve();
     let regionsEnabled = (() => {
@@ -551,6 +567,87 @@
       // The editor and preview are same-origin.  Never broadcast captures or
       // FrameResults to an arbitrary embedding origin.
       global.parent?.postMessage({ source: SOURCE, version: VERSION, type, projectId, ...payload }, global.location.origin);
+    }
+
+    function announceWebBluetoothState(extra = {}) {
+      const available = bluetoothProvider === "local" || typeof global.PocketWebBluetooth?.create === "function";
+      announce("preview.plugins-state", {
+        webBluetooth: {
+          enabled: webBluetoothEnabled,
+          provider: bluetoothProvider,
+          available,
+          secureContext: global.isSecureContext === true,
+          ...(available ? {} : { reason: "web Bluetooth plugin is unavailable" }),
+          ...extra,
+        },
+      });
+    }
+
+    function disposeWebBluetoothPlugin() {
+      try {
+        const result = webBluetoothPlugin?.dispose?.();
+        Promise.resolve(result).catch((error) => announce("preview.error", { error: String(error?.message || error) }));
+      } catch (error) { announce("preview.error", { error: String(error?.message || error) }); }
+      webBluetoothPlugin = null;
+    }
+
+    function createWebBluetoothPlugin() {
+      disposeWebBluetoothPlugin();
+      if (!webBluetoothEnabled) {
+        announceWebBluetoothState();
+        return;
+      }
+      if (bluetoothProvider === "local") {
+        announceWebBluetoothState();
+        return;
+      }
+      const factory = global.PocketWebBluetooth?.create;
+      if (typeof factory !== "function") {
+        announceWebBluetoothState({ enabled: false, reason: "web Bluetooth plugin is unavailable" });
+        return;
+      }
+      try {
+        // Keep the browser permission action visible outside the scaled/clipped
+        // phone surface. Same-origin parent clicks activate this frame too.
+        let chooserDocument = global.document;
+        try {
+          if (global.parent !== global && global.parent.location.origin === global.location.origin) chooserDocument = global.parent.document;
+        } catch { /* Standalone or cross-origin embedding uses its own document. */ }
+        webBluetoothPlugin = factory({
+          send: (token, message) => input({ type: "plugin-message", clientId: webBluetoothClientId, token, message }),
+          document: chooserDocument,
+          bluetooth: global.navigator?.bluetooth,
+          isSecureContext: global.isSecureContext === true,
+        });
+        announceWebBluetoothState();
+      } catch (error) {
+        webBluetoothPlugin = null;
+        announceWebBluetoothState({ enabled: false, reason: String(error?.message || error) });
+        announce("preview.error", { error: String(error?.message || error) });
+      }
+    }
+
+    function setWebBluetoothEnabled(enabled, provider = bluetoothProvider) {
+      const next = enabled === true;
+      const nextProvider = provider === "local" ? "local" : "web";
+      if (next === webBluetoothEnabled && nextProvider === bluetoothProvider && (!next || bluetoothProvider === "local" || webBluetoothPlugin)) {
+        announceWebBluetoothState();
+        return;
+      }
+      const replacingProvider = nextProvider !== bluetoothProvider;
+      bluetoothProvider = nextProvider;
+      webBluetoothEnabled = next;
+      disposeWebBluetoothPlugin();
+      connectionGeneration += 1;
+      stream?.close();
+      stream = null;
+      announceWebBluetoothState();
+      if (!closed && (!next || replacingProvider)) {
+        const disabled = input({ type: "plugin-disable", clientId: webBluetoothClientId });
+        Promise.resolve(disabled).finally(() => { if (!closed) connect(); });
+      } else if (!closed) {
+        setTimeout(connect, 0);
+      }
     }
 
     function mediaUrl(asset) {
@@ -1448,13 +1545,14 @@
       const requests = Array.isArray(next.events) ? next.events.filter((event) => event && event.name === "host.request") : [];
       const unsupportedOps = Array.isArray(next.ops) ? next.ops.filter((op) => op && op.type === "hostSurface") : [];
       if (requests.length) {
-        status.textContent = `PocketJS preview · ${requests.length} host request(s) pending (no fake plugin response)`;
+        status.textContent = `PocketJS preview · ${requests.length} host request(s) pending`;
         announce("preview.host-request", { requests });
         // No host capability is silently treated as successful.  The parent
         // may answer with a real adapter, or surface this structured pending
         // capability to the user; the preview never invents plugin values.
         const unsupported = requests.filter((event) => {
           const capability = event?.payload?.capability;
+          if (webBluetoothEnabled && (bluetoothProvider === "local" || webBluetoothPlugin) && (typeof capability === "string" && capability.startsWith("hardware.bluetooth.") || capability === "hardware.permissions.request" && event.payload?.params?.permission === "hardware.bluetooth")) return false;
           return typeof capability !== "string" || !capability.startsWith("platform.systemUi.");
         });
         if (unsupported.length) {
@@ -1499,12 +1597,30 @@
     }
 
     function connect() {
+      const generation = ++connectionGeneration;
       const endpoint = `${options.basePath || `/api/projects/${encodeURIComponent(projectId)}/preview`}/stream`;
-      stream = new EventSource(`${endpoint}?presentation=browser`);
-      stream.onmessage = (event) => {
+      const params = new URLSearchParams({ presentation: "browser", clientId: webBluetoothClientId });
+      if (webBluetoothEnabled) { params.set("webBluetooth", "1"); params.set("bluetoothProvider", bluetoothProvider); }
+      const current = new EventSource(`${endpoint}?${params.toString()}`);
+      stream = current;
+      current.onopen = () => {
+        if (generation !== connectionGeneration || stream !== current || closed) return;
+        if (webBluetoothEnabled && !webBluetoothPlugin) createWebBluetoothPlugin();
+      };
+      current.onmessage = (event) => {
+        if (generation !== connectionGeneration || stream !== current || closed) return;
         try {
           const packet = JSON.parse(event.data);
           if (packet.type === "frame") installFrame(packet.frame);
+          else if (packet.type === "plugin.request" && packet.plugin === "web-bluetooth") {
+            if (!webBluetoothEnabled || !webBluetoothPlugin) {
+              announce("preview.unsupported", { capabilities: ["web-bluetooth"], reason: "Web Bluetooth is disabled" });
+            } else {
+              Promise.resolve(webBluetoothPlugin.handle(packet)).catch((error) => {
+                announce("preview.error", { error: String(error?.message || error) });
+              });
+            }
+          }
           else if (packet.type === "status") {
             const state = packet.status?.state;
             if (state === "error") cancelPointerContacts();
@@ -1521,7 +1637,9 @@
           announce("preview.error", { error: String(error?.message || error) });
         }
       };
-      stream.onerror = () => {
+      current.onerror = () => {
+        if (generation !== connectionGeneration || stream !== current || closed) return;
+        if (webBluetoothEnabled) disposeWebBluetoothPlugin();
         status.textContent = "PocketJS preview stream reconnecting…";
         announce("preview.error", { error: "preview stream reconnecting" });
       };
@@ -1864,6 +1982,8 @@
         // capabilities. This path forwards its canonical response unchanged;
         // the preview never invents a successful plugin result.
         void input({ type: "message", message: message.message });
+      } else if (message.type === "preview.plugins" && Object.prototype.hasOwnProperty.call(message, "webBluetooth")) {
+        setWebBluetoothEnabled(message.webBluetooth === true, message.bluetoothProvider);
       }
     });
 
@@ -1894,6 +2014,7 @@
       observer.observe(canvas);
     }
     announce("preview.ready", { width: logicalWidth(), height: logicalHeight(), transport: "native-probe-full-frames" });
+    createWebBluetoothPlugin();
     connect();
     return { canvas, input, close: async () => {
       closed = true;
@@ -1902,7 +2023,9 @@
       textInputElement = null;
       resetVideoProjection(true);
       cancelPointerContacts();
+      connectionGeneration += 1;
       stream?.close();
+      disposeWebBluetoothPlugin();
       global.removeEventListener("blur", cancelPointerContacts);
       densityQuery?.removeEventListener("change", onDensityChange);
       global.removeEventListener("resize", onPreviewResize);

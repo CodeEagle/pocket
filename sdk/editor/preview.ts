@@ -22,6 +22,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { resolveNativeProbePath } from "../scripts/native_probe_path.ts";
 import { servePreviewMedia } from "./preview_media_assets.ts";
+import type { LocalBluetoothProvider } from "./local_bluetooth.ts";
 
 export type PreviewArtifactPaths = {
   /** Absolute path to the current Editor qjbc artifact. */
@@ -86,6 +87,8 @@ export type PreviewManagerOptions = {
   idleDisposeMs?: number;
   /** Override the checked-in browser projection file for an embedding build. */
   clientPath?: string;
+  /** Explicit local native IO provider; never enabled by merely opening preview. */
+  localBluetooth?: LocalBluetoothProvider;
 };
 
 /** Safe-area coordinates are in the same logical pixels as a PreviewFrame. */
@@ -137,6 +140,8 @@ const EMPTY_PREVIEW_SAFE_AREA: PreviewSafeArea = { top: 0, right: 0, bottom: 0, 
 const editorRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const maxInputBytes = 64 * 1024;
 const maxFrameBytes = 64 * 1024 * 1024;
+const maxBrowserPluginPending = 64;
+const browserPluginTimeoutMs = 120_000;
 
 /** Frame elapsed time must not jump when wall-clock time is adjusted. */
 function monotonicNow(): number {
@@ -261,7 +266,8 @@ function isRecoverableInputFailure(message: string): boolean {
     message.includes("textInput") ||
     message.startsWith("preview input type") ||
     message.includes("input.pointer") ||
-    message.includes("input.text");
+    message.includes("input.text") ||
+    message.startsWith("web Bluetooth plugin");
 }
 
 function resolveValue<T>(value: PreviewResolver<T> | undefined, projectId: string): Promise<T | undefined> {
@@ -662,7 +668,24 @@ function transformedTextInputEvent(
   return transformed;
 }
 
-type Subscriber = { controller: ReadableStreamDefaultController<Uint8Array>; closed: boolean; browserPresentation: boolean };
+type Subscriber = {
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  closed: boolean;
+  browserPresentation: boolean;
+  webBluetooth?: { clientId: string; lease: string };
+};
+
+type BrowserPluginRequest = {
+  token: string;
+  clientId: string;
+  lease: string;
+  runtime: PreviewRuntime;
+  requestId?: string;
+  capability?: string;
+  streamId?: string;
+  kind: "request" | "stream.open" | "stream.cancel" | "scope.dispose";
+  timer?: ReturnType<typeof setTimeout>;
+};
 
 class PreviewSession {
   readonly id: string;
@@ -679,6 +702,10 @@ class PreviewSession {
     child: PreviewRuntime; published: boolean;
     respond: (result: unknown, error?: JsonRecord) => Promise<void>;
   }>();
+  private webBluetoothOwner?: { clientId: string; lease: string; provider: "web" | "local"; queue: JsonRecord[] };
+  private readonly localBluetoothScopes = new Set<string>();
+  private readonly browserPluginRequests = new Map<string, BrowserPluginRequest>();
+  private readonly browserPluginStreams = new Map<string, BrowserPluginRequest>();
   private readonly pointerTargets = new Map<number, PointerTarget>();
   private readonly storage = new Map<string, JsonRecord | null>();
   private systemCatalog?: SystemCatalog;
@@ -934,6 +961,14 @@ class PreviewSession {
     const probe = this.probe;
     this.probe = undefined;
     const children = [...this.childRuntimes.values()];
+    if (this.rootRuntime) {
+      this.emitWebBluetoothScopeDispose(this.rootRuntime);
+      await this.failBrowserPluginRuntime(this.rootRuntime, "runtime_stopped", "preview runtime stopped");
+    }
+    for (const runtime of children) {
+      this.emitWebBluetoothScopeDispose(runtime);
+      await this.failBrowserPluginRuntime(runtime, "runtime_stopped", "preview runtime stopped");
+    }
     this.childRuntimes.clear();
     this.rootRuntime = undefined;
     this.pointerTargets.clear();
@@ -1020,6 +1055,218 @@ class PreviewSession {
     if (subscriberDropped) {
       this.failPendingPresentationsIfBrowserGone();
       this.cancelActivePointersIfBrowserGone();
+    }
+  }
+
+  private pluginRequestKey(token: string, id: string): string {
+    return `${token}\u0000${id}`;
+  }
+
+  /** Claim the one browser Web Bluetooth adapter allowed to service this preview. */
+  claimWebBluetooth(clientId: string, provider: "web" | "local" = "web"): { clientId: string; lease: string } | undefined {
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(clientId)) return undefined;
+    if (provider === "local" && !this.manager.options.localBluetooth) return undefined;
+    const current = this.webBluetoothOwner;
+    if (current && (current.clientId !== clientId || current.provider !== provider)) return undefined;
+    if (current && this.pluginSubscriber()) return undefined;
+    if (!current) this.webBluetoothOwner = { clientId, lease: randomUUID(), provider, queue: [] };
+    this.touch();
+    return { clientId, lease: this.webBluetoothOwner!.lease };
+  }
+
+  private pluginSubscriber(): Subscriber | undefined {
+    const owner = this.webBluetoothOwner;
+    if (!owner) return undefined;
+    return [...this.subscribers].find((subscriber) =>
+      !subscriber.closed && subscriber.webBluetooth?.clientId === owner.clientId && subscriber.webBluetooth.lease === owner.lease);
+  }
+
+  private emitWebBluetoothRequest(request: BrowserPluginRequest, params: JsonRecord = {}): void {
+    const owner = this.webBluetoothOwner;
+    if (!owner || owner.clientId !== request.clientId || owner.lease !== request.lease) return;
+    if (owner.provider === "local") {
+      const provider = this.manager.options.localBluetooth!;
+      const scope = `${this.id}:${owner.lease}:${request.runtime.instanceId}:${request.runtime.generation}`;
+      if (request.kind === "scope.dispose") this.localBluetoothScopes.delete(scope);
+      else this.localBluetoothScopes.add(scope);
+      const deliver = (message: JsonRecord) => {
+        void this.enqueue(() => this.handleBrowserPluginMessage({ clientId: owner.clientId, token: request.token, message }))
+          .catch((error) => this.reportError(error));
+      };
+      void provider.handle({ scope, kind: request.kind, requestId: request.requestId, capability: request.capability, streamId: request.streamId, topic: request.kind === "stream.open" ? "hardware.bluetooth.notifications" : undefined, params }, deliver)
+        .catch((error) => {
+          const failure = hostError("hardware_bluetooth_error", errorText(error));
+          if (request.kind === "request") deliver({ type: "event", name: "host.response", payload: { requestId: request.requestId, capability: request.capability, ok: false, error: failure } });
+          else if (request.kind === "stream.open") deliver({ type: "event", name: "stream.error", payload: { streamId: request.streamId, error: failure } });
+        });
+      return;
+    }
+    const packet: JsonRecord = {
+      type: "plugin.request",
+      plugin: "web-bluetooth",
+      clientId: owner.clientId,
+      token: request.token,
+      scope: `${request.runtime.instanceId}:${request.runtime.generation}`,
+      kind: request.kind,
+      ...(request.kind === "stream.open" ? { topic: "hardware.bluetooth.notifications" } : {}),
+      ...(request.requestId ? { requestId: request.requestId } : {}),
+      ...(request.capability ? { capability: request.capability } : {}),
+      ...(request.streamId ? { streamId: request.streamId } : {}),
+      params,
+    };
+    const subscriber = this.pluginSubscriber();
+    if (!subscriber) {
+      if (owner.queue.length < 32) owner.queue.push(packet);
+      return;
+    }
+    try {
+      subscriber.controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(packet)}\n\n`));
+    } catch {
+      subscriber.closed = true;
+      this.subscribers.delete(subscriber);
+      this.releaseWebBluetoothOwner(owner.lease);
+    }
+  }
+
+  private emitWebBluetoothScopeDispose(runtime: PreviewRuntime): void {
+    const owner = this.webBluetoothOwner;
+    if (!owner) return;
+    this.emitWebBluetoothRequest({
+      token: randomUUID(),
+      clientId: owner.clientId,
+      lease: owner.lease,
+      runtime,
+      kind: "scope.dispose",
+    }, {});
+  }
+
+  private armBrowserPluginTimeout(request: BrowserPluginRequest, stream: boolean): void {
+    if (request.kind === "scope.dispose") return;
+    request.timer = setTimeout(() => {
+      const key = this.pluginRequestKey(request.token, stream ? request.streamId! : request.requestId!);
+      const map = stream ? this.browserPluginStreams : this.browserPluginRequests;
+      if (map.get(key) !== request) return;
+      map.delete(key);
+      const failure = hostError("hardware_bluetooth_error", "Web Bluetooth plugin response timed out");
+      void this.enqueue(async () => {
+        if (stream) {
+          await request.runtime.probe.checked({ op: "send", message: { type: "event", name: "stream.error", payload: { streamId: request.streamId, error: failure } } });
+          request.runtime.needsPump = true;
+        } else {
+          await this.sendHostResponse(request.runtime, request.requestId!, request.capability!, null, failure);
+        }
+        await this.tickNow(0);
+      }).catch((error) => this.reportError(error));
+    }, browserPluginTimeoutMs);
+  }
+
+  private clearBrowserPluginTimer(request: BrowserPluginRequest | undefined): void {
+    if (request?.timer) clearTimeout(request.timer);
+    if (request) request.timer = undefined;
+  }
+
+  /**
+   * Remove browser-plugin work owned by a runtime before its probe can be
+   * stopped or replaced.  Keeping the request token alive after teardown
+   * would route a late browser reply into a dead probe (or, worse, a rebuilt
+   * runtime that happens to reuse the same guest request id).
+   */
+  private takeBrowserPluginRuntime(runtime: PreviewRuntime): {
+    requests: BrowserPluginRequest[];
+    streams: BrowserPluginRequest[];
+  } {
+    const requests = [...this.browserPluginRequests.values()].filter((request) => request.runtime === runtime);
+    const streams = [...this.browserPluginStreams.values()].filter((request) => request.runtime === runtime);
+    for (const request of [...requests, ...streams]) this.clearBrowserPluginTimer(request);
+    for (const [key, request] of this.browserPluginRequests) {
+      if (request.runtime === runtime) this.browserPluginRequests.delete(key);
+    }
+    for (const [key, request] of this.browserPluginStreams) {
+      if (request.runtime === runtime) this.browserPluginStreams.delete(key);
+    }
+    return { requests, streams };
+  }
+
+  private async failBrowserPluginRuntime(
+    runtime: PreviewRuntime,
+    code: string,
+    message: string,
+  ): Promise<void> {
+    const { requests, streams } = this.takeBrowserPluginRuntime(runtime);
+    if (requests.length === 0 && streams.length === 0) return;
+    const failure = hostError(code, message);
+    for (const request of requests) {
+      try {
+        await this.sendHostResponse(runtime, request.requestId!, request.capability!, null, failure);
+      } catch {
+        // Runtime teardown is already in progress.  The important invariant
+        // is that the token is retired; a stopped probe cannot be repaired by
+        // reporting this best-effort rejection as a session error.
+      }
+    }
+    for (const stream of streams) {
+      try {
+        await runtime.probe.checked({
+          op: "send",
+          message: { type: "event", name: "stream.error", payload: { streamId: stream.streamId, error: failure } },
+        });
+        runtime.needsPump = true;
+      } catch {
+        // See the request path above: stale stream work is intentionally
+        // discarded when the owning runtime is no longer usable.
+      }
+    }
+  }
+
+  private releaseWebBluetoothOwner(lease?: string): void {
+    const owner = this.webBluetoothOwner;
+    if (!owner || (lease && owner.lease !== lease)) return;
+    const requests = [...this.browserPluginRequests.values()].filter((request) => request.lease === owner.lease);
+    const streams = [...this.browserPluginStreams.values()].filter((request) => request.lease === owner.lease);
+    for (const request of [...requests, ...streams]) this.clearBrowserPluginTimer(request);
+    for (const [key, request] of this.browserPluginRequests) {
+      if (request.lease === owner.lease) this.browserPluginRequests.delete(key);
+    }
+    for (const [key, request] of this.browserPluginStreams) {
+      if (request.lease === owner.lease) this.browserPluginStreams.delete(key);
+    }
+    this.webBluetoothOwner = undefined;
+    if (owner.provider === "local") {
+      for (const scope of [...this.localBluetoothScopes]) {
+        if (!scope.startsWith(`${this.id}:${owner.lease}:`)) continue;
+        this.localBluetoothScopes.delete(scope);
+        void this.manager.options.localBluetooth?.handle({ scope, kind: "scope.dispose" }, () => {}).catch(() => {});
+      }
+    }
+    if (requests.length || streams.length) {
+      void this.enqueue(async () => {
+        const failure = hostError("hardware_bluetooth_disconnected", "Web Bluetooth preview plugin was disabled");
+        for (const request of requests) {
+          await this.sendHostResponse(request.runtime, request.requestId!, request.capability!, null, failure);
+        }
+        for (const stream of streams) {
+          await stream.runtime.probe.checked({
+            op: "send",
+            message: { type: "event", name: "stream.error", payload: { streamId: stream.streamId, error: failure } },
+          });
+          stream.runtime.needsPump = true;
+        }
+        if (this.probe) await this.tickNow(0);
+      }).catch((error) => this.reportError(error));
+    }
+  }
+
+  private flushWebBluetoothQueue(subscriber: Subscriber): void {
+    const owner = this.webBluetoothOwner;
+    if (!owner || !subscriber.webBluetooth || subscriber.webBluetooth.lease !== owner.lease) return;
+    const queue = owner.queue.splice(0);
+    for (const packet of queue) {
+      try { subscriber.controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(packet)}\n\n`)); } catch {
+        subscriber.closed = true;
+        this.subscribers.delete(subscriber);
+        this.releaseWebBluetoothOwner(owner.lease);
+        break;
+      }
     }
   }
 
@@ -1165,14 +1412,93 @@ class PreviewSession {
   }
 
   private async handleRuntimeEvent(runtime: PreviewRuntime, event: JsonRecord, depth: number): Promise<void> {
-    if (eventName(event) !== "host.request") return;
-    const payload = eventPayload(event);
+    const name = eventName(event);
+    const eventValue = eventPayload(event);
+    if (name === "stream.open" && eventValue && typeof eventValue.streamId === "string" && eventValue.topic === "hardware.bluetooth.notifications") {
+      const owner = this.webBluetoothOwner;
+      if (owner) {
+        const streamId = eventValue.streamId;
+        const request: BrowserPluginRequest = {
+          token: randomUUID(),
+          clientId: owner.clientId,
+          lease: owner.lease,
+          runtime,
+          streamId,
+          kind: "stream.open",
+        };
+        if (this.browserPluginStreams.size >= maxBrowserPluginPending) {
+          await runtime.probe.checked({ op: "send", message: { type: "event", name: "stream.error", payload: { streamId, error: hostError("hardware_busy", "Web Bluetooth stream limit reached") } } });
+          runtime.needsPump = true;
+          return;
+        }
+        this.browserPluginStreams.set(this.pluginRequestKey(request.token, streamId), request);
+        this.armBrowserPluginTimeout(request, true);
+        this.emitWebBluetoothRequest(request, eventValue.params && typeof eventValue.params === "object" && !Array.isArray(eventValue.params)
+          ? eventValue.params as JsonRecord
+          : {});
+      } else {
+        await runtime.probe.checked({
+          op: "send",
+          message: { type: "event", name: "stream.error", payload: {
+            streamId: eventValue.streamId,
+            error: hostError("unsupported_capability", "Web Bluetooth preview plugin is disabled"),
+          } },
+        });
+        runtime.needsPump = true;
+      }
+      return;
+    }
+    if ((name === "stream.cancel" || name === "stream.end") && eventValue && typeof eventValue.streamId === "string") {
+      const owner = this.webBluetoothOwner;
+      if (owner) {
+        const request = [...this.browserPluginStreams.values()].find((candidate) =>
+          candidate.lease === owner.lease && candidate.runtime === runtime && candidate.streamId === eventValue.streamId);
+        if (request) {
+          const key = this.pluginRequestKey(request.token, request.streamId!);
+          this.clearBrowserPluginTimer(request);
+          this.browserPluginStreams.delete(key);
+          this.emitWebBluetoothRequest({ ...request, kind: "stream.cancel" }, {
+            reason: typeof eventValue.reason === "string"
+              ? eventValue.reason
+              : name === "stream.end" ? "guest_ended" : "guest_cancelled",
+          });
+        }
+      }
+      return;
+    }
+    if (name !== "host.request") return;
+    const payload = eventValue;
     if (!payload || typeof payload.requestId !== "string" || typeof payload.capability !== "string") return;
     const requestId = payload.requestId;
     const capability = payload.capability;
     const params = payload.params && typeof payload.params === "object" && !Array.isArray(payload.params)
       ? payload.params as JsonRecord
       : {};
+
+    const isBluetoothPermissionRequest = capability === "hardware.permissions.request" &&
+      params.permission === "hardware.bluetooth";
+    if (capability.startsWith("hardware.bluetooth.") || isBluetoothPermissionRequest) {
+      const owner = this.webBluetoothOwner;
+      if (owner) {
+        if (this.browserPluginRequests.size >= maxBrowserPluginPending) {
+          await this.sendHostResponse(runtime, requestId, capability, null, hostError("hardware_busy", "Web Bluetooth request limit reached"));
+          return;
+        }
+        const request: BrowserPluginRequest = {
+          token: randomUUID(),
+          clientId: owner.clientId,
+          lease: owner.lease,
+          runtime,
+          requestId,
+          capability,
+          kind: "request",
+        };
+        this.browserPluginRequests.set(this.pluginRequestKey(request.token, requestId), request);
+        this.armBrowserPluginTimeout(request, false);
+        this.emitWebBluetoothRequest(request, params);
+        return;
+      }
+    }
 
     if (capability.startsWith("system.runtime.") || capability.startsWith("system.storage.")) {
       await this.handleSystemRuntimeRequest(runtime, requestId, capability, params, depth);
@@ -1245,7 +1571,11 @@ class PreviewSession {
       };
     }
     if (capability === "runtime.performance") return { supported: false, context: params.context ?? null };
-    if (capability === "plugins.list") return [];
+    if (capability === "plugins.list") {
+      return this.webBluetoothOwner
+        ? [{ id: this.webBluetoothOwner.provider === "local" ? "local-bluetooth" : "web-bluetooth", provider: this.webBluetoothOwner.provider === "local" ? "native-macos" : "browser", enabled: true, capabilities: ["hardware.permissions.request", "hardware.bluetooth.scan", "hardware.bluetooth.connect", "hardware.bluetooth.read", "hardware.bluetooth.write", "hardware.bluetooth.notifications"] }]
+        : [];
+    }
     if (capability === "plugins.packageInfo") return { provider: "editor-preview", appId: runtime.appId };
     if (capability === "updates.status") return { configured: false, stage: "disabled", activeVersion: null, availableVersion: null };
     if (capability === "platform.systemUi.set") return { accepted: true };
@@ -1416,6 +1746,8 @@ class PreviewSession {
         const child = this.runtimeByInstance(params.instanceId);
         if (!child || child === this.rootRuntime) throw new Error("runtime.destroy instance does not exist");
         this.childRuntimes.delete(child.appId);
+        this.emitWebBluetoothScopeDispose(child);
+        await this.failBrowserPluginRuntime(child, "runtime_destroyed", `runtime ${child.appId} was destroyed`);
         for (const [token, pending] of this.pendingPresentations) {
           if (pending.child !== child) continue;
           this.pendingPresentations.delete(token);
@@ -2163,8 +2495,12 @@ class PreviewSession {
         } else {
           await probe.checked({ op: "send", message });
         }
+      } else if (kind === "plugin-message") {
+        await this.handleBrowserPluginMessage(input);
+      } else if (kind === "plugin-disable") {
+        this.handleBrowserPluginDisable(input);
       } else {
-        throw new Error("preview input type must be pointer, text, key, resize, or message");
+        throw new Error("preview input type must be pointer, text, key, resize, message, plugin-message, or plugin-disable");
       }
       await this.tickNow(0);
     });
@@ -2190,17 +2526,70 @@ class PreviewSession {
     throw new Error(`unsupported text event kind: ${String(kind)}`);
   }
 
-  stream(browserPresentation = false): Response {
+  private async handleBrowserPluginMessage(input: JsonRecord): Promise<void> {
+    const owner = this.webBluetoothOwner;
+    const clientId = typeof input.clientId === "string" ? input.clientId : "";
+    const token = typeof input.token === "string" ? input.token : "";
+    // A reply racing a disabled/reconnected browser adapter is stale input,
+    // not a native preview failure. Ignore it so the session remains usable.
+    if (!owner || owner.clientId !== clientId || !token) return;
+    const message = input.message && typeof input.message === "object" && !Array.isArray(input.message)
+      ? input.message as JsonRecord
+      : undefined;
+    if (!message) throw new Error("web Bluetooth plugin message is invalid");
+    const name = eventName(message);
+    const payload = eventPayload(message);
+    if (!payload) throw new Error("web Bluetooth plugin message payload is invalid");
+    if (name === "host.response") {
+      const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+      const request = this.browserPluginRequests.get(this.pluginRequestKey(token, requestId));
+      if (!request || request.lease !== owner.lease || payload.capability !== request.capability) return;
+      this.clearBrowserPluginTimer(request);
+      this.browserPluginRequests.delete(this.pluginRequestKey(token, requestId));
+      await request.runtime.probe.checked({ op: "send", message });
+      request.runtime.needsPump = true;
+      await this.tickNow(0);
+      return;
+    }
+    const streamId = typeof payload.streamId === "string" ? payload.streamId : "";
+    const stream = this.browserPluginStreams.get(this.pluginRequestKey(token, streamId));
+    if (!stream || stream.lease !== owner.lease) return;
+    if (name === "stream.data" || name === "stream.error" || name === "stream.end") {
+      await stream.runtime.probe.checked({ op: "send", message });
+      stream.runtime.needsPump = true;
+      if (name === "stream.end" || name === "stream.error") {
+        this.clearBrowserPluginTimer(stream);
+        this.browserPluginStreams.delete(this.pluginRequestKey(token, streamId));
+      }
+      await this.tickNow(0);
+      return;
+    }
+    if (name === "stream.open") {
+      this.clearBrowserPluginTimer(stream);
+      return;
+    }
+    throw new Error(`unsupported web Bluetooth plugin message: ${name}`);
+  }
+
+  private handleBrowserPluginDisable(input: JsonRecord): void {
+    const owner = this.webBluetoothOwner;
+    const clientId = typeof input.clientId === "string" ? input.clientId : "";
+    if (!owner || owner.clientId !== clientId) return;
+    this.releaseWebBluetoothOwner(owner.lease);
+  }
+
+  stream(browserPresentation = false, webBluetooth?: { clientId: string; lease: string }): Response {
     this.touch();
     const encoder = new TextEncoder();
     let subscriber!: Subscriber;
     const body = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        subscriber = { controller, closed: false, browserPresentation };
+        subscriber = { controller, closed: false, browserPresentation, ...(webBluetooth ? { webBluetooth } : {}) };
         this.subscribers.add(subscriber);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "status", status: this.status() })}\n\n`));
         const replay = this.replayFrame();
         if (replay) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "frame", revision: this.artifactRevision ?? null, frame: replay })}\n\n`));
+        this.flushWebBluetoothQueue(subscriber);
         void this.schedule().catch((error) => this.reportError(error));
       },
       cancel: () => {
@@ -2212,6 +2601,11 @@ class PreviewSession {
           this.tickDeadlineAt = undefined;
         }
         if (this.subscribers.size === 0) this.armIdleCleanup();
+        if (subscriber.webBluetooth && this.webBluetoothOwner?.lease === subscriber.webBluetooth.lease) {
+          const ownerStillConnected = [...this.subscribers].some((candidate) =>
+            !candidate.closed && candidate.webBluetooth?.lease === subscriber.webBluetooth?.lease);
+          if (!ownerStillConnected) this.releaseWebBluetoothOwner(subscriber.webBluetooth.lease);
+        }
         this.failPendingPresentationsIfBrowserGone();
         if (subscriber.browserPresentation) this.cancelActivePointersIfBrowserGone();
       },
@@ -2262,6 +2656,7 @@ class PreviewSession {
       try { subscriber.controller.close(); } catch { /* client already disconnected */ }
     }
     this.subscribers.clear();
+    this.releaseWebBluetoothOwner();
     this.state = "stopped";
   }
 }
@@ -2326,7 +2721,14 @@ class PreviewManagerImpl implements PreviewManager {
 
   private async clientSource(): Promise<string> {
     const path = this.options.clientPath ?? join(dirname(fileURLToPath(import.meta.url)), "client/preview.js");
-    return readFile(path, "utf8");
+    const source = await readFile(path, "utf8");
+    const pluginPath = join(dirname(path), "plugins/web-bluetooth.js");
+    try {
+      const plugin = await readFile(pluginPath, "utf8");
+      return `${plugin}\n${source}`;
+    } catch {
+      return source;
+    }
   }
 
   private async document(projectId: string): Promise<Response> {
@@ -2339,6 +2741,7 @@ class PreviewManagerImpl implements PreviewManager {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "content-security-policy": "frame-ancestors 'self'",
+        "permissions-policy": "bluetooth=(self)",
         "x-frame-options": "SAMEORIGIN",
       },
     });
@@ -2361,8 +2764,14 @@ class PreviewManagerImpl implements PreviewManager {
         return page;
       }
       if (route === "stream" && request.method === "GET") {
+        const query = new URL(request.url).searchParams;
+        const webBluetooth = query.get("webBluetooth") === "1";
+        const clientId = query.get("clientId") ?? "";
+        const provider = query.get("bluetoothProvider") === "local" ? "local" : "web";
+        if (webBluetooth && provider === "local" && !this.options.localBluetooth) return failure("Local Bluetooth is unavailable on this editor host", 400);
+        const pluginOwner = webBluetooth ? session.claimWebBluetooth(clientId, provider) : undefined;
         await session.ensureStarted();
-        return session.stream(new URL(request.url).searchParams.get("presentation") === "browser");
+        return session.stream(query.get("presentation") === "browser", pluginOwner);
       }
       if (route === "status" && request.method === "GET") return json(session.status());
       if (route === "snapshot" && request.method === "GET") return json(session.snapshot());
@@ -2390,6 +2799,7 @@ class PreviewManagerImpl implements PreviewManager {
   async dispose(): Promise<void> {
     await Promise.all([...this.sessions.values()].map((session) => session.dispose()));
     this.sessions.clear();
+    await this.options.localBluetooth?.dispose();
   }
 }
 

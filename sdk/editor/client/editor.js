@@ -50,6 +50,13 @@ let captureSequence = 0;
 const captureWaiters = new Map();
 const PREVIEW_HEIGHT_STORAGE_KEY = "pocket.editor.previewPaneHeight";
 const PREVIEW_BEZEL_STORAGE_KEY = "pocket.editor.previewShowBezel";
+const WEB_BLUETOOTH_STORAGE_KEY = "pocket.editor.webBluetooth";
+const browserBluetoothSupported = window.isSecureContext && typeof navigator.bluetooth?.requestDevice === "function";
+let webBluetoothSupported = browserBluetoothSupported;
+let localBluetoothAvailable = false;
+let bluetoothProvider = "web";
+let webBluetoothEnabled = false;
+try { webBluetoothEnabled = localStorage.getItem(WEB_BLUETOOTH_STORAGE_KEY) === "1"; } catch {}
 let previewDeviceProfile = null;
 let previewDevicePromise = null;
 let devices = [];
@@ -769,6 +776,9 @@ async function loadProjects(preferred) {
     const health = await api("/health");
     if (health?.csrfToken) csrfToken = health.csrfToken;
     configuredProjectId = health?.projectId;
+    localBluetoothAvailable = health?.bluetooth?.local === true;
+    try { bluetoothProvider = localBluetoothAvailable && localStorage.getItem("pocket.editor.bluetoothProvider") !== "web" ? "local" : "web"; } catch { bluetoothProvider = localBluetoothAvailable ? "local" : "web"; }
+    updateBluetoothSettings();
   } catch {
     // The editor credential still lets local development continue.
   }
@@ -905,12 +915,24 @@ async function refreshPreview({ automatic = false } = {}) {
   $("preview-empty").hidden = true;
   previewFrame.hidden = false;
   layoutPreviewFrame();
-  const separator = previewPath.includes("?") ? "&" : "?";
-  previewFrame.src = `${previewPath}${separator}t=${Date.now()}`;
+  const url = previewBrowserUrl();
+  url.searchParams.set("t", String(Date.now()));
+  previewFrame.src = url.href;
   previewStarted = true;
   previewRevision = currentStatus.builtRevision;
   previewGeneration = currentStatus.artifacts?.generation ?? currentStatus.finishedAt ?? null;
   updateActionStates();
+}
+
+function previewBrowserUrl() {
+  const url = new URL(previewPath, window.location.origin);
+  if (previewRegionsEnabled) url.searchParams.set("regions", "1");
+  if (webBluetoothEnabled) { url.searchParams.set("webBluetooth", "1"); url.searchParams.set("bluetoothProvider", bluetoothProvider); }
+  return url;
+}
+
+function sendPreviewPlugins() {
+  previewFrame.contentWindow?.postMessage({ source: "pocket-editor", type: "preview.plugins", webBluetooth: webBluetoothEnabled, bluetoothProvider }, window.location.origin);
 }
 
 function captureFromMessage(message) {
@@ -967,8 +989,7 @@ async function copyPreviewLink() {
     showNotice("Build the saved project before copying its preview URL.", "info");
     return;
   }
-  const urlObject = new URL(previewPath, window.location.origin);
-  if (previewRegionsEnabled) urlObject.searchParams.set("regions", "1");
+  const urlObject = previewBrowserUrl();
   const url = urlObject.href;
   try {
     if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser.");
@@ -1320,6 +1341,7 @@ window.addEventListener("message", (event) => {
     previewHasFrame = false;
     resizePreviewRuntime();
     sendPreviewRegions();
+    sendPreviewPlugins();
     setPreviewState("Starting", "loading");
     updateActionStates();
   }
@@ -1400,7 +1422,7 @@ $("build").addEventListener("click", () => { void buildProject(); });
 $("publish").addEventListener("click", () => { void publishProject("release"); });
 $("publish-test").addEventListener("click", () => { void publishProject("test"); });
 $("refresh-preview").addEventListener("click", () => { void refreshPreview(); });
-$("preview-open").addEventListener("click", () => { if (previewPath) window.open(previewPath, "_blank", "noopener"); });
+$("preview-open").addEventListener("click", () => { if (previewPath) window.open(previewBrowserUrl().href, "_blank", "noopener"); });
 $("clear-log").addEventListener("click", () => { logEl.textContent = ""; });
 $("refresh-source").addEventListener("click", refreshSourceFromServer);
 $("file-picker").addEventListener("change", async (event) => {
@@ -1426,6 +1448,38 @@ if (previewBezelToggle) {
     updatePreviewBezelPresentation();
   });
 }
+const webBluetoothToggle = $("web-bluetooth-toggle");
+const bluetoothProviderPicker = $("bluetooth-provider");
+function updateBluetoothSettings() {
+  webBluetoothSupported = bluetoothProvider === "local" ? localBluetoothAvailable : browserBluetoothSupported;
+  if (webBluetoothToggle) {
+    webBluetoothToggle.checked = webBluetoothEnabled;
+    webBluetoothToggle.disabled = !webBluetoothSupported;
+  }
+  if (bluetoothProviderPicker) {
+    bluetoothProviderPicker.hidden = !localBluetoothAvailable;
+    bluetoothProviderPicker.value = bluetoothProvider;
+    bluetoothProviderPicker.querySelector('option[value="web"]').disabled = !browserBluetoothSupported;
+  }
+  setText("bluetooth-provider-label", bluetoothProvider === "local" ? "Local Bluetooth" : "Web Bluetooth");
+  setText("web-bluetooth-help", bluetoothProvider === "local"
+    ? "Request grants macOS Bluetooth access. Scan BLE discovers nearby devices inside the app."
+    : webBluetoothSupported ? "Authorize a device with Request, then use Scan BLE in the app." : "Requires a browser with Web Bluetooth on localhost or HTTPS.");
+}
+if (webBluetoothToggle) {
+  updateBluetoothSettings();
+  webBluetoothToggle.addEventListener("change", () => {
+    webBluetoothEnabled = webBluetoothToggle.checked && webBluetoothSupported;
+    try { localStorage.setItem(WEB_BLUETOOTH_STORAGE_KEY, webBluetoothEnabled ? "1" : "0"); } catch {}
+    sendPreviewPlugins();
+  });
+}
+bluetoothProviderPicker?.addEventListener("change", () => {
+  bluetoothProvider = bluetoothProviderPicker.value === "local" && localBluetoothAvailable ? "local" : "web";
+  try { localStorage.setItem("pocket.editor.bluetoothProvider", bluetoothProvider); } catch {}
+  updateBluetoothSettings();
+  sendPreviewPlugins();
+});
 $("capture-preview").addEventListener("click", async () => {
   try {
     const capture = await capturePreview();

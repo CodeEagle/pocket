@@ -41,6 +41,7 @@ test("Editor keeps Canvas and WeChat previews visible together and cleans the in
   const wechatStates = new Map<string, Record<string, unknown>>(
     projects.map((project) => [project.id, { state: "idle", logs: [] }]),
   );
+  let nativeBluetoothAvailable = false;
   let server: ReturnType<typeof Bun.serve> | undefined;
   const browser = await chromium.launch({ headless: true });
   try {
@@ -57,7 +58,7 @@ test("Editor keeps Canvas and WeChat previews visible together and cleans the in
           return new Response(`${script}\nwindow.__pocketTestRenderWechat = renderWechatState;`, { headers: { "content-type": "text/javascript; charset=utf-8" } });
         }
         if (path === "/api/preview/device") return json(previewDevice);
-        if (path === "/health") return json({ csrfToken: "inline-test", projectId: projects[0]!.id });
+        if (path === "/health") return json({ csrfToken: "inline-test", projectId: projects[0]!.id, bluetooth: { local: nativeBluetoothAvailable } });
         if (path === "/api/devices") return json([]);
         if (path === "/api/projects") return json(projects);
         const projectMatch = path.match(/^\/api\/projects\/([^/]+)(?:\/(.*))?$/);
@@ -98,6 +99,24 @@ test("Editor keeps Canvas and WeChat previews visible together and cleans the in
     await page.goto(`http://127.0.0.1:${server.port}/`);
     await page.locator("#preview-frame").waitFor({ state: "visible" });
     await page.locator("#wechat-preview-pane").waitFor({ state: "hidden" });
+    expect(await page.locator('#preview-frame').getAttribute('allow')).toBe('bluetooth');
+    await page.locator('.preview-options > summary').click();
+    const bluetoothToggle = page.locator('#web-bluetooth-toggle');
+    expect(await bluetoothToggle.isChecked()).toBe(false);
+    const supportsBluetooth = await page.evaluate(() => isSecureContext && typeof navigator.bluetooth?.requestDevice === 'function');
+    expect(await bluetoothToggle.isDisabled()).toBe(!supportsBluetooth);
+    if (supportsBluetooth) {
+      const frame = page.frames().find(frame => frame.url().includes('/api/projects/inline-a/preview'))!;
+      await frame.evaluate(() => { (window as any).__pluginMessages = []; window.addEventListener('message', event => { if (event.data?.type === 'preview.plugins') (window as any).__pluginMessages.push(event.data); }); });
+      await bluetoothToggle.check();
+      await frame.waitForFunction(() => (window as any).__pluginMessages?.at(-1)?.webBluetooth === true);
+      expect(await page.evaluate(() => localStorage.getItem('pocket.editor.webBluetooth'))).toBe('1');
+      await bluetoothToggle.uncheck();
+      await frame.waitForFunction(() => (window as any).__pluginMessages?.at(-1)?.webBluetooth === false);
+      expect(await page.evaluate(() => localStorage.getItem('pocket.editor.webBluetooth'))).toBe('0');
+    }
+    await page.locator('.preview-options > summary').click();
+
     await page.evaluate(() => {
       (window as unknown as { __wechatFrameLoads: number }).__wechatFrameLoads = 0;
       document.getElementById("wechat-preview-frame")?.addEventListener("load", () => {
@@ -174,6 +193,18 @@ test("Editor keeps Canvas and WeChat previews visible together and cleans the in
     await page.locator("#wechat-stop").click();
     await page.locator("#wechat-preview-pane").waitFor({ state: "hidden" });
     expect(await page.locator("#wechat-preview-frame").getAttribute("src")).toBe("about:blank");
+    nativeBluetoothAvailable = true;
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.reload();
+    await page.locator("#preview-frame").waitFor({ state: "visible" });
+    await page.locator(".preview-options > summary").click();
+    await page.locator("#bluetooth-provider").waitFor({ state: "visible" });
+    expect(await page.locator("#bluetooth-provider").inputValue()).toBe("local");
+    expect(await page.locator("#bluetooth-provider-label").textContent()).toBe("Local Bluetooth");
+    expect(await page.locator("#web-bluetooth-toggle").isDisabled()).toBe(false);
+    await page.locator("#web-bluetooth-toggle").check();
+    await page.locator("#refresh-preview").click();
+    await page.waitForFunction(() => document.querySelector("#preview-frame")?.getAttribute("src")?.includes("bluetoothProvider=local"));
     expect(pageErrors).toEqual([]);
   } finally {
     await browser.close();
