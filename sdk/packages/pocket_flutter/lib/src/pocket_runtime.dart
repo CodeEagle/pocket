@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'pocket_binary_codec.dart';
 import 'pocket_duplex.dart';
 import 'pocket_model.dart';
 import 'pocket_memory_limits.dart';
@@ -353,6 +354,10 @@ typedef _ResizeViewportDart =
     int Function(Pointer<Void>, double width, double height);
 typedef _SendNative = Int32 Function(Pointer<Void>, Pointer<Utf8> message);
 typedef _SendDart = int Function(Pointer<Void>, Pointer<Utf8> message);
+typedef _SendBinaryNative =
+    Int32 Function(Pointer<Void>, Pointer<Uint8> data, UintPtr len);
+typedef _SendBinaryDart =
+    int Function(Pointer<Void>, Pointer<Uint8> data, int len);
 typedef _DestroyNative = Void Function(Pointer<Void>);
 typedef _DestroyDart = void Function(Pointer<Void>);
 typedef _StringNative = Pointer<Utf8> Function(Pointer<Void>);
@@ -431,6 +436,8 @@ final class FfiPocketRuntime
   final PocketRecordingController? _recordingController;
   final _EvalDart _eval;
   final _FrameDart _frame;
+  _FrameBinaryDart? _frameBinary;
+  bool _frameBinaryLookedUp = false;
   _FrameDart? _frameDelta;
   bool _frameDeltaLookedUp = false;
   _FrameBinaryDart? _frameDeltaBinary;
@@ -456,6 +463,8 @@ final class FfiPocketRuntime
   _ResizeViewportDart? _resizeViewport;
   bool _resizeViewportLookedUp = false;
   final _SendDart _send;
+  _SendBinaryDart? _sendBinary;
+  bool _sendBinaryLookedUp = false;
   final _DestroyDart _destroy;
   final _StringDart _lastError;
   _LoadDart? _load;
@@ -934,6 +943,11 @@ final class FfiPocketRuntime
     PocketFrame? output;
     Object? failure;
     try {
+      final binary = _lookupFrameBinary();
+      if (binary != null) {
+        output = _readBinaryFullFrame(binary, delta);
+        return output;
+      }
       final pointer = _frame(_handle, delta);
       output = _readFullFrame(pointer, 'pocket_frame returned no frame');
       return output;
@@ -986,11 +1000,10 @@ final class FfiPocketRuntime
               'pocket_frame_delta_binary returned an oversized frame',
             );
           }
-          // The native pointer is borrowed until the next FFI call. Copy it
-          // before parsing so model construction never observes mutable native
-          // storage and no native allocation crosses the Dart boundary.
-          final bytes = Uint8List.fromList(pointer.asTypedList(byteLength));
-          output = PocketFrame.fromBinary(bytes);
+          // The native pointer is borrowed until the next FFI call. Parse
+          // directly from the borrowed typed view; retained resources copy
+          // only their own pixel/palette slices inside PocketFrame.fromBinary.
+          output = PocketFrame.fromBinary(pointer.asTypedList(byteLength));
           return output;
         } finally {
           calloc.free(length);
@@ -1099,6 +1112,48 @@ final class FfiPocketRuntime
       _setSchedulerPaused = null;
     }
     return _setSchedulerPaused;
+  }
+
+  _FrameBinaryDart? _lookupFrameBinary() {
+    if (_frameBinaryLookedUp) return _frameBinary;
+    _frameBinaryLookedUp = true;
+    try {
+      _frameBinary = _library
+          .lookupFunction<_FrameBinaryNative, _FrameBinaryDart>(
+            'pocket_frame_binary',
+          );
+    } on Object {
+      // Older native libraries continue through the JSON full-frame ABI.
+      _frameBinary = null;
+    }
+    return _frameBinary;
+  }
+
+  PocketFrame _readBinaryFullFrame(
+    _FrameBinaryDart binary,
+    double delta,
+  ) {
+    final length = calloc<Uint64>();
+    try {
+      length.value = 0;
+      final pointer = binary(_handle, delta, length);
+      final error = lastError;
+      if (error != null && error.isNotEmpty) {
+        throw PocketRuntimeException(error);
+      }
+      if (pointer.address == 0 || length.value == 0) {
+        _throwLastError('pocket_frame_binary returned no frame');
+      }
+      final byteLength = length.value;
+      if (byteLength > 64 * 1024 * 1024) {
+        throw const PocketRuntimeException(
+          'pocket_frame_binary returned an oversized frame',
+        );
+      }
+      return PocketFrame.fromBinary(pointer.asTypedList(byteLength));
+    } finally {
+      calloc.free(length);
+    }
   }
 
   _FrameBinaryDart? _lookupFrameDeltaBinary() {
@@ -1638,20 +1693,45 @@ final class FfiPocketRuntime
     return _duplexStep;
   }
 
+  _SendBinaryDart? _lookupSendBinary() {
+    if (_sendBinaryLookedUp) return _sendBinary;
+    _sendBinaryLookedUp = true;
+    try {
+      _sendBinary = _library.lookupFunction<_SendBinaryNative, _SendBinaryDart>(
+        'pocket_send_binary',
+      );
+    } on Object {
+      _sendBinary = null;
+    }
+    return _sendBinary;
+  }
+
   @override
   void send(Map<String, dynamic> message) {
     _checkAlive();
     _traceTransactionBegin();
-    String? encoded;
     Object? failure;
     try {
-      encoded = jsonEncode(message);
-      final pointer = encoded.toNativeUtf8(allocator: calloc);
-      try {
-        final result = _send(_handle, pointer);
-        if (result != 0) _throwLastError('pocket_send failed');
-      } finally {
-        calloc.free(pointer);
+      final sendBinary = _lookupSendBinary();
+      if (sendBinary != null) {
+        final encodedBytes = PocketBinaryCodec.encodeMessage(message);
+        final pointer = calloc<Uint8>(encodedBytes.length);
+        try {
+          pointer.asTypedList(encodedBytes.length).setAll(0, encodedBytes);
+          final result = sendBinary(_handle, pointer, encodedBytes.length);
+          if (result != 0) _throwLastError('pocket_send_binary failed');
+        } finally {
+          calloc.free(pointer);
+        }
+      } else {
+        final encoded = jsonEncode(message);
+        final pointer = encoded.toNativeUtf8(allocator: calloc);
+        try {
+          final result = _send(_handle, pointer);
+          if (result != 0) _throwLastError('pocket_send failed');
+        } finally {
+          calloc.free(pointer);
+        }
       }
     } catch (error) {
       failure = error;
@@ -1881,6 +1961,10 @@ final class FfiPocketRuntime
   /// transaction with the admission operation rather than an invisible
   /// nested `frame(0)` transaction.
   PocketFrame _loadFrame() {
+    final binary = _lookupFrameBinary();
+    if (binary != null) {
+      return _readBinaryFullFrame(binary, 0.0);
+    }
     final pointer = _frame(_handle, 0.0);
     return _readFullFrame(pointer, 'pocket_frame returned no frame');
   }
@@ -2065,6 +2149,7 @@ final class FfiPocketRuntime
     if (depth > 16) throw const FormatException('message nesting is too deep');
     if (value == null || value is bool || value is String || value is int)
       return value;
+    if (value is Uint8List) return List<int>.from(value);
     if (value is double) {
       if (!value.isFinite)
         throw const FormatException('message number is not finite');

@@ -37,14 +37,20 @@ export function createPocketPlatformClient(send?: HostSend, options: { bridge?: 
   const messageListeners = new Set<(message: AppMessage) => void>();
   const lifecycleListeners = new Set<(event: JsonObject) => void>();
   let disposed = false;
-  const target = globalThis as typeof globalThis & { __pocketEvent?: (line: string) => void };
+  const target = globalThis as typeof globalThis & {
+    __pocketEvent?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+  };
   const previous = target.__pocketEvent;
-  const receive = (line: string) => {
+  const receive: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean } = (packet) => {
     // Modern bridges own the event sink below this forwarding wrapper.
     // Request-only injected bridges retain the explicit compatibility path.
-    if (typeof host.onEvent !== "function") host.handle(line);
+    if (typeof host.onEvent !== "function") host.handle(packet);
     let event: Record<string, unknown> | undefined;
-    try { event = JSON.parse(line); } catch { /* Other guest handlers may own this packet. */ }
+    if (typeof packet === "string") {
+      try { event = JSON.parse(packet); } catch { /* Other guest handlers may own this packet. */ }
+    } else if (packet && typeof packet === "object" && !Array.isArray(packet)) {
+      event = packet;
+    }
     if (!disposed && event) {
       const name = event.name ?? event.method;
       const value = event.payload ?? event.params;
@@ -63,8 +69,12 @@ export function createPocketPlatformClient(send?: HostSend, options: { bridge?: 
         }
       }
     }
-    previous?.(line);
+    if (previous) {
+      if (previous.__binaryCapable === true || typeof packet === "string") previous(packet);
+      else previous(JSON.stringify(packet));
+    }
   };
+  receive.__binaryCapable = true;
   target.__pocketEvent = receive;
 
   const request = (name: string, params: JsonObject = {}) => host.request(name, params);

@@ -5,8 +5,12 @@ import {
   type DisplayGeometry,
 } from "./responsive.ts";
 
+export type DisplayEventHandler = ((packet: string | Record<string, unknown>) => void) & {
+  __binaryCapable?: boolean;
+};
+
 export interface DisplayGeometryBridge {
-  __pocketEvent?: (line: string) => void;
+  __pocketEvent?: DisplayEventHandler;
   ui?: { __viewport?: { w?: unknown; h?: unknown } };
 }
 
@@ -24,7 +28,7 @@ export interface DisplayGeometryOptions {
   onChange?: (geometry: DisplayGeometry) => void;
 }
 
-type DisplayListener = (line: string) => void;
+type DisplayListener = DisplayEventHandler;
 
 interface DisplayBridgeState {
   readonly previous?: DisplayListener;
@@ -42,16 +46,22 @@ function subscribeDisplayBridge(bridge: DisplayGeometryBridge, listener: Display
   if (!state) {
     const listeners = new Set<DisplayListener>();
     const previous = bridge.__pocketEvent;
-    const receive: DisplayListener = (line) => {
+    const receive: DisplayListener = (packet) => {
       for (const current of [...listeners]) {
         try {
-          current(line);
+          current(packet);
         } catch {
           // An observer must not prevent the remaining bridge subscribers.
         }
       }
-      previous?.(line);
+      if (!previous) return;
+      if (previous.__binaryCapable === true || typeof packet === "string") {
+        previous(packet);
+      } else {
+        previous(JSON.stringify(packet));
+      }
     };
+    receive.__binaryCapable = true;
     state = { previous, receive, listeners };
     displayBridgeStates.set(bridge, state);
     bridge.__pocketEvent = receive;
@@ -104,10 +114,10 @@ export function createDisplayGeometry(options: DisplayGeometryOptions = {}): () 
   const [geometry, setGeometry] = createSignal<DisplayGeometry>(initialDisplayGeometry(bridge, fallback));
   let disposed = false;
   onMount(() => {
-    const receive = (line: string): void => {
+    const receive: DisplayListener = (packet): void => {
       if (disposed) return;
       try {
-        const message = JSON.parse(line) as {
+        const message = (typeof packet === "string" ? JSON.parse(packet) : packet) as {
           method?: unknown;
           name?: unknown;
           params?: unknown;

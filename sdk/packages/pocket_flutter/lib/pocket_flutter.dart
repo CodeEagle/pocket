@@ -1,4 +1,5 @@
 export 'src/pocket_assets.dart';
+export 'src/pocket_binary_codec.dart';
 export 'src/pocket_display.dart';
 export 'src/pocket_display_geometry.dart';
 export 'src/pocket_duplex.dart';

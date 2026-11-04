@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'pocket_binary_codec.dart';
+
 class PocketClip {
   const PocketClip({
     required this.x,
@@ -347,13 +349,18 @@ class PocketEvent {
     required this.id,
     required this.method,
     required this.params,
+    this.wireByteLength,
   });
 
   final String id;
   final String method;
   final Map<String, dynamic> params;
+  final int? wireByteLength;
 
-  factory PocketEvent.fromJson(Map<String, dynamic> json) {
+  factory PocketEvent.fromJson(
+    Map<String, dynamic> json, {
+    int? wireByteLength,
+  }) {
     final rawParams = json['params'] ?? json['payload'];
     return PocketEvent(
       id: '${json['id'] ?? ''}',
@@ -361,6 +368,7 @@ class PocketEvent {
       params: rawParams is Map
           ? Map<String, dynamic>.from(rawParams)
           : <String, dynamic>{},
+      wireByteLength: wireByteLength,
     );
   }
 }
@@ -527,12 +535,8 @@ class PocketFrame {
     final events = <PocketEvent>[];
     final eventCount = reader.count('events');
     for (var index = 0; index < eventCount; index++) {
-      final payload = reader.bytes('event');
-      final decoded = jsonDecode(utf8.decode(payload));
-      if (decoded is! Map) {
-        throw const FormatException('Pocket binary event must be an object');
-      }
-      events.add(PocketEvent.fromJson(Map<String, dynamic>.from(decoded)));
+      final payload = reader.bytes('event', copy: false);
+      events.add(PocketBinaryCodec.decodeEvent(payload));
     }
     final resources = <PocketImageResource>[];
     final resourceCount = reader.count('resources');
@@ -844,15 +848,15 @@ final class _PocketBinaryReader {
     return value;
   }
 
-  Uint8List bytes(String field) {
+  Uint8List bytes(String field, {bool copy = true}) {
     final length = u32();
     _require(length, field);
-    final result = Uint8List.fromList(data.sublist(offset, offset + length));
+    final slice = Uint8List.sublistView(data, offset, offset + length);
     offset += length;
-    return result;
+    return copy ? Uint8List.fromList(slice) : slice;
   }
 
-  String string(String field) => utf8.decode(bytes(field));
+  String string(String field) => utf8.decode(bytes(field, copy: false));
 
   void finish() {
     if (offset != data.length) {

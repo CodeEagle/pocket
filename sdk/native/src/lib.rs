@@ -4,6 +4,7 @@
 //! but exposes a tiny JSON bridge to Dart.  The Flutter side owns painting;
 //! this library owns JavaScript execution, flexbox layout and frame timing.
 
+pub mod binary_bridge;
 pub mod bytecode;
 mod demand;
 pub mod duplex;
@@ -20,7 +21,7 @@ use pocket_spec::BINDING_GENERATION;
 use pocketjs_core::{damage::DamageRect, Ui};
 use rquickjs::{Coerced, Ctx, Exception, FromJs, Function, Object, Value};
 use serde::Serialize;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{c_char, CStr, CString};
 use std::io::Read;
@@ -78,6 +79,38 @@ const MAX_HOST_TICK_HZ: u32 = 120;
 const MAX_FRAME_DELTA_MS: f64 = 1000.0;
 const MAX_CATCH_UP_TICKS: u32 = MAX_HOST_TICK_HZ;
 const CLOCK_EPSILON_MS: f64 = 1.0e-9;
+
+// Control traffic is bounded independently of the high-frequency binary ring.
+// Match the JS SDK's event/batch limits and bound retained native frames even
+// when a guest emits many small packets before returning its frame.
+const MAX_BRIDGE_MESSAGE_BYTES: usize = 256 * 1024;
+const MAX_BRIDGE_BATCH_EVENTS: usize = 256;
+const MAX_BRIDGE_QUEUED_BYTES: usize = 1024 * 1024;
+const MAX_BRIDGE_QUEUED_EVENTS: usize = 1024;
+
+fn valid_bridge_batch(value: &serde_json::Value) -> bool {
+    if !value.is_object() {
+        return false;
+    }
+    let is_batch = |event: &serde_json::Value| {
+        ["method", "name"]
+            .iter()
+            .any(|key| event.get(*key).and_then(|v| v.as_str()) == Some("stream.batch"))
+    };
+    if !is_batch(value) {
+        return true;
+    }
+    let Some(events) = value
+        .get("params")
+        .or_else(|| value.get("payload"))
+        .and_then(|params| params.get("events"))
+        .and_then(|events| events.as_array())
+    else {
+        return false;
+    };
+    events.len() <= MAX_BRIDGE_BATCH_EVENTS
+        && events.iter().all(|event| event.is_object() && !is_batch(event))
+}
 
 // The POC has one host-owned Flutter video Texture.  Framework
 // CompositorSurface resolves its package prop through ui.__surfaces before it
@@ -171,6 +204,24 @@ struct Clip {
     h: f32,
 }
 
+#[derive(Clone, Debug)]
+struct OutboundEvent {
+    /// Pre-encoded `0xB1` Binary TLV bytes ready to be written directly into
+    /// `PFB1` binary frames without any re-serialization.
+    binary: Vec<u8>,
+}
+
+impl Serialize for OutboundEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let value =
+            binary_bridge::decode_to_json(&self.binary).map_err(serde::ser::Error::custom)?;
+        value.serialize(serializer)
+    }
+}
+
 #[derive(Serialize)]
 struct FrameResult {
     frame: u64,
@@ -179,7 +230,7 @@ struct FrameResult {
     ops: Vec<FrameOp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auxiliary: Option<SurfaceFrame>,
-    events: Vec<serde_json::Value>,
+    events: Vec<OutboundEvent>,
     resources: Vec<FrameResource>,
     #[serde(rename = "releasedResources", skip_serializing_if = "Vec::is_empty")]
     released_resources: Vec<String>,
@@ -282,7 +333,7 @@ pub struct HostState {
     /// active realm cannot be downgraded while it is executing.
     memory_limits: MemoryLimits,
     nodes: Rc<RefCell<Vec<NodeMeta>>>,
-    outbound: Rc<RefCell<Vec<serde_json::Value>>>,
+    outbound: Rc<RefCell<Vec<OutboundEvent>>>,
     /// One lock-free SPSC channel per runtime. Reload closes this generation
     /// and installs a new Arc rather than clearing a ring borrowed by another
     /// isolate.
@@ -321,6 +372,7 @@ pub struct HostState {
     worker_instance: u64,
     offload: Option<Arc<offload::OffloadHost>>,
     offload_output: CString,
+    offload_binary_output: Vec<u8>,
     touches: Vec<TouchContact>,
     pending_touch_frames: Vec<PendingTouchFrame>,
     buttons: u32,
@@ -566,9 +618,7 @@ fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
         u32::try_from(frame.events.len()).map_err(|_| "too many frame events".to_owned())?;
     writer.u32(event_count);
     for event in &frame.events {
-        let encoded =
-            serde_json::to_vec(event).map_err(|error| format!("event JSON encode: {error}"))?;
-        writer.bytes(&encoded)?;
+        writer.bytes(&event.binary)?;
     }
     let resource_count =
         u32::try_from(frame.resources.len()).map_err(|_| "too many frame resources".to_owned())?;
@@ -988,7 +1038,7 @@ fn install_bridge(
     guest: &RquickjsGuest,
     ops: OpContext,
     nodes: Rc<RefCell<Vec<NodeMeta>>>,
-    outbound: Rc<RefCell<Vec<serde_json::Value>>>,
+    outbound: Rc<RefCell<Vec<OutboundEvent>>>,
     duplex: Arc<duplex::DuplexRing>,
     auxiliary: Option<(i32, f32, f32)>,
     compositor_surfaces: &BTreeMap<String, i32>,
@@ -1002,19 +1052,77 @@ fn install_bridge(
             let bridge = Object::new(ctx.clone())?;
 
             let emit_queue = outbound.clone();
-            let emit = Function::new(ctx.clone(), move |_ctx: Ctx<'_>, line: String| {
-                let parsed = serde_json::from_str::<serde_json::Value>(&line).unwrap_or_else(
-                    |_| serde_json::json!({"type":"error","message":"invalid bridge payload"}),
-                );
-                emit_queue.borrow_mut().push(parsed);
-                // The official PocketJS app/stream bridge treats the host
-                // emitter as a boolean transport. Returning `undefined`
-                // makes a valid queued event look rejected to
-                // `stream.open`/`host.request`, even though it was accepted
-                // by this native queue.
-                Ok::<bool, rquickjs::Error>(true)
+            // This closure is the only producer of this queue. An empty queue
+            // means the frame/load/error boundary drained it, so accounting
+            // resets without introducing a second host queue or polling task.
+            let queued_bytes = Rc::new(Cell::new(0usize));
+            let enqueue_bridge_value = {
+                let emit_queue = emit_queue.clone();
+                let queued_bytes = queued_bytes.clone();
+                move |raw: Value<'_>| -> rquickjs::Result<bool> {
+                    let mut queue = emit_queue.borrow_mut();
+                    if queue.is_empty() {
+                        queued_bytes.set(0);
+                    }
+                    if queue.len() >= MAX_BRIDGE_QUEUED_EVENTS {
+                        return Ok(false);
+                    }
+                    let remaining_budget =
+                        MAX_BRIDGE_QUEUED_BYTES.saturating_sub(queued_bytes.get());
+                    let max_bytes = MAX_BRIDGE_MESSAGE_BYTES.min(remaining_budget);
+                    if max_bytes == 0 {
+                        return Ok(false);
+                    }
+                    if let Some(js_str) = raw.as_string() {
+                        let Ok(line) = js_str.to_string() else {
+                            return Ok(false);
+                        };
+                        if line.len() > MAX_BRIDGE_MESSAGE_BYTES || line.len() > remaining_budget {
+                            return Ok(false);
+                        }
+                        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) else {
+                            return Ok(false);
+                        };
+                        if !valid_bridge_batch(&parsed) {
+                            return Ok(false);
+                        }
+                        let Ok(binary) =
+                            binary_bridge::encode_json_to_binary(&parsed, usize::MAX)
+                        else {
+                            return Ok(false);
+                        };
+                        queue.push(OutboundEvent { binary });
+                        queued_bytes.set(queued_bytes.get() + line.len());
+                        return Ok(true);
+                    }
+                    let Ok(binary) = binary_bridge::encode_js_message(
+                        raw,
+                        max_bytes,
+                        MAX_BRIDGE_BATCH_EVENTS,
+                    ) else {
+                        return Ok(false);
+                    };
+                    let cost = binary.len();
+                    queue.push(OutboundEvent { binary });
+                    queued_bytes.set(queued_bytes.get() + cost);
+                    // The official PocketJS app/stream bridge treats the host
+                    // emitter as a boolean transport. Returning `undefined`
+                    // makes a valid queued event look rejected to
+                    // `stream.open`/`host.request`, even though it was accepted
+                    // by this native queue.
+                    Ok(true)
+                }
+            };
+            let emit_fn_closure = enqueue_bridge_value.clone();
+            let emit = Function::new(ctx.clone(), move |_ctx: Ctx<'_>, value: Value<'_>| {
+                emit_fn_closure(value)
+            })?;
+            let emit_val_closure = enqueue_bridge_value;
+            let emit_value = Function::new(ctx.clone(), move |_ctx: Ctx<'_>, value: Value<'_>| {
+                emit_val_closure(value)
             })?;
             bridge.set("_emit", emit)?;
+            bridge.set("_emitValue", emit_value)?;
 
             // Binary high-frequency host/guest transport.  The record is
             // written straight into the native-owned ring; only five scalar
@@ -1361,7 +1469,19 @@ fn evaluate_guest(guest: &mut RquickjsGuest, source: &str, tick_hz: u32) -> Resu
     })
 }
 
-fn dispatch_guest(guest: &RquickjsGuest, function_name: &str, line: &str) -> Result<(), String> {
+fn is_js_handler_binary_capable(function: &Function<'_>) -> bool {
+    function
+        .as_object()
+        .and_then(|obj| obj.get::<_, bool>("__binaryCapable").ok())
+        .unwrap_or(false)
+}
+
+fn dispatch_guest_json(
+    guest: &RquickjsGuest,
+    function_name: &str,
+    json_val: &serde_json::Value,
+    fallback_line: Option<&str>,
+) -> Result<(), String> {
     guest
         .with_turn(|ctx| -> Result<(), String> {
             let value: Value = ctx
@@ -1373,9 +1493,58 @@ fn dispatch_guest(guest: &RquickjsGuest, function_name: &str, line: &str) -> Res
             }
             let function =
                 Function::from_js(&ctx, value).map_err(|error| quickjs_error(&ctx, error))?;
-            function
-                .call::<_, ()>((line.to_owned(),))
-                .map_err(|error| quickjs_error(&ctx, error))
+            if is_js_handler_binary_capable(&function) {
+                let js_packet = binary_bridge::json_to_js(&ctx, json_val)?;
+                function
+                    .call::<_, ()>((js_packet,))
+                    .map_err(|error| quickjs_error(&ctx, error))
+            } else {
+                let owned;
+                let line = match fallback_line {
+                    Some(line) => line,
+                    None => {
+                        owned = serde_json::to_string(json_val)
+                            .map_err(|error| format!("guest event JSON encode: {error}"))?;
+                        &owned
+                    }
+                };
+                function
+                    .call::<_, ()>((line.to_owned(),))
+                    .map_err(|error| quickjs_error(&ctx, error))
+            }
+        })
+        .ok_or_else(|| "guest context is not initialized".to_owned())?
+}
+
+fn dispatch_guest_binary(
+    guest: &RquickjsGuest,
+    function_name: &str,
+    binary_bytes: &[u8],
+) -> Result<(), String> {
+    guest
+        .with_turn(|ctx| -> Result<(), String> {
+            let value: Value = ctx
+                .globals()
+                .get(function_name)
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            if value.is_undefined() {
+                return Ok(());
+            }
+            let function =
+                Function::from_js(&ctx, value).map_err(|error| quickjs_error(&ctx, error))?;
+            if is_js_handler_binary_capable(&function) {
+                let js_packet = binary_bridge::decode_to_js(&ctx, binary_bytes)?;
+                function
+                    .call::<_, ()>((js_packet,))
+                    .map_err(|error| quickjs_error(&ctx, error))
+            } else {
+                let json_val = binary_bridge::decode_to_json(binary_bytes)?;
+                let line = serde_json::to_string(&json_val)
+                    .map_err(|error| format!("binary fallback JSON encode: {error}"))?;
+                function
+                    .call::<_, ()>((line,))
+                    .map_err(|error| quickjs_error(&ctx, error))
+            }
         })
         .ok_or_else(|| "guest context is not initialized".to_owned())?
 }
@@ -1454,9 +1623,7 @@ fn dispatch_duplex_pointer(
         "payload": payload,
     });
     queue_input(host, &input)?;
-    let line = serde_json::to_string(&input)
-        .map_err(|error| format!("duplex pointer event encode: {error}"))?;
-    dispatch_guest(&host.guest, "__pocketEvent", &line)
+    dispatch_guest_json(&host.guest, "__pocketEvent", &input, None)
 }
 
 /// Drain host-written records on the native owner thread and dispatch them to
@@ -3615,6 +3782,7 @@ fn create_host(
             worker_instance: 0,
             offload: None,
             offload_output: c_string(""),
+            offload_binary_output: Vec::new(),
             touches: Vec::new(),
             pending_touch_frames: Vec::new(),
             buttons: 0,
@@ -3683,6 +3851,7 @@ fn create_host(
             worker_instance: 0,
             offload: None,
             offload_output: c_string(""),
+            offload_binary_output: Vec::new(),
             touches: Vec::new(),
             pending_touch_frames: Vec::new(),
             buttons: 0,
@@ -3736,6 +3905,7 @@ fn create_host(
         worker_instance: 0,
         offload: None,
         offload_output: c_string(""),
+        offload_binary_output: Vec::new(),
         touches: Vec::new(),
         pending_touch_frames: Vec::new(),
         buttons: 0,
@@ -3927,7 +4097,7 @@ pub unsafe extern "C" fn pocket_resize_viewport(
                 "height": requested.1,
             },
         });
-        dispatch_guest(&host.guest, "__pocketEvent", &event.to_string())?;
+        dispatch_guest_json(&host.guest, "__pocketEvent", &event, None)?;
         Ok(())
     })();
     match result {
@@ -4059,6 +4229,38 @@ pub unsafe extern "C" fn pocket_offload_take(
     host.offload_output.as_ptr()
 }
 
+/// Binary counterpart of `pocket_offload_take`. Returns a borrowed `0xB2`
+/// binary record until the next offload take call on the same host.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_offload_take_binary(
+    handle: *mut HostState,
+    cancelled: u32,
+    out_byte_length: *mut u64,
+) -> *const u8 {
+    if let Some(length) = out_byte_length.as_mut() {
+        *length = 0;
+    }
+    let Some(host) = handle.as_mut() else {
+        return ptr::null();
+    };
+    let Some(provider) = &host.offload else {
+        return ptr::null();
+    };
+    let request = if cancelled == 0 {
+        provider.take_request()
+    } else {
+        provider.take_cancellation()
+    };
+    let Some(request) = request else {
+        return ptr::null();
+    };
+    host.offload_binary_output = binary_bridge::encode_offload_request(&request);
+    if let Some(length) = out_byte_length.as_mut() {
+        *length = host.offload_binary_output.len() as u64;
+    }
+    host.offload_binary_output.as_ptr()
+}
+
 /// Observe native replies without consuming them. No periodic probe is used;
 /// Dart checks this only while handling a native provider notification.
 #[no_mangle]
@@ -4111,6 +4313,36 @@ pub unsafe extern "C" fn pocket_offload_complete(
         (Some(payload), None) => Ok(payload.to_owned()),
         (None, Some(error)) => Err(error.to_owned()),
         _ => return -1,
+    };
+    if provider.complete(generation, session, id, result) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Binary counterpart of `pocket_offload_complete`. Accepts a `0xB2` binary
+/// completion record without intermediate JSON envelope encoding.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_offload_complete_binary(
+    handle: *mut HostState,
+    record: *const u8,
+    record_len: usize,
+) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    let Some(provider) = &host.offload else {
+        return -1;
+    };
+    if record.is_null() || record_len == 0 || record_len > 16384 {
+        return -1;
+    }
+    let bytes = std::slice::from_raw_parts(record, record_len);
+    let Some((generation, session, id, result)) =
+        binary_bridge::decode_offload_completion(bytes)
+    else {
+        return -1;
     };
     if provider.complete(generation, session, id, result) {
         0
@@ -5117,6 +5349,45 @@ pub unsafe extern "C" fn pocket_frame_delta(
     }
 }
 
+/// Full-frame binary counterpart of `pocket_frame`. Used by initial guest load
+/// (`_loadFrame`) and explicit full-frame callers so startup textures and
+/// DrawOps bypass UTF-8 JSON serialization.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_frame_binary(
+    handle: *mut HostState,
+    delta_ms: f64,
+    out_byte_length: *mut u64,
+) -> *const u8 {
+    if let Some(length) = out_byte_length.as_mut() {
+        *length = 0;
+    }
+    let Some(host) = handle.as_mut() else {
+        return ptr::null();
+    };
+    match build_frame(host, delta_ms) {
+        Ok(built) => match encode_binary_frame(&built.result) {
+            Ok(bytes) => {
+                host.binary_output = bytes;
+                if let Some(length) = out_byte_length.as_mut() {
+                    *length = host.binary_output.len() as u64;
+                }
+                clear_error(host);
+                host.binary_output.as_ptr()
+            }
+            Err(error) => {
+                host.binary_output.clear();
+                set_error(host, format!("frame binary encode: {error}"));
+                ptr::null()
+            }
+        },
+        Err(error) => {
+            host.binary_output.clear();
+            failed_frame_output(host, error);
+            ptr::null()
+        }
+    }
+}
+
 /// Compact binary counterpart of `pocket_frame_delta`.  A zero output length
 /// with no `pocket_last_error` means the retained frame was unchanged.  The
 /// returned bytes are borrowed from the runtime and remain valid until the
@@ -5162,6 +5433,72 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn pocket_send_binary(
+    handle: *mut HostState,
+    message: *const u8,
+    message_len: usize,
+) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    if message.is_null() || message_len == 0 {
+        set_error(host, "null or empty binary message");
+        return -1;
+    }
+    if message_len > MAX_BRIDGE_MESSAGE_BYTES {
+        set_error(host, "binary message exceeds maximum bridge limit");
+        return -1;
+    }
+    let bytes = std::slice::from_raw_parts(message, message_len);
+    let meta = match binary_bridge::inspect_binary_envelope(bytes) {
+        Ok(meta) => meta,
+        Err(error) => {
+            set_error(host, format!("invalid binary message: {error}"));
+            return -1;
+        }
+    };
+    let target = if meta.is_response() {
+        "__pocketDeliver"
+    } else {
+        "__pocketEvent"
+    };
+    if host.guest_loaded {
+        if let Err(error) = demand::before_external(host) {
+            set_error(host, error);
+            return -1;
+        }
+        if let Err(error) = drain_duplex(host) {
+            set_error(host, error);
+            return -1;
+        }
+    }
+    if meta.is_input() {
+        let parsed = match binary_bridge::decode_to_json(bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                set_error(host, format!("invalid binary input message: {error}"));
+                return -1;
+            }
+        };
+        if let Err(error) = queue_input(host, &parsed) {
+            set_error(host, error);
+            return -1;
+        }
+    }
+    match dispatch_guest_binary(&host.guest, target, bytes) {
+        Ok(()) => {
+            clear_error(host);
+            0
+        }
+        Err(error) => {
+            host.outbound.borrow_mut().clear();
+            set_error(host, format!("dispatch {target}: {error}"));
+            -1
+        }
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn pocket_send(handle: *mut HostState, message: *const c_char) -> i32 {
     let Some(host) = handle.as_mut() else {
         return -1;
@@ -5200,7 +5537,7 @@ pub unsafe extern "C" fn pocket_send(handle: *mut HostState, message: *const c_c
         set_error(host, error);
         return -1;
     }
-    match dispatch_guest(&host.guest, target, &line) {
+    match dispatch_guest_json(&host.guest, target, &parsed, Some(&line)) {
         Ok(()) => {
             clear_error(host);
             0
@@ -7232,5 +7569,135 @@ mod smoke_tests {
         unsafe {
             pocket_destroy(handle);
         }
+    }
+
+    #[test]
+    fn binary_bridge_ffi_roundtrips_emit_value_send_binary_and_offload_binary() {
+        let handle = pocket_create(80.0, 80.0);
+        let offload_cfg = CString::new(
+            r#"{"generation":1,"session":3,"timeoutMs":1000,"methods":["crypto.digest"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { pocket_configure_offload(handle, offload_cfg.as_ptr(), None) },
+            0
+        );
+
+        let source = CString::new(
+            r#"
+            const handler = function(packet) {
+                if (typeof packet === "string") {
+                    throw new Error("expected direct JS object for __binaryCapable handler");
+                }
+                const bytes = packet.payload.bytes;
+                if (!(bytes instanceof Uint8Array) || bytes.length !== 3 || bytes[1] !== 99) {
+                    throw new Error("expected Uint8Array payload");
+                }
+                pocket._emitValue({
+                    type: "event",
+                    name: "echo.binary",
+                    payload: {
+                        count: packet.payload.count + 1,
+                        bytes: new Uint8Array([bytes[0], bytes[1], bytes[2], 77])
+                    }
+                });
+            };
+            handler.__binaryCapable = true;
+            globalThis.__pocketEvent = handler;
+            if (!offload.submit(JSON.stringify({v:1,id:1,method:"crypto.digest",payload:'{"input":"hello"}'}))) {
+                throw new Error("offload.submit failed");
+            }
+            globalThis.frame = function() {
+                const reply = offload.take();
+                if (reply) {
+                    pocket._emitValue({
+                        type: "event",
+                        name: "offload.done",
+                        payload: JSON.parse(reply)
+                    });
+                }
+            };
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+
+        let inbound = binary_bridge::encode_json_to_binary(
+            &serde_json::json!({
+                "type": "event",
+                "name": "host.push",
+                "payload": {
+                    "count": 10,
+                    "bytes": [1, 99, 250]
+                }
+            }),
+            4096,
+        )
+        .unwrap();
+        // Patch the array in `inbound` or construct a packet with TAG_BYTES via QuickJS:
+        let inbound_with_bytes = {
+            let rt = Runtime::new().unwrap();
+            let ctx = Context::full(&rt).unwrap();
+            ctx.with(|c| {
+                let v: Value = c
+                    .eval(
+                        r#"({
+                            type: "event",
+                            name: "host.push",
+                            payload: {
+                                count: 10,
+                                bytes: new Uint8Array([1, 99, 250])
+                            }
+                        })"#,
+                    )
+                    .unwrap();
+                binary_bridge::encode_js_message(v, 4096, 256).unwrap()
+            })
+        };
+        assert_eq!(
+            unsafe {
+                pocket_send_binary(
+                    handle,
+                    inbound_with_bytes.as_ptr(),
+                    inbound_with_bytes.len(),
+                )
+            },
+            0,
+            "{}",
+            unsafe { &*handle }.last_error
+        );
+
+        let mut req_len = 0u64;
+        let req_ptr = unsafe { pocket_offload_take_binary(handle, 0, &mut req_len) };
+        assert!(!req_ptr.is_null());
+        let req_bytes = unsafe { std::slice::from_raw_parts(req_ptr, req_len as usize) };
+        assert_eq!(req_bytes[0], binary_bridge::OFFLOAD_BINARY_MAGIC);
+        let req_id = u64::from_le_bytes(req_bytes[9..17].try_into().unwrap());
+
+        let mut completion = Vec::new();
+        completion.push(binary_bridge::OFFLOAD_BINARY_MAGIC);
+        completion.extend_from_slice(&1u32.to_le_bytes());
+        completion.extend_from_slice(&3u32.to_le_bytes());
+        completion.extend_from_slice(&req_id.to_le_bytes());
+        completion.push(1);
+        let reply_json = br#"{"ok":true}"#;
+        completion.extend_from_slice(&(reply_json.len() as u32).to_le_bytes());
+        completion.extend_from_slice(reply_json);
+        assert_eq!(
+            unsafe {
+                pocket_offload_complete_binary(handle, completion.as_ptr(), completion.len())
+            },
+            0
+        );
+
+        let mut frame_len = 0u64;
+        let frame_ptr = unsafe { pocket_frame_binary(handle, 16.0, &mut frame_len) };
+        assert!(!frame_ptr.is_null() && frame_len > 0);
+        assert_eq!(unsafe { &*handle }.frame_json_serializations, 0);
+
+        unsafe {
+            pocket_destroy(handle);
+        }
+        let _ = inbound;
     }
 }

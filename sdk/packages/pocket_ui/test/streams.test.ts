@@ -314,3 +314,84 @@ test("stream deadlines use HostBridge.tick without timers", async () => {
     host.dispose();
   }
 });
+
+test("HostBridge uses pocket._emitValue directly and marks __pocketEvent/__pocketDeliver __binaryCapable", async () => {
+  const globalObject = globalThis as typeof globalThis & {
+    pocket?: {
+      _emit?: (line: string) => boolean;
+      _emitValue?: (packet: Record<string, unknown>) => boolean;
+    };
+    __pocketEvent?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+    __pocketDeliver?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+  };
+  const previousPocket = globalObject.pocket;
+  const previousEvent = globalObject.__pocketEvent;
+  const previousDeliver = globalObject.__pocketDeliver;
+
+  const emittedObjects: Record<string, unknown>[] = [];
+  let legacyStringCalls = 0;
+
+  const legacyPrevious = (line: string | Record<string, unknown>) => {
+    assert.equal(typeof line, "string");
+    legacyStringCalls += 1;
+  };
+  globalObject.__pocketEvent = legacyPrevious;
+  globalObject.pocket = {
+    _emit: () => {
+      throw new Error("_emit should not be called when _emitValue is present");
+    },
+    _emitValue: (packet) => {
+      emittedObjects.push(packet);
+      return true;
+    },
+  };
+
+  const host = createHostBridge();
+
+  try {
+    assert.equal(globalObject.__pocketEvent?.__binaryCapable, true);
+    assert.equal(globalObject.__pocketDeliver?.__binaryCapable, true);
+
+    const requestPromise = host.request("binary.echo", { count: 7 });
+    assert.equal(emittedObjects.length, 1);
+    assert.equal(emittedObjects[0]?.name, "host.request");
+    const requestPayload = emittedObjects[0]?.payload as Record<string, unknown>;
+    assert.equal(requestPayload.capability, "binary.echo");
+
+    assert.equal(host.emit?.("guest.telemetry", { ok: true }), true);
+    assert.equal(emittedObjects.length, 2);
+    assert.equal(emittedObjects[1]?.name, "guest.telemetry");
+
+    let receivedBytes: Uint8Array | undefined;
+    host.onEvent?.((ev) => {
+      if (ev.method === "host.binary") {
+        receivedBytes = (ev.params as unknown as { bytes: Uint8Array }).bytes;
+      }
+    });
+
+    globalObject.__pocketEvent?.({
+      type: "event",
+      name: "host.binary",
+      payload: { bytes: new Uint8Array([9, 8, 7]) },
+    });
+    assert.deepEqual(Array.from(receivedBytes ?? []), [9, 8, 7]);
+    assert.equal(legacyStringCalls, 1);
+
+    globalObject.__pocketDeliver?.({
+      type: "event",
+      name: "host.response",
+      payload: {
+        requestId: requestPayload.requestId,
+        capability: "binary.echo",
+        ok: true,
+        result: { echoed: 7 },
+      },
+    });
+    assert.deepEqual(await requestPromise, { echoed: 7 });
+  } finally {
+    host.dispose();
+    globalObject.pocket = previousPocket;
+    globalObject.__pocketEvent = previousEvent;
+    globalObject.__pocketDeliver = previousDeliver;
+  }
+});

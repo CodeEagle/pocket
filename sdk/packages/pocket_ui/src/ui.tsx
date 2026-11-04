@@ -406,6 +406,7 @@ function normalizeInputColor(
 
 type TextInputPocket = {
   _emit?: (line: string) => boolean;
+  _emitValue?: (packet: Record<string, unknown>) => boolean;
   getLayout?: (id: number) => unknown;
 };
 
@@ -462,6 +463,14 @@ function viewportLayout(node: NodeMirror | undefined): TextInputRect | undefined
 }
 
 function emitTextInput(method: string, params: TextInputParams): boolean {
+  const emitValue = textInputGlobal.pocket?._emitValue;
+  if (typeof emitValue === "function") {
+    try {
+      return emitValue({ type: "event", name: method, payload: params }) === true;
+    } catch {
+      return false;
+    }
+  }
   const emit = textInputGlobal.pocket?._emit;
   if (typeof emit !== "function") return false;
   try {

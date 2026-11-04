@@ -551,9 +551,9 @@ function parsePolicies(
   return policies;
 }
 
-function eventOf(line: string): { name: string; payload: unknown } | undefined {
+function eventOf(packet: string | Record<string, unknown>): { name: string; payload: unknown } | undefined {
   try {
-    const value: unknown = JSON.parse(line);
+    const value: unknown = typeof packet === "string" ? JSON.parse(packet) : packet;
     if (!isRecord(value)) return undefined;
     const name = typeof value.name === "string"
       ? value.name
@@ -594,9 +594,11 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
   private readonly calls = new Map<string, PendingCall>();
   private readonly mailbox: PocketAppMessage[] = [];
   private readonly completedRequests = new Map<string, StoredResponse>();
-  private readonly target: typeof globalThis & { __pocketEvent?: (line: string) => void };
-  private readonly previousEvent: ((line: string) => void) | undefined;
-  private readonly receiveEvent: (line: string) => void;
+  private readonly target: typeof globalThis & {
+    __pocketEvent?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+  };
+  private readonly previousEvent: (((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean }) | undefined;
+  private readonly receiveEvent: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
   private queue: Promise<void> = Promise.resolve();
   private disposed = false;
   private initialized = false;
@@ -622,11 +624,13 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       throw new PocketSystemError("invalid_system_manifest", "manifest must be an object");
     }
 
-    this.target = globalThis as typeof globalThis & { __pocketEvent?: (line: string) => void };
+    this.target = globalThis as typeof globalThis & {
+      __pocketEvent?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+    };
     this.previousEvent = this.target.__pocketEvent;
-    this.receiveEvent = (line: string): void => {
-      if (typeof this.bridge.onEvent !== "function") this.bridge.handle(line);
-      const event = eventOf(line);
+    this.receiveEvent = (packet: string | Record<string, unknown>): void => {
+      if (typeof this.bridge.onEvent !== "function") this.bridge.handle(packet);
+      const event = eventOf(packet);
       if (event?.name === "system.request") {
         void this.enqueue(async () => {
           await this.handleSystemRequest(event.payload);
@@ -644,11 +648,18 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         });
       }
       try {
-        this.previousEvent?.(line);
+        if (this.previousEvent) {
+          if (this.previousEvent.__binaryCapable === true || typeof packet === "string") {
+            this.previousEvent(packet);
+          } else {
+            this.previousEvent(JSON.stringify(packet));
+          }
+        }
       } catch {
         // Keep the host event lane alive if an earlier subscriber fails.
       }
     };
+    this.receiveEvent.__binaryCapable = true;
     this.target.__pocketEvent = this.receiveEvent;
     this.ready = this.enqueue(() => this.initialize()).catch((error) => {
       this.dispose();

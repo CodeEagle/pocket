@@ -12,6 +12,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:video_player/video_player.dart';
 
 import 'pocket_assets.dart';
+import 'pocket_binary_codec.dart';
 import 'pocket_compositor.dart';
 import 'pocket_display.dart';
 import 'pocket_display_geometry.dart';
@@ -197,23 +198,27 @@ final class PocketViewController {
   /// decode on every controller message.
   bool _enqueueMessage(Map<String, dynamic> message) {
     try {
-      final encoded = jsonEncode(message);
-      final byteLength = utf8.encode(encoded).length;
+      final encoded = PocketBinaryCodec.encodeMessage(
+        message,
+        maxBytes: maxPendingMessageBytes,
+      );
+      final byteLength = encoded.length;
       if (byteLength > maxPendingMessageBytes ||
           _pendingMessages.length >= maxPendingMessages ||
           _pendingMessageBytes + byteLength > maxPendingMessageBytes) {
         return false;
       }
-      final decoded = jsonDecode(encoded);
-      if (decoded is! Map) return false;
-      final snapshot = Map<String, dynamic>.from(decoded);
+      final snapshot = PocketBinaryCodec.decodeMessage(
+        encoded,
+        maxBytes: maxPendingMessageBytes,
+      );
       _pendingMessages.add(
         _PocketQueuedMessage(_generation, snapshot, byteLength),
       );
       _pendingMessageBytes += byteLength;
       return true;
     } on Object {
-      // Non-JSON payloads cannot be retained safely across a visibility
+      // Non-serializable payloads cannot be retained safely across a visibility
       // transition. Match the bounded-queue contract by rejecting them.
       return false;
     }

@@ -203,6 +203,66 @@ void main() {
       throwsA(isA<FormatException>()),
     );
   });
+
+  test('PocketBinaryCodec roundtrips 0xB1 messages, Uint8List slices, PFB1 binary events, and 0xB2 offload records', () {
+    final original = <String, dynamic>{
+      'type': 'event',
+      'name': 'host.push',
+      'id': 'ev-9',
+      'payload': <String, dynamic>{
+        'flag': true,
+        'none': null,
+        'count': -42,
+        'ratio': 3.5,
+        'bytes': Uint8List.fromList(<int>[1, 99, 250]),
+        'nested': <Object?>['hello', 7],
+      },
+    };
+    final encoded = PocketBinaryCodec.encodeMessage(original);
+    expect(encoded.first, pocketBinaryMessageMagic);
+
+    final decoded = PocketBinaryCodec.decodeMessage(encoded);
+    expect(decoded['name'], 'host.push');
+    final payload = decoded['payload'] as Map<String, dynamic>;
+    expect(payload['flag'], isTrue);
+    expect(payload['none'], isNull);
+    expect(payload['count'], -42);
+    expect(payload['ratio'], 3.5);
+    expect(payload['bytes'], isA<Uint8List>());
+    expect(payload['bytes'], Uint8List.fromList(<int>[1, 99, 250]));
+    expect(payload['nested'], <Object?>['hello', 7]);
+
+    final binaryFrame = _BinaryFrameBuilder()
+      ..u32(0x31424650)
+      ..u16(1)
+      ..u16(0)
+      ..u64(1)
+      ..f32(320)
+      ..f32(480)
+      ..u32(0) // ops
+      ..u32(1) // events
+      ..bytes(encoded)
+      ..u32(0) // resources
+      ..u32(0) // releasedResources
+      ..u8(0); // auxiliary
+    final frame = PocketFrame.fromBinary(binaryFrame.build());
+    expect(frame.events, hasLength(1));
+    expect(frame.events.single.method, 'host.push');
+    expect(frame.events.single.wireByteLength, encoded.length);
+    expect(
+      frame.events.single.params['bytes'],
+      Uint8List.fromList(<int>[1, 99, 250]),
+    );
+
+    final completionOk = PocketBinaryCodec.encodeOffloadCompletion(
+      const PocketOffloadCompletion.success(
+        PocketOffloadKey(generation: 1, session: 5, id: 19),
+        '{"ok":true}',
+      ),
+    );
+    expect(completionOk.first, pocketOffloadBinaryMagic);
+    expect(completionOk[17], 1);
+  });
 }
 
 final class _BinaryFrameBuilder {

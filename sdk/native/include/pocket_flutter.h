@@ -46,6 +46,19 @@ int32_t pocket_load(HostState *handle, const char *source,
 int32_t pocket_load_bytecode(HostState *handle, const uint8_t *bytecode,
                              size_t bytecode_len, const uint8_t *pak,
                              size_t pak_len);
+const char *pocket_frame(HostState *handle, double delta_ms);
+const char *pocket_frame_delta(HostState *handle, double delta_ms);
+const uint8_t *pocket_frame_binary(HostState *handle, double delta_ms,
+                                   uint64_t *out_byte_length);
+const uint8_t *pocket_frame_delta_binary(HostState *handle, double delta_ms,
+                                         uint64_t *out_byte_length);
+int32_t pocket_send(HostState *handle, const char *message);
+int32_t pocket_send_binary(HostState *handle, const uint8_t *message,
+                           size_t message_len);
+const uint8_t *pocket_offload_take_binary(HostState *handle, uint32_t cancelled,
+                                          uint64_t *out_byte_length);
+int32_t pocket_offload_complete_binary(HostState *handle, const uint8_t *record,
+                                       size_t record_len);
 
 /* The returned string is borrowed and remains valid until the next host call. */
 const char *pocket_last_error(HostState *handle);

@@ -154,16 +154,33 @@ export interface HostBridgeOptions {
   scheduleTimeout?: (frames: number, callback: () => void) => () => void;
 }
 
+export type HostPacketHandler = ((packet: string | Record<string, unknown>) => void) & {
+  __binaryCapable?: boolean;
+};
+
 export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOptions = {}): HostBridge {
   const globalObject = globalThis as typeof globalThis & {
-    pocket?: { _emit?: (line: string) => boolean };
-    __pocketDeliver?: (line: string) => void;
-    __pocketEvent?: (line: string) => void;
+    pocket?: {
+      _emit?: (line: string) => boolean;
+      _emitValue?: (packet: Record<string, unknown>) => boolean;
+    };
+    __pocketDeliver?: HostPacketHandler;
+    __pocketEvent?: HostPacketHandler;
   };
   const send: HostSend = sendOverride ?? ((line) => {
     const emit = globalObject.pocket?._emit;
     return typeof emit === "function" && emit(line) === true;
   });
+  const sendPacket = (packet: Record<string, unknown>): boolean => {
+    if (!sendOverride) {
+      const emitValue = globalObject.pocket?._emitValue;
+      if (typeof emitValue === "function") {
+        return emitValue(packet) === true;
+      }
+    }
+    const line = JSON.stringify(packet);
+    return send(line);
+  };
   const maxPendingRequests = options.maxPendingRequests ?? 32;
   const timeoutFrames = options.timeoutFrames ?? 180;
   if (!Number.isInteger(maxPendingRequests) || maxPendingRequests < 1 || maxPendingRequests > 256) {
@@ -221,14 +238,28 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     for (const listener of [...tickListeners]) listener();
   };
 
-  const deliver = (line: string): void => {
-    handle(line);
-    previousDeliver?.(line);
+  const forwardPacket = (
+    handler: HostPacketHandler | undefined,
+    packet: string | Record<string, unknown>,
+  ): void => {
+    if (!handler) return;
+    if (handler.__binaryCapable === true || typeof packet === "string") {
+      handler(packet);
+      return;
+    }
+    handler(JSON.stringify(packet));
   };
-  const eventDeliver = (line: string): void => {
-    handle(line);
-    previousEvent?.(line);
+
+  const deliver: HostPacketHandler = (packet: string | Record<string, unknown>): void => {
+    handle(packet);
+    forwardPacket(previousDeliver, packet);
   };
+  deliver.__binaryCapable = true;
+  const eventDeliver: HostPacketHandler = (packet: string | Record<string, unknown>): void => {
+    handle(packet);
+    forwardPacket(previousEvent, packet);
+  };
+  eventDeliver.__binaryCapable = true;
   globalObject.__pocketDeliver = deliver;
   globalObject.__pocketEvent = eventDeliver;
 
@@ -236,14 +267,8 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     if (disposed) return false;
     if (typeof method !== "string" || method.length === 0) return false;
     if (!isJsonObject(params)) return false;
-    let line: string;
     try {
-      line = JSON.stringify({ type: "event", name: method, payload: params });
-    } catch {
-      return false;
-    }
-    try {
-      return send(line);
+      return sendPacket({ type: "event", name: method, payload: params });
     } catch {
       return false;
     }
@@ -256,11 +281,11 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       if (!isJsonObject(params)) return Promise.reject(new TypeError("Host capability params must be an object"));
       if (pending.size >= maxPendingRequests) return Promise.reject(new HostRequestError("", "request_quota", "Host request limit reached"));
       const requestId = `guest-${nextId++}`;
-      const line = JSON.stringify({
+      const packet: Record<string, unknown> = {
         type: "event",
         name: "host.request",
         payload: { requestId, capability, params },
-      });
+      };
       return new Promise<T>((resolve, reject) => {
         const entry = {
           resolve: resolve as (value: JsonValue) => void,
@@ -275,7 +300,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
             if (!pending.delete(requestId)) return;
             entry.reject(new HostRequestError(requestId, "timeout", "Host response timed out"));
           });
-          accepted = send(line);
+          accepted = sendPacket(packet);
         } catch (error) {
           pending.delete(requestId);
           entry.cancelTimeout?.();

@@ -21,10 +21,26 @@ typedef _OffloadTakeNative =
     Pointer<Utf8> Function(Pointer<Void> host, Uint32 cancel);
 typedef _OffloadTakeDart =
     Pointer<Utf8> Function(Pointer<Void> host, int cancel);
+typedef _OffloadTakeBinaryNative =
+    Pointer<Uint8> Function(
+      Pointer<Void> host,
+      Uint32 cancel,
+      Pointer<Uint64> outByteLength,
+    );
+typedef _OffloadTakeBinaryDart =
+    Pointer<Uint8> Function(
+      Pointer<Void> host,
+      int cancel,
+      Pointer<Uint64> outByteLength,
+    );
 typedef _OffloadCompleteNative =
     Int32 Function(Pointer<Void> host, Pointer<Utf8> completion);
 typedef _OffloadCompleteDart =
     int Function(Pointer<Void> host, Pointer<Utf8> completion);
+typedef _OffloadCompleteBinaryNative =
+    Int32 Function(Pointer<Void> host, Pointer<Uint8> data, UintPtr len);
+typedef _OffloadCompleteBinaryDart =
+    int Function(Pointer<Void> host, Pointer<Uint8> data, int len);
 typedef _OffloadHasRepliesNative = Uint32 Function(Pointer<Void> host);
 typedef _OffloadHasRepliesDart = int Function(Pointer<Void> host);
 
@@ -55,10 +71,26 @@ final class _PocketOffloadBinding {
         .lookupFunction<_OffloadTakeNative, _OffloadTakeDart>(
           'pocket_offload_take',
         );
+    try {
+      _takeBinary = _owner._library
+          .lookupFunction<_OffloadTakeBinaryNative, _OffloadTakeBinaryDart>(
+            'pocket_offload_take_binary',
+          );
+    } on Object {
+      _takeBinary = null;
+    }
     _complete = _owner._library
         .lookupFunction<_OffloadCompleteNative, _OffloadCompleteDart>(
           'pocket_offload_complete',
         );
+    try {
+      _completeBinary = _owner._library.lookupFunction<
+        _OffloadCompleteBinaryNative,
+        _OffloadCompleteBinaryDart
+      >('pocket_offload_complete_binary');
+    } on Object {
+      _completeBinary = null;
+    }
     _hasReplies = _owner._library
         .lookupFunction<_OffloadHasRepliesNative, _OffloadHasRepliesDart>(
           'pocket_offload_has_replies',
@@ -112,7 +144,9 @@ final class _PocketOffloadBinding {
   late final List<String> _methods;
   late final _ConfigureOffloadDart _configure;
   late final _OffloadTakeDart _take;
+  _OffloadTakeBinaryDart? _takeBinary;
   late final _OffloadCompleteDart _complete;
+  _OffloadCompleteBinaryDart? _completeBinary;
   late final _OffloadHasRepliesDart _hasReplies;
   late final NativeCallable<_WorkerWakeNative> _notify;
   final Map<PocketOffloadKey, _PocketOffloadPending> _pending =
@@ -164,55 +198,40 @@ final class _PocketOffloadBinding {
     // replacement requests from the same notification batch.
     var drainedCancellations = 0;
     while (drainedCancellations < 256) {
-      String? record;
+      bool took;
       try {
-        record = _takeRecord(cancel: true);
+        took = _drainOneRecord(cancel: true);
       } on Object {
         hadError = true;
         break;
       }
-      if (record == null) break;
+      if (!took) break;
       drainedCancellations++;
-      try {
-        _cancelRecord(record);
-      } on Object {
-        hadError = true;
-      }
     }
     var drainedRequests = 0;
     while (drainedRequests < 256) {
-      String? record;
+      bool took;
       try {
-        record = _takeRecord(cancel: false);
+        took = _drainOneRecord(cancel: false);
       } on Object {
         hadError = true;
         break;
       }
-      if (record == null) break;
+      if (!took) break;
       drainedRequests++;
-      try {
-        _requestRecord(record);
-      } on Object {
-        hadError = true;
-      }
     }
     if (drainedRequests > 0) {
       var postCancellations = 0;
       while (postCancellations < 256) {
-        String? record;
+        bool took;
         try {
-          record = _takeRecord(cancel: true);
+          took = _drainOneRecord(cancel: true);
         } on Object {
           hadError = true;
           break;
         }
-        if (record == null) break;
+        if (!took) break;
         postCancellations++;
-        try {
-          _cancelRecord(record);
-        } on Object {
-          hadError = true;
-        }
       }
     }
 
@@ -223,6 +242,42 @@ final class _PocketOffloadBinding {
       hadError = true;
     }
     if (hadError || hasReplies) _wakeOwner();
+  }
+
+  bool _drainOneRecord({required bool cancel}) {
+    if (_disposing || _owner._disposed) return false;
+    final takeBinary = _takeBinary;
+    if (takeBinary != null) {
+      final length = malloc<Uint64>();
+      try {
+        length.value = 0;
+        final pointer = takeBinary(_owner._handle, cancel ? 1 : 0, length);
+        if (pointer.address == 0 || length.value == 0) return false;
+        final bytes = pointer.asTypedList(length.value);
+        final decoded = PocketBinaryCodec.decodeOffloadRecord(
+          bytes,
+          isCancel: cancel,
+        );
+        if (cancel) {
+          _cancelByKey(decoded.key);
+        } else if (decoded.validationError != null) {
+          _completeFailure(decoded.key, decoded.validationError!);
+        } else if (decoded.request != null) {
+          _acceptRequest(decoded.request!);
+        }
+        return true;
+      } finally {
+        malloc.free(length);
+      }
+    }
+    final record = _takeRecord(cancel: cancel);
+    if (record == null) return false;
+    if (cancel) {
+      _cancelRecord(record);
+    } else {
+      _requestRecord(record);
+    }
+    return true;
   }
 
   String? _takeRecord({required bool cancel}) {
@@ -237,6 +292,10 @@ final class _PocketOffloadBinding {
     final key = _readKey(record);
     if (key == null)
       throw const FormatException('invalid offload cancellation key');
+    _cancelByKey(key);
+  }
+
+  void _cancelByKey(PocketOffloadKey key) {
     final active = _pending.remove(key);
     if (active == null) return;
     active.cancellation.cancel();
@@ -260,6 +319,10 @@ final class _PocketOffloadBinding {
       _completeFailure(key, 'invalid offload request: $error');
       return;
     }
+    _acceptRequest(request);
+  }
+
+  void _acceptRequest(PocketOffloadRequest request) {
     if (request.generation != _pocketOffloadGeneration ||
         request.session != _session) {
       // A request from a retired native generation/session cannot be completed
@@ -325,6 +388,20 @@ final class _PocketOffloadBinding {
     // Async provider results can arrive after either the Dart owner or its
     // native handle has been disposed. Never cross FFI after that boundary.
     if (_disposing || _owner._disposed || !_configured) return false;
+    final completeBinary = _completeBinary;
+    if (completeBinary != null) {
+      Pointer<Uint8>? pointer;
+      try {
+        final bytes = PocketBinaryCodec.encodeOffloadCompletion(completion);
+        pointer = malloc<Uint8>(bytes.length);
+        pointer.asTypedList(bytes.length).setAll(0, bytes);
+        return completeBinary(_owner._handle, pointer, bytes.length) == 0;
+      } on Object {
+        return false;
+      } finally {
+        if (pointer != null) malloc.free(pointer);
+      }
+    }
     final source = completion.toNativeRecord();
     final pointer = source.toNativeUtf8(allocator: malloc);
     try {
