@@ -1060,24 +1060,24 @@ fn install_bridge(
                 let emit_queue = emit_queue.clone();
                 let queued_bytes = queued_bytes.clone();
                 move |raw: Value<'_>| -> rquickjs::Result<bool> {
-                    let mut queue = emit_queue.borrow_mut();
-                    if queue.is_empty() {
-                        queued_bytes.set(0);
-                    }
-                    if queue.len() >= MAX_BRIDGE_QUEUED_EVENTS {
+                    let remaining_budget = {
+                        let queue = emit_queue.borrow();
+                        if queue.is_empty() {
+                            queued_bytes.set(0);
+                        }
+                        if queue.len() >= MAX_BRIDGE_QUEUED_EVENTS {
+                            return Ok(false);
+                        }
+                        MAX_BRIDGE_QUEUED_BYTES.saturating_sub(queued_bytes.get())
+                    };
+                    if remaining_budget == 0 {
                         return Ok(false);
                     }
-                    let remaining_budget =
-                        MAX_BRIDGE_QUEUED_BYTES.saturating_sub(queued_bytes.get());
-                    let max_bytes = MAX_BRIDGE_MESSAGE_BYTES.min(remaining_budget);
-                    if max_bytes == 0 {
-                        return Ok(false);
-                    }
-                    if let Some(js_str) = raw.as_string() {
+                    let (binary, cost) = if let Some(js_str) = raw.as_string() {
                         let Ok(line) = js_str.to_string() else {
                             return Ok(false);
                         };
-                        if line.len() > MAX_BRIDGE_MESSAGE_BYTES || line.len() > remaining_budget {
+                        if line.len() > MAX_BRIDGE_MESSAGE_BYTES.min(remaining_budget) {
                             return Ok(false);
                         }
                         let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -1091,18 +1091,27 @@ fn install_bridge(
                         else {
                             return Ok(false);
                         };
-                        queue.push(OutboundEvent { binary });
-                        queued_bytes.set(queued_bytes.get() + line.len());
-                        return Ok(true);
-                    }
-                    let Ok(binary) = binary_bridge::encode_js_message(
-                        raw,
-                        max_bytes,
-                        MAX_BRIDGE_BATCH_EVENTS,
-                    ) else {
-                        return Ok(false);
+                        (binary, line.len())
+                    } else {
+                        let Ok(binary) = binary_bridge::encode_js_message(
+                            raw,
+                            remaining_budget,
+                            MAX_BRIDGE_BATCH_EVENTS,
+                        ) else {
+                            return Ok(false);
+                        };
+                        let cost = binary.len();
+                        (binary, cost)
                     };
-                    let cost = binary.len();
+                    let mut queue = emit_queue.borrow_mut();
+                    if queue.is_empty() {
+                        queued_bytes.set(0);
+                    }
+                    let remaining_budget =
+                        MAX_BRIDGE_QUEUED_BYTES.saturating_sub(queued_bytes.get());
+                    if queue.len() >= MAX_BRIDGE_QUEUED_EVENTS || cost > remaining_budget {
+                        return Ok(false);
+                    }
                     queue.push(OutboundEvent { binary });
                     queued_bytes.set(queued_bytes.get() + cost);
                     // The official PocketJS app/stream bridge treats the host
@@ -7699,5 +7708,63 @@ mod smoke_tests {
             pocket_destroy(handle);
         }
         let _ = inbound;
+    }
+
+    #[test]
+    fn binary_bridge_handles_reentrant_getter_emit_and_preserves_proto_data_property() {
+        let handle = pocket_create(80.0, 80.0);
+        let source = CString::new(
+            r#"
+            const handler = function(packet) {
+                if (!Object.prototype.hasOwnProperty.call(packet.payload, "__proto__")) {
+                    throw new Error("expected __proto__ as an own property");
+                }
+                if (packet.payload.evil === true) {
+                    throw new Error("prototype pollution occurred");
+                }
+                pocket._emitValue({
+                    type: "event",
+                    name: "outer.emit",
+                    payload: {
+                        get nested() {
+                            pocket._emitValue({
+                                type: "event",
+                                name: "inner.emit",
+                                payload: { ok: true }
+                            });
+                            return 42;
+                        }
+                    }
+                });
+            };
+            handler.__binaryCapable = true;
+            globalThis.__pocketEvent = handler;
+            globalThis.frame = function() {};
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+
+        let inbound = binary_bridge::encode_json_to_binary(
+            &serde_json::json!({
+                "type": "event",
+                "name": "proto.check",
+                "payload": {
+                    "__proto__": { "evil": true }
+                }
+            }),
+            4096,
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { pocket_send_binary(handle, inbound.as_ptr(), inbound.len()) },
+            0,
+            "{}",
+            unsafe { &*handle }.last_error
+        );
+        assert_eq!(unsafe { (*handle).outbound.borrow().len() }, 2);
+        unsafe {
+            pocket_destroy(handle);
+        }
     }
 }

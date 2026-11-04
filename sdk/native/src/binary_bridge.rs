@@ -5,6 +5,7 @@
 //! passes on the JS <-> Rust <-> Dart event, RPC, stream, and offload channels
 //! while preserving full backward compatibility with legacy JSON callers.
 
+use rquickjs::object::Property;
 use rquickjs::{Array, ArrayBuffer, Ctx, FromJs, Object, TypedArray, Value};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
@@ -692,7 +693,9 @@ fn decode_js_value<'js>(
             for _ in 0..count {
                 let key = reader.str()?;
                 let child = decode_js_value(ctx, reader, depth + 1)?;
-                object.set(key, child).map_err(|error| error.to_string())?;
+                object
+                    .prop(key, Property::from(child).configurable().enumerable().writable())
+                    .map_err(|error| error.to_string())?;
             }
             Ok(object.into_value())
         }
@@ -734,7 +737,10 @@ pub fn json_to_js<'js>(ctx: &Ctx<'js>, value: &JsonValue) -> Result<Value<'js>, 
             for (key, item) in map {
                 let child = json_to_js(ctx, item)?;
                 object
-                    .set(key.as_str(), child)
+                    .prop(
+                        key.as_str(),
+                        Property::from(child).configurable().enumerable().writable(),
+                    )
                     .map_err(|error| error.to_string())?;
             }
             Ok(object.into_value())

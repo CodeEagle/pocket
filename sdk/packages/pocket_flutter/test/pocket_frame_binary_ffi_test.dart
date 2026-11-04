@@ -71,4 +71,63 @@ void main() {
         ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
         : false,
   );
+
+  test(
+    'binary bridge replays Uint8List send messages and decodes 64KiB+ admitted event payloads',
+    () async {
+      final controller = PocketRecordingController(retainReplayAssets: true);
+      final runtime = FfiPocketRuntime.open(
+        width: 320,
+        height: 480,
+        recording: controller,
+      );
+      try {
+        runtime.eval('''
+          const handler = function(packet) {
+            if (!(packet.payload.bytes instanceof Uint8Array)) {
+              throw new Error("expected Uint8Array during send/replay");
+            }
+            pocket._emitValue({
+              type: "event",
+              name: "guest.large",
+              payload: {
+                items: Array(8000).fill(7),
+                sum: packet.payload.bytes[0] + packet.payload.bytes[1],
+              },
+            });
+          };
+          handler.__binaryCapable = true;
+          globalThis.__pocketEvent = handler;
+          globalThis.frame = function() {};
+        ''');
+        runtime.send(<String, dynamic>{
+          'type': 'event',
+          'name': 'host.bytes',
+          'payload': <String, dynamic>{
+            'bytes': Uint8List.fromList(<int>[12, 30]),
+          },
+        });
+        final frame = runtime.frameAt(16);
+        expect(frame.events, hasLength(1));
+        expect(frame.events.single.method, 'guest.large');
+        expect(frame.events.single.params['sum'], 42);
+        expect(
+          (frame.events.single.params['items'] as List).length,
+          8000,
+        );
+      } finally {
+        runtime.dispose();
+      }
+      final recording = controller.recording!;
+      expect(recording.replayable, isTrue);
+      final replay = await replayPocketRecording(
+        recording,
+        assets: controller.replayAssets,
+      );
+      expect(replay.matched, isTrue, reason: '${replay.firstMismatch}');
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
 }

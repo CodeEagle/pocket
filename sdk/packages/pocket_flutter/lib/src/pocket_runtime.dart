@@ -2149,7 +2149,9 @@ final class FfiPocketRuntime
     if (depth > 16) throw const FormatException('message nesting is too deep');
     if (value == null || value is bool || value is String || value is int)
       return value;
-    if (value is Uint8List) return List<int>.from(value);
+    if (value is Uint8List) {
+      return <String, dynamic>{'__pocketBytesBase64': base64Encode(value)};
+    }
     if (value is double) {
       if (!value.isFinite)
         throw const FormatException('message number is not finite');
@@ -2176,6 +2178,11 @@ final class FfiPocketRuntime
             redactPrivateKeys: redactPrivateKeys,
           );
         }
+      }
+      if (result.length == 1 &&
+          (result.containsKey('__pocketBytesBase64') ||
+              result.containsKey('__pocketEscapedMap'))) {
+        return <String, dynamic>{'__pocketEscapedMap': result};
       }
       return result;
     }
@@ -2791,7 +2798,13 @@ final class PocketReplayRunner {
             throw const FormatException(
               'recorded send message is not an object',
             );
-          runtime.send(Map<String, dynamic>.from(message));
+          final restored = _restoreRecordedMessage(message, 0);
+          if (restored is! Map<String, dynamic>) {
+            throw const FormatException(
+              'recorded send message is not an object',
+            );
+          }
+          runtime.send(restored);
           actualResult = <String, dynamic>{'sent': true};
         case 'resize':
           final resized = runtime.resizeViewport(
@@ -3320,6 +3333,43 @@ final class PocketReplayRunner {
       throw const FormatException('asset digest is invalid');
     }
     return map;
+  }
+
+  Object? _restoreRecordedMessage(Object? value, int depth) {
+    if (depth > 16) throw const FormatException('message nesting is too deep');
+    if (value == null || value is bool || value is String || value is num) {
+      return value;
+    }
+    if (value is Uint8List) return value;
+    if (value is Map) {
+      if (value.length == 1) {
+        final rawBytes = value['__pocketBytesBase64'];
+        if (rawBytes is String) {
+          return _base64Bytes(rawBytes);
+        }
+        final escaped = value['__pocketEscapedMap'];
+        if (escaped is Map) {
+          return Map<String, dynamic>.from(escaped);
+        }
+      }
+      final result = <String, dynamic>{};
+      for (final entry in value.entries) {
+        if (entry.key is! String) {
+          throw const FormatException('message key is not string');
+        }
+        result[entry.key as String] = _restoreRecordedMessage(
+          entry.value,
+          depth + 1,
+        );
+      }
+      return result;
+    }
+    if (value is Iterable) {
+      return value
+          .map((item) => _restoreRecordedMessage(item, depth + 1))
+          .toList(growable: false);
+    }
+    throw const FormatException('unsupported recorded message value');
   }
 
   Uint8List _base64Bytes(Object? value) {

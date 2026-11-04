@@ -23,6 +23,7 @@ const int _tagObject = 0x08;
 const int _maxNestingDepth = 16;
 const int _maxDecodeNestingDepth = 128;
 const int _defaultMaxMessageBytes = 64 * 1024;
+const int _maxOutboundEventBytes = 1024 * 1024;
 const int _maxCollectionEntries = 100000;
 
 /// Decoded binary offload record from `pocket_offload_take_binary`.
@@ -87,7 +88,7 @@ final class PocketBinaryCodec {
   /// Decodes a binary or legacy UTF-8 JSON event slice from `PFB1` frames.
   static PocketEvent decodeEvent(Uint8List payload) {
     if (payload.isNotEmpty && payload[0] == pocketBinaryMessageMagic) {
-      final decoded = decodeMessage(payload);
+      final decoded = decodeMessage(payload, maxBytes: _maxOutboundEventBytes);
       return PocketEvent.fromJson(decoded, wireByteLength: payload.length);
     }
     final decoded = jsonDecode(utf8.decode(payload));
