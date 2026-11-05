@@ -245,7 +245,8 @@ async function invoke(payload: JsonObject): Promise<JsonObject> {
 }
 
 function valueOf(response: JsonObject): JsonValue {
-  assert.equal(response.ok, true, `expected success, received ${JSON.stringify(response.error)}`);
+  const error = response.error as JsonObject | undefined;
+  assert.equal(response.ok, true, `expected success, received ${String(error?.code)}: ${String(error?.message)}`);
   return response.value ?? null;
 }
 
@@ -491,26 +492,55 @@ assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI
 
 // ACLs are JS policy: namespaced persistence uses app identity, a private
 // namespace stays app-scoped, and unauthorized shared namespaces never reach IO.
-const storageProfile = valueOf(await invoke(request(SYSTEM_UI, "system-ui", "platform.apps.open", { appId: PROFILE })));
-const storageProfileInstance = instanceOf(PROFILE);
-const setShared = await invoke(request(PROFILE, storageProfileInstance, "platform.storage.set", {
-  key: "name", value: "Alex", namespace: "identity",
-}));
-assert.equal((valueOf(setShared) as JsonObject).stored, true);
-const lastStorageSet = [...host.calls].reverse().find((call) => call.capability === "system.storage.set");
-assert.deepEqual(lastStorageSet?.params, { appId: PROFILE, key: "name", namespace: "identity", value: "Alex" });
-const storageBeforeDenied = host.calls.filter((call) => call.capability.startsWith("system.storage.")).length;
-assert.equal(errorCode(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.get", {
-  key: "name", namespace: "secret",
-}))), "shared_namespace_denied");
-assert.equal(host.calls.filter((call) => call.capability.startsWith("system.storage.")).length, storageBeforeDenied);
-const getShared = await invoke(request(PROFILE, storageProfileInstance, "platform.storage.get", {
-  key: "name", namespace: "identity",
-}));
-assert.equal(valueOf(getShared), "Alex");
-await invoke(request(PROFILE, storageProfileInstance, "platform.apps.return", { value: null }));
-assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
-assert.ok(launchId(storageProfile).length > 0);
+const originalJsonParse = JSON.parse;
+const originalJsonStringify = JSON.stringify;
+try {
+  JSON.parse = (() => { throw new Error("JSON.parse must not be used by System storage"); }) as typeof JSON.parse;
+  JSON.stringify = (() => { throw new Error("JSON.stringify must not be used by System storage"); }) as typeof JSON.stringify;
+  const storageProfile = valueOf(await invoke(request(SYSTEM_UI, "system-ui", "platform.apps.open", { appId: PROFILE })));
+  const storageProfileInstance = instanceOf(PROFILE);
+  const setShared = await invoke(request(PROFILE, storageProfileInstance, "platform.storage.set", {
+    key: "name", value: "Alex", namespace: "identity",
+  }));
+  assert.equal((valueOf(setShared) as JsonObject).stored, true);
+  const lastStorageSet = [...host.calls].reverse().find((call) => call.capability === "system.storage.set");
+  assert.deepEqual(lastStorageSet?.params, { appId: PROFILE, key: "name", namespace: "identity", value: "Alex" });
+  const storageBeforeDenied = host.calls.filter((call) => call.capability.startsWith("system.storage.")).length;
+  assert.equal(errorCode(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.get", {
+    key: "name", namespace: "secret",
+  }))), "shared_namespace_denied");
+  assert.equal(host.calls.filter((call) => call.capability.startsWith("system.storage.")).length, storageBeforeDenied);
+  const getShared = await invoke(request(PROFILE, storageProfileInstance, "platform.storage.get", {
+    key: "name", namespace: "identity",
+  }));
+  assert.equal(valueOf(getShared), "Alex");
+
+  // The direct System storage path still preserves its public error codes and
+  // top-level undefined -> null behavior without a JSON intermediate string.
+  const invalidStorageValue: Record<string, unknown> = {};
+  invalidStorageValue.self = invalidStorageValue;
+  assert.equal(errorCode(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.set", {
+    key: "invalid", value: invalidStorageValue as JsonValue,
+  }))), "invalid_json");
+  assert.equal(errorCode(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.set", {
+    key: "oversized", value: "x".repeat(66 * 1024),
+  }))), "payload_too_large");
+  const setUndefined = await invoke(request(PROFILE, storageProfileInstance, "platform.storage.set", {
+    key: "undefined", value: undefined as unknown as JsonValue,
+  }));
+  assert.equal((valueOf(setUndefined) as JsonObject).stored, true);
+  const getUndefined = await invoke(request(PROFILE, storageProfileInstance, "platform.storage.get", {
+    key: "undefined",
+  }));
+  assert.equal(valueOf(getUndefined), null);
+
+  await invoke(request(PROFILE, storageProfileInstance, "platform.apps.return", { value: null }));
+  assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
+  assert.ok(launchId(storageProfile).length > 0);
+} finally {
+  JSON.parse = originalJsonParse;
+  JSON.stringify = originalJsonStringify;
+}
 
 // Mail is retained while its target is hidden, then posted only after the
 // target becomes foreground. Rejected delivery retries on the next event.
@@ -604,7 +634,8 @@ assert.ok(destroyIndex > responseIndex, "deferred source teardown follows succes
 assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
 assert.ok(launchId(retryOpen).length > 0);
 
-// JSON values are cloned through JSON and checked against the 64 KiB budget.
+// Values are cloned through the bounded direct-value snapshot and checked
+// against the 64 KiB budget.
 assert.equal(errorCode(await invoke(request(SYSTEM_UI, "system-ui", "platform.apps.open", {
   appId: PROFILE,
   arguments: { data: "x".repeat(66 * 1024) },

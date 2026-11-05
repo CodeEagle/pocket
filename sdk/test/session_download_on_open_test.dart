@@ -215,6 +215,119 @@ void main() {
   );
 
   test(
+    'applying the active package is a verified no-op without a remount',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+      late PocketHostRegistry registry;
+      final value = PocketSession(
+        config: config().copyWith(
+          pluginFactories: [
+            (_) => _CaptureUpdateRegistry((captured) => registry = captured),
+          ],
+        ),
+      );
+      try {
+        await value.initialize();
+        await waitForHealthy(value);
+        final generation = value.generation;
+
+        final checked = await registry
+            .registrationFor('updates.check')!
+            .request!(const {});
+        expect((checked as Map)['availableVersion'], '2.0.0');
+
+        final applied = await registry
+            .registrationFor('updates.apply')!
+            .request!(const {});
+        expect((applied as Map)['scheduled'], isFalse);
+        expect(applied['version'], '2.0.0');
+        expect(value.generation, generation);
+        expect(value.active?.build, 2);
+        expect(value.stage, 'ready');
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'stale apply precondition leaves the signed candidate untouched',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      final release3 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 3,
+        version: '3.0.0',
+      );
+      updateServer.current = release2;
+      late PocketHostRegistry registry;
+      final value = PocketSession(
+        config: config().copyWith(
+          pluginFactories: [
+            (_) => _CaptureUpdateRegistry((captured) => registry = captured),
+          ],
+        ),
+      );
+      try {
+        await value.initialize();
+        await waitForHealthy(value);
+        final generation = value.generation;
+
+        updateServer.current = release3;
+        final checked = await registry
+            .registrationFor('updates.check')!
+            .request!(const {});
+        expect((checked as Map)['availableVersion'], '3.0.0');
+
+        await expectLater(
+          registry.registrationFor('updates.apply')!.request!(<String, dynamic>{
+            // A JS Number can arrive in Dart as double; an integral 2.0 is
+            // accepted, then rejected as stale against the prepared v3.
+            'expectedVersion': '2.0.0',
+            'expectedBuild': 2.0,
+          }),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'stale_update',
+            ),
+          ),
+        );
+        expect(value.generation, generation);
+        expect(value.active?.build, 2);
+        expect(value.stage, 'verified');
+        expect((await value.status())['availableVersion'], '3.0.0');
+
+        // The stale rejection must not leave the session busy; a subsequent
+        // check can still replace/reuse the verified signed candidate.
+        final retried = await registry
+            .registrationFor('updates.check')!
+            .request!(const {});
+        expect((retried as Map)['availableVersion'], '3.0.0');
+        expect(value.stage, 'verified');
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
     'signed partial base archive fetches only omitted resources before activation',
     () async {
       final release = await _makeRelease(

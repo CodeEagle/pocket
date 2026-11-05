@@ -83,6 +83,7 @@ import { createPocketPlatformClient } from "@pocket/ui/platform";
 import { createPlatformExperience, isUnsupportedPlatformError } from "@pocket/ui/platform-experience";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
 import { installShowcaseSystem } from "./system.ts";
+import { showcaseUpdateState } from "./update-state.ts";
 import { SettingsPage, readAppearance, storedAppearance } from "./settings.tsx";
 import { computeTransitionDescriptor, createDisplayGeometry } from "@pocket/ui";
 import {
@@ -577,8 +578,8 @@ function App() {
     timeoutFrames: 30 * simulationHz(),
     scheduleTimeout: (frames, callback) => after(frames / simulationHz(), callback),
   });
-  const system = installShowcaseSystem(host);
   const platform = createPocketPlatformClient(undefined, { bridge: host });
+  const system = installShowcaseSystem(host, showcaseUpdateState(platform.storage, state, setState, routeOf));
   const experience = createPlatformExperience(host);
   let systemUiKey = "";
   const syncSystemUi = (force = false): void => {
@@ -724,7 +725,8 @@ function App() {
     if (state()[key].phase === "loading") return;
     const requestId = `${capability}-${++requestSequence}`;
     dispatch({ type: "capabilityStart", key, requestId });
-    host.request<JsonValue>(capability, params).then(
+    const request = capability === "updates.apply" ? system.updates.apply() : host.request<JsonValue>(capability, params);
+    request.then(
       (result) => {
         if (key === "runtimePerformance") setPerformance(parsePerformanceSnapshot(result));
         dispatch({ type: "capabilitySuccess", key, requestId, result });

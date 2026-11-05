@@ -547,7 +547,7 @@ final class PocketSession extends ChangeNotifier {
     registry.registerRequest('plugins.list', (_) => plugins.manifest());
     registry.registerRequest('updates.status', (_) => status());
     registry.registerRequest('updates.check', (params) => _check(params));
-    registry.registerRequest('updates.apply', (_) => _apply());
+    registry.registerRequest('updates.apply', (params) => _apply(params));
     registry.registerRequest('updates.rollback', (_) => _rollback());
     for (final provider in providers) {
       plugins.register(provider);
@@ -763,7 +763,9 @@ final class PocketSession extends ChangeNotifier {
     }
   }
 
-  Map<String, dynamic> _apply() {
+  Future<Map<String, dynamic>> _apply([
+    Map<String, dynamic> params = const <String, dynamic>{},
+  ]) async {
     _requireUpdates();
     if (_busy) {
       throw const PocketCapabilityException(
@@ -778,7 +780,64 @@ final class PocketSession extends ChangeNotifier {
         'Check and verify an update first',
       );
     }
+    final hasExpectedVersion = params.containsKey('expectedVersion');
+    final hasExpectedBuild = params.containsKey('expectedBuild');
+    if (hasExpectedVersion != hasExpectedBuild) {
+      throw const PocketCapabilityException(
+        'invalid_params',
+        'expectedVersion and expectedBuild must be provided together',
+      );
+    }
+    if (hasExpectedVersion) {
+      final expectedVersion = params['expectedVersion'];
+      final expectedBuild = params['expectedBuild'];
+      final validBuild =
+          expectedBuild is num &&
+          expectedBuild.isFinite &&
+          expectedBuild >= 0 &&
+          expectedBuild == expectedBuild.truncateToDouble();
+      if (expectedVersion is! String ||
+          expectedVersion.isEmpty ||
+          !validBuild) {
+        throw const PocketCapabilityException(
+          'invalid_params',
+          'expectedVersion must be a non-empty string and expectedBuild a non-negative integer',
+        );
+      }
+      final expectedBuildInt = expectedBuild.toInt();
+      if (next.version != expectedVersion || next.build != expectedBuildInt) {
+        throw const PocketCapabilityException(
+          'stale_update',
+          'The prepared update changed before apply',
+        );
+      }
+    }
     _busy = true;
+    if (!next.needsActivation) {
+      // A check against the active package is a valid no-op. Re-admit the
+      // cached package at the final trust boundary, but do not remount the
+      // already healthy guest or emit updates.changed (which would cause an
+      // automatic refresh client to check/apply the same package again).
+      try {
+        await _withAdmittedPackage(next, () {});
+        if (!_disposed) {
+          _candidate = null;
+          stage = 'ready';
+          notifyListeners();
+        }
+        return {'scheduled': false, 'version': next.version};
+      } on PocketPackageException catch (error) {
+        stage = 'error';
+        lastError = '$error';
+        throw PocketCapabilityException(error.code, error.message);
+      } catch (error) {
+        stage = 'error';
+        lastError = '$error';
+        rethrow;
+      } finally {
+        _busy = false;
+      }
+    }
     // Allow the old guest to consume its response before disposing its runtime.
     _mountTimer = Timer(const Duration(milliseconds: 150), () => _mount(next));
     return {'scheduled': true, 'version': next.version};

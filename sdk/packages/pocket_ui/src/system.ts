@@ -1,7 +1,7 @@
 import { simulationHz } from "@pocketjs/framework/clock";
 import { forwardHostPacket, type HostBridge, type HostEvent, type HostRequestOptions, type HostPacketHandler, type JsonObject, type JsonValue } from "./host.ts";
+import { clonePocketValue, PocketValueSnapshotError } from "./value_snapshot.ts";
 
-const MAX_JSON_BYTES = 64 * 1024;
 const MAX_PENDING_CALLS = 32;
 const MAX_MAILBOX_MESSAGES = 32;
 const MAX_COMPLETED_REQUESTS = 256;
@@ -277,45 +277,13 @@ function generationKey(value: string | number): string {
   return typeof value + ":" + String(value);
 }
 
-function utf8ByteLength(value: string): number {
-  let bytes = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x7f) {
-      bytes += 1;
-    } else if (code <= 0x7ff) {
-      bytes += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        bytes += 4;
-        index += 1;
-      } else {
-        bytes += 3;
-      }
-    } else {
-      bytes += 3;
-    }
-  }
-  return bytes;
-}
-
 function jsonSnapshot(value: unknown, field: string): JsonValue {
-  let encoded: string | undefined;
   try {
-    encoded = JSON.stringify(value === undefined ? null : value);
-  } catch {
-    throw new PocketSystemError("invalid_json", field + " must be JSON-safe");
-  }
-  if (encoded === undefined) {
-    throw new PocketSystemError("invalid_json", field + " must be JSON-safe");
-  }
-  if (utf8ByteLength(encoded) > MAX_JSON_BYTES) {
-    throw new PocketSystemError("payload_too_large", field + " exceeds 64 KiB");
-  }
-  try {
-    return JSON.parse(encoded) as JsonValue;
-  } catch {
+    return clonePocketValue(value === undefined ? null : value, { jsonSemantics: true });
+  } catch (error) {
+    if (error instanceof PocketValueSnapshotError && error.code === "too_large") {
+      throw new PocketSystemError("payload_too_large", field + " exceeds 64 KiB");
+    }
     throw new PocketSystemError("invalid_json", field + " must be JSON-safe");
   }
 }
@@ -647,7 +615,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       });
     } else {
       this.previousEvent = this.target.__pocketEvent;
-      this.receiveEvent = (packet: string | Record<string, unknown>): void => {
+      this.receiveEvent = (packet: Record<string, unknown>): void => {
         this.bridge.handle(packet);
         const event = eventOf(packet);
         if (event) handleEvent(event.name, event.payload);

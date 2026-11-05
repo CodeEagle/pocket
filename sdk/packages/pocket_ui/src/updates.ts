@@ -1,4 +1,6 @@
 import type { HostBridge, JsonObject, JsonValue } from "./host.ts";
+import { createPocketUpdateState, type PocketUpdateStateOptions } from "./update_state.ts";
+export type { PocketUpdateStateOptions } from "./update_state.ts";
 
 export type PocketUpdateDeliveryMode = "auto" | "zip" | "granular";
 export type PocketUpdateResolvedMode = "zip" | "granular";
@@ -531,8 +533,8 @@ export interface PocketPreparedUpdateSummary {
 export interface PocketUpdateStatusSnapshot {
   readonly configured: boolean;
   readonly stage: string;
-  readonly activeVersion: string;
-  readonly activeBuild: number;
+  readonly activeVersion: string | null;
+  readonly activeBuild: number | null;
   readonly availableVersion?: string | null;
   readonly preparedUpdate?: PocketPreparedUpdateSummary | null;
   readonly versions: readonly JsonObject[];
@@ -540,6 +542,8 @@ export interface PocketUpdateStatusSnapshot {
 }
 
 export interface PocketUpdateClient {
+  /** Resolves after the new guest attempts compatible state restoration. */
+  readonly ready: Promise<boolean>;
   status(): Promise<PocketUpdateStatusSnapshot>;
   check(request?: PocketUpdateCheckRequest): Promise<PocketUpdateStatusSnapshot>;
   /** One-shot ZIP archive download of code and all resources. */
@@ -550,12 +554,90 @@ export interface PocketUpdateClient {
   checkResource(resource: string): Promise<PocketUpdateStatusSnapshot>;
   apply(): Promise<{ scheduled: boolean; version: string }>;
   rollback(): Promise<{ scheduled: boolean; version: string }>;
+  /** Check, verify and remount this guest through the host's normal update path. */
+  refresh(request?: PocketUpdateCheckRequest): Promise<PocketUpdateRefreshResult>;
+  /** Stop automatic work; an apply already sent to the host cannot be cancelled. */
+  dispose(): void;
+}
+
+export interface PocketUpdateRefreshResult {
+  readonly scheduled: boolean;
+  readonly version: string | null;
+}
+
+export interface PocketUpdateClientOptions {
+  /** Check after host health readiness and on resume, without polling. */
+  readonly autoRefresh?: boolean;
+  readonly onError?: (error: unknown) => void;
+  /** Opt in to versioned UI state handoff using the app's existing storage. */
+  readonly state?: PocketUpdateStateOptions;
 }
 
 /**
  * Guest JS SDK client for orchestrating package updates over `HostBridge`.
  */
-export function createPocketUpdateClient(host: HostBridge): PocketUpdateClient {
+export function createPocketUpdateClient(host: HostBridge, options: PocketUpdateClientOptions = {}): PocketUpdateClient {
+  if ((options.autoRefresh || options.state) && typeof host.onEvent !== "function") {
+    throw new PocketUpdatePlanError("update-events-unavailable", "Update lifecycle requires HostBridge.onEvent");
+  }
+  let disposed = false;
+  let refreshing: Promise<PocketUpdateRefreshResult> | undefined;
+  let applying: Promise<{ scheduled: boolean; version: string }> | undefined;
+  const status = async (): Promise<PocketUpdateStatusSnapshot> =>
+    await host.request<JsonValue>("updates.status", {}) as unknown as PocketUpdateStatusSnapshot;
+  const state = options.state ? createPocketUpdateState({
+    ...options.state,
+    restore: (value) => !disposed && options.state!.restore(value),
+  }) : undefined;
+  const identity = (current: PocketUpdateStatusSnapshot) => ({
+    version: current.activeVersion ?? null, build: current.activeBuild ?? null,
+  });
+  const healthy = (current: PocketUpdateStatusSnapshot): boolean =>
+    current.stage === "ready" || current.stage === "not_configured";
+  const ready = state ? status().then(async (current) => {
+    const restored = await state.restore(identity(current));
+    if (!disposed && healthy(current)) await state.commit(identity(current));
+    return restored;
+  }) : Promise.resolve(false);
+  // Keep the original rejection observable through ready/refresh without an
+  // unhandled rejection when a consumer waits for host health before using it.
+  void ready.catch(() => {});
+  const apply = (): Promise<{ scheduled: boolean; version: string }> => {
+    if (disposed) return Promise.reject(new PocketUpdatePlanError("update-client-disposed", "Update client is disposed"));
+    if (applying) return applying;
+    const operation = (async () => {
+      await ready;
+      if (disposed) throw new PocketUpdatePlanError("update-client-disposed", "Update client is disposed");
+      const current = state ? await status() : undefined;
+      if (disposed) throw new PocketUpdatePlanError("update-client-disposed", "Update client is disposed");
+      const candidate = current?.preparedUpdate;
+      if (state && !candidate) {
+        throw new PocketUpdatePlanError("update_not_checked", "Check an update before applying with state handoff");
+      }
+      const target = candidate && (candidate.build !== current?.activeBuild || candidate.version !== current?.activeVersion)
+        ? { version: candidate.version, build: candidate.build } : undefined;
+      const source = current && typeof current.activeVersion === "string" && typeof current.activeBuild === "number" && Number.isSafeInteger(current.activeBuild)
+        ? { version: current.activeVersion, build: current.activeBuild } : undefined;
+      if (state && target) await state.capture(target, source);
+      try {
+        if (disposed) throw new PocketUpdatePlanError("update-client-disposed", "Update client is disposed");
+        const params: JsonObject = state && candidate
+          ? { expectedVersion: candidate.version, expectedBuild: candidate.build } : {};
+        const result = await host.request<JsonValue>("updates.apply", params) as unknown as { scheduled: boolean; version: string };
+        if (state && target && !result.scheduled) await state.discard(target);
+        return result;
+      } catch (error) {
+        if (state && target) await state.discard(target).catch(() => {});
+        throw error;
+      }
+    })();
+    applying = operation;
+    void operation.then(
+      (result) => { if (!result.scheduled && applying === operation) applying = undefined; },
+      () => { if (applying === operation) applying = undefined; },
+    );
+    return operation;
+  };
   const check = async (request?: PocketUpdateCheckRequest): Promise<PocketUpdateStatusSnapshot> => {
     const params: JsonObject = {};
     if (request?.mode) params.mode = request.mode;
@@ -563,11 +645,64 @@ export function createPocketUpdateClient(host: HostBridge): PocketUpdateClient {
     if (request?.resource !== undefined) params.resource = request.resource;
     return await host.request<JsonValue>("updates.check", params) as unknown as PocketUpdateStatusSnapshot;
   };
+  const refresh = (request?: PocketUpdateCheckRequest, retryAfterFailure = true): Promise<PocketUpdateRefreshResult> => {
+    if (disposed) return Promise.reject(new PocketUpdatePlanError("update-client-disposed", "Update client is disposed"));
+    if (refreshing) return refreshing;
+    if (applying) return applying;
+    const operation = (async (): Promise<PocketUpdateRefreshResult> => {
+      await ready;
+      const current = await status();
+      if (state && !disposed && healthy(current)) await state.commit(identity(current));
+      // Readiness is a host fact: a guest must finish its health window before
+      // attempting another package operation. The next health/resume event
+      // retries automatic refresh; no ticker or retry timer is installed here.
+      if (disposed || !current.configured ||
+          (current.stage !== "ready" && current.stage !== "verified" && current.stage !== "error") ||
+          (!retryAfterFailure && current.lastError && healthy(current))) {
+        return { scheduled: false, version: current.activeVersion ?? null };
+      }
+      await check(request);
+      if (disposed) return { scheduled: false, version: current.activeVersion ?? null };
+      return apply();
+    })();
+    refreshing = operation;
+    // Keep a scheduled result until the old guest is disposed. Another event
+    // during the host's response-to-remount interval must not apply twice.
+    void operation.then(
+      (result) => { if (!result.scheduled && refreshing === operation) refreshing = undefined; },
+      () => { if (refreshing === operation) refreshing = undefined; },
+    );
+    return operation;
+  };
+  const reportError = (error: unknown): void => {
+    if (disposed) return;
+    try {
+      if (options.onError) options.onError(error);
+      else console.warn("Pocket update failed", error);
+    } catch { /* isolate the application's error observer */ }
+  };
+  const automaticallyRefresh = (retryAfterFailure = false): void => {
+    if (!disposed) void refresh(undefined, retryAfterFailure).catch(reportError);
+  };
+  const removeEvents = (options.autoRefresh || state) ? host.onEvent!((event) => {
+    const resuming = event.method === "platform.lifecycle" && event.params.state === "onResume";
+    if (options.autoRefresh && (event.method === "updates.changed" || resuming)) {
+      // Recovery retains lastError. Do not immediately activate the same
+      // broken release again when the fallback guest becomes healthy.
+      automaticallyRefresh(resuming);
+    } else if (state && event.method === "updates.changed") {
+      void ready.then(async () => {
+        if (disposed) return;
+        const current = await status();
+        if (!disposed && healthy(current)) await state.commit(identity(current));
+      }).catch(reportError);
+    }
+  }) : undefined;
+  if (options.autoRefresh) automaticallyRefresh();
 
   return {
-    async status(): Promise<PocketUpdateStatusSnapshot> {
-      return await host.request<JsonValue>("updates.status", {}) as unknown as PocketUpdateStatusSnapshot;
-    },
+    ready,
+    status,
     check,
     checkZip(): Promise<PocketUpdateStatusSnapshot> {
       return check({ mode: "zip", scope: "all" });
@@ -581,11 +716,14 @@ export function createPocketUpdateClient(host: HostBridge): PocketUpdateClient {
       }
       return check({ mode: "granular", scope: "resource", resource });
     },
-    async apply(): Promise<{ scheduled: boolean; version: string }> {
-      return await host.request<JsonValue>("updates.apply", {}) as unknown as { scheduled: boolean; version: string };
-    },
+    apply,
     async rollback(): Promise<{ scheduled: boolean; version: string }> {
       return await host.request<JsonValue>("updates.rollback", {}) as unknown as { scheduled: boolean; version: string };
+    },
+    refresh,
+    dispose(): void {
+      disposed = true;
+      removeEvents?.();
     },
   };
 }
