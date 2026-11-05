@@ -13,10 +13,11 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { existsSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -149,6 +150,9 @@ const maxBrowserPluginPending = 64;
 // while remaining a hard, finite bound for a malformed guest.
 const maxPendingBrowserEvents = 512;
 const browserPluginTimeoutMs = 120_000;
+const previewRecordingMaxEntries = 8192;
+const previewRecordingMaxBytes = 8 * 1024 * 1024;
+const previewRecordingMaxAssets = 128 * 1024 * 1024;
 
 /** Frame elapsed time must not jump when wall-clock time is adjusted. */
 function monotonicNow(): number {
@@ -415,6 +419,9 @@ async function requestJson(request: Request): Promise<JsonRecord> {
 }
 
 /** A serialized line-oriented client for the checked-in native probe. */
+type NativeProbeObserver = (command: JsonRecord, response: JsonRecord) => void | Promise<void>;
+type NativeProbeCommandDecorator = (command: JsonRecord) => JsonRecord;
+
 class NativeProbe {
   readonly path: string;
   readonly timeoutMs: number;
@@ -423,6 +430,8 @@ class NativeProbe {
   private readonly pending: Array<{ resolve: (value: JsonRecord) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
   private readonly stderr: string[] = [];
   private closed = false;
+  private observer?: NativeProbeObserver;
+  private decorator?: NativeProbeCommandDecorator;
 
   constructor(path: string, timeoutMs: number) {
     this.path = path;
@@ -483,9 +492,21 @@ class NativeProbe {
   }
 
   async checked(command: JsonRecord): Promise<JsonRecord> {
-    const response = await this.command(command);
-    if (response.ok !== true) throw new Error(typeof response.error === "string" ? response.error : "pocket_probe operation failed");
+    const actualCommand = this.decorator?.(command) ?? command;
+    const response = await this.command(actualCommand);
+    if (response.ok !== true) {
+      throw new Error(typeof response.error === "string" ? response.error : "pocket_probe operation failed");
+    }
+    await this.observer?.(actualCommand, response);
     return response;
+  }
+
+  setObserver(observer: NativeProbeObserver | undefined): void {
+    this.observer = observer;
+  }
+
+  setDecorator(decorator: NativeProbeCommandDecorator | undefined): void {
+    this.decorator = decorator;
   }
 
   async stop(): Promise<void> {
@@ -506,6 +527,261 @@ class NativeProbe {
       });
     });
   }
+}
+
+type PreviewProbeHistoryEntry = {
+  command: JsonRecord;
+  response: JsonRecord;
+  frameSummary?: JsonRecord;
+};
+
+type PreviewRecordingEntry = {
+  index: number;
+  kind: string;
+  args: JsonRecord;
+  result: JsonRecord;
+  error: null;
+};
+
+type PreviewRecordingAsset = {
+  descriptor: JsonRecord;
+  path: string;
+  bytes: Uint8Array;
+};
+
+type PreviewRecordingCapture = {
+  id: string;
+  appId: string;
+  runtime: PreviewRuntime;
+  entries: PreviewRecordingEntry[];
+  assets: Map<string, PreviewRecordingAsset>;
+  contentHashes: Record<string, string>;
+  engineAbi?: string;
+  incompleteReason?: string;
+  stopped: boolean;
+};
+
+type PreviewRecordingState = {
+  enabled: boolean;
+  stopped: boolean;
+  captures: Map<PreviewRuntime, PreviewRecordingCapture>;
+  incompleteReason?: string;
+};
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/** Canonical JSON mirrors pocketCanonicalJson for preview-local digests. */
+function canonicalPreviewJson(value: unknown): string {
+  if (value === undefined) return "null";
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("recording JSON contains a non-finite number");
+    return Object.is(value, -0) ? "-0.0" : String(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalPreviewJson).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonicalPreviewJson(record[key])}`).join(",")}}`;
+  }
+  throw new Error(`recording JSON contains unsupported ${typeof value}`);
+}
+
+function sha256Hex(value: Uint8Array | string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function previewBytes(value: unknown): Uint8Array {
+  if (!Array.isArray(value)) return new Uint8Array();
+  return new Uint8Array(value.map((item) => {
+    const number = Number(item);
+    return Number.isFinite(number) ? Math.max(0, Math.min(255, Math.trunc(number))) : 0;
+  }));
+}
+
+function previewClip(value: unknown): JsonRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const clip = value as JsonRecord;
+  return {
+    x: Number(clip.x ?? 0),
+    y: Number(clip.y ?? 0),
+    width: Number(clip.width ?? clip.w ?? 0),
+    height: Number(clip.height ?? clip.h ?? 0),
+  };
+}
+
+function previewOpSummary(value: unknown): JsonRecord {
+  const op = asRecord(value, "recording frame op");
+  const type = typeof op.type === "string" ? op.type : "unknown";
+  const result: JsonRecord = {
+    type,
+    x: Number(op.x ?? 0),
+    y: Number(op.y ?? 0),
+    width: Number(op.width ?? op.w ?? 0),
+    height: Number(op.height ?? op.h ?? 0),
+    clip: previewClip(op.clip),
+  };
+  if (type === "rect") result.color = op.color;
+  else if (type === "rounded") {
+    result.color = op.color;
+    result.radius = op.radius;
+  } else if (type === "gradient") {
+    result.fromColor = op.from ?? op.fromColor;
+    result.toColor = op.to ?? op.toColor;
+    result.direction = op.direction;
+  } else if (type === "triangle") {
+    result.points = Array.isArray(op.points) ? op.points.map((point) => {
+      const item = asRecord(point, "recording triangle point");
+      return { x: Number(item.x), y: Number(item.y) };
+    }) : [];
+    result.colors = op.colors;
+  } else if (type === "textureTriangle") {
+    result.asset = op.asset;
+    result.color = op.color;
+    result.points = Array.isArray(op.points) ? op.points.map((point) => {
+      const item = asRecord(point, "recording texture triangle point");
+      return { x: Number(item.x), y: Number(item.y) };
+    }) : [];
+    result.uvs = op.uvs;
+  } else if (type === "text") {
+    result.text = op.text;
+    result.size = op.size;
+    result.color = op.color;
+    result.fontSlot = op.fontSlot;
+    result.align = op.align;
+  } else if (type === "image") {
+    result.asset = op.asset;
+    result.uv = op.uv;
+    // The native FrameOp schema calls this ARGB modulation word `color`;
+    // PocketImageOp exposes the same value as `tint` after decoding. Keep
+    // the preview digest on the canonical Dart field rather than relying on
+    // a non-existent native `tint` key.
+    result.tint = op.color ?? op.tint;
+  } else if (type === "hostSurface") {
+    // Host-surface parameters travel in the native asset descriptor. The
+    // Flutter decoder reads that descriptor before constructing
+    // PocketHostSurfaceOp, so do the same before hashing the frame. This
+    // keeps application/glass providers replay-equivalent without inventing
+    // a second host-surface schema in the editor.
+    let descriptor: JsonRecord | undefined;
+    if (typeof op.asset === "string") {
+      try {
+        const parsed = JSON.parse(op.asset);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) descriptor = parsed as JsonRecord;
+      } catch {
+        // A malformed descriptor is rejected by the canonical Flutter
+        // decoder; retain the raw fallback so the digest remains diagnostic.
+      }
+    }
+    result.id = op.id;
+    result.kind = descriptor?.kind ?? op.kind;
+    result.surfaceHandle = op.surfaceHandle;
+    result.focused = op.focused;
+    result.parameters = descriptor?.parameters ?? op.parameters ?? {};
+  } else if (type === "video") {
+    result.id = op.id;
+    result.asset = op.asset;
+    result.autoplay = op.autoplay;
+    result.fit = op.fit;
+  }
+  return result;
+}
+
+function previewEventSummary(value: unknown): JsonRecord {
+  const event = asRecord(value, "recording frame event");
+  const payload = event.payload ?? event.params ?? {};
+  const payloadRecord = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as JsonRecord
+    : { value: payload };
+  return {
+    id: String(event.id ?? ""),
+    method: String(event.method ?? event.name ?? ""),
+    params: payloadRecord,
+  };
+}
+
+function previewResourceSummary(value: unknown): JsonRecord {
+  const resource = asRecord(value, "recording frame resource");
+  const pixels = previewBytes(resource.pixels);
+  const palette = resource.palette === undefined || resource.palette === null ? undefined : previewBytes(resource.palette);
+  return {
+    asset: resource.asset,
+    revision: resource.revision,
+    width: resource.width,
+    height: resource.height,
+    psm: resource.psm,
+    linear: resource.linear,
+    pixelsBytes: pixels.byteLength,
+    pixelsSha256: sha256Hex(pixels),
+    paletteBytes: palette?.byteLength,
+    paletteSha256: palette === undefined ? null : sha256Hex(palette),
+  };
+}
+
+/**
+ * Some preview/resource providers omit the native revision field. Compare
+ * their actual pixel payload before forwarding a resource delta; otherwise a
+ * static atlas is decoded and dropped by the browser on every animation
+ * frame. Revision-bearing native resources retain the cheaper revision path
+ * at the compositor boundary below.
+ */
+function samePreviewResourceBytes(left: unknown, right: unknown): boolean {
+  const leftAbsent = left === undefined || left === null;
+  const rightAbsent = right === undefined || right === null;
+  if (leftAbsent || rightAbsent) return leftAbsent && rightAbsent;
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  const leftBytes = previewBytes(left);
+  const rightBytes = previewBytes(right);
+  if (leftBytes.byteLength !== rightBytes.byteLength) return false;
+  for (let index = 0; index < leftBytes.byteLength; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return false;
+  }
+  return true;
+}
+
+function samePreviewResourcePayload(left: JsonRecord, right: JsonRecord): boolean {
+  return left.width === right.width && left.height === right.height &&
+    left.psm === right.psm && left.linear === right.linear &&
+    samePreviewResourceBytes(left.pixels, right.pixels) &&
+    samePreviewResourceBytes(left.palette, right.palette);
+}
+
+function previewFrameSummary(value: PreviewFrame): JsonRecord {
+  const canonical: JsonRecord = {
+    width: value.width,
+    height: value.height,
+    ops: value.ops.map(previewOpSummary),
+    events: value.events.map(previewEventSummary),
+    resources: value.resources.map(previewResourceSummary),
+    releasedResources: value.releasedResources ?? [],
+    auxiliary: value.auxiliary === undefined ? null : {
+      width: value.auxiliary.width,
+      height: value.auxiliary.height,
+      ops: value.auxiliary.ops.map(previewOpSummary),
+    },
+  };
+  const digest = (item: unknown): string => sha256Hex(canonicalPreviewJson(item));
+  return {
+    sha256: digest(canonical),
+    opsSha: digest(canonical.ops),
+    eventsSha: digest(canonical.events),
+    resourcesSha: digest(canonical.resources),
+    auxSha: digest(canonical.auxiliary),
+    width: value.width,
+    height: value.height,
+    ops: value.ops.length,
+    events: value.events.length,
+    resources: value.resources.length,
+    releasedResources: (value.releasedResources ?? []).length,
+    auxiliaryOps: value.auxiliary?.ops.length ?? 0,
+  };
+}
+
+function emptyPreviewTraceClock(): JsonRecord {
+  return { idleMs: [], scalars: [] };
 }
 
 type PreviewRuntime = {
@@ -529,6 +805,9 @@ type PreviewRuntime = {
   pendingBrowserEvents: PendingBrowserEvent[];
   needsPump: boolean;
   pumping: number;
+  /** Bounded command history retained so a later recording start includes the
+   * real create/load boundaries that happened before the UI request. */
+  recordingHistory?: PreviewProbeHistoryEntry[];
 };
 
 /** Keep lifecycle edges tied to the runtime generation that emitted them. */
@@ -767,6 +1046,8 @@ class PreviewSession {
   private readonly browserPluginStreams = new Map<string, BrowserPluginRequest>();
   private readonly pointerTargets = new Map<number, PointerTarget>();
   private readonly storage = new Map<string, JsonRecord | null>();
+  private previewRecording?: PreviewRecordingState;
+  private nextRecordingRuntimeId = 0;
   private systemCatalog?: SystemCatalog;
   private systemConfigured = false;
   private nextInstanceId = 0;
@@ -947,6 +1228,24 @@ class PreviewSession {
       this.tickHz = artifacts.tickHz ?? this.manager.options.tickHz ?? 60;
       const probePath = await this.manager.findProbe();
       const probe = new NativeProbe(probePath, this.manager.options.commandTimeoutMs ?? 15_000);
+      const runtime: PreviewRuntime = {
+        appId: this.systemCatalog?.systemUI ?? (artifacts.appId ?? this.id),
+        instanceId: "system-ui",
+        generation: ++this.rootGeneration,
+        probe,
+        artifacts,
+        viewportWidth: this.width,
+        viewportHeight: this.height,
+        safeArea: { ...this.safeArea },
+        resources: new Map(),
+        initialEvents: [],
+        pendingBrowserEvents: [],
+        needsPump: false,
+        pumping: 0,
+        recordingHistory: [],
+      };
+      probe.setObserver((command, response) => this.observeProbeCommand(runtime, command, response));
+      probe.setDecorator((command) => this.decorateProbeCommand(command));
       try {
         await probe.checked({
           op: "create",
@@ -954,14 +1253,18 @@ class PreviewSession {
           height: this.height,
           rasterDensity: this.manager.options.rasterDensity ?? 1,
           tickHz: this.tickHz,
-          ...(artifacts.compositorSurfaces && Object.keys(artifacts.compositorSurfaces).length > 0
-            ? { compositorSurfaces: artifacts.compositorSurfaces }
-            : {}),
         });
+        // The native trace clock must be selected before the first guest load.
+        // It remains allocation-free until a transaction carries traceClock:{}
+        // and lets a later UI start capture the already-live preview safely.
+        await probe.checked({ op: "traceMode", mode: 1 });
+        if (artifacts.compositorSurfaces && Object.keys(artifacts.compositorSurfaces).length > 0) {
+          await probe.checked({ op: "compositor", applications: artifacts.compositorSurfaces });
+        }
         if (artifacts.bytecodePath) {
-          await probe.checked({ op: "loadBytecode", bytecodePath: artifacts.bytecodePath, pakPath: artifacts.pakPath });
+          await probe.checked({ op: "loadBytecode", bytecodePath: artifacts.bytecodePath, pakPath: artifacts.pakPath, render: true, traceClock: {} });
         } else {
-          await probe.checked({ op: "load", sourcePath: artifacts.sourcePath, pakPath: artifacts.pakPath });
+          await probe.checked({ op: "load", sourcePath: artifacts.sourcePath, pakPath: artifacts.pakPath, render: true, traceClock: {} });
         }
         // The native resize ABI intentionally remains width/height-only. Send
         // the richer safe-area fact over the existing guest event lane before
@@ -969,21 +1272,7 @@ class PreviewSession {
         // a Flutter host (and never briefly mounts under the notch).
         await sendDisplayViewport(probe, this.width, this.height, this.safeArea);
         this.probe = probe;
-        this.rootRuntime = {
-          appId: this.systemCatalog?.systemUI ?? (artifacts.appId ?? this.id),
-          instanceId: "system-ui",
-          generation: ++this.rootGeneration,
-          probe,
-          artifacts,
-          viewportWidth: this.width,
-          viewportHeight: this.height,
-          safeArea: { ...this.safeArea },
-          resources: new Map(),
-          initialEvents: [],
-          pendingBrowserEvents: [],
-          needsPump: false,
-          pumping: 0,
-        };
+        this.rootRuntime = runtime;
         this.childRuntimes.clear();
         this.pendingSystemRequests.clear();
         this.systemConfigured = false;
@@ -1460,6 +1749,435 @@ class PreviewSession {
     }
   }
 
+  private recordableProbeCommand(command: JsonRecord): boolean {
+    const operation = command.op;
+    if (!["create", "compositor", "load", "loadBytecode", "eval", "frame", "send", "resize"].includes(String(operation))) return false;
+    if (operation !== "send") return true;
+    const message = command.message && typeof command.message === "object" && !Array.isArray(command.message)
+      ? command.message as JsonRecord
+      : undefined;
+    const payload = message?.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
+      ? message.payload as JsonRecord
+      : undefined;
+    // A start/stop/status response is a control-plane transaction for the
+    // recorder itself. Capturing it would make replay depend on a recording
+    // request that is intentionally not replayed.
+    return !(message?.name === "host.response" && typeof payload?.capability === "string" && payload.capability.startsWith("diagnostics.recording."));
+  }
+
+  private decorateProbeCommand(command: JsonRecord): JsonRecord {
+    // Once trace mode is selected (before guest load), every traced native
+    // transaction must close its envelope. Keeping the empty envelope on all
+    // probe transactions also makes the pre-Start bootstrap history genuinely
+    // replayable instead of requiring a synthetic load record.
+    if (command.op === "create" || !this.recordableProbeCommand(command)) return command;
+    if (command.traceClock !== undefined) return command;
+    return { ...command, traceClock: {} };
+  }
+
+  private async observeProbeCommand(runtime: PreviewRuntime, command: JsonRecord, response: JsonRecord): Promise<void> {
+    if (!this.recordableProbeCommand(command)) return;
+    const item: PreviewProbeHistoryEntry = {
+      command: cloneJson(command),
+      response: (() => {
+        const copy = cloneJson(response);
+        delete copy.frame;
+        return copy;
+      })(),
+    };
+    if (response.frame && typeof response.frame === "object" && !Array.isArray(response.frame)) {
+      try {
+        item.frameSummary = previewFrameSummary(asFrame(response.frame));
+      } catch {
+        // A malformed frame is surfaced by pumpRuntime. History must never
+        // turn an ordinary guest failure into an observer failure.
+      }
+    }
+    const history = runtime.recordingHistory ?? (runtime.recordingHistory = []);
+    history.push(item);
+    if (history.length > previewRecordingMaxEntries) history.shift();
+    const state = this.previewRecording;
+    if (!state || !state.enabled || state.stopped) return;
+    const capture = state.captures.get(runtime);
+    if (!capture || capture.stopped) return;
+    try {
+      const entry = await this.recordingEntryFromHistory(capture, item);
+      if (entry) this.appendPreviewRecordingEntry(capture, entry);
+    } catch (error) {
+      capture.incompleteReason ??= `probe boundary capture failed: ${errorText(error)}`;
+      state.incompleteReason ??= capture.incompleteReason;
+    }
+  }
+
+  private appendPreviewRecordingEntry(capture: PreviewRecordingCapture, entry: PreviewRecordingEntry): void {
+    if (capture.entries.length >= previewRecordingMaxEntries) {
+      capture.incompleteReason ??= "maxEntries exceeded";
+      return;
+    }
+    entry.index = capture.entries.length;
+    const bytes = new TextEncoder().encode(canonicalPreviewJson(entry)).byteLength;
+    const current = capture.entries.reduce((total, item) => total + new TextEncoder().encode(canonicalPreviewJson(item)).byteLength, 0);
+    if (bytes > previewRecordingMaxBytes - current) {
+      capture.incompleteReason ??= "maxBytes exceeded";
+      return;
+    }
+    capture.entries.push(entry);
+  }
+
+  private async recordingAsset(
+    capture: PreviewRecordingCapture,
+    kind: string,
+    path: string,
+  ): Promise<JsonRecord> {
+    const bytes = new Uint8Array(await readFile(path));
+    if (bytes.byteLength > previewRecordingMaxAssets) throw new Error(`${kind} asset exceeds preview recording limit`);
+    const sha256 = sha256Hex(bytes);
+    const key = `${kind}:${sha256.slice(0, 16)}`;
+    const existing = capture.assets.get(sha256);
+    if (existing) return cloneJson(existing.descriptor);
+    const descriptor: JsonRecord = { bytes: bytes.byteLength, sha256, key };
+    capture.assets.set(sha256, { descriptor, path, bytes });
+    capture.contentHashes[kind] = sha256;
+    return cloneJson(descriptor);
+  }
+
+  private async recordingEntryFromHistory(
+    capture: PreviewRecordingCapture,
+    item: PreviewProbeHistoryEntry,
+  ): Promise<PreviewRecordingEntry | undefined> {
+    const command = item.command;
+    const operation = command.op;
+    const traceClock = item.response.traceClock && typeof item.response.traceClock === "object"
+      ? cloneJson(item.response.traceClock)
+      : emptyPreviewTraceClock();
+    if (operation === "create") {
+      const args = cloneJson(command);
+      delete args.op;
+      args.operation = "create";
+      return { index: 0, kind: "auxiliary", args, result: { enabled: true, traceClock }, error: null };
+    }
+    if (operation === "compositor") {
+      return {
+        index: 0,
+        kind: "compositor",
+        args: { applications: cloneJson(command.applications) },
+        result: { configured: true, traceClock },
+        error: null,
+      };
+    }
+    if (operation === "loadBytecode" || operation === "load") {
+      const args: JsonRecord = {};
+      if (operation === "loadBytecode") {
+        if (typeof command.bytecodePath !== "string" || typeof command.pakPath !== "string") throw new Error("loadBytecode paths are missing");
+        args.bytecode = await this.recordingAsset(capture, "bytecode", command.bytecodePath);
+        args.pak = await this.recordingAsset(capture, "pak", command.pakPath);
+        if (typeof item.response.runtimeAbi === "string") {
+          capture.engineAbi = item.response.runtimeAbi;
+          args.expectedRuntimeAbi = item.response.runtimeAbi;
+        }
+      } else {
+        if (typeof command.sourcePath !== "string" || typeof command.pakPath !== "string") throw new Error("load paths are missing");
+        args.source = await this.recordingAsset(capture, "source", command.sourcePath);
+        args.pak = await this.recordingAsset(capture, "pak", command.pakPath);
+      }
+      if (item.frameSummary) return { index: 0, kind: operation, args, result: { frame: item.frameSummary, traceClock }, error: null };
+      return { index: 0, kind: operation, args, result: { traceClock }, error: null };
+    }
+    if (operation === "frame") {
+      const result: JsonRecord = { traceClock };
+      if (item.frameSummary) result.frame = item.frameSummary;
+      return { index: 0, kind: "frame", args: { deltaMs: command.deltaMs }, result, error: null };
+    }
+    if (operation === "send") {
+      return { index: 0, kind: "send", args: { message: cloneJson(command.message) }, result: { sent: true, traceClock }, error: null };
+    }
+    if (operation === "resize") {
+      return { index: 0, kind: "resize", args: { width: command.width, height: command.height }, result: { resized: true, traceClock }, error: null };
+    }
+    if (operation === "eval") {
+      const result: JsonRecord = { traceClock };
+      if (item.frameSummary) result.frame = item.frameSummary;
+      return { index: 0, kind: "eval", args: { source: command.source }, result, error: null };
+    }
+    return undefined;
+  }
+
+  private createPreviewRecordingCapture(runtime: PreviewRuntime): PreviewRecordingCapture {
+    return {
+      id: `${++this.nextRecordingRuntimeId}-${runtime.appId}`,
+      appId: runtime.appId,
+      runtime,
+      entries: [],
+      assets: new Map(),
+      contentHashes: {},
+      stopped: false,
+    };
+  }
+
+  private ensurePreviewRecordingCapture(runtime: PreviewRuntime): PreviewRecordingCapture | undefined {
+    const state = this.previewRecording;
+    if (!state || !state.enabled || state.stopped) return undefined;
+    const existing = state.captures.get(runtime);
+    if (existing) return existing;
+    const capture = this.createPreviewRecordingCapture(runtime);
+    state.captures.set(runtime, capture);
+    return capture;
+  }
+
+  private previewRecordingRuntimes(): PreviewRuntime[] {
+    return [
+      ...(this.rootRuntime ? [this.rootRuntime] : []),
+      ...this.childRuntimes.values(),
+    ];
+  }
+
+  private previewRecordingStatus(): JsonRecord {
+    const state = this.previewRecording;
+    if (!state) return { enabled: false, recording: false, stopped: false, incomplete: false, runtimes: [] };
+    const runtimes = [...state.captures.values()].map((capture) => ({
+      id: capture.id,
+      appId: capture.appId,
+      entries: capture.entries.length,
+      bytes: capture.entries.reduce((total, item) => total + new TextEncoder().encode(canonicalPreviewJson(item)).byteLength, 0),
+      finished: capture.stopped,
+      incomplete: capture.incompleteReason !== undefined,
+    }));
+    const incomplete = state.incompleteReason !== undefined || [...state.captures.values()].some((capture) => capture.incompleteReason !== undefined);
+    return {
+      enabled: state.enabled,
+      recording: state.enabled && !state.stopped && !incomplete,
+      stopped: state.stopped,
+      incomplete,
+      ...(state.incompleteReason ? { reason: state.incompleteReason } : {}),
+      runtimes,
+    };
+  }
+
+  private async startPreviewRecording(runtime: PreviewRuntime): Promise<JsonRecord> {
+    if (this.previewRecording?.enabled && !this.previewRecording.stopped) return this.previewRecordingStatus();
+    this.previewRecording = {
+      enabled: true,
+      stopped: false,
+      captures: new Map(),
+    };
+    this.nextRecordingRuntimeId = 0;
+    try {
+      for (const candidate of this.previewRecordingRuntimes()) {
+        const capture = this.ensurePreviewRecordingCapture(candidate)!;
+        for (const item of candidate.recordingHistory ?? []) {
+          const entry = await this.recordingEntryFromHistory(capture, item);
+          if (entry) this.appendPreviewRecordingEntry(capture, entry);
+        }
+      }
+      const status = this.previewRecordingStatus();
+      // Match PocketSession's started event while retaining the same real
+      // runtime and avoiding a second JS/native runtime implementation.
+      await runtime.probe.checked({
+        op: "send",
+        message: { type: "event", name: "diagnostics.recording.started", payload: status },
+      });
+      runtime.needsPump = true;
+      return status;
+    } catch (error) {
+      this.previewRecording = undefined;
+      throw new Error(`preview recording start failed: ${errorText(error)}`);
+    }
+  }
+
+  private async stopPreviewRecording(): Promise<JsonRecord> {
+    const state = this.previewRecording;
+    if (!state) return this.previewRecordingStatus();
+    state.stopped = true;
+    for (const capture of state.captures.values()) capture.stopped = true;
+    return this.previewRecordingStatus();
+  }
+
+  private previewRecordingDocument(capture: PreviewRecordingCapture): JsonRecord {
+    const create = capture.entries.find((entry) => entry.kind === "auxiliary" && entry.args.operation === "create");
+    const width = Number(create?.args.width ?? capture.runtime.viewportWidth);
+    const height = Number(create?.args.height ?? capture.runtime.viewportHeight);
+    const density = Number(create?.args.rasterDensity ?? this.manager.options.rasterDensity ?? 1);
+    const tickHz = Number(create?.args.tickHz ?? this.tickHz);
+    const bytes = capture.entries.reduce((total, entry) => total + new TextEncoder().encode(canonicalPreviewJson(entry)).byteLength, 0);
+    const version = capture.entries.some((entry) => {
+      const clock = entry.result.traceClock;
+      return !!clock && typeof clock === "object" && (clock as JsonRecord).version === 2;
+    }) ? 2 : 1;
+    const recording: JsonRecord = {
+      schema: "pocket.runtime.recording",
+      version,
+      metadata: {
+        width,
+        height,
+        density,
+        tickHz,
+        engineAbi: capture.engineAbi ?? null,
+        contentHashes: capture.contentHashes,
+      },
+      limits: { maxEntries: previewRecordingMaxEntries, maxBytes: previewRecordingMaxBytes },
+      bytes,
+      incomplete: capture.incompleteReason !== undefined,
+      incompleteReason: capture.incompleteReason ?? null,
+      entries: capture.entries,
+    };
+    return recording;
+  }
+
+  private async exportPreviewRecording(params: JsonRecord): Promise<JsonRecord> {
+    const state = this.previewRecording;
+    if (!state || state.captures.size === 0) throw new Error("No guest has been recorded");
+    if (!state.stopped) await this.stopPreviewRecording();
+    if (state.incompleteReason || [...state.captures.values()].some((capture) => capture.incompleteReason)) {
+      throw new Error(state.incompleteReason ?? "Incomplete guest recording");
+    }
+    const recordings: Record<string, JsonRecord> = {};
+    const assets = new Map<string, Uint8Array>();
+    for (const capture of state.captures.values()) {
+      const recording = this.previewRecordingDocument(capture);
+      recordings[capture.id] = recording;
+      for (const [sha256, asset] of capture.assets) assets.set(sha256, asset.bytes);
+    }
+    if (assets.size > 128 || [...assets.values()].reduce((total, bytes) => total + bytes.byteLength, 0) > previewRecordingMaxAssets) {
+      throw new Error("Archive asset limits exceeded");
+    }
+    const status = this.previewRecordingStatus();
+    const inputTape = params.inputTape;
+    if (inputTape !== undefined && (!inputTape || typeof inputTape !== "object" || Array.isArray(inputTape) || new TextEncoder().encode(JSON.stringify(inputTape)).byteLength > 256 * 1024)) {
+      throw new Error("Upstream input tape must be a bounded object");
+    }
+    const document: JsonRecord = {
+      schema: "pocket.recording.archive",
+      version: 1,
+      status,
+      ...(inputTape === undefined ? {} : { upstreamInputTape: cloneJson(inputTape) }),
+      recordings,
+    };
+    const directory = join(tmpdir(), `pocket-preview-recording-${this.id.replace(/[^A-Za-z0-9_-]/g, "_")}-${randomUUID()}`);
+    await mkdir(join(directory, "assets"), { recursive: true });
+    for (const [sha256, bytes] of assets) await writeFile(join(directory, "assets", `${sha256}.bin`), bytes);
+    const manifest = join(directory, "recordings.json");
+    await writeFile(manifest, JSON.stringify(document));
+    return { path: manifest, runtimeCount: Object.keys(recordings).length, ...status };
+  }
+
+  private previewAssetPath(capture: PreviewRecordingCapture, descriptor: unknown): string {
+    const value = asRecord(descriptor, "recording asset descriptor");
+    const sha256 = value.sha256;
+    if (typeof sha256 !== "string") throw new Error("recording asset SHA-256 is missing");
+    const asset = capture.assets.get(sha256);
+    if (!asset) throw new Error(`recording asset ${sha256} is unavailable`);
+    return asset.path;
+  }
+
+  private async replayPreviewCapture(capture: PreviewRecordingCapture): Promise<JsonRecord> {
+    if (capture.incompleteReason || capture.entries.length === 0) {
+      return {
+        matched: false,
+        replayable: false,
+        entriesReplayed: 0,
+        framesCompared: 0,
+        rejection: capture.incompleteReason ?? "recording contains no transactions",
+      };
+    }
+    const probe = new NativeProbe(await this.manager.findProbe(), this.manager.options.commandTimeoutMs ?? 15_000);
+    let entriesReplayed = 0;
+    let framesCompared = 0;
+    try {
+      for (const entry of capture.entries) {
+        let response: JsonRecord;
+        if (entry.kind === "auxiliary" && entry.args.operation === "create") {
+          const command = cloneJson(entry.args);
+          delete command.operation;
+          command.op = "create";
+          response = await probe.checked(command);
+          await probe.checked({ op: "traceMode", mode: 2 });
+        } else if (entry.kind === "compositor") {
+          const command: JsonRecord = { op: "compositor", applications: cloneJson(entry.args.applications) };
+          if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
+          response = await probe.checked(command);
+        } else if (entry.kind === "loadBytecode") {
+          const command: JsonRecord = {
+            op: "loadBytecode",
+            bytecodePath: this.previewAssetPath(capture, entry.args.bytecode),
+            pakPath: this.previewAssetPath(capture, entry.args.pak),
+            render: true,
+          };
+          if (typeof entry.args.expectedRuntimeAbi === "string") command.expectedRuntimeAbi = entry.args.expectedRuntimeAbi;
+          if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
+          response = await probe.checked(command);
+          if (entry.result.frame && response.frame && canonicalPreviewJson(entry.result.frame) !== canonicalPreviewJson(previewFrameSummary(asFrame(response.frame)))) {
+            return { matched: false, replayable: true, entriesReplayed: entriesReplayed + 1, framesCompared: framesCompared + 1, firstMismatch: { transaction: entry.kind, entryIndex: entry.index, reason: "load frame summary differs", expected: entry.result.frame, actual: previewFrameSummary(asFrame(response.frame)) } };
+          }
+          if (response.frame) framesCompared += 1;
+          if (typeof response.runtimeAbi === "string" && capture.engineAbi && response.runtimeAbi !== capture.engineAbi) {
+            return { matched: false, replayable: true, entriesReplayed, framesCompared, firstMismatch: { transaction: entry.kind, reason: "engine ABI mismatch", expected: capture.engineAbi, actual: response.runtimeAbi } };
+          }
+        } else if (entry.kind === "load") {
+          const command: JsonRecord = {
+            op: "load",
+            sourcePath: this.previewAssetPath(capture, entry.args.source),
+            pakPath: this.previewAssetPath(capture, entry.args.pak),
+            render: true,
+          };
+          if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
+          response = await probe.checked(command);
+          if (entry.result.frame && response.frame && canonicalPreviewJson(entry.result.frame) !== canonicalPreviewJson(previewFrameSummary(asFrame(response.frame)))) {
+            return { matched: false, replayable: true, entriesReplayed: entriesReplayed + 1, framesCompared: framesCompared + 1, firstMismatch: { transaction: entry.kind, entryIndex: entry.index, reason: "load frame summary differs", expected: entry.result.frame, actual: previewFrameSummary(asFrame(response.frame)) } };
+          }
+          if (response.frame) framesCompared += 1;
+        } else if (entry.kind === "frame") {
+          const command: JsonRecord = { op: "frame", deltaMs: entry.args.deltaMs };
+          if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
+          response = await probe.checked(command);
+          if (!response.frame || typeof response.frame !== "object" || Array.isArray(response.frame)) throw new Error("replay frame is missing");
+          const actual = previewFrameSummary(asFrame(response.frame));
+          const expected = entry.result.frame;
+          if (expected && canonicalPreviewJson(expected) !== canonicalPreviewJson(actual)) {
+            return { matched: false, replayable: true, entriesReplayed: entriesReplayed + 1, framesCompared: framesCompared + 1, firstMismatch: { transaction: entry.kind, entryIndex: entry.index, reason: "frame summary differs", expected, actual } };
+          }
+          framesCompared += 1;
+        } else if (entry.kind === "send") {
+          const command: JsonRecord = { op: "send", message: cloneJson(entry.args.message) };
+          if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
+          response = await probe.checked(command);
+        } else if (entry.kind === "resize") {
+          const command: JsonRecord = { op: "resize", width: entry.args.width, height: entry.args.height };
+          if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
+          response = await probe.checked(command);
+        } else if (entry.kind === "eval") {
+          const command: JsonRecord = { op: "eval", source: entry.args.source, render: true };
+          if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
+          response = await probe.checked(command);
+          if (entry.result.frame && response.frame && canonicalPreviewJson(entry.result.frame) !== canonicalPreviewJson(previewFrameSummary(asFrame(response.frame)))) {
+            return { matched: false, replayable: true, entriesReplayed: entriesReplayed + 1, framesCompared: framesCompared + 1, firstMismatch: { transaction: entry.kind, entryIndex: entry.index, reason: "eval frame summary differs", expected: entry.result.frame, actual: previewFrameSummary(asFrame(response.frame)) } };
+          }
+          if (response.frame) framesCompared += 1;
+        } else {
+          return { matched: false, replayable: true, entriesReplayed, framesCompared, firstMismatch: { transaction: entry.kind, entryIndex: entry.index, reason: "unsupported preview recording entry" } };
+        }
+        const expectedTrace = entry.result.traceClock;
+        if (expectedTrace && response.traceClock && canonicalPreviewJson(expectedTrace) !== canonicalPreviewJson(response.traceClock)) {
+          return { matched: false, replayable: true, entriesReplayed: entriesReplayed + 1, framesCompared, firstMismatch: { transaction: entry.kind, entryIndex: entry.index, reason: "native trace clock differs", expected: expectedTrace, actual: response.traceClock } };
+        }
+        entriesReplayed += 1;
+      }
+      return { matched: true, replayable: true, entriesReplayed, framesCompared };
+    } catch (error) {
+      return { matched: false, replayable: true, entriesReplayed, framesCompared, firstMismatch: { transaction: "runner", entryIndex: entriesReplayed, reason: errorText(error) } };
+    } finally {
+      await probe.stop();
+    }
+  }
+
+  private async replayPreviewRecording(): Promise<JsonRecord> {
+    const state = this.previewRecording;
+    if (!state || state.captures.size === 0) throw new Error("No guest has been recorded");
+    if (!state.stopped) await this.stopPreviewRecording();
+    const runtimes: Record<string, JsonRecord> = {};
+    for (const capture of state.captures.values()) runtimes[capture.id] = await this.replayPreviewCapture(capture);
+    return { ok: Object.values(runtimes).every((value) => value.matched === true), runtimes };
+  }
+
   private async sendHostResponse(
     runtime: PreviewRuntime,
     requestId: string,
@@ -1665,7 +2383,7 @@ class PreviewSession {
       return;
     }
     try {
-      await this.sendHostResponse(runtime, requestId, capability, this.genericCapabilityResult(runtime, capability, params));
+      await this.sendHostResponse(runtime, requestId, capability, await this.genericCapabilityResult(runtime, capability, params));
     } catch (error) {
       // Keep the guest's host.request contract finite even when the browser
       // cannot provide a native plugin. An explicit rejected response lets
@@ -1704,7 +2422,7 @@ class PreviewSession {
     }
   }
 
-  private genericCapabilityResult(runtime: PreviewRuntime, capability: string, params: JsonRecord): unknown {
+  private async genericCapabilityResult(runtime: PreviewRuntime, capability: string, params: JsonRecord): Promise<unknown> {
     if (capability === "runtime.info") {
       return {
         entryFormat: "quickjs-bytecode",
@@ -1725,6 +2443,11 @@ class PreviewSession {
     if (capability === "platform.messages.send" || capability === "platform.messages.receive") {
       return { supported: false, reason: "System catalog is required for app messaging in the preview" };
     }
+    if (capability === "diagnostics.recording.start") return this.startPreviewRecording(runtime);
+    if (capability === "diagnostics.recording.status") return this.previewRecordingStatus();
+    if (capability === "diagnostics.recording.stop") return await this.stopPreviewRecording();
+    if (capability === "diagnostics.recording.export") return this.exportPreviewRecording(params);
+    if (capability === "diagnostics.recording.replay") return this.replayPreviewRecording();
     // Hardware and other native-only plugins remain explicitly non-emulated.
     // Video DrawOps are a browser media projection, but native video/plugin
     // capability requests still require their real host adapter.
@@ -2032,7 +2755,11 @@ class PreviewSession {
       pendingBrowserEvents: [],
       needsPump: false,
       pumping: 0,
+      recordingHistory: [],
     };
+    probe.setObserver((command, response) => this.observeProbeCommand(runtime, command, response));
+    probe.setDecorator((command) => this.decorateProbeCommand(command));
+    this.ensurePreviewRecordingCapture(runtime);
     try {
       await probe.checked({
         op: "create",
@@ -2042,8 +2769,9 @@ class PreviewSession {
         tickHz: this.tickHz,
         ...(memory ? { memory } : {}),
       });
-      if (artifacts.bytecodePath) await probe.checked({ op: "loadBytecode", bytecodePath: artifacts.bytecodePath, pakPath: artifacts.pakPath });
-      else await probe.checked({ op: "load", sourcePath: artifacts.sourcePath, pakPath: artifacts.pakPath });
+      await probe.checked({ op: "traceMode", mode: 1 });
+      if (artifacts.bytecodePath) await probe.checked({ op: "loadBytecode", bytecodePath: artifacts.bytecodePath, pakPath: artifacts.pakPath, render: true, traceClock: {} });
+      else await probe.checked({ op: "load", sourcePath: artifacts.sourcePath, pakPath: artifacts.pakPath, render: true, traceClock: {} });
       await sendDisplayViewport(probe, initialWidth, initialHeight, initialSafeArea);
       this.childRuntimes.set(appId, runtime);
       return runtime;
@@ -2254,9 +2982,15 @@ class PreviewSession {
       // tick makes the browser decode megabytes instead of painting frames.
       resources: [...rootResources, ...childResources].filter(resource => {
         const previous = this.resourceCache.get(String(resource.asset));
-        return !previous || previous.revision === undefined || resource.revision === undefined ||
-          previous.revision !== resource.revision || previous.width !== resource.width ||
-          previous.height !== resource.height || previous.psm !== resource.psm;
+        if (!previous) return true;
+        // Native FrameResource revisions are the authoritative cheap path.
+        // A legacy/preview provider may omit them, so compare the actual
+        // payload rather than retransmitting unchanged pixels forever.
+        if (previous.revision !== undefined && resource.revision !== undefined) {
+          return previous.revision !== resource.revision || previous.width !== resource.width ||
+            previous.height !== resource.height || previous.psm !== resource.psm;
+        }
+        return previous.revision !== resource.revision || !samePreviewResourcePayload(previous, resource);
       }),
       releasedResources: [...releasedResources],
       events: [...rootEvents, ...rootBrowserEvents, ...childVideoEvents, ...childTextInputEvents],

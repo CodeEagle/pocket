@@ -1,10 +1,10 @@
 import { For, Show, createSignal, onCleanup, type JSX } from "solid-js";
 import { Text, View } from "@pocketjs/framework/solid/components";
+import { onFrame } from "@pocketjs/framework/solid/lifecycle";
 import {
   InputField,
   MobileAccordion,
   MobileAlert,
-  MobileAppBar,
   MobileAvatar,
   MobileBadge,
   MobileButton,
@@ -28,16 +28,50 @@ import {
   MobileToast,
   MobileTonalButton,
   PlatformTextureSurface,
-  MOBILE_THEME_DARK,
-  MOBILE_THEME_LIGHT,
-  MobileThemeProvider,
   FlutterChip,
   FlutterDivider,
   FlutterFloatingActionButton,
   FlutterIconButton,
   FlutterLinearProgressIndicator,
   FlutterNavigationDestination,
-  type DesignDensity,
+  ShadcnAspectRatio,
+  ShadcnBreadcrumb,
+  ShadcnButtonGroup,
+  ShadcnCalendar,
+  ShadcnCarousel,
+  ShadcnChart,
+  ShadcnCollapsible,
+  ShadcnCombobox,
+  ShadcnCommand,
+  ShadcnContextMenu,
+  ShadcnDataTable,
+  ShadcnDatePicker,
+  ShadcnDrawer,
+  ShadcnDropdownMenu,
+  ShadcnEmpty,
+  ShadcnFormField,
+  ShadcnHoverCard,
+  ShadcnInputGroup,
+  ShadcnInputOTP,
+  ShadcnItem,
+  ShadcnKbd,
+  ShadcnMenubar,
+  ShadcnNavigationMenu,
+  ShadcnPagination,
+  ShadcnPopover,
+  ShadcnResizable,
+  ShadcnScrollArea,
+  ShadcnSelect,
+  ShadcnSeparator,
+  ShadcnSheet,
+  ShadcnSidebar,
+  ShadcnSpinner,
+  ShadcnTable,
+  ShadcnTextarea,
+  ShadcnToggleGroup,
+  ShadcnTooltip,
+  ShadcnTypography,
+  wrapTextLines,
 } from "@pocket/ui";
 import {
   TRANSITION_MODES,
@@ -88,8 +122,15 @@ function capabilityTone(
 export function MobileUiPage(props: MobilePageProps): JSX.Element {
   const [selected, setSelected] = createSignal("overview");
   const dark = () => props.state().mobileDark;
-  const [densityMode, setDensityMode] = createSignal<"auto" | DesignDensity>("auto");
   const [enabled, setEnabled] = createSignal(true);
+  const [asyncEnabled, setAsyncEnabled] = createSignal(false);
+  const [toggleResolution, setToggleResolution] = createSignal<((accepted: boolean) => void) | undefined>();
+  const resolveToggle = (accepted: boolean): void => {
+    const resolve = toggleResolution();
+    setToggleResolution(undefined);
+    resolve?.(accepted);
+  };
+  onCleanup(() => toggleResolution()?.(false));
   const [level, setLevel] = createSignal(3);
   const [draft, setDraft] = createSignal("");
   const [dialogOpen, setDialogOpen] = createSignal(false);
@@ -97,7 +138,7 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
   const [popupOpen, setPopupOpen] = createSignal(false);
   const [toastOpen, setToastOpen] = createSignal(true);
   const [toastTone, setToastTone] = createSignal<"info" | "success" | "warning" | "danger">("info");
-  const [toastMessage, setToastMessage] = createSignal("Design tokens synced · 60fps transitions ready");
+  const [toastMessage, setToastMessage] = createSignal("Workspace updates are visible here");
   const [alertOpen, setAlertOpen] = createSignal(true);
   const [alertTone, setAlertTone] = createSignal<"info" | "success" | "warning" | "danger">("info");
   const [checkboxAutoSave, setCheckboxAutoSave] = createSignal(true);
@@ -107,12 +148,17 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
   const [accordionSpecOpen, setAccordionSpecOpen] = createSignal(true);
   const [accordionAnimOpen, setAccordionAnimOpen] = createSignal(false);
   const [skeletonPulse, setSkeletonPulse] = createSignal(true);
-  const [lastOverlayAction, setLastOverlayAction] = createSignal("Ready");
+  const [lastOverlayAction, setLastOverlayAction] = createSignal("No action yet");
   const [destination, setDestination] = createSignal("home");
-  const toggleTheme = (): void => {
-    const next = !dark();
-    props.dispatch({ type: "setMobileDark", value: next });
-  };
+  const [selectedFramework, setSelectedFramework] = createSignal("Next.js");
+  const [otpSlot, setOtpSlot] = createSignal(2);
+  const [otpCode, setOtpCode] = createSignal("482910");
+  const [toggleFormatting, setToggleFormatting] = createSignal<string[]>(["bold", "italic"]);
+  const [calendarDay, setCalendarDay] = createSignal(14);
+  const [selectedCommand, setSelectedCommand] = createSignal("calendar");
+  const [selectedInvoice, setSelectedInvoice] = createSignal("INV001");
+  const [tablePage, setTablePage] = createSignal(1);
+  const [shadcnSuiteTab, setShadcnSuiteTab] = createSignal<"scroll" | "menus" | "forms" | "data" | "overlays">("scroll");
   const showToast = (
     tone: "info" | "success" | "warning" | "danger",
     msg: string,
@@ -132,41 +178,7 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
   const showControls = () => selected() === "overview" || selected() === "controls";
   const showData = () => selected() === "overview" || selected() === "data";
   return (
-    <MobileThemeProvider
-      theme={() => (dark() ? MOBILE_THEME_DARK : MOBILE_THEME_LIGHT)}
-      density={() => densityMode()}
-    >
-      <MobileScaffold
-        class={
-          dark()
-            ? "flex-col gap-4 p-4 bg-[#0E1728] transition-colors duration-200 ease-out"
-            : "flex-col gap-4 p-4 bg-[#F5F6FA] transition-colors duration-200 ease-out"
-        }
-      >
-        <MobileAppBar
-          title="Mobile UI"
-          subtitle="Option C · Mobile + PC Design System"
-          leading={
-            <MobileButton
-              label="Back"
-              kind="text"
-              compact
-              onPress={() => props.dispatch({ type: "popRoute" })}
-            />
-          }
-          dark={dark()}
-          trailing={
-            <View class="flex-row items-center gap-1">
-              <MobileBadge label="JS" tone="success" />
-              <MobileButton
-                label={dark() ? "Light" : "Dark"}
-                kind="text"
-                compact
-                onPress={toggleTheme}
-              />
-            </View>
-          }
-        />
+    <MobileScaffold class="flex-col gap-4 p-4">
         <MobileSegmentedControl
           items={[
             { id: "overview", label: "Overview" },
@@ -177,48 +189,11 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
           active={selected()}
           onChange={setSelected}
         />
-        <MobileCard
-          title="Theme & Density Tokens"
-          detail="M3 + Shadcn Slate palette · TDesign dual density (Touch 44px / Desktop 36px)."
-        >
-          <View class="flex-row items-center justify-between gap-2">
-            <View class="flex-row items-center gap-2">
-              <MobileBadge label={dark() ? "Theme: Night" : "Theme: Daylight"} tone="accent" />
-              <MobileBadge label={`Density: ${densityMode()}`} tone="neutral" />
-            </View>
-            <MobileTonalButton
-              label="Popup Sheet"
-              compact
-              onPress={() => {
-                setPopupOpen(true);
-                setLastOverlayAction("Popup opened");
-              }}
-            />
-          </View>
-          <MobileSegmentedControl
-            items={[
-              { id: "auto", label: "Auto" },
-              { id: "touch", label: "Touch 44px" },
-              { id: "desktop", label: "PC 36px" },
-            ]}
-            active={densityMode()}
-            onChange={(id) => setDensityMode(id as "auto" | DesignDensity)}
-          />
-        </MobileCard>
-
         <Show when={showOverview()}>
-          <MobileCard
-            title="Scaffold + AppBar"
-            detail="Shared mobile primitives."
-            class={
-              dark()
-                ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-                : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-            }
-          >
+          <MobileCard title="Scaffold + AppBar" detail="Shared page layout and navigation.">
             <MobileListTile
               title="ListTile"
-              detail="JS-owned press semantics."
+              detail="Tap the row or its action to open details."
               leading={<MobileBadge label="UI" />}
               trailing={
                 <MobileButton
@@ -244,7 +219,7 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
               <MobileTonalButton
                 label="Tonal"
                 compact
-                onPress={() => showToast("info", "Tonal button pressed")}
+                onPress={() => showToast("info", "Information message shown")}
               />
               <MobileOutlinedButton
                 label="Transitions"
@@ -260,12 +235,146 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
               />
             </View>
           </MobileCard>
+
+          <MobileCard
+            title="shadcn/ui Command & Overlays"
+            detail="Breadcrumb, Command palette, DropdownMenu and HoverCard."
+          >
+            <ShadcnBreadcrumb
+              items={["shadcn/ui", "Components", "Command"]}
+              dark={dark()}
+            />
+            <ShadcnSeparator dark={dark()} />
+            <ShadcnCommand
+              placeholder="Type a command or search..."
+              selectedId={selectedCommand()}
+              onSelect={(id) => {
+                setSelectedCommand(id);
+                setLastOverlayAction(`Command (${id})`);
+              }}
+              items={[
+                { id: "calendar", label: "Calendar", group: "Suggestions" },
+                { id: "emoji", label: "Search Emoji", group: "Suggestions" },
+                { id: "calculator", label: "Calculator", group: "Suggestions" },
+                { id: "profile", label: "Profile", group: "Preferences", shortcut: "⌘P" },
+                { id: "billing", label: "Billing", group: "Preferences", shortcut: "⌘B" },
+                { id: "settings", label: "Preferences", group: "Preferences", shortcut: "⌘S" },
+              ]}
+              dark={dark()}
+            />
+            <ShadcnDropdownMenu
+              triggerLabel="My Account"
+              items={[
+                { id: "profile", label: "Profile", shortcut: "⇧⌘P" },
+                { id: "billing", label: "Billing", shortcut: "⌘B" },
+                { id: "team", label: "Team" },
+                { id: "shortcuts", label: "Keyboard shortcuts", shortcut: "⌘K" },
+              ]}
+              onSelect={(id) => showToast("info", `Selected menu: ${id}`)}
+              dark={dark()}
+            />
+            <ShadcnHoverCard
+              handle="@nextjs"
+              description="The React Framework – created and maintained by @vercel."
+              joined="Joined December 2021"
+              dark={dark()}
+            />
+          </MobileCard>
+
+          <MobileCard
+            title="shadcn/ui Full Component Suite (50+)"
+            detail="ScrollArea + ScrollFade, Resizable, Sidebar, NavigationMenu, Menubar, Command, Forms, Charts, DataTable & Overlays."
+          >
+            <View class="flex-row flex-wrap gap-1.5">
+              <MobileButton
+                label="Scroll & Layout"
+                kind={shadcnSuiteTab() === "scroll" ? "filled" : "tonal"}
+                compact
+                onPress={() => setShadcnSuiteTab("scroll")}
+              />
+              <MobileButton
+                label="Menus & Command"
+                kind={shadcnSuiteTab() === "menus" ? "filled" : "tonal"}
+                compact
+                onPress={() => setShadcnSuiteTab("menus")}
+              />
+              <MobileButton
+                label="Forms & Date"
+                kind={shadcnSuiteTab() === "forms" ? "filled" : "tonal"}
+                compact
+                onPress={() => setShadcnSuiteTab("forms")}
+              />
+              <MobileButton
+                label="Charts & Tables"
+                kind={shadcnSuiteTab() === "data" ? "filled" : "tonal"}
+                compact
+                onPress={() => setShadcnSuiteTab("data")}
+              />
+              <MobileButton
+                label="Overlays & Text"
+                kind={shadcnSuiteTab() === "overlays" ? "filled" : "tonal"}
+                compact
+                onPress={() => setShadcnSuiteTab("overlays")}
+              />
+            </View>
+            <Show when={shadcnSuiteTab() === "scroll"}>
+              <ShadcnScrollArea
+                title="Tags (ScrollArea + ScrollFade)"
+                dark={dark()}
+              />
+              <ShadcnSeparator dark={dark()} />
+              <ShadcnResizable dark={dark()} />
+              <ShadcnSeparator dark={dark()} />
+              <ShadcnSidebar dark={dark()} />
+              <ShadcnCarousel dark={dark()} />
+              <ShadcnAspectRatio dark={dark()} />
+            </Show>
+            <Show when={shadcnSuiteTab() === "menus"}>
+              <ShadcnNavigationMenu dark={dark()} />
+              <ShadcnSeparator dark={dark()} />
+              <ShadcnMenubar dark={dark()} />
+              <ShadcnSeparator dark={dark()} />
+              <ShadcnContextMenu dark={dark()} />
+            </Show>
+            <Show when={shadcnSuiteTab() === "forms"}>
+              <ShadcnCombobox dark={dark()} />
+              <ShadcnDatePicker dark={dark()} />
+              <ShadcnFormField dark={dark()} />
+              <ShadcnInputGroup dark={dark()} />
+              <ShadcnTextarea dark={dark()} />
+              <ShadcnButtonGroup dark={dark()} />
+            </Show>
+            <Show when={shadcnSuiteTab() === "data"}>
+              <ShadcnChart dark={dark()} />
+              <ShadcnDataTable dark={dark()} />
+              <ShadcnItem
+                title="Two-factor authentication (Item)"
+                description="Verify via email or authenticator code."
+                badge="Enabled"
+                dark={dark()}
+              />
+              <ShadcnTypography dark={dark()} />
+            </Show>
+            <Show when={shadcnSuiteTab() === "overlays"}>
+              <ShadcnDrawer dark={dark()} />
+              <ShadcnSheet dark={dark()} />
+              <ShadcnPopover dark={dark()} />
+              <View class="flex-row items-center justify-between flex-wrap gap-2">
+                <ShadcnTooltip dark={dark()} />
+                <ShadcnSpinner dark={dark()} />
+              </View>
+              <ShadcnEmpty
+                onAction={() => showToast("success", "Created new project")}
+                dark={dark()}
+              />
+            </Show>
+          </MobileCard>
         </Show>
 
         <Show when={showFeedback()}>
           <MobileCard
             title="Feedback & Overlays"
-            detail="Toast, Alert, Popup (BottomSheet / PC Popover) & Modal Dialog with state animations."
+            detail="Notifications, menus and confirmations for everyday actions."
           >
             <MobileToast
               open={toastOpen()}
@@ -280,22 +389,22 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
               <MobileTonalButton
                 label="Info Toast"
                 compact
-                onPress={() => showToast("info", "Info toast · spring entrance active")}
+                onPress={() => showToast("info", "Information message shown")}
               />
               <MobileTonalButton
                 label="Success Toast"
                 compact
-                onPress={() => showToast("success", "Saved to JS state · 0ms bridge lag")}
+                onPress={() => showToast("success", "Changes saved for this session")}
               />
               <MobileOutlinedButton
                 label="Warn Toast"
                 compact
-                onPress={() => showToast("warning", "Network latency elevated · retrying")}
+                onPress={() => showToast("warning", "Please review this setting")}
               />
               <MobileDangerButton
                 label="Error Toast"
                 compact
-                onPress={() => showToast("danger", "Action blocked by sandbox policy")}
+                onPress={() => showToast("danger", "The requested action could not be completed")}
               />
             </View>
 
@@ -347,27 +456,62 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
                 onPress={() => openDialogVariant("danger")}
               />
             </View>
-            <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>
+            <Text class={dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>
               Overlay status · {lastOverlayAction()}
             </Text>
+            <ShadcnSeparator label="Collapsible" dark={dark()} />
+            <ShadcnCollapsible
+              title="@peduarte starred 3 repositories"
+              pinnedItem="@radix-ui/primitives"
+              hiddenItems={["@radix-ui/colors", "@stitches/react"]}
+              dark={dark()}
+            />
           </MobileCard>
+
+          <Show when={selected() === "feedback"}>
+            <MobileCard
+              title="shadcn/ui Drawer, Sheet, Popover, ContextMenu, Tooltip & Empty"
+              detail="Vaul Drawer, Side Sheet, Popover, ContextMenu, Tooltip and Empty/Spinner states."
+            >
+              <ShadcnDrawer dark={dark()} />
+              <ShadcnSheet dark={dark()} />
+              <ShadcnPopover dark={dark()} />
+              <ShadcnContextMenu dark={dark()} />
+              <View class="flex-row items-center justify-between flex-wrap gap-2">
+                <ShadcnTooltip dark={dark()} />
+                <ShadcnSpinner dark={dark()} />
+              </View>
+              <ShadcnEmpty
+                onAction={() => showToast("success", "Created new project")}
+                dark={dark()}
+              />
+            </MobileCard>
+          </Show>
         </Show>
 
         <Show when={showControls()}>
           <MobileCard
             title="Controls"
-            detail="Signals and input stay in JS."
-            class={
-              dark()
-                ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-                : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-            }
+            detail="Adjust preferences and try a native text field."
           >
             <MobileSwitch
               value={enabled()}
               label={enabled() ? "Enabled" : "Disabled"}
               onChange={setEnabled}
             />
+            <MobileSwitch
+              value={asyncEnabled()}
+              label={asyncEnabled() ? "Async on" : "Async off"}
+              onChange={setAsyncEnabled}
+              onBeforeChange={() => new Promise<boolean>((resolve) => setToggleResolution(() => resolve))}
+            />
+            <Show when={toggleResolution()}>
+              <Text class={dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>{wrapTextLines("Waiting for a result. Complete or reject this change below.", 34, 240)}</Text>
+              <View class="flex-row flex-wrap gap-2">
+                <MobileButton label="Complete change" compact onPress={() => resolveToggle(true)} />
+                <MobileButton label="Reject change" compact kind="outlined" onPress={() => resolveToggle(false)} />
+              </View>
+            </Show>
             <MobileStepper
               value={level()}
               min={0}
@@ -378,6 +522,7 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
               value={level()}
               max={10}
               label="Animated Progress"
+              animated={enabled()}
               tone={level() >= 8 ? "success" : level() <= 2 ? "warning" : "accent"}
             />
             <View class="flex-col gap-2">
@@ -385,22 +530,22 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
                 checked={checkboxAutoSave()}
                 onChange={setCheckboxAutoSave}
                 label="Auto-commit state snapshots"
-                detail="Animated spring checkbox indicator"
+                detail="Keep these changes for the session"
               />
               <MobileCheckbox
                 checked={checkboxHaptics()}
                 onChange={setCheckboxHaptics}
                 label="Desktop keyboard shortcuts"
-                detail="Adapts to compact touch or expanded PC density"
+                detail="Choose a keyboard-friendly layout"
               />
             </View>
             <MobileRadioGroup
               value={radioLayout()}
               onChange={setRadioLayout}
               items={[
-                { id: "adaptive", label: "Adaptive 3-Tier Split", detail: "Compact / Medium / Expanded" },
-                { id: "mobile", label: "Mobile Single-Column", detail: "Bottom NavigationBar + Sheet" },
-                { id: "desktop", label: "Desktop Multi-Pane", detail: "Side NavigationRail + Popover" },
+                { id: "adaptive", label: "Adaptive layout", detail: "Adjusts to your window" },
+                { id: "mobile", label: "Single column", detail: "Focused mobile layout" },
+                { id: "desktop", label: "Multi-pane", detail: "More room for desktop" },
               ]}
             />
             <InputField
@@ -411,14 +556,14 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
             />
             <Text
               class={
-                dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"
+                dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#09090B]"
               }
             >
               State · {enabled() ? "on" : "off"} · level {String(level())} · layout {radioLayout()}
             </Text>
             <Text
               class={
-                dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"
+                dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#09090B]"
               }
             >
               Draft · {draft() || "(empty)"}
@@ -428,68 +573,164 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
               onPress={() => openDialogVariant("default")}
             />
           </MobileCard>
+
+          <MobileCard
+            title="shadcn/ui Select, InputOTP, ToggleGroup & Calendar"
+            detail="Interactive form primitives from the shadcn/ui suite."
+          >
+            <ShadcnSelect
+              label="Framework"
+              value={selectedFramework()}
+              options={["Next.js", "SolidJS", "SvelteKit", "Astro", "Remix"]}
+              onChange={setSelectedFramework}
+              dark={dark()}
+            />
+            <View class="flex-col gap-1.5">
+              <View class="flex-row items-center justify-between">
+                <Text
+                  class={
+                    dark()
+                      ? "text-xs text-[#FAFAFA]"
+                      : "text-xs text-[#09090B]"
+                  }
+                >
+                  One-Time Password (InputOTP)
+                </Text>
+                <MobileTextButton
+                  label="Rotate code"
+                  compact
+                  onPress={() =>
+                    setOtpCode((prev) =>
+                      prev === "482910" ? "739204" : "482910",
+                    )
+                  }
+                />
+              </View>
+              <ShadcnInputOTP
+                value={otpCode()}
+                activeSlot={otpSlot()}
+                onSelectSlot={setOtpSlot}
+                dark={dark()}
+              />
+            </View>
+            <View class="flex-col gap-1.5">
+              <Text
+                class={
+                  dark()
+                    ? "text-xs text-[#FAFAFA]"
+                    : "text-xs text-[#09090B]"
+                }
+              >
+                ToggleGroup formatting
+              </Text>
+              <ShadcnToggleGroup
+                options={[
+                  { id: "bold", label: "B Bold" },
+                  { id: "italic", label: "I Italic" },
+                  { id: "underline", label: "U Underline" },
+                ]}
+                selected={toggleFormatting()}
+                onToggle={(id) =>
+                  setToggleFormatting((prev) =>
+                    prev.includes(id)
+                      ? prev.filter((item) => item !== id)
+                      : [...prev, id],
+                  )
+                }
+                dark={dark()}
+              />
+            </View>
+            <ShadcnCalendar
+              monthLabel="November 2026"
+              selectedDay={calendarDay()}
+              onSelectDay={setCalendarDay}
+              dark={dark()}
+            />
+          </MobileCard>
+
+          <Show when={selected() === "controls"}>
+            <MobileCard
+              title="shadcn/ui Combobox, DatePicker, Form, InputGroup, Textarea & ButtonGroup"
+              detail="Complete form and selection primitives from shadcn/ui."
+            >
+              <ShadcnCombobox dark={dark()} />
+              <ShadcnDatePicker dark={dark()} />
+              <ShadcnFormField dark={dark()} />
+              <ShadcnInputGroup dark={dark()} />
+              <ShadcnTextarea dark={dark()} />
+              <ShadcnButtonGroup dark={dark()} />
+            </MobileCard>
+          </Show>
         </Show>
 
         <Show when={showData()}>
           <MobileCard
             title="Data Display & Disclosure"
-            detail="Avatar, Badge, Tag, Accordion, Skeleton & TDesign Cell rows."
+            detail="Profiles, labels, expandable sections and loading previews."
           >
-            <View class="flex-row items-center justify-between gap-2">
+            <View class="flex-row flex-wrap items-center justify-between gap-2">
               <View class="flex-row items-center gap-3">
                 <MobileAvatar label="AC" tone="accent" status="online" />
                 <MobileAvatar label="LN" tone="success" status="busy" />
                 <MobileAvatar label="PK" tone="warning" status="offline" />
               </View>
               <View class="flex-row flex-wrap gap-1">
-                <MobileBadge label="M3" tone="accent" />
-                <MobileBadge label="Ready" tone="success" />
+                <MobileBadge label="Core" tone="accent" />
+                <MobileBadge label="Active" tone="success" />
                 <MobileBadge label="Warn" tone="warning" />
                 <MobileBadge label="Alert" tone="danger" />
               </View>
             </View>
             <View class="flex-row flex-wrap gap-2">
               <MobileTag
-                label="Material 3"
+                label="Core components"
                 selected={selectedTag() === "m3"}
                 onPress={() => setSelectedTag("m3")}
               />
               <MobileTag
-                label="TDesign Cell"
+                label="Cells"
                 selected={selectedTag() === "tdesign"}
                 onPress={() => setSelectedTag("tdesign")}
               />
               <MobileTag
-                label="Shadcn Slate"
+                label="Slate"
                 selected={selectedTag() === "shadcn"}
                 onPress={() => setSelectedTag("shadcn")}
               />
             </View>
             <MobileAccordion
-              title="Option C Token Specification"
-              detail="Tap to expand/collapse with chevron & body transition"
-              badge="Tokens"
+              title="Appearance options"
+              detail="Tap to expand or collapse details"
+              badge="Details"
               expanded={accordionSpecOpen()}
               onToggle={() => setAccordionSpecOpen((v) => !v)}
             >
-              <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>
-                Semantic surfaces: canvas, surface, surfaceMuted, accentSoft, success, warning, danger.
+              <Text class={dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>
+                {wrapTextLines(
+                  "Choose clear surfaces, accents and status colors that keep the interface easy to scan.",
+                  38,
+                  252,
+                )}
               </Text>
             </MobileAccordion>
             <MobileAccordion
-              title="60Hz State-Change Animation Pipeline"
-              detail="Compiled StyleRecord transitions + frame-driven spring progress"
-              badge="60fps"
+              title="Motion details"
+              detail="Subtle transitions keep feedback clear as controls change"
+              badge="Motion"
               expanded={accordionAnimOpen()}
               onToggle={() => setAccordionAnimOpen((v) => !v)}
             >
-              <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>
-                Every interactive control animates scale, opacity, translation, or rotation on state change.
+              <Text class={dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>
+                {wrapTextLines(
+                  "Buttons, menus and panels ease between states so changes are easy to follow.",
+                  38,
+                  252,
+                )}
               </Text>
             </MobileAccordion>
             <View class="flex-row items-center justify-between">
-              <Text class={dark() ? "text-xs text-white font-bold" : "text-xs text-[#17233B] font-bold"}>
-                Skeleton Placeholder
+              <Text class={dark() ? "text-xs text-[#FAFAFA] font-bold" : "text-xs text-[#09090B] font-bold"}>
+                Loading preview
               </Text>
               <MobileTextButton
                 label={skeletonPulse() ? "Pause pulse" : "Resume pulse"}
@@ -501,17 +742,63 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
           </MobileCard>
 
           <MobileCard
-            title="Flutter widgets"
-            detail="Official @pocket/ui adapters."
-            class={
-              dark()
-                ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-                : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-            }
+            title="shadcn/ui Table, Pagination & Kbd"
+            detail="Recent invoices table, keyboard shortcuts and page navigation."
+          >
+            <ShadcnTable
+              caption="A list of your recent invoices."
+              selectedInvoice={selectedInvoice()}
+              onSelectRow={setSelectedInvoice}
+              rows={[
+                { invoice: "INV001", status: "Paid", method: "Credit Card", amount: "$250.00" },
+                { invoice: "INV002", status: "Pending", method: "PayPal", amount: "$150.00" },
+                { invoice: "INV003", status: "Unpaid", method: "Bank Transfer", amount: "$350.00" },
+                { invoice: "INV004", status: "Paid", method: "Credit Card", amount: "$450.00" },
+              ]}
+              totalAmount="$1,200.00"
+              dark={dark()}
+            />
+            <View class="flex-row items-center justify-between flex-wrap gap-2">
+              <View class="flex-row items-center gap-1.5">
+                <ShadcnKbd keys="⌘K" dark={dark()} />
+                <ShadcnKbd keys="⇧⌘P" dark={dark()} />
+                <ShadcnKbd keys="⌘B" dark={dark()} />
+              </View>
+              <ShadcnPagination
+                page={tablePage()}
+                totalPages={3}
+                onChange={setTablePage}
+                dark={dark()}
+              />
+            </View>
+          </MobileCard>
+
+          <Show when={selected() === "data"}>
+            <MobileCard
+              title="shadcn/ui Chart, DataTable, Carousel, AspectRatio, Item & Typography"
+              detail="Interactive Bar Chart, Payments DataTable, Carousel, AspectRatio, Item and Typography."
+            >
+              <ShadcnChart dark={dark()} />
+              <ShadcnDataTable dark={dark()} />
+              <ShadcnCarousel dark={dark()} />
+              <ShadcnAspectRatio dark={dark()} />
+              <ShadcnItem
+                title="Two-factor authentication (Item)"
+                description="Verify via email or authenticator code."
+                badge="Enabled"
+                dark={dark()}
+              />
+              <ShadcnTypography dark={dark()} />
+            </MobileCard>
+          </Show>
+
+          <MobileCard
+            title="Additional controls"
+            detail="Buttons, chips and navigation samples."
           >
             <Text
               class={
-                dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"
+                dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#09090B]"
               }
             >
               Widget actions
@@ -536,7 +823,7 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
             <FlutterDivider />
             <Text
               class={
-                dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"
+                dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#09090B]"
               }
             >
               Progress · {level()}/10
@@ -561,22 +848,20 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
 
         <MobilePopup
           open={popupOpen()}
-          title="Workspace Action Sheet"
-          subtitle="Auto-adapts: BottomSheet on mobile, centered Popover on desktop."
+          title="More actions"
+          subtitle="Choose an action for this workspace."
           actions={[
-            { id: "share", label: "Share design tokens", detail: "Publish Light & Night palette to MiniApps" },
-            { id: "density", label: "Toggle PC 36px density", detail: "Switch between Touch 44px and Desktop 36px" },
-            { id: "reset", label: "Reset control state", detail: "Restore default demo signals", danger: true },
+            { id: "reset", label: "Reset control state", detail: "Restore the default values", danger: true },
           ]}
           onSelectAction={(id) => {
-            if (id === "density") {
-              setDensityMode((prev) => (prev === "desktop" ? "touch" : "desktop"));
-            } else if (id === "reset") {
+            if (id === "reset") {
               setLevel(3);
               setEnabled(true);
+              setDraft("");
+              setLastOverlayAction("Controls restored");
+              showToast("warning", "Controls restored");
+              return;
             }
-            setLastOverlayAction(`Popup action: ${id}`);
-            showToast(id === "reset" ? "warning" : "success", `Executed popup action: ${id}`);
           }}
           onClose={() => setPopupOpen(false)}
         />
@@ -587,15 +872,15 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
             dialogMode() === "danger"
               ? "Delete cached snapshot?"
               : dialogMode() === "confirm"
-                ? "Apply Option C Theme?"
-                : "JS-owned dialog"
+              ? "Apply appearance?"
+                : "Confirm action"
           }
           body={
             dialogMode() === "danger"
               ? "This action clears local draft signals and animates dismissal."
               : dialogMode() === "confirm"
-                ? "Synchronize Light & Night tokens across mobile and desktop panes."
-                : "Modal portal; state stays in JS."
+              ? "Use this appearance across the app."
+                : "This action will update the current workspace."
           }
           tone={dialogMode() === "danger" ? "danger" : "default"}
           confirmLabel={
@@ -609,6 +894,11 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
             dialogMode() === "default"
               ? undefined
               : () => {
+                  if (dialogMode() === "danger") {
+                    setDraft("");
+                    setLevel(3);
+                    setEnabled(true);
+                  }
                   setLastOverlayAction(`Dialog confirmed (${dialogMode()})`);
                   showToast(
                     dialogMode() === "danger" ? "danger" : "success",
@@ -619,7 +909,6 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
           onClose={() => setDialogOpen(false)}
         />
       </MobileScaffold>
-    </MobileThemeProvider>
   );
 }
 const transitionLabels: Record<TransitionMode, string> = {
@@ -657,42 +946,10 @@ export function TransitionsPage(props: MobilePageProps): JSX.Element {
     label: transitionModeLabels[id],
   }));
   return (
-    <MobileThemeProvider
-      theme={() => (dark() ? MOBILE_THEME_DARK : MOBILE_THEME_LIGHT)}
-    >
-      <MobileScaffold
-        class={
-          dark()
-            ? "flex-col gap-4 p-4 bg-[#0E1728]"
-            : "flex-col gap-4 p-4 bg-[#F5F6FA]"
-        }
-      >
-        <MobileAppBar
-          title="Transitions"
-          subtitle="Route motion"
-          leading={
-            <MobileButton
-              label="Back"
-              kind="text"
-              compact
-              onPress={() => props.dispatch({ type: "popRoute" })}
-            />
-          }
-          dark={dark()}
-          trailing={
-            <MobileBadge
-              label={transitionModeLabels[props.state().transitionMode]}
-            />
-          }
-        />
+      <MobileScaffold class="flex-col gap-4 p-4">
         <MobileCard
           title="Mode"
-          detail="JS route descriptor."
-          class={
-            dark()
-              ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-              : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-          }
+          detail="Choose how the next page enters the screen."
         >
           <MobileSegmentedControl
             items={modeItems}
@@ -711,7 +968,7 @@ export function TransitionsPage(props: MobilePageProps): JSX.Element {
             onChange={(value) => setProgress(value / 100)}
           />
           <Text
-            class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"}
+            class={dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#09090B]"}
           >
             Progress {Math.round(progress() * 100)}% · in{" "}
             {descriptor().inTx.toFixed(1)} · out {descriptor().outTx.toFixed(1)}
@@ -719,20 +976,36 @@ export function TransitionsPage(props: MobilePageProps): JSX.Element {
           <View
             class={
               dark()
-                ? "relative h-[64] overflow-hidden rounded-xl bg-[#22314A]"
-                : "relative h-[64] overflow-hidden rounded-xl bg-[#EEF1F6]"
+                ? "relative h-[64] overflow-hidden rounded-xl bg-[#18181B] border-[#27272A]"
+                : "relative h-[64] overflow-hidden rounded-xl bg-[#F4F4F5] border-[#E4E4E7]"
             }
           >
             <View
-              class="absolute inset-2 flex-col justify-center rounded-lg bg-[#315DEB] px-3"
+              class={
+                dark()
+                  ? "absolute inset-2 flex-col justify-center rounded-lg bg-[#FAFAFA] px-3"
+                  : "absolute inset-2 flex-col justify-center rounded-lg bg-[#18181B] px-3"
+              }
               style={{
                 translateX: descriptor().inTx,
                 translateY: descriptor().inTy,
                 scale: descriptor().inScale,
               }}
             >
-              <Text class="text-xs text-white font-bold">Incoming preview</Text>
-              <Text class="text-xs text-[#E8EDFF]">
+              <Text
+                class={
+                  dark()
+                    ? "text-xs text-[#09090B] font-bold"
+                    : "text-xs text-[#FAFAFA] font-bold"
+                }
+              >
+                Incoming preview
+              </Text>
+              <Text
+                class={
+                  dark() ? "text-xs text-[#71717A]" : "text-xs text-[#A1A1AA]"
+                }
+              >
                 {transitionLabels[props.state().transitionMode]}
               </Text>
             </View>
@@ -740,12 +1013,7 @@ export function TransitionsPage(props: MobilePageProps): JSX.Element {
         </MobileCard>
         <MobileCard
           title="Route stack"
-          detail="Push/pop in the guest reducer."
-          class={
-            dark()
-              ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-              : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-          }
+          detail="Open a page, then return with Back."
         >
           <View class="flex-row flex-wrap gap-1">
             <For each={props.state().routeStack}>
@@ -773,7 +1041,6 @@ export function TransitionsPage(props: MobilePageProps): JSX.Element {
           </View>
         </MobileCard>
       </MobileScaffold>
-    </MobileThemeProvider>
   );
 }
 const hardwarePermissions: readonly {
@@ -1035,16 +1302,16 @@ function HardwareResult(props: {
     <View
       class={
         props.dark
-          ? "flex-col gap-1 px-3 py-2 rounded-xl bg-[#22314A] border-[#30405A]"
-          : "flex-col gap-1 px-3 py-2 rounded-xl bg-[#F1F3F8] border-[#E5E9F2]"
+          ? "flex-col gap-1 px-3 py-2 rounded-xl bg-[#18181B] border-[#27272A]"
+          : "flex-col gap-1 px-3 py-2 rounded-xl bg-[#FAFAFA] border-[#E4E4E7]"
       }
     >
       <View class="flex-row items-center justify-between gap-2">
         <Text
           class={
             props.dark
-              ? "text-xs text-white font-bold"
-              : "text-xs text-[#17233B] font-bold"
+              ? "text-xs text-[#FAFAFA] font-bold"
+              : "text-xs text-[#09090B] font-bold"
           }
         >
           {props.label}
@@ -1055,7 +1322,7 @@ function HardwareResult(props: {
         />
       </View>
       <Text
-        class={props.dark ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}
+        class={props.dark ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}
       >
         {hardwareCapabilityLabels[props.capability]}
       </Text>
@@ -1068,8 +1335,8 @@ function HardwareResult(props: {
                   ? "text-xs text-rose-300"
                   : "text-xs text-rose-700"
                 : props.dark
-                  ? "text-xs text-white"
-                  : "text-xs text-[#17233B]"
+                  ? "text-xs text-[#FAFAFA]"
+                  : "text-xs text-[#09090B]"
             }
           >
             {line}
@@ -1127,46 +1394,14 @@ export function HardwarePage(props: MobilePageProps): JSX.Element {
   const previewReady = () =>
     preview().phase === "ready" && previewTexture() !== undefined;
   onCleanup(() => {
-    if (previewReady())
-      props.requestCapability(
-        "hardwareCameraPreviewStop",
-        "hardware.camera.preview.stop",
-      );
+    // The root route gate also catches a start response arriving after pop.
     streamAdapter?.dispose("hardware_page_unmounted");
   });
   return (
-    <MobileThemeProvider
-      theme={() => (dark() ? MOBILE_THEME_DARK : MOBILE_THEME_LIGHT)}
-    >
-      <MobileScaffold
-        class={
-          dark()
-            ? "flex-col gap-4 p-4 bg-[#0E1728]"
-            : "flex-col gap-4 p-4 bg-[#F5F6FA]"
-        }
-      >
-        <MobileAppBar
-          title="Hardware"
-          subtitle="Camera · sensors · access"
-          leading={
-            <MobileButton
-              label="Back"
-              kind="text"
-              compact
-              onPress={() => props.dispatch({ type: "popRoute" })}
-            />
-          }
-          dark={dark()}
-          trailing={<MobileBadge label="host" tone="warning" />}
-        />
+      <MobileScaffold class="flex-col gap-4 p-4">
         <MobileCard
           title="Permissions"
           detail="Check access or request one item."
-          class={
-            dark()
-              ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-              : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-          }
         >
           <HardwareResult
             label="Current state"
@@ -1215,11 +1450,6 @@ export function HardwarePage(props: MobilePageProps): JSX.Element {
         <MobileCard
           title="Camera"
           detail="Preview uses host texture."
-          class={
-            dark()
-              ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-              : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-          }
         >
           <View class="flex-row flex-wrap gap-2">
             <MobileButton
@@ -1267,7 +1497,7 @@ export function HardwarePage(props: MobilePageProps): JSX.Element {
                 sourceHeight={texture().height}
                 rotationDegrees={texture().rotationDegrees}
                 mirrorX={texture().mirrorX}
-                class="relative w-full h-[150] rounded-xl bg-[#17233B]"
+                class="relative w-full h-[150] rounded-xl bg-[#09090B]"
               />
             )}
           </Show>
@@ -1347,11 +1577,6 @@ export function HardwarePage(props: MobilePageProps): JSX.Element {
         <MobileCard
           title="Photos"
           detail="Delete always requires confirmation."
-          class={
-            dark()
-              ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-              : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-          }
         >
           <View class="flex-row flex-wrap gap-2">
             <MobileButton
@@ -1408,11 +1633,6 @@ export function HardwarePage(props: MobilePageProps): JSX.Element {
         <MobileCard
           title="Connectivity"
           detail="BLE and sensors use host permissions."
-          class={
-            dark()
-              ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-              : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-          }
         >
           <View class="flex-row flex-wrap gap-2">
             <MobileButton
@@ -1504,11 +1724,6 @@ export function HardwarePage(props: MobilePageProps): JSX.Element {
         <MobileCard
           title="Device services"
           detail="Each action calls the host."
-          class={
-            dark()
-              ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-              : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
-          }
         >
           <View class="flex-row flex-wrap gap-2">
             <MobileButton
@@ -1594,24 +1809,17 @@ export function HardwarePage(props: MobilePageProps): JSX.Element {
           open={() => deletePath() !== undefined}
           title="Delete photo?"
           body={deleteDescription()}
+          tone="danger"
+          confirmLabel="Delete"
+          cancelLabel="Cancel"
+          onConfirm={() => {
+            const path = deletePath();
+            if (path) props.requestCapability(
+              "hardwarePhotosDelete", "hardware.photos.delete", { filePath: path },
+            );
+          }}
           onClose={() => setDeletePath(undefined)}
-        >
-          <MobileButton
-            label="Confirm delete"
-            kind="danger"
-            onPress={() => {
-              const path = deletePath();
-              if (path)
-                props.requestCapability(
-                  "hardwarePhotosDelete",
-                  "hardware.photos.delete",
-                  { filePath: path },
-                );
-              setDeletePath(undefined);
-            }}
-          />
-        </MobileDialog>
+        />
       </MobileScaffold>
-    </MobileThemeProvider>
   );
 }

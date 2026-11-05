@@ -69,17 +69,19 @@ Flutter 绘制的是 native 投影的操作与资源；并非每个 JS 组件都
 | View.WrapLines | 删除仅包一层 Text 的占位包装；需要时使用上游 wrapText 契约实现 |
 | View.WrapTextPage | 尚未实现分页语义，不保留空壳 |
 
-## JS mobile 组合与转场
+## JS mobile 组合、设计规范（方案 C）与转场
 
-本轮的 mobile UI 仍是 JS/TSX 组合，不是 Flutter 业务 Widget 树。`guest/ui/mobile.tsx`
-导出 `SafeAreaScaffold`（独立 guest 的 canonical safe-area 壳）、
-`MobileThemeProvider`、`MobileScaffold`、`MobileAppBar`、`MobileCard`、
-`MobileButton`/filled/outlined/text aliases、`MobileBadge`、`MobileListTile`、
-`MobileSegmentedControl`、`MobileSwitch`、`MobileStepper`、`MobileDialog`，并复用官方
-`View`/`Text`/`Focusable`/`Modal`。`guest/mobile-pages.tsx` 将它们接到 Mobile UI、
-Transitions、Hardware 三个可操作页面；Demo 的 Liquid Glass 页面/路由已暂时移除，
-但 SDK 的 `GlassSurface` 与共享 surface bridge 仍保留；`guest/app.tsx` 负责 route
-stack 和约 220ms 的 JS-owned transition tick。
+本轮的 mobile / PC 双端设计系统仍是纯 JS/TSX 组合，不是 Flutter 业务 Widget 树。`packages/pocket_ui/src/mobile.tsx` 与 `packages/pocket_ui/src/responsive.ts` 内置 **方案 C 融合设计规范**（Material 3 / Shadcn 现代 Light & Dark 语义 Token + 3 档响应式断点与双密度 + TDesign 移动端/桌面端常见反馈与表单组件）：
+
+- **语义主题 Token (`MOBILE_THEME_LIGHT` / `MOBILE_THEME_DARK`)**：提供 `canvas`、`surface`、`surfaceElevated`、`surfaceMuted`、`ink`、`muted`、`border`、`accent`、`accentSoft`、`accentInk`、`success`、`successSoft`、`warning`、`warningSoft`、`danger`、`dangerSoft` 完整明暗双主题色阶，支持 `MobileThemeProvider` 运行时即时切换。
+- **响应式断点与双密度 (`responsive.ts`)**：`deriveWindowSizeClass(geometry)` 划分 `compact` (`< 600px`)、`medium` (`600..959px`)、`expanded` (`>= 960px`) 三档窗口；`deriveDesignDensity(geometry, override)` 与 `DesignDensityProvider` 支持 `touch`（44px 触控行高）与 `desktop`（36px 紧凑桌面行高）双密度切换。
+- **内置组件矩阵 (`mobile.tsx`)**：导出 `SafeAreaScaffold`、`MobileThemeProvider`、`DesignDensityProvider`、`MobileScaffold`、`MobileAppBar`、`MobileCard`、`MobileButton`（支持 `filled`、`tonal`、`outlined`、`text`、`danger` 五种变体及对应别名 `MobileFilledButton`、`MobileTonalButton`、`MobileOutlinedButton`、`MobileTextButton`、`MobileDangerButton`）、`MobileBadge`、`MobileTag` (`Tag` 可选选中态)、`MobileAvatar` (`Avatar` 在线状态指示点)、`MobileListTile`、`MobileSegmentedControl`、`MobileSwitch`、`MobileStepper`、`MobileProgress` (`ProgressBar`)、`MobileCheckbox` (`Checkbox`)、`MobileRadioGroup` (`RadioGroup`)、`MobileAccordion` (`Accordion`)、`MobileSkeleton` (`Skeleton`)，以及 4 类核心反馈/浮层组件：
+  - `MobileAlert` (`Alert`)：页内状态横幅，支持 `info`/`success`/`warning`/`danger` 四种语义色与关闭操作。
+  - `MobileToast` (`Toast`)：轻提示浮层，支持 `info`/`success`/`warning`/`danger` 四种语义色与操作按钮。
+  - `MobilePopup` / `MobileActionSheet` (`Popup` / `ActionSheet`)：自适应抽屉/浮层，在移动端 (`compact`) 下表现为底部圆角弹出抽屉，在桌面端 (`medium`/`expanded`) 下自动切换为居中浮层面板。
+  - `MobileDialog` (`Dialog`)：模态确认对话框，支持常规提示、双按钮确认与 `danger` 破坏性操作确认。
+- **状态变更动画 (`useStateTransition` / `useAnimatedNumber`)**：所有交互与浮层组件均通过 `onFrame` 弹簧阻尼插值或编译器 `transition-colors` 驱动真实状态变更动画（如 `Switch` 滑块位移与缩放、`Progress`/`Stepper` 进度条 `scaleX` 平滑插值、`Checkbox`/`RadioGroup` 指示器弹簧缩放、`Accordion` 展开位移与透明度、`Skeleton` 呼吸脉冲、`Toast`/`Alert`/`Popup`/`Dialog` 进出场 `opacity` + `translateY` 动画）。注意：由于 Rust 引擎 `style.rs:declares_transform()` 对非平移变换（`scale != 1.0` / `rotate != 0.0`）子树门控普通 `TEXT_RUN` 绘制，含 `<Text>` 子节点的容器动画统一使用 `opacity`、`translateX`、`translateY` 与 `transition-colors`，而 `scale`/`scaleX` 仅施加在无文字子节点的图形指示器 `View` 上。
+- **Showcase 全组件展示**：`demo/js/mobile-pages.tsx` 的 `Mobile UI` 页面通过 `Overview`、`Feedback`、`Controls`、`Data` 四个分栏及实时明暗/密度切换栏展示并可交互操作全部组件；`demo/js/app.tsx` 的 `Gallery` 页面同步展示方案 C 组件目录矩阵。`sdk/packages/pocket_ui/test/design_system_native.test.ts` 在真实 QuickJS + Rust 引擎中验证全组件渲染、交互与逐帧动画中间态。
 
 `guest/legacy.ts` 的 `computeTransitionDescriptor` 提供
 `IOS_SPRING_PARALLAX`、`SHARED_AXIS_Z`、`LIQUID_GLASS_MORPH`、`PORTAL_EXPAND` 四种

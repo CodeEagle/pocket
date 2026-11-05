@@ -1,6 +1,6 @@
 import { createEffect, createSignal, onCleanup, type JSX } from "solid-js";
 import { Text, View } from "@pocketjs/framework/solid/components";
-import { ActionButton, Card } from "@pocket/ui";
+import { MobileButton, MobileCard, useMobileTheme, wrapTextLines } from "@pocket/ui";
 import { captureUpstreamTape } from "@pocket/ui/recording";
 import { hostError, type HostBridge, type JsonValue } from "@pocket/ui/host";
 import { formatRecordingStatus } from "./state.ts";
@@ -10,6 +10,7 @@ export function RecordingPanel(props: {
   host: HostBridge;
   status?: () => Record<string, unknown> | undefined;
 }): JSX.Element {
+  const theme = useMobileTheme();
   const [busy, setBusy] = createSignal(false);
   const [message, setMessage] = createSignal("Capture input, IME and external results; replay in a fresh guest.");
   createEffect(() => {
@@ -66,20 +67,19 @@ export function RecordingPanel(props: {
     }
   };
   return (
-    <Card>
+    <MobileCard title="Deterministic replay">
       <View class="flex-col gap-3">
-        <Text class="text-base text-slate-950 font-bold">Deterministic replay</Text>
-        <Text class="text-xs text-slate-600">{busy() ? "Working…" : message()}</Text>
+        <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>{wrapTextLines(busy() ? "Working…" : message(), 46, 300)}</Text>
         <View class="flex-row flex-wrap gap-2">
-          <ActionButton label="Start recording" kind="primary" onPress={() => { void run("start"); }} />
-          <ActionButton label="Stop recording" kind="quiet" onPress={() => { void run("stop"); }} />
-          <ActionButton label="Recording status" kind="quiet" onPress={() => { void run("status"); }} />
+          <MobileButton label="Start recording" onPress={() => { void run("start"); }} />
+          <MobileButton label="Stop recording" kind="outlined" onPress={() => { void run("stop"); }} />
+          <MobileButton label="Recording status" kind="text" onPress={() => { void run("status"); }} />
         </View>
         <View class="flex-row flex-wrap gap-2">
-          <ActionButton label="Stop & verify replay" kind="secondary" onPress={() => { void run("replay"); }} />
-          <ActionButton label="Export recording" kind="quiet" onPress={() => { void run("export"); }} />
+          <MobileButton label="Stop & verify replay" kind="tonal" onPress={() => { void run("replay"); }} />
+          <MobileButton label="Export recording" kind="text" onPress={() => { void run("export"); }} />
         </View>
       </View>
-    </Card>
+    </MobileCard>
   );
 }

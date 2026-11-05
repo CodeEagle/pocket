@@ -5,6 +5,7 @@ import {
   createMemo,
   createSignal,
   onCleanup,
+  untrack,
   type JSX,
 } from "solid-js";
 import {
@@ -13,7 +14,9 @@ import {
   MobileButton,
   MobileCard,
   MobileListTile,
+  MobileParagraph,
   MobileSwitch,
+  useRouteActive,
 } from "@pocket/ui";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import type { HostBridge, JsonObject, JsonValue } from "@pocket/ui/host";
@@ -41,12 +44,6 @@ function shortText(value: unknown, limit = 42): string {
   return text.length > limit
     ? `${text.slice(0, Math.max(1, limit - 1))}…`
     : text;
-}
-
-function cardClass(dark: boolean): string {
-  return dark
-    ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-    : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]";
 }
 
 function bodyTextClass(dark: boolean): string {
@@ -136,7 +133,6 @@ export function PlatformExperiencePanel(
     <MobileCard
       title="Platform experience"
       detail="Explicit haptics and system UI; links stay opt-in."
-      class={cardClass(props.dark)}
     >
       <View class="flex-row items-center justify-between gap-2">
         <View class="flex-col gap-1 flex-1">
@@ -145,10 +141,10 @@ export function PlatformExperiencePanel(
         </View>
         <MobileBadge label="Opt-in" tone="warning" />
       </View>
-      <Text class={bodyTextClass(props.dark)}>
-        No background URL listener or route selection. Check the initial link
-        only when requested.
-      </Text>
+      <MobileParagraph
+        text="No background URL listener or route selection. Check the initial link only when requested."
+        class={bodyTextClass(props.dark)}
+      />
       <View class="flex-row flex-wrap gap-2">
         <MobileButton
           label={busy() === "Initial link" ? "Checking" : "Check initial link"}
@@ -417,6 +413,7 @@ export interface HardwareStreamsPanelProps {
 export function HardwareStreamsPanel(
   props: HardwareStreamsPanelProps,
 ): JSX.Element {
+  const routeActive = useRouteActive();
   const [sensorPhase, setSensorPhase] = createSignal<StreamPhase>("idle");
   const [sensorLatest, setSensorLatest] =
     createSignal<string>("No samples yet");
@@ -486,6 +483,7 @@ export function HardwareStreamsPanel(
   };
 
   const startSensor = (): void => {
+    if (!routeActive()) return;
     if (!props.adapter) {
       setSensorFailure({
         code: "stream_unavailable",
@@ -545,6 +543,18 @@ export function HardwareStreamsPanel(
     if (notifyPhase() === "watching" || notifyPhase() === "starting")
       setNotifyPhase("stopped");
   };
+
+  // Retained RouteView pages remain mounted while another page is visible.
+  // Streams are an explicit user opt-in, so pause them on hide and let the
+  // user restart after returning; keep their last samples and controls.
+  createEffect(() => {
+    if (!routeActive()) {
+      untrack(() => {
+        stopSensor("hardware_page_inactive");
+        stopNotifications("hardware_page_inactive");
+      });
+    }
+  });
 
   const runBleRequest = async (kind: "read" | "write"): Promise<void> => {
     if (!props.host) {
@@ -621,6 +631,7 @@ export function HardwareStreamsPanel(
   };
 
   const startNotifications = (): void => {
+    if (!routeActive()) return;
     if (!props.adapter) {
       setNotifyFailure({
         code: "stream_unavailable",
@@ -691,7 +702,6 @@ export function HardwareStreamsPanel(
     <MobileCard
       title="Hardware streams"
       detail="Start and stop real streams; no permission request runs automatically."
-      class={cardClass(props.dark)}
     >
       <View class="flex-row items-center justify-between gap-2">
         <Text class={valueTextClass(props.dark)}>Sensors</Text>
@@ -740,10 +750,10 @@ export function HardwareStreamsPanel(
       </Show>
 
       <Text class={valueTextClass(props.dark)}>Bluetooth characteristic</Text>
-      <Text class={bodyTextClass(props.dark)}>
-        Choose a connected service and characteristic before read, write, or
-        notify.
-      </Text>
+      <MobileParagraph
+        text="Choose a connected service and characteristic before read, write, or notify."
+        class={bodyTextClass(props.dark)}
+      />
       <InputField
         value={deviceId}
         onInput={setDeviceId}

@@ -1,17 +1,15 @@
 import { For, Show, createSignal, onCleanup, type Accessor, type JSX } from "solid-js";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import {
-  MOBILE_THEME_LIGHT,
-  MobileAppBar,
   MobileBadge,
   MobileButton,
   MobileCard,
   MobileListTile,
   MobileScaffold,
   MobileSegmentedControl,
-  MobileThemeProvider,
   ScrollablePage,
-  StatusBar,
+  MobileAlert,
+  useMobileTheme,
   Video,
 } from "@pocket/ui";
 import type { HostBridge, HostEvent } from "@pocket/ui/host";
@@ -75,10 +73,6 @@ type VideoEntry = {
   group?: string;
 };
 
-function panelClass(): string {
-  return "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]";
-}
-
 function eventLabel(event: HostEvent): string {
   const params = event.params as Record<string, unknown>;
   const id = typeof params.id === "string" ? ` ${params.id}` : "";
@@ -120,10 +114,11 @@ function VideoStateSplit(props: {
   expected: string;
   native: string;
 }): JSX.Element {
+  const theme = useMobileTheme();
   return (
-    <View class="flex-col gap-1 px-3 py-2 rounded-xl bg-[#F1F3F8] border-[#E5E9F2]">
-      <Text class="text-xs text-[#17233B] font-bold">Expected policy state · {props.expected}</Text>
-      <Text class="text-xs text-[#7C8799]">Native video.state · {props.native}</Text>
+    <View class={theme().name === "dark" ? "flex-col gap-1 px-3 py-2 rounded-xl bg-[#22314A] border-[#30405A]" : "flex-col gap-1 px-3 py-2 rounded-xl bg-[#F1F3F8] border-[#E5E9F2]"}>
+      <Text class={theme().name === "dark" ? "text-xs text-white font-bold" : "text-xs text-[#17233B] font-bold"}>Expected policy state · {props.expected}</Text>
+      <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>Native video.state · {props.native}</Text>
     </View>
   );
 }
@@ -135,7 +130,6 @@ function TestMatrix(props: {
     <MobileCard
       title="Manual test matrix"
       detail="Expected JS policy and native video.state are intentionally shown separately."
-      class={panelClass()}
     >
       <For each={props.rows()}>
         {(row) => (
@@ -184,6 +178,7 @@ function VideoControls(props: {
 }
 
 export function VideoPage(props: VideoPageProps): JSX.Element {
+  const theme = useMobileTheme();
   const media = props.platform.media;
   const [tab, setTab] = createSignal("playback");
   const [recent, setRecent] = createSignal<string[]>([]);
@@ -357,20 +352,13 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
   onCleanup(() => removeHostEvent?.());
 
   return (
-    <MobileThemeProvider theme={MOBILE_THEME_LIGHT}>
-      <MobileScaffold class="flex-col w-full bg-[#F5F6FA]" reservedActions="mini-app">
-        <MobileAppBar
-          title="Video Lab"
-          subtitle="Real local MP4 · lifecycle policy"
-          leading={<MobileButton label="Back" kind="text" compact onPress={() => props.onNavigate("home")} />}
-          trailing={<MobileBadge label={media ? "SDK media" : "Unavailable"} tone={media ? "success" : "danger"} />}
-        />
+      <MobileScaffold reservedActions="mini-app">
         <ScrollablePage>
           <View class="flex-col gap-3 p-4">
-            <StatusBar
-              label="Manual verification"
-              detail="Native video.state is reported only when the host emits it; expected policy is JS-owned."
-              ok={media !== undefined}
+            <MobileAlert
+              title="Playback status"
+              body="Native video.state is reported only when the host emits it; expected policy is JS-owned."
+              tone={media !== undefined ? "info" : "warning"}
             />
             <MobileSegmentedControl
               items={[
@@ -383,18 +371,17 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
             />
             <Show
               when={media}
-              fallback={<MobileCard title="Media unavailable" detail="The platform client was created with media disabled; no playback claim is made." class={panelClass()} />}
+              fallback={<MobileCard title="Media unavailable" detail="The platform client was created with media disabled; no playback claim is made." />}
             >
               <MobileCard
                 title="1 · Default / explicit control"
                 detail="Starts paused. Play, explicit pause, fast play/pause, and remove/rebuild. This hero remains mounted while Coverage opens a MiniApp."
-                class={panelClass()}
               >
                 <Show
                   when={showHero()}
                   fallback={
-                    <View class="flex-col gap-2 p-3 rounded-xl bg-[#FFF4DD] border-[#F2D6A1]">
-                      <Text class="text-xs text-[#936211]">Hero Video disposed; user intent is retained outside the component.</Text>
+                    <View class={theme().name === "dark" ? "flex-col gap-2 p-3 rounded-xl bg-[#3D2E10] border-[#F2D6A1]" : "flex-col gap-2 p-3 rounded-xl bg-[#FFF4DD] border-[#F2D6A1]"}>
+                      <Text class={theme().name === "dark" ? "text-xs text-[#FCD34D]" : "text-xs text-[#936211]"}>Hero Video disposed; user intent is retained outside the component.</Text>
                       <MobileButton
                         label="Rebuild Video"
                         compact
@@ -441,9 +428,9 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
                     distant launch button can hide/release the video before
                     coverage starts, making a lifecycle test inconclusive. */}
                 <MobileButton label="Open Profile MiniApp" onPress={() => void openMiniApp()} compact />
-                <Text class="text-xs text-[#17233B] font-bold">{nativeLabelFor(HERO_ID)}</Text>
-                <Text class="text-xs text-[#7C8799]">Native controllers · {nativeControllers()}</Text>
-                <Text class="text-xs text-[#7C8799]">BoxFit · {heroFit()} (cover / contain / fill)</Text>
+                <Text class={theme().name === "dark" ? "text-xs text-white font-bold" : "text-xs text-[#17233B] font-bold"}>{nativeLabelFor(HERO_ID)}</Text>
+                <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>Native controllers · {nativeControllers()}</Text>
+                <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>BoxFit · {heroFit()} (cover / contain / fill)</Text>
                 <View class="flex-row flex-wrap gap-2">
                   <MobileButton label="Cover fit" compact onPress={() => { setHeroFit("cover"); log("hero fit=cover"); }} />
                   <MobileButton label="Contain fit" kind="outlined" compact onPress={() => { setHeroFit("contain"); log("hero fit=contain"); }} />
@@ -460,7 +447,7 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
                 />
               </MobileCard>
               <Show when={tab() === "playback"}>
-                <MobileCard title="2 · Feed group exclusivity" detail="Two real clips share one media group; selecting one clears the peer intent." class={panelClass()}>
+                <MobileCard title="2 · Feed group exclusivity" detail="Two real clips share one media group; selecting one clears the peer intent.">
                   <VideoSurface media={media!} id={FEED_A_ID} asset={VIDEO_LAB_ASSETS.clipA} playing={feedAPlaying()} active={feedAActive()} group={FEED_GROUP} class="w-full h-[132] rounded-xl" />
                   <View class="flex-row flex-wrap gap-2">
                     <MobileButton label="Play clip A" compact onPress={() => setFeed(FEED_A_ID)} />
@@ -469,10 +456,10 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
                     <MobileButton label={feedBActive() ? "Hide B" : "Show B"} kind="outlined" compact onPress={() => setActive(feedB, !feedBActive())} />
                   </View>
                   <VideoSurface media={media!} id={FEED_B_ID} asset={VIDEO_LAB_ASSETS.clipB} playing={feedBPlaying()} active={feedBActive()} group={FEED_GROUP} class="w-full h-[132] rounded-xl" />
-                  <Text class="text-xs text-[#7C8799]">{nativeLabelFor(FEED_A_ID)} · {nativeLabelFor(FEED_B_ID)}</Text>
-                  <Text class="text-xs text-[#7C8799]">Selection is expected policy; actual decode/playback is a separate native observation.</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{nativeLabelFor(FEED_A_ID)} · {nativeLabelFor(FEED_B_ID)}</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>Selection is expected policy; actual decode/playback is a separate native observation.</Text>
                 </MobileCard>
-                <MobileCard title="3 · Same id / asset swap + retry" detail="Asset identity changes must not resurrect an explicit pause. Missing asset is intentionally real and retryable." class={panelClass()}>
+                <MobileCard title="3 · Same id / asset swap + retry" detail="Asset identity changes must not resurrect an explicit pause. Missing asset is intentionally real and retryable.">
                   <VideoSurface media={media!} id={SWAP_ID} asset={swapAsset()} playing={swapPlaying()} active={true} class="w-full h-[120] rounded-xl" />
                   <View class="flex-row flex-wrap gap-2">
                     <MobileButton label={`Swap same id → ${swapAsset() === VIDEO_LAB_ASSETS.clipA ? "clip B" : "clip A"}`} compact onPress={swapSameIdAsset} />
@@ -480,46 +467,46 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
                     <MobileButton label="Pause same id" kind="outlined" compact onPress={() => { rememberIntent(SWAP_ID, false); setSwapPlaying(false); log("same-id explicit pause retained across asset swap"); }} />
                   </View>
                   <VideoSurface media={media!} id={RETRY_ID} asset={retryAsset()} playing={retryPlaying()} active={true} class="w-full h-[120] rounded-xl" />
-                  <Text class="text-xs text-[#7C8799]">{nativeLabelFor(SWAP_ID)} · {nativeLabelFor(RETRY_ID)}</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{nativeLabelFor(SWAP_ID)} · {nativeLabelFor(RETRY_ID)}</Text>
                   <View class="flex-row flex-wrap gap-2">
                     <MobileButton label={retryAsset() === VIDEO_LAB_ASSETS.missing ? "Retry with clip A" : "Restore failing asset"} kind="outlined" compact onPress={retryMissingAsset} />
                     <MobileButton label="Play retry" compact onPress={() => { rememberIntent(RETRY_ID, true); setRetryPlaying(true); log("retry playing intent requested"); }} />
                     <MobileButton label="Pause retry" kind="text" compact onPress={() => { rememberIntent(RETRY_ID, false); setRetryPlaying(false); log("retry asset paused"); }} />
                   </View>
                 </MobileCard>
-                <MobileCard title="Supported scope" detail="This page exposes the current Video API only." class={panelClass()}>
-                  <Text class="text-xs text-[#17233B]">Supported: bundled local MP4 assets, fixed loop + muted playback, play/pause intent, lifecycle/coverage gates, feed exclusivity, and native draw visibility.</Text>
-                  <Text class="text-xs text-[#7C8799]">Not exposed: seek/progress, volume, playback-completion callbacks, and network URL assets. These are not part of this test page.</Text>
+                <MobileCard title="Supported scope" detail="This page exposes the current Video API only.">
+                  <Text class={theme().name === "dark" ? "text-xs text-white" : "text-xs text-[#17233B]"}>Supported: bundled local MP4 assets, fixed loop + muted playback, play/pause intent, lifecycle/coverage gates, feed exclusivity, and native draw visibility.</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>Not exposed: seek/progress, volume, playback-completion callbacks, and network URL assets. These are not part of this test page.</Text>
                 </MobileCard>
               </Show>
               <Show when={tab() === "coverage"}>
-                <MobileCard title="4 · MiniApp coverage" detail="Root SystemUI remains scheduled; platform.openApp media coverage pauses only registered video." class={panelClass()}>
-                  <Text class="text-xs text-[#17233B]">{miniAppStatus()}</Text>
-                  <Text class="text-xs text-[#7C8799]">{coverageLabel()}</Text>
+                <MobileCard title="4 · MiniApp coverage" detail="Root SystemUI remains scheduled; platform.openApp media coverage pauses only registered video.">
+                  <Text class={theme().name === "dark" ? "text-xs text-white" : "text-xs text-[#17233B]"}>{miniAppStatus()}</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{coverageLabel()}</Text>
                   <View class="flex-row flex-wrap gap-2">
                     <MobileButton label="Other page" kind="outlined" compact onPress={() => { log("navigate away: expected page gate pause"); props.onNavigate("about"); }} />
                   </View>
-                  <Text class="text-xs text-[#7C8799]">After leaving, use Home → Video Lab to return and verify the retained play or pause intent.</Text>
-                  <Text class="text-xs text-[#7C8799]">Background / foreground: send the app to background and return on a real iOS/Android host; this row is manual until native video.state confirms it.</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>After leaving, use Home → Video Lab to return and verify the retained play or pause intent.</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>Background / foreground: send the app to background and return on a real iOS/Android host; this row is manual until native video.state confirms it.</Text>
                   <VideoStateSplit expected={heroPlaying() ? "hero intent playing" : "hero intent paused"} native={nativeLabelFor(HERO_ID)} />
                 </MobileCard>
-                <MobileCard title="5 · Recent bounded events" detail={`${recent().length}/${RECENT_LIMIT} entries; no polling loop.`} class={panelClass()}>
+                <MobileCard title="5 · Recent bounded events" detail={`${recent().length}/${RECENT_LIMIT} entries; no polling loop.`}>
                   <For each={recent()}>
-                    {(item) => <Text class="text-xs text-[#17233B]">{item}</Text>}
+                    {(item) => <Text class={theme().name === "dark" ? "text-xs text-white" : "text-xs text-[#17233B]"}>{item}</Text>}
                   </For>
                   <MobileButton label="Clear event log" kind="text" compact onPress={() => setRecent([])} />
                 </MobileCard>
               </Show>
               <Show when={tab() === "scroll"}>
-                <MobileCard title="6 · Real scroll visibility" detail="Scroll the Video below the retained clip boundary, then return. Native draw visibility is not a JS timer." class={panelClass()}>
+                <MobileCard title="6 · Real scroll visibility" detail="Scroll the Video below the retained clip boundary, then return. Native draw visibility is not a JS timer.">
                   <View class="flex-col gap-2 h-[420] items-center justify-center rounded-xl bg-[#EEF1F6]">
-                    <Text class="text-sm text-[#17233B] font-bold">Scroll down to the clip</Text>
-                    <Text class="text-xs text-[#7C8799]">The content canvas is taller than the viewport.</Text>
+                    <Text class={theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>Scroll down to the clip</Text>
+                    <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>The content canvas is taller than the viewport.</Text>
                   </View>
                   <VideoSurface media={media!} id={SCROLL_ID} asset={VIDEO_LAB_ASSETS.clipB} playing={scrollPlaying()} active={true} class="w-full h-[176] rounded-xl" />
                   <VideoControls entry={scroll} log={log} label="scroll clip" playLabel="Play scroll clip" pauseLabel="Pause scroll clip" />
-                  <Text class="text-xs text-[#7C8799]">{nativeLabelFor(SCROLL_ID)}</Text>
-                  <Text class="text-xs text-[#7C8799]">Expected: while offscreen the native PocketView visibility gate pauses decode; when visible again it follows the retained user intent.</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{nativeLabelFor(SCROLL_ID)}</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>Expected: while offscreen the native PocketView visibility gate pauses decode; when visible again it follows the retained user intent.</Text>
                 </MobileCard>
               </Show>
             </Show>
@@ -527,6 +514,5 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
           </View>
         </ScrollablePage>
       </MobileScaffold>
-    </MobileThemeProvider>
   );
 }

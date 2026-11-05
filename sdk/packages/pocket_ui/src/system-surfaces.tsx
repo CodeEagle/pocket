@@ -89,7 +89,8 @@ function MiniAppSurface(props: {
   const [timeline, setTimeline] = createSignal(0);
   const [phase, setPhase] = createSignal<"preparing" | "entering" | "open" | "closing" | "waiting">(props.binding().ready === false ? "preparing" : "entering");
   const [closeFailed, setCloseFailed] = createSignal(false);
-  const transitionDuration = 420;
+  const enterDuration = 420;
+  const dismissDuration = 360;
   let startedAt = 0;
   let transitionFrom = 0;
   let transitionAnchored = false;
@@ -147,15 +148,21 @@ function MiniAppSurface(props: {
       startedAt = virtualNow();
       transitionAnchored = true;
     }
-    const t = Math.min(1, Math.max(0, (virtualNow() - startedAt) * 1000 / transitionDuration));
+    const target = current === "entering" ? 1 : 0;
+    const distance = Math.abs(target - transitionFrom);
+    const duration = (current === "entering" ? enterDuration : dismissDuration) * distance;
+    const t = duration === 0 ? 1 : Math.min(1, Math.max(0, (virtualNow() - startedAt) * 1000 / duration));
+    // Store the presented position itself. Reversing an interrupted entry
+    // starts at that position instead of reinterpreting a second eased clock.
+    // Entry settles cubically; dismissal uses a gentler quadratic deceleration
+    // so a full-screen surface does not pause and then rush through its middle.
+    const eased = 1 - Math.pow(1 - t, current === "entering" ? 3 : 2);
+    const next = transitionFrom + (target - transitionFrom) * eased;
+    setTimeline(next);
     if (current === "entering") {
-      const next = Math.min(1, transitionFrom + t);
-      setTimeline(next);
-      if (next === 1) setPhase("open");
+      if (t === 1) setPhase("open");
     } else {
-      const next = Math.max(0, transitionFrom - t);
-      setTimeline(next);
-      if (next === 0) {
+      if (t === 1) {
         setPhase("waiting");
         pendingDismiss?.resolve();
         pendingDismiss = undefined;
@@ -163,20 +170,11 @@ function MiniAppSurface(props: {
     }
   }, { continuous: () => phase() === "entering" || phase() === "closing" });
 
-  // One symmetric cubic is shared by entry and its reverse. The eased value
-  // starts slowly, so a first admitted frame cannot jump into mid-screen.
-  const easedProgress = () => {
-    const value = timeline();
-    return value < 0.5
-      ? 4 * value * value * value
-      : 1 - Math.pow(-2 * value + 2, 3) / 2;
-  };
-
   return <View class={props.class ?? "absolute inset-0 w-full h-full"} style={props.style}>
     <FocusScope class="absolute inset-0 w-full h-full" active={() => props.binding().focused && !props.systemUIFocused} autoFocus restoreFocus>
-    <View class="absolute inset-0 w-full h-full bg-black" style={{ opacity: easedProgress() * 0.16 }} />
+    <View class="absolute inset-0 w-full h-full bg-black" style={{ opacity: timeline() * 0.16 }} />
     <View class="absolute left-0 top-0 w-full overflow-hidden bg-white"
-      style={{ height: Math.max(1, height()), translateY: entryOffset() * (1 - easedProgress()) }}>
+      style={{ height: Math.max(1, height()), translateY: entryOffset() * (1 - timeline()) }}>
       <CompositorSurface package={props.binding().appId}
         focused={props.binding().focused && !props.systemUIFocused && phase() !== "closing" && phase() !== "waiting"}
         class="absolute inset-0 w-full h-full" />

@@ -7,7 +7,7 @@
  * mounted by this sample.
  */
 
-import { For, children as resolveChildren, createContext, createEffect, createSignal, onCleanup, useContext, type Accessor, type JSX } from "solid-js";
+import { For, Show, children as resolveChildren, createContext, createEffect, createSignal, onCleanup, useContext, type Accessor, type JSX } from "solid-js";
 import { createGesture } from "@pocketjs/framework/gesture";
 import { bindDpadScroll, createScroller } from "@pocketjs/framework/kinetics";
 import { onFrame } from "@pocketjs/framework/solid/lifecycle";
@@ -36,9 +36,11 @@ import {
   sideContourReservesForBand,
   topRightContourReserveForBand,
   topRightOcclusionFrame,
+  topRightOcclusionFrames,
   type DisplayGeometry,
   type DisplaySideContourReserves,
 } from "./responsive.ts";
+import { useRouteActive } from "./route.tsx";
 
 /**
  * Safe-area aware guest shell for standalone pages.
@@ -108,6 +110,10 @@ export interface ScrollablePageContextValue {
   scrollOffset: () => number;
   geometry: () => DisplayGeometry;
   subscribeContour: (sync: () => boolean) => () => void;
+  /** iOS-style nested scroll chaining: forward unconsumed vertical drag delta to parent page. */
+  chainDrag?: (deltaY: number) => void;
+  /** Complete a chained nested drag with release velocity (or 0 on cancel). */
+  chainEndDrag?: (velocityY: number) => void;
 }
 
 export const ScrollablePageContext = createContext<ScrollablePageContextValue | undefined>(undefined);
@@ -214,9 +220,9 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
   const hasAppBar = props.appBar !== undefined && props.appBar !== null;
   const hasBottomBar = bottomBar !== undefined && bottomBar !== null;
   const intrinsic = props.edges === "none";
-  const canvasClass = props.class ?? (intrinsic
-    ? "flex-col w-full bg-[#F5F6FA]"
-    : "flex-col w-full h-full bg-[#F5F6FA]");
+  const canvasClass = () => props.class ?? (intrinsic
+    ? "flex-col w-full bg-[#FAFAFA]"
+    : "flex-col w-full h-full bg-[#FAFAFA]");
   const consumes = (edge: SafeAreaEdge): boolean =>
     props.edges === "all" || (props.edges !== "none" && props.edges.includes(edge));
   const bodyLeftInset = () => {
@@ -281,7 +287,7 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
   if (intrinsic) {
     return (
       <View class="flex-col w-full" style={{ grow: 1 }}>
-        <View class={canvasClass} style={{ grow: 1 }}>
+        <View class={canvasClass()} style={{ grow: 1 }}>
           {hasAppBar ? resolveSlot(props.appBar) : null}
           {resolvedChildren()}
           {hasBottomBar ? bottomBar : null}
@@ -293,7 +299,7 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
   return (
     <View class="flex-col w-full h-full" style={{ grow: 1 }}>
       <View
-        class={canvasClass}
+        class={canvasClass()}
         style={{
           grow: 1,
           paddingL: bodyLeftInset(),
@@ -704,12 +710,12 @@ export function ActionButton(props: ActionButtonProps): JSX.Element {
   return (
     <Focusable
       class={props.class ?? (props.kind === "secondary"
-        ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF] active:bg-[#C9D6FF] active:scale-95 transition-all duration-150 ease-out"
+        ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF] active:bg-[#C9D6FF] transition-colors duration-150 ease-out"
         : props.kind === "quiet"
-          ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#EEF1F6] focus:bg-[#E4E9F2] active:bg-[#D7DDE8] active:scale-95 transition-all duration-150 ease-out"
+          ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#EEF1F6] focus:bg-[#E4E9F2] active:bg-[#D7DDE8] transition-colors duration-150 ease-out"
           : props.kind === "danger"
-            ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238] active:bg-[#7F1D2D] active:scale-95 transition-all duration-150 ease-out"
-            : "px-4 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5] active:bg-[#1E3A8A] active:scale-95 transition-all duration-150 ease-out")}
+            ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238] active:bg-[#7F1D2D] transition-colors duration-150 ease-out"
+            : "px-4 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5] active:bg-[#1E3A8A] transition-colors duration-150 ease-out")}
       style={props.disabled
         ? { ...(props.style ?? {}), opacity: props.style?.opacity ?? 0.5 }
         : { ...(props.style ?? {}), opacity: props.style?.opacity ?? 1 }}
@@ -784,7 +790,13 @@ export function StatusBar(props: { label: string; detail: string; ok?: boolean }
   );
 }
 
-export type NavigationRoute = "home" | "gallery" | "about";
+export type NavigationRoute = "home" | "gallery" | "about" | "settings";
+
+export interface NavigationItem {
+  id: NavigationRoute;
+  label: string;
+  kind: "home" | "gallery" | "host" | "settings";
+}
 
 /**
  * Navigation icons are deliberately composed from host primitives instead of
@@ -794,14 +806,16 @@ export type NavigationRoute = "home" | "gallery" | "about";
  * geometric marks are therefore stable across Flutter, WeChat and native
  * probe hosts and inherit the selected-tab colour through one explicit style.
  */
-function NavigationIcon(props: { kind: "home" | "gallery" | "host"; active: boolean }): JSX.Element {
-  const color = () => props.active ? "#315DEB" : "#7C8799";
+function NavigationIcon(props: { kind: NavigationItem["kind"]; active: boolean; dark?: boolean; accentColor?: string; surfaceColor?: string }): JSX.Element {
+  const color = () => props.active
+    ? props.accentColor ?? (props.dark ? "#A8BEFF" : "#315DEB")
+    : props.dark ? "#A9B7CF" : "#7C8799";
   if (props.kind === "home") {
     return (
       <View class="relative w-[20] h-[20]">
         <View class="absolute left-[4] top-[8] w-[12] h-[9] rounded-sm" style={{ bgColor: color() }} />
         <View class="absolute left-[5] top-[3] w-[10] h-[10] rounded-sm" style={{ bgColor: color(), rotate: 45 }} />
-        <View class="absolute left-[8] top-[10] w-[4] h-[7] rounded-sm bg-white" />
+        <View class="absolute left-[8] top-[10] w-[4] h-[7] rounded-sm" style={{ bgColor: props.surfaceColor ?? "#FFFFFF" }} />
       </View>
     );
   }
@@ -819,6 +833,15 @@ function NavigationIcon(props: { kind: "home" | "gallery" | "host"; active: bool
       </View>
     );
   }
+  if (props.kind === "settings") {
+    return (
+      <View class="relative w-[20] h-[20]">
+        <View class="absolute left-[8] top-[1] w-[4] h-[18] rounded-sm" style={{ bgColor: color() }} />
+        <View class="absolute left-[1] top-[8] w-[18] h-[4] rounded-sm" style={{ bgColor: color() }} />
+        <View class="absolute left-[4] top-[4] w-[12] h-[12] rounded-sm" style={{ bgColor: color(), rotate: 45 }} />
+      </View>
+    );
+  }
   return (
     <View class="flex-col gap-[3] w-[20] h-[20] items-center justify-center">
       <View class="w-[14] h-[3] rounded-full" style={{ bgColor: color() }} />
@@ -828,11 +851,26 @@ function NavigationIcon(props: { kind: "home" | "gallery" | "host"; active: bool
   );
 }
 
+const defaultNavigationItems: readonly NavigationItem[] = [
+  { id: "home", label: "Home", kind: "home" },
+  // Keep the old Gallery route as the compatibility alias for the UI page.
+  { id: "gallery", label: "Gallery", kind: "gallery" },
+  { id: "about", label: "Host", kind: "host" },
+];
+
 export function NavigationBar(props: {
   route: string;
   onNavigate: (route: NavigationRoute) => void;
   wide?: boolean | (() => boolean);
   geometry?: DisplayGeometry | (() => DisplayGeometry);
+  /** Hide the complete bar, including its home-indicator inset, when false. */
+  visible?: boolean;
+  /** Optional replacement for the backwards-compatible Home/Gallery/Host set. */
+  items?: readonly NavigationItem[];
+  /** Use the dark shell colours for a page with a dark surface. */
+  dark?: boolean;
+  /** Optional ARGB accent rendered as the active icon/text colour. */
+  accentColor?: number;
 }): JSX.Element {
   const navStyle = () => {
     const geometry = props.geometry
@@ -849,35 +887,46 @@ export function NavigationBar(props: {
       paddingB: padding.bottom,
     };
   };
-  const hostRoute = () => props.route !== "home" && props.route !== "gallery";
-  const items = [
-    { id: "home" as const, label: "Home", kind: "home" as const },
-    // Keep the old Gallery route as the compatibility alias for the UI page.
-    { id: "gallery" as const, label: "Gallery", kind: "gallery" as const },
-    { id: "about" as const, label: "Host", kind: "host" as const },
-  ];
+  const hostRoute = () => props.route !== "home" && props.route !== "gallery" && props.route !== "settings";
+  const items = () => props.items ?? defaultNavigationItems;
+  const surface = () => props.dark ? "#09090B" : "#FFFFFF";
+  const border = () => props.dark ? "#27272A" : "#E4E4E7";
+  const muted = () => props.dark ? "#A1A1AA" : "#71717A";
+  const accent = () => props.accentColor === undefined
+    ? props.dark ? "#FAFAFA" : "#18181B"
+    : `#${(props.accentColor & 0xFFFFFF).toString(16).padStart(6, "0")}`;
   return (
-    <View
-      style={navStyle()}
-      class="flex-row items-center w-full shrink-0 px-2 py-1 bg-white border-[#E5E9F2]"
-    >
-      <For each={items}>
-        {(item) => {
-          const active = () => props.route === item.id || (hostRoute() && item.id === "about");
-          return (
-            <Focusable
-              class="flex-1 h-[56] flex-col items-center justify-center gap-1 rounded-xl bg-transparent focus:bg-[#F7F8FC] active:scale-95 transition-all duration-150 ease-out"
-              onPress={() => props.onNavigate(item.id)}
-            >
-              <View class={active() ? "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-[#E8EDFF] transition-all duration-200 ease-spring" : "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-transparent transition-all duration-200 ease-spring"}>
-                <NavigationIcon kind={item.kind} active={active()} />
-              </View>
-              <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#7C8799] font-bold"}>{item.label}</Text>
-            </Focusable>
-          );
-        }}
-      </For>
-    </View>
+    <Show when={props.visible !== false}>
+      <View
+        style={{ ...navStyle(), bgColor: surface() }}
+        class="flex-col w-full shrink-0"
+      >
+        <View class="w-full h-[1]" style={{ bgColor: border() }} />
+        <View class="flex-row items-center w-full h-[54] px-2" style={{ bgColor: surface() }}>
+          <For each={items()}>
+            {(item) => {
+              const active = () => props.route === item.id || (hostRoute() && item.id === "about");
+              return (
+                <Focusable
+                  class="flex-1 h-[52] flex-col items-center justify-center gap-1 bg-transparent"
+                  onPress={() => props.onNavigate(item.id)}
+                >
+                  <View class="w-[24] h-[22] flex-col items-center justify-center bg-transparent">
+                    <NavigationIcon kind={item.kind} active={active()} dark={props.dark} accentColor={active() ? accent() : undefined} surfaceColor={surface()} />
+                  </View>
+                  <Text
+                    class={active()
+                      ? "text-xs font-bold"
+                      : props.dark ? "text-xs text-[#A1A1AA] font-bold" : "text-xs text-[#71717A] font-bold"}
+                    style={{ textColor: active() ? accent() : muted() }}
+                  >{item.label}</Text>
+                </Focusable>
+              );
+            }}
+          </For>
+        </View>
+      </View>
+    </Show>
   );
 }
 
@@ -896,8 +945,8 @@ export function Tabs(props: { items: readonly TabItem[]; active: string; onChang
         {(item) => (
           <Focusable
             class={props.active === item.id
-              ? "w-[68] h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF] active:scale-95 transition-all duration-150 ease-out"
-              : "w-[68] h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#EEF1F6] active:scale-95 transition-all duration-150 ease-out"}
+              ? "w-[68] h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF] transition-colors duration-150 ease-out"
+              : "w-[68] h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#EEF1F6] transition-colors duration-150 ease-out"}
             onPress={() => props.onChange(item.id)}
           >
             <Text class={props.active === item.id ? "text-sm text-[#315DEB] font-bold" : "text-sm text-[#7C8799] font-bold"}>{item.label}</Text>
@@ -1010,12 +1059,12 @@ const defaultInputFieldAppearance: Required<InputFieldAppearance> = {
   // ABGR, while the Flutter bridge accepts the same CSS spelling and converts
   // it to an ARGB Color. Passing raw integers here would swap red/blue in the
   // JS shell even though the Flutter overlay looked correct.
-  textColor: "#17233B",
-  placeholderColor: "#7C8799",
+  textColor: "#09090B",
+  placeholderColor: "#71717A",
   fillColor: "#ffffff",
-  borderColor: "#D6DCE7",
-  focusedBorderColor: "#315DEB",
-  borderRadius: 12,
+  borderColor: "#E4E4E7",
+  focusedBorderColor: "#18181B",
+  borderRadius: 8,
   fontSize: 14,
   paddingHorizontal: 12,
   paddingVertical: 10,
@@ -1154,6 +1203,7 @@ export function InputField(props: {
   placeholder?: string;
   appearance?: InputFieldAppearance;
 }): JSX.Element {
+  const routeActive = useRouteActive();
   const id = `guest-text-input-${nextTextInputId++}`;
   const [isFocused, setIsFocused] = createSignal(false);
   let node: NodeMirror | undefined;
@@ -1440,6 +1490,16 @@ export function InputField(props: {
     },
   };
 
+  // Retained routes stay mounted, so unmount cleanup is no longer sufficient
+  // to release the native editor overlay. Close only this field's session
+  // when its route becomes inactive; the controlled JS value remains intact
+  // and a later activation can reopen it with the same text.
+  createEffect(() => {
+    if (routeActive() || !opened) return;
+    close();
+    if (activeTextInput === session) activeTextInput = undefined;
+  });
+
   createEffect(() => {
     const text = props.value();
     if (text === lastObservedText) return;
@@ -1450,7 +1510,7 @@ export function InputField(props: {
   // Layout can change after Flutter adjusts the viewport for the system
   // keyboard. Observe geometry on work-driven frames while this session owns
   // the overlay; emit only changed rects without keeping the ticker alive.
-  onFrame(sendRectUpdate, { continuous: false });
+  onFrame(sendRectUpdate, { active: routeActive, continuous: false });
 
   onCleanup(() => {
     close();
@@ -1486,11 +1546,14 @@ export function ScrollablePage(props: {
   children?: JSX.Element;
   class?: string;
 }): JSX.Element {
+  const routeActive = useRouteActive();
   const fallbackViewportHeight = 480;
   let viewportNode: NodeMirror | undefined;
   let contentNode: NodeMirror | undefined;
   let previousViewportHeight = fallbackViewportHeight;
   let previousOffset = 0;
+  let needsActiveMeasurement = false;
+  let activeMeasurementFrames = 0;
   const [viewportHeight, setViewportHeight] = createSignal(fallbackViewportHeight);
   const [contentHeight, setContentHeight] = createSignal(fallbackViewportHeight);
   const scroller = createScroller({
@@ -1506,6 +1569,7 @@ export function ScrollablePage(props: {
    * Keep the last origin/size in that gap and cap it with the live viewport.
    */
   const measureViewport = (): TextInputRect | undefined => {
+    if (!routeActive()) return undefined;
     const measured = viewportLayout(viewportNode);
     if (measured) {
       lastViewportRect = measured;
@@ -1535,6 +1599,7 @@ export function ScrollablePage(props: {
     rect: TextInputRect | undefined;
     viewportChanged: boolean;
   } => {
+    if (!routeActive()) return { rect: undefined, viewportChanged: false };
     const rect = measureViewport();
     const viewportChanged = rect !== undefined &&
       rect.height > 0 && rect.height !== previousViewportHeight;
@@ -1546,8 +1611,14 @@ export function ScrollablePage(props: {
     // pane is resizing. Its height remains useful for the scroll extent;
     // rejecting the whole record would leave maxScroll frozen at an old value.
     const measuredContent = committedLayout(contentNode, true);
-    if (measuredContent) {
-      const nextContentHeight = Math.max(rect?.height ?? viewportHeight(), measuredContent.height);
+    // A retained display:none subtree reports a zero geometry until the
+    // native layout pass after it is shown again. Do not turn that transient
+    // zero into `contentHeight = viewportHeight`, which would clamp the
+    // retained scroll offset to zero. A valid viewport is also required for
+    // the first reactivation measurement; the existing zero-width Duo
+    // fallback remains valid when its height is present.
+    if (rect && rect.height > 0 && measuredContent && measuredContent.height > 0) {
+      const nextContentHeight = Math.max(rect.height, measuredContent.height);
       if (nextContentHeight !== contentHeight()) setContentHeight(nextContentHeight);
     }
     return { rect, viewportChanged };
@@ -1555,6 +1626,7 @@ export function ScrollablePage(props: {
 
   const pageScroll = {
     visualRect: (node: NodeMirror, fallback?: TextInputRect): TextInputRect | undefined => {
+      if (!routeActive()) return fallback;
       // The fallback is already in painted/visual coordinates: InputField
       // stores the last emitted overlay rect and ensureVisible passes its
       // current visual rect back here. Only a fresh committed layout is raw
@@ -1568,6 +1640,7 @@ export function ScrollablePage(props: {
     },
     clipRect: (): TextInputRect | undefined => measureViewport(),
     ensureVisible: (node: NodeMirror, fallback?: TextInputRect): void => {
+      if (!routeActive()) return;
       const viewport = measureViewport();
       if (!viewport) return;
       const input = pageScroll.visualRect(node, fallback);
@@ -1590,7 +1663,19 @@ export function ScrollablePage(props: {
       }
     },
   };
-  activePageScroll = pageScroll;
+  createEffect(() => {
+    const active = routeActive();
+    if (active) {
+      needsActiveMeasurement = true;
+      activeMeasurementFrames = 0;
+      activePageScroll = pageScroll;
+    } else if (activePageScroll === pageScroll) {
+      // A retained page must not keep serving overlay geometry after it is
+      // hidden. The identity check prevents an older page's effect from
+      // clearing a newer page that became active in the same route turn.
+      activePageScroll = undefined;
+    }
+  });
   onCleanup(() => {
     if (activePageScroll === pageScroll) activePageScroll = undefined;
   });
@@ -1608,6 +1693,7 @@ export function ScrollablePage(props: {
   const hasSideContours = (current: DisplayGeometry): boolean =>
     leftOcclusionFrames(current).length > 0 || rightOcclusionFrames(current).length > 0;
   const syncContourSubscribers = (): boolean => {
+    if (!routeActive()) return false;
     if (contourSubscribers.size === 0) return false;
     const hasContour = hasSideContours(activePageGeometry());
     if (!hasContour && !hadActiveContour) return false;
@@ -1626,6 +1712,7 @@ export function ScrollablePage(props: {
     return anyChanged;
   };
   const scheduleContourMicrotask = (): void => {
+    if (!routeActive()) return;
     if (microtaskSyncScheduled) return;
     if (!hadActiveContour && !hasSideContours(activePageGeometry())) return;
     microtaskSyncScheduled = true;
@@ -1636,6 +1723,7 @@ export function ScrollablePage(props: {
   };
 
   const syncViewportResize = (): void => {
+    if (!routeActive()) return;
     syncContourSubscribers();
     const { rect } = refreshMeasurements();
     if (!rect || activePageScroll !== pageScroll) return;
@@ -1661,10 +1749,28 @@ export function ScrollablePage(props: {
         scheduleContourMicrotask();
       };
     },
+    chainDrag: (deltaY: number) => {
+      if (!routeActive() || deltaY === 0) return;
+      if (scroller.state() !== "dragging") {
+        endedOnThisTurn = false;
+        scroller.stop();
+        scroller.beginDrag();
+      }
+      scroller.drag(deltaY);
+      syncedOffsetInTurn = scroller.offset();
+      syncContourSubscribers();
+    },
+    chainEndDrag: (velocityY: number) => {
+      if (!routeActive()) return;
+      if (scroller.state() === "dragging") {
+        endedOnThisTurn = true;
+        scroller.endDrag(velocityY);
+      }
+    },
   };
 
   let endedOnThisTurn = false;
-  createGesture({
+  const gesture = createGesture({
     axis: "y",
     // Keep the node hit fact when a host provides it, but retain the official
     // geometry fallback for cold/replay hosts and bare gaps in the viewport.
@@ -1672,28 +1778,35 @@ export function ScrollablePage(props: {
     // without the rect a touch whose down hit is unresolved cannot start a
     // page pan even though it is visibly inside the clip.
     region: {
-      node: () => viewportNode,
+      node: () => routeActive() ? viewportNode : undefined,
       rect: () => {
+        if (!routeActive()) return undefined;
         const rect = measureViewport();
         return rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : undefined;
       },
     },
     panSlop: 1,
     onDown: () => {
+      if (!routeActive()) return;
       endedOnThisTurn = false;
       scroller.stop();
     },
-    onPanStart: () => scroller.beginDrag(),
+    onPanStart: () => {
+      if (routeActive()) scroller.beginDrag();
+    },
     onPanMove: (contact) => {
+      if (!routeActive()) return;
       scroller.drag(-contact.fdy);
       syncedOffsetInTurn = scroller.offset();
       syncContourSubscribers();
     },
     onPanEnd: (contact) => {
+      if (!routeActive()) return;
       endedOnThisTurn = true;
       scroller.endDrag(-contact.vy);
     },
     onUp: () => {
+      if (!routeActive()) return;
       if (scroller.state() === "idle") {
         const max = Math.max(0, contentHeight() - viewportHeight());
         const current = scroller.offset();
@@ -1705,13 +1818,23 @@ export function ScrollablePage(props: {
       }
     },
     onCancel: () => {
+      if (!routeActive()) return;
       endedOnThisTurn = true;
       if (scroller.state() === "idle") scroller.beginDrag();
       scroller.endDrag(0);
     },
   });
-  bindDpadScroll(scroller);
+  bindDpadScroll(scroller, { active: routeActive });
+  createEffect(() => {
+    if (routeActive()) return;
+    // Stop an in-flight fling/spring without changing the retained offset.
+    // Cancelling the recognizer also releases a contact that crossed a route
+    // transition while the old page was active.
+    gesture.cancel();
+    scroller.stop();
+  });
   onFrame(() => {
+    if (!routeActive()) return;
     if (endedOnThisTurn) {
       endedOnThisTurn = false;
     } else {
@@ -1725,6 +1848,18 @@ export function ScrollablePage(props: {
     const contourChanged = alreadySyncedInPan ? false : syncContourSubscribers();
     if (!alreadySyncedInPan) scheduleContourMicrotask();
     const { rect, viewportChanged } = refreshMeasurements();
+    if (needsActiveMeasurement) {
+      activeMeasurementFrames += 1;
+      // display:none can leave one stale zero-layout frame behind. Give the
+      // native layout one follow-up frame when the first read is not real,
+      // then stop the work hint while retaining the prior extent as a safe
+      // fallback if the host does not expose layout readback.
+      const viewportReady = viewportLayout(viewportNode) !== undefined;
+      const contentReady = committedLayout(contentNode, true) !== undefined;
+      if ((viewportReady && contentReady) || activeMeasurementFrames >= 2) {
+        needsActiveMeasurement = false;
+      }
+    }
     const input = activeTextInput;
     const inputNode = input?.isOpen() ? input.node() : undefined;
     if (viewportChanged && inputNode && activePageScroll === pageScroll) {
@@ -1743,7 +1878,10 @@ export function ScrollablePage(props: {
         if (activeTextInput === input) activeTextInput = undefined;
       }
     }
-  }, { continuous: () => scroller.state() !== "idle" });
+  }, {
+    active: routeActive,
+    continuous: () => needsActiveMeasurement || scroller.state() !== "idle",
+  });
 
   return (
     <ScrollablePageContext.Provider value={scrollContext}>

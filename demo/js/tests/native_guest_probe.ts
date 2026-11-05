@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
+import { backIconPoint } from "./navigation_geometry.ts";
 
 type JsonObject = Record<string, unknown>;
 type ProbeResponse = {
@@ -22,6 +23,12 @@ type DrawOp = {
   y?: number;
   w?: number;
   h?: number;
+  clip?: {
+    x?: number;
+    y?: number;
+    w?: number;
+    h?: number;
+  };
 };
 type Frame = {
   events?: FrameEvent[];
@@ -83,6 +90,12 @@ function event(name: string, payload: JsonObject = {}): JsonObject {
   return { op: "send", message: { type: "event", name, payload } };
 }
 
+function frameCommands(count: number): JsonObject[] {
+  return Array.from({ length: count }, () => ({ op: "frame", deltaMs: 16 }));
+}
+
+const BOOT_STABILIZATION_FRAMES = 20;
+
 function hostResponse(
   requestId: string,
   capability: string,
@@ -136,6 +149,10 @@ function bootstrap(width = 360, height = 640): JsonObject[] {
       error: { code: "capability_unavailable", message: "single-instance native probe" },
     }),
     { op: "frame", deltaMs: 16 },
+    // Retained RouteView adds one layout/visibility pass before the host
+    // response is painted. Keep the real host responses above, then allow the
+    // pinned frame scheduler to settle before any coordinate is measured.
+    ...frameCommands(BOOT_STABILIZATION_FRAMES),
   ];
 }
 
@@ -190,6 +207,16 @@ function frameEvents(frame: Frame, name: string): FrameEvent[] {
   return (frame.events ?? []).filter((item) => item.name === name);
 }
 
+function frameMatching(
+  frames: Frame[],
+  predicate: (frame: Frame) => boolean,
+  description: string,
+): Frame {
+  const frame = frames.find(predicate);
+  assert.ok(frame, `native probe is missing ${description} checkpoint`);
+  return frame!;
+}
+
 // Discover real request IDs from actual bytecode execution. Adding an unrelated
 // bootstrap capability must not redirect a synthetic response to another RPC.
 const bootRequests = framesOf(runProbe([
@@ -220,19 +247,24 @@ const resultResponses = runProbe([
 ]);
 const resultFrames = framesOf(resultResponses);
 assert.ok(resultFrames.length >= 6, "native probe must return all bootstrap/page frames");
-assert.match(textOf(resultFrames[2]), /quickjs-bytecode/, "runtime.info response did not reach the JS runtime page");
-assert.match(textOf(resultFrames[2]), /package_info_plus/, "package_info_plus response did not reach JS");
-assert.match(textOf(resultFrames[3]), /probe\.plugin/, "plugins.list response did not reach the JS plugin page");
-assert.match(textOf(resultFrames[4]), /configured=false/, "updates.status response did not reach the JS update page");
-assert.match(textOf(resultFrames[4]), /stage=not_configured/, "updates.status stage was not rendered");
-assert.match(textOf(resultFrames[4]), /active=embedded/, "updates.status active version was not rendered");
-assert.match(textOf(resultFrames[4]), /lastError=none/, "updates.status lastError was not rendered");
+const runtimeInfoFrame = frameMatching(resultFrames, (frame) => textOf(frame).includes("quickjs-bytecode"), "runtime.info");
+assert.match(textOf(runtimeInfoFrame), /package_info_plus/, "package_info_plus response did not reach JS");
+const pluginsFrame = frameMatching(resultFrames, (frame) => textOf(frame).includes("probe.plugin"), "plugins.list");
+assert.match(textOf(pluginsFrame), /probe\.plugin/, "plugins.list response did not reach the JS plugin page");
+const updatesFrame = frameMatching(resultFrames, (frame) => textOf(frame).includes("configured=false"), "updates.status");
+assert.match(textOf(updatesFrame), /stage=not_configured/, "updates.status stage was not rendered");
+assert.match(textOf(updatesFrame), /active=embedded/, "updates.status active version was not rendered");
+assert.match(textOf(updatesFrame), /lastError=none/, "updates.status lastError was not rendered");
 
-const readyHome = resultFrames[1];
-const gallery = resultFrames[5];
+const readyHome = frameMatching(
+  resultFrames,
+  (frame) => textOf(frame).includes("Made to feel native.") && textOp(frame, "+1") !== undefined,
+  "stable Home layout",
+);
+const gallery = frameMatching(resultFrames, (frame) => textOf(frame).includes("Official building blocks"), "Gallery layout");
 const homePoint = labelCenter(gallery, "Home");
 const plusPoint = labelCenter(readyHome, "+1");
-const checkPoint = labelCenter(resultFrames[4], "Check");
+const checkPoint = labelCenter(updatesFrame, "Check");
 
 const pointerCommands: JsonObject[] = [
   ...bootstrap(),
@@ -287,12 +319,27 @@ const pointerAndStressResponses = runProbe([
 ]);
 const pointerFrames = framesOf(pointerAndStressResponses);
 assert.ok(pointerFrames.length >= 20, "native probe must return pointer and stress frames");
-assert.match(textOf(pointerFrames[2]), /01/, "demo.increment did not reach the retained frame");
-assert.match(textOf(pointerFrames[3]), /native guest/, "demo.setText did not reach the retained frame");
-assert.match(textOf(pointerFrames[4]), /Official building blocks/, "guest route did not reach Gallery");
-assert.match(textOf(pointerFrames[6]), /Made to feel native/, "native pointer Home navigation did not reach the guest route");
-assert.match(textOf(pointerFrames[8]), /02/, "native pointer +1 did not update JS state");
-assert.match(textOf(pointerFrames[8]), /Incremented in JS/, "native pointer +1 did not dispatch the JS action");
+const incrementedFrame = frameMatching(
+  pointerFrames,
+  (frame) => /01/.test(textOf(frame)) && textOf(frame).includes("Incremented in JS"),
+  "demo.increment",
+);
+assert.match(textOf(incrementedFrame), /01/, "demo.increment did not reach the retained frame");
+const setTextFrame = frameMatching(pointerFrames, (frame) => textOf(frame).includes("native guest"), "demo.setText");
+assert.match(textOf(setTextFrame), /native guest/, "demo.setText did not reach the retained frame");
+const pointerGalleryIndex = pointerFrames.findIndex((frame) => textOf(frame).includes("Official building blocks"));
+assert.ok(pointerGalleryIndex >= 0, "native probe is missing guest Gallery navigation checkpoint");
+const pointerGalleryFrame = pointerFrames[pointerGalleryIndex]!;
+assert.match(textOf(pointerGalleryFrame), /Official building blocks/, "guest route did not reach Gallery");
+const pointerHomeFrame = frameMatching(pointerFrames.slice(pointerGalleryIndex + 1), (frame) => textOf(frame).includes("Made to feel native"), "native pointer Home navigation");
+assert.match(textOf(pointerHomeFrame), /Made to feel native/, "native pointer Home navigation did not reach the guest route");
+const pointerPlusFrame = frameMatching(
+  pointerFrames.slice(pointerGalleryIndex + 1),
+  (frame) => /02/.test(textOf(frame)) && textOf(frame).includes("Incremented in JS"),
+  "native pointer +1",
+);
+assert.match(textOf(pointerPlusFrame), /02/, "native pointer +1 did not update JS state");
+assert.match(textOf(pointerPlusFrame), /Incremented in JS/, "native pointer +1 did not dispatch the JS action");
 
 // The refreshed Gallery is taller than the probe viewport, so the Lazy card is
 // below the initial clip. Toggle it through the guest event, then use the
@@ -317,7 +364,11 @@ assert.ok(
   "guest lazy state did not render its subtree after the Gallery scroll",
 );
 
-const updateRequestFrame = pointerFrames[13];
+const updateRequestFrame = frameMatching(
+  pointerFrames,
+  (frame) => frameEvents(frame, "host.request").some((item) => item.payload?.capability === "updates.check"),
+  "native pointer Check request",
+);
 const updateRequests = frameEvents(updateRequestFrame, "host.request");
 const updateRequest = updateRequests.find((item) => item.payload?.capability === "updates.check");
 assert.ok(updateRequest, "native pointer Check did not produce host.request updates.check");
@@ -344,47 +395,42 @@ const updateErrorFrame = framesOf(updateErrorResponses).find((frame) => textOf(f
 assert.ok(updateErrorFrame, "host.response error was not rendered by the updates capability lane");
 assert.match(textOf(updateErrorFrame), /not configured/, "host.response error detail was not rendered");
 
-const stress100 = pointerFrames[18];
-const stress500 = pointerFrames[19];
+const stress100 = frameMatching(pointerFrames, (frame) => textOf(frame).includes("100 retained nodes"), "100-node stress");
+const stress500 = frameMatching(pointerFrames, (frame) => textOf(frame).includes("500 retained nodes"), "500-node stress");
 assert.match(textOf(stress100), /100 retained nodes/, "100-node JS stress run was not rendered");
 assert.match(textOf(stress500), /500 retained nodes/, "500-node JS stress run was not rendered");
 assert.ok((stress500.ops?.length ?? 0) > (stress100.ops?.length ?? 0), "500-node stress frame did not redraw more retained nodes");
 
-// Mobile UI pointer regression: the hidden JS-owned dialog must not leave a
-// full-screen overlay in the native bounds hit tree. Resolve the Dark button
-// from its painted text bounds, press it through the native touch path, and
-// require the theme label to change without a Dart handler.
+// Secondary routes use the fixed app bar and release the entire bottom tab
+// extent. Activate Back through the native input path and require the primary
+// navigation to return without losing the guest's application state.
 const mobileResponses = runProbe([
   ...bootstrap(390, 669),
   event("demo.navigate", { route: "mobile" }),
   ...Array.from({ length: 40 }, () => ({ op: "frame", deltaMs: 16 })),
   { op: "quit" },
 ]);
-const mobileFrames = framesOf(mobileResponses);
-const mobileReady = mobileFrames.at(-1)!;
-const darkPoint = labelCenter(mobileReady, "Dark");
-const mobilePointerResponses = runProbe([
+const mobileReady = framesOf(mobileResponses).at(-1)!;
+
+for (const label of ["Home", "UI", "Host", "Settings"]) {
+  assert.equal((mobileReady.ops ?? []).some((op) => op.type === "text" && op.text === label && Number(op.y) > 610), false, `secondary route must hide ${label} tab`);
+}
+const backPoint = backIconPoint(mobileReady);
+const returnedFrames = framesOf(runProbe([
   ...bootstrap(390, 669),
   event("demo.navigate", { route: "mobile" }),
   ...Array.from({ length: 40 }, () => ({ op: "frame", deltaMs: 16 })),
-  event("input.pointer", { phase: "down", id: 0, x: darkPoint.x, y: darkPoint.y }),
+  event("input.pointer", { phase: "down", id: 0, ...backPoint }),
   { op: "frame", deltaMs: 16 },
-  event("input.pointer", { phase: "up", id: 0, x: darkPoint.x, y: darkPoint.y }),
-  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "up", id: 0, ...backPoint }),
+  ...Array.from({ length: 40 }, () => ({ op: "frame", deltaMs: 16 })),
   { op: "quit" },
-]);
-const mobilePointerFrames = framesOf(mobilePointerResponses);
-const mobileDarkFrame = mobilePointerFrames.at(-1)!;
-assert.match(textOf(mobileDarkFrame), /Light/, "native Mobile UI Dark button did not toggle JS theme state");
-assert.doesNotMatch(textOf(mobileDarkFrame), /\bDark\b/, "native Mobile UI theme button remained dark after press");
-const mobileRootBackground = (mobileDarkFrame.ops ?? []).find((op) =>
-  op.type === "rect" && op.x === 0 && op.y === 0 && op.w === 390 && op.h === 669,
-);
-assert.equal(
-  mobileRootBackground?.color,
-  0xff0e1728,
-  "mobileDark must drive the root Screen canvas color, not only child labels",
-);
+]));
+const returnedHome = returnedFrames.at(-1)!;
+assert.match(textOf(returnedHome), /Made to feel native/, "native Back did not pop to Home");
+for (const label of ["Home", "UI", "Host", "Settings"]) {
+  assert.ok(textOp(returnedHome, label), `Back must restore ${label} tab`);
+}
 
 // Live orientation/DeviceHub resize must preserve the mounted JS page. The
 // native runtime changes its canvas dimensions without reloading QuickJS;
@@ -403,8 +449,16 @@ const liveResizeResponses = runProbe([
   { op: "quit" },
 ]);
 const liveResizeFrames = framesOf(liveResizeResponses);
-const liveWide = liveResizeFrames[3];
-const liveNarrow = liveResizeFrames.at(-1);
+const liveWide = frameMatching(
+  liveResizeFrames,
+  (frame) => frame.width === 951 && textOp(frame, "+1") !== undefined && textOf(frame).includes("01"),
+  "wide resize checkpoint",
+);
+const liveNarrow = frameMatching(
+  liveResizeFrames,
+  (frame) => frame.width === 390 && textOp(frame, "+1") !== undefined && textOf(frame).includes("01"),
+  "narrow resize checkpoint",
+);
 assert.ok(liveWide && liveNarrow, "native resize probe did not return both orientation frames");
 for (const [label, frame] of [["wide", liveWide], ["narrow", liveNarrow]] as const) {
   const rendered = textOf(frame!);
@@ -470,19 +524,19 @@ assert.match(textOf(resizedPointerFrames.at(-1)!), /Incremented in JS/, "resize-
 // for Focusable children.
 const scrollResponses = runProbe([
   // Use a real compact 360x480 viewport so Home has a genuine content extent;
-  // the down point is in the ScrollablePage's blank left gutter, away from
-  // feature-card/focusable hit regions, while remaining inside its clip.
+  // the down point is in the Playground description, away from the
+  // counter buttons, while remaining inside the scroll content clip.
   ...bootstrap(360, 480),
-  event("input.pointer", { phase: "down", id: 0, x: 10, y: 250 }),
+  event("input.pointer", { phase: "down", id: 0, x: 180, y: 350 }),
   { op: "frame", deltaMs: 16 },
-  event("input.pointer", { phase: "move", id: 0, x: 10, y: 150 }),
+  event("input.pointer", { phase: "move", id: 0, x: 180, y: 250 }),
   { op: "frame", deltaMs: 16 },
-  event("input.pointer", { phase: "up", id: 0, x: 10, y: 150 }),
+  event("input.pointer", { phase: "up", id: 0, x: 180, y: 250 }),
   { op: "frame", deltaMs: 16 },
   { op: "quit" },
 ]);
 const scrollFrames = framesOf(scrollResponses);
-const scrollMarker = "Input round-trip";
+const scrollMarker = "Playground";
 const markerFrames = scrollFrames.filter((frame) => textOp(frame, scrollMarker));
 assert.ok(markerFrames.length >= 2, `scroll probe could not locate the Home ${scrollMarker} marker`);
 const beforeScrollMarker = textOp(markerFrames[0]!, scrollMarker);
@@ -563,10 +617,14 @@ const revisionFrames = framesOf(runProbe([
   { op: "frame", deltaMs: 16 },
   { op: "quit" },
 ]));
-assert.match(textOf(revisionFrames[6]!), /Draft: abc/, "old same-ID edit overwrote the newer draft");
-assert.match(textOf(revisionFrames[7]!), /Draft: abc/, "previous editing generation overwrote the draft");
+const replacementIndex = revisionFrames.findIndex((frame) => textOf(frame).includes("Draft: JS replacement"));
+assert.ok(replacementIndex >= 0, "explicit JS replacement did not render");
+const framesBeforeReplacement = revisionFrames.slice(0, replacementIndex);
+const stableDraftFrames = framesBeforeReplacement.filter((frame) => textOf(frame).includes("Draft: abc"));
+assert.ok(stableDraftFrames.length >= 3, "stale native edits did not preserve the latest draft through their checkpoints");
+assert.match(textOf(stableDraftFrames.at(-1)!), /Draft: abc/, "previous editing generation overwrote the draft");
 assert.match(textOf(revisionFrames.at(-1)!), /Draft: JS replacement/, "native echo before the JS replacement overwrote its controlled value");
-const replacement = revisionFrames.at(-2)!;
+const replacement = revisionFrames[replacementIndex]!;
 assert.match(textOf(replacement), /Draft: JS replacement/, "explicit JS controlled value was blocked");
 assert.ok(frameEvents(replacement, "textInput.update").some((packet) =>
   packet.payload?.text === "JS replacement" && packet.payload?.source === "js" && packet.payload?.force === true && packet.payload?.revision === 2,
@@ -636,19 +694,55 @@ assert.ok(
 
 // Client-controlled recording: starting recording is triggered from the JS
 // guest rather than automatically at boot, and the remounted generation
-// restores the Runtime view with the active recording status.
-const recordingBootFrames = framesOf(runProbe([
-  ...bootstrap(360, 1100),
-  event("demo.navigate", { route: "about" }),
+// restores the Runtime view with the active recording status. The Runtime
+// page is intentionally tested at the compact host viewport: its recording
+// card is below the initial clip, so first reveal it through the official
+// page-scroll gesture and then tap the measured native bounds.
+const recordingScrollGesture: JsonObject[] = [
+  event("input.pointer", { phase: "down", id: 0, x: 10, y: 500 }),
   { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "move", id: 0, x: 10, y: 100 }),
+  { op: "frame", deltaMs: 16 },
+  event("input.pointer", { phase: "up", id: 0, x: 10, y: 100 }),
+  { op: "frame", deltaMs: 16 },
+];
+const recordingBootFrames = framesOf(runProbe([
+  ...bootstrap(360, 640),
+  event("demo.navigate", { route: "about" }),
+  ...Array.from({ length: 40 }, () => ({ op: "frame", deltaMs: 16 })),
   { op: "quit" },
 ]));
-const runtimeFrame = recordingBootFrames.at(-1)!;
-const startRecordingPoint = labelCenter(runtimeFrame, "Start recording");
-const recordingStartFrames = framesOf(runProbe([
-  ...bootstrap(360, 1100),
+const recordingInitialFrame = recordingBootFrames.at(-1)!;
+assert.equal(textOp(recordingInitialFrame, "Start recording"), undefined, "recording controls should begin below the compact page clip");
+const recordingRevealFrames = framesOf(runProbe([
+  ...bootstrap(360, 640),
   event("demo.navigate", { route: "about" }),
-  { op: "frame", deltaMs: 16 },
+  ...Array.from({ length: 40 }, () => ({ op: "frame", deltaMs: 16 })),
+  ...recordingScrollGesture,
+  { op: "quit" },
+]));
+const runtimeFrame = recordingRevealFrames.findLast((frame) => textOp(frame, "Start recording") !== undefined);
+const startRecordingOp = runtimeFrame ? textOp(runtimeFrame, "Start recording") : undefined;
+assert.ok(startRecordingOp, "scrolling the Runtime page must reveal Start recording");
+assert.equal(typeof startRecordingOp!.x, "number", "revealed Start recording must have an x bound");
+assert.equal(typeof startRecordingOp!.y, "number", "revealed Start recording must have a y bound");
+assert.equal(typeof startRecordingOp!.w, "number", "revealed Start recording must have a width bound");
+assert.equal(typeof startRecordingOp!.h, "number", "revealed Start recording must have a height bound");
+const startClip = startRecordingOp!.clip;
+assert.ok(startClip && typeof startClip.x === "number" && typeof startClip.y === "number" && typeof startClip.w === "number" && typeof startClip.h === "number", "revealed Start recording must expose its page clip");
+const startRecordingPoint = labelCenter(runtimeFrame!, "Start recording");
+assert.ok(
+  startRecordingPoint.x >= startClip!.x! &&
+    startRecordingPoint.x <= startClip!.x! + startClip!.w! &&
+    startRecordingPoint.y >= startClip!.y! &&
+    startRecordingPoint.y <= startClip!.y! + startClip!.h!,
+  "measured Start recording point must be inside the scroll clip",
+);
+const recordingStartFrames = framesOf(runProbe([
+  ...bootstrap(360, 640),
+  event("demo.navigate", { route: "about" }),
+  ...Array.from({ length: 40 }, () => ({ op: "frame", deltaMs: 16 })),
+  ...recordingScrollGesture,
   event("input.pointer", { phase: "down", id: 0, ...startRecordingPoint }),
   { op: "frame", deltaMs: 16 },
   event("input.pointer", { phase: "up", id: 0, ...startRecordingPoint }),

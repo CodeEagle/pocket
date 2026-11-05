@@ -144,6 +144,53 @@ one theme context, and one GlassSurface adapter. The old UIKit is not copied
 as a second runtime library, and no static “38 components” catalogue is
 claimed. Unimplemented upstream primitives stay outside this showcase.
 
+## Option C Design System (Mobile + Desktop Dual Density & Dark Mode)
+
+`packages/pocket_ui/src/mobile.tsx` and `packages/pocket_ui/src/responsive.ts`
+implement the built-in **Option C Design System**, combining:
+
+1. **Material 3 / Shadcn Light & Dark Semantic Tokens** (`MOBILE_THEME_LIGHT`,
+   `MOBILE_THEME_DARK`): `canvas`, `surface`, `surfaceElevated`, `surfaceMuted`,
+   `ink`, `muted`, `border`, `accent`, `accentSoft`, `accentInk`, `success`,
+   `successSoft`, `warning`, `warningSoft`, `danger`, `dangerSoft`.
+2. **3-Tier Window Size Classes & Dual Density** (`responsive.ts`):
+   `deriveWindowSizeClass(geometry)` (`compact < 600px`, `medium 600..959px`,
+   `expanded >= 960px`) and `deriveDesignDensity(geometry, override)` (`touch`
+   44px targets vs `desktop` 36px targets), exposed through
+   `DesignDensityProvider`, `useDesignDensity()`, and `useWindowSizeClass()`.
+3. **Complete Mobile & Desktop Component Library** (`mobile.tsx`):
+   - Actions & Navigation: `MobileButton` (`filled`, `tonal`, `outlined`,
+     `text`, `danger`), `MobileSegmentedControl`, `Tabs`, `NavigationBar`.
+   - Feedback & Overlays: `MobileToast` (`Toast`), `MobileAlert` (`Alert`),
+     `MobilePopup` / `MobileActionSheet` (`Popup` / `ActionSheet` adapting
+     between mobile bottom sheet on `compact` and centered desktop popover on
+     `medium`/`expanded`), and `MobileDialog` (`Dialog` with confirmation and
+     destructive `danger` modes).
+   - Form Controls: `MobileSwitch`, `MobileStepper`, `MobileProgress`
+     (`ProgressBar`), `MobileCheckbox` (`Checkbox`), `MobileRadioGroup`
+     (`RadioGroup`), and `InputField`.
+   - Data Display: `MobileCard`, `MobileListTile`, `MobileBadge`, `MobileTag`
+     (`Tag`), `MobileAvatar` (`Avatar` with presence status dot),
+     `MobileAccordion` (`Accordion`), and `MobileSkeleton` (`Skeleton`).
+4. **State-Change Animations** (`useStateTransition`, `useAnimatedNumber`):
+   Every interactive control and overlay animates state changes through
+   `onFrame` spring interpolation (`opacity`, `translateX`, `translateY`, and
+   leaf graphic `scale` / `scaleX`) combined with compiler-baked
+   `transition-colors` style records. Containers that host `<Text>` descendants
+   avoid non-translation transforms (`scale != 1.0`, `rotate != 0.0`) so the
+   Rust renderer's `style.rs:declares_transform()` check keeps `TEXT_RUN`
+   active throughout the animation.
+5. **Validation**:
+   - `demo/js/tests/mobile_ui.test.ts`: verifies token palettes, window size
+     classes, design density derivation, and Showcase state transitions across
+     all Option C components.
+   - `sdk/packages/pocket_ui/test/design_system_native.test.ts`: compiles and
+     executes the Option C component suite inside the native QuickJS + Rust
+     engine, asserting both mid-transition animated frames (`opacity`,
+     `translateY`, `scaleX`) and interactive state updates across `Toast`,
+     `Alert`, `Popup`, `Dialog`, `Checkbox`, `RadioGroup`, `Accordion`,
+     `Skeleton`, `Progress`, `Switch`, `Tag`, and `Avatar`.
+
 ## Home visual reuse note
 
 The Home visual refresh continues to reuse the old syslib vocabulary and the
@@ -179,3 +226,11 @@ hardware or battery-power validation. Real pointer navigation, Gallery/Hardware,
 system IME and fixed-chrome scrolling passed; the separately rerun three-app
 recording case also passed with its actual memory budgets and strict replay.
 
+
+## Showcase consumer rewrite
+
+The four-tab Showcase now consumes the shared mobile components and one root
+theme/density provider. Secondary routes use a fixed root `MobileAppBar` and
+`NavigationBar visible={false}`; Settings centralizes appearance and persists it
+through the existing app-scoped storage capability. See
+[SHOWCASE_REWRITE.md](SHOWCASE_REWRITE.md) for provenance, ablation and validation.

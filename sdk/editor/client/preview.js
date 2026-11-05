@@ -39,6 +39,12 @@
   const PARENT_SOURCE = "pocket-editor";
   const MAX_DIMENSION = 32000;
   const tintedImageCache = new WeakMap();
+  // A glass surface is painted in the same DrawOps order as the native host:
+  // copy the already-painted backdrop, blur that copy, then let following
+  // ops (the black scrim and the modal panel) paint above it. Keep one scratch
+  // canvas per preview canvas so opening/closing a modal does not allocate a
+  // new full-viewport buffer on every frame.
+  const glassScratchCache = new WeakMap();
 
   function number(value, fallback) {
     const parsed = Number(value);
@@ -116,7 +122,7 @@
     const context = canvas.getContext("2d");
     if (!context) return null;
     context.putImageData(new ImageData(rgba, width, height), 0, 0);
-    return { canvas, width, height, revision: Number(resource.revision) || 0 };
+    return { canvas, rgba, width, height, revision: Number(resource.revision) || 0 };
   }
 
   function tintedImage(image, tintValue) {
@@ -129,14 +135,19 @@
       tintedImageCache.set(image, variants);
     }
     const cached = variants.get(tint);
-    if (cached) return cached;
+    if (cached) {
+      variants.delete(tint);
+      variants.set(tint, cached);
+      return cached;
+    }
     const canvas = document.createElement("canvas");
     canvas.width = image.width;
     canvas.height = image.height;
     const context = canvas.getContext("2d");
     if (!context) return image;
-    context.drawImage(image.canvas, 0, 0);
-    const data = context.getImageData(0, 0, image.width, image.height);
+    // Retain the decoded CPU pixels: reading a rendered Canvas back for every
+    // intermediate theme colour forces a GPU synchronisation on the UI thread.
+    const data = new ImageData(new Uint8ClampedArray(image.rgba), image.width, image.height);
     const red = (tint >>> 16) & 0xff;
     const green = (tint >>> 8) & 0xff;
     const blue = tint & 0xff;
@@ -150,7 +161,26 @@
     context.putImageData(data, 0, 0);
     const result = { canvas, width: image.width, height: image.height, revision: image.revision };
     variants.set(tint, result);
+    // Interrupted transitions can produce unlimited distinct colours. Keep a
+    // small LRU, also bounded by pixel area for large textures.
+    const limit = Math.max(1, Math.min(8, Math.floor(1024 * 1024 / (image.width * image.height))));
+    while (variants.size > limit) {
+      const oldest = variants.keys().next().value;
+      const retired = variants.get(oldest);
+      variants.delete(oldest);
+      retired.canvas.width = retired.canvas.height = 0;
+    }
     return result;
+  }
+
+  function disposeResource(image) {
+    if (!image) return;
+    for (const variant of tintedImageCache.get(image)?.values() ?? []) {
+      variant.canvas.width = variant.canvas.height = 0;
+    }
+    tintedImageCache.delete(image);
+    image.canvas.width = image.canvas.height = 0;
+    image.rgba = null;
   }
 
   function clipRect(context, clip) {
@@ -281,6 +311,97 @@
     return (index >= 7 && index <= 13) || index === 15 || index === 20 ? 700 : 400;
   }
 
+  function surfaceDescriptor(op) {
+    if (!op || typeof op !== "object") return null;
+    if (op.kind === "glass" && op.parameters && typeof op.parameters === "object") {
+      return { kind: "glass", parameters: op.parameters };
+    }
+    if (op.type !== "hostSurface" || typeof op.asset !== "string") return null;
+    try {
+      const descriptor = JSON.parse(op.asset);
+      if (!descriptor || typeof descriptor !== "object" || descriptor.kind !== "glass" ||
+          !descriptor.parameters || typeof descriptor.parameters !== "object") return null;
+      return { kind: "glass", parameters: descriptor.parameters };
+    } catch {
+      return null;
+    }
+  }
+
+  function glassScratchFor(canvas) {
+    let scratch = glassScratchCache.get(canvas);
+    if (scratch) return scratch;
+    const element = document.createElement("canvas");
+    const context = element.getContext("2d");
+    if (!context) return null;
+    scratch = { canvas: element, context };
+    glassScratchCache.set(canvas, scratch);
+    return scratch;
+  }
+
+  function roundedClip(context, x, y, width, height, radius) {
+    context.beginPath();
+    if (radius > 0 && typeof context.roundRect === "function") {
+      context.roundRect(x, y, width, height, radius);
+    } else {
+      context.rect(x, y, width, height);
+    }
+    context.clip();
+  }
+
+  /** Paint one real browser-side backdrop blur for a native `glass` surface. */
+  function drawGlassSurface(context, op, frameWidth, frameHeight) {
+    const descriptor = surfaceDescriptor(op);
+    if (!descriptor) return false;
+    const source = context.canvas;
+    const scratch = glassScratchFor(source);
+    if (!scratch || typeof scratch.context.filter !== "string") return false;
+    const backingWidth = source.width;
+    const backingHeight = source.height;
+    if (backingWidth <= 0 || backingHeight <= 0) return false;
+    if (scratch.canvas.width !== backingWidth) scratch.canvas.width = backingWidth;
+    if (scratch.canvas.height !== backingHeight) scratch.canvas.height = backingHeight;
+    const scratchContext = scratch.context;
+    const scaleX = backingWidth / Math.max(1, frameWidth);
+    const scaleY = backingHeight / Math.max(1, frameHeight);
+    const scale = Math.min(scaleX, scaleY);
+    const parameters = descriptor.parameters;
+    const sigma = clamp(number(parameters.blur, 5), 0, 20);
+    const tintOpacity = clamp(number(parameters.tintOpacity, 0), 0, 1);
+    const x = number(op.x, 0);
+    const y = number(op.y, 0);
+    const width = Math.max(0, number(op.w, op.width ?? 0));
+    const height = Math.max(0, number(op.h, op.height ?? 0));
+    if (width <= 0 || height <= 0) return false;
+
+    // Copy only the frame that has already been painted. The copy is the
+    // browser equivalent of Flutter's BackdropFilter input texture; it does
+    // not re-run guest layout or invent a screenshot of the modal itself.
+    scratchContext.setTransform(1, 0, 0, 1, 0, 0);
+    scratchContext.globalAlpha = 1;
+    scratchContext.globalCompositeOperation = "copy";
+    scratchContext.filter = `blur(${sigma * scale}px)`;
+    scratchContext.drawImage(source, 0, 0, backingWidth, backingHeight);
+    scratchContext.filter = "none";
+    scratchContext.globalCompositeOperation = "source-over";
+
+    context.save();
+    const clip = op.clip && typeof op.clip === "object" ? op.clip : null;
+    if (clip) {
+      context.beginPath();
+      context.rect(number(clip.x, 0), number(clip.y, 0), Math.max(0, number(clip.w ?? clip.width, 0)), Math.max(0, number(clip.h ?? clip.height, 0)));
+      context.clip();
+    }
+    const radius = clamp(number(parameters.radius, 0), 0, Math.min(width, height) / 2);
+    roundedClip(context, x, y, width, height, radius);
+    context.drawImage(scratch.canvas, 0, 0, backingWidth, backingHeight, 0, 0, frameWidth, frameHeight);
+    if (tintOpacity > 0) {
+      context.fillStyle = `rgba(255,255,255,${tintOpacity})`;
+      context.fillRect(x, y, width, height);
+    }
+    context.restore();
+    return true;
+  }
+
   function drawFrame(context, frame, resources, videos) {
     const width = number(frame.width, 1);
     const height = number(frame.height, 1);
@@ -332,8 +453,10 @@
       } else if (kind === "video") {
         drawVideo(context, videos?.get(videoKey(op)), op);
       } else if (kind === "hostSurface") {
-        // Generic native host surfaces have no browser-side provider. Do not
-        // paint a fabricated rectangle or screenshot.
+        // Glass is a real browser projection of the native compositor
+        // surface. Other host surfaces still have no browser-side provider;
+        // do not paint fabricated rectangles or screenshots for them.
+        drawGlassSurface(context, op, width, height);
       }
       context.restore();
     }
@@ -1532,11 +1655,15 @@
         const asset = String(resource.asset ?? "");
         if (!asset) continue;
         const decoded = decodeResource(resource);
+        disposeResource(resources.get(asset));
         if (decoded) resources.set(asset, decoded);
         else resources.delete(asset);
       }
       for (const asset of Array.isArray(next.releasedResources) ? next.releasedResources : []) {
-        if (typeof asset === "string") resources.delete(asset);
+        if (typeof asset === "string") {
+          disposeResource(resources.get(asset));
+          resources.delete(asset);
+        }
       }
       for (const event of Array.isArray(next.events) ? next.events : []) applyVideoCommand(event);
       syncVideoOps(next.ops);
@@ -1583,7 +1710,9 @@
       status.textContent = `PocketJS native preview · frame ${next.frame} · ${next.width}×${next.height} · full FrameResult transport`;
       announce("preview.frame", { frame: next });
       const requests = Array.isArray(next.events) ? next.events.filter((event) => event && event.name === "host.request") : [];
-      const unsupportedOps = Array.isArray(next.ops) ? next.ops.filter((op) => op && op.type === "hostSurface") : [];
+      const unsupportedOps = Array.isArray(next.ops)
+        ? next.ops.filter((op) => op && op.type === "hostSurface" && !surfaceDescriptor(op))
+        : [];
       if (requests.length) {
         status.textContent = `PocketJS preview · ${requests.length} host request(s) pending`;
         announce("preview.host-request", { requests });
@@ -2062,6 +2191,8 @@
       textInputElement?.remove?.();
       textInputElement = null;
       resetVideoProjection(true);
+      for (const image of resources.values()) disposeResource(image);
+      resources.clear();
       cancelPointerContacts();
       connectionGeneration += 1;
       stream?.close();

@@ -29,6 +29,24 @@ writeFileSync(join(solidPackageRoot, "solid.js"), `export * from ${JSON.stringif
 // repository's source tree is not modified just to select the pinned runtime.
 writeFileSync(isolatedMobileSourcePath, readFileSync(mobileSourcePath));
 writeFileSync(join(isolatedSourceRoot, "legacy.ts"), readFileSync(join(import.meta.dir, "../src/legacy.ts")));
+writeFileSync(join(isolatedSourceRoot, "ui.tsx"), `
+import { createContext } from "solid-js";
+export const ContourConsumedContext = createContext(() => false);
+export const SafeAreaScaffold = (props: any) => ({ type: "scaffold", props });
+export const SafeAreaScaffoldContext = createContext({
+  hasScaffold: false,
+  reservedActions: 0,
+  geometry: () => ({ width: 390, height: 669, safeArea: { top: 0, right: 0, bottom: 0, left: 0 }, keyboardInset: 0, reservedRegions: [] }),
+  topRightContentReserve: () => 0,
+  topRightReserveForBand: () => 0,
+});
+export const ScrollContourItem = (props: any) => ({ type: "scroll-contour-item", props });
+export const useScrollContourReserve = () => ({ nodeRef: () => {}, reserve: () => 0, syncLayout: () => false });
+`);
+writeFileSync(join(isolatedSourceRoot, "responsive.ts"), `
+export const deriveWindowSizeClass = () => "compact";
+export const deriveDesignDensity = () => "touch";
+`);
 
 writeFileSync(runnerPath, `
 import { strict as assert } from "node:assert";
@@ -51,24 +69,7 @@ mock.module("@pocketjs/framework/solid/lifecycle", () => ({
   onFrame: () => () => {},
 }));
 
-const { createContext, createRoot, createSignal } = await import("solid-js");
-mock.module(${JSON.stringify(join(isolatedSourceRoot, "ui.tsx"))}, () => ({
-  ContourConsumedContext: createContext(() => false),
-  SafeAreaScaffold: (props) => ({ type: "scaffold", props }),
-  SafeAreaScaffoldContext: createContext({
-    hasScaffold: false,
-    reservedActions: 0,
-    geometry: () => ({ width: 390, height: 669, safeArea: { top: 0, right: 0, bottom: 0, left: 0 }, keyboardInset: 0, reservedRegions: [] }),
-    topRightContentReserve: () => 0,
-    topRightReserveForBand: () => 0,
-  }),
-  ScrollContourItem: (props) => ({ type: "scroll-contour-item", props }),
-  useScrollContourReserve: () => ({ nodeRef: () => {}, reserve: () => 0, syncLayout: () => false }),
-}));
-mock.module(${JSON.stringify(join(isolatedSourceRoot, "responsive.ts"))}, () => ({
-  deriveWindowSizeClass: () => "compact",
-  deriveDesignDensity: () => "touch",
-}));
+const { createRoot, createSignal } = await import("solid-js");
 const { GlassSurface } = await import(${JSON.stringify(isolatedMobileSourcePath)});
 
 const registrations = [];

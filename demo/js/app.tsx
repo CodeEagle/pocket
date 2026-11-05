@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { mount } from "@pocketjs/framework/solid";
 import { onFrame } from "@pocketjs/framework/solid/lifecycle";
 import { after, simulationHz } from "@pocketjs/framework/clock";
@@ -14,34 +14,66 @@ import {
   View,
 } from "@pocketjs/framework/solid/components";
 import {
-  ActionButton,
-  Badge,
-  Card,
-  DetailModal,
-  EmptyState,
-  Header,
+  MobileButton,
+  MobileCard,
   InputField,
-  List,
-  MetricCard,
   MiniBarChart,
   MobileAlert,
   MobileBadge,
+  MobileBackButton,
+  RouteView,
+  MobileThemeProvider,
+  createMobileTheme,
+  useMobileTheme,
+  toMobileColor,
   MobileDialog,
   MobilePopup,
   MobileToast,
   NavigationBar,
-  PageIntro,
-  Row,
-  SectionHeading,
+  MobileAppBar,
   SafeAreaScaffold,
   ScrollContourItem,
   ScrollablePage,
-  StatusBar,
-  Tabs,
-  TileGrid,
-  ViewText,
+  MobileListTile,
   deliverTextInputEvent,
   useScrollContourReserve,
+  ShadcnAspectRatio,
+  ShadcnBreadcrumb,
+  ShadcnButtonGroup,
+  ShadcnCalendar,
+  ShadcnCarousel,
+  ShadcnChart,
+  ShadcnCollapsible,
+  ShadcnCombobox,
+  ShadcnCommand,
+  ShadcnContextMenu,
+  ShadcnDataTable,
+  ShadcnDatePicker,
+  ShadcnDrawer,
+  ShadcnDropdownMenu,
+  ShadcnEmpty,
+  ShadcnFormField,
+  ShadcnHoverCard,
+  ShadcnInputGroup,
+  ShadcnInputOTP,
+  ShadcnItem,
+  ShadcnKbd,
+  ShadcnMenubar,
+  ShadcnNavigationMenu,
+  ShadcnPagination,
+  ShadcnPopover,
+  ShadcnResizable,
+  ShadcnScrollArea,
+  ShadcnSelect,
+  ShadcnSeparator,
+  ShadcnSheet,
+  ShadcnSidebar,
+  ShadcnSpinner,
+  ShadcnTable,
+  ShadcnTextarea,
+  ShadcnToggleGroup,
+  ShadcnTooltip,
+  ShadcnTypography,
 } from "@pocket/ui";
 import { HardwarePage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx";
 import { createHostBridge, hostError, type HostBridge, type HostEvent, type JsonValue } from "@pocket/ui/host";
@@ -51,9 +83,10 @@ import { createPocketPlatformClient } from "@pocket/ui/platform";
 import { createPlatformExperience, isUnsupportedPlatformError } from "@pocket/ui/platform-experience";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
 import { installShowcaseSystem } from "./system.ts";
-import { demoRelease } from "./release.ts";
-import { availableDisplayPanes, computeTransitionDescriptor, createDisplayGeometry, deriveResponsiveLayout } from "@pocket/ui";
+import { SettingsPage, readAppearance, storedAppearance } from "./settings.tsx";
+import { computeTransitionDescriptor, createDisplayGeometry } from "@pocket/ui";
 import {
+  isPrimaryRoute,
   PERFORMANCE_HISTORY_LIMIT,
   PERFORMANCE_JANK_LIMIT,
   initialDemoState,
@@ -115,7 +148,13 @@ const hostTabs = [
   { id: "stress", label: "Stress" },
 ];
 
-const demoTitle = "Pocket Host Lab";
+const demoTitle = "Pocket";
+const showcaseTabs = [
+  { id: "home" as const, label: "Home", kind: "home" as const },
+  { id: "gallery" as const, label: "UI", kind: "gallery" as const },
+  { id: "about" as const, label: "Host", kind: "host" as const },
+  { id: "settings" as const, label: "Settings", kind: "settings" as const },
+];
 
 function decode(line: string): BridgeMessage | undefined {
   try {
@@ -133,7 +172,7 @@ function paramsOf(message: BridgeMessage): Record<string, unknown> {
 function routeOf(value: unknown): Route | undefined {
   const route = String(value ?? "");
   // `gallery` remains the old probe's compatibility spelling for UI.
-  if (route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video") return route;
+  if (route === "settings" || route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video") return route;
   if (route === "ui") return "gallery";
   return undefined;
 }
@@ -152,6 +191,9 @@ function hostLabel(state: CapabilityState): string {
 function supportsRecording(state: CapabilityState): boolean {
   const result = state.result && typeof state.result === "object" ? state.result as Record<string, unknown> : {};
   const features = result.features as Record<string, unknown> | undefined;
+  // Keep legacy hosts usable: only an explicit false disables the optional
+  // panel. The action still reports the real host error if the provider is
+  // absent; missing metadata is not evidence of unsupported recording.
   return features?.recording !== false;
 }
 
@@ -162,11 +204,11 @@ function hostPhase(state: CapabilityState): string {
   return "Error";
 }
 
-function toneForPhase(state: CapabilityState): "cyan" | "green" | "amber" | "rose" {
-  if (state.phase === "ready") return capabilityUnavailable(state) ? "amber" : "green";
-  if (state.phase === "error") return "rose";
-  if (state.phase === "loading") return "amber";
-  return "cyan";
+function toneForPhase(state: CapabilityState): "accent" | "success" | "warning" | "danger" {
+  if (state.phase === "ready") return capabilityUnavailable(state) ? "warning" : "success";
+  if (state.phase === "error") return "danger";
+  if (state.phase === "loading") return "warning";
+  return "accent";
 }
 
 function valueSummary(value: unknown): string {
@@ -478,40 +520,47 @@ function CapabilityCard(props: {
   state: CapabilityState;
   onRefresh: () => void;
 }): JSX.Element {
+  const theme = useMobileTheme();
   const [expanded, setExpanded] = createSignal(true);
   const lines = () => summaryLines(capabilitySummary(props.state));
   return (
-    <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-white border-slate-200">
-      <Row>
-        <ViewText title={props.title} body={props.capability} />
-        <Badge tone={toneForPhase(props.state)}>{hostPhase(props.state)}</Badge>
-      </Row>
+    <MobileCard title={props.title} detail={props.capability}>
+      <MobileBadge tone={toneForPhase(props.state)} label={hostPhase(props.state)} />
       <Show when={expanded()}>
         <View class="flex-col gap-1">
-          <For each={lines()}>{(line) => <Text class="text-xs text-slate-600">{line}</Text>}</For>
+          <For each={lines()}>{(line) => <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>{line}</Text>}</For>
         </View>
       </Show>
-      <Row>
-        <ActionButton label={expanded() ? "Hide details" : "Details"} kind="quiet" onPress={() => setExpanded(!expanded())} />
-        <ActionButton label={props.state.phase === "loading" ? "Waiting" : "Refresh"} kind="quiet" onPress={props.onRefresh} />
-      </Row>
-    </Card>
+      <View class="flex-row items-center gap-2">
+        <MobileButton label={expanded() ? "Hide details" : "Details"} kind="text" onPress={() => setExpanded(!expanded())} />
+        <MobileButton label={props.state.phase === "loading" ? "Waiting" : "Refresh"} kind="text" onPress={props.onRefresh} />
+      </View>
+    </MobileCard>
   );
 }
 
 function App() {
   const [state, setState] = createSignal<DemoState>(initialDemoState());
-  const displayGeometry = createDisplayGeometry();
-  // MobileUiPage owns the theme choice in JS state. Keep the canvas itself in
-  // the same palette so a dark mobile page never exposes the light Screen
-  // behind a resized/scrolling subtree.
-  const mobileDark = () => isShowcaseRoute(state().route) && state().mobileDark;
-  const responsiveLayout = () => deriveResponsiveLayout(displayGeometry());
-  const wideLayout = () => responsiveLayout().mode === "wide";
-  const contentPaneWidth = (): number => Math.max(0, displayGeometry().width);
-  const contentPaneStyle = () => ({
-    grow: 1,
+  // The stack is the navigation source of truth. The Set is only an instance
+  // cache for visited primary tabs; popped secondary routes leave this list
+  // and Solid disposes their resources. Every retained route owns its actual
+  // local signals and ScrollablePage instead of mirrored scroll snapshots.
+  const primaryPages = new Set<Route>(["home"]);
+  const stack = createMemo(() => state().routeStack);
+  const mountedRoutes = createMemo(() => {
+    const entries = stack();
+    for (const route of entries) if (isPrimaryRoute(route)) primaryPages.add(route);
+    return [...primaryPages, ...entries.filter((route) => !isPrimaryRoute(route))];
   });
+  const displayGeometry = createDisplayGeometry();
+  // One persisted appearance applies to the canvas and every mounted route.
+  const mobileDark = () => state().mobileDark;
+  const theme = () => createMobileTheme(mobileDark(), state().accentColor);
+  const [preferencesReady, setPreferencesReady] = createSignal(false);
+  const [preferencesStatus, setPreferencesStatus] = createSignal("Loading your preferences…");
+  let saveQueue: Promise<void> = Promise.resolve();
+  let saveRevision = 0;
+  const contentPaneWidth = (): number => Math.max(0, displayGeometry().width);
   // Performance samples arrive independently of the application reducer. This
   // keeps a 1 Hz/host-driven metric stream from rebuilding Home/Stress trees.
   const [performance, setPerformance] = createSignal<PerformanceSnapshot>({
@@ -582,12 +631,41 @@ function App() {
     if (event.type === "navigate" && event.route !== state().route) pendingTransitionDirection = "forward";
     if (event.type === "popRoute" && state().routeStack.length > 1) pendingTransitionDirection = "reverse";
     setState((current) => reduceDemoState(current, event));
+    if (event.type === "setMobileDark" || event.type === "setAccentColor" || event.type === "setInterfaceDensity" || event.type === "resetAppearance") {
+      const value = storedAppearance(state());
+      const revision = ++saveRevision;
+      setPreferencesStatus("Saving preferences…");
+      saveQueue = saveQueue.then(async () => {
+        try {
+          await platform.storage.set("appearance", value);
+          if (revision === saveRevision) setPreferencesStatus("Saved on this device");
+        } catch {
+          if (revision === saveRevision) setPreferencesStatus("Changes apply this session. Device storage is unavailable.");
+        }
+      });
+    }
     if (event.type !== "capabilityStart" && event.type !== "capabilitySuccess" && event.type !== "capabilityFailure") {
       publishPerformanceContext();
     }
   };
 
   const navigate = (route: Route): void => dispatch({ type: "navigate", route });
+  const restorePreferences = async (): Promise<void> => {
+    setPreferencesReady(false);
+    setPreferencesStatus("Loading your preferences…");
+    try {
+      await system.ready;
+      const saved = readAppearance(await platform.storage.get("appearance"));
+      if (saved) dispatch({ type: "restoreAppearance", ...saved });
+      setPreferencesStatus(saved ? "Saved on this device" : "Using the default appearance");
+    } catch {
+      setPreferencesStatus("Changes apply this session. Device storage is unavailable.");
+    } finally {
+      setPreferencesReady(true);
+    }
+  };
+  onMount(() => { void restorePreferences(); });
+
 
   const isShowcaseRoute = (route: Route): boolean =>
     route === "mobile" || route === "transitions" || route === "hardware" || route === "video";
@@ -657,6 +735,21 @@ function App() {
       },
     );
   };
+
+  // Camera access belongs to the visible device page. Keep this gate above
+  // page lifetime so a start result arriving after pop is stopped as well.
+  let stoppedPreviewRequest: string | null | undefined;
+  createEffect(() => {
+    const current = state();
+    if (current.route === "hardware") {
+      stoppedPreviewRequest = undefined;
+      return;
+    }
+    const preview = current.hardwareCameraPreviewStart;
+    if (preview.phase !== "ready" || preview.requestId === stoppedPreviewRequest) return;
+    stoppedPreviewRequest = preview.requestId;
+    requestCapability("hardwareCameraPreviewStop", "hardware.camera.preview.stop");
+  });
 
   const runStress = (requestedNodes: number): void => {
     const nodeCount = requestedNodes === 500 ? 500 : 100;
@@ -792,60 +885,58 @@ function App() {
     });
   });
 
+  const renderRoute = (route: Route): JSX.Element => {
+    switch (route) {
+      case "home":
+        return <HomePage state={state} platform={platform} system={system} dispatch={dispatch} runtime={state().runtimeInfo} />;
+      case "settings":
+        return <SettingsPage state={state} dispatch={dispatch} ready={preferencesReady} status={preferencesStatus} />;
+      case "gallery":
+        return <GalleryPage state={state} dispatch={dispatch} contentWidth={contentPaneWidth} />;
+      case "mobile":
+        return <ScrollablePage><MobileUiPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>;
+      case "transitions":
+        return <ScrollablePage><TransitionsPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>;
+      case "hardware":
+        return <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} host={host} experience={experience} /></ScrollablePage>;
+      case "video":
+        return <VideoPage host={host} platform={platform} onNavigate={navigate} />;
+      default:
+        return <HostPages route={route} host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} recordingStatus={recordingStatus} />;
+    }
+  };
+
   // The retained Flutter host consumed MediaQuery.padding.top before its page
   // body. PocketView reports the equivalent logical inset through
   // display.viewport; consume it once at the SystemUI shell so every route
   // (including the Home header and mobile AppBar) starts below the status bar
   // without teaching each page its own safe-area state.
   return (
+    <MobileThemeProvider theme={theme} density={() => state().interfaceDensity}>
     <Screen
       class={mobileDark() ? "w-full h-full flex-col bg-[#0E1728] overflow-hidden" : "w-full h-full flex-col bg-[#F5F6FA] overflow-hidden"}
     >
-      <SafeAreaScaffold edges={["top"]} geometry={() => displayGeometry()} class="flex-col w-full h-full">
-      <Show when={!isShowcaseRoute(state().route)}>
-        <Header
-          title={demoTitle}
-          subtitle={`${demoRelease} · Solid guest · ${hostLabel(state().runtimeInfo)}`}
-        />
-      </Show>
+      <SafeAreaScaffold
+        edges={isPrimaryRoute(state().route) ? ["top"] : ["top", "bottom"]}
+        geometry={() => displayGeometry()}
+        class={mobileDark() ? "flex-col w-full h-full bg-[#09090B]" : "flex-col w-full h-full bg-[#FAFAFA]"}
+      >
       <FocusScope class="flex-1 flex-col overflow-hidden" autoFocus restoreFocus>
-        {/* Keep FocusScope's own props static and mount a single bottom
-            NavigationBar TabBar below the active route viewport across both
-            folded and unfolded Duo postures. */}
+      <MobileAppBar
+        title={state().route === "home" ? demoTitle : state().route === "gallery" ? "UI Collection" : state().route === "about" ? "Host" : state().route === "settings" ? "Settings" : state().route === "mobile" ? "Mobile UI" : state().route === "transitions" ? "Transitions" : state().route === "hardware" ? "Hardware" : state().route === "video" ? "Video Lab" : hostTabs.find((tab) => tab.id === state().route)?.label ?? "Frame diagnostics"}
+        centered={!isPrimaryRoute(state().route)}
+        leading={isPrimaryRoute(state().route) ? undefined : <MobileBackButton onPress={() => dispatch({ type: "popRoute" })} />}
+      />
+        {/* Visibility is derived from the route, without a second nav state. */}
         <View class="flex-1 flex-col h-full overflow-hidden">
-          <View class="flex-1 w-full h-full overflow-hidden" style={{ ...contentPaneStyle(), translateX: transitionDescriptor().inTx, translateY: transitionDescriptor().inTy, scale: transitionDescriptor().inScale }}>
-            <Show when={state().route === "home"}>
-              <HomePage
-                state={state}
-                platform={platform}
-                system={system}
-                dispatch={dispatch}
-                runtime={state().runtimeInfo}
-                onRefresh={() => requestCapability("runtimeInfo", "runtime.info")}
-                wide={wideLayout}
-                contentWidth={() => undefined}
-              />
-            </Show>
-            <Show when={state().route === "gallery"}>
-              <GalleryPage state={state} dispatch={dispatch} contentWidth={contentPaneWidth} />
-            </Show>
-            <Show when={state().route === "mobile"}>
-              <ScrollablePage><MobileUiPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
-            </Show>
-            <Show when={state().route === "transitions"}>
-              <ScrollablePage><TransitionsPage state={state} dispatch={dispatch} requestCapability={requestCapability} /></ScrollablePage>
-            </Show>
-            <Show when={state().route === "hardware"}>
-              <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} host={host} experience={experience} /></ScrollablePage>
-            </Show>
-            <Show when={state().route === "video"}>
-              <VideoPage host={host} platform={platform} onNavigate={navigate} />
-            </Show>
-            <Show when={state().route === "about" || state().route === "bytecode" || state().route === "updates" || state().route === "plugins" || state().route === "stress" || state().route === "performance"}>
-              <HostPages host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} recordingStatus={recordingStatus} />
-            </Show>
+          <View class="flex-1 w-full h-full overflow-hidden" style={{ translateX: transitionDescriptor().inTx, translateY: transitionDescriptor().inTy, scale: transitionDescriptor().inScale }}>
+            <For each={mountedRoutes()}>{(route) => (
+              <RouteView active={state().route === route}>
+                {renderRoute(route)}
+              </RouteView>
+            )}</For>
           </View>
-          <NavigationBar route={state().route} onNavigate={navigate} wide={wideLayout} geometry={() => displayGeometry()} />
+          <NavigationBar route={state().route} onNavigate={navigate} items={showcaseTabs} visible={isPrimaryRoute(state().route)} dark={mobileDark()} accentColor={theme().accentColor} geometry={() => displayGeometry()} />
         </View>
       </FocusScope>
       </SafeAreaScaffold>
@@ -860,7 +951,7 @@ function App() {
         }}
       />
       <Show when={state().detailsOpen}>
-        <DetailModal
+        <MobileDialog
           open={state().detailsOpen}
           title={state().selectedComponent ?? "Component"}
           body={componentDetails[state().selectedComponent ?? ""] ?? "Official guest composition."}
@@ -868,6 +959,7 @@ function App() {
         />
       </Show>
     </Screen>
+    </MobileThemeProvider>
   );
 }
 
@@ -877,68 +969,56 @@ function HomePage(props: {
   system: ReturnType<typeof installShowcaseSystem>;
   dispatch: (event: DemoEvent) => void;
   runtime: CapabilityState;
-  onRefresh: () => void;
-  wide?: () => boolean;
-  contentWidth?: () => number | undefined;
 }): JSX.Element {
-  const wide = () => props.wide?.() === true;
-  const contentWidth = () => props.contentWidth?.();
-  const panelLayout = () => wide() ? "flex-row gap-3 mx-5" : "flex-col gap-3 mx-5";
-  const panelClass = () => wide()
-    ? "flex-1 flex-col gap-3 p-4 rounded-xl bg-white"
-    : "flex-col gap-3 p-4 rounded-xl bg-white";
+  const theme = useMobileTheme();
   return (
     <ScrollablePage>
-      <View class="flex-col gap-3 pb-5">
+      <View class="flex-col gap-3 p-4 pb-6">
         <ScrollContourItem
           defaultInBand
-          class="flex-col gap-2 mx-5 mt-4 p-4 rounded-xl bg-[#315deb]"
-          style={contentWidth() === undefined ? undefined : { width: contentWidth()! }}
+          class={
+            theme().name === "dark"
+              ? "flex-col gap-1.5 p-4 rounded-xl bg-[#18181B] border-[#27272A]"
+              : "flex-col gap-1.5 p-4 rounded-xl bg-[#18181B] border-[#18181B]"
+          }
+          style={{ radius: 12, borderWidth: 1 }}
         >
-          <View class="flex-row items-center gap-2">
-            <View class="w-[6] h-[6] rounded-full bg-[#a9f2ce]" />
-            <Text class="text-xs text-blue-100 font-bold">POCKET SHOWCASE</Text>
-          </View>
-          <Text class="text-2xl text-white font-bold">Made to feel native.</Text>
-          <Text class="text-sm text-blue-100">Small building blocks. Real possibilities.</Text>
+          <Text class="text-xs text-[#A1A1AA] font-bold">POCKET SHOWCASE</Text>
+          <Text class="text-2xl text-[#FAFAFA] font-bold">Made to feel native.</Text>
+          <Text class="text-xs text-[#A1A1AA]">Small building blocks. Real possibilities.</Text>
         </ScrollContourItem>
-        <HomeExplore wide={wide} dispatch={props.dispatch} />
-        <ScrollContourItem class="flex-row items-center justify-between mx-5">
-          <Text class="text-sm text-slate-950 font-bold">Playground</Text>
-          <Text class="text-xs text-slate-500">Try it live</Text>
-        </ScrollContourItem>
-        <ScrollContourItem enabled={wide} class={panelLayout()}>
-        <Card class={panelClass()}>
-          <ViewText title="Input round-trip" body="Your system keyboard, right here." />
+        <HomeExplore dispatch={props.dispatch} />
+        <MobileCard title="Playground" detail="A small interaction. An immediate response.">
+          <Named name="CounterCard">
+            <View class="flex-row items-center justify-between gap-3">
+              <View class="flex-col gap-1 flex-1">
+                <Text class={theme().name === "dark" ? "text-sm text-[#FAFAFA] font-bold" : "text-sm text-[#09090B] font-bold"}>Counter</Text>
+                <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>{props.state().lastAction}</Text>
+              </View>
+              <View class="flex-row items-center gap-2">
+                <MobileButton label="−" kind="tonal" onPress={() => props.dispatch({ type: "decrement" })} />
+                <Text class={theme().name === "dark" ? "text-xl text-[#FAFAFA] font-bold" : "text-xl text-[#09090B] font-bold"}>{String(props.state().count).padStart(2, "0")}</Text>
+                <MobileButton label="+1" onPress={() => props.dispatch({ type: "increment" })} />
+              </View>
+            </View>
+          </Named>
+          <Text class={theme().name === "dark" ? "text-sm text-[#FAFAFA] font-bold" : "text-sm text-[#09090B] font-bold"}>Input round-trip</Text>
           <InputField
             value={() => props.state().draft}
             onInput={(value) => props.dispatch({ type: "draft", value })}
             onSubmit={(value) => props.dispatch({ type: "draft", value })}
-            appearance={{ fillColor: "#f5f6fa", borderColor: "#e4e8f0", focusedBorderColor: "#315deb", borderRadius: 10, paddingVertical: 11 }}
+            appearance={theme().name === "dark"
+              ? { fillColor: "#09090B", textColor: "#FAFAFA", placeholderColor: "#A1A1AA", borderColor: "#27272A", focusedBorderColor: "#FAFAFA", borderRadius: 8 }
+              : { fillColor: "#FFFFFF", textColor: "#09090B", placeholderColor: "#71717A", borderColor: "#E4E4E7", focusedBorderColor: "#18181B", borderRadius: 8 }}
           />
-          <Text class="text-xs text-slate-500">Draft: {props.state().draft || "(empty)"}</Text>
-        </Card>
-        <Named name="CounterCard">
-          <Card class={panelClass()}>
-            <View class="flex-row items-center justify-between gap-3">
-              <ViewText title="Counter" body={props.state().lastAction} />
-              <View class="flex-row items-center gap-3">
-                <ActionButton label="−" kind="quiet" onPress={() => props.dispatch({ type: "decrement" })} />
-                <Text class="text-2xl text-slate-950 font-bold">{String(props.state().count).padStart(2, "0")}</Text>
-                <ActionButton label="+1" onPress={() => props.dispatch({ type: "increment" })} />
-              </View>
-            </View>
-          </Card>
-        </Named>
-        </ScrollContourItem>
+          <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>Draft: {props.state().draft || "(empty)"}</Text>
+        </MobileCard>
         <PlatformAppsCard platform={props.platform} system={props.system} />
-        <ScrollContourItem class="flex-row items-center justify-between mx-5 px-1 py-2">
-          <View class="flex-row items-center gap-2">
-            <View class={props.runtime.phase === "error" ? "w-[6] h-[6] rounded-full bg-rose-500" : "w-[6] h-[6] rounded-full bg-emerald-500"} />
-            <Text class="text-xs text-slate-500">{props.runtime.phase === "ready" ? "Runtime ready" : props.runtime.phase === "error" ? "Runtime unavailable" : "Connecting"}</Text>
-          </View>
-          <ActionButton label="Open Host details" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "about" })} />
-        </ScrollContourItem>
+        <MobileListTile
+          title={props.runtime.phase === "ready" ? "Runtime ready" : props.runtime.phase === "error" ? "Runtime unavailable" : "Connecting"}
+          detail="Explore the host behind your experience."
+          trailing={<MobileButton label="Open Host details" kind="text" onPress={() => props.dispatch({ type: "navigate", route: "about" })} />}
+        />
       </View>
     </ScrollablePage>
   );
@@ -957,6 +1037,7 @@ function miniAppResultSummary(value: JsonValue | undefined): string {
 }
 
 function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatformClient>; system: ReturnType<typeof installShowcaseSystem> }): JSX.Element {
+  const theme = useMobileTheme();
   const [status, setStatus] = createSignal("Preparing apps...");
   onMount(() => {
     void props.system.ready.then(
@@ -977,30 +1058,31 @@ function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatf
     } catch (error) { setStatus(hostError(error).message); }
   };
   return (
-    <Card class="flex-col gap-3 mx-5 p-4 rounded-xl bg-white">
+    <MobileCard>
       <View class="flex-row items-center justify-between">
-        <ViewText title="Mini Apps" body="A little more to explore." />
-        <Badge tone="cyan">2 APPS</Badge>
+        <MobileListTile title="Mini Apps" detail="A little more to explore." />
+        <MobileBadge label="2 APPS" tone="neutral" />
       </View>
       <View class="flex-col gap-2">
-        <ActionButton label="Open profile app" onPress={() => void open("pocket.demo.profile")} />
-        <ActionButton label="Open lobby app" kind="quiet" onPress={() => void open("pocket.demo.lobby")} />
+        <MobileButton label="Open profile app" onPress={() => void open("pocket.demo.profile")} />
+        <MobileButton label="Open lobby app" kind="text" onPress={() => void open("pocket.demo.lobby")} />
       </View>
-      <For each={summaryLines(status())}>{(line) => <Text class="text-xs text-slate-500">{line}</Text>}</For>
+      <For each={summaryLines(status())}>{(line) => <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-500"}>{line}</Text>}</For>
       <Show when={message() !== "No app messages yet"}>
-        <For each={summaryLines(message())}>{(line) => <Text class="text-xs text-slate-500">{line}</Text>}</For>
+        <For each={summaryLines(message())}>{(line) => <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-500"}>{line}</Text>}</For>
       </Show>
-      <ActionButton label="Prewarm lobby" kind="quiet" onPress={() => {
+      <MobileButton label="Prewarm lobby" kind="text" onPress={() => {
         void props.system.ready.then(() => props.platform.prewarm("pocket.demo.lobby")).then(
           () => setStatus("Lobby prewarmed; its guest clock is paused"),
           (error) => setStatus(hostError(error).message),
         );
       }} />
-    </Card>
+    </MobileCard>
   );
 }
 
-function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) => void }): JSX.Element {
+function HomeExplore(props: { dispatch: (event: DemoEvent) => void }): JSX.Element {
+  const theme = useMobileTheme();
   const features = [
     { title: "Mobile UI", detail: "Components", route: "mobile" as const },
     { title: "Transitions", detail: "Motion", route: "transitions" as const },
@@ -1008,17 +1090,31 @@ function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) 
     { title: "Video Lab", detail: "Playback", route: "video" as const },
   ];
   return (
-    <ScrollContourItem class="flex-row gap-2 mx-5">
+    <ScrollContourItem class="flex-row gap-2">
       <For each={features}>{(feature) => (
-        <Focusable class="flex-1 flex-col gap-2 h-[104] p-2 rounded-xl bg-white focus:bg-blue-50 overflow-hidden" onPress={() => props.dispatch({ type: "navigate", route: feature.route })}>
-          <View class="w-[30] h-[30] items-center justify-center rounded-lg bg-blue-50">
+        <Focusable
+          class={
+            theme().name === "dark"
+              ? "flex-1 flex-col gap-2 h-[104] p-2.5 rounded-xl bg-[#09090B] border-[#27272A] focus:bg-[#18181B] overflow-hidden"
+              : "flex-1 flex-col gap-2 h-[104] p-2.5 rounded-xl bg-white border-[#E4E4E7] focus:bg-[#F4F4F5] overflow-hidden"
+          }
+          style={{ radius: 12, borderWidth: 1 }}
+          onPress={() => props.dispatch({ type: "navigate", route: feature.route })}
+        >
+          <View
+            class={
+              theme().name === "dark"
+                ? "w-[30] h-[30] items-center justify-center rounded-lg bg-[#27272A]"
+                : "w-[30] h-[30] items-center justify-center rounded-lg bg-[#F4F4F5]"
+            }
+          >
             <Show when={feature.route === "mobile"}><Image class="w-[20] h-[20]" src="icons/components.svg" /></Show>
             <Show when={feature.route === "transitions"}><Image class="w-[20] h-[20]" src="icons/motion.svg" /></Show>
             <Show when={feature.route === "hardware"}><Image class="w-[20] h-[20]" src="icons/hardware.svg" /></Show>
-            <Show when={feature.route === "video"}><Text class="text-sm text-blue-600">▶</Text></Show>
+            <Show when={feature.route === "video"}><Text class={theme().name === "dark" ? "text-sm text-[#FAFAFA]" : "text-sm text-[#09090B]"}>▶</Text></Show>
           </View>
-          <Text class="text-xs text-slate-950 font-bold">{feature.title}</Text>
-          <Text class="text-xs text-slate-500">{feature.detail}</Text>
+          <Text class={theme().name === "dark" ? "text-xs text-[#FAFAFA] font-bold" : "text-xs text-[#09090B] font-bold"}>{feature.title}</Text>
+          <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>{feature.detail}</Text>
         </Focusable>
       )}</For>
     </ScrollContourItem>
@@ -1031,9 +1127,10 @@ function GalleryTile(props: {
   contentWidth: () => number;
   onSelect: () => void;
 }): JSX.Element {
+  const theme = useMobileTheme();
   const { leftReserve, nodeRef, reserve } = useScrollContourReserve({
-    itemLeft: 20,
-    itemRight: () => Math.max(0, props.contentWidth() - 20),
+    itemLeft: 16,
+    itemRight: () => Math.max(0, props.contentWidth() - 16),
   });
   let appliedLeftNonZero = false;
   const tileStyle = () => {
@@ -1041,25 +1138,37 @@ function GalleryTile(props: {
     const r = reserve();
     const isLeftColumn = props.index() % 2 === 0;
     if (isLeftColumn && l > 0) appliedLeftNonZero = true;
-    const width = Math.max(0, (props.contentWidth() - l - r - 40 - 12) / 2);
+    const width = Math.max(0, (props.contentWidth() - l - r - 32 - 12) / 2);
     return {
       width,
+      radius: 12,
+      borderWidth: 1,
       ...(isLeftColumn && (l > 0 || appliedLeftNonZero) ? { marginL: l } : {}),
     };
   };
   return (
     <Focusable
       nodeRef={nodeRef}
-      class="flex-col gap-3 h-[112] p-4 rounded-xl bg-white focus:bg-blue-50 overflow-hidden"
+      class={
+        theme().name === "dark"
+          ? "flex-col gap-3 h-[112] p-4 rounded-xl bg-[#09090B] border-[#27272A] focus:bg-[#18181B] overflow-hidden"
+          : "flex-col gap-3 h-[112] p-4 rounded-xl bg-white border-[#E4E4E7] focus:bg-[#F4F4F5] overflow-hidden"
+      }
       style={tileStyle()}
       onPress={props.onSelect}
     >
-      <View class="w-[28] h-[28] items-center justify-center rounded-lg bg-blue-50">
-        <Text class="text-xs text-blue-600 font-bold">{props.card.slice(0, 2)}</Text>
+      <View
+        class={
+          theme().name === "dark"
+            ? "w-[28] h-[28] items-center justify-center rounded-md bg-[#27272A]"
+            : "w-[28] h-[28] items-center justify-center rounded-md bg-[#F4F4F5]"
+        }
+      >
+        <Text class={theme().name === "dark" ? "text-xs text-[#FAFAFA] font-bold" : "text-xs text-[#09090B] font-bold"}>{props.card.slice(0, 2)}</Text>
       </View>
       <View class="flex-row items-center justify-between">
-        <Text class="text-sm text-slate-950 font-bold">{props.card}</Text>
-        <Text class="text-sm text-slate-400">›</Text>
+        <Text class={theme().name === "dark" ? "text-sm text-[#FAFAFA] font-bold" : "text-sm text-[#09090B] font-bold"}>{props.card}</Text>
+        <Text class={theme().name === "dark" ? "text-sm text-[#A1A1AA]" : "text-sm text-[#71717A]"}>›</Text>
       </View>
     </Focusable>
   );
@@ -1070,14 +1179,24 @@ function GalleryPage(props: {
   dispatch: (event: DemoEvent) => void;
   contentWidth: () => number;
 }): JSX.Element {
+  const theme = useMobileTheme();
   const [galleryToastOpen, setGalleryToastOpen] = createSignal(true);
   const [galleryPopupOpen, setGalleryPopupOpen] = createSignal(false);
   const [galleryDialogOpen, setGalleryDialogOpen] = createSignal(false);
+  const [galleryFw, setGalleryFw] = createSignal("Next.js");
+  const [galleryOtp, setGalleryOtp] = createSignal(1);
+  const [galleryToggle, setGalleryToggle] = createSignal<string[]>(["bold"]);
+  const [galleryDay, setGalleryDay] = createSignal(14);
+  const [galleryCmd, setGalleryCmd] = createSignal("calendar");
+  const [galleryInv, setGalleryInv] = createSignal("INV001");
+  const [galleryPage, setGalleryPage] = createSignal(1);
+  const [shadcnTab, setShadcnTab] = createSignal<"scroll" | "menus" | "forms" | "data" | "overlays">("scroll");
+  const isDark = () => theme().name === "dark";
   return (
     <ScrollablePage>
-      <View class="flex-col gap-4 pb-5">
-      <PageIntro title="Official building blocks" body="The essentials, ready to explore." />
-      <TileGrid>
+      <View class="flex-col gap-4 p-4 pb-6">
+      <MobileListTile title="Official building blocks" detail="The essentials, ready to explore." />
+      <View class="flex-row flex-wrap gap-3">
         <For each={componentCards}>
           {(card, index) => (
             <GalleryTile
@@ -1088,40 +1207,34 @@ function GalleryPage(props: {
             />
           )}
         </For>
-      </TileGrid>
-      <Card class="flex-col gap-3 mx-5 p-4 rounded-xl bg-white">
-        <Row>
-          <ViewText title="Lazy panel" body="Content, when you need it." />
-          <ActionButton label={props.state().lazyVisible ? "Hide" : "Show"} kind="secondary" onPress={() => props.dispatch({ type: "toggleLazy" })} />
-        </Row>
+      </View>
+      <MobileCard>
+        <MobileListTile title="Lazy panel" detail="Content, when you need it." trailing={<MobileButton label={props.state().lazyVisible ? "Hide" : "Show"} kind="tonal" onPress={() => props.dispatch({ type: "toggleLazy" })} />} />
         <Lazy when={() => props.state().lazyVisible}>
           {() => (
-            <View class="flex-col gap-1 p-2 rounded-lg bg-purple-600">
-              <Text class="text-xs text-white font-bold">Lazy subtree is mounted</Text>
-              <Text class="text-xs text-purple-100">Only mounted while visible.</Text>
+            <View class="flex-col gap-1 p-3 rounded-lg bg-[#18181B] border-[#27272A]">
+              <Text class="text-xs text-[#FAFAFA] font-bold">Lazy subtree is mounted</Text>
+              <Text class="text-xs text-[#A1A1AA]">Only mounted while visible.</Text>
               <MiniBarChart values={[8, 14, 10, 22, 18, 28, 24]} />
             </View>
           )}
         </Lazy>
-      </Card>
-      <Card class="flex-col gap-3 mx-5 p-4 rounded-xl bg-white">
-        <ViewText title="Go a little further" body="Components, motion and device APIs." />
+      </MobileCard>
+      <MobileCard>
+        <MobileListTile title="Go a little further" detail="Components, motion and device APIs." />
         <View class="flex-row flex-wrap gap-2">
-          <ActionButton label="Mobile UI" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
-          <ActionButton label="Transitions" kind="secondary" onPress={() => props.dispatch({ type: "navigate", route: "transitions" })} />
-          <ActionButton label="Hardware" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "hardware" })} />
-          <ActionButton label="Video Lab" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "video" })} />
+          <MobileButton label="Mobile UI" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
+          <MobileButton label="Transitions" kind="tonal" onPress={() => props.dispatch({ type: "navigate", route: "transitions" })} />
+          <MobileButton label="Hardware" kind="text" onPress={() => props.dispatch({ type: "navigate", route: "hardware" })} />
+          <MobileButton label="Video Lab" kind="text" onPress={() => props.dispatch({ type: "navigate", route: "video" })} />
         </View>
-      </Card>
-      <Card class="flex-col gap-3 mx-5 p-4 rounded-xl bg-white">
-        <View class="flex-row items-center justify-between gap-2">
-          <ViewText title="Option C Design System" body="Toast, Alert, Popup & Dialog with state animations." />
-          <MobileBadge label="M3 + TDesign" tone="accent" />
-        </View>
+      </MobileCard>
+      <MobileCard>
+        <MobileListTile title="Feedback & overlays" detail="Messages, sheets and dialogs." />
         <MobileAlert
           tone="info"
-          title="Built-in Light & Night Tokens"
-          body="Touch 44px and Desktop 36px dual density with 60Hz transitions."
+          title="Make it yours"
+          body="Choose your appearance and display preferences in Settings."
         />
         <MobileToast
           open={galleryToastOpen()}
@@ -1131,18 +1244,18 @@ function GalleryPage(props: {
           onClose={() => setGalleryToastOpen(false)}
         />
         <View class="flex-row flex-wrap gap-2">
-          <ActionButton label="Toast" kind="secondary" onPress={() => setGalleryToastOpen(true)} />
-          <ActionButton label="Popup" kind="quiet" onPress={() => setGalleryPopupOpen(true)} />
-          <ActionButton label="Dialog" kind="quiet" onPress={() => setGalleryDialogOpen(true)} />
-          <ActionButton label="Full Suite" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
+          <MobileButton label="Toast" kind="tonal" onPress={() => setGalleryToastOpen(true)} />
+          <MobileButton label="Popup" kind="text" onPress={() => setGalleryPopupOpen(true)} />
+          <MobileButton label="Dialog" kind="text" onPress={() => setGalleryDialogOpen(true)} />
+          <MobileButton label="Full Suite" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
         </View>
-      </Card>
+      </MobileCard>
       <MobilePopup
         open={galleryPopupOpen()}
         title="Gallery Action Sheet"
         subtitle="BottomSheet on mobile, centered Popover on desktop."
         actions={[
-          { id: "mobile", label: "Open full Mobile + PC UI showcase", detail: "Explore all 20+ animated components" },
+          { id: "mobile", label: "Open full Mobile + PC UI showcase", detail: "Explore the component collection" },
           { id: "transitions", label: "Inspect route transitions", detail: "iOS spring, shared axis & portal" },
         ]}
         onSelectAction={(id) => {
@@ -1153,19 +1266,194 @@ function GalleryPage(props: {
       />
       <MobileDialog
         open={galleryDialogOpen()}
-        title="Option C Modal Dialog"
+        title="A moment to confirm"
         body="Animated scale & opacity transition owned by JS."
         confirmLabel="Open Mobile UI"
         onConfirm={() => props.dispatch({ type: "navigate", route: "mobile" })}
         onClose={() => setGalleryDialogOpen(false)}
       />
-      <EmptyState title="Not mounted here" body="More capabilities live under Host." />
+      <MobileAlert tone="info" title="Not mounted here" body="More capabilities live under Host." />
+
+      <Show when={props.state().route === "gallery"}>
+        <MobileCard
+          title="shadcn/ui Full Component Suite (50+)"
+          detail="Browse all shadcn/ui primitives: ScrollArea/ScrollFade, Resizable, Sidebar, Menus, Forms, DataTable, Chart, Overlays & Typography."
+        >
+          <View class="flex-row flex-wrap gap-1.5">
+            <MobileButton
+              label="Scroll & Layout"
+              kind={shadcnTab() === "scroll" ? "filled" : "tonal"}
+              compact
+              onPress={() => setShadcnTab("scroll")}
+            />
+            <MobileButton
+              label="Menus & Command"
+              kind={shadcnTab() === "menus" ? "filled" : "tonal"}
+              compact
+              onPress={() => setShadcnTab("menus")}
+            />
+            <MobileButton
+              label="Forms & Date"
+              kind={shadcnTab() === "forms" ? "filled" : "tonal"}
+              compact
+              onPress={() => setShadcnTab("forms")}
+            />
+            <MobileButton
+              label="Charts & Tables"
+              kind={shadcnTab() === "data" ? "filled" : "tonal"}
+              compact
+              onPress={() => setShadcnTab("data")}
+            />
+            <MobileButton
+              label="Overlays & Text"
+              kind={shadcnTab() === "overlays" ? "filled" : "tonal"}
+              compact
+              onPress={() => setShadcnTab("overlays")}
+            />
+          </View>
+
+          <Show when={shadcnTab() === "scroll"}>
+            <ShadcnScrollArea title="Tags (ScrollArea + ScrollFade)" dark={isDark()} />
+            <ShadcnSeparator dark={isDark()} />
+            <ShadcnResizable dark={isDark()} />
+            <ShadcnSeparator dark={isDark()} />
+            <ShadcnSidebar dark={isDark()} />
+            <ShadcnSeparator dark={isDark()} />
+            <ShadcnCarousel dark={isDark()} />
+            <ShadcnAspectRatio dark={isDark()} />
+          </Show>
+
+          <Show when={shadcnTab() === "menus"}>
+            <ShadcnBreadcrumb items={["shadcn/ui", "Components", "Preview"]} dark={isDark()} />
+            <ShadcnNavigationMenu dark={isDark()} />
+            <ShadcnMenubar dark={isDark()} />
+            <ShadcnCommand
+              selectedId={galleryCmd()}
+              onSelect={setGalleryCmd}
+              items={[
+                { id: "calendar", label: "Calendar", group: "Suggestions" },
+                { id: "emoji", label: "Search Emoji", group: "Suggestions" },
+                { id: "profile", label: "Profile", group: "Preferences", shortcut: "⌘P" },
+                { id: "billing", label: "Billing", group: "Preferences", shortcut: "⌘B" },
+              ]}
+              dark={isDark()}
+            />
+            <ShadcnDropdownMenu
+              triggerLabel="My Account"
+              items={[
+                { id: "profile", label: "Profile", shortcut: "⇧⌘P" },
+                { id: "billing", label: "Billing", shortcut: "⌘B" },
+                { id: "shortcuts", label: "Keyboard shortcuts", shortcut: "⌘K" },
+              ]}
+              dark={isDark()}
+            />
+            <ShadcnContextMenu dark={isDark()} />
+            <ShadcnHoverCard
+              handle="@nextjs"
+              description="The React Framework – created and maintained by @vercel."
+              joined="Joined December 2021"
+              dark={isDark()}
+            />
+          </Show>
+
+          <Show when={shadcnTab() === "forms"}>
+            <ShadcnSelect
+              label="Framework"
+              value={galleryFw()}
+              options={["Next.js", "SolidJS", "SvelteKit", "Astro", "Remix"]}
+              onChange={setGalleryFw}
+              dark={isDark()}
+            />
+            <ShadcnCombobox dark={isDark()} />
+            <ShadcnInputOTP
+              value="482910"
+              activeSlot={galleryOtp()}
+              onSelectSlot={setGalleryOtp}
+              dark={isDark()}
+            />
+            <ShadcnToggleGroup
+              options={[
+                { id: "bold", label: "B Bold" },
+                { id: "italic", label: "I Italic" },
+                { id: "underline", label: "U Underline" },
+              ]}
+              selected={galleryToggle()}
+              onToggle={(id) =>
+                setGalleryToggle((prev) =>
+                  prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+                )
+              }
+              dark={isDark()}
+            />
+            <ShadcnDatePicker dark={isDark()} />
+            <ShadcnCalendar
+              monthLabel="November 2026"
+              selectedDay={galleryDay()}
+              onSelectDay={setGalleryDay}
+              dark={isDark()}
+            />
+            <ShadcnFormField dark={isDark()} />
+            <ShadcnInputGroup dark={isDark()} />
+            <ShadcnTextarea dark={isDark()} />
+            <ShadcnButtonGroup dark={isDark()} />
+          </Show>
+
+          <Show when={shadcnTab() === "data"}>
+            <ShadcnChart dark={isDark()} />
+            <ShadcnDataTable dark={isDark()} />
+            <ShadcnTable
+              caption="A list of your recent invoices."
+              selectedInvoice={galleryInv()}
+              onSelectRow={setGalleryInv}
+              rows={[
+                { invoice: "INV001", status: "Paid", method: "Credit Card", amount: "$250.00" },
+                { invoice: "INV002", status: "Pending", method: "PayPal", amount: "$150.00" },
+                { invoice: "INV003", status: "Unpaid", method: "Bank Transfer", amount: "$350.00" },
+              ]}
+              totalAmount="$750.00"
+              dark={isDark()}
+            />
+            <View class="flex-row items-center justify-between flex-wrap gap-2">
+              <View class="flex-row items-center gap-1.5">
+                <ShadcnKbd keys="⌘K" dark={isDark()} />
+                <ShadcnKbd keys="⇧⌘P" dark={isDark()} />
+              </View>
+              <ShadcnPagination page={galleryPage()} totalPages={3} onChange={setGalleryPage} dark={isDark()} />
+            </View>
+            <ShadcnItem
+              title="Two-factor authentication (Item)"
+              description="Verify via email or authenticator code."
+              badge="Enabled"
+              dark={isDark()}
+            />
+          </Show>
+
+          <Show when={shadcnTab() === "overlays"}>
+            <ShadcnDrawer dark={isDark()} />
+            <ShadcnSheet dark={isDark()} />
+            <ShadcnPopover dark={isDark()} />
+            <ShadcnCollapsible
+              title="@peduarte starred 3 repositories"
+              pinnedItem="@radix-ui/primitives"
+              hiddenItems={["@radix-ui/colors", "@stitches/react"]}
+              dark={isDark()}
+            />
+            <View class="flex-row items-center justify-between flex-wrap gap-2">
+              <ShadcnTooltip dark={isDark()} />
+              <ShadcnSpinner dark={isDark()} />
+            </View>
+            <ShadcnEmpty dark={isDark()} />
+            <ShadcnTypography dark={isDark()} />
+          </Show>
+        </MobileCard>
+      </Show>
       </View>
     </ScrollablePage>
   );
 }
 
 function HostPages(props: {
+  route: Route;
   host: HostBridge;
   state: () => DemoState;
   dispatch: (event: DemoEvent) => void;
@@ -1174,18 +1462,23 @@ function HostPages(props: {
   performance: () => PerformanceSnapshot;
   recordingStatus?: () => Record<string, unknown> | undefined;
 }): JSX.Element {
-  const route = () => props.state().route;
+  const route = () => props.route;
   const switchTab = (id: string): void => {
     const target = routeOf(id);
     if (target && target !== "home" && target !== "gallery") props.dispatch({ type: "navigate", route: target });
   };
   return (
     <ScrollablePage>
-      <View class="flex-col gap-2">
-      <Tabs items={hostTabs} active={route() === "performance" ? "about" : route()} onChange={switchTab} />
+      <View class="flex-col gap-4 p-4 pb-6">
       <Show when={route() === "about"}>
         <RuntimePage host={props.host} state={props.state} requestCapability={props.requestCapability} onNavigate={(route) => props.dispatch({ type: "navigate", route })} recordingStatus={props.recordingStatus} />
       </Show>
+      <Show when={route() === "about"}>
+        <MobileCard title="Explore your host" detail="Packages, updates and diagnostics.">
+          <For each={hostTabs.filter((tab) => tab.id !== "about")}>{(tab) => <MobileListTile title={tab.label} detail="Open details" trailing={<MobileButton label={`Open ${tab.label}`} kind="text" onPress={() => switchTab(tab.id)} />} onPress={() => switchTab(tab.id)} />}</For>
+        </MobileCard>
+      </Show>
+
       <Show when={route() === "bytecode"}>
         <BytecodePage state={props.state} requestCapability={props.requestCapability} />
       </Show>
@@ -1213,18 +1506,34 @@ function RuntimePage(props: {
   onNavigate: (route: Route) => void;
   recordingStatus?: () => Record<string, unknown> | undefined;
 }): JSX.Element {
+  const theme = useMobileTheme();
   return (
     <View class="flex-col gap-3">
-      <PageIntro title="Runtime" body="Live host status and package identity." />
+      <MobileListTile title="Runtime" detail="Live host status and package identity." />
       <CapabilityCard title="Runtime info" capability="runtime.info" state={props.state().runtimeInfo} onRefresh={() => props.requestCapability("runtimeInfo", "runtime.info")} />
       <CapabilityCard title="Package metadata" capability="plugins.packageInfo" state={props.state().packageInfo} onRefresh={() => props.requestCapability("packageInfo", "plugins.packageInfo")} />
       <ScrollContourItem>
-        <ActionButton label="Frame diagnostics" kind="secondary" onPress={() => props.onNavigate("performance")} />
+        <MobileButton label="Frame diagnostics" kind="tonal" onPress={() => props.onNavigate("performance")} />
       </ScrollContourItem>
-      <Show when={supportsRecording(props.state().runtimeInfo)} fallback={<EmptyState title="Deterministic replay unavailable" body="The active host does not provide recording and replay." />}>
+      <Show
+        when={supportsRecording(props.state().runtimeInfo)}
+        fallback={<MobileAlert
+          tone="info"
+          title={props.state().runtimeInfo.phase === "ready"
+            ? "Deterministic replay unavailable"
+            : props.state().runtimeInfo.phase === "error"
+            ? "Recording support unavailable"
+            : "Checking recording support"}
+          body={props.state().runtimeInfo.phase === "ready"
+            ? "The active host does not provide recording and replay."
+            : props.state().runtimeInfo.phase === "error"
+            ? `${props.state().runtimeInfo.error?.code ?? "host_error"}: ${props.state().runtimeInfo.error?.message ?? "Runtime facts are unavailable."}`
+            : "Waiting for the host to finish capability negotiation."}
+        />}
+      >
         <RecordingPanel host={props.host} status={props.recordingStatus} />
       </Show>
-      <StatusBar label={`JS ↔ ${hostLabel(props.state().runtimeInfo)}`} detail="UI state stays in JS" ok={props.state().runtimeInfo.phase !== "error"} />
+      <MobileAlert title={`Connected to ${hostLabel(props.state().runtimeInfo)}`} body="UI state stays in JS" tone={props.state().runtimeInfo.phase === "error" ? "danger" : "info"} />
     </View>
   );
 }
@@ -1234,6 +1543,7 @@ function PerformancePage(props: {
   performance: () => PerformanceSnapshot;
   requestCapability: (key: CapabilityKey, capability: string, params?: Record<string, JsonValue>) => void;
 }): JSX.Element {
+  const theme = useMobileTheme();
   onMount(() => props.requestCapability("runtimePerformance", "runtime.performance"));
   const points = () => recentPerformance(props.performance());
   const latest = () => props.performance().latest;
@@ -1251,65 +1561,59 @@ function PerformancePage(props: {
   const latestBridgeDecode = () => latest()?.nativeWorkMsP95 ?? latestLongFrame()?.nativeMs;
   return (
     <View class="flex-col gap-2">
-      <PageIntro title="Frame diagnostics" body="Guest ticks are separate from display FPS. Sparse rendering is not a stall." />
-      <Card class="flex-row items-center justify-between gap-2 mx-4 p-2 rounded-xl bg-white border-slate-200">
+      <MobileListTile title="Frame diagnostics" detail="Guest ticks are separate from display FPS. Sparse rendering is not a stall." />
+      <MobileCard>
         <View class="flex-col gap-1 flex-1">
-          <Text class="text-xs text-slate-950 font-bold">Performance provider · {hostPhase(provider())}</Text>
+          <Text class={theme().name === "dark" ? "text-xs text-white font-bold" : "text-xs text-slate-950 font-bold"}>Performance provider · {hostPhase(provider())}</Text>
           <Text class={provider().phase === "error" ? "text-xs text-rose-700" : "text-xs text-slate-600"}>
             {capabilitySummary(provider())}
           </Text>
         </View>
-        <ActionButton
+        <MobileButton
           label={provider().phase === "loading" ? "Wait" : "Refresh"}
-          kind="quiet"
+          kind="text"
           onPress={() => props.requestCapability("runtimePerformance", "runtime.performance")}
         />
-      </Card>
-      <Card class="flex-col gap-2 mx-4 p-2 rounded-xl bg-slate-100 border-slate-200">
-        <Row>
-          <ViewText title="Recent 60 samples" body={props.performance().recording ? "Recording" : "Provider not recording"} />
-          <Badge tone={props.performance().recording ? "green" : "amber"}>{String(points().length)}</Badge>
-        </Row>
-        <Show when={points().length > 0} fallback={<EmptyState title="No guest tick samples" body="Open a configured host performance provider or refresh this page." />}>
+      </MobileCard>
+      <MobileCard>
+        <MobileListTile title="Recent 60 samples" detail={props.performance().recording ? "Recording" : "Provider not recording"} trailing={<MobileBadge tone={props.performance().recording ? "success" : "warning"} label={String(points().length)} />} />
+        <Show when={points().length > 0} fallback={<MobileAlert tone="info" title="No guest tick samples" body="Open a configured host performance provider or refresh this page." />}>
           <MiniBarChart values={performanceBars(points())} />
-          <Text class="text-xs text-slate-600">Bars show guest scheduler turns per active second, not display FPS.</Text>
+          <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>Bars show guest scheduler turns per active second, not display FPS.</Text>
         </Show>
-      </Card>
-      <ScrollContourItem class="flex-row gap-2 mx-4">
-        <MetricCard
-          label="Guest ticks/s"
-          value={metricNumber(latest()?.fps)}
-          detail={latest() ? `min ${metricNumber(latest()?.minFps)} · active gap ${metricNumber(latestGap())} ms` : "No latest sample"}
-          tone="purple"
-        />
-        <Card class="flex-col gap-1 p-3 rounded-xl bg-rose-100">
-          <Text class="text-xs text-rose-700">Current minimum</Text>
-          <Text class="text-xl text-rose-700 font-bold">{metricNumber(minimumPerformanceFps(points()))}</Text>
-          <Text class="text-xs text-rose-700">lowest guest tick window</Text>
-        </Card>
+      </MobileCard>
+      <ScrollContourItem class="flex-row gap-2">
+        <MobileCard title="Guest ticks/s" detail={latest() ? `min ${metricNumber(latest()?.minFps)} · active gap ${metricNumber(latestGap())} ms` : "No latest sample"}>
+          <Text class="text-2xl font-bold" style={{ textColor: toMobileColor(theme().accentInkColor) }}>{metricNumber(latest()?.fps)}</Text>
+        </MobileCard>
+        <MobileCard>
+          <Text class={theme().name === "dark" ? "text-xs text-rose-300" : "text-xs text-rose-700"}>Current minimum</Text>
+          <Text class={theme().name === "dark" ? "text-xl text-rose-300 font-bold" : "text-xl text-rose-700 font-bold"}>{metricNumber(minimumPerformanceFps(points()))}</Text>
+          <Text class={theme().name === "dark" ? "text-xs text-rose-300" : "text-xs text-rose-700"}>lowest guest tick window</Text>
+        </MobileCard>
       </ScrollContourItem>
-      <Show when={latest() ?? latestLongFrame()} fallback={<EmptyState title="No frame breakdown" body="The provider has not returned a current frame window." />}>
-        <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-white border-slate-200">
-          <SectionHeading
+      <Show when={latest() ?? latestLongFrame()} fallback={<MobileAlert tone="info" title="No frame breakdown" body="The provider has not returned a current frame window." />}>
+        <MobileCard>
+          <MobileListTile
             title="Latest frame breakdown"
             detail={latestBudget() === undefined ? "refresh budget unavailable" : `budget ${metricNumber(latestBudget())} ms`}
           />
-          <Row>
-            <ViewText title="UI build" body={latestBuild() === undefined ? "—" : `${metricNumber(latestBuild())} ms${latest()?.buildMsP95 === undefined ? " long frame" : " p95"}`} />
-            <ViewText title="Raster" body={latestRaster() === undefined ? "—" : `${metricNumber(latestRaster())} ms${latest()?.rasterMsP95 === undefined ? " long frame" : " p95"}`} />
-          </Row>
-          <Row>
-            <ViewText title="Bridge/decode" body={latestBridgeDecode() === undefined ? "—" : `${metricNumber(latestBridgeDecode())} ms${latest()?.nativeWorkMsP95 === undefined ? " long frame" : " p95"}`} />
-            <ViewText title="Active gap" body={latestGap() === undefined ? "—" : `${metricNumber(latestGap())} ms`} />
-          </Row>
-          <Text class="text-xs text-slate-600">
+          <View class="flex-row items-center justify-between gap-2">
+            <MobileListTile title="UI build" detail={latestBuild() === undefined ? "—" : `${metricNumber(latestBuild())} ms${latest()?.buildMsP95 === undefined ? " long frame" : " p95"}`} />
+            <MobileListTile title="Raster" detail={latestRaster() === undefined ? "—" : `${metricNumber(latestRaster())} ms${latest()?.rasterMsP95 === undefined ? " long frame" : " p95"}`} />
+          </View>
+          <View class="flex-row items-center justify-between gap-2">
+            <MobileListTile title="Bridge/decode" detail={latestBridgeDecode() === undefined ? "—" : `${metricNumber(latestBridgeDecode())} ms${latest()?.nativeWorkMsP95 === undefined ? " long frame" : " p95"}`} />
+            <MobileListTile title="Active gap" detail={latestGap() === undefined ? "—" : `${metricNumber(latestGap())} ms`} />
+          </View>
+          <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>
             Compatibility bridge p95: {metricNumber(latest()?.nativeMsP95)} ms · refresh {latest()?.refreshHz === undefined ? "—" : `${metricNumber(latest()?.refreshHz)} Hz`}
           </Text>
-        </Card>
+        </MobileCard>
       </Show>
-      <Show when={jankRows().length > 0} fallback={<EmptyState title="No recent long frames" body="No active gap exceeded the provider's refresh-rate budget. A low guest tick rate with gap 0 can be intentional sparse rendering." />}>
-        <Card class="flex-col gap-1 mx-4 p-2 rounded-xl bg-amber-50 border-amber-200">
-          <SectionHeading title="Recent long frames" detail="Measured jank history" />
+      <Show when={jankRows().length > 0} fallback={<MobileAlert tone="info" title="No recent long frames" body="No active gap exceeded the provider's refresh-rate budget. A low guest tick rate with gap 0 can be intentional sparse rendering." />}>
+        <MobileCard>
+          <MobileListTile title="Recent long frames" detail="Measured jank history" />
           <VirtualList
             count={jankRows().length}
             rowHeight={64}
@@ -1319,19 +1623,19 @@ function PerformancePage(props: {
             renderRow={(index) => {
               const item = jankRows()[index];
               return (
-                <View class="flex-col gap-1 px-2 py-1 bg-amber-50 border-amber-200">
-                  <Text class="text-xs text-amber-800 font-bold">{item?.title ?? "Long frame"}</Text>
-                  <Text class="text-xs text-slate-600">{item?.detail ?? "Frame timing breakdown unavailable"}</Text>
-                  <Text class="text-xs text-slate-600">{item?.context ?? "Host frame sampler"}</Text>
+                <View class="flex-col gap-1 px-2 py-1 bg-[#3D2E10] border-[#936211]">
+                  <Text class={theme().name === "dark" ? "text-xs text-[#FCD34D] font-bold" : "text-xs text-amber-800 font-bold"}>{item?.title ?? "Long frame"}</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>{item?.detail ?? "Frame timing breakdown unavailable"}</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>{item?.context ?? "Host frame sampler"}</Text>
                 </View>
               );
             }}
           />
-        </Card>
+        </MobileCard>
       </Show>
-      <Show when={lowRows().length > 0} fallback={<EmptyState title="No low-frame samples" body="The provider has not returned a measurable history yet." />}>
-        <Card class="flex-col gap-1 mx-4 p-2 rounded-xl bg-white border-slate-200">
-          <SectionHeading title="Lowest guest tick samples" detail="Compatibility history · not jank by itself" />
+      <Show when={lowRows().length > 0} fallback={<MobileAlert tone="info" title="No low-frame samples" body="The provider has not returned a measurable history yet." />}>
+        <MobileCard>
+          <MobileListTile title="Lowest guest tick samples" detail="Compatibility history · not jank by itself" />
           <VirtualList
             count={lowRows().length}
             rowHeight={36}
@@ -1341,14 +1645,14 @@ function PerformancePage(props: {
             renderRow={(index) => {
               const item = lowRows()[index];
               return (
-                <View class="flex-col gap-1 px-2 py-1 bg-slate-50 border-slate-200">
-                  <Text class="text-xs text-rose-700 font-bold">{item?.title ?? "Low guest tick sample"}</Text>
-                  <Text class="text-xs text-slate-600">{item?.detail ?? "Provider metrics unavailable"}</Text>
+                <View class={theme().name === "dark" ? "flex-col gap-1 px-2 py-1 bg-[#17233B] border-[#30405A]" : "flex-col gap-1 px-2 py-1 bg-slate-50 border-slate-200"}>
+                  <Text class={theme().name === "dark" ? "text-xs text-rose-300 font-bold" : "text-xs text-rose-700 font-bold"}>{item?.title ?? "Low guest tick sample"}</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>{item?.detail ?? "Provider metrics unavailable"}</Text>
                 </View>
               );
             }}
           />
-        </Card>
+        </MobileCard>
       </Show>
     </View>
   );
@@ -1358,14 +1662,15 @@ function BytecodePage(props: {
   state: () => DemoState;
   requestCapability: (key: CapabilityKey, capability: string) => void;
 }): JSX.Element {
+  const theme = useMobileTheme();
   return (
     <View class="flex-col gap-3">
-      <PageIntro title="Bytecode" body="QuickJS runtime and bundle identity." />
+      <MobileListTile title="Bytecode" detail="QuickJS runtime and bundle identity." />
       <CapabilityCard title="QuickJS runtime" capability="runtime.info" state={props.state().runtimeInfo} onRefresh={() => props.requestCapability("runtimeInfo", "runtime.info")} />
-      <Card class="flex-col gap-2 mx-4 p-4 rounded-xl bg-white">
-        <ViewText title="Package response" body="Reported by the active runtime." />
-        <For each={summaryLines(capabilitySummary(props.state().runtimeInfo))}>{(line) => <Text class="text-xs text-slate-500">{line}</Text>}</For>
-      </Card>
+      <MobileCard>
+        <MobileListTile title="Package response" detail="Reported by the active runtime." />
+        <For each={summaryLines(capabilitySummary(props.state().runtimeInfo))}>{(line) => <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-500"}>{line}</Text>}</For>
+      </MobileCard>
     </View>
   );
 }
@@ -1374,17 +1679,15 @@ function UpdatesPage(props: {
   state: () => DemoState;
   requestCapability: (key: CapabilityKey, capability: string, params?: Record<string, JsonValue>) => void;
 }): JSX.Element {
+  const theme = useMobileTheme();
   const versions = () => versionHistory(props.state().updatesStatus.result);
   return (
     <View class="flex-col gap-2">
-      <PageIntro title="Updates" body="Manage versions supplied by the host." />
+      <MobileListTile title="Updates" detail="Manage versions supplied by the host." />
       <CapabilityCard title="Current status" capability="updates.status" state={props.state().updatesStatus} onRefresh={() => props.requestCapability("updatesStatus", "updates.status")} />
-      <Show when={versions().length > 0} fallback={<EmptyState title="Version history" body="The host returned no verified versions." />}>
-        <Card class="flex-col gap-1 mx-4 p-2 rounded-xl bg-slate-100 border-slate-200">
-          <Row>
-            <ViewText title="Version history" body="From updates.status" />
-            <Badge tone="cyan">{String(versions().length)}</Badge>
-          </Row>
+      <Show when={versions().length > 0} fallback={<MobileAlert tone="info" title="Version history" body="The host returned no verified versions." />}>
+        <MobileCard>
+          <MobileListTile title="Version history" detail="From updates.status" trailing={<MobileBadge label={String(versions().length)} />} />
           <VirtualList
             count={versions().length}
             rowHeight={32}
@@ -1394,27 +1697,27 @@ function UpdatesPage(props: {
             renderRow={(index) => {
               const item = versions()[index];
               return (
-                <View class="flex-col gap-1 px-2 py-1 bg-white border-slate-200">
-                  <Text class="text-xs text-slate-950 font-bold">{item?.title ?? "Version"}</Text>
-                  <Text class="text-xs text-slate-600">{item?.detail ?? "verified version"}</Text>
+                <View class={theme().name === "dark" ? "flex-col gap-1 px-2 py-1 bg-[#17233B] border-[#30405A]" : "flex-col gap-1 px-2 py-1 bg-white border-slate-200"}>
+                  <Text class={theme().name === "dark" ? "text-xs text-white font-bold" : "text-xs text-slate-950 font-bold"}>{item?.title ?? "Version"}</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>{item?.detail ?? "verified version"}</Text>
                 </View>
               );
             }}
           />
-        </Card>
+        </MobileCard>
       </Show>
       <Show when={!capabilityUnavailable(props.state().updatesStatus)}
-        fallback={<EmptyState title="Updates not configured" body="This host runs the embedded package. Pocket package updates are not enabled." />}>
-      <Row class="mx-4">
-        <ActionButton label="Check" onPress={() => props.requestCapability("updatesCheck", "updates.check")} />
-        <ActionButton label="Apply" kind="secondary" onPress={() => props.requestCapability("updatesApply", "updates.apply")} />
-        <ActionButton label="Rollback" kind="danger" onPress={() => props.requestCapability("updatesRollback", "updates.rollback")} />
-      </Row>
-      <List tone="light" items={[
-        { id: "check", title: "updates.check", detail: capabilitySummary(props.state().updatesCheck) },
-        { id: "apply", title: "updates.apply", detail: capabilitySummary(props.state().updatesApply) },
-        { id: "rollback", title: "updates.rollback", detail: capabilitySummary(props.state().updatesRollback) },
-      ]} />
+        fallback={<MobileAlert tone="info" title="Updates not configured" body="This host runs the embedded package. Pocket package updates are not enabled." />}>
+      <View class="flex-row flex-wrap gap-2">
+        <MobileButton label="Check" onPress={() => props.requestCapability("updatesCheck", "updates.check")} />
+        <MobileButton label="Apply" kind="tonal" onPress={() => props.requestCapability("updatesApply", "updates.apply")} />
+        <MobileButton label="Rollback" kind="danger" onPress={() => props.requestCapability("updatesRollback", "updates.rollback")} />
+      </View>
+      <MobileCard>
+        <MobileListTile title="updates.check" detail={capabilitySummary(props.state().updatesCheck)} />
+        <MobileListTile title="updates.apply" detail={capabilitySummary(props.state().updatesApply)} />
+        <MobileListTile title="updates.rollback" detail={capabilitySummary(props.state().updatesRollback)} />
+      </MobileCard>
       </Show>
     </View>
   );
@@ -1424,13 +1727,14 @@ function PluginsPage(props: {
   state: () => DemoState;
   requestCapability: (key: CapabilityKey, capability: string) => void;
 }): JSX.Element {
+  const theme = useMobileTheme();
   const plugins = () => listItems(props.state().pluginsList.result);
   return (
     <View class="flex-col gap-3">
-      <PageIntro title="Plugins" body="Installed capabilities from the host." />
+      <MobileListTile title="Plugins" detail="Installed capabilities from the host." />
       <CapabilityCard title="Installed plugins" capability="plugins.list" state={props.state().pluginsList} onRefresh={() => props.requestCapability("pluginsList", "plugins.list")} />
-      <Show when={plugins().length > 0} fallback={<EmptyState title="No plugin list" body={capabilitySummary(props.state().pluginsList)} />}>
-        <List items={plugins()} tone="light" />
+      <Show when={plugins().length > 0} fallback={<MobileAlert tone="info" title="No plugin list" body={capabilitySummary(props.state().pluginsList)} />}>
+        <MobileCard><For each={plugins()}>{(plugin) => <MobileListTile title={plugin.title} detail={plugin.detail} />}</For></MobileCard>
       </Show>
       <CapabilityCard title="External package info" capability="plugins.packageInfo" state={props.state().packageInfo} onRefresh={() => props.requestCapability("packageInfo", "plugins.packageInfo")} />
     </View>
@@ -1438,26 +1742,24 @@ function PluginsPage(props: {
 }
 
 function StressPage(props: { state: () => DemoState; runStress: (nodes: number) => void }): JSX.Element {
+  const theme = useMobileTheme();
   const nodes = () => stressItems(props.state().stress.nodeCount);
   return (
     <View class="flex-col gap-3">
-      <PageIntro title="Stress" body="Measure JS node pressure at two sizes." />
-      <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-white border-slate-200">
-        <Row>
-          <ViewText title="Retained node pressure" body="Guest-owned UI state" />
-          <Badge tone="amber">JS</Badge>
-        </Row>
-        <Row>
-          <ActionButton label="Run 100 nodes" onPress={() => props.runStress(100)} />
-          <ActionButton label="Run 500 nodes" kind="secondary" onPress={() => props.runStress(500)} />
-        </Row>
-      </Card>
-      <ScrollContourItem class="flex-row gap-2 mx-4">
-        <MetricCard label="Nodes" value={String(props.state().stress.nodeCount)} detail={`${props.state().stress.durationMs} ms JS setup`} tone="purple" />
-        <MetricCard label="Checksum" value={String(props.state().stress.checksum)} detail={props.state().stress.lastAction} tone="green" />
+      <MobileListTile title="Stress" detail="Measure JS node pressure at two sizes." />
+      <MobileCard>
+        <MobileListTile title="Retained node pressure" detail="Guest-owned UI state" />
+        <View class="flex-row items-center justify-between gap-2">
+          <MobileButton label="Run 100 nodes" onPress={() => props.runStress(100)} />
+          <MobileButton label="Run 500 nodes" kind="tonal" onPress={() => props.runStress(500)} />
+        </View>
+      </MobileCard>
+      <ScrollContourItem class="flex-row gap-2">
+        <MobileCard title="Nodes" detail={`${props.state().stress.durationMs} ms JS setup`}><Text class="text-2xl font-bold" style={{ textColor: toMobileColor(theme().accentInkColor) }}>{String(props.state().stress.nodeCount)}</Text></MobileCard>
+        <MobileCard title="Checksum" detail={props.state().stress.lastAction}><Text class="text-xl font-bold" style={{ textColor: toMobileColor(theme().accentInkColor) }}>{String(props.state().stress.checksum)}</Text></MobileCard>
       </ScrollContourItem>
       <ScrollContourItem mode="padding" class="px-4">
-        <Text class="text-xs text-slate-600">{props.state().stress.nodeCount} retained nodes in the current guest frame.</Text>
+        <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-600"}>{props.state().stress.nodeCount} retained nodes in the current guest frame.</Text>
       </ScrollContourItem>
       <ScrollContourItem mode="padding" class="flex-row flex-wrap gap-1 px-4 overflow-hidden">
         <For each={nodes()}>

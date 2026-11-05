@@ -20,7 +20,15 @@ export type Route =
   | "mobile"
   | "transitions"
   | "hardware"
-  | "video";
+  | "video"
+  | "settings";
+
+export type AccentColor = "blue" | "violet" | "teal" | "rose";
+export type InterfaceDensity = "auto" | "touch" | "desktop";
+
+export function isPrimaryRoute(route: Route): boolean {
+  return route === "home" || route === "gallery" || route === "about" || route === "settings";
+}
 
 export type { TransitionMode } from "@pocket/ui";
 
@@ -189,6 +197,8 @@ export interface DemoState {
   lazyVisible: boolean;
   /** Shared mobile showcase theme; the root canvas mirrors this signal. */
   mobileDark: boolean;
+  accentColor: AccentColor;
+  interfaceDensity: InterfaceDensity;
   lastAction: string;
   runtimeInfo: CapabilityState;
   pluginsList: CapabilityState;
@@ -218,6 +228,10 @@ export interface DemoState {
 }
 
 export type DemoEvent =
+  | { type: "setAccentColor"; value: AccentColor }
+  | { type: "setInterfaceDensity"; value: InterfaceDensity }
+  | { type: "resetAppearance" }
+  | { type: "restoreAppearance"; dark: boolean; accent: AccentColor; density: InterfaceDensity }
   | { type: "navigate"; route: Route }
   | { type: "popRoute" }
   | { type: "setTransitionMode"; mode: TransitionMode }
@@ -575,6 +589,8 @@ export function initialDemoState(): DemoState {
     detailsOpen: false,
     lazyVisible: false,
     mobileDark: false,
+    accentColor: "blue",
+    interfaceDensity: "auto",
     lastAction: "Ready",
     runtimeInfo: idleCapability(),
     pluginsList: idleCapability(),
@@ -645,12 +661,20 @@ export function reduceDemoState(state: DemoState, event: DemoEvent): DemoState {
     };
   }
   switch (event.type) {
+    case "resetAppearance":
+      return { ...state, mobileDark: false, accentColor: "blue", interfaceDensity: "auto", lastAction: "Appearance reset" };
+    case "restoreAppearance":
+      return { ...state, mobileDark: event.dark, accentColor: event.accent, interfaceDensity: event.density };
+    case "setAccentColor":
+      return { ...state, accentColor: event.value, lastAction: `Accent set to ${event.value}` };
+    case "setInterfaceDensity":
+      return { ...state, interfaceDensity: event.value, lastAction: `Density set to ${event.value}` };
     case "navigate":
       {
         const existing = state.routeStack.lastIndexOf(event.route);
-        const routeStack = existing >= 0
+        const routeStack = isPrimaryRoute(event.route) ? [event.route] : existing >= 0
           ? state.routeStack.slice(0, existing + 1)
-          : [...state.routeStack, event.route].slice(-8);
+          : [...state.routeStack, event.route];
         return {
           ...state,
           route: event.route,

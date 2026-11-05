@@ -25,3 +25,9 @@ bun tests/guest_ablation.ts --required
 
 echo "test_guest: static native probe integration (required)"
 bun tests/native_guest_probe.ts --required
+
+echo "test_guest: native settings and preference restore (required)"
+bun tests/settings_native.test.ts
+
+echo "test_guest: native route lifetime and state retention (required)"
+bun test tests/navigation_native.test.ts

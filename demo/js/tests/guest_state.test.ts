@@ -71,6 +71,46 @@ test("initial state and state transitions", () => {
   assert.equal(apply(darkMobile, { type: "setMobileDark", value: false }).mobileDark, false);
 });
 
+test("primary tabs reset navigation history and appearance survives page changes", () => {
+  const initial = initialDemoState();
+  const configured = apply(initial,
+    { type: "navigate", route: "settings" },
+    { type: "setMobileDark", value: true },
+    { type: "setAccentColor", value: "teal" },
+    { type: "setInterfaceDensity", value: "desktop" },
+    { type: "navigate", route: "hardware" },
+  );
+  assert.deepEqual(configured.routeStack, ["settings", "hardware"]);
+  const returned = apply(configured, { type: "popRoute" });
+  assert.equal(returned.route, "settings");
+  assert.equal(returned.mobileDark, true);
+  assert.equal(returned.accentColor, "teal");
+  assert.equal(returned.interfaceDensity, "desktop");
+  const switched = apply(returned, { type: "navigate", route: "home" });
+  assert.deepEqual(switched.routeStack, ["home"]);
+  assert.equal(apply(switched, { type: "popRoute" }).route, "home");
+  const restored = apply(initial, { type: "restoreAppearance", dark: true, accent: "violet", density: "touch" });
+  assert.equal(restored.mobileDark, true);
+  assert.equal(restored.accentColor, "violet");
+  assert.equal(restored.interfaceDensity, "touch");
+  const reset = apply(restored, { type: "resetAppearance" });
+  assert.equal(reset.mobileDark, false);
+  assert.equal(reset.accentColor, "blue");
+  assert.equal(reset.interfaceDensity, "auto");
+});
+
+test("deep secondary navigation retains the caller and pops one page at a time", () => {
+  const routes = ["mobile", "transitions", "hardware", "video", "bytecode", "updates", "plugins", "stress", "performance"] as const;
+  let state = initialDemoState();
+  for (const route of routes) state = apply(state, { type: "navigate", route });
+  assert.deepEqual(state.routeStack, ["home", ...routes]);
+  for (let index = routes.length - 1; index >= 0; index--) {
+    state = apply(state, { type: "popRoute" });
+    assert.equal(state.route, index === 0 ? "home" : routes[index - 1]);
+  }
+  assert.deepEqual(state.routeStack, ["home"]);
+});
+
 test("capability lifecycle and cameraStop transition", () => {
   const initial = initialDemoState();
   const capabilityLoading = apply(initial, { type: "capabilityStart", key: "runtimeInfo", requestId: "runtime-1" });
@@ -730,7 +770,7 @@ test("source checks and boundary integrity", () => {
   assert.match(appSource, /previous/);
   assert.match(appSource, /Run 500 nodes/);
   assert.match(appSource, /demo\.stress/);
-  assert.match(appSource, /Pocket Host Lab/);
+  assert.match(appSource, /const demoTitle = "Pocket"/);
   assert.match(appSource, /state\(\)\.mobileDark/);
   assert.doesNotMatch(appSource, /package:flutter|dart:|lib\//);
   const profileLaunchStart = profileSource.indexOf("const saveAndOpenLobby");

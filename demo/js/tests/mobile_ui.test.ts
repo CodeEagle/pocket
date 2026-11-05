@@ -13,7 +13,9 @@ import {
   avoidDisplayOcclusions,
   bottomBarInsets,
   DISPLAY_UI_SAFETY_GAP,
+  deriveDesignDensity,
   deriveResponsiveLayout,
+  deriveWindowSizeClass,
   displayPane,
   pageInsets,
   parseDisplayGeometry,
@@ -252,9 +254,42 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   for (const label of ["Mobile UI", "Transitions", "Hardware"]) assert.match(appSource, new RegExp(label));
   assert.doesNotMatch(appSource, /LiquidGlassPage|route === "glass"|route: "glass"|label="Liquid Glass"/);
   assert.doesNotMatch(pageSource, /LiquidGlassPage|Liquid Glass|buildLiquidGlassRecipe|glassShapes|GlassSurface/);
-  for (const label of ["MobileAppBar", "MobileCard", "MobileListTile", "MobileSwitch", "MobileStepper", "MobileDialog", "InputField", "GlassSurface", "FilledButton", "ElevatedButton", "hardware.camera.preview.start", "hardware.weather.current"]) {
+  for (const label of [
+    "MobileAppBar",
+    "MobileCard",
+    "MobileListTile",
+    "MobileSwitch",
+    "MobileStepper",
+    "MobileDialog",
+    "MobileToast",
+    "MobileAlert",
+    "MobilePopup",
+    "MobileTonalButton",
+    "MobileCheckbox",
+    "MobileRadioGroup",
+    "MobileAccordion",
+    "MobileSkeleton",
+    "MobileProgress",
+    "MobileTag",
+    "MobileAvatar",
+    "InputField",
+    "GlassSurface",
+    "FilledButton",
+    "ElevatedButton",
+    "hardware.camera.preview.start",
+    "hardware.weather.current",
+  ]) {
     assert.match(pageSource + mobileSource + uiSource, new RegExp(label.replace(".", "\\.")));
   }
+  assert.equal(deriveWindowSizeClass(parseDisplayGeometry({ width: 390, height: 844 })), "compact");
+  assert.equal(deriveWindowSizeClass(parseDisplayGeometry({ width: 768, height: 1024 })), "medium");
+  assert.equal(deriveWindowSizeClass(parseDisplayGeometry({ width: 1280, height: 800 })), "expanded");
+  assert.equal(deriveDesignDensity(parseDisplayGeometry({ width: 390, height: 844 })), "touch");
+  assert.equal(deriveDesignDensity(parseDisplayGeometry({ width: 1280, height: 800 })), "desktop");
+  assert.equal(deriveDesignDensity(parseDisplayGeometry({ width: 1280, height: 800 }), "touch"), "touch");
+  assert.equal(deriveDesignDensity(parseDisplayGeometry({ width: 390, height: 844 }), "desktop"), "desktop");
+  assert.match(mobileSource, /useStateTransition/);
+  assert.match(mobileSource, /useAnimatedNumber/);
   assert.match(mobileSource, /registerSurface/);
   assert.match(mobileSource, /blur: current\.blurSigma/);
   assert.match(mobileSource, /CompositorSurface/);
@@ -268,9 +303,8 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(appSource, /setRouteTransition/);
   assert.match(appSource, /onFrame\(\(\) =>/);
   assert.match(displaySource, /ui\?: \{ __viewport/);
-  assert.match(appSource, /wideLayout/);
-  assert.match(appSource, /availableDisplayPanes/);
-  assert.match(appSource, /contentPaneStyle/);
+  assert.match(appSource, /visible=\{isPrimaryRoute\(state\(\)\.route\)\}/);
+  assert.match(appSource, /items=\{showcaseTabs\}/);
   assert.doesNotMatch(appSource, /width: wide\(\) \? 640/);
   assert.doesNotMatch(appSource, /badge="JS-owned"/);
   assert.match(appSource, /contentWidth/);
@@ -287,7 +321,7 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(mobileSource, /Number\.isFinite/);
   assert.match(mobileSource, /radius: platformTextureRadius\(props\.radius\)/);
   assert.match(mobileSource, /registerSurface\(id, "platformTexture", payload\(\)\) !== false/);
-  assert.match(mobileSource, /<Show when=\{typeof props\.open === "function"/);
+  assert.match(mobileSource, /typeof props\.open === "function" \? props\.open\(\) : props\.open/);
   assert.match(mobileSource, /focusable=\{!props\.disabled\}/);
   assert.match(pageSource, /hardware\.camera\.preview\.start/);
   assert.match(pageSource, /previewReady/);

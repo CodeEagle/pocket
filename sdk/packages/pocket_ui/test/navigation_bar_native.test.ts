@@ -71,17 +71,36 @@ function centerPoint(frame: Frame, label: string): { x: number; y: number } {
   return { x: op.x! + op.w! / 2, y: op.y! + op.h! / 2 };
 }
 
-function assertEvenBottomNavigation(frame: Frame, width: number): void {
-  const centers = ["Home", "Gallery", "Host"].map((label) => center(frame, label));
-  const expected = [width / 6, width / 2, width * 5 / 6];
+function assertEvenBottomNavigation(frame: Frame, width: number, labels = ["Home", "Gallery", "Host"]): void {
+  const centers = labels.map((label) => center(frame, label));
+  const expected = labels.map((_, index) => width * (index * 2 + 1) / (labels.length * 2));
   for (let index = 0; index < centers.length; index += 1) {
     assert.ok(
       Math.abs(centers[index]! - expected[index]!) < 24,
-      `${["Home", "Gallery", "Host"][index]} center ${centers[index]} is not in equal-width cell ${expected[index]}`,
+      `${labels[index]} center ${centers[index]} is not in equal-width cell ${expected[index]}`,
     );
   }
-  assert.ok(centers[1]! - centers[0]! > width * 0.25, `first and second tabs are still intrinsic-width packed: ${centers.join(", ")}`);
-  assert.ok(centers[2]! - centers[1]! > width * 0.25, `second and third tabs are still intrinsic-width packed: ${centers.join(", ")}`);
+  for (let index = 1; index < centers.length; index += 1) {
+    assert.ok(
+      centers[index]! - centers[index - 1]! > width / (labels.length * 1.5),
+      `navigation tabs are still intrinsic-width packed: ${centers.join(", ")}`,
+    );
+  }
+}
+
+function tap(commands: JsonObject[], frame: Frame, label: string): void {
+  const point = centerPoint(frame, label);
+  commands.push(
+    { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "down", id: 0, x: point.x, y: point.y } } },
+    { op: "frame", deltaMs: 16 },
+    { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "up", id: 0, x: point.x, y: point.y } } },
+    { op: "frame", deltaMs: 16 },
+    { op: "frame", deltaMs: 16 },
+  );
+}
+
+function hasText(frame: Frame, label: string): boolean {
+  return (frame.ops ?? []).some((item) => item.type === "text" && item.text === label);
 }
 
 try {
@@ -108,6 +127,92 @@ try {
   const narrow = framesOf(narrowResponses)[0];
   assert.ok(narrow, "navigation fixture did not produce a narrow frame");
   assertEvenBottomNavigation(narrow, 390);
+
+  // The default three-item API remains intact, while a parent can supply a
+  // four-item Settings menu and toggle the whole bar through a real Solid
+  // signal. The hidden frame must contain neither navigation labels nor the
+  // safe-area shell owned by NavigationBar.
+  const initialControls = runProbe([
+    { op: "create", width: 390, height: 844 },
+    { op: "loadBytecode", bytecodePath, pakPath },
+    { op: "frame", deltaMs: 16 },
+    { op: "quit" },
+  ]);
+  const initialControlsFrame = framesOf(initialControls).at(-1);
+  assert.ok(initialControlsFrame, "navigation fixture controls frame is missing");
+  const settingsCommands: JsonObject[] = [
+    { op: "create", width: 390, height: 844 },
+    { op: "loadBytecode", bytecodePath, pakPath },
+    { op: "frame", deltaMs: 16 },
+  ];
+  tap(settingsCommands, initialControlsFrame!, "Toggle settings");
+  settingsCommands.push({ op: "quit" });
+  const customFrame = framesOf(runProbe(settingsCommands)).at(-1);
+  assert.ok(customFrame, "navigation fixture did not rerender custom items");
+  assertEvenBottomNavigation(customFrame!, 390, ["Home", "Gallery", "Host", "Settings"]);
+
+  const hiddenCommands: JsonObject[] = [
+    { op: "create", width: 390, height: 844 },
+    { op: "loadBytecode", bytecodePath, pakPath },
+    { op: "frame", deltaMs: 16 },
+  ];
+  tap(hiddenCommands, initialControlsFrame!, "Toggle settings");
+  tap(hiddenCommands, customFrame!, "Toggle navigation");
+  hiddenCommands.push({ op: "quit" });
+  const hiddenFrame = framesOf(runProbe(hiddenCommands)).at(-1);
+  assert.ok(hiddenFrame, "navigation fixture did not produce a hidden frame");
+  for (const label of ["Home", "Gallery", "Host", "Settings"]) {
+    assert.equal(hasText(hiddenFrame!, label), false, `hidden NavigationBar still paints ${label}`);
+  }
+  assert.equal(hasText(hiddenFrame!, "Toggle navigation"), true, "hidden fixture lost its body after NavigationBar removal");
+  assert.ok(
+    centerPoint(hiddenFrame!, "Toggle navigation").y > centerPoint(initialControlsFrame!, "Toggle navigation").y + 20,
+    "hidden NavigationBar must release its measured height and bottom safe-area inset",
+  );
+
+  const darkCommands: JsonObject[] = [
+    { op: "create", width: 390, height: 844 },
+    { op: "loadBytecode", bytecodePath, pakPath },
+    { op: "frame", deltaMs: 16 },
+  ];
+  tap(darkCommands, initialControlsFrame!, "Toggle dark");
+  darkCommands.push({ op: "quit" });
+  const darkFrame = framesOf(runProbe(darkCommands)).at(-1);
+  assert.ok(darkFrame, "navigation fixture did not rerender dark mode");
+  assert.notEqual(
+    textOp(darkFrame!, "Gallery").color,
+    textOp(initialControlsFrame!, "Gallery").color,
+    "dark NavigationBar did not update inactive text colour",
+  );
+
+  // A route switch must clear the previous active text style. After tapping
+  // Settings and returning Home, only Home may retain the accent colour.
+  const settingsRouteCommands: JsonObject[] = [
+    { op: "create", width: 390, height: 844 },
+    { op: "loadBytecode", bytecodePath, pakPath },
+    { op: "frame", deltaMs: 16 },
+  ];
+  tap(settingsRouteCommands, initialControlsFrame!, "Toggle settings");
+  tap(settingsRouteCommands, customFrame!, "Settings");
+  settingsRouteCommands.push({ op: "quit" });
+  const settingsRouteFrame = framesOf(runProbe(settingsRouteCommands)).at(-1);
+  assert.ok(settingsRouteFrame, "navigation fixture did not navigate to Settings");
+
+  const homeRouteCommands: JsonObject[] = [
+    { op: "create", width: 390, height: 844 },
+    { op: "loadBytecode", bytecodePath, pakPath },
+    { op: "frame", deltaMs: 16 },
+  ];
+  tap(homeRouteCommands, initialControlsFrame!, "Toggle settings");
+  tap(homeRouteCommands, customFrame!, "Settings");
+  tap(homeRouteCommands, settingsRouteFrame!, "Home");
+  homeRouteCommands.push({ op: "quit" });
+  const homeRouteFrame = framesOf(runProbe(homeRouteCommands)).at(-1);
+  assert.ok(homeRouteFrame, "navigation fixture did not return Home");
+  const labels = ["Home", "Gallery", "Host", "Settings"];
+  const homeAccent = textOp(homeRouteFrame!, "Home").color;
+  const accentLabels = labels.filter((label) => textOp(homeRouteFrame!, label).color === homeAccent);
+  assert.deepEqual(accentLabels, ["Home"], "route switch left more than one navigation label active");
 
   const wideResponses = runProbe([
     { op: "create", width: 720, height: 844 },

@@ -26,7 +26,7 @@ test("Video Lab keeps the real Video API and local MP4 assets source-visible", (
   assert.match(source, /assets\/videos\/clip-b\.mp4/);
   assert.match(source, /missing-video\.mp4/);
   assert.match(source, /platform\.openApp\("pocket\.demo\.profile"/);
-  assert.match(source, /title="Video Lab"/);
+  assert.match(readFileSync(join(root, "app.tsx"), "utf8"), /"Video Lab"/);
   assert.match(source, /const HERO_ID = "video-lab-hero"/);
   assert.match(source, /nativeLabelFor\(HERO_ID\)/);
   assert.match(source, /Native controllers ·/);
