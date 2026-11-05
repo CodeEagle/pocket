@@ -15,15 +15,23 @@
 //! * `{"op":"send","message":{"type":"event",...}}`
 //! * `{"op":"frame","deltaMs":16}` -> `{ "ok": true, "frame": {...} }`
 //! * `{"op":"resize","width":390,"height":400}` updates the live viewport
+//! * `{"op":"traceMode","mode":1}` selects the existing native recording
+//!   clock (0 live, 1 record, 2 replay) before load/eval.
+//! * Add `"traceClock":{}` to a transaction to return its native trace envelope;
+//!   replay supplies the previously captured envelope in the same field.
+//! * `load`, `loadBytecode` and `eval` accept `"render":true` to include the
+//!   initial frame in that same transaction, matching the public runtime ABI.
 //! * `{"op":"lastError"}`, `{"op":"destroy"}`, `{"op":"quit"}`
 //!
 //! The probe deliberately has no application/page logic; all composition and
 //! state continue to come from the guest bundle supplied by the caller.
 
 use pocket_flutter::{
-    pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_configure_guest_security, pocket_create, pocket_create_with_density_and_tick_hz,
-    pocket_create_with_memory_limits, pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
+    pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_configure_guest_security,
+    pocket_create, pocket_create_with_density_and_tick_hz, pocket_create_with_memory_limits,
+    pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
     pocket_load_files, pocket_next_wake_delay_ms, pocket_resize_viewport, pocket_send,
+    pocket_trace_clock_begin_json, pocket_trace_clock_end_json, pocket_trace_clock_mode,
 };
 use serde_json::{json, Value};
 use std::ffi::{c_void, CStr, CString};
@@ -113,6 +121,63 @@ unsafe fn destroy(handle: &mut Handle) {
 }
 
 unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
+    let Some(envelope) = command.get("traceClock") else {
+        return command_inner(command, handle);
+    };
+    let operation = command
+        .get("op")
+        .or_else(|| command.get("command"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !matches!(
+        operation,
+        "load"
+            | "loadBytecode"
+            | "eval"
+            | "send"
+            | "resize"
+            | "frame"
+            | "compositor"
+            | "traceBoundary"
+    ) {
+        return (
+            false,
+            error_response("traceClock requires a live native transaction"),
+        );
+    }
+    if handle.is_null() {
+        return (
+            false,
+            error_response("create a native runtime before tracing"),
+        );
+    }
+    let encoded = CString::new(envelope.to_string()).expect("JSON has no literal NUL");
+    if pocket_trace_clock_begin_json((*handle).cast(), encoded.as_ptr()) != 0 {
+        return (
+            false,
+            native_error(*handle, "pocket_trace_clock_begin_json"),
+        );
+    }
+    let (quit, mut response) = command_inner(command, handle);
+    let trace = pocket_trace_clock_end_json((*handle).cast());
+    if trace.is_null() {
+        let mut failure = native_error(*handle, "pocket_trace_clock_end_json");
+        failure["operationResult"] = response;
+        return (quit, failure);
+    }
+    match serde_json::from_str::<Value>(&CStr::from_ptr(trace).to_string_lossy()) {
+        Ok(envelope) => response["traceClock"] = envelope,
+        Err(error) => {
+            return (
+                quit,
+                error_response(format!("invalid native trace clock JSON: {error}")),
+            )
+        }
+    }
+    (quit, response)
+}
+
+unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
     let operation = command
         .get("op")
         .or_else(|| command.get("command"))
@@ -120,11 +185,66 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
         .unwrap_or("");
 
     match operation {
+        "compositor" => {
+            if handle.is_null() {
+                return (
+                    false,
+                    error_response(
+                        "create a native runtime before configuring compositor surfaces",
+                    ),
+                );
+            }
+            let Some(applications) = command
+                .get("applications")
+                .filter(|value| value.is_object())
+            else {
+                return (
+                    false,
+                    error_response("compositor requires an applications object"),
+                );
+            };
+            let encoded = CString::new(applications.to_string()).expect("JSON has no literal NUL");
+            if pocket_configure_compositor((*handle).cast(), encoded.as_ptr()) != 0 {
+                return (false, native_error(*handle, "pocket_configure_compositor"));
+            }
+            (false, json!({"ok": true, "configured": true}))
+        }
+        "traceMode" => {
+            if handle.is_null() {
+                return (
+                    false,
+                    error_response("create a native runtime before selecting trace mode"),
+                );
+            }
+            let Some(mode) = command
+                .get("mode")
+                .and_then(Value::as_u64)
+                .filter(|mode| *mode <= 2)
+            else {
+                return (false, error_response("trace mode must be 0, 1, or 2"));
+            };
+            if pocket_trace_clock_mode((*handle).cast(), mode as u32) != 0 {
+                return (false, native_error(*handle, "pocket_trace_clock_mode"));
+            }
+            (false, json!({"ok": true}))
+        }
+        "traceBoundary" => {
+            if command.get("traceClock").is_none() {
+                return (false, error_response("traceBoundary requires traceClock"));
+            }
+            (false, json!({"ok": true, "captured": true}))
+        }
         "schedule" => {
             if handle.is_null() {
-                return (false, error_response("create a native runtime before querying schedule"));
+                return (
+                    false,
+                    error_response("create a native runtime before querying schedule"),
+                );
             }
-            (false, json!({"ok": true, "nextWakeDelayMs": pocket_next_wake_delay_ms((*handle).cast())}))
+            (
+                false,
+                json!({"ok": true, "nextWakeDelayMs": pocket_next_wake_delay_ms((*handle).cast())}),
+            )
         }
         "create" => {
             let width = match finite_number(command, "width", 390.0) {
@@ -187,7 +307,8 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 }
             }
             if let Some(applications) = command.get("compositorSurfaces") {
-                let registry = CString::new(applications.to_string()).expect("JSON has no literal NUL");
+                let registry =
+                    CString::new(applications.to_string()).expect("JSON has no literal NUL");
                 if pocket_configure_compositor(created, registry.as_ptr()) != 0 {
                     let detail = last_error(*handle);
                     destroy(handle);
@@ -221,6 +342,9 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 pocket_load_files((*handle).cast(), source_path.as_ptr(), pak_path.as_ptr());
             if result != 0 {
                 return (false, native_error(*handle, "pocket_load_files"));
+            }
+            if command.get("render") == Some(&Value::Bool(true)) {
+                return (false, frame_response(*handle, 0.0));
             }
             (false, json!({"ok": true}))
         }
@@ -256,6 +380,11 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
             let abi = CStr::from_ptr(pocket_bytecode_runtime_abi())
                 .to_string_lossy()
                 .into_owned();
+            if command.get("render") == Some(&Value::Bool(true)) {
+                let mut response = frame_response(*handle, 0.0);
+                response["runtimeAbi"] = Value::String(abi);
+                return (false, response);
+            }
             (false, json!({"ok": true, "runtimeAbi": abi}))
         }
         "eval" => {
@@ -274,6 +403,9 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
             };
             if pocket_eval((*handle).cast(), source.as_ptr()) != 0 {
                 return (false, native_error(*handle, "pocket_eval"));
+            }
+            if command.get("render") == Some(&Value::Bool(true)) {
+                return (false, frame_response(*handle, 0.0));
             }
             (false, json!({"ok": true}))
         }
@@ -386,4 +518,70 @@ fn main() -> io::Result<()> {
 
     unsafe { destroy(&mut handle) };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe fn run(handle: &mut Handle, value: Value) -> Value {
+        let (_, response) = command(&value, handle);
+        assert_eq!(response["ok"], true, "{response}");
+        response
+    }
+
+    #[test]
+    fn native_trace_round_trip_and_unconsumed_facts_fail() {
+        unsafe {
+            let mut recorded = std::ptr::null_mut();
+            run(
+                &mut recorded,
+                json!({"op":"create", "width":80, "height":80}),
+            );
+            run(&mut recorded, json!({"op":"traceMode", "mode":1}));
+            let source = "globalThis.__pocketEvent=function(){}; globalThis.frame=function(){pocket._emit(JSON.stringify({method:'trace.sample',params:{random:Math.random(),now:Date.now()}}));};";
+            let boot = run(
+                &mut recorded,
+                json!({"op":"eval", "source":source, "render":true, "traceClock":{}}),
+            );
+            let frame = run(
+                &mut recorded,
+                json!({"op":"frame", "deltaMs":16, "traceClock":{}}),
+            );
+            assert!(!boot["traceClock"]["scalars"].as_array().unwrap().is_empty());
+
+            let mut replayed = std::ptr::null_mut();
+            run(
+                &mut replayed,
+                json!({"op":"create", "width":80, "height":80}),
+            );
+            run(&mut replayed, json!({"op":"traceMode", "mode":2}));
+            let replay_boot = run(
+                &mut replayed,
+                json!({"op":"eval", "source":source, "render":true, "traceClock":boot["traceClock"]}),
+            );
+            assert_eq!(replay_boot["frame"]["events"], boot["frame"]["events"]);
+            let replay_frame = run(
+                &mut replayed,
+                json!({"op":"frame", "deltaMs":16, "traceClock":frame["traceClock"]}),
+            );
+            assert_eq!(replay_frame["frame"]["events"], frame["frame"]["events"]);
+
+            let mut invalid = frame["traceClock"].clone();
+            let scalars = invalid["scalars"].as_array_mut().unwrap();
+            for _ in 0..8 {
+                scalars.push(boot["traceClock"]["scalars"][0].clone());
+            }
+            let (_, failure) = command(
+                &json!({"op":"frame", "deltaMs":16, "traceClock":invalid}),
+                &mut replayed,
+            );
+            assert_eq!(
+                failure["ok"], false,
+                "unconsumed trace facts cannot be reported as a successful replay"
+            );
+            destroy(&mut recorded);
+            destroy(&mut replayed);
+        }
+    }
 }

@@ -126,3 +126,37 @@ test("destroyed child assets are released and not released after same-app restar
   assert.equal(frame.releasedResources?.includes(asset), false, "replacement must not be deleted by the stale release");
   await manager.dispose();
 });
+
+test("resource deltas compare omitted-revision pixel payloads", async () => {
+  const { manager, session } = await sessionFor("resource-payload-delta");
+  const probe = fakeProbe();
+  const root = fakeRuntime("system", probe);
+  session.probe = probe;
+  session.rootRuntime = root;
+  const asset = "atlas.static";
+  const cached = { asset, width: 1, height: 1, psm: 1, linear: false, pixels: [7, 8], palette: [9] };
+  session.resourceCache.set(asset, cached);
+  root.resources.set(asset, { ...cached, pixels: [7, 8], palette: [9] });
+
+  const stable = session.compositeFrame({
+    frame: 1,
+    width: 390,
+    height: 360,
+    ops: [],
+    events: [],
+    resources: [],
+  });
+  assert.equal(stable.resources.length, 0, "unchanged revision-less pixels should not be resent");
+
+  root.resources.set(asset, { ...cached, pixels: [7, 10], palette: [9] });
+  const changed = session.compositeFrame({
+    frame: 2,
+    width: 390,
+    height: 360,
+    ops: [],
+    events: [],
+    resources: [],
+  });
+  assert.deepEqual(changed.resources, [{ ...cached, pixels: [7, 10], palette: [9] }]);
+  await manager.dispose();
+});

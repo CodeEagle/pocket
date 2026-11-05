@@ -105,13 +105,13 @@
     } else if (psm === 5) {
       const palette = Array.isArray(resource.palette) ? new Uint8Array(resource.palette) : null;
       if (!palette || palette.length < 1024 || source.length < expected) return null;
+      // Glyph pages are indexed textures. Copy an RGBA palette entry as one
+      // word instead of expanding four byte channels on the cold UI frame.
+      // Both views use the same byte order, preserving the wire RGBA bytes.
+      const colors = new Uint32Array(palette.buffer, palette.byteOffset, 256);
+      const output = new Uint32Array(rgba.buffer);
       for (let index = 0; index < expected; index += 1) {
-        const sourceAt = source[index] * 4;
-        const at = index * 4;
-        rgba[at] = palette[sourceAt];
-        rgba[at + 1] = palette[sourceAt + 1];
-        rgba[at + 2] = palette[sourceAt + 2];
-        rgba[at + 3] = palette[sourceAt + 3];
+        output[index] = colors[source[index]];
       }
     } else {
       return null;
@@ -163,7 +163,10 @@
     variants.set(tint, result);
     // Interrupted transitions can produce unlimited distinct colours. Keep a
     // small LRU, also bounded by pixel area for large textures.
-    const limit = Math.max(1, Math.min(8, Math.floor(1024 * 1024 / (image.width * image.height))));
+    const pixelArea = Math.max(1, image.width * image.height);
+    const maxVariants = pixelArea <= 16 ? 8 : 64;
+    const memoryBudget = pixelArea <= 16 ? 1024 * 1024 : 16 * 1024 * 1024;
+    const limit = Math.max(1, Math.min(maxVariants, Math.floor(memoryBudget / pixelArea)));
     while (variants.size > limit) {
       const oldest = variants.keys().next().value;
       const retired = variants.get(oldest);
@@ -192,13 +195,27 @@
 
   function drawImage(context, image, op) {
     if (!image) return;
-    image = tintedImage(image, op.color);
+    let alpha = 1;
+    if (op.color !== undefined && op.color !== null) {
+      const rawColor = Number(op.color) >>> 0;
+      const alphaByte = (rawColor >>> 24) & 0xff;
+      if (alphaByte === 0) return;
+      alpha = alphaByte / 255;
+      image = tintedImage(image, ((0xff000000 | (rawColor & 0x00ffffff)) >>> 0));
+    }
     const uv = Array.isArray(op.uv) && op.uv.length === 4 ? op.uv : [0, 0, 1, 1];
     const sx = clamp(uv[0], 0, 1) * image.width;
     const sy = clamp(uv[1], 0, 1) * image.height;
     const sw = (clamp(uv[2], 0, 1) - clamp(uv[0], 0, 1)) * image.width;
     const sh = (clamp(uv[3], 0, 1) - clamp(uv[1], 0, 1)) * image.height;
     if (sw <= 0 || sh <= 0) return;
+    if (alpha < 1) {
+      const previousAlpha = context.globalAlpha;
+      context.globalAlpha = previousAlpha * alpha;
+      context.drawImage(image.canvas, sx, sy, sw, sh, number(op.x, 0), number(op.y, 0), number(op.w, 0), number(op.h, 0));
+      context.globalAlpha = previousAlpha;
+      return;
+    }
     context.drawImage(image.canvas, sx, sy, sw, sh, number(op.x, 0), number(op.y, 0), number(op.w, 0), number(op.h, 0));
   }
 
@@ -262,7 +279,16 @@
       context.fill();
       return;
     }
-    image = tintedImage(image, op.color);
+    let alpha = 1;
+    if (op.color !== undefined && op.color !== null) {
+      const tint = Number(op.color) >>> 0;
+      alpha = ((tint >>> 24) & 0xff) / 255;
+      if (alpha === 0) return;
+      // Transformed glyphs use TEX_TRI during a dialog's scale animation.
+      // Share the RGB texture through the fade instead of cloning and
+      // uploading an entire font atlas for each intermediate alpha.
+      image = tintedImage(image, (0xff000000 | (tint & 0x00ffffff)) >>> 0);
+    }
     // Map source texture coordinates to the real triangle. Canvas2D has no
     // vertex primitive, so the path clip + affine texture draw is the direct
     // projection of the native TEX_TRI geometry.
@@ -284,6 +310,7 @@
     const d = (p0.y * (u2 - u1) + p1.y * (u0 - u2) + p2.y * (u1 - u0)) / determinant;
     const f = (p0.y * (u1 * v2 - u2 * v1) + p1.y * (u2 * v0 - u0 * v2) + p2.y * (u0 * v1 - u1 * v0)) / determinant;
     context.save();
+    context.globalAlpha *= alpha;
     context.beginPath();
     context.moveTo(p0.x, p0.y);
     context.lineTo(p1.x, p1.y);
@@ -352,6 +379,13 @@
   function drawGlassSurface(context, op, frameWidth, frameHeight) {
     const descriptor = surfaceDescriptor(op);
     if (!descriptor) return false;
+    const parameters = descriptor.parameters;
+    const effect = parameters.effect === "blur" ? "blur" : "glass";
+    const opacity = effect === "blur" ? clamp(number(parameters.opacity, 1), 0, 1) : 1;
+    // A transparent entrance frame has no filtered contribution. In
+    // particular, do not allocate a DPR-sized canvas or initialize the blur
+    // pipeline on the same input turn merely to discard all of its pixels.
+    if (opacity === 0) return true;
     const source = context.canvas;
     const scratch = glassScratchFor(source);
     if (!scratch || typeof scratch.context.filter !== "string") return false;
@@ -364,9 +398,10 @@
     const scaleX = backingWidth / Math.max(1, frameWidth);
     const scaleY = backingHeight / Math.max(1, frameHeight);
     const scale = Math.min(scaleX, scaleY);
-    const parameters = descriptor.parameters;
     const sigma = clamp(number(parameters.blur, 5), 0, 20);
-    const tintOpacity = clamp(number(parameters.tintOpacity, 0), 0, 1);
+    // Plain backdrop blur deliberately has no colour wash, even if a stale
+    // recipe field is present. The native provider applies the same contract.
+    const tintOpacity = effect === "blur" ? 0 : clamp(number(parameters.tintOpacity, 0), 0, 1);
     const x = number(op.x, 0);
     const y = number(op.y, 0);
     const width = Math.max(0, number(op.w, op.width ?? 0));
@@ -393,6 +428,7 @@
     }
     const radius = clamp(number(parameters.radius, 0), 0, Math.min(width, height) / 2);
     roundedClip(context, x, y, width, height, radius);
+    context.globalAlpha = opacity;
     context.drawImage(scratch.canvas, 0, 0, backingWidth, backingHeight, 0, 0, frameWidth, frameHeight);
     if (tintOpacity > 0) {
       context.fillStyle = `rgba(255,255,255,${tintOpacity})`;
@@ -402,6 +438,15 @@
     return true;
   }
 
+  function sameClip(a, b) {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return number(a.x, 0) === number(b.x, 0) &&
+      number(a.y, 0) === number(b.y, 0) &&
+      number(a.w, 0) === number(b.w, 0) &&
+      number(a.h, 0) === number(b.h, 0);
+  }
+
   function drawFrame(context, frame, resources, videos) {
     const width = number(frame.width, 1);
     const height = number(frame.height, 1);
@@ -409,10 +454,18 @@
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
     const ops = Array.isArray(frame.ops) ? frame.ops : [];
+    let activeClip = null;
     for (const op of ops) {
       if (!op || typeof op !== "object") continue;
-      context.save();
-      clipRect(context, op.clip);
+      const nextClip = op.clip && typeof op.clip === "object" ? op.clip : null;
+      if (!sameClip(activeClip, nextClip)) {
+        if (activeClip) context.restore();
+        if (nextClip) {
+          context.save();
+          clipRect(context, nextClip);
+        }
+        activeClip = nextClip;
+      }
       const kind = op.type;
       if (kind === "rect") {
         context.fillStyle = argb(op.color ?? 0);
@@ -458,8 +511,8 @@
         // do not paint fabricated rectangles or screenshots for them.
         drawGlassSurface(context, op, width, height);
       }
-      context.restore();
     }
+    if (activeClip) context.restore();
   }
 
   function visibleRegion(op, width, height) {
@@ -2112,8 +2165,11 @@
         // desktop selections.
         void input({ type: "resize", width, height, safeArea: safeArea(message.safeArea) });
       } else if (message.type === "preview.regions") {
-        regionsEnabled = message.enabled === true;
-        renderCurrentFrame();
+        const enabled = message.enabled === true;
+        if (regionsEnabled !== enabled) {
+          regionsEnabled = enabled;
+          renderCurrentFrame();
+        }
       } else if (message.type === "preview.capture") {
         const scale = clamp(Math.round(number(message.scale, 1)), 1, 4);
         let captureCanvas = canvas;
@@ -2193,6 +2249,9 @@
       resetVideoProjection(true);
       for (const image of resources.values()) disposeResource(image);
       resources.clear();
+      const glassScratch = glassScratchCache.get(canvas);
+      if (glassScratch) glassScratch.canvas.width = glassScratch.canvas.height = 0;
+      glassScratchCache.delete(canvas);
       cancelPointerContacts();
       connectionGeneration += 1;
       stream?.close();

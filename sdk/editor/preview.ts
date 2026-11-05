@@ -153,6 +153,9 @@ const browserPluginTimeoutMs = 120_000;
 const previewRecordingMaxEntries = 8192;
 const previewRecordingMaxBytes = 8 * 1024 * 1024;
 const previewRecordingMaxAssets = 128 * 1024 * 1024;
+// Keep the web archive within PocketRecordingLibrary's canonical runtime
+// bound. A destroyed/recreated child consumes a new capture identity.
+const previewRecordingMaxRuntimes = 8;
 
 /** Frame elapsed time must not jump when wall-clock time is adjusted. */
 function monotonicNow(): number {
@@ -554,6 +557,8 @@ type PreviewRecordingCapture = {
   appId: string;
   runtime: PreviewRuntime;
   entries: PreviewRecordingEntry[];
+  bytes: number;
+  createArgs?: JsonRecord;
   assets: Map<string, PreviewRecordingAsset>;
   contentHashes: Record<string, string>;
   engineAbi?: string;
@@ -564,6 +569,8 @@ type PreviewRecordingCapture = {
 type PreviewRecordingState = {
   enabled: boolean;
   stopped: boolean;
+  /** The live guest is being replaced with a trace-enabled probe. */
+  pendingRestart: boolean;
   captures: Map<PreviewRuntime, PreviewRecordingCapture>;
   incompleteReason?: string;
 };
@@ -573,6 +580,17 @@ function cloneJson<T>(value: T): T {
 }
 
 /** Canonical JSON mirrors pocketCanonicalJson for preview-local digests. */
+const previewNumberKind = Symbol("preview-number-kind");
+type PreviewNumber = { [previewNumberKind]: "int" | "double"; value: number };
+
+function previewInteger(value: unknown): unknown {
+  return typeof value === "number" ? { [previewNumberKind]: "int", value } as PreviewNumber : value;
+}
+
+function previewDouble(value: unknown): unknown {
+  return typeof value === "number" ? { [previewNumberKind]: "double", value } as PreviewNumber : value;
+}
+
 function canonicalPreviewJson(value: unknown): string {
   if (value === undefined) return "null";
   if (value === null) return "null";
@@ -584,6 +602,12 @@ function canonicalPreviewJson(value: unknown): string {
   }
   if (Array.isArray(value)) return `[${value.map(canonicalPreviewJson).join(",")}]`;
   if (typeof value === "object") {
+    const number = value as Partial<PreviewNumber>;
+    if (number[previewNumberKind] !== undefined) {
+      if (typeof number.value !== "number" || !Number.isFinite(number.value)) throw new Error("recording JSON contains a non-finite number");
+      if (number[previewNumberKind] === "int") return String(number.value);
+      return Object.is(number.value, -0) ? "-0.0" : number.value === 0 ? "0" : Number.isInteger(number.value) ? `${number.value}.0` : String(number.value);
+    }
     const record = value as Record<string, unknown>;
     return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonicalPreviewJson(record[key])}`).join(",")}}`;
   }
@@ -606,10 +630,10 @@ function previewClip(value: unknown): JsonRecord | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const clip = value as JsonRecord;
   return {
-    x: Number(clip.x ?? 0),
-    y: Number(clip.y ?? 0),
-    width: Number(clip.width ?? clip.w ?? 0),
-    height: Number(clip.height ?? clip.h ?? 0),
+    x: previewDouble(Number(clip.x ?? 0)),
+    y: previewDouble(Number(clip.y ?? 0)),
+    width: previewDouble(Number(clip.width ?? clip.w ?? 0)),
+    height: previewDouble(Number(clip.height ?? clip.h ?? 0)),
   };
 }
 
@@ -618,48 +642,48 @@ function previewOpSummary(value: unknown): JsonRecord {
   const type = typeof op.type === "string" ? op.type : "unknown";
   const result: JsonRecord = {
     type,
-    x: Number(op.x ?? 0),
-    y: Number(op.y ?? 0),
-    width: Number(op.width ?? op.w ?? 0),
-    height: Number(op.height ?? op.h ?? 0),
+    x: previewDouble(Number(op.x ?? 0)),
+    y: previewDouble(Number(op.y ?? 0)),
+    width: previewDouble(Number(op.width ?? op.w ?? 0)),
+    height: previewDouble(Number(op.height ?? op.h ?? 0)),
     clip: previewClip(op.clip),
   };
-  if (type === "rect") result.color = op.color;
+  if (type === "rect") result.color = previewInteger(op.color);
   else if (type === "rounded") {
-    result.color = op.color;
-    result.radius = op.radius;
+    result.color = previewInteger(op.color);
+    result.radius = previewDouble(op.radius);
   } else if (type === "gradient") {
-    result.fromColor = op.from ?? op.fromColor;
-    result.toColor = op.to ?? op.toColor;
-    result.direction = op.direction;
+    result.fromColor = previewInteger(op.from ?? op.fromColor);
+    result.toColor = previewInteger(op.to ?? op.toColor);
+    result.direction = previewInteger(op.direction);
   } else if (type === "triangle") {
     result.points = Array.isArray(op.points) ? op.points.map((point) => {
       const item = asRecord(point, "recording triangle point");
-      return { x: Number(item.x), y: Number(item.y) };
+      return { x: previewDouble(Number(item.x)), y: previewDouble(Number(item.y)) };
     }) : [];
-    result.colors = op.colors;
+    result.colors = Array.isArray(op.colors) ? op.colors.map((color) => previewInteger(color)) : op.colors;
   } else if (type === "textureTriangle") {
     result.asset = op.asset;
-    result.color = op.color;
+    result.color = previewInteger(op.color);
     result.points = Array.isArray(op.points) ? op.points.map((point) => {
       const item = asRecord(point, "recording texture triangle point");
-      return { x: Number(item.x), y: Number(item.y) };
+      return { x: previewDouble(Number(item.x)), y: previewDouble(Number(item.y)) };
     }) : [];
-    result.uvs = op.uvs;
+    result.uvs = Array.isArray(op.uvs) ? op.uvs.map((uv) => previewDouble(uv)) : op.uvs;
   } else if (type === "text") {
     result.text = op.text;
-    result.size = op.size;
-    result.color = op.color;
-    result.fontSlot = op.fontSlot;
-    result.align = op.align;
+    result.size = previewDouble(op.size);
+    result.color = previewInteger(op.color);
+    result.fontSlot = op.fontSlot === undefined ? null : previewInteger(op.fontSlot);
+    result.align = previewInteger(op.align);
   } else if (type === "image") {
     result.asset = op.asset;
-    result.uv = op.uv;
+    result.uv = op.uv === undefined ? null : Array.isArray(op.uv) ? op.uv.map((uv) => previewDouble(uv)) : op.uv;
     // The native FrameOp schema calls this ARGB modulation word `color`;
     // PocketImageOp exposes the same value as `tint` after decoding. Keep
     // the preview digest on the canonical Dart field rather than relying on
     // a non-existent native `tint` key.
-    result.tint = op.color ?? op.tint;
+    result.tint = op.color === undefined && op.tint === undefined ? null : previewInteger(op.color ?? op.tint);
   } else if (type === "hostSurface") {
     // Host-surface parameters travel in the native asset descriptor. The
     // Flutter decoder reads that descriptor before constructing
@@ -678,7 +702,7 @@ function previewOpSummary(value: unknown): JsonRecord {
     }
     result.id = op.id;
     result.kind = descriptor?.kind ?? op.kind;
-    result.surfaceHandle = op.surfaceHandle;
+    result.surfaceHandle = previewInteger(op.surfaceHandle);
     result.focused = op.focused;
     result.parameters = descriptor?.parameters ?? op.parameters ?? {};
   } else if (type === "video") {
@@ -695,7 +719,7 @@ function previewEventSummary(value: unknown): JsonRecord {
   const payload = event.payload ?? event.params ?? {};
   const payloadRecord = payload && typeof payload === "object" && !Array.isArray(payload)
     ? payload as JsonRecord
-    : { value: payload };
+    : {};
   return {
     id: String(event.id ?? ""),
     method: String(event.method ?? event.name ?? ""),
@@ -709,14 +733,14 @@ function previewResourceSummary(value: unknown): JsonRecord {
   const palette = resource.palette === undefined || resource.palette === null ? undefined : previewBytes(resource.palette);
   return {
     asset: resource.asset,
-    revision: resource.revision,
-    width: resource.width,
-    height: resource.height,
-    psm: resource.psm,
+    revision: previewInteger(resource.revision),
+    width: previewInteger(resource.width),
+    height: previewInteger(resource.height),
+    psm: previewInteger(resource.psm),
     linear: resource.linear,
-    pixelsBytes: pixels.byteLength,
+    pixelsBytes: previewInteger(pixels.byteLength),
     pixelsSha256: sha256Hex(pixels),
-    paletteBytes: palette?.byteLength,
+    paletteBytes: palette === undefined ? null : previewInteger(palette.byteLength),
     paletteSha256: palette === undefined ? null : sha256Hex(palette),
   };
 }
@@ -729,15 +753,14 @@ function previewResourceSummary(value: unknown): JsonRecord {
  * at the compositor boundary below.
  */
 function samePreviewResourceBytes(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
   const leftAbsent = left === undefined || left === null;
   const rightAbsent = right === undefined || right === null;
   if (leftAbsent || rightAbsent) return leftAbsent && rightAbsent;
   if (!Array.isArray(left) || !Array.isArray(right)) return false;
-  const leftBytes = previewBytes(left);
-  const rightBytes = previewBytes(right);
-  if (leftBytes.byteLength !== rightBytes.byteLength) return false;
-  for (let index = 0; index < leftBytes.byteLength; index += 1) {
-    if (leftBytes[index] !== rightBytes[index]) return false;
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
   }
   return true;
 }
@@ -751,15 +774,15 @@ function samePreviewResourcePayload(left: JsonRecord, right: JsonRecord): boolea
 
 function previewFrameSummary(value: PreviewFrame): JsonRecord {
   const canonical: JsonRecord = {
-    width: value.width,
-    height: value.height,
+    width: previewDouble(value.width),
+    height: previewDouble(value.height),
     ops: value.ops.map(previewOpSummary),
     events: value.events.map(previewEventSummary),
     resources: value.resources.map(previewResourceSummary),
     releasedResources: value.releasedResources ?? [],
     auxiliary: value.auxiliary === undefined ? null : {
-      width: value.auxiliary.width,
-      height: value.auxiliary.height,
+      width: previewDouble(value.auxiliary.width),
+      height: previewDouble(value.auxiliary.height),
       ops: value.auxiliary.ops.map(previewOpSummary),
     },
   };
@@ -778,10 +801,6 @@ function previewFrameSummary(value: PreviewFrame): JsonRecord {
     releasedResources: (value.releasedResources ?? []).length,
     auxiliaryOps: value.auxiliary?.ops.length ?? 0,
   };
-}
-
-function emptyPreviewTraceClock(): JsonRecord {
-  return { idleMs: [], scalars: [] };
 }
 
 type PreviewRuntime = {
@@ -805,9 +824,6 @@ type PreviewRuntime = {
   pendingBrowserEvents: PendingBrowserEvent[];
   needsPump: boolean;
   pumping: number;
-  /** Bounded command history retained so a later recording start includes the
-   * real create/load boundaries that happened before the UI request. */
-  recordingHistory?: PreviewProbeHistoryEntry[];
 };
 
 /** Keep lifecycle edges tied to the runtime generation that emitted them. */
@@ -1047,6 +1063,7 @@ class PreviewSession {
   private readonly pointerTargets = new Map<number, PointerTarget>();
   private readonly storage = new Map<string, JsonRecord | null>();
   private previewRecording?: PreviewRecordingState;
+  private previewRecordingRestartScheduled = false;
   private nextRecordingRuntimeId = 0;
   private systemCatalog?: SystemCatalog;
   private systemConfigured = false;
@@ -1228,6 +1245,7 @@ class PreviewSession {
       this.tickHz = artifacts.tickHz ?? this.manager.options.tickHz ?? 60;
       const probePath = await this.manager.findProbe();
       const probe = new NativeProbe(probePath, this.manager.options.commandTimeoutMs ?? 15_000);
+      const recording = this.previewRecordingActive();
       const runtime: PreviewRuntime = {
         appId: this.systemCatalog?.systemUI ?? (artifacts.appId ?? this.id),
         instanceId: "system-ui",
@@ -1242,10 +1260,10 @@ class PreviewSession {
         pendingBrowserEvents: [],
         needsPump: false,
         pumping: 0,
-        recordingHistory: [],
       };
       probe.setObserver((command, response) => this.observeProbeCommand(runtime, command, response));
       probe.setDecorator((command) => this.decorateProbeCommand(command));
+      this.ensurePreviewRecordingCapture(runtime);
       try {
         await probe.checked({
           op: "create",
@@ -1254,18 +1272,36 @@ class PreviewSession {
           rasterDensity: this.manager.options.rasterDensity ?? 1,
           tickHz: this.tickHz,
         });
-        // The native trace clock must be selected before the first guest load.
-        // It remains allocation-free until a transaction carries traceClock:{}
-        // and lets a later UI start capture the already-live preview safely.
-        await probe.checked({ op: "traceMode", mode: 1 });
+        // Recording is opt-in. A recording request arms a fresh runtime before
+        // this method is entered, so the native clock is selected before the
+        // first guest load and every transaction can be replayed canonically.
+        if (recording) await probe.checked({ op: "traceMode", mode: 1 });
         if (artifacts.compositorSurfaces && Object.keys(artifacts.compositorSurfaces).length > 0) {
           await probe.checked({ op: "compositor", applications: artifacts.compositorSurfaces });
         }
+        let loadResponse: JsonRecord;
         if (artifacts.bytecodePath) {
-          await probe.checked({ op: "loadBytecode", bytecodePath: artifacts.bytecodePath, pakPath: artifacts.pakPath, render: true, traceClock: {} });
+          loadResponse = await probe.checked({
+            op: "loadBytecode",
+            bytecodePath: artifacts.bytecodePath,
+            pakPath: artifacts.pakPath,
+            ...(recording ? { render: true, traceClock: {} } : {}),
+          });
         } else {
-          await probe.checked({ op: "load", sourcePath: artifacts.sourcePath, pakPath: artifacts.pakPath, render: true, traceClock: {} });
+          loadResponse = await probe.checked({
+            op: "load",
+            sourcePath: artifacts.sourcePath,
+            pakPath: artifacts.pakPath,
+            ...(recording ? { render: true, traceClock: {} } : {}),
+          });
         }
+        // A recording load asks the probe to render the first frame in the
+        // same native transaction. Install that frame before the normal pump
+        // so resources and lifecycle requests are not lost when the browser
+        // subscribes after the load response. Host requests are deferred until
+        // the runtime is installed below, because SystemUI routing needs the
+        // root identity to be visible first.
+        if (loadResponse.frame !== undefined) await this.ingestRuntimeFrame(runtime, loadResponse.frame, 0, false);
         // The native resize ABI intentionally remains width/height-only. Send
         // the richer safe-area fact over the existing guest event lane before
         // the first pump so the first admitted frame uses the same geometry as
@@ -1282,6 +1318,13 @@ class PreviewSession {
         this.artifactRevision = artifacts.revision;
         this.state = "ready";
         this.lastTickAt = monotonicNow();
+        if (runtime.frame) {
+          for (const event of runtime.frame.events) {
+            if (event && typeof event === "object" && !Array.isArray(event)) {
+              await this.handleRuntimeEvent(runtime, event as JsonRecord, 0);
+            }
+          }
+        }
         await this.tickNow(1000 / this.tickHz);
         this.hotBuild = nextHotBuild;
         this.hotVersion = String(artifacts.generation ?? randomUUID());
@@ -1297,6 +1340,7 @@ class PreviewSession {
           await this.schedule();
         }
       } catch (error) {
+        await this.finishPreviewRecordingCapture(runtime);
         await probe.stop();
         throw error;
       }
@@ -1387,6 +1431,15 @@ class PreviewSession {
     const probe = this.probe;
     this.probe = undefined;
     const children = [...this.childRuntimes.values()];
+    const runtimes = [
+      ...(this.rootRuntime ? [this.rootRuntime] : []),
+      ...children,
+    ];
+    // A child may be intentionally destroyed while a recording continues on
+    // the root. Close its native trace clock before stopping its probe so the
+    // completed capture is exportable instead of being misclassified as a
+    // transport failure by the later global teardown.
+    for (const runtime of runtimes) await this.finishPreviewRecordingCapture(runtime);
     if (this.rootRuntime) {
       this.emitWebBluetoothScopeDispose(this.rootRuntime);
       await this.failBrowserPluginRuntime(this.rootRuntime, "runtime_stopped", "preview runtime stopped");
@@ -1752,38 +1805,43 @@ class PreviewSession {
   private recordableProbeCommand(command: JsonRecord): boolean {
     const operation = command.op;
     if (!["create", "compositor", "load", "loadBytecode", "eval", "frame", "send", "resize"].includes(String(operation))) return false;
-    if (operation !== "send") return true;
-    const message = command.message && typeof command.message === "object" && !Array.isArray(command.message)
-      ? command.message as JsonRecord
-      : undefined;
-    const payload = message?.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
-      ? message.payload as JsonRecord
-      : undefined;
-    // A start/stop/status response is a control-plane transaction for the
-    // recorder itself. Capturing it would make replay depend on a recording
-    // request that is intentionally not replayed.
-    return !(message?.name === "host.response" && typeof payload?.capability === "string" && payload.capability.startsWith("diagnostics.recording."));
+    // Recording control responses are real guest-visible boundaries. The
+    // initial start response is sent while the old runtime is pending restart
+    // (and is therefore intentionally not captured); active status/repeated
+    // start responses remain part of the canonical send lane.
+    return true;
+  }
+
+  private previewRecordingActive(): boolean {
+    const state = this.previewRecording;
+    return !!state?.enabled && !state.stopped && !state.pendingRestart && !state.incompleteReason;
   }
 
   private decorateProbeCommand(command: JsonRecord): JsonRecord {
-    // Once trace mode is selected (before guest load), every traced native
-    // transaction must close its envelope. Keeping the empty envelope on all
-    // probe transactions also makes the pre-Start bootstrap history genuinely
-    // replayable instead of requiring a synthetic load record.
-    if (command.op === "create" || !this.recordableProbeCommand(command)) return command;
-    if (command.traceClock !== undefined) return command;
-    return { ...command, traceClock: {} };
+    // The native trace clock is installed only on an armed recording runtime.
+    // This keeps ordinary preview animation on the same allocation-free probe
+    // path as before recording was requested.
+    if (!this.previewRecordingActive() || command.op === "create" || !this.recordableProbeCommand(command)) return command;
+    const decorated = command.traceClock !== undefined ? command : { ...command, traceClock: {} };
+    // PocketReplayRunner's eval lane always returns a canonical frame summary;
+    // ask the native probe for that same eval+frame transaction while tracing.
+    return command.op === "eval" && command.render === undefined
+      ? { ...decorated, render: true }
+      : decorated;
   }
 
   private async observeProbeCommand(runtime: PreviewRuntime, command: JsonRecord, response: JsonRecord): Promise<void> {
-    if (!this.recordableProbeCommand(command)) return;
+    if (!this.previewRecordingActive() || !this.recordableProbeCommand(command)) return;
     const item: PreviewProbeHistoryEntry = {
       command: cloneJson(command),
-      response: (() => {
-        const copy = cloneJson(response);
-        delete copy.frame;
-        return copy;
-      })(),
+      // Frame payloads can contain full atlas pixels. Keep only the small
+      // transaction result fields in the entry; the digest below reads the
+      // live response once without cloning that payload first.
+      response: Object.fromEntries(
+        Object.entries(response)
+          .filter(([key]) => key !== "frame")
+          .map(([key, value]) => [key, cloneJson(value)]),
+      ),
     };
     if (response.frame && typeof response.frame === "object" && !Array.isArray(response.frame)) {
       try {
@@ -1793,14 +1851,16 @@ class PreviewSession {
         // turn an ordinary guest failure into an observer failure.
       }
     }
-    const history = runtime.recordingHistory ?? (runtime.recordingHistory = []);
-    history.push(item);
-    if (history.length > previewRecordingMaxEntries) history.shift();
     const state = this.previewRecording;
-    if (!state || !state.enabled || state.stopped) return;
+    if (!state) return;
     const capture = state.captures.get(runtime);
     if (!capture || capture.stopped) return;
     try {
+      if (command.op === "create") {
+        const args = cloneJson(command);
+        delete args.op;
+        capture.createArgs = args;
+      }
       const entry = await this.recordingEntryFromHistory(capture, item);
       if (entry) this.appendPreviewRecordingEntry(capture, entry);
     } catch (error) {
@@ -1816,12 +1876,12 @@ class PreviewSession {
     }
     entry.index = capture.entries.length;
     const bytes = new TextEncoder().encode(canonicalPreviewJson(entry)).byteLength;
-    const current = capture.entries.reduce((total, item) => total + new TextEncoder().encode(canonicalPreviewJson(item)).byteLength, 0);
-    if (bytes > previewRecordingMaxBytes - current) {
+    if (bytes > previewRecordingMaxBytes - capture.bytes) {
       capture.incompleteReason ??= "maxBytes exceeded";
       return;
     }
     capture.entries.push(entry);
+    capture.bytes += bytes;
   }
 
   private async recordingAsset(
@@ -1847,14 +1907,19 @@ class PreviewSession {
   ): Promise<PreviewRecordingEntry | undefined> {
     const command = item.command;
     const operation = command.op;
-    const traceClock = item.response.traceClock && typeof item.response.traceClock === "object"
-      ? cloneJson(item.response.traceClock)
-      : emptyPreviewTraceClock();
-    if (operation === "create") {
-      const args = cloneJson(command);
-      delete args.op;
-      args.operation = "create";
-      return { index: 0, kind: "auxiliary", args, result: { enabled: true, traceClock }, error: null };
+    // `create` is a native runtime setup boundary, not the canonical
+    // auxiliary-surface entry. PocketReplayRunner creates the runtime from
+    // recording metadata and only accepts `auxiliary` for its actual
+    // enableAuxiliary(width,height) transaction, so retain create arguments
+    // on the capture metadata and omit a synthetic entry.
+    if (operation === "create") return undefined;
+    const rawTraceClock = item.response.traceClock;
+    if (!rawTraceClock || typeof rawTraceClock !== "object" || Array.isArray(rawTraceClock)) {
+      throw new Error(`native trace clock missing for ${String(operation)}`);
+    }
+    const traceClock = cloneJson(rawTraceClock);
+    if (!Array.isArray(traceClock.idleMs) || !Array.isArray(traceClock.scalars)) {
+      throw new Error(`native trace clock envelope is incomplete for ${String(operation)}`);
     }
     if (operation === "compositor") {
       return {
@@ -1908,6 +1973,7 @@ class PreviewSession {
       appId: runtime.appId,
       runtime,
       entries: [],
+      bytes: 0,
       assets: new Map(),
       contentHashes: {},
       stopped: false,
@@ -1916,19 +1982,34 @@ class PreviewSession {
 
   private ensurePreviewRecordingCapture(runtime: PreviewRuntime): PreviewRecordingCapture | undefined {
     const state = this.previewRecording;
-    if (!state || !state.enabled || state.stopped) return undefined;
+    if (!state || !state.enabled || state.stopped || state.pendingRestart) return undefined;
     const existing = state.captures.get(runtime);
     if (existing) return existing;
+    if (state.captures.size >= previewRecordingMaxRuntimes) {
+      state.incompleteReason ??= `maxRuntimes exceeded (${previewRecordingMaxRuntimes})`;
+      return undefined;
+    }
     const capture = this.createPreviewRecordingCapture(runtime);
     state.captures.set(runtime, capture);
     return capture;
   }
 
-  private previewRecordingRuntimes(): PreviewRuntime[] {
-    return [
-      ...(this.rootRuntime ? [this.rootRuntime] : []),
-      ...this.childRuntimes.values(),
-    ];
+  /** Finish one live capture before its native probe is destroyed. */
+  private async finishPreviewRecordingCapture(runtime: PreviewRuntime): Promise<void> {
+    const state = this.previewRecording;
+    const capture = state?.captures.get(runtime);
+    if (!state || !capture || capture.stopped || state.pendingRestart) return;
+    try {
+      await runtime.probe.checked({ op: "traceMode", mode: 0 });
+    } catch (error) {
+      capture.incompleteReason ??= `native trace clock stop failed: ${errorText(error)}`;
+      state.incompleteReason ??= capture.incompleteReason;
+    } finally {
+      // A successful child destroy is a completed runtime boundary. Mark it
+      // stopped even when the probe reports a close error; the error remains
+      // explicit above and export will reject rather than silently omit it.
+      capture.stopped = true;
+    }
   }
 
   private previewRecordingStatus(): JsonRecord {
@@ -1938,7 +2019,7 @@ class PreviewSession {
       id: capture.id,
       appId: capture.appId,
       entries: capture.entries.length,
-      bytes: capture.entries.reduce((total, item) => total + new TextEncoder().encode(canonicalPreviewJson(item)).byteLength, 0),
+      bytes: capture.bytes,
       finished: capture.stopped,
       incomplete: capture.incompleteReason !== undefined,
     }));
@@ -1947,39 +2028,75 @@ class PreviewSession {
       enabled: state.enabled,
       recording: state.enabled && !state.stopped && !incomplete,
       stopped: state.stopped,
+      restarting: state.pendingRestart,
       incomplete,
       ...(state.incompleteReason ? { reason: state.incompleteReason } : {}),
       runtimes,
     };
   }
 
+  private async publishPreviewRecordingStarted(): Promise<void> {
+    const state = this.previewRecording;
+    const runtime = this.rootRuntime;
+    if (!state || state.stopped || state.pendingRestart || !runtime) return;
+    const status = this.previewRecordingStatus();
+    await runtime.probe.checked({
+      op: "send",
+      message: { type: "event", name: "diagnostics.recording.started", payload: status },
+    });
+    runtime.needsPump = true;
+    // The event is a real guest input boundary. Deliver it on the new probe
+    // before exposing the first post-start frame to subscribers.
+    await this.tickNow(0);
+  }
+
+  private async restartPreviewRuntimeForRecording(state: PreviewRecordingState): Promise<void> {
+    if (this.previewRecording !== state || state.stopped) return;
+    await this.stopProbe();
+    if (this.previewRecording !== state || state.stopped) return;
+    state.pendingRestart = false;
+    await this.ensureStarted();
+    await this.publishPreviewRecordingStarted();
+  }
+
+  private schedulePreviewRecordingRestart(state: PreviewRecordingState): void {
+    if (this.previewRecordingRestartScheduled) return;
+    this.previewRecordingRestartScheduled = true;
+    // The start request is handled while the old runtime is pumping. Wait for
+    // that serialized turn to finish before destroying its probe; otherwise
+    // the host.response would be sent to a closed transport.
+    const tail = this.operationTail.promise;
+    void tail
+      .then(() => this.restartPreviewRuntimeForRecording(state))
+      .catch((error) => {
+        if (this.previewRecording === state) {
+          state.incompleteReason ??= `preview recording start failed: ${errorText(error)}`;
+          state.pendingRestart = false;
+        }
+        this.reportError(error);
+      })
+      .finally(() => { this.previewRecordingRestartScheduled = false; });
+  }
+
   private async startPreviewRecording(runtime: PreviewRuntime): Promise<JsonRecord> {
     if (this.previewRecording?.enabled && !this.previewRecording.stopped) return this.previewRecordingStatus();
-    this.previewRecording = {
+    const state: PreviewRecordingState = {
       enabled: true,
       stopped: false,
+      pendingRestart: true,
       captures: new Map(),
     };
+    this.previewRecording = state;
     this.nextRecordingRuntimeId = 0;
     try {
-      for (const candidate of this.previewRecordingRuntimes()) {
-        const capture = this.ensurePreviewRecordingCapture(candidate)!;
-        for (const item of candidate.recordingHistory ?? []) {
-          const entry = await this.recordingEntryFromHistory(capture, item);
-          if (entry) this.appendPreviewRecordingEntry(capture, entry);
-        }
-      }
-      const status = this.previewRecordingStatus();
-      // Match PocketSession's started event while retaining the same real
-      // runtime and avoiding a second JS/native runtime implementation.
-      await runtime.probe.checked({
-        op: "send",
-        message: { type: "event", name: "diagnostics.recording.started", payload: status },
-      });
-      runtime.needsPump = true;
-      return status;
+      // A native trace clock must be selected before load. Rebuild the live
+      // probe only for an explicit recording request; ordinary preview never
+      // pays for trace envelopes, command history, or frame digests.
+      if (runtime.pumping > 0) this.schedulePreviewRecordingRestart(state);
+      else await this.restartPreviewRuntimeForRecording(state);
+      return this.previewRecordingStatus();
     } catch (error) {
-      this.previewRecording = undefined;
+      if (this.previewRecording === state) this.previewRecording = undefined;
       throw new Error(`preview recording start failed: ${errorText(error)}`);
     }
   }
@@ -1987,18 +2104,25 @@ class PreviewSession {
   private async stopPreviewRecording(): Promise<JsonRecord> {
     const state = this.previewRecording;
     if (!state) return this.previewRecordingStatus();
+    if (!state.pendingRestart) {
+      for (const capture of state.captures.values()) await this.finishPreviewRecordingCapture(capture.runtime);
+    }
     state.stopped = true;
+    state.pendingRestart = false;
     for (const capture of state.captures.values()) capture.stopped = true;
     return this.previewRecordingStatus();
   }
 
   private previewRecordingDocument(capture: PreviewRecordingCapture): JsonRecord {
-    const create = capture.entries.find((entry) => entry.kind === "auxiliary" && entry.args.operation === "create");
-    const width = Number(create?.args.width ?? capture.runtime.viewportWidth);
-    const height = Number(create?.args.height ?? capture.runtime.viewportHeight);
-    const density = Number(create?.args.rasterDensity ?? this.manager.options.rasterDensity ?? 1);
-    const tickHz = Number(create?.args.tickHz ?? this.tickHz);
-    const bytes = capture.entries.reduce((total, entry) => total + new TextEncoder().encode(canonicalPreviewJson(entry)).byteLength, 0);
+    const create = capture.createArgs;
+    const width = Number(create?.width ?? capture.runtime.viewportWidth);
+    const height = Number(create?.height ?? capture.runtime.viewportHeight);
+    const density = Number(create?.rasterDensity ?? this.manager.options.rasterDensity ?? 1);
+    const tickHz = Number(create?.tickHz ?? this.tickHz);
+    const bytes = capture.bytes;
+    const memory = create?.memory && typeof create.memory === "object" && !Array.isArray(create.memory)
+      ? cloneJson(create.memory)
+      : undefined;
     const version = capture.entries.some((entry) => {
       const clock = entry.result.traceClock;
       return !!clock && typeof clock === "object" && (clock as JsonRecord).version === 2;
@@ -2013,6 +2137,7 @@ class PreviewSession {
         tickHz,
         engineAbi: capture.engineAbi ?? null,
         contentHashes: capture.contentHashes,
+        ...(memory && Object.keys(memory).length > 0 ? { memory } : {}),
       },
       limits: { maxEntries: previewRecordingMaxEntries, maxBytes: previewRecordingMaxBytes },
       bytes,
@@ -2083,15 +2208,21 @@ class PreviewSession {
     let entriesReplayed = 0;
     let framesCompared = 0;
     try {
+      // `create` is runtime setup rather than a PocketRecording entry. Reopen
+      // the probe from the captured metadata, then select native replay mode
+      // before the first traced load/compositor transaction.
+      const create = cloneJson(capture.createArgs ?? {
+        width: capture.runtime.viewportWidth,
+        height: capture.runtime.viewportHeight,
+        rasterDensity: this.manager.options.rasterDensity ?? 1,
+        tickHz: this.tickHz,
+      });
+      delete create.op;
+      await probe.checked({ op: "create", ...create });
+      await probe.checked({ op: "traceMode", mode: 2 });
       for (const entry of capture.entries) {
         let response: JsonRecord;
-        if (entry.kind === "auxiliary" && entry.args.operation === "create") {
-          const command = cloneJson(entry.args);
-          delete command.operation;
-          command.op = "create";
-          response = await probe.checked(command);
-          await probe.checked({ op: "traceMode", mode: 2 });
-        } else if (entry.kind === "compositor") {
+        if (entry.kind === "compositor") {
           const command: JsonRecord = { op: "compositor", applications: cloneJson(entry.args.applications) };
           if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
           response = await probe.checked(command);
@@ -2224,30 +2355,7 @@ class PreviewSession {
         const response = await runtime.probe.checked({ op: "frame", deltaMs: delta });
         delta = 0;
         if (response.frame === undefined) continue;
-        const frameJson = JSON.stringify(response.frame);
-        if (Buffer.byteLength(frameJson) > maxFrameBytes) throw new Error(`native preview frame for ${runtime.appId} exceeds the safety limit`);
-        const frame = asFrame(response.frame);
-        runtime.frame = frame;
-        for (const event of frame.events) {
-          if (!event || typeof event !== "object" || Array.isArray(event)) continue;
-          const browserEvent = event as JsonRecord;
-          if (!isVideoPlaybackEvent(browserEvent) && !isTextInputLifecycleEvent(browserEvent)) continue;
-          enqueueBrowserEvent(runtime.pendingBrowserEvents, browserEvent, runtime.generation);
-        }
-        // A guest can emit several control edges while native settles one
-        // input boundary. enqueueBrowserEvent coalesces repeated state for
-        // one generation/identity and throws on an actual bound violation;
-        // cleanup edges are therefore never silently discarded.
-        if (runtime.initialEvents.length === 0) {
-          runtime.initialEvents = frame.events.filter((event): event is JsonRecord =>
-            !!event && typeof event === "object" && !Array.isArray(event) && eventName(event as JsonRecord) === "host.request",
-          ) as JsonRecord[];
-        }
-        this.runtimeResourceCache(runtime, frame);
-        for (const event of frame.events) {
-          if (!event || typeof event !== "object" || Array.isArray(event)) continue;
-          await this.handleRuntimeEvent(runtime, event as JsonRecord, depth + 1);
-        }
+        const frame = await this.ingestRuntimeFrame(runtime, response.frame, depth + 1);
         if (runtime.needsPump) {
           settlePasses = 1;
           continue;
@@ -2262,6 +2370,41 @@ class PreviewSession {
     } finally {
       runtime.pumping -= 1;
     }
+  }
+
+  /** Install one native frame, including resource/lifecycle/event edges. */
+  private async ingestRuntimeFrame(
+    runtime: PreviewRuntime,
+    value: unknown,
+    depth: number,
+    processEvents = true,
+  ): Promise<PreviewFrame> {
+    const frameJson = JSON.stringify(value);
+    if (Buffer.byteLength(frameJson) > maxFrameBytes) throw new Error(`native preview frame for ${runtime.appId} exceeds the safety limit`);
+    const frame = asFrame(value);
+    runtime.frame = frame;
+    for (const event of frame.events) {
+      if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+      const browserEvent = event as JsonRecord;
+      if (!isVideoPlaybackEvent(browserEvent) && !isTextInputLifecycleEvent(browserEvent)) continue;
+      enqueueBrowserEvent(runtime.pendingBrowserEvents, browserEvent, runtime.generation);
+    }
+    // A guest can emit several control edges while native settles one input
+    // boundary. enqueueBrowserEvent coalesces repeated state for one
+    // generation/identity and throws on an actual bound violation; cleanup
+    // edges are therefore never silently discarded.
+    if (runtime.initialEvents.length === 0) {
+      runtime.initialEvents = frame.events.filter((event): event is JsonRecord =>
+        !!event && typeof event === "object" && !Array.isArray(event) && eventName(event as JsonRecord) === "host.request",
+      ) as JsonRecord[];
+    }
+    this.runtimeResourceCache(runtime, frame);
+    if (!processEvents) return frame;
+    for (const event of frame.events) {
+      if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+      await this.handleRuntimeEvent(runtime, event as JsonRecord, depth + 1);
+    }
+    return frame;
   }
 
   private async handleRuntimeEvent(runtime: PreviewRuntime, event: JsonRecord, depth: number): Promise<void> {
@@ -2635,6 +2778,7 @@ class PreviewSession {
           }
         }
         this.dropRuntimeResources(child.appId);
+        await this.finishPreviewRecordingCapture(child);
         await child.probe.stop();
         await respond({ destroyed: true });
         return;
@@ -2755,8 +2899,8 @@ class PreviewSession {
       pendingBrowserEvents: [],
       needsPump: false,
       pumping: 0,
-      recordingHistory: [],
     };
+    const recording = this.previewRecordingActive();
     probe.setObserver((command, response) => this.observeProbeCommand(runtime, command, response));
     probe.setDecorator((command) => this.decorateProbeCommand(command));
     this.ensurePreviewRecordingCapture(runtime);
@@ -2769,13 +2913,33 @@ class PreviewSession {
         tickHz: this.tickHz,
         ...(memory ? { memory } : {}),
       });
-      await probe.checked({ op: "traceMode", mode: 1 });
-      if (artifacts.bytecodePath) await probe.checked({ op: "loadBytecode", bytecodePath: artifacts.bytecodePath, pakPath: artifacts.pakPath, render: true, traceClock: {} });
-      else await probe.checked({ op: "load", sourcePath: artifacts.sourcePath, pakPath: artifacts.pakPath, render: true, traceClock: {} });
+      if (recording) await probe.checked({ op: "traceMode", mode: 1 });
+      let loadResponse: JsonRecord;
+      if (artifacts.bytecodePath) loadResponse = await probe.checked({
+        op: "loadBytecode",
+        bytecodePath: artifacts.bytecodePath,
+        pakPath: artifacts.pakPath,
+        ...(recording ? { render: true, traceClock: {} } : {}),
+      });
+      else loadResponse = await probe.checked({
+        op: "load",
+        sourcePath: artifacts.sourcePath,
+        pakPath: artifacts.pakPath,
+        ...(recording ? { render: true, traceClock: {} } : {}),
+      });
+      if (loadResponse.frame !== undefined) await this.ingestRuntimeFrame(runtime, loadResponse.frame, 0, false);
       await sendDisplayViewport(probe, initialWidth, initialHeight, initialSafeArea);
       this.childRuntimes.set(appId, runtime);
+      if (runtime.frame) {
+        for (const event of runtime.frame.events) {
+          if (event && typeof event === "object" && !Array.isArray(event)) {
+            await this.handleRuntimeEvent(runtime, event as JsonRecord, 0);
+          }
+        }
+      }
       return runtime;
     } catch (error) {
+      await this.finishPreviewRecordingCapture(runtime);
       await probe.stop();
       throw error;
     }
@@ -2784,6 +2948,16 @@ class PreviewSession {
   private surfaceSlots(frame: PreviewFrame): SurfaceSlot[] {
     return frame.ops.flatMap((value) => {
       if (!value || typeof value !== "object" || Array.isArray(value) || value.type !== "hostSurface") return [];
+      let kind = typeof value.kind === "string" ? value.kind : undefined;
+      if (typeof value.asset === "string") {
+        try {
+          const descriptor = JSON.parse(value.asset);
+          if (descriptor && typeof descriptor.kind === "string") kind = descriptor.kind;
+        } catch { /* Legacy application surfaces have no descriptor. */ }
+      }
+      // Optical/texture surfaces share the native handle/id fields with apps.
+      // They must survive composition in paint order for their host provider.
+      if (kind !== undefined && kind !== "application") return [];
       const handle = typeof value.surfaceHandle === "number" ? value.surfaceHandle : Number(value.surfaceHandle);
       const appId = typeof value.id === "string" ? value.id : "";
       const x = Number(value.x);
@@ -2988,7 +3162,7 @@ class PreviewSession {
         // payload rather than retransmitting unchanged pixels forever.
         if (previous.revision !== undefined && resource.revision !== undefined) {
           return previous.revision !== resource.revision || previous.width !== resource.width ||
-            previous.height !== resource.height || previous.psm !== resource.psm;
+            previous.height !== resource.height || previous.psm !== resource.psm || previous.linear !== resource.linear;
         }
         return previous.revision !== resource.revision || !samePreviewResourcePayload(previous, resource);
       }),
@@ -3309,7 +3483,10 @@ class PreviewSession {
           if (phase === "up" || phase === "cancel") {
             this.pointerTargets.delete(id);
             if (this.pointerTargets.size === 0) {
-              this.lastTickAt = monotonicNow();
+              // Native settled the preceding idle interval on pointer DOWN.
+              // Keep that interval in the next display delta so it can repay
+              // native's elapsed credit; resetting here stalls new animation
+              // ticks until subsequent deltas repay the discarded idle time.
               if (this.tickTimer) {
                 clearTimeout(this.tickTimer);
                 this.tickTimer = undefined;

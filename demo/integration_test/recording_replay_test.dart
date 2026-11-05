@@ -250,36 +250,54 @@ void main() {
     },
   );
 
-  testWidgets('JS debug controls start, stop, verify and export their real guest', (
-    tester,
-  ) async {
-    final library = PocketRecordingLibrary();
-    Directory? exported;
-    try {
-      await tester.pumpWidget(PocketHostApp(recordings: library));
-      await guest.waitFor(tester, '00');
-      await guest.tapGuest(tester, 'Open Host details');
-      await guest.waitFor(tester, 'Runtime');
-      await guest.tapGuest(tester, 'Recording status');
-      await guest.waitForContaining(tester, 'Idle · 0 guests');
-      await guest.tapGuest(tester, 'Start recording');
-      await guest.waitForContaining(tester, 'Recording · 1 guests');
-      await guest.tapGuest(tester, 'Stop & verify replay');
-      await guest.waitForContaining(tester, 'Replay matched · 1 native guests');
-      await guest.tapGuest(tester, 'Export recording');
-      await guest.waitForContaining(tester, 'Exported: ');
-      final label = guest
-          .texts(tester)
-          .firstWhere((text) => text.startsWith('Exported: '));
-      final manifest = File(label.substring('Exported: '.length));
-      exported = manifest.parent;
-      expect(await manifest.exists(), isTrue);
-      final imported = await PocketRecordingLibrary.replayArchive(manifest);
-      expect(imported['ok'], isTrue, reason: imported.toString());
-    } finally {
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump();
-      await exported?.delete(recursive: true);
-    }
-  });
+  testWidgets(
+    'JS debug controls start, stop, verify and export their real guest',
+    (tester) async {
+      final library = PocketRecordingLibrary();
+      Directory? exported;
+      try {
+        await tester.pumpWidget(PocketHostApp(recordings: library));
+        await guest.waitFor(tester, '00');
+        await guest.tapGuest(tester, 'Open Host details');
+        await guest.waitFor(tester, 'Runtime');
+        await guest.tapGuest(tester, 'Recording status');
+        await guest.waitForContaining(tester, 'Idle · 0 guests');
+        await guest.tapGuest(tester, 'Start recording');
+        // Starting remounts the guest generation. Re-reveal the Runtime page
+        // before inspecting its status because the mobile shell may reset the
+        // page viewport while the recording-start event arrives.
+        await guest.tapGuest(tester, 'Recording status');
+        await guest.waitForContaining(tester, 'Recording · 1 guests');
+        await guest.tapGuest(tester, 'Stop & verify replay');
+        await guest.waitForContaining(
+          tester,
+          'Replay matched · 1 native guests',
+        );
+        await guest.tapGuest(tester, 'Export recording');
+        await guest.waitForContaining(tester, 'Exported: ');
+        final exportedText = guest
+            .texts(tester)
+            .firstWhere(
+              (text) =>
+                  text.replaceAll(RegExp(r'\s+'), ' ').startsWith('Exported: '),
+            );
+        final pathStart =
+            exportedText.indexOf('Exported: ') + 'Exported: '.length;
+        final manifest = File(
+          exportedText.substring(pathStart).replaceAll(RegExp(r'\s+'), ''),
+        );
+        exported = manifest.parent;
+        expect(await manifest.exists(), isTrue);
+        final imported = await PocketRecordingLibrary.replayArchive(manifest);
+        expect(imported['ok'], isTrue, reason: imported.toString());
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        final archive = exported;
+        if (archive != null && await archive.exists()) {
+          await archive.delete(recursive: true);
+        }
+      }
+    },
+  );
 }

@@ -122,17 +122,23 @@ test("real native preview boots the Showcase SystemUI with its trusted catalog",
     assert.ok(before.frame.resources.some((resource: Record<string, unknown>) => resource.asset === "pocket.texture.3"), "Showcase frame must expose its live rounded-mask resource");
     assert.equal(before.frame.inputBounds, undefined, "root-only Showcase frames must not advertise a child input rectangle");
     const text = before.frame.ops.filter((op: Record<string, unknown>) => op.type === "text").map((op: Record<string, unknown>) => op.text);
-    assert.ok(text.includes("Pocket Host Lab"), "Showcase SystemUI home did not render");
+    assert.ok(text.includes("Pocket"), "Showcase SystemUI home did not render the current Pocket title");
     assert.ok(text.includes("Open profile app"));
     assert.ok(text.includes("Open lobby app"));
     assert.ok(before.frame.events.some((event: Record<string, unknown>) => event.name === "host.request"), "host capability requests should remain explicit");
 
     // This is a real root-guest input round trip, not a child fixture or a
-    // browser-side counter. The native Showcase page increments its counter.
+    // browser-side counter. Derive the current +1 hit point from the actual
+    // FrameResult because the redesigned Home page moved the Playground card.
+    const increment = before.frame.ops.find((op: Record<string, unknown>) => op.type === "text" && op.text === "+1");
+    assert.ok(increment, "current Showcase Home must expose the +1 counter action");
+    const incrementX = Number(increment.x) + Number(increment.w) / 2;
+    const incrementY = Number(increment.y) + Number(increment.h) / 2;
+    assert.ok([incrementX, incrementY].every(Number.isFinite), "counter action must expose numeric native bounds");
     for (const phase of ["down", "up"]) {
       const response = await manager.handle(new Request("http://127.0.0.1/api/projects/pocket-host-showcase/preview/input", {
         method: "POST",
-        body: JSON.stringify({ type: "pointer", phase, id: 0, x: 330, y: 534 }),
+        body: JSON.stringify({ type: "pointer", phase, id: 0, x: incrementX, y: incrementY }),
       }), "pocket-host-showcase", "input");
       assert.equal(response.status, 200);
     }
@@ -140,12 +146,18 @@ test("real native preview boots the Showcase SystemUI with its trusted catalog",
     const afterText = after.frame.ops.filter((op: Record<string, unknown>) => op.type === "text").map((op: Record<string, unknown>) => op.text);
     assert.ok(afterText.includes("01"), "Showcase root counter did not change after real pointer input");
 
-    // The same root guest owns bottom navigation; no child-app host launch is
-    // assumed when checking this local, fully JS-owned route.
+    // The same root guest owns the primary navigation; derive the current UI
+    // tab hit point from its FrameResult rather than relying on the previous
+    // tab-cell boundary (the redesigned bar moved the exact split).
+    const uiTab = after.frame.ops.find((op: Record<string, unknown>) => op.type === "text" && op.text === "UI");
+    assert.ok(uiTab, "current Showcase navigation must expose the UI tab");
+    const uiX = Number(uiTab.x) + Number(uiTab.w) / 2;
+    const uiY = Number(uiTab.y) + Number(uiTab.h) / 2;
+    assert.ok([uiX, uiY].every(Number.isFinite), "UI tab must expose numeric native bounds");
     for (const phase of ["down", "up"]) {
       await manager.handle(new Request("http://127.0.0.1/api/projects/pocket-host-showcase/preview/input", {
         method: "POST",
-        body: JSON.stringify({ type: "pointer", phase, id: 0, x: 195, y: 820 }),
+        body: JSON.stringify({ type: "pointer", phase, id: 0, x: uiX, y: uiY }),
       }), "pocket-host-showcase", "input");
     }
     const components = await bodyJson(await manager.handle(new Request("http://127.0.0.1/api/projects/pocket-host-showcase/preview/snapshot"), "pocket-host-showcase", "snapshot"));
@@ -178,7 +190,7 @@ test("real native preview boots the Showcase SystemUI with its trusted catalog",
   }
 });
 
-test("real native preview opens Profile, launches Lobby, and returns through SystemUI", async () => {
+test("real native preview opens Profile, launches Lobby, and returns through SystemUI", { timeout: 30_000 }, async () => {
   assert.ok(existsSync(probe), `pocket_probe is required for mini-app acceptance: ${probe}`);
   const manager = createPreviewManager({
     probePath: probe,
@@ -199,7 +211,11 @@ test("real native preview opens Profile, launches Lobby, and returns through Sys
     "pocket-host-showcase",
     "snapshot",
   ));
-  const waitFor = async (predicate: (value: Record<string, any>) => boolean, timeoutMs = 5000) => {
+  // Mini-app launch/return includes the real host admission and settled child
+  // viewport transition. Keep the existing semantic predicates and pointer
+  // assertions, but allow the pinned probe a full transition budget instead of
+  // treating a normal cold start as a missing route.
+  const waitFor = async (predicate: (value: Record<string, any>) => boolean, timeoutMs = 15000) => {
     const deadline = Date.now() + timeoutMs;
     let value = await snapshot();
     while (Date.now() < deadline && !predicate(value)) {

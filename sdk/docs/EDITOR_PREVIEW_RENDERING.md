@@ -1,5 +1,49 @@
 # Editor 网页绘制：圆角拼接与屏幕密度
 
+## 反复切换主题的图片着色开销（2026-11-05）
+
+保留父项目的 `mini_apps/syslib/pocket_syslib_pages.js` 主题/组件组合与
+`shaders/liquid_glass.frag` 作为原有行为参考；父项目没有 Editor Canvas
+投影，因此这里只适配现有 `sdk/editor/client/preview.js`，不复制布局或
+业务状态。实际 PocketJS 仍负责主题动画并输出 DrawOps。
+
+中间色原先每次都先 drawImage 再 getImageData，强制同步读取 Canvas，
+且每张资源的着色 Map 永不淘汰。现在复用资源解码时的 CPU RGBA，保持
+逐通道乘色语义，取消这次 GPU 读回。缓存采用最多 8 项的 LRU，同时按
+纹理面积限制为约 1M 像素（单张超过预算时最多保留一项）。资源替换、
+release 和预览关闭时释放原图与着色 Canvas。
+
+真实 Chromium 的 `preview_tint.test.ts` 连续输入 80 种颜色，验证颜色
+像素、缓存面积有界、无内部 getImageData、替换与释放后的缓冲清理。
+消融时仅取消 LRU，保留面积由最多 9 像素变为 82，测试明确失败；仅
+恢复 GPU 读回时，无读回断言失败。两个负对照均只使用临时脚本，没有
+修改共享工作区的生产文件。该测试验证投影开销，完整主题交互另由真实
+native guest 与浏览器输入测试验证。
+
+静态资源转发同时保留 native revision 快路径；旧 provider 没有 revision
+时先比较缓存的像素/调色板引用，只有不同数组才比较内容，不为每帧创建
+两份 Uint8Array。重连仍发送完整资源，真实变化仍作为 delta 发送。
+
+Editor 的每个 preview.frame 通知还会重发 preview.regions 设置。旧绘制
+入口不检查设置是否改变，导致每帧多画一次完整 Canvas。现在只在开关值
+真正变化时重画。Chromium 回归发送 80 次相同值，确认额外 clearRect/
+整帧绘制次数为 0；切换值后无论重复多少次均只额外绘制一次。该去重位于
+公共投影入口，未更改业务组件来减少通知或省略真实动画帧。
+
+真实 Modal 回归还检出了另一处投影错误：`glass` 与 application surface
+都带有 id/handle，旧合成器把 glass 当成未加载的 child 删除。现在读取
+native descriptor 的 kind，仅将 application（或无 descriptor 的旧帧）
+作为 child slot，glass/platformTexture 等保留原始绘制位置，交给已有
+宿主投影处理。不能用没有 native id/handle 的合成图片测试代替该回归。
+
+Native `build_frame` 的变化帧也移除了重复生成 DrawList：先各调用一次
+官方 `draw()` / `draw_auxiliary()` 作缓存判断，变化时从官方已有的
+`current_draw_list()` / `current_auxiliary_draw_list()` 取得同一份快照再
+复制给解码器，命中时不复制。原有 DrawOps 解码、资源 revision、事件与
+缓存失效条件保留，没有新增另一套 renderer。父项目
+`native/pocket_runtime_multi.c` 的 frame/drawlist 边界也先行检查；该适配
+使用当前 pinned PocketJS 的保留快照 API，没有修改上游绘制算法。
+
 ## 问题与路径
 
 2026-11-04，Editor `8792` 的 Mini Apps 按钮出现横向细缝。网页绘制路径为 `preview.ts` 合成 native FrameResult，然后由 `client/preview.js` 投影到 Canvas2D。它不经过 Flutter 的 `pocket_view_painter.dart`，因此与 Android Impeller 的硬矩形 scissor 优化分别维护。
@@ -63,3 +107,57 @@ Duo 展开时的要求是只避让右上角状态区域，顶部其余部分保�
 ## Native mask 与浏览器 DPR
 
 Canvas backing store 的 DPR 不会增加 native 原始纹理的信息量。PocketJS 的 disc/border mask 会依据 runtime 的 rasterDensity 生成更高分辨率纹理，而逻辑尺寸保持不变。Editor 的服务入口专门配置 rasterDensity=2；公共 PreviewManager 默认值仍为 1。此设置改善生成的圆角/阴影 mask，不会把外部低分辨率图片变成高清，也没有在 DPR 变化时重建并丢弃用户运行状态。Flutter 真机仍沿用其设备像素密度路径。
+
+## 重复主题/开关的实际绘制时延验证（2026-11-05）
+
+为区分 JS 状态提交、native FrameResult 往返和 Canvas 绘制，使用临时
+`sdk/editor/test/.tmp_showcase_render_measure.ts`，以当前
+`demo/assets`（root bytecode 587,987 bytes，同时加载其 profile/lobby
+子应用 pak/qjbc）和 pinned Playwright Chromium 进行真实点击。native 使用
+新构建的优化 probe：
+`sdk/native/target/release/pocket_probe`（不是 debug probe）。临时 wrapper
+只给每个 `op: "frame"` 请求记录发送到 native 子进程、收到完整响应之间的
+单调时钟时长，未改变协议或生产代码。
+
+浏览器注入的测试 instrumentation 只包裹主预览 Canvas 的
+`CanvasRenderingContext2D.clearRect/save/restore`：在 depth=0 的
+`clearRect` 开始计时，在最后一个 restore 回到 depth=0 时结束。它测量
+`renderCurrentFrame` 的同步 Canvas2D 投影段，不包含浏览器合成器/GPU swap
+或屏幕扫描；Chrome 的计时粒度使很短的样本量化为 0 或约 0.1ms。p50/p95
+使用排序样本的最近秩，不作 60fps 或帧预算达标声明。
+
+真实操作为 Settings 中 Light/Dark 快速交替 9 次，以及 Mobile UI → Controls
+中 Enabled 快速点击 9 次（最终状态分别 Dark、Disabled）；两组均确认
+最终 pending input 为 0、无页面异常，并在 settle 后等待 250ms，确认没有
+新的 preview.frame 通知或 Canvas draw。
+
+| 交互 | Canvas draw 样本 | draw p50 / p95 / max | DrawOps | resources | Frame payload max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Theme 9 次交替 | 42 | 0 / 0.100 / 0.100 ms | 282（min=max） | 0 | 39,505 B |
+| Enabled 9 次点击 | 35 | 0 / 0.100 / 0.100 ms | 364（min=max） | 0 | 50,244 B |
+
+同一 run 的 native `op: "frame"` 独立 wrapper 记录 270 个完整 frame 响应：
+round-trip walltime p50 **0.952ms**、p95 **3.471ms**、max **40.429ms**；
+最大 native frame 为 364 DrawOps、9 resources、120,177 B JSON 响应。这个
+walltime 包含 probe 子进程边界和 native guest 执行，但不等于 Canvas paint
+时长；两者必须分开看。
+
+这项验证是临时 instrumentation，不向 preview API 增加 telemetry。它证明
+当前重复输入路径的同步 Canvas 投影耗时和 idle 后无额外绘制；不能推断
+浏览器合成、GPU 交换、真实设备刷新率或所有资源/host-surface 场景的成本。
+
+## 2026-11-05 modal 组合 harness 的未解决问题
+
+独立的真实 guest modal/Chromium 连续打开关闭通过；最新 colorless blur +
+scale/fade 的 native、Flutter raster 和 browser 定向回归也通过。但在同一 Bun
+进程先运行 `preview_timing.test.ts` 再运行 real modal 时，仍有独立的组合回归
+问题：最后一轮独立 Bun 进程 baseline 0/5，modal-only 3/3。失败时 probe 会以
+code 0/EOF 退出，最后收到 `frame`/`schedule`，没有收到 `quit`，且部分样本仍有
+一个 SSE subscriber；另有样本先失去 subscriber 后触发 idle eviction。
+
+检查了延迟 DOWN 的 fulfill 顺序：MOVE/UP 已在 DOWN 响应之后发送。等待
+operationTail、await server.stop(true)、先 page.close、先 preview.close 的实验
+都不能稳定消除失败，因此没有加入固定 sleep，也没有将其解释为已证实的
+Modal JS、NativeProbe 或 Bun 缺陷。没有足够因果证据保留新的 NativeProbe
+close/stdin.end 生命周期补丁；相关临时诊断和进程已清理。此问题仍未定位，
+本轮定向 UI 通过结果不等于完整组合 suite 通过。
