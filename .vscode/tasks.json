@@ -1,0 +1,84 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Pocket: native iOS",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/sdk/scripts/build_native.sh",
+                "ios-sim"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Pocket: native macOS",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/sdk/scripts/build_native.sh",
+                "macos"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Pocket: native Android",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/sdk/scripts/build_native.sh",
+                "android"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Pocket: guest bytecode",
+            "type": "process",
+            "command": "bun",
+            "args": [
+                "run",
+                "build:system"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/demo/js"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Pocket: prepare iOS",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Pocket: native iOS",
+                "Pocket: guest bytecode"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Pocket: prepare macOS",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Pocket: native macOS",
+                "Pocket: guest bytecode"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Pocket: prepare Android",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Pocket: native Android",
+                "Pocket: guest bytecode"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}

@@ -269,6 +269,8 @@ flutter run -d <device-id>
 
 更新 SDK 原生源码或传输 ABI 后，须重新执行对应平台的 `build_native.sh`，再重新构建并启动 Flutter。`flutter run`、hot reload 和 hot restart 都不会编译 Rust；旧 iOS archive 可能缺少新 Dart 所需的接口。独立消费工程可使用 `pocket.ts build --platform=ios-sim|ios`，由现有输入指纹检查决定是否重建。
 
+VS Code 打开仓库根目录后，可选择 `Pocket Demo (iPhone Duo)` 启动；配置会先按顺序准备 native 库与 JS 字节码。其他平台入口和环境要求见 [VS Code 启动说明](sdk/docs/VSCODE_LAUNCH.md)。
+
 ### 创建独立消费者
 
 从仓库根目录执行：
