@@ -109,8 +109,13 @@ mount(() => <App />);
     const reverseIndex = reverse.findIndex((f, index) => index > 0
       && f.ops.some(op => op.type === "text" && op.text === "Sync OFF")
       && reverse[index - 1].ops.some(op => op.type === "text" && op.text === "Sync ON"));
-    assert.ok(reverseIndex > 0 && thumb(reverse[reverseIndex], "Sync OFF").x < thumb(reverse[reverseIndex - 1], "Sync ON").x,
-      "reversing a moving switch must respond in its input turn");
+    assert.ok(reverseIndex > 0, "the reverse input must update the controlled state immediately");
+    const beforeReverse = thumb(reverse[reverseIndex - 1], "Sync ON").x;
+    const atReverse = thumb(reverse[reverseIndex], "Sync OFF").x;
+    assert.ok(Math.abs(atReverse - beforeReverse) < 4,
+      "an interrupted thumb must retain its painted position instead of jumping to an endpoint");
+    assert.ok(reverse.slice(reverseIndex + 1, reverseIndex + 11).some((f) => thumb(f, "Sync OFF").x < atReverse - 1),
+      "a velocity-preserving spring must turn toward the latest target within the next few frames");
     assert.ok(Math.abs(thumb(reverse.at(-1)!, "Sync OFF").x - syncStart) < 1,
       "a reversed switch must finish at the latest controlled value");
 

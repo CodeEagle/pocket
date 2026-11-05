@@ -47,6 +47,8 @@ import {
 } from "./responsive.ts";
 import { useRouteActive } from "./route.tsx";
 import type { BridgeObject } from "./host.ts";
+import { MOBILE_MOTION, motionEaseInOut, stepMotionSpring } from "./motion.ts";
+export { MOBILE_MOTION } from "./motion.ts";
 
 export type SemanticTone = "accent" | "info" | "success" | "warning" | "danger" | "neutral";
 
@@ -318,15 +320,15 @@ export function wrapTextLines(
   return lines.join("\n");
 }
 
-function readNodeWidth(node: { id: number } | undefined): number | undefined {
+function readNodeExtent(node: { id: number } | undefined, dimension: "width" | "height" = "width"): number | undefined {
   const getLayout = layoutGlobal.pocket?.getLayout;
   if (!node || typeof getLayout !== "function") return undefined;
   try {
     const raw = getLayout(node.id);
     if (!raw || typeof raw !== "object") return undefined;
     const record = raw as Record<string, unknown>;
-    const w = record.width ?? record.w;
-    return typeof w === "number" && Number.isFinite(w) && w > 0 ? w : undefined;
+    const extent = record[dimension] ?? record[dimension === "width" ? "w" : "h"];
+    return typeof extent === "number" && Number.isFinite(extent) && extent > 0 ? extent : undefined;
   } catch {
     return undefined;
   }
@@ -373,7 +375,7 @@ export function MobileParagraph(props: MobileParagraphProps): JSX.Element {
       layoutReadArmed = true;
       return;
     }
-    const measured = readNodeWidth(containerNode);
+    const measured = readNodeExtent(containerNode);
     if (measured !== undefined && measured > 0 && Math.abs(measured - containerWidth()) >= 1) {
       setContainerWidth(measured);
     }
@@ -417,7 +419,8 @@ export function MobileParagraph(props: MobileParagraphProps): JSX.Element {
 /**
  * Frame-driven state-change animation hook.
  * Whenever `key()` changes, progresses smoothly from `0` to `1.0` over
- * `frames` ticks using a cubic ease-out curve. Overlay callers use the
+ * `frames / 60` seconds. The legacy frame parameter is independent of the
+ * host's simulation rate. Overlay callers use the
  * presence helper below so their subtree can reverse before unmounting.
  * Inline controls pass `animateOnMount = false` so they render at rest (`1.0`)
  * on initial mount and animate whenever their state changes; overlays pass
@@ -431,7 +434,8 @@ export function useStateTransition(
   const routeActive = useRouteActive();
   const [progress, setProgress] = createSignal(animateOnMount ? 0 : 1);
   const [active, setActive] = createSignal(animateOnMount);
-  let step = animateOnMount ? 0 : frames;
+  const durationSeconds = Math.max(1, frames) / 60;
+  let startedAt = virtualNow();
   let initialized = false;
   let previousKey: unknown;
   createEffect(() => {
@@ -443,32 +447,25 @@ export function useStateTransition(
     if (!initialized) {
       initialized = true;
       if (animateOnMount) {
-        step = 0;
+        startedAt = virtualNow();
         setProgress(0);
         setActive(true);
       } else {
-        step = frames;
         setProgress(1);
         setActive(false);
       }
       return;
     }
-    step = 0;
+    startedAt = virtualNow();
     setProgress(0);
     setActive(true);
   });
   try {
     onFrame(() => {
       if (!routeActive()) return;
-      if (step < frames) {
-        step += 1;
-        const linear = Math.min(1, step / Math.max(1, frames));
-        const eased = 1 - Math.pow(1 - linear, 3);
-        setProgress(eased);
-        if (step >= frames) setActive(false);
-      } else if (active()) {
-        setActive(false);
-      }
+      const linear = Math.min(1, Math.max(0, virtualNow() - startedAt) / durationSeconds);
+      setProgress(motionEaseInOut(linear));
+      if (linear >= 1) setActive(false);
     }, { active: () => routeActive() && active(), continuous: () => routeActive() && active() });
   } catch {
     // Ignore when running in unit tests without an active frame scheduler.
@@ -476,31 +473,29 @@ export function useStateTransition(
   return progress;
 }
 
-const MOBILE_OVERLAY_DURATION_SECONDS = 0.3;
-
-function overlayEaseInOut(value: number): number {
-  const t = Math.max(0, Math.min(1, value));
-  return t * t * (3 - 2 * t);
-}
-
-type OverlayPresence = {
+export type MobilePresenceTransition = {
   mounted: () => boolean;
   progress: () => number;
   interactive: () => boolean;
 };
 
 /**
- * Retain a Modal subtree through its exit so the panel and the colorless
- * backdrop reverse together. `virtualNow()` is the pinned simulation clock;
+ * Retain a subtree through its exit. Overlay panels and their colorless
+ * backdrops reverse together. `virtualNow()` is the pinned simulation clock;
  * the duration is expressed in seconds rather than fixed input-frame counts.
  * Reversing an interrupted transition walks the same phase backward.
  */
-function useOverlayPresence(open: () => boolean): OverlayPresence {
+export function usePresenceTransition(
+  open: () => boolean,
+  options: { durationMs?: number; animateOnMount?: boolean } = {},
+): MobilePresenceTransition {
   const routeActive = useRouteActive();
-  const [mounted, setMounted] = createSignal(false);
-  const [progress, setProgress] = createSignal(0);
-  let requested = false;
-  let phase = 0;
+  const initial = options.animateOnMount === false && untrack(routeActive) && Boolean(untrack(open));
+  const [mounted, setMounted] = createSignal(initial);
+  const [progress, setProgress] = createSignal(initial ? 1 : 0);
+  const durationSeconds = Math.max(1, options.durationMs ?? MOBILE_MOTION.presentation) / 1000;
+  let requested = initial;
+  let phase = initial ? 1 : 0;
   let lastTime = virtualNow();
 
   createEffect(() => {
@@ -536,8 +531,11 @@ function useOverlayPresence(open: () => boolean): OverlayPresence {
       const now = virtualNow();
       const delta = Math.max(0, now - lastTime);
       lastTime = now;
-      phase = Math.max(0, Math.min(1, phase + (requested ? 1 : -1) * delta / MOBILE_OVERLAY_DURATION_SECONDS));
-      setProgress(overlayEaseInOut(phase));
+      phase = Math.max(0, Math.min(1, phase + (requested ? 1 : -1) * delta / durationSeconds));
+      // Avoid an extra transparent interception frame from floating-point
+      // residue after exactly N fixed ticks.
+      if (Math.abs(phase - target) < 0.000001) phase = target;
+      setProgress(motionEaseInOut(phase));
       if (phase === target && !requested) setMounted(false);
     }, {
       active: () => routeActive() && mounted() && phase !== (requested ? 1 : 0),
@@ -551,8 +549,9 @@ function useOverlayPresence(open: () => boolean): OverlayPresence {
 
 /**
  * Smoothly interpolates a numeric value (such as progress ratio, switch thumb,
- * or segmented control indicator position) across frames when the target
- * changes. Keeps the demand scheduler active only while settling.
+ * or segmented control indicator position) with a non-bouncy spring. Retargets
+ * preserve the painted position and velocity; settled controls park again.
+ * `rate` remains a compatible speed hint for callers without durationMs.
  */
 export function useAnimatedNumber(target: () => number, rate = 0.38, durationMs?: number): () => number {
   const routeActive = useRouteActive();
@@ -560,50 +559,60 @@ export function useAnimatedNumber(target: () => number, rate = 0.38, durationMs?
   const [current, setCurrent] = createSignal(initial);
   const [active, setActive] = createSignal(false);
   let goal = initial;
-  let from = initial;
-  let elapsedMs = 0;
-  const advanceTimed = (): boolean => {
-    if (durationMs === undefined || durationMs <= 0) return false;
-    elapsedMs += 1000 / simulationHz();
-    const progress = Math.min(1, elapsedMs / durationMs);
-    const eased = 1 - Math.pow(1 - progress, 3);
-    setCurrent(progress === 1 ? goal : from + (goal - from) * eased);
-    if (progress === 1) setActive(false);
-    return true;
+  let velocity = 0;
+  let lastTime = virtualNow();
+  let elapsed = 0;
+  let distance = 0;
+  const responseMs = durationMs ?? MOBILE_MOTION.selection * 0.38 / Math.max(0.05, rate);
+  const advance = (delta: number): void => {
+    if (delta <= 0) return;
+    elapsed += delta;
+    const next = stepMotionSpring(untrack(current), velocity, goal, delta, responseMs);
+    velocity = next.velocity;
+    // Bound the final snap below a hundredth of a logical pixel. Normalized
+    // properties use a proportionally smaller tolerance.
+    const tolerance = Math.max(0.0001, Math.min(0.01, distance * 0.005));
+    if (elapsed * 1000 >= responseMs && Math.abs(goal - next.position) <= tolerance) {
+      velocity = 0;
+      setCurrent(goal);
+      setActive(false);
+    } else {
+      setCurrent(next.position);
+    }
   };
   createEffect(() => {
     const next = target();
+    if (!routeActive()) {
+      goal = next;
+      velocity = 0;
+      setCurrent(next);
+      setActive(false);
+      return;
+    }
     if (Object.is(next, goal)) return;
-    // Only the target restarts the animation. Reading current tracked here
-    // causes each animation write to rerun this effect and settle instantly.
     const previous = untrack(current);
+    const wasMoving = untrack(active);
     goal = next;
-    from = previous;
-    elapsedMs = 0;
-    if (Math.abs(next - previous) <= 0.002) {
+    distance = Math.abs(next - previous);
+    elapsed = 0;
+    lastTime = virtualNow();
+    if (distance <= 0.0001 && Math.abs(velocity) <= 0.001) {
       setCurrent(next);
       setActive(false);
     } else {
       setActive(true);
-      // Presses run after frame hooks. Publish the first visible sample in
-      // that same input turn instead of waiting for another hook and then
-      // rounding a slow ease-in sample back to the previous pixel.
-      if (untrack(routeActive)) advanceTimed();
+      // An idle control responds in the press transaction. An interrupted
+      // spring keeps its exact painted position and its existing velocity.
+      if (!wasMoving) advance(1 / simulationHz());
     }
   });
   try {
     onFrame(() => {
       if (!routeActive() || !active()) return;
-      const previous = untrack(current);
-      if (advanceTimed()) return;
-      const difference = goal - previous;
-      if (Math.abs(difference) <= 0.002) {
-        setCurrent(goal);
-        setActive(false);
-      } else {
-        setCurrent(previous + difference * rate);
-      }
-    }, { active: () => routeActive() && active(), continuous: active });
+      const now = virtualNow();
+      advance(Math.max(0, now - lastTime));
+      lastTime = now;
+    }, { active: () => routeActive() && active(), continuous: () => routeActive() && active() });
   } catch {
     // Source-only consumers have no native frame scheduler.
   }
@@ -779,41 +788,41 @@ export function MobileButton(props: MobileButtonProps): JSX.Element {
       class={props.class ?? (kind() === "outlined"
         ? (theme().name === "dark"
           ? (isCompact()
-            ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#09090B] border-[#27272A] focus:bg-[#18181B] active:bg-[#27272A] transition-colors duration-150 ease-out"
-            : "px-4 h-[44] items-center justify-center rounded-lg bg-[#09090B] border-[#27272A] focus:bg-[#18181B] active:bg-[#27272A] transition-colors duration-150 ease-out")
+            ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#09090B] border-[#27272A] focus:bg-[#18181B] active:bg-[#27272A] active:opacity-80 transition duration-150 ease-out"
+            : "px-4 h-[44] items-center justify-center rounded-lg bg-[#09090B] border-[#27272A] focus:bg-[#18181B] active:bg-[#27272A] active:opacity-80 transition duration-150 ease-out")
           : (isCompact()
-            ? "px-3 h-[36] items-center justify-center rounded-lg bg-white border-[#E4E4E7] focus:bg-[#F4F4F5] active:bg-[#E4E4E7] transition-colors duration-150 ease-out"
-            : "px-4 h-[44] items-center justify-center rounded-lg bg-white border-[#E4E4E7] focus:bg-[#F4F4F5] active:bg-[#E4E4E7] transition-colors duration-150 ease-out"))
+            ? "px-3 h-[36] items-center justify-center rounded-lg bg-white border-[#E4E4E7] focus:bg-[#F4F4F5] active:bg-[#E4E4E7] active:opacity-80 transition duration-150 ease-out"
+            : "px-4 h-[44] items-center justify-center rounded-lg bg-white border-[#E4E4E7] focus:bg-[#F4F4F5] active:bg-[#E4E4E7] active:opacity-80 transition duration-150 ease-out"))
         : kind() === "tonal"
           ? (theme().name === "dark"
             ? (isCompact()
-               ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#27272A] focus:bg-[#3F3F46] active:bg-[#52525B] transition-colors duration-150 ease-out"
-               : "px-4 h-[44] items-center justify-center rounded-lg bg-[#27272A] focus:bg-[#3F3F46] active:bg-[#52525B] transition-colors duration-150 ease-out")
+               ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#27272A] focus:bg-[#3F3F46] active:bg-[#52525B] active:opacity-80 transition duration-150 ease-out"
+               : "px-4 h-[44] items-center justify-center rounded-lg bg-[#27272A] focus:bg-[#3F3F46] active:bg-[#52525B] active:opacity-80 transition duration-150 ease-out")
             : (isCompact()
-               ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#F4F4F5] focus:bg-[#E4E4E7] active:bg-[#D4D4D8] transition-colors duration-150 ease-out"
-               : "px-4 h-[44] items-center justify-center rounded-lg bg-[#F4F4F5] focus:bg-[#E4E4E7] active:bg-[#D4D4D8] transition-colors duration-150 ease-out"))
+               ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#F4F4F5] focus:bg-[#E4E4E7] active:bg-[#D4D4D8] active:opacity-80 transition duration-150 ease-out"
+               : "px-4 h-[44] items-center justify-center rounded-lg bg-[#F4F4F5] focus:bg-[#E4E4E7] active:bg-[#D4D4D8] active:opacity-80 transition duration-150 ease-out"))
           : kind() === "text"
             ? (theme().name === "dark"
               ? (isCompact()
-                ? "px-3 h-[36] items-center justify-center rounded-lg bg-transparent focus:bg-[#27272A] active:bg-[#3F3F46] transition-colors duration-150 ease-out"
-                : "px-4 h-[44] items-center justify-center rounded-lg bg-transparent focus:bg-[#27272A] active:bg-[#3F3F46] transition-colors duration-150 ease-out")
+                ? "px-3 h-[36] items-center justify-center rounded-lg bg-transparent focus:bg-[#27272A] active:bg-[#3F3F46] active:opacity-80 transition duration-150 ease-out"
+                : "px-4 h-[44] items-center justify-center rounded-lg bg-transparent focus:bg-[#27272A] active:bg-[#3F3F46] active:opacity-80 transition duration-150 ease-out")
               : (isCompact()
-                ? "px-3 h-[36] items-center justify-center rounded-lg bg-transparent focus:bg-[#F4F4F5] active:bg-[#E4E4E7] transition-colors duration-150 ease-out"
-                : "px-4 h-[44] items-center justify-center rounded-lg bg-transparent focus:bg-[#F4F4F5] active:bg-[#E4E4E7] transition-colors duration-150 ease-out"))
+                ? "px-3 h-[36] items-center justify-center rounded-lg bg-transparent focus:bg-[#F4F4F5] active:bg-[#E4E4E7] active:opacity-80 transition duration-150 ease-out"
+                : "px-4 h-[44] items-center justify-center rounded-lg bg-transparent focus:bg-[#F4F4F5] active:bg-[#E4E4E7] active:opacity-80 transition duration-150 ease-out"))
             : kind() === "danger"
               ? (isCompact()
-                ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#DC2626] focus:bg-[#B91C1C] active:bg-[#991B1B] transition-colors duration-150 ease-out"
-                : "px-4 h-[44] items-center justify-center rounded-lg bg-[#DC2626] focus:bg-[#B91C1C] active:bg-[#991B1B] transition-colors duration-150 ease-out")
+                ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#DC2626] focus:bg-[#B91C1C] active:bg-[#991B1B] active:opacity-80 transition duration-150 ease-out"
+                : "px-4 h-[44] items-center justify-center rounded-lg bg-[#DC2626] focus:bg-[#B91C1C] active:bg-[#991B1B] active:opacity-80 transition duration-150 ease-out")
               : (theme().name === "dark"
                 ? (isCompact()
-                  ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#FAFAFA] focus:bg-[#E4E4E7] active:bg-[#D4D4D8] transition-colors duration-150 ease-out"
-                  : "px-4 h-[44] items-center justify-center rounded-lg bg-[#FAFAFA] focus:bg-[#E4E4E7] active:bg-[#D4D4D8] transition-colors duration-150 ease-out")
+                  ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#FAFAFA] focus:bg-[#E4E4E7] active:bg-[#D4D4D8] active:opacity-80 transition duration-150 ease-out"
+                  : "px-4 h-[44] items-center justify-center rounded-lg bg-[#FAFAFA] focus:bg-[#E4E4E7] active:bg-[#D4D4D8] active:opacity-80 transition duration-150 ease-out")
                 : (isCompact()
-                  ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#18181B] focus:bg-[#27272A] active:bg-[#3F3F46] transition-colors duration-150 ease-out"
-                  : "px-4 h-[44] items-center justify-center rounded-lg bg-[#18181B] focus:bg-[#27272A] active:bg-[#3F3F46] transition-colors duration-150 ease-out")))}
+                  ? "px-3 h-[36] items-center justify-center rounded-lg bg-[#18181B] focus:bg-[#27272A] active:bg-[#3F3F46] active:opacity-80 transition duration-150 ease-out"
+                  : "px-4 h-[44] items-center justify-center rounded-lg bg-[#18181B] focus:bg-[#27272A] active:bg-[#3F3F46] active:opacity-80 transition duration-150 ease-out")))}
       style={props.disabled
         ? { ...filledBgStyle(), ...(props.style ?? {}), opacity: props.style?.opacity ?? 0.5 }
-        : { ...filledBgStyle(), ...(props.style ?? {}), opacity: props.style?.opacity ?? 1 }}
+        : { ...filledBgStyle(), ...(props.style ?? {}) }}
       debugName={props.debugName}
       focusable={!props.disabled}
       onPress={props.disabled ? undefined : props.onPress}
@@ -922,7 +931,7 @@ export function MobileTag(props: {
   onClose?: () => void;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const progress = useStateTransition(() => `${props.selected ?? false}:${props.tone ?? "accent"}`, 8, false);
+  const selection = useAnimatedNumber(() => props.selected ? 1 : 0, 0.38, MOBILE_MOTION.state);
   const content = (
     <View
       class={props.selected
@@ -935,8 +944,7 @@ export function MobileTag(props: {
       style={{
         minW: 28,
         radius: 6,
-        opacity: 0.72 + 0.28 * progress(),
-        translateY: Math.round((1 - progress()) * -2),
+        scale: 1 + 0.025 * selection(),
       }}
     >
       <Text
@@ -1084,7 +1092,7 @@ export function MobileSegmentedControl(props: {
       return;
     }
     if (measuredWidth() > 0) return;
-    const w = readNodeWidth(trackNode);
+    const w = readNodeExtent(trackNode);
     if (w !== undefined && w > 0 && Math.abs(w - measuredWidth()) >= 1) {
       setMeasuredWidth(w);
     }
@@ -1120,8 +1128,8 @@ export function MobileSegmentedControl(props: {
     return Math.max(120, currentViewportWidth() - 36);
   };
   const segmentWidth = () => Math.max(40, Math.round(totalTrackWidth() / count()));
-  const targetX = () => Math.round(activeIndex() * (totalTrackWidth() / count()));
-  const indicatorX = useAnimatedNumber(targetX, 0.38);
+  const targetX = () => activeIndex() * (totalTrackWidth() / count());
+  const indicatorX = useAnimatedNumber(targetX, 0.38, MOBILE_MOTION.selection);
 
   return (
     <ScrollContourItem
@@ -1141,7 +1149,7 @@ export function MobileSegmentedControl(props: {
           style={{
             posType: 1,
             insetT: 8,
-            insetL: Math.round(indicatorX() + Math.max(0, segmentWidth() / 2 - 14)),
+            insetL: indicatorX() + Math.max(0, segmentWidth() / 2 - 14),
             width: 28,
             height: 16,
             bgColor: accentColor(theme()),
@@ -1157,7 +1165,7 @@ export function MobileSegmentedControl(props: {
             insetL: 0,
             width: segmentWidth(),
             radius: 6,
-            translateX: Math.round(indicatorX()),
+            translateX: indicatorX(),
             ...(props.accentActive ? { bgColor: accentColor(theme()) } : {}),
           }}
         />
@@ -1211,7 +1219,7 @@ export function MobileSwitch(props: MobileSwitchProps): JSX.Element {
   const [pending, setPending] = createSignal(false);
   const [spinnerPhase, setSpinnerPhase] = createSignal(0);
   const busy = () => props.loading === true || pending();
-  const thumbX = useAnimatedNumber(() => busy() ? 10 : props.value ? 20 : 0, 0.24, 280);
+  const thumbX = useAnimatedNumber(() => busy() ? 10 : props.value ? 20 : 0, 0.24, MOBILE_MOTION.control);
   const spinnerOpacity = () => Math.max(0, 1 - Math.abs(thumbX() - 10) / 3);
   let disposed = false;
   onCleanup(() => { disposed = true; });
@@ -1294,7 +1302,7 @@ export function MobileStepper(props: { value: number; min?: number; max?: number
   const step = props.step ?? 1;
   const set = (next: number): void => props.onChange(Math.max(min, Math.min(max, next)));
   const ratio = () => Math.max(0, Math.min(1, (props.value - min) / Math.max(1, max - min)));
-  const animatedRatio = useAnimatedNumber(ratio, 0.24, 240);
+  const animatedRatio = useAnimatedNumber(ratio, 0.24, MOBILE_MOTION.selection);
   return (
     <View class="flex-row items-center gap-2">
       <MobileOutlinedButton label="−" compact onPress={() => set(props.value - step)} />
@@ -1342,7 +1350,7 @@ export function MobileProgress(props: {
   const max = () => Math.max(1, props.max ?? 100);
   const ratio = () => Math.max(0, Math.min(1, props.value / max()));
   const animatedTarget = () => (props.animated === false ? 0 : ratio());
-  const animatedRatio = useAnimatedNumber(animatedTarget, 0.24, 240);
+  const animatedRatio = useAnimatedNumber(animatedTarget, 0.24, MOBILE_MOTION.selection);
   const effectiveRatio = () => (props.animated === false ? ratio() : animatedRatio());
   const pct = () => `${Math.round((props.animated ? effectiveRatio() : ratio()) * 100)}%`;
   const tone = () => props.tone ?? "accent";
@@ -1384,8 +1392,7 @@ export function MobileCheckbox(props: {
   disabled?: boolean;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const progress = useStateTransition(() => props.checked, 8, false);
-  const boxScale = () => 0.75 + 0.25 * progress();
+  const presence = usePresenceTransition(() => props.checked, { durationMs: MOBILE_MOTION.state, animateOnMount: false });
   return (
     <Focusable
       class={props.checked
@@ -1408,15 +1415,19 @@ export function MobileCheckbox(props: {
             : "w-[18] h-[18] items-center justify-center bg-white border-[#D4D4D8] transition-colors duration-150 ease-spring"}
         style={{
           radius: 4,
-          opacity: 0.75 + 0.25 * progress(),
+          opacity: 0.75 + 0.25 * presence.progress(),
         }}
       >
-        {props.checked ? (
+        <Show when={presence.mounted()}>
           <View
             class={theme().name === "dark" ? "w-[8] h-[8] bg-[#09090B]" : "w-[8] h-[8] bg-[#FAFAFA]"}
-            style={{ radius: 2, scale: boxScale() }}
+            style={{
+              radius: 2,
+              opacity: presence.progress(),
+              scale: 0.75 + 0.25 * presence.progress(),
+            }}
           />
-        ) : null}
+        </Show>
       </View>
       <View class="flex-col gap-0.5 flex-1">
         <Text class={theme().name === "dark" ? "text-xs text-[#FAFAFA] font-bold" : "text-xs text-[#09090B] font-bold"}>{props.label}</Text>
@@ -1432,13 +1443,12 @@ export function MobileRadioGroup(props: {
   onChange: (id: string) => void;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const progress = useStateTransition(() => props.value, 8, false);
-  const dotScale = () => 0.75 + 0.25 * progress();
   return (
     <View class="flex-col gap-2">
       <For each={props.items}>
         {(item) => {
           const active = () => props.value === item.id;
+          const selection = usePresenceTransition(active, { durationMs: MOBILE_MOTION.state, animateOnMount: false });
           return (
             <Focusable
               class={active()
@@ -1460,12 +1470,12 @@ export function MobileRadioGroup(props: {
                     : "w-[18] h-[18] items-center justify-center bg-white border-[#D4D4D8] transition-colors duration-150 ease-spring"}
                 style={{ radius: 8 }}
               >
-                {active() ? (
+                <Show when={selection.mounted()}>
                   <View
                     class={theme().name === "dark" ? "w-[8] h-[8] bg-[#FAFAFA]" : "w-[8] h-[8] bg-[#18181B]"}
-                    style={{ radius: 3, opacity: dotScale() }}
+                    style={{ radius: 3, opacity: selection.progress(), scale: 0.75 + 0.25 * selection.progress() }}
                   />
-                ) : null}
+                </Show>
               </View>
               <View class="flex-col gap-0.5 flex-1">
                 <Text
@@ -1490,13 +1500,28 @@ export function MobileAccordion(props: {
   children?: JSX.Element;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const progress = useStateTransition(() => props.expanded, 10, false);
+  const presence = usePresenceTransition(() => props.expanded, { durationMs: MOBILE_MOTION.selection, animateOnMount: false });
+  let contentNode: { id: number } | undefined;
+  const [contentHeight, setContentHeight] = createSignal(0);
+  const measureContent = (): void => {
+    const height = readNodeExtent(contentNode, "height");
+    if (height !== undefined) setContentHeight(height);
+  };
+  createEffect(() => {
+    if (!presence.mounted()) setContentHeight(0);
+  });
+  onFrame(measureContent, {
+    active: presence.mounted,
+    // Presence already requests every transition frame. Measurement consumes
+    // committed native layout without acquiring a second animation ticker.
+    continuous: false,
+  });
   return (
     <ScrollContourItem class={theme().name === "dark"
-      ? "flex-col gap-2 p-3 rounded-lg bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-out"
-      : "flex-col gap-2 p-3 rounded-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-out"}>
+      ? "flex-col gap-0 p-3 rounded-lg bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-out"
+      : "flex-col gap-0 p-3 rounded-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-out"}>
       <Focusable
-        class="flex-row items-center justify-between gap-2 w-full py-1 rounded-md transition-opacity duration-150 ease-out"
+        class="flex-row items-center justify-between gap-2 w-full py-1 rounded-md"
         onPress={props.onToggle}
       >
         <View class="flex-col gap-1 flex-1">
@@ -1509,7 +1534,7 @@ export function MobileAccordion(props: {
             class={theme().name === "dark"
               ? "w-[24] h-[24] items-center justify-center bg-[#18181B] border-[#27272A] transition-colors duration-200 ease-spring"
               : "w-[24] h-[24] items-center justify-center bg-[#F4F4F5] border-[#E4E4E7] transition-colors duration-200 ease-spring"}
-            style={{ radius: 6, translateY: Math.round((1 - progress()) * -2) }}
+            style={{ radius: 6, translateY: (1 - presence.progress()) * -2 }}
           >
             <Text
               class={theme().name === "dark" ? "text-xs text-[#FAFAFA] font-bold" : "text-xs text-[#09090B] font-bold"}
@@ -1520,16 +1545,22 @@ export function MobileAccordion(props: {
           </View>
         </View>
       </Focusable>
-      <Show when={props.expanded}>
+      <Show when={presence.mounted()}>
         <View
-          class="flex-col gap-2 w-full pt-2 transition-opacity duration-200 ease-out"
+          class="flex-col w-full overflow-hidden"
           style={{
-            opacity: progress(),
-            translateY: Math.round((1 - progress()) * -6),
+            opacity: presence.progress(),
+            height: presence.progress() >= 1 ? undefined : contentHeight() * presence.progress(),
           }}
         >
-          <View class={theme().name === "dark" ? "w-full h-[1] bg-[#27272A]" : "w-full h-[1] bg-[#E4E4E7]"} />
-          {props.children}
+          <View
+            class="flex-col gap-2 w-full pt-4 shrink-0"
+            ref={(node) => { contentNode = node; measureContent(); }}
+            style={{ translateY: (1 - presence.progress()) * -6 }}
+          >
+            <View class={theme().name === "dark" ? "w-full h-[1] bg-[#27272A]" : "w-full h-[1] bg-[#E4E4E7]"} />
+            {props.children}
+          </View>
         </View>
       </Show>
     </ScrollContourItem>
@@ -1542,17 +1573,13 @@ export function MobileSkeleton(props: {
   active?: boolean;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const progress = useStateTransition(() => `${props.active !== false}:${props.rows ?? 3}:${props.avatar !== false}`, 14, false);
-  const pulseOpacity = () => {
-    const base = props.active === false ? 0.55 : 0.92;
-    return base * progress();
-  };
+  const opacity = useAnimatedNumber(() => props.active === false ? 0.55 : 0.92, 0.38, MOBILE_MOTION.state);
   const count = () => Math.max(1, Math.min(5, props.rows ?? 3));
   const indices = () => Array.from({ length: count() }, (_, idx) => idx);
   return (
     <View
-      class="flex-row items-center gap-3 w-full transition-opacity duration-300 ease-in-out"
-      style={{ opacity: pulseOpacity() }}
+      class="flex-row items-center gap-3 w-full"
+      style={{ opacity: opacity() }}
     >
       {props.avatar !== false ? (
         <View
@@ -1592,12 +1619,13 @@ export function MobileAlert(props: {
   const theme = useMobileThemeAccessor();
   const routeActive = useRouteActive();
   const isOpen = () => routeActive() && (props.open === undefined ? true : typeof props.open === "function" ? props.open() : props.open);
+  const presence = usePresenceTransition(isOpen, { durationMs: MOBILE_MOTION.presentation, animateOnMount: true });
   const tone = () => props.tone ?? "info";
   let textColumnNode: { id: number } | undefined;
   const [textColumnWidth, setTextColumnWidth] = createSignal(0);
   const [needsMeasurement, setNeedsMeasurement] = createSignal(false);
   const syncTextColumnWidth = (): void => {
-    const measured = readNodeWidth(textColumnNode);
+    const measured = readNodeExtent(textColumnNode);
     if (measured !== undefined && measured > 0) {
       if (Math.abs(measured - textColumnWidth()) >= 1) setTextColumnWidth(measured);
       setNeedsMeasurement(false);
@@ -1618,13 +1646,12 @@ export function MobileAlert(props: {
     // Ignore when no frame scheduler is active.
   }
   const textMaxWidth = () => textColumnWidth() > 0 ? textColumnWidth() : 190;
-  const progress = useStateTransition(() => `${isOpen()}:${tone()}:${props.title}`, 10, false);
   const iconGlyph = () => (tone() === "success" ? "✓" : tone() === "warning" ? "!" : tone() === "danger" ? "×" : "i");
   const hasActions = () => Boolean(
     (props.actionLabel && props.onAction) || (props.closable && props.onClose),
   );
   return (
-    <Show when={isOpen()}>
+    <Show when={presence.mounted()}>
       <ScrollContourItem
         class={tone() === "danger"
           ? (theme().name === "dark"
@@ -1634,8 +1661,8 @@ export function MobileAlert(props: {
             ? "flex-col gap-2 w-full p-3.5 rounded-lg bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-out"
             : "flex-col gap-2 w-full p-3.5 rounded-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-out")}
         style={{
-          opacity: progress(),
-          translateY: Math.round((1 - progress()) * -6),
+          opacity: presence.progress(),
+          translateY: (1 - presence.progress()) * -6,
         }}
       >
         <View class="flex-row items-start gap-3 w-full">
@@ -1679,10 +1706,23 @@ export function MobileAlert(props: {
         <Show when={hasActions()}>
           <View class="flex-row flex-wrap items-center justify-end gap-2 w-full">
             {props.actionLabel && props.onAction ? (
-              <MobileButton label={props.actionLabel} compact kind="outlined" onPress={props.onAction} />
+              <MobileButton
+                label={props.actionLabel}
+                compact
+                kind="outlined"
+                onPress={() => {
+                  if (presence.interactive()) props.onAction?.();
+                }}
+              />
             ) : null}
             {props.closable && props.onClose ? (
-              <MobileTextButton label="Dismiss" compact onPress={props.onClose} />
+              <MobileTextButton
+                label="Dismiss"
+                compact
+                onPress={() => {
+                  if (presence.interactive()) props.onClose?.();
+                }}
+              />
             ) : null}
           </View>
         </Show>
@@ -1703,12 +1743,13 @@ export function MobileToast(props: {
   const theme = useMobileThemeAccessor();
   const routeActive = useRouteActive();
   const isOpen = () => routeActive() && (typeof props.open === "function" ? props.open() : props.open);
+  const presence = usePresenceTransition(isOpen, { durationMs: MOBILE_MOTION.presentation, animateOnMount: true });
   const tone = () => props.tone ?? "info";
   let textColumnNode: { id: number } | undefined;
   const [textColumnWidth, setTextColumnWidth] = createSignal(0);
   const [needsMeasurement, setNeedsMeasurement] = createSignal(false);
   const syncTextColumnWidth = (): void => {
-    const measured = readNodeWidth(textColumnNode);
+    const measured = readNodeExtent(textColumnNode);
     if (measured !== undefined && measured > 0) {
       if (Math.abs(measured - textColumnWidth()) >= 1) setTextColumnWidth(measured);
       setNeedsMeasurement(false);
@@ -1729,18 +1770,17 @@ export function MobileToast(props: {
     // Ignore when no frame scheduler is active.
   }
   const textMaxWidth = () => textColumnWidth() > 0 ? textColumnWidth() : 190;
-  const progress = useStateTransition(() => `${isOpen()}:${tone()}:${props.message}`, 10, false);
   const badgeGlyph = () => (tone() === "success" ? "✓" : tone() === "warning" ? "!" : tone() === "danger" ? "×" : "i");
   const hasActions = () => Boolean((props.actionLabel && props.onAction) || props.onClose);
   return (
-    <Show when={isOpen()}>
+    <Show when={presence.mounted()}>
       <ScrollContourItem
         class={theme().name === "dark"
           ? "flex-col gap-2 w-full px-4 py-3 rounded-lg shadow-lg bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-spring"
           : "flex-col gap-2 w-full px-4 py-3 rounded-lg shadow-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-spring"}
         style={{
-          opacity: progress(),
-          translateY: Math.round((1 - progress()) * -8),
+          opacity: presence.progress(),
+          translateY: (1 - presence.progress()) * -8,
         }}
       >
         <View class="flex-row items-start gap-3 w-full">
@@ -1779,10 +1819,23 @@ export function MobileToast(props: {
         <Show when={hasActions()}>
           <View class="flex-row flex-wrap items-center justify-end gap-2 w-full">
             {props.actionLabel && props.onAction ? (
-              <MobileButton label={props.actionLabel} compact kind="outlined" onPress={props.onAction} />
+              <MobileButton
+                label={props.actionLabel}
+                compact
+                kind="outlined"
+                onPress={() => {
+                  if (presence.interactive()) props.onAction?.();
+                }}
+              />
             ) : null}
             {props.onClose ? (
-              <MobileTextButton label="Hide" compact onPress={props.onClose} />
+              <MobileTextButton
+                label="Hide"
+                compact
+                onPress={() => {
+                  if (presence.interactive()) props.onClose?.();
+                }}
+              />
             ) : null}
           </View>
         </Show>
@@ -1830,7 +1883,7 @@ export function MobilePopup(props: {
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
   const sizeClass = useWindowSizeClass();
-  const presence = useOverlayPresence(() => typeof props.open === "function" ? props.open() : props.open);
+  const presence = usePresenceTransition(() => typeof props.open === "function" ? props.open() : props.open);
   const isBottomSheet = () => {
     const placement = props.placement ?? "auto";
     if (placement === "bottom") return true;
@@ -1856,7 +1909,7 @@ export function MobilePopup(props: {
             : "flex-col gap-3 w-[344] p-4 rounded-xl shadow-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-spring"}
           style={{
             opacity: presence.progress(),
-            translateY: Math.round((1 - presence.progress()) * 10),
+            translateY: (1 - presence.progress()) * 10,
             scale: 0.92 + 0.08 * presence.progress(),
           }}
         >
@@ -1927,7 +1980,7 @@ export function MobileDialog(props: {
   onClose: () => void;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const presence = useOverlayPresence(() => typeof props.open === "function" ? props.open() : props.open);
+  const presence = usePresenceTransition(() => typeof props.open === "function" ? props.open() : props.open);
   return (
     <Show when={presence.mounted()}>
       <MobileModalBackdrop progress={presence.progress} />
