@@ -469,27 +469,28 @@ assert.match(textOf(resizedPointerFrames.at(-1)!), /Incremented in JS/, "resize-
 // inside Home must move a guest text op while preserving the normal tap owner
 // for Focusable children.
 const scrollResponses = runProbe([
-  // Home fits exactly in the normal 360x640 shell. Use the real compact
-  // viewport used by the keyboard/rotation path so this exercises a genuine
-  // content extent rather than asserting movement where maxScroll is zero.
+  // Use a real compact 360x480 viewport so Home has a genuine content extent;
+  // the down point is in the ScrollablePage's blank left gutter, away from
+  // feature-card/focusable hit regions, while remaining inside its clip.
   ...bootstrap(360, 480),
-  event("input.pointer", { phase: "down", id: 0, x: 180, y: 250 }),
+  event("input.pointer", { phase: "down", id: 0, x: 10, y: 250 }),
   { op: "frame", deltaMs: 16 },
-  event("input.pointer", { phase: "move", id: 0, x: 180, y: 150 }),
+  event("input.pointer", { phase: "move", id: 0, x: 10, y: 150 }),
   { op: "frame", deltaMs: 16 },
-  event("input.pointer", { phase: "up", id: 0, x: 180, y: 150 }),
+  event("input.pointer", { phase: "up", id: 0, x: 10, y: 150 }),
   { op: "frame", deltaMs: 16 },
   { op: "quit" },
 ]);
 const scrollFrames = framesOf(scrollResponses);
-const draftFrames = scrollFrames.filter((frame) => textOp(frame, "Draft: (empty)"));
-assert.ok(draftFrames.length >= 2, "scroll probe could not locate the Home draft label");
-const beforeScrollDraft = textOp(draftFrames[0]!, "Draft: (empty)");
-const afterScrollDraft = textOp(draftFrames.at(-1)!, "Draft: (empty)");
-assert.ok(beforeScrollDraft && afterScrollDraft, "scroll probe could not locate the Home draft label");
-assert.equal(typeof beforeScrollDraft.y, "number", "pre-scroll draft must have a y bound");
-assert.equal(typeof afterScrollDraft.y, "number", "post-scroll draft must have a y bound");
-assert.ok(afterScrollDraft.y! < beforeScrollDraft.y!, "vertical pointer drag did not scroll the guest page");
+const scrollMarker = "Input round-trip";
+const markerFrames = scrollFrames.filter((frame) => textOp(frame, scrollMarker));
+assert.ok(markerFrames.length >= 2, `scroll probe could not locate the Home ${scrollMarker} marker`);
+const beforeScrollMarker = textOp(markerFrames[0]!, scrollMarker);
+const afterScrollMarker = textOp(markerFrames.at(-1)!, scrollMarker);
+assert.ok(beforeScrollMarker && afterScrollMarker, `scroll probe could not locate the Home ${scrollMarker} marker`);
+assert.equal(typeof beforeScrollMarker.y, "number", "pre-scroll marker must have a y bound");
+assert.equal(typeof afterScrollMarker.y, "number", "post-scroll marker must have a y bound");
+assert.ok(afterScrollMarker.y! < beforeScrollMarker.y!, "vertical pointer drag did not scroll the guest page");
 
 // The text field is a real Focusable shell. A native pointer activation must
 // emit a measured textInput.open packet (the Flutter host consumes its rect

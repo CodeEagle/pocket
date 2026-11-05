@@ -55,6 +55,8 @@ final class _ChildMounts {
   int initialized = 0;
   int disposed = 0;
   final List<Offset> pointerDowns = <Offset>[];
+  final List<Offset> pointerUps = <Offset>[];
+  int pointerCancels = 0;
 }
 
 final class _CompositorChild extends StatefulWidget {
@@ -89,6 +91,8 @@ final class _CompositorChildState extends State<_CompositorChild> {
     behavior: HitTestBehavior.opaque,
     onPointerDown: (event) =>
         widget.mounts.pointerDowns.add(event.localPosition),
+    onPointerUp: (event) => widget.mounts.pointerUps.add(event.localPosition),
+    onPointerCancel: (_) => widget.mounts.pointerCancels++,
     child: ColoredBox(color: widget.color),
   );
 }
@@ -393,6 +397,104 @@ void main() {
         1,
         reason: 'destroying the resident releases its keyed subtree',
       );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'paint-after-child overlay routes input without stealing child contact',
+    (tester) async {
+      final runtime = _CompositorRuntime(
+        PocketFrame(
+          width: 200,
+          height: 120,
+          ops: <PocketOp>[
+            const PocketRectOp(
+              x: 0,
+              y: 0,
+              width: 200,
+              height: 120,
+              color: 0xff101827,
+            ),
+            _applicationSurface(
+              7,
+              const Rect.fromLTWH(0, 0, 200, 120),
+              focused: true,
+            ),
+            const PocketRoundedOp(
+              x: 8,
+              y: 8,
+              width: 44,
+              height: 44,
+              radius: 22,
+              color: 0xfff5f6f7,
+            ),
+          ],
+          events: const <PocketEvent>[],
+        ),
+      );
+      final mounts = _ChildMounts();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Center(
+            child: SizedBox(
+              width: 200,
+              height: 120,
+              child: PocketView(
+                runtime: runtime,
+                jsSource: '',
+                pakBytes: Uint8List(0),
+                showDebugFps: false,
+                enableDuplexPointerInput: false,
+                hostSurfaceBuilder: (slot) => _CompositorChild(
+                  mounts: mounts,
+                  color: const Color(0xff405060),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final surface = tester.getRect(
+        find.byKey(const ValueKey<String>('pocket-surface-0')),
+      );
+      Offset point(double x, double y) =>
+          Offset(surface.left + x, surface.top + y);
+      List<String?> rootPhases() => runtime.messages
+          .where((message) => message['name'] == 'input.pointer')
+          .map((message) {
+            final payload = message['payload'] ?? message['params'];
+            return payload is Map ? payload['phase'] as String? : null;
+          })
+          .toList(growable: false);
+
+      // The full-viewport host is the topmost hit target away from the later
+      // overlay. The parent sees the bubbling edge but must not duplicate it.
+      await tester.tapAt(point(100, 80));
+      expect(mounts.pointerDowns, contains(const Offset(100, 80)));
+      expect(rootPhases(), isEmpty);
+
+      // The sparse root DrawOp is painted after the host. It must receive the
+      // root pointer pair while the focused child remains untouched.
+      mounts.pointerDowns.clear();
+      runtime.messages.clear();
+      await tester.tapAt(point(30, 30));
+      expect(mounts.pointerDowns, isEmpty);
+      expect(rootPhases(), <String?>['down', 'up']);
+
+      // Once admitted to the child, leaving its bounds does not retarget the
+      // contact to the root. A cancellation still reaches the original child.
+      runtime.messages.clear();
+      mounts.pointerCancels = 0;
+      final gesture = await tester.startGesture(point(100, 80));
+      expect(rootPhases(), isEmpty);
+      await gesture.moveTo(point(220, 80));
+      await gesture.cancel();
+      expect(mounts.pointerCancels, 1);
+      expect(rootPhases(), isEmpty);
+
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );

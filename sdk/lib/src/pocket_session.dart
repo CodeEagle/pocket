@@ -199,8 +199,13 @@ final class PocketSession extends ChangeNotifier {
         requireBytecode: true,
         minimumBuild: embeddedBuild,
         debugHttpHosts: kDebugMode
-            ? const ['127.0.0.1', 'localhost', '10.0.2.2']
-            : const [],
+            ? <String>{
+                '127.0.0.1',
+                'localhost',
+                '10.0.2.2',
+                ...updateConfig.debugHttpHosts,
+              }
+            : const <String>[],
       );
       // The coordinator owns an HTTP client. If the widget was disposed while
       // assets/path resolution was in flight, no session field existed yet for
@@ -290,6 +295,7 @@ final class PocketSession extends ChangeNotifier {
     'activeVersion': active?.version ?? _embeddedVersion,
     'activeBuild': active?.build ?? _embeddedBuild,
     'availableVersion': _candidate?.version,
+    'preparedUpdate': _candidate?.toSummaryJson(),
     'versions': [
       {
         'version': _embeddedVersion,
@@ -363,7 +369,7 @@ final class PocketSession extends ChangeNotifier {
     });
     registry.registerRequest('plugins.list', (_) => plugins.manifest());
     registry.registerRequest('updates.status', (_) => status());
-    registry.registerRequest('updates.check', (_) => _check());
+    registry.registerRequest('updates.check', (params) => _check(params));
     registry.registerRequest('updates.apply', (_) => _apply());
     registry.registerRequest('updates.rollback', (_) => _rollback());
     for (final provider in providers) {
@@ -500,7 +506,9 @@ final class PocketSession extends ChangeNotifier {
     });
   }
 
-  Future<Map<String, dynamic>> _check() async {
+  Future<Map<String, dynamic>> _check([
+    Map<String, dynamic> params = const <String, dynamic>{},
+  ]) async {
     final updates = _requireUpdates();
     if (_busy) {
       throw const PocketCapabilityException(
@@ -508,6 +516,33 @@ final class PocketSession extends ChangeNotifier {
         'A package operation is in progress',
       );
     }
+    final rawMode = params['mode'];
+    final mode = switch (rawMode) {
+      null || 'auto' => PocketUpdateMode.auto,
+      'zip' || 'bundle' => PocketUpdateMode.zip,
+      'granular' => PocketUpdateMode.granular,
+      _ => throw PocketCapabilityException(
+        'invalid_params',
+        'Unsupported update mode: $rawMode',
+      ),
+    };
+    final rawScope = params['scope'];
+    final rawResource = params['resource'];
+    final target = switch (rawScope) {
+      null || 'all' => const PocketUpdateTarget.all(),
+      'code' => const PocketUpdateTarget.codeOnly(),
+      'resource' =>
+        rawResource is String && rawResource.trim().isNotEmpty
+            ? PocketUpdateTarget.singleResource(rawResource)
+            : throw const PocketCapabilityException(
+                'invalid_params',
+                'Resource update scope requires a non-empty resource parameter',
+              ),
+      _ => throw PocketCapabilityException(
+        'invalid_params',
+        'Unsupported update scope: $rawScope',
+      ),
+    };
     _busy = true;
     _candidate = null;
     lastError = null;
@@ -515,6 +550,8 @@ final class PocketSession extends ChangeNotifier {
     try {
       _candidate = await updates.prepare(
         cancellation: token,
+        mode: mode,
+        target: target,
         onProgress: (progress) {
           stage = progress.stage.name;
           _send('updates.progress', {
@@ -526,6 +563,14 @@ final class PocketSession extends ChangeNotifier {
       );
       stage = 'verified';
       return await status();
+    } on PocketCapabilityException catch (error) {
+      stage = 'error';
+      lastError = '$error';
+      rethrow;
+    } on PocketPackageException catch (error) {
+      stage = 'error';
+      lastError = '$error';
+      throw PocketCapabilityException(error.code, error.message);
     } catch (error) {
       stage = 'error';
       lastError = '$error';

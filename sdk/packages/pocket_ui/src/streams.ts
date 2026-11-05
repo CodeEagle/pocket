@@ -100,6 +100,154 @@ function boundedInteger(
   return value;
 }
 
+/** Keep JS admission aligned with the native event transport's hard bounds. */
+export const POCKET_STREAM_MAX_BATCH_EVENTS = 256;
+export const POCKET_STREAM_MAX_BATCH_BYTES = 256 * 1024;
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+const JSON_SIZE_INVALID = Symbol("json-size-invalid");
+const JSON_SIZE_TOO_LARGE = Symbol("json-size-too-large");
+type JsonSizeResult = number | typeof JSON_SIZE_INVALID | typeof JSON_SIZE_TOO_LARGE;
+
+function quotedJsonStringByteLength(value: string, maxBytes: number): JsonSizeResult {
+  let bytes = 2; // opening and closing quotes
+  const add = (amount: number): boolean => {
+    bytes += amount;
+    return bytes <= maxBytes;
+  };
+  if (bytes > maxBytes) return JSON_SIZE_TOO_LARGE;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x22 || code === 0x5c) {
+      if (!add(2)) return JSON_SIZE_TOO_LARGE;
+    } else if (code <= 0x1f) {
+      // JSON.stringify uses the short escapes where they exist.
+      if (!add(code === 8 || code === 9 || code === 10 || code === 12 || code === 13 ? 2 : 6)) return JSON_SIZE_TOO_LARGE;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        if (!add(4)) return JSON_SIZE_TOO_LARGE;
+        index += 1;
+      } else if (!add(6)) {
+        return JSON_SIZE_TOO_LARGE;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      if (!add(6)) return JSON_SIZE_TOO_LARGE;
+    } else if (code <= 0x7f) {
+      if (!add(1)) return JSON_SIZE_TOO_LARGE;
+    } else if (code <= 0x7ff) {
+      if (!add(2)) return JSON_SIZE_TOO_LARGE;
+    } else if (!add(3)) {
+      return JSON_SIZE_TOO_LARGE;
+    }
+  }
+  return bytes;
+}
+
+function hasUnsafeJsonProperties(value: object): boolean {
+  try {
+    // JSON.stringify invokes inherited toJSON even when it is non-enumerable;
+    // reject it without reading the property so a hostile getter cannot run.
+    if ("toJSON" in value) return true;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > 16384) return true;
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      // Accessors are not stable between the bounded preflight and the final
+      // host.emit stringify. JSON data objects must expose value descriptors.
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, "value")) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Calculate a JSON value's encoded size without allocating its encoded text.
+ * The explicit result symbols distinguish malformed values from values that
+ * are valid but cannot fit the caller's remaining byte budget.
+ */
+function boundedJsonByteLength(value: unknown, maxBytes: number): JsonSizeResult {
+  const ancestors = new Set<object>();
+  let nodes = 0;
+  const visit = (item: unknown, depth: number): JsonSizeResult => {
+    if (++nodes > 16384 || depth > 32) return JSON_SIZE_INVALID;
+    if (item === null) return maxBytes >= 4 ? 4 : JSON_SIZE_TOO_LARGE;
+    if (typeof item === "string") return quotedJsonStringByteLength(item, maxBytes);
+    if (typeof item === "boolean") return item ? (maxBytes >= 4 ? 4 : JSON_SIZE_TOO_LARGE) : (maxBytes >= 5 ? 5 : JSON_SIZE_TOO_LARGE);
+    if (typeof item === "number") {
+      if (!Number.isFinite(item)) return JSON_SIZE_INVALID;
+      const encoded = JSON.stringify(item);
+      if (encoded === undefined) return JSON_SIZE_INVALID;
+      return encoded.length <= maxBytes ? encoded.length : JSON_SIZE_TOO_LARGE;
+    }
+    if (item instanceof Uint8Array) {
+      const size = 5 + item.byteLength;
+      return size <= maxBytes ? size : JSON_SIZE_TOO_LARGE;
+    }
+    if (typeof item !== "object" || ArrayBuffer.isView(item) || ancestors.has(item)) return JSON_SIZE_INVALID;
+    if (hasUnsafeJsonProperties(item)) return JSON_SIZE_INVALID;
+    ancestors.add(item);
+    let bytes = 1;
+    const add = (amount: number): boolean => {
+      bytes += amount;
+      return bytes <= maxBytes;
+    };
+    try {
+      if (Array.isArray(item)) {
+        for (let index = 0; index < item.length; index += 1) {
+          // JSON.stringify serializes sparse array holes as null. Explicit
+          // undefined values remain invalid JSON values.
+          const child = index in item ? visit(item[index], depth + 1) : 4;
+          if (child === JSON_SIZE_INVALID || child === JSON_SIZE_TOO_LARGE) return child;
+          if (!add(child + (index === 0 ? 0 : 1))) return JSON_SIZE_TOO_LARGE;
+        }
+      } else {
+        let first = true;
+        for (const key in item) {
+          if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
+          const keyBytes = quotedJsonStringByteLength(key, maxBytes - bytes);
+          if (keyBytes === JSON_SIZE_INVALID || keyBytes === JSON_SIZE_TOO_LARGE) return keyBytes;
+          if (!add(keyBytes + 1 + (first ? 0 : 1))) return JSON_SIZE_TOO_LARGE;
+          first = false;
+          const child = visit((item as Record<string, unknown>)[key], depth + 1);
+          if (child === JSON_SIZE_INVALID || child === JSON_SIZE_TOO_LARGE) return child;
+          if (!add(child)) return JSON_SIZE_TOO_LARGE;
+        }
+      }
+      return add(1) ? bytes : JSON_SIZE_TOO_LARGE; // closing ] or }
+    } catch {
+      return JSON_SIZE_INVALID;
+    } finally {
+      ancestors.delete(item);
+    }
+  };
+  return visit(value, 0);
+}
+
 function reasonMessage(
   reason: BridgeValue | undefined,
   fallback: string,
@@ -282,14 +430,57 @@ export class PocketStream<T extends BridgeValue = BridgeValue> {
 
   sendBatch(values: readonly T[]): boolean {
     if (this.terminal) return false;
-    if (!values.every(isJsonValue))
-      throw new TypeError("Stream data must be JSON serializable");
     if (values.length === 0) return true;
+    if (values.length > POCKET_STREAM_MAX_BATCH_EVENTS) {
+      throw new PocketStreamError(
+        "stream_batch_too_large",
+        `Stream batch exceeds the ${POCKET_STREAM_MAX_BATCH_EVENTS}-event limit`,
+        this.id,
+        { count: values.length, maxEvents: POCKET_STREAM_MAX_BATCH_EVENTS },
+      );
+    }
+
+    // Count against the complete event envelope before handing a large array
+    // to the host. The bounded walk avoids allocating item JSON text, and the
+    // events array is never built for an over-limit batch.
+    const emptyPacket = JSON.stringify({
+      type: "event",
+      name: "stream.batch",
+      payload: { events: [] },
+    });
+    // Keep the array's two bracket bytes from the empty envelope; each item
+    // is added between those brackets.
+    let packetBytes = utf8ByteLength(emptyPacket);
+    const events: BridgeValue[] = [];
+    for (const data of values) {
+      const event: BridgeValue = {
+        method: "stream.data",
+        params: { streamId: this.id, data },
+      };
+      const separatorBytes = events.length === 0 ? 0 : 1;
+      const itemBytes = boundedJsonByteLength(
+        event,
+        POCKET_STREAM_MAX_BATCH_BYTES - packetBytes - separatorBytes,
+      );
+      if (itemBytes === JSON_SIZE_INVALID) {
+        throw new TypeError("Stream data must be JSON serializable");
+      }
+      if (itemBytes === JSON_SIZE_TOO_LARGE) {
+        throw new PocketStreamError(
+          "stream_batch_too_large",
+          `Stream batch exceeds the ${POCKET_STREAM_MAX_BATCH_BYTES}-byte limit`,
+          this.id,
+          {
+            bytes: POCKET_STREAM_MAX_BATCH_BYTES + 1,
+            maxBytes: POCKET_STREAM_MAX_BATCH_BYTES,
+            count: values.length,
+          },
+        );
+      }
+      packetBytes += separatorBytes + itemBytes;
+      events.push(event);
+    }
     this.touch();
-    const events: BridgeValue[] = values.map((data) => ({
-      method: "stream.data",
-      params: { streamId: this.id, data },
-    }));
     if (!this.sendEvent("stream.batch", { events })) {
       this.failLocal(
         new PocketStreamError(
@@ -564,10 +755,18 @@ const DEFAULT_BUFFER = 64;
 const MAX_BUFFER = 4096;
 const MAX_DEADLINE = 3600;
 const RESERVED_HOST_PREFIX = "host-stream";
+interface HostStreamRegistry {
+  readonly owners: Map<string, PocketStreamAdapterImpl>;
+}
+
+// A HostBridge is the single event transport.  Keep ownership alongside it so
+// two adapters can share the bridge without both materializing a host stream.
+const hostStreamRegistries = new WeakMap<object, HostStreamRegistry>();
 let nextAdapterId = 1;
 
 class PocketStreamAdapterImpl implements PocketStreamAdapter {
   private readonly host: HostBridge;
+  private readonly registry: HostStreamRegistry;
   private readonly sendEvent: StreamEventSender;
   private readonly maxBufferedMessages: number;
   private readonly maxActiveStreams: number;
@@ -588,6 +787,12 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
       );
     }
     this.host = host;
+    let registry = hostStreamRegistries.get(host as object);
+    if (!registry) {
+      registry = { owners: new Map() };
+      hostStreamRegistries.set(host as object, registry);
+    }
+    this.registry = registry;
     this.sendEvent = (method, params) => {
       try {
         return host.emit!(method, params) === true;
@@ -755,11 +960,17 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
     this.removeTick?.();
     for (const stream of [...this.streams.values()]) stream.dispose(reason);
     this.streams.clear();
+    for (const [streamId, owner] of this.registry.owners) {
+      if (owner === this) this.registry.owners.delete(streamId);
+    }
     this.incomingListeners.clear();
   }
 
   private removeClosed(streamId: string): void {
     this.streams.delete(streamId);
+    if (this.registry.owners.get(streamId) === this) {
+      this.registry.owners.delete(streamId);
+    }
   }
 
   private advanceFrames(): void {
@@ -795,6 +1006,10 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
       this.openIncoming(streamId, event.params);
       return;
     }
+    const owner = this.registry.owners.get(streamId);
+    // Guest-owned streams are intentionally absent from the shared registry;
+    // only host-originated IDs need cross-adapter ownership arbitration.
+    if (owner && owner !== this) return;
     const stream = this.streams.get(streamId);
     if (!stream) return;
     if (event.method === "stream.data") {
@@ -834,6 +1049,12 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
   }
 
   private openIncoming(streamId: string, params: BridgeObject): void {
+    // A host-originated stream is only meaningful to an adapter that has an
+    // active consumer.  In particular, a newly-created adapter with no
+    // onStream listener must not steal the stream from another adapter.
+    if (this.incomingListeners.size === 0) return;
+    const owner = this.registry.owners.get(streamId);
+    if (owner && owner !== this) return;
     if (streamId.startsWith(`${this.idPrefix}-`)) {
       this.sendEvent("stream.cancel", {
         streamId,
@@ -851,6 +1072,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
       this.sendEvent("stream.cancel", { streamId, reason: "stream_quota" });
       return;
     }
+    this.registry.owners.set(streamId, this);
     const topic = typeof params.topic === "string" ? params.topic : undefined;
     let streamParams: BridgeObject;
     try {
@@ -862,6 +1084,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
               "Incoming stream params must be a JSON object",
             );
     } catch {
+      if (this.registry.owners.get(streamId) === this) this.registry.owners.delete(streamId);
       this.sendEvent("stream.error", {
         streamId,
         error: {

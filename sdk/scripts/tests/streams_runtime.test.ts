@@ -105,6 +105,12 @@ import { createPlatformExperience } from "@pocket/ui/platform-experience";
 import { createPocketStreamAdapter } from "@pocket/ui/streams";
 
 const host = createHostBridge();
+// Deliberately broken observers must not stop the real stream adapter that is
+// registered afterwards. This is the runtime proof for R2, not just a mock
+// dispatch assertion.
+host.onEvent!((event) => {
+  if (event.method === "stream.data") throw new Error("fixture event observer failed");
+});
 const streams = createPocketStreamAdapter(host, {
   idPrefix: "fixture-stream",
   maxActiveStreams: 8,
@@ -121,6 +127,20 @@ const [ready, setReady] = createSignal("boot");
 const dataStream = streams.open("fixture.samples", {}, { id: "fixture-stream-data" });
 const errorStream = streams.open("fixture.errors", {}, { id: "fixture-stream-error" });
 const cancelStream = streams.open("fixture.cancels", {}, { id: "fixture-stream-cancel" });
+const batchStream = streams.open("fixture.batch", {}, { id: "fixture-stream-batch" });
+const [batchCountError, setBatchCountError] = createSignal("none");
+const [batchBytesError, setBatchBytesError] = createSignal("none");
+
+try {
+  batchStream.sendBatch(Array.from({ length: 257 }, () => 1));
+} catch (error) {
+  setBatchCountError(String((error as { code?: unknown }).code ?? "unknown"));
+}
+try {
+  batchStream.sendBatch(["x".repeat(300 * 1024)]);
+} catch (error) {
+  setBatchBytesError(String((error as { code?: unknown }).code ?? "unknown"));
+}
 
 dataStream.onData((value) => {
   setSampleCount((count) => count + 1);
@@ -154,6 +174,8 @@ mount(() => (
       <Text>error={streamError()}</Text>
       <Text>cancel={remoteCancel()}</Text>
       <Text>link={linkResult()}</Text>
+      <Text>batchCount={batchCountError()}</Text>
+      <Text>batchBytes={batchBytesError()}</Text>
     </View>
   </Screen>
 ));
@@ -239,6 +261,15 @@ test(
       assert.match(initialText, /streams-runtime-fixture/);
       assert.match(initialText, /samples=0/);
       assert.match(initialText, /link=pending/);
+      assert.match(initialText, /batchCount=stream_batch_too_large/);
+      assert.match(initialText, /batchBytes=stream_batch_too_large/);
+      assert.equal(
+        initialFrames
+          .flatMap((frame) => frameEvents(frame, "stream.batch"))
+          .filter((event) => event.payload?.streamId === "fixture-stream-batch").length,
+        0,
+        "preflight rejection must not emit an over-limit batch",
+      );
 
       const scenarioResponses = runProbe(probe, [
         ...baseCommands,

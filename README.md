@@ -104,6 +104,8 @@ flowchart TD
 
 实现入口：[PocketView](sdk/packages/pocket_flutter/lib/src/pocket_view.dart)、[文字缓存](sdk/packages/pocket_flutter/lib/src/pocket_text_cache.dart)、[原生帧与 FFI](sdk/native/src/lib.rs)。
 
+矩形 `SCISSOR` 使用硬裁剪，不使用 Flutter 默认的裁剪边缘抗锯齿；圆角、文字和图片的绘制质量设置保持独立。Android 真机曾因逐 DrawOp 抗锯齿矩形裁剪，在 Impeller Vulkan 下出现约 56ms raster；显式硬裁剪后同场景约 3ms。设备、消融、Release 验收和回归说明见 [Android Impeller 裁剪记录](sdk/docs/ANDROID_IMPELLER_SCISSOR.md)。
+
 ### FPS 和耗电如何看
 
 Demo 的 `Flutter FPS` 角标直接采集 Flutter engine `FrameTiming`，按最近一秒 `vsyncStart` 的真实间隔计算，不依赖 Pocket ticker、不封顶 60，也不主动刷帧。UI/raster 耗时单独显示；空闲保留 `last window`。可用 `--dart-define=FLUTTER_PERFORMANCE_OVERLAY=true` 开启 Flutter 官方性能图交叉查看，用 `--dart-define=FLUTTER_FPS=false` 关闭数字监控。
@@ -176,6 +178,8 @@ Guest 使用 `host.request` 携带 requestId、capability 和参数，Host 返�
 消费工程通过 `pluginFactories` 显式注册 Dart capability provider（`PocketPlugin` 实例）；iOS/Android 原生插件由 Flutter 包依赖及平台 plugin registry 注册。Guest 更新不能安装 Swift/Kotlin/Dart 原生代码。切换 Guest、回退、关闭时，SDK 撤销能力并清理插件。核心 SDK 不强制依赖硬件插件。
 
 持续数据使用 `@pocket/ui/streams` 复用现有流协议与 HostBridge，原生传感器和 BLE 通知由 callback 推送，取消/离开页面释放 producer；流缓冲、并发数和 pending read 有界。硬件包提供传感器 watch、BLE characteristic read/write/notifications，页面与字节解析仍在 JS。可选 `pocket_platform` 只承接系统栏、触觉和 URL 入口；Deep Link **默认关闭**，脚手架只有显式 `--deep-link-scheme=pocketapp` 才配置原生 scheme，JS 决定如何路由。插件可附带有界数据 schema，`pocket.ts types` 根据真实 descriptor 和已注册能力生成 TS 客户端；缺失类型保持 `unknown`。
+
+控制消息单包上限为 256 KiB；`stream.batch` 最多 256 项，不能嵌套。原生待输出控制消息最多 1024 条、累计编码长度最多 1 MiB，拒绝时保留已接受消息。JS 在发送 batch 前做有界预检，Dart 在数据真正交付时释放 pending 额度，未监听或暂停也受缓冲上限约束。System、Platform、Display 复用 HostBridge 已解码事件，逐消费者隔离异常。具体限制、消融数据和验收边界见 [本轮修复记录](sdk/docs/REVIEW_FIXES_6e40c54.md)。
 
 ## JS UI、系统输入与设备适配
 
@@ -300,6 +304,8 @@ bun pocket.ts editor /path/to/my-app --port=8790
 ```
 
 Pocket Studio 提供项目创建、源码/资源编辑、构建、日志、签名发布与产物检查，使用与 CLI 相同的 `buildGuest` 和公共 starter；不会再维护第二套编译器或 Showcase 副本。外部项目模式编辑原项目。
+
+Showcase 的完整 Studio 从 `demo/js` 执行 `bun run editor`，打开 **http://127.0.0.1:8791**。可以编辑 JS、构建真实字节码、网页 Canvas 交互预览，再选择模拟器或连接设备部署 Flutter。默认页面以预览为主，提供 Copy preview link，可让 Codex 浏览器直接打开真实交互预览；项目与构建配置收在高级设置中。页面不再内嵌 Codex 对话。网页投影与 Flutter 真机的渲染/硬件支持不同，使用流程、模块职责、来源与限制见 [Studio 说明](sdk/docs/EDITOR_STUDIO.md)。
 
 Demo 的本机服务另有 `sdk/scripts/editor_service.sh start|status|stop` 包装；更新源、公钥及首次签名配置参见集成指南。Editor 中“构建/发布”与客户端“检查/激活更新”是两个阶段，发布成功不表示所有客户端已升级。
 

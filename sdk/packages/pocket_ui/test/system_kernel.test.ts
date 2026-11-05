@@ -271,6 +271,237 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
   assert.equal(resultEvent.params.reason, "cancelled");
 });
 
+test("includeStack retains lower app bindings while the foreground child is open", async () => {
+  const { host, kernel, invoke } = createEnv(5);
+  await kernel.ready;
+
+  const profileOpened = await invoke({
+    requestId: "req-stack-profile",
+    sourceAppId: SYSTEM_UI,
+    sourceInstanceId: "system-ui",
+    sourceGeneration: "gen-system-ui",
+    capability: "platform.apps.open",
+    params: { appId: PROFILE },
+  });
+  assert.equal(profileOpened.ok, true);
+  const profileInstance = kernel.snapshot().residents.find((record) => record.appId === PROFILE)!.instanceId;
+  const profileGeneration = host.generations.get(profileInstance)!;
+
+  const lobbyOpened = await invoke({
+    requestId: "req-stack-lobby",
+    sourceAppId: PROFILE,
+    sourceInstanceId: profileInstance,
+    sourceGeneration: profileGeneration,
+    capability: "platform.apps.open",
+    params: { appId: LOBBY },
+  });
+  assert.equal(lobbyOpened.ok, true);
+  const lobbyInstance = kernel.snapshot().residents.find((record) => record.appId === LOBBY)!.instanceId;
+
+  // The legacy/default contract remains visible-only for plain consumers.
+  assert.deepEqual(kernel.surfaceBindings().map((binding) => binding.appId), [LOBBY]);
+  // Mini-app presentation consumers opt into the retained stack so Profile's
+  // instance remains mounted and resumes with its original state after Lobby.
+  assert.deepEqual(kernel.surfaceBindings({ includeStack: true }).map((binding) => binding.appId), [PROFILE, LOBBY]);
+  assert.deepEqual(kernel.surfaceBindings({ includeStack: true }).map((binding) => binding.focused), [false, true]);
+  assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI, PROFILE, LOBBY]);
+
+  const returned = await invoke({
+    requestId: "req-stack-return-lobby",
+    sourceAppId: LOBBY,
+    sourceInstanceId: lobbyInstance,
+    sourceGeneration: host.generations.get(lobbyInstance)!,
+    capability: "platform.apps.return",
+    params: { value: { from: "lobby" } },
+  });
+  assert.equal(returned.ok, true);
+  assert.deepEqual(kernel.surfaceBindings({ includeStack: true }).map((binding) => binding.appId), [PROFILE]);
+  assert.equal(host.destroyed.includes(lobbyInstance), true, "return destroys only the popped foreground runtime");
+  assert.equal(host.destroyed.includes(profileInstance), false, "return must preserve the lower caller runtime");
+});
+
+test("return waits for before-dismiss handlers before popping and destroys once", async () => {
+  const { host, kernel, invoke } = createEnv(5);
+  await kernel.ready;
+
+  const opened = await invoke({
+    requestId: "req-dismiss-return-open",
+    sourceAppId: SYSTEM_UI,
+    sourceInstanceId: "system-ui",
+    sourceGeneration: "gen-system-ui",
+    capability: "platform.apps.open",
+    params: { appId: PROFILE },
+  });
+  assert.equal(opened.ok, true);
+  const profile = kernel.snapshot().residents.find((record) => record.appId === PROFILE)!;
+  const launchId = String((opened.value as JsonObject).requestId);
+  let started = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const dismissed: string[][] = [];
+  const unsubscribe = kernel.onBeforeDismiss(async (instanceIds) => {
+    started = true;
+    dismissed.push([...instanceIds]);
+    await gate;
+  });
+
+  const returning = invoke({
+    requestId: "req-dismiss-return",
+    sourceAppId: PROFILE,
+    sourceInstanceId: profile.instanceId,
+    sourceGeneration: profile.generation!,
+    capability: "platform.apps.return",
+    params: { value: { done: true } },
+  });
+  for (let attempt = 0; attempt < 100 && !started; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(started, true, "return should enter the dismissal barrier");
+  assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI, PROFILE]);
+  assert.equal(host.destroyed.includes(profile.instanceId), false, "target stays resident during reverse animation");
+  assert.equal(
+    host.posted.filter((post) => post.event === "platform.result" && post.params.requestId === launchId).length,
+    0,
+  );
+
+  release();
+  const response = await returning;
+  assert.equal(response.ok, true);
+  assert.deepEqual(dismissed, [[profile.instanceId]]);
+  for (let attempt = 0; attempt < 100 && !host.destroyed.includes(profile.instanceId); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(host.destroyed.filter((instanceId) => instanceId === profile.instanceId).length, 1);
+  assert.equal(
+    host.posted.filter((post) => post.event === "platform.result" && post.params.requestId === launchId).length,
+    1,
+  );
+  unsubscribe();
+  kernel.dispose();
+});
+
+test("cancel waits for one top-to-bottom dismissal barrier before unwinding nested frames", async () => {
+  const { host, kernel, invoke } = createEnv(5);
+  await kernel.ready;
+
+  const profileOpened = await invoke({
+    requestId: "req-dismiss-cancel-profile",
+    sourceAppId: SYSTEM_UI,
+    sourceInstanceId: "system-ui",
+    sourceGeneration: "gen-system-ui",
+    capability: "platform.apps.open",
+    params: { appId: PROFILE },
+  });
+  assert.equal(profileOpened.ok, true);
+  const profile = kernel.snapshot().residents.find((record) => record.appId === PROFILE)!;
+  const lobbyOpened = await invoke({
+    requestId: "req-dismiss-cancel-lobby",
+    sourceAppId: PROFILE,
+    sourceInstanceId: profile.instanceId,
+    sourceGeneration: profile.generation!,
+    capability: "platform.apps.open",
+    params: { appId: LOBBY },
+  });
+  assert.equal(lobbyOpened.ok, true);
+  const lobby = kernel.snapshot().residents.find((record) => record.appId === LOBBY)!;
+  const lobbyLaunch = String((lobbyOpened.value as JsonObject).requestId);
+
+  let started = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const dismissed: string[][] = [];
+  const unsubscribe = kernel.onBeforeDismiss(async (instanceIds) => {
+    started = true;
+    dismissed.push([...instanceIds]);
+    await gate;
+  });
+
+  const cancelling = invoke({
+    requestId: "req-dismiss-cancel",
+    sourceAppId: SYSTEM_UI,
+    sourceInstanceId: "system-ui",
+    sourceGeneration: "gen-system-ui",
+    capability: "platform.apps.cancel",
+    params: { requestId: (profileOpened.value as JsonObject).requestId },
+  });
+  for (let attempt = 0; attempt < 100 && !started; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(started, true, "cancel should enter the dismissal barrier");
+  assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI, PROFILE, LOBBY]);
+  assert.equal(host.destroyed.includes(profile.instanceId), false);
+  assert.equal(host.destroyed.includes(lobby.instanceId), false);
+
+  release();
+  const response = await cancelling;
+  assert.equal(response.ok, true);
+  assert.equal((response.value as JsonObject).cancelled, true);
+  assert.deepEqual(dismissed, [[lobby.instanceId, profile.instanceId]]);
+  assert.equal(host.destroyed.filter((instanceId) => instanceId === profile.instanceId).length, 1);
+  assert.equal(host.destroyed.filter((instanceId) => instanceId === lobby.instanceId).length, 1);
+  assert.equal(
+    host.posted.filter((post) => post.event === "platform.result" && post.params.requestId === (profileOpened.value as JsonObject).requestId).length,
+    1,
+  );
+  assert.equal(
+    host.posted.filter((post) => post.event === "platform.result" && post.params.requestId === lobbyLaunch).length,
+    0,
+    "nested call result is not delivered to a caller that is unwound",
+  );
+  unsubscribe();
+  kernel.dispose();
+});
+
+test("dispose releases a pending dismissal barrier without post-dispose teardown", async () => {
+  const { host, kernel, invoke } = createEnv(5);
+  await kernel.ready;
+
+  const opened = await invoke({
+    requestId: "req-dispose-dismiss-open",
+    sourceAppId: SYSTEM_UI,
+    sourceInstanceId: "system-ui",
+    sourceGeneration: "gen-system-ui",
+    capability: "platform.apps.open",
+    params: { appId: PROFILE },
+  });
+  assert.equal(opened.ok, true);
+  const profile = kernel.snapshot().residents.find((record) => record.appId === PROFILE)!;
+  let started = false;
+  kernel.onBeforeDismiss(async () => {
+    started = true;
+    await new Promise<void>(() => {});
+  });
+
+  // This request is intentionally left awaiting the never-resolving visual
+  // transition. The kernel itself must still release its queue on dispose.
+  void invoke({
+    requestId: "req-dispose-dismiss-return",
+    sourceAppId: PROFILE,
+    sourceInstanceId: profile.instanceId,
+    sourceGeneration: profile.generation!,
+    capability: "platform.apps.return",
+    params: { value: null },
+  });
+  for (let attempt = 0; attempt < 100 && !started; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(started, true, "return should be waiting inside the dismissal hook");
+  const callsAtDispose = host.calls.length;
+  kernel.dispose();
+
+  // This operation is queued behind the blocked return. If dispose did not
+  // release the barrier, it would remain pending forever.
+  const queueProbe = kernel.presentSurfaces([]).then(() => true);
+  const queueSettled = await Promise.race([
+    queueProbe,
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+  ]);
+  assert.equal(queueSettled, true, "dispose must release the kernel queue");
+  assert.deepEqual(kernel.snapshot().stack, []);
+  assert.deepEqual(kernel.snapshot().residents, []);
+  assert.deepEqual(host.calls.slice(callsAtDispose), [], "dispose must prevent post-dispose host teardown or responses");
+});
+
 test("split-view non-active presented instance excluded from LRU eviction", async () => {
   const { host, kernel, invoke } = createEnv(4);
   await kernel.ready;

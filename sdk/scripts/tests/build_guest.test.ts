@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildGuest, parseBuildGuestArgs, resolveReleaseIdentity } from "../build_guest.ts";
 import { buildProject } from "../../pocket.ts";
+import { unpack } from "../../.cache/pocketjs/framework/compiler/pak.ts";
 
 // These tests exercise the full pinned JSX compiler and the Rust QuickJS
 // bytecode builder.  Bun's per-test default is 5 seconds, which is shorter
@@ -63,6 +64,31 @@ mount(() => <MobileButton label="Installed package" onPress={() => {}} />);
     // The package manager's source directory is restored after the build; the
     // compiler's transformed copy never leaks into the consumer project.
     expect(readFileSync(join(installed, "src/mobile.tsx"), "utf8")).toContain("<");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}, BUILD_GUEST_TEST_TIMEOUT_MS);
+
+test("build_guest copies ordinary binary assets outside the image PAK", async () => {
+  const project = mkdtempSync(join(tmpdir(), "pocket-build-project-assets-"));
+  const output = join(project, "out");
+  const hostAssets = join(project, "host-assets");
+  const videoBytes = Uint8Array.from([0x00, 0x00, 0x01, 0x67, 0xa1, 0xff, 0x00, 0x42]);
+  try {
+    mkdirSync(join(project, "assets/videos"), { recursive: true });
+    writeFileSync(join(project, "pocket.json"), JSON.stringify({ app: { entry: "app.tsx" } }));
+    writeFileSync(join(project, "manifest.json"), JSON.stringify({ capabilities: { requires: [] } }));
+    writeFileSync(join(project, "app.tsx"), "export default function App(){ return <text value='binary asset'/>; }\n");
+    writeFileSync(join(project, "assets/videos/clip-a.mp4"), videoBytes);
+
+    const result = await buildGuest({
+      projectRoot: project,
+      outDir: output,
+      copyAssetsTo: hostAssets,
+    });
+    expect(readFileSync(join(hostAssets, "videos/clip-a.mp4"))).toEqual(videoBytes);
+    const pakKeys = unpack(new Uint8Array(readFileSync(result.pak))).map((entry) => entry.key);
+    expect(pakKeys.some((key) => key.includes("video"))).toBe(false);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -267,12 +293,16 @@ test("projectConfig and build_guest emit the same complete identity for partial 
       writeFileSync(join(project, "pocket.json"), JSON.stringify({ id: "fixture-app", ...fixture.pocket, app: { entry: "app.tsx" } }));
       writeFileSync(join(project, "manifest.json"), JSON.stringify({ capabilities: { requires: [] } }));
       writeFileSync(join(project, "editor.json"), JSON.stringify(fixture.editor ?? {}));
+      const videoBytes = Uint8Array.from([0x00, 0x01, 0x67, 0x42, 0xff]);
+      mkdirSync(join(project, "assets/videos"), { recursive: true });
+      writeFileSync(join(project, "assets/videos/clip.mp4"), videoBytes);
 
       const result = await buildProject(project, { outDir: output });
       const buildInfo = JSON.parse(readFileSync(join(output, "build.json"), "utf8")) as Record<string, unknown>;
       const metadata = JSON.parse(readFileSync(result.metadata, "utf8")) as Record<string, unknown>;
       expect({ version: buildInfo.version, build: buildInfo.build }).toEqual(fixture.expected);
       expect({ version: metadata.version, build: metadata.build }).toEqual(fixture.expected);
+      expect(readFileSync(join(project, "flutter/assets/videos/clip.mp4"))).toEqual(videoBytes);
     } finally {
       rmSync(project, { recursive: true, force: true });
     }
@@ -288,6 +318,30 @@ test("build_guest rejects an invalid explicit release build instead of falling b
     writeFileSync(join(project, "editor.json"), JSON.stringify({ version: "2.4.0", build: 0 }));
     writeFileSync(join(project, "manifest.json"), JSON.stringify({ version: "1.0.0", build: 1, capabilities: { requires: [] } }));
     await expect(buildGuest({ projectRoot: project, outDir: output })).rejects.toThrow(/release build must be a positive safe integer/);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}, BUILD_GUEST_TEST_TIMEOUT_MS);
+
+test("build_guest uses declared file UI source instead of a stale installed copy", async () => {
+  const project = mkdtempSync(join(tmpdir(), "pocket-build-declared-ui-"));
+  const installed = join(project, "node_modules/@pocket/ui");
+  const source = join(import.meta.dir, "../../packages/pocket_ui");
+  const oldIndex = "export const installedCopyIsOld = true;\n";
+  try {
+    cpSync(source, installed, { recursive: true });
+    writeFileSync(join(installed, "src/index.ts"), oldIndex);
+    writeFileSync(join(project, "package.json"), JSON.stringify({ dependencies: { "@pocket/ui": `file:${source}` } }));
+    writeFileSync(join(project, "pocket.json"), JSON.stringify({ app: { entry: "app.tsx" } }));
+    writeFileSync(join(project, "manifest.json"), JSON.stringify({ capabilities: { requires: [] } }));
+    writeFileSync(join(project, "app.tsx"), `import { mount } from "@pocketjs/framework/solid";
+import { SafeAreaScaffold } from "@pocket/ui";
+mount(() => <SafeAreaScaffold />);
+`);
+    const built = await buildGuest({ projectRoot: project, outDir: join(project, "out") });
+    expect(JSON.parse(readFileSync(built.metadata, "utf8")).bytecodeBytes).toBeGreaterThan(0);
+    expect(readFileSync(join(installed, "src/index.ts"), "utf8")).toBe(oldIndex);
+    expect(existsSync(join(project, ".pocket-ui.lock"))).toBe(false);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

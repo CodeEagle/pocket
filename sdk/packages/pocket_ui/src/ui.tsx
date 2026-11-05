@@ -560,12 +560,12 @@ export function ActionButton(props: ActionButtonProps): JSX.Element {
   return (
     <Focusable
       class={props.class ?? (props.kind === "secondary"
-        ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF] active:bg-[#C9D6FF]"
+        ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF] active:bg-[#C9D6FF] active:scale-95 transition-all duration-150 ease-out"
         : props.kind === "quiet"
-          ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#EEF1F6] focus:bg-[#E4E9F2] active:bg-[#D7DDE8]"
+          ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#EEF1F6] focus:bg-[#E4E9F2] active:bg-[#D7DDE8] active:scale-95 transition-all duration-150 ease-out"
           : props.kind === "danger"
-            ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238] active:bg-[#7F1D2D]"
-            : "px-4 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5] active:bg-[#1E3A8A]")}
+            ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238] active:bg-[#7F1D2D] active:scale-95 transition-all duration-150 ease-out"
+            : "px-4 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5] active:bg-[#1E3A8A] active:scale-95 transition-all duration-150 ease-out")}
       style={props.disabled
         ? { ...(props.style ?? {}), opacity: props.style?.opacity ?? 0.5 }
         : { ...(props.style ?? {}), opacity: props.style?.opacity ?? 1 }}
@@ -722,10 +722,10 @@ export function NavigationBar(props: {
           const active = () => props.route === item.id || (hostRoute() && item.id === "about");
           return (
             <Focusable
-              class="flex-1 h-[56] flex-col items-center justify-center gap-1 rounded-xl bg-transparent focus:bg-[#F7F8FC]"
+              class="flex-1 h-[56] flex-col items-center justify-center gap-1 rounded-xl bg-transparent focus:bg-[#F7F8FC] active:scale-95 transition-all duration-150 ease-out"
               onPress={() => props.onNavigate(item.id)}
             >
-              <View class={active() ? "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-[#E8EDFF]" : "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-transparent"}>
+              <View class={active() ? "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-[#E8EDFF] transition-all duration-200 ease-spring" : "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-transparent transition-all duration-200 ease-spring"}>
                 <NavigationIcon kind={item.kind} active={active()} />
               </View>
               <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#7C8799] font-bold"}>{item.label}</Text>
@@ -752,8 +752,8 @@ export function Tabs(props: { items: readonly TabItem[]; active: string; onChang
         {(item) => (
           <Focusable
             class={props.active === item.id
-              ? "w-[68] h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF]"
-              : "w-[68] h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#EEF1F6]"}
+              ? "w-[68] h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF] active:scale-95 transition-all duration-150 ease-out"
+              : "w-[68] h-[44] items-center justify-center rounded-xl bg-transparent focus:bg-[#EEF1F6] active:scale-95 transition-all duration-150 ease-out"}
             onPress={() => props.onChange(item.id)}
           >
             <Text class={props.active === item.id ? "text-sm text-[#315DEB] font-bold" : "text-sm text-[#7C8799] font-bold"}>{item.label}</Text>

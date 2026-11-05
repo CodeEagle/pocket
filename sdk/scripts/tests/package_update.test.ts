@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pack } from "../../.cache/pocketjs/framework/compiler/pak.ts";
 import {
+  create7zArchive,
+  createZipArchive,
+  extract7zArchive,
+  extractBundleArchive,
+  extractZipArchive,
+  packPak,
   packageArtifacts,
+  patchPackageArtifacts,
   generateDevKey,
   parsePakLayout,
   sha256Hex,
@@ -389,4 +396,330 @@ test("signed worker bytes/declaration survive publication and tampering is rejec
     writeFileSync(manifest,JSON.stringify({capabilities:{requires:["runtime.worker"]}}));
     expect(()=>packageArtifacts(options)).toThrow("without its signed descriptor");
   } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+
+test("package emits verified bundle.7z by default (and supports bundle.zip) and serveUpdates serves both", async () => {
+  const dir = tempDirectory();
+  let server: ReturnType<typeof serveUpdates> | undefined;
+  try {
+    const input = writeFixture(join(dir, "input"), 10);
+    const assetsDir = join(dir, "assets");
+    mkdirSync(assetsDir, { recursive: true });
+    writeFileSync(join(assetsDir, "banner.bin"), Buffer.from([10, 20, 30, 40, 50]));
+    const out = join(dir, "out");
+    const result = packageArtifacts({
+      appId: "fixture-app",
+      version: "1.0.0",
+      build: 1,
+      jsPath: input.js,
+      pakPath: input.pak,
+      outDir: out,
+      keyFile: fixtureKey,
+      assetDir: assetsDir,
+      assetPrefix: "assets",
+    });
+
+    expect(result.payload.bundle).toBeDefined();
+    expect(result.payload.bundle?.format).toBe("7z");
+    expect(result.payload.bundle?.url).toBe(`bundles/bundle-${result.payload.bundle!.sha256}.7z`);
+
+    server = serveUpdates({ rootDir: out, port: 0 });
+    const base = String(server.url).replace(/\/$/, "");
+    const immutableRes = await fetch(`${base}/${result.payload.bundle!.url}`);
+    expect(immutableRes.status).toBe(200);
+    expect(immutableRes.headers.get("Content-Type")).toBe("application/x-7z-compressed");
+    expect(immutableRes.headers.get("Cache-Control")).toContain("immutable");
+    const bundleRes = await fetch(`${base}/bundle.7z`);
+    expect(bundleRes.status).toBe(200);
+    expect(bundleRes.headers.get("Content-Type")).toBe("application/x-7z-compressed");
+    const sevenZipBytes = new Uint8Array(await immutableRes.arrayBuffer());
+    expect(sevenZipBytes.byteLength).toBe(result.payload.bundle!.size);
+    expect(sha256Hex(sevenZipBytes)).toBe(result.payload.bundle!.sha256);
+
+    const extracted = extract7zArchive(sevenZipBytes);
+    for (const file of result.payload.files) {
+      const entry = extracted.get(file.url);
+      expect(entry).toBeDefined();
+      expect(entry!.byteLength).toBe(file.size);
+      expect(sha256Hex(entry!)).toBe(file.sha256);
+    }
+
+    // Verify built-in 7z encoder (useCli: false) and 7z CLI encoder both roundtrip through extractBundleArchive
+    const builtin7z = create7zArchive(extracted, { useCli: false });
+    const extractedFromBuiltin = extractBundleArchive(builtin7z, undefined, "7z");
+    expect(extractedFromBuiltin.size).toBe(extracted.size);
+    for (const [key, val] of extracted.entries()) {
+      expect([...(extractedFromBuiltin.get(key) ?? [])]).toEqual([...val]);
+    }
+
+    // Verify backward-compatible ZIP format option
+    const outZip = join(dir, "out-zip");
+    const zipResult = packageArtifacts({
+      appId: "fixture-app",
+      version: "1.0.0",
+      build: 1,
+      jsPath: input.js,
+      pakPath: input.pak,
+      outDir: outZip,
+      keyFile: fixtureKey,
+      assetDir: assetsDir,
+      assetPrefix: "assets",
+      bundleFormat: "zip",
+    });
+    expect(zipResult.payload.bundle?.format).toBe("zip");
+    expect(zipResult.payload.bundle?.url).toBe(`bundles/bundle-${zipResult.payload.bundle!.sha256}.zip`);
+    const extractedZip = extractZipArchive(new Uint8Array(readFileSync(zipResult.bundlePath!)));
+    expect(extractedZip.size).toBe(zipResult.payload.files.length);
+  } finally {
+    server?.stop(true);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("patchPackageArtifacts supports granular code-only, single PAK resource, and single loose asset updates", () => {
+  const dir = tempDirectory();
+  try {
+    const input = writeFixture(join(dir, "input"), 10);
+    const assetsDir = join(dir, "assets");
+    mkdirSync(join(assetsDir, "images"), { recursive: true });
+    writeFileSync(join(assetsDir, "video.mp4"), Buffer.from([1, 2, 3, 4]));
+    writeFileSync(join(assetsDir, "images", "poster.png"), Buffer.from([9, 8, 7]));
+
+    const v1Dir = join(dir, "v1");
+    const v1 = packageArtifacts({
+      appId: "fixture-app",
+      version: "1.0.0",
+      build: 1,
+      jsPath: input.js,
+      pakPath: input.pak,
+      outDir: v1Dir,
+      keyFile: fixtureKey,
+      assetDir: assetsDir,
+      assetPrefix: "assets",
+    });
+    const v1FileSet = new Set(v1.payload.files.map((f) => f.sha256));
+
+    // 1. Code-only update: PAK and all assets are reused unchanged
+    const updatedJs = join(dir, "app-v2.js");
+    writeFileSync(updatedJs, "globalThis.frame=()=>{return 2;};\n");
+    const v2Dir = join(dir, "v2-code");
+    const v2 = patchPackageArtifacts({
+      baseDir: v1Dir,
+      outDir: v2Dir,
+      version: "1.0.1",
+      build: 2,
+      keyFile: fixtureKey,
+      jsPath: updatedJs,
+    });
+    expect(v2.payload.entry.sha256).not.toBe(v1.payload.entry.sha256);
+    expect(v2.payload.pak.sha256).toBe(v1.payload.pak.sha256);
+    expect(v2.payload.assets).toEqual(v1.payload.assets);
+    const v2Added = v2.payload.files.filter((f) => !v1FileSet.has(f.sha256));
+    expect(v2Added.map((f) => f.sha256)).toEqual([v2.payload.entry.sha256]);
+
+    // 2. Single PAK resource update ("ui:img.beta"): code, assets, and "ui:img.alpha" blob are reused
+    const v2FileSet = new Set(v2.payload.files.map((f) => f.sha256));
+    const v3Dir = join(dir, "v3-pak-resource");
+    const v3 = patchPackageArtifacts({
+      baseDir: v2Dir,
+      outDir: v3Dir,
+      version: "1.0.2",
+      build: 3,
+      keyFile: fixtureKey,
+      replacePakEntries: {
+        "ui:img.beta": new Uint8Array([99, 16, 32, 255, 64, 96, 128, 255]),
+      },
+    });
+    expect(v3.payload.entry.sha256).toBe(v2.payload.entry.sha256);
+    expect(v3.payload.assets).toEqual(v2.payload.assets);
+    const alphaV2 = v2.payload.pak.parts.find((p) => p.key === "ui:img.alpha");
+    const alphaV3 = v3.payload.pak.parts.find((p) => p.key === "ui:img.alpha");
+    const betaV2 = v2.payload.pak.parts.find((p) => p.key === "ui:img.beta");
+    const betaV3 = v3.payload.pak.parts.find((p) => p.key === "ui:img.beta");
+    expect(alphaV3?.sha256).toBe(alphaV2?.sha256);
+    expect(betaV3?.sha256).not.toBe(betaV2?.sha256);
+    const v3Added = v3.payload.files.filter((f) => !v2FileSet.has(f.sha256));
+    expect(v3Added).toHaveLength(1);
+    expect(v3Added[0].sha256).toBe(betaV3?.sha256);
+
+    // 3. Single external asset update ("assets/images/poster.png"): code, PAK, and "assets/video.mp4" are reused
+    const v3FileSet = new Set(v3.payload.files.map((f) => f.sha256));
+    const v4Dir = join(dir, "v4-asset-resource");
+    const v4 = patchPackageArtifacts({
+      baseDir: v3Dir,
+      outDir: v4Dir,
+      version: "1.0.3",
+      build: 4,
+      keyFile: fixtureKey,
+      replaceAssets: {
+        "assets/images/poster.png": new Uint8Array([42, 43, 44, 45]),
+      },
+    });
+    expect(v4.payload.entry.sha256).toBe(v3.payload.entry.sha256);
+    expect(v4.payload.pak.sha256).toBe(v3.payload.pak.sha256);
+    expect(v4.payload.assets?.["assets/video.mp4"]).toEqual(v3.payload.assets?.["assets/video.mp4"]);
+    expect(v4.payload.assets?.["assets/images/poster.png"]?.sha256).not.toBe(
+      v3.payload.assets?.["assets/images/poster.png"]?.sha256,
+    );
+    const v4Added = v4.payload.files.filter((f) => !v3FileSet.has(f.sha256));
+    expect(v4Added).toHaveLength(1);
+    expect(v4Added[0].sha256).toBe(v4.payload.assets?.["assets/images/poster.png"]?.sha256);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("in-place patching preserves content-addressed bundles and enforces PAK/ZIP/worker invariants", async () => {
+  const dir = tempDirectory();
+  let server: ReturnType<typeof serveUpdates> | undefined;
+  try {
+    // 1. ZIP encoder rejects normalized duplicates and >65535-byte entry names
+    expect(() =>
+      createZipArchive({
+        "a\\b": new Uint8Array([1]),
+        "a/b": new Uint8Array([2]),
+      }),
+    ).toThrow(/duplicate entry a\/b/);
+    expect(() =>
+      createZipArchive({
+        ["k".repeat(65536)]: new Uint8Array([1]),
+      }),
+    ).toThrow(/exceeds 65535 bytes/);
+
+    // 2. packPak / parsePakLayout enforce 1..65535 UTF-8 key lengths, non-empty data, unique keys, and non-aliased ranges
+    const maxKey = "k".repeat(65535);
+    const validMaxPak = packPak([{ key: maxKey, dtype: 3, data: new Uint8Array([1, 2, 3]) }]);
+    const parsedMax = parsePakLayout(validMaxPak).find((p) => p.kind === "blob");
+    expect(parsedMax?.key).toBe(maxKey);
+    expect(parsedMax?.dtype).toBe(3);
+
+    expect(() => packPak([{ key: "k".repeat(65536), dtype: 0, data: new Uint8Array([1]) }])).toThrow(/1\.\.65535/);
+    expect(() => packPak([{ key: "empty", dtype: 0, data: new Uint8Array(0) }])).toThrow(/must not be empty/);
+    expect(() => packPak([{ key: " trailing ", dtype: 0, data: new Uint8Array([1]) }])).toThrow(/invalid key/);
+
+    // Craft a PAK with two directory entries aliasing the same blob range -> parsePakLayout must reject
+    const twoEntryPak = new Uint8Array(packPak([
+      { key: "alpha", dtype: 0, data: new Uint8Array([1, 2, 3, 4]) },
+      { key: "beta", dtype: 0, data: new Uint8Array([5, 6, 7, 8]) },
+    ]));
+    const pakView = new DataView(twoEntryPak.buffer, twoEntryPak.byteOffset, twoEntryPak.byteLength);
+    // Point entry 1's blobOffset and blobSize to entry 0's range
+    pakView.setUint32(32 + 24 + 4, pakView.getUint32(32 + 4, true), true);
+    pakView.setUint32(32 + 24 + 8, pakView.getUint32(32 + 8, true), true);
+    expect(() => parsePakLayout(twoEntryPak)).toThrow(/overlapping or aliased/);
+
+    // 3. In-place patching retains v1's content-addressed bundle while publishing v2's bundle
+    const input = writeFixture(join(dir, "input"), 10);
+    const entry = join(dir, "input", "app.qjbc");
+    writeFileSync(entry, Buffer.from("PJBC-ui-v1"));
+    const workerBytesV1 = Buffer.concat([Buffer.from("PJBC"), Buffer.alloc(128, 7)]);
+    writeFileSync(join(dir, "input", "app.worker.qjbc"), workerBytesV1);
+    const workerV1 = {
+      kind: "quickjs-bytecode",
+      protocolVersion: 1,
+      runtimeAbi: "fixture-abi",
+      bindingGeneration: 12,
+      tickHz: 60,
+      bytecode: { path: "app.worker.qjbc", bytes: workerBytesV1.length, sha256: sha256Hex(workerBytesV1) },
+      declaration: { entry: "worker.ts", nodes: [], channels: [] },
+      requiredCaps: ["runtime.worker"],
+    };
+    const guestPath = join(dir, "input", "guest-manifest.json");
+    writeFileSync(guestPath, JSON.stringify({ worker: workerV1, capabilities: { requires: ["runtime.worker"], optional: [] } }));
+
+    const servedDir = join(dir, "served");
+    const v1 = packageArtifacts({
+      appId: "fixture-app",
+      version: "1.0.0",
+      build: 1,
+      bytecodePath: entry,
+      runtimeAbi: "fixture-abi",
+      pakPath: input.pak,
+      outDir: servedDir,
+      keyFile: fixtureKey,
+      guestManifestPath: guestPath,
+    });
+
+    // Reject removing or replacing active worker asset without updating worker descriptor
+    expect(() =>
+      patchPackageArtifacts({
+        baseDir: servedDir,
+        outDir: join(dir, "bad-remove"),
+        version: "1.0.1",
+        build: 2,
+        keyFile: fixtureKey,
+        removeAssets: ["app.worker.qjbc"],
+      }),
+    ).toThrow(/cannot remove active worker asset/);
+
+    expect(() =>
+      patchPackageArtifacts({
+        baseDir: servedDir,
+        outDir: join(dir, "bad-replace"),
+        version: "1.0.1",
+        build: 2,
+        keyFile: fixtureKey,
+        replaceAssets: {
+          "app.worker.qjbc": Buffer.concat([Buffer.from("PJBC"), Buffer.alloc(128, 9)]),
+        },
+      }),
+    ).toThrow(/cannot replace worker asset/);
+
+    // Patch in-place with updated entry + sibling app.bytecode.json worker
+    const v2InputDir = join(dir, "input-v2");
+    mkdirSync(v2InputDir, { recursive: true });
+    const entryV2 = join(v2InputDir, "app.qjbc");
+    writeFileSync(entryV2, Buffer.from("PJBC-ui-v2"));
+    const workerBytesV2 = Buffer.concat([Buffer.from("PJBC"), Buffer.alloc(128, 9)]);
+    writeFileSync(join(v2InputDir, "app.worker.qjbc"), workerBytesV2);
+    const workerV2 = {
+      ...workerV1,
+      bytecode: { path: "app.worker.qjbc", bytes: workerBytesV2.length, sha256: sha256Hex(workerBytesV2) },
+    };
+    writeFileSync(join(v2InputDir, "app.bytecode.json"), JSON.stringify({ worker: workerV2 }));
+
+    const v2 = patchPackageArtifacts({
+      baseDir: servedDir,
+      outDir: servedDir,
+      version: "1.0.1",
+      build: 2,
+      keyFile: fixtureKey,
+      bytecodePath: entryV2,
+    });
+    expect(v2.payload.worker).toEqual(workerV2);
+    expect(v2.payload.bundle?.url).not.toBe(v1.payload.bundle?.url);
+
+    server = serveUpdates({ rootDir: servedDir, port: 0 });
+    const base = String(server.url).replace(/\/$/, "");
+    const resV1 = await fetch(`${base}/${v1.payload.bundle!.url}`);
+    const resV2 = await fetch(`${base}/${v2.payload.bundle!.url}`);
+    expect(resV1.status).toBe(200);
+    expect(resV2.status).toBe(200);
+    expect(sha256Hex(new Uint8Array(await resV1.arrayBuffer()))).toBe(v1.payload.bundle!.sha256);
+    expect(sha256Hex(new Uint8Array(await resV2.arrayBuffer()))).toBe(v2.payload.bundle!.sha256);
+
+    // 4. Malformed UTF-8 in PAK key is rejected (Finding 8)
+    const badUtf8Pak = new Uint8Array(packPak([
+      { key: "alpha", dtype: 0, data: new Uint8Array([1, 2, 3, 4]) },
+    ]));
+    const badPakView = new DataView(badUtf8Pak.buffer, badUtf8Pak.byteOffset, badUtf8Pak.byteLength);
+    const namesOffset = badPakView.getUint32(16, true);
+    const keyOffset = namesOffset + badPakView.getUint32(32 + 12, true);
+    badUtf8Pak[keyOffset] = 0xff;
+    badUtf8Pak[keyOffset + 1] = 0xfe;
+    expect(() => parsePakLayout(badUtf8Pak)).toThrow();
+
+    // 5. Truncated LZMA2 compressed stream is rejected instead of zero-padded (Finding 6)
+    const sample7z = create7zArchive({
+      "blobs/a": Buffer.from("Repeated LZMA2 test payload for truncation check! ".repeat(8)),
+      "blobs/b": Buffer.from("Second solid substream payload! ".repeat(6)),
+    });
+    expect(extract7zArchive(sample7z).get("blobs/a")?.byteLength).toBeGreaterThan(0);
+    const mutatedLzma = new Uint8Array(sample7z);
+    mutatedLzma[38] = 0x01;
+    expect(() => extract7zArchive(mutatedLzma)).toThrow(/LZMA|CRC/);
+  } finally {
+    server?.stop(true);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

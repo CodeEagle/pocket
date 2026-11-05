@@ -16,7 +16,8 @@ final class PocketUpdateConfig {
     required this.keyId,
     required this.publicKey,
     this.namespace = 'default',
-  });
+    List<String> debugHttpHosts = const <String>[],
+  }) : _debugHttpHosts = debugHttpHosts;
   const PocketUpdateConfig.fromEnvironment()
     : url = const String.fromEnvironment('POCKET_UPDATE_URL'),
       keyId = const String.fromEnvironment('POCKET_UPDATE_KEY_ID'),
@@ -24,13 +25,24 @@ final class PocketUpdateConfig {
       namespace = const String.fromEnvironment(
         'POCKET_STORE_NAMESPACE',
         defaultValue: 'default',
-      );
+      ),
+      _debugHttpHosts = const <String>[
+        String.fromEnvironment('POCKET_UPDATE_DEBUG_HTTP_HOST'),
+      ];
   final String url;
   final String keyId;
 
   /// Base64-encoded Ed25519 public key.
   final String publicKey;
   final String namespace;
+
+  /// Additional HTTP hosts allowed for signed updates in debug builds only.
+  /// Loopback and Android's emulator host remain built-in debug hosts.
+  final List<String> _debugHttpHosts;
+  List<String> get debugHttpHosts =>
+      _debugHttpHosts.length == 1 && _debugHttpHosts.first.isEmpty
+      ? const <String>[]
+      : _debugHttpHosts;
   bool get configured =>
       url.isNotEmpty && keyId.isNotEmpty && publicKey.isNotEmpty;
 
@@ -54,10 +66,17 @@ final class PocketUpdateConfig {
           url == other.url &&
           keyId == other.keyId &&
           publicKey == other.publicKey &&
-          namespace == other.namespace;
+          namespace == other.namespace &&
+          listEquals(debugHttpHosts, other.debugHttpHosts);
 
   @override
-  int get hashCode => Object.hash(url, keyId, publicKey, namespace);
+  int get hashCode => Object.hash(
+    url,
+    keyId,
+    publicKey,
+    namespace,
+    Object.hashAll(debugHttpHosts),
+  );
 }
 
 /// App-specific identity and admission policy, separate from the reusable host.

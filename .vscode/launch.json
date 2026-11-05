@@ -1,0 +1,196 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "demo",
+            "cwd": "demo",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "demo (profile mode)",
+            "cwd": "demo",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "demo (release mode)",
+            "cwd": "demo",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "sdk",
+            "cwd": "sdk",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "sdk (profile mode)",
+            "cwd": "sdk",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "sdk (release mode)",
+            "cwd": "sdk",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "pocket_biometrics",
+            "cwd": "sdk/packages/pocket_biometrics",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_bluetooth",
+            "cwd": "sdk/packages/pocket_bluetooth",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_camera",
+            "cwd": "sdk/packages/pocket_camera",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_dio",
+            "cwd": "sdk/packages/pocket_dio",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_flutter",
+            "cwd": "sdk/packages/pocket_flutter",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_flutter (profile mode)",
+            "cwd": "sdk/packages/pocket_flutter",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "pocket_flutter (release mode)",
+            "cwd": "sdk/packages/pocket_flutter",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "pocket_hardware",
+            "cwd": "sdk/packages/pocket_hardware",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_hardware (profile mode)",
+            "cwd": "sdk/packages/pocket_hardware",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "pocket_hardware (release mode)",
+            "cwd": "sdk/packages/pocket_hardware",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "pocket_hardware_core",
+            "cwd": "sdk/packages/pocket_hardware_core",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_hardware_core (profile mode)",
+            "cwd": "sdk/packages/pocket_hardware_core",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "pocket_hardware_core (release mode)",
+            "cwd": "sdk/packages/pocket_hardware_core",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "pocket_location",
+            "cwd": "sdk/packages/pocket_location",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_permissions",
+            "cwd": "sdk/packages/pocket_permissions",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_permissions (profile mode)",
+            "cwd": "sdk/packages/pocket_permissions",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "pocket_permissions (release mode)",
+            "cwd": "sdk/packages/pocket_permissions",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "pocket_platform",
+            "cwd": "sdk/packages/pocket_platform",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_platform (profile mode)",
+            "cwd": "sdk/packages/pocket_platform",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "pocket_platform (release mode)",
+            "cwd": "sdk/packages/pocket_platform",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        },
+        {
+            "name": "pocket_sensors",
+            "cwd": "sdk/packages/pocket_sensors",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_services",
+            "cwd": "sdk/packages/pocket_services",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "pocket_weather",
+            "cwd": "sdk/packages/pocket_weather",
+            "request": "launch",
+            "type": "dart"
+        }
+    ]
+}

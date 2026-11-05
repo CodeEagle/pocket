@@ -20,7 +20,7 @@ export type BuildGuestOptions = {
   tickHz?: number;
   /** Integer raster density used while baking glyphs and image assets. */
   rasterDensity?: number;
-  /** Copy the four runtime assets to a host asset directory. */
+  /** Copy runtime artifacts and the project's ordinary assets to a host directory. */
   copyAssetsTo?: string;
   /** Keep a diagnostic copy of the generated JavaScript source. */
   keepSource?: string;
@@ -183,6 +183,17 @@ function copyTree(source: string, target: string): void {
  */
 function publicUiPackageRoot(projectRoot: string): string | undefined {
   const candidates = [join(projectRoot, "vendor/pocket-ui")];
+  // A file dependency names source, while node_modules can be an older Bun
+  // copy. Honor that declared source so a rebuild really includes SDK fixes
+  // without replacing a consumer's vendored/custom UI package.
+  const projectManifest = join(projectRoot, "package.json");
+  if (existsSync(projectManifest)) {
+    const manifest = JSON.parse(readFileSync(projectManifest, "utf8"));
+    const dependency = manifest.dependencies?.["@pocket/ui"] ?? manifest.devDependencies?.["@pocket/ui"];
+    if (typeof dependency === "string" && dependency.startsWith("file:")) {
+      candidates.push(resolve(projectRoot, dependency.slice(5)));
+    }
+  }
   const localPackage = join(projectRoot, "node_modules/@pocket/ui");
   // The in-repo demo and external projects may install the UI locally. The
   // SDK package is also an allowed build-time fallback; compiled artifacts do
@@ -418,6 +429,50 @@ export function parseBuildGuestArgs(args: string[]): BuildGuestOptions {
   return result;
 }
 
+/**
+ * Copy ordinary project resources without passing them through the image/PAK
+ * baker. Video and other binary assets must stay byte-for-byte files so
+ * Flutter's rootBundle and an OTA PocketPackageSource can open them directly.
+ */
+function copyProjectAssets(projectRoot: string, destinationRoot: string): void {
+  const sourceRoot = resolve(projectRoot, "assets");
+  if (!existsSync(sourceRoot)) return;
+  const sourceStat = lstatSync(sourceRoot);
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) {
+    throw new Error(`build_guest: project assets must be a real directory: ${sourceRoot}`);
+  }
+  const destination = resolve(destinationRoot);
+  const nested = relative(sourceRoot, destination);
+  // `copyAssetsTo=project/assets` is the retained runtime-artifact contract;
+  // the ordinary source tree is already at the requested destination, so
+  // there is nothing to copy and, importantly, no recursive walk to perform.
+  if (nested === "") return;
+  if (!nested.startsWith("..") && !isAbsolute(nested)) {
+    throw new Error("build_guest: project asset destination must not be inside project assets");
+  }
+  mkdirSync(destination, { recursive: true });
+  const copyTree = (source: string): void => {
+    for (const entry of readdirSync(source, { withFileTypes: true })) {
+      const sourcePath = join(source, entry.name);
+      const relativePath = relative(sourceRoot, sourcePath);
+      const targetPath = join(destination, relativePath);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`build_guest: project assets contain unsupported symlink: ${sourcePath}`);
+      }
+      if (entry.isDirectory()) {
+        mkdirSync(targetPath, { recursive: true });
+        copyTree(sourcePath);
+      } else if (entry.isFile()) {
+        mkdirSync(dirname(targetPath), { recursive: true });
+        copyFileSync(sourcePath, targetPath);
+      } else {
+        throw new Error(`build_guest: unsupported project asset: ${sourcePath}`);
+      }
+    }
+  };
+  copyTree(sourceRoot);
+}
+
 export async function buildGuest(options: BuildGuestOptions = {}): Promise<BuildGuestResult> {
   // The SDK has no application entry of its own. Consumers and the sibling
   // demo pass an explicit projectRoot; a zero-argument build is supported only
@@ -615,6 +670,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       if (!manifestObj) throw new Error(`build_guest: missing or invalid guest manifest: ${guestManifest}`);
       copyFileSync(generatedManifest, join(assets, "guest-manifest.json"));
       copyFileSync(pak, join(assets, "app.pak"));
+      // Keep ordinary project resources beside the runtime artifacts. This
+      // destination is also the Flutter asset root for built-in consumers;
+      // binary media stays a loose file and never enters the image PAK.
+      copyProjectAssets(projectRoot, assets);
     }
     if (options.keepSource) {
       mkdirSync(resolve(options.keepSource, ".."), { recursive: true });

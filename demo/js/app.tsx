@@ -39,7 +39,8 @@ import {
   useScrollContourReserve,
 } from "@pocket/ui";
 import { HardwarePage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx";
-import { createHostBridge, hostError, type HostBridge, type JsonValue } from "@pocket/ui/host";
+import { createHostBridge, hostError, type HostBridge, type HostEvent, type JsonValue } from "@pocket/ui/host";
+import { VideoPage } from "./video-page.tsx";
 import { RecordingPanel } from "./recording-panel.tsx";
 import { createPocketPlatformClient } from "@pocket/ui/platform";
 import { createPlatformExperience, isUnsupportedPlatformError } from "@pocket/ui/platform-experience";
@@ -127,7 +128,7 @@ function paramsOf(message: BridgeMessage): Record<string, unknown> {
 function routeOf(value: unknown): Route | undefined {
   const route = String(value ?? "");
   // `gallery` remains the old probe's compatibility spelling for UI.
-  if (route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware") return route;
+  if (route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video") return route;
   if (route === "ui") return "gallery";
   return undefined;
 }
@@ -584,7 +585,11 @@ function App() {
   const navigate = (route: Route): void => dispatch({ type: "navigate", route });
 
   const isShowcaseRoute = (route: Route): boolean =>
-    route === "mobile" || route === "transitions" || route === "hardware";
+    route === "mobile" || route === "transitions" || route === "hardware" || route === "video";
+
+  // One JS route gate owns playback policy; the Flutter host only executes it.
+  // This also pauses a video before its page is removed from the draw tree.
+  createEffect(() => platform.media?.setCurrentPage(state().route));
 
   const nowMs = (): number =>
     typeof globalThis.performance !== "undefined" && typeof globalThis.performance.now === "function"
@@ -661,14 +666,7 @@ function App() {
   };
 
   onMount(() => {
-    const previous = bridge.__pocketEvent;
-    const receive = (line: string): void => {
-      // The previous sink installed by createHostBridge owns transport
-      // delivery. Forward once below; equal sensor readings are real events.
-      const message = decode(line);
-      if (!message) return;
-      const method = message.method ?? message.name ?? "";
-      const params = paramsOf(message);
+    const handleEvent = (method: string, params: Record<string, unknown>): void => {
       if (deliverTextInputEvent(method, params)) {
         // The shell owns the input session; its callbacks dispatch the app
         // draft while preserving native selection/composing metadata.
@@ -753,9 +751,21 @@ function App() {
           });
         }
       }
-      previous?.(line);
     };
-    bridge.__pocketEvent = receive;
+    const previous = typeof host.onEvent === "function" ? undefined : bridge.__pocketEvent;
+    const receive = (line: string): void => {
+      // Request-only injected bridges retain the compatibility sink. Modern
+      // HostBridge users receive the already-decoded HostEvent below.
+      if (typeof host.onEvent !== "function") host.handle(line);
+      const message = decode(line);
+      if (!message) return;
+      handleEvent(message.method ?? message.name ?? "", paramsOf(message));
+      try { previous?.(line); } catch { /* isolate legacy previous sinks */ }
+    };
+    const removeHostEvent = typeof host.onEvent === "function"
+      ? host.onEvent((event: HostEvent) => handleEvent(event.method, event.params))
+      : undefined;
+    if (typeof host.onEvent !== "function") bridge.__pocketEvent = receive;
 
     // These are real requests. If the active host has not registered a
     // capability, the resulting host error is rendered rather than replaced
@@ -767,6 +777,7 @@ function App() {
     requestCapability("updatesStatus", "updates.status");
 
     onCleanup(() => {
+      removeHostEvent?.();
       if (bridge.__pocketEvent === receive) bridge.__pocketEvent = previous;
       system.dispose();
       removeExperienceLifecycle();
@@ -822,6 +833,9 @@ function App() {
             <Show when={state().route === "hardware"}>
               <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} host={host} experience={experience} /></ScrollablePage>
             </Show>
+            <Show when={state().route === "video"}>
+              <VideoPage host={host} platform={platform} onNavigate={navigate} />
+            </Show>
             <Show when={state().route === "about" || state().route === "bytecode" || state().route === "updates" || state().route === "plugins" || state().route === "stress" || state().route === "performance"}>
               <HostPages host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} recordingStatus={recordingStatus} />
             </Show>
@@ -833,6 +847,12 @@ function App() {
       <SystemAppSurfaces
         system={system}
         systemUIFocused={state().detailsOpen}
+        presentation="mini-app"
+        onClose={async (binding) => {
+          const frame = system.snapshot().stack.find((entry) => entry.instanceId === binding.instanceId);
+          if (!frame?.requestId) return;
+          await host.request("platform.apps.cancel", { requestId: frame.requestId });
+        }}
       />
       <Show when={state().detailsOpen}>
         <DetailModal
@@ -980,6 +1000,7 @@ function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) 
     { title: "Mobile UI", detail: "Components", route: "mobile" as const },
     { title: "Transitions", detail: "Motion", route: "transitions" as const },
     { title: "Hardware", detail: "Device APIs", route: "hardware" as const },
+    { title: "Video Lab", detail: "Playback", route: "video" as const },
   ];
   return (
     <ScrollContourItem class="flex-row gap-2 mx-5">
@@ -989,6 +1010,7 @@ function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) 
             <Show when={feature.route === "mobile"}><Image class="w-[20] h-[20]" src="icons/components.svg" /></Show>
             <Show when={feature.route === "transitions"}><Image class="w-[20] h-[20]" src="icons/motion.svg" /></Show>
             <Show when={feature.route === "hardware"}><Image class="w-[20] h-[20]" src="icons/hardware.svg" /></Show>
+            <Show when={feature.route === "video"}><Text class="text-sm text-blue-600">▶</Text></Show>
           </View>
           <Text class="text-xs text-slate-950 font-bold">{feature.title}</Text>
           <Text class="text-xs text-slate-500">{feature.detail}</Text>
@@ -1015,7 +1037,7 @@ function GalleryTile(props: {
       onPress={props.onSelect}
     >
       <View class="w-[28] h-[28] items-center justify-center rounded-lg bg-blue-50">
-        <Text class="text-xs text-blue-600 font-bold">{card.slice(0, 2)}</Text>
+        <Text class="text-xs text-blue-600 font-bold">{props.card.slice(0, 2)}</Text>
       </View>
       <View class="flex-row items-center justify-between">
         <Text class="text-sm text-slate-950 font-bold">{props.card}</Text>
@@ -1066,6 +1088,7 @@ function GalleryPage(props: {
           <ActionButton label="Mobile UI" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
           <ActionButton label="Transitions" kind="secondary" onPress={() => props.dispatch({ type: "navigate", route: "transitions" })} />
           <ActionButton label="Hardware" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "hardware" })} />
+          <ActionButton label="Video Lab" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "video" })} />
         </View>
       </Card>
       <EmptyState title="Not mounted here" body="More capabilities live under Host." />

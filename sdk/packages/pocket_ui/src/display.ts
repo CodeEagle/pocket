@@ -1,5 +1,5 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
-import { forwardHostPacket } from "./host.ts";
+import { forwardHostPacket, type BridgeObject, type HostEvent } from "./host.ts";
 import {
   EMPTY_DISPLAY_GEOMETRY,
   parseDisplayGeometry,
@@ -12,6 +12,8 @@ export type DisplayEventHandler = ((packet: string | Record<string, unknown>) =>
 
 export interface DisplayGeometryBridge {
   __pocketEvent?: DisplayEventHandler;
+  onEvent?: (listener: (event: HostEvent) => void) => () => void;
+  __pocketHostBridge?: { onEvent?: (listener: (event: HostEvent) => void) => () => void };
   ui?: { __viewport?: { w?: unknown; h?: unknown } };
 }
 
@@ -29,47 +31,116 @@ export interface DisplayGeometryOptions {
   onChange?: (geometry: DisplayGeometry) => void;
 }
 
-type DisplayListener = DisplayEventHandler;
+type DisplayListener = (event: HostEvent) => void;
 
 interface DisplayBridgeState {
-  readonly previous?: DisplayListener;
-  readonly receive: DisplayListener;
+  readonly previous?: DisplayEventHandler;
+  readonly receive?: DisplayEventHandler;
   readonly listeners: Set<DisplayListener>;
+  readonly removeHostEvent?: () => void;
 }
+
+interface LatestDisplayFact {
+  readonly event: HostEvent;
+  /** Canonical state after applying partial viewport updates. */
+  readonly geometry: DisplayGeometry;
+}
+
+// Keep the latest complete display fact independently of the current listener
+// set. Mini-app surfaces can mount after the root shell has already consumed a
+// viewport event; replaying this fact avoids admitting their first frame with
+// the EMPTY safe area (and therefore briefly putting the close action under a
+// camera/status cluster). This is a cache of the existing event lane, not a
+// second transport or a poller.
+const latestDisplayFacts = new WeakMap<object, LatestDisplayFact>();
 
 // Keep one wrapper per host bridge. A page can be replaced while another
 // subscriber (for example the app shell) remains mounted; a wrapper-per-page
 // chain would retain disposed callbacks in `previous` and grow on every route.
 const displayBridgeStates = new WeakMap<object, DisplayBridgeState>();
 
-function subscribeDisplayBridge(bridge: DisplayGeometryBridge, listener: DisplayListener): () => void {
+function subscribeDisplayBridge(
+  bridge: DisplayGeometryBridge,
+  listener: DisplayListener,
+  alreadyApplied?: HostEvent,
+  initialGeometry: DisplayGeometry = EMPTY_DISPLAY_GEOMETRY,
+): () => void {
   let state = displayBridgeStates.get(bridge);
   if (!state) {
     const listeners = new Set<DisplayListener>();
-    const previous = bridge.__pocketEvent;
-    const receive: DisplayListener = (packet) => {
-      for (const current of [...listeners]) {
-        try {
-          current(packet);
-        } catch {
-          // An observer must not prevent the remaining bridge subscribers.
-        }
+    const dispatch = (event: HostEvent): void => {
+      if (event.method === "display.viewport") {
+        const previous = latestDisplayFacts.get(bridge)?.geometry ?? initialGeometry;
+        latestDisplayFacts.set(bridge, {
+          event,
+          geometry: parseDisplayGeometry(event.params, previous),
+        });
       }
-      forwardHostPacket(previous, packet);
+      for (const current of [...listeners]) {
+        try { current(event); } catch { /* keep the display event lane live */ }
+      }
     };
-    receive.__binaryCapable = true;
-    state = { previous, receive, listeners };
+    const hostEventSource = typeof bridge.onEvent === "function"
+      ? bridge
+      : bridge.__pocketHostBridge && typeof bridge.__pocketHostBridge.onEvent === "function"
+        ? bridge.__pocketHostBridge
+        : undefined;
+    if (hostEventSource) {
+      state = {
+        listeners,
+        removeHostEvent: hostEventSource.onEvent!(dispatch),
+      };
+    } else {
+      const previous = bridge.__pocketEvent;
+      const receive: DisplayEventHandler = (packet): void => {
+        let event: HostEvent | undefined;
+        try {
+          const message = (typeof packet === "string" ? JSON.parse(packet) : packet) as {
+            id?: unknown;
+            method?: unknown;
+            name?: unknown;
+            params?: unknown;
+            payload?: unknown;
+          };
+          const method = typeof message.method === "string"
+            ? message.method
+            : typeof message.name === "string" ? message.name : "";
+          if (method) {
+            const params = message.params ?? message.payload;
+            event = {
+              id: typeof message.id === "string" ? message.id : "",
+              method,
+              params: params && typeof params === "object" && !Array.isArray(params)
+                ? params as BridgeObject
+                : {},
+              raw: message,
+            };
+          }
+        } catch {
+          // A malformed unrelated host line must not break the existing lane.
+        }
+        if (event) dispatch(event);
+        try { forwardHostPacket(previous, packet); } catch { /* isolate legacy previous sinks */ }
+      };
+      receive.__binaryCapable = true;
+      state = { previous, receive, listeners };
+      bridge.__pocketEvent = receive;
+    }
     displayBridgeStates.set(bridge, state);
-    bridge.__pocketEvent = receive;
   }
   const currentState = state;
   currentState.listeners.add(listener);
+  const latest = latestDisplayFacts.get(bridge)?.event;
+  if (latest && latest !== alreadyApplied) {
+    try { listener(latest); } catch { /* keep subscription setup non-throwing */ }
+  }
   return () => {
     const active = displayBridgeStates.get(bridge);
     if (!active) return;
     active.listeners.delete(listener);
     if (active.listeners.size !== 0) return;
-    if (bridge.__pocketEvent === active.receive) bridge.__pocketEvent = active.previous;
+    active.removeHostEvent?.();
+    if (active.receive && bridge.__pocketEvent === active.receive) bridge.__pocketEvent = active.previous;
     displayBridgeStates.delete(bridge);
   };
 }
@@ -82,8 +153,37 @@ function globalDisplayBridge(): DisplayGeometryBridge {
   return globalThis as typeof globalThis & DisplayGeometryBridge;
 }
 
-function initialDisplayGeometry(bridge: DisplayGeometryBridge, fallback: DisplayGeometry): DisplayGeometry {
-  const viewport = bridge.ui?.__viewport;
+function resolvedDisplayBridge(bridge: DisplayGeometryBridge): DisplayGeometryBridge {
+  // Resolve the modern bridge at mount time: app shells commonly construct
+  // their display signal before creating the bridge during the same render.
+  if (typeof bridge.onEvent === "function") return bridge;
+  if (bridge.__pocketHostBridge && typeof bridge.__pocketHostBridge.onEvent === "function") {
+    return bridge.__pocketHostBridge;
+  }
+  const globalBridge = globalDisplayBridge();
+  if (typeof globalBridge.onEvent === "function") return globalBridge;
+  return globalBridge.__pocketHostBridge && typeof globalBridge.__pocketHostBridge.onEvent === "function"
+    ? globalBridge.__pocketHostBridge
+    : bridge;
+}
+
+function initialDisplayGeometry(
+  bridge: DisplayGeometryBridge,
+  fallback: DisplayGeometry,
+  viewportBridge: DisplayGeometryBridge = bridge,
+): DisplayGeometry {
+  const latest = latestDisplayFacts.get(bridge);
+  if (latest) {
+    // The canonical host snapshot is more authoritative than the
+    // width/height-only ui.__viewport fallback. It includes reserved regions
+    // and margins needed for a first-frame close placement, even if the most
+    // recent packet was a partial keyboard/resize update.
+    return latest.geometry;
+  }
+  // The modern event source may be nested under the global adapter; retain
+  // the canonical ui.__viewport fallback from that adapter when no event fact
+  // has arrived yet.
+  const viewport = bridge.ui?.__viewport ?? viewportBridge.ui?.__viewport;
   const width = finite(viewport?.w, fallback.width);
   const height = finite(viewport?.h, fallback.height);
   return parseDisplayGeometry({
@@ -107,36 +207,26 @@ function initialDisplayGeometry(bridge: DisplayGeometryBridge, fallback: Display
 export function createDisplayGeometry(options: DisplayGeometryOptions = {}): () => DisplayGeometry {
   const bridge = options.bridge ?? globalDisplayBridge();
   const fallback = options.fallback ?? EMPTY_DISPLAY_GEOMETRY;
-  const [geometry, setGeometry] = createSignal<DisplayGeometry>(initialDisplayGeometry(bridge, fallback));
+  const initialBridge = resolvedDisplayBridge(bridge);
+  const initialGeometry = initialDisplayGeometry(initialBridge, fallback, bridge);
+  const initialEvent = latestDisplayFacts.get(initialBridge)?.event;
+  const [geometry, setGeometry] = createSignal<DisplayGeometry>(initialGeometry);
   let disposed = false;
   onMount(() => {
-    const receive: DisplayListener = (packet): void => {
-      if (disposed) return;
+    const receive = (event: HostEvent): void => {
+      if (disposed || event.method !== "display.viewport") return;
+      const next = parseDisplayGeometry(event.params, geometry());
+      setGeometry(next);
       try {
-        const message = (typeof packet === "string" ? JSON.parse(packet) : packet) as {
-          method?: unknown;
-          name?: unknown;
-          params?: unknown;
-          payload?: unknown;
-        };
-        const method = typeof message.method === "string"
-          ? message.method
-          : typeof message.name === "string" ? message.name : "";
-        if (method === "display.viewport") {
-          const params = message.params ?? message.payload;
-          const next = parseDisplayGeometry(params, geometry());
-          setGeometry(next);
-          try {
-            options.onChange?.(next);
-          } catch {
-            // A resize observer must not break the existing host event lane.
-          }
-        }
+        options.onChange?.(next);
       } catch {
-        // A malformed unrelated host line must not break the existing lane.
+        // A resize observer must not break the existing host event lane.
       }
     };
-    const unsubscribe = subscribeDisplayBridge(bridge, receive);
+    // Resolve again at mount: the root can create its signal before the host
+    // bridge is installed, while child surfaces normally see the existing
+    // modern bridge and its cached latest fact immediately.
+    const unsubscribe = subscribeDisplayBridge(resolvedDisplayBridge(bridge), receive, initialEvent, initialGeometry);
     onCleanup(() => {
       disposed = true;
       unsubscribe();

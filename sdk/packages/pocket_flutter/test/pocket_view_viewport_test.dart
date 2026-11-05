@@ -50,6 +50,12 @@ Map<String, dynamic> _lastViewport(_ViewportRuntime runtime) {
   return Map<String, dynamic>.from(message['payload'] as Map);
 }
 
+List<Map<String, dynamic>> _viewportMessages(_ViewportRuntime runtime) {
+  return runtime.messages
+      .where((message) => message['name'] == 'display.viewport')
+      .toList(growable: false);
+}
+
 void _configureDuoLikeView(WidgetTester tester) {
   addTearDown(tester.view.reset);
   tester.view.devicePixelRatio = 1;
@@ -110,6 +116,65 @@ void main() {
         'left': 5,
       });
       expect(payload['keyboardInset'], 80);
+    },
+  );
+
+  testWidgets(
+    'rechecks a moved compositor child after layout without repeating stable geometry',
+    (tester) async {
+      _configureDuoLikeView(tester);
+      final runtime = _ViewportRuntime();
+
+      Widget buildSurface({required double top, required int revision}) {
+        return MaterialApp(
+          home: Stack(
+            children: <Widget>[
+              Positioned(
+                left: 0,
+                top: top,
+                width: 320,
+                height: 480,
+                child: PocketView(
+                  runtime: runtime,
+                  jsSource: '',
+                  pakBytes: Uint8List(0),
+                  showDebugFps: false,
+                  geometryRevision: revision,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      // The child has its real size but starts below the 480px FlutterView,
+      // matching the mini-app entry surface before it reaches the top.
+      await tester.pumpWidget(buildSurface(top: 480, revision: 0));
+      await tester.pump();
+      final initial = _viewportMessages(runtime);
+      expect(initial, isNotEmpty);
+      expect((_lastViewport(runtime)['safeArea'] as Map)['top'], 0);
+
+      // The parent transform changes only the child's global position. The
+      // revision is the explicit host notification that causes a post-layout
+      // measurement, so the child now sees the 10px top system inset.
+      await tester.pumpWidget(buildSurface(top: 0, revision: 1));
+      await tester.pump();
+      await tester.pump();
+      final moved = _viewportMessages(runtime);
+      expect(moved.length, greaterThan(initial.length));
+      expect(_lastViewport(runtime)['safeArea'], <String, double>{
+        'top': 10,
+        'right': 20,
+        'bottom': 30,
+        'left': 5,
+      });
+
+      // A root frame can be rebuilt without moving the slot. No polling or
+      // duplicate display.viewport event is allowed for stable geometry.
+      await tester.pumpWidget(buildSurface(top: 0, revision: 1));
+      await tester.pump();
+      expect(_viewportMessages(runtime), hasLength(moved.length));
     },
   );
 

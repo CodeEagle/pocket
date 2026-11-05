@@ -1094,9 +1094,15 @@ export async function buildProject(directory: string, options: { outDir?: string
   patchDeepLinkPlatforms(join(project, "flutter"), config.deepLinkScheme);
   const output = resolve(options.outDir ?? join(project, "build/pocket"));
   mkdirSync(output, { recursive: true });
+  const flutterAssets = join(project, "flutter/assets");
   const staging = mkdtempSync(join(tmpdir(), "pocket-sdk-build-"));
   try {
-    const built = await buildGuest({ projectRoot: project, outDir: staging, tickHz: config.tickHz });
+    const built = await buildGuest({
+      projectRoot: project,
+      outDir: staging,
+      tickHz: config.tickHz,
+      copyAssetsTo: flutterAssets,
+    });
     for (const name of ["app.js", "app.pak", "app.qjbc", "app.bytecode.json"] as const) {
       const source = join(staging, name);
       if (!existsSync(source)) fail(`compiler did not produce ${name}`);
@@ -1122,7 +1128,6 @@ export async function buildProject(directory: string, options: { outDir?: string
     writeJson(join(output, "guest-manifest.json"), guestManifest);
     const metadata = readJson(join(output, "app.bytecode.json"));
     if (metadata.entryFormat !== "quickjs-bytecode" || typeof metadata.runtimeAbi !== "string" || !metadata.runtimeAbi) fail("bytecode metadata is not a real QuickJS artifact");
-    const flutterAssets = join(project, "flutter/assets");
     mkdirSync(flutterAssets, { recursive: true });
     for (const name of ["app.qjbc", "app.pak", "app.bytecode.json", "guest-manifest.json"]) cpSync(join(output, name), join(flutterAssets, name));
     if (existsSync(flutterAssets) && (built.worker || existsSync(join(staging, "app.worker.qjbc")))) {
@@ -1140,11 +1145,11 @@ export async function buildProject(directory: string, options: { outDir?: string
   }
 }
 
-async function runEditor(directory: string, options: { port?: number; workspace?: string }): Promise<void> {
+async function runEditor(directory: string, options: { port?: number; workspace?: string; flutterRoot?: string }): Promise<void> {
   const project = resolve(directory);
   if (!existsSync(join(project, "pocket.json"))) fail(`not an initialized PocketJS project: ${project}`);
   const { startEditor } = await import("./editor/server.ts");
-  const server = await startEditor({ projectRoot: project, workspace: options.workspace ?? join(project, ".pocket-editor"), port: options.port });
+  const server = await startEditor({ projectRoot: project, flutterRoot: options.flutterRoot, workspace: options.workspace ?? join(project, ".pocket-editor"), port: options.port });
   console.log(`Pocket Studio listening at http://${server.hostname}:${server.port}`);
   console.log(`project: ${project}`);
   await new Promise<void>((resolveExit) => {
@@ -1167,7 +1172,7 @@ export async function exportPluginTypes(inputPath: string, outputPath: string): 
 }
 
 function usage(): never {
-  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--camera] [--bluetooth] [--sensors] [--location] [--biometrics] [--weather] [--permissions=POLICY_KEYS] [--dio] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR]");
+  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--camera] [--bluetooth] [--sensors] [--location] [--biometrics] [--weather] [--permissions=POLICY_KEYS] [--dio] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR] [--flutter-root=DIR]");
   process.exit(1);
 }
 
@@ -1209,10 +1214,11 @@ if (import.meta.main) {
       const directory = takePosition(args, "project directory");
       const portValue = takeFlag(args, "port");
       const workspace = takeFlag(args, "workspace");
+      const flutterRoot = takeFlag(args, "flutter-root");
       ensureNoArgs(args);
       const port = portValue === undefined ? undefined : Number(portValue);
       if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) fail("--port must be an integer from 0 through 65535");
-      await runEditor(directory, { port, workspace });
+      await runEditor(directory, { port, workspace, flutterRoot });
     } else usage();
   } catch (error) {
     console.error(`pocket: ${error instanceof Error ? error.message : String(error)}`);

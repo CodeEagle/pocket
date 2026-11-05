@@ -131,7 +131,10 @@ void main() {
         await guest.waitFor(tester, 'Lin Mei');
         await guest.tapGuest(tester, 'Increment lobby counter');
         await guest.waitForContaining(tester, 'visits=1');
-        await guest.tapGuest(tester, 'Return visits to Showcase');
+        await guest.tapGuest(tester, 'Return visits to caller');
+        await guest.waitFor(tester, 'Pocket Profile');
+        await guest.waitForContaining(tester, 'Last shared value: Lin Mei');
+        await guest.tapGuest(tester, 'Return to Showcase');
         await guest.reveal(tester, 'Prewarm lobby');
         await guest.waitForContaining(tester, 'App result:');
         await _revealReturnedDraft(tester);

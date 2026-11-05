@@ -41,6 +41,14 @@ Pocket multi-app policy implementation:
    bounds, clip, and focused flag. A JS subscription wakes the UI when those
    policy bindings change. Geometry, clipping, and Z order stay in the
    SystemUI DrawOps stream.
+   `PocketSystemKernel.surfaceBindings()` remains visible-only by default;
+   retained mini-app presentation opts into `includeStack`, which derives a
+   de-duplicated binding order from the existing JS app stack plus presented
+   instances. This keeps a lower caller mounted while a foreground child is
+   open without adding a second app stack or changing focus ownership.
+   `onBeforeDismiss()` is the corresponding async presentation barrier: return
+   and cancellation pass closing instance ids top-to-bottom and only pop or
+   destroy after registered reverse-animation handlers complete.
 4. `PocketSystemHost` mounts only the SystemUI guest at the root. It resolves
    each `PocketCompositorSlot.surfaceHandle` to the matching live guest
    instance and returns that child using an instance-stable `GlobalKey`. The

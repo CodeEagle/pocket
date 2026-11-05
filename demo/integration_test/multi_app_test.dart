@@ -128,8 +128,14 @@ void main() {
 
         await guest.tapGuest(tester, 'Increment lobby counter');
         await guest.waitForContaining(tester, 'visits=1');
-        await guest.tapGuest(tester, 'Return visits to Showcase');
-        // Profile awaits B's result and returns it to SystemUI, without a Dart stack.
+        await guest.tapGuest(tester, 'Return visits to caller');
+        // Profile resumes with its selected/stored identity intact. Returning
+        // from Profile to SystemUI remains an explicit user action, without a
+        // Dart-owned navigation stack.
+        await guest.waitFor(tester, 'Pocket Profile');
+        await guest.waitForContaining(tester, 'Last shared value: Lin Mei');
+        await guest.waitForContaining(tester, 'Profile remains available');
+        await guest.tapGuest(tester, 'Return to Showcase');
         await guest.reveal(tester, 'Prewarm lobby');
         await guest.waitForContaining(tester, 'App result:');
         await guest.waitForContaining(tester, 'Lin Mei');
@@ -164,7 +170,7 @@ void main() {
         final coldMs = await _openLatency(tester, host);
         await guest.waitFor(tester, 'Pocket Lobby');
         final cold = await _instance(tester, host, _lobby, presented: true);
-        await guest.tapGuest(tester, 'Return visits to Showcase');
+        await guest.tapGuest(tester, 'Return visits to caller');
         await guest.reveal(tester, 'Prewarm lobby');
         await guest.waitForContaining(tester, 'App result:');
         await guest.tapGuest(tester, 'Prewarm lobby');
@@ -192,7 +198,7 @@ void main() {
         print(
           'Pocket SystemUI prewarm ablation: cold=${coldMs}ms warm=${warmMs}ms residents=${host.instances.length} reused=${opened.instanceId == warm.instanceId}',
         );
-        await guest.tapGuest(tester, 'Return visits to Showcase');
+        await guest.tapGuest(tester, 'Return visits to caller');
         await guest.reveal(tester, 'Prewarm lobby');
         await guest.waitForContaining(tester, 'App result:');
       } finally {

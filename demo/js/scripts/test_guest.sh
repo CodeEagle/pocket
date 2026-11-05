@@ -12,6 +12,9 @@ bun tests/guest_state.test.ts
 echo "test_guest: platform-neutral hardware contract"
 bun tests/hardware_platform.test.ts
 
+echo "test_guest: video playback and lifecycle scenarios"
+bun run test:video
+
 if [[ "${POCKET_BUILD_GUEST:-1}" == "1" ]]; then
   echo "test_guest: reproducible pinned build"
   bun "$SDK_ROOT/scripts/build_guest.ts" --project-root="$DEMO_ROOT" --copy-assets-to="$FLUTTER_ROOT/assets" --keep-source="$DEMO_ROOT/.pocket-build/app.js"

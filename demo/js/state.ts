@@ -19,7 +19,8 @@ export type Route =
   | "performance"
   | "mobile"
   | "transitions"
-  | "hardware";
+  | "hardware"
+  | "video";
 
 export type { TransitionMode } from "@pocket/ui";
 
@@ -771,7 +772,6 @@ export function reduceDemoState(state: DemoState, event: DemoEvent): DemoState {
       };
   }
 }
-
 
 export function formatRecordingStatus(result: Record<string, unknown>): string {
   const runtimes = Array.isArray(result.runtimes) ? result.runtimes : [];

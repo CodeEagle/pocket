@@ -31,6 +31,20 @@ export interface HostResponse {
   error?: HostErrorShape | string;
 }
 
+/** A bounded, observable report for an isolated host callback failure. */
+export type HostBridgeDiagnosticKind =
+  | "event_listener"
+  | "tick_listener"
+  | "previous_event_sink"
+  | "previous_deliver_sink"
+  | "bridge_dispatch";
+
+export interface HostBridgeDiagnostic {
+  readonly kind: HostBridgeDiagnosticKind;
+  readonly method?: string;
+  readonly error: HostErrorShape;
+}
+
 /** A guest event delivered by the native host event sink. */
 export interface HostEvent {
   readonly id: string;
@@ -154,7 +168,13 @@ export interface HostBridgeOptions {
   timeoutFrames?: number;
   /** Supply the guest virtual timer so waiting for a response can sleep. */
   scheduleTimeout?: (frames: number, callback: () => void) => () => void;
+  /** Observe isolated callback failures without creating another event bus. */
+  onDiagnostic?: (diagnostic: HostBridgeDiagnostic) => void;
 }
+
+/** The callback error budget is deliberately finite so a broken consumer cannot
+ * turn a high-rate host event stream into an unbounded diagnostics queue. */
+export const HOST_BRIDGE_MAX_DIAGNOSTICS = 32;
 
 export type HostPacketHandler = ((packet: string | Record<string, unknown>) => void) & {
   __binaryCapable?: boolean;
@@ -190,6 +210,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     };
     __pocketDeliver?: HostPacketHandler;
     __pocketEvent?: HostPacketHandler;
+    __pocketHostBridge?: HostBridge;
   };
   const send: HostSend = sendOverride ?? ((line) => {
     const emit = globalObject.pocket?._emit;
@@ -223,11 +244,46 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   let disposed = false;
   const previousDeliver = globalObject.__pocketDeliver;
   const previousEvent = globalObject.__pocketEvent;
+  const previousHostBridge = globalObject.__pocketHostBridge;
   const eventListeners = new Set<HostEventListener>();
   const tickListeners = new Set<() => void>();
+  let diagnosticsReported = 0;
+  const diagnose = (
+    kind: HostBridgeDiagnosticKind,
+    error: unknown,
+    method?: string,
+  ): void => {
+    if (!options.onDiagnostic || diagnosticsReported >= HOST_BRIDGE_MAX_DIAGNOSTICS) return;
+    diagnosticsReported += 1;
+    let normalized: HostErrorShape;
+    try {
+      normalized = hostError(error);
+    } catch {
+      normalized = { code: "host_callback_error", message: "Host callback failed" };
+    }
+    try {
+      options.onDiagnostic({
+        kind,
+        ...(method ? { method } : {}),
+        error: {
+          code: normalized.code.slice(0, 64),
+          message: normalized.message.slice(0, 256),
+        },
+      });
+    } catch {
+      // A diagnostic observer is itself untrusted and must not re-enter the
+      // transport or make later listeners disappear.
+    }
+  };
   const dispatchEvent = (event: HostEvent): boolean => {
     if (eventListeners.size === 0) return false;
-    for (const listener of [...eventListeners]) listener(event);
+    for (const listener of [...eventListeners]) {
+      try {
+        listener(event);
+      } catch (error) {
+        diagnose("event_listener", error, event.method);
+      }
+    }
     return true;
   };
 
@@ -259,17 +315,39 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       pending.delete(requestId);
       entry.reject(new HostRequestError(requestId, "timeout", "Host response timed out"));
     }
-    for (const listener of [...tickListeners]) listener();
+    for (const listener of [...tickListeners]) {
+      try {
+        listener();
+      } catch (error) {
+        diagnose("tick_listener", error);
+      }
+    }
   };
 
   const deliver: HostPacketHandler = (packet: string | Record<string, unknown>): void => {
-    handle(packet);
-    forwardHostPacket(previousDeliver, packet);
+    try {
+      handle(packet);
+    } catch (error) {
+      diagnose("bridge_dispatch", error);
+    }
+    try {
+      forwardHostPacket(previousDeliver, packet);
+    } catch (error) {
+      diagnose("previous_deliver_sink", error);
+    }
   };
   deliver.__binaryCapable = true;
   const eventDeliver: HostPacketHandler = (packet: string | Record<string, unknown>): void => {
-    handle(packet);
-    forwardHostPacket(previousEvent, packet);
+    try {
+      handle(packet);
+    } catch (error) {
+      diagnose("bridge_dispatch", error);
+    }
+    try {
+      forwardHostPacket(previousEvent, packet);
+    } catch (error) {
+      diagnose("previous_event_sink", error);
+    }
   };
   eventDeliver.__binaryCapable = true;
   globalObject.__pocketDeliver = deliver;
@@ -352,6 +430,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       disposed = true;
       if (globalObject.__pocketDeliver === deliver) globalObject.__pocketDeliver = previousDeliver;
       if (globalObject.__pocketEvent === eventDeliver) globalObject.__pocketEvent = previousEvent;
+      if (globalObject.__pocketHostBridge === bridge) globalObject.__pocketHostBridge = previousHostBridge;
       const error = new Error("Host bridge disposed");
       for (const entry of pending.values()) {
         entry.cancelTimeout?.();
@@ -362,6 +441,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       tickListeners.clear();
     },
   };
+  globalObject.__pocketHostBridge = bridge;
   return bridge;
 }
 

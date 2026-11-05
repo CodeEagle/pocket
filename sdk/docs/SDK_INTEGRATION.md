@@ -80,23 +80,27 @@ bun /path/to/pocket/sdk/pocket.ts types plugins.json --out=plugin-types.ts
 
 ```tsx
 const [dark, setDark] = createSignal(false);
-const geometry = createDisplayGeometry();
-const pane = () => availableDisplayPanes(geometry())[0];
 return (
   <MobileThemeProvider theme={() => dark() ? MOBILE_THEME_DARK : MOBILE_THEME_LIGHT}>
-    <MobileScaffold>
-      <View style={{ marginL: pane()?.left, width: pane()?.width }}>
+    <SafeAreaScaffold>
+      <View class={dark() ? 'flex-col gap-2 p-4 bg-[#0d1726]' : 'flex-col gap-2 p-4 bg-slate-50'}>
         <Text>Hello PocketJS</Text>
         <MobileButton label={dark() ? 'Light' : 'Dark'} onPress={() => setDark(!dark())} />
       </View>
-    </MobileScaffold>
+    </SafeAreaScaffold>
   </MobileThemeProvider>
 );
 ```
 
-`createDisplayGeometry` 订阅宿主的 `display.viewport`，而
-`availableDisplayPanes` 已处理 safe area 与 active division；应用页面只选择
-pane，不另造折叠屏/刘海判断。
+`SafeAreaScaffold` 订阅宿主的 `display.viewport`，并将 safe area 作为一次性
+内容壳边距消费；`availableDisplayPanes` 仍处理 active division。嵌套在
+Showcase root 下的页面应使用默认 `MobileScaffold`（`safeArea="none"`），不要
+再次包裹安全壳。
+
+独立 mini-app 若由宿主提供右上角关闭动作，应在同一个壳上声明
+`reservedActions="mini-app"`。这会统一保留 60 logical px（44 按钮 + 8
+右边距 + 8 间隔）；`MobileAppBar` 自动收缩并裁剪标题/副标题，背景仍铺满
+viewport，页面不应再手写右侧 margin 或 body padding。
 
 如果初始化环境没有 Flutter，JS 工程仍会生成；稍后在 `flutter/` 运行
 `flutter pub get`，再用带 `--platform` 的 `pocket build` 应用 iOS 设置。

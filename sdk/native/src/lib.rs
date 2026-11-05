@@ -36,6 +36,10 @@ struct NodeMeta {
     asset: String,
     video_id: String,
     fit: String,
+    /// Video playback policy carried by the surface metadata.  `true` is the
+    /// legacy default for registrations that predate the explicit field;
+    /// JS-owned `Video` surfaces send `false` and rely on media events.
+    autoplay: bool,
     texture: i32,
     surface: i32,
     from_pack: bool,
@@ -150,6 +154,11 @@ struct FrameOp {
     /// absent or unknown metadata is normalized to cover.
     #[serde(skip_serializing_if = "Option::is_none")]
     fit: Option<String>,
+    /// Explicit native-video initial playback policy.  `None` is omitted for
+    /// non-video operations; video operations always carry `Some`, including
+    /// `Some(false)`, so the JSON path cannot fall back to legacy autoplay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    autoplay: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     color: Option<u32>,
     /// First/last endpoint of a real core GRAD_RECT. Colors use the public
@@ -587,7 +596,11 @@ impl BinaryFrameWriter {
                     } else {
                         0
                     });
-                    self.u8(1); // video autoplay is true for native surfaces
+                    // Older FrameOps did not carry this bit and native
+                    // surfaces historically autoplayed. Keep that fallback
+                    // for legacy producers while honoring explicit JS video
+                    // metadata (including false).
+                    self.u8(u8::from(op.autoplay.unwrap_or(true)));
                 }
             }
             _ => unreachable!(),
@@ -1195,6 +1208,7 @@ fn install_bridge(
                         asset: String::new(),
                         video_id: String::new(),
                         fit: "cover".to_owned(),
+                        autoplay: true,
                         texture: -1,
                         surface: -1,
                         from_pack: false,
@@ -1211,6 +1225,10 @@ fn install_bridge(
                             .unwrap_or("")
                             .to_owned();
                         meta.fit = normalize_video_fit(extra.get("fit").and_then(|v| v.as_str()));
+                        meta.autoplay = extra
+                            .get("autoplay")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
                         meta.texture =
                             extra.get("texture").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
                         meta.surface =
@@ -1233,7 +1251,7 @@ fn install_bridge(
                 move |ctx: Ctx<'_>, package: String, kind: String, payload: String| {
                     if package.is_empty()
                         || package.len() > 160
-                        || !matches!(kind.as_str(), "glass" | "platformTexture")
+                        || !matches!(kind.as_str(), "glass" | "platformTexture" | "video")
                         || payload.len() > 8192
                     {
                         return Err(Exception::throw_type(&ctx, "invalid compositor provider"));
@@ -1244,6 +1262,14 @@ fn install_bridge(
                         return Err(Exception::throw_type(
                             &ctx,
                             "surface parameters must be an object",
+                        ));
+                    }
+                    let is_video = kind == "video";
+                    let video_asset = data.get("asset").and_then(|value| value.as_str());
+                    if is_video && video_asset.map_or(true, str::is_empty) {
+                        return Err(Exception::throw_type(
+                            &ctx,
+                            "video surface parameters require a non-empty asset",
                         ));
                     }
                     let mut list = surface_nodes.borrow_mut();
@@ -1258,11 +1284,19 @@ fn install_bridge(
                     }
                     let existing = list
                         .iter()
-                        .position(|n| n.kind == "hostSurface" && n.video_id == package);
+                        .position(|n| {
+                            (n.kind == "hostSurface" || n.kind == "video")
+                                && n.video_id == package
+                        });
                     let handle = if let Some(index) = existing {
                         list[index].surface
                     } else {
-                        if list.iter().filter(|n| n.kind == "hostSurface").count() >= 64 {
+                        if list
+                            .iter()
+                            .filter(|n| n.kind == "hostSurface" || n.kind == "video")
+                            .count()
+                            >= 64
+                        {
                             return Err(Exception::throw_type(&ctx, "surface limit exceeded"));
                         }
                         let mut next = next_surface.borrow_mut();
@@ -1272,14 +1306,29 @@ fn install_bridge(
                         })?;
                         handle
                     };
-                    let descriptor =
-                        serde_json::json!({"kind": kind, "parameters": data}).to_string();
+                    let (node_kind, asset, fit) = if is_video {
+                        (
+                            "video".to_owned(),
+                            video_asset.expect("validated video asset").to_owned(),
+                            normalize_video_fit(data.get("fit").and_then(|value| value.as_str())),
+                        )
+                    } else {
+                        (
+                            "hostSurface".to_owned(),
+                            serde_json::json!({"kind": kind, "parameters": data}).to_string(),
+                            "fill".to_owned(),
+                        )
+                    };
                     let meta = NodeMeta {
                         id: -handle,
-                        kind: "hostSurface".into(),
-                        asset: descriptor,
+                        kind: node_kind,
+                        asset,
                         video_id: package.clone(),
-                        fit: "fill".into(),
+                        fit,
+                        autoplay: data
+                            .get("autoplay")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(true),
                         texture: -1,
                         surface: handle,
                         from_pack: false,
@@ -1311,7 +1360,10 @@ fn install_bridge(
                     }
                     release_nodes
                         .borrow_mut()
-                        .retain(|n| !(n.kind == "hostSurface" && n.video_id == package));
+                        .retain(|n| {
+                            !((n.kind == "hostSurface" || n.kind == "video")
+                                && n.video_id == package)
+                        });
                     let ui: Object = ctx.globals().get("ui")?;
                     let surfaces: Object = ui.get("__surfaces")?;
                     surfaces.remove(package)?;
@@ -1385,6 +1437,7 @@ fn install_compositor_apps(
                 .to_string(),
             video_id: app_id.clone(),
             fit: "fill".into(),
+            autoplay: true,
             texture: -1,
             surface: *handle,
             from_pack: false,
@@ -2447,7 +2500,11 @@ fn run_virtual_frames(
     Ok(())
 }
 
-fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String> {
+fn build_frame(
+    host: &mut HostState,
+    delta_ms: f64,
+    allow_unchanged: bool,
+) -> Result<BuiltFrame, String> {
     // Advance known quiescent time before delivering this boundary's input.
     // A virtual timer's due frame still runs the ordinary guest transaction.
     let tick_count = demand::ticks_for_delta(host, delta_ms)?;
@@ -2493,16 +2550,8 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
     // decoded DrawList operation is forwarded as-is (with its original
     // geometry/UV/tint). Core-generated rounded/shadow masks are ordinary
     // live TEX_QUAD resources, so no host-side RRect reconstruction is needed.
-    let (ops, auxiliary, generic_texture_handles) = if cache_hit {
-        let cache = host
-            .draw_cache
-            .as_ref()
-            .expect("draw cache hit must have a cache");
-        (
-            cache.ops.clone(),
-            cache.auxiliary.clone(),
-            cache.generic_texture_handles.clone(),
-        )
+    let decoded = if cache_hit {
+        None
     } else {
         // A changed DrawList means any static JSON captured for the previous
         // visual state is stale. It must not be reused merely because this
@@ -2568,7 +2617,18 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
             auxiliary: auxiliary.clone(),
             generic_texture_handles: generic_texture_handles.clone(),
         });
-        (ops, auxiliary, generic_texture_handles)
+        Some((ops, auxiliary, generic_texture_handles))
+    };
+
+    // Borrow retained DrawOps for resource bookkeeping. Delta callers only
+    // need owned operations when a draw/resource/event actually changed.
+    let (ops, auxiliary, generic_texture_handles) = match decoded.as_ref() {
+        Some((ops, auxiliary, textures)) => (ops, auxiliary, textures),
+        None => {
+            let cache = host.draw_cache.as_ref()
+                .expect("draw cache hit must have a cache");
+            (&cache.ops, &cache.auxiliary, &cache.generic_texture_handles)
+        }
     };
 
     let referenced_assets = {
@@ -2638,7 +2698,7 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
             },
         );
     }
-    for texture in generic_texture_handles {
+    for &texture in generic_texture_handles {
         let asset = synthetic_texture_asset(texture);
         let revision = core
             .ui
@@ -2672,7 +2732,16 @@ fn build_frame(host: &mut HostState, delta_ms: f64) -> Result<BuiltFrame, String
     // DrawOps may sample one generated page.  Do not let its randomized
     // iteration order leak into the frame ABI or replay digest.
     resources.sort_by(|left, right| left.asset.cmp(&right.asset));
-    let events = host.outbound.borrow_mut().drain(..).collect();
+    let events: Vec<_> = host.outbound.borrow_mut().drain(..).collect();
+    let unchanged = allow_unchanged && cache_hit && events.is_empty()
+        && resources.is_empty() && released_resources.is_empty();
+    let (ops, auxiliary) = if unchanged {
+        (Vec::new(), None)
+    } else if let Some((ops, auxiliary, _)) = decoded {
+        (ops, auxiliary)
+    } else {
+        (ops.clone(), auxiliary.clone())
+    };
     host.frame = host.frame.wrapping_add(1);
     drop(core);
     drop(nodes_borrow);
@@ -2793,6 +2862,7 @@ fn append_draw_operation(
                 asset: None,
                 id: None,
                 fit: None,
+                autoplay: None,
                 color: Some(argb_from_abgr(color)),
                 from_color: None,
                 to_color: None,
@@ -2843,6 +2913,7 @@ fn append_draw_operation(
                 asset: None,
                 id: None,
                 fit: None,
+                autoplay: None,
                 color: None,
                 from_color: Some(argb_from_abgr(from)),
                 to_color: Some(argb_from_abgr(to)),
@@ -2931,6 +3002,7 @@ fn append_draw_operation(
                     asset: Some(asset),
                     id: None,
                     fit: None,
+                    autoplay: None,
                     color: Some(argb_from_abgr(color)),
                     from_color: None,
                     to_color: None,
@@ -2998,6 +3070,7 @@ fn append_draw_operation(
                 asset: Some(asset),
                 id: None,
                 fit: None,
+                autoplay: None,
                 // TEX_QUAD word 8 is the core's per-quad ABGR modulation
                 // (alpha-covered discs and shadow masks rely on it).
                 color: Some(argb_from_abgr(*words.get(8).ok_or_else(|| {
@@ -3065,6 +3138,7 @@ fn append_draw_operation(
                 asset: None,
                 id: None,
                 fit: None,
+                autoplay: None,
                 color: None,
                 from_color: None,
                 to_color: None,
@@ -3159,6 +3233,7 @@ fn append_draw_operation(
                 asset: Some(asset),
                 id: None,
                 fit: None,
+                autoplay: None,
                 color: Some(argb_from_abgr(*words.get(11).ok_or_else(|| {
                     "TEX_TRI is missing its modulation color".to_owned()
                 })?)),
@@ -3222,6 +3297,7 @@ fn append_draw_operation(
                 asset: None,
                 id: None,
                 fit: None,
+                autoplay: None,
                 color: Some(argb_from_abgr(words[6])),
                 from_color: None,
                 to_color: None,
@@ -3278,6 +3354,7 @@ fn append_draw_operation(
                 asset: Some(video.asset.clone()),
                 id: Some(video.video_id.clone()),
                 fit: Some(video.fit.clone()),
+                autoplay: (video.kind == "video").then_some(video.autoplay),
                 color: None,
                 from_color: None,
                 to_color: None,
@@ -4539,6 +4616,13 @@ const MAX_SCRIPT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_BYTECODE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PACKAGE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
+fn package_file_limit(host: &HostState) -> u64 {
+    let policy = host.memory_limits;
+    MAX_PACKAGE_FILE_BYTES
+        .min(policy.max_pak_bytes.map_or(u64::MAX, |value| value as u64))
+        .min(policy.heap_limit_bytes.map_or(u64::MAX, |value| value as u64))
+}
+
 fn read_application_file(path: &CStr, limit: u64, label: &str) -> Result<Vec<u8>, String> {
     let path = path
         .to_str()
@@ -4621,6 +4705,7 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
                 asset: texture.name.clone(),
                 video_id: String::new(),
                 fit: "cover".to_owned(),
+                autoplay: true,
                 texture: texture.handle,
                 surface: -1,
                 from_pack: true,
@@ -4634,6 +4719,7 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
                 asset: sprite.name.clone(),
                 video_id: String::new(),
                 fit: "cover".to_owned(),
+                autoplay: true,
                 texture: sprite.handle,
                 surface: -1,
                 from_pack: true,
@@ -4699,7 +4785,7 @@ pub unsafe extern "C" fn pocket_load_files(
             CString::new(source).map_err(|_| "guest source contains a NUL byte".to_owned())?;
         let pak = read_application_file(
             CStr::from_ptr(pak_path),
-            MAX_PACKAGE_FILE_BYTES,
+            package_file_limit(host),
             "guest PAK",
         )?;
         Ok::<_, String>((source, pak))
@@ -4902,7 +4988,7 @@ pub unsafe extern "C" fn pocket_load_bytecode_files(
         )?;
         let pak = read_application_file(
             CStr::from_ptr(pak_path),
-            MAX_PACKAGE_FILE_BYTES,
+            package_file_limit(host),
             "guest PAK",
         )?;
         Ok::<_, String>((bytecode, pak))
@@ -5037,7 +5123,7 @@ pub unsafe extern "C" fn pocket_frame(handle: *mut HostState, delta_ms: f64) -> 
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
-    match build_frame(host, delta_ms) {
+    match build_frame(host, delta_ms, false) {
         Ok(built) => complete_frame_output(host, built),
         Err(error) => failed_frame_output(host, error),
     }
@@ -5349,7 +5435,7 @@ pub unsafe extern "C" fn pocket_frame_delta(
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
-    match build_frame(host, delta_ms) {
+    match build_frame(host, delta_ms, true) {
         Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
             clear_error(host);
             host.output = c_string(UNCHANGED_FRAME_JSON);
@@ -5375,7 +5461,7 @@ pub unsafe extern "C" fn pocket_frame_binary(
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
-    match build_frame(host, delta_ms) {
+    match build_frame(host, delta_ms, false) {
         Ok(built) => match encode_binary_frame(&built.result) {
             Ok(bytes) => {
                 host.binary_output = bytes;
@@ -5415,7 +5501,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
-    match build_frame(host, delta_ms) {
+    match build_frame(host, delta_ms, true) {
         Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
             clear_error(host);
             ptr::null()
@@ -6198,6 +6284,79 @@ mod smoke_tests {
     }
 
     #[test]
+    fn registered_video_surface_updates_asset_and_fit_without_reusing_cached_op() {
+        let handle = pocket_create(320.0, 480.0);
+        let source = CString::new(
+            r#"
+            const surface = pocket.registerSurface('test.video', 'video', JSON.stringify({asset:'one.mp4', fit:'contain', autoplay:false}));
+            const node = ui.createNode(3);
+            ui.setProp(node, 1, 120); ui.setProp(node, 2, 80);
+            ui.setCompositorSurface(node, surface, 0);
+            ui.insertBefore(1, node, 0);
+            let tick = 0;
+            globalThis.frame = function() {
+                tick++;
+                if (tick === 2) pocket.registerSurface('test.video', 'video', JSON.stringify({asset:'two.mp4', fit:'fill', autoplay:true}));
+            };
+        "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        let _ = frame_json(handle);
+        let first = frame_json(handle);
+        let first_op = first["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "video")
+            .unwrap();
+        assert_eq!(first_op["id"], "test.video");
+        assert_eq!(first_op["asset"], "one.mp4");
+        assert_eq!(first_op["fit"], "contain");
+        assert_eq!(first_op["autoplay"], false);
+
+        let second = frame_json(handle);
+        assert_ne!(second["unchanged"], serde_json::json!(true));
+        let second_op = second["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "video")
+            .unwrap();
+        assert_eq!(second_op["id"], "test.video");
+        assert_eq!(second_op["asset"], "two.mp4");
+        assert_eq!(second_op["fit"], "fill");
+        assert_eq!(second_op["autoplay"], true);
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn legacy_video_surface_without_autoplay_metadata_keeps_native_default() {
+        let handle = pocket_create(160.0, 120.0);
+        let source = CString::new(
+            r#"
+            const surface = pocket.registerSurface('legacy.video', 'video', '{"asset":"legacy.mp4"}');
+            const node = ui.createNode(3);
+            ui.setProp(node, 1, 80); ui.setProp(node, 2, 40);
+            ui.setCompositorSurface(node, surface, 0);
+            ui.insertBefore(1, node, 0);
+            globalThis.frame = function() {};
+        "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        let frame = frame_json(handle);
+        let op = frame["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "video")
+            .unwrap();
+        assert_eq!(op["autoplay"], true);
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
     fn host_surface_projection_uses_inline_clip_for_nested_and_fully_clipped_nodes() {
         let handle = pocket_create(80.0, 80.0);
         let source = CString::new(
@@ -6280,6 +6439,7 @@ mod smoke_tests {
             asset: r#"{"kind":"glass","parameters":{"radius":18}}"#.into(),
             video_id: "test.clip".into(),
             fit: "fill".into(),
+            autoplay: true,
             texture: -1,
             surface: 7,
             from_pack: false,

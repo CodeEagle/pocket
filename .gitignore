@@ -22,4 +22,8 @@
 
 .pocket-updates/
 
+# Temporary Pocket UI build inputs; successful builds remove these.
+**/.pocket-ui-backup-*/
+**/pocket-ui-entry-*
+
 **/.kotlin/

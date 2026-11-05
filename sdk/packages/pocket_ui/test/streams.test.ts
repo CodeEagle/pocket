@@ -3,6 +3,8 @@ import { test } from "bun:test";
 import { createHostBridge, type JsonObject } from "../src/host.ts";
 import {
   createPocketStreamAdapter,
+  POCKET_STREAM_MAX_BATCH_BYTES,
+  POCKET_STREAM_MAX_BATCH_EVENTS,
   type PocketStream,
   PocketStreamError,
 } from "../src/streams.ts";
@@ -65,6 +67,136 @@ test("independent adapters do not collide on stream IDs", async () => {
   } finally {
     first.dispose();
     second.dispose();
+    host.dispose();
+  }
+});
+
+test("host-originated streams have one adapter owner and release it on dispose", async () => {
+  const { host, packets } = wire();
+  const idle = createPocketStreamAdapter(host);
+  const first = createPocketStreamAdapter(host);
+  const second = createPocketStreamAdapter(host);
+  let firstIncoming: PocketStream | undefined;
+  let secondIncoming: PocketStream | undefined;
+  const removeFirst = first.onStream((stream) => { firstIncoming = stream; });
+  const removeSecond = second.onStream((stream) => { secondIncoming = stream; });
+  try {
+    host.handle(event("stream.open", { streamId: "host-stream-shared", topic: "sensor" }));
+    assert.equal(idle.get("host-stream-shared"), undefined, "an adapter without a listener must not claim the stream");
+    assert.ok(firstIncoming);
+    assert.equal(secondIncoming, undefined, "the second adapter must not duplicate the host stream");
+    host.handle(event("stream.data", { streamId: "host-stream-shared", data: 1 }));
+    assert.equal(await firstIncoming!.read(), 1);
+    first.dispose("first_disposed");
+    assert.equal(
+      packets.filter((packet) => packet.name === "stream.cancel" && packet.payload?.streamId === "host-stream-shared").length,
+      1,
+      "only the owner may cancel the remote stream",
+    );
+
+    // Ownership is released after disposal. A retransmitted host open may be
+    // claimed by the remaining adapter, while an adapter with no listener does
+    // not claim it at all.
+    host.handle(event("stream.open", { streamId: "host-stream-shared", topic: "sensor" }));
+    assert.ok(secondIncoming, "the remaining listening adapter may claim a reopened stream");
+    second.dispose("second_disposed");
+    removeFirst();
+    removeSecond();
+  } finally {
+    first.dispose();
+    second.dispose();
+    idle.dispose();
+    host.dispose();
+  }
+});
+
+test("sendBatch rejects count and UTF-8 byte overflow before sending", () => {
+  const { host, packets } = wire();
+  const streams = createPocketStreamAdapter(host);
+  try {
+    const stream = streams.open("batch-boundary");
+    const batchCount = (): number => packets.filter((packet) => packet.name === "stream.batch").length;
+    const beforeCount = batchCount();
+    assert.throws(
+      () => stream.sendBatch(Array.from({ length: POCKET_STREAM_MAX_BATCH_EVENTS + 1 }, () => 1)),
+      (error: unknown) => error instanceof PocketStreamError && error.code === "stream_batch_too_large",
+    );
+    assert.equal(batchCount(), beforeCount, "count rejection must not emit a batch");
+    assert.equal(stream.state, "open");
+
+    // The bounded preflight must reject a huge string without first building a
+    // complete JSON string for the item or the enclosing batch.
+    const huge = "x".repeat(POCKET_STREAM_MAX_BATCH_BYTES + 1024);
+    assert.throws(
+      () => stream.sendBatch([huge]),
+      (error: unknown) => error instanceof PocketStreamError && error.code === "stream_batch_too_large",
+    );
+    assert.equal(batchCount(), beforeCount, "byte rejection must not emit a batch");
+    assert.equal(stream.state, "open");
+
+    assert.equal(stream.sendBatch(["small"]), true);
+    assert.equal(batchCount(), beforeCount + 1);
+    const packet = packets.at(-1);
+    assert.equal(packet?.name, "stream.batch");
+    assert.ok(JSON.stringify(packet).length < POCKET_STREAM_MAX_BATCH_BYTES);
+  } finally {
+    streams.dispose();
+    host.dispose();
+  }
+});
+
+test("sendBatch rejects toJSON and accessors before the host stringify pass", () => {
+  const { host, packets } = wire();
+  const streams = createPocketStreamAdapter(host);
+  try {
+    const stream = streams.open("batch-json-shape");
+    const nullPrototype = Object.create(null) as Record<string, unknown>;
+    nullPrototype.value = 1;
+    const valid = streams.open("batch-json-valid");
+    assert.equal(valid.sendBatch([{ value: 1 }, nullPrototype as never]), true);
+    const beforeRejectedBatches = packets.filter((packet) => packet.name === "stream.batch").length;
+
+    const hiddenToJson: Record<string, unknown> = { value: 1 };
+    Object.defineProperty(hiddenToJson, "toJSON", {
+      configurable: true,
+      enumerable: false,
+      value: () => ({ value: "expanded" }),
+    });
+    assert.throws(
+      () => stream.sendBatch([hiddenToJson as never]),
+      (error: unknown) => error instanceof TypeError,
+    );
+
+    const inheritedToJson = Object.create({ toJSON: () => ({ value: "expanded" }) }) as Record<string, unknown>;
+    inheritedToJson.value = 1;
+    assert.throws(
+      () => stream.sendBatch([inheritedToJson as never]),
+      (error: unknown) => error instanceof TypeError,
+    );
+
+    let getterReads = 0;
+    const getterValue: Record<string, unknown> = {};
+    Object.defineProperty(getterValue, "value", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        getterReads += 1;
+        return "should-not-run";
+      },
+    });
+    assert.throws(
+      () => stream.sendBatch([getterValue as never]),
+      (error: unknown) => error instanceof TypeError,
+    );
+    assert.equal(getterReads, 0, "preflight must reject accessors without reading them");
+    assert.equal(
+      packets.filter((packet) => packet.name === "stream.batch").length,
+      beforeRejectedBatches,
+      "shape rejection must not emit a batch",
+    );
+    assert.equal(stream.state, "open");
+  } finally {
+    streams.dispose();
     host.dispose();
   }
 });

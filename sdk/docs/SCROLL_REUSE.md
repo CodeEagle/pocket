@@ -50,6 +50,18 @@ and outside-viewport checks. This avoids closing a live IME session merely
 because the untransformed layout y-coordinate is below a newly reduced
 viewport.
 
+The same `visualTop = committedLayout.y - scroller.offset()` coordinate is used
+by `ScrollContourItem` and `useScrollContourReserve` in
+`packages/pocket_ui/src/ui.tsx` to implement progressive contour-aware width
+adaptation on displays with a top-right occlusion (such as iPhone Duo's camera
+and status cluster). `ScrollablePage` exposes `ScrollablePageContext` (`scrollOffset`,
+`geometry`, `subscribeContour`) and runs registered contour subscribers before
+remeasuring `contentHeight` on drag, kinetic step, and `display.viewport`
+updates. Each top-level item computes its right-edge reservation via
+`topRightContourReserveForBand()` using a 48px C1-continuous Hermite smoothstep
+ramp (`3t^2 - 2t^3`) below `cutoutBottom`, narrowing progressively as it scrolls
+into the top-right band and restoring its base width when scrolled back down.
+
 `VirtualList` remains a fixed-row primitive with its own viewport and
 `createGesture({ region: { node: () => viewportNode }, axis: "y" })`
 (`.cache/pocketjs/framework/src/virtual-list.ts:255-277`). The current app

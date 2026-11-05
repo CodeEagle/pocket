@@ -72,7 +72,8 @@ Flutter 绘制的是 native 投影的操作与资源；并非每个 JS 组件都
 ## JS mobile 组合与转场
 
 本轮的 mobile UI 仍是 JS/TSX 组合，不是 Flutter 业务 Widget 树。`guest/ui/mobile.tsx`
-导出 `MobileThemeProvider`、`MobileScaffold`、`MobileAppBar`、`MobileCard`、
+导出 `SafeAreaScaffold`（独立 guest 的 canonical safe-area 壳）、
+`MobileThemeProvider`、`MobileScaffold`、`MobileAppBar`、`MobileCard`、
 `MobileButton`/filled/outlined/text aliases、`MobileBadge`、`MobileListTile`、
 `MobileSegmentedControl`、`MobileSwitch`、`MobileStepper`、`MobileDialog`，并复用官方
 `View`/`Text`/`Focusable`/`Modal`。`guest/mobile-pages.tsx` 将它们接到 Mobile UI、

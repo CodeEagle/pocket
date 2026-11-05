@@ -330,7 +330,15 @@ final class PocketCanvasPainter extends CustomPainter {
       canvas.save();
       final clip = op.clip;
       if (clip != null) {
-        canvas.clipRect(Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height));
+        // PocketJS SCISSOR is a hard rectangular boundary. Flutter defaults
+        // to antialiased clipping; repeating that per op caused Android
+        // Impeller/Vulkan raster time to rise from ~3ms to ~56ms in device
+        // tests. Keep shape/image antialiasing, but never antialias scissor.
+        // Evidence and reproduction: sdk/docs/ANDROID_IMPELLER_SCISSOR.md.
+        canvas.clipRect(
+          Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height),
+          doAntiAlias: false,
+        );
       }
       switch (op) {
         case PocketHostSurfaceOp():
@@ -427,9 +435,9 @@ final class PocketCanvasPainter extends CustomPainter {
                 textDirection: TextDirection.ltr,
               ) ??
               (TextPainter(
-                  text: TextSpan(text: value, style: textStyle),
-                  textDirection: TextDirection.ltr,
-                )..layout());
+                text: TextSpan(text: value, style: textStyle),
+                textDirection: TextDirection.ltr,
+              )..layout());
           // PocketJS supplies line breaks. Align each line inside the native
           // box without a second wrapping pass or truncating overflowing text.
           if (op.align == 1 || op.align == 2) {
@@ -505,6 +513,25 @@ final class PocketCanvasPainter extends CustomPainter {
     canvas.restore();
   }
 
+  /// Canvas blocks are full-size Stack siblings so retained layers can keep
+  /// their original DrawOps order. A full-size CustomPaint is otherwise a
+  /// full-size hit target too, which hides a focused host surface that is
+  /// painted before a sparse root overlay (the mini-app close control is one
+  /// such overlay). Restrict hit testing to the actual painted op bounds and
+  /// let Flutter continue its Stack walk for uncovered points.
+  @override
+  bool hitTest(Offset position) {
+    if (width <= 0 || height <= 0) return false;
+    final rendered = renderedSize;
+    final scaleX = rendered == null ? 1.0 : rendered.width / width;
+    final scaleY = rendered == null ? 1.0 : rendered.height / height;
+    if (!scaleX.isFinite || !scaleY.isFinite || scaleX <= 0 || scaleY <= 0) {
+      return false;
+    }
+    final logical = Offset(position.dx / scaleX, position.dy / scaleY);
+    return ops.any((op) => _pocketOpPaintsAt(op, logical));
+  }
+
   @override
   bool shouldRepaint(PocketCanvasPainter oldDelegate) {
     if (oldDelegate._fingerprint != _fingerprint) return true;
@@ -512,6 +539,40 @@ final class PocketCanvasPainter extends CustomPainter {
     // a theoretical 32-bit hash collision can never retain stale pixels.
     return !_pocketCanvasEquals(oldDelegate, this);
   }
+}
+
+bool _pocketArgbPaints(int color) => (color >>> 24) != 0;
+
+/// Conservative visual hit approximation for a DrawOp. The native Guest
+/// remains the authority for JS activation; this is only the Flutter sibling
+/// hit-test needed to choose between a host surface and later root paint.
+bool _pocketOpPaintsAt(PocketOp op, Offset point) {
+  if (op is PocketHostSurfaceOp ||
+      op.width <= 0 ||
+      op.height <= 0 ||
+      !Rect.fromLTWH(op.x, op.y, op.width, op.height).contains(point)) {
+    return false;
+  }
+  final clip = op.clip;
+  if (clip != null &&
+      !Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height).contains(point)) {
+    return false;
+  }
+  return switch (op) {
+    PocketRectOp(:final color) => _pocketArgbPaints(color),
+    PocketRoundedOp(:final color) => _pocketArgbPaints(color),
+    PocketGradientOp(:final fromColor, :final toColor) =>
+      _pocketArgbPaints(fromColor) || _pocketArgbPaints(toColor),
+    PocketTriangleOp(:final colors) => colors.any(_pocketArgbPaints),
+    PocketTextureTriangleOp(:final color) => _pocketArgbPaints(color),
+    PocketTextOp(:final color) => _pocketArgbPaints(color),
+    // A loaded image/video may contain transparent pixels, but its DrawOp is
+    // still the only host-visible sibling at this point. Keep the hit region
+    // conservative; JS performs the precise semantic hit test afterwards.
+    PocketImageOp(:final tint) => tint == null || _pocketArgbPaints(tint),
+    PocketVideoOp() => true,
+    PocketHostSurfaceOp() => false,
+  };
 }
 
 /// Align rectangle fills and image quads to the device-pixel grid after the

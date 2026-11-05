@@ -353,6 +353,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       config: instance.config,
       session: instance.session,
       inputEnabled: slot.visible && slot.focused,
+      geometryRevision: instance.compositorGeometryRevision,
       onFirstFrame: () => _onFirstFrame(instance!),
     );
   }
@@ -363,11 +364,27 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   ) {
     final visible = slot.visible && !slot.visibleClip.isEmpty;
     final focused = visible && slot.focused;
-    if (instance.compositorVisible == visible &&
+    final geometryChanged =
+        instance.compositorBounds != slot.bounds ||
+        instance.compositorVisibleClip != slot.visibleClip ||
+        instance.compositorLogicalViewport != slot.logicalViewport;
+    if (!geometryChanged &&
+        instance.compositorVisible == visible &&
         instance.compositorFocused == focused) {
       return;
     }
     final visibilityChanged = instance.compositorVisible != visible;
+    if (geometryChanged) {
+      // The JS mini-app sheet animates its host surface from the bottom of the
+      // root canvas to the top. A child PocketView's RenderBox moves without
+      // changing constraints, so Flutter emits no metrics/dependency signal;
+      // carry only a revision and let that child measure its own post-layout
+      // safe-area intersection. See sdk/docs/EDITOR_PREVIEW_RENDERING.md.
+      instance.compositorGeometryRevision++;
+      instance.compositorBounds = slot.bounds;
+      instance.compositorVisibleClip = slot.visibleClip;
+      instance.compositorLogicalViewport = slot.logicalViewport;
+    }
     instance.compositorVisible = visible;
     instance.compositorFocused = focused;
     if (visible) {
@@ -1460,6 +1477,10 @@ final class _RuntimeInstance {
   bool hasEverProducedFrame = false;
   bool compositorVisible = false;
   bool compositorFocused = false;
+  int compositorGeometryRevision = 0;
+  Rect? compositorBounds;
+  Rect? compositorVisibleClip;
+  Size? compositorLogicalViewport;
   bool get isFirstVisibleFrameReady =>
       firstFrameReady &&
       session.failure == null &&

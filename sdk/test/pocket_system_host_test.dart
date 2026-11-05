@@ -224,19 +224,24 @@ void main() {
         );
 
         // Child produces an Offstage first frame while its compositor slot is hidden.
+        const offstageSlot = PocketCompositorSlot(
+          surfaceHandle: 2,
+          bounds: Rect.zero,
+          visibleClip: Rect.zero,
+          logicalViewport: Size(120, 120),
+          visible: false,
+          focused: false,
+          drawIndex: 0,
+        );
         final offstageChild =
-            rootGuest.hostSurfaceBuilder!(
-                  const PocketCompositorSlot(
-                    surfaceHandle: 2,
-                    bounds: Rect.zero,
-                    visibleClip: Rect.zero,
-                    logicalViewport: Size(120, 120),
-                    visible: false,
-                    focused: false,
-                    drawIndex: 0,
-                  ),
-                )
-                as PocketGuestSession;
+            rootGuest.hostSurfaceBuilder!(offstageSlot) as PocketGuestSession;
+        final stableOffstageChild =
+            rootGuest.hostSurfaceBuilder!(offstageSlot) as PocketGuestSession;
+        expect(
+          stableOffstageChild.geometryRevision,
+          offstageChild.geometryRevision,
+          reason: 'unchanged slots must not schedule duplicate geometry work',
+        );
         offstageChild.onFirstFrame!();
 
         final childAfterOffstageFrame = controller.instances.singleWhere(
@@ -249,16 +254,23 @@ void main() {
         await childAfterOffstageFrame.session.onError(
           StateError('failed after offstage frame'),
         );
-        rootGuest.hostSurfaceBuilder!(
-          const PocketCompositorSlot(
-            surfaceHandle: 2,
-            bounds: Rect.fromLTWH(0, 0, 120, 120),
-            visibleClip: Rect.fromLTWH(0, 0, 120, 120),
-            logicalViewport: Size(120, 120),
-            visible: true,
-            focused: true,
-            drawIndex: 0,
-          ),
+        final visibleChild =
+            rootGuest.hostSurfaceBuilder!(
+                  const PocketCompositorSlot(
+                    surfaceHandle: 2,
+                    bounds: Rect.fromLTWH(0, 0, 120, 120),
+                    visibleClip: Rect.fromLTWH(0, 0, 120, 120),
+                    logicalViewport: Size(120, 120),
+                    visible: true,
+                    focused: true,
+                    drawIndex: 0,
+                  ),
+                )
+                as PocketGuestSession;
+        expect(
+          visibleChild.geometryRevision,
+          greaterThan(offstageChild.geometryRevision),
+          reason: 'a moved/visible slot must invalidate child geometry',
         );
         await tester.pump();
 

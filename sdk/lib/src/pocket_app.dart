@@ -43,12 +43,18 @@ final class PocketGuestSession extends StatefulWidget {
     this.hostSurfaceResidents = const {},
     this.inputEnabled = true,
     this.viewport,
+    this.geometryRevision = 0,
   });
   final PocketAppConfig config;
   final PocketHostSurfaceBuilder? hostSurfaceBuilder;
   final Set<int> hostSurfaceResidents;
   final bool inputEnabled;
   final Size? viewport;
+
+  /// Increments when a compositor host surface moves or changes clip. The
+  /// child PocketView uses this as a post-layout safe-area invalidation token;
+  /// it is deliberately not a copied root inset or a second geometry state.
+  final int geometryRevision;
 
   /// Optional host-owned Session.  When supplied, this widget only attaches
   /// its PocketView and never disposes the Session.
@@ -132,6 +138,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       active: session.foreground,
       inputEnabled: widget.inputEnabled,
       viewport: widget.viewport,
+      geometryRevision: widget.geometryRevision,
       hostSurfaceBuilder: widget.hostSurfaceBuilder,
       hostSurfaceResidents: widget.hostSurfaceResidents,
       compositorSurfaces: config.compositorSurfaces,

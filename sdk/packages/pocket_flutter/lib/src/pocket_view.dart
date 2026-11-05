@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -340,6 +340,7 @@ class PocketView extends StatefulWidget {
     this.workerProgram,
     this.offloadProviderFactory,
     this.viewport,
+    this.geometryRevision = 0,
     this.tickHz = 60,
     this.fontFamilyFallback = const <String>[],
     this.onBeforeFrame,
@@ -406,6 +407,11 @@ class PocketView extends StatefulWidget {
   /// Injected runtimes keep their own dimensions for tests/hosts, preserving
   /// the old fixed-runtime behavior when no explicit size is supplied.
   final Size? viewport;
+
+  /// Host compositor geometry revision. This is a notification only: the
+  /// child still measures its own RenderBox after layout and reports the
+  /// existing display.viewport contract, rather than inheriting root insets.
+  final int geometryRevision;
 
   /// Fixed PocketJS core/bundle rate. This must match the `--hz` value used
   /// when [jsAsset] was compiled. The Flutter ticker may run at 60 or 120 Hz;
@@ -549,6 +555,11 @@ class _PocketViewState extends State<PocketView>
   static const int _duplexPointerMove = 2;
   static const int _duplexPointerUp = 3;
   static const int _duplexPointerCancel = 4;
+  static const int _maxVideoDiagnostics = 64;
+  static const int _maxVideoPlaybackCommands = 128;
+  static const int _maxVideoFailureEntries = 128;
+  static const int _maxVideoRetiredIds = 128;
+  static const int _maxVideoIdLength = 128;
   // Keep the retained-layer count bounded while limiting a text/label update
   // to a small contiguous draw block. Video ops still force a boundary so
   // painter blocks never cross a texture in the original op order.
@@ -592,11 +603,43 @@ class _PocketViewState extends State<PocketView>
   final Map<String, int> _imageResourceRevisions = <String, int>{};
   final Set<String> _loadingVideos = <String>{};
   final Set<String> _failedImages = <String>{};
-  final Set<String> _failedVideos = <String>{};
+  final LinkedHashSet<({String id, String asset})> _failedVideos =
+      LinkedHashSet<({String id, String asset})>();
+  final Map<String, String> _videoFailureAssets = <String, String>{};
   final Map<String, String> _videoAssets = <String, String>{};
   final Map<String, String> _loadingVideoAssets = <String, String>{};
   final Map<String, int> _videoEpochs = <String, int>{};
+  // Zero is reserved for "no ticket" so a dropped epoch entry can never
+  // accidentally match the first in-flight load through a ?? 0 fallback.
+  int _nextVideoEpoch = 1;
   final Map<String, bool> _videoVisibility = <String, bool>{};
+  // Video ids are admitted by either a real DrawOp or an explicit playback
+  // command and retained across temporary culling. The active set is bounded
+  // so arbitrary host input cannot grow a command cache forever. Retired ids
+  // are a separate bounded tombstone set: an old DrawOp cannot resurrect a
+  // permanently released id, while an explicit command is allowed to
+  // re-register it.
+  final LinkedHashSet<String> _videoKnownIds = LinkedHashSet<String>();
+  final LinkedHashSet<String> _videoReleasedIds = LinkedHashSet<String>();
+  final Set<String> _videoFrameIds = <String>{};
+  // Diagnostics mirror the real controller/resource boundary only. They are
+  // not a second playback policy: desired playback remains the JS/lifecycle
+  // map below, while these entries expose actual Flutter controller state to
+  // the guest Lab without a timer or decoder poll.
+  final Map<String, _PocketVideoDiagnostic> _videoDiagnostics =
+      <String, _PocketVideoDiagnostic>{};
+  final Map<String, VoidCallback> _videoDiagnosticListeners =
+      <String, VoidCallback>{};
+  // Playback commands are coalesced per controller. The video_player plugin
+  // updates `value.isPlaying` before its platform Future completes, so a
+  // single in-flight play/pause command is not enough to represent the final
+  // intent when visibility or app activity changes mid-command. Keep only the
+  // execution pump here; desired playback remains the JS/lifecycle state
+  // above and is re-read after every platform await.
+  final Map<String, Future<void>> _videoPlaybackPumps =
+      <String, Future<void>>{};
+  final Map<String, VideoPlayerController> _videoPlaybackPumpVideos =
+      <String, VideoPlayerController>{};
   // Flutter pointer IDs are host-global and can grow beyond the native touch
   // wire range. Keep them only as map keys; the native bridge receives a
   // bounded, reusable slot in [0, _maxPointerSlots).
@@ -888,6 +931,12 @@ class _PocketViewState extends State<PocketView>
         _isUsableSize(widget.viewport)) {
       _scheduleResize(widget.viewport!);
     }
+    if (oldWidget.geometryRevision != widget.geometryRevision) {
+      // A compositor transform can move this RenderBox without changing its
+      // constraints or FlutterView metrics. Defer until the parent slot has
+      // laid out, then reuse _safeAreaForHost's physical intersection logic.
+      _scheduleSafeAreaReport();
+    }
     if (oldWidget.active != widget.active) _syncGuestActivity();
     final wasCollecting =
         oldWidget.showDebugFps || oldWidget.onPerformanceSample != null;
@@ -934,13 +983,7 @@ class _PocketViewState extends State<PocketView>
     _dismissTextInput(reason: 'inactive', rebuild: false);
     for (final entry in _videos.entries) {
       _videoDesiredPlayback[entry.key] ??= entry.value.value.isPlaying;
-      unawaited(
-        _applyVideoPlayback(
-          entry.key,
-          entry.value,
-          visible: _videoVisibility[entry.key] ?? false,
-        ),
-      );
+      unawaited(_applyVideoPlayback(entry.key, entry.value));
     }
   }
 
@@ -972,13 +1015,7 @@ class _PocketViewState extends State<PocketView>
     _wakePendingUntilTickerCreated = false;
     if (!ticker.isActive) ticker.start();
     for (final entry in _videos.entries) {
-      unawaited(
-        _applyVideoPlayback(
-          entry.key,
-          entry.value,
-          visible: _videoVisibility[entry.key] ?? false,
-        ),
-      );
+      unawaited(_applyVideoPlayback(entry.key, entry.value));
     }
   }
 
@@ -1316,6 +1353,11 @@ class _PocketViewState extends State<PocketView>
       if (!mounted) return;
       _beginInvalidationBatch();
       try {
+        // Fold video commands into the registration state before resource
+        // coordination. A first-frame command may intentionally target a
+        // video whose DrawOp is still culled; loading must observe that final
+        // intent instead of falling back to autoplay.
+        _handleVideoEvents(first.events);
         // Keep the loading surface visible until image/mask resources used by
         // the first DrawList have become paintable. Later frames continue to
         // use the existing demand-driven, non-blocking resource path.
@@ -1334,6 +1376,8 @@ class _PocketViewState extends State<PocketView>
           // ticker wake when there is no image/mask to gate.
           unawaited(_requestResources(first));
         }
+        // Keep non-video event dispatch (including text input and onEvent)
+        // at its established point after the resource request is scheduled.
         _handleEvents(first.events);
       } finally {
         _endInvalidationBatch();
@@ -1354,7 +1398,8 @@ class _PocketViewState extends State<PocketView>
         if (hadPendingMessages) {
           _controller._flushPendingMessages();
         }
-        final wakePending = _wakePendingUntilTickerCreated || hadPendingMessages;
+        final wakePending =
+            _wakePendingUntilTickerCreated || hadPendingMessages;
         _wakePendingUntilTickerCreated = false;
         if (wakePending) {
           _ticker!.start();
@@ -2424,11 +2469,17 @@ class _PocketViewState extends State<PocketView>
       _frame = visual;
       _auxiliaryFrame = visual.auxiliary;
       if (visualChanged) _markSceneNeedsBuild();
-      if (requestResources) unawaited(_requestResources(next));
       if (nextFocus != null && nextFocus != previousFocus) {
         _cancelPointerSequences();
         _dismissTextInput(reason: 'compositor.focus', rebuild: false);
       }
+      // Video events and the DrawOp are one frame transaction. Fold video
+      // commands first, then perform one resource scan from the resulting
+      // state; otherwise play followed by pause can start an observable
+      // intermediate platform operation. Other event dispatch remains after
+      // the resource request is scheduled.
+      _handleVideoEvents(next.events);
+      if (requestResources) unawaited(_requestResources(next));
       _handleEvents(next.events);
     } finally {
       _endInvalidationBatch();
@@ -2633,12 +2684,14 @@ class _PocketViewState extends State<PocketView>
     return overlap / scaleY;
   }
 
-  /// Converts platform-view ReservedRegion frames into the current guest
-  /// canvas coordinates. UIKit reports these in the Flutter root view; a
-  /// PocketView may be nested, padded, clipped, or aspect-fitted, so sending
-  /// the raw window rectangles would move JS controls to the wrong place.
+  /// Converts platform-view ReservedRegion frames and Flutter DisplayFeatures
+  /// into the current guest canvas coordinates. UIKit and Flutter report these
+  /// in the Flutter root view; a PocketView may be nested, padded, clipped, or
+  /// aspect-fitted, so sending raw window rectangles would move JS controls to
+  /// the wrong place.
   List<Map<String, dynamic>> _reservedRegionsForHost(
     RenderBox host,
+    BuildContext context,
     _PocketCanvasGeometry geometry,
   ) {
     final canvasSize = geometry.size;
@@ -2652,8 +2705,54 @@ class _PocketViewState extends State<PocketView>
     }
     final canvasOrigin = host.localToGlobal(geometry.origin);
     final canvasRect = canvasOrigin & canvasSize;
+    final regions = List<PocketDisplayRegion>.of(
+      _displayGeometrySnapshot.regions,
+    );
+    final view = View.of(context);
+    final media = MediaQuery.maybeOf(context);
+    final displayFeatures =
+        media?.displayFeatures ??
+        MediaQueryData.fromView(view).displayFeatures;
+    for (var i = 0; i < displayFeatures.length; i++) {
+      final feature = displayFeatures[i];
+      final String? kind = switch (feature.type) {
+        ui.DisplayFeatureType.cutout => 'occlusion',
+        ui.DisplayFeatureType.hinge || ui.DisplayFeatureType.fold => 'division',
+        ui.DisplayFeatureType.unknown => null,
+      };
+      if (kind == null) continue;
+      final bounds = feature.bounds;
+      if (!bounds.left.isFinite ||
+          !bounds.top.isFinite ||
+          !bounds.width.isFinite ||
+          !bounds.height.isFinite ||
+          bounds.width <= 0 ||
+          bounds.height <= 0) {
+        continue;
+      }
+      final alreadyCovered = regions.any(
+        (existing) =>
+            existing.kind == kind && !existing.frame.intersect(bounds).isEmpty,
+      );
+      if (alreadyCovered) continue;
+      final active = switch (feature.type) {
+        ui.DisplayFeatureType.cutout || ui.DisplayFeatureType.hinge => true,
+        ui.DisplayFeatureType.fold =>
+          feature.state == ui.DisplayFeatureState.postureHalfOpened,
+        ui.DisplayFeatureType.unknown => false,
+      };
+      regions.add(
+        PocketDisplayRegion(
+          id: 'display-feature-$kind-$i',
+          kind: kind,
+          frame: bounds,
+          margins: EdgeInsets.zero,
+          active: active,
+        ),
+      );
+    }
     final result = <Map<String, dynamic>>[];
-    for (final region in _displayGeometrySnapshot.regions) {
+    for (final region in regions) {
       final visible = region.frame.intersect(canvasRect);
       if (visible.isEmpty) continue;
       final local = Rect.fromLTRB(
@@ -2744,7 +2843,11 @@ class _PocketViewState extends State<PocketView>
       hostContext,
       geometry: geometry,
     );
-    final reservedRegions = _reservedRegionsForHost(renderObject, geometry);
+    final reservedRegions = _reservedRegionsForHost(
+      renderObject,
+      hostContext,
+      geometry,
+    );
     final reservedRegionsKey = _reservedRegionsKey(reservedRegions);
     if (_reportedViewport == viewport &&
         _reportedSafeArea == safeArea &&
@@ -2875,6 +2978,17 @@ class _PocketViewState extends State<PocketView>
       collectResources(auxiliary.ops, auxiliary.width, auxiliary.height);
     }
 
+    // Admission is independent of visibility. Events were folded by the
+    // caller first, so an offscreen registration's pause/play intent is
+    // already present when its first visible DrawOp reaches this scan.
+    _videoFrameIds
+      ..clear()
+      ..addAll(videoRequests.keys.where(_isValidVideoId));
+    for (final id in _videoFrameIds) {
+      _admitVideoId(id);
+    }
+    _trimVideoCommandCaches();
+
     // A texture is owned by the current DrawList, not by the lifetime of the
     // whole PocketView. Retire both loaded and in-flight videos that no
     // longer occur in either surface. The epoch prevents a late initialize()
@@ -2886,7 +3000,10 @@ class _PocketViewState extends State<PocketView>
     };
     for (final id in activeVideoIds) {
       if (!videoRequests.containsKey(id)) {
-        _releaseVideo(id, resetDesiredPlayback: true);
+        // DrawOp disappearance is temporary resource eviction. Keep the JS
+        // registration's desired playback intent for a later reappearance;
+        // only video.release clears that intent permanently.
+        _releaseVideo(id);
       }
     }
 
@@ -2894,22 +3011,30 @@ class _PocketViewState extends State<PocketView>
       final id = entry.key;
       final request = entry.value;
       final op = request.op;
-      final previousVisible = _videoVisibility[id];
       _videoVisibility[id] = request.visible;
+
+      // A permanent JS release blocks autoplay until a new registration sends
+      // an explicit play/pause command. The DrawOp can remain in one retained
+      // frame after that release, so absence alone cannot distinguish a new
+      // registration from the old one.
+      if (!_videoKnownIds.contains(id) || _videoReleasedIds.contains(id)) {
+        continue;
+      }
 
       final loadedAsset = _videoAssets[id] ?? _loadingVideoAssets[id];
       if (loadedAsset != null && loadedAsset != op.asset) {
-        // A resource identity is (id, asset), not just id. Reset the default
-        // playback intent for a newly loaded asset; a later JS event can set
-        // it again before initialization completes.
-        _releaseVideo(id, resetDesiredPlayback: true);
+        // A resource identity is (id, asset), but the JS playback intent is
+        // keyed by id. Preserve an explicit video.pause/video.play command
+        // across an asset replacement; a registry that already emitted
+        // video.pause must not be forced back to the new op's autoplay value.
+        _releaseVideo(id);
         _videoVisibility[id] = request.visible;
       }
 
       final video = _videos[id];
       if (!request.visible) {
-        if (video != null) {
-          unawaited(_applyVideoPlayback(id, video, visible: false));
+        if (video != null && _videoNeedsPlaybackSync(id, video)) {
+          unawaited(_applyVideoPlayback(id, video));
         } else if (_loadingVideos.contains(id)) {
           // Do not finish an invisible first load. The platform create cannot
           // be synchronously cancelled, so invalidate its epoch and dispose
@@ -2922,8 +3047,8 @@ class _PocketViewState extends State<PocketView>
       if (video != null) {
         // Playback is synchronized only on a state transition. This keeps a
         // static DrawList from issuing play() on every engine frame.
-        if (previousVisible != true || video.value.isPlaying != true) {
-          unawaited(_applyVideoPlayback(id, video, visible: true));
+        if (_videoNeedsPlaybackSync(id, video)) {
+          unawaited(_applyVideoPlayback(id, video));
         }
       } else {
         _loadVideo(op);
@@ -3007,21 +3132,163 @@ class _PocketViewState extends State<PocketView>
     return visible.width > 0 && visible.height > 0;
   }
 
+  bool _isValidVideoId(String id) =>
+      id.isNotEmpty && id.length <= _maxVideoIdLength;
+
+  bool _videoDrawOpInCurrentFrame(String id) {
+    bool contains(List<PocketOp> ops) {
+      return ops.any((op) => op is PocketVideoOp && op.id == id);
+    }
+
+    return contains(_frame.ops) ||
+        (_frame.auxiliary != null && contains(_frame.auxiliary!.ops));
+  }
+
+  void _trimVideoCommandCaches() {
+    // Active admissions are never evicted: doing so would allow a retained
+    // DrawOp to fall back to autoplay after its command history is dropped.
+    while (_videoReleasedIds.length > _maxVideoRetiredIds) {
+      // A tombstone that is still painted is an old retained surface, not
+      // disposable history. Pin it until its DrawOp leaves the current frame;
+      // otherwise a burst of unrelated releases could make that old surface
+      // eligible for autoplay again on the next scan.
+      String? stale;
+      for (final id in _videoReleasedIds) {
+        if (!_videoDrawOpInCurrentFrame(id)) {
+          stale = id;
+          break;
+        }
+      }
+      if (stale == null) break;
+      _videoReleasedIds.remove(stale);
+      _dropVideoEpochIfIdle(stale);
+    }
+    while (_videoDesiredPlayback.length > _maxVideoPlaybackCommands) {
+      // This should normally track _videoKnownIds exactly. Keep a defensive
+      // bound for malformed/legacy state without evicting an active id's
+      // admission record.
+      String? stale;
+      for (final key in _videoDesiredPlayback.keys) {
+        if (!_videoKnownIds.contains(key)) {
+          stale = key;
+          break;
+        }
+      }
+      if (stale == null) break;
+      _videoDesiredPlayback.remove(stale);
+    }
+  }
+
+  bool _admitVideoId(String id, {bool explicitCommand = false}) {
+    if (!_isValidVideoId(id)) return false;
+    if (_videoKnownIds.contains(id)) return true;
+    if (_videoKnownIds.length >= _maxVideoPlaybackCommands) return false;
+    if (_videoReleasedIds.contains(id)) {
+      // A tombstone is a permanent-release boundary. Only an explicit
+      // playback command is evidence of a new registration; an old DrawOp
+      // must not revive the released surface by itself.
+      if (!explicitCommand) return false;
+      _videoReleasedIds.remove(id);
+    }
+    // Never evict an older admitted id to make room for a new one. Once the
+    // bound is reached, an unrecognized id fails closed until an active id is
+    // permanently released.
+    _videoKnownIds.add(id);
+    return true;
+  }
+
+  String? _videoEventId(Map<String, dynamic> params) {
+    final raw = params['id'];
+    if (raw is! String || !_isValidVideoId(raw)) return null;
+    return raw;
+  }
+
+  void _dropVideoEpochIfIdle(String id) {
+    if (_videoKnownIds.contains(id) ||
+        _videoReleasedIds.contains(id) ||
+        _loadingVideos.contains(id) ||
+        _loadingVideoAssets.containsKey(id) ||
+        _videos.containsKey(id)) {
+      return;
+    }
+    _videoEpochs.remove(id);
+  }
+
+  void _clearFailedVideo(String id) {
+    _failedVideos.removeWhere((key) => key.id == id);
+    _videoFailureAssets.remove(id);
+  }
+
+  void _rememberFailedVideo(String id, String asset) {
+    final key = (id: id, asset: asset);
+    _failedVideos.remove(key);
+    _failedVideos.add(key);
+    _videoFailureAssets[id] = asset;
+    while (_failedVideos.length > _maxVideoFailureEntries) {
+      final stale = _failedVideos.first;
+      _failedVideos.remove(stale);
+      if (_videoFailureAssets[stale.id] == stale.asset) {
+        _videoFailureAssets.remove(stale.id);
+      }
+    }
+  }
+
   void _invalidateVideoLoad(String id) {
     if (!_loadingVideos.remove(id)) return;
+    final asset = _loadingVideoAssets[id] ?? _videoDiagnostics[id]?.asset ?? '';
     _loadingVideoAssets.remove(id);
-    _videoEpochs[id] = (_videoEpochs[id] ?? 0) + 1;
+    _videoEpochs[id] = _nextVideoEpoch++;
+    _emitVideoState(id, asset: asset, state: 'disposed');
   }
 
   void _releaseVideo(String id, {bool resetDesiredPlayback = false}) {
-    _videoEpochs[id] = (_videoEpochs[id] ?? 0) + 1;
+    final asset =
+        _videoAssets[id] ??
+        _loadingVideoAssets[id] ??
+        _videoDiagnostics[id]?.asset ??
+        '';
+    // Use a view-global ticket instead of an id-local counter. If a retired
+    // tombstone and its epoch are both bounded out while an old initialize()
+    // is still pending, a newly admitted id must not be able to reuse the
+    // stale epoch (ABA).
+    _videoEpochs[id] = _nextVideoEpoch++;
+    final playbackPump = _videoPlaybackPumps.remove(id);
+    _videoPlaybackPumpVideos.remove(id);
     _loadingVideos.remove(id);
     _loadingVideoAssets.remove(id);
     _videoVisibility.remove(id);
     _videoAssets.remove(id);
     if (resetDesiredPlayback) _videoDesiredPlayback.remove(id);
     final video = _videos.remove(id);
-    if (video != null) unawaited(video.dispose());
+    final listener = _videoDiagnosticListeners.remove(id);
+    if (video != null && listener != null) video.removeListener(listener);
+    _emitVideoState(id, asset: asset, state: 'disposed');
+    if (video != null) {
+      // video_player starts its position timer after an in-flight play Future
+      // completes. Await the stale pump before disposing so a late completion
+      // cannot create a timer on an already-disposed controller.
+      unawaited(() async {
+        if (playbackPump != null) {
+          try {
+            await playbackPump;
+          } catch (_) {
+            // The stale pump owns its diagnostic error boundary; teardown is
+            // still required even when the platform command failed.
+          }
+        }
+        await video.dispose();
+      }());
+    }
+  }
+
+  void _releaseVideoPermanently(String id) {
+    if (!_videoKnownIds.contains(id)) return;
+    _videoReleasedIds.remove(id);
+    _videoReleasedIds.add(id);
+    _videoKnownIds.remove(id);
+    _clearFailedVideo(id);
+    _releaseVideo(id, resetDesiredPlayback: true);
+    _trimVideoCommandCaches();
   }
 
   /// Retire native textures before admitting resources from the same frame.
@@ -3154,6 +3421,15 @@ class _PocketViewState extends State<PocketView>
   }
 
   Future<void> _loadVideo(PocketVideoOp op) async {
+    if (!_videoKnownIds.contains(op.id) || _videoReleasedIds.contains(op.id)) {
+      return;
+    }
+    final previousFailureAsset = _videoFailureAssets[op.id];
+    if (previousFailureAsset != null && previousFailureAsset != op.asset) {
+      // A source change is an explicit retry boundary. Do not carry a failed
+      // (id, oldAsset) cache entry back when the guest swaps sources.
+      _clearFailedVideo(op.id);
+    }
     final resourceKey = _videoResourceKey(op);
     if (_videos.containsKey(op.id) || _failedVideos.contains(resourceKey)) {
       return;
@@ -3163,7 +3439,9 @@ class _PocketViewState extends State<PocketView>
     if (loadingAsset != null) _invalidateVideoLoad(op.id);
     if (!_loadingVideos.add(op.id)) return;
     _loadingVideoAssets[op.id] = op.asset;
-    final epoch = _videoEpochs[op.id] ?? 0;
+    _emitVideoState(op.id, asset: op.asset, state: 'loading');
+    final epoch = _nextVideoEpoch++;
+    _videoEpochs[op.id] = epoch;
     VideoPlayerController? video;
     try {
       // video_player renders through Flutter's Texture widget by default; no
@@ -3182,13 +3460,19 @@ class _PocketViewState extends State<PocketView>
       _videos[op.id] = video;
       _videoAssets[op.id] = op.asset;
       _videoDesiredPlayback.putIfAbsent(op.id, () => op.autoplay);
-      await _applyVideoPlayback(
-        op.id,
-        video,
-        visible: _videoVisibility[op.id] ?? false,
-      );
+      _failedVideos.remove(resourceKey);
+      if (_videoFailureAssets[op.id] == op.asset) {
+        _videoFailureAssets.remove(op.id);
+      }
+      final listener = () => _onVideoValueChanged(op.id, video!);
+      _videoDiagnosticListeners[op.id] = listener;
+      video.addListener(listener);
+      _emitVideoState(op.id, asset: op.asset, state: 'ready', video: video);
+      await _applyVideoPlayback(op.id, video);
       if (!mounted || (_videoEpochs[op.id] ?? 0) != epoch) {
         if (identical(_videos[op.id], video)) {
+          video.removeListener(listener);
+          _videoDiagnosticListeners.remove(op.id);
           _videos.remove(op.id);
           _videoAssets.remove(op.id);
           await video.dispose();
@@ -3197,43 +3481,244 @@ class _PocketViewState extends State<PocketView>
       }
       _markSceneNeedsBuild();
     } catch (error) {
-      await video?.dispose();
-      if ((_videoEpochs[op.id] ?? 0) == epoch) {
-        _failedVideos.add(resourceKey);
-        if (mounted) widget.onError?.call(error);
+      final current = (_videoEpochs[op.id] ?? 0) == epoch;
+      final listener = _videoDiagnosticListeners.remove(op.id);
+      if (video != null && listener != null) video.removeListener(listener);
+      // `video_player` leaves its creating completer pending when a platform
+      // create call fails before a player id exists. Awaiting dispose in that
+      // branch would therefore suppress the local error forever. There is no
+      // native resource to synchronously release in that case; let the plugin
+      // finish any available cancellation without blocking diagnostics.
+      if (video != null) unawaited(video.dispose());
+      if (current) {
+        if (identical(_videos[op.id], video)) {
+          _videos.remove(op.id);
+          _videoAssets.remove(op.id);
+        }
+        _rememberFailedVideo(op.id, op.asset);
+        _emitVideoState(
+          op.id,
+          asset: op.asset,
+          state: 'error',
+          error: '$error',
+        );
       }
     } finally {
       if ((_videoEpochs[op.id] ?? 0) == epoch) {
         _loadingVideos.remove(op.id);
         _loadingVideoAssets.remove(op.id);
       }
+      _dropVideoEpochIfIdle(op.id);
     }
   }
 
-  String _videoResourceKey(PocketVideoOp op) => '${op.id}\u0000${op.asset}';
+  ({String id, String asset}) _videoResourceKey(PocketVideoOp op) =>
+      (id: op.id, asset: op.asset);
 
-  Future<void> _applyVideoPlayback(
-    String id,
-    VideoPlayerController video, {
-    required bool visible,
-  }) async {
-    final desired = _videoDesiredPlayback[id];
-    if (desired == null || !video.value.isInitialized) return;
-    try {
-      if (!_effectiveActive || !visible) {
-        if (video.value.isPlaying) await video.pause();
-      } else if (desired) {
-        if (!video.value.isPlaying) await video.play();
-      } else {
-        if (video.value.isPlaying) await video.pause();
+  void _onVideoValueChanged(String id, VideoPlayerController video) {
+    if (!identical(_videos[id], video)) return;
+    final value = video.value;
+    final state = value.hasError
+        ? 'error'
+        : value.isPlaying
+        ? 'playing'
+        : value.isInitialized
+        ? (_videoDiagnostics[id]?.state == 'ready' ? 'ready' : 'paused')
+        : 'loading';
+    _emitVideoState(
+      id,
+      asset: _videoAssets[id] ?? _videoDiagnostics[id]?.asset ?? '',
+      state: state,
+      video: video,
+      error: value.errorDescription,
+    );
+  }
+
+  void _emitVideoState(
+    String id, {
+    required String asset,
+    required String state,
+    VideoPlayerController? video,
+    String? error,
+  }) {
+    final playing = video?.value.isPlaying ?? state == 'playing';
+    final diagnostic = _PocketVideoDiagnostic(
+      id: id,
+      asset: asset,
+      state: state,
+      playing: playing,
+      visible: _videoVisibility[id] ?? false,
+      active: _effectiveActive,
+      error: error,
+    );
+    final previous = _videoDiagnostics[id];
+    if (previous != null && previous.sameState(diagnostic)) return;
+    _videoDiagnostics[id] = diagnostic;
+    while (_videoDiagnostics.length > _maxVideoDiagnostics) {
+      String? stale;
+      for (final key in _videoDiagnostics.keys) {
+        if (!_videos.containsKey(key) && !_loadingVideos.contains(key)) {
+          stale = key;
+          break;
+        }
       }
-      // Visibility can change while the platform play/pause Future is in
-      // flight. Re-check after the await so a late play completion cannot
-      // leave a hidden texture running.
-      if (!_effectiveActive && video.value.isPlaying) await video.pause();
-    } catch (error) {
-      if (mounted) widget.onError?.call(error);
+      // Live entries are reconstructed from the controller by snapshot, so
+      // the diagnostic history itself can still enforce a hard bound when a
+      // host mounts more than the retained history window at once.
+      _videoDiagnostics.remove(stale ?? _videoDiagnostics.keys.first);
     }
+    if (!mounted || _runtime == null) return;
+    _controller.send(
+      method: 'video.state',
+      params: {
+        ...diagnostic.toJson(),
+        'controllers': _videos.length,
+        'loading': _loadingVideos.length,
+      },
+    );
+  }
+
+  Map<String, dynamic> _videoSnapshotItem(String id) {
+    final video = _videos[id];
+    final prior = _videoDiagnostics[id];
+    if (video != null) {
+      final value = video.value;
+      final state = value.hasError
+          ? 'error'
+          : value.isPlaying
+          ? 'playing'
+          : prior?.state == 'ready'
+          ? 'ready'
+          : 'paused';
+      return _PocketVideoDiagnostic(
+        id: id,
+        asset: _videoAssets[id] ?? prior?.asset ?? '',
+        state: state,
+        playing: value.isPlaying,
+        visible: _videoVisibility[id] ?? false,
+        active: _effectiveActive,
+        error: value.errorDescription,
+      ).toJson();
+    }
+    return (prior ??
+            _PocketVideoDiagnostic(
+              id: id,
+              asset: _loadingVideoAssets[id] ?? '',
+              state: _loadingVideos.contains(id) ? 'loading' : 'disposed',
+              playing: false,
+              visible: _videoVisibility[id] ?? false,
+              active: _effectiveActive,
+            ))
+        .toJson();
+  }
+
+  void _sendVideoSnapshot() {
+    final ids = <String>{
+      ..._videoDiagnostics.keys,
+      ..._loadingVideos,
+      ..._videos.keys,
+    };
+    final items = ids.map(_videoSnapshotItem).toList(growable: false);
+    items.sort((left, right) => '${left['id']}'.compareTo('${right['id']}'));
+    _controller.send(
+      method: 'video.snapshot',
+      params: {
+        'controllers': _videos.length,
+        'loading': _loadingVideos.length,
+        'items': items,
+      },
+    );
+  }
+
+  bool _videoShouldPlay(String id) {
+    return _effectiveActive &&
+        (_videoVisibility[id] ?? false) &&
+        _videoDesiredPlayback[id] == true;
+  }
+
+  bool _videoNeedsPlaybackSync(String id, VideoPlayerController video) {
+    return video.value.isInitialized &&
+        video.value.isPlaying != _videoShouldPlay(id);
+  }
+
+  bool _videoPlaybackStillCurrent(
+    String id,
+    VideoPlayerController video,
+    int epoch,
+  ) {
+    final currentEpoch = _videoEpochs[id];
+    return !_isDisposed &&
+        mounted &&
+        currentEpoch != null &&
+        currentEpoch == epoch &&
+        identical(_videos[id], video);
+  }
+
+  Future<void> _applyVideoPlayback(String id, VideoPlayerController video) {
+    if (_isDisposed || !video.value.isInitialized) {
+      return Future<void>.value();
+    }
+    final running = _videoPlaybackPumps[id];
+    if (running != null && identical(_videoPlaybackPumpVideos[id], video)) {
+      return running;
+    }
+    final result = _drainVideoPlayback(id, video);
+    final operation = result.then<void>((_) {});
+    _videoPlaybackPumps[id] = operation;
+    _videoPlaybackPumpVideos[id] = video;
+    unawaited(
+      result.then<void>((converged) {
+        if (identical(_videoPlaybackPumps[id], operation)) {
+          _videoPlaybackPumps.remove(id);
+          _videoPlaybackPumpVideos.remove(id);
+          // A command can already be complete when a second JS event arrives
+          // in the same batch. Reconcile once after cleanup so a no-op
+          // play/pause cannot hide the latest intent. A failed command returns
+          // false and is not retried in a microtask loop.
+          if (converged && _videoNeedsPlaybackSync(id, video)) {
+            unawaited(_applyVideoPlayback(id, video));
+          }
+        }
+      }),
+    );
+    return operation;
+  }
+
+  Future<bool> _drainVideoPlayback(
+    String id,
+    VideoPlayerController video,
+  ) async {
+    final epoch = _videoEpochs[id];
+    if (epoch == null) return false;
+    try {
+      while (_videoPlaybackStillCurrent(id, video, epoch)) {
+        final shouldPlay = _videoShouldPlay(id);
+        if (video.value.isPlaying == shouldPlay) return true;
+        if (shouldPlay) {
+          await video.play();
+        } else {
+          await video.pause();
+        }
+        // The canonical visibility/activity/desired state may have changed
+        // while the platform Future was in flight. The loop serializes the
+        // next command after the previous one completes, so a late play can
+        // never race a compensating pause on the same controller.
+      }
+    } catch (error) {
+      // A release, asset replacement, or PocketView disposal owns teardown of
+      // the stale controller. Do not report its expected late platform error.
+      if (_videoPlaybackStillCurrent(id, video, epoch)) {
+        _emitVideoState(
+          id,
+          asset: _videoAssets[id] ?? _videoDiagnostics[id]?.asset ?? '',
+          state: 'error',
+          video: video,
+          error: '$error',
+        );
+      }
+      return false;
+    }
+    return true;
   }
 
   double? _finiteTextInputNumber(Object? value) {
@@ -4002,25 +4487,39 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
+  void _handleVideoEvents(List<PocketEvent> events) {
+    for (final event in events) {
+      if (event.method == 'video.release') {
+        final id = _videoEventId(event.params);
+        if (id != null) {
+          // A first registration may release its DrawOp in the same frame.
+          // Treat the current DrawOp as the narrow admission proof for that
+          // release, while still rejecting an arbitrary raw release id.
+          if (!_videoKnownIds.contains(id) && _videoDrawOpInCurrentFrame(id)) {
+            _admitVideoId(id);
+          }
+          _releaseVideoPermanently(id);
+        }
+      } else if (event.method == 'video.play' ||
+          event.method == 'video.pause') {
+        final id = _videoEventId(event.params);
+        // A command is a legal registration boundary even when its DrawOp is
+        // currently culled. Tombstoned ids can only be revived explicitly;
+        // a late DrawOp alone remains rejected.
+        if (id != null && _admitVideoId(id, explicitCommand: true)) {
+          _videoDesiredPlayback[id] = event.method == 'video.play';
+          _trimVideoCommandCaches();
+        }
+      }
+    }
+  }
+
   void _handleEvents(List<PocketEvent> events) {
     for (final event in events) {
       _handleGestureRegions(event);
       if (event.method == 'input.gesture.regions') continue;
       _handleTextInputEvent(event);
-      if (event.method == 'video.play' || event.method == 'video.pause') {
-        final id = '${event.params['id'] ?? 'video'}';
-        _videoDesiredPlayback[id] = event.method == 'video.play';
-        final video = _videos[id];
-        if (video != null) {
-          unawaited(
-            _applyVideoPlayback(
-              id,
-              video,
-              visible: _videoVisibility[id] ?? false,
-            ),
-          );
-        }
-      }
+      if (event.method == 'video.inspect') _sendVideoSnapshot();
       if (event.method == 'app.echo') {
         final result = event.params['message'] ?? event.params;
         _controller.sendRaw(<String, dynamic>{
@@ -4080,6 +4579,37 @@ class _PocketViewState extends State<PocketView>
     _outsideTextInputPointerOrigins.clear();
   }
 
+  bool _applicationSurfaceContains(PocketHostSurfaceOp op, Offset point) {
+    if (op.kind != 'application' || !op.focused) return false;
+    if (!Rect.fromLTWH(op.x, op.y, op.width, op.height).contains(point)) {
+      return false;
+    }
+    final clip = op.clip;
+    return clip == null ||
+        Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height).contains(point);
+  }
+
+  /// Mirrors the compositor's paint-order input rule: a focused child owns a
+  /// point only when no later root DrawOp visibly covers that point. The
+  /// previous geometry-only gate treated a full-viewport child as an input
+  /// barrier and dropped root overlay taps before JS hit testing could see
+  /// them.
+  bool _focusedApplicationOwnsPointerAt(Offset point) {
+    final ops = _frame.ops;
+    for (var index = ops.length - 1; index >= 0; index--) {
+      final op = ops[index];
+      if (op is! PocketHostSurfaceOp ||
+          !_applicationSurfaceContains(op, point)) {
+        continue;
+      }
+      for (var later = index + 1; later < ops.length; later++) {
+        if (_pocketOpPaintsAt(ops[later], point)) return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
   bool _sendPointer({
     required int surface,
     required String phase,
@@ -4115,28 +4645,14 @@ class _PocketViewState extends State<PocketView>
     final rawY = localPosition.dy * frameHeight / actualHeight;
     if (!rawX.isFinite || !rawY.isFinite) return false;
 
-    // A focused nested guest owns its local pointer route. Parent Listener
-    // also sees bubbling events, so do not submit the same down to both realms.
+    // A focused nested guest owns its local pointer route only when no later
+    // root DrawOp paints over this point. Parent Listener also sees bubbling
+    // events, so suppress the duplicate root down only for that case. A root
+    // overlay painted after a full-viewport child must still reach its own
+    // JS hit-test/FocusScope.
     if (phase == 'down' &&
         surface == 0 &&
-        _frame.ops.whereType<PocketHostSurfaceOp>().any(
-          (op) =>
-              op.kind == 'application' &&
-              op.focused &&
-              Rect.fromLTWH(
-                op.x,
-                op.y,
-                op.width,
-                op.height,
-              ).contains(Offset(rawX, rawY)) &&
-              (op.clip == null ||
-                  Rect.fromLTWH(
-                    op.clip!.x,
-                    op.clip!.y,
-                    op.clip!.width,
-                    op.clip!.height,
-                  ).contains(Offset(rawX, rawY))),
-        )) {
+        _focusedApplicationOwnsPointerAt(Offset(rawX, rawY))) {
       return false;
     }
     final effectiveTextInputRect = surface == 0
@@ -4367,7 +4883,6 @@ class _PocketViewState extends State<PocketView>
     _closeTextInput(rebuild: false);
     _sceneRevision.dispose();
     _editorRevision.dispose();
-    _detachRuntime(fallback: widget.runtime);
     for (final image in _images.values) {
       image.dispose();
     }
@@ -4377,18 +4892,41 @@ class _PocketViewState extends State<PocketView>
     _loadingImages.clear();
     _loadingImageRevisions.clear();
     _textLayoutCache.dispose();
-    for (final id in _loadingVideos) {
+    final retiringVideoIds = <String>{..._loadingVideos, ..._videos.keys};
+    final retiringVideoAssets = <String, String>{
+      for (final id in retiringVideoIds)
+        id: _videoAssets[id] ?? _loadingVideoAssets[id] ?? '',
+    };
+    for (final id in retiringVideoIds) {
       _videoEpochs[id] = (_videoEpochs[id] ?? 0) + 1;
+    }
+    for (final entry in _videos.entries) {
+      final listener = _videoDiagnosticListeners.remove(entry.key);
+      if (listener != null) entry.value.removeListener(listener);
     }
     _loadingVideos.clear();
     _loadingVideoAssets.clear();
     _videoVisibility.clear();
+    _videoKnownIds.clear();
+    _videoReleasedIds.clear();
+    _videoFrameIds.clear();
+    _videoDesiredPlayback.clear();
+    _videoPlaybackPumps.clear();
+    _videoPlaybackPumpVideos.clear();
     _videoAssets.clear();
     final videos = _videos.values.toList(growable: false);
     _videos.clear();
+    for (final id in retiringVideoIds) {
+      _emitVideoState(
+        id,
+        asset: retiringVideoAssets[id] ?? '',
+        state: 'disposed',
+      );
+    }
     for (final video in videos) {
       unawaited(video.dispose());
     }
+    _detachRuntime(fallback: widget.runtime);
     super.dispose();
   }
 
@@ -5260,6 +5798,45 @@ class _PocketViewState extends State<PocketView>
       ),
     );
   }
+}
+
+final class _PocketVideoDiagnostic {
+  const _PocketVideoDiagnostic({
+    required this.id,
+    required this.asset,
+    required this.state,
+    required this.playing,
+    required this.visible,
+    required this.active,
+    this.error,
+  });
+
+  final String id;
+  final String asset;
+  final String state;
+  final bool playing;
+  final bool visible;
+  final bool active;
+  final String? error;
+
+  bool sameState(_PocketVideoDiagnostic other) =>
+      id == other.id &&
+      asset == other.asset &&
+      state == other.state &&
+      playing == other.playing &&
+      visible == other.visible &&
+      active == other.active &&
+      error == other.error;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'id': id,
+    'asset': asset,
+    'state': state,
+    'playing': playing,
+    'visible': visible,
+    'active': active,
+    if (error != null && error!.isNotEmpty) 'error': error,
+  };
 }
 
 final class _PocketVideoRequest {

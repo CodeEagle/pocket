@@ -40,6 +40,9 @@ export interface DisplayGeometry {
   reservedRegions: readonly DisplayRegion[];
 }
 
+export type WindowSizeClass = "compact" | "medium" | "expanded";
+export type DesignDensity = "touch" | "desktop";
+
 export interface ResponsiveLayout {
   mode: "narrow" | "wide";
   navigation: "bottom" | "rail";
@@ -314,14 +317,23 @@ export interface DisplayContourBandOptions {
   bottomTrim?: number;
   /** Extra vertical reservation below the occlusion (for example a folded-rail close button). */
   extraBottom?: number;
-  /** Extra horizontal reservation at the top-right edge (for example a top action target). */
+  /** Extra horizontal reservation at the left edge. */
+  extraLeft?: number;
+  /** Extra horizontal reservation at the top-right/right edge (for example a top action target). */
   extraRight?: number;
+  /** Unreserved left boundary of the item/container in guest-canvas coordinates. Defaults to `0`. */
+  itemLeft?: number;
   /** Unreserved right boundary of the item/container in guest-canvas coordinates. Defaults to `geometry.width`. */
   itemRight?: number;
-  /** Progressive transition zone height below the contour bottom. */
+  /** Progressive transition zone height above/below the contour. */
   rampPx?: number;
   /** Clearance between UI content and the occlusion contour. Defaults to `DISPLAY_CONTOUR_CLEARANCE_PX` (5px). */
   safetyGap?: number;
+}
+
+export interface DisplaySideContourReserves {
+  readonly left: number;
+  readonly right: number;
 }
 
 function isVerticalDivision(region: DisplayRegion, geometry: DisplayGeometry): boolean {
@@ -339,19 +351,52 @@ function isVerticalDivision(region: DisplayRegion, geometry: DisplayGeometry): b
     && frameRight > 0;
 }
 
-function isLocalTopRightOcclusion(region: DisplayRegion, geometry: DisplayGeometry): boolean {
+function isCoveredByTopSafeAreaOnly(expanded: DisplayRegionFrame, geometry: DisplayGeometry): boolean {
+  return geometry.safeArea.top > DISPLAY_GEOMETRY_EPSILON
+    && expanded.top + expanded.height <= geometry.safeArea.top + DISPLAY_GEOMETRY_EPSILON
+    && geometry.safeArea.left <= DISPLAY_GEOMETRY_EPSILON
+    && geometry.safeArea.right <= DISPLAY_GEOMETRY_EPSILON;
+}
+
+function isLocalLeftOcclusion(region: DisplayRegion, geometry: DisplayGeometry): boolean {
+  if (region.kind !== "occlusion") return false;
+  const expanded = expandedRegionFrame(region);
+  const expandedRight = expanded.left + expanded.width;
+  if (isCoveredByTopSafeAreaOnly(expanded, geometry)) return false;
+  const maxOuterGap = Math.max(DISPLAY_GEOMETRY_EPSILON, geometry.safeArea.left - expanded.width + DISPLAY_GEOMETRY_EPSILON, 24);
+  return region.frame.top >= -DISPLAY_GEOMETRY_EPSILON
+    && region.frame.top + region.frame.height <= geometry.height + DISPLAY_GEOMETRY_EPSILON
+    && expanded.left >= 0
+    && expanded.left <= maxOuterGap
+    && expandedRight < geometry.width * 0.4
+    && expanded.height < geometry.height * 0.6
+    && expanded.width < geometry.width * 0.6;
+}
+
+function isLocalRightOcclusion(region: DisplayRegion, geometry: DisplayGeometry): boolean {
   if (region.kind !== "occlusion") return false;
   const expanded = expandedRegionFrame(region);
   const frameRight = region.frame.left + region.frame.width;
   const expandedRight = expanded.left + expanded.width;
-  return region.frame.top >= 0
-    && expanded.top <= DISPLAY_GEOMETRY_EPSILON
+  if (isCoveredByTopSafeAreaOnly(expanded, geometry)) return false;
+  const outerDistance = geometry.width - expandedRight;
+  const maxOuterGap = Math.max(DISPLAY_GEOMETRY_EPSILON, geometry.safeArea.right - expanded.width + DISPLAY_GEOMETRY_EPSILON, 24);
+  return region.frame.top >= -DISPLAY_GEOMETRY_EPSILON
     && expanded.left >= 0
     && frameRight <= geometry.width + DISPLAY_GEOMETRY_EPSILON
     && region.frame.top + region.frame.height <= geometry.height + DISPLAY_GEOMETRY_EPSILON
-    && geometry.width - expandedRight <= DISPLAY_GEOMETRY_EPSILON
+    && outerDistance <= maxOuterGap
+    && expanded.left > geometry.width * 0.6
     && expanded.height < geometry.height * 0.6
     && expanded.width < geometry.width * 0.6;
+}
+
+function isLocalTopRightOcclusion(region: DisplayRegion, geometry: DisplayGeometry): boolean {
+  if (!isLocalRightOcclusion(region, geometry)) return false;
+  const expanded = expandedRegionFrame(region);
+  const expandedRight = expanded.left + expanded.width;
+  return expanded.top <= DISPLAY_GEOMETRY_EPSILON
+    && geometry.width - expandedRight <= DISPLAY_GEOMETRY_EPSILON;
 }
 
 function matchesTopRightOcclusionSafeRight(geometry: DisplayGeometry, insets: DisplayInsets): boolean {
@@ -374,6 +419,40 @@ function matchesTopRightOcclusionSafeRight(geometry: DisplayGeometry, insets: Di
   return maxCornerRight > 0 && Math.abs(safeRight - maxCornerRight) <= DISPLAY_GEOMETRY_EPSILON;
 }
 
+function matchesSideOcclusionSafeLeft(geometry: DisplayGeometry, insets: DisplayInsets): boolean {
+  const safeLeft = geometry.safeArea.left;
+  if (safeLeft <= 0 || Math.abs(insets.left - safeLeft) > DISPLAY_GEOMETRY_EPSILON) return false;
+  let maxLocalLeft = 0;
+  for (const region of activeRegions(geometry)) {
+    if (region.kind !== "occlusion") continue;
+    const expanded = expandedRegionFrame(region);
+    const nearLeftEdge = expanded.left < geometry.width * 0.4;
+    if (!nearLeftEdge) continue;
+    if (!isLocalLeftOcclusion(region, geometry)) {
+      return false;
+    }
+    maxLocalLeft = Math.max(maxLocalLeft, expanded.left + expanded.width);
+  }
+  return maxLocalLeft > 0 && Math.abs(safeLeft - maxLocalLeft) <= DISPLAY_GEOMETRY_EPSILON;
+}
+
+function matchesSideOcclusionSafeRight(geometry: DisplayGeometry, insets: DisplayInsets): boolean {
+  const safeRight = geometry.safeArea.right;
+  if (safeRight <= 0 || Math.abs(insets.right - safeRight) > DISPLAY_GEOMETRY_EPSILON) return false;
+  let maxLocalRight = 0;
+  for (const region of activeRegions(geometry)) {
+    if (region.kind !== "occlusion") continue;
+    const expanded = expandedRegionFrame(region);
+    const nearRightEdge = expanded.left + expanded.width > geometry.width * 0.6;
+    if (!nearRightEdge) continue;
+    if (!isLocalRightOcclusion(region, geometry)) {
+      return false;
+    }
+    maxLocalRight = Math.max(maxLocalRight, geometry.width - expanded.left, region.frame.width + region.margins.right);
+  }
+  return maxLocalRight > 0 && Math.abs(safeRight - maxLocalRight) <= DISPLAY_GEOMETRY_EPSILON;
+}
+
 function explainsConservativeRightInset(geometry: DisplayGeometry, insets: DisplayInsets): boolean {
   // A division is topology metadata, not an active layout reservation. Keep
   // inactive divisions in this test: open Duo can publish the seam inactive
@@ -390,6 +469,24 @@ function explainsConservativeRightInset(geometry: DisplayGeometry, insets: Displ
  */
 export function hasLocalTopRightOcclusionInset(geometry: DisplayGeometry): boolean {
   return matchesTopRightOcclusionSafeRight(geometry, reservedInsets(geometry));
+}
+
+/**
+ * True when `safeArea.left` is solely a conservative projection of local
+ * left-side occlusions (such as a landscape notch, Dynamic Island, or single
+ * hole-punch) rather than a full-height left bezel.
+ */
+export function hasLocalLeftOcclusionInset(geometry: DisplayGeometry): boolean {
+  return matchesSideOcclusionSafeLeft(geometry, reservedInsets(geometry));
+}
+
+/**
+ * True when `safeArea.right` is solely a conservative projection of local
+ * right-side occlusions (top-right status cluster, landscape notch, Dynamic
+ * Island, or single hole-punch) rather than a full-height right bezel.
+ */
+export function hasLocalRightOcclusionInset(geometry: DisplayGeometry): boolean {
+  return matchesSideOcclusionSafeRight(geometry, reservedInsets(geometry));
 }
 
 /**
@@ -596,4 +693,30 @@ export function availableDisplayPanes(geometry: DisplayGeometry): DisplayPane[] 
 export function displayPane(geometry: DisplayGeometry, side: "left" | "right"): DisplayPane {
   const panes = availableDisplayPanes(geometry);
   return side === "right" ? panes[panes.length - 1]! : panes[0]!;
+}
+
+/**
+ * Derive the Option C 3-tier Window Size Class from the logical guest viewport:
+ * - `compact` (< 600px): Phone portrait / WeChat Mini-Program
+ * - `medium` (600px..959px): Foldable / Tablet portrait / Two-pane Duo
+ * - `expanded` (>= 960px): Desktop / Web / Large tablet
+ */
+export function deriveWindowSizeClass(geometry: DisplayGeometry): WindowSizeClass {
+  const width = finite(geometry?.width, 390);
+  if (width >= 960) return "expanded";
+  if (width >= 600) return "medium";
+  return "compact";
+}
+
+/**
+ * Derive interactive control density from the viewport or an explicit override:
+ * - `touch` (44px target height, 12-16px spacing) for compact/medium viewports
+ * - `desktop` (36px target height, 8-12px spacing) for expanded desktop viewports
+ */
+export function deriveDesignDensity(
+  geometry: DisplayGeometry,
+  override?: DesignDensity | "auto",
+): DesignDensity {
+  if (override === "touch" || override === "desktop") return override;
+  return deriveWindowSizeClass(geometry) === "expanded" ? "desktop" : "touch";
 }

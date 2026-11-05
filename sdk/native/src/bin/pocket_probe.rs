@@ -22,7 +22,7 @@
 
 use pocket_flutter::{
     pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_create, pocket_create_with_density_and_tick_hz,
-    pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
+    pocket_create_with_memory_limits, pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
     pocket_load_files, pocket_next_wake_delay_ms, pocket_resize_viewport, pocket_send,
 };
 use serde_json::{json, Value};
@@ -72,6 +72,21 @@ fn positive_u32(command: &Value, key: &str, default: u32) -> Result<u32, String>
     } else {
         Err(format!("{key} must be positive"))
     }
+}
+
+fn memory_limit(command: &Value, key: &str) -> Result<u64, String> {
+    let Some(memory) = command.get("memory") else {
+        return Ok(0);
+    };
+    let object = memory
+        .as_object()
+        .ok_or_else(|| "memory must be an object".to_owned())?;
+    let Some(value) = object.get(key) else {
+        return Ok(0);
+    };
+    value
+        .as_u64()
+        .ok_or_else(|| format!("memory.{key} must be a non-negative integer"))
 }
 
 fn c_string(value: &str, label: &str) -> Result<CString, Value> {
@@ -128,13 +143,29 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 Ok(value) => value,
                 Err(error) => return (false, error_response(error)),
             };
+            let heap_limit_bytes = match memory_limit(command, "heapLimitBytes") {
+                Ok(value) => value,
+                Err(error) => return (false, error_response(error)),
+            };
+            let max_pak_bytes = match memory_limit(command, "maxPakBytes") {
+                Ok(value) => value,
+                Err(error) => return (false, error_response(error)),
+            };
             destroy(handle);
-            let created =
-                if command.get("rasterDensity").is_some() || command.get("tickHz").is_some() {
-                    pocket_create_with_density_and_tick_hz(width, height, density, tick_hz)
-                } else {
-                    pocket_create(width, height)
-                };
+            let created = if command.get("memory").is_some() {
+                pocket_create_with_memory_limits(
+                    width,
+                    height,
+                    density,
+                    tick_hz,
+                    heap_limit_bytes,
+                    max_pak_bytes,
+                )
+            } else if command.get("rasterDensity").is_some() || command.get("tickHz").is_some() {
+                pocket_create_with_density_and_tick_hz(width, height, density, tick_hz)
+            } else {
+                pocket_create(width, height)
+            };
             if created.is_null() {
                 return (
                     false,

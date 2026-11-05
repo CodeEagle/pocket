@@ -17,6 +17,12 @@ retained frame and host capability messages.
   semantics while composing `View`, `Text`, `Focusable`, `Modal`, and
   `CompositorSurface`. The `demo/js/ui/mobile.tsx` path was a compatibility
   re-export; pages import the public `@pocket/ui` package directly.
+- The retained renderer's `Screen`/`Scaffold` contract and the Flutter
+  host's `MediaQuery.paddingOf(context).top` boundary were used as the
+  source for `packages/pocket_ui/src/ui.tsx:SafeAreaScaffold`. It consumes
+  the existing `display.viewport.safeArea` facts in JS, keeps the canvas
+  background edge-to-edge, and exposes explicit `edges` so a root shell can
+  consume only `top` while an independent guest consumes `all`.
 - `../../mini_apps/syslib/pocket_syslib_router.js` supplied
   `TRANSITION_MODES` and `computeTransitionDescriptor`. The local pure adapter
   is `packages/pocket_ui/src/legacy.ts`; the reducer owns the route stack and
@@ -66,25 +72,47 @@ callback, and restores that callback on cleanup. The signal exposes the live
 viewport, safe area, keyboard inset, and ReservedRegion frames to an external
 app or the showcase. `deriveResponsiveLayout()` then maps the data to bottom
 navigation or a rail while treating a central division as a layout landmark.
-`MobileScaffold` does not silently subscribe to host events; an app opts into
-the adapter where it owns navigation and page composition.
+`SafeAreaScaffold` is the canonical safe-area shell. It subscribes to the
+same event lane and consumes each selected edge once. Independent guests such
+as `demo/js/apps/profile/app.tsx` and `demo/js/apps/lobby/app.tsx` use the
+default `edges="all"`; the Showcase root uses `edges={["top"]}` so its
+full-screen compositor/modal siblings remain outside the padded content.
+When a parent already owns `createDisplayGeometry()`, pass its signal through
+`geometry` to avoid a second signal; independent guests can omit it.
+`MobileScaffold` delegates to this shell with `safeArea="none"` by default
+because nested Showcase pages already sit below that root shell. A caller
+that owns a standalone mobile page can pass `safeArea="all"` instead of
+adding another wrapper.
+
+Independent mini-apps that expose a host close action pass
+`reservedActions="mini-app"` to `SafeAreaScaffold`. This is one shared 60px
+top-right reservation (44px action + 8px outer inset + 8px content gap), not
+per-page right padding. `MobileAppBar` reads the scaffold context and keeps its
+background full width while its title/subtitle column is shrinkable and clipped;
+the trailing badge/action therefore stays at `x + width <= viewportWidth - 60`
+even on a narrow portrait window. The root Showcase intentionally does not set
+this reservation because its full-screen host surfaces own that action region.
+The native JS regression fixture (`packages/pocket_ui/test/safe_area_native.test.ts`)
+probes 390px and 320px windows, sends a 24px top/18px bottom viewport update,
+and asserts the Guest badge and subtitle remain left of that 60px boundary while
+the bottom slot does not consume the bottom inset twice.
 
 The retained Flutter showcase used the same rule at its host boundary: its
 top shell read `MediaQuery.paddingOf(context).top` and reserved that height
 before painting the header (`../../pocketjs_flutter_demo/lib/ui/mini_app_host_page.dart:107-133`),
 while its `BottomNavigationBar` (`../../pocketjs_flutter_demo/lib/render/pocket_ui_components.dart:2239-2345`)
 occupied full width at the bottom with `Expanded` equal-width tab items and
-bottom safe-area padding. The current JS SystemUI applies the equivalent
-`deriveResponsiveLayout(...).insets.top` once on its root `Screen`
-(`demo/js/app.tsx`); individual pages and `MobileScaffold` do not add another
-top inset. `NavigationBar` (also exported as `TabBar` and
-`BottomNavigationBar` from `@pocket/ui`) remains a full-width horizontal
-bottom TabBar across narrow, wide, and iPhone Duo folded/unfolded postures,
-using `bottomBarInsets()` (`packages/pocket_ui/src/responsive.ts`) so
+bottom safe-area padding. The current JS SystemUI applies the equivalent top
+edge once on its root content shell (`demo/js/app.tsx`); individual nested
+pages keep `MobileScaffold safeArea="none"`. `NavigationBar` (also exported as
+`TabBar` and `BottomNavigationBar` from `@pocket/ui`) remains a full-width
+horizontal bottom TabBar across narrow, wide, and iPhone Duo folded/unfolded
+postures, using `bottomBarInsets()` (`packages/pocket_ui/src/responsive.ts`) so
 top-corner occlusions (such as iPhone Duo's top-right status cluster projected
-into `safeArea.right = 84`) do not shrink or shift the bottom tabs. This keeps
-Home/Header, MobileAppBar, and compositor child surfaces in one coordinate
-space.
+into `safeArea.right = 84`) do not shrink or shift the bottom tabs. Passing it
+through the scaffold's `bottomBar` slot does not add a second bottom inset.
+This keeps Home/Header, MobileAppBar, and compositor child surfaces in one
+coordinate space.
 
 ## Liquid Glass boundary
 
@@ -108,7 +136,9 @@ generic renderer concern, not a Dart business widget.
 ## Ablation
 
 There is one public implementation in `packages/pocket_ui` for each mobile
-primitive. There is one mobile button implementation (`MobileButton`) with named aliases
+primitive. `SafeAreaScaffold` owns the only edge-inset policy; `MobileScaffold`
+is a thin themed adapter with an explicit `safeArea="none"` nested default,
+not a second geometry implementation. There is one mobile button implementation (`MobileButton`) with named aliases
 (`FilledButton`, `ElevatedButton`, `OutlinedButton`, and `TextButton`),
 one theme context, and one GlassSurface adapter. The old UIKit is not copied
 as a second runtime library, and no static “38 components” catalogue is

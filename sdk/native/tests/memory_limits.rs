@@ -2,7 +2,8 @@ use std::ffi::{CStr, CString};
 
 use pocket_flutter::{
     bytecode, pocket_create_with_memory_limits, pocket_destroy, pocket_eval, pocket_frame,
-    pocket_last_error, pocket_load, pocket_load_bytecode,
+    pocket_last_error, pocket_load, pocket_load_bytecode, pocket_load_bytecode_files,
+    pocket_load_files,
 };
 use pocket_spec::BINDING_GENERATION;
 use rquickjs::{Context, Runtime};
@@ -242,4 +243,54 @@ fn quickjs_heap_oom_does_not_change_an_independent_runtime() {
         pocket_destroy(independent_32m);
         pocket_destroy(independent_64m);
     }
+}
+
+#[test]
+fn file_loaders_apply_package_policy_at_metadata_before_reading_or_resetting() {
+    let directory = std::env::temp_dir().join(format!(
+        "pocket-pak-admission-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let source_path = directory.join("app.js");
+    let bytecode_path = directory.join("app.qjbc");
+    let pak_path = directory.join("app.pak");
+    std::fs::write(&source_path, "globalThis.frame = () => {};").unwrap();
+    // If the file loader reaches bytecode validation first, it did not reject
+    // the PAK at its file admission boundary.
+    std::fs::write(&bytecode_path, b"invalid bytecode").unwrap();
+    let file = std::fs::File::create(&pak_path).unwrap();
+    file.set_len(128 * MIB).unwrap(); // Sparse: no large fixture allocation.
+    drop(file);
+    let source_path = CString::new(source_path.to_str().unwrap()).unwrap();
+    let bytecode_path = CString::new(bytecode_path.to_str().unwrap()).unwrap();
+    let pak_path = CString::new(pak_path.to_str().unwrap()).unwrap();
+    let handle = pocket_create_with_memory_limits(80.0, 80.0, 1, 60, 8 * MIB, 32);
+    let source = CString::new("globalThis.frame = () => {};").unwrap();
+    let pak = empty_pak();
+    unsafe {
+        assert_eq!(
+            pocket_load(handle, source.as_ptr(), pak.as_ptr(), pak.len()),
+            0
+        );
+        for result in [
+            pocket_load_files(handle, source_path.as_ptr(), pak_path.as_ptr()),
+            pocket_load_bytecode_files(handle, bytecode_path.as_ptr(), pak_path.as_ptr()),
+        ] {
+            assert_eq!(result, -1);
+            assert!(
+                last_error(handle).contains("at most 32 bytes"),
+                "{}",
+                last_error(handle)
+            );
+        }
+        assert!(!pocket_frame(handle, 17.0).is_null());
+        assert!(last_error(handle).is_empty());
+        pocket_destroy(handle);
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }

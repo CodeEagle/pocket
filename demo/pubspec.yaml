@@ -28,6 +28,7 @@ dev_dependencies:
   integration_test:
     sdk: flutter
   flutter_lints: ^5.0.0
+  video_player: ^2.9.5
   flutter_test:
     sdk: flutter
 
@@ -38,5 +39,6 @@ flutter:
     - assets/app.bytecode.json
     - assets/guest-manifest.json
     - assets/app.pak
+    - assets/videos/
     - assets/apps/profile/
     - assets/apps/lobby/

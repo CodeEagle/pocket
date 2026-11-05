@@ -47,8 +47,28 @@ mock.module("@pocketjs/framework/solid/components", () => ({
   Text: (props) => ({ type: "text", props }),
   View: (props) => ({ type: "view", props }),
 }));
+mock.module("@pocketjs/framework/solid/lifecycle", () => ({
+  onFrame: () => () => {},
+}));
 
-const { createRoot, createSignal } = await import("solid-js");
+const { createContext, createRoot, createSignal } = await import("solid-js");
+mock.module(${JSON.stringify(join(isolatedSourceRoot, "ui.tsx"))}, () => ({
+  ContourConsumedContext: createContext(() => false),
+  SafeAreaScaffold: (props) => ({ type: "scaffold", props }),
+  SafeAreaScaffoldContext: createContext({
+    hasScaffold: false,
+    reservedActions: 0,
+    geometry: () => ({ width: 390, height: 669, safeArea: { top: 0, right: 0, bottom: 0, left: 0 }, keyboardInset: 0, reservedRegions: [] }),
+    topRightContentReserve: () => 0,
+    topRightReserveForBand: () => 0,
+  }),
+  ScrollContourItem: (props) => ({ type: "scroll-contour-item", props }),
+  useScrollContourReserve: () => ({ nodeRef: () => {}, reserve: () => 0, syncLayout: () => false }),
+}));
+mock.module(${JSON.stringify(join(isolatedSourceRoot, "responsive.ts"))}, () => ({
+  deriveWindowSizeClass: () => "compact",
+  deriveDesignDensity: () => "touch",
+}));
 const { GlassSurface } = await import(${JSON.stringify(isolatedMobileSourcePath)});
 
 const registrations = [];

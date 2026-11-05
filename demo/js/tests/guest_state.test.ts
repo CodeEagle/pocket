@@ -683,6 +683,8 @@ test("tracked app.qjbc renders performance state through native probe", () => {
 
 test("source checks and boundary integrity", () => {
   const appSource = readFileSync(join(root, "app.tsx"), "utf8");
+  const profileSource = readFileSync(join(root, "apps/profile/app.tsx"), "utf8");
+  const lobbySource = readFileSync(join(root, "apps/lobby/app.tsx"), "utf8");
   const uiSource = readFileSync(join(root, "../../sdk/packages/pocket_ui/src/ui.tsx"), "utf8");
   const releaseSource = readFileSync(join(root, "release.ts"), "utf8");
   const guestManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {
@@ -731,6 +733,15 @@ test("source checks and boundary integrity", () => {
   assert.match(appSource, /Pocket Host Lab/);
   assert.match(appSource, /state\(\)\.mobileDark/);
   assert.doesNotMatch(appSource, /package:flutter|dart:|lib\//);
+  const profileLaunchStart = profileSource.indexOf("const saveAndOpenLobby");
+  const profileLaunchEnd = profileSource.indexOf("\n  return (", profileLaunchStart);
+  assert.ok(profileLaunchStart >= 0 && profileLaunchEnd > profileLaunchStart, "Profile launch flow must remain source-visible");
+  const profileLaunch = profileSource.slice(profileLaunchStart, profileLaunchEnd);
+  assert.doesNotMatch(profileLaunch, /returnToShowcase/, "nested Lobby completion must not auto-return Profile to Showcase");
+  assert.match(profileLaunch, /Profile remains available/);
+  assert.match(profileSource, /label="Return to Showcase"/);
+  assert.match(lobbySource, /label="Return visits to caller"/);
+  assert.doesNotMatch(lobbySource, /label="Return visits to Showcase"/);
   assert.match(uiSource, /function Tabs/);
   assert.match(uiSource, /Button = ActionButton/);
   assert.match(uiSource, /function List/);

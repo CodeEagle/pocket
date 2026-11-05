@@ -27,7 +27,14 @@ function safeFile(rootDir: string, pathname: string): string | undefined {
   try { decoded = decodeURIComponent(pathname); } catch { return undefined; }
   const requested = decoded === "/latest.json" && !existsSync(join(rootDir, "latest.json"))
     ? "/signed-manifest.json" : decoded;
-  const allowed = requested === "/latest.json" || requested === "/signed-manifest.json" || requested === "/payload.json" || /^\/blobs\/[a-f0-9]{64}$/.test(requested);
+  const allowed =
+    requested === "/latest.json" ||
+    requested === "/signed-manifest.json" ||
+    requested === "/payload.json" ||
+    requested === "/bundle.7z" ||
+    requested === "/bundle.zip" ||
+    /^\/bundles\/bundle-[a-f0-9]{64}\.(?:7z|zip)$/.test(requested) ||
+    /^\/blobs\/[a-f0-9]{64}$/.test(requested);
   if (!allowed) return undefined;
   const root = realpathSync(rootDir);
   const candidate = resolve(root, `.${requested}`);
@@ -57,8 +64,20 @@ export function serveUpdates(options: PocketUpdateServerOptions): PocketUpdateSe
       if (!filePath) return new Response("Not Found", { status: 404 });
       const file = Bun.file(filePath);
       if (!await file.exists()) return new Response("Not Found", { status: 404 });
-      const manifest = url.pathname === "/latest.json" || url.pathname === "/signed-manifest.json" || url.pathname === "/payload.json";
-      const headers = new Headers({ "Access-Control-Allow-Origin": "*", "Content-Type": url.pathname.endsWith(".json") ? "application/json; charset=utf-8" : "application/octet-stream", "Cache-Control": manifest ? "no-store" : "public, max-age=31536000, immutable" });
+      const mutable =
+        url.pathname === "/latest.json" ||
+        url.pathname === "/signed-manifest.json" ||
+        url.pathname === "/payload.json" ||
+        url.pathname === "/bundle.7z" ||
+        url.pathname === "/bundle.zip";
+      const contentType = url.pathname.endsWith(".json")
+        ? "application/json; charset=utf-8"
+        : url.pathname.endsWith(".7z")
+          ? "application/x-7z-compressed"
+          : url.pathname.endsWith(".zip")
+            ? "application/zip"
+            : "application/octet-stream";
+      const headers = new Headers({ "Access-Control-Allow-Origin": "*", "Content-Type": contentType, "Cache-Control": mutable ? "no-store" : "public, max-age=31536000, immutable" });
       return request.method === "HEAD" ? new Response(null, { status: 200, headers }) : new Response(file, { headers });
     },
   });

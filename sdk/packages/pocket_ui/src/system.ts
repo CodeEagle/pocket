@@ -1,4 +1,4 @@
-import { forwardHostPacket, type HostBridge, type JsonObject, type JsonValue } from "./host.ts";
+import { forwardHostPacket, type HostBridge, type HostEvent, type HostPacketHandler, type JsonObject, type JsonValue } from "./host.ts";
 
 const MAX_JSON_BYTES = 64 * 1024;
 const MAX_PENDING_CALLS = 32;
@@ -77,6 +77,12 @@ export interface PocketAppPolicy {
 
 export type PocketSystemPolicies = Readonly<Record<string, PocketAppPolicy>>;
 
+/**
+ * Runs before one or more app frames are dismissed. The kernel owns the
+ * lifetime barrier; presentation consumers own any visual transition.
+ */
+export type PocketSystemBeforeDismissHandler = (instanceIds: readonly string[]) => Promise<void>;
+
 export interface InstallPocketSystemOptions {
   bridge: HostBridge;
   policies?: PocketSystemPolicies;
@@ -127,6 +133,8 @@ export interface PocketSystemSurfaceBinding {
   /** Stable handle supplied by the trusted compositor registry in `ui`. */
   surfaceHandle: number;
   focused: boolean;
+  /** False only while the existing launch awaits the host's first-frame fact. */
+  ready?: boolean;
 }
 
 type SystemGlobal = typeof globalThis & {
@@ -162,11 +170,18 @@ export interface PocketSystemSnapshot {
 export interface PocketSystemKernel {
   readonly ready: Promise<void>;
   snapshot(): PocketSystemSnapshot;
-  /** Current visible child bindings; geometry and z-order stay in SystemUI's
-   *  ordinary PocketJS layout tree. */
-  surfaceBindings(): readonly PocketSystemSurfaceBinding[];
+  /** Current child bindings; geometry and z-order stay in SystemUI's ordinary
+   *  PocketJS layout tree. `includeStack` keeps lower app frames resident for
+   *  retained mini-app presentations while preserving the default visible-only
+   *  contract for plain compositor consumers. */
+  surfaceBindings(options?: { includeStack?: boolean }): readonly PocketSystemSurfaceBinding[];
   /** Subscribe to JS policy changes without a frame callback or polling loop. */
   subscribe(listener: () => void): () => void;
+  /**
+   * Await presentation-owned dismissal work before a normal return/cancel
+   * pops or destroys app frames. IDs are ordered top-to-bottom.
+   */
+  onBeforeDismiss(handler: PocketSystemBeforeDismissHandler): () => void;
   /** Present already resident children as compositor surfaces. The requested
    *  order only controls scheduling; actual DrawOps order is owned by the
    *  SystemUI layout tree. A multi-app presentation names its focused app. */
@@ -591,14 +606,17 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
   private presentedInstanceIds: string[] = [];
   private focusedInstanceId: string | null = null;
   private readonly presentationListeners = new Set<() => void>();
+  private readonly beforeDismissHandlers = new Set<PocketSystemBeforeDismissHandler>();
+  private readonly dismissWaiters = new Set<() => void>();
   private readonly calls = new Map<string, PendingCall>();
   private readonly mailbox: PocketAppMessage[] = [];
   private readonly completedRequests = new Map<string, StoredResponse>();
   private readonly target: typeof globalThis & {
-    __pocketEvent?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+    __pocketEvent?: HostPacketHandler;
   };
-  private readonly previousEvent: (((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean }) | undefined;
-  private readonly receiveEvent: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+  private readonly previousEvent: HostPacketHandler | undefined;
+  private readonly receiveEvent: HostPacketHandler;
+  private readonly removeHostEvent: (() => void) | undefined;
   private queue: Promise<void> = Promise.resolve();
   private disposed = false;
   private initialized = false;
@@ -624,37 +642,47 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       throw new PocketSystemError("invalid_system_manifest", "manifest must be an object");
     }
 
-    this.target = globalThis as typeof globalThis & {
-      __pocketEvent?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
-    };
-    this.previousEvent = this.target.__pocketEvent;
-    this.receiveEvent = (packet: string | Record<string, unknown>): void => {
-      if (typeof this.bridge.onEvent !== "function") this.bridge.handle(packet);
-      const event = eventOf(packet);
-      if (event?.name === "system.request") {
+    this.target = globalThis as typeof globalThis & { __pocketEvent?: HostPacketHandler };
+    const handleEvent = (name: string, payload: unknown): void => {
+      if (name === "system.request") {
         void this.enqueue(async () => {
-          await this.handleSystemRequest(event.payload);
+          await this.handleSystemRequest(payload);
           await this.flushForegroundWork();
         });
-      } else if (event?.name === "system.runtime.failed" || event?.name === "system.runtime.closed") {
+      } else if (name === "system.runtime.failed" || name === "system.runtime.closed") {
         void this.enqueue(async () => {
-          await this.handleRuntimeTermination(event.payload, event.name === "system.runtime.failed");
+          await this.handleRuntimeTermination(payload, name === "system.runtime.failed");
           await this.flushForegroundWork();
         });
-      } else if (event?.name === "system.runtime.generation") {
+      } else if (name === "system.runtime.generation") {
         void this.enqueue(async () => {
-          await this.handleGenerationChange(event.payload);
+          await this.handleGenerationChange(payload);
           await this.flushForegroundWork();
         });
       }
-      try {
-        forwardHostPacket(this.previousEvent, packet);
-      } catch {
-        // Keep the host event lane alive if an earlier subscriber fails.
-      }
     };
-    this.receiveEvent.__binaryCapable = true;
-    this.target.__pocketEvent = this.receiveEvent;
+    if (typeof this.bridge.onEvent === "function") {
+      this.previousEvent = undefined;
+      this.receiveEvent = (_packet): void => {};
+      this.removeHostEvent = this.bridge.onEvent((event: HostEvent) => {
+        handleEvent(event.method, event.params);
+      });
+    } else {
+      this.previousEvent = this.target.__pocketEvent;
+      this.receiveEvent = (packet: string | Record<string, unknown>): void => {
+        this.bridge.handle(packet);
+        const event = eventOf(packet);
+        if (event) handleEvent(event.name, event.payload);
+        try {
+          forwardHostPacket(this.previousEvent, packet);
+        } catch {
+          // Keep legacy event chains alive if an earlier subscriber fails.
+        }
+      };
+      this.receiveEvent.__binaryCapable = true;
+      this.removeHostEvent = undefined;
+      this.target.__pocketEvent = this.receiveEvent;
+    }
     this.ready = this.enqueue(() => this.initialize()).catch((error) => {
       this.dispose();
       throw error;
@@ -718,10 +746,16 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     });
   }
 
-  surfaceBindings(): readonly PocketSystemSurfaceBinding[] {
+  surfaceBindings(options: { includeStack?: boolean } = {}): readonly PocketSystemSurfaceBinding[] {
     const registry = this.readSurfaceRegistry();
     const focusedInstanceId = this.focusedInstanceId;
-    return Object.freeze(this.presentedInstanceIds.flatMap((instanceId) => {
+    const instanceIds = options.includeStack
+      ? [...new Set([
+        ...this.stack.map((frame) => frame.instanceId),
+        ...this.presentedInstanceIds,
+      ])]
+      : this.presentedInstanceIds;
+    return Object.freeze(instanceIds.flatMap((instanceId) => {
       if (instanceId === SYSTEM_UI_INSTANCE_ID) return [];
       const record = this.records.get(instanceId);
       if (!record || record.closing || record.failed) return [];
@@ -737,6 +771,8 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         instanceId: record.instanceId,
         surfaceHandle,
         focused: record.instanceId === focusedInstanceId,
+        ...([...this.calls.values()].some(call => call.targetInstanceId === instanceId && call.launchPending)
+          ? { ready: false } : {}),
       })];
     }));
   }
@@ -745,6 +781,15 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.assertActive();
     this.presentationListeners.add(listener);
     return () => this.presentationListeners.delete(listener);
+  }
+
+  onBeforeDismiss(handler: PocketSystemBeforeDismissHandler): () => void {
+    this.assertActive();
+    if (typeof handler !== "function") {
+      throw new PocketSystemError("invalid_dismiss_handler", "before-dismiss handler must be a function");
+    }
+    this.beforeDismissHandlers.add(handler);
+    return () => this.beforeDismissHandlers.delete(handler);
   }
 
   presentSurfaces(appIds: readonly string[], focusedAppId?: string): Promise<void> {
@@ -805,9 +850,13 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const release of this.dismissWaiters) release();
+    this.dismissWaiters.clear();
+    this.beforeDismissHandlers.clear();
     if (this.target.__pocketEvent === this.receiveEvent) {
       this.target.__pocketEvent = this.previousEvent;
     }
+    this.removeHostEvent?.();
     this.stack.length = 0;
     this.presentedInstanceIds = [];
     this.focusedInstanceId = null;
@@ -830,6 +879,25 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
 
   private assertActive(): void {
     if (this.disposed) throw new PocketSystemError("system_disposed", "Pocket System kernel is disposed");
+  }
+
+  private async awaitBeforeDismiss(instanceIds: readonly string[]): Promise<void> {
+    const handlers = [...this.beforeDismissHandlers];
+    if (this.disposed || handlers.length === 0) return;
+    const ids = Object.freeze([...instanceIds]);
+    let release: (() => void) | undefined;
+    const disposed = new Promise<void>((resolve) => {
+      release = resolve;
+      this.dismissWaiters.add(resolve);
+    });
+    try {
+      await Promise.race([
+        Promise.all(handlers.map((handler) => Promise.resolve().then(() => handler(ids)))).then(() => undefined),
+        disposed,
+      ]);
+    } finally {
+      if (release) this.dismissWaiters.delete(release);
+    }
   }
 
   private async hostRequest(capability: string, params: JsonObject): Promise<JsonValue> {
@@ -1286,6 +1354,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         throw new PocketSystemError("runtime_unavailable", "target runtime did not accept its launch event");
       }
       call.launchPending = false;
+      this.notifyPresentation();
       await this.lifecycle(target, "onDidAppear", { requestId: callId });
       await this.flushLifecycle(target);
       await this.flushForegroundMailbox(targetAppId);
@@ -1512,6 +1581,8 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       value: jsonSnapshot(completion.value, "app result"),
       ...(completion.reason ? { reason: completion.reason } : {}),
     };
+    await this.awaitBeforeDismiss([target.instanceId]);
+    this.assertActive();
     await this.lifecycle(target, "onWillDisappear", {
       requestId: call.requestId,
       reason: completion.reason ?? "returned",
@@ -1569,6 +1640,8 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       }
     }
     primaryCall.completion = { cancelled: true, value: null, reason };
+    await this.awaitBeforeDismiss(frames.slice().reverse().map((frame) => frame.instanceId));
+    this.assertActive();
     for (let frameIndex = this.stack.length - 1; frameIndex > index; frameIndex -= 1) {
       const frame = this.stack[frameIndex]!;
       const nested = this.records.get(frame.instanceId);

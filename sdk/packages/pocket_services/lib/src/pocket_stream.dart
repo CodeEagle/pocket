@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:pocket_flutter/src/pocket_model.dart' show PocketEvent;
 
@@ -36,6 +37,13 @@ final class PocketStreamBridge {
   final Map<String, _StreamState> _states = <String, _StreamState>{};
   int _nextId = 0;
   bool _disposed = false;
+
+  // Keep the Dart-side wire admission in step with the public JS adapter and
+  // the native event boundary.  Batches are deliberately one level deep:
+  // accepting nested batches here would make a small outer packet an
+  // unbounded recursive work item.
+  static const int maxBatchMessages = 256;
+  static const int maxMessageBytes = 256 * 1024;
 
   Stream<PocketDuplexStream> get incoming => _incomingController.stream;
 
@@ -83,15 +91,44 @@ final class PocketStreamBridge {
   /// Delivers a packet decoded by the renderer's PocketEvent model.
   void handle(PocketEvent event) {
     if (_disposed) return;
+    if (!_fitsWireLimit(event)) {
+      _rejectOversized(event);
+      return;
+    }
     if (event.method == 'stream.batch') {
       final raw = event.params['events'];
-      if (raw is List) {
-        for (final item in raw.whereType<Map>()) {
-          handle(PocketEvent.fromJson(Map<String, dynamic>.from(item)));
+      if (raw is! List || raw.length > maxBatchMessages) return;
+      for (final item in raw) {
+        if (item is! Map) continue;
+        Map<String, dynamic> json;
+        try {
+          json = Map<String, dynamic>.from(item);
+        } on Object {
+          continue;
+        }
+        // A nested batch is rejected rather than recursively expanded.  This
+        // keeps work bounded even when a hostile packet is deeply nested.
+        final method = '${json['method'] ?? json['name'] ?? ''}';
+        if (method == 'stream.batch') continue;
+        try {
+          _handleSingle(PocketEvent.fromJson(json));
+        } on Object {
+          // Malformed batch members are rejected as a whole member; they do
+          // not abort delivery of the other bounded members.
         }
       }
       return;
     }
+    try {
+      _handleSingle(event);
+    } on Object {
+      // Malformed direct events are ignored without tearing down the host
+      // event pump.  Structured stream failures are emitted only when a
+      // stream id can be trusted by the admission checks above.
+    }
+  }
+
+  void _handleSingle(PocketEvent event) {
     final id = '${event.params['streamId'] ?? event.params['id'] ?? ''}';
     if (id.isEmpty) return;
     if (event.method == 'stream.open') {
@@ -131,6 +168,41 @@ final class PocketStreamBridge {
           ),
         );
     }
+  }
+
+  bool _fitsWireLimit(PocketEvent event) {
+    final sink = _BoundedJsonSink(maxMessageBytes);
+    try {
+      final converter = JsonUtf8Encoder(
+        null,
+        (Object? _) => throw const FormatException('non-JSON event value'),
+      ).startChunkedConversion(sink);
+      converter.add(<String, dynamic>{
+        'id': event.id,
+        'method': event.method,
+        'params': event.params,
+      });
+      converter.close();
+      return true;
+    } on _JsonSizeLimitExceeded {
+      return false;
+    } on Object {
+      // A non-JSON event is not allowed to enter the stream controller.  The
+      // event may already have been decoded by a trusted native boundary, but
+      // this guard keeps the public Dart bridge safe for direct callers too.
+      return false;
+    }
+  }
+
+  void _rejectOversized(PocketEvent event) {
+    final id = '${event.params['streamId'] ?? event.params['id'] ?? ''}';
+    if (id.isEmpty) return;
+    final state = _states[id];
+    if (state == null) return;
+    state.failProtocol(
+      code: 'stream_message_too_large',
+      message: 'Stream message exceeds $maxMessageBytes bytes',
+    );
   }
 
   void dispose() {
@@ -192,6 +264,25 @@ final class _StreamState {
     this.limit,
   ) : _controller = StreamController<Object?>(sync: true) {
     port = _Port(this);
+    _dataStream = _controller.stream.transform(
+      StreamTransformer<Object?, Object?>.fromHandlers(
+        handleData: (value, sink) {
+          _markDelivered();
+          try {
+            sink.add(value);
+          } finally {
+            _deliveringData = false;
+          }
+        },
+        handleError: (error, stackTrace, sink) {
+          sink.addError(error, stackTrace);
+        },
+      ),
+    );
+
+    // The only lifecycle callback needed here is cancellation: it is the
+    // controller's signal that its internal queue has been discarded.
+    _controller.onCancel = _onCancel;
   }
 
   final PocketStreamBridge owner;
@@ -201,26 +292,91 @@ final class _StreamState {
   final int limit;
   final StreamController<Object?> _controller;
   late final _Port port;
-  int _buffered = 0;
+  late final Stream<Object?> _dataStream;
+  // Number of data events still held by the controller or its active
+  // subscription.  The controller has no public queue length, so the
+  // transform marks events only when they actually leave that queue.
+  int _pendingData = 0;
+  bool _deliveringData = false;
   bool _closed = false;
 
   void add(Object? value) {
     if (_closed) return;
-    if (_buffered >= limit) {
-      finish(PocketStreamBufferOverflowException(streamId, limit));
+    // A synchronous controller can have pre-listen events scheduled for
+    // delivery even though `isPaused` is already false after listen().  The
+    // pending count and the delivery guard cover that short interval too.
+    final needsBuffer =
+        _controller.isPaused || _pendingData > 0 || _deliveringData;
+    if (needsBuffer && _pendingData >= limit) {
+      _overflow();
       return;
     }
-    _buffered++;
-    _controller.add(value);
-    if (_buffered > 0) _buffered--;
+    if (needsBuffer) _pendingData++;
+    try {
+      _controller.add(value);
+    } on Object {
+      if (needsBuffer && _pendingData > 0) _pendingData--;
+      rethrow;
+    }
   }
 
   void finish([Object? error]) {
     if (_closed) return;
     _closed = true;
+    // No further data can be admitted after terminal transition.  The
+    // controller retains at most the already-buffered data and terminal event
+    // until a late/paused listener drains or cancels it; our accounting must
+    // not retain a second copy of that state.
+    _pendingData = 0;
+    _deliveringData = false;
     if (error != null && !_controller.isClosed) _controller.addError(error);
     if (!_controller.isClosed) unawaited(_controller.close());
     owner._remove(streamId);
+  }
+
+  void failProtocol({required String code, required String message}) {
+    if (_closed) return;
+    owner.send('stream.error', <String, dynamic>{
+      'streamId': streamId,
+      'error': <String, dynamic>{'code': code, 'message': message},
+    });
+    finish(PocketStreamProtocolException(streamId, message));
+  }
+
+  void _overflow() {
+    final message = 'Stream $streamId exceeded its ${limit}-message buffer';
+    owner.send('stream.error', <String, dynamic>{
+      'streamId': streamId,
+      'error': <String, dynamic>{
+        'code': 'stream_buffer_overflow',
+        'message': message,
+      },
+    });
+    finish(PocketStreamBufferOverflowException(streamId, limit));
+  }
+
+  void _markDelivered() {
+    if (_pendingData > 0) _pendingData--;
+    _deliveringData = true;
+    // The handler calls sink.add synchronously for a synchronous source.  The
+    // wrapper clears the flag after the consumer callback has returned, so
+    // re-entrant inbound packets remain bounded as well.
+  }
+
+  void _onCancel() {
+    // A canceled subscription causes the Dart controller to discard its
+    // internal pending queue.  Drop only our accounting here; an explicit
+    // PocketDuplexStream.cancel() remains available, while cancellation of
+    // the only data subscription also releases the remote producer.
+    _pendingData = 0;
+    _deliveringData = false;
+    if (_closed) return;
+    _closed = true;
+    owner._remove(streamId);
+    owner.send('stream.cancel', <String, dynamic>{
+      'streamId': streamId,
+      'reason': 'listener_cancelled',
+    });
   }
 
   bool send(Object? value) {
@@ -268,7 +424,7 @@ final class _Port implements PocketDuplexStream {
       Map<String, dynamic>.unmodifiable(state.parameters);
 
   @override
-  Stream<Object?> get data => state._controller.stream;
+  Stream<Object?> get data => state._dataStream;
 
   @override
   bool get isClosed => state._closed;
@@ -281,4 +437,24 @@ final class _Port implements PocketDuplexStream {
 
   @override
   bool cancel([String? reason]) => state.cancel(reason);
+}
+
+final class _BoundedJsonSink implements Sink<List<int>> {
+  _BoundedJsonSink(this.limit);
+
+  final int limit;
+  int _bytes = 0;
+
+  @override
+  void add(List<int> chunk) {
+    _bytes += chunk.length;
+    if (_bytes > limit) throw const _JsonSizeLimitExceeded();
+  }
+
+  @override
+  void close() {}
+}
+
+final class _JsonSizeLimitExceeded implements Exception {
+  const _JsonSizeLimitExceeded();
 }

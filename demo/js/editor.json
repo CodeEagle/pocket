@@ -1,0 +1,12 @@
+{
+  "id": "pocket-host-showcase",
+  "appId": "pocket.host.demo",
+  "name": "PocketJS Flutter host showcase",
+  "title": "PocketJS Flutter host showcase",
+  "version": "0.1.0",
+  "build": 1,
+  "tickHz": 60,
+  "entry": "app.tsx",
+  "output": "showcase-app",
+  "framework": "solid"
+}
