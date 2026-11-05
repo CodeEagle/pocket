@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { mock, test } from "bun:test";
 import {
   createHostBridge,
+  HostBridgeAbiError,
   HOST_BRIDGE_MAX_DIAGNOSTICS,
 } from "../src/host.ts";
 import { createPocketStreamAdapter } from "../src/streams.ts";
@@ -12,14 +13,14 @@ mock.module("@pocketjs/framework/clock", () => ({
 }));
 const { createPocketPlatformClient } = await import("../src/platform.ts");
 
-function event(name: string, payload: Record<string, unknown> = {}): string {
-  return JSON.stringify({ type: "event", name, payload });
+function event(name: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+  return { type: "event", name, payload };
 }
 
 test("HostBridge isolates event/tick/previous-sink failures and keeps a bounded diagnostic lane", () => {
   const globalObject = globalThis as typeof globalThis & {
-    __pocketEvent?: (line: string) => void;
-    __pocketDeliver?: (line: string) => void;
+    __pocketEvent?: (packet: Record<string, unknown>) => void;
+    __pocketDeliver?: (packet: Record<string, unknown>) => void;
   };
   const oldEvent = globalObject.__pocketEvent;
   const oldDeliver = globalObject.__pocketDeliver;
@@ -46,7 +47,7 @@ test("HostBridge isolates event/tick/previous-sink failures and keeps a bounded 
   host.onTick!(() => { laterTicks += 1; });
   try {
     globalObject.__pocketEvent!(event("diagnostic.event"));
-    globalObject.__pocketDeliver!("not-json");
+    globalObject.__pocketDeliver!({ type: "unrelated" });
     host.tick();
     for (let index = 0; index < HOST_BRIDGE_MAX_DIAGNOSTICS + 8; index += 1) {
       host.handle(event("bounded.event"));
@@ -67,7 +68,25 @@ test("HostBridge isolates event/tick/previous-sink failures and keeps a bounded 
   }
 });
 
-test("modern HostBridge listeners share one decoded event object across platform and streams", () => {
+test("HostBridge reports a clear error when the direct-object ABI is absent", async () => {
+  const globalObject = globalThis as typeof globalThis & {
+    pocket?: { _emitValue?: (packet: Record<string, unknown>) => boolean };
+  };
+  const previousPocket = globalObject.pocket;
+  globalObject.pocket = undefined;
+  const host = createHostBridge();
+  try {
+    await assert.rejects(host.request("runtime.info"), (error: unknown) =>
+      error instanceof HostBridgeAbiError && /_emitValue/.test(error.message));
+    assert.throws(() => host.emit?.("fixture.event"), (error: unknown) =>
+      error instanceof HostBridgeAbiError && /direct-object/.test(error.message));
+  } finally {
+    host.dispose();
+    globalObject.pocket = previousPocket;
+  }
+});
+
+test("modern HostBridge listeners share one direct event object across platform and streams", () => {
   const host = createHostBridge(() => true);
   const platform = createPocketPlatformClient(undefined, { bridge: host });
   const streams = createPocketStreamAdapter(host);
@@ -88,7 +107,7 @@ test("modern HostBridge listeners share one decoded event object across platform
       data: { value: 7 },
     }));
     assert.deepEqual(values, [{ value: 7 }]);
-    assert.equal(parseCount, 1, "the host decodes the wire packet once for all modern listeners");
+    assert.equal(parseCount, 0, "direct-object host events must not invoke JSON.parse");
   } finally {
     JSON.parse = originalParse;
     streams.dispose();
@@ -99,7 +118,7 @@ test("modern HostBridge listeners share one decoded event object across platform
 
 test("per-request cold-load deadline preserves ordinary deadlines and late responses", async () => {
   const sent: Array<{ payload: { requestId: string; capability: string } }> = [];
-  const bridge = createHostBridge((line) => { sent.push(JSON.parse(line)); return true; }, { timeoutFrames: 2 });
+  const bridge = createHostBridge((packet) => { sent.push(packet as typeof sent[number]); return true; }, { timeoutFrames: 2 });
   try {
     const ordinary = bridge.request("runtime.info").catch((error) => error);
     const cold = bridge.request("system.runtime.create", { appId: "example.remote" }, { timeoutFrames: 5 });
@@ -136,8 +155,8 @@ test("per-request deadline uses virtual timer and disposes its scheduled wake", 
 test("app open and prewarm extend only their own deadline on a shared bridge", async () => {
   const sent: Array<{ payload: { requestId: string; capability: string } }> = [];
   let bridge: ReturnType<typeof createHostBridge>;
-  bridge = createHostBridge((line) => {
-    const packet = JSON.parse(line); sent.push(packet);
+  bridge = createHostBridge((packet) => {
+    sent.push(packet as typeof sent[number]);
     queueMicrotask(() => bridge.handle({ type: "event", name: "host.response", payload: {
       requestId: packet.payload.requestId, capability: packet.payload.capability, ok: true,
       result: packet.payload.capability === "platform.apps.open" ? { requestId: "launch-1" } : {},

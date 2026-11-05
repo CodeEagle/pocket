@@ -550,18 +550,12 @@ function parsePolicies(
   return policies;
 }
 
-function eventOf(packet: string | Record<string, unknown>): { name: string; payload: unknown } | undefined {
-  try {
-    const value: unknown = typeof packet === "string" ? JSON.parse(packet) : packet;
-    if (!isRecord(value)) return undefined;
-    const name = typeof value.name === "string"
-      ? value.name
-      : typeof value.method === "string" ? value.method : "";
-    if (!name) return undefined;
-    return { name, payload: value.payload ?? value.params };
-  } catch {
-    return undefined;
-  }
+function eventOf(packet: Record<string, unknown>): { name: string; payload: unknown } | undefined {
+  const name = typeof packet.name === "string"
+    ? packet.name
+    : typeof packet.method === "string" ? packet.method : "";
+  if (!name) return undefined;
+  return { name, payload: packet.payload ?? packet.params };
 }
 
 function errorShape(error: unknown): { code: string; message: string } {

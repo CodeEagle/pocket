@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { decodeMessage } from "../../targets/wechat/template/binary-bridge.js";
 import { PocketWechatHost, registerCapability, setPermissionHandler } from "../../targets/wechat/template/wechat-host.js";
 
 type Fake = PocketWechatHost & { destroyCalls: number };
@@ -33,11 +34,11 @@ test("dispose rejects reentrant host requests and destroys the WASM host once", 
   const unregister = registerCapability("test.cap", () => new Promise(() => {}));
   setPermissionHandler(() => true);
   host.exports.web_wechat_deliver = () => {
-    host.outbound.push(JSON.stringify({
+    host.outbound.push({
       type: "event",
       name: "host.request",
       payload: { requestId: "reentrant", capability: "test.cap", params: {} },
-    }));
+    });
     host.drainOutbound();
     return 0;
   };
@@ -144,7 +145,7 @@ test("scheduled frames retain an active touch until the real release or cancella
   const host = fakeHost();
   const facts: any[] = [];
   host.exports.web_advance = (_handle: number, pointer: number, length: number) => {
-    facts.push(JSON.parse(new TextDecoder().decode(new Uint8Array(host.exports.memory.buffer, pointer, length))));
+    facts.push(decodeMessage(new Uint8Array(host.exports.memory.buffer, pointer, length)));
     return 0;
   };
   host.exports.web_present = () => 0;

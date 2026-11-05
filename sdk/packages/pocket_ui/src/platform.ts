@@ -98,14 +98,9 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
     }
   };
   const receive: HostPacketHandler = (packet): void => {
-    // Request-only injected bridges retain the explicit compatibility path.
+    // Request-only injected bridges still share the direct-object event lane.
     if (typeof host.onEvent !== "function") host.handle(packet);
-    let event: Record<string, unknown> | undefined;
-    if (typeof packet === "string") {
-      try { event = JSON.parse(packet); } catch { /* Other guest handlers may own this packet. */ }
-    } else if (packet && typeof packet === "object" && !Array.isArray(packet)) {
-      event = packet;
-    }
+    const event = packet;
     if (event) handleEvent(
       typeof event.name === "string" ? event.name : typeof event.method === "string" ? event.method : "",
       event.payload ?? event.params,

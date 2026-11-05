@@ -77,10 +77,10 @@ assert.equal(registrations.length, 1);
 assert.deepEqual(registrations[0].options, { group: undefined, page: undefined, active: true, playing: false });
 assert.equal(surfaces[0].id, "hero");
 assert.equal(surfaces[0].kind, "video");
-assert.deepEqual(JSON.parse(surfaces[0].payload), { asset: "one.mp4", fit: "cover", autoplay: false });
+assert.deepEqual(surfaces[0].payload, { asset: "one.mp4", fit: "cover", autoplay: false });
 setAsset("two.mp4");
 await Promise.resolve();
-assert.deepEqual(JSON.parse(surfaces[1].payload), { asset: "two.mp4", fit: "cover", autoplay: false });
+assert.deepEqual(surfaces[1].payload, { asset: "two.mp4", fit: "cover", autoplay: false });
 dispose();
 assert.deepEqual(releases, ["hero"]);
 

@@ -1,5 +1,7 @@
 // PocketSystem transport only. App policy, stack, LRU and transitions remain
 // in the existing JS SystemUI kernel inside the real QuickJS Guest.
+const { decodeMessage } = require("./binary-bridge.js");
+
 class PocketWechatSystem {
   constructor(root, createHost) {
     this.root = root;
@@ -127,8 +129,9 @@ class PocketWechatSystem {
     const root = this.root;
     root.check(root.exports.web_compositor_frames(root.host), 'System compositor frames unavailable');
     const bytes = new Uint8Array(root.exports.memory.buffer, root.exports.web_result_ptr(root.host), root.exports.web_result_len(root.host));
-    // Compositor evidence contains numbers and ASCII keys only.
-    return JSON.parse(String.fromCharCode.apply(null, bytes));
+    const packet = decodeMessage(bytes);
+    if (!Array.isArray(packet.frames)) throw root.error('render_failed', 'Invalid binary compositor frame packet');
+    return packet.frames;
   }
 
   upload(runtime) {

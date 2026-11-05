@@ -457,6 +457,7 @@ function patchPinnedWorkspace(
   const src = join(workspace, "programs/web/wasm/src");
   cpSync(join(TARGET_ROOT, "src/wechat_guest.rs"), join(src, "wechat_guest.rs"));
   cpSync(bytecodeModule, join(src, "bytecode.rs"));
+  cpSync(join(SDK_ROOT, "native/src/binary_bridge.rs"), join(src, "binary_bridge.rs"));
   if (!artifacts.length) throw new Error("build_wechat: no Guest artifacts were produced");
   const appDefinitions = artifacts.map((artifact) =>
     `    WechatApp { qjbc: include_bytes!(${JSON.stringify(artifact.qjbc)}), pak: include_bytes!(${JSON.stringify(artifact.pak)}), tick_hz: ${artifact.tickHz} },\n`).join("");
@@ -474,7 +475,7 @@ function patchPinnedWorkspace(
 
   const libPath = join(src, "lib.rs");
   let lib = readFileSync(libPath, "utf8");
-  lib = replaceOnce(lib, "mod browser;", "pub(crate) mod browser;\nmod bytecode;\nmod wechat_guest;\nmod wechat_assets;", "WebAssembly target modules");
+  lib = replaceOnce(lib, "mod browser;", "pub(crate) mod browser;\nmod bytecode;\nmod binary_bridge;\nmod wechat_guest;\nmod wechat_assets;", "WebAssembly target modules");
   lib = replaceOnce(lib,
 `        Err(e) => {
             *host.result.borrow_mut() = format!("{e:?}").into_bytes();
@@ -488,6 +489,48 @@ function patchPinnedWorkspace(
             -1
         }`,
     "preserve detailed Guest errors during WeChat boot");
+  lib = replaceOnce(lib,
+`#[no_mangle]
+pub extern "C" fn web_compositor_frames(h: &WasmHost) -> i32 {
+    status(
+        h,
+        (|| {
+            let ops = h.ops.borrow();
+            let mut c = ops.core_mut()?;
+            c.draw();
+            let frames = c.compositor_surface_frames();
+            *h.result.borrow_mut()=serde_json::to_vec(&frames.iter().enumerate().map(|(order,f)|json!({"handle":f.handle,"full":f.full,"clip":f.clip,"focused":f.focused,"order":order})).collect::<Vec<_>>()).unwrap();
+            Ok(())
+        })(),
+    )
+}`,
+`#[no_mangle]
+pub extern "C" fn web_compositor_frames(h: &WasmHost) -> i32 {
+    status(
+        h,
+        (|| {
+            let ops = h.ops.borrow();
+            let mut c = ops.core_mut()?;
+            c.draw();
+            let frames = c.compositor_surface_frames();
+            let packet = json!({
+                "frames": frames.iter().enumerate().map(|(order, f)| json!({
+                    "handle": f.handle,
+                    "full": f.full,
+                    "clip": f.clip,
+                    "focused": f.focused,
+                    "order": order,
+                })).collect::<Vec<_>>(),
+            });
+            *h.result.borrow_mut() = crate::binary_bridge::encode_json_to_binary(
+                &packet,
+                64 * 1024,
+            ).map_err(|_| RuntimeError::InvalidArgument)?;
+            Ok(())
+        })(),
+    )
+}`,
+    "typed WeChat compositor frame transport");
   lib = replaceOnce(lib, "    runtime: RefCell<Option<Runtime>>,", "    runtime: RefCell<Option<Runtime>>,\n    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,", "owned QuickJS handle");
   lib = replaceOnce(lib, "    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,", "    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,\n    pub(crate) app_index: Cell<usize>,", "WeChat Guest app index");
   lib = replaceOnce(lib, "        runtime: RefCell::new(None),", "        runtime: RefCell::new(None),\n        quickjs: Rc::new(RefCell::new(None)),", "QuickJS state initialization");
@@ -497,6 +540,11 @@ function patchPinnedWorkspace(
 
   const browserPath = join(src, "browser.rs");
   let browser = readFileSync(browserPath, "utf8");
+  browser = replaceOnce(browser,
+    "serde_json::from_slice(bytes(p, n)).map_err(|_| RuntimeError::InvalidInput)?",
+    "crate::binary_bridge::decode_to_json(bytes(p, n)).map_err(|_| RuntimeError::InvalidInput)?",
+    "typed WeChat input facts");
+
   const guestStart = browser.indexOf("#[cfg(target_arch = \"wasm32\")]\n#[link(wasm_import_module = \"pocket_web\")]");
   const guestEnd = browser.indexOf("pub struct BrowserInput", guestStart);
   if (guestStart < 0 || guestEnd < 0) throw new Error("build_wechat: pinned BrowserGuest source section changed; refusing fuzzy replacement");
@@ -654,7 +702,7 @@ type WechatConsumerOptions = {
 };
 
 function writeConsumer(output: string, sourceProject: string, options: WechatConsumerOptions): void {
-  const files = ["app.js", "app.json", "app.wxss", "sitemap.json", "wechat-host.js", "wechat-system.js"];
+  const files = ["app.js", "app.json", "app.wxss", "sitemap.json", "wechat-host.js", "wechat-system.js", "binary-bridge.js"];
   cpSync(join(TARGET_ROOT, "template/pages"), join(output, "pages"), { recursive: true });
   for (const file of files) cpSync(join(TARGET_ROOT, "template", file), join(output, file));
   mkdirSync(join(output, "engine"), { recursive: true });

@@ -87,18 +87,19 @@ void main() {
       );
 
       runtime.eval('''
-        globalThis.offload.submit(JSON.stringify({
+        JSON.parse = JSON.stringify = () => { throw Error('JSON reached offload transport'); };
+        globalThis.offload.submitValue({
           v: 1,
           id: 1,
           method: 'compute.sum',
           payload: '[1,2]'
-        }));
-        globalThis.offload.submit(JSON.stringify({
+        });
+        globalThis.offload.submitValue({
           v: 1,
           id: 2,
           method: 'compute.sum',
           payload: '[4,5]'
-        }));
+        });
       ''');
 
       final request = await firstDispatched.future.timeout(
@@ -151,19 +152,20 @@ void main() {
         },
       );
       runtime.eval(r'''
-        if (!offload.submit(JSON.stringify({
+        JSON.parse = JSON.stringify = () => { throw Error('JSON reached offload transport'); };
+        if (!offload.submitValue({
           v: 1,
           id: 1,
           method: 'compute.sum',
           payload: '[2,3]'
-        }))) throw new Error('offload submit failed');
+        })) throw new Error('offload submit failed');
         globalThis.frame = () => {
-          const reply = offload.take();
+          const reply = offload.takeValue();
           if (reply) {
-            pocket._emit(JSON.stringify({
+            pocket._emitValue({
               method: 'offload.result',
-              params: JSON.parse(reply)
-            }));
+              params: reply
+            });
           }
         };
       ''');

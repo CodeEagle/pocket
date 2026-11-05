@@ -45,7 +45,12 @@ void main() {
   test(
     'v2 binary operation splice is expanded into one full retained frame',
     () {
-      final runtime = FfiPocketRuntime.open(width: 640, height: 480);
+      final recording = PocketRecordingController();
+      final runtime = FfiPocketRuntime.open(
+        width: 640,
+        height: 480,
+        recording: recording,
+      );
       try {
         final initial = runtime.eval(r'''
           const rects = [];
@@ -65,12 +70,13 @@ void main() {
               rects.push(node);
             }
           };
-          globalThis.__pocketEvent = function(packet) {
-            const message = typeof packet === "string" ? JSON.parse(packet) : packet;
+          globalThis.__pocketEvent = function(message) {
             if (message.name === "bump") {
               ui.setProp(rects[50], 64, 0xffcc6633);
             }
           };
+          __pocketEvent.__binaryCapable = true;
+          JSON.parse = JSON.stringify = () => { throw Error('JSON reached frame transport'); };
         ''');
         expect(initial.sequence, isNotNull);
         expect(initial.ops, hasLength(100));
@@ -95,6 +101,11 @@ void main() {
       } finally {
         runtime.dispose();
       }
+      final frameDelta = recording.finish().entries.lastWhere(
+        (entry) => entry.kind == 'frameDelta',
+      );
+      expect(frameDelta.result['mode'], 'binaryV2');
+      expect(frameDelta.result['unchanged'], isFalse);
     },
     skip: libraryPath == null
         ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
@@ -159,6 +170,84 @@ void main() {
           Uint8List.fromList(<int>[10, 20, 200]),
         );
       } finally {
+        runtime.dispose();
+      }
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
+
+  test(
+    'binary frame, surface pointer duplex, and v2 delta stay JSON-free',
+    () {
+      final runtime = FfiPocketRuntime.open(width: 640, height: 480);
+      PocketDuplexChannel? duplex;
+      try {
+        final initial = runtime.eval(r'''
+          const rects = [];
+          let mounted = false;
+          globalThis.__pocketEvent = function(packet) {
+            if (typeof packet === "string") {
+              throw new Error("input.pointer must not use a JSON string");
+            }
+            if (packet.name !== "input.pointer") {
+              throw new Error("unexpected binary pointer event");
+            }
+            ui.setProp(rects[packet.payload.id], 64, 0xffcc6633);
+          };
+          globalThis.__pocketEvent.__binaryCapable = true;
+          globalThis.frame = function() {
+            if (mounted) return;
+            mounted = true;
+            for (let i = 0; i < 100; i++) {
+              const node = ui.createNode(0);
+              ui.setProp(node, 1, 16);
+              ui.setProp(node, 2, 16);
+              ui.setProp(node, 24, 1);
+              ui.setProp(node, 28, 4 + (i % 10) * 24);
+              ui.setProp(node, 25, 4 + Math.floor(i / 10) * 24);
+              ui.setProp(node, 64, 0xff204060 + i);
+              ui.insertBefore(1, node, 0);
+              rects.push(node);
+            }
+          };
+          // The binary-capable bridge must not need either JS JSON helper.
+          JSON.parse = function() { throw new Error("JSON.parse disabled"); };
+          JSON.stringify = function() { throw new Error("JSON.stringify disabled"); };
+        ''');
+        expect(initial.ops, hasLength(100));
+        final initialRect = initial.ops.whereType<PocketRectOp>().singleWhere(
+          (op) => op.x == 4 && op.y == 124,
+        );
+
+        // A zero-delta probe is the native null/zero-length unchanged packet.
+        expect(runtime.frameDeltaAt(0), isNull);
+
+        final channel = PocketDuplexChannel.fromRuntime(runtime);
+        duplex = channel;
+        expect(channel.isNativeZeroCopy, isTrue);
+        expect(
+          channel.pushToPocketJs(
+            msgType: PocketDuplexChannel.pointerMessageType,
+            flags: PocketDuplexChannel.pointerDownFlag,
+            targetId: 50,
+            arg0: 12.5,
+            arg1: 18.25,
+          ),
+          isTrue,
+        );
+        expect(channel.step(), 1);
+
+        final changed = runtime.frameDeltaAt(0);
+        expect(changed, isNotNull);
+        expect(changed!.ops, hasLength(100));
+        final changedRect = changed.ops.whereType<PocketRectOp>().singleWhere(
+          (op) => op.x == 4 && op.y == 124,
+        );
+        expect(changedRect.color, isNot(initialRect.color));
+      } finally {
+        duplex?.close();
         runtime.dispose();
       }
     },

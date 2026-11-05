@@ -42,7 +42,7 @@ void main() {
     final binary = _BinaryFrameBuilder();
     binary.u32(0x31424650); // PFB1
     binary.u16(1);
-    binary.u16(0);
+    binary.u16(2);
     binary.u64(7);
     binary.f32(320);
     binary.f32(480);
@@ -100,7 +100,8 @@ void main() {
     binary.u32(0xff010203);
     common(7);
     binary.string('surface-id');
-    binary.string('{"kind":"glass","parameters":{"radius":12}}');
+    binary.string('glass');
+    binary.bytes(PocketBinaryCodec.encodeMessage({'radius': 12}));
     common(8);
     binary.string('video-id');
     binary.string('camera');
@@ -109,7 +110,7 @@ void main() {
 
     binary.u32(1); // event count
     binary.bytes(
-      utf8.encode('{"id":"1","method":"host.response","params":{"ok":true}}'),
+      PocketBinaryCodec.encodeMessage({'id':'1','method':'host.response','params':{'ok':true}}),
     );
     binary.u32(1); // resource count
     binary.string('icon');
@@ -166,7 +167,7 @@ void main() {
 
   test('PFB1 metadata preserves text alignment and compositor focus/handle', () {
     final binary = _BinaryFrameBuilder()
-      ..u32(0x31424650)..u16(1)..u16(1)..u64(1)..f32(320)..f32(480)..u32(2);
+      ..u32(0x31424650)..u16(1)..u16(3)..u64(1)..f32(320)..f32(480)..u32(2);
     void common(int kind) {
       binary..u8(kind)..f32(10)..f32(20)..f32(100)..f32(40)
         ..f32(0)..f32(0)..f32(320)..f32(480);
@@ -174,7 +175,7 @@ void main() {
     common(5);
     binary..string('中😀\nright')..f32(16)..u32(0xffffffff)..u8(0)..u8(2);
     common(7);
-    binary..string('app.a')..string('{"kind":"application","parameters":{"appId":"app.a"}}')..u32(2)..u8(1)
+    binary..string('app.a')..string('application')..bytes(PocketBinaryCodec.encodeMessage({'appId':'app.a'}))..u32(2)..u8(1)
       ..u32(0)..u32(0)..u32(0)..u8(0);
     final frame = PocketFrame.fromBinary(binary.build());
     expect((frame.ops[0] as PocketTextOp).align, 2);
@@ -182,7 +183,7 @@ void main() {
     expect(surface.surfaceHandle, 2);
     expect(surface.focused, isTrue);
     final unknown = binary.build();
-    unknown[6] = 2;
+    unknown[6] = 4;
     expect(() => PocketFrame.fromBinary(unknown), throwsFormatException);
     final json = PocketFrame.fromJson(jsonEncode({'width':320,'height':480,'ops':[
       {'type':'text','x':0,'y':0,'w':100,'h':20,'text':'center','align':1},
@@ -190,6 +191,15 @@ void main() {
        'asset':jsonEncode({'kind':'application','parameters':{}})}]}));
     expect((json.ops[0] as PocketTextOp).align, 1);
     expect((json.ops[1] as PocketHostSurfaceOp).focused, isTrue);
+  });
+
+  test('binary event transport rejects legacy JSON instead of falling back', () {
+    expect(
+      () => PocketBinaryCodec.decodeEvent(Uint8List.fromList(
+        utf8.encode('{"type":"event","name":"legacy","payload":{}}'),
+      )),
+      throwsFormatException,
+    );
   });
 
   test('rejects truncated and trailing compact binary frames', () {

@@ -1,3 +1,4 @@
+const { encodeMessage, decodeMessage } = require("./binary-bridge.js");
 const { PocketWechatSystem, wechatBuiltinCapability, isWechatBuiltinCapability } = require("./wechat-system.js");
 const MAX_OUTBOUND = 32;
 const MAX_REQUESTS = 32;
@@ -17,15 +18,6 @@ let permissionHandler = null;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function parseLine(line) {
-  try {
-    const value = JSON.parse(line);
-    return isRecord(value) ? value : null;
-  } catch (_) {
-    return null;
-  }
 }
 
 function utf8Length(value) {
@@ -244,7 +236,7 @@ class PocketWechatHost {
   }
 
   allocBytes(text) {
-    const bytes = encodeUtf8(text);
+    const bytes = text instanceof Uint8Array ? text : encodeUtf8(text);
     const pointer = this.exports.web_alloc(bytes.length);
     if (!pointer) throw new Error("PocketJS WASM could not allocate an input buffer.");
     new Uint8Array(this.exports.memory.buffer, pointer, bytes.length).set(bytes);
@@ -270,8 +262,9 @@ class PocketWechatHost {
 
   enqueueFromWasm(pointer, length) {
     if (!this.exports || length <= 0 || length > 64 * 1024 || this.outbound.length >= MAX_OUTBOUND) return 0;
-    const line = decodeUtf8(new Uint8Array(this.exports.memory.buffer, pointer, length));
-    this.outbound.push(line);
+    try {
+      this.outbound.push(decodeMessage(new Uint8Array(this.exports.memory.buffer, pointer, length)));
+    } catch (_) { return 0; }
     return 1;
   }
 
@@ -284,7 +277,7 @@ class PocketWechatHost {
 
   advance(contacts = this.contacts) {
     this.contacts = contacts.filter(contact => !contact.cancelled);
-    const facts = JSON.stringify({ buttons: 0, analog: 0x8080, rightAnalog: 0x8080, contacts, axisDeltas: [] });
+    const facts = encodeMessage({ buttons: 0, analog: 0x8080, rightAnalog: 0x8080, contacts, axisDeltas: [] });
     this.withBytes(facts, (pointer, length) => this.check(
       this.exports.web_advance(this.host, pointer, length, 1), "PocketJS guest frame failed.",
     ));
@@ -307,7 +300,7 @@ class PocketWechatHost {
     this.check(this.exports.web_wechat_work_state(this.host), "PocketJS scheduler state is unavailable.");
     const pointer = this.exports.web_result_ptr(this.host);
     const length = this.exports.web_result_len(this.host);
-    return JSON.parse(decodeUtf8(new Uint8Array(this.exports.memory.buffer, pointer, length)));
+    return decodeMessage(new Uint8Array(this.exports.memory.buffer, pointer, length));
   }
 
   schedule() {
@@ -413,8 +406,7 @@ class PocketWechatHost {
     try {
       let passes = 0;
       while (this.outbound.length && passes++ < MAX_OUTBOUND * 2) {
-        const line = this.outbound.shift();
-        const event = parseLine(line);
+        const event = this.outbound.shift();
         if (!event) continue;
         const name = event.name || event.method;
         const payload = event.payload || event.params || {};
@@ -556,7 +548,7 @@ class PocketWechatHost {
   }
 
   respond(request, ok, result, error) {
-    const packet = JSON.stringify({
+    const packet = encodeMessage({
       type: "event",
       name: "host.response",
       payload: {
@@ -581,7 +573,7 @@ class PocketWechatHost {
   deliverGuestEvent(method, params, wake = true) {
     if (!this.exports || this.disposed) return;
     const methodBytes = this.allocBytes(method);
-    const paramsBytes = this.allocBytes(JSON.stringify(params || {}));
+    const paramsBytes = this.allocBytes(encodeMessage(params || {}));
     try {
       this.check(this.exports.web_wechat_guest_event(
         this.host,

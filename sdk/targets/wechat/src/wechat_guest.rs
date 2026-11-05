@@ -2,7 +2,7 @@
 //! This adapter admits the same PJBC envelope as the native host and never
 //! evaluates application JavaScript source.
 
-use crate::{bytecode, wechat_assets, WasmHost};
+use crate::{binary_bridge, bytecode, wechat_assets, WasmHost};
 use pocket_guest_rquickjs::{BindingProfile, RquickjsGuest};
 use pocket_runtime::{
     generated_ops::BINDING_GENERATION, Guest, GuestEnvironment, GuestFrame, OpContext, RuntimeError,
@@ -113,16 +113,28 @@ impl Guest for WechatGuest {
                 Ok(value) => value,
                 Err(_) => Object::new(ctx.clone())?,
             };
-            let emit = Function::new(ctx.clone(), |line: String| -> bool {
-                if line.len() > MAX_HOST_PACKET {
+            let emit = Function::new(ctx.clone(), |value: Value| -> bool {
+                let Ok(bytes) = binary_bridge::encode_js_message(value, MAX_HOST_PACKET, 32) else {
                     return false;
-                }
-                unsafe { host_emit(line.as_ptr(), line.len()) == 1 }
+                };
+                unsafe { host_emit(bytes.as_ptr(), bytes.len()) == 1 }
             })?;
-            pocket.set("_emit", emit)?;
+            pocket.set("_emitValue", emit)?;
             let get_layout = Function::new(ctx.clone(), LayoutFunction { host: self.host })?;
             pocket.set("getLayout", get_layout)?;
             globals.set("pocket", pocket)?;
+            // WX capabilities use the async host bridge. There is no native
+            // offload provider here; keep the pinned coverage uploader while
+            // exposing the current value ABI as explicitly disconnected.
+            let offload = match globals.get::<_, Object>("offload") {
+                Ok(value) => value,
+                Err(_) => Object::new(ctx.clone())?,
+            };
+            offload.set("session", Function::new(ctx.clone(), || 0_u32)?)?;
+            offload.set("eventDriven", true)?;
+            offload.set("submitValue", Function::new(ctx.clone(), |_value: Value<'_>| false)?)?;
+            offload.set("takeValue", Function::new(ctx.clone(), || None::<Value<'_>>)?)?;
+            globals.set("offload", offload)?;
             // SystemUI receives the trusted compositor registry from the
             // generated catalog. Child Guests deliberately do not receive it;
             // only the root is allowed to decide which package owns a surface.
@@ -209,13 +221,12 @@ pub unsafe extern "C" fn web_wechat_deliver(host: &WasmHost, p: *const u8, n: us
     if n == 0 || n > MAX_HOST_PACKET {
         return -1;
     }
-    let line = match std::str::from_utf8(std::slice::from_raw_parts(p, n)) {
-        Ok(value) => value,
-        Err(_) => return -1,
-    };
+    let bytes = std::slice::from_raw_parts(p, n);
     let delivered = with_guest(host, |ctx| {
+        let value = binary_bridge::decode_to_js(&ctx, bytes)
+            .map_err(|_| rquickjs::Error::Exception)?;
         let function: Function = ctx.globals().get("__pocketDeliver")?;
-        function.call::<_, ()>((line.to_owned(),))
+        function.call::<_, ()>((value,))
     });
     if delivered.is_err() {
         return -1;
@@ -241,23 +252,20 @@ pub unsafe extern "C" fn web_wechat_guest_event(
         Ok(value) => value,
         Err(_) => return -1,
     };
-    let params = match std::str::from_utf8(std::slice::from_raw_parts(params, params_len)) {
-        Ok(value) => value,
-        Err(_) => return -1,
-    };
+    let params = std::slice::from_raw_parts(params, params_len);
     let delivered = with_guest(host, |ctx| {
+        let params = binary_bridge::decode_to_js(&ctx, params)
+            .map_err(|_| rquickjs::Error::Exception)?;
         if method.starts_with("textInput.") {
-            let json: Object = ctx.globals().get("JSON")?;
-            let parse: Function = json.get("parse")?;
-            let params: Value = parse.call::<_, Value>((params.to_owned(),))?;
             let function: Function = ctx.globals().get("__pocketTextInputEvent")?;
             let _: bool = function.call((method.to_owned(), params))?;
         } else {
-            let line = format!("{{\"type\":\"event\",\"name\":{},\"payload\":{}}}",
-                serde_json::to_string(method).unwrap(),
-                params);
+            let packet = Object::new(ctx.clone())?;
+            packet.set("type", "event")?;
+            packet.set("name", method)?;
+            packet.set("payload", params)?;
             let function: Function = ctx.globals().get("__pocketEvent")?;
-            function.call::<_, ()>((line,))?;
+            function.call::<_, ()>((packet,))?;
         }
         Ok(())
     });
@@ -282,7 +290,7 @@ pub extern "C" fn web_wechat_work_state(host: &WasmHost) -> i32 {
     });
     match state {
         Ok(state) => {
-            *host.result.borrow_mut() = serde_json::to_vec(&state).unwrap_or_default();
+            *host.result.borrow_mut() = binary_bridge::encode_json_to_binary(&state, MAX_HOST_PACKET).unwrap_or_default();
             0
         }
         Err(error) => {

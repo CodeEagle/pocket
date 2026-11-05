@@ -96,6 +96,7 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
     onCleanup: (callback: () => void) => {
       cleanupCallbacks.push(callback);
     },
+    untrack: <T>(fn: () => T): T => fn(),
     onMount: (callback: () => void) => callback(),
     For: () => null,
     Show: () => null,
@@ -109,6 +110,10 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
     },
   }));
   mock.module("solid-js", () => mockSolid);
+  mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60 }));
+  mock.module(join(testDir, "../src/route.tsx"), () => ({
+    useRouteActive: () => () => true,
+  }));
   mock.module("@pocketjs/framework/gesture", () => ({ createGesture: () => ({}) }));
   mock.module("@pocketjs/framework/kinetics", () => ({
     bindDpadScroll: () => ({}),
@@ -141,6 +146,7 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
     },
     Grid: () => null,
     Modal: () => null,
+    Portal: () => null,
     Text: () => null,
     View: (props: any) => {
       const id = ++nextViewNodeId;
@@ -183,8 +189,8 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
       }
       return { x: 0, y: 0, width: viewportWidth, height: 400 };
     },
-    _emit: (line: string) => {
-      emitted.push(JSON.parse(line));
+    _emitValue: (packet: { type: string; name: string; payload: any }) => {
+      emitted.push(packet);
       return true;
     },
   };
@@ -207,13 +213,13 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   // measurement is refreshed without waiting for onFrame, even with no input
   // session open yet.
   (globalThis as any).ui = { __viewport: { w: 300, h: 250 } };
-  const receiveViewport = (globalThis as any).__pocketEvent as ((line: string) => void) | undefined;
+  const receiveViewport = (globalThis as any).__pocketEvent as ((packet: Record<string, unknown>) => void) | undefined;
   assert.ok(receiveViewport, "ScrollablePage should subscribe to display.viewport");
-  receiveViewport!(JSON.stringify({
+  receiveViewport!({
     type: "event",
     name: "display.viewport",
     payload: { width: 300, height: 250 },
-  }));
+  });
   assert.equal(scrollerOptions.max(), 150, "resize event must refresh the page extent before frame(0)");
   console.log("flutter_widgets.test: display.viewport synchronous measurement passed");
 
@@ -292,11 +298,11 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   frameCallbacks.forEach((callback) => callback());
   scrollMax = 60;
   (globalThis as any).ui = { __viewport: { w: 300, h: 100 } };
-  receiveViewport!(JSON.stringify({
+  receiveViewport!({
     type: "event",
     name: "display.viewport",
     payload: { width: 300, height: 100 },
-  }));
+  });
   frameCallbacks.forEach((callback) => callback());
   assert.equal(
     emitted.some((event) => event.name === "textInput.close"),
@@ -311,11 +317,11 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   console.log("flutter_widgets.test: ensureVisible focus preservation on subsequent frame passed");
   scrollMax = Number.POSITIVE_INFINITY;
   (globalThis as any).ui = { __viewport: { w: 300, h: 250 } };
-  receiveViewport!(JSON.stringify({
+  receiveViewport!({
     type: "event",
     name: "display.viewport",
     payload: { width: 300, height: 250 },
-  }));
+  });
   frameCallbacks.forEach((callback) => callback());
   emitted.splice(1);
 
@@ -372,15 +378,15 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   // A disposed page may still be reachable through a host callback captured
   // before its parent restored the bridge. The observer must be inert after
   // cleanup rather than updating a detached signal or calling onChange.
-  const staleViewportReceiver = (globalThis as any).__pocketEvent as ((line: string) => void) | undefined;
+  const staleViewportReceiver = (globalThis as any).__pocketEvent as ((packet: Record<string, unknown>) => void) | undefined;
   assert.ok(staleViewportReceiver);
   const emittedBeforeCleanup = emitted.length;
   for (const cleanup of cleanupCallbacks.splice(0).reverse()) cleanup();
-  staleViewportReceiver!(JSON.stringify({
+  staleViewportReceiver!({
     type: "event",
     name: "display.viewport",
     payload: { width: 300, height: 220 },
-  }));
+  });
   assert.equal(emitted.length, emittedBeforeCleanup + 1, "input cleanup may emit one close event");
   console.log("flutter_widgets.test: display observer cleanup guard passed");
 }

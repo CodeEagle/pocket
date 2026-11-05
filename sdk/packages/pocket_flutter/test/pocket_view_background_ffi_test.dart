@@ -50,8 +50,7 @@ for (let i = 0; i < 40; i++) {
 }
 let deleted = false;
 globalThis.frame = function() {};
-globalThis.__pocketEvent = function(packet) {
-  const event = typeof packet === 'string' ? JSON.parse(packet) : packet;
+globalThis.__pocketEvent = function(event) {
   if (event.name === 'input.pointer' && event.payload.phase === 'move') {
     ui.setProp(nodes[34], 28, 40);
   } else if (event.name === 'input.pointer' && event.payload.phase === 'up' && !deleted) {
@@ -61,6 +60,8 @@ globalThis.__pocketEvent = function(packet) {
     ui.setProp(nodes[34], 28, event.payload.x);
   }
 };
+__pocketEvent.__binaryCapable = true;
+JSON.parse = JSON.stringify = () => { throw Error('JSON reached render transport'); };
 ''';
 
 void main() {
@@ -302,7 +303,7 @@ List<PocketCanvasPainter> _canvasPainters(WidgetTester tester) {
 }
 
 int _blockIndexForColor(List<PocketCanvasPainter> painters, Color color) {
-  final value = color.value;
+  final value = color.toARGB32();
   for (var block = 0; block < painters.length; block++) {
     if (painters[block].ops.any(
       (op) => op is PocketRectOp && op.color == value,

@@ -20,8 +20,8 @@ function fixture(): {
   packets: Packet[];
 } {
   const packets: Packet[] = [];
-  const host = createHostBridge((line) => {
-    packets.push(JSON.parse(line) as Packet);
+  const host = createHostBridge((packet) => {
+    packets.push(packet as Packet);
     return true;
   });
   return { host, packets };
@@ -34,13 +34,11 @@ function response(
 ): void {
   const requestId = packet.payload?.requestId;
   assert.equal(typeof requestId, "string");
-  host.handle(
-    JSON.stringify({
-      type: "event",
-      name: "host.response",
-      payload: { requestId, ok: true, result },
-    }),
-  );
+  host.handle({
+    type: "event",
+    name: "host.response",
+    payload: { requestId, ok: true, result },
+  });
 }
 
 test("platform experience is lazy and uses fixed host capabilities", async () => {
@@ -98,13 +96,11 @@ test("links are an explicit callback subscription with no route or app selection
     assert.deepEqual(packets[0]?.payload?.params, { source: "explicit" });
     const streamId = packets[0]?.payload?.streamId;
     assert.equal(typeof streamId, "string");
-    host.handle(
-      JSON.stringify({
-        type: "event",
-        name: "stream.data",
-        payload: { streamId, data: { uri: "pocket://event" } },
-      }),
-    );
+    host.handle({
+      type: "event",
+      name: "stream.data",
+      payload: { streamId, data: { uri: "pocket://event" } },
+    });
     assert.deepEqual(values, [{ uri: "pocket://event" }]);
     subscription.unsubscribe();
     assert.equal(packets.at(-1)?.name, "stream.cancel");
@@ -122,20 +118,18 @@ test("unsupported optional capabilities remain distinguishable", async () => {
     const request = experience.latest();
     const packet = packets[0]!;
     const requestId = packet.payload?.requestId;
-    host.handle(
-      JSON.stringify({
-        type: "event",
-        name: "host.response",
-        payload: {
-          requestId,
-          ok: false,
-          error: {
-            code: "capability_unavailable",
-            message: "Deep links are not configured",
-          },
+    host.handle({
+      type: "event",
+      name: "host.response",
+      payload: {
+        requestId,
+        ok: false,
+        error: {
+          code: "capability_unavailable",
+          message: "Deep links are not configured",
         },
-      }),
-    );
+      },
+    });
     await assert.rejects(request, (error: unknown) =>
       isUnsupportedPlatformError(error),
     );
@@ -143,13 +137,11 @@ test("unsupported optional capabilities remain distinguishable", async () => {
     const subscription = experience.subscribeLinks(() => {});
     const streamId = packets[1]?.payload?.streamId;
     assert.equal(typeof streamId, "string");
-    host.handle(
-      JSON.stringify({
-        type: "event",
-        name: "stream.cancel",
-        payload: { streamId, reason: "capability_unavailable" },
-      }),
-    );
+    host.handle({
+      type: "event",
+      name: "stream.cancel",
+      payload: { streamId, reason: "capability_unavailable" },
+    });
     const closed = await subscription.stream.closed;
     assert.equal(closed.error?.code, "capability_unavailable");
     assert.equal(isUnsupportedPlatformError(closed.error), true);

@@ -41,6 +41,7 @@ import {
   type DisplaySideContourReserves,
 } from "./responsive.ts";
 import { useRouteActive } from "./route.tsx";
+import { HostBridgeAbiError } from "./host.ts";
 
 /**
  * Safe-area aware guest shell for standalone pages.
@@ -1081,7 +1082,6 @@ function normalizeInputColor(
 }
 
 type TextInputPocket = {
-  _emit?: (line: string) => boolean;
   _emitValue?: (packet: Record<string, unknown>) => boolean;
   getLayout?: (id: number) => unknown;
 };
@@ -1140,17 +1140,9 @@ function viewportLayout(node: NodeMirror | undefined): TextInputRect | undefined
 
 function emitTextInput(method: string, params: TextInputParams): boolean {
   const emitValue = textInputGlobal.pocket?._emitValue;
-  if (typeof emitValue === "function") {
-    try {
-      return emitValue({ type: "event", name: method, payload: params }) === true;
-    } catch {
-      return false;
-    }
-  }
-  const emit = textInputGlobal.pocket?._emit;
-  if (typeof emit !== "function") return false;
+  if (typeof emitValue !== "function") throw new HostBridgeAbiError();
   try {
-    return emit(JSON.stringify({ type: "event", name: method, payload: params })) === true;
+    return emitValue({ type: "event", name: method, payload: params }) === true;
   } catch {
     return false;
   }

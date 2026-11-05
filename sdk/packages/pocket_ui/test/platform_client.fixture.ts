@@ -21,7 +21,7 @@ type PendingRequest = {
 
 class FixtureBridge implements HostBridge {
   readonly requests: PendingRequest[] = [];
-  readonly handled: Array<string | Record<string, unknown>> = [];
+  readonly handled: Array<Record<string, unknown>> = [];
   disposed = false;
 
   request<T extends JsonValue = JsonValue>(
@@ -38,7 +38,7 @@ class FixtureBridge implements HostBridge {
     });
   }
 
-  handle(packet: string | Record<string, unknown>): boolean {
+  handle(packet: Record<string, unknown>): boolean {
     this.handled.push(packet);
     return true;
   }
@@ -57,23 +57,23 @@ class FixtureBridge implements HostBridge {
   }
 }
 
-function packet(name: string, params: JsonObject): string {
-  return JSON.stringify({ type: "event", name, params });
+function packet(name: string, params: JsonObject): Record<string, unknown> {
+  return { type: "event", name, params };
 }
 
-function eventSink(): (line: string) => void {
-  const sink = (globalThis as { __pocketEvent?: (line: string) => void }).__pocketEvent;
+function eventSink(): (packet: Record<string, unknown>) => void {
+  const sink = (globalThis as { __pocketEvent?: (packet: Record<string, unknown>) => void }).__pocketEvent;
   assert.equal(typeof sink, "function", "client must install a guest event sink");
   return sink!;
 }
 
 function withPreviousEventSink(): {
-  previous: (line: string) => void;
-  calls: string[];
+  previous: (packet: Record<string, unknown>) => void;
+  calls: Record<string, unknown>[];
 } {
-  const calls: string[] = [];
-  const previous = (line: string): void => calls.push(line);
-  (globalThis as { __pocketEvent?: (line: string) => void }).__pocketEvent = previous;
+  const calls: Record<string, unknown>[] = [];
+  const previous = (packet: Record<string, unknown>): void => calls.push(packet);
+  (globalThis as { __pocketEvent?: (packet: Record<string, unknown>) => void }).__pocketEvent = previous;
   return { previous, calls };
 }
 

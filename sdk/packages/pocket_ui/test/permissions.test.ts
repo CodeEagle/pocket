@@ -4,7 +4,7 @@ import { createPocketPermissionsClient } from "../src/permissions.ts";
 
 test("permissions client preserves limited and denied OS facts and uses the existing bridge", async () => {
   const packets: any[] = [];
-  const host = createHostBridge(line => { packets.push(JSON.parse(line)); return true; });
+  const host = createHostBridge(packet => { packets.push(packet); return true; });
   try {
     const permissions = createPocketPermissionsClient(host);
     const status = permissions.status("hardware.photos");

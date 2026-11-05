@@ -67,7 +67,7 @@ class FakeHost implements HostBridge {
   readonly destroyed: string[] = [];
   readonly generations = new Map<string, string>();
   readonly storage = new Map<string, JsonValue>();
-  readonly handled: Array<string | Record<string, unknown>> = [];
+  readonly handled: Array<Record<string, unknown>> = [];
   readonly rejectedPostEvents: string[] = [];
   failRespondRequestId: string | null = null;
   ticks = 0;
@@ -82,7 +82,7 @@ class FakeHost implements HostBridge {
     return Promise.resolve(this.respond(capability, params) as T);
   }
 
-  handle(packet: string | Record<string, unknown>): boolean {
+  handle(packet: Record<string, unknown>): boolean {
     this.handled.push(packet);
     return false;
   }
@@ -172,7 +172,7 @@ class FakeHost implements HostBridge {
 }
 
 const globalObject = globalThis as typeof globalThis & {
-  __pocketEvent?: (line: string) => void;
+  __pocketEvent?: (packet: Record<string, unknown>) => void;
   ui?: { __surfaces?: Record<string, number> };
 };
 globalObject.ui = {
@@ -182,8 +182,8 @@ globalObject.ui = {
     [NOTES]: 4,
   },
 };
-const forwarded: string[] = [];
-const previousEvent = (line: string): void => forwarded.push(line);
+const forwarded: Record<string, unknown>[] = [];
+const previousEvent = (packet: Record<string, unknown>): void => forwarded.push(packet);
 globalObject.__pocketEvent = previousEvent;
 
 const host = new FakeHost();
@@ -234,7 +234,7 @@ function request(
 function sendEvent(name: string, payload: JsonObject): void {
   const sink = globalObject.__pocketEvent;
   assert.equal(typeof sink, "function", "kernel should chain the existing event callback");
-  sink!(JSON.stringify({ type: "event", name, payload }));
+  sink!({ type: "event", name, payload });
 }
 
 async function invoke(payload: JsonObject): Promise<JsonObject> {

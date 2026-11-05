@@ -6,7 +6,7 @@ import {
   type DisplayGeometry,
 } from "./responsive.ts";
 
-export type DisplayEventHandler = ((packet: string | Record<string, unknown>) => void) & {
+export type DisplayEventHandler = ((packet: Record<string, unknown>) => void) & {
   __binaryCapable?: boolean;
 };
 
@@ -93,32 +93,19 @@ function subscribeDisplayBridge(
     } else {
       const previous = bridge.__pocketEvent;
       const receive: DisplayEventHandler = (packet): void => {
-        let event: HostEvent | undefined;
-        try {
-          const message = (typeof packet === "string" ? JSON.parse(packet) : packet) as {
-            id?: unknown;
-            method?: unknown;
-            name?: unknown;
-            params?: unknown;
-            payload?: unknown;
-          };
-          const method = typeof message.method === "string"
-            ? message.method
-            : typeof message.name === "string" ? message.name : "";
-          if (method) {
-            const params = message.params ?? message.payload;
-            event = {
-              id: typeof message.id === "string" ? message.id : "",
-              method,
-              params: params && typeof params === "object" && !Array.isArray(params)
-                ? params as BridgeObject
-                : {},
-              raw: message,
-            };
-          }
-        } catch {
-          // A malformed unrelated host line must not break the existing lane.
-        }
+        const message = packet;
+        const method = typeof message.method === "string"
+          ? message.method
+          : typeof message.name === "string" ? message.name : "";
+        const params = message.params ?? message.payload;
+        const event: HostEvent | undefined = method ? {
+          id: typeof message.id === "string" ? message.id : "",
+          method,
+          params: params && typeof params === "object" && !Array.isArray(params)
+            ? params as BridgeObject
+            : {},
+          raw: message,
+        } : undefined;
         if (event) dispatch(event);
         try { forwardHostPacket(previous, packet); } catch { /* isolate legacy previous sinks */ }
       };

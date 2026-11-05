@@ -518,8 +518,8 @@ class PocketFrame {
 
   /// Decodes the compact native frame ABI (PFB1). The format is deliberately
   /// typed: draw geometry and image pixels never pass through JSON maps or
-  /// decimal byte arrays. Bridge events keep a small JSON payload because
-  /// their schema is intentionally open-ended.
+  /// decimal byte arrays. Events and host surface parameters use binary TLV
+  /// objects, including their open-ended fields.
   factory PocketFrame.fromBinary(Uint8List source) {
     final reader = _PocketBinaryReader(source);
     if (reader.u32() != 0x31424650) {
@@ -527,7 +527,7 @@ class PocketFrame {
     }
     final version = reader.u16();
     final flags = reader.u16();
-    if (flags & ~1 != 0) {
+    if (flags & ~3 != 0) {
       throw FormatException('Unsupported Pocket binary frame flags: $flags');
     }
     if (version != 1) {
@@ -739,13 +739,17 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
         );
       case 7:
         final id = reader.string('surface id');
-        final descriptor = reader.string('surface descriptor');
+        if (flags & 2 == 0) {
+          throw const FormatException(
+            'Pocket host surfaces require typed descriptors; rebuild the native SDK',
+          );
+        }
+        final kind = reader.string('surface kind');
+        final parameters = PocketBinaryCodec.decodeMessage(
+          reader.bytes('surface parameters', copy: false),
+        );
         final surfaceHandle = flags & 1 == 0 ? 0 : (reader.u32().toSigned(32));
         final focused = flags & 1 != 0 && reader.u8() != 0;
-        final decoded = jsonDecode(descriptor);
-        if (decoded is! Map || decoded['parameters'] is! Map) {
-          throw const FormatException('Invalid binary host surface descriptor');
-        }
         result.add(
           PocketHostSurfaceOp(
             x: x,
@@ -756,8 +760,8 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
             id: id,
             surfaceHandle: surfaceHandle,
             focused: focused,
-            kind: '${decoded['kind']}',
-            parameters: Map<String, dynamic>.from(decoded['parameters'] as Map),
+            kind: kind,
+            parameters: parameters,
           ),
         );
       case 8:

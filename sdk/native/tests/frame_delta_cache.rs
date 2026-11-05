@@ -400,10 +400,11 @@ fn v2_resize_preserves_resource_ack_for_dropped_release() {
       ui.setProp(node, 1, 32); ui.setProp(node, 2, 32);
       ui.setImage(node, texture); ui.insertBefore(1, node, 0);
       globalThis.frame = () => {};
-      globalThis.__pocketEvent = (raw) => {
-        const packet = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const eventHandler = (packet) => {
         if (packet.name === 'release') ui.setImage(node, -1);
       };
+      eventHandler.__binaryCapable = true;
+      globalThis.__pocketEvent = eventHandler;
     "#;
 
     let handle = pocket_create(320.0, 240.0);

@@ -193,7 +193,7 @@ final class PocketViewController {
     return true;
   }
 
-  /// Captures a JSON message only while the guest is hidden. The normal active
+  /// Captures a binary-safe message only while the guest is hidden. The normal active
   /// path above forwards the existing map directly, avoiding a second encode /
   /// decode on every controller message.
   bool _enqueueMessage(Map<String, dynamic> message) {
@@ -322,7 +322,7 @@ final class PocketViewController {
 /// A Flutter-only PocketJS surface.
 ///
 /// PocketJS is evaluated through FFI, but no AndroidView, UiKitView or
-/// WebView is created. The guest emits a compact frame JSON. Flutter paints
+/// WebView is created. The guest emits typed binary draw frames. Flutter paints
 /// rects, text and images through [CustomPainter]; videos are Flutter texture
 /// widgets placed into the same stack and covered by the canvas painter.
 class PocketView extends StatefulWidget {
@@ -656,7 +656,7 @@ class _PocketViewState extends State<PocketView>
   final Map<int, int> _pointerSurfaceIds = <int, int>{};
   final Map<int, PocketCompositorSlot> _lastCompositorSlots =
       <int, PocketCompositorSlot>{};
-  final List<Map<String, dynamic>> _pendingPointerJson =
+  final List<Map<String, dynamic>> _pendingPointerMessages =
       <Map<String, dynamic>>[];
   final Map<int, Offset> _outsideTextInputPointerOrigins = <int, Offset>{};
   final Map<int, Offset> _textInputTapRegionDowns = <int, Offset>{};
@@ -1585,8 +1585,7 @@ class _PocketViewState extends State<PocketView>
         onIngressPublished: _wakeTicker,
       );
     } on UnsupportedError {
-      // Older native libraries do not expose ABI v2. The JSON bridge remains
-      // the compatibility path for those hosts.
+      // Native libraries without duplex ABI v2 use the binary message bridge.
       return null;
     } on StateError {
       // A host may have explicitly claimed the endpoint for another
@@ -1624,7 +1623,7 @@ class _PocketViewState extends State<PocketView>
       }
     } catch (error) {
       // A stale endpoint can race a reload/dispose. Close it and keep the
-      // regular JSON frame path alive; endpoint errors must not tear down the
+      // regular binary frame path alive; endpoint errors must not tear down the
       // guest that owns the view.
       channel.close();
       _duplexChannel = null;
@@ -2326,7 +2325,7 @@ class _PocketViewState extends State<PocketView>
       // post-frame outside-editor dismiss can enqueue `textInput.dismiss`
       // first, and the guest may process the dismiss/re-layout before the
       // pending pointer-up snapshot is consumed by its next frame.
-      _flushPendingPointerJson();
+      _flushPendingPointerMessages();
       final stopwatch = _performanceCollectionEnabled
           ? (Stopwatch()..start())
           : null;
@@ -4624,10 +4623,10 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  void _flushPendingPointerJson() {
-    if (_pendingPointerJson.isEmpty) return;
-    final pending = List<Map<String, dynamic>>.of(_pendingPointerJson);
-    _pendingPointerJson.clear();
+  void _flushPendingPointerMessages() {
+    if (_pendingPointerMessages.isEmpty) return;
+    final pending = List<Map<String, dynamic>>.of(_pendingPointerMessages);
+    _pendingPointerMessages.clear();
     for (var index = 0; index < pending.length; index++) {
       final params = pending[index];
       try {
@@ -4643,14 +4642,14 @@ class _PocketViewState extends State<PocketView>
         // Preserve the event below so a transient bridge failure cannot
         // reorder a later pointer edge.
       }
-      _pendingPointerJson.addAll(pending.sublist(index));
+      _pendingPointerMessages.addAll(pending.sublist(index));
       break;
     }
   }
 
   void _cancelPointerSequences() {
     if (_runtime == null || _pointerSlots.isEmpty) return;
-    _flushPendingPointerJson();
+    _flushPendingPointerMessages();
     for (final entry in _pointerSlots.entries) {
       _controller.send(
         method: 'input.pointer',
@@ -4709,7 +4708,6 @@ class _PocketViewState extends State<PocketView>
     required double actualHeight,
   }) {
     if (!widget.inputEnabled) return false;
-    _wakeTicker();
     if (surface != 0 && _auxiliaryFrame == null) return false;
     // PocketFrame and PocketSurfaceFrame intentionally share the same
     // dimensions, but are separate model types. Select the concrete frame
@@ -4803,17 +4801,25 @@ class _PocketViewState extends State<PocketView>
         : phase;
     final x = rawX.clamp(0.0, frameWidth).toDouble();
     final y = rawY.clamp(0.0, frameHeight).toDouble();
-    final params = <String, dynamic>{
-      'phase': outgoingPhase,
-      'id': slot,
-      'x': x,
-      'y': y,
-    };
-    if (surface != 0) params['surface'] = surface;
+    // The numeric duplex path is the hot path for drag/move events. Build the
+    // JSON envelope only when that path is unavailable or full; otherwise a
+    // successful ring write should not allocate a short-lived Map per move.
+    Map<String, dynamic> pointerParams() {
+      final params = <String, dynamic>{
+        'phase': outgoingPhase,
+        'id': slot,
+        'x': x,
+        'y': y,
+      };
+      if (surface != 0) params['surface'] = surface;
+      return params;
+    }
+
     var sent = false;
     var deferredToJson = false;
+    var wakeAfterSend = false;
     final duplex = _duplexChannel;
-    if (widget.enableDuplexPointerInput && _pendingPointerJson.isNotEmpty) {
+    if (widget.enableDuplexPointerInput && _pendingPointerMessages.isNotEmpty) {
       deferredToJson = true;
     }
     if (widget.enableDuplexPointerInput &&
@@ -4822,7 +4828,7 @@ class _PocketViewState extends State<PocketView>
         // Once one edge falls back because the ring is full, keep the rest of
         // that contact in the same FIFO until the next frame flushes it. A
         // later edge must never overtake the deferred predecessor.
-        _pendingPointerJson.isEmpty) {
+        _pendingPointerMessages.isEmpty) {
       final flags = switch (outgoingPhase) {
         'down' => _duplexPointerDown,
         'move' => _duplexPointerMove,
@@ -4854,13 +4860,19 @@ class _PocketViewState extends State<PocketView>
           }
           sent = false;
         }
-        if (!sent && !duplex.isClosed) deferredToJson = true;
+        if (sent) {
+          // PocketDuplexChannel invokes the owner callback after publishing
+          // the ring record; do not wake a second time here.
+        } else if (!duplex.isClosed) {
+          deferredToJson = true;
+        }
       }
     }
     if (!sent) {
       if (deferredToJson) {
-        _pendingPointerJson.add(params);
+        _pendingPointerMessages.add(pointerParams());
         sent = true;
+        wakeAfterSend = true;
       } else {
         sent = _controller.send(
           // Native owns one pointer queue for all surfaces. The surface
@@ -4868,7 +4880,7 @@ class _PocketViewState extends State<PocketView>
           // share the same slot and hit-test path on primary and auxiliary
           // outputs.
           method: 'input.pointer',
-          params: params,
+          params: pointerParams(),
         );
       }
     }
@@ -4884,6 +4896,11 @@ class _PocketViewState extends State<PocketView>
       _pointerSlots.remove(id);
       _pointerSurfaceIds.remove(id);
     }
+    // _PocketViewController.send() and a successful duplex publish already
+    // wake through their respective owner callbacks. Only the deferred JSON
+    // FIFO needs an explicit wake here; invalid or host-owned events never
+    // reach this point.
+    if (wakeAfterSend) _wakeTicker();
     if (sent &&
         outsideTextInputContact &&
         outgoingPhase == 'up' &&
@@ -4965,7 +4982,7 @@ class _PocketViewState extends State<PocketView>
     _ticker?.dispose();
     _ticker = null;
     _pointerSlots.clear();
-    _pendingPointerJson.clear();
+    _pendingPointerMessages.clear();
     _outsideTextInputPointerOrigins.clear();
     _textInputTapRegionDowns.clear();
     _guestGestureRegions.clear();
@@ -5049,7 +5066,7 @@ class _PocketViewState extends State<PocketView>
     _cancelScheduledWake();
     _ticker?.stop();
     _pointerSlots.clear();
-    _pendingPointerJson.clear();
+    _pendingPointerMessages.clear();
     _dismissTextInput(reason: 'runtime.dispose', rebuild: false);
     _detachRuntime();
     if (!mounted) return;
@@ -5068,7 +5085,7 @@ class _PocketViewState extends State<PocketView>
         : fallback != null && widget.runtime == null;
     _runtime = null;
     _ownsRuntime = false;
-    _pendingPointerJson.clear();
+    _pendingPointerMessages.clear();
     final duplex = _duplexChannel;
     _duplexChannel = null;
     duplex?.close();

@@ -5,6 +5,7 @@
 //! this library owns JavaScript execution, flexbox layout and frame timing.
 
 pub mod binary_bridge;
+mod binary_offload;
 pub mod bytecode;
 mod frame_delta;
 mod guest_security;
@@ -36,6 +37,11 @@ struct NodeMeta {
     id: i32,
     kind: String,
     asset: String,
+    /// Typed compositor descriptor retained beside the legacy JSON asset
+    /// spelling. The binary frame path consumes these bytes directly; the
+    /// legacy JSON serializer reconstructs the asset only when requested.
+    surface_kind: String,
+    surface_parameters: Vec<u8>,
     video_id: String,
     fit: String,
     /// Video playback policy carried by the surface metadata.  `true` is the
@@ -137,39 +143,100 @@ fn normalize_video_fit(value: Option<&str>) -> String {
     .to_owned()
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+fn js_string_property<'js>(object: &Object<'js>, key: &str) -> Option<String> {
+    let value: Value<'js> = object.get(key).ok()?;
+    value.as_string()?.to_string().ok()
+}
+
+fn js_bool_property<'js>(object: &Object<'js>, key: &str) -> Option<bool> {
+    let value: Value<'js> = object.get(key).ok()?;
+    value.as_bool()
+}
+
+fn js_i32_property<'js>(object: &Object<'js>, key: &str) -> Option<i32> {
+    let value: Value<'js> = object.get(key).ok()?;
+    if let Some(integer) = value.as_int() {
+        return Some(integer);
+    }
+    value
+        .as_number()
+        .filter(|number| number.is_finite() && number.fract() == 0.0)
+        .and_then(|number| i32::try_from(number as i64).ok())
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct FrameOp {
-    #[serde(rename = "type")]
     kind: String,
     x: f32,
     y: f32,
     w: f32,
     h: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     asset: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<String>,
     /// Flutter texture fitting policy carried by a video SURFACE_QUAD.
     /// The native bridge accepts only the canonical cover/contain/fill values;
     /// absent or unknown metadata is normalized to cover.
-    #[serde(skip_serializing_if = "Option::is_none")]
     fit: Option<String>,
     /// Explicit native-video initial playback policy.  `None` is omitted for
     /// non-video operations; video operations always carry `Some`, including
     /// `Some(false)`, so the JSON path cannot fall back to legacy autoplay.
+    autoplay: Option<bool>,
+    color: Option<u32>,
+    /// First/last endpoint of a real core GRAD_RECT. Colors use the public
+    /// FrameResult ARGB convention (the core DrawList stores ABGR).
+    from_color: Option<u32>,
+    to_color: Option<u32>,
+    /// pocket_spec::GradDir: 0=top, 1=bottom, 2=left, 3=right.
+    direction: Option<u32>,
+    size: Option<f32>,
+    font_slot: Option<u8>,
+    text_align: Option<u8>,
+    surface_handle: Option<i32>,
+    focused: Option<bool>,
+    radius: Option<f32>,
+    /// Triangle geometry is present only for TRI/TEX_TRI records. Keeping
+    /// the vertices instead of reducing them to an AABB lets a Canvas host
+    /// preserve real rotated/gouraud DrawList output.
+    points: Option<Vec<FramePoint>>,
+    colors: Option<Vec<u32>>,
+    uvs: Option<Vec<f32>>,
+    /// Normalized source rectangle for an axis-aligned TEX_QUAD. This is
+    /// essential for PAK sprite atlases; [0,0,1,1] is the ordinary image
+    /// case. TEX_TRI uses `uvs` above because it has one pair per vertex.
+    uv: Option<Vec<f32>>,
+    /// Typed compositor descriptor used only by the PFB1 encoder. Keeping it
+    /// out of the serde representation preserves the legacy JSON asset
+    /// descriptor contract without building JSON on the binary hot path.
+    surface_kind: Option<String>,
+    surface_parameters: Option<Vec<u8>>,
+    clip: Clip,
+}
+
+#[derive(Serialize)]
+struct LegacyFrameOp<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fit: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     autoplay: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     color: Option<u32>,
-    /// First/last endpoint of a real core GRAD_RECT. Colors use the public
-    /// FrameResult ARGB convention (the core DrawList stores ABGR).
     #[serde(rename = "from", skip_serializing_if = "Option::is_none")]
     from_color: Option<u32>,
     #[serde(rename = "to", skip_serializing_if = "Option::is_none")]
     to_color: Option<u32>,
-    /// pocket_spec::GradDir: 0=top, 1=bottom, 2=left, 3=right.
     #[serde(skip_serializing_if = "Option::is_none")]
     direction: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,21 +251,73 @@ struct FrameOp {
     focused: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     radius: Option<f32>,
-    /// Triangle geometry is present only for TRI/TEX_TRI records. Keeping
-    /// the vertices instead of reducing them to an AABB lets a Canvas host
-    /// preserve real rotated/gouraud DrawList output.
     #[serde(skip_serializing_if = "Option::is_none")]
-    points: Option<Vec<FramePoint>>,
+    points: Option<&'a Vec<FramePoint>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    colors: Option<Vec<u32>>,
+    colors: Option<&'a Vec<u32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    uvs: Option<Vec<f32>>,
-    /// Normalized source rectangle for an axis-aligned TEX_QUAD. This is
-    /// essential for PAK sprite atlases; [0,0,1,1] is the ordinary image
-    /// case. TEX_TRI uses `uvs` above because it has one pair per vertex.
+    uvs: Option<&'a Vec<f32>>,
     #[serde(rename = "uv", skip_serializing_if = "Option::is_none")]
-    uv: Option<Vec<f32>>,
-    clip: Clip,
+    uv: Option<&'a Vec<f32>>,
+    clip: &'a Clip,
+}
+
+impl Serialize for FrameOp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Only the legacy JSON ABI needs the descriptor string. PFB1 calls
+        // BinaryFrameWriter directly and never enters this method.
+        let descriptor;
+        let asset = if self.kind == "hostSurface" && self.asset.is_none() {
+            let kind = self
+                .surface_kind
+                .as_deref()
+                .ok_or_else(|| serde::ser::Error::custom("hostSurface kind is missing"))?;
+            let parameters = self.surface_parameters.as_deref().ok_or_else(|| {
+                serde::ser::Error::custom("hostSurface parameters are missing")
+            })?;
+            let value =
+                binary_bridge::decode_to_json(parameters).map_err(serde::ser::Error::custom)?;
+            descriptor = serde_json::to_string(&serde_json::json!({
+                "kind": kind,
+                "parameters": value,
+            }))
+            .map_err(serde::ser::Error::custom)?;
+            Some(descriptor.as_str())
+        } else {
+            self.asset.as_deref()
+        };
+        LegacyFrameOp {
+            kind: &self.kind,
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h: self.h,
+            text: self.text.as_deref(),
+            asset,
+            id: self.id.as_deref(),
+            fit: self.fit.as_deref(),
+            autoplay: self.autoplay,
+            color: self.color,
+            from_color: self.from_color,
+            to_color: self.to_color,
+            direction: self.direction,
+            size: self.size,
+            font_slot: self.font_slot,
+            text_align: self.text_align,
+            surface_handle: self.surface_handle,
+            focused: self.focused,
+            radius: self.radius,
+            points: self.points.as_ref(),
+            colors: self.colors.as_ref(),
+            uvs: self.uvs.as_ref(),
+            uv: self.uv.as_ref(),
+            clip: &self.clip,
+        }
+        .serialize(serializer)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -601,14 +720,23 @@ impl BinaryFrameWriter {
             }
             7 | 8 => {
                 self.string(op.id.as_deref().unwrap_or(""))?;
-                self.string(op.asset.as_deref().unwrap_or(""))?;
                 if tag == 7 {
-                    // hostSurface assets are the canonical descriptor JSON;
-                    // the Dart decoder extracts kind/parameters exactly as
-                    // it does for the legacy JSON schema.
+                    self.string(op.surface_kind.as_deref().ok_or_else(|| {
+                        "hostSurface kind is missing".to_owned()
+                    })?)?;
+                    let parameters = op.surface_parameters.as_deref().ok_or_else(|| {
+                        "hostSurface parameters are missing".to_owned()
+                    })?;
+                    if parameters.first().copied()
+                        != Some(binary_bridge::BINARY_MESSAGE_MAGIC)
+                    {
+                        return Err("hostSurface parameters are not a 0xB1 object".to_owned());
+                    }
+                    self.bytes(parameters)?;
                     self.u32(op.surface_handle.unwrap_or(0) as u32);
                     self.u8(u8::from(op.focused.unwrap_or(false)));
                 } else {
+                    self.string(op.asset.as_deref().unwrap_or(""))?;
                     self.u8(if op.fit.as_deref() == Some("contain") {
                         1
                     } else if op.fit.as_deref() == Some("fill") {
@@ -658,7 +786,9 @@ fn encode_binary_frame_with_ops(
     let mut writer = BinaryFrameWriter::new();
     writer.u32(BINARY_FRAME_MAGIC);
     writer.u16(BINARY_FRAME_VERSION);
-    writer.u16(1); // PFB1 metadata: TEXT_RUN align, SURFACE_QUAD handle/focus.
+    // PFB1 metadata: existing text/handle fields plus typed surface
+    // descriptors (tag 7).
+    writer.u16(3);
     writer.u64(frame.frame);
     writer.f32(frame.width);
     writer.f32(frame.height);
@@ -1117,7 +1247,7 @@ fn install_bridge(
             let enqueue_bridge_value = {
                 let emit_queue = emit_queue.clone();
                 let queued_bytes = queued_bytes.clone();
-                move |raw: Value<'_>| -> rquickjs::Result<bool> {
+                move |raw: Value<'_>, allow_legacy_string: bool| -> rquickjs::Result<bool> {
                     let remaining_budget = {
                         let queue = emit_queue.borrow();
                         if queue.is_empty() {
@@ -1132,6 +1262,9 @@ fn install_bridge(
                         return Ok(false);
                     }
                     let (binary, cost) = if let Some(js_str) = raw.as_string() {
+                        if !allow_legacy_string {
+                            return Ok(false);
+                        }
                         let Ok(line) = js_str.to_string() else {
                             return Ok(false);
                         };
@@ -1184,11 +1317,11 @@ fn install_bridge(
             };
             let emit_fn_closure = enqueue_bridge_value.clone();
             let emit = Function::new(ctx.clone(), move |_ctx: Ctx<'_>, value: Value<'_>| {
-                emit_fn_closure(value)
+                emit_fn_closure(value, true)
             })?;
             let emit_val_closure = enqueue_bridge_value;
             let emit_value = Function::new(ctx.clone(), move |_ctx: Ctx<'_>, value: Value<'_>| {
-                emit_val_closure(value)
+                emit_val_closure(value, false)
             })?;
             bridge.set("_emit", emit)?;
             bridge.set("_emitValue", emit_value)?;
@@ -1244,13 +1377,15 @@ fn install_bridge(
             let register_nodes = nodes.clone();
             let register = Function::new(
                 ctx.clone(),
-                move |_ctx: Ctx<'_>, id: i32, kind: String, payload: String| {
+                move |_ctx: Ctx<'_>, id: i32, kind: String, payload: Value<'_>| {
                     let mut list = register_nodes.borrow_mut();
                     list.retain(|node| node.id != id);
                     let mut meta = NodeMeta {
                         id,
                         kind,
                         asset: String::new(),
+                        surface_kind: String::new(),
+                        surface_parameters: Vec::new(),
                         video_id: String::new(),
                         fit: "cover".to_owned(),
                         autoplay: true,
@@ -1258,26 +1393,48 @@ fn install_bridge(
                         surface: -1,
                         from_pack: false,
                     };
-                    if let Ok(extra) = serde_json::from_str::<serde_json::Value>(&payload) {
-                        meta.asset = extra
-                            .get("asset")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_owned();
-                        meta.video_id = extra
-                            .get("videoId")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_owned();
-                        meta.fit = normalize_video_fit(extra.get("fit").and_then(|v| v.as_str()));
-                        meta.autoplay = extra
-                            .get("autoplay")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(true);
-                        meta.texture =
-                            extra.get("texture").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
-                        meta.surface =
-                            extra.get("surface").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+                    if let Some(extra) = payload.as_object() {
+                        meta.asset = js_string_property(&extra, "asset").unwrap_or_default();
+                        meta.video_id =
+                            js_string_property(&extra, "videoId").unwrap_or_default();
+                        meta.fit = normalize_video_fit(
+                            js_string_property(&extra, "fit").as_deref(),
+                        );
+                        meta.autoplay = js_bool_property(&extra, "autoplay").unwrap_or(true);
+                        meta.texture = js_i32_property(&extra, "texture").unwrap_or(-1);
+                        meta.surface = js_i32_property(&extra, "surface").unwrap_or(-1);
+                    } else if let Some(js_string) = payload.as_string() {
+                        if let Ok(payload) = js_string.to_string() {
+                            if let Ok(extra) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                meta.asset = extra
+                                    .get("asset")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_owned();
+                                meta.video_id = extra
+                                    .get("videoId")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_owned();
+                                meta.fit = normalize_video_fit(
+                                    extra.get("fit").and_then(|v| v.as_str()),
+                                );
+                                meta.autoplay = extra
+                                    .get("autoplay")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                meta.texture = extra
+                                    .get("texture")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(-1)
+                                    as i32;
+                                meta.surface = extra
+                                    .get("surface")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(-1)
+                                    as i32;
+                            }
+                        }
                     }
                     list.push(meta);
                     Ok::<(), rquickjs::Error>(())
@@ -1293,25 +1450,72 @@ fn install_bridge(
             let next_surface = Rc::new(RefCell::new(100_i32));
             let register_surface = Function::new(
                 ctx.clone(),
-                move |ctx: Ctx<'_>, package: String, kind: String, payload: String| {
+                move |ctx: Ctx<'_>, package: String, kind: String, payload: Value<'_>| {
                     if package.is_empty()
                         || package.len() > 160
                         || !matches!(kind.as_str(), "glass" | "platformTexture" | "video")
-                        || payload.len() > 8192
                     {
                         return Err(Exception::throw_type(&ctx, "invalid compositor provider"));
                     }
-                    let data: serde_json::Value = serde_json::from_str(&payload)
-                        .map_err(|_| Exception::throw_type(&ctx, "invalid surface parameters"))?;
-                    if !data.is_object() {
-                        return Err(Exception::throw_type(
-                            &ctx,
-                            "surface parameters must be an object",
-                        ));
-                    }
                     let is_video = kind == "video";
-                    let video_asset = data.get("asset").and_then(|value| value.as_str());
-                    if is_video && video_asset.map_or(true, str::is_empty) {
+                    let (parameters, video_asset, fit, autoplay) =
+                        if let Some(object) = payload.as_object() {
+                            let parameters = binary_bridge::encode_js_message(
+                                payload.clone(),
+                                8192,
+                                MAX_BRIDGE_BATCH_EVENTS,
+                            )
+                            .map_err(|_| {
+                                Exception::throw_type(&ctx, "invalid surface parameters")
+                            })?;
+                            let video_asset = js_string_property(&object, "asset");
+                            let fit = normalize_video_fit(
+                                js_string_property(&object, "fit").as_deref(),
+                            );
+                            let autoplay = js_bool_property(&object, "autoplay").unwrap_or(true);
+                            (parameters, video_asset, fit, autoplay)
+                        } else if let Some(js_string) = payload.as_string() {
+                            let text = js_string.to_string().map_err(|_| {
+                                Exception::throw_type(&ctx, "invalid surface parameters")
+                            })?;
+                            if text.len() > 8192 {
+                                return Err(Exception::throw_type(
+                                    &ctx,
+                                    "invalid surface parameters",
+                                ));
+                            }
+                            let data: serde_json::Value = serde_json::from_str(&text).map_err(
+                                |_| Exception::throw_type(&ctx, "invalid surface parameters"),
+                            )?;
+                            if !data.is_object() {
+                                return Err(Exception::throw_type(
+                                    &ctx,
+                                    "surface parameters must be an object",
+                                ));
+                            }
+                            let parameters = binary_bridge::encode_json_to_binary(&data, 8192)
+                                .map_err(|_| {
+                                    Exception::throw_type(&ctx, "invalid surface parameters")
+                                })?;
+                            let video_asset = data
+                                .get("asset")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned);
+                            let fit = normalize_video_fit(
+                                data.get("fit").and_then(|value| value.as_str()),
+                            );
+                            let autoplay = data
+                                .get("autoplay")
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(true);
+                            (parameters, video_asset, fit, autoplay)
+                        } else {
+                            return Err(Exception::throw_type(
+                                &ctx,
+                                "surface parameters must be an object",
+                            ));
+                        };
+                    if is_video && video_asset.as_deref().map_or(true, str::is_empty) {
                         return Err(Exception::throw_type(
                             &ctx,
                             "video surface parameters require a non-empty asset",
@@ -1355,25 +1559,24 @@ fn install_bridge(
                         (
                             "video".to_owned(),
                             video_asset.expect("validated video asset").to_owned(),
-                            normalize_video_fit(data.get("fit").and_then(|value| value.as_str())),
+                            fit,
                         )
                     } else {
-                        (
-                            "hostSurface".to_owned(),
-                            serde_json::json!({"kind": kind, "parameters": data}).to_string(),
-                            "fill".to_owned(),
-                        )
+                        ("hostSurface".to_owned(), String::new(), "fill".to_owned())
                     };
                     let meta = NodeMeta {
                         id: -handle,
                         kind: node_kind,
                         asset,
+                        surface_kind: if is_video { String::new() } else { kind.clone() },
+                        surface_parameters: if is_video {
+                            Vec::new()
+                        } else {
+                            parameters
+                        },
                         video_id: package.clone(),
                         fit,
-                        autoplay: data
-                            .get("autoplay")
-                            .and_then(|value| value.as_bool())
-                            .unwrap_or(true),
+                        autoplay,
                         texture: -1,
                         surface: handle,
                         from_pack: false,
@@ -1490,8 +1693,13 @@ fn install_compositor_apps(
         list.push(NodeMeta {
             id: -*handle,
             kind: "hostSurface".into(),
-            asset: serde_json::json!({"kind":"application", "parameters":{"appId": app_id}})
-                .to_string(),
+            asset: String::new(),
+            surface_kind: "application".into(),
+            surface_parameters: binary_bridge::encode_json_to_binary(
+                &serde_json::json!({"appId": app_id}),
+                8192,
+            )
+            .unwrap_or_else(|_| vec![binary_bridge::BINARY_MESSAGE_MAGIC, 0]),
             video_id: app_id.clone(),
             fit: "fill".into(),
             autoplay: true,
@@ -1619,19 +1827,15 @@ fn dispatch_guest_json(
                 function
                     .call::<_, ()>((js_packet,))
                     .map_err(|error| quickjs_error(&ctx, error))
-            } else {
-                let owned;
-                let line = match fallback_line {
-                    Some(line) => line,
-                    None => {
-                        owned = serde_json::to_string(json_val)
-                            .map_err(|error| format!("guest event JSON encode: {error}"))?;
-                        &owned
-                    }
-                };
+            } else if let Some(line) = fallback_line {
+                // Only pocket_send's explicit diagnostic record uses text.
                 function
                     .call::<_, ()>((line.to_owned(),))
                     .map_err(|error| quickjs_error(&ctx, error))
+            } else {
+                Err(format!(
+                    "Pocket direct-object guest ABI unavailable: {function_name}.__binaryCapable is required; rebuild the guest"
+                ))
             }
         })
         .ok_or_else(|| "guest context is not initialized".to_owned())?
@@ -1653,19 +1857,15 @@ fn dispatch_guest_binary(
             }
             let function =
                 Function::from_js(&ctx, value).map_err(|error| quickjs_error(&ctx, error))?;
-            if is_js_handler_binary_capable(&function) {
-                let js_packet = binary_bridge::decode_to_js(&ctx, binary_bytes)?;
-                function
-                    .call::<_, ()>((js_packet,))
-                    .map_err(|error| quickjs_error(&ctx, error))
-            } else {
-                let json_val = binary_bridge::decode_to_json(binary_bytes)?;
-                let line = serde_json::to_string(&json_val)
-                    .map_err(|error| format!("binary fallback JSON encode: {error}"))?;
-                function
-                    .call::<_, ()>((line,))
-                    .map_err(|error| quickjs_error(&ctx, error))
+            if !is_js_handler_binary_capable(&function) {
+                return Err(format!(
+                    "Pocket direct-object guest ABI unavailable: {function_name}.__binaryCapable is required; rebuild the guest"
+                ));
             }
+            let js_packet = binary_bridge::decode_to_js(&ctx, binary_bytes)?;
+            function
+                .call::<_, ()>((js_packet,))
+                .map_err(|error| quickjs_error(&ctx, error))
         })
         .ok_or_else(|| "guest context is not initialized".to_owned())?
 }
@@ -1703,10 +1903,69 @@ fn dispatch_duplex_event(
         .ok_or_else(|| "guest context is not initialized".to_owned())?
 }
 
+fn dispatch_duplex_pointer_guest(
+    guest: &RquickjsGuest,
+    phase: &str,
+    id: u8,
+    x: f64,
+    y: f64,
+    surface: u8,
+) -> Result<(), String> {
+    guest
+        .with_turn(|ctx| -> Result<(), String> {
+            let value: Value = ctx
+                .globals()
+                .get("__pocketEvent")
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            if value.is_undefined() || value.is_null() {
+                return Ok(());
+            }
+            let function =
+                Function::from_js(&ctx, value).map_err(|error| quickjs_error(&ctx, error))?;
+            if !is_js_handler_binary_capable(&function) {
+                return Err(
+                    "Pocket direct-object guest ABI unavailable: __pocketEvent.__binaryCapable is required; rebuild the guest".to_owned(),
+                );
+            }
+            let payload = Object::new(ctx.clone()).map_err(|error| quickjs_error(&ctx, error))?;
+            payload
+                .set("phase", phase)
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            payload
+                .set("id", id as u32)
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            payload
+                .set("x", x)
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            payload
+                .set("y", y)
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            if surface == 1 {
+                payload
+                    .set("surface", 1_u32)
+                    .map_err(|error| quickjs_error(&ctx, error))?;
+            }
+            let input = Object::new(ctx.clone()).map_err(|error| quickjs_error(&ctx, error))?;
+            input
+                .set("type", "event")
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            input
+                .set("name", "input.pointer")
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            input
+                .set("payload", payload)
+                .map_err(|error| quickjs_error(&ctx, error))?;
+            function
+                .call::<_, ()>((input.into_value(),))
+                .map_err(|error| quickjs_error(&ctx, error))
+        })
+        .ok_or_else(|| "guest context is not initialized".to_owned())?
+}
+
 /// Translate the reserved numeric pointer message into the exact canonical
-/// `input.pointer` path used by JSON callers. The conversion is confined to
+/// `input.pointer` path used by binary callers. The conversion is confined to
 /// the native owner thread: it queues the hit-tested touch snapshot and then
-/// delivers the same `__pocketEvent` line to the guest, so a JS app does not
+/// delivers a direct `__pocketEvent` object to the guest, so a JS app does not
 /// need a second pointer protocol just because the host selected the
 /// lock-free transport.
 fn dispatch_duplex_pointer(
@@ -1729,31 +1988,38 @@ fn dispatch_duplex_pointer(
     if message.flags & !(POINTER_PHASE_MASK | POINTER_AUXILIARY_FLAG) != 0 {
         return Err("duplex pointer flags contain unknown bits".to_owned());
     }
-    let mut payload = serde_json::json!({
-        "phase": phase,
-        "id": message.target_id,
-        "x": message.arg0,
-        "y": message.arg1,
-    });
-    if message.flags & POINTER_AUXILIARY_FLAG != 0 {
-        payload["surface"] = serde_json::json!(1);
-    }
-    let input = serde_json::json!({
-        "type": "event",
-        "name": "input.pointer",
-        "payload": payload,
-    });
-    queue_input(host, &input)?;
-    dispatch_guest_json(&host.guest, "__pocketEvent", &input, None)
+    let id = u8::try_from(message.target_id)
+        .map_err(|_| "input.pointer payload.id must be an integer in [0,255]".to_owned())?;
+    let surface = if message.flags & POINTER_AUXILIARY_FLAG != 0 {
+        1
+    } else {
+        0
+    };
+    queue_pointer_fields(
+        host,
+        phase,
+        id,
+        message.arg0 as f64,
+        message.arg1 as f64,
+        surface,
+    )?;
+    dispatch_duplex_pointer_guest(
+        &host.guest,
+        phase,
+        id,
+        message.arg0 as f64,
+        message.arg1 as f64,
+        surface,
+    )
 }
 
 /// Drain host-written records on the native owner thread and dispatch them to
 /// the current QuickJS guest. The cursor is committed only after JS accepts a
 /// record, making an unset/failed handler observable rather than silently
 /// dropping input. Generic duplex records remain scalar-only; the reserved
-/// pointer record is adapted to the canonical `__pocketEvent` compatibility
-/// path, where one small JSON event is intentionally created so existing JS
-/// guests observe exactly the same input contract as JSON callers.
+/// pointer record is adapted to the canonical `__pocketEvent` object path.
+/// A stale guest without the direct-object ABI fails without consuming the
+/// record; canonical input never falls back to JSON text.
 fn drain_duplex(host: &mut HostState) -> Result<i32, String> {
     let mut processed = 0_i32;
     loop {
@@ -1890,36 +2156,24 @@ fn enqueue_touch_frame(host: &mut HostState, cancelled: Vec<TouchContact>, coale
     }
 }
 
-/// Capture one host pointer edge.  A DOWN resolves the official core bounds
-/// hit once, then the id/hit pair is carried in every GuestFrame until UP or
-/// CANCEL.  No Flutter-side hit rectangle is involved in this path.
-fn queue_pointer(host: &mut HostState, message: &serde_json::Value) -> Result<(), String> {
-    let Some(payload) = pointer_payload(message) else {
-        return Err("input.pointer requires an object payload".to_owned());
-    };
-    let phase = payload
-        .get("phase")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            "input.pointer payload.phase must be down, move, up, or cancel".to_owned()
-        })?;
-    let id = payload
-        .get("id")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    if id > u8::MAX as u64 {
-        return Err("input.pointer payload.id must be an integer in [0,255]".to_owned());
+/// Queue a pointer edge after its transport-specific envelope has been
+/// decoded. Keeping this path scalar lets the duplex ring avoid constructing
+/// a serde value while preserving the JSON input.pointer validation and touch
+/// snapshot semantics exactly.
+fn queue_pointer_fields(
+    host: &mut HostState,
+    phase: &str,
+    id: u8,
+    x_value: f64,
+    y_value: f64,
+    surface: u8,
+) -> Result<(), String> {
+    if surface == 1 && host.auxiliary_viewport.is_none() {
+        return Err("input.pointer auxiliary surface is not enabled".to_owned());
     }
-    let id = id as u8;
-    let surface = pointer_surface(host, payload)?;
-    let x_value = payload
-        .get("x")
-        .and_then(|value| value.as_f64())
-        .ok_or_else(|| "input.pointer payload.x must be finite".to_owned())?;
-    let y_value = payload
-        .get("y")
-        .and_then(|value| value.as_f64())
-        .ok_or_else(|| "input.pointer payload.y must be finite".to_owned())?;
+    if surface > 1 {
+        return Err("input.pointer payload.surface must be primary/auxiliary or 0/1".to_owned());
+    }
     if !x_value.is_finite() || !y_value.is_finite() {
         return Err("input.pointer payload coordinates must be finite".to_owned());
     }
@@ -2015,6 +2269,39 @@ fn queue_pointer(host: &mut HostState, message: &serde_json::Value) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Capture one host pointer edge.  A DOWN resolves the official core bounds
+/// hit once, then the id/hit pair is carried in every GuestFrame until UP or
+/// CANCEL.  No Flutter-side hit rectangle is involved in this path.
+fn queue_pointer(host: &mut HostState, message: &serde_json::Value) -> Result<(), String> {
+    let Some(payload) = pointer_payload(message) else {
+        return Err("input.pointer requires an object payload".to_owned());
+    };
+    let phase = payload
+        .get("phase")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            "input.pointer payload.phase must be down, move, up, or cancel".to_owned()
+        })?;
+    let id = payload
+        .get("id")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    if id > u8::MAX as u64 {
+        return Err("input.pointer payload.id must be an integer in [0,255]".to_owned());
+    }
+    let id = id as u8;
+    let surface = pointer_surface(host, payload)?;
+    let x_value = payload
+        .get("x")
+        .and_then(|value| value.as_f64())
+        .ok_or_else(|| "input.pointer payload.x must be finite".to_owned())?;
+    let y_value = payload
+        .get("y")
+        .and_then(|value| value.as_f64())
+        .ok_or_else(|| "input.pointer payload.y must be finite".to_owned())?;
+    queue_pointer_fields(host, phase, id, x_value, y_value, surface)
 }
 
 fn input_value<'a>(message: &'a serde_json::Value) -> &'a serde_json::Value {
@@ -3018,6 +3305,8 @@ fn append_draw_operation(
                 colors: None,
                 uvs: None,
                 uv: None,
+                surface_kind: None,
+                surface_parameters: None,
                 clip: clip_of(operation.clip),
             });
         }
@@ -3069,6 +3358,8 @@ fn append_draw_operation(
                 colors: None,
                 uvs: None,
                 uv: None,
+                surface_kind: None,
+                surface_parameters: None,
                 clip: clip_of(operation.clip),
             });
         }
@@ -3158,6 +3449,8 @@ fn append_draw_operation(
                     colors: None,
                     uvs: None,
                     uv: Some(page.uv(gid).to_vec()),
+                    surface_kind: None,
+                    surface_parameters: None,
                     clip: clip_of(operation.clip),
                 });
             }
@@ -3230,6 +3523,8 @@ fn append_draw_operation(
                 colors: None,
                 uvs: None,
                 uv: Some(uv.to_vec()),
+                surface_kind: None,
+                surface_parameters: None,
                 clip: clip_of(operation.clip),
             });
         }
@@ -3294,6 +3589,8 @@ fn append_draw_operation(
                 colors: Some(colors),
                 uvs: None,
                 uv: None,
+                surface_kind: None,
+                surface_parameters: None,
                 clip: clip_of(operation.clip),
             });
         }
@@ -3391,6 +3688,8 @@ fn append_draw_operation(
                 colors: None,
                 uvs: Some(uvs),
                 uv: None,
+                surface_kind: None,
+                surface_parameters: None,
                 clip: clip_of(operation.clip),
             });
         }
@@ -3453,6 +3752,8 @@ fn append_draw_operation(
                 colors: None,
                 uvs: None,
                 uv: None,
+                surface_kind: None,
+                surface_parameters: None,
                 clip: clip_of(operation.clip),
             });
         }
@@ -3475,7 +3776,11 @@ fn append_draw_operation(
                 .ok_or_else(|| {
                     format!("SURFACE_QUAD surface handle {surface} has no registered video asset")
                 })?;
-            if video.asset.is_empty() || video.video_id.is_empty() {
+            if video.video_id.is_empty()
+                || (video.kind == "video" && video.asset.is_empty())
+                || (video.kind == "hostSurface"
+                    && (video.surface_kind.is_empty() || video.surface_parameters.is_empty()))
+            {
                 return Err(format!(
                     "SURFACE_QUAD surface handle {surface} has an incomplete video mapping"
                 ));
@@ -3492,7 +3797,7 @@ fn append_draw_operation(
                 w,
                 h,
                 text: None,
-                asset: Some(video.asset.clone()),
+                asset: (video.kind == "video").then(|| video.asset.clone()),
                 id: Some(video.video_id.clone()),
                 fit: Some(video.fit.clone()),
                 autoplay: (video.kind == "video").then_some(video.autoplay),
@@ -3510,6 +3815,16 @@ fn append_draw_operation(
                 colors: None,
                 uvs: None,
                 uv: None,
+                surface_kind: if video.kind == "hostSurface" {
+                    Some(video.surface_kind.clone())
+                } else {
+                    None
+                },
+                surface_parameters: if video.kind == "hostSurface" {
+                    Some(video.surface_parameters.clone())
+                } else {
+                    None
+                },
                 clip: clip_of(visible),
             });
         }
@@ -4930,6 +5245,8 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
                 id: i32::MIN.saturating_add(index as i32),
                 kind: "image".to_owned(),
                 asset: texture.name.clone(),
+                surface_kind: String::new(),
+                surface_parameters: Vec::new(),
                 video_id: String::new(),
                 fit: "cover".to_owned(),
                 autoplay: true,
@@ -4944,6 +5261,8 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
                 id: i32::MIN.saturating_add((texture_count + index) as i32),
                 kind: "image".to_owned(),
                 asset: sprite.name.clone(),
+                surface_kind: String::new(),
+                surface_parameters: Vec::new(),
                 video_id: String::new(),
                 fit: "cover".to_owned(),
                 autoplay: true,
@@ -6023,9 +6342,8 @@ pub unsafe extern "C" fn pocket_send(handle: *mut HostState, message: *const c_c
     } else {
         "__pocketEvent"
     };
-    // A duplex producer may be full for one edge, in which case Flutter
-    // falls back to this JSON entry point. Drain already-published numeric
-    // records first so a fallback UP/CANCEL cannot overtake a queued DOWN.
+    // Explicit legacy callers must preserve the same edge ordering as the
+    // binary ABI. Drain published records before dispatching their next edge.
     if host.guest_loaded {
         if let Err(error) = demand::before_external(host) {
             set_error(host, error);
@@ -6688,6 +7006,132 @@ mod smoke_tests {
     }
 
     #[test]
+    fn typed_surface_and_duplex_pointer_avoid_guest_json_and_preserve_edges() {
+        let handle = pocket_create(320.0, 480.0);
+        let source = CString::new(
+            r#"
+            JSON.parse = function() { throw new Error('JSON.parse must not run'); };
+            JSON.stringify = function() { throw new Error('JSON.stringify must not run'); };
+            const seen = [];
+            const handler = function(packet) {
+                if (typeof packet === 'string') throw new Error('pointer must be an object');
+                if (!packet || packet.name !== 'input.pointer') throw new Error('wrong pointer event');
+                seen.push(packet.payload.phase);
+                pocket._emitValue({
+                    type: 'event',
+                    name: 'pointer.seen',
+                    payload: { phase: packet.payload.phase, id: packet.payload.id }
+                });
+            };
+            handler.__binaryCapable = true;
+            globalThis.__pocketEvent = handler;
+            pocket._register(77, 'image', { asset: 'typed.png', texture: 4 });
+            if (pocket._emitValue('must-be-rejected') !== false) throw new Error('string accepted');
+            if (pocket._emitValue({ type: 'event', name: 'typed.emit', payload: { ok: true } }) !== true) {
+                throw new Error('object emit rejected');
+            }
+            const surface = pocket.registerSurface('typed.glass', 'glass', {
+                radius: 18,
+                nested: { enabled: true }
+            });
+            const node = ui.createNode(3);
+            ui.setProp(node, 1, 100); ui.setProp(node, 2, 60);
+            ui.setCompositorSurface(node, surface, 0);
+            ui.insertBefore(1, node, 0);
+            globalThis.frame = function() {};
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+        });
+
+        let producer = unsafe { (&*handle).duplex.claim_ingress_producer().unwrap() };
+        for (flags, x, y) in [(1_u16, 10.0_f32, 20.0_f32), (2, 12.0, 22.0), (3, 14.0, 24.0)] {
+            let reservation = producer.reserve(1).unwrap();
+            unsafe {
+                ptr::write(
+                    producer
+                        .payload_ptr(reservation)
+                        .unwrap()
+                        .cast::<duplex::DuplexMessage>(),
+                    duplex::DuplexMessage {
+                        msg_type: 1,
+                        flags,
+                        target_id: 9,
+                        arg0: x,
+                        arg1: y,
+                    },
+                );
+            }
+            assert!(producer.commit(reservation));
+        }
+        assert_eq!(unsafe { pocket_duplex_step(handle) }, 3, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+        });
+
+        let phases = unsafe { &*handle }
+            .outbound
+            .borrow()
+            .iter()
+            .filter_map(|event| {
+                let value = binary_bridge::decode_to_json(&event.binary).unwrap();
+                (value["name"] == "pointer.seen").then(|| {
+                    value["payload"]["phase"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(phases, ["down", "move", "up"]);
+
+        // The native touch queue still carries the three edge snapshots to
+        // the real GuestFrame path; UP must not leave an active contact.
+        let _ = frame_json(handle);
+        assert!(unsafe { &*handle }.touches.is_empty());
+        let frame = frame_json(handle);
+        let surface_op = frame["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["type"] == "hostSurface")
+            .expect("typed surface draw op");
+        let descriptor: serde_json::Value =
+            serde_json::from_str(surface_op["asset"].as_str().unwrap()).unwrap();
+        assert_eq!(descriptor["kind"], "glass");
+        assert_eq!(descriptor["parameters"]["nested"]["enabled"], true);
+
+        let mut length = 0_u64;
+        let pointer = unsafe { pocket_frame_binary(handle, 16.0, &mut length) };
+        assert!(!pointer.is_null() && length > 32);
+        let bytes = unsafe { std::slice::from_raw_parts(pointer, length as usize) };
+        assert_eq!(&bytes[..4], b"PFB1");
+        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 3);
+        let op_count = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        assert!(op_count >= 1);
+        let mut offset = 28_usize;
+        assert_eq!(bytes[offset], 7, "expected typed hostSurface tag");
+        offset += 33;
+        let read_bytes = |bytes: &[u8], offset: &mut usize| {
+            let len = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap()) as usize;
+            *offset += 4;
+            let result = bytes[*offset..*offset + len].to_vec();
+            *offset += len;
+            result
+        };
+        assert_eq!(String::from_utf8(read_bytes(bytes, &mut offset)).unwrap(), "typed.glass");
+        assert_eq!(String::from_utf8(read_bytes(bytes, &mut offset)).unwrap(), "glass");
+        let parameters = read_bytes(bytes, &mut offset);
+        assert_eq!(parameters.first().copied(), Some(binary_bridge::BINARY_MESSAGE_MAGIC));
+        let decoded = binary_bridge::decode_to_json(&parameters).unwrap();
+        assert_eq!(decoded["nested"]["enabled"], true);
+        assert_eq!(u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()), 100);
+
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
     fn registered_video_surface_updates_asset_and_fit_without_reusing_cached_op() {
         let handle = pocket_create(320.0, 480.0);
         let source = CString::new(
@@ -6840,7 +7284,13 @@ mod smoke_tests {
         let nodes = [NodeMeta {
             id: -7,
             kind: "hostSurface".into(),
-            asset: r#"{"kind":"glass","parameters":{"radius":18}}"#.into(),
+            asset: String::new(),
+            surface_kind: "glass".into(),
+            surface_parameters: binary_bridge::encode_json_to_binary(
+                &serde_json::json!({"radius": 18}),
+                8192,
+            )
+            .unwrap(),
             video_id: "test.clip".into(),
             fit: "fill".into(),
             autoplay: true,
@@ -6948,6 +7398,7 @@ mod smoke_tests {
         let bytes = unsafe { std::slice::from_raw_parts(pointer, length as usize) };
         assert_eq!(&bytes[..4], b"PFB1");
         assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
+        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 3);
         // Header (24 bytes) is followed by the operation count. The source
         // above emits at least one rect operation.
         let op_count = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
@@ -7346,12 +7797,12 @@ mod smoke_tests {
             ui.setProp(node, 1, 40); ui.setProp(node, 2, 24);
             ui.setProp(node, 64, 0xff336699); ui.insertBefore(1, node, 0);
             globalThis.frame = function() {};
-            globalThis.__pocketEvent = function(line) {
-                const event = JSON.parse(line);
+            globalThis.__pocketEvent = function(event) {
                 if (event.name === 'input.pointer' && event.payload.phase === 'up') {
                     ui.setProp(node, 64, 0xffcc6633);
                 }
             };
+            __pocketEvent.__binaryCapable = true;
             "#,
         )
         .unwrap();
@@ -7401,7 +7852,7 @@ mod smoke_tests {
     }
 
     #[test]
-    fn json_pointer_fallback_does_not_overtake_queued_duplex_down() {
+    fn binary_pointer_fallback_does_not_overtake_queued_duplex_down() {
         let handle = pocket_create(320.0, 480.0);
         let source = CString::new(
             r#"
@@ -7409,12 +7860,12 @@ mod smoke_tests {
             ui.setProp(node, 1, 40); ui.setProp(node, 2, 24);
             ui.insertBefore(1, node, 0);
             globalThis.frame = function() {};
-            globalThis.__pocketEvent = function(line) {
-                const event = JSON.parse(line);
+            globalThis.__pocketEvent = function(event) {
                 if (event.name === 'input.pointer') {
-                    pocket._emit(JSON.stringify({type:'event', name:'input.seen', payload:{phase:event.payload.phase}}));
+                    pocket._emitValue({type:'event', name:'input.seen', payload:{phase:event.payload.phase}});
                 }
             };
+            __pocketEvent.__binaryCapable = true;
             "#,
         )
         .unwrap();
@@ -7437,11 +7888,14 @@ mod smoke_tests {
             );
             assert_eq!(pocket_duplex_ingress_publish(endpoint, count), 1);
         }
-        let fallback_up = CString::new(
-            r#"{"type":"event","name":"input.pointer","payload":{"phase":"up","id":0,"x":8,"y":12}}"#,
-        )
-        .unwrap();
-        assert_eq!(unsafe { pocket_send(handle, fallback_up.as_ptr()) }, 0);
+        let fallback_up = binary_bridge::encode_json_to_binary(
+            &serde_json::json!({"type":"event","name":"input.pointer","payload":{"phase":"up","id":0,"x":8,"y":12}}),
+            4096,
+        ).unwrap();
+        assert_eq!(
+            unsafe { pocket_send_binary(handle, fallback_up.as_ptr(), fallback_up.len()) },
+            0
+        );
         let frame = frame_json(handle);
         let phases = frame["events"]
             .as_array()
@@ -8162,6 +8616,7 @@ mod smoke_tests {
 
         let source = CString::new(
             r#"
+            JSON.parse = JSON.stringify = function() { throw new Error("JSON reached binary bridge"); };
             const handler = function(packet) {
                 if (typeof packet === "string") {
                     throw new Error("expected direct JS object for __binaryCapable handler");
@@ -8181,16 +8636,16 @@ mod smoke_tests {
             };
             handler.__binaryCapable = true;
             globalThis.__pocketEvent = handler;
-            if (!offload.submit(JSON.stringify({v:1,id:1,method:"crypto.digest",payload:'{"input":"hello"}'}))) {
-                throw new Error("offload.submit failed");
+            if (!offload.submitValue({v:1,id:1,method:"crypto.digest",payload:'{"input":"hello"}'})) {
+                throw new Error("offload.submitValue failed");
             }
             globalThis.frame = function() {
-                const reply = offload.take();
+                const reply = offload.takeValue();
                 if (reply) {
                     pocket._emitValue({
                         type: "event",
                         name: "offload.done",
-                        payload: JSON.parse(reply)
+                        payload: reply
                     });
                 }
             };
@@ -8276,6 +8731,48 @@ mod smoke_tests {
             pocket_destroy(handle);
         }
         let _ = inbound;
+    }
+
+    #[test]
+    fn binary_input_rejects_a_stale_guest_without_a_json_downgrade() {
+        let handle = pocket_create(80.0, 80.0);
+        let source = CString::new(
+            r#"
+            let seen = 0;
+            globalThis.__pocketEvent = function(line) {
+                if (typeof line !== 'string') throw Error('legacy diagnostic expects text');
+                seen++;
+            };
+            globalThis.frame = function() {};
+        "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        let packet = serde_json::json!({"type":"event", "name":"test", "payload":{}});
+        let bytes = binary_bridge::encode_json_to_binary(&packet, 4096).unwrap();
+        assert_eq!(
+            unsafe { pocket_send_binary(handle, bytes.as_ptr(), bytes.len()) },
+            -1
+        );
+        assert!(unsafe { &*handle }
+            .last_error
+            .contains("__binaryCapable"));
+        assert!(
+            dispatch_duplex_pointer_guest(&unsafe { &*handle }.guest, "down", 0, 1.0, 1.0, 0)
+                .is_err()
+        );
+        assert!(
+            dispatch_guest_json(&unsafe { &*handle }.guest, "__pocketEvent", &packet, None)
+                .is_err()
+        );
+        // The explicit diagnostic API remains source compatible.
+        let line = CString::new(packet.to_string()).unwrap();
+        assert_eq!(unsafe { pocket_send(handle, line.as_ptr()) }, 0);
+        let check =
+            CString::new("if (seen !== 1) throw Error('canonical input invoked legacy handler');")
+                .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, check.as_ptr()) }, 0);
+        unsafe { pocket_destroy(handle) };
     }
 
     #[test]

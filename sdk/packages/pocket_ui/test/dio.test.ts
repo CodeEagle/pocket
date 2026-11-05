@@ -4,7 +4,7 @@ import { createPocketDioClient } from "../src/dio.ts";
 
 test("dio client shares host correlation, HTTP responses and unavailable errors", async () => {
   const sent: any[] = [];
-  const host = createHostBridge(line => { sent.push(JSON.parse(line)); return true; });
+  const host = createHostBridge(packet => { sent.push(packet); return true; });
   try {
     const dio = createPocketDioClient(host);
     const result = dio.request({ url: "https://example.com/api", method: "POST", data: { hello: "world" } });

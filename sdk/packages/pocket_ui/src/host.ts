@@ -6,10 +6,10 @@
  *   event/host.request  { requestId, capability, params }
  *   event/host.response { requestId, capability, ok, result?, error? }
  *
- * The native runtime exposes `pocket._emit` for outbound packets and routes
- * event envelopes through `__pocketEvent` (with raw response compatibility on
- * `__pocketDeliver`). Keeping this adapter in the guest means UI code only
- * deals with promises and never knows about Dart objects.
+ * The native runtime exposes `pocket._emitValue` for outbound packets and
+ * routes object envelopes through `__pocketEvent`/`__pocketDeliver`.
+ * Keeping this adapter in the guest means UI code only deals with promises
+ * and never knows about Dart objects or a JSON wire representation.
  */
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -63,7 +63,7 @@ export interface HostRequestOptions {
 
 export interface HostBridge {
   request<T extends BridgeValue = BridgeValue>(capability: string, params?: BridgeObject, options?: HostRequestOptions): Promise<T>;
-  handle(packet: string | Record<string, unknown>): boolean;
+  handle(packet: Record<string, unknown>): boolean;
   /**
    * Emit a host event on the same Pocket event transport used by requests.
    * Optional keeps existing injected bridges source-compatible.
@@ -80,7 +80,18 @@ export interface HostBridge {
   dispose(): void;
 }
 
-export type HostSend = (line: string) => boolean;
+/** Direct-object transport used by deterministic tests and embedded hosts. */
+export type HostSend = (packet: Record<string, unknown>) => boolean;
+
+/** Raised when a guest is running against a pre-direct-object host ABI. */
+export class HostBridgeAbiError extends Error {
+  readonly code = "host_abi_unavailable";
+
+  constructor() {
+    super("Pocket direct-object host ABI unavailable: pocket._emitValue is required");
+    this.name = "HostBridgeAbiError";
+  }
+}
 
 class HostRequestError extends Error {
   readonly code: string;
@@ -100,18 +111,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isJsonObject(value: unknown): value is BridgeObject {
   return isObject(value);
-}
-
-function decode(packet: string | Record<string, unknown>): Record<string, unknown> | undefined {
-  if (typeof packet === "string") {
-    try {
-      const value: unknown = JSON.parse(packet);
-      return isObject(value) ? value : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return isObject(packet) ? packet : undefined;
 }
 
 function responseFrom(packet: Record<string, unknown>): HostResponse | undefined {
@@ -181,55 +180,32 @@ export interface HostBridgeOptions {
  * turn a high-rate host event stream into an unbounded diagnostics queue. */
 export const HOST_BRIDGE_MAX_DIAGNOSTICS = 32;
 
-export type HostPacketHandler = ((packet: string | Record<string, unknown>) => void) & {
+export type HostPacketHandler = ((packet: Record<string, unknown>) => void) & {
   __binaryCapable?: boolean;
 };
 
-export function stringifyHostPacket(packet: Record<string, unknown>): string {
-  return JSON.stringify(packet, (_key, value) => {
-    if (value instanceof Uint8Array) return Array.from(value);
-    if (ArrayBuffer.isView(value)) {
-      return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-    }
-    return value;
-  });
-}
-
 export function forwardHostPacket(
   handler: HostPacketHandler | undefined,
-  packet: string | Record<string, unknown>,
+  packet: Record<string, unknown>,
 ): void {
   if (!handler) return;
-  if (handler.__binaryCapable === true || typeof packet === "string") {
-    handler(packet);
-    return;
-  }
-  handler(stringifyHostPacket(packet));
+  handler(packet);
 }
 
 export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOptions = {}): HostBridge {
   const globalObject = globalThis as typeof globalThis & {
     pocket?: {
-      _emit?: (line: string) => boolean;
       _emitValue?: (packet: Record<string, unknown>) => boolean;
     };
     __pocketDeliver?: HostPacketHandler;
     __pocketEvent?: HostPacketHandler;
     __pocketHostBridge?: HostBridge;
   };
-  const send: HostSend = sendOverride ?? ((line) => {
-    const emit = globalObject.pocket?._emit;
-    return typeof emit === "function" && emit(line) === true;
-  });
   const sendPacket = (packet: Record<string, unknown>): boolean => {
-    if (!sendOverride) {
-      const emitValue = globalObject.pocket?._emitValue;
-      if (typeof emitValue === "function") {
-        return emitValue(packet) === true;
-      }
-    }
-    const line = stringifyHostPacket(packet);
-    return send(line);
+    if (sendOverride) return sendOverride(packet) === true;
+    const emitValue = globalObject.pocket?._emitValue;
+    if (typeof emitValue !== "function") throw new HostBridgeAbiError();
+    return emitValue(packet) === true;
   };
   const maxPendingRequests = options.maxPendingRequests ?? 32;
   const timeoutFrames = options.timeoutFrames ?? 180;
@@ -292,11 +268,10 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     return true;
   };
 
-  const handle = (packet: string | Record<string, unknown>): boolean => {
+  const handle = (packet: Record<string, unknown>): boolean => {
     if (disposed) return false;
-    const decoded = decode(packet);
-    if (!decoded) return false;
-    const response = responseFrom(decoded);
+    if (!isObject(packet)) return false;
+    const response = responseFrom(packet);
     if (response) {
       const entry = pending.get(response.requestId);
       if (!entry) return false;
@@ -306,7 +281,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       else entry.resolve(response.result === undefined ? null : response.result);
       return true;
     }
-    const event = eventFrom(decoded);
+    const event = eventFrom(packet);
     if (!event) return false;
     return dispatchEvent(event);
   };
@@ -329,7 +304,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     }
   };
 
-  const deliver: HostPacketHandler = (packet: string | Record<string, unknown>): void => {
+  const deliver: HostPacketHandler = (packet: Record<string, unknown>): void => {
     try {
       handle(packet);
     } catch (error) {
@@ -342,7 +317,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     }
   };
   deliver.__binaryCapable = true;
-  const eventDeliver: HostPacketHandler = (packet: string | Record<string, unknown>): void => {
+  const eventDeliver: HostPacketHandler = (packet: Record<string, unknown>): void => {
     try {
       handle(packet);
     } catch (error) {
@@ -362,11 +337,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     if (disposed) return false;
     if (typeof method !== "string" || method.length === 0) return false;
     if (!isJsonObject(params)) return false;
-    try {
-      return sendPacket({ type: "event", name: method, payload: params });
-    } catch {
-      return false;
-    }
+    return sendPacket({ type: "event", name: method, payload: params });
   };
 
   const bridge: HostBridge = {

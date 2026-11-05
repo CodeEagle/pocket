@@ -10,7 +10,7 @@ mod trace_data;
 
 use crate::replay::Mode;
 use crate::worker_trace::{TraceActor, WorkerTrace};
-use rquickjs::{Ctx, Function, Object};
+use rquickjs::{Ctx, Function, Object, Value as JsValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -24,6 +24,11 @@ const MAX_PAYLOAD_CHARS: usize = 2500;
 const MAX_PENDING: usize = 8;
 const MAX_METHOD_CHARS: usize = 64;
 const MAX_SAFE_JS_INTEGER: u64 = 9_007_199_254_740_991;
+// The JS direct-value bridge accounts for its fixed 66-byte B1 object envelope
+// (including the magic byte) plus the UTF-8 bytes of method and payload.
+// Legacy JSON records retain their own input-length check below and must not
+// use this estimate.
+const DIRECT_RECORD_FIXED_BYTES: usize = 66;
 type Notify = unsafe extern "C" fn();
 type RequestKey = (u32, u64);
 
@@ -37,9 +42,9 @@ pub struct OffloadProviderRequest {
     pub timeout: Duration,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RawRequest {
+struct RequestValue {
     v: u32,
     id: u64,
     method: String,
@@ -55,7 +60,13 @@ struct PendingRequest {
 struct Reply {
     session: u32,
     id: u64,
-    record: String,
+    result: Result<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReplyValue {
+    id: u64,
+    result: Result<String, String>,
 }
 struct BrokerState {
     session: u32,
@@ -93,13 +104,22 @@ pub struct OffloadHost {
 struct SubmitOutcome {
     accepted: bool,
     record: Option<String>,
+    request: Option<RequestValue>,
     oversized_bytes: Option<usize>,
     token: Option<u64>,
+    legacy: bool,
 }
 
 struct TakeOutcome {
     request: Option<OffloadProviderRequest>,
     trace_request: Option<trace_data::ProviderRequest>,
+}
+
+struct TakeValueOutcome {
+    reply: Option<ReplyValue>,
+    /// Replay an older string trace with the typed API without changing its
+    /// persisted event shape. New typed traces use the `value` field.
+    legacy: bool,
 }
 
 struct CancelOutcome {
@@ -249,10 +269,7 @@ impl BrokerInner {
                         state.replies.push_back(Reply {
                             session: pending.request.session,
                             id: pending.request.id,
-                            record: encode_reply(
-                                pending.request.id,
-                                Err("Provider request timed out".to_owned()),
-                            ),
+                            result: Err("Provider request timed out".to_owned()),
                         });
                         expired = true;
                         self.changed.notify_all();
@@ -425,13 +442,22 @@ impl OffloadHost {
         )?;
         root.set("take", Function::new(ctx.clone(), || None::<String>)?)?;
         root.set(
+            "submitValue",
+            Function::new(ctx.clone(), |_value: JsValue<'_>| false)?,
+        )?;
+        root.set(
+            "takeValue",
+            Function::new(ctx.clone(), || None::<JsValue<'_>>)?,
+        )?;
+        root.set(
             "cancel",
             Function::new(ctx.clone(), |_id: u64, _session: u32| false)?,
         )?;
         ctx.globals().set("offload", root)
     }
 
-    /// Synchronous bounded record admission from the JS submit operation.
+    /// Legacy diagnostic/test adapter for a serialized JSON record. The
+    /// canonical JS client uses `submitValue` below.
     pub fn submit_record(&self, record: &str) -> bool {
         let result = self.inner.transition(
             TraceActor::Ui,
@@ -440,24 +466,73 @@ impl OffloadHost {
                 if let Some(expected) = expected {
                     expect_submit_input(expected, record)?;
                 }
-                let (accepted, token) = submit_locked(&self.inner, state, record);
+                let (accepted, token) = if record.len() <= MAX_RECORD_BYTES {
+                    serde_json::from_str::<RequestValue>(record)
+                        .map(|request| submit_locked(&self.inner, state, &request))
+                        .unwrap_or((false, None))
+                } else {
+                    (false, None)
+                };
                 Ok(SubmitOutcome {
                     accepted,
                     record: (trace_enabled && record.len() <= MAX_RECORD_BYTES)
                         .then(|| record.to_owned()),
+                    request: None,
                     oversized_bytes: (trace_enabled && record.len() > MAX_RECORD_BYTES)
                         .then_some(record.len()),
                     token: (trace_enabled).then_some(token).flatten(),
+                    legacy: true,
                 })
             },
-            |outcome| {
-                json!({
-                    "accepted": outcome.accepted,
-                    "record": outcome.record,
-                    "oversizedBytes": outcome.oversized_bytes,
-                    "token": outcome.token,
+            encode_submit_outcome,
+        );
+        match result {
+            Ok(outcome) => {
+                if outcome.accepted {
+                    self.inner.notify();
+                }
+                outcome.accepted
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Synchronous bounded admission from the typed QuickJS object path.
+    /// The canonical client never serializes this request into a JSON record;
+    /// only the legacy `submit` adapter below accepts a string record.
+    fn submit_value(&self, request: RequestValue) -> bool {
+        let result = self.inner.transition(
+            TraceActor::Ui,
+            "offload.submit",
+            |state, expected, trace_enabled| {
+                let (legacy, legacy_record, legacy_oversized_bytes, legacy_rejected) =
+                    if let Some(expected) = expected {
+                        expect_submit_value(expected, &request)?
+                    } else {
+                        (false, None, None, false)
+                    };
+                let direct_bytes = direct_record_bytes(&request);
+                let (accepted, token) = if legacy_rejected {
+                    (false, None)
+                } else if legacy || direct_bytes <= MAX_RECORD_BYTES {
+                    submit_locked(&self.inner, state, &request)
+                } else {
+                    (false, None)
+                };
+                Ok(SubmitOutcome {
+                    accepted,
+                    record: legacy_record,
+                    request: (!legacy && trace_enabled).then_some(request.clone()),
+                    oversized_bytes: if legacy {
+                        legacy_oversized_bytes
+                    } else {
+                        (trace_enabled && direct_bytes > MAX_RECORD_BYTES).then_some(direct_bytes)
+                    },
+                    token: trace_enabled.then_some(token).flatten(),
+                    legacy,
                 })
             },
+            encode_submit_outcome,
         );
         match result {
             Ok(outcome) => {
@@ -586,20 +661,15 @@ impl OffloadHost {
         }
     }
 
-    /// One completion record at a time, matching the upstream frame budget.
+    /// Legacy diagnostic/test adapter returning one serialized completion
+    /// record at a time. The canonical JS client uses `takeValue` below.
     pub fn take_reply(&self) -> Option<String> {
         self.inner
             .transition(
                 TraceActor::Ui,
                 "offload.reply.take",
                 |state, _expected, _trace_enabled| {
-                    let mut selected = None;
-                    while let Some(queued) = state.replies.pop_front() {
-                        if queued.session == state.session {
-                            selected = Some(queued.record);
-                            break;
-                        }
-                    }
+                    let selected = pop_reply(state).map(|reply| encode_reply_value(&reply));
                     // The callback gate is level-triggered. A reply can keep
                     // it armed after the provider queues have been drained;
                     // rearm only while holding the broker lock, after this
@@ -614,6 +684,33 @@ impl OffloadHost {
                 |record| json!({"record": record}),
             )
             .unwrap_or(None)
+    }
+
+    /// One typed completion value at a time. This is the canonical JS path;
+    /// it returns a QuickJS object without constructing or parsing a JSON
+    /// envelope. The legacy `take_reply` adapter above remains string-based
+    /// for diagnostics and old hosts.
+    fn take_reply_value(&self) -> Option<ReplyValue> {
+        let result = self.inner.transition(
+            TraceActor::Ui,
+            "offload.reply.take",
+            |state, expected, _trace_enabled| {
+                let selected = pop_reply(state);
+                let legacy = expected.and_then(|value| value.get("record")).is_some();
+                if let Some(expected) = expected {
+                    expect_reply_value(expected, selected.as_ref())?;
+                }
+                if work_queues_empty(state) {
+                    self.inner.rearm_wake();
+                }
+                Ok(TakeValueOutcome {
+                    reply: selected,
+                    legacy,
+                })
+            },
+            |outcome| encode_take_value_outcome(outcome),
+        );
+        result.ok().and_then(|outcome| outcome.reply)
     }
 
     /// Read-only host wake probe. External-work wakeups are traced by the
@@ -885,7 +982,7 @@ impl Drop for OffloadHost {
     }
 }
 
-fn operations_object(ctx: Ctx<'_>, host: Arc<OffloadHost>) -> rquickjs::Result<Object<'_>> {
+fn operations_object<'js>(ctx: Ctx<'js>, host: Arc<OffloadHost>) -> rquickjs::Result<Object<'js>> {
     let operations = Object::new(ctx.clone())?;
     let session_host = Arc::clone(&host);
     operations.set(
@@ -899,10 +996,31 @@ fn operations_object(ctx: Ctx<'_>, host: Arc<OffloadHost>) -> rquickjs::Result<O
             submit_host.submit_record(&record)
         })?,
     )?;
+    let submit_value_host = Arc::clone(&host);
+    operations.set(
+        "submitValue",
+        Function::new(ctx.clone(), move |value: JsValue<'_>| {
+            parse_request_value(value)
+                .is_some_and(|request| submit_value_host.submit_value(request))
+        })?,
+    )?;
     let take_host = Arc::clone(&host);
     operations.set(
         "take",
         Function::new(ctx.clone(), move || take_host.take_reply())?,
+    )?;
+    let take_value_host = Arc::clone(&host);
+    operations.set(
+        "takeValue",
+        Function::new(
+            ctx.clone(),
+            move |call_ctx: Ctx<'js>| -> rquickjs::Result<Option<JsValue<'js>>> {
+                take_value_host
+                    .take_reply_value()
+                    .map(|reply| reply_value_to_js(&call_ctx, &reply))
+                    .transpose()
+            },
+        )?,
     )?;
     let cancel_host = Arc::clone(&host);
     operations.set(
@@ -917,20 +1035,9 @@ fn operations_object(ctx: Ctx<'_>, host: Arc<OffloadHost>) -> rquickjs::Result<O
 fn submit_locked(
     inner: &BrokerInner,
     state: &mut BrokerState,
-    record: &str,
+    request: &RequestValue,
 ) -> (bool, Option<u64>) {
-    if record.len() > MAX_RECORD_BYTES {
-        return (false, None);
-    }
-    let Ok(raw) = serde_json::from_str::<RawRequest>(record) else {
-        return (false, None);
-    };
-    if raw.v != 1
-        || raw.id == 0
-        || raw.id > MAX_SAFE_JS_INTEGER
-        || !valid_method(&raw.method)
-        || raw.payload.chars().count() > MAX_PAYLOAD_CHARS
-    {
+    if !valid_request(request) {
         return (false, None);
     }
 
@@ -940,23 +1047,23 @@ fn submit_locked(
         || state.pending.len() + state.replies.len() >= MAX_PENDING
         || state.pending.len() + state.cancellations.len() >= MAX_PENDING
         || state.request_queue.len() >= MAX_PENDING
-        || raw.id <= state.last_submitted_id
+        || request.id <= state.last_submitted_id
     {
         return (false, None);
     }
-    if state.pending.contains_key(&(session, raw.id))
+    if state.pending.contains_key(&(session, request.id))
         || state
             .replies
             .iter()
-            .any(|reply| reply.session == session && reply.id == raw.id)
+            .any(|reply| reply.session == session && reply.id == request.id)
         || state
             .cancellations
             .iter()
-            .any(|request| request.session == session && request.id == raw.id)
+            .any(|cancel| cancel.session == session && cancel.id == request.id)
     {
         return (false, None);
     }
-    let token = if inner.methods.contains(&raw.method) {
+    let token = if inner.methods.contains(&request.method) {
         let Some(token) = state.next_token.checked_add(1) else {
             return (false, None);
         };
@@ -964,30 +1071,27 @@ fn submit_locked(
     } else {
         None
     };
-    state.last_submitted_id = raw.id;
+    state.last_submitted_id = request.id;
     if token.is_none() {
         state.replies.push_back(Reply {
             session,
-            id: raw.id,
-            record: encode_reply(
-                raw.id,
-                Err(format!("Provider does not implement {}", raw.method)),
-            ),
+            id: request.id,
+            result: Err(format!("Provider does not implement {}", request.method)),
         });
         return (true, None);
     }
     let token = token.expect("known provider method has a token");
     state.next_token = token;
-    let key = (session, raw.id);
+    let key = (session, request.id);
     state.pending.insert(
         key,
         PendingRequest {
             request: OffloadProviderRequest {
                 generation: inner.generation,
                 session,
-                id: raw.id,
-                method: raw.method,
-                payload: raw.payload,
+                id: request.id,
+                method: request.method.clone(),
+                payload: request.payload.clone(),
                 timeout: inner.timeout,
             },
             deadline: Instant::now() + inner.timeout,
@@ -998,6 +1102,138 @@ fn submit_locked(
     state.request_queue.push_back(key);
     inner.changed.notify_all();
     (true, Some(token))
+}
+
+fn parse_request_value<'js>(value: JsValue<'js>) -> Option<RequestValue> {
+    if !value.is_object() || value.is_array() || value.is_function() || value.is_null() {
+        return None;
+    }
+    let object = Object::from_value(value).ok()?;
+    for property in object.props::<String, JsValue<'js>>() {
+        let (key, _) = property.ok()?;
+        if !matches!(key.as_str(), "v" | "id" | "method" | "payload") {
+            return None;
+        }
+    }
+    let v = safe_js_integer(object.get("v").ok()?)?.try_into().ok()?;
+    let id = safe_js_integer(object.get("id").ok()?)?;
+    Some(RequestValue {
+        v,
+        id,
+        method: object.get("method").ok()?,
+        payload: object.get("payload").ok()?,
+    })
+}
+
+fn safe_js_integer(value: JsValue<'_>) -> Option<u64> {
+    let number = value.as_number()?;
+    (number.is_finite()
+        && number >= 0.0
+        && number <= MAX_SAFE_JS_INTEGER as f64
+        && number.fract() == 0.0)
+        .then_some(number as u64)
+}
+
+fn valid_request(request: &RequestValue) -> bool {
+    request.v == 1
+        && request.id > 0
+        && request.id <= MAX_SAFE_JS_INTEGER
+        && valid_method(&request.method)
+        && request.payload.chars().count() <= MAX_PAYLOAD_CHARS
+}
+
+fn decimal_digits(mut value: u64) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn json_string_bytes(value: &str) -> usize {
+    let mut bytes = 2usize;
+    for character in value.chars() {
+        bytes = bytes.saturating_add(match character {
+            '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+            character if character <= '\u{1f}' => 6,
+            character => character.len_utf8(),
+        });
+    }
+    bytes
+}
+
+fn direct_record_bytes(request: &RequestValue) -> usize {
+    DIRECT_RECORD_FIXED_BYTES
+        .saturating_add(request.method.len())
+        .saturating_add(request.payload.len())
+}
+
+fn legacy_json_record_bytes(request: &RequestValue) -> usize {
+    b"{\"v\":1,\"id\":"
+        .len()
+        .saturating_add(decimal_digits(request.id))
+        .saturating_add(b",\"method\":".len())
+        .saturating_add(json_string_bytes(&request.method))
+        .saturating_add(b",\"payload\":".len())
+        .saturating_add(json_string_bytes(&request.payload))
+        .saturating_add(1)
+}
+
+fn encode_submit_outcome(outcome: &SubmitOutcome) -> Value {
+    if outcome.legacy {
+        json!({
+            "accepted": outcome.accepted,
+            "record": outcome.record,
+            "oversizedBytes": outcome.oversized_bytes,
+            "token": outcome.token,
+        })
+    } else {
+        json!({
+            "accepted": outcome.accepted,
+            "request": outcome.request,
+            "oversizedBytes": outcome.oversized_bytes,
+            "token": outcome.token,
+        })
+    }
+}
+
+fn expect_submit_value(
+    expected: &Value,
+    request: &RequestValue,
+) -> Result<(bool, Option<String>, Option<usize>, bool), String> {
+    if let Some(record) = expected.get("record") {
+        if let Some(record) = record.as_str() {
+            let expected_request = serde_json::from_str::<RequestValue>(record)
+                .map_err(|error| format!("legacy offload submit trace is invalid: {error}"))?;
+            if &expected_request != request {
+                return Err("typed offload submit differs from legacy trace".into());
+            }
+            return Ok((true, Some(record.to_owned()), None, false));
+        }
+        let expected_bytes = expected
+            .get("oversizedBytes")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "legacy offload submit trace has no record".to_owned())?;
+        if expected_bytes != legacy_json_record_bytes(request) as u64 {
+            return Err("typed offload submit size differs from legacy trace".into());
+        }
+        let expected_bytes = usize::try_from(expected_bytes)
+            .map_err(|_| "legacy offload submit size does not fit host usize".to_owned())?;
+        return Ok((true, None, Some(expected_bytes), true));
+    }
+    let expected_request = expected
+        .get("request")
+        .cloned()
+        .ok_or_else(|| "typed offload submit trace has no request".to_owned())
+        .and_then(|value| {
+            serde_json::from_value::<RequestValue>(value)
+                .map_err(|error| format!("typed offload submit trace is invalid: {error}"))
+        })?;
+    if &expected_request != request {
+        return Err("typed offload submit differs from trace".into());
+    }
+    Ok((false, None, None, false))
 }
 
 fn pop_request(state: &mut BrokerState) -> Option<OffloadProviderRequest> {
@@ -1032,11 +1268,10 @@ fn complete_locked(
     let reply_result = trace_result
         .map(|value| value.clone().into_result())
         .unwrap_or(result);
-    let record = encode_reply(id, reply_result);
     state.replies.push_back(Reply {
         session,
         id,
-        record,
+        result: normalize_reply_result(reply_result),
     });
     true
 }
@@ -1244,6 +1479,107 @@ fn encode_reply(id: u64, result: Result<String, String>) -> String {
     } else {
         json!({"id": id, "error": "Provider response exceeds record budget"}).to_string()
     }
+}
+
+fn normalize_reply_result(result: Result<String, String>) -> Result<String, String> {
+    match result {
+        Ok(payload) if payload.chars().count() <= MAX_PAYLOAD_CHARS => Ok(payload),
+        Ok(_) => Err("Provider response exceeds payload budget".to_owned()),
+        Err(error) => Err(error.chars().take(160).collect()),
+    }
+}
+
+fn pop_reply(state: &mut BrokerState) -> Option<ReplyValue> {
+    while let Some(queued) = state.replies.pop_front() {
+        if queued.session == state.session {
+            return Some(ReplyValue {
+                id: queued.id,
+                result: queued.result,
+            });
+        }
+    }
+    None
+}
+
+fn encode_reply_value(reply: &ReplyValue) -> String {
+    encode_reply(reply.id, reply.result.clone())
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TraceReplyValue {
+    id: u64,
+    #[serde(default)]
+    payload: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+fn reply_value_to_trace(reply: &ReplyValue) -> Value {
+    match &reply.result {
+        Ok(payload) => json!({"id": reply.id, "payload": payload}),
+        Err(error) => json!({"id": reply.id, "error": error}),
+    }
+}
+
+fn trace_to_reply_value(value: &Value) -> Result<ReplyValue, String> {
+    let trace = serde_json::from_value::<TraceReplyValue>(value.clone())
+        .map_err(|error| format!("typed offload reply trace is invalid: {error}"))?;
+    match (trace.payload, trace.error) {
+        (Some(payload), None) => Ok(ReplyValue {
+            id: trace.id,
+            result: Ok(payload),
+        }),
+        (None, Some(error)) => Ok(ReplyValue {
+            id: trace.id,
+            result: Err(error),
+        }),
+        _ => Err("typed offload reply trace must contain payload or error".into()),
+    }
+}
+
+fn encode_take_value_outcome(outcome: &TakeValueOutcome) -> Value {
+    if outcome.legacy {
+        json!({
+            "record": outcome.reply.as_ref().map(encode_reply_value),
+        })
+    } else {
+        json!({
+            "value": outcome.reply.as_ref().map(reply_value_to_trace),
+        })
+    }
+}
+
+fn expect_reply_value(expected: &Value, actual: Option<&ReplyValue>) -> Result<(), String> {
+    if let Some(record) = expected.get("record") {
+        let actual_record = actual.map(encode_reply_value);
+        if record.as_str() != actual_record.as_deref() {
+            return Err("typed offload reply differs from legacy trace".into());
+        }
+        return Ok(());
+    }
+    let expected_value = expected
+        .get("value")
+        .ok_or_else(|| "typed offload reply trace has no value".to_owned())?;
+    let expected_reply = if expected_value.is_null() {
+        None
+    } else {
+        Some(trace_to_reply_value(expected_value)?)
+    };
+    if expected_reply.as_ref() != actual {
+        return Err("typed offload reply differs from trace".into());
+    }
+    Ok(())
+}
+
+fn reply_value_to_js<'js>(ctx: &Ctx<'js>, reply: &ReplyValue) -> rquickjs::Result<JsValue<'js>> {
+    let object = Object::new(ctx.clone())?;
+    object.set("id", reply.id)?;
+    match &reply.result {
+        Ok(payload) => object.set("payload", payload.clone())?,
+        Err(error) => object.set("error", error.clone())?,
+    }
+    Ok(object.into_value())
 }
 
 fn notify_once(pending: &AtomicBool, notify: Option<Notify>) {
@@ -1566,6 +1902,145 @@ mod tests {
     }
 
     #[test]
+    fn quickjs_typed_offload_path_does_not_use_json_roundtrip() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let host = test_host(41, 17, Duration::from_secs(30));
+
+        let (accepted, rejected, fractional, escaped, empty) = context
+            .with(|ctx| {
+                OffloadHost::install(ctx.clone(), Arc::clone(&host), None)?;
+                ctx.eval::<(), _>(
+                    r#"
+              JSON.stringify = function() { throw new Error("typed path called stringify"); };
+              JSON.parse = function() { throw new Error("typed path called parse"); };
+              globalThis.typedAccepted = offload.submitValue({
+                v: 1, id: 1, method: "compute.sum", payload: "[2,3]"
+              });
+              globalThis.typedRejected = offload.submitValue({
+                v: 1, id: 2, method: "compute.sum", payload: "[]", extra: true
+              });
+              globalThis.typedFractional = offload.submitValue({
+                v: 1, id: 1.5, method: "compute.sum", payload: "[]"
+              });
+              const escapedPayload = '"'.repeat(1250) + String.fromCharCode(10).repeat(1250);
+              globalThis.typedEscaped = offload.submitValue({
+                v: 1, id: 2, method: "compute.sum", payload: escapedPayload
+              });
+              globalThis.typedEmpty = offload.takeValue() === undefined;
+            "#,
+                )?;
+                Ok::<_, rquickjs::Error>((
+                    ctx.globals().get::<_, bool>("typedAccepted")?,
+                    ctx.globals().get::<_, bool>("typedRejected")?,
+                    ctx.globals().get::<_, bool>("typedFractional")?,
+                    ctx.globals().get::<_, bool>("typedEscaped")?,
+                    ctx.globals().get::<_, bool>("typedEmpty")?,
+                ))
+            })
+            .unwrap();
+        assert!(accepted);
+        assert!(!rejected, "unknown typed request fields must be rejected");
+        assert!(!fractional, "typed request ids must be safe integers");
+        assert!(escaped, "direct value sizing must not count JSON escapes");
+        assert!(empty);
+
+        let request = host.take_request().expect("typed request must be queued");
+        assert_eq!(request.id, 1);
+        assert_eq!(request.method, "compute.sum");
+        assert_eq!(request.payload, "[2,3]");
+        assert!(host.complete(41, 17, 1, Ok("5".to_owned())));
+        let escaped_request = host.take_request().expect("escaped request must be queued");
+        assert_eq!(escaped_request.id, 2);
+        assert_eq!(escaped_request.payload.chars().count(), MAX_PAYLOAD_CHARS);
+        assert_eq!(escaped_request.payload.chars().next(), Some('"'));
+        assert_eq!(escaped_request.payload.chars().nth(1250), Some('\n'));
+        assert!(host.complete(41, 17, 2, Ok("escaped".to_owned())));
+
+        let (reply_id, payload, has_error, escaped_reply_id, escaped_payload, drained) = context
+            .with(|ctx| {
+                ctx.eval::<(), _>(
+                    r#"
+              const reply = offload.takeValue();
+              const escapedReply = offload.takeValue();
+              globalThis.typedReplyId = reply.id;
+              globalThis.typedReplyPayload = reply.payload;
+              globalThis.typedReplyHasError = Object.prototype.hasOwnProperty.call(reply, "error");
+              globalThis.typedEscapedReplyId = escapedReply.id;
+              globalThis.typedEscapedReplyPayload = escapedReply.payload;
+              globalThis.typedReplyDrained = offload.takeValue() === undefined;
+            "#,
+                )?;
+                Ok::<_, rquickjs::Error>((
+                    ctx.globals().get::<_, u64>("typedReplyId")?,
+                    ctx.globals().get::<_, String>("typedReplyPayload")?,
+                    ctx.globals().get::<_, bool>("typedReplyHasError")?,
+                    ctx.globals().get::<_, u64>("typedEscapedReplyId")?,
+                    ctx.globals().get::<_, String>("typedEscapedReplyPayload")?,
+                    ctx.globals().get::<_, bool>("typedReplyDrained")?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(reply_id, 1);
+        assert_eq!(payload, "5");
+        assert!(!has_error);
+        assert_eq!(escaped_reply_id, 2);
+        assert_eq!(escaped_payload, "escaped");
+        assert!(drained);
+        host.shutdown();
+    }
+
+    #[test]
+    fn typed_offload_replays_legacy_record_trace_shapes() {
+        let request = RequestValue {
+            v: 1,
+            id: 1,
+            method: "compute.sum".to_owned(),
+            payload: "[2,3]".to_owned(),
+        };
+        let record = r#"{"v":1,"id":1,"method":"compute.sum","payload":"[2,3]"}"#;
+        let expected = json!({
+            "accepted": true,
+            "record": record,
+            "oversizedBytes": null,
+            "token": 1,
+        });
+        assert_eq!(
+            expect_submit_value(&expected, &request).unwrap(),
+            (true, Some(record.to_owned()), None, false)
+        );
+
+        let reply = ReplyValue {
+            id: 1,
+            result: Ok("5".to_owned()),
+        };
+        let expected_reply = json!({
+            "record": encode_reply_value(&reply),
+        });
+        expect_reply_value(&expected_reply, Some(&reply)).unwrap();
+
+        // An old JSON trace may reject a request whose escaped record is over
+        // budget even though the direct object itself is within the new B1
+        // envelope budget. Preserve that recorded admission result too.
+        let oversized_request = RequestValue {
+            payload: "\"".repeat(MAX_PAYLOAD_CHARS),
+            ..request
+        };
+        let oversized_bytes = legacy_json_record_bytes(&oversized_request);
+        assert!(oversized_bytes > MAX_RECORD_BYTES);
+        let oversized = json!({
+            "accepted": false,
+            "record": null,
+            "oversizedBytes": oversized_bytes,
+            "token": null,
+        });
+        assert_eq!(
+            expect_submit_value(&oversized, &oversized_request).unwrap(),
+            (true, None, Some(oversized_bytes), true)
+        );
+    }
+
+    #[test]
     fn reply_drain_rearms_wake_for_later_submit_and_cancel() {
         REPLY_DRAIN_NOTIFICATION_COUNT.store(0, Ordering::Relaxed);
         let host = OffloadHost::new(
@@ -1621,7 +2096,7 @@ mod tests {
         stale_host.inner.lock_state().replies.push_back(Reply {
             session: 99,
             id: 1,
-            record: "stale".to_owned(),
+            result: Err("stale".to_owned()),
         });
         assert!(stale_host.take_reply().is_none());
         assert!(stale_host.submit_record(r#"{"v":1,"id":1,"method":"compute.sum","payload":"[]"}"#));
@@ -1743,6 +2218,123 @@ mod tests {
         }).unwrap();
         let replayed_reply = context
             .with(|ctx| ctx.eval::<String, _>("offload.take()"))
+            .unwrap();
+        assert_eq!(replayed_reply, recorded_reply);
+        replay_host.shutdown();
+        assert_eq!(replay_lane.finish_batch().unwrap(), recorded);
+    }
+
+    #[test]
+    fn quickjs_typed_offload_trace_stays_structured_and_replays() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let record_lane = WorkerTrace::new(Mode::Record);
+        record_lane.begin_batch(&[]).unwrap();
+        let record_host = OffloadHost::new_traced(
+            52,
+            7,
+            Duration::from_secs(5),
+            ["compute.sum".to_owned()],
+            None,
+            Arc::clone(&record_lane),
+            "offload:52".to_owned(),
+        );
+        context
+            .with(|ctx| {
+                OffloadHost::install(ctx.clone(), Arc::clone(&record_host), None)?;
+                ctx.eval::<(), _>(
+                    r#"
+              JSON.stringify = function() { throw new Error("typed path called stringify"); };
+              JSON.parse = function() { throw new Error("typed path called parse"); };
+              globalThis.typedAccepted = offload.submitValue({
+                v: 1, id: 1, method: "compute.sum", payload: "[2,3]"
+              });
+            "#,
+                )
+            })
+            .unwrap();
+        assert!(context
+            .with(|ctx| ctx.globals().get::<_, bool>("typedAccepted"))
+            .unwrap());
+        assert_eq!(record_host.take_request().unwrap().id, 1);
+        assert!(record_host.complete(52, 7, 1, Ok("5".to_owned())));
+        let recorded_reply = context
+            .with(|ctx| {
+                ctx.eval::<(), _>(
+                    r#"
+              const reply = offload.takeValue();
+              globalThis.typedReplyId = reply.id;
+              globalThis.typedReplyPayload = reply.payload;
+            "#,
+                )?;
+                Ok::<_, rquickjs::Error>((
+                    ctx.globals().get::<_, u64>("typedReplyId")?,
+                    ctx.globals().get::<_, String>("typedReplyPayload")?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(recorded_reply, (1, "5".to_owned()));
+        record_host.shutdown();
+        let recorded = record_lane.finish_batch().unwrap();
+        drop(record_host);
+        drop(context);
+
+        let submit_event = recorded
+            .iter()
+            .find(|event| event.kind == "offload.submit")
+            .expect("typed submit must be traced");
+        assert!(submit_event.data.get("record").is_none());
+        assert_eq!(submit_event.data["request"]["method"], "compute.sum");
+        let reply_event = recorded
+            .iter()
+            .find(|event| event.kind == "offload.reply.take")
+            .expect("typed reply must be traced");
+        assert!(reply_event.data.get("record").is_none());
+        assert_eq!(reply_event.data["value"]["payload"], "5");
+
+        let replay_lane = WorkerTrace::new(Mode::Replay);
+        replay_lane.begin_batch(&recorded).unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let replay_host = OffloadHost::new_traced(
+            52,
+            7,
+            Duration::from_secs(5),
+            ["compute.sum".to_owned()],
+            None,
+            Arc::clone(&replay_lane),
+            "offload:52".to_owned(),
+        );
+        context
+            .with(|ctx| {
+                OffloadHost::install(ctx.clone(), Arc::clone(&replay_host), None)?;
+                ctx.eval::<(), _>(
+                    r#"
+              JSON.stringify = function() { throw new Error("typed path called stringify"); };
+              JSON.parse = function() { throw new Error("typed path called parse"); };
+              globalThis.typedAccepted = offload.submitValue({
+                v: 1, id: 1, method: "compute.sum", payload: "[2,3]"
+              });
+            "#,
+                )
+            })
+            .unwrap();
+        assert!(context
+            .with(|ctx| ctx.globals().get::<_, bool>("typedAccepted"))
+            .unwrap());
+        let replayed_reply = context
+            .with(|ctx| {
+                ctx.eval::<(), _>(
+                    r#"
+              const reply = offload.takeValue();
+              globalThis.typedReplyId = reply.id;
+              globalThis.typedReplyPayload = reply.payload;
+            "#,
+                )?;
+                Ok::<_, rquickjs::Error>((
+                    ctx.globals().get::<_, u64>("typedReplyId")?,
+                    ctx.globals().get::<_, String>("typedReplyPayload")?,
+                ))
+            })
             .unwrap();
         assert_eq!(replayed_reply, recorded_reply);
         replay_host.shutdown();

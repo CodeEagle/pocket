@@ -7,7 +7,8 @@ The Pocket SDK replaces intermediate `JSON.stringify` / `JSON.parse` / `jsonEnco
 1. **QuickJS Direct Object Boundary (`rquickjs::Value`)**:
    - Outbound (`JS -> Rust`): `pocket._emitValue(packet)` accepts a native JS object (`Record<string, unknown>`, including `Uint8Array` views) directly on the QuickJS stack and encodes it in a single pass into the `0xB1` binary TLV wire format.
    - Inbound (`Rust -> JS`): When `globalThis.__pocketEvent` or `globalThis.__pocketDeliver` declares `__binaryCapable = true` (installed by `createHostBridge`, `createDisplayGeometry`, `createPocketPlatformClient`, and `PocketSystemKernel`), `pocket_send_binary` decodes the `0xB1` binary TLV payload directly into a `rquickjs::Value` (mapping `0x06` byte slices to `Uint8Array`) and invokes the JS handler with zero JSON string parsing.
-   - Legacy `pocket._emit(jsonString)`, `pocket_send(jsonCString)`, and non-`__binaryCapable` JS handlers remain supported as automatic fallbacks.
+   - The shared JS SDK requires `_emitValue`; Dart requires `pocket_send_binary`, `pocket_frame_binary`, and `pocket_frame_delta_binary_v2`. Missing symbols fail with a rebuild-native error. They never select JSON automatically.
+   - Legacy `_emit`/`pocket_send` and JSON frame exports are diagnostic interfaces for probes and explicitly old callers. They are not selected by the SDK. Binary input and duplex pointers reject a stale unmarked guest handler with a rebuild-guest error; they cannot stringify a fallback packet.
 
 2. **Binary TLV Message Envelope (`0xB1`)**:
    - Magic byte: `0xB1` (`pocketBinaryMessageMagic`).
@@ -47,3 +48,36 @@ The Pocket SDK replaces intermediate `JSON.stringify` / `JSON.parse` / `jsonEnco
   - `sdk/packages/pocket_flutter/lib/src/pocket_runtime.dart`
   - `sdk/packages/pocket_flutter/lib/src/pocket_offload_binding.dart`
   - `sdk/packages/pocket_flutter/lib/src/pocket_view.dart`
+
+## Typed host surfaces (2026-11-05)
+
+`PFB1` version 1 flags are bit 0 (text alignment and compositor handle/focus)
+and bit 1 (typed surface descriptors). Current native frames set flags to 3.
+After tag 7's common geometry the wire is:
+
+1. length-prefixed UTF-8 `id`
+2. length-prefixed UTF-8 `kind`
+3. length-prefixed `0xB1` object containing the parameters
+4. signed handle encoded as `u32`, followed by `u8` focused (bit 0)
+
+The Dart decoder rejects old JSON surface descriptors, unknown flags and JSON
+event slices. `registerSurface` receives a JS object; the binary descriptor is
+retained in node metadata instead of being stringified and parsed every frame.
+Diagnostic JSON frame serialization alone reconstructs the historical `asset`
+descriptor for the editor/probe contract.
+
+The pinned offload client uses `submitValue(request)` and `takeValue()` for
+QuickJS/native envelopes. The broker retains typed replies and constructs JS
+objects directly; its Dart provider boundary uses B2. Capability payload strings
+remain opaque provider data. Old `submit`/`take` strings are explicit legacy
+adapters, and persisted trace compatibility is handled only in trace/replay.
+
+The WeChat adapter copies the same native object codec into its reproducible
+Wasm build. Its JS adapter implements the same `0xB1` tags for host events,
+responses, input facts and scheduler state. It does not retain a second guest
+runtime or a string fallback. Build metadata, storage snapshots, recordings,
+update signatures and editor HTTP APIs still have intentional JSON formats;
+this protocol does not claim those files or formats were removed.
+
+See [the rendering and transport review](RENDER_PIPELINE_REVIEW_20261105.md)
+for provenance, ablation and measured limitations.

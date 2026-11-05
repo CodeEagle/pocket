@@ -14,7 +14,7 @@ import {
 } from "@pocket/ui";
 
 const bridge = globalThis as typeof globalThis & {
-  __pocketEvent?: (line: string) => void;
+  __pocketEvent?: (packet: Record<string, unknown>) => void;
 };
 
 function App() {
@@ -24,25 +24,15 @@ function App() {
   const [draft, setDraft] = createSignal("");
   onMount(() => {
     const previous = bridge.__pocketEvent;
-    const receive = (line: string): void => {
-      try {
-        const message = JSON.parse(line) as {
-          method?: unknown;
-          name?: unknown;
-          params?: unknown;
-          payload?: unknown;
-        };
-        const method = typeof message.method === "string"
-          ? message.method
-          : typeof message.name === "string" ? message.name : "";
-        const params = message.params ?? message.payload;
-        if (params && typeof params === "object") {
-          deliverTextInputEvent(method, params as any);
-        }
-      } catch {
-        // Keep unrelated host messages on the original bridge path.
+    const receive = (message: Record<string, unknown>): void => {
+      const method = typeof message.method === "string"
+        ? message.method
+        : typeof message.name === "string" ? message.name : "";
+      const params = message.params ?? message.payload;
+      if (params && typeof params === "object" && !Array.isArray(params)) {
+        deliverTextInputEvent(method, params as any);
       }
-      previous?.(line);
+      previous?.(message);
     };
     bridge.__pocketEvent = receive;
     onCleanup(() => {

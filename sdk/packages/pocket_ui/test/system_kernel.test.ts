@@ -123,7 +123,7 @@ class TestHost implements HostBridge {
 }
 
 const globalObject = globalThis as typeof globalThis & {
-  __pocketEvent?: (line: string) => void;
+  __pocketEvent?: (packet: Record<string, unknown>) => void;
   ui?: { __surfaces?: Record<string, number> };
 };
 globalObject.ui = {
@@ -144,7 +144,7 @@ function createEnv(maxResidentApps = 5) {
   });
   const invoke = async (req: JsonObject): Promise<JsonObject> => {
     const start = host.calls.length;
-    globalObject.__pocketEvent!(JSON.stringify({ type: "event", name: "system.request", payload: req }));
+    globalObject.__pocketEvent!({ type: "event", name: "system.request", payload: req });
     for (let i = 0; i < 50; i++) {
       const resp = host.calls.slice(start).find((c) => c.capability === "system.runtime.respond");
       if (resp) return resp.params;

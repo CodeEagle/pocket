@@ -85,20 +85,10 @@ final class PocketBinaryCodec {
     return root;
   }
 
-  /// Decodes a binary or legacy UTF-8 JSON event slice from `PFB1` frames.
+  /// Decodes a binary `0xB1` event slice from a `PFB1` frame.
   static PocketEvent decodeEvent(Uint8List payload) {
-    if (payload.isNotEmpty && payload[0] == pocketBinaryMessageMagic) {
-      final decoded = decodeMessage(payload, maxBytes: _maxOutboundEventBytes);
-      return PocketEvent.fromJson(decoded, wireByteLength: payload.length);
-    }
-    final decoded = jsonDecode(utf8.decode(payload));
-    if (decoded is! Map) {
-      throw const FormatException('Pocket binary event must be an object');
-    }
-    return PocketEvent.fromJson(
-      Map<String, dynamic>.from(decoded),
-      wireByteLength: payload.length,
-    );
+    final decoded = decodeMessage(payload, maxBytes: _maxOutboundEventBytes);
+    return PocketEvent.fromJson(decoded, wireByteLength: payload.length);
   }
 
   /// Decodes a `0xB2`-prefixed binary offload record from native FFI.
@@ -129,10 +119,7 @@ final class PocketBinaryCodec {
     final method = reader.readString();
     final payload = reader.readString();
     reader.finish();
-    if (generation < 1 ||
-        session < 1 ||
-        id < 1 ||
-        id > 9007199254740991) {
+    if (generation < 1 || session < 1 || id < 1 || id > 9007199254740991) {
       throw const FormatException('Invalid binary offload key');
     }
     final key = PocketOffloadKey(
@@ -152,10 +139,7 @@ final class PocketBinaryCodec {
         'payload': payload,
         'timeoutMicros': timeoutMicros,
       });
-      return PocketBinaryOffloadRecord._(
-        key: key,
-        request: request,
-      );
+      return PocketBinaryOffloadRecord._(key: key, request: request);
     } on Object catch (error) {
       return PocketBinaryOffloadRecord._(
         key: key,
@@ -323,7 +307,9 @@ final class _BinaryTlvWriter {
     for (final entry in map.entries) {
       final key = entry.key;
       if (key is! String) {
-        throw const FormatException('Binary bridge object key must be a String');
+        throw const FormatException(
+          'Binary bridge object key must be a String',
+        );
       }
       writeString(key);
       writeValue(entry.value, depth + 1);

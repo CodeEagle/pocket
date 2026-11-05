@@ -30,21 +30,22 @@ void main() {
                       ? touches.length
                       : 0;
                     if (previousTouchCount > 0 && currentTouchCount === 0) {
-                      pocket._emit(JSON.stringify({
+                      pocket._emitValue({
                         type: "event",
                         name: "outside.pointer.order",
                         payload: {
                           status: dismissSeen ? "up-after-dismiss" : "up-before-dismiss"
                         }
-                      }));
+                      });
                     }
                     previousTouchCount = currentTouchCount;
                   };
-                  globalThis.__pocketEvent = function(line) {
-                    const event = JSON.parse(line);
+                  globalThis.__pocketEvent = function(event) {
                     if (event.name === "textInput.dismiss") dismissSeen = true;
                   };
-                  pocket._emit(JSON.stringify({
+                  __pocketEvent.__binaryCapable = true;
+                  JSON.parse = JSON.stringify = () => { throw Error('JSON reached pointer transport'); };
+                  pocket._emitValue({
                     type: "event",
                     name: "textInput.open",
                     payload: {
@@ -53,7 +54,7 @@ void main() {
                       rect: { x: 20, y: 40, w: 180, h: 42 },
                       text: ""
                     }
-                  }));
+                  });
                 ''',
                 showDebugFps: false,
                 onEvent: events.add,
@@ -67,7 +68,7 @@ void main() {
 
         // Fill the native SPSC ingress with an unhandled application record.
         // Native drain stops at that record, so both pointer edges exercise
-        // the production JSON fallback while retaining the real frame path.
+        // the production B1 fallback while retaining the real frame path.
         final accepted = channel!.pushBatch(
           List<PocketDuplexMessage>.generate(
             PocketDuplexChannel.ringCapacity - 1,

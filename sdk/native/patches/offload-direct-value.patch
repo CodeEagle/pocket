@@ -1,0 +1,591 @@
+--- a/framework/src/offload.ts
++++ b/framework/src/offload.ts
+@@ -1,4 +1,4 @@
+-import { OFFLOAD, type OffloadOps, type OffloadReply } from "../../contracts/spec/offload.ts";
++import { OFFLOAD, type OffloadOps, type OffloadReply, type OffloadRequest } from "../../contracts/spec/offload.ts";
+ import { registerServicePump } from "./services.ts";
+ 
+ export { OFFLOAD };
+@@ -12,11 +12,38 @@
+   return (globalThis as unknown as { offload?: OffloadOps }).offload?.uploadCoverage?.(base64, width, height, foreground, colors?.columns, colors?.palette);
+ }
+ export type OffloadResult = { ok: true; value: string } | { ok: false; error: string };
+-type Pending = { record: string; callback: (result: OffloadResult) => void; deadline: number; sent: boolean; session: number };
++type Pending = { record: OffloadRequest; callback: (result: OffloadResult) => void; deadline: number; sent: boolean; session: number };
+ 
+-/** One client per JS realm. Inputs are already serialized bounded strings:
+- * arbitrary object traversal/serialization is never hidden inside this API. */
++// The host ABI carries this bounded object through the direct-value bridge.
++// Keep the admission check allocation-free: it is the B1 object envelope
++// bound (including the magic byte), not a JSON serialization estimate.
++const DIRECT_RECORD_FIXED_BYTES = 66;
++function directStringMetrics(value: string, maxChars = Number.MAX_SAFE_INTEGER): { bytes: number; chars: number } {
++  let bytes = 0, chars = 0;
++  for (const char of value) {
++    chars++;
++    if (chars > maxChars) return { bytes: Number.MAX_SAFE_INTEGER, chars };
++    const code = char.codePointAt(0)!;
++    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
++  }
++  return { bytes, chars };
++}
++function directRecordMetrics(record: OffloadRequest): { bytes: number; payloadChars: number } {
++  const method = directStringMetrics(record.method), payload = directStringMetrics(record.payload, OFFLOAD.payloadChars);
++  return { bytes: DIRECT_RECORD_FIXED_BYTES + method.bytes + payload.bytes, payloadChars: payload.chars };
++}
++function isOffloadReply(value: unknown): value is OffloadReply {
++  if (!value || typeof value !== "object") return false;
++  const id = (value as { id?: unknown }).id;
++  return typeof id === "number" && Number.isSafeInteger(id) && id > 0;
++}
++
++/** One client per JS realm. Capability payloads are bounded strings, while
++ * the request/reply envelope stays a direct host value. */
+ export function createOffloadClient(ops: OffloadOps) {
++  if (typeof ops.submitValue !== "function" || typeof ops.takeValue !== "function") {
++    throw new Error("Offload host ABI requires submitValue(request) and takeValue()");
++  }
+   const pending = new Map<number, Pending>();
+   let nextId = 1, frame = 0, disposed = false;
+   const finish = (id: number, result: OffloadResult) => {
+@@ -43,17 +70,12 @@
+     request(method: string, payload: string, callback: Pending["callback"]): number {
+       if (disposed || pending.size >= OFFLOAD.pending) return 0;
+       if (!/^[a-z][a-z0-9_.-]{0,63}$/.test(method)) throw new Error("Invalid offload capability");
+-      if (typeof payload !== "string" || payload.length > OFFLOAD.payloadChars) throw new Error("Offload payload exceeds budget");
++      if (typeof payload !== "string") throw new Error("Offload payload exceeds budget");
+       const id = nextId++;
+-      const record = JSON.stringify({ v: 1, id, method, payload });
+-      // Conservative UTF-8 bound, refined without allocating a byte buffer.
+-      let bytes = 0;
+-      for (let i = 0; i < record.length; i++) {
+-        const c = record.charCodeAt(i);
+-        if (c >= 0xd800 && c <= 0xdbff && i + 1 < record.length) { bytes += 4; i++; }
+-        else bytes += c < 128 ? 1 : c < 2048 ? 2 : 3;
+-      }
+-      if (bytes > OFFLOAD.recordBytes) throw new Error("Offload record exceeds budget");
++      const record: OffloadRequest = { v: 1, id, method, payload };
++      const metrics = directRecordMetrics(record);
++      if (metrics.payloadChars > OFFLOAD.payloadChars) throw new Error("Offload payload exceeds budget");
++      if (metrics.bytes > OFFLOAD.recordBytes) throw new Error("Offload record exceeds budget");
+       pending.set(id, { record, callback, deadline: frame + OFFLOAD.timeoutFrames, sent: false, session: 0 });
+       return id;
+     },
+@@ -69,19 +91,18 @@
+       frame++;
+       const session = ops.session();
+       let delivered = false;
+-      const raw = ops.take();
+-      if (raw && raw.length <= OFFLOAD.recordBytes) {
+-        try {
+-          const reply = JSON.parse(raw) as OffloadReply;
++      try {
++        const reply = ops.takeValue();
++        if (reply && isOffloadReply(reply)) {
+           const item = pending.get(reply.id);
+           if (item?.sent && item.session === session && session > 0) {
+             delivered = true;
+-            finish(reply.id, typeof reply.payload === "string" && reply.payload.length <= OFFLOAD.payloadChars
++            finish(reply.id, typeof reply.payload === "string" && directStringMetrics(reply.payload, OFFLOAD.payloadChars).chars <= OFFLOAD.payloadChars
+               ? { ok: true, value: reply.payload }
+               : { ok: false, error: typeof reply.error === "string" ? reply.error.slice(0, 160) : "Malformed reply" });
+           }
+-        } catch { /* A malformed bounded record cannot stop the UI. */ }
+-      }
++        }
++      } catch { /* A malformed bounded value cannot stop the UI. */ }
+       let submitted = 0;
+       for (const [id, item] of pending) {
+         if (!delivered && session <= 0) {
+@@ -90,7 +111,7 @@
+         } else if (!delivered && ((!eventDriven() && frame >= item.deadline) || (item.sent && item.session !== session))) {
+           delivered = true;
+           finish(id, { ok: false, error: item.sent ? "Connection lost or request expired; outcome may be unknown" : "Provider unavailable" });
+-        } else if (!item.sent && session > 0 && submitted < OFFLOAD.submissionsPerFrame && ops.submit(item.record)) {
++        } else if (!item.sent && session > 0 && submitted < OFFLOAD.submissionsPerFrame && ops.submitValue(item.record)) {
+           item.sent = true; item.session = session; submitted++;
+         }
+       }
+--- a/contracts/spec/offload.ts
++++ b/contracts/spec/offload.ts
+@@ -1,5 +1,6 @@
+-/** Offload v1. JSON records are length-prefixed UTF-8 on the wire.
+- * The UI copies bounded records; only the provider executes capabilities. */
++/** Offload v1 request/reply values cross the host boundary as bounded direct
++ * objects. The UI copies bounded values; only the provider executes
++ * capabilities. */
+ export const OFFLOAD = Object.freeze({
+   version: 1, recordBytes: 4096, payloadChars: 2500, pending: 8,
+   deliveriesPerFrame: 1, submissionsPerFrame: 2, timeoutFrames: 600,
+@@ -13,9 +14,9 @@
+   /** Positive authenticated connection generation; zero/negative = offline. */
+   session(): number;
+   /** Nonwaiting bounded copy. False means no credit; caller retains work. */
+-  submit(record: string): boolean;
+-  /** At most one complete record per host frame. Never performs IO. */
+-  take(): string | undefined;
++  submitValue(request: OffloadRequest): boolean;
++  /** At most one complete reply value per host frame. Never performs IO. */
++  takeValue(): OffloadReply | undefined;
+   /** 2-bit coverage; width 4..512 in multiples of 4, height 1..128.
+    * Power-of-two envelope: min width 8, min height 16, at most 8192 pixels
+    * on POSIX hosts; the 3DS permits 16384 envelope pixels for multiline text.
+--- a/tests/offload.test.ts
++++ b/tests/offload.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, test } from "bun:test";
+ import { createOffloadClient, OFFLOAD } from "../framework/src/offload.ts";
++import type { OffloadReply, OffloadRequest } from "../contracts/spec/offload.ts";
+ import { OffloadDecoder, encodeOffloadRecord } from "../tools/offload-wire.ts";
+ import { dispatchOffload } from "../tools/offload-provider.ts";
+ import { sqliteQueries, httpResources } from "../tools/offload-capabilities.ts";
+@@ -9,8 +10,8 @@
+ import { join, resolve } from "node:path";
+ function rig() {
+   let session = 1;
+-  const sent: string[] = [], replies: string[] = [];
+-  const client = createOffloadClient({ session: () => session, submit: record => { sent.push(record); return true; }, take: () => replies.shift() });
++  const sent: OffloadRequest[] = [], replies: unknown[] = [];
++  const client = createOffloadClient({ session: () => session, submitValue: record => { sent.push(record); return true; }, takeValue: () => replies.shift() as OffloadReply | undefined });
+   return { client, sent, replies, disconnect: () => session = -1, reconnect: () => session = 2 };
+ }
+ describe("offload budgets and failure delivery", () => {
+@@ -30,7 +31,7 @@
+     for (let i = 0; i < 8; i++) expect(r.client.request("db.page", "{}", () => delivered++)).toBeGreaterThan(0);
+     expect(r.client.request("db.page", "{}", () => {})).toBe(0);
+     r.client.step(); expect(r.sent.length).toBe(2);
+-    for (const s of r.sent) r.replies.push(JSON.stringify({ id: JSON.parse(s).id, payload: "[]" }));
++    for (const request of r.sent) r.replies.push({ id: request.id, payload: "[]" });
+     r.client.step(); expect(delivered).toBe(1); expect(r.sent.length).toBe(4);
+     r.client.step(); expect(delivered).toBe(2);
+   });
+@@ -39,7 +40,7 @@
+     const id = r.client.request("file.save", "edit", p => results.push(p));
+     r.client.step(); r.disconnect(); r.client.step();
+     expect(results).toHaveLength(1); expect(results[0]).toMatchObject({ ok: false });
+-    r.reconnect(); r.replies.push(JSON.stringify({ id, payload: "saved" })); r.client.step();
++    r.reconnect(); r.replies.push({ id, payload: "saved" }); r.client.step();
+     expect(r.client.session()).toBe(2);
+     expect(results).toHaveLength(1); expect(r.sent).toHaveLength(1);
+   });
+@@ -48,11 +49,36 @@
+     const id = r.client.request("slow.query", "{}", () => delivered++);
+     r.client.cancel(id); r.client.step(); expect(r.sent).toHaveLength(0);
+     r.client.request("slow.query", "{}", () => delivered++);
+-    r.replies.push("{bad");
++    r.replies.push({ id: "bad" });
+     for (let i = 0; i <= OFFLOAD.timeoutFrames; i++) r.client.step();
+     expect(delivered).toBe(1); expect(r.client.pending()).toBe(0);
+     expect(() => r.client.request("db.page", "中".repeat(2500), () => {})).toThrow();
+   });
++  test("direct request and reply values do not touch JSON serialization", () => {
++    const originalParse = JSON.parse, originalStringify = JSON.stringify;
++    JSON.parse = (() => { throw new Error("JSON.parse must not be used"); }) as typeof JSON.parse;
++    JSON.stringify = (() => { throw new Error("JSON.stringify must not be used"); }) as typeof JSON.stringify;
++    try {
++      let session = 1;
++      const sent: OffloadRequest[] = [], replies: OffloadReply[] = [], results: unknown[] = [];
++      const client = createOffloadClient({ session: () => session,
++        submitValue(request) { sent.push(request); return true; },
++        takeValue() { return replies.shift(); },
++      });
++      client.request("echo.value", "payload", result => results.push(result));
++      client.step();
++      expect(sent[0]).toEqual({ v: 1, id: 1, method: "echo.value", payload: "payload" });
++      replies.push({ id: 1, payload: "ok" }); client.step();
++      expect(results).toEqual([{ ok: true, value: "ok" }]);
++      client.request("fail.value", "", result => results.push(result)); client.step();
++      replies.push({ id: 2, error: "provider rejected" }); client.step();
++      expect(results.at(-1)).toEqual({ ok: false, error: "provider rejected" });
++      session = 0; client.request("offline.value", "", result => results.push(result)); client.step();
++      expect(results.at(-1)).toEqual({ ok: false, error: "Provider unavailable" });
++    } finally {
++      JSON.parse = originalParse; JSON.stringify = originalStringify;
++    }
++  });
+   test("UTF-8 records survive every split and reject oversized length immediately", () => {
+     const record = JSON.stringify({ text: "文档 😀" }), bytes = encodeOffloadRecord(record);
+     for (let split = 0; split <= bytes.length; split++) {
+--- a/tests/clear-text.test.ts
++++ b/tests/clear-text.test.ts
+@@ -5,7 +5,7 @@
+ import { KB_H, KB_PAD, KB_ROW_H, KB_GAP } from "../apps/clear/keyboard-metrics.ts";
+ import { PROP } from "../contracts/spec/spec.ts";
+ import { IME } from "../contracts/spec/ime.ts";
+-import type { OffloadRequest } from "../contracts/spec/offload.ts";
++import type { OffloadReply, OffloadRequest } from "../contracts/spec/offload.ts";
+ import type { HostOps } from "../framework/src/host.ts";
+ 
+ afterAll(() => { delete (globalThis as { offload?: unknown }).offload; });
+@@ -16,24 +16,24 @@
+   return [];
+ }
+ for (const connected of [false, true]) test(`Clear text layout owns offline symbols and completed-row width (connected=${connected})`, async () => {
+-  const width = 360, height = 800, replies: string[] = [], held: OffloadRequest[] = [], sent: OffloadRequest[] = [];
++  const width = 360, height = 800, replies: OffloadReply[] = [], held: OffloadRequest[] = [], sent: OffloadRequest[] = [];
+   const props = new Map<number, Map<number, number>>(), nativeText = new Set<string>();
+   let allowTitle = false, ops: HostOps;
+   const answer = (r: OffloadRequest) => {
+     const g = JSON.parse(r.payload), width = g.size * 2, height = 64;
+-    replies.push(JSON.stringify({ id: r.id, payload: JSON.stringify({ face: g.face, advance: g.size === 20 ? 17 : 16,
+-      xoff: 0, width, height, mask: Buffer.alloc(width * height / 4, 255).toString("base64") }) }));
++    replies.push({ id: r.id, payload: JSON.stringify({ face: g.face, advance: g.size === 20 ? 17 : 16,
++      xoff: 0, width, height, mask: Buffer.alloc(width * height / 4, 255).toString("base64") }) });
+   };
+   const world = await bootWorld("clear-main.vue-vapor", 60, { offload: {
+-    session: () => connected ? 1 : 0, take: () => replies.shift(),
+-    submit(raw: string) {
+-      const r = JSON.parse(raw) as OffloadRequest; sent.push(r);
+-      if (r.method === "text.font") replies.push(JSON.stringify({ id: r.id, payload: JSON.stringify({ id: "a".repeat(64), mapping: "scalar" }) }));
++    session: () => connected ? 1 : 0, takeValue: () => replies.shift(),
++    submitValue(r: OffloadRequest) {
++      sent.push(r);
++      if (r.method === "text.font") replies.push({ id: r.id, payload: JSON.stringify({ id: "a".repeat(64), mapping: "scalar" }) });
+       if (r.method === "text.glyph") { if (JSON.parse(r.payload).size === 20 && !allowTitle) held.push(r); else answer(r); }
+       if (r.method === "ime.compose") {
+         const keys = JSON.parse(r.payload) as number[], selected = keys.some(k => k >= IME.select);
+-        replies.push(JSON.stringify({ id: r.id, payload: JSON.stringify({ preedit: selected ? "" : "n", raw: selected ? "" : "n", rawCaret: selected ? 0 : 1,
+-          caret: selected ? 0 : 1, commit: selected ? "你好世界" : "", candidates: selected ? [] : ["你好世界"], page: 0, last: true }) }));
++        replies.push({ id: r.id, payload: JSON.stringify({ preedit: selected ? "" : "n", raw: selected ? "" : "n", rawCaret: selected ? 0 : 1,
++          caret: selected ? 0 : 1, commit: selected ? "你好世界" : "", candidates: selected ? [] : ["你好世界"], page: 0, last: true }) });
+       }
+       return true;
+     },
+--- a/tests/clear-ime-loading.test.ts
++++ b/tests/clear-ime-loading.test.ts
+@@ -2,31 +2,31 @@
+ import { bootWorld, treeHasText } from "../programs/sim/sim.ts";
+ import { __packTouchWide } from "../framework/src/touch.ts";
+ import type { HostOps } from "../framework/src/host.ts";
+-import type { OffloadRequest } from "../contracts/spec/offload.ts";
++import type { OffloadReply, OffloadRequest } from "../contracts/spec/offload.ts";
+ import { IME } from "../contracts/spec/ime.ts";
+ import { PROP } from "../contracts/spec/spec.ts";
+ import { KB_H, KB_PAD, KB_ROW_H, KB_GAP, IME_BAR_H, IME_LABEL_H, IME_LABEL_GAP } from "../apps/clear/keyboard-metrics.ts";
+ 
+ afterAll(() => { delete (globalThis as { offload?: unknown }).offload; });
+ for (const [width, height] of [[320, 480], [360, 800]]) test(`Clear retains text and paints compact IME controls at ${width}x${height}`, async () => {
+-  const sent: OffloadRequest[] = [], replies: string[] = [], held: OffloadRequest[] = [], uploads: number[] = [];
++  const sent: OffloadRequest[] = [], replies: OffloadReply[] = [], held: OffloadRequest[] = [], uploads: number[] = [];
+   let textWrites = 0, topWrites = 0, allowGlyphs = false, frame = 0, lastUpload = -1, session = 1, ops: HostOps;
+   function answerGlyph(request: OffloadRequest) {
+     const { face, size, density } = JSON.parse(request.payload);
+     const width = size * density, height = 2 ** Math.ceil(Math.log2((size + 8) * density));
+-    replies.push(JSON.stringify({ id: request.id, payload: JSON.stringify({ face, advance: size, xoff: 0, width, height,
+-      mask: Buffer.alloc(width * height / 4, 255).toString("base64") }) }));
++    replies.push({ id: request.id, payload: JSON.stringify({ face, advance: size, xoff: 0, width, height,
++      mask: Buffer.alloc(width * height / 4, 255).toString("base64") }) });
+   }
+   const world = await bootWorld("clear-main.vue-vapor", 60, { offload: {
+-    session: () => session, take: () => replies.shift(),
+-    submit(raw: string) {
+-      const request = JSON.parse(raw) as OffloadRequest; sent.push(request);
+-      if (request.method === "text.font") replies.push(JSON.stringify({ id: request.id, payload: JSON.stringify({ id: "a".repeat(64), mapping: "scalar" }) }));
++    session: () => session, takeValue: () => replies.shift(),
++    submitValue(request: OffloadRequest) {
++      sent.push(request);
++      if (request.method === "text.font") replies.push({ id: request.id, payload: JSON.stringify({ id: "a".repeat(64), mapping: "scalar" }) });
+       if (request.method === "text.glyph") { if (allowGlyphs) answerGlyph(request); else held.push(request); }
+       if (request.method === "ime.candidates") {
+         const { offset } = JSON.parse(request.payload);
+         const candidates = Array.from({ length: 15 }, (_, i) => offset + i === 0 ? "你好" : `你${offset + i}`);
+-        replies.push(JSON.stringify({ id: request.id, payload: JSON.stringify({ offset, candidates, last: offset >= 45 }) }));
++        replies.push({ id: request.id, payload: JSON.stringify({ offset, candidates, last: offset >= 45 }) });
+       }
+       return true;
+     },
+@@ -66,8 +66,8 @@
+   const compositions = () => sent.filter(r => r.method === "ime.compose");
+   function answerComposition(preedit: string, commit = "") {
+     const request = compositions().at(-1)!;
+-    replies.push(JSON.stringify({ id: request.id, payload: JSON.stringify({ preedit, raw: preedit.replaceAll(" ", ""), rawCaret: preedit.replaceAll(" ", "").length, caret: preedit.length, commit,
+-      candidates: preedit ? ["你好", "呢"] : [], page: 0, last: false }) }));
++    replies.push({ id: request.id, payload: JSON.stringify({ preedit, raw: preedit.replaceAll(" ", ""), rawCaret: preedit.replaceAll(" ", "").length, caret: preedit.length, commit,
++      candidates: preedit ? ["你好", "呢"] : [], page: 0, last: false }) });
+   }
+   function controlsInk() {
+     const pixels = world.render(); let ink = 0;
+@@ -142,9 +142,9 @@
+ 
+ for (const [width, height] of [[320, 480], [360, 800]]) test(`Clear offline editor can commit, switch mode and close at ${width}x${height}`, async () => {
+   let session = 0;
+-  const sent: string[] = [];
++  const sent: OffloadRequest[] = [];
+   const world = await bootWorld("clear-main.vue-vapor", 60, { offload: {
+-    session: () => session, take: () => undefined, submit: (raw: string) => { sent.push(raw); return true; },
++    session: () => session, takeValue: () => undefined, submitValue: (request: OffloadRequest) => { sent.push(request); return true; },
+   } }, undefined, { width, height, rasterDensity: 2 });
+   async function idle(n = 20) { for (let i = 0; i < n; i++) { world.frame(0); world.tick(); await Promise.resolve(); } }
+   async function tap(x: number, y: number) {
+@@ -167,7 +167,7 @@
+   expect(has("Swipe right to completenina|")).toBe(false);
+   expect(sent).toHaveLength(0);
+   session = 2; await idle(35);
+-  expect(sent.map(raw => JSON.parse(raw).method)).not.toContain("ime.compose");
++  expect(sent.map(request => request.method)).not.toContain("ime.compose");
+   await tap(100, 31); await idle(); // another edit proves the app remains interactive
+   expect(has("Swipe right to completenina|")).toBe(true);
+ });
+--- a/tests/ime.test.ts
++++ b/tests/ime.test.ts
+@@ -2,18 +2,19 @@
+ import { createIme, IME } from "../framework/src/ime.ts";
+ import { createOffloadClient } from "../framework/src/offload.ts";
+ import type { ImeSnapshot } from "../contracts/spec/ime.ts";
++import type { OffloadReply, OffloadRequest } from "../contracts/spec/offload.ts";
+ 
+ function fixture() {
+   let session = 1, time = 0;
+-  const sent: { id: number; method: string; payload: string }[] = [], replies: string[] = [], committed: string[] = [];
+-  const io = createOffloadClient({ session: () => session, take: () => replies.shift(),
+-    submit: raw => { sent.push(JSON.parse(raw)); return true; } });
++  const sent: OffloadRequest[] = [], replies: OffloadReply[] = [], committed: string[] = [];
++  const io = createOffloadClient({ session: () => session, takeValue: () => replies.shift(),
++    submitValue: request => { sent.push(request); return true; } });
+   const events: string[] = [];
+   const ime = createIme({ io, now: () => time, changed() {}, commit: value => { committed.push(value); events.push(`commit:${value}`); },
+     edit: action => events.push(`edit:${action}`) });
+   const tick = () => { time += 1 / 60; io.step(); ime.step(); };
+-  const answer = (request: number, fields: Partial<ImeSnapshot> = {}) => replies.push(JSON.stringify({ id: request,
+-    payload: JSON.stringify({ raw: (fields.preedit ?? "ni").replaceAll(" ", ""), rawCaret: (fields.preedit ?? "ni").replaceAll(" ", "").length, commit: "", preedit: "ni", candidates: ["你", "呢"], page: 0, last: false, caret: (fields.preedit ?? "ni").length, ...fields }) }));
++  const answer = (request: number, fields: Partial<ImeSnapshot> = {}) => replies.push({ id: request,
++    payload: JSON.stringify({ raw: (fields.preedit ?? "ni").replaceAll(" ", ""), rawCaret: (fields.preedit ?? "ni").replaceAll(" ", "").length, commit: "", preedit: "ni", candidates: ["你", "呢"], page: 0, last: false, caret: (fields.preedit ?? "ni").length, ...fields }) });
+   return { ime, io, sent, committed, events, tick, answer, replies, connect: (n: number) => { session = n; } };
+ }
+ describe("replayable IME", () => {
+@@ -24,7 +25,7 @@
+     const read = f.sent.at(-1)!;
+     expect(read.method).toBe("ime.candidates");
+     expect(JSON.parse(read.payload)).toEqual({ keys: [110], offset: 15 });
+-    f.replies.push(JSON.stringify({ id: read.id, payload: JSON.stringify({ offset: 15, candidates: ["泥", "拟"], last: true }) })); f.tick();
++    f.replies.push({ id: read.id, payload: JSON.stringify({ offset: 15, candidates: ["泥", "拟"], last: true }) }); f.tick();
+     expect(count).toBe(2); expect(f.ime.state().preedit).toBe("ni");
+     expect(f.ime.selectAbsolute(16)).toBe(true); f.tick(); f.tick();
+     expect(JSON.parse(f.sent.at(-1)!.payload)).toEqual([110, IME.selectAbsolute + 16]);
+@@ -35,7 +36,7 @@
+     let completed = false;
+     f.ime.browse(15, () => { completed = true; }); f.tick(); const old = f.sent.at(-1)!.id;
+     f.ime.key(105);
+-    f.replies.push(JSON.stringify({ id: old, payload: JSON.stringify({ offset: 15, candidates: ["wrong"], last: true }) })); f.tick();
++    f.replies.push({ id: old, payload: JSON.stringify({ offset: 15, candidates: ["wrong"], last: true }) }); f.tick();
+     expect(completed).toBe(false); expect(f.ime.selectAbsolute(15)).toBe(false);
+     expect(f.ime.browse(512, () => {})).toBe(0);
+   });
+@@ -158,7 +159,7 @@
+   for (const invalid of [false, true]) {
+     const f = fixture(); f.ime.key(110); f.tick(); f.tick();
+     if (invalid) f.answer(f.sent.at(-1)!.id, { rawCaret: 200 });
+-    else f.replies.push(JSON.stringify({ id: f.sent.at(-1)!.id, error: "engine unavailable" }));
++    else f.replies.push({ id: f.sent.at(-1)!.id, error: "engine unavailable" });
+     f.tick(); expect(f.ime.state().error).not.toBe(""); f.ime.accept();
+     expect(f.committed).toEqual(["n"]);
+   }
+--- a/tests/text.test.ts
++++ b/tests/text.test.ts
+@@ -7,20 +7,20 @@
+ import { createTextResources } from "../framework/src/text.ts";
+ import { createOffloadClient } from "../framework/src/offload.ts";
+ import { createTextProvider } from "../tools/text-glyph-provider.ts";
+-import type { OffloadRequest } from "../contracts/spec/offload.ts";
++import type { OffloadReply, OffloadRequest } from "../contracts/spec/offload.ts";
+ const font = existsSync("/System/Library/Fonts/STHeiti Medium.ttc") ? "/System/Library/Fonts/STHeiti Medium.ttc" : "assets/fonts/Inter-Regular.ttf";
+ 
+ function fixture(maxGlyphs = 96) {
+-  const provider = createTextProvider(font), sent: OffloadRequest[] = [], replies: string[] = [], held: OffloadRequest[] = [];
++  const provider = createTextProvider(font), sent: OffloadRequest[] = [], replies: OffloadReply[] = [], held: OffloadRequest[] = [];
+   let session = 1, allow = true, next = 1, frame = 0;
+   let failure: "load" | "upload" | undefined;
+   const uploaded: number[] = [], freed: number[] = [];
+   function answer(r: OffloadRequest) {
+-    if (r.method === "text.glyph" && failure === "load") { replies.push(JSON.stringify({ id: r.id, error: "unavailable" })); return; }
+-    replies.push(JSON.stringify({ id: r.id,
+-    payload: r.method === "text.font" ? provider["text.font"]() : provider["text.glyph"](r.payload) })); }
+-  const io = createOffloadClient({ session: () => session, take: () => replies.shift(), submit: raw => {
+-    const request = JSON.parse(raw) as OffloadRequest; sent.push(request);
++    if (r.method === "text.glyph" && failure === "load") { replies.push({ id: r.id, error: "unavailable" }); return; }
++    replies.push({ id: r.id,
++    payload: r.method === "text.font" ? provider["text.font"]() : provider["text.glyph"](r.payload) }); }
++  const io = createOffloadClient({ session: () => session, takeValue: () => replies.shift(), submitValue: request => {
++    sent.push(request);
+     if (request.method === "text.font" || allow) answer(request); else held.push(request);
+     return true;
+   } });
+--- a/tests/text-batch.test.ts
++++ b/tests/text-batch.test.ts
+@@ -21,10 +21,10 @@
+   const provider = createFontArchiveProvider({ "font.pjfa": path });
+   const wasm = await createWasmUi(await Bun.file("platforms/web/pocketjs.wasm").arrayBuffer());
+   wasm.ops.loadFontAtlas!(fixture.baked);
+-  const queue: any[] = [], replies: string[] = [], seen: any[] = [];
++  const queue: any[] = [], replies: any[] = [], seen: any[] = [];
+   let session = 1, fail = false, corrupt = false;
+-  const client = createOffloadClient({ session: () => session, take: () => replies.shift(),
+-    submit: raw => { queue.push(JSON.parse(raw)); return true; } });
++  const client = createOffloadClient({ session: () => session, takeValue: () => replies.shift(),
++    submitValue: request => { queue.push(request); return true; } });
+   const archive = createFontArchive({ path: "font.pjfa", slots: [fixture.slot], capacity, maxBytes, resident: [{ slot: fixture.slot, text: resident }] }, wasm.ops, client);
+   return { archive, seen, wasm, reconnect: () => session++, fail: (v: boolean) => fail = v, corrupt: () => corrupt = true,
+     step(count = 1) {
+@@ -36,8 +36,8 @@
+             if (fail) throw Error("Injected disk failure");
+             let payload = provider.methods[q.method](q.payload) as string;
+             if (corrupt && q.method === "font.glyphs") payload = "00".repeat(20);
+-            replies.push(JSON.stringify({ id: q.id, payload }));
+-          } catch (e) { replies.push(JSON.stringify({ id: q.id, error: String(e) })); }
++            replies.push({ id: q.id, payload });
++          } catch (e) { replies.push({ id: q.id, error: String(e) }); }
+         }
+         client.step(); runServicePumps(); wasm.tick();
+       }
+--- a/tests/text-layout-client.test.ts
++++ b/tests/text-layout-client.test.ts
+@@ -1,28 +1,26 @@
+ import { expect, test } from "bun:test";
+ import { createTextLayout } from "../framework/src/text-layout.ts";
+ import { runServicePumps } from "../framework/src/services.ts";
++import type { OffloadReply, OffloadRequest } from "../contracts/spec/offload.ts";
+ 
+ test("resident edits use one bounded job and canceled mutations force a fresh snapshot", () => {
+   let generation = 1;
+   const sent: any[] = [],
+-    replies: string[] = [],
++    replies: OffloadReply[] = [],
+     states: any[] = [];
+   (globalThis as any).offload = {
+     session: () => generation,
+-    submit(record: string) {
+-      expect(Buffer.byteLength(record)).toBeLessThanOrEqual(4096);
+-      const r = JSON.parse(record);
+-      r.data = JSON.parse(r.payload);
++    submitValue(request: OffloadRequest) {
++      const r = { ...request, data: JSON.parse(request.payload) };
+       sent.push(r);
+       return true;
+     },
+-    take: () => replies.shift(),
++    takeValue: () => replies.shift(),
+   };
+   const doc = createTextLayout((s) => states.push(s));
+   const deliver = (text: string) => {
+     const request = sent.at(-1)!;
+-    replies.push(
+-      JSON.stringify({
++    replies.push({
+         id: request.id,
+         payload: JSON.stringify({
+           revision: request.data.revision,
+@@ -30,8 +28,7 @@
+           total: 1,
+           next: null,
+         }),
+-      }),
+-    );
++      });
+     runServicePumps();
+   };
+   doc.update("😀 initial", { slot: 1, width: 400 });
+--- a/tests/service-client.test.ts
++++ b/tests/service-client.test.ts
+@@ -5,9 +5,9 @@
+ 
+ for (const companion of [true, false]) test(`${companion ? "companion" : "mailbox"} service owns requests, failures and asset namespace`, async () => {
+   const directory = mkdtempSync(join(tmpdir(), "pocket-service-"));
+-  const sent: any[] = [], incoming: string[] = [], replies: any[] = [], assets: string[] = [], events: any[] = [];
++  const sent: any[] = [], incoming: any[] = [], replies: any[] = [], assets: string[] = [], events: any[] = [];
+   let session = 1, opened = 0;
+-  (globalThis as any).offload = { session: () => session, take: () => incoming.shift(), submit: (raw: string) => { sent.push(JSON.parse(raw)); return true; } };
++  (globalThis as any).offload = { session: () => session, takeValue: () => incoming.shift(), submitValue: (request: unknown) => { sent.push(request); return true; } };
+   try {
+     const build = await Bun.build({ entrypoints: [join(import.meta.dir, "fixtures/service-client-entry.ts")], outdir: directory, target: "bun",
+       define: { __POCKET_FEATURES__: JSON.stringify({ "io.offload": companion }) } });
+@@ -25,9 +25,9 @@
+     if (companion) {
+       expect(opened).toBe(0);
+       const request = sent.shift(); expect(request.method).toBe("fixture.command");
+-      incoming.push(JSON.stringify({ id: request.id, payload: '{"job":1}' })); step(20);
++      incoming.push({ id: request.id, payload: '{"job":1}' }); step(20);
+       const poll = sent.shift(); expect(poll.method).toBe("fixture.poll");
+-      incoming.push(JSON.stringify({ id: poll.id, payload: '{"state":"done","value":{"t":"ready"}}' })); step();
++      incoming.push({ id: poll.id, payload: '{"state":"done","value":{"t":"ready"}}' }); step();
+     } else { incoming.push(JSON.stringify({ t: "ready", id: sent.shift().id })); step(5); }
+     expect(replies).toEqual([{ t: "ready", id: 42 }]);
+     expect(client.image("thumbs/card.img")).toBe(7); expect(client.openStream("media/one.pkst")).toBe(true);
+--- a/tests/resource-cache.test.ts
++++ b/tests/resource-cache.test.ts
+@@ -84,13 +84,13 @@
+ });
+ 
+ test("offload adapter obeys session fencing and does not replay command requests", () => {
+-  let session = 1; let raw: string | undefined; const sent: any[] = [];
+-  const io = createOffloadClient({ session: () => session, submit(record) { sent.push(JSON.parse(record)); return true; }, take() { const s = raw; raw = undefined; return s; } });
++  let session = 1; let raw: any; const sent: any[] = [];
++  const io = createOffloadClient({ session: () => session, submitValue(record) { sent.push(record); return true; }, takeValue() { const value = raw; raw = undefined; return value; } });
+   const scheduler = createResourceScheduler({ maxConcurrent: 1, startsPerFrame: 1, completionsPerFrame: 1, maxCollections: 1, available: () => io.connected() });
+   const cache = scheduler.createCache({ key: (s: string) => s, maxEntries: 1, maxResponseBytes: 100, maxCost: 10, cost: () => 10,
+     load: offloadResource(io, "read.tile", s => JSON.stringify(s)), materialize: (s: string) => JSON.parse(s) });
+   cache.reconcile([{ input: "tile", priority: 0 }]); scheduler.step(); io.step();
+-  raw = JSON.stringify({ id: sent[0].id, payload: '"texture"' }); io.step(); expect(cache.state("tile").status).toBe("pending"); scheduler.step();
++  raw = { id: sent[0].id, payload: '"texture"' }; io.step(); expect(cache.state("tile").status).toBe("pending"); scheduler.step();
+   expect(cache.state("tile")).toEqual({ status: "ready", value: "texture" });
+   let commandResults = 0; io.request("document.save", "{}", () => commandResults++); io.step(); session = 2; io.step();
+   for (let n = 0; n < 40; n++) { scheduler.step(); io.step(); }
+--- a/tests/helpers/font-archive-provider.ts
++++ b/tests/helpers/font-archive-provider.ts
+@@ -26,16 +26,16 @@
+     glyphs = 0,
+     fail = false;
+   const requests: any[] = [],
+-    replies: string[] = [],
++    replies: any[] = [],
+     seen: any[] = [];
+   const documents = new Map<string, string>([["common.txt", "你好"]]);
+   const ops: OffloadOps = {
+     session: () => session,
+-    submit(record) {
+-      requests.push(JSON.parse(record));
++    submitValue(record) {
++      requests.push(record);
+       return true;
+     },
+-    take: () => replies.shift(),
++    takeValue: () => replies.shift(),
+   };
+   return {
+     ops,
+@@ -111,9 +111,9 @@
+           });
+           payload = Buffer.from(out).toString("hex");
+         } else throw new Error("Unknown capability");
+-        replies.push(JSON.stringify({ id: r.id, payload }));
++        replies.push({ id: r.id, payload });
+       } catch (e) {
+-        replies.push(JSON.stringify({ id: r.id, error: String(e) }));
++        replies.push({ id: r.id, error: String(e) });
+       }
+     },
+   };
+--- a/tools/ime/verify.ts
++++ b/tools/ime/verify.ts
+@@ -70,10 +70,10 @@
+   // Exercise the guest state machine against real conversion, holding every
+   // response for three frames while both confirmed words arrive beforehand.
+   let frame = 0;
+-  const pending: { id: number; payload: string; at: number }[] = [], replies: string[] = [], committed: string[] = [];
++  const pending: { id: number; payload: string; at: number }[] = [], replies: any[] = [], committed: string[] = [];
+   const transcripts: number[][] = [];
+-  const io = createOffloadClient({ session: () => 1, take: () => replies.shift(), submit(raw) {
+-    const request = JSON.parse(raw); pending.push({ ...request, at: frame + 3 });
++  const io = createOffloadClient({ session: () => 1, takeValue: () => replies.shift(), submitValue(request) {
++    pending.push({ ...request, at: frame + 3 });
+     transcripts.push(JSON.parse(request.payload)); return true;
+   } });
+   const ime = createIme({ io, now: () => frame / 60, changed() {}, commit: text => committed.push(text) });
+@@ -83,7 +83,7 @@
+   for (frame = 1; frame <= 35; frame++) {
+     while (pending[0]?.at <= frame) {
+       const request = pending.shift()!;
+-      replies.push(JSON.stringify({ id: request.id, payload: await engine.compose(request.payload) }));
++      replies.push({ id: request.id, payload: await engine.compose(request.payload) });
+     }
+     io.step(); ime.step();
+   }

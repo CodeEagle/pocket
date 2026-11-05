@@ -46,6 +46,7 @@ import {
   type WindowSizeClass,
 } from "./responsive.ts";
 import { useRouteActive } from "./route.tsx";
+import type { BridgeObject } from "./host.ts";
 
 export type SemanticTone = "accent" | "info" | "success" | "warning" | "danger" | "neutral";
 
@@ -345,13 +346,18 @@ export function MobileParagraph(props: MobileParagraphProps): JSX.Element {
   let containerNode: { id: number } | undefined;
   const [containerWidth, setContainerWidth] = createSignal(0);
   let lastFallbackWidth = 0;
+  let layoutReadArmed = false;
   const fallbackWidth = (): number => {
     const geometryWidth = scaffold.geometry().width;
     const viewportWidth = layoutGlobal.ui?.__viewport?.w;
-    const width = geometryWidth > 0
-      ? geometryWidth
-      : typeof viewportWidth === "number" && Number.isFinite(viewportWidth) && viewportWidth > 0
-        ? viewportWidth
+    // The native viewport updates synchronously on resize, while the
+    // scaffold's display event can arrive one frame later (or be absent on
+    // the lightweight probe host). Prefer it so a measured paragraph is
+    // invalidated for the same resize that invalidates its parent layout.
+    const width = typeof viewportWidth === "number" && Number.isFinite(viewportWidth) && viewportWidth > 0
+      ? viewportWidth
+      : geometryWidth > 0
+        ? geometryWidth
         : 390;
     return Math.max(1, width - 64);
   };
@@ -359,11 +365,16 @@ export function MobileParagraph(props: MobileParagraphProps): JSX.Element {
     const nextFallbackWidth = fallbackWidth();
     if (nextFallbackWidth !== lastFallbackWidth) {
       lastFallbackWidth = nextFallbackWidth;
+      layoutReadArmed = false;
       if (containerWidth() !== 0) setContainerWidth(0);
       return;
     }
+    if (!layoutReadArmed) {
+      layoutReadArmed = true;
+      return;
+    }
     const measured = readNodeWidth(containerNode);
-    if (measured !== undefined && Math.abs(measured - containerWidth()) >= 1) {
+    if (measured !== undefined && measured > 0 && Math.abs(measured - containerWidth()) >= 1) {
       setContainerWidth(measured);
     }
   };
@@ -372,11 +383,15 @@ export function MobileParagraph(props: MobileParagraphProps): JSX.Element {
     const nextFallbackWidth = fallbackWidth();
     if (nextFallbackWidth !== lastFallbackWidth) {
       lastFallbackWidth = nextFallbackWidth;
+      layoutReadArmed = false;
       setContainerWidth(0);
     }
   });
   try {
-    onFrame(syncWidth, { active: routeActive, continuous: false });
+    onFrame(syncWidth, {
+      active: routeActive,
+      continuous: () => routeActive() && (containerWidth() <= 0 || fallbackWidth() !== lastFallbackWidth),
+    });
   } catch {
     // Source-only consumers have no native frame scheduler.
   }
@@ -392,7 +407,7 @@ export function MobileParagraph(props: MobileParagraphProps): JSX.Element {
         containerNode = current;
         syncWidth();
       }}
-      class="w-full min-w-0 self-stretch"
+      class="w-full min-w-0"
     >
       <Text class={props.class ?? "text-xs"}>{wrappedText()}</Text>
     </View>
@@ -1878,7 +1893,8 @@ export function MobileDialog(props: {
 }
 
 type SurfaceBridge = {
-  registerSurface?: (packageId: string, kind: "glass" | "platformTexture", payload: string) => unknown;
+  /** The native ABI accepts the typed descriptor object directly. */
+  registerSurface?: (packageId: string, kind: "glass" | "platformTexture", payload: BridgeObject) => unknown;
   releaseSurface?: (packageId: string) => void;
 };
 
@@ -1894,6 +1910,23 @@ function platformTextureRadius(value: unknown): number {
   return Math.max(0, Math.min(MAX_PLATFORM_TEXTURE_RADIUS, value));
 }
 
+function flatBridgeObjectEquals(
+  previous: BridgeObject | undefined,
+  next: BridgeObject | undefined,
+): boolean {
+  if (previous === next) return true;
+  if (previous === undefined || next === undefined) return false;
+  const previousKeys = Object.keys(previous);
+  const nextKeys = Object.keys(next);
+  if (previousKeys.length !== nextKeys.length) return false;
+  for (const key of previousKeys) {
+    if (!Object.prototype.hasOwnProperty.call(next, key) || !Object.is(previous[key], next[key])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function GlassSurface(props: {
   children?: JSX.Element;
   shape?: GlassShape;
@@ -1905,9 +1938,9 @@ export function GlassSurface(props: {
   const recipe = createMemo(() => buildLiquidGlassRecipe({ shape: props.shape ?? "rounded", focused: props.pressed === true, warp: true }));
   // Keep the shell transparent when a native surface is registered; the
   // gradient layer below is only the unsupported-host fallback.
-  const payload = createMemo((): string => {
+  const payload = createMemo<BridgeObject>(() => {
     const current = recipe();
-    return JSON.stringify({
+    return {
       radius: current.radius,
       // The native glass provider calls this field `blur`; the local recipe
       // keeps the more descriptive `blurSigma` name for UI/tests.
@@ -1921,9 +1954,9 @@ export function GlassSurface(props: {
       warp: current.warp,
       pressed: props.pressed === true,
       shape: current.shape,
-    });
-  });
-  const register = (nextPayload: string): void => {
+    };
+  }, undefined, { equals: flatBridgeObjectEquals });
+  const register = (nextPayload: BridgeObject): void => {
     const registerSurface = surfaceGlobal.pocket?.registerSurface;
     if (typeof registerSurface !== "function") {
       setRegistered(false);
@@ -1938,7 +1971,7 @@ export function GlassSurface(props: {
   };
   // The host updates an existing package id in place. This keeps shape and
   // pressed/focus controls interactive without remounting the surface node.
-  // The string memo suppresses equal payloads. One effect owns registration;
+  // The object memo is kept as the one registration source; one effect owns
   // it does not subscribe to the registered signal it updates.
   createEffect(() => register(payload()));
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
@@ -1982,7 +2015,7 @@ export function PlatformTextureSurface(props: {
 }): JSX.Element {
   const [registered, setRegistered] = createSignal(false);
   const id = `guest.texture.${nextTextureSurface++}`;
-  const payload = createMemo((): string => JSON.stringify({
+  const payload = createMemo<BridgeObject>(() => ({
     textureId: props.textureId,
     sourceWidth: props.sourceWidth,
     sourceHeight: props.sourceHeight,
@@ -1990,15 +2023,15 @@ export function PlatformTextureSurface(props: {
     radius: platformTextureRadius(props.radius),
     rotationDegrees: props.rotationDegrees ?? 0,
     mirrorX: props.mirrorX ?? false,
-  }));
-  const register = (_nextPayload = payload()): void => {
+  }), undefined, { equals: flatBridgeObjectEquals });
+  const register = (nextPayload: BridgeObject): void => {
     const registerSurface = surfaceGlobal.pocket?.registerSurface;
     if (typeof registerSurface !== "function") {
       setRegistered(false);
       return;
     }
     try {
-      const ok = registerSurface(id, "platformTexture", payload()) !== false;
+      const ok = registerSurface(id, "platformTexture", nextPayload) !== false;
       setRegistered(ok);
     } catch {
       setRegistered(false);

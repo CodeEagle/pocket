@@ -138,7 +138,7 @@ test("native Duo close hitbox stays in the top app-bar slot across folded and op
 import { mount } from "@pocketjs/framework/solid";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
 
-const pocketGlobal = globalThis as typeof globalThis & { pocket?: { _emit?: (line: string) => boolean } };
+const pocketGlobal = globalThis as typeof globalThis & { pocket?: { _emitValue?: (packet: Record<string, unknown>) => boolean } };
 const binding = { appId: "app.child", instanceId: "child-1", surfaceHandle: 2, focused: true, ready: true };
 const system = {
   surfaceBindings: () => [binding],
@@ -146,7 +146,7 @@ const system = {
   onBeforeDismiss: (_handler: (instanceIds: readonly string[]) => Promise<void>) => () => {},
 };
 function onClose(): void {
-  pocketGlobal.pocket?._emit?.(JSON.stringify({ type: "event", name: "fixture.close", payload: { instanceId: binding.instanceId } }));
+  pocketGlobal.pocket?._emitValue?.({ type: "event", name: "fixture.close", payload: { instanceId: binding.instanceId } });
 }
 mount(() => <SystemAppSurfaces presentation="mini-app" system={system} onClose={onClose} />);
 `);
@@ -201,7 +201,7 @@ import { createDisplayGeometry } from "@pocket/ui/display";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
 import { createEffect, createSignal, Show } from "solid-js";
 
-const pocketGlobal = globalThis as typeof globalThis & { pocket?: { _emit?: (line: string) => boolean } };
+const pocketGlobal = globalThis as typeof globalThis & { pocket?: { _emitValue?: (packet: Record<string, unknown>) => boolean } };
 const binding = { appId: "app.child", instanceId: "late-child", surfaceHandle: 2, focused: true, ready: true };
 const system = {
   surfaceBindings: () => [binding],
@@ -220,7 +220,7 @@ function App() {
     if (rootGeometry().width === 466 && rootGeometry().keyboardInset === 18 && rootGeometry().reservedRegions.length > 0) setAdmitted(true);
   });
   const close = (): void => {
-    pocketGlobal.pocket?._emit?.(JSON.stringify({ type: "event", name: "fixture.close", payload: { instanceId: binding.instanceId } }));
+    pocketGlobal.pocket?._emitValue?.({ type: "event", name: "fixture.close", payload: { instanceId: binding.instanceId } });
   };
   return <Show when={admitted()}><SystemAppSurfaces presentation="mini-app" system={system} onClose={close} /></Show>;
 }

@@ -20,15 +20,15 @@ function wire(): {
   packets: Packet[];
 } {
   const packets: Packet[] = [];
-  const host = createHostBridge((line) => {
-    packets.push(JSON.parse(line) as Packet);
+  const host = createHostBridge((packet) => {
+    packets.push(packet as Packet);
     return true;
   });
   return { host, packets };
 }
 
-function event(name: string, payload: JsonObject): string {
-  return JSON.stringify({ type: "event", name, payload });
+function event(name: string, payload: JsonObject): Record<string, unknown> {
+  return { type: "event", name, payload };
 }
 
 function packetPayload(packet: Packet): JsonObject {
@@ -125,7 +125,7 @@ test("sendBatch rejects count and UTF-8 byte overflow before sending", () => {
     assert.equal(stream.state, "open");
 
     // The bounded preflight must reject a huge string without first building a
-    // complete JSON string for the item or the enclosing batch.
+    // complete encoded item or enclosing batch.
     const huge = "x".repeat(POCKET_STREAM_MAX_BATCH_BYTES + 1024);
     assert.throws(
       () => stream.sendBatch([huge]),
@@ -138,21 +138,23 @@ test("sendBatch rejects count and UTF-8 byte overflow before sending", () => {
     assert.equal(batchCount(), beforeCount + 1);
     const packet = packets.at(-1);
     assert.equal(packet?.name, "stream.batch");
-    assert.ok(JSON.stringify(packet).length < POCKET_STREAM_MAX_BATCH_BYTES);
+    const packetEvents = packet?.payload?.events;
+    assert.ok(Array.isArray(packetEvents));
+    assert.equal(packetEvents.length, 1);
   } finally {
     streams.dispose();
     host.dispose();
   }
 });
 
-test("sendBatch rejects toJSON and accessors before the host stringify pass", () => {
+test("sendBatch rejects unsafe values before direct-object emission", () => {
   const { host, packets } = wire();
   const streams = createPocketStreamAdapter(host);
   try {
-    const stream = streams.open("batch-json-shape");
+    const stream = streams.open("batch-value-shape");
     const nullPrototype = Object.create(null) as Record<string, unknown>;
     nullPrototype.value = 1;
-    const valid = streams.open("batch-json-valid");
+    const valid = streams.open("batch-value-valid");
     assert.equal(valid.sendBatch([{ value: 1 }, nullPrototype as never]), true);
     const beforeRejectedBatches = packets.filter((packet) => packet.name === "stream.batch").length;
 
@@ -193,6 +195,57 @@ test("sendBatch rejects toJSON and accessors before the host stringify pass", ()
       packets.filter((packet) => packet.name === "stream.batch").length,
       beforeRejectedBatches,
       "shape rejection must not emit a batch",
+    );
+    assert.equal(stream.state, "open");
+  } finally {
+    streams.dispose();
+    host.dispose();
+  }
+});
+
+test("sendBatch charges exact B1 TLV bytes at numeric, Unicode, and Uint8Array boundaries", () => {
+  const { host, packets } = wire();
+  const streams = createPocketStreamAdapter(host, { idPrefix: "b1" });
+  try {
+    // Keep the stream id fixed so these values exercise the exact envelope
+    // boundary rather than a changing ID-length estimate.
+    const stream = streams.open("b1-boundary", {}, { id: "b1-x" });
+    const batchCount = (): number => packets.filter((packet) => packet.name === "stream.batch").length;
+    const batch = (value: unknown): unknown[] => Array.from(
+      { length: POCKET_STREAM_MAX_BATCH_EVENTS },
+      () => value,
+    );
+    const assertBoundary = (fits: unknown, over: unknown, label: string): void => {
+      const before = batchCount();
+      assert.equal(stream.sendBatch(batch(fits)), true, `${label} batch at the B1 limit must send`);
+      assert.equal(batchCount(), before + 1, `${label} fit must emit exactly one batch`);
+      assert.throws(
+        () => stream.sendBatch(batch(over)),
+        (error: unknown) => error instanceof PocketStreamError && error.code === "stream_batch_too_large",
+        `${label} batch beyond the B1 limit must reject before emission`,
+      );
+      assert.equal(batchCount(), before + 1, `${label} overflow must not emit a batch`);
+    };
+
+    // Every finite JS number is one B1 tag plus an eight-byte integer/float
+    // slot. The 917/918-byte pad makes that nine-byte fact observable.
+    assertBoundary(
+      { n: 1, pad: new Uint8Array(917) },
+      { n: 1, pad: new Uint8Array(918) },
+      "numeric field",
+    );
+
+    // 235 four-byte emoji plus three ASCII bytes is exactly 943 UTF-8 bytes.
+    assertBoundary(
+      "😀".repeat(235) + "abc",
+      "😀".repeat(236),
+      "Unicode string",
+    );
+
+    assertBoundary(
+      new Uint8Array(943),
+      new Uint8Array(944),
+      "Uint8Array",
     );
     assert.equal(stream.state, "open");
   } finally {
@@ -450,30 +503,25 @@ test("stream deadlines use HostBridge.tick without timers", async () => {
 test("HostBridge uses pocket._emitValue directly and marks __pocketEvent/__pocketDeliver __binaryCapable", async () => {
   const globalObject = globalThis as typeof globalThis & {
     pocket?: {
-      _emit?: (line: string) => boolean;
       _emitValue?: (packet: Record<string, unknown>) => boolean;
     };
-    __pocketEvent?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
-    __pocketDeliver?: ((packet: string | Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+    __pocketEvent?: ((packet: Record<string, unknown>) => void) & { __binaryCapable?: boolean };
+    __pocketDeliver?: ((packet: Record<string, unknown>) => void) & { __binaryCapable?: boolean };
   };
   const previousPocket = globalObject.pocket;
   const previousEvent = globalObject.__pocketEvent;
   const previousDeliver = globalObject.__pocketDeliver;
 
   const emittedObjects: Record<string, unknown>[] = [];
-  let legacyStringCalls = 0;
-  let lastLegacyParsed: Record<string, unknown> | undefined;
+  let previousObjectCalls = 0;
+  let lastPreviousObject: Record<string, unknown> | undefined;
 
-  const legacyPrevious = (line: string | Record<string, unknown>) => {
-    assert.equal(typeof line, "string");
-    lastLegacyParsed = JSON.parse(line as string) as Record<string, unknown>;
-    legacyStringCalls += 1;
+  const legacyPrevious = (packet: Record<string, unknown>) => {
+    lastPreviousObject = packet;
+    previousObjectCalls += 1;
   };
   globalObject.__pocketEvent = legacyPrevious;
   globalObject.pocket = {
-    _emit: () => {
-      throw new Error("_emit should not be called when _emitValue is present");
-    },
     _emitValue: (packet) => {
       emittedObjects.push(packet);
       return true;
@@ -512,8 +560,9 @@ test("HostBridge uses pocket._emitValue directly and marks __pocketEvent/__pocke
       payload: { bytes: new Uint8Array([9, 8, 7]) },
     });
     assert.deepEqual(Array.from(receivedBytes ?? []), [9, 8, 7]);
-    assert.equal(legacyStringCalls, 1);
-    assert.deepEqual((lastLegacyParsed?.payload as { bytes?: unknown } | undefined)?.bytes, [9, 8, 7]);
+    assert.equal(previousObjectCalls, 1);
+    assert.equal((lastPreviousObject?.payload as { bytes?: unknown } | undefined)?.bytes instanceof Object, true);
+    assert.deepEqual(Array.from(((lastPreviousObject?.payload as { bytes?: Uint8Array } | undefined)?.bytes) ?? []), [9, 8, 7]);
 
     const streams = createPocketStreamAdapter(host, { idPrefix: "bin-stream" });
     const binStream = streams.open<Uint8Array>("binary.stream", { seed: new Uint8Array([6]) });

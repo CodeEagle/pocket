@@ -61,7 +61,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) && !ArrayBuffer.isView(value);
 }
 
-function isJsonValue(value: unknown): value is BridgeValue {
+function isBridgeValue(value: unknown): value is BridgeValue {
   const ancestors = new Set<object>();
   let nodes = 0;
   const visit = (item: unknown, depth: number): boolean => {
@@ -80,7 +80,7 @@ function isJsonValue(value: unknown): value is BridgeValue {
 }
 
 function jsonObject(value: unknown, message: string): BridgeObject {
-  if (!isObject(value) || !Object.values(value).every(isJsonValue))
+  if (!isObject(value) || !Object.values(value).every(isBridgeValue))
     throw new TypeError(message);
   return value as BridgeObject;
 }
@@ -127,56 +127,88 @@ function utf8ByteLength(value: string): number {
   return bytes;
 }
 
-const JSON_SIZE_INVALID = Symbol("json-size-invalid");
-const JSON_SIZE_TOO_LARGE = Symbol("json-size-too-large");
-type JsonSizeResult = number | typeof JSON_SIZE_INVALID | typeof JSON_SIZE_TOO_LARGE;
+const B1_MAGIC_BYTES = 1;
+const B1_TAG_BYTES = 1;
+const B1_U32_BYTES = 4;
+const B1_NUMBER_BYTES = B1_TAG_BYTES + 8;
+const B1_OBJECT_HEADER_BYTES = B1_TAG_BYTES + B1_U32_BYTES;
+const B1_ARRAY_HEADER_BYTES = B1_TAG_BYTES + B1_U32_BYTES;
 
-function quotedJsonStringByteLength(value: string, maxBytes: number): JsonSizeResult {
-  let bytes = 2; // opening and closing quotes
-  const add = (amount: number): boolean => {
-    bytes += amount;
-    return bytes <= maxBytes;
-  };
-  if (bytes > maxBytes) return JSON_SIZE_TOO_LARGE;
+const B1_SIZE_INVALID = Symbol("b1-size-invalid");
+const B1_SIZE_TOO_LARGE = Symbol("b1-size-too-large");
+type B1SizeResult = number | typeof B1_SIZE_INVALID | typeof B1_SIZE_TOO_LARGE;
+
+function b1StringValueBytes(value: string): number {
+  return B1_TAG_BYTES + B1_U32_BYTES + utf8ByteLength(value);
+}
+
+function b1KeyBytes(value: string): number {
+  return B1_U32_BYTES + utf8ByteLength(value);
+}
+
+/**
+ * The stream batch envelope is encoded once by the native B1 encoder:
+ * magic + root object (`type`, `name`, `payload`) + an empty `events` array.
+ * Each event object is then charged as one additional array value; B1 arrays
+ * have no JSON separators or quoted keys between elements.
+ */
+const POCKET_STREAM_EMPTY_BATCH_B1_BYTES =
+  B1_MAGIC_BYTES +
+  B1_OBJECT_HEADER_BYTES +
+  b1KeyBytes("type") + b1StringValueBytes("event") +
+  b1KeyBytes("name") + b1StringValueBytes("stream.batch") +
+  b1KeyBytes("payload") + B1_OBJECT_HEADER_BYTES +
+  b1KeyBytes("events") + B1_ARRAY_HEADER_BYTES;
+
+function boundedUtf8ByteLength(value: string, maxBytes: number): number | typeof B1_SIZE_TOO_LARGE {
+  if (maxBytes < 0) return B1_SIZE_TOO_LARGE;
+  let bytes = 0;
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
-    if (code === 0x22 || code === 0x5c) {
-      if (!add(2)) return JSON_SIZE_TOO_LARGE;
-    } else if (code <= 0x1f) {
-      // JSON.stringify uses the short escapes where they exist.
-      if (!add(code === 8 || code === 9 || code === 10 || code === 12 || code === 13 ? 2 : 6)) return JSON_SIZE_TOO_LARGE;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        if (!add(4)) return JSON_SIZE_TOO_LARGE;
-        index += 1;
-      } else if (!add(6)) {
-        return JSON_SIZE_TOO_LARGE;
-      }
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      if (!add(6)) return JSON_SIZE_TOO_LARGE;
-    } else if (code <= 0x7f) {
-      if (!add(1)) return JSON_SIZE_TOO_LARGE;
+    if (code <= 0x7f) {
+      bytes += 1;
     } else if (code <= 0x7ff) {
-      if (!add(2)) return JSON_SIZE_TOO_LARGE;
-    } else if (!add(3)) {
-      return JSON_SIZE_TOO_LARGE;
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
     }
+    if (bytes > maxBytes) return B1_SIZE_TOO_LARGE;
   }
   return bytes;
 }
 
-function hasUnsafeJsonProperties(value: object): boolean {
+function boundedB1StringValueBytes(value: string, maxBytes: number): B1SizeResult {
+  const body = boundedUtf8ByteLength(value, maxBytes - B1_TAG_BYTES - B1_U32_BYTES);
+  if (body === B1_SIZE_TOO_LARGE) return body;
+  return B1_TAG_BYTES + B1_U32_BYTES + body;
+}
+
+function boundedB1KeyBytes(value: string, maxBytes: number): B1SizeResult {
+  const body = boundedUtf8ByteLength(value, maxBytes - B1_U32_BYTES);
+  if (body === B1_SIZE_TOO_LARGE) return body;
+  return B1_U32_BYTES + body;
+}
+
+function hasUnsafeProperties(value: object): boolean {
   try {
-    // JSON.stringify invokes inherited toJSON even when it is non-enumerable;
-    // reject it without reading the property so a hostile getter cannot run.
+    // A host-facing value with inherited toJSON is not a stable direct-object
+    // payload; reject it without reading the property so a hostile getter
+    // cannot run.
     if ("toJSON" in value) return true;
     const keys = Reflect.ownKeys(value);
     if (keys.length > 16384) return true;
     for (const key of keys) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       // Accessors are not stable between the bounded preflight and the final
-      // host.emit stringify. JSON data objects must expose value descriptors.
+      // host emission. Stream values must expose value descriptors.
       if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, "value")) return true;
     }
     return false;
@@ -186,61 +218,68 @@ function hasUnsafeJsonProperties(value: object): boolean {
 }
 
 /**
- * Calculate a JSON value's encoded size without allocating its encoded text.
+ * Calculate the exact B1 TLV size without allocating an encoded buffer.
  * The explicit result symbols distinguish malformed values from values that
  * are valid but cannot fit the caller's remaining byte budget.
  */
-function boundedJsonByteLength(value: unknown, maxBytes: number): JsonSizeResult {
+function boundedB1ByteLength(value: unknown, maxBytes: number): B1SizeResult {
   const ancestors = new Set<object>();
   let nodes = 0;
-  const visit = (item: unknown, depth: number): JsonSizeResult => {
-    if (++nodes > 16384 || depth > 32) return JSON_SIZE_INVALID;
-    if (item === null) return maxBytes >= 4 ? 4 : JSON_SIZE_TOO_LARGE;
-    if (typeof item === "string") return quotedJsonStringByteLength(item, maxBytes);
-    if (typeof item === "boolean") return item ? (maxBytes >= 4 ? 4 : JSON_SIZE_TOO_LARGE) : (maxBytes >= 5 ? 5 : JSON_SIZE_TOO_LARGE);
+  const visit = (item: unknown, depth: number): B1SizeResult => {
+    if (++nodes > 16384 || depth > 32) return B1_SIZE_INVALID;
+    if (item === null) return maxBytes >= B1_TAG_BYTES ? B1_TAG_BYTES : B1_SIZE_TOO_LARGE;
+    if (typeof item === "string") return boundedB1StringValueBytes(item, maxBytes);
+    if (typeof item === "boolean") return maxBytes >= B1_TAG_BYTES ? B1_TAG_BYTES : B1_SIZE_TOO_LARGE;
     if (typeof item === "number") {
-      if (!Number.isFinite(item)) return JSON_SIZE_INVALID;
-      const encoded = JSON.stringify(item);
-      if (encoded === undefined) return JSON_SIZE_INVALID;
-      return encoded.length <= maxBytes ? encoded.length : JSON_SIZE_TOO_LARGE;
+      if (!Number.isFinite(item)) return B1_SIZE_INVALID;
+      return maxBytes >= B1_NUMBER_BYTES ? B1_NUMBER_BYTES : B1_SIZE_TOO_LARGE;
     }
     if (item instanceof Uint8Array) {
-      const size = 5 + item.byteLength;
-      return size <= maxBytes ? size : JSON_SIZE_TOO_LARGE;
+      const size = B1_TAG_BYTES + B1_U32_BYTES + item.byteLength;
+      return size <= maxBytes ? size : B1_SIZE_TOO_LARGE;
     }
-    if (typeof item !== "object" || ArrayBuffer.isView(item) || ancestors.has(item)) return JSON_SIZE_INVALID;
-    if (hasUnsafeJsonProperties(item)) return JSON_SIZE_INVALID;
+    if (typeof item !== "object" || ArrayBuffer.isView(item) || ancestors.has(item)) return B1_SIZE_INVALID;
+    if (hasUnsafeProperties(item)) return B1_SIZE_INVALID;
     ancestors.add(item);
-    let bytes = 1;
+    let bytes = B1_OBJECT_HEADER_BYTES;
     const add = (amount: number): boolean => {
+      if (amount > maxBytes - bytes) return false;
       bytes += amount;
-      return bytes <= maxBytes;
+      return true;
     };
     try {
       if (Array.isArray(item)) {
+        if (item.length > 0xffffffff) return B1_SIZE_INVALID;
+        bytes = B1_ARRAY_HEADER_BYTES;
         for (let index = 0; index < item.length; index += 1) {
-          // JSON.stringify serializes sparse array holes as null. Explicit
-          // undefined values remain invalid JSON values.
-          const child = index in item ? visit(item[index], depth + 1) : 4;
-          if (child === JSON_SIZE_INVALID || child === JSON_SIZE_TOO_LARGE) return child;
-          if (!add(child + (index === 0 ? 0 : 1))) return JSON_SIZE_TOO_LARGE;
+          // B1 encodes sparse holes as TAG_NULL. Explicit undefined values
+          // remain invalid under the public stream data constraint.
+          let child: B1SizeResult;
+          if (index in item) {
+            const raw = item[index];
+            if (raw === undefined) return B1_SIZE_INVALID;
+            child = visit(raw, depth + 1);
+          } else {
+            if (++nodes > 16384) return B1_SIZE_INVALID;
+            child = B1_TAG_BYTES;
+          }
+          if (child === B1_SIZE_INVALID || child === B1_SIZE_TOO_LARGE) return child;
+          if (!add(child)) return B1_SIZE_TOO_LARGE;
         }
       } else {
-        let first = true;
         for (const key in item) {
           if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
-          const keyBytes = quotedJsonStringByteLength(key, maxBytes - bytes);
-          if (keyBytes === JSON_SIZE_INVALID || keyBytes === JSON_SIZE_TOO_LARGE) return keyBytes;
-          if (!add(keyBytes + 1 + (first ? 0 : 1))) return JSON_SIZE_TOO_LARGE;
-          first = false;
+          const keyBytes = boundedB1KeyBytes(key, maxBytes - bytes);
+          if (keyBytes === B1_SIZE_INVALID || keyBytes === B1_SIZE_TOO_LARGE) return keyBytes;
+          if (!add(keyBytes)) return B1_SIZE_TOO_LARGE;
           const child = visit((item as Record<string, unknown>)[key], depth + 1);
-          if (child === JSON_SIZE_INVALID || child === JSON_SIZE_TOO_LARGE) return child;
-          if (!add(child)) return JSON_SIZE_TOO_LARGE;
+          if (child === B1_SIZE_INVALID || child === B1_SIZE_TOO_LARGE) return child;
+          if (!add(child)) return B1_SIZE_TOO_LARGE;
         }
       }
-      return add(1) ? bytes : JSON_SIZE_TOO_LARGE; // closing ] or }
+      return bytes <= maxBytes ? bytes : B1_SIZE_TOO_LARGE;
     } catch {
-      return JSON_SIZE_INVALID;
+      return B1_SIZE_INVALID;
     } finally {
       ancestors.delete(item);
     }
@@ -411,8 +450,8 @@ export class PocketStream<T extends BridgeValue = BridgeValue> {
 
   send(value: T): boolean {
     if (this.terminal) return false;
-    if (!isJsonValue(value))
-      throw new TypeError("Stream data must be JSON serializable");
+    if (!isBridgeValue(value))
+      throw new TypeError("Stream data must be a supported bridge value");
     this.touch();
     if (!this.sendEvent("stream.data", { streamId: this.id, data: value })) {
       this.failLocal(
@@ -440,32 +479,26 @@ export class PocketStream<T extends BridgeValue = BridgeValue> {
       );
     }
 
-    // Count against the complete event envelope before handing a large array
-    // to the host. The bounded walk avoids allocating item JSON text, and the
-    // events array is never built for an over-limit batch.
-    const emptyPacket = JSON.stringify({
-      type: "event",
-      name: "stream.batch",
-      payload: { events: [] },
-    });
-    // Keep the array's two bracket bytes from the empty envelope; each item
-    // is added between those brackets.
-    let packetBytes = utf8ByteLength(emptyPacket);
+    // Count against the complete B1 event envelope before handing a large
+    // array to the host. The bounded walk avoids allocating encoded item text,
+    // and the events array is never built for an over-limit batch. The magic
+    // byte and all root/payload/empty-array headers are charged exactly once;
+    // each event is then one additional B1 array value with no separator.
+    let packetBytes = POCKET_STREAM_EMPTY_BATCH_B1_BYTES;
     const events: BridgeValue[] = [];
     for (const data of values) {
       const event: BridgeValue = {
         method: "stream.data",
         params: { streamId: this.id, data },
       };
-      const separatorBytes = events.length === 0 ? 0 : 1;
-      const itemBytes = boundedJsonByteLength(
+      const itemBytes = boundedB1ByteLength(
         event,
-        POCKET_STREAM_MAX_BATCH_BYTES - packetBytes - separatorBytes,
+        POCKET_STREAM_MAX_BATCH_BYTES - packetBytes,
       );
-      if (itemBytes === JSON_SIZE_INVALID) {
-        throw new TypeError("Stream data must be JSON serializable");
+      if (itemBytes === B1_SIZE_INVALID) {
+        throw new TypeError("Stream data must be a supported bridge value");
       }
-      if (itemBytes === JSON_SIZE_TOO_LARGE) {
+      if (itemBytes === B1_SIZE_TOO_LARGE) {
         throw new PocketStreamError(
           "stream_batch_too_large",
           `Stream batch exceeds the ${POCKET_STREAM_MAX_BATCH_BYTES}-byte limit`,
@@ -477,7 +510,7 @@ export class PocketStream<T extends BridgeValue = BridgeValue> {
           },
         );
       }
-      packetBytes += separatorBytes + itemBytes;
+      packetBytes += itemBytes;
       events.push(event);
     }
     this.touch();
@@ -727,7 +760,7 @@ export type PocketIncomingStreamListener = (stream: PocketStream) => void;
 /**
  * Adapter for the Dart `PocketStreamBridge` wire.  It consumes events from
  * the existing HostBridge event sink and emits packets through its existing
- * `pocket._emit` request transport; it does not create a second bus or poll.
+ * direct-object request transport; it does not create a second bus or poll.
  */
 export interface PocketStreamAdapter {
   open<T extends BridgeValue = BridgeValue>(
@@ -1017,7 +1050,7 @@ class PocketStreamAdapterImpl implements PocketStreamAdapter {
         event.params.data !== undefined && event.params.data !== null
           ? event.params.data
           : (event.params.value ?? null);
-      if (isJsonValue(raw)) stream.receive(raw);
+      if (isBridgeValue(raw)) stream.receive(raw);
       return;
     }
     if (event.method === "stream.end") {

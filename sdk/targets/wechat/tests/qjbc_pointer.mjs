@@ -3,11 +3,48 @@
 // This is a Node WebAssembly runtime probe, not a WeChat simulator.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { brotliDecompressSync } from "node:zlib";
 
 const input = process.argv[2];
 if (!input) throw new Error("usage: node qjbc_pointer.mjs <generated-mini-program-dir|pocketjs.wasm[.br]>");
+
+function loadBridge(inputPath) {
+  const absolute = resolve(inputPath);
+  let isDirectory;
+  try { isDirectory = statSync(absolute).isDirectory(); }
+  catch (error) { throw new Error(`cannot locate generated PocketJS package at ${inputPath}: ${error.message}`); }
+  const roots = isDirectory
+    ? [absolute]
+    : [dirname(absolute), dirname(dirname(absolute))];
+  const require = createRequire(import.meta.url);
+  const seen = new Set();
+  let lastError;
+  for (const root of roots) {
+    const candidate = join(root, "binary-bridge.js");
+    if (seen.has(candidate) || !existsSync(candidate)) continue;
+    seen.add(candidate);
+    try {
+      const bridge = require(candidate);
+      if (typeof bridge?.encodeMessage !== "function" || typeof bridge?.decodeMessage !== "function") {
+        throw new Error("binary-bridge.js does not expose encodeMessage/decodeMessage");
+      }
+      return bridge;
+    } catch (error) { lastError = error; }
+  }
+  const detail = lastError ? ` Last load error: ${lastError.message}` : "";
+  throw new Error(
+    `binary-bridge.js was not found beside ${inputPath}; pass a complete generated ` +
+    `WeChat mini-program bundle (or a WASM file with its generated bundle beside it).${detail}`,
+  );
+}
+
+// Load the codec emitted with the consumer bundle. Do not fall back to the
+// repository template: that would let a raw WASM probe silently test a second,
+// potentially different bridge implementation.
+const { encodeMessage, decodeMessage } = loadBridge(input);
 
 let wasm;
 let buildInfo = null;
@@ -50,7 +87,7 @@ const imported = {
   pocket_wechat: {
     host_emit(pointer, length) {
       if (!instance || length <= 0 || length > 64 * 1024) return 0;
-      emitted.push(decoder.decode(new Uint8Array(instance.exports.memory.buffer, pointer, length)));
+      emitted.push(decodeMessage(new Uint8Array(instance.exports.memory.buffer, pointer, length)));
       return 1;
     },
   },
@@ -68,7 +105,7 @@ const decodeResult = () => {
 };
 const check = (code, message) => assert.equal(code, 0, `${message}: ${decodeResult()}`);
 const withBytes = (text, callback) => {
-  const bytes = new TextEncoder().encode(text);
+  const bytes = text instanceof Uint8Array ? text : new TextEncoder().encode(text);
   const pointer = ex.web_alloc(bytes.length);
   assert.ok(pointer);
   new Uint8Array(ex.memory.buffer, pointer, bytes.length).set(bytes);
@@ -76,7 +113,7 @@ const withBytes = (text, callback) => {
   finally { ex.web_free(pointer, bytes.length); }
 };
 const present = () => check(ex.web_present(host), "renderer present failed");
-const frame = (contacts) => withBytes(JSON.stringify({
+const frame = (contacts) => withBytes(encodeMessage({
   buttons: 0,
   analog: 0x8080,
   rightAnalog: 0x8080,
@@ -190,11 +227,13 @@ try {
   }
   const workStatePointer = ex.web_wechat_work_state(host);
   check(workStatePointer, "event-driven scheduler state query failed");
-  const packets = emitted.map((line) => JSON.parse(line));
+  const scheduler = decodeMessage(new Uint8Array(ex.memory.buffer, ex.web_result_ptr(host), ex.web_result_len(host)));
+  assert.equal(typeof scheduler.continuous, "boolean", "scheduler state must cross the binary wire");
+  const packets = emitted;
   assert.ok(packets.every((packet) => typeof packet === "object"), "host bridge output must remain JSON packets");
   const storageRequest = packets.find((packet) => packet.name === "host.request" && packet.payload?.capability === "platform.storage.get");
   assert.ok(storageRequest, "the Lobby Guest must reach the host.request capability bridge");
-  const response = JSON.stringify({
+  const response = encodeMessage({
     type: "event",
     name: "host.response",
     payload: { requestId: storageRequest.payload.requestId, capability: "platform.storage.get", ok: true, result: null },

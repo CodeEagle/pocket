@@ -1,5 +1,11 @@
 # Pocket transport codec evaluation
 
+> Historical measurement. The lane descriptions below predate the direct-object
+> and typed-surface cleanup. Current production transport and verification are
+> described in [BINARY_BRIDGE_PROTOCOL.md](BINARY_BRIDGE_PROTOCOL.md) and
+> [RENDER_PIPELINE_REVIEW_20261105.md](RENDER_PIPELINE_REVIEW_20261105.md).
+> Do not use the old JSON fallback recommendations as current implementation guidance.
+
 **Scope:** read-only assessment of the current `pocket/sdk` transport. No production source was changed for this evaluation. The active worktree already contains unrelated glyph and scheduling edits; this report describes the live source paths at the time of inspection.
 
 ## Finding

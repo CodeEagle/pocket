@@ -1,4 +1,4 @@
-import type { HostBridge, HostEvent, JsonObject } from "./host.ts";
+import { HostBridgeAbiError, type HostBridge, type HostEvent, type JsonObject } from "./host.ts";
 
 /** Commands understood by the Flutter video surface. */
 export type VideoPlaybackMethod = "video.play" | "video.pause" | "video.release";
@@ -98,12 +98,12 @@ function lifecycleFromEvent(event: HostEvent): MediaLifecycleEvent | undefined {
 
 function defaultEmitter(method: VideoPlaybackMethod, params: JsonObject): boolean {
   const globalObject = globalThis as typeof globalThis & {
-    pocket?: { _emit?: (line: string) => boolean };
+    pocket?: { _emitValue?: (packet: Record<string, unknown>) => boolean };
   };
-  const emit = globalObject.pocket?._emit;
-  if (typeof emit !== "function") return false;
+  const emit = globalObject.pocket?._emitValue;
+  if (typeof emit !== "function") throw new HostBridgeAbiError();
   try {
-    return emit(JSON.stringify({ type: "event", name: method, payload: params })) === true;
+    return emit({ type: "event", name: method, payload: params }) === true;
   } catch {
     return false;
   }
@@ -146,7 +146,8 @@ export function createMediaController(options: MediaControllerOptions = {}): Med
     let accepted = false;
     try {
       accepted = emit(method, { id: entry.id });
-    } catch {
+    } catch (error) {
+      if (error instanceof HostBridgeAbiError) throw error;
       accepted = false;
     }
     if (accepted) entry.applied = playing;

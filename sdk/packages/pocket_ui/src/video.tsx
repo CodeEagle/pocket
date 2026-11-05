@@ -11,9 +11,10 @@
 import { CompositorSurface, Text, View, type ViewProps } from "@pocketjs/framework/solid/components";
 import { Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
 import type { MediaController, MediaRegistration } from "./media.ts";
+import type { BridgeObject } from "./host.ts";
 
 type VideoSurfaceBridge = {
-  registerSurface?: (packageId: string, kind: "video", payload: string) => unknown;
+  registerSurface?: (packageId: string, kind: "video", payload: BridgeObject) => unknown;
   releaseSurface?: (packageId: string) => void;
 };
 
@@ -57,14 +58,16 @@ export function Video(props: VideoProps): JSX.Element {
     playing: props.playing === true,
   });
   const [registered, setRegistered] = createSignal(false);
-  const payload = createMemo(() => JSON.stringify({
+  const payload = createMemo<BridgeObject>(() => ({
     asset: props.asset,
     fit: props.fit ?? "cover",
     // The media controller is the sole source of playback intent.  Native
     // video surfaces retain a legacy autoplay default for older callers, so
     // this component must always make its policy explicit.
     autoplay: false,
-  }));
+  }), undefined, {
+    equals: (previous, next) => previous?.asset === next.asset && previous?.fit === next.fit,
+  });
   // A provider may reject this id because it is host-owned, or reject an
   // update because its payload is invalid.  Only a successful registration
   // gives this component release ownership; cleanup must never probe/release
@@ -75,7 +78,7 @@ export function Video(props: VideoProps): JSX.Element {
     return radius === undefined ? undefined : { radius };
   });
 
-  const register = (nextPayload: string): void => {
+  const register = (nextPayload: BridgeObject): void => {
     const provider = videoGlobal.pocket;
     const registerSurface = provider?.registerSurface;
     if (typeof registerSurface !== "function") {

@@ -16,13 +16,14 @@ void main() {
         ui.setProp(node, 64, 0xff336699);
         ui.insertBefore(1, node, 0);
         globalThis.frame = function() {};
-        globalThis.__pocketEvent = function(line) {
-          const event = JSON.parse(line);
+        globalThis.__pocketEvent = function(event) {
           if (event.name === "input.pointer" &&
               event.payload.phase === "up") {
             ui.setProp(node, 64, 0xffcc6633);
           }
         };
+        __pocketEvent.__binaryCapable = true;
+        JSON.parse = JSON.stringify = () => { throw Error('JSON reached pointer transport'); };
       ''';
       try {
         final initial = runtime.eval(source);

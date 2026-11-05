@@ -23,8 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / ".cache" / "pocketjs"
 MARKER = CACHE / ".pocketjs-revision"
 
-# Only patches that affect the native guest/core contract are applied here.
-# Browser-host and catalog/demo patches stay out of this host's bootstrap.
+# Only patches that affect the native guest/core contract or a stable official
+# framework host boundary are applied here. Browser-host and catalog/demo
+# patches stay out of this host's bootstrap.
 PATCHES = (
     ("guest-rquickjs-stack-size.patch", "guest stack size"),
     ("guest-execution-budget.patch", "guest execution budget"),
@@ -36,6 +37,7 @@ PATCHES = (
     ("rgba-filter-helpers.patch", "RGBA filter helper"),
     ("demand-scheduler.patch", "demand scheduler"),
     ("offload-cancel.patch", "offload provider cancellation"),
+    ("offload-direct-value.patch", "offload direct-value transport"),
 )
 
 # Later patches can intentionally supersede one earlier diff hunk. The
