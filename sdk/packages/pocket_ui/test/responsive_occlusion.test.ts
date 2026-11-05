@@ -6,10 +6,15 @@ import {
   DISPLAY_CONTOUR_CLEARANCE_PX,
   DISPLAY_CONTOUR_RAMP_PX,
   DISPLAY_UI_SAFETY_GAP,
+  hasLocalLeftOcclusionInset,
+  hasLocalRightOcclusionInset,
   hasLocalTopRightOcclusionInset,
+  leftOcclusionFrames,
   pageInsets,
   parseDisplayGeometry,
   reservedInsets,
+  rightOcclusionFrames,
+  sideContourReservesForBand,
   topRightContourReserveForBand,
   topRightOcclusionFrame,
   type DisplayGeometry,
@@ -329,6 +334,122 @@ describe("display occlusion target avoidance", () => {
       hasLocalTopRightOcclusionInset(tallExpandedOcclusion),
       false,
       "an occlusion whose expanded height reaches 60% of the viewport is not a local corner inset",
+    );
+  });
+
+  test("computes progressive left and right contour reserves for landscape notches and single hole-punches", () => {
+    const landscapeLeftNotch = parseDisplayGeometry({
+      width: 844,
+      height: 390,
+      safeArea: { top: 0, right: 0, bottom: 21, left: 44 },
+      reservedRegions: [{
+        id: "landscape-notch-left",
+        kind: "occlusion",
+        frame: { left: 0, top: 120, width: 44, height: 150 },
+        margins: { top: 0, right: 0, bottom: 0, left: 0 },
+        active: true,
+      }],
+    });
+    assert.equal(hasLocalLeftOcclusionInset(landscapeLeftNotch), true, "landscape left notch is a local side occlusion");
+    assert.equal(hasLocalRightOcclusionInset(landscapeLeftNotch), false);
+    assert.equal(leftOcclusionFrames(landscapeLeftNotch).length, 1);
+
+    const maxLeft = 44 + DISPLAY_CONTOUR_CLEARANCE_PX;
+    assert.deepEqual(
+      sideContourReservesForBand(landscapeLeftNotch, 276, 330),
+      { left: 0, right: 0 },
+      "items below `cutoutBottom + 5px` stay full-width in landscape",
+    );
+    const bottomMidRamp = sideContourReservesForBand(landscapeLeftNotch, 270 + DISPLAY_CONTOUR_RAMP_PX / 2, 320);
+    assert.equal(bottomMidRamp.left, Math.round(maxLeft * 0.5 * 2) / 2, "bottom ramp midpoint uses smoothstep 0.5");
+    assert.deepEqual(
+      sideContourReservesForBand(landscapeLeftNotch, 160, 220),
+      { left: maxLeft, right: 0 },
+      "items overlapping the landscape left notch reserve `44 + 5 = 49px` on the left",
+    );
+    assert.deepEqual(
+      sideContourReservesForBand(landscapeLeftNotch, 160, 220, { itemLeft: 16 }),
+      { left: maxLeft - 16, right: 0 },
+      "container left margin is subtracted so item left border sits 5px from the notch",
+    );
+    const topMidRamp = sideContourReservesForBand(landscapeLeftNotch, 60, 120 - DISPLAY_CONTOUR_RAMP_PX / 2);
+    assert.equal(topMidRamp.left, Math.round(maxLeft * 0.5 * 2) / 2, "top exit ramp midpoint smoothly restores width above the notch");
+    assert.deepEqual(
+      sideContourReservesForBand(landscapeLeftNotch, 16, 120 - DISPLAY_CONTOUR_RAMP_PX),
+      { left: 0, right: 0 },
+      "items scrolled completely above a mid-edge landscape notch restore full width",
+    );
+
+    const landscapeRightPunchHole = parseDisplayGeometry({
+      width: 800,
+      height: 360,
+      safeArea: { top: 0, right: 36, bottom: 16, left: 0 },
+      reservedRegions: [{
+        id: "single-hole-right",
+        kind: "occlusion",
+        frame: { left: 764, top: 166, width: 28, height: 28 },
+        margins: { top: 0, right: 0, bottom: 0, left: 0 },
+        active: true,
+      }],
+    });
+    assert.equal(hasLocalRightOcclusionInset(landscapeRightPunchHole), true, "inset single hole-punch matching safeArea.right is recognized");
+    assert.equal(rightOcclusionFrames(landscapeRightPunchHole).length, 1);
+    const holeMaxRight = (800 - 764) + DISPLAY_CONTOUR_CLEARANCE_PX;
+    assert.deepEqual(
+      sideContourReservesForBand(landscapeRightPunchHole, 200, 260),
+      { left: 0, right: 0 },
+      "cards below the 28px single hole-punch are full-width",
+    );
+    assert.deepEqual(
+      sideContourReservesForBand(landscapeRightPunchHole, 170, 210),
+      { left: 0, right: holeMaxRight },
+      "card overlapping the 28px single hole-punch indents locally on the right",
+    );
+    assert.deepEqual(
+      sideContourReservesForBand(landscapeRightPunchHole, 40, 160),
+      { left: 0, right: 0 },
+      "cards above the 28px single hole-punch are full-width",
+    );
+
+    const leftWithOutwardMarginAndTallTopCutout = parseDisplayGeometry({
+      width: 844,
+      height: 390,
+      safeArea: { top: 0, right: 0, bottom: 0, left: 40 },
+      reservedRegions: [{
+        id: "top-left-tall-notch",
+        kind: "occlusion",
+        frame: { left: 0, top: 0, width: 40, height: 100 },
+        margins: { top: 0, right: 0, bottom: 0, left: 4 },
+        active: true,
+      }],
+    });
+    assert.equal(
+      hasLocalLeftOcclusionInset(leftWithOutwardMarginAndTallTopCutout),
+      true,
+      "left-edge occlusion with outward left margin is still recognized as a local left occlusion",
+    );
+    assert.deepEqual(
+      sideContourReservesForBand(leftWithOutwardMarginAndTallTopCutout, 95, 130),
+      { left: 40 + DISPLAY_CONTOUR_CLEARANCE_PX, right: 0 },
+      "tall top-left cutout does not apply the 14px top-right status-cluster bottom trim",
+    );
+
+    const tallRightPhysicalNotchAtTop = parseDisplayGeometry({
+      width: 640,
+      height: 360,
+      safeArea: { top: 0, right: 32, bottom: 0, left: 0 },
+      reservedRegions: [{
+        id: "landscape-right-notch-top",
+        kind: "occlusion",
+        frame: { left: 608, top: 0, width: 32, height: 150 },
+        margins: { top: 0, right: 0, bottom: 0, left: 0 },
+        active: true,
+      }],
+    });
+    assert.deepEqual(
+      sideContourReservesForBand(tallRightPhysicalNotchAtTop, 141, 253),
+      { left: 0, right: 32 + DISPLAY_CONTOUR_CLEARANCE_PX },
+      "tall right-edge physical notch at y=0 preserves full vertical protection at its bottom edge",
     );
   });
 });

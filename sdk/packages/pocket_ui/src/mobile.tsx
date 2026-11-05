@@ -33,8 +33,11 @@ import {
   type SafeAreaSlot,
 } from "./ui.tsx";
 import {
+  DISPLAY_UI_SAFETY_GAP,
+  avoidDisplayOcclusions,
   deriveDesignDensity,
   deriveWindowSizeClass,
+  topRightOcclusionFrame,
   type DesignDensity,
   type DisplayGeometry,
   type WindowSizeClass,
@@ -262,21 +265,43 @@ export function MobileAppBar(props: {
   const theme = useMobileThemeAccessor();
   const scaffold = useContext(SafeAreaScaffoldContext);
   const alreadyConsumed = useContext(ContourConsumedContext);
-  const { nodeRef, reserve } = useScrollContourReserve({
+  const { leftReserve, nodeRef, reserve } = useScrollContourReserve({
+    baseLeft: 16,
     baseRight: 16,
     defaultInBand: true,
     enabled: () => !alreadyConsumed(),
     mode: "padding",
   });
   const dark = () => props.dark === true || theme().name === "dark";
-  let appliedNonZero = false;
+  let appliedLeftNonZero = false;
+  let appliedRightNonZero = false;
   const appBarStyle = () => {
+    const l = leftReserve();
     const r = reserve();
-    if (r > 0) appliedNonZero = true;
-    if (scaffold.reservedActions > 0 || r > 0 || appliedNonZero) {
-      return { paddingR: Math.max(16 + r, scaffold.reservedActions + r) };
+    if (l > 0) appliedLeftNonZero = true;
+    if (r > 0) appliedRightNonZero = true;
+    const hasLeft = l > 0 || appliedLeftNonZero;
+    const hasRight = scaffold.reservedActions > 0 || r > 0 || appliedRightNonZero;
+    if (!hasLeft && !hasRight) return undefined;
+    let actionRightPadding = scaffold.reservedActions;
+    if (scaffold.reservedActions > 0 && !alreadyConsumed()) {
+      const current = scaffold.geometry();
+      if (current.width > 0) {
+        const target = {
+          left: Math.max(0, current.width - scaffold.reservedActions),
+          top: 0,
+          width: scaffold.reservedActions,
+          height: 56,
+        };
+        const local = avoidDisplayOcclusions(current, target, { prefer: "horizontal" });
+        const actionShift = Math.max(0, -local.offsetX) + (topRightOcclusionFrame(current) ? DISPLAY_UI_SAFETY_GAP : 0);
+        actionRightPadding = scaffold.reservedActions + actionShift;
+      }
     }
-    return undefined;
+    return {
+      ...(hasLeft ? { paddingL: 16 + l } : {}),
+      ...(hasRight ? { paddingR: Math.max(16 + r, actionRightPadding) } : {}),
+    };
   };
   return (
     <ContourConsumedContext.Provider value={() => true}>

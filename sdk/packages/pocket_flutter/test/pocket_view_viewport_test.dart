@@ -90,6 +90,20 @@ Widget _surface(_ViewportRuntime runtime) {
   );
 }
 
+final class _FixedDisplayGeometrySource implements PocketDisplayGeometrySource {
+  const _FixedDisplayGeometrySource(this.snapshot);
+
+  final PocketDisplayGeometrySnapshot snapshot;
+
+  @override
+  Future<PocketDisplayGeometrySnapshot> start({
+    PocketDisplayGeometryUpdate? onUpdate,
+  }) async => snapshot;
+
+  @override
+  Future<void> stop({PocketDisplayGeometryUpdate? onUpdate}) async {}
+}
+
 void main() {
   testWidgets(
     'reports view safe area and keyboard overlap in guest coordinates',
@@ -289,4 +303,82 @@ void main() {
       reason: 'a nested SafeArea must not forward the full view inset twice',
     );
   });
+
+  testWidgets(
+    'bridges Flutter DisplayFeature cutouts (landscape notch and hole-punch) into reservedRegions',
+    (tester) async {
+      addTearDown(tester.view.reset);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(320, 480);
+      tester.view.displayFeatures = const <ui.DisplayFeature>[
+        ui.DisplayFeature(
+          bounds: Rect.fromLTWH(0, 160, 28, 28),
+          type: ui.DisplayFeatureType.cutout,
+          state: ui.DisplayFeatureState.unknown,
+        ),
+        ui.DisplayFeature(
+          bounds: Rect.fromLTWH(160, 0, 0, 480),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      final runtime = _ViewportRuntime();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 320,
+              height: 480,
+              child: PocketView(
+                runtime: runtime,
+                jsSource: '',
+                pakBytes: Uint8List(0),
+                showDebugFps: false,
+                displayGeometry: _FixedDisplayGeometrySource(
+                  PocketDisplayGeometrySnapshot(
+                    viewport: const Size(320, 480),
+                    supported: true,
+                    regions: const <PocketDisplayRegion>[
+                      PocketDisplayRegion(
+                        id: 'inactive-native-cutout',
+                        kind: 'occlusion',
+                        frame: Rect.fromLTWH(0, 160, 28, 28),
+                        margins: EdgeInsets.zero,
+                        active: false,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final payload = _lastViewport(runtime);
+      final regions = payload['reservedRegions'] as List<dynamic>;
+      expect(regions, hasLength(2));
+      final cutout = Map<String, dynamic>.from(regions[0] as Map);
+      expect(cutout['kind'], 'occlusion');
+      expect(cutout['active'], isTrue);
+      expect(cutout['frame'], <String, double>{
+        'left': 0,
+        'top': 160,
+        'width': 28,
+        'height': 28,
+      });
+      final fold = Map<String, dynamic>.from(regions[1] as Map);
+      expect(fold['kind'], 'division');
+      expect(fold['active'], isTrue);
+      expect(fold['frame'], <String, double>{
+        'left': 160,
+        'top': 0,
+        'width': 1,
+        'height': 480,
+      });
+    },
+  );
 }
