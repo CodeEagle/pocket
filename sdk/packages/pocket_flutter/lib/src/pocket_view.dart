@@ -334,6 +334,7 @@ class PocketView extends StatefulWidget {
     this.controller,
     this.active = true,
     this.inputEnabled = true,
+    this.backgroundColor,
     this.compositorSurfaces = const {},
     this.hostSurfaceBuilder,
     this.hostSurfaceResidents = const {},
@@ -383,6 +384,14 @@ class PocketView extends StatefulWidget {
   /// Focus gate independent from visibility: unfocused visible children may
   /// animate but cannot own an IME or pointer sequence.
   final bool inputEnabled;
+
+  /// Backing color for the entire viewport, including uncovered/letterboxed
+  /// regions. Set an opaque color on a standalone root surface. Null preserves
+  /// transparency for embedded surfaces and compositor overlays.
+  ///
+  /// This is painted once beneath the scene, never inside individual retained
+  /// canvas blocks, so later blocks cannot cover earlier DrawOps.
+  final Color? backgroundColor;
   final Map<String, int> compositorSurfaces;
   final PocketHostSurfaceBuilder? hostSurfaceBuilder;
 
@@ -5132,28 +5141,28 @@ class _PocketViewState extends State<PocketView>
       key: _hostKey,
       builder: (context, constraints) {
         _observeConstraints(constraints);
-        return _buildContent(context);
+        final content = _buildContent(context);
+        final background =
+            widget.backgroundColor ??
+            (_loading || _error != null ? const Color(0xff101827) : null);
+        return background == null
+            ? content
+            : ColoredBox(color: background, child: content);
       },
     );
   }
 
   Widget _buildContent(BuildContext context) {
     if (_loading) {
-      return const ColoredBox(
-        color: Color(0xff101827),
-        child: Center(child: CircularProgressIndicator()),
-      );
+      return const Center(child: CircularProgressIndicator());
     }
     if (_error != null) {
-      return ColoredBox(
-        color: const Color(0xff101827),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Text(
-              'PocketJS runtime unavailable\n$_error',
-              style: const TextStyle(color: Colors.white),
-            ),
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Text(
+            'PocketJS runtime unavailable\n$_error',
+            style: const TextStyle(color: Colors.white),
           ),
         ),
       );

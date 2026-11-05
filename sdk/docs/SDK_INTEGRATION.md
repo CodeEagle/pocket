@@ -118,6 +118,12 @@ void main() => runApp(const PocketApp(
 ));
 ```
 
+`PocketApp` 和 `PocketSystemHost` 默认提供不透明黑色根底，可通过
+`backgroundColor: const Color(0xFF000000)` 修改。独立使用 `PocketGuest` 或
+`PocketView` 时可显式传同一参数；嵌入式 surface 默认保留透明。
+背景只需配置在一个根边界，不必给每个 DrawOps 分块或滚动内容重复填色。
+来源、消融验证与 macOS 窗口边界见 [SURFACE_BACKGROUND.md](SURFACE_BACKGROUND.md)。
+
 已有 Flutter App 可将同一 guest 嵌入自己的 `MaterialApp`：
 
 ```dart

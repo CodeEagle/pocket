@@ -9,13 +9,24 @@ import 'pocket_session.dart';
 /// Standalone Flutter entry point. Its only page is the JS rendering surface.
 /// Use [PocketGuest] inside an existing MaterialApp instead.
 final class PocketApp extends StatelessWidget {
-  const PocketApp({super.key, required this.config});
+  const PocketApp({
+    super.key,
+    required this.config,
+    this.backgroundColor = const Color(0xFF000000),
+  });
   final PocketAppConfig config;
+  final Color backgroundColor;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
     debugShowCheckedModeBanner: false,
-    home: Scaffold(body: PocketGuest(config: config)),
+    home: Scaffold(
+      // PocketGuest/PocketView owns the only effective root fill. Keep the
+      // scaffold transparent so a standalone surface does not paint a second
+      // retained layer beneath it while preserving Scaffold's IME/layout role.
+      backgroundColor: Colors.transparent,
+      body: PocketGuest(config: config, backgroundColor: backgroundColor),
+    ),
   );
 }
 
@@ -24,12 +35,16 @@ final class PocketApp extends StatelessWidget {
 /// Layout follows the parent constraints. Safe areas and reserved system
 /// regions are sent to JS, which owns component layout and navigation.
 final class PocketGuest extends StatelessWidget {
-  const PocketGuest({super.key, required this.config});
+  const PocketGuest({super.key, required this.config, this.backgroundColor});
   final PocketAppConfig config;
+  final Color? backgroundColor;
 
   @override
-  Widget build(BuildContext context) =>
-      _PocketGuestSession(key: ValueKey<String>(config.appId), config: config);
+  Widget build(BuildContext context) => _PocketGuestSession(
+    key: ValueKey<String>(config.appId),
+    config: config,
+    backgroundColor: backgroundColor,
+  );
 }
 
 @visibleForTesting
@@ -44,12 +59,14 @@ final class PocketGuestSession extends StatefulWidget {
     this.inputEnabled = true,
     this.viewport,
     this.geometryRevision = 0,
+    this.backgroundColor,
   });
   final PocketAppConfig config;
   final PocketHostSurfaceBuilder? hostSurfaceBuilder;
   final Set<int> hostSurfaceResidents;
   final bool inputEnabled;
   final Size? viewport;
+  final Color? backgroundColor;
 
   /// Increments when a compositor host surface moves or changes clip. The
   /// child PocketView uses this as a post-layout safe-area invalidation token;
@@ -124,11 +141,37 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
 
   @override
   Widget build(BuildContext context) {
+    final error = startupError ?? session.failure;
+    final content = _buildContent(context);
+    final backgroundColor = widget.backgroundColor;
+    // PocketView owns the single backing layer once its real surface exists.
+    // Before that point, keep startup and failure states opaque here as well;
+    // otherwise the pre-surface Center would expose the surrounding host scene.
+    if (backgroundColor == null || (session.ready && error == null)) {
+      return content;
+    }
+    return ColoredBox(color: backgroundColor, child: content);
+  }
+
+  Widget _buildContent(BuildContext context) {
     final config = widget.config;
     final error = startupError ?? session.failure;
     final epoch = session.generation;
-    if (error != null)
-      return Center(child: SelectableText('Pocket startup failed: $error'));
+    if (error != null) {
+      final background = widget.backgroundColor;
+      return Center(
+        child: SelectableText(
+          'Pocket startup failed: $error',
+          style: background == null
+              ? null
+              : TextStyle(
+                  color: background.computeLuminance() > 0.179
+                      ? Colors.black
+                      : Colors.white,
+                ),
+        ),
+      );
+    }
     if (!session.ready) return const Center(child: CircularProgressIndicator());
     return PocketView(
       key: ValueKey(epoch),
@@ -137,6 +180,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       memoryLimits: session.memoryLimits,
       active: session.foreground,
       inputEnabled: widget.inputEnabled,
+      backgroundColor: widget.backgroundColor,
       viewport: widget.viewport,
       geometryRevision: widget.geometryRevision,
       hostSurfaceBuilder: widget.hostSurfaceBuilder,

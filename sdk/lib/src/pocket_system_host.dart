@@ -78,6 +78,7 @@ final class PocketSystemHost extends StatefulWidget {
     this.maxInstances = 8,
     this.controller,
     this.recordings,
+    this.backgroundColor = const Color(0xFF000000),
   });
 
   /// The trusted host-selected SystemUI package and authorization boundary.
@@ -97,6 +98,10 @@ final class PocketSystemHost extends StatefulWidget {
   /// Explicit bounded debug recording for every native guest generation.
   /// Only SystemUI receives the optional export/replay diagnostic controls.
   final PocketRecordingLibrary? recordings;
+
+  /// Opaque root fill for the SystemUI surface, including startup and error
+  /// states. Child compositor sessions stay transparent and reveal this fill.
+  final Color backgroundColor;
 
   @override
   State<PocketSystemHost> createState() => _PocketSystemHostState();
@@ -326,6 +331,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     return PocketGuestSession(
       config: _systemUIInstance.config,
       session: _systemUIInstance.session,
+      backgroundColor: widget.backgroundColor,
       onFirstFrame: () => _onFirstFrame(_systemUIInstance),
       hostSurfaceBuilder: _buildCompositorSurface,
       hostSurfaceResidents: <int>{
