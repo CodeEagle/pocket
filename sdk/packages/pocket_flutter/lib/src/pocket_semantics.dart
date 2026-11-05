@@ -1,5 +1,3 @@
-import 'dart:ui' show Rect;
-
 import 'package:flutter/widgets.dart';
 
 import 'pocket_model.dart';
@@ -210,8 +208,8 @@ final class PocketSemanticsSnapshot {
 
 /// A semantics-only overlay over the JS-owned Pocket canvas.
 ///
-/// The overlay is wrapped in `IgnorePointer(ignoringSemantics: false)`: hit
-/// testing continues to the ordinary guest pointer surface, while Flutter's
+/// The childless positioned [Semantics] nodes do not hit-test themselves, so
+/// hit testing continues to the ordinary guest pointer surface while Flutter's
 /// accessibility tree sees the explicit JS controls. Accessibility activation
 /// is sent back through [sendEvent] and never becomes Dart UI state.
 final class PocketSemanticsOverlay extends StatelessWidget {
@@ -267,7 +265,7 @@ final class PocketSemanticsOverlay extends StatelessWidget {
             label: node.label,
             button: node.button,
             toggled: node.checked,
-            selected: node.selected,
+            selected: node.role == 'tab' ? node.selected : null,
             enabled: node.enabled,
             onTap: activate,
             child: const SizedBox.expand(),
@@ -281,11 +279,7 @@ final class PocketSemanticsOverlay extends StatelessWidget {
       children: <Widget>[
         child,
         if (semanticNodes.isNotEmpty)
-          IgnorePointer(
-            ignoring: true,
-            ignoringSemantics: false,
-            child: Stack(clipBehavior: Clip.none, children: semanticNodes),
-          ),
+          Stack(clipBehavior: Clip.none, children: semanticNodes),
       ],
     );
   }

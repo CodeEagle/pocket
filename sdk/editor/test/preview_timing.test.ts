@@ -173,11 +173,16 @@ const lines = createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   const command = JSON.parse(line);
   if (command.op === "frame") {
+    // Model a small render/probe cost. Sleeping another complete frame after
+    // this work would drop the continuous cadence below 50 Hz.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 4);
     const deltaMs = Number(command.deltaMs);
     const delta = Number.isFinite(deltaMs) && deltaMs > 0 ? deltaMs : 0;
     totalDelta += delta;
     frame += 1;
-    reply({ ok: true, frame: { frame, width: 390, height: 360, ops: [], events: [{ name: "debug.clock", payload: { deltaMs: delta, totalDelta } }], resources: [] } });
+    // Put the clock instrument in an op: an event on every zero-delta settle
+    // frame would itself demand another event-draining pump.
+    reply({ ok: true, frame: { frame, width: 390, height: 360, ops: [{ type: "rect", x: totalDelta, y: 0, w: 1, h: 1, color: 0 }], events: [], resources: [] } });
   } else if (command.op === "schedule") reply({ ok: true, nextWakeDelayMs: 0 });
   else if (["create", "loadBytecode", "load", "send", "resize", "destroy"].includes(command.op)) reply({ ok: true });
   else if (command.op === "quit") { reply({ ok: true }); setImmediate(() => process.exit(0)); }
@@ -199,9 +204,8 @@ lines.on("line", (line) => {
   const inputUrl = `http://127.0.0.1/api/projects/${projectId}/preview/input`;
   const snapshotTotal = async (): Promise<number> => {
     const response = await manager.handle(new Request(`http://127.0.0.1/api/projects/${projectId}/preview/snapshot`), projectId, "snapshot");
-    const body = await response.json() as { frame?: { events?: Array<Record<string, any>> } };
-    const event = body.frame?.events?.find((value) => value.name === "debug.clock");
-    return Number(event?.payload?.totalDelta ?? 0);
+    const body = await response.json() as { frame?: { ops?: Array<Record<string, any>> } };
+    return Number(body.frame?.ops?.[0]?.x ?? 0);
   };
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
@@ -228,6 +232,13 @@ lines.on("line", (line) => {
     const advancedMs = finalTotal - initialTotal;
     assert.ok(advancedMs >= elapsedMs * 0.3, `clock delta ${advancedMs}ms must track elapsed ${elapsedMs}ms`);
     assert.ok(advancedMs <= elapsedMs * 2 + 40, `clock delta ${advancedMs}ms must not multiply by input event count over ${elapsedMs}ms`);
+    const pacingStart = (await manager.status(projectId)).lastFrame!;
+    const pacingAt = performance.now();
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 800));
+    const pacingEnd = (await manager.status(projectId)).lastFrame!;
+    const deliveredHz = (pacingEnd - pacingStart) * 1000 / (performance.now() - pacingAt);
+    assert.ok(deliveredHz >= 54, `continuous work must retain its clock phase despite a 4ms probe cost: ${deliveredHz} Hz`);
+    assert.ok(deliveredHz <= 66, `continuous work must remain bounded by its configured cadence: ${deliveredHz} Hz`);
   } finally {
     await reader?.cancel();
     await manager.dispose();

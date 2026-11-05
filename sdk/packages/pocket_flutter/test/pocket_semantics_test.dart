@@ -153,8 +153,6 @@ void main() {
           isButton: true,
           hasEnabledState: true,
           isEnabled: true,
-          hasSelectedState: true,
-          isSelected: false,
           hasToggledState: true,
           isToggled: false,
           hasTapAction: true,

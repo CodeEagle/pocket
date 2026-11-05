@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
@@ -247,6 +248,78 @@ void main() {
     );
     await tester.pump();
   }
+
+  testWidgets('publishes official accessibility preference facts and changes', (
+    tester,
+  ) async {
+    final runtime = _TestMockRuntime();
+    final controller = PocketViewController();
+
+    Widget host(MediaQueryData data) => MaterialApp(
+      home: MediaQuery(
+        data: data,
+        child: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            controller: controller,
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            showDebugFps: false,
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(
+      host(
+        const MediaQueryData(
+          disableAnimations: true,
+          highContrast: true,
+          textScaler: TextScaler.linear(1.25),
+          accessibleNavigation: true,
+        ),
+      ),
+    );
+    await tester.pump();
+    final initial = runtime.messages
+        .where((message) => message['name'] == 'accessibility.preferences')
+        .toList();
+    expect(initial, hasLength(1));
+    expect(initial.single['payload'], <String, dynamic>{
+      'reduceMotion': true,
+      'increaseContrast': true,
+      'textScale': 1.25,
+      'accessibleNavigation': true,
+      'reduceTransparency': null,
+    });
+
+    await tester.pumpWidget(
+      host(
+        const MediaQueryData(
+          disableAnimations: false,
+          highContrast: false,
+          textScaler: TextScaler.linear(1.5),
+          accessibleNavigation: false,
+        ),
+      ),
+    );
+    await tester.pump();
+    final updates = runtime.messages
+        .where((message) => message['name'] == 'accessibility.preferences')
+        .toList();
+    expect(updates, hasLength(2));
+    expect(updates.last['payload'], <String, dynamic>{
+      'reduceMotion': false,
+      'increaseContrast': false,
+      'textScale': 1.5,
+      'accessibleNavigation': false,
+      'reduceTransparency': null,
+    });
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('PocketView owns the duplex generation and drains egress', (
     tester,
@@ -1296,5 +1369,108 @@ void main() {
     expect(samples.first.fps, greaterThan(45));
     expect(samples.first.maxGapMs, lessThan(50));
     expect(samples.last.slowFrames, 0);
+  });
+
+  testWidgets('forwards an explicit JS semantics snapshot and action', (
+    tester,
+  ) async {
+    final runtime = _TestMockRuntime(
+      initialEvent: const PocketEvent(
+        id: 'semantic-snapshot-1',
+        method: 'accessibility.snapshot',
+        params: <String, dynamic>{
+          'generation': 1,
+          'controls': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'guestId': 'apple.save',
+              'nativeId': 11,
+              'label': 'Save',
+              'role': 'button',
+              'selected': true,
+              'disabled': false,
+              'enabled': true,
+              'rect': <String, double>{
+                'x': 20,
+                'y': 30,
+                'width': 100,
+                'height': 44,
+              },
+            },
+            <String, dynamic>{
+              'guestId': 'apple.delete',
+              'nativeId': 12,
+              'label': 'Delete',
+              'role': 'button',
+              'selected': false,
+              'disabled': true,
+              'enabled': false,
+              'rect': <String, double>{
+                'x': 20,
+                'y': 90,
+                'width': 100,
+                'height': 44,
+              },
+            },
+          ],
+        },
+      ),
+    );
+    final controller = PocketViewController();
+    final semanticsHandle = tester.ensureSemantics();
+    await mountView(tester, runtime, controller: controller);
+    await tester.pump();
+
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Save')),
+      matchesSemantics(
+        label: 'Save',
+        isButton: true,
+        hasSelectedState: true,
+        isSelected: true,
+        hasEnabledState: true,
+        isEnabled: true,
+        hasTapAction: true,
+      ),
+    );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Delete')),
+      matchesSemantics(
+        label: 'Delete',
+        isButton: true,
+        hasSelectedState: true,
+        isSelected: false,
+        hasEnabledState: true,
+        isEnabled: false,
+      ),
+    );
+
+    tester.semantics.performAction(
+      find.semantics.byLabel('Save'),
+      SemanticsAction.tap,
+    );
+    final actionMessages = runtime.messages
+        .where((message) => message['name'] == 'accessibility.action')
+        .toList();
+    expect(actionMessages, hasLength(1));
+    expect(actionMessages.single['payload'], <String, dynamic>{
+      'action': 'activate',
+      'guestId': 'apple.save',
+      'nativeId': 11,
+      'generation': 1,
+    });
+
+    runtime.enqueue(
+      const PocketEvent(
+        id: 'semantic-snapshot-2',
+        method: 'accessibility.snapshot',
+        params: <String, dynamic>{'generation': 2, 'controls': <dynamic>[]},
+      ),
+    );
+    expect(controller.send(method: 'semantic.wake'), isTrue);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump();
+    expect(find.bySemanticsLabel('Save'), findsNothing);
+    expect(find.bySemanticsLabel('Delete'), findsNothing);
+    semanticsHandle.dispose();
   });
 }

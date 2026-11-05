@@ -21,6 +21,7 @@ export type Route =
   | "transitions"
   | "hardware"
   | "video"
+  | "apple"
   | "settings";
 
 export type AccentColor = "blue" | "violet" | "teal" | "rose";

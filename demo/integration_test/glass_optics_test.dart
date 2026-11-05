@@ -76,8 +76,8 @@ ui.insertBefore(ROOT, glassNode, 0);
 
 // Test control is sent through the same native event ingress used by hosts.
 // The update and release therefore appear only on a subsequent native frame.
-globalThis.__pocketEvent = function(line) {
-  const event = JSON.parse(line);
+globalThis.__pocketEvent = function(message) {
+  const event = typeof message === 'string' ? JSON.parse(message) : message;
   if (event.name === 'qa.glass.optics' && glassNode !== 0) {
     warp = false;
     pocket.registerSurface('qa.glass', 'glass', glassPayload('pill'));
@@ -94,6 +94,7 @@ globalThis.__pocketEvent = function(line) {
     pocket.releaseSurface('qa.glass');
   }
 };
+globalThis.__pocketEvent.__binaryCapable = true;
 
 globalThis.frame = function() {};
 ''';
@@ -199,9 +200,17 @@ void _recordCapture(String name, Uint8List png) {
   (captures as Map<String, dynamic>)[name] = base64Encode(png);
 }
 
-Future<void> _waitForRefractive(WidgetTester tester) async {
+Future<void> _waitForRefractive(
+  WidgetTester tester, {
+  Object? Function()? readError,
+}) async {
   for (var attempt = 0; attempt < 120; attempt++) {
-    await tester.pump(const Duration(milliseconds: 50));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+    final error = readError?.call();
+    if (error != null) fail('PocketView onError: $error');
     if (find
         .byKey(const ValueKey('pocket-glass-failed'))
         .evaluate()
@@ -218,9 +227,17 @@ Future<void> _waitForRefractive(WidgetTester tester) async {
   fail('native glass surface did not reach a refractive BackdropFilter');
 }
 
-Future<void> _waitForNoGlass(WidgetTester tester) async {
+Future<void> _waitForNoGlass(
+  WidgetTester tester, {
+  Object? Function()? readError,
+}) async {
   for (var attempt = 0; attempt < 80; attempt++) {
-    await tester.pump(const Duration(milliseconds: 50));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+    final error = readError?.call();
+    if (error != null) fail('PocketView onError: $error');
     if (find.byType(BackdropFilter).evaluate().isEmpty) return;
   }
   fail('released native glass surface remained in the Flutter scene');
@@ -265,7 +282,11 @@ int _changedPixels(
   return changed;
 }
 
-Widget _glassScene(FfiPocketRuntime runtime, {required bool offset}) {
+Widget _glassScene(
+  FfiPocketRuntime runtime, {
+  required bool offset,
+  void Function(Object error)? onError,
+}) {
   final guest = SizedBox(
     width: 390,
     height: 600,
@@ -274,6 +295,7 @@ Widget _glassScene(FfiPocketRuntime runtime, {required bool offset}) {
       jsSource: _glassGuestSource,
       viewport: const Size(390, 600),
       showDebugFps: false,
+      onError: onError,
     ),
   );
   final boundary = RepaintBoundary(
@@ -321,14 +343,21 @@ void main() {
     );
 
     FfiPocketRuntime? runtime;
+    Object? viewError;
+    void onViewError(Object error) {
+      viewError = error;
+    }
+
     try {
       runtime = FfiPocketRuntime.open(width: 390, height: 600, tickHz: 60);
-      await tester.pumpWidget(_glassScene(runtime, offset: false));
+      await tester.pumpWidget(
+        _glassScene(runtime, offset: false, onError: onViewError),
+      );
 
       // A native SURFACE_QUAD is materialized by PocketView as this actual
       // compositor child.  Require the Impeller shader, not the frosted
       // fallback, so this test cannot pass by merely adding a widget.
-      await _waitForRefractive(tester);
+      await _waitForRefractive(tester, readError: () => viewError);
       expect(find.byType(BackdropFilter), findsWidgets);
       expect(find.byKey(const ValueKey('pocket-glass-failed')), findsNothing);
       final rounded = await _capture(tester);
@@ -340,7 +369,7 @@ void main() {
         'payload': <String, dynamic>{'shape': 'pill'},
       });
       await tester.pump(const Duration(milliseconds: 350));
-      await _waitForRefractive(tester);
+      await _waitForRefractive(tester, readError: () => viewError);
       final pill = await _capture(tester);
       runtime.send(<String, dynamic>{
         'type': 'event',
@@ -356,7 +385,7 @@ void main() {
         'name': 'qa.glass.release',
         'payload': <String, dynamic>{},
       });
-      await _waitForNoGlass(tester);
+      await _waitForNoGlass(tester, readError: () => viewError);
       final released = await _capture(tester);
 
       const glassBounds = Rect.fromLTWH(60, 180, 270, 190);
@@ -418,8 +447,11 @@ void main() {
         tickHz: 60,
       );
       runtime = offsetRuntime;
-      await tester.pumpWidget(_glassScene(offsetRuntime, offset: true));
-      await _waitForRefractive(tester);
+      viewError = null;
+      await tester.pumpWidget(
+        _glassScene(offsetRuntime, offset: true, onError: onViewError),
+      );
+      await _waitForRefractive(tester, readError: () => viewError);
       final offsetFrame = await _capture(tester);
       final offsetCrop = await _crop(
         offsetFrame,

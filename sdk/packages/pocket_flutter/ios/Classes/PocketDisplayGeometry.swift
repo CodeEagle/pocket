@@ -115,6 +115,11 @@ final class PocketDisplayGeometry: NSObject {
         object: nil,
         queue: .main
       ) { [weak self] _ in self?.publishCurrentSnapshot() },
+      center.addObserver(
+        forName: UIAccessibility.reduceTransparencyStatusDidChangeNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in self?.publishCurrentSnapshot() },
     ]
   }
 
@@ -134,6 +139,7 @@ final class PocketDisplayGeometry: NSObject {
         "supported": false,
         "viewport": ["width": 0.0, "height": 0.0],
         "reservedRegions": [[String: Any]](),
+        "reduceTransparency": UIAccessibility.isReduceTransparencyEnabled,
       ]
     }
     return snapshot(for: root)
@@ -164,6 +170,9 @@ final class PocketDisplayGeometry: NSObject {
         "height": max(0.0, root.bounds.height),
       ],
       "reservedRegions": regions,
+      // UIKit exposes this preference globally, independently of whether the
+      // optional iOS 27 ReservedRegion API is available.
+      "reduceTransparency": UIAccessibility.isReduceTransparencyEnabled,
     ]
   }
 
@@ -212,6 +221,7 @@ final class PocketDisplayGeometry: NSObject {
       values.append(String(describing: region["margins"] ?? [:]))
       values.append(String(describing: region["active"] ?? false))
     }
+    values.append(String(describing: payload["reduceTransparency"] ?? "unknown"))
     return values.joined(separator: "|")
   }
 

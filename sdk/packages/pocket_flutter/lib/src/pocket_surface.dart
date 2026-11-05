@@ -84,6 +84,15 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
     final plainBlur = p['effect'] == 'blur';
     final opacity = _surfaceNumber(p, 'opacity', 1, 0, 1);
     final tint = _surfaceNumber(p, 'tintOpacity', .16, 0, 1);
+    final materialStrength = _surfaceNumber(p, 'materialStrength', 0, 0, 1);
+    final materialBits = _surfaceNumber(
+      p,
+      'materialTint',
+      0xfff2f2f7,
+      0,
+      0xffffffff,
+    ).toInt();
+    final materialColor = Color(materialBits);
     final shape = p['shape'];
     final rounded = BorderRadius.circular(
       shape == 'pill' || shape == 'circle' ? 10000 : radius,
@@ -151,6 +160,10 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
             p['warp'] == true ? 1 : 0,
             p['pressed'] == true ? 1 : 0,
             sigma,
+            materialStrength,
+            materialColor.r,
+            materialColor.g,
+            materialColor.b,
           ];
           for (var i = 0; i < values.length; i++) {
             shader.setFloat(i + 2, values[i]);
@@ -179,7 +192,9 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
               decoration: BoxDecoration(
                 borderRadius: rounded,
                 color: !plainBlur && shader == null
-                    ? Colors.white.withValues(alpha: tint)
+                    ? materialStrength > 0
+                          ? materialColor.withValues(alpha: materialStrength)
+                          : Colors.white.withValues(alpha: tint)
                     : null,
                 border: !plainBlur && shader == null
                     ? Border.all(

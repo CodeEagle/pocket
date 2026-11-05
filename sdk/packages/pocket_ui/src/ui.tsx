@@ -42,6 +42,7 @@ import {
 } from "./responsive.ts";
 import { useRouteActive } from "./route.tsx";
 import { HostBridgeAbiError } from "./host.ts";
+import { useAnimatedNumber } from "./mobile.tsx";
 
 /**
  * Safe-area aware guest shell for standalone pages.
@@ -111,6 +112,10 @@ export interface ScrollablePageContextValue {
   scrollOffset: () => number;
   geometry: () => DisplayGeometry;
   subscribeContour: (sync: () => boolean) => () => void;
+  /** Existing painted control geometry, shared with native editor overlays. */
+  visualRect?: (node: NodeMirror) => TextInputRect | undefined;
+  /** Visible page bounds for overlays such as explicit accessibility nodes. */
+  clipRect?: () => TextInputRect | undefined;
   /** iOS-style nested scroll chaining: forward unconsumed vertical drag delta to parent page. */
   chainDrag?: (deltaY: number) => void;
   /** Complete a chained nested drag with release velocity (or 0 on cancel). */
@@ -794,9 +799,37 @@ export function StatusBar(props: { label: string; detail: string; ok?: boolean }
 export type NavigationRoute = "home" | "gallery" | "about" | "settings";
 
 export interface NavigationItem {
-  id: NavigationRoute;
+  /** String keeps NavigationBar reusable for local segmented routes. */
+  id: string;
   label: string;
   kind: "home" | "gallery" | "host" | "settings";
+}
+
+export interface NavigationBarProps {
+  route: string;
+  onNavigate: (route: NavigationRoute) => void;
+  wide?: boolean | (() => boolean);
+  geometry?: DisplayGeometry | (() => DisplayGeometry);
+  /** Hide the complete bar, including its home-indicator inset, when false. */
+  visible?: boolean;
+  /** Optional replacement for the backwards-compatible Home/Gallery/Host set. */
+  items?: readonly NavigationItem[];
+  /** Use the dark shell colours for a page with a dark surface. */
+  dark?: boolean;
+  /** Optional ARGB accent rendered as the active icon/text colour. */
+  accentColor?: number;
+  /** Optional surface rendered behind the controls (for example GlassSurface). */
+  background?: JSX.Element | (() => JSX.Element);
+  /** Keep the same safe-area and icon logic while using a floating capsule shell. */
+  floating?: boolean;
+  /** Handle local string tabs without introducing a second navigation component. */
+  onItemPress?: (id: string) => void;
+  /** Draw and animate the shared active selection capsule. */
+  selectionIndicator?: boolean;
+  /** Optional content inside the shared active selection capsule. */
+  indicator?: JSX.Element | (() => JSX.Element);
+  /** Optional semantic node ref for each existing tab Focusable. */
+  nodeRefForItem?: (item: NavigationItem) => ViewProps["nodeRef"];
 }
 
 /**
@@ -859,20 +892,68 @@ const defaultNavigationItems: readonly NavigationItem[] = [
   { id: "about", label: "Host", kind: "host" },
 ];
 
-export function NavigationBar(props: {
-  route: string;
-  onNavigate: (route: NavigationRoute) => void;
-  wide?: boolean | (() => boolean);
-  geometry?: DisplayGeometry | (() => DisplayGeometry);
-  /** Hide the complete bar, including its home-indicator inset, when false. */
-  visible?: boolean;
-  /** Optional replacement for the backwards-compatible Home/Gallery/Host set. */
-  items?: readonly NavigationItem[];
-  /** Use the dark shell colours for a page with a dark surface. */
+function NavigationSelectionIndicator(props: {
+  index: () => number;
+  trackWidth: () => number;
+  itemCount: () => number;
+  trackNode: () => NodeMirror | undefined;
+  floating: () => boolean;
   dark?: boolean;
-  /** Optional ARGB accent rendered as the active icon/text colour. */
-  accentColor?: number;
+  content?: JSX.Element | (() => JSX.Element);
 }): JSX.Element {
+  const routeActive = useRouteActive();
+  const [measuredWidth, setMeasuredWidth] = createSignal<number>();
+  // Use the committed native row, including when a standalone bar is placed
+  // in a narrower container. This observes existing layout; it does not lay
+  // out a second tree or keep the frame scheduler active.
+  onFrame(() => {
+    const width = committedLayout(props.trackNode())?.width;
+    if (width !== undefined) setMeasuredWidth(width);
+  }, { active: routeActive, continuous: false });
+  const segmentWidth = () => Math.max(0, (measuredWidth() ?? props.trackWidth()) - 16) / props.itemCount();
+  const indicatorX = useAnimatedNumber(
+    () => props.index() * segmentWidth(),
+    0.38,
+  );
+  const content = (): JSX.Element | undefined =>
+    typeof props.content === "function" ? props.content() : props.content;
+  return (
+    <View
+      class="absolute overflow-hidden"
+      style={{
+        posType: 1,
+        insetT: 4,
+        insetL: 12 + indicatorX(),
+        width: Math.max(0, segmentWidth() - 8),
+        height: props.floating() ? 50 : 46,
+        radius: 999,
+        bgColor: props.dark ? 0x2effffff : 0x88ffffff,
+      }}
+    >
+      {content()}
+    </View>
+  );
+}
+
+export function NavigationBar(props: NavigationBarProps): JSX.Element {
+  let trackNode: NodeMirror | undefined;
+  const isFloating = () => props.floating === true;
+  const resolveBackground = (): JSX.Element | undefined =>
+    typeof props.background === "function" ? props.background() : props.background;
+  const itemList = () => props.items ?? defaultNavigationItems;
+  const itemIndex = () => {
+    const index = itemList().findIndex((item) => item.id === props.route);
+    return index >= 0 ? index : 0;
+  };
+  const itemCount = () => Math.max(1, itemList().length);
+  const trackWidth = () => {
+    const geometry = props.geometry
+      ? (typeof props.geometry === "function" ? props.geometry() : props.geometry)
+      : undefined;
+    if (!geometry || geometry.width <= 0) return 360;
+    const padding = bottomBarInsets(geometry);
+    return Math.max(120, geometry.width - padding.left - padding.right - (isFloating() ? 24 : 0));
+  };
   const navStyle = () => {
     const geometry = props.geometry
       ? (typeof props.geometry === "function" ? props.geometry() : props.geometry)
@@ -883,13 +964,18 @@ export function NavigationBar(props: {
     // Let the children and bottom inset determine the outer extent. A fixed
     // 56px shell plus paddingB would put controls under the home indicator.
     return {
-      paddingL: padding.left,
-      paddingR: padding.right,
-      paddingB: padding.bottom,
+      paddingL: padding.left + (isFloating() ? 12 : 0),
+      paddingR: padding.right + (isFloating() ? 12 : 0),
+      paddingB: padding.bottom + (isFloating() ? 10 : 0),
+      ...(isFloating() ? { paddingT: 8 } : {}),
     };
   };
-  const hostRoute = () => props.route !== "home" && props.route !== "gallery" && props.route !== "settings";
-  const items = () => props.items ?? defaultNavigationItems;
+  const hostRoute = () => (
+    itemList().some((item) => item.id === "about")
+    && props.route !== "home"
+    && props.route !== "gallery"
+    && props.route !== "settings"
+  );
   const surface = () => props.dark ? "#09090B" : "#FFFFFF";
   const border = () => props.dark ? "#27272A" : "#E4E4E7";
   const muted = () => props.dark ? "#A1A1AA" : "#71717A";
@@ -899,18 +985,42 @@ export function NavigationBar(props: {
   return (
     <Show when={props.visible !== false}>
       <View
-        style={{ ...navStyle(), bgColor: surface() }}
-        class="flex-col w-full shrink-0"
+        style={{ ...navStyle(), ...(isFloating() ? {} : { bgColor: surface() }) }}
+        class="relative flex-col w-full shrink-0"
       >
-        <View class="w-full h-[1]" style={{ bgColor: border() }} />
-        <View class="flex-row items-center w-full h-[54] px-2" style={{ bgColor: surface() }}>
-          <For each={items()}>
+        <Show when={!isFloating()}>
+          <View class="w-full h-[1]" style={{ bgColor: border() }} />
+        </Show>
+        <View
+          nodeRef={(node) => { trackNode = node; }}
+          class={isFloating()
+            ? "relative flex-row items-center w-full h-[58] px-2 overflow-hidden"
+            : "relative flex-row items-center w-full h-[54] px-2"}
+          style={isFloating() ? undefined : { bgColor: surface() }}
+        >
+          <Show when={props.background !== undefined}>
+            <View class="absolute inset-0 overflow-hidden">{resolveBackground()}</View>
+          </Show>
+          <Show when={props.selectionIndicator === true || props.indicator !== undefined}>
+            <NavigationSelectionIndicator
+              index={itemIndex}
+              trackWidth={trackWidth}
+              itemCount={itemCount}
+              trackNode={() => trackNode}
+              floating={isFloating}
+              dark={props.dark}
+              content={props.indicator}
+            />
+          </Show>
+          <For each={itemList()}>
             {(item) => {
+              const nodeRef = props.nodeRefForItem?.(item);
               const active = () => props.route === item.id || (hostRoute() && item.id === "about");
               return (
                 <Focusable
+                  nodeRef={nodeRef}
                   class="flex-1 h-[52] flex-col items-center justify-center gap-1 bg-transparent"
-                  onPress={() => props.onNavigate(item.id)}
+                  onPress={() => props.onItemPress ? props.onItemPress(item.id) : props.onNavigate(item.id as NavigationRoute)}
                 >
                   <View class="w-[24] h-[22] flex-col items-center justify-center bg-transparent">
                     <NavigationIcon kind={item.kind} active={active()} dark={props.dark} accentColor={active() ? accent() : undefined} surfaceColor={surface()} />
@@ -1733,6 +1843,8 @@ export function ScrollablePage(props: {
   const scrollContext: ScrollablePageContextValue = {
     scrollOffset: () => scroller.offset(),
     geometry: activePageGeometry,
+    visualRect: (node) => pageScroll.visualRect(node),
+    clipRect: pageScroll.clipRect,
     subscribeContour: (sync) => {
       contourSubscribers.add(sync);
       scheduleContourMicrotask();

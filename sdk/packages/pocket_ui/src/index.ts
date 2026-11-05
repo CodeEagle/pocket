@@ -7,11 +7,14 @@ export * from "./navigation.tsx";
 export * from "./legacy.ts";
 export * from "./responsive.ts";
 export * from "./display.ts";
+export * from "./accessibility.ts";
+export * from "./semantics.ts";
 export * from "./graphics.ts";
 export * from "./media.ts";
 export * from "./video.tsx";
 export * from "./updates.ts";
 export * from "./flutter-widgets.tsx";
+export * from "./apple.tsx";
 
 // Preload compositor composition with the public UI entry so the pinned
 // compiler collects its class literals before bundling subpath imports.

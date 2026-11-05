@@ -1,7 +1,7 @@
 /**
  * Pocket Studio's real web preview bridge.
  *
- * The browser is deliberately only a Canvas2D projection.  Guest source is
+ * The browser is a Canvas2D/optical-shader projection. Guest source is
  * built by the ordinary Editor pipeline and executed by the pinned native
  * PocketJS runtime (`pocket_probe`).  The probe returns the same FrameResult
  * DrawOps/resources used by the Flutter host; no screenshot or second layout
@@ -139,6 +139,20 @@ export type PreviewStatus = {
 };
 
 type JsonRecord = Record<string, unknown>;
+type PreviewAccessibilityPreferences = {
+  reduceMotion: boolean;
+  increaseContrast: boolean;
+  textScale: number;
+  accessibleNavigation: boolean;
+  /** null means that the browser/host cannot observe this preference. */
+  reduceTransparency: boolean | null;
+};
+
+const accessibilityPreferencesEvent = "accessibility.preferences";
+const accessibilitySnapshotEvent = "accessibility.snapshot";
+const accessibilityActionEvent = "accessibility.action";
+const maxAccessibilityControls = 128;
+const maxAccessibilityLabelLength = 1024;
 const EMPTY_PREVIEW_SAFE_AREA: PreviewSafeArea = { top: 0, right: 0, bottom: 0, left: 0 };
 const editorRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const maxInputBytes = 64 * 1024;
@@ -183,6 +197,146 @@ function finiteNonNegative(value: unknown, label: string, maximum = 1024): numbe
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0 || number > maximum) throw new Error(`${label} must be a finite number in [0, ${maximum}]`);
   return number;
+}
+
+function parseAccessibilityPreferences(value: unknown): PreviewAccessibilityPreferences {
+  const record = asRecord(value, "accessibility preferences");
+  const booleanField = (name: keyof Pick<PreviewAccessibilityPreferences, "reduceMotion" | "increaseContrast" | "accessibleNavigation">): boolean => {
+    if (typeof record[name] !== "boolean") throw new Error(`accessibility preferences ${name} must be boolean`);
+    return record[name] as boolean;
+  };
+  const textScale = Number(record.textScale);
+  if (!Number.isFinite(textScale) || textScale < 0.1 || textScale > 8) {
+    throw new Error("accessibility preferences textScale must be finite in [0.1, 8]");
+  }
+  const reduceTransparency = record.reduceTransparency;
+  if (reduceTransparency !== null && typeof reduceTransparency !== "boolean") {
+    throw new Error("accessibility preferences reduceTransparency must be boolean or null");
+  }
+  return {
+    reduceMotion: booleanField("reduceMotion"),
+    increaseContrast: booleanField("increaseContrast"),
+    textScale,
+    accessibleNavigation: booleanField("accessibleNavigation"),
+    reduceTransparency,
+  };
+}
+
+type PreviewAccessibilityRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type PreviewAccessibilityControl = {
+  guestId: string;
+  nativeId: number;
+  label: string;
+  role: "button" | "tab";
+  selected: boolean;
+  disabled: boolean;
+  enabled: boolean;
+  checked?: boolean;
+  rect: PreviewAccessibilityRect;
+};
+
+type PreviewAccessibilitySnapshot = {
+  generation: number;
+  controls: PreviewAccessibilityControl[];
+};
+
+function isAccessibilitySnapshotEvent(event: JsonRecord): boolean {
+  return eventName(event) === accessibilitySnapshotEvent;
+}
+
+function parseAccessibilityRect(value: unknown): PreviewAccessibilityRect | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as JsonRecord;
+  const x = Number(record.x);
+  const y = Number(record.y);
+  const width = Number(record.width ?? record.w);
+  const height = Number(record.height ?? record.h);
+  if (![x, y, width, height].every(Number.isFinite) ||
+      Math.abs(x) > 32000 || Math.abs(y) > 32000 || width <= 0 || height <= 0 || width > 32000 || height > 32000) {
+    return undefined;
+  }
+  return { x, y, width, height };
+}
+
+function parseAccessibilitySnapshot(event: JsonRecord): PreviewAccessibilitySnapshot | undefined {
+  if (!isAccessibilitySnapshotEvent(event)) return undefined;
+  const payload = eventPayload(event);
+  if (!payload) return undefined;
+  const generation = Number(payload.generation);
+  const rawControls = payload.controls ?? payload.nodes;
+  if (!Number.isInteger(generation) || generation < 0 || generation > 0x7fffffff || !Array.isArray(rawControls)) return undefined;
+  const controls: PreviewAccessibilityControl[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawControls) {
+    if (controls.length >= maxAccessibilityControls || !raw || typeof raw !== "object" || Array.isArray(raw)) break;
+    const record = raw as JsonRecord;
+    const guestId = typeof record.guestId === "string" ? record.guestId : typeof record.id === "string" ? record.id : "";
+    const label = typeof record.label === "string" ? record.label : undefined;
+    const nativeId = Number(record.nativeId);
+    const role = record.role === "tab" ? "tab" : record.role === "button" ? "button" : undefined;
+    const rect = parseAccessibilityRect(record.rect);
+    if (!guestId || guestId.length > 256 || seen.has(guestId) || label === undefined ||
+        !Number.isInteger(nativeId) || nativeId < 0 || nativeId > 0x7fffffff || !role || !rect) continue;
+    seen.add(guestId);
+    const disabled = record.disabled === true;
+    const enabled = record.enabled !== false && !disabled;
+    controls.push({
+      guestId,
+      nativeId,
+      label: label.slice(0, maxAccessibilityLabelLength),
+      role,
+      selected: record.selected === true,
+      disabled,
+      enabled,
+      ...(typeof record.checked === "boolean" ? { checked: record.checked } : {}),
+      rect,
+    });
+  }
+  return { generation, controls };
+}
+
+function canonicalAccessibilitySnapshotEvent(snapshot: PreviewAccessibilitySnapshot): JsonRecord {
+  return {
+    name: accessibilitySnapshotEvent,
+    payload: {
+      generation: snapshot.generation,
+      controls: snapshot.controls.map((control) => ({
+        guestId: control.guestId,
+        nativeId: control.nativeId,
+        label: control.label,
+        role: control.role,
+        selected: control.selected,
+        disabled: control.disabled,
+        enabled: control.enabled,
+        ...(control.checked === undefined ? {} : { checked: control.checked }),
+        rect: { ...control.rect },
+      })),
+    },
+  };
+}
+
+function parseAccessibilityAction(input: JsonRecord): {
+  action: "activate";
+  guestId: string;
+  nativeId: number;
+  generation: number;
+  runtime?: string;
+  runtimeToken?: string;
+} {
+  if (input.action !== "activate") throw new Error("semantic action must be activate");
+  const guestId = typeof input.guestId === "string" ? input.guestId : "";
+  if (!guestId || guestId.length > 256) throw new Error("semantic action guestId is invalid");
+  const nativeId = integerIn(input.nativeId, "semantic action nativeId", 0, 0x7fffffff);
+  const generation = integerIn(input.generation, "semantic action generation", 0, 0x7fffffff);
+  const runtime = input.runtime === undefined ? undefined : typeof input.runtime === "string" && input.runtime ? input.runtime : (() => { throw new Error("semantic action runtime is invalid"); })();
+  const runtimeToken = input.runtimeToken === undefined ? undefined : typeof input.runtimeToken === "string" && input.runtimeToken ? input.runtimeToken : (() => { throw new Error("semantic action runtimeToken is invalid"); })();
+  return { action: "activate", guestId, nativeId, generation, ...(runtime ? { runtime } : {}), ...(runtimeToken ? { runtimeToken } : {}) };
 }
 
 function normalizeSafeArea(value: unknown, fallback: PreviewSafeArea = EMPTY_PREVIEW_SAFE_AREA): PreviewSafeArea {
@@ -279,6 +433,8 @@ function isRecoverableInputFailure(message: string): boolean {
     message.startsWith("unsupported text event") ||
     message.includes("textInput") ||
     message.startsWith("preview input type") ||
+    message.startsWith("accessibility preferences") ||
+    message.startsWith("semantic action") ||
     message.includes("input.pointer") ||
     message.includes("input.text") ||
     message.startsWith("web Bluetooth plugin");
@@ -822,6 +978,8 @@ type PreviewRuntime = {
    * because pumpRuntime may settle several native frames before tickNow emits
    * the browser projection. */
   pendingBrowserEvents: PendingBrowserEvent[];
+  /** Latest validated semantic snapshot, retained across settled frames. */
+  accessibilitySnapshot?: PreviewAccessibilitySnapshot;
   needsPump: boolean;
   pumping: number;
 };
@@ -898,6 +1056,7 @@ function isBrowserCleanupEvent(event: JsonRecord): boolean {
 function browserEventIdentity(event: JsonRecord): string | undefined {
   const name = eventName(event);
   const payload = eventPayload(event);
+  if (name === accessibilitySnapshotEvent) return accessibilitySnapshotEvent;
   if (isVideoPlaybackEvent(event)) {
     const id = payload?.id;
     return typeof id === "string" && id.length > 0 ? `${name}:${id}` : undefined;
@@ -1022,6 +1181,67 @@ function transformedTextInputEvent(
   return transformed;
 }
 
+function clippedAccessibilityRect(
+  rect: PreviewAccessibilityRect,
+  bounds: { x: number; y: number; width: number; height: number },
+): PreviewAccessibilityRect | undefined {
+  const left = Math.max(rect.x, bounds.x);
+  const top = Math.max(rect.y, bounds.y);
+  const right = Math.min(rect.x + rect.width, bounds.x + bounds.width);
+  const bottom = Math.min(rect.y + rect.height, bounds.y + bounds.height);
+  if (right <= left || bottom <= top) return undefined;
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function projectedAccessibilityEvent(
+  snapshot: PreviewAccessibilitySnapshot,
+  root: PreviewFrame,
+  runtimeToken: string,
+  slot?: SurfaceSlot,
+  child?: PreviewFrame,
+  runtime?: string,
+): JsonRecord {
+  const rootBounds = { x: 0, y: 0, width: Math.max(1, root.width), height: Math.max(1, root.height) };
+  const scaleX = slot && child ? slot.w / Math.max(1, child.width) : 1;
+  const scaleY = slot && child ? slot.h / Math.max(1, child.height) : 1;
+  const bounds = slot && child
+    ? { x: slot.x, y: slot.y, width: slot.w, height: slot.h }
+    : rootBounds;
+  const controls = snapshot.controls.flatMap((control) => {
+    const rect = slot && child
+      ? {
+          x: control.rect.x * scaleX + slot.x,
+          y: control.rect.y * scaleY + slot.y,
+          width: control.rect.width * scaleX,
+          height: control.rect.height * scaleY,
+        }
+      : control.rect;
+    const rootClipped = clippedAccessibilityRect(rect, rootBounds);
+    const clipped = rootClipped ? clippedAccessibilityRect(rootClipped, bounds) : undefined;
+    if (!clipped) return [];
+    return [{
+      guestId: control.guestId,
+      nativeId: control.nativeId,
+      label: control.label,
+      role: control.role,
+      selected: control.selected,
+      disabled: control.disabled,
+      enabled: control.enabled,
+      ...(control.checked === undefined ? {} : { checked: control.checked }),
+      rect: clipped,
+    }];
+  });
+  return {
+    name: accessibilitySnapshotEvent,
+    payload: {
+      generation: snapshot.generation,
+      controls,
+      runtimeToken,
+      ...(runtime ? { runtime } : {}),
+    },
+  };
+}
+
 type Subscriber = {
   controller: ReadableStreamDefaultController<Uint8Array>;
   closed: boolean;
@@ -1109,6 +1329,8 @@ class PreviewSession {
   private height: number;
   private safeArea: PreviewSafeArea;
   private tickHz: number;
+  /** Latest browser accessibility facts, replayed to every newly loaded guest. */
+  private accessibilityPreferences?: PreviewAccessibilityPreferences;
 
   constructor(manager: PreviewManagerImpl, id: string) {
     this.manager = manager;
@@ -1121,6 +1343,20 @@ class PreviewSession {
       this.height,
     );
     this.tickHz = manager.options.tickHz ?? 60;
+  }
+
+  private async replayAccessibilityPreferences(runtime: PreviewRuntime): Promise<void> {
+    const preferences = this.accessibilityPreferences;
+    if (!preferences) return;
+    await runtime.probe.checked({
+      op: "send",
+      message: {
+        type: "event",
+        name: accessibilityPreferencesEvent,
+        payload: { ...preferences },
+      },
+    });
+    runtime.needsPump = true;
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -1307,6 +1543,7 @@ class PreviewSession {
         // the first pump so the first admitted frame uses the same geometry as
         // a Flutter host (and never briefly mounts under the notch).
         await sendDisplayViewport(probe, this.width, this.height, this.safeArea);
+        await this.replayAccessibilityPreferences(runtime);
         this.probe = probe;
         this.rootRuntime = runtime;
         this.childRuntimes.clear();
@@ -1404,6 +1641,10 @@ class PreviewSession {
       this.hotVersion = transition.version;
       this.hotReload = { mode: "replace" };
       this.lastTickAt = monotonicNow();
+      // A hot replacement remounts the root guest without replacing the
+      // PreviewSession. Re-emit the cached host fact so the new guest observes
+      // the same accessibility state before its first settled frame.
+      await this.replayAccessibilityPreferences(this.rootRuntime);
       await this.tickNow(0);
       this.emit({ type: "status", ...this.status() });
       return true;
@@ -2386,6 +2627,14 @@ class PreviewSession {
     for (const event of frame.events) {
       if (!event || typeof event !== "object" || Array.isArray(event)) continue;
       const browserEvent = event as JsonRecord;
+      const snapshot = parseAccessibilitySnapshot(browserEvent);
+      if (snapshot) {
+        if (!runtime.accessibilitySnapshot || snapshot.generation >= runtime.accessibilitySnapshot.generation) {
+          runtime.accessibilitySnapshot = snapshot;
+          enqueueBrowserEvent(runtime.pendingBrowserEvents, canonicalAccessibilitySnapshotEvent(snapshot), runtime.generation);
+        }
+        continue;
+      }
       if (!isVideoPlaybackEvent(browserEvent) && !isTextInputLifecycleEvent(browserEvent)) continue;
       enqueueBrowserEvent(runtime.pendingBrowserEvents, browserEvent, runtime.generation);
     }
@@ -2929,6 +3178,7 @@ class PreviewSession {
       });
       if (loadResponse.frame !== undefined) await this.ingestRuntimeFrame(runtime, loadResponse.frame, 0, false);
       await sendDisplayViewport(probe, initialWidth, initialHeight, initialSafeArea);
+      await this.replayAccessibilityPreferences(runtime);
       this.childRuntimes.set(appId, runtime);
       if (runtime.frame) {
         for (const event of runtime.frame.events) {
@@ -3109,7 +3359,7 @@ class PreviewSession {
       ? { ...op, runtimeToken: rootRuntimeToken }
       : op);
     const rootEvents = (root.events.length > 0 ? root.events : (this.rootRuntime?.initialEvents ?? []))
-      .filter((event) => !isVideoPlaybackEvent(event) && !isTextInputLifecycleEvent(event))
+      .filter((event) => !isVideoPlaybackEvent(event) && !isTextInputLifecycleEvent(event) && !isAccessibilitySnapshotEvent(event))
       .map((event) => rootRuntimeToken ? { ...event, runtimeToken: rootRuntimeToken } : event);
     // Playback/text edges are consumed by native while it settles an input and
     // can disappear from the final settled frame. The shared runtime queue
@@ -3117,6 +3367,7 @@ class PreviewSession {
     // every live child for video, even when its surface is culled, so media
     // intent is not lost during coverage/scroll transitions.
     const rootBrowserEvents = (this.rootRuntime?.pendingBrowserEvents ?? [])
+      .filter(({ event }) => !isAccessibilitySnapshotEvent(event))
       .map(({ event, generation }) => rootRuntimeToken
         ? { ...event, runtimeToken: `${this.rootRuntime!.instanceId}:${generation}` }
         : event);
@@ -3142,6 +3393,24 @@ class PreviewSession {
           focusedChildRuntime ? `${focusedChildRuntime.instanceId}:${generation}` : "",
         ))
       : [];
+    const accessibilityEvents: JsonRecord[] = [];
+    if (this.rootRuntime?.accessibilitySnapshot && rootRuntimeToken) {
+      accessibilityEvents.push(projectedAccessibilityEvent(
+        this.rootRuntime.accessibilitySnapshot,
+        root,
+        rootRuntimeToken,
+      ));
+    }
+    if (focusedSlot && focusedChildRuntime?.accessibilitySnapshot && focusedChild && focusedChildRuntime) {
+      accessibilityEvents.push(projectedAccessibilityEvent(
+        focusedChildRuntime.accessibilitySnapshot,
+        root,
+        `${focusedChildRuntime.instanceId}:${focusedChildRuntime.generation}`,
+        focusedSlot,
+        focusedChild,
+        focusedSlot.appId,
+      ));
+    }
     const { inputBounds: _nativeInputBounds, ...rootFrame } = root;
     return {
       ...rootFrame,
@@ -3167,7 +3436,7 @@ class PreviewSession {
         return previous.revision !== resource.revision || !samePreviewResourcePayload(previous, resource);
       }),
       releasedResources: [...releasedResources],
-      events: [...rootEvents, ...rootBrowserEvents, ...childVideoEvents, ...childTextInputEvents],
+      events: [...rootEvents, ...rootBrowserEvents, ...childVideoEvents, ...childTextInputEvents, ...accessibilityEvents],
     };
   }
 
@@ -3309,9 +3578,21 @@ class PreviewSession {
     // A native full-frame probe cannot run faster than the guest's fixed-step
     // cadence. A zero demand delay means continuous work, so keep a bounded
     // vsync-like timer instead of a microtask/busy loop.
-    const minimum = this.nextWakeDelay === 0 ? 1000 / this.tickHz : this.nextWakeDelay;
-    const delay = Math.max(1, Math.ceil(minimum));
-    const deadline = monotonicNow() + delay;
+    // Continuous work is due one period after the previous display tick,
+    // not one period after rendering and querying the probe have finished.
+    // Adding a full sleep after that work reduces a 60 Hz guest to ~50 Hz
+    // even with no optical surfaces. Input-only delta=0 pumps deliberately
+    // leave lastTickAt untouched, so they cannot postpone this cadence.
+    const now = monotonicNow();
+    const period = 1000 / this.tickHz;
+    const due = this.nextWakeDelay === 0
+      // Keep a fixed clock phase: rounded millisecond timers and a late wake
+      // must not add their overshoot to every following frame. No catch-up
+      // loop is needed; tickNow still supplies the actual elapsed delta.
+      ? (Math.floor(this.lastTickAt / period) + 1) * period
+      : now + this.nextWakeDelay;
+    const delay = Math.max(1, Math.ceil(due - now));
+    const deadline = now + delay;
     // Input edges call schedule() with delta=0. Do not move an already
     // earlier timer deadline on every edge, or a continuous drag can starve
     // the real display pump indefinitely. A newly-active runtime may still
@@ -3512,6 +3793,46 @@ class PreviewSession {
         const target = this.focusedSurface() ? this.childRuntimes.get(this.focusedSurface()!.appId) : this.rootRuntime;
         if (!target) throw new Error("preview runtime is not ready");
         await target.probe.checked({ op: "send", message: { method: "input.text", params: admitted } });
+      } else if (kind === "accessibility") {
+        const preferences = parseAccessibilityPreferences(input.preferences);
+        this.accessibilityPreferences = preferences;
+        const root = this.rootRuntime;
+        if (!root) throw new Error("preview runtime is not ready");
+        await this.replayAccessibilityPreferences(root);
+        for (const child of this.childRuntimes.values()) {
+          await this.replayAccessibilityPreferences(child);
+        }
+      } else if (kind === "semantic") {
+        const action = parseAccessibilityAction(input);
+        let target: PreviewRuntime | undefined;
+        if (action.runtime) {
+          target = this.childRuntimes.get(action.runtime);
+          const focused = this.focusedSurface();
+          if (!target || !focused || focused.appId !== action.runtime ||
+              action.runtimeToken !== `${target.instanceId}:${target.generation}`) return;
+        } else {
+          target = this.rootRuntime;
+          if (!target || (action.runtimeToken !== undefined && action.runtimeToken !== `${target.instanceId}:${target.generation}`)) return;
+        }
+        const snapshot = target.accessibilitySnapshot;
+        const control = snapshot?.generation === action.generation
+          ? snapshot.controls.find((candidate) => candidate.guestId === action.guestId && candidate.nativeId === action.nativeId)
+          : undefined;
+        if (!control || control.disabled || !control.enabled) return;
+        await target.probe.checked({
+          op: "send",
+          message: {
+            type: "event",
+            name: accessibilityActionEvent,
+            payload: {
+              action: action.action,
+              guestId: action.guestId,
+              nativeId: action.nativeId,
+              generation: action.generation,
+            },
+          },
+        });
+        target.needsPump = true;
       } else if (kind === "message") {
         const message = asRecord(input.message, "message");
         // Browser media diagnostics use the same guest event lane as the
@@ -3562,9 +3883,22 @@ class PreviewSession {
       } else if (kind === "plugin-disable") {
         this.handleBrowserPluginDisable(input);
       } else {
-        throw new Error("preview input type must be pointer, text, key, resize, message, plugin-message, or plugin-disable");
+        throw new Error("preview input type must be pointer, text, key, accessibility, semantic, resize, message, plugin-message, or plugin-disable");
       }
       await this.tickNow(0);
+      if (kind === "accessibility") {
+        // tickNow settles the root and focused child. A cached preference is a
+        // fact for every existing guest, including background children; drain
+        // those marked runtimes once without changing elapsed animation time.
+        const focusedAppId = this.focusedSurface()?.appId;
+        let pumpedBackgroundChild = false;
+        for (const child of this.childRuntimes.values()) {
+          if (child.appId === focusedAppId || !child.needsPump) continue;
+          await this.pumpRuntime(child, 0);
+          pumpedBackgroundChild = true;
+        }
+        if (pumpedBackgroundChild) await this.schedule();
+      }
     });
   }
 
@@ -3785,12 +4119,18 @@ class PreviewManagerImpl implements PreviewManager {
   private async clientSource(): Promise<string> {
     const path = this.options.clientPath ?? join(dirname(fileURLToPath(import.meta.url)), "client/preview.js");
     const source = await readFile(path, "utf8");
+    const editorDirectory = dirname(fileURLToPath(import.meta.url));
+    const [optics, shader] = await Promise.all([
+      readFile(join(editorDirectory, "client/liquid-glass.js"), "utf8"),
+      readFile(join(editorDirectory, "../packages/pocket_flutter/shaders/liquid_glass.frag"), "utf8"),
+    ]);
+    const projection = optics.replace('"" /* pocket-liquid-glass-shader */', JSON.stringify(shader));
     const pluginPath = join(dirname(path), "plugins/web-bluetooth.js");
     try {
       const plugin = await readFile(pluginPath, "utf8");
-      return `${plugin}\n${source}`;
+      return `${plugin}\n${projection}\n${source}`;
     } catch {
-      return source;
+      return `${projection}\n${source}`;
     }
   }
 
@@ -3878,6 +4218,7 @@ export const previewProtocol = {
   frame: "data: {type:'frame',revision,frame:FrameResult}",
   pointer: "{type:'pointer',phase:'down|move|up|cancel',id,x,y,surface?}",
   text: "{type:'text',events:[{kind:'keyDown|keyUp|commit|composition|compositionEnd',...}]} ",
+  semantic: "{type:'semantic',action:'activate',guestId,nativeId,generation,runtime?,runtimeToken?}",
   wheel: "browser wheel is translated to a real pointer drag; native probe has no wheel method",
   resize: "{type:'resize',width,height,safeArea?:{top,right,bottom,left}}",
   media: "GET|HEAD /api/projects/:id/preview/media?asset=<scope-prefixed assets/...>",

@@ -23,6 +23,9 @@ import {
   MobileBackButton,
   RouteView,
   MobileThemeProvider,
+  AccessibilityPreferencesProvider,
+  AppleSemanticsProvider,
+  createAccessibilityPreferences,
   createMobileTheme,
   useMobileTheme,
   toMobileColor,
@@ -85,6 +88,7 @@ import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
 import { installShowcaseSystem } from "./system.ts";
 import { showcaseUpdateState } from "./update-state.ts";
 import { SettingsPage, readAppearance, storedAppearance } from "./settings.tsx";
+import { ApplePage } from "./apple-page.tsx";
 import { computeTransitionDescriptor, createDisplayGeometry } from "@pocket/ui";
 import {
   isPrimaryRoute,
@@ -173,7 +177,7 @@ function paramsOf(message: BridgeMessage): Record<string, unknown> {
 function routeOf(value: unknown): Route | undefined {
   const route = String(value ?? "");
   // `gallery` remains the old probe's compatibility spelling for UI.
-  if (route === "settings" || route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video") return route;
+  if (route === "settings" || route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple") return route;
   if (route === "ui") return "gallery";
   return undefined;
 }
@@ -579,6 +583,7 @@ function App() {
     scheduleTimeout: (frames, callback) => after(frames / simulationHz(), callback),
   });
   const platform = createPocketPlatformClient(undefined, { bridge: host });
+  const accessibility = createAccessibilityPreferences({ bridge: host });
   const system = installShowcaseSystem(host, showcaseUpdateState(platform.storage, state, setState, routeOf));
   const experience = createPlatformExperience(host);
   let systemUiKey = "";
@@ -669,7 +674,7 @@ function App() {
 
 
   const isShowcaseRoute = (route: Route): boolean =>
-    route === "mobile" || route === "transitions" || route === "hardware" || route === "video";
+    route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple";
 
   // One JS route gate owns playback policy; the Flutter host only executes it.
   // This also pauses a video before its page is removed from the draw tree.
@@ -903,6 +908,8 @@ function App() {
         return <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} host={host} experience={experience} /></ScrollablePage>;
       case "video":
         return <VideoPage host={host} platform={platform} onNavigate={navigate} />;
+      case "apple":
+        return <ApplePage />;
       default:
         return <HostPages route={route} host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} recordingStatus={recordingStatus} />;
     }
@@ -914,6 +921,8 @@ function App() {
   // (including the Home header and mobile AppBar) starts below the status bar
   // without teaching each page its own safe-area state.
   return (
+    <AppleSemanticsProvider bridge={host}>
+    <AccessibilityPreferencesProvider value={accessibility}>
     <MobileThemeProvider theme={theme} density={() => state().interfaceDensity}>
     <Screen
       class={mobileDark() ? "w-full h-full flex-col bg-[#0E1728] overflow-hidden" : "w-full h-full flex-col bg-[#F5F6FA] overflow-hidden"}
@@ -928,7 +937,7 @@ function App() {
         <View class="flex-1 flex-col h-full overflow-hidden">
           <View class="flex-1 flex-col w-full h-full overflow-hidden" style={{ translateX: transitionDescriptor().inTx, translateY: transitionDescriptor().inTy, scale: transitionDescriptor().inScale }}>
             <MobileAppBar
-              title={state().route === "home" ? demoTitle : state().route === "gallery" ? "UI Collection" : state().route === "about" ? "Host" : state().route === "settings" ? "Settings" : state().route === "mobile" ? "Mobile UI" : state().route === "transitions" ? "Transitions" : state().route === "hardware" ? "Hardware" : state().route === "video" ? "Video Lab" : hostTabs.find((tab) => tab.id === state().route)?.label ?? "Frame diagnostics"}
+              title={state().route === "home" ? demoTitle : state().route === "gallery" ? "UI Collection" : state().route === "about" ? "Host" : state().route === "settings" ? "Settings" : state().route === "mobile" ? "Mobile UI" : state().route === "transitions" ? "Transitions" : state().route === "hardware" ? "Hardware" : state().route === "video" ? "Video Lab" : state().route === "apple" ? "Apple Glass" : hostTabs.find((tab) => tab.id === state().route)?.label ?? "Frame diagnostics"}
               centered={!isPrimaryRoute(state().route)}
               leading={isPrimaryRoute(state().route) ? undefined : <MobileBackButton onPress={() => dispatch({ type: "popRoute" })} />}
             />
@@ -962,6 +971,8 @@ function App() {
       />
     </Screen>
     </MobileThemeProvider>
+    </AccessibilityPreferencesProvider>
+    </AppleSemanticsProvider>
   );
 }
 
@@ -1198,6 +1209,12 @@ function GalleryPage(props: {
     <ScrollablePage>
       <View class="flex-col gap-4 p-4 pb-6">
       <MobileListTile title="Official building blocks" detail="The essentials, ready to explore." />
+      <MobileCard
+        title="Apple Glass"
+        detail="Apple-style controls and navigation, with a calm backdrop to explore."
+      >
+        <MobileButton label="Open Apple Glass" onPress={() => props.dispatch({ type: "navigate", route: "apple" })} />
+      </MobileCard>
       <View class="flex-row flex-wrap gap-3">
         <For each={componentCards}>
           {(card, index) => (

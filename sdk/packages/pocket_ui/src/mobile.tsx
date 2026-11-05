@@ -48,6 +48,7 @@ import {
 import { useRouteActive } from "./route.tsx";
 import type { BridgeObject } from "./host.ts";
 import { MOBILE_MOTION, motionEaseInOut, stepMotionSpring } from "./motion.ts";
+import { useAccessibilityPreferences } from "./accessibility.ts";
 export { MOBILE_MOTION } from "./motion.ts";
 
 export type SemanticTone = "accent" | "info" | "success" | "warning" | "danger" | "neutral";
@@ -431,6 +432,7 @@ export function useStateTransition(
   frames = 10,
   animateOnMount = false,
 ): () => number {
+  const accessibility = useAccessibilityPreferences();
   const routeActive = useRouteActive();
   const [progress, setProgress] = createSignal(animateOnMount ? 0 : 1);
   const [active, setActive] = createSignal(animateOnMount);
@@ -440,6 +442,13 @@ export function useStateTransition(
   let previousKey: unknown;
   createEffect(() => {
     const nextKey = key();
+    if (accessibility().reduceMotion) {
+      previousKey = nextKey;
+      initialized = true;
+      setProgress(1);
+      setActive(false);
+      return;
+    }
     // A parent store can invalidate its getters every frame without changing
     // the transition key. Restart only for an actual visual state change.
     if (initialized && Object.is(nextKey, previousKey)) return;
@@ -489,6 +498,7 @@ export function usePresenceTransition(
   open: () => boolean,
   options: { durationMs?: number; animateOnMount?: boolean } = {},
 ): MobilePresenceTransition {
+  const accessibility = useAccessibilityPreferences();
   const routeActive = useRouteActive();
   const initial = options.animateOnMount === false && untrack(routeActive) && Boolean(untrack(open));
   const [mounted, setMounted] = createSignal(initial);
@@ -501,6 +511,14 @@ export function usePresenceTransition(
   createEffect(() => {
     const activeRoute = routeActive();
     const nextRequested = activeRoute && Boolean(open());
+    if (accessibility().reduceMotion) {
+      requested = nextRequested;
+      phase = nextRequested ? 1 : 0;
+      lastTime = virtualNow();
+      setMounted(nextRequested);
+      setProgress(phase);
+      return;
+    }
     if (!activeRoute) {
       requested = false;
       phase = 0;
@@ -554,6 +572,7 @@ export function usePresenceTransition(
  * `rate` remains a compatible speed hint for callers without durationMs.
  */
 export function useAnimatedNumber(target: () => number, rate = 0.38, durationMs?: number): () => number {
+  const accessibility = useAccessibilityPreferences();
   const routeActive = useRouteActive();
   const initial = untrack(target);
   const [current, setCurrent] = createSignal(initial);
@@ -582,7 +601,7 @@ export function useAnimatedNumber(target: () => number, rate = 0.38, durationMs?
   };
   createEffect(() => {
     const next = target();
-    if (!routeActive()) {
+    if (!routeActive() || accessibility().reduceMotion) {
       goal = next;
       velocity = 0;
       setCurrent(next);
@@ -2091,6 +2110,14 @@ export function GlassSurface(props: {
   children?: JSX.Element;
   shape?: GlassShape;
   pressed?: boolean;
+  /** Clear controls retain a sharper backdrop; regular is the existing material. */
+  material?: "regular" | "clear";
+  /** Neutral regular-material tint; JS owns appearance, hosts only mix it. */
+  materialTint?: number;
+  materialStrength?: GlassSurfaceNumber;
+  radius?: GlassSurfaceNumber;
+  blur?: GlassSurfaceNumber;
+  warp?: boolean;
   /** `blur` is a colorless backdrop sample; `glass` keeps the liquid recipe. */
   effect?: GlassSurfaceEffect;
   /** Plain-backdrop-blur alpha; optical glass keeps its provider default. */
@@ -2098,31 +2125,44 @@ export function GlassSurface(props: {
   /** Optional tint override; a blur backdrop should pass zero. */
   tintOpacity?: GlassSurfaceNumber;
   class?: string;
+  style?: ViewProps["style"];
+  /** Compose toolbar rows without imposing the default card content layout. */
+  contentClass?: string;
 }): JSX.Element {
   const [registered, setRegistered] = createSignal(false);
+  const accessibility = useAccessibilityPreferences();
+  const theme = useMobileTheme();
   const id = `guest.glass.${nextGlassSurface++}`;
-  const recipe = createMemo(() => buildLiquidGlassRecipe({ shape: props.shape ?? "rounded", focused: props.pressed === true, warp: true }));
+  const recipe = createMemo(() => buildLiquidGlassRecipe({
+    shape: props.shape ?? "rounded",
+    focused: props.pressed === true,
+    warp: props.warp ?? (props.material !== "clear"),
+    tintOpacity: props.material === "clear" ? 0.04 : 0.16,
+  }));
   const effect = props.effect ?? "glass";
+  const solidMaterial = () => effect === "glass" && (accessibility().reduceTransparency === true || accessibility().increaseContrast);
   const surfaceOpacity = createMemo(() => effect === "blur" ? resolveGlassSurfaceNumber(props.opacity, 1, 0, 1) : 1);
-  const surfaceRadius = createMemo(() => effect === "blur" ? 0 : recipe().radius);
+  const surfaceRadius = createMemo(() => effect === "blur" ? 0 : resolveGlassSurfaceNumber(props.radius, recipe().radius, 0, 10000));
   // Keep the shell transparent when a native surface is registered; the
   // gradient layer below is only the unsupported-host fallback.
   const payload = createMemo<BridgeObject>(() => {
     const current = recipe();
     const blurOnly = effect === "blur";
     return {
-      radius: blurOnly ? 0 : current.radius,
+      radius: surfaceRadius(),
       // The native glass provider calls this field `blur`; the local recipe
       // keeps the more descriptive `blurSigma` name for UI/tests.
-      blur: current.blurSigma,
+      blur: resolveGlassSurfaceNumber(props.blur, props.material === "clear" ? 1.5 : current.blurSigma, 0, 20),
       effect,
       opacity: surfaceOpacity(),
       edgeIntensity: blurOnly ? 0 : current.edgeIntensity,
       rimIntensity: blurOnly ? 0 : current.rimIntensity,
       baseIntensity: blurOnly ? 0 : current.baseIntensity,
       tintOpacity: resolveGlassSurfaceNumber(props.tintOpacity, current.tintOpacity, 0, 1),
+      materialTint: props.materialTint ?? (props.material === "regular" && theme().name === "dark" ? 0xff1c1c1e : 0xfff2f2f7),
+      materialStrength: resolveGlassSurfaceNumber(props.materialStrength, props.material === "regular" ? 0.72 : 0, 0, 1),
       cornerBoost: blurOnly ? 0 : current.cornerBoost,
-      rippleEffect: blurOnly ? 0 : current.rippleEffect,
+      rippleEffect: blurOnly || props.material === "clear" ? 0 : current.rippleEffect,
       warp: blurOnly ? false : current.warp,
       pressed: props.pressed === true,
       shape: current.shape,
@@ -2145,10 +2185,17 @@ export function GlassSurface(props: {
   // pressed/focus controls interactive without remounting the surface node.
   // The object memo is the one registration source; one effect owns
   // registration and does not subscribe to the registered signal it updates.
-  createEffect(() => register(payload()));
+  createEffect(() => {
+    if (solidMaterial()) {
+      if (untrack(registered)) surfaceGlobal.pocket?.releaseSurface?.(id);
+      setRegistered(false);
+      return;
+    }
+    register(payload());
+  });
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
-    <ScrollContourItem class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"}>
+    <ScrollContourItem class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"} style={props.style}>
       <Show when={registered()}>
         <View class={effect === "blur" ? "absolute inset-0 overflow-hidden" : "absolute inset-0 overflow-hidden rounded-xl"}>
           <CompositorGlass packageId={id} radius={surfaceRadius()} />
@@ -2158,8 +2205,8 @@ export function GlassSurface(props: {
         <View
           class={effect === "blur" ? "absolute inset-0 overflow-hidden" : "absolute inset-0 overflow-hidden rounded-xl"}
           style={{
-            gradFrom: effect === "blur" ? 0x00000000 : recipe().bgColors[0],
-            gradTo: effect === "blur" ? 0x00000000 : recipe().bgColors[2],
+            gradFrom: solidMaterial() ? (theme().name === "dark" ? 0xff1c1c1e : 0xfff2f2f7) : effect === "blur" ? 0x00000000 : recipe().bgColors[0],
+            gradTo: solidMaterial() ? (theme().name === "dark" ? 0xff1c1c1e : 0xfff2f2f7) : effect === "blur" ? 0x00000000 : recipe().bgColors[2],
             gradDir: 1,
             radius: surfaceRadius(),
             opacity: surfaceOpacity(),
@@ -2167,7 +2214,7 @@ export function GlassSurface(props: {
           }}
         />
       </Show>
-      <View class="relative flex-col gap-3">{props.children}</View>
+      <View class={props.contentClass ?? "relative flex-col gap-3"}>{props.children}</View>
     </ScrollContourItem>
   );
 }

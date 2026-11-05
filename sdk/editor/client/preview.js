@@ -361,7 +361,7 @@
     const element = document.createElement("canvas");
     const context = element.getContext("2d");
     if (!context) return null;
-    scratch = { canvas: element, context, backdropKey: null, sigma: null };
+    scratch = { canvas: element, context, backdropKey: null, sigma: null, optics: null, opticsTried: false };
     glassScratchCache.set(canvas, scratch);
     return scratch;
   }
@@ -389,7 +389,30 @@
     if (opacity === 0) return true;
     const source = context.canvas;
     const scratch = glassScratchFor(source);
-    if (!scratch || typeof scratch.context.filter !== "string") return false;
+    if (!scratch) return false;
+    if (effect === "glass") {
+      if (!scratch.opticsTried) {
+        scratch.opticsTried = true;
+        scratch.optics = global.PocketLiquidGlass?.create(scratch.canvas, scratch.context,
+          () => source.dispatchEvent(new Event("pocket-optical-ready"))) ?? null;
+      }
+      const optical = scratch.optics?.draw(source, frameWidth, frameHeight, op, parameters, backdropKey);
+      // Optical sampling shares the existing 2D scratch, invalidating its blur.
+      scratch.backdropKey = null;
+      source.dataset.glassRenderer = optical ? "webgl-refractive" : "frosted";
+      if (optical) {
+        context.save();
+        const width = Math.max(0, number(op.w, op.width ?? 0));
+        const height = Math.max(0, number(op.h, op.height ?? 0));
+        const radius = parameters.shape === "pill" || parameters.shape === "circle"
+          ? Math.min(width, height) / 2 : clamp(number(parameters.radius, 0), 0, Math.min(width, height) / 2);
+        roundedClip(context, number(op.x, 0), number(op.y, 0), width, height, radius);
+        context.drawImage(optical.canvas, optical.x, optical.y, optical.width, optical.height);
+        context.restore();
+        return true;
+      }
+    }
+    if (typeof scratch.context.filter !== "string") return false;
     const backingWidth = source.width;
     const backingHeight = source.height;
     if (backingWidth <= 0 || backingHeight <= 0) return false;
@@ -438,12 +461,19 @@
       context.rect(number(clip.x, 0), number(clip.y, 0), Math.max(0, number(clip.w ?? clip.width, 0)), Math.max(0, number(clip.h ?? clip.height, 0)));
       context.clip();
     }
-    const radius = clamp(number(parameters.radius, 0), 0, Math.min(width, height) / 2);
+    const radius = parameters.shape === "pill" || parameters.shape === "circle"
+      ? Math.min(width, height) / 2 : clamp(number(parameters.radius, 0), 0, Math.min(width, height) / 2);
     roundedClip(context, x, y, width, height, radius);
     context.globalAlpha = opacity;
     context.drawImage(scratch.canvas, 0, 0, backingWidth, backingHeight, 0, 0, frameWidth, frameHeight);
     if (tintOpacity > 0) {
       context.fillStyle = `rgba(255,255,255,${tintOpacity})`;
+      context.fillRect(x, y, width, height);
+    }
+    const materialStrength = effect === "glass" ? clamp(number(parameters.materialStrength, 0), 0, 1) : 0;
+    if (materialStrength > 0) {
+      context.globalAlpha = opacity * materialStrength;
+      context.fillStyle = argb(parameters.materialTint ?? 0xfff2f2f7);
       context.fillRect(x, y, width, height);
     }
     context.restore();
@@ -691,6 +721,8 @@
   function client(root, options) {
     const projectId = String(options.projectId || root.dataset.projectId || "");
     const canvas = root.querySelector("canvas") || document.createElement("canvas");
+    const onOpticalReady = () => { if (!closed) renderCurrentFrame(); };
+    canvas.addEventListener("pocket-optical-ready", onOpticalReady);
     if (!canvas.parentNode) root.appendChild(canvas);
     canvas.id = canvas.id || "pocket-preview-surface";
     canvas.tabIndex = 0;
@@ -708,6 +740,11 @@
     document.body.style.overflow = "hidden";
     root.style.cssText += ";display:flex;flex-direction:column;align-items:stretch;min-height:100%;position:relative;background:#0b1020;color:#e5e7eb";
     canvas.style.cssText += ";display:block;width:100%;height:auto;max-width:100%;background:#fff;touch-action:none;outline:none;image-rendering:auto";
+    const semanticLayer = document.createElement("div");
+    semanticLayer.dataset.pocketSemanticLayer = "true";
+    semanticLayer.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:20";
+    root.appendChild(semanticLayer);
+    const semanticNodes = new Map();
     const resources = new Map();
     let resourceEpoch = 0;
     // Browser videos are real HTMLMediaElements used as Canvas sources. The
@@ -1275,6 +1312,262 @@
       return enqueueInput(() => sendInputPayload(payload), onFailure, guard, pointerMoveKey(payload));
     }
 
+    const MAX_SEMANTIC_CONTROLS = 128;
+    const MAX_SEMANTIC_LABEL = 1024;
+
+    function semanticEventPayload(event) {
+      const payload = event?.payload ?? event?.params;
+      return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+    }
+
+    function semanticRect(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const x = number(value.x, NaN);
+      const y = number(value.y, NaN);
+      const width = number(value.width ?? value.w, NaN);
+      const height = number(value.height ?? value.h, NaN);
+      if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0 ||
+          Math.abs(x) > MAX_DIMENSION || Math.abs(y) > MAX_DIMENSION || width > MAX_DIMENSION || height > MAX_DIMENSION) return null;
+      return { x, y, width, height };
+    }
+
+    function semanticDescriptor(event, control, runtime) {
+      if (!control || typeof control !== "object" || Array.isArray(control)) return null;
+      const guestId = typeof control.guestId === "string" ? control.guestId : typeof control.id === "string" ? control.id : "";
+      const label = typeof control.label === "string" ? control.label.slice(0, MAX_SEMANTIC_LABEL) : null;
+      const nativeId = Number(control.nativeId);
+      const generation = Number(event.generation);
+      const role = control.role === "tab" || control.role === "button" ? control.role : null;
+      const rect = semanticRect(control.rect);
+      if (!guestId || guestId.length > 256 || label === null || !role || !rect ||
+          !Number.isInteger(nativeId) || nativeId < 0 || nativeId > 0x7fffffff ||
+          !Number.isInteger(generation) || generation < 0 || generation > 0x7fffffff) return null;
+      const runtimeToken = typeof event.runtimeToken === "string" ? event.runtimeToken : "";
+      return {
+        key: `${runtime}\u0000${guestId}`,
+        runtime: runtime === "root" ? "" : runtime,
+        runtimeToken,
+        generation,
+        guestId,
+        nativeId,
+        label,
+        role,
+        selected: control.selected === true,
+        checked: typeof control.checked === "boolean" ? control.checked : undefined,
+        disabled: control.disabled === true || control.enabled === false,
+        rect,
+      };
+    }
+
+    function sendSemanticAction(descriptor) {
+      if (!descriptor || descriptor.disabled || closed) return;
+      const payload = {
+        type: "semantic",
+        action: "activate",
+        guestId: descriptor.guestId,
+        nativeId: descriptor.nativeId,
+        generation: descriptor.generation,
+        ...(descriptor.runtime ? { runtime: descriptor.runtime } : {}),
+        ...(descriptor.runtimeToken ? { runtimeToken: descriptor.runtimeToken } : {}),
+      };
+      void input(payload);
+    }
+
+    function updateSemanticElement(entry) {
+      const descriptor = entry.descriptor;
+      const element = entry.element;
+      element.textContent = descriptor.label;
+      element.setAttribute("aria-label", descriptor.label);
+      element.setAttribute("role", descriptor.role);
+      element.setAttribute("aria-disabled", String(descriptor.disabled));
+      element.tabIndex = descriptor.disabled ? -1 : 0;
+      element.disabled = descriptor.disabled;
+      if (descriptor.role === "tab") {
+        element.setAttribute("aria-selected", String(descriptor.selected));
+        element.removeAttribute("aria-pressed");
+      } else if (descriptor.checked !== undefined) {
+        element.setAttribute("aria-pressed", String(descriptor.checked));
+        element.removeAttribute("aria-selected");
+      } else {
+        element.removeAttribute("aria-pressed");
+        element.removeAttribute("aria-selected");
+      }
+      if (descriptor.checked === undefined) element.removeAttribute("aria-checked");
+      else element.setAttribute("aria-checked", String(descriptor.checked));
+      element.dataset.pocketSemanticGuestId = descriptor.guestId;
+      element.dataset.pocketSemanticRuntime = descriptor.runtime || "root";
+    }
+
+    function createSemanticElement(descriptor) {
+      const element = document.createElement("button");
+      element.type = "button";
+      element.style.cssText = "position:absolute;box-sizing:border-box;margin:0;padding:0;border:0;background:transparent;color:transparent;font:inherit;line-height:normal;pointer-events:none;outline-offset:2px";
+      const entry = { element, descriptor, suppressClick: false };
+      element.addEventListener("click", () => {
+        if (entry.suppressClick) { entry.suppressClick = false; return; }
+        sendSemanticAction(entry.descriptor);
+      });
+      element.addEventListener("keydown", (event) => {
+        if (entry.descriptor.disabled) return;
+        if (event.key === "Enter") {
+          event.preventDefault();
+          entry.suppressClick = true;
+          sendSemanticAction(entry.descriptor);
+          setTimeout(() => { entry.suppressClick = false; }, 0);
+        } else if (event.key === " ") {
+          event.preventDefault();
+        }
+      });
+      element.addEventListener("keyup", (event) => {
+        if (entry.descriptor.disabled || event.key !== " ") return;
+        event.preventDefault();
+        entry.suppressClick = true;
+        sendSemanticAction(entry.descriptor);
+        setTimeout(() => { entry.suppressClick = false; }, 0);
+      });
+      updateSemanticElement(entry);
+      semanticLayer.appendChild(element);
+      return entry;
+    }
+
+    function layoutSemanticDOM() {
+      const canvasRect = canvas.getBoundingClientRect();
+      const rootRect = root.getBoundingClientRect();
+      const width = Math.max(1, logicalWidth());
+      const height = Math.max(1, logicalHeight());
+      const canvasWidth = Math.max(0, canvasRect.width);
+      const canvasHeight = Math.max(0, canvasRect.height);
+      const scaleX = canvasWidth / width;
+      const scaleY = canvasHeight / height;
+      semanticLayer.style.left = `${canvasRect.left - rootRect.left}px`;
+      semanticLayer.style.top = `${canvasRect.top - rootRect.top}px`;
+      semanticLayer.style.width = `${canvasWidth}px`;
+      semanticLayer.style.height = `${canvasHeight}px`;
+      for (const entry of semanticNodes.values()) {
+        const rect = entry.descriptor.rect;
+        entry.element.style.left = `${rect.x * scaleX}px`;
+        entry.element.style.top = `${rect.y * scaleY}px`;
+        entry.element.style.width = `${Math.max(1, rect.width * scaleX)}px`;
+        entry.element.style.height = `${Math.max(1, rect.height * scaleY)}px`;
+      }
+    }
+
+    function clearSemanticDOM() {
+      for (const entry of semanticNodes.values()) {
+        try { entry.element.blur?.(); } catch { /* already detached */ }
+        entry.element.remove();
+      }
+      semanticNodes.clear();
+      layoutSemanticDOM();
+    }
+
+    function reconcileSemanticDOM(events) {
+      const next = new Map();
+      const seenRuntimes = new Set();
+      for (const event of Array.isArray(events) ? events : []) {
+        const name = typeof event?.name === "string" ? event.name : typeof event?.method === "string" ? event.method : "";
+        if (name !== "accessibility.snapshot") continue;
+        const payload = semanticEventPayload(event);
+        if (!payload || !Array.isArray(payload.controls)) continue;
+        const runtime = typeof payload.runtime === "string" && payload.runtime ? payload.runtime : "root";
+        if (seenRuntimes.has(runtime)) continue;
+        seenRuntimes.add(runtime);
+        const controls = payload.controls.slice(0, MAX_SEMANTIC_CONTROLS);
+        const seenControls = new Set();
+        for (const control of controls) {
+          const descriptor = semanticDescriptor(payload, control, runtime);
+          if (!descriptor || seenControls.has(descriptor.guestId)) continue;
+          seenControls.add(descriptor.guestId);
+          next.set(descriptor.key, descriptor);
+        }
+      }
+      for (const [key, entry] of semanticNodes) {
+        if (next.has(key)) continue;
+        try { entry.element.blur?.(); } catch { /* already detached */ }
+        entry.element.remove();
+        semanticNodes.delete(key);
+      }
+      for (const [key, descriptor] of next) {
+        const entry = semanticNodes.get(key) || createSemanticElement(descriptor);
+        entry.descriptor = descriptor;
+        updateSemanticElement(entry);
+        semanticNodes.set(key, entry);
+      }
+      layoutSemanticDOM();
+    }
+
+    // Browser media queries are the only reliable accessibility facts exposed
+    // by this projection. Keep the wire deliberately small and explicit: the
+    // native host owns OS-only values such as Reduce Transparency, while the
+    // guest receives `null` for facts this browser cannot observe. Text scale
+    // has no portable browser equivalent, so 1 is the documented baseline;
+    // it is not inferred from zoom or device-pixel density.
+    function readAccessibilityPreferences() {
+      const query = (expression) => {
+        try {
+          return typeof global.matchMedia === "function" ? global.matchMedia(expression) : null;
+        } catch {
+          return null;
+        }
+      };
+      return {
+        reduceMotion: query("(prefers-reduced-motion: reduce)")?.matches === true,
+        increaseContrast: query("(prefers-contrast: more)")?.matches === true,
+        textScale: 1,
+        accessibleNavigation: false,
+        reduceTransparency: null,
+      };
+    }
+
+    let accessibilityPreferences = readAccessibilityPreferences();
+    let accessibilityMediaQueryCleanups = [];
+    let accessibilityMediaQueryListenersInstalled = false;
+
+    function sameAccessibilityPreferences(left, right) {
+      return left.reduceMotion === right.reduceMotion &&
+        left.increaseContrast === right.increaseContrast &&
+        left.textScale === right.textScale &&
+        left.accessibleNavigation === right.accessibleNavigation &&
+        left.reduceTransparency === right.reduceTransparency;
+    }
+
+    function publishAccessibilityPreferences() {
+      void input({ type: "accessibility", preferences: { ...accessibilityPreferences } });
+    }
+
+    function onAccessibilityMediaChange() {
+      const next = readAccessibilityPreferences();
+      if (sameAccessibilityPreferences(accessibilityPreferences, next)) return;
+      accessibilityPreferences = next;
+      publishAccessibilityPreferences();
+    }
+
+    function installAccessibilityMediaQueryListeners() {
+      if (accessibilityMediaQueryListenersInstalled) return;
+      accessibilityMediaQueryListenersInstalled = true;
+      for (const expression of ["(prefers-reduced-motion: reduce)", "(prefers-contrast: more)"]) {
+        let media;
+        try { media = typeof global.matchMedia === "function" ? global.matchMedia(expression) : null; } catch { media = null; }
+        if (!media) continue;
+        const listener = () => onAccessibilityMediaChange();
+        if (typeof media.addEventListener === "function") {
+          media.addEventListener("change", listener);
+          accessibilityMediaQueryCleanups.push(() => media.removeEventListener("change", listener));
+        } else if (typeof media.addListener === "function") {
+          // Safari versions that predate MediaQueryList.addEventListener.
+          media.addListener(listener);
+          accessibilityMediaQueryCleanups.push(() => media.removeListener(listener));
+        }
+      }
+    }
+
+    function removeAccessibilityMediaQueryListeners() {
+      for (const cleanup of accessibilityMediaQueryCleanups.splice(0)) {
+        try { cleanup(); } catch { /* a disposed MediaQueryList is harmless */ }
+      }
+      accessibilityMediaQueryListenersInstalled = false;
+    }
+
     function textInputPayload(event) {
       const payload = event?.payload ?? event?.params;
       return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
@@ -1729,6 +2022,7 @@
         resetPointerContacts();
         resetVideoProjection(true);
         closeTextInputElement();
+        clearSemanticDOM();
       }
       frame = next;
       for (const resource of Array.isArray(next.resources) ? next.resources : []) {
@@ -1751,6 +2045,7 @@
       for (const event of Array.isArray(next.events) ? next.events : []) applyVideoCommand(event);
       syncVideoOps(next.ops);
       renderCurrentFrame();
+      reconcileSemanticDOM(next.events);
       // The compositor exposes a child input rectangle only while a child
       // surface owns focus. Do not leave a root editor targeting SystemUI (or
       // a child editor targeting a vanished surface) active across that focus
@@ -1846,6 +2141,7 @@
       context.setTransform(backingWidth / width, 0, 0, backingHeight / height, 0, 0);
       drawFrame(context, frame, resources, videos, resourceEpoch);
       if (regionsEnabled) drawRegionOverlay(context, frame);
+      layoutSemanticDOM();
     }
 
     function connect() {
@@ -1858,6 +2154,10 @@
       current.onopen = () => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
         if (webBluetoothEnabled && !webBluetoothPlugin) createWebBluetoothPlugin();
+        installAccessibilityMediaQueryListeners();
+        // Replay the current snapshot after every stream connection. The
+        // server caches it for guests that mount after this page connects.
+        publishAccessibilityPreferences();
       };
       current.onmessage = (event) => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
@@ -2257,6 +2557,7 @@
     const onPreviewResize = () => {
       renderCurrentFrame();
       textInputLayout();
+      layoutSemanticDOM();
     };
     global.addEventListener("resize", onPreviewResize);
 
@@ -2265,6 +2566,7 @@
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(resize, 50);
         textInputLayout();
+        layoutSemanticDOM();
       });
       observer.observe(canvas);
     }
@@ -2273,14 +2575,18 @@
     connect();
     return { canvas, input, close: async () => {
       closed = true;
+      canvas.removeEventListener("pocket-optical-ready", onOpticalReady);
       closeTextInputElement();
       textInputElement?.remove?.();
       textInputElement = null;
       resetVideoProjection(true);
+      clearSemanticDOM();
+      semanticLayer.remove();
       for (const image of resources.values()) disposeResource(image);
       resources.clear();
       const glassScratch = glassScratchCache.get(canvas);
       if (glassScratch) {
+        glassScratch.optics?.dispose();
         glassScratch.canvas.width = glassScratch.canvas.height = 0;
         glassScratch.backdropKey = null;
       }
@@ -2290,6 +2596,7 @@
       stream?.close();
       disposeWebBluetoothPlugin();
       global.removeEventListener("blur", cancelPointerContacts);
+      removeAccessibilityMediaQueryListeners();
       densityQuery?.removeEventListener("change", onDensityChange);
       global.removeEventListener("resize", onPreviewResize);
       await inputTail;

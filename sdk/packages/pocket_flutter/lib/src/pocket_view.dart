@@ -23,6 +23,7 @@ import 'pocket_performance.dart';
 import 'pocket_recording.dart';
 import 'pocket_memory_limits.dart';
 import 'pocket_runtime.dart';
+import 'pocket_semantics.dart';
 import 'pocket_text_cache.dart';
 import 'pocket_worker_runtime.dart';
 import 'pocket_offload_runtime.dart';
@@ -812,6 +813,12 @@ class _PocketViewState extends State<PocketView>
   EdgeInsets? _reportedSafeArea;
   double? _reportedKeyboardInset;
   String? _reportedReservedRegionsKey;
+  bool _accessibilityPreferencesReportScheduled = false;
+  String? _reportedAccessibilityPreferencesKey;
+  PocketSemanticsSnapshot _semanticSnapshot = const PocketSemanticsSnapshot(
+    generation: 0,
+    nodes: <PocketSemanticsNode>[],
+  );
 
   bool get _effectiveActive =>
       widget.active && _controller.appActive && !_lifecyclePaused;
@@ -897,6 +904,7 @@ class _PocketViewState extends State<PocketView>
       if (!mounted) return;
       _displayGeometrySnapshot = snapshot;
       _scheduleSafeAreaReport();
+      _scheduleAccessibilityPreferencesReport();
     } catch (_) {
       // The bridge is optional. Keep the normal safe-area contract when a
       // host has no ReservedRegion provider or the channel is unavailable.
@@ -908,6 +916,7 @@ class _PocketViewState extends State<PocketView>
     if (!mounted) return;
     _displayGeometrySnapshot = snapshot;
     _scheduleSafeAreaReport();
+    _scheduleAccessibilityPreferencesReport();
   }
 
   Future<void> _stopDisplayGeometry() async {
@@ -1057,6 +1066,22 @@ class _PocketViewState extends State<PocketView>
     _wakeTicker();
     _scheduleStartIfReady();
     _scheduleSafeAreaReport();
+    _scheduleAccessibilityPreferencesReport();
+  }
+
+  @override
+  void didChangeAccessibilityFeatures() {
+    super.didChangeAccessibilityFeatures();
+    _wakeTicker();
+    // MediaQuery updates its inherited data in response to this callback. Read
+    // it on the next frame so the payload contains the new official values.
+    _scheduleAccessibilityPreferencesReport();
+  }
+
+  @override
+  void didChangeTextScaleFactor() {
+    super.didChangeTextScaleFactor();
+    _scheduleAccessibilityPreferencesReport();
   }
 
   @override
@@ -1419,6 +1444,7 @@ class _PocketViewState extends State<PocketView>
         _endInvalidationBatch();
       }
       if (!mounted || _isDisposed) return;
+      _reportAccessibilityPreferences();
       setState(() {});
       _scheduleSafeAreaReport();
       _ticker = createTicker(_onTick);
@@ -2529,6 +2555,64 @@ class _PocketViewState extends State<PocketView>
       _safeAreaReportScheduled = false;
       _reportSafeArea();
     });
+  }
+
+  void _scheduleAccessibilityPreferencesReport() {
+    if (_accessibilityPreferencesReportScheduled || !mounted) return;
+    _accessibilityPreferencesReportScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _accessibilityPreferencesReportScheduled = false;
+      _reportAccessibilityPreferences();
+    });
+  }
+
+  MediaQueryData? _accessibilityMediaQueryData() {
+    final inherited = MediaQuery.maybeOf(context);
+    if (inherited != null) return inherited;
+    final view = View.maybeOf(context);
+    return view == null ? null : MediaQueryData.fromView(view);
+  }
+
+  void _reportAccessibilityPreferences() {
+    final runtime = _runtime;
+    if (runtime == null || _loading || !mounted) return;
+    final media = _accessibilityMediaQueryData();
+    if (media == null) return;
+    // TextScaler may be nonlinear (Dynamic Type). The wire carries the
+    // canonical 17 logical-pixel typography baseline; JS text layout remains
+    // responsible for applying its own type ramp around this fact.
+    const textBaseline = 17.0;
+    final textScale = media.textScaler.scale(textBaseline) / textBaseline;
+    if (!textScale.isFinite || textScale <= 0) return;
+    // Flutter exposes reduce motion, high contrast, text scaling and
+    // VoiceOver/TalkBack navigation state through MediaQuery. It has no
+    // cross-platform reduce-transparency field, so null is intentional and
+    // means unknown rather than false. The JS guest owns the policy.
+    final payload = <String, dynamic>{
+      'reduceMotion': media.disableAnimations,
+      'increaseContrast': media.highContrast,
+      'textScale': textScale,
+      'accessibleNavigation': media.accessibleNavigation,
+      'reduceTransparency': _displayGeometrySnapshot.reduceTransparency,
+    };
+    final key = [
+      payload['reduceMotion'],
+      payload['increaseContrast'],
+      payload['textScale'],
+      payload['accessibleNavigation'],
+      payload['reduceTransparency'],
+    ].join('|');
+    if (_reportedAccessibilityPreferencesKey == key) return;
+    try {
+      if (_controller.send(
+        method: 'accessibility.preferences',
+        params: payload,
+      )) {
+        _reportedAccessibilityPreferencesKey = key;
+      }
+    } catch (error) {
+      _failRuntime(error);
+    }
   }
 
   /// Geometry actually used by the primary surface in [_buildContent].
@@ -4689,6 +4773,15 @@ class _PocketViewState extends State<PocketView>
 
   void _handleEvents(List<PocketEvent> events) {
     for (final event in events) {
+      if (event.method == pocketAccessibilitySnapshotEvent) {
+        final snapshot = PocketSemanticsSnapshot.tryFromEvent(event);
+        if (snapshot != null &&
+            snapshot.generation > _semanticSnapshot.generation) {
+          _semanticSnapshot = snapshot;
+          _markSceneNeedsBuild();
+        }
+        continue;
+      }
       _handleGestureRegions(event);
       if (event.method == 'input.gesture.regions') continue;
       _handleTextInputEvent(event);
@@ -5168,6 +5261,11 @@ class _PocketViewState extends State<PocketView>
         ? _ownsRuntime
         : fallback != null && widget.runtime == null;
     _runtime = null;
+    _reportedAccessibilityPreferencesKey = null;
+    _semanticSnapshot = const PocketSemanticsSnapshot(
+      generation: 0,
+      nodes: <PocketSemanticsNode>[],
+    );
     _ownsRuntime = false;
     _pendingPointerMessages.clear();
     final duplex = _duplexChannel;
@@ -5914,7 +6012,17 @@ class _PocketViewState extends State<PocketView>
     final hasGlass = ops.any(
       (op) => op is PocketHostSurfaceOp && op.kind == 'glass',
     );
-    final scene = Stack(fit: StackFit.expand, children: sceneChildren);
+    final renderedScene = Stack(fit: StackFit.expand, children: sceneChildren);
+    final Widget scene = surface == 0 && _semanticSnapshot.nodes.isNotEmpty
+        ? PocketSemanticsOverlay(
+            snapshot: _semanticSnapshot,
+            scaleX: scaleX,
+            scaleY: scaleY,
+            sendEvent: (method, params) =>
+                _controller.send(method: method, params: params),
+            child: renderedScene,
+          )
+        : renderedScene;
     // Backdrop shaders sample their current render target. Isolate only an
     // optical canvas so embedding or translating PocketView cannot change
     // the normalized sampling coordinates. Ordinary pages keep cached layers

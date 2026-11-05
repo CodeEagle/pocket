@@ -49,6 +49,8 @@ export const ScrollContourItem = (props: any) => ({ type: "scroll-contour-item",
 export const useScrollContourReserve = () => ({ nodeRef: () => {}, reserve: () => 0, syncLayout: () => false });
 `);
 writeFileSync(join(isolatedSourceRoot, "responsive.ts"), readFileSync(join(import.meta.dir, "../src/responsive.ts")));
+writeFileSync(join(isolatedSourceRoot, "motion.ts"), readFileSync(join(import.meta.dir, "../src/motion.ts")));
+writeFileSync(join(isolatedSourceRoot, "accessibility.ts"), readFileSync(join(import.meta.dir, "../src/accessibility.ts")));
 
 writeFileSync(runnerPath, `
 import { strict as assert } from "node:assert";
@@ -65,6 +67,7 @@ mock.module("@pocketjs/framework/gesture", () => ({
 }));
 mock.module("@pocketjs/framework/clock", () => ({
   simulationHz: () => 60,
+  virtualNow: () => 0,
 }));
 mock.module("@pocketjs/framework/solid/components", () => ({
   CompositorSurface: (props) => ({ type: "compositor", props }),
@@ -78,7 +81,7 @@ mock.module("@pocketjs/framework/solid/lifecycle", () => ({
   onFrame: () => () => {},
 }));
 
-const { createRoot, createSignal } = await import("solid-js");
+const { createRoot, createSignal, untrack } = await import("solid-js");
 const { GlassSurface } = await import(${JSON.stringify(isolatedMobileSourcePath)});
 
 const registrations = [];
@@ -117,6 +120,8 @@ assert.deepEqual(registrations[0].payload, {
   rimIntensity: 0.05,
   baseIntensity: 0.01,
   tintOpacity: 0.16,
+  materialTint: 0xfff2f2f7,
+  materialStrength: 0,
   cornerBoost: 0.02,
   rippleEffect: 0.08,
   warp: true,
@@ -210,6 +215,53 @@ await flush();
 assert.deepEqual(attempts.map((attempt) => attempt.bridge), ["fail", "retry"], "the retried payload must then deduplicate");
 retryDispose();
 
+globalThis.pocket = bridge;
+let materialDispose;
+let setMaterial;
+createRoot((dispose) => {
+  materialDispose = dispose;
+  const [material, update] = createSignal("regular");
+  setMaterial = update;
+  GlassSurface({
+    get material() { return material(); },
+    shape: "pill", radius: 36, blur: () => 3, warp: false,
+  });
+});
+await flush();
+assert.equal(registrations.at(-1).payload.radius, 36);
+assert.equal(registrations.at(-1).payload.blur, 3);
+assert.equal(registrations.at(-1).payload.warp, false);
+setMaterial("clear");
+await flush();
+assert.equal(registrations.at(-1).payload.tintOpacity, 0.04);
+assert.equal(registrations.at(-1).payload.rippleEffect, 0);
+materialDispose();
+
+const { AccessibilityPreferencesContext, DEFAULT_ACCESSIBILITY_PREFERENCES } = await import(${JSON.stringify(join(isolatedSourceRoot, "accessibility.ts"))});
+let preferencesDispose;
+let updatePreferences;
+createRoot((dispose) => {
+  preferencesDispose = dispose;
+  const [preferences, update] = createSignal(DEFAULT_ACCESSIBILITY_PREFERENCES);
+  updatePreferences = update;
+  AccessibilityPreferencesContext.Provider({
+    value: preferences,
+    get children() { return untrack(() => GlassSurface({ shape: "pill" })); },
+  });
+});
+await flush();
+const preferenceSurface = registrations.at(-1).id;
+const registeredBeforeReduction = registrations.length;
+updatePreferences({ ...DEFAULT_ACCESSIBILITY_PREFERENCES, reduceTransparency: true });
+await flush();
+assert.equal(registrations.length, registeredBeforeReduction, "reduced transparency must not register another GPU surface");
+assert.equal(releases.at(-1), preferenceSurface, "reduced transparency releases the optical provider");
+updatePreferences(DEFAULT_ACCESSIBILITY_PREFERENCES);
+await flush();
+assert.equal(registrations.length, registeredBeforeReduction + 1);
+assert.equal(registrations.at(-1).id, preferenceSurface, "restoring material reuses the component's own identity");
+preferencesDispose();
+
 console.log(JSON.stringify({ registrations: registrations.length, attempts: attempts.length, releases: releases.length }));
 `);
 
@@ -223,7 +275,7 @@ test("GlassSurface uses the real pinned Solid runtime for registration lifecycle
     });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const output = result.stdout.trim().split(/\r?\n/).at(-1);
-    assert.deepEqual(JSON.parse(output ?? "{}"), { registrations: 5, attempts: 2, releases: 4 });
+    assert.deepEqual(JSON.parse(output ?? "{}"), { registrations: 9, attempts: 2, releases: 7 });
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }

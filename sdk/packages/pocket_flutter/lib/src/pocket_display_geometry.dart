@@ -90,16 +90,22 @@ final class PocketDisplayGeometrySnapshot {
     this.viewport,
     this.regions = const <PocketDisplayRegion>[],
     this.supported = false,
+    this.reduceTransparency,
   });
 
   const PocketDisplayGeometrySnapshot.empty()
     : viewport = null,
       regions = const <PocketDisplayRegion>[],
-      supported = false;
+      supported = false,
+      reduceTransparency = null;
 
   final Size? viewport;
   final List<PocketDisplayRegion> regions;
   final bool supported;
+
+  /// iOS UIKit's Reduce Transparency preference when available; null means
+  /// that the optional platform provider cannot observe it.
+  final bool? reduceTransparency;
 
   static PocketDisplayGeometrySnapshot fromDynamic(Object? value) {
     if (value is! Map) return const PocketDisplayGeometrySnapshot.empty();
@@ -125,11 +131,16 @@ final class PocketDisplayGeometrySnapshot {
       viewport: viewport,
       regions: List<PocketDisplayRegion>.unmodifiable(regions),
       supported: map['supported'] == true,
+      reduceTransparency: map['reduceTransparency'] is bool
+          ? map['reduceTransparency'] as bool
+          : null,
     );
   }
 }
 
-/// Optional platform channel for iOS 27.1 ReservedRegion data.
+/// Optional platform channel for iOS ReservedRegion and Reduce Transparency
+/// facts. ReservedRegion data requires iOS 27.1; the accessibility fact is
+/// available on the supported iOS deployment target.
 ///
 /// The channel is intentionally optional. On Android, macOS, older iOS, or a
 /// host that has not registered the provider, [start] returns an empty

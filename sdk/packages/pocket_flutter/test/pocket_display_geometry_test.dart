@@ -85,6 +85,15 @@ int _viewportMessageCount(_GeometryRuntime runtime) {
       .length;
 }
 
+Map<String, dynamic> _lastAccessibility(_GeometryRuntime runtime) {
+  return Map<String, dynamic>.from(
+    runtime.messages.lastWhere(
+          (message) => message['name'] == 'accessibility.preferences',
+        )['payload']
+        as Map,
+  );
+}
+
 Widget _view(
   _GeometryRuntime runtime, {
   PocketDisplayGeometrySource? displayGeometry,
@@ -111,6 +120,20 @@ Widget _view(
 }
 
 void main() {
+  test('parses the optional native reduce-transparency fact', () {
+    final enabled = PocketDisplayGeometrySnapshot.fromDynamic(<String, dynamic>{
+      'supported': false,
+      'reduceTransparency': true,
+    });
+    expect(enabled.reduceTransparency, isTrue);
+
+    final unknown = PocketDisplayGeometrySnapshot.fromDynamic(<String, dynamic>{
+      'supported': false,
+      'reduceTransparency': 'unavailable',
+    });
+    expect(unknown.reduceTransparency, isNull);
+  });
+
   testWidgets('maps reserved regions into an offset guest canvas', (
     tester,
   ) async {
@@ -214,6 +237,25 @@ void main() {
     expect(_lastViewport(runtime)['reservedRegions'], isEmpty);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'replays native reduce-transparency changes on the preference lane',
+    (tester) async {
+      final source = _FakeGeometrySource(
+        const PocketDisplayGeometrySnapshot(reduceTransparency: true),
+      );
+      final runtime = _GeometryRuntime();
+      await tester.pumpWidget(_view(runtime, displayGeometry: source));
+      await tester.pump();
+      expect(_lastAccessibility(runtime)['reduceTransparency'], isTrue);
+
+      source.emit(
+        const PocketDisplayGeometrySnapshot(reduceTransparency: false),
+      );
+      await tester.pump();
+      expect(_lastAccessibility(runtime)['reduceTransparency'], isFalse);
+    },
+  );
 
   testWidgets('defers geometry until the Flutter view size catches up', (
     tester,

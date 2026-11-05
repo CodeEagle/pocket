@@ -12,6 +12,7 @@ uniform vec4 uGlassOptics;   // 10..13: edgeIntensity, rimIntensity, baseIntensi
 uniform vec4 uExtraOptics;   // 14..17: cornerBoost, rippleEffect, warpFlag, isPressedFlag
 
 uniform float uBlur;         // 18: JS frosted radius in logical pixels
+uniform vec4 uMaterial;      // 19..22: optional JS neutral veil strength and RGB
 
 uniform sampler2D uTexture;  // Sampler 0: Pre-rasterized L1-cached background scene texture
 
@@ -106,7 +107,7 @@ void main() {
   vec2 toLens = (fragPos - lensCenter) / max(uSurfaceSize, vec2(1.0));
   vec2 uvG = clamp(uv + (refr.xy * opticalThickness) / uSurfaceSize - toLens * centerShift + rippleOffset, 0.002, 0.998);
 
-  // 5-Tap Hardware-Bilinear Gaussian Frosted Blur (50% fewer texture fetches, silky smooth)
+  // Retained five-tap bilinear frost approximation; not a full Gaussian blur.
   vec2 blurStep = vec2(uBlur * 0.56 / uSurfaceSize.x, uBlur * 0.48 / uSurfaceSize.y);
   vec3 glassColor = texture(uTexture, uvG).rgb * 0.36 +
                     texture(uTexture, clamp(uvG + vec2( blurStep.x,  blurStep.y), 0.002, 0.998)).rgb * 0.16 +
@@ -119,6 +120,9 @@ void main() {
   // ============================================================================
   // A) Neutral Milky-White Frosted Veil
   glassColor = mix(glassColor, vec3(0.96, 0.97, 1.0), 0.14 + tintOpacity * 0.22);
+  // Opt-in regular material separates functional controls from busy content.
+  // A zero strength preserves every legacy optical recipe unchanged.
+  glassColor = mix(glassColor, uMaterial.yzw, clamp(uMaterial.x, 0.0, 1.0));
 
   // B) Soft Inner Bevel Cushion Glow (`distFromEdge` 1.2px .. 12px)
   float innerCushion = exp(-max(0.0, distFromEdge - 1.2) / 6.2) * 0.16;
