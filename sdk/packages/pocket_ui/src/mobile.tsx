@@ -2126,6 +2126,8 @@ export function GlassSurface(props: {
   tintOpacity?: GlassSurfaceNumber;
   class?: string;
   style?: ViewProps["style"];
+  /** Expose the single glass shell for gesture regions and semantic overlays. */
+  nodeRef?: ViewProps["nodeRef"];
   /** Compose toolbar rows without imposing the default card content layout. */
   contentClass?: string;
 }): JSX.Element {
@@ -2195,7 +2197,11 @@ export function GlassSurface(props: {
   });
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
-    <ScrollContourItem class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"} style={props.style}>
+    <ScrollContourItem
+      nodeRef={props.nodeRef}
+      class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"}
+      style={props.style}
+    >
       <Show when={registered()}>
         <View class={effect === "blur" ? "absolute inset-0 overflow-hidden" : "absolute inset-0 overflow-hidden rounded-xl"}>
           <CompositorGlass packageId={id} radius={surfaceRadius()} />

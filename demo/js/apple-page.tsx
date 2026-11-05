@@ -1,6 +1,7 @@
 import { For, Show, createSignal, useContext, type JSX } from "solid-js";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import {
+  AppleDraggableGlass,
   AppleGlassButton,
   AppleGlassNavigationBar,
   AppleGlassToolbar,
@@ -119,6 +120,22 @@ export function ApplePage(): JSX.Element {
               icon={<DotIcon color="#315DEB" />}
               onPress={() => setLastAction("Focus block added")}
             />
+
+            <View class={dark() ? "flex-col gap-2 p-3 rounded-[24] bg-[#111D32CC] border-[#2D3D5A]" : "flex-col gap-2 p-3 rounded-[24] bg-[#FFFFFFCC] border-[#DCE3F0]"}>
+              <Text class="text-sm font-bold" style={{ textColor: dark() ? "#F8FAFC" : "#152238" }}>A little movement</Text>
+              <Text class="text-sm" style={{ textColor: dark() ? "#B9C5D8" : "#66758A" }}>Drag the glass card, then let it settle back into place.</Text>
+              <View class="relative w-full h-[132] flex-row items-center justify-center overflow-hidden rounded-[20]" style={{ radius: 20, bgColor: dark() ? 0xff243756 : 0xffe8efff }}>
+                <View class="absolute left-[-18] top-[18] w-[180] h-[96] rounded-full" style={{ bgColor: dark() ? 0xff365d9e : 0xffbfd2ff, opacity: 0.8, rotate: -12 }} />
+                <View class="absolute right-[-10] bottom-[-28] w-[176] h-[104] rounded-full" style={{ bgColor: dark() ? 0xff7c456e : 0xffffcfc6, opacity: 0.75, rotate: 12 }} />
+                <AppleDraggableGlass
+                  class="w-[176] h-[68] flex-col items-center justify-center"
+                  maxX={Math.max(16, Math.min(64, ((scaffold.geometry().width || 375) - 232) / 2 - 12))}
+                  maxY={20}
+                >
+                  <Text class="text-sm font-bold" style={{ textColor: dark() ? "#F8FAFC" : "#152238" }}>Drag the glass</Text>
+                </AppleDraggableGlass>
+              </View>
+            </View>
 
             <Show when={activeTab() === "overview"}>
               <View class="flex-col gap-3">

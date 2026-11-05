@@ -28,3 +28,29 @@ test("an interrupted scalar keeps its velocity and changes direction continuousl
   const returned = stepMotionSpring(moving.position, moving.velocity, 0, 0.4, 280);
   assert.ok(returned.position < 0.01 && returned.velocity < 0, "the latest target must still win");
 });
+
+
+test("drag release bounce preserves elapsed-time physics and settles after an interruption", () => {
+  for (const damping of [0.62, 1.5]) {
+    const samples = [30, 60, 120].map((hz) => {
+      let state = { position: 90, velocity: 240 };
+      for (let frame = 0; frame < hz / 2; frame++) {
+        state = stepMotionSpring(state.position, state.velocity, 0, 1 / hz, 560, damping);
+      }
+      return state;
+    });
+    for (const sample of samples.slice(1)) {
+      assert.ok(Math.abs(sample.position - samples[0]!.position) < 1e-9);
+      assert.ok(Math.abs(sample.velocity - samples[0]!.velocity) < 1e-9);
+    }
+  }
+  let state = { position: 90, velocity: 240 };
+  let crossed = false;
+  for (let frame = 0; frame < 120; frame++) {
+    state = stepMotionSpring(state.position, state.velocity, 0, 1 / 60, 560, 0.62);
+    crossed ||= state.position < 0;
+  }
+  assert.ok(crossed, "the opt-in release spring must visibly cross its rest position");
+  assert.ok(Math.abs(state.position) < 0.001 && Math.abs(state.velocity) < 0.01);
+  assert.deepEqual(stepMotionSpring(20, -120, -40, 0, 560, 0.62), { position: 20, velocity: -120 });
+});

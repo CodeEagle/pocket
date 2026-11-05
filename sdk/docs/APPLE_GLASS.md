@@ -206,3 +206,6 @@ actions and pointer passthrough; a PocketView test covers snapshot admission,
 activation returning to JS and clearing stale nodes. Browser tests cover
 preference replay for current/future children, transparent semantic projection,
 and actual pinned QJBC keyboard activation and route cleanup.
+
+For the optional anchored drag and jelly return, see
+[Apple glass interaction](APPLE_GLASS_INTERACTION.md).
