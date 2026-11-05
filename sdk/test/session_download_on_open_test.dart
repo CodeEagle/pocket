@@ -215,6 +215,101 @@ void main() {
   );
 
   test(
+    'signed partial base archive fetches only omitted resources before activation',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+        partialBundle: true,
+      );
+      updateServer.current = release;
+      final value = session();
+      try {
+        await value.initialize();
+        expect(updateServer.count('/base.zip'), 1);
+        expect(updateServer.count(release.entryPath), 0);
+        expect(updateServer.count(release.pakPath), 1);
+        expect(
+          await File(value.active!.source.pakPath).readAsBytes(),
+          release.pak,
+        );
+        await waitForHealthy(value);
+        final requests = updateServer.totalRequests;
+        await closeQuietly(value);
+        updateServer.online = false;
+        final reopened = session();
+        try {
+          await reopened.initialize();
+          expect(reopened.active!.build, 2);
+          expect(updateServer.totalRequests, requests);
+        } finally {
+          await closeQuietly(reopened);
+        }
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  for (final failure in [
+    'corrupt-network',
+    'missing-base-entry',
+    'missing-base-entry-warm',
+    'corrupt-base-entry-warm',
+    'extra-base-entry',
+    'unknown-hash',
+    'duplicate-hash',
+  ]) {
+    test('partial base archive rejects $failure without activation', () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+        partialBundle: true,
+        corruptPak: failure == 'corrupt-network',
+        omitBundledEntry: failure.startsWith('missing-base-entry'),
+        corruptBundledEntry: failure == 'corrupt-base-entry-warm',
+        extraBundledEntry: failure == 'extra-base-entry',
+        invalidSubset: failure == 'unknown-hash' || failure == 'duplicate-hash'
+            ? failure
+            : null,
+      );
+      updateServer.current = release;
+      if (failure.endsWith('-warm')) {
+        final hash = crypto.sha256.convert(release.entry).toString();
+        await packageStore()
+            .scoped(appId)
+            .writeBlob(
+              file: PocketManifestFile(
+                sha256: hash,
+                size: release.entry.length,
+                url: 'blobs/$hash',
+              ),
+              bytes: Stream<List<int>>.value(release.entry),
+              cancellation: PocketCancellationToken(),
+            );
+      }
+      final value = session();
+      try {
+        await expectLater(value.initialize(), throwsA(anything));
+        expect(value.active, isNull);
+        final store = packageStore().scoped(appId);
+        expect(await store.active(verifier: verifier()), isNull);
+        expect(await store.lastGood(verifier: verifier()), isNull);
+        if (failure != 'corrupt-network')
+          expect(updateServer.count(release.pakPath), 0);
+      } finally {
+        await closeQuietly(value);
+      }
+    });
+  }
+
+  test(
     'a healthy download-on-open cache reopens offline without another request',
     () async {
       final release = await _makeRelease(
@@ -337,47 +432,51 @@ void main() {
     },
   );
 
-  test(
-    'close cancels an in-flight download before it can become healthy',
-    () async {
-      final release = await _makeRelease(
-        keyPair: keyPair,
-        appId: appId,
-        abi: abi,
-        build: 2,
-        version: '2.0.0',
-      );
-      updateServer.current = release;
-      updateServer.holdPath = release.entryPath;
-      final value = session();
-      final initializing = value.initialize();
-      try {
-        await waitUntil(() => updateServer.count(release.entryPath) > 0);
-        final closing = value.close();
-        try {
-          await closing.timeout(const Duration(seconds: 3));
-        } on TimeoutException {
-          rethrow;
-        } catch (_) {
-          // close() waits on initialize(); cancellation may surface the
-          // expected PocketUpdateCancellation through that future.
-        }
-        // The disposed session is allowed to swallow cancellation while
-        // unwinding its initialization future; the observable contract is
-        // that it never publishes a runtime or healthy pointer.
-        await initializing;
-        expect(value.ready, isFalse);
-        expect(value.active, isNull);
-        expect(
-          await packageStore().scoped(appId).lastGood(verifier: verifier()),
-          isNull,
+  for (final partial in [false, true]) {
+    test(
+      'close cancels an in-flight download before it can become healthy (partial archive: $partial)',
+      () async {
+        final release = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 2,
+          version: '2.0.0',
+          partialBundle: partial,
         );
-      } finally {
-        updateServer.releaseHeldResponse();
-        await closeQuietly(value);
-      }
-    },
-  );
+        updateServer.current = release;
+        final heldPath = partial ? release.pakPath : release.entryPath;
+        updateServer.holdPath = heldPath;
+        final value = session();
+        final initializing = value.initialize();
+        try {
+          await waitUntil(() => updateServer.count(heldPath) > 0);
+          final closing = value.close();
+          try {
+            await closing.timeout(const Duration(seconds: 3));
+          } on TimeoutException {
+            rethrow;
+          } catch (_) {
+            // close() waits on initialize(); cancellation may surface the
+            // expected PocketUpdateCancellation through that future.
+          }
+          // The disposed session is allowed to swallow cancellation while
+          // unwinding its initialization future; the observable contract is
+          // that it never publishes a runtime or healthy pointer.
+          await initializing;
+          expect(value.ready, isFalse);
+          expect(value.active, isNull);
+          expect(
+            await packageStore().scoped(appId).lastGood(verifier: verifier()),
+            isNull,
+          );
+        } finally {
+          updateServer.releaseHeldResponse();
+          await closeQuietly(value);
+        }
+      },
+    );
+  }
 
   test(
     'runtime failure before first health has no embedded fallback',
@@ -658,6 +757,7 @@ void main() {
         entryBytes: entry,
         pakBytes: pak,
         requiredCapabilities: const <String>[],
+        partialBundle: true,
       );
       updateServer.current = release;
       final value = session(id: nativeAppId);
@@ -670,6 +770,9 @@ void main() {
         final actualPak = await File(package.source.pakPath).readAsBytes();
         expect(actualEntry, orderedEquals(entry));
         expect(actualPak, orderedEquals(pak));
+        expect(updateServer.count('/base.zip'), 1);
+        expect(updateServer.count(release.entryPath), 0);
+        expect(updateServer.count(release.pakPath), 1);
 
         runtime = FfiPocketRuntime.open(width: 360, height: 640);
         var frame = runtime.loadBytecode(
@@ -677,6 +780,7 @@ void main() {
           Uint8List.fromList(actualPak),
           expectedRuntimeAbi: fixtureAbi,
         );
+        final imageResources = <PocketImageResource>[...frame.resources];
         String textFrom(PocketFrame current) => current.ops
             .whereType<PocketTextOp>()
             .map((op) => op.text)
@@ -688,9 +792,20 @@ void main() {
           tick++
         ) {
           frame = runtime.frame(16);
+          imageResources.addAll(frame.resources);
           text = textFrom(frame);
         }
         expect(text, contains('Downloaded count 0'));
+        final image = imageResources.singleWhere(
+          (resource) => resource.asset == 'assets/remote.svg',
+        );
+        expect(image.width, 16);
+        expect(image.height, 16);
+        expect(image.pixels.take(4), orderedEquals(<int>[50, 100, 200, 255]));
+        expect(
+          frame.ops.whereType<PocketImageOp>().map((op) => op.asset),
+          contains('assets/remote.svg'),
+        );
         final button = frame.ops.whereType<PocketTextOp>().singleWhere(
           (op) => op.text == 'Increment downloaded app',
         );
@@ -744,6 +859,11 @@ Future<_Release> _makeRelease({
   ],
   bool corruptSignature = false,
   bool corruptPak = false,
+  bool partialBundle = false,
+  bool omitBundledEntry = false,
+  bool corruptBundledEntry = false,
+  bool extraBundledEntry = false,
+  String? invalidSubset,
 }) async {
   final entry = entryBytes ?? Uint8List.fromList(<int>[0x51, build, 0x42]);
   final pak =
@@ -753,6 +873,15 @@ Future<_Release> _makeRelease({
       ]);
   final entryHash = crypto.sha256.convert(entry).toString();
   final pakHash = crypto.sha256.convert(pak).toString();
+  final bundle = partialBundle
+      ? encodePocketZip(<String, List<int>>{
+          if (!omitBundledEntry)
+            'blobs/$entryHash': corruptBundledEntry
+                ? (Uint8List.fromList(entry)..[0] ^= 1)
+                : entry,
+          if (extraBundledEntry) 'unlisted': <int>[1, 2, 3],
+        })
+      : null;
   final payload = <String, dynamic>{
     'schemaVersion': 1,
     'appId': appId,
@@ -765,6 +894,18 @@ Future<_Release> _makeRelease({
     'entry': <String, dynamic>{'sha256': entryHash, 'size': entry.length},
     'entryFormat': 'bytecode',
     'runtimeAbi': abi,
+    if (bundle != null)
+      'bundle': <String, dynamic>{
+        'format': 'zip',
+        'sha256': crypto.sha256.convert(bundle).toString(),
+        'size': bundle.length,
+        'url': 'base.zip',
+        'blobs': <String>[
+          entryHash,
+          if (invalidSubset == 'unknown-hash') List.filled(64, 'a').join(),
+          if (invalidSubset == 'duplicate-hash') entryHash,
+        ],
+      },
     'pak': <String, dynamic>{
       'sha256': pakHash,
       'size': pak.length,
@@ -807,6 +948,7 @@ Future<_Release> _makeRelease({
     entry: entry,
     pak: pak,
     servedPak: servedPak,
+    bundle: bundle,
   );
 }
 
@@ -818,6 +960,7 @@ final class _Release {
     required this.entry,
     required this.pak,
     required this.servedPak,
+    this.bundle,
   });
 
   final Uint8List envelope;
@@ -826,6 +969,7 @@ final class _Release {
   final Uint8List entry;
   final Uint8List pak;
   final Uint8List servedPak;
+  final Uint8List? bundle;
 }
 
 final class _UpdateServer {
@@ -851,6 +995,7 @@ final class _UpdateServer {
     }
     final bytes = switch (path) {
       '/manifest.json' => release.envelope,
+      '/base.zip' => release.bundle,
       _ when path == release.entryPath => release.entry,
       _ when path == release.pakPath => release.servedPak,
       _ => null,

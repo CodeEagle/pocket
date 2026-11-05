@@ -15,6 +15,7 @@ import {
   open,
   mkdir,
   mkdtemp,
+  rename,
   readFile,
   readdir,
   rm,
@@ -39,6 +40,18 @@ import { previewDevice } from "./preview_device.ts";
 import { createEditorDeviceManager, type DeploymentSnapshot } from "./devices.ts";
 import { createWechatPreviewManager } from "./wechat.ts";
 import { chooseUpdateHost, startUpdateEndpoint } from "./update_endpoint.ts";
+import {
+  applyResourcePlacements,
+  buildResourceSnapshot,
+  emptyResourceInventory,
+  readResourcePolicy,
+  readResourceSnapshot,
+  resourceArtifactDirectory,
+  resourceInventory,
+  resourcePackageNetwork,
+  RESOURCE_POLICY_FILE,
+  RESOURCE_SNAPSHOT_FILE,
+} from "./resources.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const projectIdPattern = /^[a-z][a-z0-9-]{0,47}$/;
@@ -73,6 +86,7 @@ export type ArtifactInfo = {
   pak: string;
   manifest: string;
   build: string;
+  resources: string;
 };
 
 export type EditorStatus = {
@@ -97,6 +111,15 @@ export type EditorStatus = {
     version?: string;
     build?: number;
     channel?: "test" | "release";
+    packages?: Array<{
+      id: string;
+      updateUrl: string;
+      manifestUrl: string;
+      hostConfigUrl: string;
+      keyId: string;
+      version: string;
+      build: number;
+    }>;
   };
 };
 
@@ -224,7 +247,7 @@ function pathFailure(message: string, status = 400): never {
 }
 
 const editableFilePattern = /\.(?:ts|tsx|js|jsx|json|svg|css|md)$/i;
-const protectedFilePattern = /^(?:editor(?:-state)?|pocket|host|payload|latest|signed-manifest|build|app\.bytecode|private|secret)\.json$|\.(?:pem|key|qjbc|pak|tar|gz)$/i;
+const protectedFilePattern = /^(?:editor(?:-state)?|pocket|pocket\.system|pocket\.resources|host|payload|latest|signed-manifest|build|app\.bytecode|private|secret)\.json$|\.(?:pem|key|qjbc|pak|tar|gz)$/i;
 const protectedDirectoryNames = new Set(["assets", "builds", "updates", "keys", "node_modules", ".git", ".pocket-build"]);
 // These directories are not consumer source inputs. In particular, a
 // package-manager SDK link under node_modules and a generated build cache may
@@ -266,7 +289,7 @@ function safeProjectFile(projectDir: string, relativePath: string, options: Safe
   if (!normalized || normalized.startsWith("/") || normalized.includes("\0") || segments.some((part) => !part || part === "." || part === "..")) {
     pathFailure("file path must stay inside the project");
   }
-  const isConfigFile = leaf === "editor.json" || leaf === "pocket.json";
+  const isConfigFile = leaf === "editor.json" || leaf === "pocket.json" || leaf === "pocket.system.json" || leaf === RESOURCE_POLICY_FILE;
   if (!options.allowAssets && !(options.allowConfig && isConfigFile) && segments.some((part) => protectedDirectoryNames.has(part.toLowerCase()))) {
     pathFailure("file is not an editable guest source file");
   }
@@ -476,14 +499,14 @@ async function validateProjectInputTree(projectDir: string): Promise<void> {
         continue;
       }
       if (!insideAssets && entry.name === "assets") {
-        if (entry.isSymbolicLink()) pathFailure(`project contains unsupported asset symlink: ${relativePath}`);
+        if (entry.isSymbolicLink()) pathFailure(`project contains unsupported asset symlink: ${relativePath} (symbolic links are not allowed)`);
         if (!entry.isDirectory()) pathFailure(`project asset path is not a directory: ${relativePath}`);
         await walk(filePath, true);
         continue;
       }
 
       if (entry.isSymbolicLink()) {
-        if (insideAssets) pathFailure(`project contains unsupported asset symlink: ${relativePath}`);
+        if (insideAssets) pathFailure(`project contains unsupported asset symlink: ${relativePath} (symbolic links are not allowed)`);
         if (isAllowedExternalSdkLink(relativePath)) {
           // A valid external UI package is an explicit build_guest input. Do
           // not follow it here; build_guest handles its package boundary.
@@ -776,17 +799,25 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
   safeProjectFile(projectDir, "editor.json", { allowConfig: true });
   const pocketPath = safeProjectFile(projectDir, "pocket.json", { allowConfig: true });
   const projectManifest = safeProjectFile(projectDir, "manifest.json", { mustExist: true });
+  const systemFile = existsSync(join(projectDir, "pocket.system.json"))
+    ? safeProjectFile(projectDir, "pocket.system.json", { allowConfig: true, mustExist: true })
+    : undefined;
+  const policyFile = safeProjectFile(projectDir, RESOURCE_POLICY_FILE, { allowConfig: true });
   const pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {});
   const app = isObject(pocket.app) ? pocket.app : {};
   const configuredEntry = typeof app.entry === "string" ? app.entry : config.entry;
   safeProjectFile(projectDir, configuredEntry, { mustExist: true });
   await validateProjectInputTree(projectDir);
   const buildDir = safeChild(workspace.builds, `${id}/${revision}`);
-  await mkdir(buildDir, { recursive: true });
+  const revisionRoot = safeChild(workspace.builds, id);
+  await mkdir(revisionRoot, { recursive: true });
+  const existingBuild = lstatIfExists(buildDir);
+  if (existingBuild?.isSymbolicLink()) throw new Error("build snapshot must not be a symlink");
+  const stagingDir = await mkdtemp(join(revisionRoot, ".staging-"));
   const temp = await mkdtemp(join(tmpdir(), "pocket-editor-build-"));
   try {
     const output = await runner({ id, projectDir, outDir: temp, config, log: (line) => pushLog(state, line) });
-    const copy = async (name: string, source: string) => { await cp(source, join(buildDir, name)); };
+    const copy = async (name: string, source: string) => { await cp(source, join(stagingDir, name)); };
     await copy("app.js", output.appJs);
     await copy("app.pak", output.pak);
     await copy("app.qjbc", output.bytecode);
@@ -812,7 +843,23 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
       version: config.version,
       build: config.build,
     };
-    await writeFile(join(buildDir, "guest-manifest.json"), JSON.stringify(artifactManifest, null, 2) + "\n");
+    await writeFile(join(stagingDir, "guest-manifest.json"), JSON.stringify(artifactManifest, null, 2) + "\n");
+    const resourceSnapshot = await buildResourceSnapshot({
+      projectRoot: projectDir,
+      buildDirectory: stagingDir,
+      revision,
+      rootPackageId: config.appId,
+      rootTitle: config.title,
+      rootManifest: "pocket.json",
+      rootVersion: config.version,
+      rootBuild: config.build,
+      rootRuntimeAbi: output.runtimeAbi,
+      tickHz: config.tickHz,
+      ...(systemFile ? { systemFile } : {}),
+      policyFile,
+      strictPak: runner === realBuild,
+      log: (line) => pushLog(state, line),
+    });
     const generation = randomUUID();
     const buildInfo = {
       generation,
@@ -825,10 +872,29 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
       entryFormat: "quickjs-bytecode",
       runtimeAbi: output.runtimeAbi,
       bytecode: output.bytecodeMetadata,
+      resources: {
+        snapshot: RESOURCE_SNAPSHOT_FILE,
+        packages: resourceSnapshot.packages.map((pkg) => ({ id: pkg.id, artifactDirectory: pkg.artifactDirectory, version: pkg.version, build: pkg.build })),
+      },
       generatedAt: now(),
     };
-    await writeFile(join(buildDir, "build.json"), JSON.stringify(buildInfo, null, 2) + "\n");
-    await writeFile(join(workspace.builds, id, "current.json"), JSON.stringify({ revision }, null, 2) + "\n");
+    await writeFile(join(stagingDir, "build.json"), JSON.stringify(buildInfo, null, 2) + "\n");
+    const backupDir = `${buildDir}.backup-${randomUUID()}`;
+    let movedExisting = false;
+    try {
+      if (existingBuild) {
+        await rename(buildDir, backupDir);
+        movedExisting = true;
+      }
+      await rename(stagingDir, buildDir);
+    } catch (error) {
+      if (movedExisting && !existsSync(buildDir)) {
+        await rename(backupDir, buildDir).catch(() => undefined);
+      }
+      throw error;
+    }
+    if (movedExisting) await rm(backupDir, { recursive: true, force: true });
+    await writeFile(join(revisionRoot, "current.json"), JSON.stringify({ revision }, null, 2) + "\n");
     state.builtRevision = revision;
     state.artifacts = {
       revision,
@@ -839,6 +905,7 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
       pak: `/api/projects/${id}/artifacts/app.pak`,
       manifest: `/api/projects/${id}/artifacts/guest-manifest.json`,
       build: `/api/projects/${id}/artifacts/build.json`,
+      resources: `/api/projects/${id}/resources`,
     };
     state.error = undefined;
     pushLog(state, `build ready: revision ${revision}, runtimeAbi=${output.runtimeAbi}`);
@@ -846,6 +913,7 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
     // This directory is a private, disposable staging area.  A failed build
     // leaves the previous snapshot intact and its diagnostics in state.logs.
     await rm(temp, { recursive: true, force: true }).catch(() => undefined);
+    await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -908,6 +976,10 @@ async function publishProject(
 ): Promise<PackageResult> {
   if (state.builtRevision !== state.revision || !state.artifacts) throw new Error("build the current source before publishing");
   const buildDir = join(workspace.builds, id, String(state.builtRevision));
+  const snapshotPath = safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`);
+  const resourceSnapshot = await readResourceSnapshot(snapshotPath);
+  const rootPackage = resourceSnapshot.packages.find((pkg) => pkg.id === config.appId);
+  if (!rootPackage) throw new Error(`resource snapshot does not contain root package ${config.appId}`);
   const releaseDir = join(workspace.updates, id);
   await mkdir(releaseDir, { recursive: true });
   const { keyPath, key } = await editorUpdateTrust(workspace, id);
@@ -920,21 +992,26 @@ async function publishProject(
   const build = channel === "test" ? Math.max(config.build, Number(previous.build ?? 0), Number(metadata.build ?? 0), Number(counter.build ?? 0)) + 1 : config.build;
   if (!Number.isSafeInteger(build) || build < 0) throw new Error("test package build is outside the safe integer range");
   const version = channel === "test" ? `${config.version}-test.${build}` : config.version;
-  const projectAssets = join(projectDirectory(workspace, id), "assets");
-  const hasProjectAssets = existsSync(projectAssets) && (await readdir(projectAssets)).length > 0;
-  const result = packageArtifacts({
+  const rootDirectory = resourceArtifactDirectory(buildDir, rootPackage);
+  const rootAssets = join(rootDirectory, "assets");
+  const hasRootAssets = existsSync(rootAssets) && (await readdir(rootAssets)).length > 0;
+  const rootNetwork = resourcePackageNetwork(resourceSnapshot, rootPackage.id);
+  const rootPackageOptions = {
     appId: config.appId,
     version,
     build,
-    bytecodePath: join(buildDir, "app.qjbc"),
+    bytecodePath: join(rootDirectory, "app.qjbc"),
     entryFormat: "quickjs-bytecode",
     runtimeAbi: String(metadata.runtimeAbi),
-    pakPath: join(buildDir, "app.pak"),
+    pakPath: join(rootDirectory, "app.pak"),
     outDir: releaseDir,
     keyFile: keyPath,
-    guestManifestPath: join(buildDir, "guest-manifest.json"),
-    ...(hasProjectAssets ? { assetDir: projectAssets, assetPrefix: "assets" } : {}),
-  });
+    guestManifestPath: join(rootDirectory, "guest-manifest.json"),
+    ...(hasRootAssets ? { assetDir: rootAssets, assetPrefix: "assets" } : {}),
+    networkPakKeys: rootNetwork.pak,
+    networkAssets: rootNetwork.assets,
+  } as Parameters<typeof packageArtifacts>[0];
+  const result = packageArtifacts(rootPackageOptions);
   if (channel === "test") await writeFile(counterPath, JSON.stringify({ build }) + "\n");
   let safeOrigin = origin;
   try {
@@ -951,6 +1028,82 @@ async function publishProject(
     POCKET_UPDATE_PUBLIC_KEY: key.publicKeyBase64,
     POCKET_STORE_NAMESPACE: `editor_${id}`,
   }, null, 2) + "\n");
+  const publishedPackages: NonNullable<EditorStatus["publish"]>["packages"] = [];
+  for (const pkg of resourceSnapshot.packages) {
+    if (pkg.id === rootPackage.id) continue;
+    const packageDirectory = resourceArtifactDirectory(buildDir, pkg);
+    const packageMetadata = await readJsonFile<Record<string, unknown>>(join(packageDirectory, "app.bytecode.json"));
+    const packagePreviousDir = join(releaseDir, "packages", pkg.id);
+    const packagePrevious = await readJsonFile<Record<string, unknown>>(join(packagePreviousDir, "payload.json"), {});
+    const packageBaseBuild = Number(packageMetadata.build ?? pkg.build);
+    const packageBuild = channel === "test"
+      ? Math.max(config.build, pkg.build, packageBaseBuild, Number(packagePrevious.build ?? 0)) + 1
+      : pkg.build;
+    const packageVersion = channel === "test" ? `${pkg.version}-test.${packageBuild}` : pkg.version;
+    const packageReleaseDir = join(releaseDir, "packages", pkg.id);
+    await mkdir(packageReleaseDir, { recursive: true });
+    const packageAssets = join(packageDirectory, "assets");
+    const hasPackageAssets = existsSync(packageAssets) && (await readdir(packageAssets)).length > 0;
+    const packageNetwork = resourcePackageNetwork(resourceSnapshot, pkg.id);
+    const packageOptions = {
+      appId: pkg.id,
+      version: packageVersion,
+      build: packageBuild,
+      bytecodePath: join(packageDirectory, "app.qjbc"),
+      entryFormat: "quickjs-bytecode",
+      runtimeAbi: pkg.runtimeAbi,
+      pakPath: join(packageDirectory, "app.pak"),
+      outDir: packageReleaseDir,
+      keyFile: keyPath,
+      ...(existsSync(join(packageDirectory, "guest-manifest.json")) ? { guestManifestPath: join(packageDirectory, "guest-manifest.json") } : {}),
+      ...(hasPackageAssets ? { assetDir: packageAssets, assetPrefix: "assets" } : {}),
+      networkPakKeys: packageNetwork.pak,
+      networkAssets: packageNetwork.assets,
+    } as Parameters<typeof packageArtifacts>[0];
+    const packageResult = packageArtifacts(packageOptions);
+    const packageManifestPath = `/updates/${id}/packages/${encodeURIComponent(pkg.id)}/latest.json`;
+    const packageHostConfigPath = `/updates/${id}/packages/${encodeURIComponent(pkg.id)}/host.json`;
+    const packageManifestUrl = `${safeOrigin}${packageManifestPath}`;
+    const bootstrapDirectory = join(packageReleaseDir, "bootstrap");
+    await mkdir(bootstrapDirectory, { recursive: true });
+    await cp(join(packageDirectory, "app.bytecode.json"), join(bootstrapDirectory, "app.bytecode.json"));
+    const hasGuestManifest = existsSync(join(packageDirectory, "guest-manifest.json"));
+    if (hasGuestManifest) await cp(join(packageDirectory, "guest-manifest.json"), join(bootstrapDirectory, "guest-manifest.json"));
+    const packageNamespace = `editor_${id}_${pkg.id.replace(/[^A-Za-z0-9_-]/g, "_")}_${sha256Hex(new TextEncoder().encode(pkg.id)).slice(0, 8)}`;
+    const metadataAsset = `assets/apps/${pkg.id}/app.bytecode.json`;
+    const manifestAsset = `assets/apps/${pkg.id}/guest-manifest.json`;
+    const bootstrapAssets: Record<string, { url: string; sha256: string; size: number }> = {};
+    const bootstrapFiles: Array<[string, string]> = [[metadataAsset, "app.bytecode.json"]];
+    if (hasGuestManifest) bootstrapFiles.push([manifestAsset, "guest-manifest.json"]);
+    for (const [asset, name] of bootstrapFiles) {
+      const bytes = new Uint8Array(await readFile(join(bootstrapDirectory, name)));
+      bootstrapAssets[asset] = { url: `${safeOrigin}/updates/${id}/packages/${encodeURIComponent(pkg.id)}/bootstrap/${name}`, sha256: sha256Hex(bytes), size: bytes.length };
+    }
+    // A consumer explicitly installs these small local Flutter assets and
+    // constructs PocketAppConfig. This is a setup template, not an invented
+    // set of Dart environment variables or an unsigned runtime downloader.
+    await writeFile(join(packageReleaseDir, "host.json"), JSON.stringify({
+      kind: "pocket-mini-app-host-template",
+      requiresLocalBootstrap: true,
+      config: {
+        appId: pkg.id,
+        downloadOnOpen: true,
+        metadataAsset,
+        ...(hasGuestManifest ? { manifestAsset } : {}),
+        updates: { url: packageManifestUrl, keyId: packageResult.envelope.keyId, publicKey: key.publicKeyBase64, namespace: packageNamespace },
+      },
+      bootstrapAssets,
+    }, null, 2) + "\n");
+    publishedPackages.push({
+      id: pkg.id,
+      updateUrl: packageManifestPath,
+      manifestUrl: packageManifestUrl,
+      hostConfigUrl: packageHostConfigPath,
+      keyId: packageResult.envelope.keyId,
+      version: packageVersion,
+      build: packageBuild,
+    });
+  }
   const archive = join(workspace.updates, `${id}.tar.gz`);
   await runProcess(["tar", "-czf", archive, "-C", releaseDir, "."], root, (line) => pushLog(state, line));
   state.publish = {
@@ -963,6 +1116,7 @@ async function publishProject(
     runtimeAbi: String(metadata.runtimeAbi),
     payloadSha256: sha256Hex(result.payloadBytes),
     version, build, channel,
+    ...(publishedPackages.length > 0 ? { packages: publishedPackages } : {}),
   };
   await saveState(workspace, id, state);
   return result;
@@ -1208,7 +1362,6 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     width: previewDevice.screenWidth,
     height: previewDevice.screenHeight,
     safeArea: previewDevice.safeArea,
-    projectDirectory: (id) => projectDir(asProjectId(id)),
     // Editor preview keeps a fixed 2x native raster for crisp core-generated
     // rounded/shadow masks on desktop Retina displays. This affects texture
     // sampling only: logical viewport geometry, Canvas DPR, and external image
@@ -1218,7 +1371,34 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       const state = await getState(asProjectId(id));
       if (!state.artifacts || state.builtRevision == null) throw new Error("Build this project before opening preview");
       const folder = `${id}/${state.builtRevision}`;
-      const config = await loadConfig(projectDir(id), id);
+      const buildRoot = join(workspace.builds, id, String(state.builtRevision));
+      const resourcesPath = safeArtifactFile(workspace.builds, `${folder}/${RESOURCE_SNAPSHOT_FILE}`);
+      const resourceSnapshot = await readResourceSnapshot(resourcesPath);
+      const buildInfo = await readJsonFile<Record<string, unknown>>(safeArtifactFile(workspace.builds, `${folder}/build.json`));
+      const rootAppId = typeof buildInfo.appId === "string"
+        ? buildInfo.appId
+        : resourceSnapshot.packages.find((pkg) => pkg.artifactDirectory === ".")?.id;
+      if (!rootAppId) throw new Error("build snapshot has no root app id");
+      const applications: Record<string, {
+        bytecodePath: string;
+        sourcePath: string;
+        pakPath: string;
+        metadataPath: string;
+        appId: string;
+        projectDirectory: string;
+      }> = {};
+      for (const pkg of resourceSnapshot.packages) {
+        if (pkg.id === rootAppId) continue;
+        const packageDir = resourceArtifactDirectory(buildRoot, pkg);
+        applications[pkg.id] = {
+          bytecodePath: safeArtifactFile(workspace.builds, `${folder}/${pkg.artifactDirectory}/app.qjbc`),
+          sourcePath: safeArtifactFile(workspace.builds, `${folder}/${pkg.artifactDirectory}/app.js`),
+          pakPath: safeArtifactFile(workspace.builds, `${folder}/${pkg.artifactDirectory}/app.pak`),
+          metadataPath: safeArtifactFile(workspace.builds, `${folder}/${pkg.artifactDirectory}/app.bytecode.json`),
+          appId: pkg.id,
+          projectDirectory: packageDir,
+        };
+      }
       return {
         bytecodePath: safeArtifactFile(workspace.builds, `${folder}/app.qjbc`),
         sourcePath: safeArtifactFile(workspace.builds, `${folder}/app.js`),
@@ -1226,7 +1406,9 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         metadataPath: safeArtifactFile(workspace.builds, `${folder}/app.bytecode.json`),
         revision: state.builtRevision,
         generation: state.artifacts.generation ?? state.finishedAt ?? `legacy:${state.builtRevision}`,
-        tickHz: config.tickHz,
+        tickHz: Number.isSafeInteger(buildInfo.tickHz) && Number(buildInfo.tickHz) >= 1 ? Number(buildInfo.tickHz) : 60,
+        projectDirectory: buildRoot,
+        ...(Object.keys(applications).length > 0 ? { applications } : {}),
       };
     },
   });
@@ -1321,7 +1503,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           const id = asProjectId(body.id);
           if (workspace.projectRoot && id === workspace.projectId) return failure("configured project already exists; edit it instead of creating it", 409);
           const config = await createProject(workspace, id, body);
-        const state: EditorState = { revision: 1, builtRevision: null, busy: false, logs: [`created from SDK starter at ${now()}`] };
+          const state: EditorState = { revision: 1, builtRevision: null, busy: false, logs: [`created from SDK starter at ${now()}`] };
           states.set(id, state);
           await saveState(workspace, id, state);
           return json({ ...config, status: publicStatus(id, state) }, 201);
@@ -1412,6 +1594,52 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               await saveState(workspace, id, state);
               return json({ ...config, status: publicStatus(id, state) });
             }
+          }
+          if (parts[3] === "resources") {
+            if (parts.length !== 4) return failure("not found", 404);
+            if (method === "GET") {
+              if (state.builtRevision === null || !state.artifacts) {
+                const config = await loadConfig(projectDir(id), id);
+                const systemFile = existsSync(join(projectDir(id), "pocket.system.json"))
+                  ? safeProjectFile(projectDir(id), "pocket.system.json", { allowConfig: true, mustExist: true })
+                  : undefined;
+                return json(await emptyResourceInventory({ projectRoot: projectDir(id), rootPackageId: config.appId, rootTitle: config.title, revision: state.revision, ...(systemFile ? { systemFile } : {}) }));
+              }
+              const snapshotPath = safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`);
+              const snapshot = await readResourceSnapshot(snapshotPath);
+              const policyPath = safeProjectFile(projectDir(id), RESOURCE_POLICY_FILE, { allowConfig: true });
+              try {
+                const policy = await readResourcePolicy(policyPath);
+                return json(resourceInventory(snapshot, state.revision, policy, state.publish?.packages, state.builtRevision ?? undefined));
+              } catch {
+                // A failed rebuild must not make the last completed immutable
+                // inventory disappear because a newly edited policy is
+                // malformed. The next successful build will surface it.
+                return json(resourceInventory(snapshot, state.revision, snapshot.policy, state.publish?.packages, state.builtRevision ?? undefined));
+              }
+            }
+            if (method === "PUT") {
+              if (state.busy) return failure("build is still running", 409);
+              if (state.builtRevision === null || !state.artifacts) return failure("build the current source before changing resources", 409);
+              const snapshotPath = safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`);
+              const snapshot = await readResourceSnapshot(snapshotPath);
+              const body = await parseJsonBody(request);
+              if (!Number.isSafeInteger(body.revision) || Number(body.revision) !== state.revision) {
+                return failure("resource revision is stale; reload the project and retry", 409);
+              }
+              const packageId = asString(body.packageId, "packageId", 128);
+              const policyPath = safeProjectFile(projectDir(id), RESOURCE_POLICY_FILE, { allowConfig: true });
+              const currentPolicy = await readResourcePolicy(policyPath);
+              const nextPolicy = applyResourcePlacements(snapshot, currentPolicy, packageId, body.placements);
+              await writeProjectFile(projectDir(id), RESOURCE_POLICY_FILE, JSON.stringify(nextPolicy, null, 2) + "\n", { allowConfig: true });
+              state.revision += 1;
+              state.error = undefined;
+              state.publish = undefined;
+              pushLog(state, `resource placement saved: ${packageId} (revision ${state.revision})`);
+              await saveState(workspace, id, state);
+              return json(resourceInventory(snapshot, state.revision, nextPolicy, undefined, state.builtRevision ?? undefined));
+            }
+            return failure("method not allowed", 405);
           }
           if (parts[3] === "source") {
             const sourcePath = safeProjectFile(projectDir(id), "app.tsx");
@@ -1519,6 +1747,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               hostConfigUrl: state.publish?.hostConfigUrl,
               updateUrl: `/updates/${id}/latest.json`,
               archiveUrl: `/releases/${id}.tar.gz`,
+              ...(state.publish?.packages ? { packages: state.publish.packages } : {}),
             });
           }
           if (parts[3] === "artifacts" && method === "GET") {

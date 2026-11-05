@@ -104,6 +104,34 @@
             </div>
           </section>
 
+          <details class="panel resources-panel" id="resources-panel">
+            <summary class="resources-summary">
+              <div class="resources-heading">
+                <div class="eyebrow">PACKAGE RESOURCES</div>
+                <h2 id="resources-title">Download resources when opening a mini-app</h2>
+                <p>Choose which resources ship in the verified base package or download on open.</p>
+              </div>
+              <div class="resources-summary-actions">
+                <span id="resources-state" class="meta-chip">Select a project</span>
+                <span class="resources-chevron" aria-hidden="true">⌄</span>
+              </div>
+            </summary>
+            <div class="resources-content">
+              <div class="resources-notice">
+                <span>Network resources download on open and remain available offline after a successful launch. Required fonts and styles stay in the base package.</span>
+              </div>
+              <div class="resources-toolbar">
+                <label class="resource-package-picker" for="resource-package-picker">Mini-app package<select id="resource-package-picker" aria-label="Mini-app package" disabled></select></label>
+                <div id="resource-package-meta" class="resource-package-meta" aria-live="polite"></div>
+              </div>
+              <div id="resource-list" class="resource-list" role="list" aria-label="Package resources"><span class="muted">Select a project to inspect its packages.</span></div>
+              <div class="resources-footer">
+                <span id="resources-save-status" class="status-text" aria-live="polite">No policy loaded</span>
+                <button id="save-resources" class="button secondary small-button" type="button" disabled>Save resource policy</button>
+              </div>
+            </div>
+          </details>
+
           <section class="panel test-publish-panel" aria-labelledby="test-publish-title">
             <div class="test-publish-card">
               <div class="test-publish-copy">

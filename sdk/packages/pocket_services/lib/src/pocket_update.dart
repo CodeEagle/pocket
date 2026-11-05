@@ -439,7 +439,7 @@ final class PocketUpdateCoordinator {
               : PocketUpdateMode.granular;
     }
 
-    final Map<String, File> blobs;
+    final blobs = <String, File>{};
     var downloadedFiles = 0;
     var reusedFiles = 0;
     var downloadedBytes = 0;
@@ -455,11 +455,16 @@ final class PocketUpdateCoordinator {
           fileSha256: bundle.sha256,
         ),
       );
-      blobs = await _downloadBundleZip(
-        bundle: bundle,
-        expectedFiles: files,
-        token: token,
-        callback: onProgress,
+      final included = bundle.blobs?.toSet();
+      blobs.addAll(
+        await _downloadBundleZip(
+          bundle: bundle,
+          expectedFiles: included == null
+              ? files
+              : files.where((file) => included.contains(file.sha256)).toList(),
+          token: token,
+          callback: onProgress,
+        ),
       );
       downloadedFiles = 1;
       reusedFiles = 0;
@@ -474,11 +479,16 @@ final class PocketUpdateCoordinator {
           fileSha256: bundle.sha256,
         ),
       );
-    } else {
-      blobs = <String, File>{};
+    }
+    // A partial base archive is an explicitly signed subset, never an excuse
+    // to accept an incomplete archive. Fetch its remaining declared blobs via
+    // the same cache/downloader as granular updates, then stage the full PAK.
+    if (resolvedMode != PocketUpdateMode.zip ||
+        signed.payload.bundle!.blobs != null) {
       final missingFiles = <PocketManifestFile>[];
       for (final file in files) {
         token.throwIfCancelled();
+        if (blobs.containsKey(file.sha256)) continue;
         final cached = await _store.validBlob(file, cancellation: token);
         if (cached != null) {
           blobs[file.sha256] = cached;
@@ -489,14 +499,14 @@ final class PocketUpdateCoordinator {
         }
       }
       final totalToDownload = missingFiles.fold<int>(
-        0,
+        downloadedBytes,
         (sum, file) => sum + file.size,
       );
       _report(
         onProgress,
         PocketUpdateProgress(
           stage: PocketUpdateStage.downloading,
-          downloadedBytes: 0,
+          downloadedBytes: downloadedBytes,
           totalBytes: totalToDownload,
         ),
       );

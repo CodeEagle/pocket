@@ -13,6 +13,7 @@ import {
   packPak,
   packageArtifacts,
   patchPackageArtifacts,
+  unpackPak,
   generateDevKey,
   parsePakLayout,
   sha256Hex,
@@ -499,6 +500,132 @@ test("package emits verified bundle.7z by default (and supports bundle.zip) and 
     expect(extractedZip.size).toBe(zipResult.payload.files.length);
   } finally {
     server?.stop(true);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("network placement omits selected blobs from the bootstrap archive but preserves canonical PAK reconstruction", () => {
+  const dir = tempDirectory();
+  try {
+    const input = writeFixture(join(dir, "input"), 10);
+    const assets = join(dir, "assets");
+    mkdirSync(assets, { recursive: true });
+    writeFileSync(join(assets, "network.bin"), Buffer.from([91, 92, 93]));
+    writeFileSync(join(assets, "bundled.bin"), Buffer.from([101, 102, 103]));
+
+    const base = {
+      appId: "fixture-app",
+      version: "1.0.0",
+      build: 1,
+      jsPath: input.js,
+      pakPath: input.pak,
+      keyFile: fixtureKey,
+      assetDir: assets,
+      assetPrefix: "assets",
+      bundleFormat: "zip" as const,
+    };
+    const full = packageArtifacts({ ...base, outDir: join(dir, "full"), signedAt: 1 });
+    const emptySelection = packageArtifacts({
+      ...base,
+      outDir: join(dir, "empty-selection"),
+      signedAt: 1,
+      networkPakKeys: [],
+      networkAssets: [],
+    });
+    expect(emptySelection.payload.bundle?.blobs).toBeUndefined();
+    expect(readFileSync(emptySelection.bundlePath!)).toEqual(readFileSync(full.bundlePath!));
+    expect(emptySelection.payload.bundle).toEqual(full.payload.bundle);
+
+    const selected = packageArtifacts({
+      ...base,
+      outDir: join(dir, "selected"),
+      signedAt: 1,
+      networkPakKeys: ["ui:img.alpha"],
+      networkAssets: ["assets/network.bin"],
+    });
+    expect(selected.payload.pak).toEqual(full.payload.pak);
+    expect(selected.payload.pak.sha256).toBe(sha256Hex(input.sourcePak));
+    expect(selected.payload.files.map((file) => file.sha256)).toEqual(full.payload.files.map((file) => file.sha256));
+
+    const alphaHash = selected.payload.pak.parts.find((part) => part.key === "ui:img.alpha")!.sha256;
+    const networkAssetHash = selected.payload.assets!["assets/network.bin"].sha256;
+    const included = new Set(selected.payload.bundle!.blobs);
+    expect(included.has(alphaHash)).toBe(false);
+    expect(included.has(networkAssetHash)).toBe(false);
+    expect(selected.payload.bundle!.blobs).toEqual([...included].sort());
+
+    const archive = extractZipArchive(new Uint8Array(readFileSync(selected.bundlePath!)));
+    expect(archive.has(`blobs/${alphaHash}`)).toBe(false);
+    expect(archive.has(`blobs/${networkAssetHash}`)).toBe(false);
+    expect(archive.size).toBe(included.size);
+    for (const file of selected.payload.files) {
+      const entry = archive.get(file.url);
+      if (included.has(file.sha256)) {
+        expect(entry).toBeDefined();
+        expect(sha256Hex(entry!)).toBe(file.sha256);
+      } else {
+        expect(entry).toBeUndefined();
+      }
+    }
+    expect([...reconstruct(join(dir, "selected"), selected.payload)]).toEqual([...input.sourcePak]);
+
+    const tampered = new Uint8Array(readFileSync(selected.bundlePath!));
+    tampered[0] ^= 0xff;
+    expect(() => extractZipArchive(tampered)).toThrow();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("network placement validates logical selections and locks non-image PAK entries", () => {
+  const dir = tempDirectory();
+  try {
+    const input = writeFixture(join(dir, "input"), 10);
+    const lockedPak = packPak([
+      ...[{ key: "ui:img.alpha", dtype: 0, data: new Uint8Array([1, 2, 3]) },
+        { key: "ui:font.required", dtype: 0, data: new Uint8Array([4, 5, 6]) },
+        { key: "ui:img.beta", dtype: 0, data: new Uint8Array([7, 8, 9]) }],
+    ]);
+    writeFileSync(input.pak, lockedPak);
+    const base = {
+      appId: "fixture-app", version: "1.0.0", build: 1,
+      jsPath: input.js, pakPath: input.pak, keyFile: fixtureKey,
+      outDir: join(dir, "out"), bundleFormat: "zip" as const,
+    };
+    expect(() => packageArtifacts({ ...base, networkPakKeys: ["ui:font.required"] })).toThrow(/only ui:img/);
+    expect(() => packageArtifacts({ ...base, networkPakKeys: ["ui:img.missing"] })).toThrow(/was not found/);
+    expect(() => packageArtifacts({ ...base, networkPakKeys: ["ui:img.alpha", "ui:img.alpha"] })).toThrow(/duplicate network PAK key/);
+
+    const assets = join(dir, "assets");
+    mkdirSync(assets, { recursive: true });
+    writeFileSync(join(assets, "known.bin"), Buffer.from([10]));
+    const withAssets = { ...base, assetDir: assets, assetPrefix: "assets", outDir: join(dir, "asset-out") };
+    expect(() => packageArtifacts({ ...withAssets, networkAssets: ["assets/missing.bin"] })).toThrow(/network asset assets\/missing.bin was not found/);
+    expect(() => packageArtifacts({ ...withAssets, networkAssets: ["../known.bin"] })).toThrow(/asset path is not safe/);
+    expect(() => packageArtifacts({ ...withAssets, networkAssets: ["assets/known.bin", "assets/known.bin"] })).toThrow(/duplicate network asset/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("network selection keeps a selected image blob when its hash is required by the entry", () => {
+  const dir = tempDirectory();
+  try {
+    const input = writeFixture(join(dir, "input"), 10);
+    const alpha = unpackPak(input.sourcePak).find((blob) => blob.key === "ui:img.alpha")!.data;
+    writeFileSync(input.js, alpha);
+    const result = packageArtifacts({
+      appId: "fixture-app", version: "1.0.0", build: 1,
+      jsPath: input.js, pakPath: input.pak, outDir: join(dir, "out"), keyFile: fixtureKey,
+      bundleFormat: "zip",
+      networkPakKeys: ["ui:img.alpha"],
+    });
+    expect(result.payload.entry.sha256).toBe(sha256Hex(alpha));
+    expect(result.payload.bundle?.blobs).toBeUndefined();
+    const archive = extractZipArchive(new Uint8Array(readFileSync(result.bundlePath!)));
+    expect(archive.size).toBe(result.payload.files.length);
+    expect(archive.has(`blobs/${result.payload.entry.sha256}`)).toBe(true);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

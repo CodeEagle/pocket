@@ -184,6 +184,7 @@ final class PocketManifestBundle {
     required this.sha256,
     required this.size,
     required this.url,
+    this.blobs,
   });
 
   factory PocketManifestBundle.fromJson(Object? value) {
@@ -195,11 +196,23 @@ final class PocketManifestBundle {
         code: 'manifest-bundle',
       );
     }
+    final rawBlobs = json['blobs'];
+    if (rawBlobs != null && rawBlobs is! List) {
+      throw const PocketPackageException(
+        'bundle.blobs must be a list of content hashes',
+        code: 'manifest-bundle',
+      );
+    }
     return PocketManifestBundle(
       format: format,
       sha256: _hash(json['sha256'], 'bundle.sha256'),
       size: _int(json['size'], 'bundle.size'),
       url: _string(json['url'], 'bundle.url'),
+      blobs: rawBlobs == null
+          ? null
+          : List<String>.unmodifiable(
+              (rawBlobs as List).map((value) => _hash(value, 'bundle.blobs')),
+            ),
     );
   }
 
@@ -208,11 +221,17 @@ final class PocketManifestBundle {
   final int size;
   final String url;
 
+  /// Exact signed contents of a partial base archive. Null means the legacy
+  /// archive containing every manifest file. Other files still require hash
+  /// verification and complete PAK admission before the guest can execute.
+  final List<String>? blobs;
+
   Map<String, dynamic> toJson() => <String, dynamic>{
     'format': format,
     'sha256': sha256,
     'size': size,
     'url': url,
+    if (blobs != null) 'blobs': blobs,
   };
 }
 
@@ -568,6 +587,16 @@ final class PocketPackageManifest {
         );
       }
       _validateAssetName(bundle!.url);
+      final included = bundle!.blobs;
+      if (included != null &&
+          (included.isEmpty ||
+              included.toSet().length != included.length ||
+              included.any((hash) => !byHash.containsKey(hash)))) {
+        throw const PocketPackageException(
+          'bundle.blobs must contain unique declared file hashes',
+          code: 'manifest-bundle',
+        );
+      }
     }
   }
 }
@@ -922,11 +951,21 @@ final class PocketPackageStore {
       format: bundle.format,
       maxTotalBytes: maxTotalBytes,
     );
+    if (bundle.blobs != null) {
+      final expectedPaths = expectedFiles.map((file) => file.url).toSet();
+      if (extracted.length != expectedPaths.length ||
+          extracted.keys.any((name) => !expectedPaths.contains(name))) {
+        throw const PocketPackageException(
+          'partial bundle entries differ from its signed subset',
+          code: 'bundle-content',
+        );
+      }
+    }
     final blobs = <String, File>{};
     for (final file in expectedFiles) {
       cancellation.throwIfCancelled();
       final existing = await validBlob(file, cancellation: cancellation);
-      if (existing != null) {
+      if (existing != null && bundle.blobs == null) {
         blobs[file.sha256] = existing;
         continue;
       }
@@ -941,6 +980,12 @@ final class PocketPackageStore {
           'bundle zip is missing or has corrupted blob ${file.sha256}',
           code: 'bundle-content',
         );
+      }
+      // A partial archive promises this exact signed subset. Validate its
+      // declared entries even when earlier downloads populated the cache.
+      if (existing != null) {
+        blobs[file.sha256] = existing;
+        continue;
       }
       final target = File(path.join(_blobs.path, file.sha256));
       await _writeAtomic(target, entryBytes);

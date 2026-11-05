@@ -41,12 +41,17 @@ export type ContentFile = {
 
 export type BundleFormat = "7z" | "zip";
 
-/** One-shot archive (`.7z` or `.zip`) containing all content-addressed blobs for initial package download. */
+/** One-shot archive (`.7z` or `.zip`) containing content-addressed blobs for initial package download. */
 export type BundleDescriptor = {
   format: BundleFormat;
   sha256: string;
   size: number;
   url: string;
+  /**
+   * Exact blob hashes present in a deliberately partial bootstrap bundle.
+   * Omitted for legacy/full bundles, where every `files` blob is present.
+   */
+  blobs?: string[];
 };
 
 /** A named external asset. The bytes themselves are in the shared `files` list. */
@@ -2062,6 +2067,10 @@ export type PackageOptions = {
   assetDir?: string;
   /** Optional safe relative prefix for names in [assetDir]. */
   assetPrefix?: string;
+  /** PAK keys whose content blob is fetched outside the bootstrap bundle. */
+  networkPakKeys?: string[];
+  /** Loose asset names whose content blob is fetched outside the bootstrap bundle. */
+  networkAssets?: string[];
   protocol?: number;
   minHostVersion?: number;
   /** Optional JSON file containing signed capabilities/permissions. */
@@ -2114,12 +2123,16 @@ function writeBundleZip(
   outDir: string,
   files: ContentFile[],
   format: BundleFormat = "7z",
+  includeHashes?: ReadonlySet<string>,
 ): { descriptor: BundleDescriptor; bundlePath: string } {
   if (format !== "7z" && format !== "zip") {
     throw new Error(`package: unsupported bundle format ${format}`);
   }
   const entries = new Map<string, Uint8Array>();
-  for (const file of files) {
+  const bundledFiles = includeHashes === undefined
+    ? files
+    : files.filter((file) => includeHashes.has(file.sha256));
+  for (const file of bundledFiles) {
     const blobPath = join(outDir, file.url);
     const bytes = new Uint8Array(readFileSync(blobPath));
     if (bytes.byteLength !== file.size || sha256Hex(bytes) !== file.sha256) {
@@ -2141,9 +2154,103 @@ function writeBundleZip(
       sha256: archiveSha256,
       size: archiveBytes.byteLength,
       url: immutableRelUrl,
+      ...(includeHashes === undefined
+        ? {}
+        : { blobs: bundledFiles.map((file) => file.sha256).sort() }),
     },
     bundlePath: immutablePath,
   };
+}
+
+function validateSelectionList(
+  values: string[] | undefined,
+  label: string,
+): Set<string> {
+  if (values === undefined) return new Set<string>();
+  if (!Array.isArray(values)) throw new Error(`package: ${label} must be an array`);
+  const result = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string" || value.length === 0 || value.trim() !== value) {
+      throw new Error(`package: ${label} contains an invalid name`);
+    }
+    if (result.has(value)) throw new Error(`package: duplicate ${label} ${value}`);
+    result.add(value);
+  }
+  return result;
+}
+
+/**
+ * Select only bootstrap-delivery placement.  The signed PAK and every PAK
+ * part remain unchanged; selected image/asset blobs are merely omitted from
+ * the optional bootstrap archive and are still listed in `files` for the
+ * existing content-addressed downloader.  If a selected hash is also needed
+ * by an unselected PAK part, the entry point, or a required asset (including
+ * the Worker), content-addressed deduplication keeps it in the bootstrap.
+ */
+function resolveBundleSelection(
+  options: PackageOptions,
+  parts: PakPart[],
+  assets: Record<string, AssetFile> | undefined,
+  entryHash: string,
+  workerPath: string | undefined,
+): { includeHashes?: Set<string> } {
+  const selectedPakKeys = validateSelectionList(options.networkPakKeys, "network PAK key");
+  const selectedAssetNames = validateSelectionList(options.networkAssets, "network asset");
+  const byPakKey = new Map<string, PakPart>();
+  for (const part of parts) {
+    if (part.key !== undefined) byPakKey.set(part.key, part);
+  }
+
+  const selectedHashes = new Set<string>();
+  for (const key of selectedPakKeys) {
+    const part = byPakKey.get(key);
+    if (part === undefined) throw new Error(`package: network PAK key ${key} was not found`);
+    if (!key.startsWith("ui:img.")) {
+      throw new Error(`package: only ui:img.* PAK keys may be placed on the network: ${key}`);
+    }
+    selectedHashes.add(part.sha256);
+  }
+
+  const selectedAssets = new Set<string>();
+  for (const rawName of selectedAssetNames) {
+    const name = validateLogicalAssetName(rawName);
+    if (name !== rawName) {
+      throw new Error(`package: network asset name must use normalized path syntax: ${rawName}`);
+    }
+    if (assets === undefined || assets[name] === undefined) {
+      throw new Error(`package: network asset ${name} was not found`);
+    }
+    if (workerPath === name) {
+      throw new Error(`package: required worker asset cannot be placed on the network: ${name}`);
+    }
+    selectedAssets.add(name);
+    selectedHashes.add(assets[name].sha256);
+  }
+
+  if (selectedHashes.size === 0) return {};
+
+  const requiredHashes = new Set<string>([entryHash]);
+  for (const part of parts) {
+    if (part.key === undefined || !selectedPakKeys.has(part.key)) {
+      requiredHashes.add(part.sha256);
+    }
+  }
+  for (const [name, asset] of Object.entries(assets ?? {})) {
+    if (!selectedAssets.has(name)) requiredHashes.add(asset.sha256);
+  }
+
+  const excludedHashes = new Set<string>();
+  for (const hash of selectedHashes) {
+    if (!requiredHashes.has(hash)) excludedHashes.add(hash);
+  }
+  // A selection whose bytes are shared with a mandatory component has no
+  // observable archive effect. Keep the legacy full-bundle descriptor shape.
+  if (excludedHashes.size === 0) return {};
+  const allHashes = new Set<string>([...requiredHashes, ...selectedHashes]);
+  allHashes.forEach((hash) => {
+    if (excludedHashes.has(hash)) allHashes.delete(hash);
+  });
+  return { includeHashes: allHashes };
 }
 
 function validateLogicalAssetName(name: string): string {
@@ -2243,9 +2350,19 @@ export function packageArtifacts(options: PackageOptions): PackageResult {
     throw new Error("package: refusing to publish a worker package without its signed descriptor");
   }
   const orderedFiles = stableFiles(files);
+  const workerPath = worker?.bytecode && typeof worker.bytecode === "object" && typeof worker.bytecode.path === "string"
+    ? worker.bytecode.path
+    : undefined;
+  const bundleSelection = resolveBundleSelection(
+    options,
+    parts,
+    assets,
+    entryFile.sha256,
+    workerPath,
+  );
   const bundleResult = options.includeBundle === false
     ? undefined
-    : writeBundleZip(outDir, orderedFiles, options.bundleFormat ?? "7z");
+    : writeBundleZip(outDir, orderedFiles, options.bundleFormat ?? "7z", bundleSelection.includeHashes);
   const payload: PocketUpdatePayload = {
     schemaVersion: 1,
     appId: options.appId,
@@ -2626,7 +2743,7 @@ export function generateDevKey(outPath: string, keyId?: string, force = false): 
 function usage(): never {
   throw new Error([
     "usage:",
-    "  bun scripts/package_update.ts package --app-id ID --version VERSION --build N --js app.js --pak app.pak --out DIR --key-file KEY [--signed-at UNIX_SECONDS] [--entry-format javascript|quickjs-bytecode --bytecode app.qjbc --runtime-abi ABI] [--guest-manifest manifest.json] [--asset-dir DIR] [--asset-prefix PREFIX] [--no-bundle]",
+    "  bun scripts/package_update.ts package --app-id ID --version VERSION --build N --js app.js --pak app.pak --out DIR --key-file KEY [--signed-at UNIX_SECONDS] [--entry-format javascript|quickjs-bytecode --bytecode app.qjbc --runtime-abi ABI] [--guest-manifest manifest.json] [--asset-dir DIR] [--asset-prefix PREFIX] [--network-pak-key ui:img.NAME ...] [--network-asset NAME ...] [--no-bundle]",
     "  bun scripts/package_update.ts patch --base-dir DIR --out DIR --version VERSION --build N --key-file KEY [--signed-at UNIX_SECONDS] [--js app.js | --bytecode app.qjbc] [--pak-entry KEY=FILE] [--asset NAME=FILE] [--remove-asset NAME] [--no-bundle]",
     "  bun scripts/pocket_package.ts generate-dev-key --out KEY [--key-id ID] [--public-config-out PUBLIC_JSON] [--force]",
   ].join("\n"));
@@ -2699,6 +2816,8 @@ if (import.meta.main) {
         runtimeAbi: parsed.flags.get("runtime-abi"),
         pakPath: parsed.flags.get("pak")!, outDir: parsed.flags.get("out")!, keyFile: parsed.flags.get("key-file")!,
         assetDir: parsed.flags.get("asset-dir"), assetPrefix: parsed.flags.get("asset-prefix"),
+        networkPakKeys: parsed.multiFlags.get("network-pak-key"),
+        networkAssets: parsed.multiFlags.get("network-asset"),
         guestManifestPath: parsed.flags.get("guest-manifest"),
         protocol: parsed.flags.has("protocol") ? Number(parsed.flags.get("protocol")) : undefined,
         minHostVersion: parsed.flags.has("min-host-version") ? Number(parsed.flags.get("min-host-version")) : undefined,

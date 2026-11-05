@@ -63,15 +63,14 @@ startup and retain their behavior.
   allow this I/O and the existing first-frame wait without lengthening ordinary
   shared-bridge requests.
 
-## Deferred Editor work
+## Editor resource delivery
 
-Editor will list all mini-app subpackages and allow choosing which resources
-stay in each PAK and which are hosted on the network. That resource placement
-UI, build configuration and individual first-use resource loading are not
-implemented here. This change downloads a complete selected mini-app package;
-it does not fetch individual images on first paint. Host/system fonts are not
-remote assets. Actually packaged custom glyph data remains part of the signed
-resource contract.
+Editor resource selection and signed base-archive/network distribution are
+described in [EDITOR_RESOURCE_DELIVERY.md](EDITOR_RESOURCE_DELIVERY.md).
+This downloads a complete selected mini-app package before execution; it does
+not fetch individual images on first paint. Host/system fonts are not remote
+assets. Actually packaged custom glyph data remains part of the signed resource
+contract.
 
 ## Validation and review
 
@@ -110,11 +109,12 @@ The Worker fixture for existing tests is generated separately with
 `bun sdk/scripts/tests/worker_recording_fixture.ts /tmp/pocket-worker-fixture-verify`.
 Analysis is scoped to the SDK's `lib` and `test`; independent leaf packages
 require their own dependency bootstrap. Architecture and pinned-upstream
-verification are also checked. Editor resource-placement settings remain deferred.
+verification are also checked.
 
 Validated on 2026-11-05: SDK tests **93 passed, 0 failed, 0 skipped**;
 package-update regressions **13 passed**; the seven JS suites above **57 passed,
 0 failed** (271 assertions). Scoped analysis reported no issues. Architecture,
 pinned-upstream verification and the staged whitespace check passed. An
 independent read-only review found no remaining blockers after the floor,
-recovery and strict healthy-cache fixes.
+recovery and strict healthy-cache fixes. These counts describe the original
+download-on-open commit; Editor validation is recorded separately.

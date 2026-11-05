@@ -67,6 +67,13 @@ let wechatPollTimer = null;
 let wechatGeneration = 0;
 let startingWechat = false;
 let stoppingWechat = false;
+let resourceInventory = null;
+let resourcePackageId = "";
+let resourceDraft = new Map();
+let resourcesDirty = false;
+let resourcesLoading = false;
+let resourcesSaving = false;
+let resourcesGeneration = 0;
 
 function storedPreviewPaneHeight() {
   try {
@@ -112,7 +119,10 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     const message = value && typeof value === "object" ? value.error : value;
-    throw new Error(message || `${response.status} ${response.statusText}`);
+    const error = new Error(message || `${response.status} ${response.statusText}`);
+    error.status = response.status;
+    error.payload = value;
+    throw error;
   }
   return value;
 }
@@ -256,7 +266,7 @@ function updateActionStates() {
   const hasProject = Boolean(currentId);
   const busy = Boolean(currentStatus?.busy);
   const built = Boolean(currentStatus && currentStatus.builtRevision === currentStatus.revision && !currentStatus.error);
-  const workLocked = busy || startingDeploy || Boolean(activeDeploy && activeDeploy.status !== "running") || publishing;
+  const workLocked = busy || startingDeploy || Boolean(activeDeploy && activeDeploy.status !== "running") || publishing || resourcesSaving;
   $("save").disabled = !hasProject || !dirty || saving || workLocked;
   $("build").disabled = !hasProject || workLocked || saving;
   $("refresh-source").disabled = !hasProject || workLocked;
@@ -292,6 +302,7 @@ function updateActionStates() {
   }
   $("publish").disabled = !hasProject || !built || workLocked;
   $("publish-test").disabled = !hasProject || !built || workLocked;
+  updateResourceActionStates(workLocked);
 }
 
 function renderProjects() {
@@ -558,6 +569,362 @@ async function refreshFiles({ preserveDraft = dirty } = {}) {
   await loadFile(projectFiles.includes(currentFile) ? currentFile : projectFiles[0]);
 }
 
+function resourcesUrl(projectId) {
+  return `/api/projects/${encodeURIComponent(projectId)}/resources`;
+}
+
+function unavailableResourceInventory(error = "") {
+  return { revision: 0, packages: [], unavailable: true, error: error ? String(error) : "" };
+}
+
+function sameOriginResourceUrl(value) {
+  if (typeof value !== "string" || !value) return "";
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.origin !== window.location.origin || !["http:", "https:"].includes(url.protocol)) return "";
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return "";
+  }
+}
+
+function normalizeResourceInventory(payload) {
+  const packages = Array.isArray(payload?.packages) ? payload.packages : [];
+  const seenPackages = new Set();
+  return {
+    revision: Number.isFinite(Number(payload?.revision)) ? Number(payload.revision) : 0,
+    unavailable: payload?.unavailable === true,
+    error: typeof payload?.error === "string" ? payload.error : "",
+    packages: packages.map((entry) => {
+      const id = typeof entry?.id === "string" ? entry.id : "";
+      if (!id || seenPackages.has(id)) return null;
+      seenPackages.add(id);
+      const seenResources = new Set();
+      const resources = (Array.isArray(entry?.resources) ? entry.resources : []).map((resource) => {
+        const key = typeof resource?.key === "string" ? resource.key : "";
+        if (!key || seenResources.has(key)) return null;
+        seenResources.add(key);
+        const kind = resource?.kind === "asset" ? "asset" : "pak";
+        const placement = resource?.placement === "network" ? "network" : "pak";
+        const bytes = Number(resource?.bytes);
+        return {
+          key,
+          kind,
+          bytes: Number.isFinite(bytes) && bytes >= 0 ? bytes : null,
+          placement,
+          locked: resource?.locked === true,
+          reason: typeof resource?.reason === "string" ? resource.reason : "",
+        };
+      }).filter(Boolean);
+      return {
+        id,
+        title: typeof entry?.title === "string" && entry.title ? entry.title : id,
+        manifest: typeof entry?.manifest === "string" ? entry.manifest : "",
+        updateUrl: sameOriginResourceUrl(entry?.updateUrl),
+        hostConfigUrl: sameOriginResourceUrl(entry?.hostConfigUrl),
+        resources,
+      };
+    }).filter(Boolean),
+  };
+}
+
+function copyResourceDraft(inventory) {
+  const draft = new Map();
+  for (const entry of inventory?.packages || []) {
+    draft.set(entry.id, new Map(entry.resources.map((resource) => [resource.key, resource.placement])));
+  }
+  return draft;
+}
+
+function resourcePackage(packageId = resourcePackageId) {
+  return resourceInventory?.packages.find((entry) => entry.id === packageId) || null;
+}
+
+function formatResourceBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "size unknown";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes >= 10 * 1024 ? 0 : 1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MiB`;
+}
+
+function renderResourceState() {
+  const state = $("resources-state");
+  const saveStatus = $("resources-save-status");
+  if (!state || !saveStatus) return;
+  let label = "Select a project";
+  let kind = "";
+  let detail = "No policy loaded";
+  if (currentId && resourcesLoading) {
+    label = "Loading…";
+    kind = "loading";
+    detail = "Loading package inventory…";
+  } else if (currentId && !resourceInventory) {
+    label = "Unavailable";
+    detail = "Resource inventory unavailable";
+  } else if (currentId && resourcesDirty) {
+    label = "Unsaved policy";
+    kind = "warn";
+    detail = "Unsaved resource policy";
+  } else if (currentId && currentStatus?.busy) {
+    label = "Building…";
+    kind = "loading";
+    detail = "Build in progress";
+  } else if (currentId && currentStatus?.error) {
+    label = "Build failed";
+    kind = "bad";
+    detail = "Build failed; review diagnostics";
+  } else if (currentId && resourceInventory?.unavailable) {
+    label = resourceInventory.error ? "Unavailable" : "Build required";
+    kind = "warn";
+    detail = resourceInventory.error || "Build to inventory package resources";
+  } else if (currentId && currentStatus && currentStatus.builtRevision !== currentStatus.revision) {
+    label = "Build required";
+    kind = "warn";
+    detail = "Save, then build to apply this policy";
+  } else if (currentId && resourceInventory) {
+    label = resourceInventory.packages.some((entry) => entry.resources.length) ? "Ready" : "Catalog ready";
+    kind = "good";
+    detail = resourcesDirty ? "Unsaved resource policy" : "Policy saved";
+  }
+  state.textContent = label;
+  state.className = `meta-chip${kind ? ` ${kind}` : ""}`;
+  saveStatus.textContent = detail;
+}
+
+function resourcePackageHasDraftChanges(entry) {
+  const draft = resourceDraft.get(entry?.id);
+  return Boolean(entry?.resources.some((resource) => (draft?.get(resource.key) || resource.placement) !== resource.placement));
+}
+
+function hasResourceDraftChanges() {
+  return Boolean(resourceInventory?.packages.some((entry) => resourcePackageHasDraftChanges(entry)));
+}
+
+function updateResourceActionStates(workLocked = false) {
+  const hasProject = Boolean(currentId);
+  const controlsLocked = !hasProject || resourcesLoading || workLocked;
+  const picker = $("resource-package-picker");
+  const save = $("save-resources");
+  if (picker) picker.disabled = controlsLocked || !resourceInventory?.packages.length;
+  if (save) save.disabled = controlsLocked || resourcesSaving || !resourcesDirty;
+  for (const select of document.querySelectorAll("#resource-list select[data-resource-key]")) {
+    select.disabled = controlsLocked || select.dataset.locked === "true";
+  }
+}
+
+function renderResourcePackage() {
+  const list = $("resource-list");
+  const meta = $("resource-package-meta");
+  if (!list || !meta) return;
+  list.replaceChildren();
+  const entry = resourcePackage();
+  if (!entry) {
+    meta.textContent = "";
+    const empty = document.createElement("div");
+    empty.className = "resource-empty";
+    empty.textContent = resourceInventory?.unavailable
+      ? resourceInventory.error || "Build the project to inventory PAK and signed network resources."
+      : resourceInventory
+        ? "No mini-app package is present in the catalog."
+        : "Select a project to inspect its packages.";
+    list.append(empty);
+    return;
+  }
+  const resourceCount = entry.resources.length;
+  meta.replaceChildren();
+  const summary = document.createElement("span");
+  summary.textContent = [
+    entry.manifest ? `Manifest ${entry.manifest}` : "Manifest unavailable",
+    `${resourceCount} resource${resourceCount === 1 ? "" : "s"}`,
+  ].join(" · ");
+  meta.append(summary);
+  for (const [label, href] of [["Update manifest", entry.updateUrl], ["Host configuration", entry.hostConfigUrl]]) {
+    if (!href) continue;
+    const link = document.createElement("a");
+    link.href = href;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = `${label} ↗`;
+    meta.append(link);
+  }
+  if (!resourceCount) {
+    const empty = document.createElement("div");
+    empty.className = "resource-empty";
+    empty.textContent = resourceInventory?.unavailable
+      ? resourceInventory.error || "Build the project to inventory PAK and signed network resources for this package."
+      : "This package has no resources in the current build.";
+    list.append(empty);
+    return;
+  }
+  const draft = resourceDraft.get(entry.id) || new Map();
+  resourceDraft.set(entry.id, draft);
+  for (const resource of entry.resources) {
+    const row = document.createElement("div");
+    row.className = `resource-row${resource.locked ? " resource-locked" : ""}`;
+    row.setAttribute("role", "listitem");
+    const main = document.createElement("div");
+    main.className = "resource-row-main";
+    const key = document.createElement("code");
+    key.className = "resource-row-key";
+    key.textContent = resource.key;
+    key.title = resource.key;
+    const info = document.createElement("span");
+    info.className = "resource-row-meta";
+    info.textContent = `${resource.kind === "asset" ? "Loose asset" : "PAK resource"} · ${formatResourceBytes(resource.bytes)}`;
+    main.append(key, info);
+    if (resource.locked) {
+      const reason = document.createElement("span");
+      reason.className = "resource-row-reason";
+      reason.textContent = resource.reason || "Required by the package; placement is locked.";
+      main.append(reason);
+    }
+    const placement = document.createElement("label");
+    placement.className = "resource-placement";
+    const placementLabel = document.createElement("span");
+    placementLabel.className = "resource-placement-hint";
+    placementLabel.textContent = resource.locked ? "Required placement" : "Delivery";
+    const picker = document.createElement("select");
+    picker.dataset.resourceKey = resource.key;
+    picker.dataset.locked = String(resource.locked);
+    picker.setAttribute("aria-label", `Delivery for ${resource.key}`);
+    for (const [value, label] of [["pak", "Base package"], ["network", "Network"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      picker.append(option);
+    }
+    picker.value = draft.get(resource.key) || resource.placement;
+    picker.disabled = resource.locked;
+    picker.addEventListener("change", () => {
+      if (resource.locked) return;
+      draft.set(resource.key, picker.value === "network" ? "network" : "pak");
+      resourcesDirty = hasResourceDraftChanges();
+      renderResourceState();
+      updateActionStates();
+    });
+    placement.append(placementLabel, picker);
+    row.append(main, placement);
+    list.append(row);
+  }
+}
+
+function renderResourceInventory() {
+  const picker = $("resource-package-picker");
+  if (!picker) return;
+  picker.replaceChildren();
+  if (resourceInventory?.packages.length) {
+    if (!resourceInventory.packages.some((entry) => entry.id === resourcePackageId)) resourcePackageId = resourceInventory.packages[0].id;
+    for (const entry of resourceInventory.packages) {
+      const option = document.createElement("option");
+      option.value = entry.id;
+      option.textContent = entry.title === entry.id ? entry.id : `${entry.title} · ${entry.id}`;
+      picker.append(option);
+    }
+    picker.value = resourcePackageId;
+  } else {
+    resourcePackageId = "";
+  }
+  renderResourcePackage();
+  renderResourceState();
+  updateResourceActionStates();
+}
+
+function setResourceInventory(payload) {
+  const normalized = normalizeResourceInventory(payload);
+  const selected = resourcePackageId;
+  resourceInventory = normalized;
+  resourcePackageId = normalized.packages.some((entry) => entry.id === selected) ? selected : (normalized.packages[0]?.id || "");
+  resourceDraft = copyResourceDraft(normalized);
+  resourcesDirty = false;
+  renderResourceInventory();
+}
+
+async function fetchResources(projectId) {
+  try {
+    return await api(resourcesUrl(projectId));
+  } catch (error) {
+    // Resource inventory is supplemental to source editing and preview. Keep
+    // those workflows usable while an unbuilt/stale server reports the
+    // inventory error inside this panel only.
+    return unavailableResourceInventory(error?.message || "Resource inventory is unavailable.");
+  }
+}
+
+async function loadResources(projectId = currentId) {
+  if (!projectId) return null;
+  const generation = ++resourcesGeneration;
+  resourcesLoading = true;
+  renderResourceState();
+  updateActionStates();
+  try {
+    const payload = await fetchResources(projectId);
+    if (currentId !== projectId || generation !== resourcesGeneration) return null;
+    setResourceInventory(payload);
+    return resourceInventory;
+  } finally {
+    if (currentId === projectId && generation === resourcesGeneration) {
+      resourcesLoading = false;
+      renderResourceState();
+      updateActionStates();
+    }
+  }
+}
+
+function resetResources() {
+  resourcesGeneration += 1;
+  resourceInventory = null;
+  resourcePackageId = "";
+  resourceDraft = new Map();
+  resourcesDirty = false;
+  resourcesLoading = false;
+  renderResourceInventory();
+  renderResourceState();
+  updateResourceActionStates();
+}
+
+async function saveResources() {
+  if (!currentId || !resourceInventory || !resourcesDirty || resourcesSaving) return;
+  const projectId = currentId;
+  const generation = resourcesGeneration;
+  const entry = resourcePackage();
+  if (!entry) return;
+  const draft = resourceDraft.get(entry.id) || new Map();
+  resourcesSaving = true;
+  setText("resources-save-status", "Saving resource policy…");
+  updateActionStates();
+  try {
+    const response = await api(resourcesUrl(projectId), {
+      method: "PUT",
+      body: JSON.stringify({
+        revision: resourceInventory.revision,
+        packageId: entry.id,
+        placements: entry.resources.map((resource) => ({ key: resource.key, placement: draft.get(resource.key) || resource.placement })),
+      }),
+    });
+    if (currentId !== projectId || generation !== resourcesGeneration) return;
+    setResourceInventory(response);
+    try { await refreshStatus(); } catch {}
+    showNotice("Resource policy saved. Build the project to apply it.", "success");
+  } catch (error) {
+    if (error?.status === 409 || error?.status === 412) {
+      try {
+        if (currentId === projectId) {
+          await loadResources(projectId);
+          await refreshStatus();
+        }
+      } catch {}
+      showNotice("The resource policy changed on the server. The latest inventory was loaded; review it before saving again.", "info");
+      return;
+    }
+    showNotice(error);
+    throw error;
+  } finally {
+    resourcesSaving = false;
+    renderResourceState();
+    updateActionStates();
+  }
+}
+
 function renderArtifacts(status) {
   const artifacts = $("artifacts");
   artifacts.replaceChildren();
@@ -673,6 +1040,7 @@ function renderStatus(status) {
   logEl.textContent = status?.logs?.join("\n") || "No diagnostics yet.";
   logEl.scrollTop = logEl.scrollHeight;
   renderArtifacts(status);
+  renderResourceState();
   if (!dirty) markDirty(false);
   else updateActionStates();
   maybeRefreshPreview(status);
@@ -695,11 +1063,18 @@ async function pollBuild(attempt = 0) {
     stopBuildPolling();
     return;
   }
+  const projectId = currentId;
   try {
     const status = await refreshStatus();
+    if (currentId !== projectId) return;
     if (status?.busy) {
       buildPollTimer = setTimeout(() => void pollBuild(attempt + 1), POLL_DELAY_MS);
-    } else stopBuildPolling();
+    } else {
+      stopBuildPolling();
+      if (status?.builtRevision === status?.revision && !status?.error) {
+        void loadResources(projectId).catch(showNotice);
+      }
+    }
   } catch (error) {
     stopBuildPolling();
     showNotice(error);
@@ -712,13 +1087,14 @@ async function selectProject(id) {
     showNotice("Finish or cancel the active deployment before switching projects.", "info");
     return;
   }
-  if (dirty && currentId !== id && !window.confirm("Discard unsaved source changes?")) return;
+  if ((dirty || resourcesDirty) && currentId !== id && !window.confirm("Discard unsaved source or resource changes?")) return;
   clearNotice();
   stopBuildPolling();
   stopDeployPolling();
   invalidateWechatRequests();
   const selectionGeneration = wechatGeneration;
   currentId = id;
+  resetResources();
   currentFile = "app.tsx";
   currentStatus = null;
   previewPath = `/api/projects/${encodeURIComponent(id)}/preview`;
@@ -732,11 +1108,14 @@ async function selectProject(id) {
   markDirty(false);
   renderProjects();
   setEnabled(false);
+  resourcesLoading = true;
+  renderResourceState();
   try {
-    const [config, files, status] = await Promise.all([
+    const [config, files, status, resources] = await Promise.all([
       api(`/api/projects/${encodeURIComponent(id)}/config`),
       api(`/api/projects/${encodeURIComponent(id)}/files`),
       api(`/api/projects/${encodeURIComponent(id)}/status`),
+      fetchResources(id),
     ]);
     if (currentId !== id || selectionGeneration !== wechatGeneration) return;
     setText("project-title", config.name || id);
@@ -750,6 +1129,8 @@ async function selectProject(id) {
     renderFilePicker(fileList);
     await loadFile(projectFiles.includes(config.entry) ? config.entry : projectFiles.includes("app.tsx") ? "app.tsx" : projectFiles[0]);
     if (currentId !== id || selectionGeneration !== wechatGeneration) return;
+    resourcesLoading = false;
+    setResourceInventory(resources);
     setEnabled(true);
     renderStatus(status);
     if (status?.busy) buildPollTimer = setTimeout(() => void pollBuild(), POLL_DELAY_MS);
@@ -757,6 +1138,8 @@ async function selectProject(id) {
     if (currentId !== id || selectionGeneration !== wechatGeneration) return;
     await resumeDeployment(id);
   } catch (error) {
+    resourcesLoading = false;
+    resetResources();
     setEnabled(false);
     showNotice(error);
   }
@@ -790,6 +1173,7 @@ async function loadProjects(preferred) {
   else {
     invalidateWechatRequests();
     currentId = null;
+    resetResources();
     resetWechatPresentation();
     setEnabled(false);
     setText("project-title", "Select a project");
@@ -840,6 +1224,10 @@ async function buildProject() {
   clearNotice();
   try {
     if (dirty) await saveProject();
+    if (resourcesDirty) {
+      showNotice("Save the resource policy before building.", "info");
+      return;
+    }
     const result = await api(`/api/projects/${encodeURIComponent(currentId)}/build`, { method: "POST", body: "{}" });
     renderStatus(result.status || result);
     stopBuildPolling();
@@ -869,6 +1257,10 @@ async function publishProject(channel = "release") {
       body: JSON.stringify(channel === "test" ? { channel: "test" } : {}),
     });
     renderStatus(result.status || result);
+    if (!resourcesDirty) {
+      const projectId = currentId;
+      void loadResources(projectId).catch(showNotice);
+    }
   } catch (error) {
     showNotice(error);
   } finally {
@@ -1433,6 +1825,20 @@ $("file-picker").addEventListener("change", async (event) => {
   }
   try { clearNotice(); await loadFile(nextFile); } catch (error) { showNotice(error); }
 });
+$("resource-package-picker").addEventListener("change", (event) => {
+  const nextPackage = event.currentTarget.value;
+  if (!resourceInventory?.packages.some((entry) => entry.id === nextPackage)) return;
+  const currentEntry = resourcePackage();
+  if (resourcesDirty && resourcePackageHasDraftChanges(currentEntry)) {
+    event.currentTarget.value = resourcePackageId;
+    showNotice("Save the current package resource policy before switching packages.", "info");
+    return;
+  }
+  resourcePackageId = nextPackage;
+  renderResourcePackage();
+  updateResourceActionStates();
+});
+$("save-resources").addEventListener("click", () => { void saveResources().catch(() => {}); });
 sourceEl.addEventListener("input", () => markDirty());
 for (const id of ["config-name", "config-app-id", "config-version", "config-build", "config-tick"]) $(id).addEventListener("input", () => markDirty());
 $("viewport-picker").addEventListener("change", (event) => setViewport(event.currentTarget.value));
@@ -1514,7 +1920,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 window.addEventListener("beforeunload", (event) => {
-  if (dirty) {
+  if (dirty || resourcesDirty) {
     event.preventDefault();
     event.returnValue = "";
   }
