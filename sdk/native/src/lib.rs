@@ -2868,30 +2868,37 @@ fn build_frame(
     // Node-quota failures are intentionally sticky even when guest code
     // catches the JS exception. Do not decode or publish a partial frame.
     ensure_guest_security_healthy(host)?;
-    let (cache_hit, (width, height), auxiliary_size, raster_revision) = {
+    let (cache_hit, (width, height), auxiliary_size, raster_revision, words, auxiliary_words) = {
         let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
         core.ui.relayout_outputs();
         let auxiliary_size = core.ui.auxiliary_viewport();
         let (width, height) = core.ui.viewport();
         let raster_revision = core.ui.raster_revision();
         let nodes = host.nodes.borrow();
-        let hit = if let Some(cache) = host.draw_cache.as_ref() {
-            cache.matches_primary(
-                &core.ui.draw().words,
+        let primary_hit = {
+            let draw = core.ui.draw();
+            host.draw_cache.as_ref().is_some_and(|cache| cache.matches_primary(
+                &draw.words,
                 width,
                 height,
                 auxiliary_size,
                 raster_revision,
                 &nodes,
-            ) && cache.matches_auxiliary(if auxiliary_size.is_some() {
-                core.ui.draw_auxiliary().map(|draw| draw.words.as_slice())
-            } else {
-                None
-            })
-        } else {
-            false
+            ))
         };
-        (hit, (width, height), auxiliary_size, raster_revision)
+        let auxiliary = if auxiliary_size.is_some() { core.ui.draw_auxiliary() } else { None };
+        let hit = primary_hit && host.draw_cache.as_ref().is_some_and(|cache|
+            cache.matches_auxiliary(auxiliary.map(|draw| draw.words.as_slice())));
+        // The official draw API returns a retained list. Build each output
+        // once, and only own its words when decoding a changed snapshot.
+        // current_* accessors do not traverse the tree or allocate on a hit.
+        let (words, auxiliary_words) = if hit {
+            (Vec::new(), None)
+        } else {
+            (core.ui.current_draw_list().words.clone(),
+             core.ui.current_auxiliary_draw_list().map(|draw| draw.words.clone()))
+        };
+        (hit, (width, height), auxiliary_size, raster_revision, words, auxiliary_words)
     };
 
     // Consume the actual PocketJS DrawList. Unsupported operations are
@@ -2907,16 +2914,6 @@ fn build_frame(
         // frame happens to emit no bridge events.
         host.frame_json_cache = None;
         host.draw_decode_count = host.draw_decode_count.wrapping_add(1);
-        let (words, auxiliary_words) = {
-            let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
-            let words = core.ui.draw().words.clone();
-            let auxiliary_words = if auxiliary_size.is_some() {
-                core.ui.draw_auxiliary().map(|draw| draw.words.clone())
-            } else {
-                None
-            };
-            (words, auxiliary_words)
-        };
         let nodes = host.nodes.borrow().clone();
         let (ops, auxiliary, generic_texture_handles) = {
             // GLYPH_RUN page preparation allocates shared core textures, so
@@ -3936,7 +3933,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
 
 const PAK_MAGIC: u32 = 0x4b50_4344;
 const FONT_ATLAS_MAGIC: u32 = 0x4146_4344;
-const BASE_GUEST_HEAP_LIMIT: usize = 16 * 1024 * 1024;
+const BASE_GUEST_HEAP_LIMIT: usize = 128 * 1024 * 1024;
 /// A configured QuickJS limit must leave enough room for the runtime and
 /// bridge bootstrap.  This is a configuration guard, not a promise about
 /// process RSS or native/GPU allocations.
