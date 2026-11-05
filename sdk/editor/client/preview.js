@@ -43,7 +43,8 @@
   // copy the already-painted backdrop, blur that copy, then let following
   // ops (the black scrim and the modal panel) paint above it. Keep one scratch
   // canvas per preview canvas so opening/closing a modal does not allocate a
-  // new full-viewport buffer on every frame.
+  // new full-viewport buffer on every frame. Retain only its last filtered
+  // backdrop: an opacity/scale change above the glass needs only compositing.
   const glassScratchCache = new WeakMap();
 
   function number(value, fallback) {
@@ -360,7 +361,7 @@
     const element = document.createElement("canvas");
     const context = element.getContext("2d");
     if (!context) return null;
-    scratch = { canvas: element, context };
+    scratch = { canvas: element, context, backdropKey: null, sigma: null };
     glassScratchCache.set(canvas, scratch);
     return scratch;
   }
@@ -376,8 +377,8 @@
   }
 
   /** Paint one real browser-side backdrop blur for a native `glass` surface. */
-  function drawGlassSurface(context, op, frameWidth, frameHeight) {
-    const descriptor = surfaceDescriptor(op);
+  function drawGlassSurface(context, op, frameWidth, frameHeight, descriptor, backdropKey = null) {
+    descriptor = descriptor || surfaceDescriptor(op);
     if (!descriptor) return false;
     const parameters = descriptor.parameters;
     const effect = parameters.effect === "blur" ? "blur" : "glass";
@@ -392,9 +393,11 @@
     const backingWidth = source.width;
     const backingHeight = source.height;
     if (backingWidth <= 0 || backingHeight <= 0) return false;
-    if (scratch.canvas.width !== backingWidth) scratch.canvas.width = backingWidth;
-    if (scratch.canvas.height !== backingHeight) scratch.canvas.height = backingHeight;
-    const scratchContext = scratch.context;
+    if (scratch.canvas.width !== backingWidth || scratch.canvas.height !== backingHeight) {
+      scratch.canvas.width = backingWidth;
+      scratch.canvas.height = backingHeight;
+      scratch.backdropKey = null;
+    }
     const scaleX = backingWidth / Math.max(1, frameWidth);
     const scaleY = backingHeight / Math.max(1, frameHeight);
     const scale = Math.min(scaleX, scaleY);
@@ -411,13 +414,22 @@
     // Copy only the frame that has already been painted. The copy is the
     // browser equivalent of Flutter's BackdropFilter input texture; it does
     // not re-run guest layout or invent a screenshot of the modal itself.
-    scratchContext.setTransform(1, 0, 0, 1, 0, 0);
-    scratchContext.globalAlpha = 1;
-    scratchContext.globalCompositeOperation = "copy";
-    scratchContext.filter = `blur(${sigma * scale}px)`;
-    scratchContext.drawImage(source, 0, 0, backingWidth, backingHeight);
-    scratchContext.filter = "none";
-    scratchContext.globalCompositeOperation = "source-over";
+    // Compare the exact ordered draw prefix, not a lossy hash. Only the most
+    // recent sample is retained in the existing scratch canvas; multiple
+    // glass surfaces safely recalculate when their prefixes differ.
+    const scaledSigma = sigma * scale;
+    if (backdropKey === null || scratch.backdropKey !== backdropKey || scratch.sigma !== scaledSigma) {
+      const scratchContext = scratch.context;
+      scratchContext.setTransform(1, 0, 0, 1, 0, 0);
+      scratchContext.globalAlpha = 1;
+      scratchContext.globalCompositeOperation = "copy";
+      scratchContext.filter = `blur(${scaledSigma}px)`;
+      scratchContext.drawImage(source, 0, 0, backingWidth, backingHeight);
+      scratchContext.filter = "none";
+      scratchContext.globalCompositeOperation = "source-over";
+      scratch.backdropKey = backdropKey;
+      scratch.sigma = scaledSigma;
+    }
 
     context.save();
     const clip = op.clip && typeof op.clip === "object" ? op.clip : null;
@@ -447,15 +459,18 @@
       number(a.h, 0) === number(b.h, 0);
   }
 
-  function drawFrame(context, frame, resources, videos) {
+  function drawFrame(context, frame, resources, videos, resourceEpoch = 0) {
     const width = number(frame.width, 1);
     const height = number(frame.height, 1);
     context.clearRect(0, 0, width, height);
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
     const ops = Array.isArray(frame.ops) ? frame.ops : [];
+    let hasGlass = false;
+    let backdropHasVideo = false;
     let activeClip = null;
-    for (const op of ops) {
+    for (let index = 0; index < ops.length; index += 1) {
+      const op = ops[index];
       if (!op || typeof op !== "object") continue;
       const nextClip = op.clip && typeof op.clip === "object" ? op.clip : null;
       if (!sameClip(activeClip, nextClip)) {
@@ -505,12 +520,24 @@
         drawTriangle(context, op, resources.get(String(op.asset ?? "")));
       } else if (kind === "video") {
         drawVideo(context, videos?.get(videoKey(op)), op);
+        backdropHasVideo = true;
       } else if (kind === "hostSurface") {
         // Glass is a real browser projection of the native compositor
         // surface. Other host surfaces still have no browser-side provider;
         // do not paint fabricated rectangles or screenshots for them.
-        drawGlassSurface(context, op, width, height);
+        const descriptor = surfaceDescriptor(op);
+        if (descriptor) {
+          hasGlass = true;
+          // Videos can change pixels without a new DrawOp. Resource updates
+          // invalidate even when an image keeps the same asset identity.
+          const key = backdropHasVideo ? null : JSON.stringify([resourceEpoch, width, height, ops.slice(0, index)]);
+          drawGlassSurface(context, op, width, height, descriptor, key);
+        }
       }
+    }
+    if (!hasGlass) {
+      const scratch = glassScratchCache.get(context.canvas);
+      if (scratch) scratch.backdropKey = null;
     }
     if (activeClip) context.restore();
   }
@@ -682,6 +709,7 @@
     root.style.cssText += ";display:flex;flex-direction:column;align-items:stretch;min-height:100%;position:relative;background:#0b1020;color:#e5e7eb";
     canvas.style.cssText += ";display:block;width:100%;height:auto;max-width:100%;background:#fff;touch-action:none;outline:none;image-rendering:auto";
     const resources = new Map();
+    let resourceEpoch = 0;
     // Browser videos are real HTMLMediaElements used as Canvas sources. The
     // maps retain only bounded intent/retired identities when a DrawOp is
     // culled; the decoder element itself follows native visibility lifetime.
@@ -1711,11 +1739,13 @@
         disposeResource(resources.get(asset));
         if (decoded) resources.set(asset, decoded);
         else resources.delete(asset);
+        resourceEpoch += 1;
       }
       for (const asset of Array.isArray(next.releasedResources) ? next.releasedResources : []) {
         if (typeof asset === "string") {
           disposeResource(resources.get(asset));
           resources.delete(asset);
+          resourceEpoch += 1;
         }
       }
       for (const event of Array.isArray(next.events) ? next.events : []) applyVideoCommand(event);
@@ -1814,7 +1844,7 @@
       // Explicit logical aspect avoids rounded backing pixels changing CSS size.
       canvas.style.aspectRatio = `${width} / ${height}`;
       context.setTransform(backingWidth / width, 0, 0, backingHeight / height, 0, 0);
-      drawFrame(context, frame, resources, videos);
+      drawFrame(context, frame, resources, videos, resourceEpoch);
       if (regionsEnabled) drawRegionOverlay(context, frame);
     }
 
@@ -2250,7 +2280,10 @@
       for (const image of resources.values()) disposeResource(image);
       resources.clear();
       const glassScratch = glassScratchCache.get(canvas);
-      if (glassScratch) glassScratch.canvas.width = glassScratch.canvas.height = 0;
+      if (glassScratch) {
+        glassScratch.canvas.width = glassScratch.canvas.height = 0;
+        glassScratch.backdropKey = null;
+      }
       glassScratchCache.delete(canvas);
       cancelPointerContacts();
       connectionGeneration += 1;

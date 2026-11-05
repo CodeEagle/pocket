@@ -1,5 +1,48 @@
 # Editor 网页绘制：圆角拼接与屏幕密度
 
+## 渐变动画的稳定背景模糊复用（2026-11-05）
+
+本轮继续复用 retained parent 的 `lib/render/pocket_ui_components.dart`
+绘制资源复用原则，以及已有真实 Canvas backdrop blur。之前每个淡入、
+淡出帧都重新执行全屏 DPR blur，即使变化的只有玻璃上方的 Dialog 和
+合成透明度。现在只在原有 scratch Canvas 中保留最近一次滤波像素，
+精确比较该 surface 前面的有序 DrawOps、资源 epoch、逻辑尺寸、backing
+尺寸和 blur sigma；相同时只执行本帧的 clip、opacity 和 tint 合成。
+
+背景操作、图片内容替换/释放或尺寸变化都会失效；前景面板的 scale/fade
+不失效。此前出现过 video DrawOp 的背景每帧重算，因为解码帧可以在
+DrawOps 不变时更新。没有 glass 的帧清除 key，预览关闭释放 scratch
+像素。多 glass 顺序仍逐个采样实际已绘画面，单一 scratch 不能命中时
+保守重算。没有降低 DPR 或 blur 分辨率，没有预开隐藏弹窗。
+
+消融删除了试验中的 32-bit hash、四份历史快照、LRU 和第二套内存预算。
+最终仅复用已有的一张 scratch，不存在颜色历史缓存。直接比较完整序列
+避免 hash 碰撞误用背景。资源 epoch 是浏览器解码资源真实变更计数，
+不是业务层的主题状态或弹窗状态副本。
+
+`preview_glass_cache.test.ts` 使用真实 Chromium Canvas 检查：透明度变化
+三帧只运行一次 blur，像素仍按进度混合；背景红蓝变红绿、相同 asset id
+图片红变蓝、资源释放为白底、resize 均正确失效；video 前缀连续两帧
+均重新滤波；整个流程只使用一个滤波目标，close 后尺寸归零。video
+用未就绪 DrawOp 检查保守失效边界，真实视频解码由原有视频测试负责。
+只通过环境变量改读 HEAD 旧 client 的负对照失败（两帧滤波 2 次而非
+1 次），未覆盖生产文件。透明 blur/TEX_TRI/PSM5 像素回归也通过。
+
+真实 Showcase 消融使用同一份新 QJBC（591,313 bytes）、release probe、
+fresh Playwright Chromium，390×844 / DPR 2，UI → For → Close，首次和
+再次打开各一次。旧 client 的入场分别有 12/13 次 blur，新版均为 4 次；
+其余帧复用滤波结果。绘制调用均值约 6.65/6.45ms → 2.78/2.80ms，
+中位数约 6.9/6.7ms → 0.45/0.40ms。剩余重算来自真实资源/背景变化。
+这是一组本机同步 Canvas 调用观测，不是 GPU 完成时间或屏幕 FPS 保证。
+两种 client 的关闭都保留多个单调递减中间 opacity，直到退出后才移除。
+
+最终三个 Canvas 回归（blur cache、texture alpha/PSM5、tint）全部通过。
+真实 idle-wake 与像素测试通过，五次原生弹窗循环在独立 Bun 进程通过。
+循环测试的退出判据改为 glass surface 已释放：淡出的原生语义 Text 会
+提前变成 glyph image，不能据此判断 Modal 已经卸载并点击下层按钮。
+缩放检查与 native Dialog 测试一致，允许整数片段每边一像素的量化误差，
+同时继续验证整体增长和逐帧 blur opacity 单调性。
+
 ## 反复切换主题的图片着色开销（2026-11-05）
 
 保留父项目的 `mini_apps/syslib/pocket_syslib_pages.js` 主题/组件组合与
