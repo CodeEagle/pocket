@@ -10,9 +10,12 @@ import {
 } from "@pocket/ui/legacy";
 import {
   availableDisplayPanes,
+  avoidDisplayOcclusions,
   bottomBarInsets,
+  DISPLAY_UI_SAFETY_GAP,
   deriveResponsiveLayout,
   displayPane,
+  pageInsets,
   parseDisplayGeometry,
   reservedInsets,
 } from "@pocket/ui/responsive";
@@ -105,6 +108,7 @@ test("display geometry and duo responsive layouts", () => {
   assert.equal(realDuoWideInsets.top, 0, "central division must not consume the full top edge");
   assert.equal(realDuoWideInsets.bottom, 34);
   assert.equal(realDuoWideInsets.right, 84);
+  assert.equal(pageInsets(realDuoWide).right, 0, "open Duo corner projection is released for Page body");
   assert.equal(deriveResponsiveLayout(realDuoWide).mode, "wide");
   assert.equal(deriveResponsiveLayout(realDuoWide).railSide, "right");
   assert.equal(realDuoWide.reservedRegions.filter((region) => region.kind === "division").length, 1);
@@ -115,12 +119,34 @@ test("display geometry and duo responsive layouts", () => {
   assert.equal(deriveResponsiveLayout(realDuoFolded).mode, "wide");
   assert.equal(reservedInsets(realDuoFolded).top, 0, "small top-right occlusion must not become global top padding");
   assert.equal(reservedInsets(realDuoFolded).right, 84);
+  assert.equal(pageInsets(realDuoFolded).right, 0, "inactive open Duo division still identifies Page topology");
   assert.equal(deriveResponsiveLayout(realDuoClosed).mode, "narrow");
   assert.equal(deriveResponsiveLayout(realDuoClosed).navigation, "bottom");
   assert.equal(reservedInsets(realDuoClosed).right, 84);
+  assert.equal(pageInsets(realDuoClosed).right, 84, "folded Duo keeps the global right safe area");
   assert.deepEqual(bottomBarInsets(realDuoWide), { top: 0, right: 0, bottom: 34, left: 0 });
   assert.deepEqual(bottomBarInsets(realDuoFolded), { top: 0, right: 0, bottom: 34, left: 0 });
   assert.deepEqual(bottomBarInsets(realDuoClosed), { top: 0, right: 0, bottom: 34, left: 0 });
+
+  const cornerTarget = { left: realDuoWide.width - 52, top: 8, width: 44, height: 44 };
+  const cornerWithoutGlobalRight = parseDisplayGeometry({
+    ...duoGeometrySamples[0] as Record<string, unknown>,
+    safeArea: { ...realDuoWide.safeArea, right: 0 },
+  });
+  const localCorner = avoidDisplayOcclusions(cornerWithoutGlobalRight, cornerTarget, { prefer: "horizontal" });
+  assert.equal(localCorner.offsetX, -76, "right=0 open Duo must move only the intersecting close target");
+  assert.equal(localCorner.offsetY, 0);
+  assert.equal(avoidDisplayOcclusions(cornerWithoutGlobalRight, { left: 0, top: 200, width: 951, height: 400 }).offsetX, 0, "open Duo body remains full width");
+  assert.equal(avoidDisplayOcclusions(realDuoWide, { left: 455, top: 8, width: 44, height: 44 }).offsetX, 0, "division is not an occlusion");
+  const openClose = avoidDisplayOcclusions(realDuoWide, { left: realDuoWide.width - 52 - realDuoWide.safeArea.right, top: 8, width: 44, height: 44 }, { prefer: "horizontal" });
+  const openToolbar = avoidDisplayOcclusions(realDuoWide, { left: realDuoWide.width - 60, top: 8, width: 60, height: 56 }, { prefer: "horizontal" });
+  const closeLeft = realDuoWide.width - 52 - realDuoWide.safeArea.right + openClose.offsetX;
+  const toolbarContentRight = realDuoWide.width - (60 - openToolbar.offsetX + DISPLAY_UI_SAFETY_GAP);
+  assert.equal(openClose.offsetY, 0, "open close remains at the top");
+  assert.ok(toolbarContentRight + 1.1 < closeLeft, `open toolbar/header must stay left of close target: ${toolbarContentRight} >= ${closeLeft}`);
+  const rotatedDuo = parseDisplayGeometry(duoGeometrySamples[2], realDuoWide);
+  assert.equal(pageInsets(rotatedDuo).right, 84, "rotation to folded geometry restores global right safe area");
+  assert.equal(avoidDisplayOcclusions(rotatedDuo, { left: 330, top: 8, width: 44, height: 44 }).offsetX, 0, "folded Duo keeps the native right safe area once");
 
   const transientKeyboardGeometry = parseDisplayGeometry({
     width: 951,
@@ -233,7 +259,7 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(mobileSource, /blur: current\.blurSigma/);
   assert.match(mobileSource, /CompositorSurface/);
   assert.match(mobileSource, /releaseSurface/);
-  assert.match(mobileSource, /<View class="flex-col w-full"/);
+  assert.match(mobileSource, /<SafeAreaScaffold/);
   assert.doesNotMatch(mobileSource, /"flex-1 w-full " \+ props\.class/);
   assert.match(pageSource, /computeTransitionDescriptor/);
   assert.match(pageSource, /TRANSITION_MODES\.filter/);
@@ -254,7 +280,7 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(appSource, /createDisplayGeometry/);
   assert.match(displaySource, /display\.viewport/);
   assert.match(displaySource, /onCleanup/);
-  assert.match(displaySource, /previous\?\.\(line\)/);
+  assert.match(displaySource, /previous\?\.\(line\)|forwardHostPacket\(previous,\s*packet\)/);
   assert.match(displaySource, /parseDisplayGeometry/);
   assert.match(mobileSource, /PlatformTextureSurface/);
   assert.match(mobileSource, /radius\?: number/);

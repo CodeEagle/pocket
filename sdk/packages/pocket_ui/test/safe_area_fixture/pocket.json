@@ -1,0 +1,18 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket.ui.safe-area-fixture",
+  "name": "pocket-ui-safe-area-fixture",
+  "version": "0.1.0",
+  "app": {
+    "entry": "app.tsx",
+    "output": "app",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [360, 640],
+        "presentation": "native"
+      }
+    }
+  }
+}

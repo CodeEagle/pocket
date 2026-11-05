@@ -7,7 +7,7 @@
  * mounted by this sample.
  */
 
-import { For, createEffect, createSignal, onCleanup, type Accessor, type JSX } from "solid-js";
+import { For, children as resolveChildren, createContext, createEffect, createSignal, onCleanup, useContext, type Accessor, type JSX } from "solid-js";
 import { createGesture } from "@pocketjs/framework/gesture";
 import { bindDpadScroll, createScroller } from "@pocketjs/framework/kinetics";
 import { onFrame } from "@pocketjs/framework/solid/lifecycle";
@@ -21,7 +21,483 @@ import {
   type ViewProps,
 } from "@pocketjs/framework/solid/components";
 import { createDisplayGeometry } from "./display.ts";
-import { availableDisplayPanes, bottomBarInsets, deriveResponsiveLayout, type DisplayGeometry } from "./responsive.ts";
+import {
+  availableDisplayPanes,
+  avoidDisplayOcclusions,
+  bottomBarInsets,
+  deriveResponsiveLayout,
+  DISPLAY_UI_SAFETY_GAP,
+  EMPTY_DISPLAY_GEOMETRY,
+  hasLocalTopRightOcclusionInset,
+  pageInsets,
+  topRightContourReserveForBand,
+  topRightOcclusionFrame,
+  topRightOcclusionFrames,
+  type DisplayGeometry,
+} from "./responsive.ts";
+
+/**
+ * Safe-area aware guest shell for standalone pages.
+ *
+ * The host reports the logical safe area through the existing
+ * `display.viewport` event.  Keep the canvas/background edge-to-edge, then
+ * consume the edge insets exactly once around the app bar and body.  A
+ * bottom-bar slot is intentionally excluded from the parent bottom padding:
+ * `NavigationBar` owns its own home-indicator inset, matching the retained
+ * parent's edge-to-edge bar contract.
+ *
+ * `MobileScaffold` remains the no-inset composition primitive used by pages
+ * already nested below the showcase `Screen`.  This separate entry point is
+ * for independent guests (for example the profile and lobby apps), where
+ * there is no parent `Screen` to consume the host inset.
+ */
+export interface SafeAreaScaffoldProps {
+  children?: JSX.Element;
+  appBar?: SafeAreaSlot;
+  bottomBar?: SafeAreaSlot;
+  /** Full-viewport canvas class; the background must remain edge-to-edge. */
+  class?: string;
+  /** Insets to consume; `all` is for an independent guest, `top` for a root shell. */
+  edges?: SafeAreaEdges;
+  /** Reuse an existing display signal when the parent already owns geometry. */
+  geometry?: DisplayGeometry | (() => DisplayGeometry);
+  /** Reserve the host's top-right action hit area without shrinking the canvas. */
+  reservedActions?: SafeAreaReservedActions;
+}
+
+export type SafeAreaEdge = "top" | "right" | "bottom" | "left";
+export type SafeAreaEdges = "all" | "none" | readonly SafeAreaEdge[];
+export type SafeAreaSlot = JSX.Element | (() => JSX.Element);
+export type SafeAreaReservedActions = "none" | "mini-app" | number;
+export const MINI_APP_HOST_ACTION_RESERVE = 60;
+
+export interface SafeAreaScaffoldContextValue {
+  hasScaffold: boolean;
+  reservedActions: number;
+  geometry: () => DisplayGeometry;
+  /** Local right reserve for a top body band under status icons. */
+  topRightContentReserve: () => number;
+  /** Progressive right reserve for an arbitrary vertical band `[visualTop, visualBottom]`. */
+  topRightReserveForBand: (visualTop: number, visualBottom: number, rampPx?: number, itemRight?: number) => number;
+}
+
+export const SafeAreaScaffoldContext = createContext<SafeAreaScaffoldContextValue>({
+  hasScaffold: false,
+  reservedActions: 0,
+  geometry: () => EMPTY_DISPLAY_GEOMETRY,
+  topRightContentReserve: () => 0,
+  topRightReserveForBand: () => 0,
+});
+
+export const ContourConsumedContext = createContext<() => boolean>(() => false);
+
+export interface ScrollablePageContextValue {
+  scrollOffset: () => number;
+  geometry: () => DisplayGeometry;
+  subscribeContour: (sync: () => boolean) => () => void;
+}
+
+export const ScrollablePageContext = createContext<ScrollablePageContextValue | undefined>(undefined);
+
+function reservedActionWidth(value: SafeAreaReservedActions | undefined): number {
+  if (value === "mini-app") return MINI_APP_HOST_ACTION_RESERVE;
+  if (value === "none" || value === undefined) return 0;
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+export function SafeAreaScaffold(props: SafeAreaScaffoldProps): JSX.Element {
+  const parentScaffold = useContext(SafeAreaScaffoldContext);
+  const edges = props.edges ?? "all";
+  // A nested no-inset adapter does not need a display subscription at all;
+  // this is the ablation that keeps the Showcase's existing root signal the
+  // only geometry owner for those pages while preserving parent contour context.
+  const ownedGeometry = props.geometry === undefined && edges !== "none"
+    ? createDisplayGeometry()
+    : undefined;
+  const geometry = (): DisplayGeometry => typeof props.geometry === "function"
+    ? props.geometry()
+    : props.geometry
+      ?? ownedGeometry?.()
+      ?? (parentScaffold.hasScaffold ? parentScaffold.geometry() : EMPTY_DISPLAY_GEOMETRY);
+  const reservedActions = props.reservedActions !== undefined
+    ? reservedActionWidth(props.reservedActions)
+    : parentScaffold.reservedActions;
+  const consumesRight = edges === "all" || (edges !== "none" && edges.includes("right"));
+  const bodyRightInset = (): number => {
+    if (!consumesRight) return 0;
+    const current = geometry();
+    if (hasLocalTopRightOcclusionInset(current)) return 0;
+    return pageInsets(current).right;
+  };
+  const topRightReserveForBand = (
+    visualTop: number,
+    visualBottom: number,
+    rampPx?: number,
+    itemRight?: number,
+  ): number => {
+    if (edges === "none" && props.geometry === undefined) {
+      return parentScaffold.topRightReserveForBand(visualTop, visualBottom, rampPx, itemRight);
+    }
+    const current = geometry();
+    const raw = topRightContourReserveForBand(current, visualTop, visualBottom, {
+      itemRight,
+      rampPx,
+    });
+    return itemRight !== undefined ? raw : Math.max(0, raw - bodyRightInset());
+  };
+  const topRightContentReserve = (): number => {
+    if (edges === "none" && props.geometry === undefined) {
+      return parentScaffold.topRightContentReserve();
+    }
+    return topRightReserveForBand(0, 56, 0);
+  };
+
+  return (
+    <SafeAreaScaffoldContext.Provider value={{
+      hasScaffold: true,
+      reservedActions,
+      geometry,
+      topRightContentReserve,
+      topRightReserveForBand,
+    }}>
+      <SafeAreaScaffoldBody {...props} edges={edges} geometry={geometry} />
+    </SafeAreaScaffoldContext.Provider>
+  );
+}
+
+function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
+  edges: SafeAreaEdges;
+  geometry: () => DisplayGeometry;
+}): JSX.Element {
+  const insets = () => pageInsets(props.geometry());
+  // Resolve slots inside the provider-owned body. A getter-backed app-bar
+  // (`appBar={() => <MobileAppBar ... />}`) therefore sees the host-action
+  // reservation and contour-consumed context instead of materializing against
+  // the default context before SafeAreaScaffold mounts.
+  const resolveSlot = (slot: SafeAreaSlot | undefined): JSX.Element | undefined =>
+    typeof slot === "function" ? slot() : slot;
+  const resolvedChildren = resolveChildren(() => resolveSlot(props.children));
+  const resolvedBottomBar = resolveChildren(() => resolveSlot(props.bottomBar));
+  const bottomBar = resolvedBottomBar();
+  const hasAppBar = props.appBar !== undefined && props.appBar !== null;
+  const hasBottomBar = bottomBar !== undefined && bottomBar !== null;
+  const intrinsic = props.edges === "none";
+  const canvasClass = props.class ?? (intrinsic
+    ? "flex-col w-full bg-[#F5F6FA]"
+    : "flex-col w-full h-full bg-[#F5F6FA]");
+  const consumes = (edge: SafeAreaEdge): boolean =>
+    props.edges === "all" || (props.edges !== "none" && props.edges.includes(edge));
+  const bodyRightInset = () => {
+    if (!consumes("right")) return 0;
+    const current = props.geometry();
+    // Release a local top-right corner occlusion from full-height page padding
+    // so content below the cutout remains full-width while contour-aware
+    // headers and scroll items narrow locally inside the top-right band.
+    if (hasLocalTopRightOcclusionInset(current)) return 0;
+    return insets().right;
+  };
+  const appBarTrailingReserve = () => {
+    if (intrinsic || !hasAppBar) return 0;
+    const current = props.geometry();
+    const padding = pageInsets(current);
+    const existingReserve = reservedActionWidth(props.reservedActions);
+    const appBarTop = consumes("top") ? padding.top : 0;
+    const contour = topRightOcclusionFrame(current);
+    if (existingReserve <= 0) {
+      return Math.max(
+        0,
+        topRightContourReserveForBand(current, appBarTop, appBarTop + 56, { rampPx: 0 }) - bodyRightInset(),
+      );
+    }
+    // Measure only the existing trailing action band in the 56px app-bar.
+    // A local Duo corner obstruction adds the missing reserve; body and
+    // full-width top layout remain unchanged. Global safeArea.right is already
+    // in `bodyRightInset`, so this cannot add the same inset twice.
+    const target = {
+      left: current.width - bodyRightInset() - existingReserve,
+      top: appBarTop,
+      width: existingReserve,
+      height: 56,
+    };
+    const local = avoidDisplayOcclusions(current, target, { prefer: "horizontal" });
+    // The close target may itself move left. Keep the app-bar content clear
+    // of that translated target, not merely clear of the original corner;
+    // the existing host-action reserve remains in MobileAppBar.
+    return Math.max(0, -local.offsetX) + (contour && bodyRightInset() === 0 ? DISPLAY_UI_SAFETY_GAP : 0);
+  };
+
+  // Preserve the retained MobileScaffold contract for nested pages: its
+  // children were direct siblings in a grow-only canvas, so a ScrollablePage
+  // could measure its intrinsic content. The bounded body wrapper below is
+  // only for an independent/root safe-area owner.
+  if (intrinsic) {
+    return (
+      <View class="flex-col w-full" style={{ grow: 1 }}>
+        <View class={canvasClass} style={{ grow: 1 }}>
+          {hasAppBar ? resolveSlot(props.appBar) : null}
+          {resolvedChildren()}
+          {hasBottomBar ? bottomBar : null}
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View class="flex-col w-full h-full" style={{ grow: 1 }}>
+      <View
+        class={canvasClass}
+        style={{
+          grow: 1,
+          paddingL: consumes("left") ? insets().left : 0,
+          paddingR: bodyRightInset(),
+        }}
+      >
+        {hasAppBar ? (
+          <ContourConsumedContext.Provider value={() => true}>
+            <View style={{
+              paddingT: consumes("top") ? insets().top : 0,
+              paddingR: appBarTrailingReserve(),
+            }}>{resolveSlot(props.appBar)}</View>
+          </ContourConsumedContext.Provider>
+        ) : null}
+        <View
+          class="flex-1 flex-col w-full overflow-hidden"
+          style={{
+            paddingT: hasAppBar || !consumes("top") ? 0 : insets().top,
+            // A bottom tab bar is already safe-area aware. Without one,
+            // keep the scroll viewport above the home indicator.
+            paddingB: hasBottomBar || !consumes("bottom") ? 0 : insets().bottom,
+          }}
+        >
+          {resolvedChildren()}
+        </View>
+        {bottomBar}
+      </View>
+    </View>
+  );
+}
+
+function baseMarginRight(className: string | undefined, explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
+  if (!className) return 0;
+  let result = 0;
+  for (const token of className.split(/\s+/)) {
+    const match = /^(?:m|mx|mr)-(?:\[(\d+(?:\.\d+)?)\]|(\d+(?:\.\d+)?))$/.exec(token);
+    if (!match) continue;
+    result = match[1] !== undefined ? Number(match[1]) : Number(match[2]) * 4;
+  }
+  return result;
+}
+
+function basePaddingRight(className: string | undefined, explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
+  if (!className) return 0;
+  let result = 0;
+  for (const token of className.split(/\s+/)) {
+    const match = /^(?:p|px|pr)-(?:\[(\d+(?:\.\d+)?)\]|(\d+(?:\.\d+)?))$/.exec(token);
+    if (!match) continue;
+    result = match[1] !== undefined ? Number(match[1]) : Number(match[2]) * 4;
+  }
+  return result;
+}
+
+function assignViewRef(ref: ViewProps["ref"], current: NodeMirror): void {
+  if (!ref) return;
+  if (typeof ref === "function") ref(current);
+  else if (typeof ref === "object" && "current" in ref) ref.current = current;
+}
+
+function baseOverflow(className: string | undefined, explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
+  if (!className) return 0;
+  return /(?:^|\s)overflow-hidden(?:\s|$)/.test(className) ? 1 : 0;
+}
+
+export interface ScrollContourOptions {
+  baseRight?: number;
+  defaultInBand?: boolean;
+  enabled?: boolean | (() => boolean);
+  itemRight?: number | (() => number | undefined);
+  mode?: "margin" | "padding";
+  rampPx?: number;
+}
+
+export function useScrollContourReserve(options: ScrollContourOptions = {}): {
+  nodeRef: (current: NodeMirror | undefined) => void;
+  reserve: Accessor<number>;
+  syncLayout: () => boolean;
+} {
+  const scaffold = useContext(SafeAreaScaffoldContext);
+  const scrollPage = useContext(ScrollablePageContext);
+  let node: NodeMirror | undefined;
+  let lastCommitted: TextInputRect | undefined;
+  let currentReserve = 0;
+  const [reserve, setReserve] = createSignal(0);
+  const isEnabled = (): boolean =>
+    options.enabled === undefined
+      ? true
+      : typeof options.enabled === "function"
+        ? options.enabled()
+        : options.enabled;
+  const activeGeometry = (): DisplayGeometry =>
+    scaffold.hasScaffold
+      ? scaffold.geometry()
+      : scrollPage
+        ? scrollPage.geometry()
+        : EMPTY_DISPLAY_GEOMETRY;
+
+  const computeForBand = (visualTop: number, visualBottom: number, itemRight?: number): number => {
+    if (scaffold.hasScaffold) {
+      return scaffold.topRightReserveForBand(visualTop, visualBottom, options.rampPx, itemRight);
+    }
+    if (scrollPage) {
+      return topRightContourReserveForBand(scrollPage.geometry(), visualTop, visualBottom, {
+        itemRight,
+        rampPx: options.rampPx,
+      });
+    }
+    return 0;
+  };
+
+  const computeNextReserve = (): number => {
+    if (!isEnabled()) return 0;
+    const currentGeometry = activeGeometry();
+    if (topRightOcclusionFrames(currentGeometry).length === 0) return 0;
+    const mode = options.mode ?? "margin";
+    const baseRight = options.baseRight ?? 0;
+    const explicitItemRight = typeof options.itemRight === "function"
+      ? options.itemRight()
+      : options.itemRight;
+    const measured = committedLayout(node, true);
+    if (measured) lastCommitted = measured;
+    const layout = measured ?? lastCommitted;
+    if (!layout) {
+      if (!options.defaultInBand) return 0;
+      const fallbackRight = explicitItemRight !== undefined
+        ? explicitItemRight
+        : currentGeometry.width > 0
+          ? Math.max(0, currentGeometry.width - baseRight)
+          : undefined;
+      return computeForBand(0, 56, fallbackRight);
+    }
+    const offset = scrollPage ? scrollPage.scrollOffset() : 0;
+    const visualTop = layout.y - offset;
+    const visualBottom = visualTop + layout.height;
+    const itemRight = explicitItemRight !== undefined
+      ? explicitItemRight
+      : layout.width > 0
+        ? Math.min(
+            currentGeometry.width,
+            Math.max(
+              0,
+              layout.x + layout.width + (mode === "margin" ? currentReserve : -baseRight),
+            ),
+          )
+        : undefined;
+    return computeForBand(visualTop, visualBottom, itemRight);
+  };
+
+  const syncLayout = (): boolean => {
+    const next = computeNextReserve();
+    if (Math.abs(next - currentReserve) >= 0.25) {
+      currentReserve = next;
+      setReserve(next);
+      return true;
+    }
+    return false;
+  };
+
+  createEffect(() => {
+    activeGeometry();
+    isEnabled();
+    if (typeof options.itemRight === "function") options.itemRight();
+    syncLayout();
+  });
+
+  if (scrollPage) {
+    const unsubscribe = scrollPage.subscribeContour(syncLayout);
+    onCleanup(unsubscribe);
+  } else {
+    onFrame(() => {
+      syncLayout();
+    }, { continuous: false });
+  }
+
+  return {
+    nodeRef: (current) => {
+      node = current;
+      if (current) syncLayout();
+    },
+    reserve,
+    syncLayout,
+  };
+}
+
+export function ScrollContourItem(props: ViewProps & {
+  mode?: "margin" | "padding";
+  defaultInBand?: boolean;
+  enabled?: boolean | (() => boolean);
+  rampPx?: number;
+}): JSX.Element {
+  const parentConsumed = useContext(ContourConsumedContext);
+  const isEnabled = (): boolean => {
+    if (parentConsumed()) return false;
+    return props.enabled === undefined
+      ? true
+      : typeof props.enabled === "function"
+        ? props.enabled()
+        : props.enabled;
+  };
+  const mode = props.mode ?? "margin";
+  const baseRight = mode === "padding"
+    ? basePaddingRight(props.class, props.style?.paddingR)
+    : baseMarginRight(props.class, props.style?.marginR);
+  const { nodeRef, reserve } = useScrollContourReserve({
+    baseRight,
+    defaultInBand: props.defaultInBand,
+    enabled: isEnabled,
+    mode,
+    rampPx: props.rampPx,
+  });
+  let appliedNonZero = false;
+  const contourStyle = (): ViewProps["style"] => {
+    const r = reserve();
+    if (r > 0) appliedNonZero = true;
+    if (mode === "padding") {
+      const basePadR = basePaddingRight(props.class, props.style?.paddingR);
+      if (r <= 0 && !appliedNonZero && props.style?.paddingR === undefined) return props.style;
+      return { ...(props.style ?? {}), paddingR: basePadR + r };
+    }
+    const baseMarR = baseMarginRight(props.class, props.style?.marginR);
+    const defaultOverflow = baseOverflow(props.class, props.style?.overflow);
+    if (r <= 0 && !appliedNonZero && props.style?.marginR === undefined) {
+      return props.style;
+    }
+    return {
+      ...(props.style ?? {}),
+      marginR: baseMarR + r,
+      overflow: r > 0 ? 1 : defaultOverflow,
+    };
+  };
+  return (
+    <ContourConsumedContext.Provider value={() => parentConsumed() || isEnabled()}>
+      <View
+        ref={(current) => {
+          nodeRef(current);
+          assignViewRef(props.ref, current);
+        }}
+        nodeRef={props.nodeRef}
+        class={props.class}
+        style={contourStyle()}
+        onPress={props.onPress}
+        focusable={props.focusable}
+        debugName={props.debugName}
+      >
+        {props.children}
+      </View>
+    </ContourConsumedContext.Provider>
+  );
+}
 
 export interface HeaderProps {
   eyebrow?: string;
@@ -32,36 +508,37 @@ export interface HeaderProps {
 
 export function Header(props: HeaderProps): JSX.Element {
   return (
-    <View class="flex-row items-center justify-between h-[56] px-4 bg-white border-[#E5E9F2]">
-      <View class="flex-col justify-center gap-1">
+    <ScrollContourItem mode="padding" defaultInBand class="flex-row items-center justify-between h-[56] px-4 bg-white border-[#E5E9F2]">
+      <View class="flex-col justify-center gap-1 flex-1 overflow-hidden" style={{ minW: 0 }}>
         {props.eyebrow ? <Text class="text-xs text-[#7C8799] font-bold">{props.eyebrow}</Text> : null}
         <Text class="text-base text-[#17233B] font-bold">{props.title}</Text>
       </View>
       {props.badge ? <Badge tone="cyan">{props.badge}</Badge> : null}
-    </View>
+    </ScrollContourItem>
   );
 }
 
 export function PageIntro(props: { title: string; body: string }): JSX.Element {
   return (
-    <View class="flex-col gap-1 px-4 pt-4 pb-2">
+    <ScrollContourItem defaultInBand class="flex-col gap-1 px-4 pt-4 pb-2 overflow-hidden">
       <Text class="text-xl text-[#17233B] font-bold">{props.title}</Text>
       <Text class="text-sm text-[#7C8799]">{props.body}</Text>
-    </View>
+    </ScrollContourItem>
   );
 }
 
 export function SectionHeading(props: { title: string; detail?: string; dark?: boolean }): JSX.Element {
   return (
-    <View class="flex-row items-center justify-between px-4 pt-4 pb-2">
+    <ScrollContourItem class="flex-row items-center justify-between px-4 pt-4 pb-2 overflow-hidden">
       <Text class={props.dark ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text>
       {props.detail ? <Text class={props.dark ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
-    </View>
+    </ScrollContourItem>
   );
 }
 
 export interface ActionButtonProps extends ViewProps {
-  label: string;
+  /** Text for the stock button content. Custom children may replace it. */
+  label?: string;
   kind?: "primary" | "secondary" | "quiet" | "danger";
   onPress?: () => void;
   icon?: string;
@@ -69,15 +546,26 @@ export interface ActionButtonProps extends ViewProps {
 }
 
 export function ActionButton(props: ActionButtonProps): JSX.Element {
+  const resolvedChildren = resolveChildren(() => props.children);
+  const stockContent = () => props.icon ? (
+    <View class="flex-col items-center justify-center gap-1">
+      <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-sm text-[#315DEB] font-bold" : "text-sm text-white font-bold"}>{props.icon}</Text>
+      <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-xs text-[#17233B] font-bold" : "text-xs text-white font-bold"}>{props.label ?? ""}</Text>
+    </View>
+  ) : (
+    <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-sm text-[#315DEB] font-bold" : "text-sm text-white font-bold"}>
+      {props.label ?? ""}
+    </Text>
+  );
   return (
     <Focusable
       class={props.class ?? (props.kind === "secondary"
-        ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF]"
+        ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#E8EDFF] focus:bg-[#DCE5FF] active:bg-[#C9D6FF]"
         : props.kind === "quiet"
-          ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#EEF1F6] focus:bg-[#E4E9F2]"
+          ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#EEF1F6] focus:bg-[#E4E9F2] active:bg-[#D7DDE8]"
           : props.kind === "danger"
-            ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238]"
-            : "px-4 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5]")}
+            ? "px-4 h-[44] items-center justify-center rounded-xl bg-[#B4233A] focus:bg-[#962238] active:bg-[#7F1D2D]"
+            : "px-4 h-[44] items-center justify-center rounded-xl bg-[#315DEB] focus:bg-[#2748C5] active:bg-[#1E3A8A]")}
       style={props.disabled
         ? { ...(props.style ?? {}), opacity: props.style?.opacity ?? 0.5 }
         : { ...(props.style ?? {}), opacity: props.style?.opacity ?? 1 }}
@@ -85,16 +573,7 @@ export function ActionButton(props: ActionButtonProps): JSX.Element {
       focusable={!props.disabled}
       onPress={props.disabled ? undefined : props.onPress}
     >
-      {props.icon ? (
-        <View class="flex-col items-center justify-center gap-1">
-          <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-sm text-[#315DEB] font-bold" : "text-sm text-white font-bold"}>{props.icon}</Text>
-          <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-xs text-[#17233B] font-bold" : "text-xs text-white font-bold"}>{props.label}</Text>
-        </View>
-      ) : (
-        <Text class={props.kind === "quiet" || props.kind === "secondary" ? "text-sm text-[#315DEB] font-bold" : "text-sm text-white font-bold"}>
-          {props.label}
-        </Text>
-      )}
+      {resolvedChildren() ?? stockContent()}
     </Focusable>
   );
 }
@@ -124,11 +603,11 @@ export function Badge(props: { children?: JSX.Element; tone?: "cyan" | "green" |
 
 export function EmptyState(props: { title: string; body: string; action?: JSX.Element }): JSX.Element {
   return (
-    <View class="flex-col items-center gap-2 p-4 rounded-xl bg-[#F1F3F8] border-[#E5E9F2]">
+    <ScrollContourItem class="flex-col items-center gap-2 p-4 rounded-xl bg-[#F1F3F8] border-[#E5E9F2]">
       <Text class="text-sm text-[#17233B] font-bold">{props.title}</Text>
       <Text class="text-xs text-[#7C8799]">{props.body}</Text>
       {props.action}
-    </View>
+    </ScrollContourItem>
   );
 }
 
@@ -148,13 +627,16 @@ export function MetricCard(props: { label: string; value: string; detail?: strin
 
 export function StatusBar(props: { label: string; detail: string; ok?: boolean }): JSX.Element {
   return (
-    <View class="flex-row items-center justify-between px-3 py-2 rounded-xl bg-[#17233B] border-[#30405A]">
-      <View class="flex-row items-center gap-2">
+    <ScrollContourItem
+      defaultInBand
+      class="flex-row items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#17233B] border-[#30405A] overflow-hidden"
+    >
+      <View class="flex-row items-center gap-2 flex-1 overflow-hidden" style={{ minW: 0, shrink: 1 }}>
         <View class={props.ok === false ? "w-2 h-2 rounded-full bg-rose-500" : "w-2 h-2 rounded-full bg-emerald-500"} />
         <Text class="text-xs text-white font-bold">{props.label}</Text>
       </View>
-      <Text class="text-xs text-[#B9C5D8]">{props.detail}</Text>
-    </View>
+      <Text class="flex-1 text-xs text-[#B9C5D8] overflow-hidden" style={{ minW: 0, shrink: 1 }}>{props.detail}</Text>
+    </ScrollContourItem>
   );
 }
 
@@ -204,7 +686,7 @@ function NavigationIcon(props: { kind: "home" | "gallery" | "host"; active: bool
 
 export function NavigationBar(props: {
   route: string;
-  onNavigate: (route: "home" | "gallery" | "about") => void;
+  onNavigate: (route: NavigationRoute) => void;
   wide?: boolean | (() => boolean);
   geometry?: DisplayGeometry | (() => DisplayGeometry);
 }): JSX.Element {
@@ -226,6 +708,7 @@ export function NavigationBar(props: {
   const hostRoute = () => props.route !== "home" && props.route !== "gallery";
   const items = [
     { id: "home" as const, label: "Home", kind: "home" as const },
+    // Keep the old Gallery route as the compatibility alias for the UI page.
     { id: "gallery" as const, label: "Gallery", kind: "gallery" as const },
     { id: "about" as const, label: "Host", kind: "host" as const },
   ];
@@ -245,7 +728,7 @@ export function NavigationBar(props: {
               <View class={active() ? "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-[#E8EDFF]" : "w-[32] h-[28] flex-col items-center justify-center rounded-xl bg-transparent"}>
                 <NavigationIcon kind={item.kind} active={active()} />
               </View>
-              <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#647084] font-bold"}>{item.label}</Text>
+              <Text class={active() ? "text-xs text-[#315DEB] font-bold" : "text-xs text-[#7C8799] font-bold"}>{item.label}</Text>
             </Focusable>
           );
         }}
@@ -264,7 +747,7 @@ export interface TabItem {
 
 export function Tabs(props: { items: readonly TabItem[]; active: string; onChange: (id: string) => void }): JSX.Element {
   return (
-    <View class="flex-row flex-wrap gap-1 px-4 py-2 bg-transparent">
+    <ScrollContourItem mode="padding" defaultInBand class="flex-row flex-wrap gap-1 px-4 py-2 bg-transparent">
       <For each={props.items}>
         {(item) => (
           <Focusable
@@ -277,7 +760,7 @@ export function Tabs(props: { items: readonly TabItem[]; active: string; onChang
           </Focusable>
         )}
       </For>
-    </View>
+    </ScrollContourItem>
   );
 }
 
@@ -951,12 +1434,14 @@ export function ScrollablePage(props: {
       const inputBottom = input.y + input.height;
       if (inputBottom > bottom) {
         scroller.scrollBy(inputBottom - bottom, { immediate: true });
+        syncContourSubscribers();
         // This correction is initiated by viewport/IME geometry, not by a
         // user's drag. Consume the resulting offset so the next frame does
         // not misclassify the automatic scroll and dismiss the focused input.
         previousOffset = scroller.offset();
       } else if (input.y < top) {
         scroller.scrollBy(input.y - top, { immediate: true });
+        syncContourSubscribers();
         previousOffset = scroller.offset();
       }
     },
@@ -966,7 +1451,46 @@ export function ScrollablePage(props: {
     if (activePageScroll === pageScroll) activePageScroll = undefined;
   });
 
+  const parentScaffold = useContext(SafeAreaScaffoldContext);
+  const contourSubscribers = new Set<() => boolean>();
+  let syncedOffsetInTurn = Number.NaN;
+  let hadActiveContour = false;
+  let microtaskSyncScheduled = false;
+  let pageGeometryAccessor: (() => DisplayGeometry) | undefined;
+  const activePageGeometry = (): DisplayGeometry =>
+    parentScaffold.hasScaffold
+      ? parentScaffold.geometry()
+      : (pageGeometryAccessor ? pageGeometryAccessor() : EMPTY_DISPLAY_GEOMETRY);
+  const syncContourSubscribers = (): boolean => {
+    if (contourSubscribers.size === 0) return false;
+    const hasContour = topRightOcclusionFrames(activePageGeometry()).length > 0;
+    if (!hasContour && !hadActiveContour) return false;
+    hadActiveContour = hasContour;
+    let anyChanged = false;
+    for (let pass = 0; pass < 2; pass += 1) {
+      let changedInPass = false;
+      for (const subscriber of contourSubscribers) {
+        if (subscriber()) {
+          changedInPass = true;
+          anyChanged = true;
+        }
+      }
+      if (!changedInPass || !hasContour) break;
+    }
+    return anyChanged;
+  };
+  const scheduleContourMicrotask = (): void => {
+    if (microtaskSyncScheduled) return;
+    if (!hadActiveContour && topRightOcclusionFrames(activePageGeometry()).length === 0) return;
+    microtaskSyncScheduled = true;
+    queueMicrotask(() => {
+      microtaskSyncScheduled = false;
+      syncContourSubscribers();
+    });
+  };
+
   const syncViewportResize = (): void => {
+    syncContourSubscribers();
     const { rect } = refreshMeasurements();
     if (!rect || activePageScroll !== pageScroll) return;
     const input = activeTextInput;
@@ -978,8 +1502,22 @@ export function ScrollablePage(props: {
     pageScroll.ensureVisible(inputNode, input.visualRect());
     input.refreshLayout();
   };
-  createDisplayGeometry({ onChange: syncViewportResize });
+  const pageGeometry = createDisplayGeometry({ onChange: syncViewportResize });
+  pageGeometryAccessor = pageGeometry;
+  const scrollContext: ScrollablePageContextValue = {
+    scrollOffset: () => scroller.offset(),
+    geometry: activePageGeometry,
+    subscribeContour: (sync) => {
+      contourSubscribers.add(sync);
+      scheduleContourMicrotask();
+      return () => {
+        contourSubscribers.delete(sync);
+        scheduleContourMicrotask();
+      };
+    },
+  };
 
+  let endedOnThisTurn = false;
   createGesture({
     axis: "y",
     // Keep the node hit fact when a host provides it, but retain the official
@@ -995,36 +1533,59 @@ export function ScrollablePage(props: {
       },
     },
     panSlop: 1,
-    onDown: () => scroller.stop(),
+    onDown: () => {
+      endedOnThisTurn = false;
+      scroller.stop();
+    },
     onPanStart: () => scroller.beginDrag(),
-    onPanMove: (contact) => scroller.drag(-contact.fdy),
-    onPanEnd: (contact) => scroller.endDrag(-contact.vy),
+    onPanMove: (contact) => {
+      scroller.drag(-contact.fdy);
+      syncedOffsetInTurn = scroller.offset();
+      syncContourSubscribers();
+    },
+    onPanEnd: (contact) => {
+      endedOnThisTurn = true;
+      scroller.endDrag(-contact.vy);
+    },
     onUp: () => {
       if (scroller.state() === "idle") {
         const max = Math.max(0, contentHeight() - viewportHeight());
         const current = scroller.offset();
         if (current < 0 || current > max) {
+          endedOnThisTurn = true;
           scroller.beginDrag();
           scroller.endDrag(0);
         }
       }
     },
     onCancel: () => {
+      endedOnThisTurn = true;
       if (scroller.state() === "idle") scroller.beginDrag();
       scroller.endDrag(0);
     },
   });
   bindDpadScroll(scroller);
   onFrame(() => {
-    scroller.step();
+    if (endedOnThisTurn) {
+      endedOnThisTurn = false;
+    } else {
+      scroller.step();
+    }
     const currentOffset = scroller.offset();
     const scrolled = currentOffset !== previousOffset;
     previousOffset = currentOffset;
+    const alreadySyncedInPan = currentOffset === syncedOffsetInTurn;
+    syncedOffsetInTurn = Number.NaN;
+    const contourChanged = alreadySyncedInPan ? false : syncContourSubscribers();
+    if (!alreadySyncedInPan) scheduleContourMicrotask();
     const { rect, viewportChanged } = refreshMeasurements();
     const input = activeTextInput;
     const inputNode = input?.isOpen() ? input.node() : undefined;
     if (viewportChanged && inputNode && activePageScroll === pageScroll) {
       pageScroll.ensureVisible(inputNode, input?.visualRect());
+    }
+    if (contourChanged && input && inputNode) {
+      input.refreshLayout();
     }
     if (scrolled && rect && input && inputNode) {
       const inputRect = pageScroll.visualRect(inputNode, input.visualRect());
@@ -1039,40 +1600,42 @@ export function ScrollablePage(props: {
   }, { continuous: () => scroller.state() !== "idle" });
 
   return (
-    <View
-      ref={(current) => {
-        viewportNode = current;
-      }}
-      class={props.class ?? "flex-1 w-full overflow-hidden"}
-    >
+    <ScrollablePageContext.Provider value={scrollContext}>
       <View
-        class="flex-col"
-        style={{
-          posType: 1,
-          insetT: 0,
-          insetL: 0,
-          width: -1,
-          // Let flex measure the actual children.  A definite height here
-          // makes the content column shrink to the viewport and leaves the
-          // scroller with max=0. `minH` preserves a full clip-sized canvas
-          // while retaining intrinsic content height when the page is longer.
-          height: Number.NaN,
-          minH: viewportHeight(),
-          translateY: -scroller.offset(),
+        ref={(current) => {
+          viewportNode = current;
         }}
+        class={props.class ?? "flex-1 w-full overflow-hidden"}
       >
         <View
-          ref={(current) => {
-            contentNode = current;
+          class="flex-col"
+          style={{
+            posType: 1,
+            insetT: 0,
+            insetL: 0,
+            width: -1,
+            // Let flex measure the actual children.  A definite height here
+            // makes the content column shrink to the viewport and leaves the
+            // scroller with max=0. `minH` preserves a full clip-sized canvas
+            // while retaining intrinsic content height when the page is longer.
+            height: Number.NaN,
+            minH: viewportHeight(),
+            translateY: -scroller.offset(),
           }}
-          // Prevent the flex column from shrinking its children to the
-          // containing clip while the auto-sized canvas is being measured.
-          class="flex-col w-full shrink-0"
         >
-          {props.children}
+          <View
+            ref={(current) => {
+              contentNode = current;
+            }}
+            // Prevent the flex column from shrinking its children to the
+            // containing clip while the auto-sized canvas is being measured.
+            class="flex-col w-full shrink-0"
+          >
+            {props.children}
+          </View>
         </View>
       </View>
-    </View>
+    </ScrollablePageContext.Provider>
   );
 }
 
@@ -1097,12 +1660,12 @@ export function List(props: { items: readonly ListItem[]; tone?: "light" | "dark
     <View class="flex-col gap-1 mx-4 rounded-xl">
       <For each={props.items}>
         {(item) => (
-          <View class={props.tone === "dark"
+          <ScrollContourItem class={props.tone === "dark"
             ? "flex-col gap-1 px-3 py-3 bg-[#17233B] border-[#30405A]"
             : "flex-col gap-1 px-3 py-3 bg-white border-[#E5E9F2]"}>
             <Text class={props.tone === "dark" ? "text-xs text-white font-bold" : "text-xs text-[#17233B] font-bold"}>{item.title}</Text>
             {item.detail ? <Text class={props.tone === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{item.detail}</Text> : null}
-          </View>
+          </ScrollContourItem>
         )}
       </For>
     </View>
@@ -1114,11 +1677,11 @@ export function ViewText(props: { title: string; body: string }): JSX.Element {
 }
 
 export function Card(props: { children?: JSX.Element; class?: string }): JSX.Element {
-  return <View class={props.class ?? "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"}>{props.children}</View>;
+  return <ScrollContourItem class={props.class ?? "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"}>{props.children}</ScrollContourItem>;
 }
 
 export function Row(props: { children?: JSX.Element; class?: string }): JSX.Element {
-  return <View class={props.class ?? "flex-row items-center gap-3"}>{props.children}</View>;
+  return <ScrollContourItem class={props.class ?? "flex-row items-center gap-3"}>{props.children}</ScrollContourItem>;
 }
 
 export function TileGrid(props: { children?: JSX.Element }): JSX.Element {

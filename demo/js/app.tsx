@@ -28,12 +28,15 @@ import {
   PageIntro,
   Row,
   SectionHeading,
+  SafeAreaScaffold,
+  ScrollContourItem,
   ScrollablePage,
   StatusBar,
   Tabs,
   TileGrid,
   ViewText,
   deliverTextInputEvent,
+  useScrollContourReserve,
 } from "@pocket/ui";
 import { HardwarePage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx";
 import { createHostBridge, hostError, type HostBridge, type JsonValue } from "@pocket/ui/host";
@@ -781,8 +784,8 @@ function App() {
   return (
     <Screen
       class={mobileDark() ? "w-full h-full flex-col bg-[#0E1728] overflow-hidden" : "w-full h-full flex-col bg-[#F5F6FA] overflow-hidden"}
-      style={{ paddingT: responsiveLayout().insets.top }}
     >
+      <SafeAreaScaffold edges={["top"]} geometry={() => displayGeometry()} class="flex-col w-full h-full">
       <Show when={!isShowcaseRoute(state().route)}>
         <Header
           title={demoTitle}
@@ -826,6 +829,7 @@ function App() {
           <NavigationBar route={state().route} onNavigate={navigate} wide={wideLayout} geometry={() => displayGeometry()} />
         </View>
       </FocusScope>
+      </SafeAreaScaffold>
       <SystemAppSurfaces
         system={system}
         systemUIFocused={state().detailsOpen}
@@ -861,7 +865,8 @@ function HomePage(props: {
   return (
     <ScrollablePage>
       <View class="flex-col gap-3 pb-5">
-        <View
+        <ScrollContourItem
+          defaultInBand
           class="flex-col gap-2 mx-5 mt-4 p-4 rounded-xl bg-[#315deb]"
           style={contentWidth() === undefined ? undefined : { width: contentWidth()! }}
         >
@@ -871,13 +876,13 @@ function HomePage(props: {
           </View>
           <Text class="text-2xl text-white font-bold">Made to feel native.</Text>
           <Text class="text-sm text-blue-100">Small building blocks. Real possibilities.</Text>
-        </View>
+        </ScrollContourItem>
         <HomeExplore wide={wide} dispatch={props.dispatch} />
-        <View class="flex-row items-center justify-between mx-5">
+        <ScrollContourItem class="flex-row items-center justify-between mx-5">
           <Text class="text-sm text-slate-950 font-bold">Playground</Text>
           <Text class="text-xs text-slate-500">Try it live</Text>
-        </View>
-        <View class={panelLayout()}>
+        </ScrollContourItem>
+        <ScrollContourItem enabled={wide} class={panelLayout()}>
         <Card class={panelClass()}>
           <ViewText title="Input round-trip" body="Your system keyboard, right here." />
           <InputField
@@ -900,15 +905,15 @@ function HomePage(props: {
             </View>
           </Card>
         </Named>
-        </View>
+        </ScrollContourItem>
         <PlatformAppsCard platform={props.platform} system={props.system} />
-        <View class="flex-row items-center justify-between mx-5 px-1 py-2">
+        <ScrollContourItem class="flex-row items-center justify-between mx-5 px-1 py-2">
           <View class="flex-row items-center gap-2">
             <View class={props.runtime.phase === "error" ? "w-[6] h-[6] rounded-full bg-rose-500" : "w-[6] h-[6] rounded-full bg-emerald-500"} />
             <Text class="text-xs text-slate-500">{props.runtime.phase === "ready" ? "Runtime ready" : props.runtime.phase === "error" ? "Runtime unavailable" : "Connecting"}</Text>
           </View>
           <ActionButton label="Open Host details" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "about" })} />
-        </View>
+        </ScrollContourItem>
       </View>
     </ScrollablePage>
   );
@@ -977,9 +982,9 @@ function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) 
     { title: "Hardware", detail: "Device APIs", route: "hardware" as const },
   ];
   return (
-    <View class="flex-row gap-3 mx-5">
+    <ScrollContourItem class="flex-row gap-2 mx-5">
       <For each={features}>{(feature) => (
-        <Focusable class="flex-1 flex-col gap-2 h-[104] p-3 rounded-xl bg-white focus:bg-blue-50" onPress={() => props.dispatch({ type: "navigate", route: feature.route })}>
+        <Focusable class="flex-1 flex-col gap-2 h-[104] p-2 rounded-xl bg-white focus:bg-blue-50 overflow-hidden" onPress={() => props.dispatch({ type: "navigate", route: feature.route })}>
           <View class="w-[30] h-[30] items-center justify-center rounded-lg bg-blue-50">
             <Show when={feature.route === "mobile"}><Image class="w-[20] h-[20]" src="icons/components.svg" /></Show>
             <Show when={feature.route === "transitions"}><Image class="w-[20] h-[20]" src="icons/motion.svg" /></Show>
@@ -989,7 +994,34 @@ function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) 
           <Text class="text-xs text-slate-500">{feature.detail}</Text>
         </Focusable>
       )}</For>
-    </View>
+    </ScrollContourItem>
+  );
+}
+
+function GalleryTile(props: {
+  card: string;
+  contentWidth: () => number;
+  onSelect: () => void;
+}): JSX.Element {
+  const { nodeRef, reserve } = useScrollContourReserve({
+    itemRight: () => Math.max(0, props.contentWidth() - 20),
+  });
+  const tileWidth = () => Math.max(0, (props.contentWidth() - reserve() - 40 - 12) / 2);
+  return (
+    <Focusable
+      nodeRef={nodeRef}
+      class="flex-col gap-3 h-[112] p-4 rounded-xl bg-white focus:bg-blue-50 overflow-hidden"
+      style={{ width: tileWidth() }}
+      onPress={props.onSelect}
+    >
+      <View class="w-[28] h-[28] items-center justify-center rounded-lg bg-blue-50">
+        <Text class="text-xs text-blue-600 font-bold">{card.slice(0, 2)}</Text>
+      </View>
+      <View class="flex-row items-center justify-between">
+        <Text class="text-sm text-slate-950 font-bold">{props.card}</Text>
+        <Text class="text-sm text-slate-400">›</Text>
+      </View>
+    </Focusable>
   );
 }
 
@@ -998,7 +1030,6 @@ function GalleryPage(props: {
   dispatch: (event: DemoEvent) => void;
   contentWidth: () => number;
 }): JSX.Element {
-  const tileWidth = () => Math.max(0, (props.contentWidth() - 40 - 12) / 2);
   return (
     <ScrollablePage>
       <View class="flex-col gap-4 pb-5">
@@ -1006,19 +1037,11 @@ function GalleryPage(props: {
       <TileGrid>
         <For each={componentCards}>
           {(card) => (
-            <Focusable
-              class="flex-col gap-3 h-[112] p-4 rounded-xl bg-white focus:bg-blue-50"
-              style={{ width: tileWidth() }}
-              onPress={() => props.dispatch({ type: "select", component: card })}
-            >
-              <View class="w-[28] h-[28] items-center justify-center rounded-lg bg-blue-50">
-                <Text class="text-xs text-blue-600 font-bold">{card.slice(0, 2)}</Text>
-              </View>
-              <View class="flex-row items-center justify-between">
-                <Text class="text-sm text-slate-950 font-bold">{card}</Text>
-                <Text class="text-sm text-slate-400">›</Text>
-              </View>
-            </Focusable>
+            <GalleryTile
+              card={card}
+              contentWidth={props.contentWidth}
+              onSelect={() => props.dispatch({ type: "select", component: card })}
+            />
           )}
         </For>
       </TileGrid>
@@ -1104,7 +1127,9 @@ function RuntimePage(props: {
       <PageIntro title="Runtime" body="Live host status and package identity." />
       <CapabilityCard title="Runtime info" capability="runtime.info" state={props.state().runtimeInfo} onRefresh={() => props.requestCapability("runtimeInfo", "runtime.info")} />
       <CapabilityCard title="Package metadata" capability="plugins.packageInfo" state={props.state().packageInfo} onRefresh={() => props.requestCapability("packageInfo", "plugins.packageInfo")} />
-      <ActionButton label="Frame diagnostics" kind="secondary" onPress={() => props.onNavigate("performance")} />
+      <ScrollContourItem>
+        <ActionButton label="Frame diagnostics" kind="secondary" onPress={() => props.onNavigate("performance")} />
+      </ScrollContourItem>
       <Show when={supportsRecording(props.state().runtimeInfo)} fallback={<EmptyState title="Deterministic replay unavailable" body="The active host does not provide recording and replay." />}>
         <RecordingPanel host={props.host} status={props.recordingStatus} />
       </Show>
@@ -1159,7 +1184,7 @@ function PerformancePage(props: {
           <Text class="text-xs text-slate-600">Bars show guest scheduler turns per active second, not display FPS.</Text>
         </Show>
       </Card>
-      <View class="flex-row gap-2 mx-4">
+      <ScrollContourItem class="flex-row gap-2 mx-4">
         <MetricCard
           label="Guest ticks/s"
           value={metricNumber(latest()?.fps)}
@@ -1171,7 +1196,7 @@ function PerformancePage(props: {
           <Text class="text-xl text-rose-700 font-bold">{metricNumber(minimumPerformanceFps(points()))}</Text>
           <Text class="text-xs text-rose-700">lowest guest tick window</Text>
         </Card>
-      </View>
+      </ScrollContourItem>
       <Show when={latest() ?? latestLongFrame()} fallback={<EmptyState title="No frame breakdown" body="The provider has not returned a current frame window." />}>
         <Card class="flex-col gap-2 mx-4 p-3 rounded-xl bg-white border-slate-200">
           <SectionHeading
@@ -1336,16 +1361,18 @@ function StressPage(props: { state: () => DemoState; runStress: (nodes: number) 
           <ActionButton label="Run 500 nodes" kind="secondary" onPress={() => props.runStress(500)} />
         </Row>
       </Card>
-      <View class="flex-row gap-2 mx-4">
+      <ScrollContourItem class="flex-row gap-2 mx-4">
         <MetricCard label="Nodes" value={String(props.state().stress.nodeCount)} detail={`${props.state().stress.durationMs} ms JS setup`} tone="purple" />
         <MetricCard label="Checksum" value={String(props.state().stress.checksum)} detail={props.state().stress.lastAction} tone="green" />
-      </View>
-      <Text class="text-xs text-slate-600 px-4">{props.state().stress.nodeCount} retained nodes in the current guest frame.</Text>
-      <View class="flex-row flex-wrap gap-1 px-4 overflow-hidden">
+      </ScrollContourItem>
+      <ScrollContourItem mode="padding" class="px-4">
+        <Text class="text-xs text-slate-600">{props.state().stress.nodeCount} retained nodes in the current guest frame.</Text>
+      </ScrollContourItem>
+      <ScrollContourItem mode="padding" class="flex-row flex-wrap gap-1 px-4 overflow-hidden">
         <For each={nodes()}>
           {() => <View class="w-2 h-2 rounded bg-cyan-500" />}
         </For>
-      </View>
+      </ScrollContourItem>
     </View>
   );
 }

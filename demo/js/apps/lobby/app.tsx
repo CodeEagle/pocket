@@ -7,8 +7,8 @@ import {
   MobileBadge,
   MobileButton,
   MobileCard,
-  MobileScaffold,
   MobileThemeProvider,
+  SafeAreaScaffold,
   ScrollablePage,
   StatusBar,
 } from "@pocket/ui";
@@ -109,14 +109,15 @@ function LobbyApp(): JSX.Element {
 
   return (
     <MobileThemeProvider theme={MOBILE_THEME_LIGHT}>
-      <MobileScaffold
-        appBar={
+      <SafeAreaScaffold
+        reservedActions="mini-app"
+        appBar={() => (
           <MobileAppBar
             title="Pocket Lobby"
             subtitle="pocket.demo.lobby · independent state"
             trailing={<MobileBadge label="Guest B" tone="success" />}
           />
-        }
+        )}
       >
         <ScrollablePage>
           <View class="flex-col gap-3 p-4">
@@ -145,12 +146,12 @@ function LobbyApp(): JSX.Element {
             <MobileCard title="Cross-app handoff" detail="The host receives both the message and the awaited return value.">
               <View class="flex-col gap-2">
                 <MobileButton label="Send lobby update to Showcase" kind="outlined" onPress={() => { void sendLobbyUpdate(); }} />
-                <MobileButton label="Return visits to Showcase" onPress={() => { void returnResult(); }} />
+                <MobileButton label="Return visits to caller" onPress={() => { void returnResult(); }} />
               </View>
             </MobileCard>
           </View>
         </ScrollablePage>
-      </MobileScaffold>
+      </SafeAreaScaffold>
     </MobileThemeProvider>
   );
 }

@@ -7,8 +7,8 @@ import {
   MobileBadge,
   MobileButton,
   MobileCard,
-  MobileScaffold,
   MobileThemeProvider,
+  SafeAreaScaffold,
   ScrollablePage,
   StatusBar,
 } from "@pocket/ui";
@@ -124,8 +124,13 @@ function ProfileApp(): JSX.Element {
       const returned = result.value && typeof result.value === "object"
         ? JSON.stringify(result.value)
         : String(result.value ?? "no result");
-      setStatus(`Lobby returned: ${returned}`);
-      await returnToShowcase({ profile: profile as unknown as JsonValue, lobby: result.value ?? null });
+      const outcome = result.cancelled
+        ? `Lobby cancelled${result.reason ? ` (${result.reason})` : ""}`
+        : `Lobby returned: ${returned}`;
+      // Returning/cancelling the nested lobby only resumes this Profile guest.
+      // Keep selected/stored local state alive until the user explicitly
+      // chooses the separate Return to Showcase action below.
+      setStatus(`${outcome}; Profile remains available.`);
     } catch (error) {
       setStatus(`Profile flow failed: ${errorText(error)}`);
       setStatusOk(false);
@@ -136,14 +141,15 @@ function ProfileApp(): JSX.Element {
 
   return (
     <MobileThemeProvider theme={MOBILE_THEME_LIGHT}>
-      <MobileScaffold
-        appBar={
+      <SafeAreaScaffold
+        reservedActions="mini-app"
+        appBar={() => (
           <MobileAppBar
             title="Pocket Profile"
             subtitle="pocket.demo.profile · shared identity"
             trailing={<MobileBadge label="Guest A" tone="accent" />}
           />
-        }
+        )}
       >
         <ScrollablePage>
           <View class="flex-col gap-3 p-4">
@@ -193,7 +199,7 @@ function ProfileApp(): JSX.Element {
             </MobileCard>
           </View>
         </ScrollablePage>
-      </MobileScaffold>
+      </SafeAreaScaffold>
     </MobileThemeProvider>
   );
 }

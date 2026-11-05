@@ -15,6 +15,17 @@
 import { For, Show, children as resolveChildren, createContext, createEffect, createMemo, createSignal, onCleanup, useContext, type JSX } from "solid-js";
 import { CompositorSurface, Focusable, Modal, Text, View, type ViewProps } from "@pocketjs/framework/solid/components";
 import { buildLiquidGlassRecipe, type GlassShape } from "./legacy.ts";
+import {
+  ContourConsumedContext,
+  SafeAreaScaffold,
+  SafeAreaScaffoldContext,
+  ScrollContourItem,
+  useScrollContourReserve,
+  type SafeAreaEdges,
+  type SafeAreaReservedActions,
+  type SafeAreaSlot,
+} from "./ui.tsx";
+import type { DisplayGeometry } from "./responsive.ts";
 
 export interface MobileTheme {
   name: string;
@@ -70,25 +81,35 @@ function useMobileThemeAccessor(): () => MobileTheme {
 
 export function MobileScaffold(props: {
   children?: JSX.Element;
-  appBar?: JSX.Element;
-  bottomBar?: JSX.Element;
+  appBar?: SafeAreaSlot;
+  bottomBar?: SafeAreaSlot;
   class?: string;
+  /**
+   * Nested showcase pages already sit below the root Screen's safe shell, so
+   * they default to `none`. Standalone guests should use `SafeAreaScaffold`
+   * (or pass `safeArea="all"`) exactly once.
+   */
+  safeArea?: SafeAreaEdges;
+  /** Reuse a parent geometry signal instead of subscribing a second time. */
+  geometry?: DisplayGeometry | (() => DisplayGeometry);
+  /** Reserve the host's top-right mini-app action area for app-bar content. */
+  reservedActions?: SafeAreaReservedActions;
 }): JSX.Element {
-  // Keep the structural classes literal in JSX. The pinned compiler collects
-  // classes from JSX attributes into the PAK style table; classes assembled
-  // by a function (the pre-package version did this) are not a portable style
-  // contract and silently become an unsized native row. The outer canvas keeps
-  // a bounded fill so a themed page also paints its empty tail.
+  // Keep one structural shell: SafeAreaScaffold owns geometry and edge
+  // padding, while this compatibility wrapper only supplies the mobile theme.
+  // The pinned compiler still sees the classes as literal JSX attributes.
   const theme = useMobileThemeAccessor();
-  const resolvedChildren = resolveChildren(() => props.children);
   return (
-    <View class="flex-col w-full" style={{ grow: 1 }}>
-      <View class={props.class ?? (theme().name === "dark" ? "flex-col w-full bg-[#0E1728]" : "flex-col w-full bg-[#F5F6FA]")} style={{ grow: 1 }}>
-        {props.appBar}
-        {resolvedChildren()}
-        {props.bottomBar}
-      </View>
-    </View>
+    <SafeAreaScaffold
+      class={props.class ?? (theme().name === "dark" ? "flex-col w-full bg-[#0E1728]" : "flex-col w-full bg-[#F5F6FA]")}
+      edges={props.safeArea ?? "none"}
+      geometry={props.geometry}
+      reservedActions={props.reservedActions}
+      appBar={props.appBar}
+      bottomBar={props.bottomBar}
+    >
+      {props.children}
+    </SafeAreaScaffold>
   );
 }
 
@@ -100,18 +121,39 @@ export function MobileAppBar(props: {
   dark?: boolean;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
+  const scaffold = useContext(SafeAreaScaffoldContext);
+  const alreadyConsumed = useContext(ContourConsumedContext);
+  const { nodeRef, reserve } = useScrollContourReserve({
+    baseRight: 16,
+    defaultInBand: true,
+    enabled: () => !alreadyConsumed(),
+    mode: "padding",
+  });
   const dark = () => props.dark === true || theme().name === "dark";
+  let appliedNonZero = false;
+  const appBarStyle = () => {
+    const r = reserve();
+    if (r > 0) appliedNonZero = true;
+    if (scaffold.reservedActions > 0 || r > 0 || appliedNonZero) {
+      return { paddingR: Math.max(16 + r, scaffold.reservedActions + r) };
+    }
+    return undefined;
+  };
   return (
-    <View class={dark()
-      ? "flex-row items-center gap-2 w-full h-[56] px-4 bg-[#0E1728]"
-      : "flex-row items-center gap-2 w-full h-[56] px-4 bg-white border-[#E5E9F2]"}>
-      {props.leading}
-      <View class="flex-col gap-1 flex-1">
-        <Text class={dark() ? "text-base text-white font-bold" : "text-base text-[#17233B] font-bold"}>{props.title}</Text>
-        {props.subtitle ? <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.subtitle}</Text> : null}
+    <ContourConsumedContext.Provider value={() => true}>
+      <View
+        ref={nodeRef}
+        class="flex-row items-center gap-2 w-full h-[56] px-4 bg-transparent"
+        style={appBarStyle()}
+      >
+        {props.leading}
+        <View class="flex-col gap-1 flex-1 overflow-hidden" style={{ minW: 0 }}>
+          <Text class={dark() ? "text-base text-white font-bold" : "text-base text-[#17233B] font-bold"}>{props.title}</Text>
+          {props.subtitle ? <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.subtitle}</Text> : null}
+        </View>
+        {props.trailing}
       </View>
-      {props.trailing}
-    </View>
+    </ContourConsumedContext.Provider>
   );
 }
 
@@ -127,22 +169,23 @@ export interface MobileCardProps {
 
 export function MobileCard(props: MobileCardProps): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const content = (
-    <View class={props.class ?? (theme().name === "dark"
+  if (props.glass) {
+    return (
+      <GlassSurface shape={props.glassShape ?? "rounded"} pressed={props.glassPressed} class={props.class}>
+        {props.title ? <Text class={theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text> : null}
+        {props.detail ? <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
+        {props.children}
+      </GlassSurface>
+    );
+  }
+  return (
+    <ScrollContourItem class={props.class ?? (theme().name === "dark"
       ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
       : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]")}>
       {props.title ? <Text class={theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text> : null}
       {props.detail ? <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
       {props.children}
-    </View>
-  );
-  if (!props.glass) return content;
-  return (
-    <GlassSurface shape={props.glassShape ?? "rounded"} pressed={props.glassPressed} class={props.class}>
-      {props.title ? <Text class={theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text> : null}
-      {props.detail ? <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
-      {props.children}
-    </GlassSurface>
+    </ScrollContourItem>
   );
 }
 
@@ -244,7 +287,7 @@ export function MobileListTile(props: {
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
   const body = (
-    <View class={props.selected
+    <ScrollContourItem class={props.selected
       ? (theme().name === "dark"
         ? "flex-row items-center gap-3 px-3 py-3 rounded-xl bg-[#253B73]"
         : "flex-row items-center gap-3 px-3 py-3 rounded-xl bg-[#E8EDFF]")
@@ -252,12 +295,12 @@ export function MobileListTile(props: {
         ? "flex-row items-center gap-3 px-3 py-3 rounded-xl bg-[#17233B] border-[#30405A]"
         : "flex-row items-center gap-3 px-3 py-3 rounded-xl bg-white border-[#E5E9F2]"}>
       {props.leading}
-      <View class="flex-col gap-1 flex-1">
+      <View class="flex-col gap-1 flex-1 overflow-hidden" style={{ minW: 0 }}>
         <Text class={props.selected && theme().name !== "dark" ? "text-sm text-[#315DEB] font-bold" : theme().name === "dark" ? "text-sm text-white font-bold" : "text-sm text-[#17233B] font-bold"}>{props.title}</Text>
         {props.detail ? <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{props.detail}</Text> : null}
       </View>
       {props.trailing}
-    </View>
+    </ScrollContourItem>
   );
   return props.onPress ? <Focusable onPress={props.onPress}>{body}</Focusable> : body;
 }
@@ -269,11 +312,11 @@ export function MobileSegmentedControl(props: {
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
   return (
-    <View class={theme().name === "dark" ? "flex-row gap-1 p-1 rounded-xl bg-[#22314A]" : "flex-row gap-1 p-1 rounded-xl bg-[#EEF1F6]"}>
+    <ScrollContourItem class={theme().name === "dark" ? "flex-row gap-1 p-1 rounded-xl bg-[#22314A]" : "flex-row gap-1 p-1 rounded-xl bg-[#EEF1F6]"}>
       <For each={props.items}>
         {(item) => <MobileButton label={item.label} compact kind={props.active === item.id ? "filled" : "text"} onPress={() => props.onChange(item.id)} />}
       </For>
-    </View>
+    </ScrollContourItem>
   );
 }
 
@@ -391,7 +434,7 @@ export function GlassSurface(props: {
   createEffect(() => register(payload()));
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
-    <View class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"}>
+    <ScrollContourItem class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"}>
       <Show when={registered()}>
         <View class="absolute inset-0 overflow-hidden rounded-xl">
           <CompositorGlass packageId={id} radius={recipe().radius} />
@@ -401,7 +444,7 @@ export function GlassSurface(props: {
         <View class="absolute inset-0 overflow-hidden rounded-xl" style={{ gradFrom: recipe().bgColors[0], gradTo: recipe().bgColors[2], gradDir: 1, radius: recipe().radius, shadow: recipe().shadowBlur > 20 ? 2 : 1 }} />
       </Show>
       <View class="relative flex-col gap-3">{props.children}</View>
-    </View>
+    </ScrollContourItem>
   );
 }
 
@@ -468,7 +511,10 @@ export function PlatformTextureSurface(props: {
 
 // Compatibility vocabulary from the old UIKit. These are aliases, not extra
 // implementations, so consumers can migrate names without multiplying logic.
-export const Scaffold = MobileScaffold;
+// `Scaffold` is the standalone safe-area contract. Nested pages should use
+// `MobileScaffold` (which defaults to `safeArea="none"`) or pass explicit
+// edges when they own a different shell.
+export const Scaffold = SafeAreaScaffold;
 export const AppBar = MobileAppBar;
 export const FilledButton = MobileFilledButton;
 export const ElevatedButton = MobileFilledButton;

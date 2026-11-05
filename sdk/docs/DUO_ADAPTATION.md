@@ -130,6 +130,66 @@ CLI，应先以 `xcrun simctl help` 为准，再把确切参数写入这里。�
 
 `@pocket/ui` 提供 `createDisplayGeometry()`、`deriveResponsiveLayout()`、`availableDisplayPanes()`；监听、safe-area/occlusion 与 division 解释属于公共库，应用使用相同结果组合导航和页面。完整旋转、多窗口与物理 Duo 的姿态矩阵仍未完成，不能由这条开合测试推断全部通过。
 
+## 2026-11-04 截图反馈：右上角状态区与 MiniApp 关闭按钮
+
+来源截图（仅作问题记录，未复制到仓库）：
+
+- `/Volumes/ORICO/mac-caches/tmp/codex-clipboard-mN9Aow.png`：折叠态。
+- `/Volumes/ORICO/mac-caches/tmp/codex-clipboard-v9wWpT.png`：展开态。
+- 最新反馈截图 `/Volumes/ORICO/mac-caches/tmp/codex-clipboard-YC0oQV.png`、
+  `/Volumes/ORICO/mac-caches/tmp/codex-clipboard-F4pMw1.png` 仅用于确认折叠态 contour 下方
+  的视觉间距与展开态首次挂载的 late-viewport 问题，仍未复制到仓库。
+
+本轮已在 JS SDK 实施局部策略；Device Hub 截图复测仍未完成，不能把它写成“真机已解决”：
+
+- 折叠态与展开态的 MiniApp 关闭按钮统一保持在顶部 `MobileAppBar` 右侧的 `reservedActions="mini-app"`（60px）预留槽位内（即 `Guest A` / `Guest B` 徽章右侧、右侧状态栏安全区左侧），不再下移到折叠态右侧状态条下方。
+- 展开态右上角避让区域不足，状态图标向下覆盖横幅；状态横幅只增加局部 contour 余量，正文其余区域不重新加全局 right/top inset。
+
+### JS 实施边界
+
+- `sdk/packages/pocket_ui/src/responsive.ts` 的 `topRightOcclusionFrame()` 使用 active
+  `occlusion.frame + margins`，只返回实际贴顶/贴右且非全高的局部 contour；不使用屏宽、机型名或
+  固定图标尺寸。展开态 app-bar/StatusBar 使用明确的 `DISPLAY_UI_SAFETY_GAP=12` logical px UI 间距；该值不是
+  OS margin。
+- `system-surfaces.tsx` 继续以 raw `reservedInsets` 作为 OS safe-area 权威，统一对顶部 `44×44`
+  close hit target 应用一次 `reservedInsets` 后执行横向 `avoidDisplayOcclusions(..., { prefer: "horizontal" })`，
+  使关闭按钮在折叠态（`x=330..374, y=8..52`）和展开态（`x=815..859, y=8..52`）均位于顶部 `Guest A` 右侧。
+  30px 同心圆视觉和 44px 触控区不变。
+- `SafeAreaScaffold` 使用 `pageInsets` 释放 open Duo 中“`safeArea.right` 恰好等于局部右上
+  occlusion 宽度、且存在纵向 division（active/inactive 均可）”的保守投影；folded 无 division
+  时仍保留全局 right。`StatusBar` 组件自身增加局部右余量，长 detail 收缩/换行，并在 label/detail
+  之间保留显式 gap；这是组件级保守 reserve，不是通用位置测量，也不把整页正文变成保守窄栏。
+- `sdk/packages/pocket_ui/src/display.ts` 在已有 display event lane 上缓存每个 host bridge
+  的最新 canonical geometry，并让晚挂载的 MiniApp surface replay 它；同宽 partial keyboard/resize
+  更新沿用先前 safeArea/reservedRegions，不会因 raw packet 缺字段而首帧回到 camera/status 区。
+
+这套策略依赖 native 提供正确的 `reservedRegions`。若 OS 只给 safeArea 或缺少局部 contour，SDK
+不会伪造图标矩形；页面只能保留保守 safe-area，仍需补齐宿主几何事实。
+
+已完成的 JS 回归与仍待设备验收：
+
+1. JS/native fixture 已验证折叠 contour、展开 active/inactive division、长 detail、44px hitbox 和 geometry 更新；测试为
+   `bun test packages/pocket_ui/test/responsive_occlusion.test.ts`、
+   `bun test packages/pocket_ui/test/safe_area_native.test.ts`、
+   `bun test js/tests/mobile_ui.test.ts`；`duo_close_native.test.ts` 另覆盖晚订阅者在完整+partial
+   viewport 后首次稳定 close 命中。
+2. Duo Flutter integration 已在真实 iPhone Duo simulator（UDID `4D366210-290E-46DB-8BC6-3C5233700409`）
+   验证两次 folded 顶部 close：viewport `466×678`、contour `Rect(382,0,466,174)`、Pointer center
+   `(352,30)`，两次均 `closedByRealPointer=true`；这同时验证了 Flutter→PocketView→JS 输入映射与
+   folded 顶部 app-bar hitbox。
+3. 仍需在 Device Hub 分别保存 folded、open 和 resize 中间帧截图，确认真实状态图标的包围盒与
+   `frame + margins` 一致；测试 fixture 不能替代真实系统像素证据。open posture 的真实点击仍需姿态切换后补测。
+4. 本轮未重启服务、未改变 Flutter/native 几何桥。
+
+补充自动化：`bun test sdk/packages/pocket_ui/test/duo_close_native.test.ts`（仓库根目录）
+构建真实字节码并实例化 `SystemAppSurfaces`，在同一个 native runtime 中切换折叠/展开/再折叠几何。
+测试逐次点击折叠态右上状态区、折叠态右侧状态条下方、折叠态顶部 `Guest A` 右侧槽位（`x=352, y=30`）、
+展开状态区、展开顶部槽位（`x=837, y=30`），以及反向折叠后的状态区/右轨/顶部槽位；断言命中结果为
+`0 / 0 / 1 / 0 / 1 / 0 / 0 / 1`，防止仅统计总点击数造成假阳性。
+另有 late-subscriber + partial viewport fixture；它验证首次稳定 close hit 落在顶部 `Guest A` 右侧槽位，
+不把透明入场动画的首个 admitted frame 冒称为已测位置，因为 pocket_probe DrawOps 不暴露该节点的 computed style。
+这是实际 PocketJS 命中测试，仍不代替 UIKit 状态图标的设备截图复测。
+
 ## 2026-11-04 底部 TabBar 统一与 iPhone Duo 开合修复
 
 ### 问题根因
@@ -152,3 +212,31 @@ CLI，应先以 `xcrun simctl help` 为准，再把确切参数写入这里。�
 - `bun sdk/packages/pocket_ui/test/navigation_bar_native.test.ts`：覆盖 `390×844`、`720×844`、窄宽切换及 iPhone Duo `951×669`（展开）→ `466×678`（折叠）→ `951×669`（再展开）全链路 native 布局断言，三枚 Tab 等宽、同线且底部安全区生效。
 - `bun test tests/mobile_ui.test.ts tests/guest_state.test.ts` 与 `bun tests/guest_ablation.ts --required`（于 `demo/js`）：通过。
 - 使用 `pocket_probe` 加载重建后的 `demo/assets/app.qjbc` + `demo/assets/app.pak` 注入真实 `duo_geometry.json` 采样：展开态（`951×669`）Tab 中心点 `159 / 475.5 / 792.5`（`y: 616`），折叠态（`466×678`）Tab 中心点 `78 / 232.5 / 388.5`（`y: 625`），往返切换无宽度残留且页面纵向拖拽滚动正常。
+
+## 2026-11-04 异形滚动列表与全量 UI 渐进式宽度避让
+
+### 问题根因
+
+1. **右上角异形遮挡重叠（摄像头挖孔 + 时间 + 信号环）**：
+   - `demo/js/app.tsx` 根 `<SafeAreaScaffold edges={["top"]} ...>` 未消费 `"right"`，而旧 `SafeAreaScaffold.topRightContentReserve()` 在 `pageInsets(current).right > 0`（折叠态 Duo `right = 84`）时直接返回 `0`，导致折叠态下 `Header`、`Tabs`、`PageIntro`、`Card` 等与右上角 `84×174` 状态区发生重叠。
+   - 嵌套 `<MobileScaffold>`（默认 `edges="none"`）覆写了父级 `SafeAreaScaffoldContext`，导致子页面丢失 `displayGeometry` 与右上角 contour 信息。
+   - 列表滚动时，位于异形区下方的子组件（`Card`、`MobileCard`、`Row`、`List`、`TileGrid` 等）上滑进入右上角遮挡区时不会动态收缩右侧宽度。
+
+### 来源复用与改动
+
+- **复用来源**：复用 `sdk/packages/pocket_ui/src/responsive.ts` 的 `topRightOcclusionFrame()` 与 `sdk/packages/pocket_ui/src/ui.tsx` 的 `ScrollablePage` + `committedLayout`（`pocket.getLayout`）坐标换算链路，不新增第二套布局引擎或 Dart 状态机。
+- **`sdk/packages/pocket_ui/src/responsive.ts`**：
+  - 新增 `hasLocalTopRightOcclusionInset(geometry)`：识别 `safeArea.right` 仅由局部右上角 occlusion 投影产生的情形（若存在全高或带 `margins` 触达右缘的其它遮挡则保留全局安全区），使正文下方保持全宽，顶部由局部 contour 渐进式避让。
+  - 新增 `DISPLAY_CONTOUR_CLEARANCE_PX = 5`、`DISPLAY_CONTOUR_BOTTOM_TRIM_PX = 14`、`DISPLAY_CONTOUR_RAMP_PX = 5` 与 `topRightContourReserveForBand(geometry, visualTop, visualBottom, options)`：支持重叠多区域右上角 contour，保持 UI 右侧边界距离真实异形区 `5px`，并对高占比状态胶囊遮挡框底部内收 `14px`（使底部与状态图标的视觉间距同左侧保持一致）；当子项位于 `cutoutBottom + 5px` 以下时返回 `0`（全宽）；当子项随滚动进入 `[cutoutBottom, cutoutBottom + 5px]` 过渡带时，按 C1 连续的 Hermite smoothstep（`3t² - 2t³`）曲线以 `0.5pt` 精度渐进式增加右侧预留宽度；进入 `visualTop <= cutoutBottom` 后保持完整 `maxReserve`（即使继续上滑出顶边也不回弹，防止屏外重排造成列表跳动）。
+- **`sdk/packages/pocket_ui/src/ui.tsx` & `sdk/packages/pocket_ui/src/mobile.tsx`**：
+  - `MobileAppBar` 顶部标题栏去除底色背景与底边线（改为 `bg-transparent`），直接融入页面背景。
+  - 新增 `ScrollablePageContext`、`ContourConsumedContext`、`useScrollContourReserve` 与 `ScrollContourItem`，在 `ScrollablePage` 的手势拖拽、动量帧、内容重排与 `display.viewport` 变更时同步测量子项真实未缩进右边界（不重复累加容器 `p-4` / `mx-5` 边距），使子项右边界精确停在距离真实异形区 `5px` 处；在缩进状态下启用裁剪，并在恢复全宽时保留组件声明的 `overflow-hidden` 属性。
+  - 全量覆盖公共 UI 组件：`Header`、`MobileAppBar`、`PageIntro`、`SectionHeading`、`Tabs`、`StatusBar`、`EmptyState`、`Card`、`MobileCard`、`GlassSurface`、`Row`、`List`、`MobileListTile`、`MobileSegmentedControl`。
+- **`demo/js/app.tsx`**：
+  - 将 `HomePage`（顶部横幅、`HomeExplore`、标题行、双栏面板、底部状态行）、`GalleryPage`（`GalleryTile` 按整行右边界 `contentWidth() - 20` 统一计算双列网格卡片宽度）、`RuntimePage`、`PerformancePage`、`StressPage` 全部接入 `ScrollContourItem` / `useScrollContourReserve`，并重新编译 `demo/js` 及 `profile`、`lobby` Mini-App 字节码。
+
+### 验证记录
+
+- `bun test sdk/packages/pocket_ui/test/responsive_occlusion.test.ts`：验证 `hasLocalTopRightOcclusionInset` 与 `topRightContourReserveForBand` 在异形区内、5px smoothstep 过渡带、异形区下方、屏外上方、多区域叠加及全高遮挡（含 margins）下的几何契约。
+- `bun test sdk/packages/pocket_ui/test/safe_area_native.test.ts`：通过 `pocket_probe` 运行编译后字节码，验证 `MobileAppBar` 透明无底色、双列网格右列距异形区 5px 避让、列表卡片从下方全宽（`358`）上滑进入 5px 过渡带（`316`）、进入右上角异形区（`285`，卡片右边框 `301 = 306 - 5`）再下滑恢复全宽（`358`）并保留裁剪、以及静止态内容重排自动同步（`285`）的完整闭环。
+- `cd demo/js && bun run test && cd ../.. && python3 sdk/scripts/check_architecture.py`：全部通过。

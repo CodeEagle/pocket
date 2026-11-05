@@ -159,6 +159,106 @@ function activeRegions(geometry: DisplayGeometry): readonly DisplayRegion[] {
   return geometry.reservedRegions.filter((region) => region.active);
 }
 
+export interface DisplayOcclusionAvoidance {
+  /** Translation to apply to the target in the same logical coordinate space. */
+  offsetX: number;
+  offsetY: number;
+  /** The translated target rectangle selected by the helper. */
+  rect: DisplayRegionFrame;
+}
+
+export interface DisplayOcclusionAvoidanceOptions {
+  /** Which axis should win when a corner occlusion can be cleared either way. */
+  prefer?: "horizontal" | "vertical";
+}
+
+function expandedRegionFrame(region: DisplayRegion): DisplayRegionFrame {
+  return {
+    left: region.frame.left - region.margins.left,
+    top: region.frame.top - region.margins.top,
+    width: region.frame.width + region.margins.left + region.margins.right,
+    height: region.frame.height + region.margins.top + region.margins.bottom,
+  };
+}
+
+function rectsIntersect(left: DisplayRegionFrame, right: DisplayRegionFrame): boolean {
+  return left.left < right.left + right.width
+    && left.left + left.width > right.left
+    && left.top < right.top + right.height
+    && left.top + left.height > right.top;
+}
+
+function translatedRect(rect: DisplayRegionFrame, offsetX: number, offsetY: number): DisplayRegionFrame {
+  return { ...rect, left: rect.left + offsetX, top: rect.top + offsetY };
+}
+
+function fitsDisplay(rect: DisplayRegionFrame, geometry: DisplayGeometry): boolean {
+  return rect.left >= 0
+    && rect.top >= 0
+    && rect.left + rect.width <= geometry.width
+    && rect.top + rect.height <= geometry.height;
+}
+
+/**
+ * Move one local control out of active occlusion rectangles.
+ *
+ * `target` and ReservedRegion frames are already in the guest logical
+ * coordinate space. The caller applies its page/host edge insets first; this helper
+ * therefore never clears or reinterprets the host safe area and cannot add a
+ * second copy of an existing edge inset. Divisions are deliberately ignored.
+ * A non-overlapping target is a zero-offset no-op, so full-width body/canvas
+ * layout is unchanged. This is especially important on Duo: the top-right
+ * system icons are a local corner obstruction, not a reason for full-top
+ * blank space.
+ */
+export function avoidDisplayOcclusions(
+  geometry: DisplayGeometry,
+  target: DisplayRegionFrame,
+  options: DisplayOcclusionAvoidanceOptions = {},
+): DisplayOcclusionAvoidance {
+  const normalized: DisplayRegionFrame = {
+    left: finite(target.left),
+    top: finite(target.top),
+    width: nonNegative(target.width),
+    height: nonNegative(target.height),
+  };
+  const zero = { offsetX: 0, offsetY: 0, rect: normalized };
+  if (normalized.width <= 0 || normalized.height <= 0 || geometry.width <= 0 || geometry.height <= 0) return zero;
+
+  const occlusions = activeRegions(geometry)
+    .filter((region) => region.kind === "occlusion")
+    .map(expandedRegionFrame);
+  const intersecting = occlusions.filter((region) => rectsIntersect(normalized, region));
+  if (intersecting.length === 0) return zero;
+
+  // Candidate translations clear one edge of an intersecting region. Trying
+  // all candidates then validates against every active occlusion, so nearby
+  // camera/hinge rectangles cannot be cleared by moving under another one.
+  const candidates: Array<{ offsetX: number; offsetY: number }> = [];
+  for (const region of intersecting) {
+    candidates.push(
+      { offsetX: region.left - (normalized.left + normalized.width), offsetY: 0 },
+      { offsetX: region.left + region.width - normalized.left, offsetY: 0 },
+      { offsetX: 0, offsetY: region.top - (normalized.top + normalized.height) },
+      { offsetX: 0, offsetY: region.top + region.height - normalized.top },
+    );
+  }
+  const prefer = options.prefer ?? "horizontal";
+  candidates.sort((left, right) => {
+    const leftPreferred = prefer === "horizontal" ? Math.abs(left.offsetY) : Math.abs(left.offsetX);
+    const rightPreferred = prefer === "horizontal" ? Math.abs(right.offsetY) : Math.abs(right.offsetX);
+    return leftPreferred - rightPreferred
+      || (Math.abs(left.offsetX) + Math.abs(left.offsetY)) - (Math.abs(right.offsetX) + Math.abs(right.offsetY));
+  });
+  for (const candidate of candidates) {
+    const rect = translatedRect(normalized, candidate.offsetX, candidate.offsetY);
+    if (!fitsDisplay(rect, geometry)) continue;
+    if (occlusions.some((region) => rectsIntersect(rect, region))) continue;
+    return { ...candidate, rect };
+  }
+  return zero;
+}
+
 /** Return edge insets from active occlusions and the host safe area. */
 export function reservedInsets(geometry: DisplayGeometry): DisplayInsets {
   const result = { ...geometry.safeArea };
@@ -170,14 +270,15 @@ export function reservedInsets(geometry: DisplayGeometry): DisplayInsets {
     // cutout is handled by the host safeArea or its side inset instead of
     // shrinking the whole page.
     if (region.kind !== "occlusion") continue;
-    const right = geometry.width - (region.frame.left + region.frame.width);
-    const bottom = geometry.height - (region.frame.top + region.frame.height);
-    const coversHorizontalEdge = region.frame.width >= geometry.width * 0.6;
-    const coversVerticalEdge = region.frame.height >= geometry.height * 0.6;
-    if (region.frame.top <= 1 && coversHorizontalEdge) {
+    const expanded = expandedRegionFrame(region);
+    const right = geometry.width - (expanded.left + expanded.width);
+    const bottom = geometry.height - (expanded.top + expanded.height);
+    const coversHorizontalEdge = expanded.width >= geometry.width * 0.6;
+    const coversVerticalEdge = expanded.height >= geometry.height * 0.6;
+    if (expanded.top <= 1 && coversHorizontalEdge) {
       result.top = Math.max(result.top, region.frame.height + region.margins.top);
     }
-    if (region.frame.left <= 1 && coversVerticalEdge) {
+    if (expanded.left <= 1 && coversVerticalEdge) {
       result.left = Math.max(result.left, region.frame.width + region.margins.left);
     }
     if (right <= 1 && coversVerticalEdge) {
@@ -187,6 +288,122 @@ export function reservedInsets(geometry: DisplayGeometry): DisplayInsets {
       result.bottom = Math.max(result.bottom, region.frame.height + region.margins.bottom);
     }
   }
+  return result;
+}
+
+const DISPLAY_GEOMETRY_EPSILON = 1;
+
+/** JS control-to-contour spacing; this is not an OS safe-area/margin fact. */
+export const DISPLAY_UI_SAFETY_GAP = 12;
+
+/** Horizontal clearance (in logical px) between contour-aware UI items and the real occlusion region. */
+export const DISPLAY_CONTOUR_CLEARANCE_PX = 5;
+
+/**
+ * Vertical bottom trim (in logical px) for tall top-right status occlusions
+ * whose OS frame includes extra bottom padding beyond the visual status pill,
+ * keeping bottom clearance aligned with the left clearance.
+ */
+export const DISPLAY_CONTOUR_BOTTOM_TRIM_PX = 14;
+
+/** Progressive transition ramp height (in logical px) below a top-right display contour. */
+export const DISPLAY_CONTOUR_RAMP_PX = 5;
+
+export interface DisplayContourBandOptions {
+  /** Vertical trim applied to the occlusion bottom before `extraBottom`. Defaults to `DISPLAY_CONTOUR_BOTTOM_TRIM_PX` for tall corner contours. */
+  bottomTrim?: number;
+  /** Extra vertical reservation below the occlusion (for example a folded-rail close button). */
+  extraBottom?: number;
+  /** Extra horizontal reservation at the top-right edge (for example a top action target). */
+  extraRight?: number;
+  /** Unreserved right boundary of the item/container in guest-canvas coordinates. Defaults to `geometry.width`. */
+  itemRight?: number;
+  /** Progressive transition zone height below the contour bottom. */
+  rampPx?: number;
+  /** Clearance between UI content and the occlusion contour. Defaults to `DISPLAY_CONTOUR_CLEARANCE_PX` (5px). */
+  safetyGap?: number;
+}
+
+function isVerticalDivision(region: DisplayRegion, geometry: DisplayGeometry): boolean {
+  const frameRight = region.frame.left + region.frame.width;
+  const frameBottom = region.frame.top + region.frame.height;
+  return region.kind === "division"
+    && region.frame.left > DISPLAY_GEOMETRY_EPSILON
+    && region.frame.top >= 0
+    && frameRight < geometry.width - DISPLAY_GEOMETRY_EPSILON
+    && frameBottom <= geometry.height + DISPLAY_GEOMETRY_EPSILON
+    && region.frame.top <= DISPLAY_GEOMETRY_EPSILON
+    && frameBottom >= geometry.height - DISPLAY_GEOMETRY_EPSILON
+    && region.frame.height >= geometry.height * 0.6
+    && region.frame.width < geometry.width * 0.6
+    && frameRight > 0;
+}
+
+function isLocalTopRightOcclusion(region: DisplayRegion, geometry: DisplayGeometry): boolean {
+  if (region.kind !== "occlusion") return false;
+  const expanded = expandedRegionFrame(region);
+  const frameRight = region.frame.left + region.frame.width;
+  const expandedRight = expanded.left + expanded.width;
+  return region.frame.top >= 0
+    && expanded.top <= DISPLAY_GEOMETRY_EPSILON
+    && expanded.left >= 0
+    && frameRight <= geometry.width + DISPLAY_GEOMETRY_EPSILON
+    && region.frame.top + region.frame.height <= geometry.height + DISPLAY_GEOMETRY_EPSILON
+    && geometry.width - expandedRight <= DISPLAY_GEOMETRY_EPSILON
+    && expanded.height < geometry.height * 0.6
+    && expanded.width < geometry.width * 0.6;
+}
+
+function matchesTopRightOcclusionSafeRight(geometry: DisplayGeometry, insets: DisplayInsets): boolean {
+  const safeRight = geometry.safeArea.right;
+  if (safeRight <= 0 || Math.abs(insets.right - safeRight) > DISPLAY_GEOMETRY_EPSILON) return false;
+  let maxCornerRight = 0;
+  for (const region of activeRegions(geometry)) {
+    if (region.kind !== "occlusion") continue;
+    const expanded = expandedRegionFrame(region);
+    const expandedRight = expanded.left + expanded.width;
+    const touchesRightEdge = geometry.width - expandedRight <= DISPLAY_GEOMETRY_EPSILON;
+    if (!touchesRightEdge) continue;
+    if (!isLocalTopRightOcclusion(region, geometry)) {
+      // Another active right-edge obstruction (such as a full-height bezel or
+      // lower-edge cutout) requires a right inset below the top corner.
+      return false;
+    }
+    maxCornerRight = Math.max(maxCornerRight, region.frame.width + region.margins.right);
+  }
+  return maxCornerRight > 0 && Math.abs(safeRight - maxCornerRight) <= DISPLAY_GEOMETRY_EPSILON;
+}
+
+function explainsConservativeRightInset(geometry: DisplayGeometry, insets: DisplayInsets): boolean {
+  // A division is topology metadata, not an active layout reservation. Keep
+  // inactive divisions in this test: open Duo can publish the seam inactive
+  // while its right status-icon occlusion remains the same.
+  const hasDivisionTopology = geometry.reservedRegions.some(region => isVerticalDivision(region, geometry));
+  if (!hasDivisionTopology) return false;
+  return matchesTopRightOcclusionSafeRight(geometry, insets);
+}
+
+/**
+ * True when `safeArea.right` is solely a conservative projection of a local
+ * top-right corner occlusion (such as iPhone Duo's camera/clock/status cluster)
+ * rather than a full-height vertical edge obstruction.
+ */
+export function hasLocalTopRightOcclusionInset(geometry: DisplayGeometry): boolean {
+  return matchesTopRightOcclusionSafeRight(geometry, reservedInsets(geometry));
+}
+
+/**
+ * Insets for an independent Page shell, retaining the conservative legacy
+ * contract everywhere else. On open Duo only, native can conservatively
+ * project a top-right icon occlusion into `safeArea.right` even though a
+ * vertical division proves the page is a two-pane surface. When that inset
+ * exactly matches the local occlusion width, release it for the body and let
+ * app-bar/close targets use `avoidDisplayOcclusions` instead. Folded Duo has
+ * no division topology, so its right safe area remains global.
+ */
+export function pageInsets(geometry: DisplayGeometry): DisplayInsets {
+  const result = reservedInsets(geometry);
+  if (explainsConservativeRightInset(geometry, result)) result.right = 0;
   return result;
 }
 
@@ -228,6 +445,81 @@ export function bottomBarInsets(geometry: DisplayGeometry): DisplayInsets {
     bottom: base.bottom,
     left,
   };
+}
+
+/**
+ * Return the expanded logical contour of the active top-right occlusion.
+ * Margins are part of UIKit's reserved geometry, so consumers must avoid the
+ * expanded contour rather than only the raw icon frame. The result is
+ * intentionally local; it is not a page-wide top inset.
+ */
+export function topRightOcclusionFrames(geometry: DisplayGeometry): DisplayRegionFrame[] {
+  return activeRegions(geometry)
+    .filter(region => region.kind === "occlusion")
+    .map(region => expandedRegionFrame(region))
+    .filter(region =>
+      region.top <= DISPLAY_GEOMETRY_EPSILON
+      && region.left >= 0
+      && region.left + region.width >= geometry.width - DISPLAY_GEOMETRY_EPSILON
+      && region.width < geometry.width * 0.6
+      && region.height < geometry.height * 0.6)
+    .sort((left, right) => right.height - left.height || right.width - left.width);
+}
+
+export function topRightOcclusionFrame(geometry: DisplayGeometry): DisplayRegionFrame | undefined {
+  return topRightOcclusionFrames(geometry)[0];
+}
+
+/**
+ * Compute the progressive right-side width reservation for a UI item whose
+ * painted vertical span is `[visualTop, visualBottom]` in guest-canvas
+ * coordinates.
+ *
+ * Items below `cutoutBottom + rampPx` stay full-width (`0`). As an item
+ * scrolls upward through the ramp zone `[cutoutBottom, cutoutBottom + rampPx]`,
+ * the reservation smoothly progresses along a C1-continuous Hermite smoothstep
+ * curve (`3t^2 - 2t^3`) from `0` to `maxReserve`. Once `visualTop <= cutoutBottom`,
+ * the item keeps `maxReserve` (even after scrolling above the top edge) so
+ * wrapped text never unwraps offscreen and shifts visible content below it.
+ */
+export function topRightContourReserveForBand(
+  geometry: DisplayGeometry,
+  visualTop: number,
+  visualBottom: number,
+  options: DisplayContourBandOptions = {},
+): number {
+  const contours = topRightOcclusionFrames(geometry);
+  if (contours.length === 0) return 0;
+  const top = finite(visualTop);
+  const bottom = Math.max(top, finite(visualBottom, top));
+  const safetyGap = options.safetyGap !== undefined ? nonNegative(options.safetyGap) : DISPLAY_CONTOUR_CLEARANCE_PX;
+  const extraRight = nonNegative(options.extraRight);
+  const extraBottom = nonNegative(options.extraBottom);
+  const ramp = options.rampPx !== undefined ? nonNegative(options.rampPx) : DISPLAY_CONTOUR_RAMP_PX;
+  const itemRight = options.itemRight !== undefined
+    ? Math.min(geometry.width, nonNegative(options.itemRight))
+    : geometry.width;
+  let bestReserve = 0;
+  for (const contour of contours) {
+    if (bottom <= top && top > contour.top + contour.height) continue;
+    const allowedRight = Math.max(0, contour.left - safetyGap - extraRight);
+    const maxReserve = Math.max(0, Math.min(geometry.width, itemRight - allowedRight));
+    if (maxReserve <= 0) continue;
+    const rawBottom = contour.top + contour.height;
+    const defaultBottomTrim = contour.height > 60 ? DISPLAY_CONTOUR_BOTTOM_TRIM_PX : 0;
+    const bottomTrim = options.bottomTrim !== undefined ? nonNegative(options.bottomTrim) : defaultBottomTrim;
+    const cutoutBottom = Math.max(contour.top, rawBottom - bottomTrim) + extraBottom;
+    let regionReserve = 0;
+    if (top <= cutoutBottom) {
+      regionReserve = maxReserve;
+    } else if (ramp > 0 && top < cutoutBottom + ramp) {
+      const linear = Math.max(0, Math.min(1, (cutoutBottom + ramp - top) / ramp));
+      const smooth = linear * linear * (3 - 2 * linear);
+      regionReserve = Math.round(maxReserve * smooth * 2) / 2;
+    }
+    if (regionReserve > bestReserve) bestReserve = regionReserve;
+  }
+  return bestReserve;
 }
 
 /**
