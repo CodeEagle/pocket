@@ -1,7 +1,10 @@
 import { strict as assert } from "node:assert";
 
 import type { HostBridge, JsonObject, JsonValue } from "../src/host.ts";
-import { installPocketSystem, type PocketSystemV1 } from "../src/system.ts";
+import { mock } from "bun:test";
+import type { PocketSystemV1 } from "../src/system.ts";
+mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60 }));
+const { installPocketSystem } = await import("../src/system.ts");
 
 const SYSTEM_UI = "pocket.host.demo";
 const PROFILE = "pocket.demo.profile";

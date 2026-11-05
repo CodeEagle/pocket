@@ -17,4 +17,41 @@ void main() {
     expect(first.hashCode, reordered.hashCode);
     expect({first: 'session'}[reordered], 'session');
   });
+
+  test(
+    'download-on-open survives host copies and changes configuration identity',
+    () {
+      const updates = PocketUpdateConfig(
+        url: 'https://updates.example.test/profile/latest.json',
+        keyId: 'release',
+        publicKey: 'AA==',
+      );
+      const remote = PocketAppConfig(
+        appId: 'remote.profile',
+        updates: updates,
+        downloadOnOpen: true,
+      );
+      const embedded = PocketAppConfig(
+        appId: 'remote.profile',
+        updates: updates,
+      );
+      expect(() => remote.validate(), returnsNormally);
+      expect(remote, isNot(embedded));
+      final copied = remote.copyWith(
+        additionalCapabilities: {'example.capability'},
+      );
+      expect(copied.downloadOnOpen, isTrue);
+      expect(copied.updates, updates);
+      expect(remote.withPlugins([]).downloadOnOpen, isTrue);
+      expect(remote.copyWith(), remote);
+      expect(remote.copyWith().hashCode, remote.hashCode);
+      expect(
+        () => const PocketAppConfig(
+          appId: 'remote.missing',
+          downloadOnOpen: true,
+        ).validate(),
+        throwsFormatException,
+      );
+    },
+  );
 }

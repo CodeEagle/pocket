@@ -56,8 +56,13 @@ export interface HostEvent {
 
 export type HostEventListener = (event: HostEvent) => void;
 
+/** Override one long-running operation without changing ordinary requests. */
+export interface HostRequestOptions {
+  timeoutFrames?: number;
+}
+
 export interface HostBridge {
-  request<T extends BridgeValue = BridgeValue>(capability: string, params?: BridgeObject): Promise<T>;
+  request<T extends BridgeValue = BridgeValue>(capability: string, params?: BridgeObject, options?: HostRequestOptions): Promise<T>;
   handle(packet: string | Record<string, unknown>): boolean;
   /**
    * Emit a host event on the same Pocket event transport used by requests.
@@ -231,8 +236,8 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   if (!Number.isInteger(maxPendingRequests) || maxPendingRequests < 1 || maxPendingRequests > 256) {
     throw new RangeError("maxPendingRequests must be an integer between 1 and 256");
   }
-  if (!Number.isInteger(timeoutFrames) || timeoutFrames < 1 || timeoutFrames > 3600) {
-    throw new RangeError("timeoutFrames must be an integer between 1 and 3600");
+  if (!Number.isInteger(timeoutFrames) || timeoutFrames < 1 || timeoutFrames > 28800) {
+    throw new RangeError("timeoutFrames must be an integer between 1 and 28800");
   }
   const pending = new Map<string, {
     resolve: (value: BridgeValue) => void;
@@ -365,11 +370,15 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   };
 
   const bridge: HostBridge = {
-    request<T extends BridgeValue = BridgeValue>(capability: string, params: BridgeObject = {}): Promise<T> {
+    request<T extends BridgeValue = BridgeValue>(capability: string, params: BridgeObject = {}, requestOptions: HostRequestOptions = {}): Promise<T> {
       if (disposed) return Promise.reject(new Error("Host bridge is disposed"));
       if (!capability) return Promise.reject(new TypeError("Host capability must be non-empty"));
       if (!isJsonObject(params)) return Promise.reject(new TypeError("Host capability params must be an object"));
       if (pending.size >= maxPendingRequests) return Promise.reject(new HostRequestError("", "request_quota", "Host request limit reached"));
+      const requestTimeout = requestOptions.timeoutFrames ?? timeoutFrames;
+      if (!Number.isInteger(requestTimeout) || requestTimeout < 1 || requestTimeout > 28800) {
+        return Promise.reject(new RangeError("timeoutFrames must be an integer between 1 and 28800"));
+      }
       const requestId = `guest-${nextId++}`;
       const packet: Record<string, unknown> = {
         type: "event",
@@ -380,13 +389,13 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
         const entry = {
           resolve: resolve as (value: BridgeValue) => void,
           reject,
-          remainingFrames: timeoutFrames,
+          remainingFrames: requestTimeout,
           cancelTimeout: undefined as (() => void) | undefined,
         };
         pending.set(requestId, entry);
         let accepted = false;
         try {
-          entry.cancelTimeout = options.scheduleTimeout?.(timeoutFrames, () => {
+          entry.cancelTimeout = options.scheduleTimeout?.(requestTimeout, () => {
             if (!pending.delete(requestId)) return;
             entry.reject(new HostRequestError(requestId, "timeout", "Host response timed out"));
           });

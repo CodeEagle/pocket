@@ -17,6 +17,8 @@ import 'performance_history.dart';
 /// Platform orchestration only: package trust, runtime lifetime and capability
 /// providers. Pages, routing, UI components and application state live in JS.
 final class PocketSession extends ChangeNotifier {
+  static const Duration _downloadOnOpenTimeout = Duration(seconds: 20);
+
   PocketSession({required this.config})
     : performance = PerformanceHistory(namespace: config.appId) {
     config.validate();
@@ -67,6 +69,8 @@ final class PocketSession extends ChangeNotifier {
   bool _foreground = true;
   bool _foregroundRequested = true;
   bool _firstFrameReady = false;
+
+  bool get _downloadOnOpen => config.downloadOnOpen;
 
   /// App visibility, distinct from the Flutter process lifecycle. Hidden apps
   /// retain their realm but stop their clock and release active capabilities.
@@ -149,10 +153,7 @@ final class PocketSession extends ChangeNotifier {
     _mountTimer?.cancel();
     // Allow the guest to receive the diagnostics.recording.start response
     // before replacing its runtime generation with a freshly recorded realm.
-    _mountTimer = Timer(
-      const Duration(milliseconds: 20),
-      () => _mount(active),
-    );
+    _mountTimer = Timer(const Duration(milliseconds: 20), () => _mount(active));
   }
 
   /// Initializes this session at most once.
@@ -181,10 +182,14 @@ final class PocketSession extends ChangeNotifier {
     final embeddedBuild = _resolveEmbeddedBuild(
       _metadata,
       manifestJson,
+      // Remote-only bootstrap metadata also pins the oldest allowed release.
+      // Requiring a build prevents first-install replay of older signed code.
       requireBuild: updateConfig?.configured == true,
     );
     _embeddedBuild = embeddedBuild;
-    _embeddedVersion = _metadata['version'] as String? ?? 'embedded';
+    if (!_downloadOnOpen) {
+      _embeddedVersion = _metadata['version'] as String? ?? 'embedded';
+    }
     if (updateConfig != null && updateConfig.configured) {
       final directory = await getApplicationSupportDirectory();
       final namespace = updateConfig.namespace;
@@ -210,7 +215,12 @@ final class PocketSession extends ChangeNotifier {
         store: PocketPackageStore(packageRoot),
         expectedRuntimeAbi: _metadata['runtimeAbi'] as String,
         requireBytecode: true,
-        minimumBuild: embeddedBuild,
+        // There is no embedded package to activate in downloadOnOpen mode,
+        // but its required bootstrap build is still the host's release
+        // floor. The coordinator's strict-newer check uses build - 1 so a
+        // remote package at the same build is accepted while older builds
+        // remain rejected.
+        minimumBuild: _downloadOnOpen ? embeddedBuild - 1 : embeddedBuild,
         trustStore: trustStore,
         trustPolicyUri: updateConfig.trustPolicyConfigured
             ? Uri.parse(updateConfig.trustPolicyUrl!)
@@ -232,17 +242,44 @@ final class PocketSession extends ChangeNotifier {
         return;
       }
       _updates = updates;
-      try {
-        active = await updates.lastGood();
-        if (active != null && embeddedBuild > active!.build) {
-          await updates.resetToEmbedded();
-          active = null;
+      if (_downloadOnOpen) {
+        // Opening a remote mini-app first reuses only a verified healthy
+        // package. With no healthy cache, the coordinator performs the full
+        // signed-manifest/blob admission path and stages a candidate; no
+        // local qjbc/PAK fallback is available in this mode.
+        try {
+          active = await updates.lastGood(allowActiveFallback: false);
+          if (_disposed) return;
+          if (active != null && active!.build < _embeddedBuild) {
+            // Keep the old pointers as a downgrade baseline. A stale healthy
+            // cache must not run, but prepare() can still use it to enforce
+            // the bootstrap floor while fetching the current release.
+            active = null;
+          }
+          if (active == null) {
+            active = await _prepareOnOpen(updates);
+          }
+        } catch (error) {
+          if (_disposed) return;
+          _failWithoutEmbedded(error);
+          rethrow;
         }
-      } catch (error) {
-        lastError = 'Cached package rejected: $error';
+      } else {
+        try {
+          active = await updates.lastGood();
+          if (active != null && embeddedBuild > active!.build) {
+            await updates.resetToEmbedded();
+            active = null;
+          }
+        } catch (error) {
+          lastError = 'Cached package rejected: $error';
+        }
       }
     }
     if (_disposed) return;
+    if (_downloadOnOpen && active == null) {
+      throw StateError('downloadOnOpen did not produce a verified package');
+    }
     void publishInitial() {
       if (_disposed) return;
       stage = 'loading';
@@ -256,6 +293,22 @@ final class PocketSession extends ChangeNotifier {
       await _configureBridge(active);
       await _withAdmittedPackage(active, publishInitial);
     } catch (error) {
+      if (_downloadOnOpen) {
+        final failed = active;
+        final fallback = failed == null
+            ? null
+            : await _verifiedFallback(failed);
+        if (fallback != null && !_disposed) {
+          active = fallback;
+          try {
+            await _configureBridge(fallback);
+            await _withAdmittedPackage(fallback, publishInitial);
+            return;
+          } catch (_) {}
+        }
+        _failWithoutEmbedded(error);
+        rethrow;
+      }
       if (active == null) rethrow;
       lastError = 'Cached capabilities rejected: $error';
       active = null;
@@ -263,6 +316,77 @@ final class PocketSession extends ChangeNotifier {
       await _configureBridge(null);
       publishInitial();
     }
+  }
+
+  /// Prepares the first remote package with one bounded wall-clock budget.
+  ///
+  /// `PocketUpdateCoordinator` already checks the signed manifest, content
+  /// hashes and cancellation at every download boundary. The timeout only
+  /// supplies an outer bound for a cold open that may contain a manifest plus
+  /// multiple blobs; awaiting the original future in `finally` lets its
+  /// temporary files and transport stream finish their cancellation cleanup.
+  Future<PocketPreparedPackage> _prepareOnOpen(
+    PocketUpdateCoordinator updates,
+  ) async {
+    final token = _download = PocketCancellationToken();
+    final operation = updates.prepare(
+      cancellation: token,
+      onProgress: (progress) {
+        if (_disposed) return;
+        stage = progress.stage.name;
+      },
+    );
+    try {
+      return await operation.timeout(
+        _downloadOnOpenTimeout,
+        onTimeout: () {
+          token.cancel();
+          throw const PocketPackageException(
+            'downloadOnOpen package preparation timed out',
+            code: 'download-timeout',
+          );
+        },
+      );
+    } finally {
+      try {
+        await operation;
+      } catch (_) {
+        // The bounded operation's error is reported by the awaited call
+        // above. This second await is only for cancellation cleanup.
+      }
+      if (identical(_download, token)) _download = null;
+    }
+  }
+
+  Future<PocketPreparedPackage?> _verifiedFallback(
+    PocketPreparedPackage failed,
+  ) async {
+    final updates = _updates;
+    if (updates == null || _disposed) return null;
+    try {
+      final fallback = await updates.fallbackFor(failed);
+      if (_downloadOnOpen &&
+          fallback != null &&
+          fallback.build < _embeddedBuild) {
+        return null;
+      }
+      return fallback;
+    } catch (error) {
+      if (!_disposed) lastError = 'Package rollback rejected: $error';
+      return null;
+    }
+  }
+
+  void _failWithoutEmbedded(Object error) {
+    if (_disposed) return;
+    active = null;
+    _candidate = null;
+    failure = error;
+    lastError = '$error';
+    stage = 'error';
+    ready = false;
+    _busy = false;
+    if (hasListeners) notifyListeners();
   }
 
   static int _resolveEmbeddedBuild(
@@ -291,47 +415,76 @@ final class PocketSession extends ChangeNotifier {
     return value.toInt();
   }
 
-  Map<String, dynamic> runtimeInfo() => {
-    'appId': appId,
-    if (active == null) ..._metadata,
-    'runtimeAbi': controller.runtimeAbi ?? _metadata['runtimeAbi'],
-    if (active != null)
-      'entrySha256': active!.package.manifest.payload.entry.sha256,
-    if (active != null && active!.package.manifest.payload.worker != null)
-      'worker': active!.package.manifest.payload.worker,
-    'entryFormat': 'quickjs-bytecode',
-    'memory': memoryLimits.toJson(),
-    'glassRenderer': ui.ImageFilter.isShaderFilterSupported
-        ? 'refractive'
-        : 'frosted',
-    'hostSurfaces': ['glass', 'platformTexture'],
-    'version': active?.version ?? _embeddedVersion,
-    'build': active?.build ?? _embeddedBuild,
-    'source': active == null ? 'embedded' : 'verified-cache',
-    'entryBytes':
-        active?.package.manifest.payload.entry.size ??
-        _metadata['bytecodeBytes'],
-  };
-
-  Future<Map<String, dynamic>> status() async => {
-    'configured': _updates != null,
-    'stage': stage,
-    'activeVersion': active?.version ?? _embeddedVersion,
-    'activeBuild': active?.build ?? _embeddedBuild,
-    'availableVersion': _candidate?.version,
-    'preparedUpdate': _candidate?.toSummaryJson(),
-    'versions': [
-      {
+  Map<String, dynamic> runtimeInfo() {
+    final info = <String, dynamic>{
+      'appId': appId,
+      // The bootstrap metadata still contributes ABI and host-facing facts,
+      // but downloadOnOpen must not present its version/bytecode fields as an
+      // executable embedded package.
+      if (active == null && !_downloadOnOpen) ..._metadata,
+      'runtimeAbi': controller.runtimeAbi ?? _metadata['runtimeAbi'],
+      if (active != null)
+        'entrySha256': active!.package.manifest.payload.entry.sha256,
+      if (active != null && active!.package.manifest.payload.worker != null)
+        'worker': active!.package.manifest.payload.worker,
+      'entryFormat': 'quickjs-bytecode',
+      'memory': memoryLimits.toJson(),
+      'glassRenderer': ui.ImageFilter.isShaderFilterSupported
+          ? 'refractive'
+          : 'frosted',
+      'hostSurfaces': ['glass', 'platformTexture'],
+    };
+    if (active != null) {
+      info.addAll(<String, dynamic>{
+        'version': active!.version,
+        'build': active!.build,
+        'source': 'verified-cache',
+        'entryBytes': active!.package.manifest.payload.entry.size,
+      });
+    } else if (_downloadOnOpen) {
+      info.addAll(const <String, dynamic>{
+        'version': null,
+        'build': null,
+        'source': 'download-on-open',
+      });
+    } else {
+      info.addAll(<String, dynamic>{
         'version': _embeddedVersion,
         'build': _embeddedBuild,
         'source': 'embedded',
-        'active': active == null,
-      },
+        'entryBytes': _metadata['bytecodeBytes'],
+      });
+    }
+    return info;
+  }
+
+  Future<Map<String, dynamic>> status() async {
+    final versions = <Map<String, dynamic>>[
+      if (!_downloadOnOpen)
+        <String, dynamic>{
+          'version': _embeddedVersion,
+          'build': _embeddedBuild,
+          'source': 'embedded',
+          'active': active == null,
+        },
       if (_updates != null)
         for (final version in await _updates!.listVersions()) version.toJson(),
-    ],
-    'lastError': lastError,
-  };
+    ];
+    return <String, dynamic>{
+      'configured': _updates != null,
+      'stage': stage,
+      'activeVersion': _downloadOnOpen
+          ? active?.version
+          : active?.version ?? _embeddedVersion,
+      'activeBuild': _downloadOnOpen
+          ? active?.build
+          : active?.build ?? _embeddedBuild,
+      'availableVersion': _candidate?.version,
+      'preparedUpdate': _candidate?.toSummaryJson(),
+      'versions': versions,
+      'lastError': lastError,
+    };
+  }
 
   Future<void> _configureBridge(PocketPreparedPackage? package) =>
       _serializeBridge(() => _configureBridgeUnlocked(package));
@@ -409,6 +562,10 @@ final class PocketSession extends ChangeNotifier {
     );
     _negotiatedCapabilities = negotiated;
     final granted = await plugins.activate(negotiated);
+    // Disposal can race the asynchronous provider activation. The close path
+    // owns the manager captured above; do not continue worker admission or
+    // publish any bridge configuration after that lifecycle boundary.
+    if (_disposed) return;
     if (!granted.satisfied) {
       throw StateError(
         'Missing capabilities: ${granted.missingRequired.join(', ')}',
@@ -483,16 +640,12 @@ final class PocketSession extends ChangeNotifier {
     final longFrameEvents = performance.add(json);
     final snapshot = performance.snapshot();
     final eventOnly = sample.frames <= 0 || sample.durationMs <= 0;
-    _send(
-      'runtime.performance.sample',
-      {
-        'sample': {...json, 'longFrameEvents': longFrameEvents},
-        'eventOnly': eventOnly,
-        'minFps': (snapshot['latest'] as Map?)?['minFps'],
-        'recording': true,
-      },
-      wake: !eventOnly,
-    );
+    _send('runtime.performance.sample', {
+      'sample': {...json, 'longFrameEvents': longFrameEvents},
+      'eventOnly': eventOnly,
+      'minFps': (snapshot['latest'] as Map?)?['minFps'],
+      'recording': true,
+    }, wake: !eventOnly);
   }
 
   void onReady(PocketViewController _) {
@@ -511,6 +664,11 @@ final class PocketSession extends ChangeNotifier {
       if (_disposed || !_foreground || generation != mountedGeneration) return;
       try {
         final package = active;
+        if (_downloadOnOpen && package == null) {
+          throw StateError(
+            'downloadOnOpen runtime cannot become healthy without a package',
+          );
+        }
         _promotion = package != null
             ? _updates!.commitHealthy(package)
             : _resetCacheOnHealth
@@ -650,9 +808,15 @@ final class PocketSession extends ChangeNotifier {
           isRollback: true,
         );
       }
+      if (_downloadOnOpen && next == null) {
+        throw const PocketCapabilityException(
+          'rollback-missing',
+          'No verified package is available for rollback',
+        );
+      }
       // The immutable embedded bundle is always a rollback target. Remove cache
       // pointers only after the embedded guest has started successfully.
-      final embeddedFallback = next == null ? active : null;
+      final embeddedFallback = _downloadOnOpen || next != null ? null : active;
       _mountTimer = Timer(
         const Duration(milliseconds: 150),
         () => _mount(
@@ -678,6 +842,15 @@ final class PocketSession extends ChangeNotifier {
     FutureOr<T> Function() publish,
   ) {
     if (package == null) return Future<T>.sync(publish);
+    if (_downloadOnOpen && package.build < _embeddedBuild) {
+      return Future<T>.error(
+        PocketPackageException(
+          'Cached package build ${package.build} is below bootstrap build '
+          '$_embeddedBuild',
+          code: 'cache-build-floor',
+        ),
+      );
+    }
     final updates = _updates;
     if (updates == null) {
       return Future<T>.error(
@@ -691,8 +864,15 @@ final class PocketSession extends ChangeNotifier {
     PocketPreparedPackage? next, {
     bool resetCache = false,
     PocketPreparedPackage? embeddedRollbackFallback,
+    bool restorePreviousOnFailure = true,
   }) async {
     if (_disposed) return;
+    if (_downloadOnOpen && next == null) {
+      _failWithoutEmbedded(
+        StateError('downloadOnOpen runtime has no verified package to mount'),
+      );
+      return;
+    }
     _healthTimer?.cancel();
     _startupTimer?.cancel();
     final previous = active;
@@ -714,6 +894,10 @@ final class PocketSession extends ChangeNotifier {
       });
     } catch (error) {
       lastError = '$error';
+      if (_downloadOnOpen && (previous == null || !restorePreviousOnFailure)) {
+        _failWithoutEmbedded(error);
+        return;
+      }
       try {
         await _withAdmittedPackage(previous, () {});
         await _configureBridge(previous);
@@ -756,7 +940,7 @@ final class PocketSession extends ChangeNotifier {
     _mountTimer = null;
     _healthTimer?.cancel();
     _startupTimer?.cancel();
-    final embeddedFallback = _embeddedRollbackFallback;
+    final embeddedFallback = _downloadOnOpen ? null : _embeddedRollbackFallback;
     _embeddedRollbackFallback = null;
     _resetCacheOnHealth = false;
     lastError = '$error';
@@ -783,14 +967,26 @@ final class PocketSession extends ChangeNotifier {
       }
       PocketPreparedPackage? fallback;
       try {
-        fallback = await _updates!.fallbackFor(failed);
+        fallback = _downloadOnOpen
+            ? await _verifiedFallback(failed)
+            : await _updates!.fallbackFor(failed);
         if (fallback?.package.versionId == failed.package.versionId) {
           fallback = null;
         }
       } catch (_) {
         fallback = null;
       }
-      await _mount(fallback, resetCache: fallback == null);
+      if (_downloadOnOpen && fallback == null) {
+        _failWithoutEmbedded(error);
+        return;
+      }
+      await _mount(
+        fallback,
+        resetCache: fallback == null,
+        // A recovery target failing admission must not restart the guest
+        // whose runtime failure caused recovery in the first place.
+        restorePreviousOnFailure: !_downloadOnOpen,
+      );
     } finally {
       _recovering = false;
     }

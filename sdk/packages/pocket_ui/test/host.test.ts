@@ -96,3 +96,62 @@ test("modern HostBridge listeners share one decoded event object across platform
     host.dispose();
   }
 });
+
+test("per-request cold-load deadline preserves ordinary deadlines and late responses", async () => {
+  const sent: Array<{ payload: { requestId: string; capability: string } }> = [];
+  const bridge = createHostBridge((line) => { sent.push(JSON.parse(line)); return true; }, { timeoutFrames: 2 });
+  try {
+    const ordinary = bridge.request("runtime.info").catch((error) => error);
+    const cold = bridge.request("system.runtime.create", { appId: "example.remote" }, { timeoutFrames: 5 });
+    bridge.tick();
+    bridge.tick();
+    assert.equal((await ordinary).code, "timeout");
+    bridge.tick();
+    const response = sent[1]!.payload;
+    assert.equal(bridge.handle({ type: "event", name: "host.response", payload: {
+      requestId: response.requestId, capability: response.capability, ok: true, result: { instanceId: "remote-1" },
+    } }), true);
+    assert.deepEqual(await cold, { instanceId: "remote-1" });
+    await assert.rejects(bridge.request("invalid", {}, { timeoutFrames: 0 }), RangeError);
+    assert.equal(sent.length, 2, "invalid deadlines must not emit a request");
+  } finally { bridge.dispose(); }
+});
+
+test("per-request deadline uses virtual timer and disposes its scheduled wake", async () => {
+  const scheduled: Array<{ frames: number; callback: () => void; cancelled: boolean }> = [];
+  const bridge = createHostBridge(() => true, { timeoutFrames: 2,
+    scheduleTimeout: (frames, callback) => {
+      const entry = { frames, callback, cancelled: false }; scheduled.push(entry);
+      return () => { entry.cancelled = true; };
+    },
+  });
+  const request = bridge.request("system.runtime.create", {}, { timeoutFrames: 60 * 120 });
+  const result = request.catch((error) => error);
+  assert.equal(scheduled[0]!.frames, 7200);
+  bridge.dispose();
+  assert.equal(scheduled[0]!.cancelled, true);
+  assert.match((await result).message, /disposed/);
+});
+
+test("app open and prewarm extend only their own deadline on a shared bridge", async () => {
+  const sent: Array<{ payload: { requestId: string; capability: string } }> = [];
+  let bridge: ReturnType<typeof createHostBridge>;
+  bridge = createHostBridge((line) => {
+    const packet = JSON.parse(line); sent.push(packet);
+    queueMicrotask(() => bridge.handle({ type: "event", name: "host.response", payload: {
+      requestId: packet.payload.requestId, capability: packet.payload.capability, ok: true,
+      result: packet.payload.capability === "platform.apps.open" ? { requestId: "launch-1" } : {},
+    } }));
+    return true;
+  }, { timeoutFrames: 2, scheduleTimeout: (frames) => { deadlines.push(frames); return () => {}; } });
+  const deadlines: number[] = [];
+  const platform = createPocketPlatformClient(undefined, { bridge, media: false });
+  try {
+    await platform.prewarm("example.remote");
+    const launch = await platform.launchApp("example.remote");
+    const result = launch.result.catch(() => {});
+    await platform.listApps();
+    assert.deepEqual(deadlines, [5400, 5400, 2]);
+    platform.dispose(); await result;
+  } finally { platform.dispose(); bridge.dispose(); }
+});

@@ -554,13 +554,18 @@ final class PocketUpdateCoordinator {
     );
   }
 
+  /// Reads a healthy package. The active-pointer fallback remains available
+  /// for legacy embedded clients; remote-only cold opens disable it because
+  /// a staged/externally activated package may never have passed health.
   Future<PocketPreparedPackage?> lastGood({
     PocketCancellationToken? cancellation,
+    bool allowActiveFallback = true,
   }) async {
     cancellation?.throwIfCancelled();
+    final healthy = await _store.lastGood(verifier: verifier);
     final package =
-        await _store.lastGood(verifier: verifier) ??
-        await _store.active(verifier: verifier);
+        healthy ??
+        (allowActiveFallback ? await _store.active(verifier: verifier) : null);
     return package == null
         ? null
         : PocketPreparedPackage(package: package, needsActivation: false);

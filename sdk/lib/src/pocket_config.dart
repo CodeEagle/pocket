@@ -69,8 +69,7 @@ final class PocketUpdateConfig {
       trustPolicyConfigured;
 
   void validate() {
-    final hasLegacy =
-        keyId.isNotEmpty || publicKey.isNotEmpty;
+    final hasLegacy = keyId.isNotEmpty || publicKey.isNotEmpty;
     final hasTrust =
         trustRootKeyId?.isNotEmpty == true ||
         trustRootPublicKey?.isNotEmpty == true ||
@@ -125,6 +124,7 @@ final class PocketAppConfig {
     this.metadataAsset = 'assets/app.bytecode.json',
     this.manifestAsset = 'assets/guest-manifest.json',
     this.updates,
+    this.downloadOnOpen = false,
     this.showFps = false,
     this.allowedPermissions = const {},
     this.pluginFactories = const [],
@@ -142,6 +142,14 @@ final class PocketAppConfig {
   final String manifestAsset;
   final PocketMemoryLimits memoryLimits;
   final PocketUpdateConfig? updates;
+
+  /// Downloads the signed mini-app package when the runtime is opened.
+  ///
+  /// The local metadata and guest manifest remain the small ABI/bootstrap
+  /// assets, but the executable entry and PAK must come from a verified
+  /// update package. This mode therefore requires a complete [updates]
+  /// configuration and has no embedded bytecode fallback.
+  final bool downloadOnOpen;
 
   final bool showFps;
   final Set<String> allowedPermissions;
@@ -172,6 +180,7 @@ final class PocketAppConfig {
     Iterable<String>? additionalCapabilities,
     PocketMemoryLimits? memoryLimits,
     PocketRecordingController Function()? recordingFactory,
+    bool? downloadOnOpen,
   }) => PocketAppConfig(
     appId: appId,
     bytecodeAsset: bytecodeAsset,
@@ -179,6 +188,7 @@ final class PocketAppConfig {
     metadataAsset: metadataAsset,
     manifestAsset: manifestAsset,
     updates: updates,
+    downloadOnOpen: downloadOnOpen ?? this.downloadOnOpen,
     showFps: showFps,
     allowedPermissions: allowedPermissions,
     pluginFactories: pluginFactories == null
@@ -212,6 +222,11 @@ final class PocketAppConfig {
       }
     }
     updates?.validate();
+    if (downloadOnOpen && !(updates?.configured ?? false)) {
+      throw const FormatException(
+        'downloadOnOpen requires a complete signed update configuration',
+      );
+    }
     memoryLimits.validate();
   }
 
@@ -226,6 +241,7 @@ final class PocketAppConfig {
           metadataAsset == other.metadataAsset &&
           manifestAsset == other.manifestAsset &&
           updates == other.updates &&
+          downloadOnOpen == other.downloadOnOpen &&
           memoryLimits == other.memoryLimits &&
           showFps == other.showFps &&
           recordingFactory == other.recordingFactory &&
@@ -244,6 +260,7 @@ final class PocketAppConfig {
     metadataAsset,
     manifestAsset,
     updates,
+    downloadOnOpen,
     memoryLimits,
     showFps,
     recordingFactory,

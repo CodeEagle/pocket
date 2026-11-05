@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
-import { test } from "bun:test";
+import { mock, test } from "bun:test";
 import { join } from "node:path";
-import type { HostBridge, JsonObject, JsonValue } from "../src/host.ts";
-import { installPocketSystem, type PocketSystemV1 } from "../src/system.ts";
+import type { HostBridge, HostRequestOptions, JsonObject, JsonValue } from "../src/host.ts";
+import type { PocketSystemV1 } from "../src/system.ts";
+mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60 }));
+const { installPocketSystem } = await import("../src/system.ts");
 
 const SYSTEM_UI = "pocket.host.demo";
 const PROFILE = "pocket.demo.profile";
@@ -66,15 +68,15 @@ const policies = {
 } as const;
 
 class TestHost implements HostBridge {
-  readonly calls: Array<{ capability: string; params: JsonObject }> = [];
+  readonly calls: Array<{ capability: string; params: JsonObject; options?: HostRequestOptions }> = [];
   readonly posted: Array<{ instanceId: string; event: string; params: JsonObject }> = [];
   readonly destroyed: string[] = [];
   readonly generations = new Map<string, string>();
   disposed = false;
   private nextInstance = 1;
 
-  request<T extends JsonValue = JsonValue>(capability: string, params: JsonObject = {}): Promise<T> {
-    const call = { capability, params };
+  request<T extends JsonValue = JsonValue>(capability: string, params: JsonObject = {}, options?: HostRequestOptions): Promise<T> {
+    const call = { capability, params, options };
     this.calls.push(call);
     if (capability === "system.runtime.configure") {
       return Promise.resolve({ systemInstanceId: "system-ui" } as T);
@@ -223,6 +225,8 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
     params: { appId: PROFILE },
   });
   assert.equal(openProfile.ok, true);
+  assert.equal(host.calls.find((call) => call.capability === "system.runtime.create")?.options?.timeoutFrames, 3600);
+  assert.equal(host.calls.find((call) => call.capability === "system.runtime.awaitFirstFrame")?.options?.timeoutFrames, 2700);
   assert.deepEqual(
     host.calls.find((call) => call.capability === "system.runtime.create")?.params,
     { appId: PROFILE, memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 } },

@@ -1,4 +1,5 @@
-import { forwardHostPacket, type HostBridge, type HostEvent, type HostPacketHandler, type JsonObject, type JsonValue } from "./host.ts";
+import { simulationHz } from "@pocketjs/framework/clock";
+import { forwardHostPacket, type HostBridge, type HostEvent, type HostRequestOptions, type HostPacketHandler, type JsonObject, type JsonValue } from "./host.ts";
 
 const MAX_JSON_BYTES = 64 * 1024;
 const MAX_PENDING_CALLS = 32;
@@ -6,29 +7,12 @@ const MAX_MAILBOX_MESSAGES = 32;
 const MAX_COMPLETED_REQUESTS = 256;
 const SYSTEM_UI_INSTANCE_ID = "system-ui";
 
-/** Compatibility names retained from the original mini-app memory tiers. */
-export const POCKET_MEMORY_POLICIES = [
-  "UI_MINI",
-  "GAME_STANDARD",
-  "VIDEO_GAME_PRO",
-  "VIDEO_GAME_ULTRA",
-] as const;
-export type PocketMemoryPolicy = (typeof POCKET_MEMORY_POLICIES)[number];
-
-/** A SystemUI budget request; the trusted host still owns the final grant. */
-export interface PocketMemoryBudget {
-  heapLimitBytes?: number;
-  maxPakBytes?: number;
-}
-
-export const POCKET_MEMORY_POLICY_BUDGETS: Readonly<Record<PocketMemoryPolicy, PocketMemoryBudget>> = Object.freeze({
-  // The legacy native/VRAM numbers are intentionally not projected into
-  // maxPakBytes: the host cannot promise those old off-heap semantics.
-  UI_MINI: Object.freeze({ heapLimitBytes: 128 * 1024 * 1024 }),
-  GAME_STANDARD: Object.freeze({ heapLimitBytes: 512 * 1024 * 1024 }),
-  VIDEO_GAME_PRO: Object.freeze({ heapLimitBytes: 1024 * 1024 * 1024 }),
-  VIDEO_GAME_ULTRA: Object.freeze({ heapLimitBytes: 2 * 1024 * 1024 * 1024 }),
-});
+import {
+  POCKET_MEMORY_POLICIES, POCKET_MEMORY_POLICY_BUDGETS,
+  type PocketMemoryPolicy, type PocketMemoryBudget,
+} from "./system-memory.ts";
+export { POCKET_MEMORY_POLICIES, POCKET_MEMORY_POLICY_BUDGETS } from "./system-memory.ts";
+export type { PocketMemoryPolicy, PocketMemoryBudget } from "./system-memory.ts";
 
 const MIN_HEAP_LIMIT_BYTES = 64 * 1024;
 const MAX_HEAP_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
@@ -900,15 +884,15 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
   }
 
-  private async hostRequest(capability: string, params: JsonObject): Promise<JsonValue> {
+  private async hostRequest(capability: string, params: JsonObject, options?: HostRequestOptions): Promise<JsonValue> {
     this.assertActive();
-    const result = await this.bridge.request<JsonValue>(capability, params);
+    const result = await this.bridge.request<JsonValue>(capability, params, options);
     this.assertActive();
     return result;
   }
 
-  private async hostObject(capability: string, params: JsonObject): Promise<JsonObject> {
-    const result = await this.hostRequest(capability, params);
+  private async hostObject(capability: string, params: JsonObject, options?: HostRequestOptions): Promise<JsonObject> {
+    const result = await this.hostRequest(capability, params, options);
     if (!isRecord(result)) {
       throw new PocketSystemError("host_protocol_error", capability + " must return an object");
     }
@@ -1389,7 +1373,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       }
       createParams.memory = memory;
     }
-    const created = await this.hostObject("system.runtime.create", createParams);
+    const created = await this.hostObject("system.runtime.create", createParams, { timeoutFrames: 60 * simulationHz() });
     this.assertActive();
     const instanceId = created.instanceId;
     if (!nonEmptyString(instanceId) || instanceId === SYSTEM_UI_INSTANCE_ID) {
@@ -1424,7 +1408,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     const ready = await this.hostObject("system.runtime.awaitFirstFrame", {
       instanceId: record.instanceId,
       generation: record.generation,
-    });
+    }, { timeoutFrames: 45 * simulationHz() });
     if (ready.ready !== true || ready.generation !== record.generation) {
       throw new PocketSystemError("host_protocol_error", "runtime.awaitFirstFrame returned a stale generation");
     }

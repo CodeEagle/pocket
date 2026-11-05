@@ -19,7 +19,7 @@ import {
   POCKET_MEMORY_POLICY_BUDGETS,
   type PocketMemoryBudget,
   type PocketMemoryPolicy,
-} from "../packages/pocket_ui/src/system.ts";
+} from "../packages/pocket_ui/src/system-memory.ts";
 
 const sdkRoot = resolve(import.meta.dir, "..");
 const upstreamRoot = join(sdkRoot, ".cache/pocketjs");

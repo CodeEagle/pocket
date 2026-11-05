@@ -1047,7 +1047,14 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final completer = Completer<Object?>();
     unawaited(completer.future.catchError((Object _) => null));
     late final _PendingPlatformRequest pending;
-    final timer = Timer(_platformRequestTimeout, () {
+    // Cold opens can download a signed package before awaiting the first frame.
+    // Other platform requests retain their existing short deadline.
+    final timeout =
+        capability == 'platform.apps.open' ||
+            capability == 'platform.apps.prewarm'
+        ? const Duration(seconds: 75)
+        : _platformRequestTimeout;
+    final timer = Timer(timeout, () {
       final current = _pendingRequests[requestId];
       if (identical(current, pending)) {
         _finishPendingError(

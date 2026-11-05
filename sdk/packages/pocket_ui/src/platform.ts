@@ -118,7 +118,10 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
     : undefined;
   if (typeof host.onEvent !== "function") target.__pocketEvent = receive;
 
-  const request = (name: string, params: BridgeObject = {}) => host.request(name, params);
+  const request = (name: string, params: BridgeObject = {}) => host.request(name, params,
+    name === "platform.apps.open" || name === "platform.apps.prewarm"
+      ? { timeoutFrames: 90 * simulationHz() }
+      : undefined);
   const launchApp = async (appId: string, argumentsValue: BridgeValue = null): Promise<AppLaunch> => {
     if (disposed) throw new Error("Platform client is disposed");
     if (pending.size >= 32) throw new Error("Too many pending app results");
