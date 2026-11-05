@@ -12,10 +12,13 @@ typedef PocketOffloadProviderFactory = PocketOffloadProvider Function();
 /// Public-key-only signed update configuration. No signing key enters an app.
 final class PocketUpdateConfig {
   const PocketUpdateConfig({
-    required this.url,
-    required this.keyId,
-    required this.publicKey,
+    this.url = '',
+    this.keyId = '',
+    this.publicKey = '',
     this.namespace = 'default',
+    this.trustRootKeyId,
+    this.trustRootPublicKey,
+    this.trustPolicyUrl,
     List<String> debugHttpHosts = const <String>[],
   }) : _debugHttpHosts = debugHttpHosts;
   const PocketUpdateConfig.fromEnvironment()
@@ -26,6 +29,11 @@ final class PocketUpdateConfig {
         'POCKET_STORE_NAMESPACE',
         defaultValue: 'default',
       ),
+      trustRootKeyId = const String.fromEnvironment('POCKET_TRUST_ROOT_KEY_ID'),
+      trustRootPublicKey = const String.fromEnvironment(
+        'POCKET_TRUST_ROOT_PUBLIC_KEY',
+      ),
+      trustPolicyUrl = const String.fromEnvironment('POCKET_TRUST_POLICY_URL'),
       _debugHttpHosts = const <String>[
         String.fromEnvironment('POCKET_UPDATE_DEBUG_HTTP_HOST'),
       ];
@@ -36,6 +44,19 @@ final class PocketUpdateConfig {
   final String publicKey;
   final String namespace;
 
+  /// Optional host-owned root policy configuration. When all three fields are
+  /// present, the update coordinator ignores the legacy release key above and
+  /// admits only keys certified by the signed policy.
+  final String? trustRootKeyId;
+  final String? trustRootPublicKey;
+  final String? trustPolicyUrl;
+
+  bool get trustPolicyConfigured =>
+      url.isNotEmpty &&
+      trustRootKeyId?.isNotEmpty == true &&
+      trustRootPublicKey?.isNotEmpty == true &&
+      trustPolicyUrl?.isNotEmpty == true;
+
   /// Additional HTTP hosts allowed for signed updates in debug builds only.
   /// Loopback and Android's emulator host remain built-in debug hosts.
   final List<String> _debugHttpHosts;
@@ -44,13 +65,23 @@ final class PocketUpdateConfig {
       ? const <String>[]
       : _debugHttpHosts;
   bool get configured =>
-      url.isNotEmpty && keyId.isNotEmpty && publicKey.isNotEmpty;
+      (url.isNotEmpty && keyId.isNotEmpty && publicKey.isNotEmpty) ||
+      trustPolicyConfigured;
 
   void validate() {
-    if ((url.isNotEmpty || keyId.isNotEmpty || publicKey.isNotEmpty) &&
-        !configured) {
+    final hasLegacy =
+        keyId.isNotEmpty || publicKey.isNotEmpty;
+    final hasTrust =
+        trustRootKeyId?.isNotEmpty == true ||
+        trustRootPublicKey?.isNotEmpty == true ||
+        trustPolicyUrl?.isNotEmpty == true;
+    final legacyComplete =
+        url.isNotEmpty && keyId.isNotEmpty && publicKey.isNotEmpty;
+    if ((hasLegacy && !legacyComplete) ||
+        (hasTrust && !trustPolicyConfigured) ||
+        (url.isNotEmpty && !legacyComplete && !trustPolicyConfigured)) {
       throw const FormatException(
-        'Update URL, key ID and public key must be configured together',
+        'Update URL/key ID/public key or trust root/policy must be configured together',
       );
     }
     if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(namespace)) {
@@ -67,6 +98,9 @@ final class PocketUpdateConfig {
           keyId == other.keyId &&
           publicKey == other.publicKey &&
           namespace == other.namespace &&
+          trustRootKeyId == other.trustRootKeyId &&
+          trustRootPublicKey == other.trustRootPublicKey &&
+          trustPolicyUrl == other.trustPolicyUrl &&
           listEquals(debugHttpHosts, other.debugHttpHosts);
 
   @override
@@ -75,6 +109,9 @@ final class PocketUpdateConfig {
     keyId,
     publicKey,
     namespace,
+    trustRootKeyId,
+    trustRootPublicKey,
+    trustPolicyUrl,
     Object.hashAll(debugHttpHosts),
   );
 }

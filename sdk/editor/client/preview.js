@@ -513,6 +513,10 @@
     const videoIntents = new Map();
     const pendingVideoIntents = new Map();
     const releasedVideoIds = new Set();
+    // A release is scoped to the runtime generation that emitted it. Keeping
+    // the legacy id-only set for untagged frames preserves older consumers,
+    // while tagged HMR cleanup cannot retire a same-id replacement.
+    const releasedVideoTokens = new Map();
     const videoScopes = new Set();
     const activeVideoIdentities = new Set();
     const MAX_VIDEO_IDENTITIES = 128;
@@ -689,6 +693,12 @@
         if (stale === undefined) break;
         releasedVideoIds.delete(stale);
       }
+      while (releasedVideoTokens.size > MAX_VIDEO_IDENTITIES) {
+        const stale = [...releasedVideoTokens.keys()].find((identity) => !activeVideoIdentities.has(identity)) ??
+          releasedVideoTokens.keys().next().value;
+        if (stale === undefined) break;
+        releasedVideoTokens.delete(stale);
+      }
       while (videoScopes.size > MAX_VIDEO_IDENTITIES) videoScopes.delete(videoScopes.values().next().value);
     }
 
@@ -697,8 +707,9 @@
       return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
     }
 
-    function videoCommandMatches(entry, id, scope) {
-      return entry && entry.id === id && assetMatchesScope(entry.asset, scope);
+    function videoCommandMatches(entry, id, scope, runtimeToken) {
+      return entry && entry.id === id && assetMatchesScope(entry.asset, scope) &&
+        (!runtimeToken || entry.runtimeToken === runtimeToken);
     }
 
     function logicalVideoAsset(state) {
@@ -728,6 +739,7 @@
       };
       void input({
         type: "message",
+        ...(state.scope ? { runtime: state.scope } : state.runtimeToken ? { runtimeToken: state.runtimeToken } : {}),
         message: { type: "event", name: "video.state", payload },
       });
     }
@@ -866,10 +878,10 @@
       });
     }
 
-    function matchingVideoEntries(id, scope) {
+    function matchingVideoEntries(id, scope, runtimeToken) {
       const entries = [];
-      for (const state of videos.values()) if (videoCommandMatches(state, id, scope)) entries.push(state);
-      for (const entry of videoIntents.values()) if (videoCommandMatches(entry, id, scope) && !entries.some((state) => state.key === entry.key)) entries.push(entry);
+      for (const state of videos.values()) if (videoCommandMatches(state, id, scope, runtimeToken)) entries.push(state);
+      for (const entry of videoIntents.values()) if (videoCommandMatches(entry, id, scope, runtimeToken) && !entries.some((state) => state.key === entry.key)) entries.push(entry);
       return entries;
     }
 
@@ -882,10 +894,20 @@
       const scope = typeof event.runtime === "string" && event.runtime ? event.runtime : "";
       if (scope) videoScopes.add(scope);
       const identity = scopedVideoId(scope, id);
-      const entries = matchingVideoEntries(id, scope);
+      const runtimeToken = typeof event.runtimeToken === "string" && event.runtimeToken ? event.runtimeToken : undefined;
+      const entries = matchingVideoEntries(id, scope, runtimeToken);
+      const allEntries = runtimeToken ? matchingVideoEntries(id, scope) : entries;
+      const pending = pendingVideoIntents.get(identity);
+      // A late edge from an older generation must not overwrite a live
+      // replacement's intent. An old release is still accepted when the old
+      // element is present (so it can be disposed), but is ignored once the
+      // same-id replacement has taken its token.
+      if (runtimeToken && entries.length === 0 &&
+        (allEntries.length > 0 || pending?.runtimeToken && pending.runtimeToken !== runtimeToken)) return;
       if (name === "video.release") {
-        releasedVideoIds.add(identity);
-        pendingVideoIntents.delete(identity);
+        if (runtimeToken) releasedVideoTokens.set(identity, runtimeToken);
+        else releasedVideoIds.add(identity);
+        if (!runtimeToken || !pending?.runtimeToken || pending.runtimeToken === runtimeToken) pendingVideoIntents.delete(identity);
         for (const entry of entries) {
           if (videos.get(entry.key) === entry) {
             disposeVideo(entry);
@@ -895,29 +917,33 @@
         }
         return;
       }
-      releasedVideoIds.delete(identity);
+      if (runtimeToken) releasedVideoTokens.delete(identity);
+      else releasedVideoIds.delete(identity);
       const desired = name === "video.play";
-      pendingVideoIntents.set(identity, desired);
+      pendingVideoIntents.set(identity, { desired, runtimeToken });
       for (const entry of entries) {
-        const intent = { key: entry.key, id: entry.id, asset: entry.asset, desired };
+        const intent = { key: entry.key, id: entry.id, asset: entry.asset, desired, runtimeToken: entry.runtimeToken ?? runtimeToken };
         videoIntents.set(entry.key, intent);
       }
     }
 
     function pendingIntentFor(op, scope) {
       const identity = scopedVideoId(scope ?? "", String(op.id));
+      const runtimeToken = typeof op.runtimeToken === "string" && op.runtimeToken ? op.runtimeToken : undefined;
       if (scope !== undefined && pendingVideoIntents.has(identity)) {
-        const desired = pendingVideoIntents.get(identity);
+        const pending = pendingVideoIntents.get(identity);
+        if (pending?.runtimeToken && runtimeToken && pending.runtimeToken !== runtimeToken) return undefined;
         pendingVideoIntents.delete(identity);
-        return desired;
+        return pending?.desired;
       }
-      for (const [candidate, desired] of pendingVideoIntents) {
+      for (const [candidate, pending] of pendingVideoIntents) {
         const separator = candidate.indexOf("\u0000");
         const candidateScope = candidate.slice(0, separator);
         const candidateId = candidate.slice(separator + 1);
-        if (candidateId === String(op.id) && assetMatchesScope(String(op.asset), candidateScope)) {
+        if (candidateId === String(op.id) && assetMatchesScope(String(op.asset), candidateScope) &&
+          (!pending?.runtimeToken || !runtimeToken || pending.runtimeToken === runtimeToken)) {
           pendingVideoIntents.delete(candidate);
-          return desired;
+          return pending?.desired;
         }
       }
       return undefined;
@@ -936,9 +962,16 @@
           activeVideoIdentities.add(identity);
         }
         const key = videoKey(op);
-        if (identity !== undefined && releasedVideoIds.has(identity)) continue;
-        let state = videos.get(key);
         const runtimeToken = typeof op.runtimeToken === "string" && op.runtimeToken ? op.runtimeToken : undefined;
+        if (identity !== undefined && (runtimeToken
+          ? releasedVideoTokens.get(identity) === runtimeToken
+          : releasedVideoIds.has(identity))) continue;
+        if (identity !== undefined && runtimeToken && releasedVideoTokens.has(identity)) {
+          // A same-id replacement starts a new generation; retire the old
+          // generation's release tombstone before installing the new op.
+          releasedVideoTokens.delete(identity);
+        }
+        let state = videos.get(key);
         if (state && runtimeToken && state.runtimeToken && state.runtimeToken !== runtimeToken) {
           disposeVideo(state);
           videos.delete(key);
@@ -949,8 +982,9 @@
         state.visible = true;
         const prior = videoIntents.get(key);
         const pending = pendingIntentFor(op, scope);
-        const desired = pending ?? prior?.desired ?? state.desired ?? (op.autoplay !== false);
-        const intent = { key, id: String(op.id), asset: String(op.asset), desired };
+        const priorMatches = !runtimeToken || !prior?.runtimeToken || prior.runtimeToken === runtimeToken;
+        const desired = pending ?? (priorMatches ? prior?.desired : undefined) ?? state.desired ?? (op.autoplay !== false);
+        const intent = { key, id: String(op.id), asset: String(op.asset), desired, runtimeToken };
         videoIntents.set(key, intent);
         state.desired = desired;
         applyVideoDesired(state, desired);
@@ -959,7 +993,12 @@
       for (const [key, state] of [...videos]) {
         if (seen.has(key)) continue;
         const scope = scopeForAsset(state.asset);
-        if (scope !== undefined && state.desired !== undefined) pendingVideoIntents.set(scopedVideoId(scope, state.id), state.desired);
+        if (scope !== undefined && state.desired !== undefined) {
+          pendingVideoIntents.set(scopedVideoId(scope, state.id), {
+            desired: state.desired,
+            runtimeToken: state.runtimeToken,
+          });
+        }
         disposeVideo(state);
         videos.delete(key);
       }
@@ -974,6 +1013,7 @@
         videoIntents.clear();
         pendingVideoIntents.clear();
         releasedVideoIds.clear();
+        releasedVideoTokens.clear();
         videoScopes.clear();
       }
     }

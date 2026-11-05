@@ -23,6 +23,7 @@
     "./system": "./src/system.ts",
     "./updates": "./src/updates.ts",
     "./recording": "./src/recording.ts",
-    "./system-surfaces": "./src/system-surfaces.tsx"
+    "./system-surfaces": "./src/system-surfaces.tsx",
+    "./dev": "./src/dev.ts"
   }
 }

@@ -5,6 +5,7 @@ export 'src/pocket_display_geometry.dart';
 export 'src/pocket_duplex.dart';
 export 'src/pocket_model.dart';
 export 'src/pocket_memory_limits.dart';
+export 'src/pocket_guest_security.dart';
 export 'src/pocket_package.dart';
 export 'src/pocket_performance.dart';
 export 'src/pocket_runtime.dart';

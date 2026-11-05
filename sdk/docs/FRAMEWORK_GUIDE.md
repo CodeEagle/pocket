@@ -427,7 +427,7 @@ Kit 的底层是本工程主要来源。**不能说“绘制没继承”，也�
 | 权限接入未产品化 | 消费工程的硬件工厂可配合 `allowedPermissions` 声明宿主权限，插件 activation 本身不预申请 OS 权限；guest 显式调用 request 时才走 MethodChannel，拒绝 UI/产品文案仍不完整 | 在真实 iOS/Android hardware 验证中覆盖授权、拒绝、撤销和下一 session 清理 |
 | stream 未在 Demo 实接 | 有 stream 协议与预算，但 `PocketSession` 尚无 stream provider | 迁入一个真实订阅能力并测试取消、背压、切包与撤销 |
 | 内存预算不是隔离 | 插件 `memoryMb` 目前是描述元数据，不是独立进程/内存限额 | 对外契约据实描述；需要隔离时单独设计并验证 |
-| 服务 API 可绕开正常准入路径 | store 的公开 `activate()` 不独立强制 verifier；当前正常 `PocketSession` 使用已验证 coordinator | 收窄或明确低层 API 前置条件，测试所有激活入口 |
+| 更新策略并发边界 | store 的公开 `activate()` 现要求 verifier；commit、rollback、fallback 与策略安装共用最终准入锁，Session 发布候选前再次校验 | 同 isolate 内已有回归；跨 isolate/process 不受此锁协调 |
 | 发布服务与平台矩阵不足 | editor 当前是 loopback 本地脚手架，能生成 `PocketSession` 可消费的 `latest.json`/`host.json` 和签名 blob；它不是多用户生产发布服务。Android 仍只有构建入口 | 生产发布、错误/故障场景、iOS hardware/Android 独立验收 |
 
 当前包工具仍可生成 JS 格式的包，renderer 的通用 API 也保留源码加载能力；**本示例 `PocketSession` 明确启用 `requireBytecode: true`，正式入口是 qjbc-only**。不能把宿主策略误写成所有底层 API 都已删除源码支持。

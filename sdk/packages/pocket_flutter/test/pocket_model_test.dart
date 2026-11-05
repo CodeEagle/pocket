@@ -148,6 +148,20 @@ void main() {
     expect(frame.resources.single.palette, orderedEquals(<int>[0, 1, 2, 3]));
     expect(frame.releasedResources, <String>['old']);
     expect(frame.auxiliary!.ops.single, isA<PocketRectOp>());
+    expect(frame.sequence, 7);
+  });
+
+  test('accepts the legacy JSON frame number as the native sequence', () {
+    final frame = PocketFrame.fromJson(
+      '{"frame":12,"width":10,"height":20,"ops":[],"events":[]}',
+    );
+    expect(frame.sequence, 12);
+    expect(
+      () => PocketFrame.fromJson(
+        '{"sequence":-1,"width":10,"height":20,"ops":[],"events":[]}',
+      ),
+      throwsFormatException,
+    );
   });
 
   test('PFB1 metadata preserves text alignment and compositor focus/handle', () {

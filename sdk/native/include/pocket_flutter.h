@@ -40,6 +40,12 @@ HostState *pocket_create_with_memory_limits(double width, double height,
                                             uint64_t heap_limit_bytes,
                                             uint64_t max_pak_bytes);
 
+/* Optional host-only policy, configured once before load/eval. JSON fields:
+ * hardenBuiltins (boolean, default false), maxNodes/maxDrawOps (1..1000000).
+ * Returns 0 on success; reload preserves the policy. Unknown fields fail. */
+int32_t pocket_configure_guest_security(HostState *handle,
+                                         const char *config_json);
+
 int32_t pocket_eval(HostState *handle, const char *source);
 int32_t pocket_load(HostState *handle, const char *source,
                     const uint8_t *pak, size_t pak_len);
@@ -52,6 +58,9 @@ const uint8_t *pocket_frame_binary(HostState *handle, double delta_ms,
                                    uint64_t *out_byte_length);
 const uint8_t *pocket_frame_delta_binary(HostState *handle, double delta_ms,
                                          uint64_t *out_byte_length);
+const uint8_t *pocket_frame_delta_binary_v2(HostState *handle, double delta_ms,
+                                            uint64_t base_frame,
+                                            uint64_t *out_byte_length);
 int32_t pocket_send(HostState *handle, const char *message);
 int32_t pocket_send_binary(HostState *handle, const uint8_t *message,
                            size_t message_len);

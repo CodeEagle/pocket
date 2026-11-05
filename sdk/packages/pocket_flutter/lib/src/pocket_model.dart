@@ -452,6 +452,7 @@ class PocketFrame {
     this.resources = const <PocketImageResource>[],
     this.releasedResources = const <String>[],
     this.auxiliary,
+    this.sequence,
   });
 
   factory PocketFrame.empty({double width = 360, double height = 640}) {
@@ -463,6 +464,7 @@ class PocketFrame {
       resources: const <PocketImageResource>[],
       releasedResources: const <String>[],
       auxiliary: null,
+      sequence: null,
     );
   }
 
@@ -477,6 +479,10 @@ class PocketFrame {
     final rawResources = json['resources'];
     final rawReleasedResources = json['releasedResources'];
     final rawAuxiliary = json['auxiliary'];
+    // Native JSON frames historically called this field `frame`; newer
+    // transports use the protocol-neutral `sequence`. Accept both so a
+    // frame decoded from the legacy ABI can seed the v2 delta baseline.
+    final sequence = _optionalSequence(json['sequence'] ?? json['frame']);
     return PocketFrame(
       width: _number(json['width'], fallback: 360),
       height: _number(json['height'], fallback: 640),
@@ -506,6 +512,7 @@ class PocketFrame {
       auxiliary: rawAuxiliary is Map
           ? PocketSurfaceFrame.fromJson(Map<String, dynamic>.from(rawAuxiliary))
           : null,
+      sequence: sequence,
     );
   }
 
@@ -528,7 +535,7 @@ class PocketFrame {
         'Unsupported Pocket binary frame version: $version',
       );
     }
-    reader.u64(); // native frame sequence is diagnostic only on the Dart side.
+    final sequence = reader.u64();
     final width = reader.f32();
     final height = reader.f32();
     final ops = _binaryOps(reader, reader.count('ops'), flags);
@@ -586,6 +593,7 @@ class PocketFrame {
       resources: List<PocketImageResource>.unmodifiable(resources),
       releasedResources: List<String>.unmodifiable(releasedResources),
       auxiliary: auxiliary,
+      sequence: sequence,
     );
   }
 
@@ -596,6 +604,13 @@ class PocketFrame {
   final List<PocketImageResource> resources;
   final List<String> releasedResources;
   final PocketSurfaceFrame? auxiliary;
+
+  /// Native frame sequence used to validate incremental DrawList deltas.
+  ///
+  /// Source-only/injected runtimes may omit the field, so it remains nullable
+  /// for source compatibility with callers that construct [PocketFrame]
+  /// directly. Native PFB1 frames always carry a sequence.
+  final int? sequence;
 }
 
 List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
@@ -906,6 +921,17 @@ int _color(Object? value) {
     }
   }
   return 0xff000000;
+}
+
+int? _optionalSequence(Object? value) {
+  if (value == null) return null;
+  if (value is! num ||
+      !value.isFinite ||
+      value < 0 ||
+      value.toDouble() != value.toInt().toDouble()) {
+    throw const FormatException('Pocket frame sequence must be a uint64');
+  }
+  return value.toInt();
 }
 
 int _integer(Object? value) {

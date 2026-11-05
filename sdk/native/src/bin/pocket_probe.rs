@@ -21,7 +21,7 @@
 //! state continue to come from the guest bundle supplied by the caller.
 
 use pocket_flutter::{
-    pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_create, pocket_create_with_density_and_tick_hz,
+    pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_configure_guest_security, pocket_create, pocket_create_with_density_and_tick_hz,
     pocket_create_with_memory_limits, pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
     pocket_load_files, pocket_next_wake_delay_ms, pocket_resize_viewport, pocket_send,
 };
@@ -177,6 +177,14 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
             if !detail.is_empty() {
                 destroy(handle);
                 return (false, error_response(detail));
+            }
+            if let Some(policy) = command.get("guestSecurity") {
+                let encoded = CString::new(policy.to_string()).expect("JSON has no literal NUL");
+                if pocket_configure_guest_security(created, encoded.as_ptr()) != 0 {
+                    let detail = last_error(*handle);
+                    destroy(handle);
+                    return (false, error_response(detail));
+                }
             }
             if let Some(applications) = command.get("compositorSurfaces") {
                 let registry = CString::new(applications.to_string()).expect("JSON has no literal NUL");

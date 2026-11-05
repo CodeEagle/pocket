@@ -7,6 +7,101 @@ import 'package:pocket_flutter/pocket_flutter.dart';
 void main() {
   final libraryPath = Platform.environment['POCKET_NATIVE_LIBRARY'];
   test(
+    'viewport baseline reset resynchronizes texture pixels through v2',
+    () {
+      final runtime = FfiPocketRuntime.open(width: 320, height: 480);
+      try {
+        final initial = runtime.eval(r'''
+          let mounted = false;
+          globalThis.frame = function() {
+            if (mounted) return;
+            mounted = true;
+            const node = ui.createNode(2);
+            ui.setProp(node, 1, 16);
+            ui.setProp(node, 2, 16);
+            const texture = ui.uploadTexture(new Uint8Array([10, 20, 30, 255]), 1, 1, 3);
+            ui.setImage(node, texture);
+            ui.insertBefore(1, node, 0);
+          };
+        ''');
+        final original = initial.resources.single;
+        expect(runtime.resizeViewport(360, 640), isTrue);
+        final resynchronized = runtime.frameDeltaAt(0)!;
+        expect(resynchronized.width, 360);
+        expect(resynchronized.height, 640);
+        expect(resynchronized.sequence, isNotNull);
+        expect(resynchronized.resources.single.asset, original.asset);
+        expect(resynchronized.resources.single.pixels, original.pixels);
+        expect(runtime.frameDeltaAt(0), isNull);
+      } finally {
+        runtime.dispose();
+      }
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
+
+  test(
+    'v2 binary operation splice is expanded into one full retained frame',
+    () {
+      final runtime = FfiPocketRuntime.open(width: 640, height: 480);
+      try {
+        final initial = runtime.eval(r'''
+          const rects = [];
+          let mounted = false;
+          globalThis.frame = function() {
+            if (mounted) return;
+            mounted = true;
+            for (let i = 0; i < 100; i++) {
+              const node = ui.createNode(0);
+              ui.setProp(node, 1, 16);
+              ui.setProp(node, 2, 16);
+              ui.setProp(node, 24, 1);
+              ui.setProp(node, 28, 4 + (i % 10) * 24);
+              ui.setProp(node, 25, 4 + Math.floor(i / 10) * 24);
+              ui.setProp(node, 64, 0xff204060 + i);
+              ui.insertBefore(1, node, 0);
+              rects.push(node);
+            }
+          };
+          globalThis.__pocketEvent = function(packet) {
+            const message = typeof packet === "string" ? JSON.parse(packet) : packet;
+            if (message.name === "bump") {
+              ui.setProp(rects[50], 64, 0xffcc6633);
+            }
+          };
+        ''');
+        expect(initial.sequence, isNotNull);
+        expect(initial.ops, hasLength(100));
+        final firstSequence = initial.sequence!;
+        final firstBumpedRect = initial.ops
+            .whereType<PocketRectOp>()
+            .singleWhere((op) => op.x == 4 && op.y == 124);
+
+        runtime.send(const <String, dynamic>{
+          'type': 'event',
+          'name': 'bump',
+          'payload': <String, dynamic>{},
+        });
+        final changed = runtime.frameDeltaAt(0);
+        expect(changed, isNotNull);
+        expect(changed!.sequence, greaterThan(firstSequence));
+        expect(changed.ops, hasLength(100));
+        final changedBumpedRect = changed.ops
+            .whereType<PocketRectOp>()
+            .singleWhere((op) => op.x == 4 && op.y == 124);
+        expect(changedBumpedRect.color, isNot(firstBumpedRect.color));
+      } finally {
+        runtime.dispose();
+      }
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
+
+  test(
     'production FfiPocketRuntime decodes the compact binary frame ABI and binary bridge events',
     () {
       final runtime = FfiPocketRuntime.open(width: 320, height: 480);
@@ -112,9 +207,7 @@ void main() {
         runtime.send(<String, dynamic>{
           'type': 'event',
           'name': 'host.large',
-          'payload': <String, dynamic>{
-            'text': 'x' * 70000,
-          },
+          'payload': <String, dynamic>{'text': 'x' * 70000},
         });
         runtime.send(<String, dynamic>{
           'type': 'event',
@@ -130,10 +223,7 @@ void main() {
         expect(frame.events, hasLength(1));
         expect(frame.events.single.method, 'guest.large');
         expect(frame.events.single.params['sum'], 42);
-        expect(
-          (frame.events.single.params['items'] as List).length,
-          8000,
-        );
+        expect((frame.events.single.params['items'] as List).length, 8000);
       } finally {
         runtime.dispose();
       }

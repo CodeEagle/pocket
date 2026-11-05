@@ -11,6 +11,7 @@ import 'package:pocket_flutter/src/pocket_package.dart'
     show PocketPackageSource;
 
 import 'pocket_guest_manifest.dart';
+import 'pocket_trust.dart';
 
 final class PocketPackageException implements Exception {
   const PocketPackageException(this.message, {this.code = 'package'});
@@ -289,6 +290,7 @@ final class PocketPackageManifest {
     this.bundle,
     this.entryFormat = 'bytecode',
     this.runtimeAbi,
+    this.signedAt,
     this.assets = const <String, PocketManifestAsset>{},
     this.guestManifest = const PocketGuestManifest(),
     this.worker,
@@ -334,6 +336,14 @@ final class PocketPackageManifest {
       runtimeAbi: json['runtimeAbi'] is String
           ? json['runtimeAbi'] as String
           : null,
+      signedAt:
+          json['signedAt'] is num &&
+              (json['signedAt'] as num).isFinite &&
+              (json['signedAt'] as num) >= 0 &&
+              (json['signedAt'] as num) ==
+                  (json['signedAt'] as num).truncateToDouble()
+          ? (json['signedAt'] as num).toInt()
+          : null,
       assets: Map<String, PocketManifestAsset>.unmodifiable(assets),
       guestManifest: PocketGuestManifest.fromJson(guestJson),
       worker: json['worker'] == null ? null : Map<String, dynamic>.unmodifiable(_object(json['worker'], 'worker descriptor')),
@@ -349,6 +359,10 @@ final class PocketPackageManifest {
   final PocketManifestEntry entry;
   final String entryFormat;
   final String? runtimeAbi;
+
+  /// Unix seconds recorded by the release tool. Legacy packages omit it and
+  /// remain valid only when the old trusted-key mode is in use.
+  final int? signedAt;
   final PocketPakManifest pak;
   final List<PocketManifestFile> files;
   final PocketManifestBundle? bundle;
@@ -371,6 +385,7 @@ final class PocketPackageManifest {
       'appId': appId,
       'version': version,
       'build': build,
+      if (signedAt != null) 'signedAt': signedAt,
       'protocol': protocol,
       'minHostVersion': minHostVersion,
       'entry': entry.toJson(),
@@ -1177,18 +1192,51 @@ final class PocketPackageStore {
 
   Future<void> activate(
     PocketPackage package, {
+    required PocketManifestVerifier verifier,
     bool recordPrevious = true,
     int minimumBuild = 0,
     bool allowDowngrade = false,
-  }) =>
-      _synchronized(
-        () => _activateUnlocked(
-          package,
-          recordPrevious: recordPrevious,
-          minimumBuild: minimumBuild,
-          allowDowngrade: allowDowngrade,
-        ),
+  }) => _synchronized(() async {
+    final verified = await _revalidatePackage(package, verifier);
+    await verifier.withVerified(
+      verified.manifest,
+      () => _activateUnlocked(
+        verified,
+        recordPrevious: recordPrevious,
+        minimumBuild: minimumBuild,
+        allowDowngrade: allowDowngrade,
+      ),
+    );
+  });
+
+  /// Rechecks cached bytes, then serializes their final trust admission and
+  /// publication with policy installation. [use] must not acquire a package
+  /// lock or install a policy. It does not mark a package healthy on disk.
+  Future<T> withVerifiedPackage<T>(
+    PocketPackage package, {
+    required PocketManifestVerifier verifier,
+    required FutureOr<T> Function() use,
+  }) => _synchronized(() async {
+    final verified = await _revalidatePackage(package, verifier);
+    return verifier.withVerified(verified.manifest, use);
+  });
+
+  Future<PocketPackage> _revalidatePackage(
+    PocketPackage package,
+    PocketManifestVerifier verifier,
+  ) async {
+    final verified = await _loadVersion(package.versionId, verifier: verifier);
+    if (verified.manifest.payload.contentHash !=
+            package.manifest.payload.contentHash ||
+        path.canonicalize(verified.directory.path) !=
+            path.canonicalize(package.directory.path)) {
+      throw const PocketPackageException(
+        'candidate package changed before admission',
+        code: 'cache-package',
       );
+    }
+    return verified;
+  }
 
   Future<void> _activateUnlocked(
     PocketPackage package, {
@@ -1242,20 +1290,15 @@ final class PocketPackageStore {
       minimumBuild: minimumBuild,
       allowDowngrade: allowDowngrade,
     );
-    final verified = await _loadVersion(package.versionId, verifier: verifier);
-    if (verified.manifest.payload.contentHash !=
-        package.manifest.payload.contentHash) {
-      throw const PocketPackageException(
-        'candidate package changed before health commit',
-        code: 'cache-package',
+    final verified = await _revalidatePackage(package, verifier);
+    await verifier.withVerified(verified.manifest, () async {
+      await _activateUnlocked(
+        verified,
+        minimumBuild: minimumBuild,
+        allowDowngrade: allowDowngrade,
       );
-    }
-    await _activateUnlocked(
-      verified,
-      minimumBuild: minimumBuild,
-      allowDowngrade: allowDowngrade,
-    );
-    await _writeAtomic(_pointer('lastGood'), utf8.encode(verified.versionId));
+      await _writeAtomic(_pointer('lastGood'), utf8.encode(verified.versionId));
+    });
     await _pruneInactiveVersionsUnlocked(keep: 2);
   }
 
@@ -1355,29 +1398,37 @@ final class PocketPackageStore {
       final prevFile = _pointer('previous');
       if (await prevFile.exists()) await prevFile.delete();
     }
-    if (lastGoodId == safeFailedId) {
-      final lgFile = _pointer('lastGood');
-      if (fallbackId != null) {
-        await _writeAtomic(lgFile, utf8.encode(fallbackId));
-      } else if (await lgFile.exists()) {
-        await lgFile.delete();
-      }
-    }
-
     PocketPackage? fallbackPackage;
     if (fallbackId != null) {
+      var admitted = false;
       try {
-        fallbackPackage = await _loadVersion(fallbackId, verifier: verifier);
+        final candidate = await _loadVersion(fallbackId, verifier: verifier);
+        await verifier.withVerified(candidate.manifest, () async {
+          admitted = true;
+          if (lastGoodId == safeFailedId) {
+            await _writeAtomic(
+              _pointer('lastGood'),
+              utf8.encode(candidate.versionId),
+            );
+          }
+          await _writeAtomic(
+            _pointer('active'),
+            utf8.encode(candidate.versionId),
+          );
+        });
+        fallbackPackage = candidate;
       } catch (_) {
+        // An invalid candidate has no usable fallback. A publication failure
+        // is an IO error, however: preserve the healthy pointers and surface
+        // it rather than treating a verified package as invalid.
+        if (admitted) rethrow;
         fallbackPackage = null;
         fallbackId = null;
       }
     }
 
     final activeFile = _pointer('active');
-    if (fallbackPackage != null) {
-      await _writeAtomic(activeFile, utf8.encode(fallbackPackage.versionId));
-    } else {
+    if (fallbackPackage == null) {
       if (await activeFile.exists()) await activeFile.delete();
       final lgFile = _pointer('lastGood');
       if (await lgFile.exists()) await lgFile.delete();
@@ -1438,8 +1489,7 @@ final class PocketPackageStore {
         );
       }
     }
-    final targetId =
-        versionId ?? (previousId ?? lastGoodId);
+    final targetId = versionId ?? (previousId ?? lastGoodId);
     if (targetId == null) {
       throw const PocketPackageException(
         'no verified rollback target',
@@ -1447,12 +1497,14 @@ final class PocketPackageStore {
       );
     }
     final target = await _loadVersion(targetId, verifier: verifier);
-    final active = await _readPointerId('active');
-    if (active != null && active != target.versionId) {
-      await _writeAtomic(_pointer('previous'), utf8.encode(active));
-    }
-    await _writeAtomic(_pointer('active'), utf8.encode(target.versionId));
-    await _writeAtomic(_pointer('lastGood'), utf8.encode(target.versionId));
+    await verifier.withVerified(target.manifest, () async {
+      final active = await _readPointerId('active');
+      if (active != null && active != target.versionId) {
+        await _writeAtomic(_pointer('previous'), utf8.encode(active));
+      }
+      await _writeAtomic(_pointer('active'), utf8.encode(target.versionId));
+      await _writeAtomic(_pointer('lastGood'), utf8.encode(target.versionId));
+    });
   }
 
   Future<List<PocketVersionInfo>> listVersions({
@@ -1691,6 +1743,7 @@ final class PocketManifestVerifier {
     this.maxTotalBytes = 768 * 1024 * 1024,
     this.expectedRuntimeAbi,
     this.requireBytecode = false,
+    this.trustStore,
   });
 
   final Map<String, List<int>> trustedKeys;
@@ -1704,8 +1757,45 @@ final class PocketManifestVerifier {
   final String? expectedRuntimeAbi;
   final bool requireBytecode;
 
+  /// When set, the host-owned root policy is the only source of release keys.
+  /// [trustedKeys] is deliberately ignored in this mode, preventing an old
+  /// configured key from bypassing rotation or revocation.
+  final PocketTrustStore? trustStore;
+
+  /// Final verification and use form one admission relative to policy install.
+  /// The package-store lock, when needed, must already be held. [use] must not
+  /// install policies or acquire another package lock.
+  Future<T> withVerified<T>(
+    PocketSignedManifest signed,
+    FutureOr<T> Function() use,
+  ) {
+    Future<T> admit() async {
+      await verify(signed);
+      return use();
+    }
+
+    return trustStore?.withPolicyAdmission(admit) ?? admit();
+  }
+
   Future<void> verify(PocketSignedManifest signed) async {
-    await signed.verify(trustedKeys: trustedKeys);
+    try {
+      if (trustStore == null) {
+        await signed.verify(trustedKeys: trustedKeys);
+      } else {
+        final key = await trustStore!.publicKeyForPackage(
+          keyId: signed.keyId,
+          packageAppId: signed.payload.appId,
+          signedAt: signed.payload.signedAt,
+          contentHash: signed.payload.contentHash,
+          payloadBytes: signed.payloadBytes,
+        );
+        await signed.verify(
+          trustedKeys: <String, List<int>>{signed.keyId: key},
+        );
+      }
+    } on PocketTrustException catch (error) {
+      throw PocketPackageException(error.message, code: error.code);
+    }
     signed.payload.validate(
       expectedAppId: appId,
       hostVersion: hostVersion,

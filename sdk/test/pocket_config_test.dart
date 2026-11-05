@@ -45,4 +45,31 @@ void main() {
       expected.isEmpty ? isEmpty : <String>[expected],
     );
   });
+
+  test('trust-only update configuration validates without legacy keys', () {
+    const config = PocketUpdateConfig(
+      url: 'https://updates.example.test/manifest.json',
+      trustRootKeyId: 'host-root-1',
+      trustRootPublicKey: 'AA==',
+      trustPolicyUrl: 'https://updates.example.test/trust-policy.json',
+    );
+    expect(config.trustPolicyConfigured, isTrue);
+    expect(config.configured, isTrue);
+    expect(() => config.validate(), returnsNormally);
+  });
+
+  test('partial trust configuration fails closed even with legacy keys', () {
+    const mixed = PocketUpdateConfig(
+      url: 'https://updates.example.test/manifest.json',
+      keyId: 'legacy-key',
+      publicKey: 'AA==',
+      trustRootKeyId: 'host-root-1',
+    );
+    expect(() => mixed.validate(), throwsFormatException);
+
+    const urlOnly = PocketUpdateConfig(
+      url: 'https://updates.example.test/manifest.json',
+    );
+    expect(() => urlOnly.validate(), throwsFormatException);
+  });
 }

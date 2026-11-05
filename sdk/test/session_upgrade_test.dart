@@ -80,7 +80,10 @@ void main() {
     ),
   );
 
-  Future<void> seedHealthyOta({int build = 2}) async {
+  Future<void> seedHealthyOta({
+    int build = 2,
+    List<String> additionalCapabilities = const [],
+  }) async {
     final entry = <int>[1, 2, 3];
     final pak = <int>[4, 5, 6];
     String digest(List<int> bytes) => crypto.sha256.convert(bytes).toString();
@@ -92,8 +95,9 @@ void main() {
         'appId': appId,
         'version': '$build.0.0',
         'build': build,
+        'signedAt': DateTime.now().millisecondsSinceEpoch ~/ 1000,
         'capabilities': {
-          'requires': ['updates.rollback'],
+          'requires': ['updates.rollback', ...additionalCapabilities],
         },
         'protocol': 1,
         'minHostVersion': 1,
@@ -158,6 +162,89 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
   }
+
+  test(
+    'cached Session rejects revocation completed during plugin activation',
+    () async {
+      await seedHealthyOta(additionalCapabilities: ['test.admission.gate']);
+      final root = await Ed25519().newKeyPair();
+      final rootPublic = await root.extractPublicKey();
+      final trust = PocketTrustStore(
+        directory: Directory(
+          '${directory.path}/pocket-packages/$appId/default',
+        ),
+        appId: appId,
+        rootKeyId: 'test-root',
+        rootPublicKey: rootPublic.bytes,
+      );
+      Future<Uint8List> policy(int epoch, {bool revoke = false}) async {
+        final payload = Uint8List.fromList(
+          utf8.encode(
+            jsonEncode({
+              'schemaVersion': 1,
+              'epoch': epoch,
+              'releaseKeys': [
+                {
+                  'keyId': 'upgrade-test',
+                  'publicKeyBase64': base64Encode(publicKey.bytes),
+                  'appScope': [appId],
+                  'notBefore': 0,
+                  'notAfter': 4000000000,
+                },
+              ],
+              if (revoke) 'revokedKeys': ['upgrade-test'],
+            }),
+          ),
+        );
+        final signature = await Ed25519().sign(payload, keyPair: root);
+        return Uint8List.fromList(
+          utf8.encode(
+            jsonEncode({
+              'keyId': 'test-root',
+              'payload': base64Encode(payload),
+              'signature': base64Encode(signature.bytes),
+            }),
+          ),
+        );
+      }
+
+      await trust.installBytes(await policy(1));
+      final revocation = await policy(2, revoke: true);
+      var activated = false;
+      final session = PocketSession(
+        config: PocketAppConfig(
+          appId: appId,
+          metadataAsset: 'upgrade/metadata.json',
+          manifestAsset: 'upgrade/manifest.json',
+          updates: PocketUpdateConfig(
+            url: 'http://127.0.0.1:1/latest.json',
+            trustPolicyUrl: 'http://127.0.0.1:1/policy.json',
+            trustRootKeyId: 'test-root',
+            trustRootPublicKey: base64Encode(rootPublic.bytes),
+          ),
+          pluginFactories: [
+            (_) => _AdmissionGate(() async {
+              await trust.installBytes(revocation);
+              activated = true;
+            }),
+          ],
+        ),
+      );
+      final publishedBuilds = <int?>[];
+      session.addListener(() => publishedBuilds.add(session.active?.build));
+      try {
+        await session.initialize();
+        expect(activated, isTrue, reason: session.lastError);
+        expect((await trust.current()).epoch, 2);
+        expect(session.ready, isTrue);
+        expect(session.active, isNull);
+        expect(publishedBuilds, isNot(contains(2)));
+        expect(session.lastError, contains('trust-revoked-key'));
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   test(
     'public rollback promotes the previous package after health and survives restart',
@@ -404,4 +491,25 @@ final class _MemoryTransport implements PocketUpdateTransport {
 
   @override
   void close() {}
+}
+
+final class _AdmissionGate extends PocketPlugin {
+  _AdmissionGate(this.onActivate);
+  final Future<void> Function() onActivate;
+  @override
+  PocketPluginDescriptor get descriptor => const PocketPluginDescriptor(
+    id: 'test.admission',
+    version: '1.0.0',
+    capabilities: {
+      'test.admission.gate': PocketPluginCapability(
+        name: 'test.admission.gate',
+        kind: PocketCapabilityKind.request,
+      ),
+    },
+  );
+  @override
+  void register(PocketPluginContext context) =>
+      context.registerRequest('test.admission.gate', (_) => null);
+  @override
+  Future<void> activate(PocketPluginContext context) => onActivate();
 }

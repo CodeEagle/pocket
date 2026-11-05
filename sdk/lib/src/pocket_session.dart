@@ -188,16 +188,33 @@ final class PocketSession extends ChangeNotifier {
     if (updateConfig != null && updateConfig.configured) {
       final directory = await getApplicationSupportDirectory();
       final namespace = updateConfig.namespace;
+      final packageRoot = Directory(
+        '${directory.path}/pocket-packages/$appId/$namespace',
+      );
+      final trustStore = updateConfig.trustPolicyConfigured
+          ? PocketTrustStore(
+              directory: packageRoot,
+              appId: appId,
+              rootKeyId: updateConfig.trustRootKeyId!,
+              rootPublicKey: base64Decode(updateConfig.trustRootPublicKey!),
+            )
+          : null;
       final updates = PocketUpdateCoordinator(
         manifestUri: Uri.parse(updateConfig.url),
         appId: appId,
-        trustedKeys: {updateConfig.keyId: base64Decode(updateConfig.publicKey)},
-        store: PocketPackageStore(
-          Directory('${directory.path}/pocket-packages/$appId/$namespace'),
-        ),
+        trustedKeys: updateConfig.trustPolicyConfigured
+            ? const <String, List<int>>{}
+            : <String, List<int>>{
+                updateConfig.keyId: base64Decode(updateConfig.publicKey),
+              },
+        store: PocketPackageStore(packageRoot),
         expectedRuntimeAbi: _metadata['runtimeAbi'] as String,
         requireBytecode: true,
         minimumBuild: embeddedBuild,
+        trustStore: trustStore,
+        trustPolicyUri: updateConfig.trustPolicyConfigured
+            ? Uri.parse(updateConfig.trustPolicyUrl!)
+            : null,
         debugHttpHosts: kDebugMode
             ? <String>{
                 '127.0.0.1',
@@ -226,19 +243,26 @@ final class PocketSession extends ChangeNotifier {
       }
     }
     if (_disposed) return;
+    void publishInitial() {
+      if (_disposed) return;
+      stage = 'loading';
+      ready = true;
+      notifyListeners();
+      _watchStartup();
+    }
+
     try {
+      await _withAdmittedPackage(active, () {});
       await _configureBridge(active);
+      await _withAdmittedPackage(active, publishInitial);
     } catch (error) {
       if (active == null) rethrow;
       lastError = 'Cached capabilities rejected: $error';
       active = null;
       _resetCacheOnHealth = true;
       await _configureBridge(null);
+      publishInitial();
     }
-    stage = 'loading';
-    ready = true;
-    notifyListeners();
-    _watchStartup();
   }
 
   static int _resolveEmbeddedBuild(
@@ -649,6 +673,20 @@ final class PocketSession extends ChangeNotifier {
   // recovery target until the embedded guest completes the health window.
   PocketPreparedPackage? _embeddedRollbackFallback;
 
+  Future<T> _withAdmittedPackage<T>(
+    PocketPreparedPackage? package,
+    FutureOr<T> Function() publish,
+  ) {
+    if (package == null) return Future<T>.sync(publish);
+    final updates = _updates;
+    if (updates == null) {
+      return Future<T>.error(
+        StateError('No update verifier for cached package'),
+      );
+    }
+    return updates.withVerifiedPrepared(package, publish);
+  }
+
   Future<void> _mount(
     PocketPreparedPackage? next, {
     bool resetCache = false,
@@ -662,24 +700,30 @@ final class PocketSession extends ChangeNotifier {
     generation++;
     _firstFrameReady = false;
     try {
+      await _withAdmittedPackage(next, () {});
       await _configureBridge(next);
-      if (_disposed) return;
-      active = next;
-      _resetCacheOnHealth = resetCache;
-      _embeddedRollbackFallback = embeddedRollbackFallback;
-      _candidate = null;
-      stage = 'loading';
-      notifyListeners();
-      _watchStartup();
-    } catch (error) {
-      lastError = '$error';
-      try {
-        await _configureBridge(previous);
+      await _withAdmittedPackage(next, () {
         if (_disposed) return;
-        active = previous;
+        active = next;
+        _resetCacheOnHealth = resetCache;
+        _embeddedRollbackFallback = embeddedRollbackFallback;
+        _candidate = null;
         stage = 'loading';
         notifyListeners();
         _watchStartup();
+      });
+    } catch (error) {
+      lastError = '$error';
+      try {
+        await _withAdmittedPackage(previous, () {});
+        await _configureBridge(previous);
+        await _withAdmittedPackage(previous, () {
+          if (_disposed) return;
+          active = previous;
+          stage = 'loading';
+          notifyListeners();
+          _watchStartup();
+        });
       } catch (restoreError) {
         failure = restoreError;
         _busy = false;

@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { resolveNativeProbePath } from "../scripts/native_probe_path.ts";
 import { servePreviewMedia } from "./preview_media_assets.ts";
 import type { LocalBluetoothProvider } from "./local_bluetooth.ts";
+import { hotCommandSource, hotIdentity, type HotIdentity } from "./hot_reload.ts";
 
 export type PreviewArtifactPaths = {
   /** Absolute path to the current Editor qjbc artifact. */
@@ -133,6 +134,7 @@ export type PreviewStatus = {
   /** Capabilities intentionally not emulated by this Canvas2D projection. */
   unsupported: string[];
   error?: string;
+  hotReload?: { mode: "replace" | "reload"; reason?: string };
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -141,6 +143,11 @@ const editorRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const maxInputBytes = 64 * 1024;
 const maxFrameBytes = 64 * 1024 * 1024;
 const maxBrowserPluginPending = 64;
+// A hot replacement can publish one old generation's cleanup edges together
+// with the next generation's media state. The SDK permits 128 media entries,
+// so 512 leaves room for both generations (including text-input cleanup)
+// while remaining a hard, finite bound for a malformed guest.
+const maxPendingBrowserEvents = 512;
 const browserPluginTimeoutMs = 120_000;
 
 /** Frame elapsed time must not jump when wall-clock time is adjusted. */
@@ -519,9 +526,15 @@ type PreviewRuntime = {
    * and text-input edges together until the composite frame is published
    * because pumpRuntime may settle several native frames before tickNow emits
    * the browser projection. */
-  pendingBrowserEvents: JsonRecord[];
+  pendingBrowserEvents: PendingBrowserEvent[];
   needsPump: boolean;
   pumping: number;
+};
+
+/** Keep lifecycle edges tied to the runtime generation that emitted them. */
+type PendingBrowserEvent = {
+  event: JsonRecord;
+  generation: number;
 };
 
 type PendingSystemRequest = {
@@ -573,6 +586,52 @@ function isVideoPlaybackEvent(event: JsonRecord): boolean {
 function isTextInputLifecycleEvent(event: JsonRecord): boolean {
   const name = eventName(event);
   return name === "textInput.open" || name === "textInput.update" || name === "textInput.close";
+}
+
+/**
+ * Cleanup edges must survive a busy replacement boundary.  They are the
+ * browser projection's only signal that an overlay/media resource owned by
+ * the old guest is no longer live. The queue never silently evicts an edge:
+ * repeatable video state is coalesced and a hard-bound violation fails
+ * explicitly so the caller can reload the guest.
+ */
+function isBrowserCleanupEvent(event: JsonRecord): boolean {
+  const name = eventName(event);
+  return name === "textInput.close" || name === "video.release";
+}
+
+function browserEventIdentity(event: JsonRecord): string | undefined {
+  const name = eventName(event);
+  const payload = eventPayload(event);
+  if (isVideoPlaybackEvent(event)) {
+    const id = payload?.id;
+    return typeof id === "string" && id.length > 0 ? `${name}:${id}` : undefined;
+  }
+  // Text input updates carry revision/selection state and must retain their
+  // full sequence; coalescing a rect-only update can overwrite a value-bearing
+  // update before the browser projection observes it.
+  return undefined;
+}
+
+function enqueueBrowserEvent(
+  queue: PendingBrowserEvent[],
+  event: JsonRecord,
+  generation: number,
+): void {
+  const identity = browserEventIdentity(event);
+  if (identity) {
+    const existing = queue.findIndex((item) => item.generation === generation && browserEventIdentity(item.event) === identity);
+    if (existing >= 0) {
+      // Move the replacement to the tail so repeated playback commands
+      // preserve the actual latest state ordering.
+      queue.splice(existing, 1);
+    }
+  }
+  if (queue.length >= maxPendingBrowserEvents) {
+    const cleanupCount = queue.filter(({ event: queued }) => isBrowserCleanupEvent(queued)).length;
+    throw new Error(`preview browser lifecycle queue exceeded ${maxPendingBrowserEvents} events (${cleanupCount} cleanup edges retained); reload required`);
+  }
+  queue.push({ event, generation });
 }
 
 function hostError(code: string, message: string): JsonRecord {
@@ -733,6 +792,11 @@ class PreviewSession {
   private nextWakeDelay: number | null = null;
   private artifactRevision?: number;
   private artifactSignature?: string;
+  private readonly hotSession = randomUUID();
+  private hotVersion?: string;
+  private hotBuild?: HotIdentity;
+  private hotAcknowledgement?: { nonce: string; result?: JsonRecord };
+  private hotReload?: PreviewStatus["hotReload"];
   private frame?: PreviewFrame;
   /** Native FrameResult resources are deltas; retain live assets for a fresh
    * SSE subscriber/snapshot without inflating every animation frame. */
@@ -874,7 +938,9 @@ class PreviewSession {
     const signature = this.signature(artifacts);
     if (this.probe && this.artifactSignature === signature && this.state !== "error") return;
     if (this.starting) return this.starting;
-    this.starting = (async () => {
+    this.starting = this.enqueue(async () => {
+      const nextHotBuild = await hotIdentity(artifacts).catch(() => undefined);
+      if (await this.tryHotReplacement(artifacts, signature, nextHotBuild)) return;
       await this.stopProbe();
       this.state = "starting";
       this.error = undefined;
@@ -928,11 +994,24 @@ class PreviewSession {
         this.state = "ready";
         this.lastTickAt = monotonicNow();
         await this.tickNow(1000 / this.tickHz);
+        this.hotBuild = nextHotBuild;
+        this.hotVersion = String(artifacts.generation ?? randomUUID());
+        if (nextHotBuild) {
+          // An ordinary guest does not opt in; it keeps the full QJBC reload path.
+          try {
+            const bound = await this.hotCommand("bind", { protocol: 1, session: this.hotSession, version: this.hotVersion });
+            if (!bound.supported || bound.value !== true) this.hotBuild = undefined;
+          }
+          catch { this.hotBuild = undefined; }
+          // Binding is a native transaction after tickNow's schedule snapshot.
+          // Refresh demand so it cannot strand newly due work behind an idle timer.
+          await this.schedule();
+        }
       } catch (error) {
         await probe.stop();
         throw error;
       }
-    })();
+    });
     try {
       await this.starting;
     } catch (error) {
@@ -942,6 +1021,64 @@ class PreviewSession {
       throw error;
     } finally {
       this.starting = undefined;
+    }
+  }
+
+  private async hotCommand(method: "bind" | "prepare" | "commit", argument: unknown): Promise<JsonRecord> {
+    const runtime = this.rootRuntime;
+    if (!runtime) throw new Error("Hot update has no live root");
+    const nonce = randomUUID();
+    this.hotAcknowledgement = { nonce };
+    try {
+      await runtime.probe.checked({ op: "eval", source: hotCommandSource(method, argument, nonce) });
+      await this.pumpRuntime(runtime, 0);
+      const result = this.hotAcknowledgement.result;
+      if (!result) throw new Error("Guest did not acknowledge the hot update");
+      return result;
+    } finally {
+      this.hotAcknowledgement = undefined;
+    }
+  }
+
+  private async tryHotReplacement(artifacts: ResolvedPreviewProject, signature: string, next?: HotIdentity): Promise<boolean> {
+    if (!this.probe || !this.rootRuntime || this.state !== "ready") return false;
+    this.hotReload = { mode: "reload", reason: "Guest or build is not compatible with root replacement" };
+    if (!next || !this.hotBuild || !this.hotVersion || next.compatibility !== this.hotBuild.compatibility ||
+        this.childRuntimes.size || this.pointerTargets.size || this.pendingSystemRequests.size ||
+        this.browserPluginRequests.size || this.browserPluginStreams.size) return false;
+    const transition = { protocol: 1, session: this.hotSession, base: this.hotVersion,
+      version: String(artifacts.generation ?? randomUUID()) };
+    if (transition.version.length > 128) return false;
+    this.scheduleGeneration += 1;
+    if (this.tickTimer) clearTimeout(this.tickTimer);
+    this.tickTimer = undefined;
+    this.tickDeadlineAt = undefined;
+    try {
+      const prepared = await this.hotCommand("prepare", transition);
+      if (!prepared.supported) return false;
+      // prepare() synchronously disposes the old root. Its lifecycle edges
+      // were captured with the old generation above; switch identity before
+      // evaluating the replacement so its mount edges receive the new token.
+      this.rootRuntime.generation = ++this.rootGeneration;
+      await this.probe.checked({ op: "eval", source: next.source });
+      const committed = await this.hotCommand("commit", transition);
+      if (committed.value !== true) throw new Error("Guest rejected hot update commit");
+      this.rootRuntime.artifacts = artifacts;
+      this.systemConfigured = false;
+      this.artifactSignature = signature;
+      this.artifactRevision = artifacts.revision;
+      this.hotBuild = next;
+      this.hotVersion = transition.version;
+      this.hotReload = { mode: "replace" };
+      this.lastTickAt = monotonicNow();
+      await this.tickNow(0);
+      this.emit({ type: "status", ...this.status() });
+      return true;
+    } catch (error) {
+      // A partly evaluated root cannot be trusted. The caller replaces the VM
+      // from the completed QJBC build instead of continuing a damaged realm.
+      this.hotReload = { mode: "reload", reason: errorText(error) };
+      return false;
     }
   }
 
@@ -1377,14 +1514,12 @@ class PreviewSession {
           if (!event || typeof event !== "object" || Array.isArray(event)) continue;
           const browserEvent = event as JsonRecord;
           if (!isVideoPlaybackEvent(browserEvent) && !isTextInputLifecycleEvent(browserEvent)) continue;
-          runtime.pendingBrowserEvents.push(browserEvent);
+          enqueueBrowserEvent(runtime.pendingBrowserEvents, browserEvent, runtime.generation);
         }
         // A guest can emit several control edges while native settles one
-        // input boundary. Keep enough history for the browser to observe the
-        // latest policy without allowing a malicious guest to grow it.
-        if (runtime.pendingBrowserEvents.length > 128) {
-          runtime.pendingBrowserEvents.splice(0, runtime.pendingBrowserEvents.length - 128);
-        }
+        // input boundary. enqueueBrowserEvent coalesces repeated state for
+        // one generation/identity and throws on an actual bound violation;
+        // cleanup edges are therefore never silently discarded.
         if (runtime.initialEvents.length === 0) {
           runtime.initialEvents = frame.events.filter((event): event is JsonRecord =>
             !!event && typeof event === "object" && !Array.isArray(event) && eventName(event as JsonRecord) === "host.request",
@@ -1414,6 +1549,14 @@ class PreviewSession {
   private async handleRuntimeEvent(runtime: PreviewRuntime, event: JsonRecord, depth: number): Promise<void> {
     const name = eventName(event);
     const eventValue = eventPayload(event);
+    if (name === "pocket.dev.hot.ack") {
+      if (runtime === this.rootRuntime && this.hotAcknowledgement &&
+          eventValue?.nonce === this.hotAcknowledgement.nonce && eventValue.result &&
+          typeof eventValue.result === "object" && !Array.isArray(eventValue.result)) {
+        this.hotAcknowledgement.result = eventValue.result as JsonRecord;
+      }
+      return;
+    }
     if (name === "stream.open" && eventValue && typeof eventValue.streamId === "string" && eventValue.topic === "hardware.bluetooth.notifications") {
       const owner = this.webBluetoothOwner;
       if (owner) {
@@ -2060,6 +2203,9 @@ class PreviewSession {
     const rootRuntimeToken = this.rootRuntime
       ? `${this.rootRuntime.instanceId}:${this.rootRuntime.generation}`
       : undefined;
+    const projectedOps = ops.map((op) => op?.type === "video" && rootRuntimeToken
+      ? { ...op, runtimeToken: rootRuntimeToken }
+      : op);
     const rootEvents = (root.events.length > 0 ? root.events : (this.rootRuntime?.initialEvents ?? []))
       .filter((event) => !isVideoPlaybackEvent(event) && !isTextInputLifecycleEvent(event))
       .map((event) => rootRuntimeToken ? { ...event, runtimeToken: rootRuntimeToken } : event);
@@ -2069,24 +2215,29 @@ class PreviewSession {
     // every live child for video, even when its surface is culled, so media
     // intent is not lost during coverage/scroll transitions.
     const rootBrowserEvents = (this.rootRuntime?.pendingBrowserEvents ?? [])
-      .map((event) => rootRuntimeToken ? { ...event, runtimeToken: rootRuntimeToken } : event);
+      .map(({ event, generation }) => rootRuntimeToken
+        ? { ...event, runtimeToken: `${this.rootRuntime!.instanceId}:${generation}` }
+        : event);
     const childVideoEvents = [...this.childRuntimes.entries()].flatMap(([appId, child]) => {
-      const runtimeToken = `${child.instanceId}:${child.generation}`;
-      return child.pendingBrowserEvents
-        .filter((event) => isVideoPlaybackEvent(event))
-        .map((event) => ({ ...event, runtime: appId, runtimeToken }));
+      return (child.pendingBrowserEvents ?? [])
+        .filter(({ event }) => isVideoPlaybackEvent(event))
+        .map(({ event, generation }) => ({
+          ...event,
+          runtime: appId,
+          runtimeToken: `${child.instanceId}:${generation}`,
+        }));
     });
     // Only the focused child owns the single browser text editor overlay. Keep
     // its lifecycle edges ordered with the root frame and tag the runtime
     // identity so a destroyed/recreated child cannot consume late DOM edits.
     const childTextInputEvents = focusedSlot && focusedChild
       ? (focusedChildRuntime?.pendingBrowserEvents ?? [])
-        .filter((event) => isTextInputLifecycleEvent(event))
-        .map((event) => transformedTextInputEvent(
+        .filter(({ event }) => isTextInputLifecycleEvent(event))
+        .map(({ event, generation }) => transformedTextInputEvent(
           event,
           focusedSlot,
           focusedChild,
-          focusedChildRuntime ? `${focusedChildRuntime.instanceId}:${focusedChildRuntime.generation}` : "",
+          focusedChildRuntime ? `${focusedChildRuntime.instanceId}:${generation}` : "",
         ))
       : [];
     const { inputBounds: _nativeInputBounds, ...rootFrame } = root;
@@ -2097,7 +2248,7 @@ class PreviewSession {
         slots.some(slot => slot.appId === pending.child.appId && slot.w > 0 && slot.h > 0 &&
           slot.x < root.width && slot.y < root.height && slot.x + slot.w > 0 && slot.y + slot.h > 0))
         .map(([token]) => token),
-      ops,
+      ops: projectedOps,
       // SSE carries native resource deltas. A reconnect gets the full cache
       // through replayFrame(); retransmitting every atlas on every animation
       // tick makes the browser decode megabytes instead of painting frames.
@@ -2639,6 +2790,7 @@ class PreviewSession {
       transport: "native-probe-full-frames",
       unsupported: ["native hardware/plugins"],
       ...(this.error ? { error: this.error } : {}),
+      ...(this.hotReload ? { hotReload: this.hotReload } : {}),
     };
   }
 

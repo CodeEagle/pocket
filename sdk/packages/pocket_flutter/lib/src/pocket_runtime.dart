@@ -8,6 +8,7 @@ import 'package:ffi/ffi.dart';
 
 import 'pocket_binary_codec.dart';
 import 'pocket_duplex.dart';
+import 'pocket_guest_security.dart';
 import 'pocket_model.dart';
 import 'pocket_memory_limits.dart';
 import 'pocket_offload_runtime.dart';
@@ -226,6 +227,69 @@ double _finiteNonNegativeDelta(double deltaMilliseconds) =>
     ? deltaMilliseconds
     : 0.0;
 
+const int _pocketBinaryFrameMagic = 0x31424650; // PFB1
+const int _pocketBinaryFrameDeltaMagic = 0x31504650; // PFP1
+const int _pocketBinaryFrameDeltaHeaderBytes = 28;
+const int _pocketMaxBinaryFrameBytes = 64 * 1024 * 1024;
+
+final class _PocketFrameDeltaPacket {
+  const _PocketFrameDeltaPacket({
+    required this.baseSequence,
+    required this.prefixCount,
+    required this.deleteCount,
+    required this.resultingOpCount,
+    required this.frame,
+  });
+
+  final int baseSequence;
+  final int prefixCount;
+  final int deleteCount;
+  final int resultingOpCount;
+  final PocketFrame frame;
+}
+
+/// Decodes the fixed-size PFP1 envelope without duplicating the PFB1 decoder.
+/// The input is already copied from borrowed native memory before this function
+/// is called. The embedded PFB1 payload is therefore a view into owned bytes;
+/// no additional payload copy is needed before decoding.
+_PocketFrameDeltaPacket _decodePocketFrameDeltaPacket(Uint8List source) {
+  if (source.length < _pocketBinaryFrameDeltaHeaderBytes) {
+    throw const FormatException(
+      'Pocket binary frame delta header is truncated',
+    );
+  }
+  final data = ByteData.sublistView(source);
+  final magic = data.getUint32(0, Endian.little);
+  if (magic != _pocketBinaryFrameDeltaMagic) {
+    throw const FormatException('Invalid Pocket binary frame delta magic');
+  }
+  final baseSequence = data.getUint64(4, Endian.little);
+  final prefixCount = data.getUint32(12, Endian.little);
+  final deleteCount = data.getUint32(16, Endian.little);
+  final resultingOpCount = data.getUint32(20, Endian.little);
+  final embeddedPayloadLength = data.getUint32(24, Endian.little);
+  final payloadEnd = _pocketBinaryFrameDeltaHeaderBytes + embeddedPayloadLength;
+  if (payloadEnd != source.length) {
+    throw FormatException(
+      'Pocket binary frame delta payload length mismatch: '
+      'header=$embeddedPayloadLength actual=${source.length - _pocketBinaryFrameDeltaHeaderBytes}',
+    );
+  }
+  final payload = Uint8List.sublistView(
+    source,
+    _pocketBinaryFrameDeltaHeaderBytes,
+    payloadEnd,
+  );
+  final frame = PocketFrame.fromBinary(payload);
+  return _PocketFrameDeltaPacket(
+    baseSequence: baseSequence,
+    prefixCount: prefixCount,
+    deleteCount: deleteCount,
+    resultingOpCount: resultingOpCount,
+    frame: frame,
+  );
+}
+
 typedef _CreateNative = Pointer<Void> Function(Double width, Double height);
 typedef _CreateDart = Pointer<Void> Function(double width, double height);
 typedef _CreateDensityNative = Pointer<Void> Function(Double, Double, Uint32);
@@ -308,6 +372,20 @@ typedef _FrameBinaryDart =
       double deltaMs,
       Pointer<Uint64> outByteLength,
     );
+typedef _FrameDeltaBinaryV2Native =
+    Pointer<Uint8> Function(
+      Pointer<Void>,
+      Double deltaMs,
+      Uint64 baseFrame,
+      Pointer<Uint64> outByteLength,
+    );
+typedef _FrameDeltaBinaryV2Dart =
+    Pointer<Uint8> Function(
+      Pointer<Void>,
+      double deltaMs,
+      int baseFrame,
+      Pointer<Uint64> outByteLength,
+    );
 typedef _NextWakeDelayNative = Double Function(Pointer<Void>);
 typedef _NextWakeDelayDart = double Function(Pointer<Void>);
 typedef _SetSchedulerPausedNative = Void Function(Pointer<Void>, Int32 paused);
@@ -343,6 +421,11 @@ typedef _StopAsyncDart = int Function(Pointer<Void>);
 typedef _ConfigureCompositorNative =
     Int32 Function(Pointer<Void>, Pointer<Utf8>);
 typedef _ConfigureCompositorDart = int Function(Pointer<Void>, Pointer<Utf8>);
+
+typedef _ConfigureGuestSecurityNative =
+    Int32 Function(Pointer<Void>, Pointer<Utf8>);
+typedef _ConfigureGuestSecurityDart =
+    int Function(Pointer<Void>, Pointer<Utf8>);
 
 typedef _EnableAuxiliaryNative =
     Int32 Function(Pointer<Void>, Double width, Double height);
@@ -415,6 +498,7 @@ final class FfiPocketRuntime
     required Pointer<Void> handle,
     PocketRecordingController? recording,
     this.memoryLimits = const PocketMemoryLimits(),
+    this.guestSecurity = const PocketGuestSecurityPolicy(),
   }) : _library = library,
        _handle = handle,
        _recordingController = recording?.enabled == true ? recording : null,
@@ -432,6 +516,7 @@ final class FfiPocketRuntime
 
   final DynamicLibrary _library;
   final PocketMemoryLimits memoryLimits;
+  final PocketGuestSecurityPolicy guestSecurity;
   final Pointer<Void> _handle;
   final PocketRecordingController? _recordingController;
   final _EvalDart _eval;
@@ -442,6 +527,13 @@ final class FfiPocketRuntime
   bool _frameDeltaLookedUp = false;
   _FrameBinaryDart? _frameDeltaBinary;
   bool _frameDeltaBinaryLookedUp = false;
+  _FrameDeltaBinaryV2Dart? _frameDeltaBinaryV2;
+  bool _frameDeltaBinaryV2LookedUp = false;
+  // The native delta ABI returns only an operation splice. Keep exactly one
+  // decoded full frame as the baseline for the next call; the widget/painter
+  // still owns the frame it receives, so this is protocol state, not a second
+  // rendering model.
+  PocketFrame? _deltaBaseFrame;
   String _lastFrameDeltaMode = 'full';
   _NextWakeDelayDart? _nextWakeDelay;
   bool _nextWakeDelayLookedUp = false;
@@ -510,8 +602,10 @@ final class FfiPocketRuntime
     int tickHz = 60,
     PocketRecordingController? recording,
     PocketMemoryLimits memoryLimits = const PocketMemoryLimits(),
+    PocketGuestSecurityPolicy guestSecurity = const PocketGuestSecurityPolicy(),
   }) {
     memoryLimits.validate();
+    guestSecurity.validate();
     if (rasterDensity < 1 || rasterDensity > 4) {
       throw RangeError.range(rasterDensity, 1, 4, 'rasterDensity');
     }
@@ -540,11 +634,22 @@ final class FfiPocketRuntime
       handle: handle,
       recording: recording,
       memoryLimits: memoryLimits,
+      guestSecurity: guestSecurity,
     );
     final error = runtime.lastError;
     if (error != null && error.isNotEmpty) {
       runtime.dispose();
       throw PocketRuntimeException('pocket_create failed: $error');
+    }
+    if (!guestSecurity.isDefault) {
+      try {
+        runtime._configureGuestSecurity(guestSecurity);
+      } catch (_) {
+        // A requested hardening policy must never silently degrade to an
+        // unconfigured guest on an older native library.
+        runtime.dispose();
+        rethrow;
+      }
     }
     if (recording?.enabled == true) {
       try {
@@ -643,6 +748,7 @@ final class FfiPocketRuntime
       return output;
     } catch (error) {
       failure = error;
+      _invalidateDeltaBase();
       rethrow;
     } finally {
       calloc.free(sourcePointer);
@@ -664,6 +770,7 @@ final class FfiPocketRuntime
   @override
   PocketFrame load(String source, Uint8List pak) {
     _checkAlive();
+    _invalidateDeltaBase();
     // Resolve lazily so source-only and injected test runtimes can still
     // use a host library built before pocket_load was added.
     final load = _load ??= _library.lookupFunction<_LoadNative, _LoadDart>(
@@ -715,6 +822,7 @@ final class FfiPocketRuntime
     String? expectedRuntimeAbi,
   }) {
     _checkAlive();
+    _invalidateDeltaBase();
     if (bytecode.isEmpty) {
       throw const PocketRuntimeException('bytecode envelope is empty');
     }
@@ -782,6 +890,7 @@ final class FfiPocketRuntime
     String? expectedRuntimeAbi,
   }) async {
     _checkAlive();
+    _invalidateDeltaBase();
     final actual = actualAbi;
     if (expectedRuntimeAbi != null &&
         (actual == null || actual != expectedRuntimeAbi)) {
@@ -879,6 +988,7 @@ final class FfiPocketRuntime
     required String pakPath,
   }) async {
     _checkAlive();
+    _invalidateDeltaBase();
     final loadFiles = _lookupLoadFiles();
     if (loadFiles == null) {
       throw UnsupportedError('pocket_load_files is unavailable');
@@ -938,21 +1048,20 @@ final class FfiPocketRuntime
   /// Native-only fractional entry point used by [pocketFrameAt].
   PocketFrame frameAt(double deltaMilliseconds) {
     _checkAlive();
+    // A full-frame transaction is authoritative even when the previous
+    // delta call failed or the guest was reloaded. Do not let a stale base be
+    // paired with the next v2 packet if this call throws halfway through.
+    _invalidateDeltaBase();
     _traceTransactionBegin();
     final delta = _finiteNonNegativeDelta(deltaMilliseconds);
     PocketFrame? output;
     Object? failure;
     try {
-      final binary = _lookupFrameBinary();
-      if (binary != null) {
-        output = _readBinaryFullFrame(binary, delta);
-        return output;
-      }
-      final pointer = _frame(_handle, delta);
-      output = _readFullFrame(pointer, 'pocket_frame returned no frame');
+      output = _readFullFrameAtDelta(delta);
       return output;
     } catch (error) {
       failure = error;
+      _invalidateDeltaBase();
       rethrow;
     } finally {
       final traceClock = _traceTransactionEnd();
@@ -971,7 +1080,7 @@ final class FfiPocketRuntime
 
   /// Calls the optional delta ABI. A missing symbol is normal when an older
   /// mobile library is loaded, so lookup failure permanently falls back to the
-  /// legacy full-frame call for this runtime instance.
+  /// legacy full-frame/delta calls for this runtime instance.
   PocketFrame? frameDeltaAt(double deltaMilliseconds) {
     _checkAlive();
     _traceTransactionBegin();
@@ -980,6 +1089,57 @@ final class FfiPocketRuntime
     Object? failure;
     var mode = 'full';
     try {
+      // A missing/invalidated v2 baseline is an explicit resynchronization:
+      // base 0 requests current pixels as well as full operations. The legacy
+      // full ABI keeps its existing incremental resource transport semantics.
+      final base = _deltaBaseFrame;
+      final binaryV2 = _lookupFrameDeltaBinaryV2();
+      if (base == null || (binaryV2 != null && base.sequence == null)) {
+        mode = 'full';
+        _invalidateDeltaBase();
+        if (binaryV2 == null) {
+          output = _readFullFrameAtDelta(delta);
+          return output;
+        }
+      }
+      if (binaryV2 != null) {
+        mode = 'binaryV2';
+        final length = calloc<Uint64>();
+        try {
+          length.value = 0;
+          final pointer = binaryV2(_handle, delta, base?.sequence ?? 0, length);
+          if (pointer.address == 0 || length.value == 0) {
+            final error = lastError;
+            if (error != null && error.isNotEmpty) {
+              throw PocketRuntimeException(error);
+            }
+            if (pointer.address != 0 || length.value != 0) {
+              throw const FormatException(
+                'pocket_frame_delta_binary_v2 returned an invalid empty frame',
+              );
+            }
+            // A null pointer and zero length are the native unchanged marker.
+            return null;
+          }
+          final byteLength = length.value;
+          if (byteLength > _pocketMaxBinaryFrameBytes) {
+            throw const PocketRuntimeException(
+              'pocket_frame_delta_binary_v2 returned an oversized frame',
+            );
+          }
+          // Copy before querying lastError or making any other native call;
+          // the v2 pointer is borrowed until the next FFI boundary.
+          final bytes = Uint8List.fromList(pointer.asTypedList(byteLength));
+          final error = lastError;
+          if (error != null && error.isNotEmpty) {
+            throw PocketRuntimeException(error);
+          }
+          output = _decodeBinaryDeltaV2(bytes, base);
+          return output;
+        } finally {
+          calloc.free(length);
+        }
+      }
       final binary = _lookupFrameDeltaBinary();
       if (binary != null) {
         mode = 'binary';
@@ -992,18 +1152,28 @@ final class FfiPocketRuntime
             if (error != null && error.isNotEmpty) {
               throw PocketRuntimeException(error);
             }
+            if (pointer.address != 0 || length.value != 0) {
+              throw const FormatException(
+                'pocket_frame_delta_binary returned an invalid empty frame',
+              );
+            }
             return null;
           }
           final byteLength = length.value;
-          if (byteLength > 64 * 1024 * 1024) {
+          if (byteLength > _pocketMaxBinaryFrameBytes) {
             throw const PocketRuntimeException(
               'pocket_frame_delta_binary returned an oversized frame',
             );
           }
-          // The native pointer is borrowed until the next FFI call. Parse
-          // directly from the borrowed typed view; retained resources copy
-          // only their own pixel/palette slices inside PocketFrame.fromBinary.
-          output = PocketFrame.fromBinary(pointer.asTypedList(byteLength));
+          // Copy before querying lastError or making any other native call;
+          // the legacy pointer is borrowed until the next FFI boundary.
+          final bytes = Uint8List.fromList(pointer.asTypedList(byteLength));
+          final error = lastError;
+          if (error != null && error.isNotEmpty) {
+            throw PocketRuntimeException(error);
+          }
+          output = PocketFrame.fromBinary(bytes);
+          _retainDeltaBase(output);
           return output;
         } finally {
           calloc.free(length);
@@ -1012,8 +1182,7 @@ final class FfiPocketRuntime
       final frameDelta = _lookupFrameDelta();
       if (frameDelta == null) {
         mode = 'full';
-        final pointer = _frame(_handle, delta);
-        output = _readFullFrame(pointer, 'pocket_frame returned no frame');
+        output = _readFullFrameAtDelta(delta);
         return output;
       }
       mode = 'delta';
@@ -1028,9 +1197,13 @@ final class FfiPocketRuntime
       }
       if (json == '{"unchanged":true}') return null;
       output = PocketFrame.fromJson(json);
+      _retainDeltaBase(output);
       return output;
     } catch (error) {
       failure = error;
+      // A native failure may have advanced the guest before serialization or
+      // validation failed. The old baseline is no longer trustworthy.
+      _invalidateDeltaBase();
       rethrow;
     } finally {
       final traceClock = _traceTransactionEnd();
@@ -1129,28 +1302,37 @@ final class FfiPocketRuntime
     return _frameBinary;
   }
 
-  PocketFrame _readBinaryFullFrame(
-    _FrameBinaryDart binary,
-    double delta,
-  ) {
+  PocketFrame _readFullFrameAtDelta(double delta) {
+    final binary = _lookupFrameBinary();
+    if (binary != null) {
+      return _readBinaryFullFrame(binary, delta);
+    }
+    final pointer = _frame(_handle, delta);
+    return _readFullFrame(pointer, 'pocket_frame returned no frame');
+  }
+
+  PocketFrame _readBinaryFullFrame(_FrameBinaryDart binary, double delta) {
     final length = calloc<Uint64>();
     try {
       length.value = 0;
       final pointer = binary(_handle, delta, length);
-      final error = lastError;
-      if (error != null && error.isNotEmpty) {
-        throw PocketRuntimeException(error);
-      }
       if (pointer.address == 0 || length.value == 0) {
         _throwLastError('pocket_frame_binary returned no frame');
       }
       final byteLength = length.value;
-      if (byteLength > 64 * 1024 * 1024) {
+      if (byteLength > _pocketMaxBinaryFrameBytes) {
         throw const PocketRuntimeException(
           'pocket_frame_binary returned an oversized frame',
         );
       }
-      return PocketFrame.fromBinary(pointer.asTypedList(byteLength));
+      final bytes = Uint8List.fromList(pointer.asTypedList(byteLength));
+      final error = lastError;
+      if (error != null && error.isNotEmpty) {
+        throw PocketRuntimeException(error);
+      }
+      final frame = PocketFrame.fromBinary(bytes);
+      _retainDeltaBase(frame);
+      return frame;
     } finally {
       calloc.free(length);
     }
@@ -1169,6 +1351,117 @@ final class FfiPocketRuntime
       _frameDeltaBinary = null;
     }
     return _frameDeltaBinary;
+  }
+
+  _FrameDeltaBinaryV2Dart? _lookupFrameDeltaBinaryV2() {
+    if (_frameDeltaBinaryV2LookedUp) return _frameDeltaBinaryV2;
+    _frameDeltaBinaryV2LookedUp = true;
+    try {
+      _frameDeltaBinaryV2 = _library
+          .lookupFunction<_FrameDeltaBinaryV2Native, _FrameDeltaBinaryV2Dart>(
+            'pocket_frame_delta_binary_v2',
+          );
+    } on Object {
+      // The v2 splice ABI is optional. Older libraries continue through the
+      // complete-frame binary, JSON delta, or full-frame fallback below.
+      _frameDeltaBinaryV2 = null;
+    }
+    return _frameDeltaBinaryV2;
+  }
+
+  PocketFrame _decodeBinaryDeltaV2(Uint8List bytes, PocketFrame? base) {
+    if (bytes.length < 4) {
+      throw const FormatException(
+        'pocket_frame_delta_binary_v2 returned a truncated frame',
+      );
+    }
+    final magic = ByteData.sublistView(bytes).getUint32(0, Endian.little);
+    if (magic == _pocketBinaryFrameMagic) {
+      final frame = PocketFrame.fromBinary(bytes);
+      _retainDeltaBase(frame);
+      return frame;
+    }
+    if (magic != _pocketBinaryFrameDeltaMagic) {
+      throw FormatException(
+        'pocket_frame_delta_binary_v2 returned unknown magic: '
+        '0x${magic.toRadixString(16)}',
+      );
+    }
+    if (base == null) {
+      throw const PocketRuntimeException(
+        'pocket frame delta has no decoded baseline',
+      );
+    }
+    final packet = _decodePocketFrameDeltaPacket(bytes);
+    final patchFrame = packet.frame;
+    final baseSequence = base.sequence;
+    final patchSequence = patchFrame.sequence;
+    if (baseSequence == null) {
+      throw const PocketRuntimeException(
+        'pocket frame delta has no decoded baseline sequence',
+      );
+    }
+    if (baseSequence != packet.baseSequence) {
+      throw PocketRuntimeException(
+        'pocket frame delta baseline mismatch: '
+        'expected=$baseSequence received=${packet.baseSequence}',
+      );
+    }
+    if (patchSequence == null) {
+      throw const FormatException(
+        'pocket frame delta payload has no resulting sequence',
+      );
+    }
+    if (patchSequence == baseSequence) {
+      throw const FormatException(
+        'pocket frame delta resulting sequence did not advance',
+      );
+    }
+    if (patchFrame.width != base.width || patchFrame.height != base.height) {
+      throw const PocketRuntimeException(
+        'pocket frame delta viewport differs from its baseline',
+      );
+    }
+    if (packet.prefixCount > base.ops.length) {
+      throw const FormatException(
+        'pocket frame delta prefix exceeds baseline operation count',
+      );
+    }
+    final suffixStart = packet.prefixCount + packet.deleteCount;
+    if (suffixStart > base.ops.length) {
+      throw const FormatException(
+        'pocket frame delta delete range exceeds baseline operation count',
+      );
+    }
+    final resultingLength =
+        packet.prefixCount +
+        patchFrame.ops.length +
+        (base.ops.length - suffixStart);
+    if (resultingLength != packet.resultingOpCount) {
+      throw FormatException(
+        'pocket frame delta resulting operation count mismatch: '
+        'header=${packet.resultingOpCount} actual=$resultingLength',
+      );
+    }
+    final ops = <PocketOp>[
+      ...base.ops.take(packet.prefixCount),
+      ...patchFrame.ops,
+      ...base.ops.skip(suffixStart),
+    ];
+    final frame = PocketFrame(
+      width: patchFrame.width,
+      height: patchFrame.height,
+      ops: List<PocketOp>.unmodifiable(ops),
+      // PFP1 metadata after the operation splice is the complete current
+      // frame. Never carry transient data from the baseline into this turn.
+      events: patchFrame.events,
+      resources: patchFrame.resources,
+      releasedResources: patchFrame.releasedResources,
+      auxiliary: patchFrame.auxiliary,
+      sequence: patchSequence,
+    );
+    _retainDeltaBase(frame);
+    return frame;
   }
 
   _FrameDart? _lookupFrameDelta() {
@@ -1198,7 +1491,9 @@ final class FfiPocketRuntime
     if (error != null && error.isNotEmpty) {
       throw PocketRuntimeException(error);
     }
-    return PocketFrame.fromJson(json);
+    final frame = PocketFrame.fromJson(json);
+    _retainDeltaBase(frame);
+    return frame;
   }
 
   void _notifyExternalWork({String source = 'external'}) {
@@ -1389,6 +1684,29 @@ final class FfiPocketRuntime
     }
   }
 
+  void _configureGuestSecurity(PocketGuestSecurityPolicy policy) {
+    _checkAlive();
+    final encoded = policy.toJsonString();
+    final pointer = encoded.toNativeUtf8(allocator: malloc);
+    try {
+      final configure = _library
+          .lookupFunction<
+            _ConfigureGuestSecurityNative,
+            _ConfigureGuestSecurityDart
+          >('pocket_configure_guest_security');
+      if (configure(_handle, pointer) != 0) {
+        _throwLastError('pocket_configure_guest_security failed');
+      }
+    } on ArgumentError {
+      throw UnsupportedError(
+        'pocket_configure_guest_security is unavailable; '
+        'rebuild the Pocket native SDK',
+      );
+    } finally {
+      malloc.free(pointer);
+    }
+  }
+
   @override
   void configureCompositor(Map<String, int> applications) {
     _checkAlive();
@@ -1434,6 +1752,7 @@ final class FfiPocketRuntime
           );
       final result = enable(_handle, width, height);
       if (result != 0) _throwLastError('pocket_enable_auxiliary failed');
+      _invalidateDeltaBase();
     } catch (error) {
       failure = error;
       rethrow;
@@ -1463,10 +1782,16 @@ final class FfiPocketRuntime
       if (resize == null) return false;
       final result = resize(_handle, width, height);
       if (result != 0) _throwLastError('pocket_resize_viewport failed');
+      // The next frame is laid out against a different viewport. Native drops
+      // its DrawOps cache, so it will return a full PFB1 packet instead of an
+      // operation splice. Keep the decoded frame sequence here: echoing it
+      // lets native acknowledge the caller's resource ledger even though the
+      // operation baseline is no longer spliceable.
       resized = true;
       return true;
     } catch (error) {
       failure = error;
+      _invalidateDeltaBase();
       rethrow;
     } finally {
       final traceClock = _traceTransactionEnd();
@@ -1756,6 +2081,7 @@ final class FfiPocketRuntime
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _invalidateDeltaBase();
     if (!_asyncStopped &&
         (_workerConfigured ||
             _offloadBinding != null ||
@@ -1953,6 +2279,14 @@ final class FfiPocketRuntime
     }
   }
 
+  void _retainDeltaBase(PocketFrame frame) {
+    _deltaBaseFrame = frame;
+  }
+
+  void _invalidateDeltaBase() {
+    _deltaBaseFrame = null;
+  }
+
   Never _throwLastError(String fallback) {
     throw PocketRuntimeException(lastError ?? fallback);
   }
@@ -1961,6 +2295,7 @@ final class FfiPocketRuntime
   /// transaction with the admission operation rather than an invisible
   /// nested `frame(0)` transaction.
   PocketFrame _loadFrame() {
+    _invalidateDeltaBase();
     final binary = _lookupFrameBinary();
     if (binary != null) {
       return _readBinaryFullFrame(binary, 0.0);

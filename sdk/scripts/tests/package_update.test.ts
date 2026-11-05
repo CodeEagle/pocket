@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createPublicKey } from "node:crypto";
+import { createPublicKey, generateKeyPairSync } from "node:crypto";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +16,8 @@ import {
   generateDevKey,
   parsePakLayout,
   sha256Hex,
+  signTrustPolicy,
+  verifySignedTrustPolicy,
   verifySignedManifest,
   writePublicKeyConfig,
   type PocketUpdatePayload,
@@ -43,6 +45,31 @@ test("dev key exports raw32 public key and a public-only Dart config", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("root trust policy signs exact payload bytes", () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const payload = {
+    schemaVersion: 1 as const,
+    epoch: 7,
+    releaseKeys: [{
+      keyId: "release-a",
+      publicKeyBase64: Buffer.alloc(32, 9).toString("base64"),
+      appScope: ["fixture-app"],
+      notBefore: 1_700_000_000,
+      notAfter: 1_800_000_000,
+    }],
+    revokedKeys: [],
+    revokedPackages: [],
+  };
+  const envelope = signTrustPolicy(payload, { keyId: "root-a", privateKey });
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+  expect([...verifySignedTrustPolicy(envelope, publicKey.export({ type: "spki", format: "pem" }))]).toEqual([...payloadBytes]);
+  const tampered = {
+    ...envelope,
+    payload: Buffer.from(`${JSON.stringify(payload)} `).toString("base64"),
+  };
+  expect(() => verifySignedTrustPolicy(tampered, publicKey.export({ type: "spki", format: "pem" }))).toThrow("invalid Ed25519 signature");
 });
 
 function tempDirectory(): string {

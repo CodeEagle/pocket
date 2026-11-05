@@ -9,6 +9,7 @@ import 'package:pocket_flutter/src/pocket_package.dart'
     show PocketPackageSource;
 
 import 'pocket_package.dart';
+import 'pocket_trust.dart';
 
 final class PocketDownloadResponse {
   const PocketDownloadResponse({required this.bytes, this.contentLength});
@@ -217,9 +218,14 @@ final class PocketPreparedPackage {
   final int reusedBytes;
   final List<String> updatedComponents;
 
+  /// Cached data descriptor, not an ongoing trust grant. Custom hosts must
+  /// publish/run it inside [PocketUpdateCoordinator.withVerifiedPrepared]
+  /// after asynchronous setup, as PocketSession does.
   PocketPackageSource get source => package.source;
   String get version => package.manifest.payload.version;
   int get build => package.manifest.payload.build;
+  /// Reads cached bytes without performing runtime admission. Use the
+  /// coordinator's final admission boundary before executing those bytes.
   Future<PocketPackageArtifact> readArtifact() => package.readArtifact();
 
   Map<String, dynamic> toSummaryJson() => <String, dynamic>{
@@ -259,6 +265,8 @@ final class PocketUpdateCoordinator {
     this.requireBytecode = false,
     this.minimumBuild = 0,
     this.allowDowngrade = false,
+    this.trustStore,
+    this.trustPolicyUri,
     Iterable<String> debugHttpHosts = const <String>[],
   }) : transport = transport ?? HttpPocketUpdateTransport(),
        debugHttpHosts = Set<String>.unmodifiable(
@@ -283,6 +291,12 @@ final class PocketUpdateCoordinator {
   final bool requireBytecode;
   final int minimumBuild;
   final bool allowDowngrade;
+
+  /// Explicit root-policy mode.  When present, release keys come only from
+  /// the persisted host-owned policy and the legacy [trustedKeys] map is not a
+  /// bypass.
+  final PocketTrustStore? trustStore;
+  final Uri? trustPolicyUri;
   final Set<String> debugHttpHosts;
 
   PocketPackageStore get _store => store.scoped(appId);
@@ -298,6 +312,7 @@ final class PocketUpdateCoordinator {
     maxTotalBytes: maxTotalBytes,
     expectedRuntimeAbi: expectedRuntimeAbi,
     requireBytecode: requireBytecode,
+    trustStore: trustStore,
   );
 
   void dispose() => transport.close();
@@ -310,6 +325,7 @@ final class PocketUpdateCoordinator {
   }) async {
     final token = cancellation ?? PocketCancellationToken();
     _validateManifestUri();
+    _validateTrustPolicyUri();
     if (target.scope != PocketUpdateScope.all && mode == PocketUpdateMode.zip) {
       throw PocketPackageException(
         'granular target scope ${target.scope.name} cannot use zip mode',
@@ -320,6 +336,7 @@ final class PocketUpdateCoordinator {
       onProgress,
       const PocketUpdateProgress(stage: PocketUpdateStage.checking),
     );
+    await _refreshTrustPolicy(token, onProgress);
     final signed = await _fetchManifest(token, onProgress);
     await verifier.verify(signed);
     final currentGood = await _store.lastGood(verifier: verifier);
@@ -566,6 +583,18 @@ final class PocketUpdateCoordinator {
   Future<void> activate(PocketPreparedPackage prepared) =>
       commitHealthy(prepared);
 
+  /// Validates cached bytes and current trust immediately before a host
+  /// publishes a candidate, without advancing the healthy package pointers.
+  /// [use] must not start another package or trust-policy operation.
+  Future<T> withVerifiedPrepared<T>(
+    PocketPreparedPackage prepared,
+    FutureOr<T> Function() use,
+  ) => _store.withVerifiedPackage(
+    prepared.package,
+    verifier: verifier,
+    use: use,
+  );
+
   Future<PocketPreparedPackage?> fallbackFor(
     PocketPreparedPackage failed,
   ) async {
@@ -612,6 +641,56 @@ final class PocketUpdateCoordinator {
       builder.add(chunk);
     }
     return PocketSignedManifest.fromBytes(builder.takeBytes());
+  }
+
+  Future<void> _refreshTrustPolicy(
+    PocketCancellationToken token,
+    PocketUpdateProgressCallback? callback,
+  ) async {
+    final store = trustStore;
+    if (store == null) return;
+    final uri = trustPolicyUri;
+    if (uri == null) {
+      // This is the restart/offline path: a configured trust store is still
+      // fail-closed when no signed policy has been persisted.
+      try {
+        await store.current();
+      } on PocketTrustException catch (error) {
+        throw PocketPackageException(error.message, code: error.code);
+      }
+      return;
+    }
+    final response = await _openWithRetry(
+      uri,
+      token,
+      callback,
+      resource: 'trust policy',
+    );
+    if (response.contentLength != null &&
+        response.contentLength! > maxManifestBytes) {
+      throw const PocketPackageException(
+        'trust policy exceeds size limit',
+        code: 'trust-policy-size',
+      );
+    }
+    final builder = BytesBuilder(copy: false);
+    var length = 0;
+    await for (final chunk in response.bytes) {
+      token.throwIfCancelled();
+      length += chunk.length;
+      if (length > maxManifestBytes) {
+        throw const PocketPackageException(
+          'trust policy exceeds size limit',
+          code: 'trust-policy-size',
+        );
+      }
+      builder.add(chunk);
+    }
+    try {
+      await store.installBytes(builder.takeBytes());
+    } on PocketTrustException catch (error) {
+      throw PocketPackageException(error.message, code: error.code);
+    }
   }
 
   static bool _isDeterministicValidationError(Object error) =>
@@ -1142,8 +1221,9 @@ final class PocketUpdateCoordinator {
   Future<PocketDownloadResponse> _openWithRetry(
     Uri uri,
     PocketCancellationToken token,
-    PocketUpdateProgressCallback? callback,
-  ) async {
+    PocketUpdateProgressCallback? callback, {
+    String resource = 'manifest',
+  }) async {
     Object? lastError;
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -1169,7 +1249,7 @@ final class PocketUpdateCoordinator {
       }
     }
     throw PocketPackageException(
-      'failed to fetch manifest: $lastError',
+      'failed to fetch $resource: $lastError',
       code: 'manifest-download',
     );
   }
@@ -1187,6 +1267,23 @@ final class PocketUpdateCoordinator {
       throw const PocketPackageException(
         'manifest URL must use HTTPS or an allowed debug host',
         code: 'manifest-url',
+      );
+    }
+  }
+
+  void _validateTrustPolicyUri() {
+    final uri = trustPolicyUri;
+    if (uri == null) return;
+    final scheme = uri.scheme.toLowerCase();
+    final loopback =
+        uri.host == '127.0.0.1' || uri.host == 'localhost' || uri.host == '::1';
+    final debug =
+        scheme == 'http' &&
+        (loopback || debugHttpHosts.contains(uri.host.toLowerCase()));
+    if (scheme != 'https' && !debug) {
+      throw const PocketPackageException(
+        'trust policy URL must use HTTPS or an allowed debug host',
+        code: 'trust-policy-url',
       );
     }
   }

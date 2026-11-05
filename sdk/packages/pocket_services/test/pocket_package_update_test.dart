@@ -386,7 +386,7 @@ void main() {
             pak3;
 
         final prepared3 = await coordinator.prepare();
-        await scoped.activate(prepared3.package);
+        await scoped.activate(prepared3.package, verifier: coordinator.verifier);
 
         final good = await scoped.lastGood(verifier: coordinator.verifier);
         final act = await scoped.active(verifier: coordinator.verifier);

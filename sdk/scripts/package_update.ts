@@ -9,7 +9,7 @@
  * metadata/padding boundaries), rather than at arbitrary fixed-size chunks.
  */
 
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, type KeyObject } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -80,6 +80,8 @@ export type PocketUpdatePayload = {
   appId: string;
   version: string;
   build: number;
+  /** Unix seconds at which the release signer made this package. */
+  signedAt?: number;
   protocol: number;
   minHostVersion: number;
   entry: { sha256: string; size: number };
@@ -106,6 +108,27 @@ export type SignedManifest = {
   payload: string;
   signature: string;
 };
+
+/** Root-signed release trust policy.  The payload bytes are signed as-is. */
+export type PocketTrustPolicyPayload = {
+  schemaVersion: 1;
+  epoch: number;
+  appId?: string;
+  issuedAt?: number;
+  notBefore?: number;
+  notAfter?: number;
+  releaseKeys: Array<{
+    keyId: string;
+    publicKeyBase64: string;
+    appScope: string[];
+    notBefore: number;
+    notAfter: number;
+  }>;
+  revokedKeys?: string[];
+  revokedPackages?: string[];
+};
+
+export type SignedTrustPolicy = SignedManifest;
 
 /** Public-only key material suitable for Dart `cryptography` verification. */
 export type PublicKeyConfig = {
@@ -1775,6 +1798,82 @@ export function signPayload(payloadBytes: Uint8Array, key: SigningKey): SignedMa
   };
 }
 
+function validateTrustPolicyPayload(payload: PocketTrustPolicyPayload): void {
+  if (payload.schemaVersion !== 1 || !Number.isSafeInteger(payload.epoch) || payload.epoch < 0) {
+    throw new Error("trust-policy: schemaVersion must be 1 and epoch must be non-negative");
+  }
+  const seen = new Set<string>();
+  if (!Array.isArray(payload.releaseKeys)) throw new Error("trust-policy: releaseKeys must be a list");
+  for (const key of payload.releaseKeys) {
+    if (!key || typeof key.keyId !== "string" || !key.keyId || seen.has(key.keyId)) {
+      throw new Error("trust-policy: release key ids must be unique non-empty strings");
+    }
+    seen.add(key.keyId);
+    if (typeof key.publicKeyBase64 !== "string" || Buffer.from(key.publicKeyBase64, "base64").byteLength !== 32) {
+      throw new Error(`trust-policy: release key ${key.keyId} must contain a raw Ed25519 public key`);
+    }
+    if (!Array.isArray(key.appScope) || key.appScope.length === 0 || key.appScope.some((scope) => typeof scope !== "string" || !scope.trim())) {
+      throw new Error(`trust-policy: release key ${key.keyId} has an invalid appScope`);
+    }
+    if (!Number.isSafeInteger(key.notBefore) || !Number.isSafeInteger(key.notAfter) || key.notBefore < 0 || key.notAfter < key.notBefore) {
+      throw new Error(`trust-policy: release key ${key.keyId} has an invalid validity interval`);
+    }
+  }
+  for (const field of ["issuedAt", "notBefore", "notAfter"] as const) {
+    const value = payload[field];
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+      throw new Error(`trust-policy: ${field} must be a non-negative integer`);
+    }
+  }
+  if (payload.notBefore !== undefined && payload.notAfter !== undefined && payload.notAfter < payload.notBefore) {
+    throw new Error("trust-policy: policy validity interval is inverted");
+  }
+  for (const field of ["revokedKeys", "revokedPackages"] as const) {
+    const values = payload[field];
+    if (values !== undefined && (!Array.isArray(values) || values.some((value) => typeof value !== "string" || !value.trim()))) {
+      throw new Error(`trust-policy: ${field} must be a list of non-empty strings`);
+    }
+  }
+}
+
+/** Sign an already encoded trust-policy payload with a host root key. */
+export function signTrustPolicyPayload(
+  payloadBytes: Uint8Array,
+  rootKey: { keyId: string; privateKey: KeyObject },
+): SignedTrustPolicy {
+  if (!rootKey.keyId.trim()) throw new Error("trust-policy: root key id is required");
+  return signPayload(payloadBytes, rootKey);
+}
+
+/** Serialize and sign a versioned root trust policy. */
+export function signTrustPolicy(
+  payload: PocketTrustPolicyPayload,
+  rootKey: { keyId: string; privateKey: KeyObject },
+): SignedTrustPolicy {
+  validateTrustPolicyPayload(payload);
+  return signTrustPolicyPayload(encoder.encode(JSON.stringify(payload)), rootKey);
+}
+
+/** Verify a trust-policy envelope against the host-configured root key. */
+export function verifySignedTrustPolicy(
+  envelope: SignedTrustPolicy,
+  publicKey: string | Buffer,
+): Uint8Array {
+  return verifySignedManifest(envelope, publicKey);
+}
+
+/** Write a root-signed trust policy without exposing private key material. */
+export function writeTrustPolicy(
+  outPath: string,
+  payload: PocketTrustPolicyPayload,
+  keyFile: string,
+): SignedTrustPolicy {
+  const envelope = signTrustPolicy(payload, loadPrivateKey(keyFile));
+  ensureDir(dirname(resolve(outPath)));
+  writeFileSync(outPath, asBuffer(encoder.encode(JSON.stringify(envelope))));
+  return envelope;
+}
+
 export function verifySignedManifest(envelope: SignedManifest, publicKey: string | Buffer): Uint8Array {
   const payload = Buffer.from(envelope.payload, "base64");
   const signature = Buffer.from(envelope.signature, "base64");
@@ -1949,6 +2048,7 @@ export type PackageOptions = {
   appId: string;
   version: string;
   build: number;
+  signedAt?: number;
   /** UTF-8 JavaScript entry for legacy/source packages. */
   jsPath?: string;
   /** Real QuickJS bytecode entry produced by the pinned compiler. */
@@ -1979,6 +2079,7 @@ export type PatchPackageOptions = {
   outDir: string;
   version: string;
   build: number;
+  signedAt?: number;
   keyFile: string;
   /** Optional code update: UTF-8 JavaScript entry. */
   jsPath?: string;
@@ -2069,6 +2170,8 @@ function validateLogicalAssetName(name: string): string {
 export function packageArtifacts(options: PackageOptions): PackageResult {
   if (!options.appId || !options.version) throw new Error("package: app-id and version are required");
   if (!Number.isSafeInteger(options.build) || options.build < 0) throw new Error("package: build must be a non-negative integer");
+  const signedAt = options.signedAt ?? Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(signedAt) || signedAt < 0) throw new Error("package: signedAt must be a non-negative integer");
   const entryFormat = options.entryFormat ?? (options.bytecodePath ? "quickjs-bytecode" : "javascript");
   const entryPath = entryFormat === "quickjs-bytecode" ? options.bytecodePath : options.jsPath;
   if (!entryPath) throw new Error(`package: ${entryFormat === "quickjs-bytecode" ? "--bytecode" : "--js"} is required`);
@@ -2148,6 +2251,7 @@ export function packageArtifacts(options: PackageOptions): PackageResult {
     appId: options.appId,
     version: options.version,
     build: options.build,
+    signedAt,
     protocol: options.protocol ?? 1,
     minHostVersion: options.minHostVersion ?? 1,
     entry: { sha256: entryFile.sha256, size: entryFile.size },
@@ -2212,6 +2316,8 @@ function reconstructBasePak(baseDir: string, payload: PocketUpdatePayload): Uint
 export function patchPackageArtifacts(options: PatchPackageOptions): PackageResult {
   if (!options.version) throw new Error("patch: version is required");
   if (!Number.isSafeInteger(options.build) || options.build < 0) throw new Error("patch: build must be a non-negative integer");
+  const signedAt = options.signedAt ?? Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(signedAt) || signedAt < 0) throw new Error("patch: signedAt must be a non-negative integer");
   const baseDir = resolve(options.baseDir);
   const outDir = resolve(options.outDir);
   ensureDir(outDir);
@@ -2465,6 +2571,7 @@ export function patchPackageArtifacts(options: PatchPackageOptions): PackageResu
     appId: basePayload.appId,
     version: options.version,
     build: options.build,
+    signedAt,
     protocol: basePayload.protocol,
     minHostVersion: basePayload.minHostVersion,
     entry: { sha256: entryFile.sha256, size: entryFile.size },
@@ -2519,8 +2626,8 @@ export function generateDevKey(outPath: string, keyId?: string, force = false): 
 function usage(): never {
   throw new Error([
     "usage:",
-    "  bun scripts/package_update.ts package --app-id ID --version VERSION --build N --js app.js --pak app.pak --out DIR --key-file KEY [--entry-format javascript|quickjs-bytecode --bytecode app.qjbc --runtime-abi ABI] [--guest-manifest manifest.json] [--asset-dir DIR] [--asset-prefix PREFIX] [--no-bundle]",
-    "  bun scripts/package_update.ts patch --base-dir DIR --out DIR --version VERSION --build N --key-file KEY [--js app.js | --bytecode app.qjbc] [--pak-entry KEY=FILE] [--asset NAME=FILE] [--remove-asset NAME] [--no-bundle]",
+    "  bun scripts/package_update.ts package --app-id ID --version VERSION --build N --js app.js --pak app.pak --out DIR --key-file KEY [--signed-at UNIX_SECONDS] [--entry-format javascript|quickjs-bytecode --bytecode app.qjbc --runtime-abi ABI] [--guest-manifest manifest.json] [--asset-dir DIR] [--asset-prefix PREFIX] [--no-bundle]",
+    "  bun scripts/package_update.ts patch --base-dir DIR --out DIR --version VERSION --build N --key-file KEY [--signed-at UNIX_SECONDS] [--js app.js | --bytecode app.qjbc] [--pak-entry KEY=FILE] [--asset NAME=FILE] [--remove-asset NAME] [--no-bundle]",
     "  bun scripts/pocket_package.ts generate-dev-key --out KEY [--key-id ID] [--public-config-out PUBLIC_JSON] [--force]",
   ].join("\n"));
 }
@@ -2587,6 +2694,7 @@ if (import.meta.main) {
       const result = packageArtifacts({
         appId: parsed.flags.get("app-id")!, version: parsed.flags.get("version")!,
         build: Number(parsed.flags.get("build")), jsPath: parsed.flags.get("js"), bytecodePath: parsed.flags.get("bytecode"),
+        signedAt: parsed.flags.has("signed-at") ? Number(parsed.flags.get("signed-at")) : undefined,
         entryFormat,
         runtimeAbi: parsed.flags.get("runtime-abi"),
         pakPath: parsed.flags.get("pak")!, outDir: parsed.flags.get("out")!, keyFile: parsed.flags.get("key-file")!,
@@ -2606,6 +2714,7 @@ if (import.meta.main) {
         outDir: parsed.flags.get("out")!,
         version: parsed.flags.get("version")!,
         build: Number(parsed.flags.get("build")),
+        signedAt: parsed.flags.has("signed-at") ? Number(parsed.flags.get("signed-at")) : undefined,
         keyFile: parsed.flags.get("key-file")!,
         jsPath: parsed.flags.get("js"),
         bytecodePath: parsed.flags.get("bytecode"),

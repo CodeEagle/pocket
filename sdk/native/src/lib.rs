@@ -6,6 +6,8 @@
 
 pub mod binary_bridge;
 pub mod bytecode;
+mod frame_delta;
+mod guest_security;
 mod demand;
 pub mod duplex;
 pub mod offload;
@@ -135,7 +137,7 @@ fn normalize_video_fit(value: Option<&str>) -> String {
     .to_owned()
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct FrameOp {
     #[serde(rename = "type")]
     kind: String,
@@ -199,13 +201,13 @@ struct FrameOp {
     clip: Clip,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct FramePoint {
     x: f32,
     y: f32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct Clip {
     x: f32,
     y: f32,
@@ -270,7 +272,7 @@ struct FrameDrawCache {
     /// static and let the Dart image cache keep stale pixels.
     raster_revision: u64,
     nodes: Vec<NodeMeta>,
-    ops: Vec<FrameOp>,
+    ops: Rc<Vec<FrameOp>>,
     auxiliary: Option<SurfaceFrame>,
     generic_texture_handles: Vec<i32>,
 }
@@ -341,6 +343,9 @@ pub struct HostState {
     /// reloads; it is deliberately not mutable after construction so an
     /// active realm cannot be downgraded while it is executing.
     memory_limits: MemoryLimits,
+    /// Opt-in guest hardening/quota policy. Configuration survives reloads;
+    /// the associated fatal marker and live node IDs are per-realm state.
+    guest_security: Rc<RefCell<guest_security::GuestSecurityState>>,
     nodes: Rc<RefCell<Vec<NodeMeta>>>,
     outbound: Rc<RefCell<Vec<OutboundEvent>>>,
     /// One lock-free SPSC channel per runtime. Reload closes this generation
@@ -393,7 +398,22 @@ pub struct HostState {
     external_work_pending: bool,
     text_metrics: Rc<RefCell<TextMetrics>>,
     sent_resources: HashMap<String, SentResource>,
+    /// Resource ledger for the caller's last confirmed frame baseline.  The
+    /// current `sent_resources` ledger is advanced while building a frame;
+    /// this one deliberately stays one transaction behind until the caller
+    /// supplies that frame's sequence again.  A stale-base/full-resync call
+    /// can therefore re-send current pixels and release assets from the
+    /// caller's real baseline without retaining unbounded frame history.
+    frame_delta_v2_resource_base: HashMap<String, SentResource>,
     draw_cache: Option<FrameDrawCache>,
+    /// Sequence of the most recent frame actually published to the caller.
+    /// `build_frame` advances `frame` for every native transaction, including
+    /// an idle v2 probe that returns zero bytes; keeping this separate prevents
+    /// an unobservable probe from moving the client's base sequence forward.
+    /// A reload clears the publication baseline. A resize keeps the sequence
+    /// for resource acknowledgement while dropping draw_cache, which still
+    /// forces a full PFB1 frame on the next v2 call.
+    frame_delta_v2_published: Option<u64>,
     frame_json_cache: Option<String>,
     // These counters are intentionally kept in the native host so regression
     // tests can measure the optimization without changing the Dart ABI. They
@@ -618,7 +638,23 @@ impl BinaryFrameWriter {
     }
 }
 
+// Every current PFB1 operation has a fixed tag/geometry/clip prefix of
+// 33 bytes, before its kind-specific fields. PFP1 adds 28 bytes, so retaining
+// at least one common operation always makes the splice smaller than a full
+// PFB1. Keep this invariant explicit when adding a new binary operation tag.
+const MIN_BINARY_OP_BYTES: usize = 33;
 fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
+    encode_binary_frame_with_ops(frame, &frame.ops)
+}
+
+/// Encode a complete PFB1 frame while replacing only the primary operation
+/// segment. PFP1 uses this to carry the insertion segment of a splice; events,
+/// resources, releases, and the complete auxiliary surface remain the current
+/// frame's metadata. The ordinary PFB1 ABI always calls this with `frame.ops`.
+fn encode_binary_frame_with_ops(
+    frame: &FrameResult,
+    ops: &[FrameOp],
+) -> Result<Vec<u8>, String> {
     let mut writer = BinaryFrameWriter::new();
     writer.u32(BINARY_FRAME_MAGIC);
     writer.u16(BINARY_FRAME_VERSION);
@@ -626,7 +662,7 @@ fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
     writer.u64(frame.frame);
     writer.f32(frame.width);
     writer.f32(frame.height);
-    writer.ops(&frame.ops)?;
+    writer.ops(ops)?;
     let event_count =
         u32::try_from(frame.events.len()).map_err(|_| "too many frame events".to_owned())?;
     writer.u32(event_count);
@@ -690,6 +726,14 @@ fn clear_error(host: &mut HostState) {
 fn set_error(host: &mut HostState, error: impl Into<String>) {
     host.last_error = error.into();
     host.error_output = c_string(&host.last_error);
+}
+
+fn guest_security_fatal(host: &HostState) -> Option<String> {
+    guest_security::fatal(&host.guest_security)
+}
+
+fn ensure_guest_security_healthy(host: &HostState) -> Result<(), String> {
+    guest_security_fatal(host).map_or(Ok(()), Err)
 }
 
 /// Patch only the leading frame number in a previously serialized static
@@ -1050,6 +1094,7 @@ fn checked_duplex_u32(value: f64) -> Option<u32> {
 fn install_bridge(
     guest: &RquickjsGuest,
     ops: OpContext,
+    security: Rc<RefCell<guest_security::GuestSecurityState>>,
     nodes: Rc<RefCell<Vec<NodeMeta>>>,
     outbound: Rc<RefCell<Vec<OutboundEvent>>>,
     duplex: Arc<duplex::DuplexRing>,
@@ -1410,6 +1455,18 @@ fn install_bridge(
                 descriptor.set("w", width)?;
                 descriptor.set("h", height)?;
                 ui.set("__auxiliarySurface", descriptor)?;
+            }
+            let security_snapshot = security.borrow().clone();
+            if let Some(max_nodes) = security_snapshot.max_nodes {
+                guest_security::install_node_quota(
+                    &ctx,
+                    ops.clone(),
+                    security.clone(),
+                    max_nodes,
+                )?;
+            }
+            if security_snapshot.harden_builtins {
+                guest_security::install_hardening(&ctx)?;
             }
             Ok::<(), rquickjs::Error>(())
         })
@@ -2504,7 +2561,9 @@ fn build_frame(
     host: &mut HostState,
     delta_ms: f64,
     allow_unchanged: bool,
+    force_full_resources: bool,
 ) -> Result<BuiltFrame, String> {
+    ensure_guest_security_healthy(host)?;
     // Advance known quiescent time before delivering this boundary's input.
     // A virtual timer's due frame still runs the ordinary guest transaction.
     let tick_count = demand::ticks_for_delta(host, delta_ms)?;
@@ -2519,6 +2578,9 @@ fn build_frame(
     let pending = std::mem::take(&mut host.pending_touch_frames);
     let guest_result = run_virtual_frames(host, pending, tick_count);
     guest_result?;
+    // Node-quota failures are intentionally sticky even when guest code
+    // catches the JS exception. Do not decode or publish a partial frame.
+    ensure_guest_security_healthy(host)?;
     let (cache_hit, (width, height), auxiliary_size, raster_revision) = {
         let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
         core.ui.relayout_outputs();
@@ -2613,7 +2675,7 @@ fn build_frame(
             auxiliary_size,
             raster_revision,
             nodes,
-            ops: ops.clone(),
+            ops: Rc::new(ops.clone()),
             auxiliary: auxiliary.clone(),
             generic_texture_handles: generic_texture_handles.clone(),
         });
@@ -2627,9 +2689,23 @@ fn build_frame(
         None => {
             let cache = host.draw_cache.as_ref()
                 .expect("draw cache hit must have a cache");
-            (&cache.ops, &cache.auxiliary, &cache.generic_texture_handles)
+            (cache.ops.as_ref(), &cache.auxiliary, &cache.generic_texture_handles)
         }
     };
+
+    let max_draw_ops = { host.guest_security.borrow().max_draw_ops };
+    if let Some(max_draw_ops) = max_draw_ops {
+        let count = ops.len() + auxiliary.as_ref().map_or(0, |frame| frame.ops.len());
+        if count > max_draw_ops as usize {
+            guest_security::set_fatal(
+                &host.guest_security,
+                format!("guest draw operation quota exceeded ({max_draw_ops})"),
+            );
+            return Err(format!(
+                "guest draw operation quota exceeded ({max_draw_ops})"
+            ));
+        }
+    }
 
     let referenced_assets = {
         let mut assets = referenced_image_assets(&ops);
@@ -2637,6 +2713,15 @@ fn build_frame(
             assets.extend(referenced_image_assets(&auxiliary.ops));
         }
         assets
+    };
+    // A full resync cannot rely on `sent_resources`: that ledger is advanced
+    // while building every frame, including a frame the caller may later
+    // discard after a decode error.  Keep the one caller-confirmed snapshot
+    // separate and use it only to recover release records on a forced full.
+    let confirmed_resources = if force_full_resources {
+        Some(host.frame_delta_v2_resource_base.clone())
+    } else {
+        None
     };
     let core = host.ops.core().map_err(|error| format!("{error:?}"))?;
     let mut released_resources = host
@@ -2648,17 +2733,30 @@ fn build_frame(
             (texture_released || no_longer_referenced).then(|| asset.clone())
         })
         .collect::<Vec<_>>();
+    if let Some(confirmed_resources) = confirmed_resources.as_ref() {
+        released_resources.extend(
+            confirmed_resources
+                .keys()
+                .filter(|asset| !referenced_assets.contains(*asset))
+                .cloned(),
+        );
+    }
     // HashMap iteration is intentionally randomized.  Resource lifecycle
     // facts are a transport list, not draw order, so publish them in a
     // stable asset order for deterministic frame/replay summaries.
     released_resources.sort();
+    released_resources.dedup();
     for asset in &released_resources {
         host.sent_resources.remove(asset);
     }
     let mut resources = Vec::new();
+    let mut emitted_resources = HashSet::new();
     let nodes_borrow = host.nodes.borrow();
     for node in nodes_borrow.iter() {
         if !node.from_pack || node.asset.is_empty() || !referenced_assets.contains(&node.asset) {
+            continue;
+        }
+        if !emitted_resources.insert(node.asset.clone()) {
             continue;
         }
         let revision = core.ui.texture_revision(node.texture).ok_or_else(|| {
@@ -2667,12 +2765,35 @@ fn build_frame(
                 node.asset, node.texture
             )
         })?;
-        if host
-            .sent_resources
-            .get(&node.asset)
-            .is_some_and(|sent| sent.texture == node.texture && sent.revision == revision)
-        {
+        let current = SentResource {
+            texture: node.texture,
+            revision,
+        };
+        let previous = host.sent_resources.get(&node.asset).copied();
+        let confirmed = confirmed_resources
+            .as_ref()
+            .and_then(|resources| resources.get(&node.asset).copied());
+        let expected = if force_full_resources {
+            // A v2-confirmed snapshot is authoritative when present. Before
+            // the first v2 echo (for example after a legacy full ABI call),
+            // the sent ledger is the only conservative indication that the
+            // receiver may already hold this asset. Releasing a possibly
+            // absent asset is harmless and prevents same-key stale pixels.
+            confirmed.or(previous)
+        } else {
+            previous
+        };
+        if !force_full_resources && previous == Some(current) {
             continue;
+        }
+        if expected.is_some_and(|sent| sent != current) {
+            // Flutter keys decoded images by asset.  Emit a release before a
+            // same-asset identity/revision replacement so an old image cannot
+            // survive when a stale-base resync reuses the asset name.
+            released_resources.push(node.asset.clone());
+        }
+        if previous.is_some_and(|sent| sent != current) {
+            host.sent_resources.remove(&node.asset);
         }
         let view = core.ui.texture(node.texture).ok_or_else(|| {
             format!(
@@ -2700,16 +2821,31 @@ fn build_frame(
     }
     for &texture in generic_texture_handles {
         let asset = synthetic_texture_asset(texture);
+        if !emitted_resources.insert(asset.clone()) {
+            continue;
+        }
         let revision = core
             .ui
             .texture_revision(texture)
             .ok_or_else(|| format!("generic TEX texture handle {texture} went stale"))?;
-        if host
-            .sent_resources
-            .get(&asset)
-            .is_some_and(|sent| sent.texture == texture && sent.revision == revision)
-        {
+        let current = SentResource { texture, revision };
+        let previous = host.sent_resources.get(&asset).copied();
+        let confirmed = confirmed_resources
+            .as_ref()
+            .and_then(|resources| resources.get(&asset).copied());
+        let expected = if force_full_resources {
+            confirmed.or(previous)
+        } else {
+            previous
+        };
+        if !force_full_resources && previous == Some(current) {
             continue;
+        }
+        if expected.is_some_and(|sent| sent != current) {
+            released_resources.push(asset.clone());
+        }
+        if previous.is_some_and(|sent| sent != current) {
+            host.sent_resources.remove(&asset);
         }
         let view = core
             .ui
@@ -2728,6 +2864,11 @@ fn build_frame(
         host.sent_resources
             .insert(asset, SentResource { texture, revision });
     }
+    // Identity replacement records are added while the current resource
+    // entries are walked; normalize them again after that pass so node order
+    // and the generic-handle HashSet cannot leak into the ABI.
+    released_resources.sort();
+    released_resources.dedup();
     // `generic_texture_handles` is collected from a HashSet because several
     // DrawOps may sample one generated page.  Do not let its randomized
     // iteration order leak into the frame ABI or replay digest.
@@ -3817,6 +3958,7 @@ fn create_host(
     let width = width.max(1.0).min(65535.0) as u32;
     let height = height.max(1.0).min(65535.0) as u32;
     let text_metrics = Rc::new(RefCell::new(TextMetrics::default()));
+    let guest_security = Rc::new(RefCell::new(guest_security::GuestSecurityState::default()));
     let (duplex, duplex_ingress_consumer) = new_duplex_channel();
     let mut ui = Ui::new_with_raster_density(raster_density);
     ui.set_viewport(width as f32, height as f32);
@@ -3842,6 +3984,7 @@ fn create_host(
             ops,
             guest: RquickjsGuest::new(BindingProfile::Canonical),
             memory_limits,
+            guest_security: guest_security.clone(),
             nodes: Rc::new(RefCell::new(Vec::new())),
             outbound: Rc::new(RefCell::new(Vec::new())),
             duplex: error_duplex,
@@ -3882,7 +4025,9 @@ fn create_host(
             external_work_pending: false,
             text_metrics: text_metrics.clone(),
             sent_resources: HashMap::new(),
+            frame_delta_v2_resource_base: HashMap::new(),
             draw_cache: None,
+            frame_delta_v2_published: None,
             frame_json_cache: None,
             frame_json_serializations: 0,
             frame_json_serialized_bytes: 0,
@@ -3911,6 +4056,7 @@ fn create_host(
             ops,
             guest,
             memory_limits,
+            guest_security: guest_security.clone(),
             nodes: Rc::new(RefCell::new(Vec::new())),
             outbound: Rc::new(RefCell::new(Vec::new())),
             duplex: error_duplex,
@@ -3951,7 +4097,9 @@ fn create_host(
             external_work_pending: false,
             text_metrics: text_metrics.clone(),
             sent_resources: HashMap::new(),
+            frame_delta_v2_resource_base: HashMap::new(),
             draw_cache: None,
+            frame_delta_v2_published: None,
             frame_json_cache: None,
             frame_json_serializations: 0,
             frame_json_serialized_bytes: 0,
@@ -3965,6 +4113,7 @@ fn create_host(
         ops,
         guest,
         memory_limits,
+        guest_security: guest_security.clone(),
         nodes: nodes.clone(),
         outbound: outbound.clone(),
         duplex,
@@ -4005,7 +4154,9 @@ fn create_host(
         external_work_pending: false,
         text_metrics: text_metrics.clone(),
         sent_resources: HashMap::new(),
+        frame_delta_v2_resource_base: HashMap::new(),
         draw_cache: None,
+        frame_delta_v2_published: None,
         frame_json_cache: None,
         frame_json_serializations: 0,
         frame_json_serialized_bytes: 0,
@@ -4015,6 +4166,7 @@ fn create_host(
     if let Err(error) = install_bridge(
         &host.guest,
         host.ops.clone(),
+        host.guest_security.clone(),
         nodes,
         outbound,
         host.duplex.clone(),
@@ -4041,6 +4193,74 @@ fn refresh_trace_hooks(host: &HostState) -> Result<(), String> {
                 .map_err(|error| quickjs_error(&ctx, error))
         })
         .ok_or_else(|| "guest context is not initialized".to_owned())?
+}
+
+/// Configure the optional production guest policy exactly once, before the
+/// first source/bytecode evaluation. The policy itself is retained across
+/// reloads; only the sticky fatal marker and live node IDs are reset per
+/// realm generation.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_configure_guest_security(
+    handle: *mut HostState,
+    config_json: *const c_char,
+) -> i32 {
+    let Some(host) = handle.as_mut() else {
+        return -1;
+    };
+    if host.guest_loaded {
+        set_error(
+            host,
+            "guest security policy must be configured before guest load/eval",
+        );
+        return -1;
+    }
+    if config_json.is_null() {
+        set_error(host, "null guest security config");
+        return -1;
+    }
+    if host.guest_security.borrow().configured {
+        set_error(host, "guest security policy is already configured");
+        return -1;
+    }
+    let config = match guest_security::parse_config(CStr::from_ptr(config_json).to_bytes()) {
+        Ok(config) => config,
+        Err(error) => {
+            set_error(host, error);
+            return -1;
+        }
+    };
+    let install = match host.guest.with(|ctx| -> rquickjs::Result<()> {
+        if config.harden_builtins {
+            guest_security::install_hardening(&ctx)?;
+        }
+        if let Some(max_nodes) = config.max_nodes {
+            guest_security::install_node_quota(
+                &ctx,
+                host.ops.clone(),
+                host.guest_security.clone(),
+                max_nodes,
+            )?;
+        }
+        Ok(())
+    }) {
+        Some(result) => result.map_err(|error| format!("{error}")),
+        None => Err("guest context is not initialized".to_owned()),
+    };
+    if let Err(error) = install {
+        set_error(host, format!("guest security install: {error}"));
+        return -1;
+    }
+    {
+        let mut state = host.guest_security.borrow_mut();
+        state.configured = true;
+        state.harden_builtins = config.harden_builtins;
+        state.max_nodes = config.max_nodes;
+        state.max_draw_ops = config.max_draw_ops;
+        state.fatal = None;
+        state.node_ids.clear();
+    }
+    clear_error(host);
+    0
 }
 
 #[no_mangle]
@@ -4172,6 +4392,9 @@ pub unsafe extern "C" fn pocket_resize_viewport(
         host.viewport_height = requested.1;
         // A viewport change invalidates DrawList words, decoded op geometry and
         // the static JSON fast path, but it does not release live textures.
+        // Keep frame_delta_v2_published so the caller can echo the last frame
+        // sequence and acknowledge its resource ledger even though the next
+        // packet must be a full frame (draw_cache is gone).
         host.draw_cache = None;
         host.frame_json_cache = None;
 
@@ -4577,6 +4800,7 @@ pub unsafe extern "C" fn pocket_enable_auxiliary(
     }
     host.auxiliary_viewport = Some(requested);
     host.draw_cache = None;
+    host.frame_delta_v2_published = None;
     host.frame_json_cache = None;
     let environment = match guest_environment(host, &[], None) {
         Ok(environment) => environment,
@@ -4596,6 +4820,7 @@ pub unsafe extern "C" fn pocket_enable_auxiliary(
     if let Err(error) = install_bridge(
         &host.guest,
         host.ops.clone(),
+        host.guest_security.clone(),
         host.nodes.clone(),
         host.outbound.clone(),
         host.duplex.clone(),
@@ -4648,6 +4873,7 @@ fn read_application_file(path: &CStr, limit: u64, label: &str) -> Result<Vec<u8>
 
 fn reset_host_for_load(host: &mut HostState) {
     stop_worker(host);
+    guest_security::reset_runtime(&host.guest_security);
     host.nodes.borrow_mut().clear();
     // A reload is a channel-generation boundary. Never clear cursors in an
     // Arc that may still be borrowed by a background Dart isolate.
@@ -4670,6 +4896,7 @@ fn reset_host_for_load(host: &mut HostState) {
     // against this set, so a guest reload retires old decoded images (including
     // glyph pages) through the same resource lifecycle as ordinary frames.
     host.draw_cache = None;
+    host.frame_delta_v2_published = None;
     host.frame_json_cache = None;
     host.frame = 0;
     host.tick_remainder_ms = 0.0;
@@ -4744,6 +4971,7 @@ fn initialize_guest_for_load(
     install_bridge(
         &host.guest,
         host.ops.clone(),
+        host.guest_security.clone(),
         host.nodes.clone(),
         host.outbound.clone(),
         host.duplex.clone(),
@@ -4853,7 +5081,8 @@ pub unsafe extern "C" fn pocket_load(
         reset_host_for_load(host);
         let assets = install_host_assets(host, pak)?;
         initialize_guest_for_load(host, pak, &assets)?;
-        evaluate_guest(&mut host.guest, &source, host.tick_hz)
+        evaluate_guest(&mut host.guest, &source, host.tick_hz)?;
+        ensure_guest_security_healthy(host)
     })();
     match result {
         Ok(()) => {
@@ -4946,7 +5175,8 @@ pub unsafe extern "C" fn pocket_load_bytecode(
             .map_err(|error| {
                 let detail = host.guest.last_error().unwrap_or("no guest detail");
                 format!("guest bytecode evaluate: {error:?}: {detail}")
-            })
+            })?;
+        ensure_guest_security_healthy(host)
     })();
     match result {
         Ok(()) => {
@@ -5046,6 +5276,12 @@ pub unsafe extern "C" fn pocket_eval(handle: *mut HostState, source: *const c_ch
     }
     match evaluate_guest(&mut host.guest, &source, host.tick_hz) {
         Ok(()) => {
+            if let Some(error) = guest_security_fatal(host) {
+                stop_worker(host);
+                host.outbound.borrow_mut().clear();
+                set_error(host, error);
+                return -1;
+            }
             host.guest_loaded = true;
             host.draw_cache = None;
             host.frame_json_cache = None;
@@ -5069,6 +5305,10 @@ fn frame_has_no_transient_data(frame: &BuiltFrame) -> bool {
         && frame.result.released_resources.is_empty()
 }
 
+fn publish_frame_sequence(host: &mut HostState, frame: u64) {
+    host.frame_delta_v2_published = Some(frame);
+}
+
 /// Serialize a complete frame for both the legacy ABI and the delta ABI's
 /// changed-frame fallback. Both entry points therefore consume the same
 /// BuiltFrame and drain the same events/resources.
@@ -5078,6 +5318,7 @@ fn complete_frame_output(host: &mut HostState, built: BuiltFrame) -> *const c_ch
         if let Some(cached) = host.frame_json_cache.as_deref() {
             if let Some(json) = patch_frame_number(cached, built.result.frame) {
                 host.frame_json_cache_hits = host.frame_json_cache_hits.wrapping_add(1);
+                publish_frame_sequence(host, built.result.frame);
                 clear_error(host);
                 host.output = json;
                 return host.output.as_ptr();
@@ -5094,10 +5335,12 @@ fn complete_frame_output(host: &mut HostState, built: BuiltFrame) -> *const c_ch
             if is_static {
                 host.frame_json_cache = Some(json.clone());
             }
+            publish_frame_sequence(host, frame.frame);
             clear_error(host);
             host.output = c_string(&json);
         }
         Err(error) => {
+            host.frame_delta_v2_published = None;
             set_error(host, format!("frame JSON encode: {error}"));
             let fallback = empty_frame_json(host);
             host.output = c_string(&fallback);
@@ -5111,6 +5354,11 @@ fn failed_frame_output(host: &mut HostState, error: String) -> *const c_char {
     // that failed turn so repeated polling cannot grow the queue or replay a
     // request that had no corresponding frame.
     host.outbound.borrow_mut().clear();
+    // A failed build/serialization may already have mutated the retained core
+    // or cache. Do not let a later v2 call splice that unpublished state
+    // against the caller's last successful sequence; force a fresh PFB1
+    // baseline instead.
+    host.frame_delta_v2_published = None;
     host.frame_json_cache = None;
     set_error(host, error);
     let fallback = empty_frame_json(host);
@@ -5123,7 +5371,7 @@ pub unsafe extern "C" fn pocket_frame(handle: *mut HostState, delta_ms: f64) -> 
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
-    match build_frame(host, delta_ms, false) {
+    match build_frame(host, delta_ms, false, false) {
         Ok(built) => complete_frame_output(host, built),
         Err(error) => failed_frame_output(host, error),
     }
@@ -5435,7 +5683,7 @@ pub unsafe extern "C" fn pocket_frame_delta(
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
-    match build_frame(host, delta_ms, true) {
+    match build_frame(host, delta_ms, true, false) {
         Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
             clear_error(host);
             host.output = c_string(UNCHANGED_FRAME_JSON);
@@ -5461,18 +5709,20 @@ pub unsafe extern "C" fn pocket_frame_binary(
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
-    match build_frame(host, delta_ms, false) {
+    match build_frame(host, delta_ms, false, false) {
         Ok(built) => match encode_binary_frame(&built.result) {
             Ok(bytes) => {
                 host.binary_output = bytes;
                 if let Some(length) = out_byte_length.as_mut() {
                     *length = host.binary_output.len() as u64;
                 }
+                publish_frame_sequence(host, built.result.frame);
                 clear_error(host);
                 host.binary_output.as_ptr()
             }
             Err(error) => {
                 host.binary_output.clear();
+                host.frame_delta_v2_published = None;
                 set_error(host, format!("frame binary encode: {error}"));
                 ptr::null()
             }
@@ -5501,7 +5751,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
-    match build_frame(host, delta_ms, true) {
+    match build_frame(host, delta_ms, true, false) {
         Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
             clear_error(host);
             ptr::null()
@@ -5512,15 +5762,169 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
                 if let Some(length) = out_byte_length.as_mut() {
                     *length = host.binary_output.len() as u64;
                 }
+                publish_frame_sequence(host, built.result.frame);
                 clear_error(host);
                 host.binary_output.as_ptr()
             }
             Err(error) => {
                 host.binary_output.clear();
+                host.frame_delta_v2_published = None;
                 set_error(host, format!("frame binary encode: {error}"));
                 ptr::null()
             }
         },
+        Err(error) => {
+            host.binary_output.clear();
+            failed_frame_output(host, error);
+            ptr::null()
+        }
+    }
+}
+
+/// Opt-in PFP1 binary frame delta ABI.
+///
+/// `base_frame` is the sequence of the last frame the caller actually
+/// received.  A caller must pass it on every invocation; native frame probes
+/// that return zero bytes do not advance the published baseline.  If the
+/// sequence does not match the most recently published frame, or if a reload,
+/// resize, or first frame removed the retained DrawOps baseline, this function
+/// returns a complete PFB1 frame.  Otherwise a changed frame may be returned
+/// as a PFP1 envelope when its complete embedded PFB1 payload (with only the
+/// inserted primary ops) is smaller than the full PFB1 frame.
+///
+/// The 28-byte PFP1 header is, in little endian order:
+/// `magic:u32`, `baseSequence:u64`, `prefixCount:u32`, `deleteCount:u32`,
+/// `resultingOpCount:u32`, `embeddedPayloadLength:u32`.  The embedded payload
+/// is a complete PFB1 frame; its primary operation list is the splice's
+/// insertion segment, while events/resources/releases and auxiliary metadata
+/// describe the complete current frame.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
+    handle: *mut HostState,
+    delta_ms: f64,
+    base_frame: u64,
+    out_byte_length: *mut u64,
+) -> *const u8 {
+    if let Some(length) = out_byte_length.as_mut() {
+        *length = 0;
+    }
+    let Some(host) = handle.as_mut() else {
+        return ptr::null();
+    };
+
+    // This is deliberately checked before build_frame.  The retained cache is
+    // the previous published visual baseline; an idle v2 transaction advances
+    // the internal diagnostic sequence but must not make an old client base
+    // appear stale on the next call.
+    let base_matches = host.frame_delta_v2_published == Some(base_frame);
+    let previous_ops = if base_matches {
+        host.draw_cache
+            .as_ref()
+            .map(|cache| Rc::clone(&cache.ops))
+    } else {
+        None
+    };
+    let can_delta = base_matches && previous_ops.is_some();
+    if base_matches {
+        // Resource acknowledgement is independent of whether the retained
+        // DrawOps baseline is still spliceable. A resize (or another layout
+        // invalidation) deliberately drops draw_cache, but the caller can
+        // still echo the last published sequence. Capture that ledger before
+        // build_frame advances it for the next frame; if the next packet is
+        // dropped, this remains the exact baseline needed by a later stale-
+        // base resync.
+        host.frame_delta_v2_resource_base = host.sent_resources.clone();
+    }
+
+    match build_frame(host, delta_ms, false, !can_delta) {
+        Ok(built) => {
+            // A stable retained frame with no lifecycle/event metadata is the
+            // only zero-byte result. Keep `frame_delta_v2_published` unchanged
+            // so the caller's base remains the last sequence it received.
+            if can_delta
+                && built.draw_cache_hit
+                && frame_has_no_transient_data(&built)
+            {
+                host.binary_output.clear();
+                clear_error(host);
+                return ptr::null();
+            }
+
+            let output = if can_delta {
+                let previous_ops = previous_ops
+                    .as_deref()
+                    .expect("delta baseline must retain decoded operations");
+                let splice = frame_delta::common_splice(previous_ops, &built.result.ops);
+                let insert_end = built
+                    .result
+                    .ops
+                    .len()
+                    .checked_sub(splice.suffix_count)
+                    .expect("common splice suffix cannot exceed result length");
+                let retained_ops = splice.prefix_count + splice.suffix_count;
+                // PFP1 adds 28 bytes. Every current PFB1 op is at least the
+                // 33-byte tag/geometry/clip prefix, so one retained op is a
+                // strict size win without a second full encoder/count pass.
+                if retained_ops.saturating_mul(MIN_BINARY_OP_BYTES)
+                    > frame_delta::HEADER_BYTES
+                {
+                    let patch = encode_binary_frame_with_ops(
+                        &built.result,
+                        &built.result.ops[splice.prefix_count..insert_end],
+                    )
+                    .and_then(|embedded| {
+                        frame_delta::encode(
+                            base_frame,
+                            splice,
+                            built.result.ops.len(),
+                            &embedded,
+                        )
+                    });
+                    match patch {
+                        Ok(patch) => patch,
+                        Err(_) => match encode_binary_frame(&built.result) {
+                            Ok(full) => full,
+                            Err(error) => {
+                                host.binary_output.clear();
+                                host.frame_delta_v2_published = None;
+                                set_error(host, format!("frame binary encode: {error}"));
+                                return ptr::null();
+                            }
+                        },
+                    }
+                } else {
+                    match encode_binary_frame(&built.result) {
+                        Ok(full) => full,
+                        Err(error) => {
+                            host.binary_output.clear();
+                            host.frame_delta_v2_published = None;
+                            set_error(host, format!("frame binary encode: {error}"));
+                            return ptr::null();
+                        }
+                    }
+                }
+            } else {
+                // First frame, invalid base, resize, reload, and any call
+                // after a cache invalidation retain the original PFB1 ABI.
+                match encode_binary_frame(&built.result) {
+                    Ok(full) => full,
+                    Err(error) => {
+                        host.binary_output.clear();
+                        host.frame_delta_v2_published = None;
+                        set_error(host, format!("frame binary encode: {error}"));
+                        return ptr::null();
+                    }
+                }
+            };
+
+            host.binary_output = output;
+            if let Some(length) = out_byte_length.as_mut() {
+                *length = host.binary_output.len() as u64;
+            }
+            publish_frame_sequence(host, built.result.frame);
+            clear_error(host);
+            host.binary_output.as_ptr()
+        }
         Err(error) => {
             host.binary_output.clear();
             failed_frame_output(host, error);

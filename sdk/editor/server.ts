@@ -1221,6 +1221,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       const config = await loadConfig(projectDir(id), id);
       return {
         bytecodePath: safeArtifactFile(workspace.builds, `${folder}/app.qjbc`),
+        sourcePath: safeArtifactFile(workspace.builds, `${folder}/app.js`),
         pakPath: safeArtifactFile(workspace.builds, `${folder}/app.pak`),
         metadataPath: safeArtifactFile(workspace.builds, `${folder}/app.bytecode.json`),
         revision: state.builtRevision,
