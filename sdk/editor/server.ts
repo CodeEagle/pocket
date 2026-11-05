@@ -1596,9 +1596,33 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             }
           }
           if (parts[3] === "resources") {
+            if (parts.length === 5 && parts[4] === "preview" && method === "GET") {
+              if (state.builtRevision === null || url.searchParams.get("revision") !== String(state.builtRevision)) return failure("preview revision not found", 404);
+              const folder = `${id}/${state.builtRevision}`;
+              const snapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${folder}/${RESOURCE_SNAPSHOT_FILE}`));
+              const pkg = snapshot.packages.find(item => item.id === url.searchParams.get("package"));
+              const resource = pkg?.resources.find(item => item.key === url.searchParams.get("key"));
+              const thumbnail = resource?.previewFile;
+              const allowedPreview = thumbnail && (/^resource-previews\/\d+\.(png|svg|jpe?g|webp|gif)$/.test(thumbnail) ||
+                (resource?.kind === "asset" && thumbnail === resource.key.slice("asset:".length) && /^assets\/.+\.(png|svg|jpe?g|webp|gif)$/i.test(thumbnail)));
+              if (!pkg || !thumbnail || !allowedPreview) return failure("resource preview not found", 404);
+              const directory = pkg.artifactDirectory === "." ? folder : `${folder}/${pkg.artifactDirectory}`;
+              const file = safeArtifactFile(workspace.builds, `${directory}/${thumbnail}`);
+              const extension = thumbnail.split(".").pop()!;
+              const mime = extension === "svg" ? "image/svg+xml" : extension === "jpg" ? "image/jpeg" : `image/${extension}`;
+              return new Response(Bun.file(file), { headers: { "Content-Type": mime, "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": "no-store" } });
+            }
             if (parts.length !== 4) return failure("not found", 404);
+            const withPreviews = (inventory: ReturnType<typeof resourceInventory>) => ({ ...inventory,
+              packages: inventory.packages.map(pkg => ({ ...pkg, resources: pkg.resources.map(({ previewFile, ...resource }) => ({ ...resource,
+                ...(previewFile ? { previewUrl: `/api/projects/${id}/resources/preview?${new URLSearchParams({ revision: String(state.builtRevision), package: pkg.id, key: resource.key })}` } : {}),
+              })) })),
+            });
             if (method === "GET") {
-              if (state.builtRevision === null || !state.artifacts) {
+              // Workspaces built by older Editors have artifacts but no resource
+              // snapshot. Their real System catalog remains discoverable.
+              const hasResourceSnapshot = state.builtRevision !== null && existsSync(join(workspace.builds, id, String(state.builtRevision), RESOURCE_SNAPSHOT_FILE));
+              if (state.builtRevision === null || !state.artifacts || !hasResourceSnapshot) {
                 const config = await loadConfig(projectDir(id), id);
                 const systemFile = existsSync(join(projectDir(id), "pocket.system.json"))
                   ? safeProjectFile(projectDir(id), "pocket.system.json", { allowConfig: true, mustExist: true })
@@ -1610,12 +1634,12 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               const policyPath = safeProjectFile(projectDir(id), RESOURCE_POLICY_FILE, { allowConfig: true });
               try {
                 const policy = await readResourcePolicy(policyPath);
-                return json(resourceInventory(snapshot, state.revision, policy, state.publish?.packages, state.builtRevision ?? undefined));
+                return json(withPreviews(resourceInventory(snapshot, state.revision, policy, state.publish?.packages, state.builtRevision ?? undefined)));
               } catch {
                 // A failed rebuild must not make the last completed immutable
                 // inventory disappear because a newly edited policy is
                 // malformed. The next successful build will surface it.
-                return json(resourceInventory(snapshot, state.revision, snapshot.policy, state.publish?.packages, state.builtRevision ?? undefined));
+                return json(withPreviews(resourceInventory(snapshot, state.revision, snapshot.policy, state.publish?.packages, state.builtRevision ?? undefined)));
               }
             }
             if (method === "PUT") {
@@ -1637,7 +1661,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               state.publish = undefined;
               pushLog(state, `resource placement saved: ${packageId} (revision ${state.revision})`);
               await saveState(workspace, id, state);
-              return json(resourceInventory(snapshot, state.revision, nextPolicy, undefined, state.builtRevision ?? undefined));
+              return json(withPreviews(resourceInventory(snapshot, state.revision, nextPolicy, undefined, state.builtRevision ?? undefined)));
             }
             return failure("method not allowed", 405);
           }

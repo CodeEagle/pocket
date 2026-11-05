@@ -56,6 +56,26 @@ required records. A project without a policy preserves full-archive behavior.
 Source manifests and asset paths remain subject to Editor's path and symlink
 boundaries.
 
+After upgrading an already-running Editor, restart its backend as well as
+reloading the page. Older build snapshots without `resources.json` still expose
+the actual System catalog (including the System UI); rebuild to generate their
+resource details. Missing snapshot compatibility does not bypass validation of
+an existing snapshot or permit saving unknown resource placements.
+
+The resource browser uses a scrollable package sidebar and a resource card grid.
+`ui:font.*` records are compiled glyph atlases for font slots (different sizes
+and weights), not separate font families. They remain required resources.
+Image cards use project-owned source images captured in the immutable build
+snapshot; loose images reuse the already-copied asset instead of duplicating it.
+Required resources use compact cards and a fixed placement badge rather than a
+large placeholder and a disabled delivery selector. Editable delivery selectors
+reserve space for the dropdown arrow and align consistently within image cards.
+Unsupported resource types have an explicit type placeholder. Thumbnail routes
+accept only catalogued resource keys in the current build, enforce snapshot
+path/symlink boundaries and image types, and serve SVG with a restrictive CSP.
+This reuses the existing snapshot/asset-copy boundary and pinned compiler image
+keys; no runtime PAK decoder or renderer is added for Editor thumbnails.
+
 Each published mini-app has its own signed manifest and a public `host.json`
 setup template (`kind: "pocket-mini-app-host-template"`). It is not a
 `--dart-define-from-file` file. Its `bootstrapAssets` map identifies the small

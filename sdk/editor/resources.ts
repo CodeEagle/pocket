@@ -37,6 +37,9 @@ export type ResourcePolicy = {
 };
 
 export type ResourceEntry = {
+  /** Editor-only immutable source thumbnail, relative to the package snapshot. */
+  previewFile?: string;
+  previewUrl?: string;
   key: string;
   kind: ResourceKind;
   bytes: number;
@@ -426,6 +429,25 @@ export async function buildResourceSnapshot(options: BuildResourceSnapshotOption
       ? { version: options.rootVersion, build: options.rootBuild, runtimeAbi: options.rootRuntimeAbi }
       : undefined);
     const resources = await scanPackageResources(target, policy, packageInfo.id, packageInfo.isRoot ? options.strictPak !== false : true);
+    for (const [index, resource] of resources.entries()) {
+      const source = resource.key.startsWith("pak:ui:img.") ? resource.key.slice("pak:ui:img.".length)
+        : resource.kind === "asset" ? resource.key.slice("asset:".length) : undefined;
+      if (!source || !/\.(png|svg|jpe?g|webp|gif)$/i.test(source)) continue;
+      if (resource.kind === "asset") {
+        // Loose assets already live in this immutable snapshot.
+        if (resource.bytes <= 8 * 1024 * 1024) resource.previewFile = source;
+        continue;
+      }
+      // Only project-owned images are copied. Compiler fallback assets do not
+      // authorize reading arbitrary SDK or filesystem paths.
+      if (!existsSync(join(packageInfo.root, source))) continue;
+      const file = safeProjectPath(packageInfo.root, source);
+      if ((await stat(file)).size > 8 * 1024 * 1024) continue;
+      const extension = source.slice(source.lastIndexOf(".")).toLowerCase();
+      resource.previewFile = `resource-previews/${index}${extension}`;
+      await mkdir(join(target, "resource-previews"), { recursive: true });
+      await cp(file, join(target, resource.previewFile));
+    }
     inventories.push({
       id: packageInfo.id,
       title: packageInfo.title,

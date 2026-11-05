@@ -35,6 +35,9 @@ test("Editor exposes catalog resources, validates placements, and snapshots poli
   writeFileSync(join(project, "manifest.json"), JSON.stringify({ capabilities: { requires: [] } }));
   writeFileSync(join(project, "app.tsx"), "export default function App(){ return <text value='resources'/>; }\n");
   writeFileSync(join(project, "assets", "poster.bin"), Buffer.from([1, 2, 3, 4]));
+  const image = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><rect width="12" height="12" fill="red"/></svg>';
+  writeFileSync(join(project, "assets", "poster.svg"), image);
+  writeFileSync(join(project, "extra.svg"), image);
   const artifactRoot = join(directory, "runner");
   mkdirSync(artifactRoot);
   const appJs = join(artifactRoot, "app.js");
@@ -46,6 +49,7 @@ test("Editor exposes catalog resources, validates placements, and snapshots poli
   const packed = packPak([
     { key: "ui:font.body", dtype: 0, data: new Uint8Array([1, 2, 3]) },
     { key: "ui:img.hero", dtype: 0, data: new Uint8Array([4, 5, 6, 7]) },
+    { key: "ui:img.extra.svg", dtype: 0, data: new Uint8Array([4, 5, 6, 7]) },
     { key: "runtime.styles", dtype: 0, data: new Uint8Array([8, 9]) },
   ]);
   writeFileSync(pak, packed);
@@ -79,6 +83,34 @@ test("Editor exposes catalog resources, validates placements, and snapshots poli
     expect(resources.find((item: any) => item.key === "pak:ui:img.hero")).toMatchObject({ kind: "pak", bytes: 4, placement: "pak" });
     expect(resources.find((item: any) => item.key === "asset:assets/poster.bin")).toMatchObject({ kind: "asset", bytes: 4, placement: "pak" });
     expect(resources.find((item: any) => item.key === "pak:ui:font.body")).toMatchObject({ locked: true, placement: "pak" });
+    const previewUrl = resources.find((item: any) => item.key === "asset:assets/poster.svg").previewUrl;
+    const origin = `http://127.0.0.1:${server.port}`;
+    const preview = await fetch(origin + previewUrl);
+    expect(preview.headers.get("content-type")).toBe("image/svg+xml");
+    expect(preview.headers.get("content-security-policy")).toContain("sandbox");
+    expect(await preview.text()).toBe(image);
+    writeFileSync(join(project, "assets", "poster.svg"), "changed after build");
+    expect(await (await fetch(origin + previewUrl)).text()).toBe(image);
+    const pakPreviewUrl = resources.find((item: any) => item.key === "pak:ui:img.extra.svg").previewUrl;
+    writeFileSync(join(project, "extra.svg"), "changed after build");
+    expect(await (await fetch(origin + pakPreviewUrl)).text()).toBe(image);
+    expect((await fetch(origin + previewUrl.replace("revision=1", "revision=99"))).status).toBe(404);
+    expect((await fetch(origin + previewUrl.replace("asset%3Aassets%2Fposter.svg", "asset%3A..%2Fsecret.svg"))).status).toBe(404);
+
+    // Persisted builds from before resource inventory was introduced must
+    // still expose the actual catalog, rather than failing with artifact 404.
+    const snapshotPath = join(directory, "workspace", "builds", "resource-app", String(built.builtRevision), "resources.json");
+    const snapshotBytes = readFileSync(snapshotPath);
+    rmSync(snapshotPath);
+    try {
+      const legacyResponse = await fetch(`${base}/resources`);
+      expect(legacyResponse.status).toBe(200);
+      const legacy = await legacyResponse.json() as any;
+      expect(legacy.packages).toEqual(initial.packages);
+      expect(legacy.builtRevision).toBeUndefined();
+    } finally {
+      writeFileSync(snapshotPath, snapshotBytes);
+    }
 
     const selected = await fetch(`${base}/resources`, {
       method: "PUT",

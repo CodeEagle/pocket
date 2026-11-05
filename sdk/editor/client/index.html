@@ -120,11 +120,29 @@
               <div class="resources-notice">
                 <span>Network resources download on open and remain available offline after a successful launch. Required fonts and styles stay in the base package.</span>
               </div>
-              <div class="resources-toolbar">
-                <label class="resource-package-picker" for="resource-package-picker">Mini-app package<select id="resource-package-picker" aria-label="Mini-app package" disabled></select></label>
-                <div id="resource-package-meta" class="resource-package-meta" aria-live="polite"></div>
+              <div class="resource-browser">
+                <aside class="resource-package-rail" aria-label="Mini-app packages">
+                  <div class="resource-package-rail-heading">
+                    <span class="eyebrow">PACKAGES</span>
+                    <span id="resource-package-count" class="resource-package-count" aria-live="polite"></span>
+                  </div>
+                  <nav id="resource-package-list" class="resource-package-list" aria-label="Mini-app packages"><span class="muted">Select a project to inspect its packages.</span></nav>
+                  <label class="resource-package-picker-legacy" for="resource-package-picker">
+                    <span class="sr-only">Mini-app package (legacy selector)</span>
+                    <select id="resource-package-picker" aria-label="Mini-app package" aria-hidden="true" tabindex="-1" disabled></select>
+                  </label>
+                </aside>
+                <section class="resource-detail" aria-labelledby="resource-detail-title">
+                  <div class="resource-detail-header">
+                    <div class="resource-detail-heading">
+                      <span class="eyebrow">SELECTED PACKAGE</span>
+                      <h3 id="resource-detail-title">Choose a package</h3>
+                    </div>
+                    <div id="resource-package-meta" class="resource-package-meta" aria-live="polite"></div>
+                  </div>
+                  <div id="resource-list" class="resource-list resource-grid" role="list" aria-label="Package resources"><span class="muted">Select a project to inspect its packages.</span></div>
+                </section>
               </div>
-              <div id="resource-list" class="resource-list" role="list" aria-label="Package resources"><span class="muted">Select a project to inspect its packages.</span></div>
               <div class="resources-footer">
                 <span id="resources-save-status" class="status-text" aria-live="polite">No policy loaded</span>
                 <button id="save-resources" class="button secondary small-button" type="button" disabled>Save resource policy</button>

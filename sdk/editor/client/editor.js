@@ -577,6 +577,8 @@ function unavailableResourceInventory(error = "") {
   return { revision: 0, packages: [], unavailable: true, error: error ? String(error) : "" };
 }
 
+const RESOURCE_BACKEND_OUTDATED_MESSAGE = "Editor backend is outdated. Restart the Editor server and reload this page.";
+
 function sameOriginResourceUrl(value) {
   if (typeof value !== "string" || !value) return "";
   try {
@@ -593,6 +595,7 @@ function normalizeResourceInventory(payload) {
   const seenPackages = new Set();
   return {
     revision: Number.isFinite(Number(payload?.revision)) ? Number(payload.revision) : 0,
+    builtRevision: Number.isInteger(payload?.builtRevision) ? payload.builtRevision : undefined,
     unavailable: payload?.unavailable === true,
     error: typeof payload?.error === "string" ? payload.error : "",
     packages: packages.map((entry) => {
@@ -614,6 +617,7 @@ function normalizeResourceInventory(payload) {
           placement,
           locked: resource?.locked === true,
           reason: typeof resource?.reason === "string" ? resource.reason : "",
+          previewUrl: sameOriginResourceUrl(resource?.previewUrl),
         };
       }).filter(Boolean);
       return {
@@ -645,6 +649,70 @@ function formatResourceBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes >= 10 * 1024 ? 0 : 1)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MiB`;
+}
+
+function isFontAtlasResource(resource) {
+  return typeof resource?.key === "string" && /(?:^|:)ui:font\./.test(resource.key);
+}
+
+function resourceTypeLabel(resource) {
+  return resource?.kind === "asset" ? "Loose asset" : "PAK resource";
+}
+
+function resourceFontSlot(resource) {
+  const match = typeof resource?.key === "string" ? resource.key.match(/(?:^|:)ui:font\.(\d+)(?:$|[^\d])/i) : null;
+  return match ? Number(match[1]) : null;
+}
+
+function compareResourceCards(left, right) {
+  const previewOrder = Number(Boolean(right.previewUrl)) - Number(Boolean(left.previewUrl));
+  if (previewOrder) return previewOrder;
+  const leftSlot = resourceFontSlot(left);
+  const rightSlot = resourceFontSlot(right);
+  if (leftSlot !== null && rightSlot !== null && leftSlot !== rightSlot) return leftSlot - rightSlot;
+  return String(left.key).localeCompare(String(right.key), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function resourcePreviewPlaceholder(resource, unavailable = false) {
+  const placeholder = document.createElement("div");
+  placeholder.className = `resource-preview-placeholder${isFontAtlasResource(resource) ? " resource-preview-font" : ""}`;
+  const icon = document.createElement("span");
+  icon.className = "resource-preview-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = isFontAtlasResource(resource) ? "Aa" : "◇";
+  const title = document.createElement("strong");
+  title.textContent = isFontAtlasResource(resource)
+    ? "Compiled glyph atlas"
+    : unavailable
+      ? "Preview unavailable"
+      : "No image preview";
+  const detail = document.createElement("span");
+  detail.textContent = isFontAtlasResource(resource)
+    ? "Not a standalone font"
+    : `${resourceTypeLabel(resource)} · preview not supplied`;
+  placeholder.append(icon, title, detail);
+  return placeholder;
+}
+
+function resourcePreview(resource) {
+  const preview = document.createElement("div");
+  preview.className = "resource-preview";
+  if (!resource.previewUrl) {
+    preview.append(resourcePreviewPlaceholder(resource));
+    return preview;
+  }
+  const image = document.createElement("img");
+  image.className = "resource-preview-image";
+  image.alt = `Preview of ${resource.key}`;
+  image.loading = "lazy";
+  image.decoding = "async";
+  image.referrerPolicy = "no-referrer";
+  image.src = resource.previewUrl;
+  image.addEventListener("error", () => {
+    preview.replaceChildren(resourcePreviewPlaceholder(resource, true));
+  }, { once: true });
+  preview.append(image);
+  return preview;
 }
 
 function renderResourceState() {
@@ -710,6 +778,65 @@ function updateResourceActionStates(workLocked = false) {
   for (const select of document.querySelectorAll("#resource-list select[data-resource-key]")) {
     select.disabled = controlsLocked || select.dataset.locked === "true";
   }
+  renderResourcePackages();
+}
+
+function renderResourcePackages() {
+  const list = $("resource-package-list");
+  const count = $("resource-package-count");
+  if (!list) return;
+  const packages = resourceInventory?.packages || [];
+  list.replaceChildren();
+  if (count) count.textContent = packages.length ? `${packages.length} package${packages.length === 1 ? "" : "s"}` : "";
+  if (!packages.length) {
+    const empty = document.createElement("span");
+    empty.className = "muted";
+    empty.textContent = currentId && resourcesLoading
+      ? "Loading packages…"
+      : "Select a project to inspect its packages.";
+    list.append(empty);
+    return;
+  }
+  const controlsLocked = !currentId || resourcesLoading || resourcesSaving;
+  for (const entry of packages) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "resource-package-button";
+    button.dataset.resourcePackage = entry.id;
+    button.dataset.packageId = entry.id;
+    button.setAttribute("aria-pressed", String(entry.id === resourcePackageId));
+    button.disabled = controlsLocked;
+    button.title = `${entry.title} · ${entry.id}`;
+    const title = document.createElement("strong");
+    title.textContent = entry.title;
+    const id = document.createElement("code");
+    id.textContent = entry.id;
+    const details = document.createElement("span");
+    details.className = "resource-package-button-meta";
+    details.textContent = `${entry.resources.length} resource${entry.resources.length === 1 ? "" : "s"}`;
+    button.append(title, id, details);
+    button.addEventListener("click", () => { selectResourcePackage(entry.id); });
+    list.append(button);
+  }
+}
+
+function selectResourcePackage(nextPackage) {
+  if (!resourceInventory?.packages.some((entry) => entry.id === nextPackage)) return false;
+  const currentEntry = resourcePackage();
+  if (resourcePackageId !== nextPackage && resourcesDirty && resourcePackageHasDraftChanges(currentEntry)) {
+    const picker = $("resource-package-picker");
+    if (picker) picker.value = resourcePackageId;
+    renderResourcePackages();
+    showNotice("Save the current package resource policy before switching packages.", "info");
+    return false;
+  }
+  resourcePackageId = nextPackage;
+  const picker = $("resource-package-picker");
+  if (picker) picker.value = nextPackage;
+  renderResourcePackages();
+  renderResourcePackage();
+  updateResourceActionStates();
+  return true;
 }
 
 function renderResourcePackage() {
@@ -718,7 +845,9 @@ function renderResourcePackage() {
   if (!list || !meta) return;
   list.replaceChildren();
   const entry = resourcePackage();
+  const title = $("resource-detail-title");
   if (!entry) {
+    if (title) title.textContent = resourceInventory?.unavailable ? "Package catalog unavailable" : "Choose a package";
     meta.textContent = "";
     const empty = document.createElement("div");
     empty.className = "resource-empty";
@@ -729,6 +858,10 @@ function renderResourcePackage() {
         : "Select a project to inspect its packages.";
     list.append(empty);
     return;
+  }
+  if (title) {
+    title.textContent = entry.title;
+    title.title = entry.id;
   }
   const resourceCount = entry.resources.length;
   meta.replaceChildren();
@@ -750,18 +883,21 @@ function renderResourcePackage() {
   if (!resourceCount) {
     const empty = document.createElement("div");
     empty.className = "resource-empty";
-    empty.textContent = resourceInventory?.unavailable
-      ? resourceInventory.error || "Build the project to inventory PAK and signed network resources for this package."
+    empty.textContent = resourceInventory?.builtRevision === undefined || resourceInventory?.unavailable
+      ? resourceInventory?.error || "Build the project to inventory PAK and signed network resources for this package."
       : "This package has no resources in the current build.";
     list.append(empty);
     return;
   }
   const draft = resourceDraft.get(entry.id) || new Map();
   resourceDraft.set(entry.id, draft);
-  for (const resource of entry.resources) {
+  const resources = [...entry.resources].sort(compareResourceCards);
+  for (const resource of resources) {
     const row = document.createElement("div");
     row.className = `resource-row${resource.locked ? " resource-locked" : ""}`;
+    row.dataset.resourceKey = resource.key;
     row.setAttribute("role", "listitem");
+    if (!resource.locked) row.append(resourcePreview(resource));
     const main = document.createElement("div");
     main.className = "resource-row-main";
     const key = document.createElement("code");
@@ -770,40 +906,47 @@ function renderResourcePackage() {
     key.title = resource.key;
     const info = document.createElement("span");
     info.className = "resource-row-meta";
-    info.textContent = `${resource.kind === "asset" ? "Loose asset" : "PAK resource"} · ${formatResourceBytes(resource.bytes)}`;
+    info.textContent = `${resourceTypeLabel(resource)} · ${formatResourceBytes(resource.bytes)}`;
     main.append(key, info);
+    if (isFontAtlasResource(resource)) {
+      const fontNote = document.createElement("span");
+      fontNote.className = "resource-font-note";
+      fontNote.textContent = "Type · Glyph atlas";
+      fontNote.title = "ui:font.N is a compiled glyph atlas, not a standalone font.";
+      main.append(fontNote);
+    }
     if (resource.locked) {
-      const reason = document.createElement("span");
-      reason.className = "resource-row-reason";
-      reason.textContent = resource.reason || "Required by the package; placement is locked.";
-      main.append(reason);
+      const required = document.createElement("span");
+      required.className = "resource-required-badge";
+      required.textContent = "Base package · Required";
+      required.title = resource.reason || "Required by the package; placement is locked.";
+      row.append(main, required);
+    } else {
+      const placement = document.createElement("label");
+      placement.className = "resource-placement";
+      const placementLabel = document.createElement("span");
+      placementLabel.className = "resource-placement-hint";
+      placementLabel.textContent = "Delivery";
+      const picker = document.createElement("select");
+      picker.dataset.resourceKey = resource.key;
+      picker.dataset.locked = String(resource.locked);
+      picker.setAttribute("aria-label", `Delivery for ${resource.key}`);
+      for (const [value, label] of [["pak", "Base package"], ["network", "Network"]]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        picker.append(option);
+      }
+      picker.value = draft.get(resource.key) || resource.placement;
+      picker.addEventListener("change", () => {
+        draft.set(resource.key, picker.value === "network" ? "network" : "pak");
+        resourcesDirty = hasResourceDraftChanges();
+        renderResourceState();
+        updateActionStates();
+      });
+      placement.append(placementLabel, picker);
+      row.append(main, placement);
     }
-    const placement = document.createElement("label");
-    placement.className = "resource-placement";
-    const placementLabel = document.createElement("span");
-    placementLabel.className = "resource-placement-hint";
-    placementLabel.textContent = resource.locked ? "Required placement" : "Delivery";
-    const picker = document.createElement("select");
-    picker.dataset.resourceKey = resource.key;
-    picker.dataset.locked = String(resource.locked);
-    picker.setAttribute("aria-label", `Delivery for ${resource.key}`);
-    for (const [value, label] of [["pak", "Base package"], ["network", "Network"]]) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = label;
-      picker.append(option);
-    }
-    picker.value = draft.get(resource.key) || resource.placement;
-    picker.disabled = resource.locked;
-    picker.addEventListener("change", () => {
-      if (resource.locked) return;
-      draft.set(resource.key, picker.value === "network" ? "network" : "pak");
-      resourcesDirty = hasResourceDraftChanges();
-      renderResourceState();
-      updateActionStates();
-    });
-    placement.append(placementLabel, picker);
-    row.append(main, placement);
     list.append(row);
   }
 }
@@ -824,6 +967,7 @@ function renderResourceInventory() {
   } else {
     resourcePackageId = "";
   }
+  renderResourcePackages();
   renderResourcePackage();
   renderResourceState();
   updateResourceActionStates();
@@ -843,6 +987,7 @@ async function fetchResources(projectId) {
   try {
     return await api(resourcesUrl(projectId));
   } catch (error) {
+    if (error?.status === 404) return unavailableResourceInventory(RESOURCE_BACKEND_OUTDATED_MESSAGE);
     // Resource inventory is supplemental to source editing and preview. Keep
     // those workflows usable while an unbuilt/stale server reports the
     // inventory error inside this panel only.
@@ -1827,16 +1972,7 @@ $("file-picker").addEventListener("change", async (event) => {
 });
 $("resource-package-picker").addEventListener("change", (event) => {
   const nextPackage = event.currentTarget.value;
-  if (!resourceInventory?.packages.some((entry) => entry.id === nextPackage)) return;
-  const currentEntry = resourcePackage();
-  if (resourcesDirty && resourcePackageHasDraftChanges(currentEntry)) {
-    event.currentTarget.value = resourcePackageId;
-    showNotice("Save the current package resource policy before switching packages.", "info");
-    return;
-  }
-  resourcePackageId = nextPackage;
-  renderResourcePackage();
-  updateResourceActionStates();
+  selectResourcePackage(nextPackage);
 });
 $("save-resources").addEventListener("click", () => { void saveResources().catch(() => {}); });
 sourceEl.addEventListener("input", () => markDirty());
