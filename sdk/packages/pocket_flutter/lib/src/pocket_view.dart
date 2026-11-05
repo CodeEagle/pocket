@@ -1094,7 +1094,18 @@ class _PocketViewState extends State<PocketView>
       return;
     }
     _started = true;
-    unawaited(_start());
+    // LayoutBuilder invokes this method from its layout callback. Starting a
+    // self-owned runtime inline is normally harmless, but a synchronous FFI
+    // admission failure (for example, a stale native ABI) reaches _start's
+    // catch before the first await and would call setState during build. Keep
+    // the one-shot _started gate, but enter the async startup after layout so
+    // both success and failure publish outside the build/layout phase. The
+    // callback reads the current host constraints, so a resize before it runs
+    // still uses the latest viewport without another startup state flag.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _isDisposed) return;
+      unawaited(_start());
+    });
   }
 
   void _observeConstraints(BoxConstraints constraints) {

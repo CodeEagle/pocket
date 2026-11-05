@@ -332,6 +332,13 @@ simulator/device/Android 不会静默共用错误的 archive；首次 clean chec
 需要对应的 Xcode/Rust 工具链。
 `--platform` 只准备库，不启动设备。
 
+每次更新 SDK 原生源码、补丁或传输 ABI 后都应再次执行带 `--platform` 的构建。
+直接 `flutter run`、hot reload 或 hot restart 不会触发上述指纹检查，也不会编译 Rust。
+若出现 `Pocket native binary ABI is incomplete`，先重建对应平台 archive，再重新构建
+Flutter 应用；不要通过延长首帧超时或恢复 JSON fallback 绕过接口检查。
+Showcase 可从仓库根目录执行 `bash sdk/scripts/build_native.sh ios-sim`，之后在
+`demo/` 重新运行 Flutter；该命令同时更新 device 与 simulator slice。
+
 ## Pocket Studio（外部工程）
 
 ```sh

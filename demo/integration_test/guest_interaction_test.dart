@@ -194,6 +194,17 @@ Future<Offset> reveal(
     for (var i = 0; i < 10; i++) {
       await gesture.moveBy(const Offset(0, -23));
       await tester.pump(const Duration(milliseconds: 16));
+      // Stop as soon as the target is pointable. A fixed ten-step drag can
+      // reveal a target and then carry it past the top while the finger is
+      // still moving, especially after a live viewport resize.
+      if (_pointSnapshot(tester, label).point != null) break;
+    }
+    // The gesture recognizer estimates release velocity over its last three
+    // virtual frames. Keep the contact down for that window so the real drag
+    // ends at rest instead of starting a fling that moves the target away
+    // between the visibility and stability samples.
+    for (var i = 0; i < 3; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
     }
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 100));

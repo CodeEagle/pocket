@@ -267,6 +267,8 @@ flutter run -d <device-id>
 
 只修改 Demo JS 时在 `demo/js` 执行 `bun run build`，再让宿主重新加载生成 assets；单纯保存 TSX 不会自动替换已经运行的 qjbc。也可以使用下述 Editor 发布/检查更新流程。
 
+更新 SDK 原生源码或传输 ABI 后，须重新执行对应平台的 `build_native.sh`，再重新构建并启动 Flutter。`flutter run`、hot reload 和 hot restart 都不会编译 Rust；旧 iOS archive 可能缺少新 Dart 所需的接口。独立消费工程可使用 `pocket.ts build --platform=ios-sim|ios`，由现有输入指纹检查决定是否重建。
+
 ### 创建独立消费者
 
 从仓库根目录执行：

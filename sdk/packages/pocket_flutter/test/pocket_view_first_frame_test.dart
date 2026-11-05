@@ -210,6 +210,32 @@ void main() {
     },
   );
 
+  testWidgets('reports a synchronous self-owned startup failure after layout', (
+    tester,
+  ) async {
+    final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+    addTearDown(() {
+      debugPocketSelfOwnedRuntimeFactory = previousFactory;
+    });
+    final errors = <Object>[];
+    debugPocketSelfOwnedRuntimeFactory = (_) {
+      throw const PocketRuntimeException('native ABI is missing');
+    };
+
+    await tester.pumpWidget(
+      _selfOwnedHost(
+        320,
+        decoder: (_) => Future<ui.Image>.error(StateError('unused')),
+        onError: errors.add,
+      ),
+    );
+    await tester.pump();
+
+    expect(errors, hasLength(1));
+    expect(errors.single.toString(), contains('native ABI is missing'));
+    expect(find.textContaining('PocketJS runtime unavailable'), findsOneWidget);
+  });
+
   testWidgets('turns a first-frame decode failure into an error surface', (
     tester,
   ) async {
@@ -289,13 +315,17 @@ void main() {
       final initialFrame = _imageFrame();
       final resizedFrame = _resizedImageFrame();
       final runtime = _ResizableFirstFrameRuntime(initialFrame, resizedFrame);
+      var factoryCalls = 0;
       final previousFactory = debugPocketSelfOwnedRuntimeFactory;
       final previousDelta = debugPocketFrameDeltaAtOverride;
       addTearDown(() {
         debugPocketSelfOwnedRuntimeFactory = previousFactory;
         debugPocketFrameDeltaAtOverride = previousDelta;
       });
-      debugPocketSelfOwnedRuntimeFactory = (_) => runtime;
+      debugPocketSelfOwnedRuntimeFactory = (_) {
+        factoryCalls++;
+        return runtime;
+      };
       debugPocketFrameDeltaAtOverride = (current, _) {
         final resizable = current as _ResizableFirstFrameRuntime;
         return resizable.resizeCalls == 0 ? null : resizable.resizedFrame;
@@ -358,6 +388,7 @@ void main() {
       expect(errors, isEmpty);
       expect(ready, isTrue);
       expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(factoryCalls, 1);
     },
   );
 

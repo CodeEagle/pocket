@@ -79,7 +79,7 @@ void main() {
         }
         await showcase.tap(tester, '+1');
         await guest.waitFor(tester, '02');
-        await showcase.tap(tester, 'Gallery', scroll: false);
+        await showcase.tap(tester, 'UI', scroll: false);
         await guest.waitFor(tester, 'Official building blocks');
         setAvailable(() => available = window);
         await tester.pump(const Duration(milliseconds: 700));
