@@ -386,6 +386,12 @@ function baseOverflow(className: string | undefined, explicit?: number): number 
   return /(?:^|\s)overflow-hidden(?:\s|$)/.test(className) ? 1 : 0;
 }
 
+function hasFullWidth(className: string | undefined, explicit?: number): boolean {
+  if (typeof explicit === "number" && explicit < 0) return true;
+  if (!className) return false;
+  return /(?:^|\s)w-full(?:\s|$)/.test(className);
+}
+
 export interface ScrollContourOptions {
   baseLeft?: number;
   baseRight?: number;
@@ -603,9 +609,12 @@ export function ScrollContourItem(props: ViewProps & {
       return props.style;
     }
     const explicitWidth = props.style?.width;
+    const isFullWidth = hasFullWidth(props.class, explicitWidth);
     const adjustedWidth = typeof explicitWidth === "number" && Number.isFinite(explicitWidth) && explicitWidth > 0
       ? Math.max(0, explicitWidth - l - r)
-      : explicitWidth;
+      : isFullWidth
+        ? (l > 0 || r > 0 ? Number.NaN : (explicitWidth ?? -1))
+        : explicitWidth;
     return {
       ...(props.style ?? {}),
       ...(adjustedWidth !== undefined ? { width: adjustedWidth } : {}),
@@ -1596,9 +1605,11 @@ export function ScrollablePage(props: {
     parentScaffold.hasScaffold
       ? parentScaffold.geometry()
       : (pageGeometryAccessor ? pageGeometryAccessor() : EMPTY_DISPLAY_GEOMETRY);
+  const hasSideContours = (current: DisplayGeometry): boolean =>
+    leftOcclusionFrames(current).length > 0 || rightOcclusionFrames(current).length > 0;
   const syncContourSubscribers = (): boolean => {
     if (contourSubscribers.size === 0) return false;
-    const hasContour = topRightOcclusionFrames(activePageGeometry()).length > 0;
+    const hasContour = hasSideContours(activePageGeometry());
     if (!hasContour && !hadActiveContour) return false;
     hadActiveContour = hasContour;
     let anyChanged = false;
@@ -1616,7 +1627,7 @@ export function ScrollablePage(props: {
   };
   const scheduleContourMicrotask = (): void => {
     if (microtaskSyncScheduled) return;
-    if (!hadActiveContour && topRightOcclusionFrames(activePageGeometry()).length === 0) return;
+    if (!hadActiveContour && !hasSideContours(activePageGeometry())) return;
     microtaskSyncScheduled = true;
     queueMicrotask(() => {
       microtaskSyncScheduled = false;

@@ -217,6 +217,67 @@ test("safe area scaffold, transparent mini-app bar, and 5px progressive scroll c
       );
       console.log(`safe_area_native.test: ${width}px top inset (${initialHeaderY} -> ${insetHeaderY}), bottom slot stable (${initialBottomY}), corner app-bar right <= ${cornerHeaderRight}, contour right <= ${cornerContourRight}, progressive scroll width (${initialRight} -> ${rampRight} -> ${narrowedRight} -> ${restoredRight}, reflow=${reflowedRight})`);
     }
+
+    const landscapeResponses = runProbe([
+      { op: "create", width: 640, height: 360 },
+      { op: "loadBytecode", bytecodePath, pakPath },
+      { op: "frame", deltaMs: 16 },
+      {
+        op: "send",
+        message: {
+          type: "event",
+          name: "display.viewport",
+          payload: {
+            width: 640,
+            height: 360,
+            safeArea: { top: 0, right: 0, bottom: 18, left: 32 },
+            keyboardInset: 0,
+            reservedRegions: [
+              {
+                id: "landscape-left-hole",
+                kind: "occlusion",
+                frame: { left: 0, top: 165, width: 32, height: 24 },
+                margins: { top: 0, right: 0, bottom: 0, left: 0 },
+                active: true,
+              },
+            ],
+          },
+        },
+      },
+      { op: "frame", deltaMs: 16 },
+      { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "down", id: 0, x: 320, y: 280 } } },
+      { op: "frame", deltaMs: 16 },
+      { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "move", id: 0, x: 320, y: 250 } } },
+      { op: "frame", deltaMs: 16 },
+      { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "move", id: 0, x: 320, y: 156 } } },
+      { op: "frame", deltaMs: 16 },
+      { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "up", id: 0, x: 320, y: 156 } } },
+      { op: "frame", deltaMs: 16 },
+      { op: "quit" },
+    ]);
+    const landscapeStep1 = frameOf(landscapeResponses, 3);
+    const landscapeStep2 = frameOf(landscapeResponses, 4);
+    const card2BelowHole = textOp(landscapeStep1, "Contour Card 2", "landscapeStep1");
+    const card1OverHole = textOp(landscapeStep1, "Contour Card 1", "landscapeStep1");
+    const card2OverHole = textOp(landscapeStep2, "Contour Card 2", "landscapeStep2");
+    const card1AboveHole = textOp(landscapeStep2, "Contour Card 1", "landscapeStep2");
+    const expectedHoleLeft = 32 + DISPLAY_CONTOUR_CLEARANCE_PX;
+    assert.ok(
+      card2BelowHole.clip && Math.abs(card2BelowHole.clip.x! - 16) <= 1.1,
+      `card below landscape left hole-punch must stay full-width at x=16: clip=${JSON.stringify(card2BelowHole.clip)}`,
+    );
+    assert.ok(
+      Math.abs(card1OverHole.x! - (expectedHoleLeft + 16)) <= 1.1,
+      `card overlapping landscape left hole-punch must indent its left border to 37px (text x=53): op=${JSON.stringify(card1OverHole)}`,
+    );
+    assert.ok(
+      card2OverHole.clip && Math.abs(card2OverHole.clip.x! - expectedHoleLeft) <= 1.1,
+      `card scrolled into landscape left hole-punch must indent its left border to 37px: clip=${JSON.stringify(card2OverHole.clip)}`,
+    );
+    assert.ok(
+      Math.abs(card1AboveHole.x! - 32) <= 1.1,
+      `card scrolled above landscape left hole-punch must restore full width at text x=32: op=${JSON.stringify(card1AboveHole)}`,
+    );
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

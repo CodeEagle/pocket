@@ -224,19 +224,20 @@ CLI，应先以 `xcrun simctl help` 为准，再把确切参数写入这里。�
 
 ### 来源复用与改动
 
-- **复用来源**：复用 `sdk/packages/pocket_ui/src/responsive.ts` 的 `topRightOcclusionFrame()` 与 `sdk/packages/pocket_ui/src/ui.tsx` 的 `ScrollablePage` + `committedLayout`（`pocket.getLayout`）坐标换算链路，不新增第二套布局引擎或 Dart 状态机。
+- **复用来源**：复用 `sdk/packages/pocket_ui/src/responsive.ts` 的 `topRightOcclusionFrame()` 与 `sdk/packages/pocket_ui/src/ui.tsx` 的 `ScrollablePage` + `committedLayout`（`pocket.getLayout`）坐标换算链路，并在 `sdk/packages/pocket_flutter/lib/src/pocket_view.dart:_reservedRegionsForHost` 合并 Flutter `MediaQuery` / `FlutterView.displayFeatures`（`DisplayFeatureType.cutout` → `occlusion`，`hinge/fold` → `division`），使 Android 全系单挖孔、药丸孔、刘海屏及 iOS 27.1+ `ReservedRegion` 在竖屏和横屏下均上报精确遮挡框，不新增第二套布局引擎或 Dart 状态机。
 - **`sdk/packages/pocket_ui/src/responsive.ts`**：
-  - 新增 `hasLocalTopRightOcclusionInset(geometry)`：识别 `safeArea.right` 仅由局部右上角 occlusion 投影产生的情形（若存在全高或带 `margins` 触达右缘的其它遮挡则保留全局安全区），使正文下方保持全宽，顶部由局部 contour 渐进式避让。
-  - 新增 `DISPLAY_CONTOUR_CLEARANCE_PX = 5`、`DISPLAY_CONTOUR_BOTTOM_TRIM_PX = 14`、`DISPLAY_CONTOUR_RAMP_PX = 5` 与 `topRightContourReserveForBand(geometry, visualTop, visualBottom, options)`：支持重叠多区域右上角 contour，保持 UI 右侧边界距离真实异形区 `5px`，并对高占比状态胶囊遮挡框底部内收 `14px`（使底部与状态图标的视觉间距同左侧保持一致）；当子项位于 `cutoutBottom + 5px` 以下时返回 `0`（全宽）；当子项随滚动进入 `[cutoutBottom, cutoutBottom + 5px]` 过渡带时，按 C1 连续的 Hermite smoothstep（`3t² - 2t³`）曲线以 `0.5pt` 精度渐进式增加右侧预留宽度；进入 `visualTop <= cutoutBottom` 后保持完整 `maxReserve`（即使继续上滑出顶边也不回弹，防止屏外重排造成列表跳动）。
+  - 新增 `hasLocalLeftOcclusionInset(geometry)`、`hasLocalRightOcclusionInset(geometry)` 与 `hasLocalTopRightOcclusionInset(geometry)`：识别 `safeArea.left` 或 `safeArea.right` 仅由局部侧边/角部 occlusion（如 Duo 右上角状态簇、横屏左右侧刘海、灵动岛或单个摄像头挖孔）投影产生的情形，释放整页冗余侧边安全边距，使挖孔上方与下方区域保持全宽。
+  - 新增 `DISPLAY_CONTOUR_CLEARANCE_PX = 5`、`DISPLAY_CONTOUR_BOTTOM_TRIM_PX = 14`、`DISPLAY_CONTOUR_RAMP_PX = 5`、`leftOcclusionFrames`、`rightOcclusionFrames`、`sideContourReservesForBand(geometry, visualTop, visualBottom, options)` 与 `topRightContourReserveForBand`：支持重叠多区域左右侧 contour，保持 UI 边界距离真实异形区 `5px`，并对高占比顶角状态胶囊底部内收 `14px`；当子项从下方滑入 `[cutoutBottom, cutoutBottom + 5px]` 过渡带时按 C1 连续 Hermite smoothstep（`3t² - 2t³`）渐进收缩；对于 `cutoutTop > 0` 的横屏居中刘海或单挖孔，当子项继续上滑至 `[cutoutTop - 5px, cutoutTop]` 上方过渡带时按同一 smoothstep 曲线渐进恢复全宽（贴顶 `cutoutTop = 0` 的角部遮挡滑出顶边后仍保持不回弹以防屏外重排跳动）。
 - **`sdk/packages/pocket_ui/src/ui.tsx` & `sdk/packages/pocket_ui/src/mobile.tsx`**：
   - `MobileAppBar` 顶部标题栏去除底色背景与底边线（改为 `bg-transparent`），直接融入页面背景。
-  - 新增 `ScrollablePageContext`、`ContourConsumedContext`、`useScrollContourReserve` 与 `ScrollContourItem`，在 `ScrollablePage` 的手势拖拽、动量帧、内容重排与 `display.viewport` 变更时同步测量子项真实未缩进右边界（不重复累加容器 `p-4` / `mx-5` 边距），使子项右边界精确停在距离真实异形区 `5px` 处；在缩进状态下启用裁剪，并在恢复全宽时保留组件声明的 `overflow-hidden` 属性。
-  - 全量覆盖公共 UI 组件：`Header`、`MobileAppBar`、`PageIntro`、`SectionHeading`、`Tabs`、`StatusBar`、`EmptyState`、`Card`、`MobileCard`、`GlassSurface`、`Row`、`List`、`MobileListTile`、`MobileSegmentedControl`。
+  - 新增 `ScrollablePageContext`、`ContourConsumedContext`、`useScrollContourReserve` 与 `ScrollContourItem`（同时支持 `leftReserve` 与 `reserve`），在 `ScrollablePage` 的手势拖拽、动量帧、内容重排与 `display.viewport` 变更时同步测量子项真实未缩进左右边界（不重复累加容器 `p-4` / `mx-5` 边距），使子项边界精确停在距离真实异形区/单挖孔 `5px` 处；在缩进状态下启用裁剪，并在恢复全宽时保留组件声明的 `overflow-hidden` 属性。
+  - 全量覆盖公共 UI 组件：`Header`、`MobileAppBar`、`PageIntro`、`SectionHeading`、`Tabs`、`StatusBar`、`EmptyState`、`Card`、`MobileCard`、`GlassSurface`、`Row`、`List`、`TileGrid`、`MobileListTile`、`MobileSegmentedControl`。
 - **`demo/js/app.tsx`**：
-  - 将 `HomePage`（顶部横幅、`HomeExplore`、标题行、双栏面板、底部状态行）、`GalleryPage`（`GalleryTile` 按整行右边界 `contentWidth() - 20` 统一计算双列网格卡片宽度）、`RuntimePage`、`PerformancePage`、`StressPage` 全部接入 `ScrollContourItem` / `useScrollContourReserve`，并重新编译 `demo/js` 及 `profile`、`lobby` Mini-App 字节码。
+  - 将 `HomePage`（顶部横幅、`HomeExplore`、标题行、双栏面板、底部状态行）、`GalleryPage`（`GalleryTile` 按整行左右边界统一计算双列网格卡片宽度）、`RuntimePage`、`PerformancePage`、`StressPage` 全部接入 `ScrollContourItem` / `useScrollContourReserve`，并重新编译 `demo/js` 及 `profile`、`lobby` Mini-App 字节码。
 
 ### 验证记录
 
-- `bun test sdk/packages/pocket_ui/test/responsive_occlusion.test.ts`：验证 `hasLocalTopRightOcclusionInset` 与 `topRightContourReserveForBand` 在异形区内、5px smoothstep 过渡带、异形区下方、屏外上方、多区域叠加及全高遮挡（含 margins）下的几何契约。
-- `bun test sdk/packages/pocket_ui/test/safe_area_native.test.ts`：通过 `pocket_probe` 运行编译后字节码，验证 `MobileAppBar` 透明无底色、双列网格右列距异形区 5px 避让、列表卡片从下方全宽（`358`）上滑进入 5px 过渡带（`316`）、进入右上角异形区（`285`，卡片右边框 `301 = 306 - 5`）再下滑恢复全宽（`358`）并保留裁剪、以及静止态内容重排自动同步（`285`）的完整闭环。
+- `flutter test test/pocket_view_viewport_test.dart`（于 `sdk/packages/pocket_flutter`）：验证 `DisplayFeatureType.cutout`（横屏刘海/单挖孔）自动转换为 `display.viewport.reservedRegions` 内的 guest 坐标 `occlusion`。
+- `bun test sdk/packages/pocket_ui/test/responsive_occlusion.test.ts`：验证 `hasLocalLeftOcclusionInset`、`hasLocalRightOcclusionInset`、`sideContourReservesForBand` 与 `topRightContourReserveForBand` 在顶角状态区、横屏左侧刘海（含上下双端 5px smoothstep 过渡带）、横屏右侧 28px 单挖孔、多区域叠加及全高遮挡下的几何契约。
+- `bun test sdk/packages/pocket_ui/test/safe_area_native.test.ts`：通过 `pocket_probe` 运行编译后字节码，验证 `MobileAppBar` 透明无底色、双列网格右列距异形区 5px 避让、顶角与横屏左侧单挖孔下列表卡片从下方全宽滑入异形区缩进（距异形区 5px）并继续上滑到横屏单孔上方后恢复全宽、以及静止态内容重排自动同步的完整闭环。
 - `cd demo/js && bun run test && cd ../.. && python3 sdk/scripts/check_architecture.py`：全部通过。

@@ -2721,26 +2721,67 @@ class _PocketViewState extends State<PocketView>
         ui.DisplayFeatureType.unknown => null,
       };
       if (kind == null) continue;
-      final bounds = feature.bounds;
-      if (!bounds.left.isFinite ||
-          !bounds.top.isFinite ||
-          !bounds.width.isFinite ||
-          !bounds.height.isFinite ||
-          bounds.width <= 0 ||
-          bounds.height <= 0) {
+      final rawBounds = feature.bounds;
+      if (!rawBounds.left.isFinite ||
+          !rawBounds.top.isFinite ||
+          !rawBounds.width.isFinite ||
+          !rawBounds.height.isFinite ||
+          rawBounds.width < 0 ||
+          rawBounds.height < 0) {
         continue;
       }
-      final alreadyCovered = regions.any(
-        (existing) =>
-            existing.kind == kind && !existing.frame.intersect(bounds).isEmpty,
-      );
-      if (alreadyCovered) continue;
       final active = switch (feature.type) {
         ui.DisplayFeatureType.cutout || ui.DisplayFeatureType.hinge => true,
         ui.DisplayFeatureType.fold =>
           feature.state == ui.DisplayFeatureState.postureHalfOpened,
         ui.DisplayFeatureType.unknown => false,
       };
+      // Zero-thickness half-opened folds have a 0px width or height line;
+      // give that division a 1px logical seam so intersection preserves it.
+      final Rect bounds;
+      if (rawBounds.width > 0 && rawBounds.height > 0) {
+        bounds = rawBounds;
+      } else if (kind == 'division' &&
+          active &&
+          (rawBounds.width > 0 || rawBounds.height > 0)) {
+        bounds = Rect.fromLTWH(
+          rawBounds.left,
+          rawBounds.top,
+          rawBounds.width > 0 ? rawBounds.width : 1.0,
+          rawBounds.height > 0 ? rawBounds.height : 1.0,
+        );
+      } else {
+        continue;
+      }
+      const matchTolerance = 1.0;
+      final existingIndex = regions.indexWhere((existing) {
+        if (existing.kind != kind) return false;
+        final expandedExisting = Rect.fromLTRB(
+          existing.frame.left - existing.margins.left,
+          existing.frame.top - existing.margins.top,
+          existing.frame.right + existing.margins.right,
+          existing.frame.bottom + existing.margins.bottom,
+        );
+        final containsBounds =
+            bounds.left >= expandedExisting.left - matchTolerance &&
+            bounds.top >= expandedExisting.top - matchTolerance &&
+            bounds.right <= expandedExisting.right + matchTolerance &&
+            bounds.bottom <= expandedExisting.bottom + matchTolerance;
+        return containsBounds;
+      });
+      if (existingIndex >= 0) {
+        final existing = regions[existingIndex];
+        if (!existing.active && active) {
+          regions[existingIndex] = PocketDisplayRegion(
+            id: existing.id,
+            kind: existing.kind,
+            frame: existing.frame,
+            margins: existing.margins,
+            active: true,
+          );
+        }
+        continue;
+      }
       regions.add(
         PocketDisplayRegion(
           id: 'display-feature-$kind-$i',
@@ -2762,6 +2803,46 @@ class _PocketViewState extends State<PocketView>
         ((visible.bottom - canvasRect.top) / scaleY).clamp(0.0, _frame.height),
       );
       if (local.isEmpty) continue;
+      final clippedTop = (visible.top - region.frame.top).clamp(
+        0.0,
+        double.infinity,
+      );
+      final clippedRight = (region.frame.right - visible.right).clamp(
+        0.0,
+        double.infinity,
+      );
+      final clippedBottom = (region.frame.bottom - visible.bottom).clamp(
+        0.0,
+        double.infinity,
+      );
+      final clippedLeft = (visible.left - region.frame.left).clamp(
+        0.0,
+        double.infinity,
+      );
+      final marginTop = clippedTop > 0
+          ? 0.0
+          : math.min(
+              region.margins.top,
+              math.max(0.0, visible.top - canvasRect.top),
+            );
+      final marginRight = clippedRight > 0
+          ? 0.0
+          : math.min(
+              region.margins.right,
+              math.max(0.0, canvasRect.right - visible.right),
+            );
+      final marginBottom = clippedBottom > 0
+          ? 0.0
+          : math.min(
+              region.margins.bottom,
+              math.max(0.0, canvasRect.bottom - visible.bottom),
+            );
+      final marginLeft = clippedLeft > 0
+          ? 0.0
+          : math.min(
+              region.margins.left,
+              math.max(0.0, visible.left - canvasRect.left),
+            );
       result.add(<String, dynamic>{
         'id': region.id,
         'kind': region.kind,
@@ -2772,10 +2853,10 @@ class _PocketViewState extends State<PocketView>
           'height': local.height,
         },
         'margins': <String, double>{
-          'top': region.margins.top / scaleY,
-          'right': region.margins.right / scaleX,
-          'bottom': region.margins.bottom / scaleY,
-          'left': region.margins.left / scaleX,
+          'top': marginTop / scaleY,
+          'right': marginRight / scaleX,
+          'bottom': marginBottom / scaleY,
+          'left': marginLeft / scaleX,
         },
         'active': region.active,
       });

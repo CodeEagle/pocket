@@ -361,13 +361,15 @@ function isCoveredByTopSafeAreaOnly(expanded: DisplayRegionFrame, geometry: Disp
 function isLocalLeftOcclusion(region: DisplayRegion, geometry: DisplayGeometry): boolean {
   if (region.kind !== "occlusion") return false;
   const expanded = expandedRegionFrame(region);
+  const frameRight = region.frame.left + region.frame.width;
   const expandedRight = expanded.left + expanded.width;
   if (isCoveredByTopSafeAreaOnly(expanded, geometry)) return false;
   const maxOuterGap = Math.max(DISPLAY_GEOMETRY_EPSILON, geometry.safeArea.left - expanded.width + DISPLAY_GEOMETRY_EPSILON, 24);
   return region.frame.top >= -DISPLAY_GEOMETRY_EPSILON
     && region.frame.top + region.frame.height <= geometry.height + DISPLAY_GEOMETRY_EPSILON
-    && expanded.left >= 0
-    && expanded.left <= maxOuterGap
+    && region.frame.left >= -DISPLAY_GEOMETRY_EPSILON
+    && frameRight > 0
+    && Math.max(0, expanded.left) <= maxOuterGap
     && expandedRight < geometry.width * 0.4
     && expanded.height < geometry.height * 0.6
     && expanded.width < geometry.width * 0.6;
@@ -379,10 +381,10 @@ function isLocalRightOcclusion(region: DisplayRegion, geometry: DisplayGeometry)
   const frameRight = region.frame.left + region.frame.width;
   const expandedRight = expanded.left + expanded.width;
   if (isCoveredByTopSafeAreaOnly(expanded, geometry)) return false;
-  const outerDistance = geometry.width - expandedRight;
+  const outerDistance = Math.max(0, geometry.width - expandedRight);
   const maxOuterGap = Math.max(DISPLAY_GEOMETRY_EPSILON, geometry.safeArea.right - expanded.width + DISPLAY_GEOMETRY_EPSILON, 24);
   return region.frame.top >= -DISPLAY_GEOMETRY_EPSILON
-    && expanded.left >= 0
+    && region.frame.left >= -DISPLAY_GEOMETRY_EPSILON
     && frameRight <= geometry.width + DISPLAY_GEOMETRY_EPSILON
     && region.frame.top + region.frame.height <= geometry.height + DISPLAY_GEOMETRY_EPSILON
     && outerDistance <= maxOuterGap
@@ -655,9 +657,7 @@ export function sideContourReservesForBand(
     const maxReserve = Math.max(0, Math.min(geometry.width, requiredLeft - itemLeft));
     if (maxReserve <= 0) continue;
     const rawBottom = contour.top + contour.height;
-    const isTopCorner = contour.top <= DISPLAY_GEOMETRY_EPSILON;
-    const defaultBottomTrim = isTopCorner && contour.height > 60 ? DISPLAY_CONTOUR_BOTTOM_TRIM_PX : 0;
-    const bottomTrim = options.bottomTrim !== undefined ? nonNegative(options.bottomTrim) : defaultBottomTrim;
+    const bottomTrim = options.bottomTrim !== undefined ? nonNegative(options.bottomTrim) : 0;
     const cutoutTop = Math.max(0, contour.top);
     const cutoutBottom = Math.max(cutoutTop, rawBottom - bottomTrim) + extraBottom;
     const factor = contourBandFactor(top, bottom, cutoutTop, cutoutBottom, ramp);
@@ -666,14 +666,25 @@ export function sideContourReservesForBand(
   }
 
   let bestRight = 0;
+  const hasTopRightPhysicalCutout = activeRegions(geometry).some(
+    region => isLocalTopRightOcclusion(region, geometry) && /^display-feature-/.test(region.id),
+  );
   for (const contour of rightContours) {
     if (bottom <= top && (top > contour.top + contour.height || bottom < contour.top)) continue;
     const allowedRight = Math.max(0, contour.left - safetyGap - extraRight);
     const maxReserve = Math.max(0, Math.min(geometry.width, itemRight - allowedRight));
     if (maxReserve <= 0) continue;
     const rawBottom = contour.top + contour.height;
-    const isTopCorner = contour.top <= DISPLAY_GEOMETRY_EPSILON;
-    const defaultBottomTrim = isTopCorner && contour.height > 60 ? DISPLAY_CONTOUR_BOTTOM_TRIM_PX : 0;
+    // Only iPhone Duo's wide top-right status capsule (`width >= 60`,
+    // `height > 60`) carries 14px of decorative bottom pill padding below the
+    // status glyphs; physical right-edge cutouts/notches must keep their full
+    // vertical protection.
+    const isTopRightStatusCluster = !hasTopRightPhysicalCutout
+      && contour.top <= DISPLAY_GEOMETRY_EPSILON
+      && contour.left + contour.width >= geometry.width - DISPLAY_GEOMETRY_EPSILON
+      && contour.width >= 60
+      && contour.height > 60;
+    const defaultBottomTrim = isTopRightStatusCluster ? DISPLAY_CONTOUR_BOTTOM_TRIM_PX : 0;
     const bottomTrim = options.bottomTrim !== undefined ? nonNegative(options.bottomTrim) : defaultBottomTrim;
     const cutoutTop = Math.max(0, contour.top);
     const cutoutBottom = Math.max(cutoutTop, rawBottom - bottomTrim) + extraBottom;

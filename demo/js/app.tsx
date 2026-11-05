@@ -1027,18 +1027,31 @@ function HomeExplore(props: { wide: () => boolean; dispatch: (event: DemoEvent) 
 
 function GalleryTile(props: {
   card: string;
+  index: () => number;
   contentWidth: () => number;
   onSelect: () => void;
 }): JSX.Element {
-  const { nodeRef, reserve } = useScrollContourReserve({
+  const { leftReserve, nodeRef, reserve } = useScrollContourReserve({
+    itemLeft: 20,
     itemRight: () => Math.max(0, props.contentWidth() - 20),
   });
-  const tileWidth = () => Math.max(0, (props.contentWidth() - reserve() - 40 - 12) / 2);
+  let appliedLeftNonZero = false;
+  const tileStyle = () => {
+    const l = leftReserve();
+    const r = reserve();
+    const isLeftColumn = props.index() % 2 === 0;
+    if (isLeftColumn && l > 0) appliedLeftNonZero = true;
+    const width = Math.max(0, (props.contentWidth() - l - r - 40 - 12) / 2);
+    return {
+      width,
+      ...(isLeftColumn && (l > 0 || appliedLeftNonZero) ? { marginL: l } : {}),
+    };
+  };
   return (
     <Focusable
       nodeRef={nodeRef}
       class="flex-col gap-3 h-[112] p-4 rounded-xl bg-white focus:bg-blue-50 overflow-hidden"
-      style={{ width: tileWidth() }}
+      style={tileStyle()}
       onPress={props.onSelect}
     >
       <View class="w-[28] h-[28] items-center justify-center rounded-lg bg-blue-50">
@@ -1066,9 +1079,10 @@ function GalleryPage(props: {
       <PageIntro title="Official building blocks" body="The essentials, ready to explore." />
       <TileGrid>
         <For each={componentCards}>
-          {(card) => (
+          {(card, index) => (
             <GalleryTile
               card={card}
+              index={index}
               contentWidth={props.contentWidth}
               onSelect={() => props.dispatch({ type: "select", component: card })}
             />
