@@ -24,6 +24,11 @@ import {
   List,
   MetricCard,
   MiniBarChart,
+  MobileAlert,
+  MobileBadge,
+  MobileDialog,
+  MobilePopup,
+  MobileToast,
   NavigationBar,
   PageIntro,
   Row,
@@ -1052,6 +1057,9 @@ function GalleryPage(props: {
   dispatch: (event: DemoEvent) => void;
   contentWidth: () => number;
 }): JSX.Element {
+  const [galleryToastOpen, setGalleryToastOpen] = createSignal(true);
+  const [galleryPopupOpen, setGalleryPopupOpen] = createSignal(false);
+  const [galleryDialogOpen, setGalleryDialogOpen] = createSignal(false);
   return (
     <ScrollablePage>
       <View class="flex-col gap-4 pb-5">
@@ -1091,6 +1099,52 @@ function GalleryPage(props: {
           <ActionButton label="Video Lab" kind="quiet" onPress={() => props.dispatch({ type: "navigate", route: "video" })} />
         </View>
       </Card>
+      <Card class="flex-col gap-3 mx-5 p-4 rounded-xl bg-white">
+        <View class="flex-row items-center justify-between gap-2">
+          <ViewText title="Option C Design System" body="Toast, Alert, Popup & Dialog with state animations." />
+          <MobileBadge label="M3 + TDesign" tone="accent" />
+        </View>
+        <MobileAlert
+          tone="info"
+          title="Built-in Light & Night Tokens"
+          body="Touch 44px and Desktop 36px dual density with 60Hz transitions."
+        />
+        <MobileToast
+          open={galleryToastOpen()}
+          tone="success"
+          message="Toast ready in Gallery"
+          detail="Spring entrance & tone transitions"
+          onClose={() => setGalleryToastOpen(false)}
+        />
+        <View class="flex-row flex-wrap gap-2">
+          <ActionButton label="Toast" kind="secondary" onPress={() => setGalleryToastOpen(true)} />
+          <ActionButton label="Popup" kind="quiet" onPress={() => setGalleryPopupOpen(true)} />
+          <ActionButton label="Dialog" kind="quiet" onPress={() => setGalleryDialogOpen(true)} />
+          <ActionButton label="Full Suite" onPress={() => props.dispatch({ type: "navigate", route: "mobile" })} />
+        </View>
+      </Card>
+      <MobilePopup
+        open={galleryPopupOpen()}
+        title="Gallery Action Sheet"
+        subtitle="BottomSheet on mobile, centered Popover on desktop."
+        actions={[
+          { id: "mobile", label: "Open full Mobile + PC UI showcase", detail: "Explore all 20+ animated components" },
+          { id: "transitions", label: "Inspect route transitions", detail: "iOS spring, shared axis & portal" },
+        ]}
+        onSelectAction={(id) => {
+          if (id === "mobile") props.dispatch({ type: "navigate", route: "mobile" });
+          if (id === "transitions") props.dispatch({ type: "navigate", route: "transitions" });
+        }}
+        onClose={() => setGalleryPopupOpen(false)}
+      />
+      <MobileDialog
+        open={galleryDialogOpen()}
+        title="Option C Modal Dialog"
+        body="Animated scale & opacity transition owned by JS."
+        confirmLabel="Open Mobile UI"
+        onConfirm={() => props.dispatch({ type: "navigate", route: "mobile" })}
+        onClose={() => setGalleryDialogOpen(false)}
+      />
       <EmptyState title="Not mounted here" body="More capabilities live under Host." />
       </View>
     </ScrollablePage>

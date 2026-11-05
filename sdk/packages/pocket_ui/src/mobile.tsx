@@ -780,14 +780,13 @@ export function MobileAccordion(props: {
       </Focusable>
       <Show when={props.expanded}>
         <View
-          class={theme().name === "dark"
-            ? "flex-col gap-2 pt-2 border-t border-[#30405A] transition-all duration-200 ease-out"
-            : "flex-col gap-2 pt-2 border-t border-[#E5E9F2] transition-all duration-200 ease-out"}
+          class="flex-col gap-2 pt-2 transition-all duration-200 ease-out"
           style={{
             opacity: progress(),
             translateY: Math.round((1 - progress()) * -6),
           }}
         >
+          <View class={theme().name === "dark" ? "w-full h-[1] bg-[#30405A]" : "w-full h-[1] bg-[#E5E9F2]"} />
           {props.children}
         </View>
       </Show>
@@ -829,11 +828,11 @@ export function MobileSkeleton(props: {
         <For each={indices()}>
           {(idx) => (
             <View
-              class={idx === 0
-                ? (theme().name === "dark" ? "w-3/4 h-3 rounded-xl bg-[#22314A]" : "w-3/4 h-3 rounded-xl bg-[#EEF1F6]")
-                : idx % 2 === 1
-                  ? (theme().name === "dark" ? "w-full h-3 rounded-xl bg-[#22314A]" : "w-full h-3 rounded-xl bg-[#EEF1F6]")
-                  : (theme().name === "dark" ? "w-1/2 h-3 rounded-xl bg-[#22314A]" : "w-1/2 h-3 rounded-xl bg-[#EEF1F6]")}
+              class={theme().name === "dark" ? "w-full h-3 rounded-xl bg-[#22314A]" : "w-full h-3 rounded-xl bg-[#EEF1F6]"}
+              style={{
+                scaleX: idx === 0 ? 0.75 : idx % 2 === 1 ? 1 : 0.55,
+                originX: -0.5,
+              }}
             />
           )}
         </For>
@@ -985,9 +984,9 @@ export function MobilePopup(props: {
     <Show when={isOpen()}>
       <Modal
         open
-        backdropClass={isBottomSheet()
-          ? "flex-col items-center justify-end w-full h-full p-3 bg-black/50 transition-opacity duration-200 ease-out"
-          : "flex-col items-center justify-center w-full h-full p-4 bg-black/50 transition-opacity duration-200 ease-out"}
+        class={isBottomSheet()
+          ? "absolute inset-0 z-50 flex-col items-center justify-end p-3"
+          : "absolute inset-0 z-50 flex-col items-center justify-center p-4"}
         panelClass={theme().name === "dark"
           ? "flex-col gap-3 w-[344] p-4 rounded-xl shadow-lg bg-[#17233B] border-[#30405A] transition-all duration-200 ease-spring"
           : "flex-col gap-3 w-[344] p-4 rounded-xl shadow-lg bg-white border-[#E5E9F2] transition-all duration-200 ease-spring"}

@@ -2,17 +2,31 @@ import { For, Show, createSignal, onCleanup, type JSX } from "solid-js";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import {
   InputField,
+  MobileAccordion,
+  MobileAlert,
   MobileAppBar,
+  MobileAvatar,
   MobileBadge,
   MobileButton,
   MobileCard,
+  MobileCheckbox,
+  MobileDangerButton,
   MobileDialog,
   MobileFilledButton,
   MobileListTile,
+  MobileOutlinedButton,
+  MobilePopup,
+  MobileProgress,
+  MobileRadioGroup,
   MobileScaffold,
   MobileSegmentedControl,
+  MobileSkeleton,
   MobileStepper,
   MobileSwitch,
+  MobileTag,
+  MobileTextButton,
+  MobileToast,
+  MobileTonalButton,
   PlatformTextureSurface,
   MOBILE_THEME_DARK,
   MOBILE_THEME_LIGHT,
@@ -23,6 +37,7 @@ import {
   FlutterIconButton,
   FlutterLinearProgressIndicator,
   FlutterNavigationDestination,
+  type DesignDensity,
 } from "@pocket/ui";
 import {
   TRANSITION_MODES,
@@ -73,29 +88,64 @@ function capabilityTone(
 export function MobileUiPage(props: MobilePageProps): JSX.Element {
   const [selected, setSelected] = createSignal("overview");
   const dark = () => props.state().mobileDark;
+  const [densityMode, setDensityMode] = createSignal<"auto" | DesignDensity>("auto");
   const [enabled, setEnabled] = createSignal(true);
   const [level, setLevel] = createSignal(3);
   const [draft, setDraft] = createSignal("");
   const [dialogOpen, setDialogOpen] = createSignal(false);
+  const [dialogMode, setDialogMode] = createSignal<"default" | "confirm" | "danger">("default");
+  const [popupOpen, setPopupOpen] = createSignal(false);
+  const [toastOpen, setToastOpen] = createSignal(true);
+  const [toastTone, setToastTone] = createSignal<"info" | "success" | "warning" | "danger">("info");
+  const [toastMessage, setToastMessage] = createSignal("Design tokens synced · 60fps transitions ready");
+  const [alertOpen, setAlertOpen] = createSignal(true);
+  const [alertTone, setAlertTone] = createSignal<"info" | "success" | "warning" | "danger">("info");
+  const [checkboxAutoSave, setCheckboxAutoSave] = createSignal(true);
+  const [checkboxHaptics, setCheckboxHaptics] = createSignal(false);
+  const [radioLayout, setRadioLayout] = createSignal("adaptive");
+  const [selectedTag, setSelectedTag] = createSignal("m3");
+  const [accordionSpecOpen, setAccordionSpecOpen] = createSignal(true);
+  const [accordionAnimOpen, setAccordionAnimOpen] = createSignal(false);
+  const [skeletonPulse, setSkeletonPulse] = createSignal(true);
+  const [lastOverlayAction, setLastOverlayAction] = createSignal("Ready");
   const [destination, setDestination] = createSignal("home");
   const toggleTheme = (): void => {
     const next = !dark();
     props.dispatch({ type: "setMobileDark", value: next });
   };
+  const showToast = (
+    tone: "info" | "success" | "warning" | "danger",
+    msg: string,
+  ): void => {
+    setToastTone(tone);
+    setToastMessage(msg);
+    setToastOpen(true);
+    setLastOverlayAction(`Toast (${tone})`);
+  };
+  const openDialogVariant = (mode: "default" | "confirm" | "danger"): void => {
+    setDialogMode(mode);
+    setDialogOpen(true);
+    setLastOverlayAction(`Dialog (${mode})`);
+  };
+  const showOverview = () => selected() === "overview";
+  const showFeedback = () => selected() === "overview" || selected() === "feedback";
+  const showControls = () => selected() === "overview" || selected() === "controls";
+  const showData = () => selected() === "overview" || selected() === "data";
   return (
     <MobileThemeProvider
       theme={() => (dark() ? MOBILE_THEME_DARK : MOBILE_THEME_LIGHT)}
+      density={() => densityMode()}
     >
       <MobileScaffold
         class={
           dark()
-            ? "flex-col gap-4 p-4 bg-[#0E1728]"
-            : "flex-col gap-4 p-4 bg-[#F5F6FA]"
+            ? "flex-col gap-4 p-4 bg-[#0E1728] transition-colors duration-200 ease-out"
+            : "flex-col gap-4 p-4 bg-[#F5F6FA] transition-colors duration-200 ease-out"
         }
       >
         <MobileAppBar
           title="Mobile UI"
-          subtitle="JS-owned components"
+          subtitle="Option C · Mobile + PC Design System"
           leading={
             <MobileButton
               label="Back"
@@ -120,12 +170,43 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
         <MobileSegmentedControl
           items={[
             { id: "overview", label: "Overview" },
+            { id: "feedback", label: "Feedback" },
             { id: "controls", label: "Controls" },
+            { id: "data", label: "Data" },
           ]}
           active={selected()}
           onChange={setSelected}
         />
-        <Show when={selected() === "overview"}>
+        <MobileCard
+          title="Theme & Density Tokens"
+          detail="M3 + Shadcn Slate palette · TDesign dual density (Touch 44px / Desktop 36px)."
+        >
+          <View class="flex-row items-center justify-between gap-2">
+            <View class="flex-row items-center gap-2">
+              <MobileBadge label={dark() ? "Theme: Night" : "Theme: Daylight"} tone="accent" />
+              <MobileBadge label={`Density: ${densityMode()}`} tone="neutral" />
+            </View>
+            <MobileTonalButton
+              label="Popup Sheet"
+              compact
+              onPress={() => {
+                setPopupOpen(true);
+                setLastOverlayAction("Popup opened");
+              }}
+            />
+          </View>
+          <MobileSegmentedControl
+            items={[
+              { id: "auto", label: "Auto" },
+              { id: "touch", label: "Touch 44px" },
+              { id: "desktop", label: "PC 36px" },
+            ]}
+            active={densityMode()}
+            onChange={(id) => setDensityMode(id as "auto" | DesignDensity)}
+          />
+        </MobileCard>
+
+        <Show when={showOverview()}>
           <MobileCard
             title="Scaffold + AppBar"
             detail="Shared mobile primitives."
@@ -144,10 +225,10 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
                   label="Open"
                   kind="text"
                   compact
-                  onPress={() => setDialogOpen(true)}
+                  onPress={() => openDialogVariant("default")}
                 />
               }
-              onPress={() => setDialogOpen(true)}
+              onPress={() => openDialogVariant("default")}
             />
             <View class="flex-row flex-wrap gap-2">
               <MobileFilledButton
@@ -160,16 +241,265 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
                   })
                 }
               />
-              <MobileButton
+              <MobileTonalButton
+                label="Tonal"
+                compact
+                onPress={() => showToast("info", "Tonal button pressed")}
+              />
+              <MobileOutlinedButton
                 label="Transitions"
-                kind="outlined"
                 compact
                 onPress={() =>
                   props.dispatch({ type: "navigate", route: "transitions" })
                 }
               />
+              <MobileDangerButton
+                label="Danger"
+                compact
+                onPress={() => openDialogVariant("danger")}
+              />
             </View>
           </MobileCard>
+        </Show>
+
+        <Show when={showFeedback()}>
+          <MobileCard
+            title="Feedback & Overlays"
+            detail="Toast, Alert, Popup (BottomSheet / PC Popover) & Modal Dialog with state animations."
+          >
+            <MobileToast
+              open={toastOpen()}
+              tone={toastTone()}
+              message={toastMessage()}
+              detail={`Last action · ${lastOverlayAction()}`}
+              actionLabel="Undo"
+              onAction={() => setLastOverlayAction("Toast Undo")}
+              onClose={() => setToastOpen(false)}
+            />
+            <View class="flex-row flex-wrap gap-2">
+              <MobileTonalButton
+                label="Info Toast"
+                compact
+                onPress={() => showToast("info", "Info toast · spring entrance active")}
+              />
+              <MobileTonalButton
+                label="Success Toast"
+                compact
+                onPress={() => showToast("success", "Saved to JS state · 0ms bridge lag")}
+              />
+              <MobileOutlinedButton
+                label="Warn Toast"
+                compact
+                onPress={() => showToast("warning", "Network latency elevated · retrying")}
+              />
+              <MobileDangerButton
+                label="Error Toast"
+                compact
+                onPress={() => showToast("danger", "Action blocked by sandbox policy")}
+              />
+            </View>
+
+            <MobileAlert
+              open={alertOpen()}
+              tone={alertTone()}
+              title={`Alert Banner (${alertTone()})`}
+              body="Inline semantic status alert with animated tone & entrance transition."
+              closable
+              actionLabel="Cycle"
+              onAction={() => {
+                const order: Array<"info" | "success" | "warning" | "danger"> = [
+                  "info",
+                  "success",
+                  "warning",
+                  "danger",
+                ];
+                const next = order[(order.indexOf(alertTone()) + 1) % order.length]!;
+                setAlertTone(next);
+                setLastOverlayAction(`Alert (${next})`);
+              }}
+              onClose={() => setAlertOpen(false)}
+            />
+            <Show when={!alertOpen()}>
+              <MobileOutlinedButton
+                label="Restore Alert Banner"
+                compact
+                onPress={() => setAlertOpen(true)}
+              />
+            </Show>
+
+            <View class="flex-row flex-wrap gap-2">
+              <MobileFilledButton
+                label="Open Popup"
+                compact
+                onPress={() => {
+                  setPopupOpen(true);
+                  setLastOverlayAction("Popup opened");
+                }}
+              />
+              <MobileTonalButton
+                label="Confirm Dialog"
+                compact
+                onPress={() => openDialogVariant("confirm")}
+              />
+              <MobileDangerButton
+                label="Danger Dialog"
+                compact
+                onPress={() => openDialogVariant("danger")}
+              />
+            </View>
+            <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>
+              Overlay status · {lastOverlayAction()}
+            </Text>
+          </MobileCard>
+        </Show>
+
+        <Show when={showControls()}>
+          <MobileCard
+            title="Controls"
+            detail="Signals and input stay in JS."
+            class={
+              dark()
+                ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
+                : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
+            }
+          >
+            <MobileSwitch
+              value={enabled()}
+              label={enabled() ? "Enabled" : "Disabled"}
+              onChange={setEnabled}
+            />
+            <MobileStepper
+              value={level()}
+              min={0}
+              max={10}
+              onChange={setLevel}
+            />
+            <MobileProgress
+              value={level()}
+              max={10}
+              label="Animated Progress"
+              tone={level() >= 8 ? "success" : level() <= 2 ? "warning" : "accent"}
+            />
+            <View class="flex-col gap-2">
+              <MobileCheckbox
+                checked={checkboxAutoSave()}
+                onChange={setCheckboxAutoSave}
+                label="Auto-commit state snapshots"
+                detail="Animated spring checkbox indicator"
+              />
+              <MobileCheckbox
+                checked={checkboxHaptics()}
+                onChange={setCheckboxHaptics}
+                label="Desktop keyboard shortcuts"
+                detail="Adapts to compact touch or expanded PC density"
+              />
+            </View>
+            <MobileRadioGroup
+              value={radioLayout()}
+              onChange={setRadioLayout}
+              items={[
+                { id: "adaptive", label: "Adaptive 3-Tier Split", detail: "Compact / Medium / Expanded" },
+                { id: "mobile", label: "Mobile Single-Column", detail: "Bottom NavigationBar + Sheet" },
+                { id: "desktop", label: "Desktop Multi-Pane", detail: "Side NavigationRail + Popover" },
+              ]}
+            />
+            <InputField
+              value={draft}
+              onInput={setDraft}
+              onSubmit={setDraft}
+              placeholder="System keyboard input"
+            />
+            <Text
+              class={
+                dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"
+              }
+            >
+              State · {enabled() ? "on" : "off"} · level {String(level())} · layout {radioLayout()}
+            </Text>
+            <Text
+              class={
+                dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"
+              }
+            >
+              Draft · {draft() || "(empty)"}
+            </Text>
+            <MobileFilledButton
+              label="Show dialog"
+              onPress={() => openDialogVariant("default")}
+            />
+          </MobileCard>
+        </Show>
+
+        <Show when={showData()}>
+          <MobileCard
+            title="Data Display & Disclosure"
+            detail="Avatar, Badge, Tag, Accordion, Skeleton & TDesign Cell rows."
+          >
+            <View class="flex-row items-center justify-between gap-2">
+              <View class="flex-row items-center gap-3">
+                <MobileAvatar label="AC" tone="accent" status="online" />
+                <MobileAvatar label="LN" tone="success" status="busy" />
+                <MobileAvatar label="PK" tone="warning" status="offline" />
+              </View>
+              <View class="flex-row flex-wrap gap-1">
+                <MobileBadge label="M3" tone="accent" />
+                <MobileBadge label="Ready" tone="success" />
+                <MobileBadge label="Warn" tone="warning" />
+                <MobileBadge label="Alert" tone="danger" />
+              </View>
+            </View>
+            <View class="flex-row flex-wrap gap-2">
+              <MobileTag
+                label="Material 3"
+                selected={selectedTag() === "m3"}
+                onPress={() => setSelectedTag("m3")}
+              />
+              <MobileTag
+                label="TDesign Cell"
+                selected={selectedTag() === "tdesign"}
+                onPress={() => setSelectedTag("tdesign")}
+              />
+              <MobileTag
+                label="Shadcn Slate"
+                selected={selectedTag() === "shadcn"}
+                onPress={() => setSelectedTag("shadcn")}
+              />
+            </View>
+            <MobileAccordion
+              title="Option C Token Specification"
+              detail="Tap to expand/collapse with chevron & body transition"
+              badge="Tokens"
+              expanded={accordionSpecOpen()}
+              onToggle={() => setAccordionSpecOpen((v) => !v)}
+            >
+              <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>
+                Semantic surfaces: canvas, surface, surfaceMuted, accentSoft, success, warning, danger.
+              </Text>
+            </MobileAccordion>
+            <MobileAccordion
+              title="60Hz State-Change Animation Pipeline"
+              detail="Compiled StyleRecord transitions + frame-driven spring progress"
+              badge="60fps"
+              expanded={accordionAnimOpen()}
+              onToggle={() => setAccordionAnimOpen((v) => !v)}
+            >
+              <Text class={dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>
+                Every interactive control animates scale, opacity, translation, or rotation on state change.
+              </Text>
+            </MobileAccordion>
+            <View class="flex-row items-center justify-between">
+              <Text class={dark() ? "text-xs text-white font-bold" : "text-xs text-[#17233B] font-bold"}>
+                Skeleton Placeholder
+              </Text>
+              <MobileTextButton
+                label={skeletonPulse() ? "Pause pulse" : "Resume pulse"}
+                compact
+                onPress={() => setSkeletonPulse((v) => !v)}
+              />
+            </View>
+            <MobileSkeleton rows={3} avatar active={skeletonPulse()} />
+          </MobileCard>
+
           <MobileCard
             title="Flutter widgets"
             detail="Official @pocket/ui adapters."
@@ -195,7 +525,7 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
               <FlutterIconButton
                 icon="⋯"
                 tooltip="More"
-                onPress={() => setDialogOpen(true)}
+                onPress={() => openDialogVariant("default")}
               />
               <FlutterFloatingActionButton
                 icon="+"
@@ -228,57 +558,64 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
             </View>
           </MobileCard>
         </Show>
-        <Show when={selected() === "controls"}>
-          <MobileCard
-            title="Controls"
-            detail="Signals and input stay in JS."
-            class={
-              dark()
-                ? "flex-col gap-3 p-4 rounded-xl bg-[#17233B] border-[#30405A]"
-                : "flex-col gap-3 p-4 rounded-xl bg-white border-[#E5E9F2]"
+
+        <MobilePopup
+          open={popupOpen()}
+          title="Workspace Action Sheet"
+          subtitle="Auto-adapts: BottomSheet on mobile, centered Popover on desktop."
+          actions={[
+            { id: "share", label: "Share design tokens", detail: "Publish Light & Night palette to MiniApps" },
+            { id: "density", label: "Toggle PC 36px density", detail: "Switch between Touch 44px and Desktop 36px" },
+            { id: "reset", label: "Reset control state", detail: "Restore default demo signals", danger: true },
+          ]}
+          onSelectAction={(id) => {
+            if (id === "density") {
+              setDensityMode((prev) => (prev === "desktop" ? "touch" : "desktop"));
+            } else if (id === "reset") {
+              setLevel(3);
+              setEnabled(true);
             }
-          >
-            <MobileSwitch
-              value={enabled()}
-              label={enabled() ? "Enabled" : "Disabled"}
-              onChange={setEnabled}
-            />
-            <MobileStepper
-              value={level()}
-              min={0}
-              max={10}
-              onChange={setLevel}
-            />
-            <InputField
-              value={draft}
-              onInput={setDraft}
-              onSubmit={setDraft}
-              placeholder="System keyboard input"
-            />
-            <Text
-              class={
-                dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"
-              }
-            >
-              State · {enabled() ? "on" : "off"} · level {String(level())}
-            </Text>
-            <Text
-              class={
-                dark() ? "text-xs text-[#B9C5D8]" : "text-xs text-[#17233B]"
-              }
-            >
-              Draft · {draft() || "(empty)"}
-            </Text>
-            <MobileFilledButton
-              label="Show dialog"
-              onPress={() => setDialogOpen(true)}
-            />
-          </MobileCard>
-        </Show>
+            setLastOverlayAction(`Popup action: ${id}`);
+            showToast(id === "reset" ? "warning" : "success", `Executed popup action: ${id}`);
+          }}
+          onClose={() => setPopupOpen(false)}
+        />
+
         <MobileDialog
           open={dialogOpen()}
-          title="JS-owned dialog"
-          body="Modal portal; state stays in JS."
+          title={
+            dialogMode() === "danger"
+              ? "Delete cached snapshot?"
+              : dialogMode() === "confirm"
+                ? "Apply Option C Theme?"
+                : "JS-owned dialog"
+          }
+          body={
+            dialogMode() === "danger"
+              ? "This action clears local draft signals and animates dismissal."
+              : dialogMode() === "confirm"
+                ? "Synchronize Light & Night tokens across mobile and desktop panes."
+                : "Modal portal; state stays in JS."
+          }
+          tone={dialogMode() === "danger" ? "danger" : "default"}
+          confirmLabel={
+            dialogMode() === "danger"
+              ? "Delete"
+              : dialogMode() === "confirm"
+                ? "Apply"
+                : undefined
+          }
+          onConfirm={
+            dialogMode() === "default"
+              ? undefined
+              : () => {
+                  setLastOverlayAction(`Dialog confirmed (${dialogMode()})`);
+                  showToast(
+                    dialogMode() === "danger" ? "danger" : "success",
+                    `Dialog confirmed: ${dialogMode()}`,
+                  );
+                }
+          }
           onClose={() => setDialogOpen(false)}
         />
       </MobileScaffold>

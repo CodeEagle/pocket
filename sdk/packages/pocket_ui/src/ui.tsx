@@ -28,12 +28,16 @@ import {
   deriveResponsiveLayout,
   DISPLAY_UI_SAFETY_GAP,
   EMPTY_DISPLAY_GEOMETRY,
-  hasLocalTopRightOcclusionInset,
+  hasLocalLeftOcclusionInset,
+  hasLocalRightOcclusionInset,
+  leftOcclusionFrames,
   pageInsets,
+  rightOcclusionFrames,
+  sideContourReservesForBand,
   topRightContourReserveForBand,
   topRightOcclusionFrame,
-  topRightOcclusionFrames,
   type DisplayGeometry,
+  type DisplaySideContourReserves,
 } from "./responsive.ts";
 
 /**
@@ -79,6 +83,14 @@ export interface SafeAreaScaffoldContextValue {
   topRightContentReserve: () => number;
   /** Progressive right reserve for an arbitrary vertical band `[visualTop, visualBottom]`. */
   topRightReserveForBand: (visualTop: number, visualBottom: number, rampPx?: number, itemRight?: number) => number;
+  /** Progressive `{ left, right }` reserves for an arbitrary vertical band `[visualTop, visualBottom]`. */
+  sideReservesForBand: (
+    visualTop: number,
+    visualBottom: number,
+    rampPx?: number,
+    itemLeft?: number,
+    itemRight?: number,
+  ) => DisplaySideContourReserves;
 }
 
 export const SafeAreaScaffoldContext = createContext<SafeAreaScaffoldContextValue>({
@@ -87,6 +99,7 @@ export const SafeAreaScaffoldContext = createContext<SafeAreaScaffoldContextValu
   geometry: () => EMPTY_DISPLAY_GEOMETRY,
   topRightContentReserve: () => 0,
   topRightReserveForBand: () => 0,
+  sideReservesForBand: () => ({ left: 0, right: 0 }),
 });
 
 export const ContourConsumedContext = createContext<() => boolean>(() => false);
@@ -122,29 +135,47 @@ export function SafeAreaScaffold(props: SafeAreaScaffoldProps): JSX.Element {
   const reservedActions = props.reservedActions !== undefined
     ? reservedActionWidth(props.reservedActions)
     : parentScaffold.reservedActions;
+  const consumesLeft = edges === "all" || (edges !== "none" && edges.includes("left"));
   const consumesRight = edges === "all" || (edges !== "none" && edges.includes("right"));
+  const bodyLeftInset = (): number => {
+    if (!consumesLeft) return 0;
+    const current = geometry();
+    if (hasLocalLeftOcclusionInset(current)) return 0;
+    return pageInsets(current).left;
+  };
   const bodyRightInset = (): number => {
     if (!consumesRight) return 0;
     const current = geometry();
-    if (hasLocalTopRightOcclusionInset(current)) return 0;
+    if (hasLocalRightOcclusionInset(current)) return 0;
     return pageInsets(current).right;
+  };
+  const sideReservesForBand = (
+    visualTop: number,
+    visualBottom: number,
+    rampPx?: number,
+    itemLeft?: number,
+    itemRight?: number,
+  ): DisplaySideContourReserves => {
+    if (edges === "none" && props.geometry === undefined) {
+      return parentScaffold.sideReservesForBand(visualTop, visualBottom, rampPx, itemLeft, itemRight);
+    }
+    const current = geometry();
+    const raw = sideContourReservesForBand(current, visualTop, visualBottom, {
+      itemLeft,
+      itemRight,
+      rampPx,
+    });
+    return {
+      left: itemLeft !== undefined ? raw.left : Math.max(0, raw.left - bodyLeftInset()),
+      right: itemRight !== undefined ? raw.right : Math.max(0, raw.right - bodyRightInset()),
+    };
   };
   const topRightReserveForBand = (
     visualTop: number,
     visualBottom: number,
     rampPx?: number,
     itemRight?: number,
-  ): number => {
-    if (edges === "none" && props.geometry === undefined) {
-      return parentScaffold.topRightReserveForBand(visualTop, visualBottom, rampPx, itemRight);
-    }
-    const current = geometry();
-    const raw = topRightContourReserveForBand(current, visualTop, visualBottom, {
-      itemRight,
-      rampPx,
-    });
-    return itemRight !== undefined ? raw : Math.max(0, raw - bodyRightInset());
-  };
+  ): number => sideReservesForBand(visualTop, visualBottom, rampPx, undefined, itemRight).right;
   const topRightContentReserve = (): number => {
     if (edges === "none" && props.geometry === undefined) {
       return parentScaffold.topRightContentReserve();
@@ -159,6 +190,7 @@ export function SafeAreaScaffold(props: SafeAreaScaffoldProps): JSX.Element {
       geometry,
       topRightContentReserve,
       topRightReserveForBand,
+      sideReservesForBand,
     }}>
       <SafeAreaScaffoldBody {...props} edges={edges} geometry={geometry} />
     </SafeAreaScaffoldContext.Provider>
@@ -187,14 +219,30 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
     : "flex-col w-full h-full bg-[#F5F6FA]");
   const consumes = (edge: SafeAreaEdge): boolean =>
     props.edges === "all" || (props.edges !== "none" && props.edges.includes(edge));
+  const bodyLeftInset = () => {
+    if (!consumes("left")) return 0;
+    const current = props.geometry();
+    if (hasLocalLeftOcclusionInset(current)) return 0;
+    return insets().left;
+  };
   const bodyRightInset = () => {
     if (!consumes("right")) return 0;
     const current = props.geometry();
-    // Release a local top-right corner occlusion from full-height page padding
-    // so content below the cutout remains full-width while contour-aware
-    // headers and scroll items narrow locally inside the top-right band.
-    if (hasLocalTopRightOcclusionInset(current)) return 0;
+    // Release a local side/corner occlusion from full-height page padding
+    // so content outside the cutout band remains full-width while contour-aware
+    // headers and scroll items narrow locally inside the cutout band.
+    if (hasLocalRightOcclusionInset(current)) return 0;
     return insets().right;
+  };
+  const appBarLeadingReserve = () => {
+    if (intrinsic || !hasAppBar) return 0;
+    const current = props.geometry();
+    const padding = pageInsets(current);
+    const appBarTop = consumes("top") ? padding.top : 0;
+    return Math.max(
+      0,
+      sideContourReservesForBand(current, appBarTop, appBarTop + 56, { rampPx: 0 }).left - bodyLeftInset(),
+    );
   };
   const appBarTrailingReserve = () => {
     if (intrinsic || !hasAppBar) return 0;
@@ -248,7 +296,7 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
         class={canvasClass}
         style={{
           grow: 1,
-          paddingL: consumes("left") ? insets().left : 0,
+          paddingL: bodyLeftInset(),
           paddingR: bodyRightInset(),
         }}
       >
@@ -256,6 +304,7 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
           <ContourConsumedContext.Provider value={() => true}>
             <View style={{
               paddingT: consumes("top") ? insets().top : 0,
+              paddingL: appBarLeadingReserve(),
               paddingR: appBarTrailingReserve(),
             }}>{resolveSlot(props.appBar)}</View>
           </ContourConsumedContext.Provider>
@@ -277,12 +326,36 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
   );
 }
 
+function baseMarginLeft(className: string | undefined, explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
+  if (!className) return 0;
+  let result = 0;
+  for (const token of className.split(/\s+/)) {
+    const match = /^(?:m|mx|ml)-(?:\[(\d+(?:\.\d+)?)\]|(\d+(?:\.\d+)?))$/.exec(token);
+    if (!match) continue;
+    result = match[1] !== undefined ? Number(match[1]) : Number(match[2]) * 4;
+  }
+  return result;
+}
+
 function baseMarginRight(className: string | undefined, explicit?: number): number {
   if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
   if (!className) return 0;
   let result = 0;
   for (const token of className.split(/\s+/)) {
     const match = /^(?:m|mx|mr)-(?:\[(\d+(?:\.\d+)?)\]|(\d+(?:\.\d+)?))$/.exec(token);
+    if (!match) continue;
+    result = match[1] !== undefined ? Number(match[1]) : Number(match[2]) * 4;
+  }
+  return result;
+}
+
+function basePaddingLeft(className: string | undefined, explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
+  if (!className) return 0;
+  let result = 0;
+  for (const token of className.split(/\s+/)) {
+    const match = /^(?:p|px|pl)-(?:\[(\d+(?:\.\d+)?)\]|(\d+(?:\.\d+)?))$/.exec(token);
     if (!match) continue;
     result = match[1] !== undefined ? Number(match[1]) : Number(match[2]) * 4;
   }
@@ -314,25 +387,35 @@ function baseOverflow(className: string | undefined, explicit?: number): number 
 }
 
 export interface ScrollContourOptions {
+  baseLeft?: number;
   baseRight?: number;
   defaultInBand?: boolean;
   enabled?: boolean | (() => boolean);
+  itemLeft?: number | (() => number | undefined);
   itemRight?: number | (() => number | undefined);
   mode?: "margin" | "padding";
   rampPx?: number;
 }
 
 export function useScrollContourReserve(options: ScrollContourOptions = {}): {
+  leftReserve: Accessor<number>;
   nodeRef: (current: NodeMirror | undefined) => void;
   reserve: Accessor<number>;
+  reserves: Accessor<DisplaySideContourReserves>;
   syncLayout: () => boolean;
 } {
   const scaffold = useContext(SafeAreaScaffoldContext);
   const scrollPage = useContext(ScrollablePageContext);
   let node: NodeMirror | undefined;
   let lastCommitted: TextInputRect | undefined;
-  let currentReserve = 0;
+  let currentLeftReserve = 0;
+  let currentRightReserve = 0;
+  const [leftReserve, setLeftReserve] = createSignal(0);
   const [reserve, setReserve] = createSignal(0);
+  const reserves = (): DisplaySideContourReserves => ({
+    left: leftReserve(),
+    right: reserve(),
+  });
   const isEnabled = (): boolean =>
     options.enabled === undefined
       ? true
@@ -346,25 +429,40 @@ export function useScrollContourReserve(options: ScrollContourOptions = {}): {
         ? scrollPage.geometry()
         : EMPTY_DISPLAY_GEOMETRY;
 
-  const computeForBand = (visualTop: number, visualBottom: number, itemRight?: number): number => {
+  const computeForBand = (
+    visualTop: number,
+    visualBottom: number,
+    itemLeft?: number,
+    itemRight?: number,
+  ): DisplaySideContourReserves => {
     if (scaffold.hasScaffold) {
-      return scaffold.topRightReserveForBand(visualTop, visualBottom, options.rampPx, itemRight);
+      return scaffold.sideReservesForBand(visualTop, visualBottom, options.rampPx, itemLeft, itemRight);
     }
     if (scrollPage) {
-      return topRightContourReserveForBand(scrollPage.geometry(), visualTop, visualBottom, {
+      return sideContourReservesForBand(scrollPage.geometry(), visualTop, visualBottom, {
+        itemLeft,
         itemRight,
         rampPx: options.rampPx,
       });
     }
-    return 0;
+    return { left: 0, right: 0 };
   };
 
-  const computeNextReserve = (): number => {
-    if (!isEnabled()) return 0;
+  const computeNextReserves = (): DisplaySideContourReserves => {
+    if (!isEnabled()) return { left: 0, right: 0 };
     const currentGeometry = activeGeometry();
-    if (topRightOcclusionFrames(currentGeometry).length === 0) return 0;
+    if (
+      leftOcclusionFrames(currentGeometry).length === 0
+      && rightOcclusionFrames(currentGeometry).length === 0
+    ) {
+      return { left: 0, right: 0 };
+    }
     const mode = options.mode ?? "margin";
+    const baseLeft = options.baseLeft ?? 0;
     const baseRight = options.baseRight ?? 0;
+    const explicitItemLeft = typeof options.itemLeft === "function"
+      ? options.itemLeft()
+      : options.itemLeft;
     const explicitItemRight = typeof options.itemRight === "function"
       ? options.itemRight()
       : options.itemRight;
@@ -372,17 +470,21 @@ export function useScrollContourReserve(options: ScrollContourOptions = {}): {
     if (measured) lastCommitted = measured;
     const layout = measured ?? lastCommitted;
     if (!layout) {
-      if (!options.defaultInBand) return 0;
+      if (!options.defaultInBand) return { left: 0, right: 0 };
+      const fallbackLeft = explicitItemLeft !== undefined ? explicitItemLeft : baseLeft;
       const fallbackRight = explicitItemRight !== undefined
         ? explicitItemRight
         : currentGeometry.width > 0
           ? Math.max(0, currentGeometry.width - baseRight)
           : undefined;
-      return computeForBand(0, 56, fallbackRight);
+      return computeForBand(0, 56, fallbackLeft, fallbackRight);
     }
     const offset = scrollPage ? scrollPage.scrollOffset() : 0;
     const visualTop = layout.y - offset;
     const visualBottom = visualTop + layout.height;
+    const itemLeft = explicitItemLeft !== undefined
+      ? explicitItemLeft
+      : Math.max(0, layout.x - (mode === "margin" ? currentLeftReserve : -baseLeft));
     const itemRight = explicitItemRight !== undefined
       ? explicitItemRight
       : layout.width > 0
@@ -390,26 +492,33 @@ export function useScrollContourReserve(options: ScrollContourOptions = {}): {
             currentGeometry.width,
             Math.max(
               0,
-              layout.x + layout.width + (mode === "margin" ? currentReserve : -baseRight),
+              layout.x + layout.width + (mode === "margin" ? currentRightReserve : -baseRight),
             ),
           )
         : undefined;
-    return computeForBand(visualTop, visualBottom, itemRight);
+    return computeForBand(visualTop, visualBottom, itemLeft, itemRight);
   };
 
   const syncLayout = (): boolean => {
-    const next = computeNextReserve();
-    if (Math.abs(next - currentReserve) >= 0.25) {
-      currentReserve = next;
-      setReserve(next);
-      return true;
+    const next = computeNextReserves();
+    let changed = false;
+    if (Math.abs(next.left - currentLeftReserve) >= 0.25) {
+      currentLeftReserve = next.left;
+      setLeftReserve(next.left);
+      changed = true;
     }
-    return false;
+    if (Math.abs(next.right - currentRightReserve) >= 0.25) {
+      currentRightReserve = next.right;
+      setReserve(next.right);
+      changed = true;
+    }
+    return changed;
   };
 
   createEffect(() => {
     activeGeometry();
     isEnabled();
+    if (typeof options.itemLeft === "function") options.itemLeft();
     if (typeof options.itemRight === "function") options.itemRight();
     syncLayout();
   });
@@ -424,11 +533,13 @@ export function useScrollContourReserve(options: ScrollContourOptions = {}): {
   }
 
   return {
+    leftReserve,
     nodeRef: (current) => {
       node = current;
       if (current) syncLayout();
     },
     reserve,
+    reserves,
     syncLayout,
   };
 }
@@ -438,6 +549,7 @@ export function ScrollContourItem(props: ViewProps & {
   defaultInBand?: boolean;
   enabled?: boolean | (() => boolean);
   rampPx?: number;
+  consumeChildren?: boolean;
 }): JSX.Element {
   const parentConsumed = useContext(ContourConsumedContext);
   const isEnabled = (): boolean => {
@@ -449,38 +561,61 @@ export function ScrollContourItem(props: ViewProps & {
         : props.enabled;
   };
   const mode = props.mode ?? "margin";
+  const baseLeft = mode === "padding"
+    ? basePaddingLeft(props.class, props.style?.paddingL)
+    : baseMarginLeft(props.class, props.style?.marginL);
   const baseRight = mode === "padding"
     ? basePaddingRight(props.class, props.style?.paddingR)
     : baseMarginRight(props.class, props.style?.marginR);
-  const { nodeRef, reserve } = useScrollContourReserve({
+  const { leftReserve, nodeRef, reserve } = useScrollContourReserve({
+    baseLeft,
     baseRight,
     defaultInBand: props.defaultInBand,
     enabled: isEnabled,
     mode,
     rampPx: props.rampPx,
   });
-  let appliedNonZero = false;
+  let appliedLeftNonZero = false;
+  let appliedRightNonZero = false;
   const contourStyle = (): ViewProps["style"] => {
+    const l = leftReserve();
     const r = reserve();
-    if (r > 0) appliedNonZero = true;
+    if (l > 0) appliedLeftNonZero = true;
+    if (r > 0) appliedRightNonZero = true;
     if (mode === "padding") {
+      const basePadL = basePaddingLeft(props.class, props.style?.paddingL);
       const basePadR = basePaddingRight(props.class, props.style?.paddingR);
-      if (r <= 0 && !appliedNonZero && props.style?.paddingR === undefined) return props.style;
-      return { ...(props.style ?? {}), paddingR: basePadR + r };
+      const hasLeft = l > 0 || appliedLeftNonZero || props.style?.paddingL !== undefined;
+      const hasRight = r > 0 || appliedRightNonZero || props.style?.paddingR !== undefined;
+      if (!hasLeft && !hasRight) return props.style;
+      return {
+        ...(props.style ?? {}),
+        ...(hasLeft ? { paddingL: basePadL + l } : {}),
+        ...(hasRight ? { paddingR: basePadR + r } : {}),
+      };
     }
+    const baseMarL = baseMarginLeft(props.class, props.style?.marginL);
     const baseMarR = baseMarginRight(props.class, props.style?.marginR);
     const defaultOverflow = baseOverflow(props.class, props.style?.overflow);
-    if (r <= 0 && !appliedNonZero && props.style?.marginR === undefined) {
+    const hasLeft = l > 0 || appliedLeftNonZero || props.style?.marginL !== undefined;
+    const hasRight = r > 0 || appliedRightNonZero || props.style?.marginR !== undefined;
+    if (!hasLeft && !hasRight) {
       return props.style;
     }
+    const explicitWidth = props.style?.width;
+    const adjustedWidth = typeof explicitWidth === "number" && Number.isFinite(explicitWidth) && explicitWidth > 0
+      ? Math.max(0, explicitWidth - l - r)
+      : explicitWidth;
     return {
       ...(props.style ?? {}),
-      marginR: baseMarR + r,
-      overflow: r > 0 ? 1 : defaultOverflow,
+      ...(adjustedWidth !== undefined ? { width: adjustedWidth } : {}),
+      ...(hasLeft ? { marginL: baseMarL + l } : {}),
+      ...(hasRight ? { marginR: baseMarR + r } : {}),
+      overflow: l > 0 || r > 0 ? 1 : defaultOverflow,
     };
   };
   return (
-    <ContourConsumedContext.Provider value={() => parentConsumed() || isEnabled()}>
+    <ContourConsumedContext.Provider value={() => parentConsumed() || (props.consumeChildren !== false && isEnabled())}>
       <View
         ref={(current) => {
           nodeRef(current);

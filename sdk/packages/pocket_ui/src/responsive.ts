@@ -545,39 +545,150 @@ export function bottomBarInsets(geometry: DisplayGeometry): DisplayInsets {
 }
 
 /**
+ * Return the expanded logical contours of active local left-side occlusions
+ * (such as landscape notches, Dynamic Island, or single hole-punches).
+ */
+export function leftOcclusionFrames(geometry: DisplayGeometry): DisplayRegionFrame[] {
+  return activeRegions(geometry)
+    .filter(region => isLocalLeftOcclusion(region, geometry))
+    .map(region => expandedRegionFrame(region))
+    .sort((left, right) => right.height - left.height || right.width - left.width);
+}
+
+/**
+ * Return the expanded logical contours of active local right-side occlusions
+ * (such as top-right status clusters, landscape notches, or single hole-punches).
+ */
+export function rightOcclusionFrames(geometry: DisplayGeometry): DisplayRegionFrame[] {
+  return activeRegions(geometry)
+    .filter(region => isLocalRightOcclusion(region, geometry))
+    .map(region => expandedRegionFrame(region))
+    .sort((left, right) => right.height - left.height || right.width - left.width);
+}
+
+/**
  * Return the expanded logical contour of the active top-right occlusion.
  * Margins are part of UIKit's reserved geometry, so consumers must avoid the
  * expanded contour rather than only the raw icon frame. The result is
  * intentionally local; it is not a page-wide top inset.
  */
 export function topRightOcclusionFrames(geometry: DisplayGeometry): DisplayRegionFrame[] {
-  return activeRegions(geometry)
-    .filter(region => region.kind === "occlusion")
-    .map(region => expandedRegionFrame(region))
-    .filter(region =>
-      region.top <= DISPLAY_GEOMETRY_EPSILON
-      && region.left >= 0
-      && region.left + region.width >= geometry.width - DISPLAY_GEOMETRY_EPSILON
-      && region.width < geometry.width * 0.6
-      && region.height < geometry.height * 0.6)
-    .sort((left, right) => right.height - left.height || right.width - left.width);
+  return rightOcclusionFrames(geometry).filter(region =>
+    region.top <= DISPLAY_GEOMETRY_EPSILON
+    && region.left + region.width >= geometry.width - DISPLAY_GEOMETRY_EPSILON);
 }
 
 export function topRightOcclusionFrame(geometry: DisplayGeometry): DisplayRegionFrame | undefined {
   return topRightOcclusionFrames(geometry)[0];
 }
 
+function contourBandFactor(
+  top: number,
+  bottom: number,
+  cutoutTop: number,
+  cutoutBottom: number,
+  ramp: number,
+): number {
+  let bottomFactor = 0;
+  if (top <= cutoutBottom) {
+    bottomFactor = 1;
+  } else if (ramp > 0 && top < cutoutBottom + ramp) {
+    const linear = Math.max(0, Math.min(1, (cutoutBottom + ramp - top) / ramp));
+    bottomFactor = linear * linear * (3 - 2 * linear);
+  }
+  if (bottomFactor <= 0) return 0;
+
+  // For top-corner cutouts anchored at y=0, keep `topFactor = 1` even after
+  // scrolling above the top edge so wrapped text never unwraps offscreen.
+  // For mid-edge cutouts (such as landscape notches or single hole-punches
+  // where `cutoutTop > 0`), visible screen space exists above the cutout, so
+  // smoothly ramp back to full width across `[cutoutTop - ramp, cutoutTop]`.
+  let topFactor = 1;
+  if (cutoutTop > DISPLAY_GEOMETRY_EPSILON) {
+    if (bottom >= cutoutTop) {
+      topFactor = 1;
+    } else if (ramp > 0 && bottom > cutoutTop - ramp) {
+      const linear = Math.max(0, Math.min(1, (bottom - (cutoutTop - ramp)) / ramp));
+      topFactor = linear * linear * (3 - 2 * linear);
+    } else {
+      topFactor = 0;
+    }
+  }
+  return Math.min(bottomFactor, topFactor);
+}
+
+/**
+ * Compute progressive `{ left, right }` horizontal reservations for a UI item
+ * whose painted vertical span is `[visualTop, visualBottom]` in guest-canvas
+ * coordinates. Supports top-right status clusters as well as landscape notches,
+ * Dynamic Island, and single hole-punches on either the left or right edge.
+ */
+export function sideContourReservesForBand(
+  geometry: DisplayGeometry,
+  visualTop: number,
+  visualBottom: number,
+  options: DisplayContourBandOptions = {},
+): DisplaySideContourReserves {
+  const leftContours = leftOcclusionFrames(geometry);
+  const rightContours = rightOcclusionFrames(geometry);
+  if (leftContours.length === 0 && rightContours.length === 0) {
+    return { left: 0, right: 0 };
+  }
+  const top = finite(visualTop);
+  const bottom = Math.max(top, finite(visualBottom, top));
+  const safetyGap = options.safetyGap !== undefined ? nonNegative(options.safetyGap) : DISPLAY_CONTOUR_CLEARANCE_PX;
+  const extraLeft = nonNegative(options.extraLeft);
+  const extraRight = nonNegative(options.extraRight);
+  const extraBottom = nonNegative(options.extraBottom);
+  const ramp = options.rampPx !== undefined ? nonNegative(options.rampPx) : DISPLAY_CONTOUR_RAMP_PX;
+  const itemLeft = options.itemLeft !== undefined
+    ? Math.min(geometry.width, nonNegative(options.itemLeft))
+    : 0;
+  const itemRight = options.itemRight !== undefined
+    ? Math.min(geometry.width, nonNegative(options.itemRight))
+    : geometry.width;
+
+  let bestLeft = 0;
+  for (const contour of leftContours) {
+    if (bottom <= top && (top > contour.top + contour.height || bottom < contour.top)) continue;
+    const requiredLeft = Math.min(geometry.width, contour.left + contour.width + safetyGap + extraLeft);
+    const maxReserve = Math.max(0, Math.min(geometry.width, requiredLeft - itemLeft));
+    if (maxReserve <= 0) continue;
+    const rawBottom = contour.top + contour.height;
+    const isTopCorner = contour.top <= DISPLAY_GEOMETRY_EPSILON;
+    const defaultBottomTrim = isTopCorner && contour.height > 60 ? DISPLAY_CONTOUR_BOTTOM_TRIM_PX : 0;
+    const bottomTrim = options.bottomTrim !== undefined ? nonNegative(options.bottomTrim) : defaultBottomTrim;
+    const cutoutTop = Math.max(0, contour.top);
+    const cutoutBottom = Math.max(cutoutTop, rawBottom - bottomTrim) + extraBottom;
+    const factor = contourBandFactor(top, bottom, cutoutTop, cutoutBottom, ramp);
+    const regionReserve = Math.round(maxReserve * factor * 2) / 2;
+    if (regionReserve > bestLeft) bestLeft = regionReserve;
+  }
+
+  let bestRight = 0;
+  for (const contour of rightContours) {
+    if (bottom <= top && (top > contour.top + contour.height || bottom < contour.top)) continue;
+    const allowedRight = Math.max(0, contour.left - safetyGap - extraRight);
+    const maxReserve = Math.max(0, Math.min(geometry.width, itemRight - allowedRight));
+    if (maxReserve <= 0) continue;
+    const rawBottom = contour.top + contour.height;
+    const isTopCorner = contour.top <= DISPLAY_GEOMETRY_EPSILON;
+    const defaultBottomTrim = isTopCorner && contour.height > 60 ? DISPLAY_CONTOUR_BOTTOM_TRIM_PX : 0;
+    const bottomTrim = options.bottomTrim !== undefined ? nonNegative(options.bottomTrim) : defaultBottomTrim;
+    const cutoutTop = Math.max(0, contour.top);
+    const cutoutBottom = Math.max(cutoutTop, rawBottom - bottomTrim) + extraBottom;
+    const factor = contourBandFactor(top, bottom, cutoutTop, cutoutBottom, ramp);
+    const regionReserve = Math.round(maxReserve * factor * 2) / 2;
+    if (regionReserve > bestRight) bestRight = regionReserve;
+  }
+
+  return { left: bestLeft, right: bestRight };
+}
+
 /**
  * Compute the progressive right-side width reservation for a UI item whose
  * painted vertical span is `[visualTop, visualBottom]` in guest-canvas
  * coordinates.
- *
- * Items below `cutoutBottom + rampPx` stay full-width (`0`). As an item
- * scrolls upward through the ramp zone `[cutoutBottom, cutoutBottom + rampPx]`,
- * the reservation smoothly progresses along a C1-continuous Hermite smoothstep
- * curve (`3t^2 - 2t^3`) from `0` to `maxReserve`. Once `visualTop <= cutoutBottom`,
- * the item keeps `maxReserve` (even after scrolling above the top edge) so
- * wrapped text never unwraps offscreen and shifts visible content below it.
  */
 export function topRightContourReserveForBand(
   geometry: DisplayGeometry,
@@ -585,38 +696,7 @@ export function topRightContourReserveForBand(
   visualBottom: number,
   options: DisplayContourBandOptions = {},
 ): number {
-  const contours = topRightOcclusionFrames(geometry);
-  if (contours.length === 0) return 0;
-  const top = finite(visualTop);
-  const bottom = Math.max(top, finite(visualBottom, top));
-  const safetyGap = options.safetyGap !== undefined ? nonNegative(options.safetyGap) : DISPLAY_CONTOUR_CLEARANCE_PX;
-  const extraRight = nonNegative(options.extraRight);
-  const extraBottom = nonNegative(options.extraBottom);
-  const ramp = options.rampPx !== undefined ? nonNegative(options.rampPx) : DISPLAY_CONTOUR_RAMP_PX;
-  const itemRight = options.itemRight !== undefined
-    ? Math.min(geometry.width, nonNegative(options.itemRight))
-    : geometry.width;
-  let bestReserve = 0;
-  for (const contour of contours) {
-    if (bottom <= top && top > contour.top + contour.height) continue;
-    const allowedRight = Math.max(0, contour.left - safetyGap - extraRight);
-    const maxReserve = Math.max(0, Math.min(geometry.width, itemRight - allowedRight));
-    if (maxReserve <= 0) continue;
-    const rawBottom = contour.top + contour.height;
-    const defaultBottomTrim = contour.height > 60 ? DISPLAY_CONTOUR_BOTTOM_TRIM_PX : 0;
-    const bottomTrim = options.bottomTrim !== undefined ? nonNegative(options.bottomTrim) : defaultBottomTrim;
-    const cutoutBottom = Math.max(contour.top, rawBottom - bottomTrim) + extraBottom;
-    let regionReserve = 0;
-    if (top <= cutoutBottom) {
-      regionReserve = maxReserve;
-    } else if (ramp > 0 && top < cutoutBottom + ramp) {
-      const linear = Math.max(0, Math.min(1, (cutoutBottom + ramp - top) / ramp));
-      const smooth = linear * linear * (3 - 2 * linear);
-      regionReserve = Math.round(maxReserve * smooth * 2) / 2;
-    }
-    if (regionReserve > bestReserve) bestReserve = regionReserve;
-  }
-  return bestReserve;
+  return sideContourReservesForBand(geometry, visualTop, visualBottom, options).right;
 }
 
 /**
