@@ -31,6 +31,20 @@ async function settle(session: NativeSession, frame: Frame): Promise<Frame> {
   return session.settle(frame, 16);
 }
 
+async function settleUntilVisibleText(
+  session: NativeSession,
+  frame: Frame,
+  label: string,
+  maxFrames = 60,
+): Promise<Frame> {
+  let latest = frame;
+  for (let index = 0; index < maxFrames; index += 1) {
+    if (findVisibleText(latest, label)) return latest;
+    latest = await session.frame();
+  }
+  assert.fail(`timed out waiting for ${label} to become visible\n${textOf(latest)}`);
+}
+
 async function settleAnchor(
   session: NativeSession,
   frame: Frame,
@@ -235,7 +249,11 @@ test("native route stack preserves page scroll/local state and isolates popped r
       openPopup = findVisibleText(frame, "Open Popup");
     }
     assert.ok(openPopup, "Mobile UI popup control must be reachable after a real page scroll");
-    frame = await settle(popupSession, await popupSession.tapPoint(center(openPopup, "Open Popup")));
+    frame = await settleUntilVisibleText(
+      popupSession,
+      await popupSession.tapPoint(center(openPopup, "Open Popup")),
+      "More actions",
+    );
     assert.match(textOf(frame), /More actions/);
 
     popupSession.sendEvent("demo.navigate", { route: "transitions" });

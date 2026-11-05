@@ -2,10 +2,13 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "bun:test";
+import { mock, test } from "bun:test";
 
 import type { HostBridge, JsonObject, JsonValue } from "../../../sdk/packages/pocket_ui/src/host.ts";
-import { installPocketSystem, type PocketSystemV1 } from "../../../sdk/packages/pocket_ui/src/system.ts";
+import type { PocketSystemV1 } from "../../../sdk/packages/pocket_ui/src/system.ts";
+
+mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60 }));
+const { installPocketSystem } = await import("../../../sdk/packages/pocket_ui/src/system.ts");
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testDirectory, "../../..");
@@ -198,6 +201,7 @@ test("SystemUI manifest covers the live runtime host capability contract", async
       instanceId: "profile-instance-1",
       surfaceHandle: 2,
       focused: true,
+      ready: false,
     }]);
   } finally {
     kernel?.dispose();
