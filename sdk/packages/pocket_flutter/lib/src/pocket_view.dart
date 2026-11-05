@@ -342,6 +342,9 @@ class PocketView extends StatefulWidget {
     this.offloadProviderFactory,
     this.viewport,
     this.geometryRevision = 0,
+    this.compositorBounds,
+    this.compositorViewport,
+    this.preserveCompositorDisplayGeometry = false,
     this.tickHz = 60,
     this.fontFamilyFallback = const <String>[],
     this.onBeforeFrame,
@@ -421,6 +424,13 @@ class PocketView extends StatefulWidget {
   /// child still measures its own RenderBox after layout and reports the
   /// existing display.viewport contract, rather than inheriting root insets.
   final int geometryRevision;
+
+  /// Optional parent compositor reference for a translated full-viewport
+  /// child. This stabilizes display/safe-area/occlusion coordinates during a
+  /// sheet transition without changing the physical slot used for input.
+  final Rect? compositorBounds;
+  final Size? compositorViewport;
+  final bool preserveCompositorDisplayGeometry;
 
   /// Fixed PocketJS core/bundle rate. This must match the `--hz` value used
   /// when [jsAsset] was compiled. The Flutter ticker may run at 60 or 120 Hz;
@@ -943,7 +953,13 @@ class _PocketViewState extends State<PocketView>
     if (oldWidget.geometryRevision != widget.geometryRevision) {
       // A compositor transform can move this RenderBox without changing its
       // constraints or FlutterView metrics. Defer until the parent slot has
-      // laid out, then reuse _safeAreaForHost's physical intersection logic.
+      // laid out, then use its anchored display reference when provided.
+      _scheduleSafeAreaReport();
+    }
+    if (oldWidget.compositorBounds != widget.compositorBounds ||
+        oldWidget.compositorViewport != widget.compositorViewport ||
+        oldWidget.preserveCompositorDisplayGeometry !=
+            widget.preserveCompositorDisplayGeometry) {
       _scheduleSafeAreaReport();
     }
     if (oldWidget.active != widget.active) _syncGuestActivity();
@@ -2545,6 +2561,7 @@ class _PocketViewState extends State<PocketView>
     RenderBox host,
     BuildContext context, {
     _PocketCanvasGeometry? geometry,
+    Rect? referenceRect,
   }) {
     if (!host.size.width.isFinite ||
         !host.size.height.isFinite ||
@@ -2566,7 +2583,7 @@ class _PocketViewState extends State<PocketView>
       return EdgeInsets.zero;
     }
     final canvasOrigin = host.localToGlobal(canvasGeometry.origin);
-    final rect = canvasOrigin & canvasSize;
+    final rect = referenceRect ?? (canvasOrigin & canvasSize);
     final scaleX = canvasSize.width / _frame.width;
     final scaleY = canvasSize.height / _frame.height;
 
@@ -2659,6 +2676,7 @@ class _PocketViewState extends State<PocketView>
     RenderBox host,
     BuildContext context, {
     _PocketCanvasGeometry? geometry,
+    Rect? referenceRect,
   }) {
     final canvasGeometry = geometry ?? _canvasGeometryForHost(host);
     final canvasSize = canvasGeometry.size;
@@ -2682,7 +2700,7 @@ class _PocketViewState extends State<PocketView>
       return 0;
     }
     final canvasOrigin = host.localToGlobal(canvasGeometry.origin);
-    final canvasRect = canvasOrigin & canvasSize;
+    final canvasRect = referenceRect ?? (canvasOrigin & canvasSize);
     final keyboardTop = viewSize.height - inset;
     final overlap = (canvasRect.bottom - keyboardTop)
         .clamp(0.0, canvasRect.height)
@@ -2700,8 +2718,9 @@ class _PocketViewState extends State<PocketView>
   List<Map<String, dynamic>> _reservedRegionsForHost(
     RenderBox host,
     BuildContext context,
-    _PocketCanvasGeometry geometry,
-  ) {
+    _PocketCanvasGeometry geometry, {
+    Rect? referenceRect,
+  }) {
     final canvasSize = geometry.size;
     if (canvasSize.width <= 0 || canvasSize.height <= 0) {
       return const <Map<String, dynamic>>[];
@@ -2712,15 +2731,14 @@ class _PocketViewState extends State<PocketView>
       return const <Map<String, dynamic>>[];
     }
     final canvasOrigin = host.localToGlobal(geometry.origin);
-    final canvasRect = canvasOrigin & canvasSize;
+    final canvasRect = referenceRect ?? (canvasOrigin & canvasSize);
     final regions = List<PocketDisplayRegion>.of(
       _displayGeometrySnapshot.regions,
     );
     final view = View.of(context);
     final media = MediaQuery.maybeOf(context);
     final displayFeatures =
-        media?.displayFeatures ??
-        MediaQueryData.fromView(view).displayFeatures;
+        media?.displayFeatures ?? MediaQueryData.fromView(view).displayFeatures;
     for (var i = 0; i < displayFeatures.length; i++) {
       final feature = displayFeatures[i];
       final String? kind = switch (feature.type) {
@@ -2906,6 +2924,54 @@ class _PocketViewState extends State<PocketView>
     return buffer.toString();
   }
 
+  /// Reconstruct the parent's stable logical viewport for a translated
+  /// fullscreen compositor child. The child RenderBox remains the source of
+  /// physical input/layout coordinates; only environmental display facts use
+  /// this anchored reference.
+  Rect? _compositorDisplayReferenceRect(
+    RenderBox host,
+    _PocketCanvasGeometry geometry,
+  ) {
+    if (!widget.preserveCompositorDisplayGeometry) return null;
+    final bounds = widget.compositorBounds;
+    final viewport = widget.compositorViewport;
+    if (bounds == null ||
+        viewport == null ||
+        !viewport.width.isFinite ||
+        !viewport.height.isFinite ||
+        viewport.width <= 0 ||
+        viewport.height <= 0 ||
+        !_frame.width.isFinite ||
+        !_frame.height.isFinite ||
+        _frame.width <= 0 ||
+        _frame.height <= 0 ||
+        geometry.size.width <= 0 ||
+        geometry.size.height <= 0) {
+      return null;
+    }
+    final scaleX = geometry.size.width / _frame.width;
+    final scaleY = geometry.size.height / _frame.height;
+    if (!scaleX.isFinite || !scaleY.isFinite || scaleX <= 0 || scaleY <= 0) {
+      return null;
+    }
+    final currentOrigin = host.localToGlobal(geometry.origin);
+    final parentOrigin = Offset(
+      currentOrigin.dx - bounds.left * scaleX,
+      currentOrigin.dy - bounds.top * scaleY,
+    );
+    final referenceSize = Size(
+      viewport.width * scaleX,
+      viewport.height * scaleY,
+    );
+    if (!referenceSize.width.isFinite ||
+        !referenceSize.height.isFinite ||
+        referenceSize.width <= 0 ||
+        referenceSize.height <= 0) {
+      return null;
+    }
+    return parentOrigin & referenceSize;
+  }
+
   void _reportSafeArea() {
     final runtime = _runtime;
     if (runtime == null || _loading || !mounted) return;
@@ -2915,10 +2981,15 @@ class _PocketViewState extends State<PocketView>
     if (renderObject is! RenderBox || !renderObject.hasSize) return;
     if (!_displayGeometryMatchesView(hostContext, renderObject)) return;
     final geometry = _canvasGeometryForHost(renderObject);
+    final referenceRect = _compositorDisplayReferenceRect(
+      renderObject,
+      geometry,
+    );
     final safeArea = _safeAreaForHost(
       renderObject,
       hostContext,
       geometry: geometry,
+      referenceRect: referenceRect,
     );
     final viewport = Size(_frame.width, _frame.height);
     if (!viewport.width.isFinite ||
@@ -2931,11 +3002,13 @@ class _PocketViewState extends State<PocketView>
       renderObject,
       hostContext,
       geometry: geometry,
+      referenceRect: referenceRect,
     );
     final reservedRegions = _reservedRegionsForHost(
       renderObject,
       hostContext,
       geometry,
+      referenceRect: referenceRect,
     );
     final reservedRegionsKey = _reservedRegionsKey(reservedRegions);
     if (_reportedViewport == viewport &&
@@ -5137,7 +5210,12 @@ class _PocketViewState extends State<PocketView>
     if (!scaleX.isFinite || !scaleY.isFinite || scaleX <= 0 || scaleY <= 0) {
       return EdgeInsets.zero;
     }
-    final safe = _safeAreaForHost(object, hostContext, geometry: geometry);
+    final safe = _safeAreaForHost(
+      object,
+      hostContext,
+      geometry: geometry,
+      referenceRect: _compositorDisplayReferenceRect(object, geometry),
+    );
     final right =
         object.size.width -
         (geometry.origin.dx + geometry.size.width - safe.right * scaleX);
@@ -5570,6 +5648,13 @@ class _PocketViewState extends State<PocketView>
             visible: !visible.isEmpty,
             focused: op.focused && !visible.isEmpty,
             drawIndex: drawIndex,
+            // A full logical-viewport application surface may be translated
+            // during presentation. Keep its display reference anchored while
+            // retaining physical slot bounds for clipping and pointer
+            // routing. Smaller embedded surfaces keep physical intersection.
+            preserveDisplayGeometry:
+                (op.width - width).abs() <= 0.001 &&
+                (op.height - height).abs() <= 0.001,
           );
           _lastCompositorSlots[op.surfaceHandle] = slot;
           child = widget.hostSurfaceBuilder!(slot);
@@ -5785,6 +5870,10 @@ class _PocketViewState extends State<PocketView>
             visible: false,
             focused: false,
             drawIndex: -1,
+            preserveDisplayGeometry:
+                prior?.preserveDisplayGeometry ??
+                ((bounds.width - width).abs() <= 0.001 &&
+                    (bounds.height - height).abs() <= 0.001),
           ),
         );
         if (child != null) {

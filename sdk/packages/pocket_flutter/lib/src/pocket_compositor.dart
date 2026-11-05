@@ -19,6 +19,7 @@ final class PocketCompositorSlot {
     this.visible = true,
     required this.focused,
     required this.drawIndex,
+    this.preserveDisplayGeometry = false,
   });
 
   /// Stable System catalog handle emitted by SURFACE_QUAD.
@@ -42,6 +43,15 @@ final class PocketCompositorSlot {
 
   /// Zero-based position in the decoded parent DrawOps list.
   final int drawIndex;
+
+  /// Keep the child guest's display/safe-area reference anchored to the
+  /// parent's logical viewport while this full-viewport surface is translated
+  /// or clipped. Pointer coordinates and [bounds]/[visibleClip] remain the
+  /// physical compositor geometry.
+  ///
+  /// Small embedded surfaces leave this false and continue deriving insets
+  /// from their actual RenderBox intersection.
+  final bool preserveDisplayGeometry;
 }
 
 /// Resolves an official SURFACE_QUAD to a live child guest widget.

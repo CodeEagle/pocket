@@ -1,6 +1,8 @@
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 
@@ -65,6 +67,102 @@ class _SurfaceRuntime implements PocketRuntime {
 }
 
 void main() {
+  testWidgets('plain backdrop blur fades without adding a material tint', (
+    tester,
+  ) async {
+    final runtime = _SurfaceRuntime();
+    final boundaryKey = GlobalKey();
+    Future<List<int>> sample(double opacity) async {
+      runtime.ops
+        ..clear()
+        ..addAll([
+          const PocketRectOp(
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 480,
+            color: 0xffff0000,
+          ),
+          const PocketRectOp(
+            x: 160,
+            y: 0,
+            width: 160,
+            height: 480,
+            color: 0xff0000ff,
+          ),
+          PocketHostSurfaceOp(
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 480,
+            id: 'modal-blur',
+            kind: 'glass',
+            // Deliberately nonzero optical tint: plain blur must ignore it.
+            parameters: {
+              'effect': 'blur',
+              'opacity': opacity,
+              'blur': 12,
+              'radius': 0,
+              'tintOpacity': .8,
+            },
+          ),
+        ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 320,
+              height: 480,
+              child: RepaintBoundary(
+                key: boundaryKey,
+                child: PocketView(
+                  runtime: runtime,
+                  viewport: const Size(320, 480),
+                  jsSource: '',
+                  pakBytes: Uint8List(0),
+                  showDebugFps: false,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 40));
+      final boundary = tester.renderObject<RenderRepaintBoundary>(
+        find.byKey(boundaryKey),
+      );
+      final image = (await tester.runAsync<ui.Image>(
+        () => boundary.toImage(pixelRatio: 1),
+      ))!;
+      try {
+        final data = (await tester.runAsync<ByteData?>(
+          () => image.toByteData(format: ui.ImageByteFormat.rawRgba),
+        ))!;
+        final offset = (240 * image.width + 158) * 4;
+        return List.generate(4, (channel) => data.getUint8(offset + channel));
+      } finally {
+        image.dispose();
+      }
+    }
+
+    final clear = await sample(0);
+    final halfway = await sample(.5);
+    final blurred = await sample(1);
+    expect(clear, [255, 0, 0, 255]);
+    expect(blurred[0], lessThan(230));
+    expect(blurred[2], greaterThan(25));
+    expect(halfway[0], inExclusiveRange(blurred[0], clear[0]));
+    expect(halfway[2], inExclusiveRange(clear[2], blurred[2]));
+    expect(halfway[0], closeTo((clear[0] + blurred[0]) / 2, 3));
+    for (final pixel in [halfway, blurred]) {
+      expect(pixel[1], 0); // White/black/colored scrims would alter channels.
+      expect(pixel[0] + pixel[2], closeTo(255, 2));
+      expect(pixel[3], 255);
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   test('host surface requires a structured provider descriptor', () {
     expect(
       () => PocketOp.fromJson({'type': 'hostSurface', 'asset': '[]'}),

@@ -22,7 +22,7 @@ import { For, Show, children as resolveChildren, createContext, createEffect, cr
 import { createGesture } from "@pocketjs/framework/gesture";
 import { CompositorSurface, Focusable, Modal, Portal, Text, View, type NodeMirror, type ViewProps } from "@pocketjs/framework/solid/components";
 import { onFrame } from "@pocketjs/framework/solid/lifecycle";
-import { simulationHz } from "@pocketjs/framework/clock";
+import { simulationHz, virtualNow } from "@pocketjs/framework/clock";
 import { buildLiquidGlassRecipe, type GlassShape } from "./legacy.ts";
 import {
   ContourConsumedContext,
@@ -416,8 +416,9 @@ export function MobileParagraph(props: MobileParagraphProps): JSX.Element {
 
 /**
  * Frame-driven state-change animation hook.
- * Whenever `key()` changes, progresses smoothly from `0.35` to `1.0` over
- * `frames` ticks using a cubic ease-out curve.
+ * Whenever `key()` changes, progresses smoothly from `0` to `1.0` over
+ * `frames` ticks using a cubic ease-out curve. Overlay callers use the
+ * presence helper below so their subtree can reverse before unmounting.
  * Inline controls pass `animateOnMount = false` so they render at rest (`1.0`)
  * on initial mount and animate whenever their state changes; overlays pass
  * `animateOnMount = true` so their entrance animates on mount.
@@ -428,7 +429,7 @@ export function useStateTransition(
   animateOnMount = false,
 ): () => number {
   const routeActive = useRouteActive();
-  const [progress, setProgress] = createSignal(animateOnMount ? 0.35 : 1);
+  const [progress, setProgress] = createSignal(animateOnMount ? 0 : 1);
   const [active, setActive] = createSignal(animateOnMount);
   let step = animateOnMount ? 0 : frames;
   let initialized = false;
@@ -443,7 +444,7 @@ export function useStateTransition(
       initialized = true;
       if (animateOnMount) {
         step = 0;
-        setProgress(0.35);
+        setProgress(0);
         setActive(true);
       } else {
         step = frames;
@@ -453,7 +454,7 @@ export function useStateTransition(
       return;
     }
     step = 0;
-    setProgress(0.35);
+    setProgress(0);
     setActive(true);
   });
   try {
@@ -463,16 +464,89 @@ export function useStateTransition(
         step += 1;
         const linear = Math.min(1, step / Math.max(1, frames));
         const eased = 1 - Math.pow(1 - linear, 3);
-        setProgress(0.35 + 0.65 * eased);
+        setProgress(eased);
         if (step >= frames) setActive(false);
       } else if (active()) {
         setActive(false);
       }
-    }, { continuous: () => routeActive() && active() });
+    }, { active: () => routeActive() && active(), continuous: () => routeActive() && active() });
   } catch {
     // Ignore when running in unit tests without an active frame scheduler.
   }
   return progress;
+}
+
+const MOBILE_OVERLAY_DURATION_SECONDS = 0.3;
+
+function overlayEaseInOut(value: number): number {
+  const t = Math.max(0, Math.min(1, value));
+  return t * t * (3 - 2 * t);
+}
+
+type OverlayPresence = {
+  mounted: () => boolean;
+  progress: () => number;
+  interactive: () => boolean;
+};
+
+/**
+ * Retain a Modal subtree through its exit so the panel and the colorless
+ * backdrop reverse together. `virtualNow()` is the pinned simulation clock;
+ * the duration is expressed in seconds rather than fixed input-frame counts.
+ * Reversing an interrupted transition walks the same phase backward.
+ */
+function useOverlayPresence(open: () => boolean): OverlayPresence {
+  const routeActive = useRouteActive();
+  const [mounted, setMounted] = createSignal(false);
+  const [progress, setProgress] = createSignal(0);
+  let requested = false;
+  let phase = 0;
+  let lastTime = virtualNow();
+
+  createEffect(() => {
+    const activeRoute = routeActive();
+    const nextRequested = activeRoute && Boolean(open());
+    if (!activeRoute) {
+      requested = false;
+      phase = 0;
+      lastTime = virtualNow();
+      setMounted(false);
+      setProgress(0);
+      return;
+    }
+    if (nextRequested === requested) return;
+    requested = nextRequested;
+    lastTime = virtualNow();
+    if (nextRequested) {
+      setMounted(true);
+    } else if (phase === 0) {
+      setMounted(false);
+    }
+  });
+
+  try {
+    onFrame(() => {
+      if (!routeActive() || !mounted()) return;
+      const target = requested ? 1 : 0;
+      if (phase === target) {
+        if (!requested) setMounted(false);
+        lastTime = virtualNow();
+        return;
+      }
+      const now = virtualNow();
+      const delta = Math.max(0, now - lastTime);
+      lastTime = now;
+      phase = Math.max(0, Math.min(1, phase + (requested ? 1 : -1) * delta / MOBILE_OVERLAY_DURATION_SECONDS));
+      setProgress(overlayEaseInOut(phase));
+      if (phase === target && !requested) setMounted(false);
+    }, {
+      active: () => routeActive() && mounted() && phase !== (requested ? 1 : 0),
+      continuous: () => routeActive() && mounted() && phase !== (requested ? 1 : 0),
+    });
+  } catch {
+    // Source-only consumers have no native frame scheduler.
+  }
+  return { mounted, progress, interactive: () => routeActive() && requested && Boolean(open()) };
 }
 
 /**
@@ -529,7 +603,7 @@ export function useAnimatedNumber(target: () => number, rate = 0.38, durationMs?
       } else {
         setCurrent(previous + difference * rate);
       }
-    }, { active: routeActive, continuous: active });
+    }, { active: () => routeActive() && active(), continuous: active });
   } catch {
     // Source-only consumers have no native frame scheduler.
   }
@@ -985,8 +1059,31 @@ export function MobileSegmentedControl(props: {
   const theme = useMobileThemeAccessor();
   const scaffold = useContext(SafeAreaScaffoldContext);
   let trackNode: { id: number } | undefined;
+  const currentViewportWidth = (): number => {
+    const geometryWidth = scaffold.geometry().width;
+    const viewportWidth = layoutGlobal.ui?.__viewport?.w;
+    return typeof viewportWidth === "number" && Number.isFinite(viewportWidth) && viewportWidth > 0
+      ? viewportWidth
+      : geometryWidth > 0
+        ? geometryWidth
+        : 390;
+  };
+  let lastViewportWidth = currentViewportWidth();
+  let layoutReadArmed = false;
   const [measuredWidth, setMeasuredWidth] = createSignal(0);
   const syncWidth = (): void => {
+    const nextViewportW = currentViewportWidth();
+    if (nextViewportW !== lastViewportWidth) {
+      lastViewportWidth = nextViewportW;
+      layoutReadArmed = false;
+      if (measuredWidth() !== 0) setMeasuredWidth(0);
+      return;
+    }
+    if (!layoutReadArmed) {
+      layoutReadArmed = true;
+      return;
+    }
+    if (measuredWidth() > 0) return;
     const w = readNodeWidth(trackNode);
     if (w !== undefined && w > 0 && Math.abs(w - measuredWidth()) >= 1) {
       setMeasuredWidth(w);
@@ -995,12 +1092,20 @@ export function MobileSegmentedControl(props: {
   createEffect(() => {
     props.active;
     props.items.length;
-    syncWidth();
+    const nextViewportW = currentViewportWidth();
+    if (nextViewportW !== lastViewportWidth) {
+      lastViewportWidth = nextViewportW;
+      layoutReadArmed = false;
+      setMeasuredWidth(0);
+    }
   });
   try {
     onFrame(() => {
       if (routeActive()) syncWidth();
-    }, { continuous: () => routeActive() && measuredWidth() <= 0 });
+    }, {
+      active: () => routeActive() && (measuredWidth() <= 0 || currentViewportWidth() !== lastViewportWidth),
+      continuous: () => routeActive() && (measuredWidth() <= 0 || currentViewportWidth() !== lastViewportWidth),
+    });
   } catch {
     // Ignore when no frame scheduler is active.
   }
@@ -1012,8 +1117,7 @@ export function MobileSegmentedControl(props: {
   const totalTrackWidth = () => {
     const measured = measuredWidth();
     if (measured > 0) return measured;
-    const viewportW = scaffold.geometry().width;
-    return Math.max(200, (viewportW > 0 ? viewportW : 390) - 36);
+    return Math.max(120, currentViewportWidth() - 36);
   };
   const segmentWidth = () => Math.max(40, Math.round(totalTrackWidth() / count()));
   const targetX = () => Math.round(activeIndex() * (totalTrackWidth() / count()));
@@ -1234,27 +1338,12 @@ export function MobileProgress(props: {
   tone?: "accent" | "success" | "warning" | "danger";
   animated?: boolean;
 }): JSX.Element {
-  const routeActive = useRouteActive();
   const theme = useMobileThemeAccessor();
   const max = () => Math.max(1, props.max ?? 100);
   const ratio = () => Math.max(0, Math.min(1, props.value / max()));
-  const animatedRatio = useAnimatedNumber(ratio, 0.24, 240);
-  const [wavePhase, setWavePhase] = createSignal(0);
-  try {
-    onFrame(() => {
-      if (!routeActive()) return;
-      if (!props.animated) return;
-      setWavePhase((prev) => (prev + 1) % 90);
-    }, { continuous: () => routeActive() && props.animated === true });
-  } catch {
-    // Ignore when no frame scheduler is active.
-  }
-  const effectiveRatio = () => {
-    const base = animatedRatio();
-    if (!props.animated) return base;
-    const swing = 0.32 * Math.sin((wavePhase() / 90) * Math.PI * 2);
-    return Math.max(0.12, Math.min(0.96, base + swing));
-  };
+  const animatedTarget = () => (props.animated === false ? 0 : ratio());
+  const animatedRatio = useAnimatedNumber(animatedTarget, 0.24, 240);
+  const effectiveRatio = () => (props.animated === false ? ratio() : animatedRatio());
   const pct = () => `${Math.round((props.animated ? effectiveRatio() : ratio()) * 100)}%`;
   const tone = () => props.tone ?? "accent";
   return (
@@ -1452,22 +1541,11 @@ export function MobileSkeleton(props: {
   avatar?: boolean;
   active?: boolean;
 }): JSX.Element {
-  const routeActive = useRouteActive();
   const theme = useMobileThemeAccessor();
-  const [phase, setPhase] = createSignal(0);
-  try {
-    onFrame(() => {
-      if (!routeActive()) return;
-      if (props.active === false) return;
-      setPhase((prev) => (prev + 1) % 60);
-    }, { continuous: () => routeActive() && props.active !== false });
-  } catch {
-    // Ignore when no frame loop is active.
-  }
+  const progress = useStateTransition(() => `${props.active !== false}:${props.rows ?? 3}:${props.avatar !== false}`, 14, false);
   const pulseOpacity = () => {
-    if (props.active === false) return 0.85;
-    const wave = 0.5 + 0.5 * Math.sin((phase() / 60) * Math.PI * 2);
-    return 0.55 + 0.4 * wave;
+    const base = props.active === false ? 0.55 : 0.92;
+    return base * progress();
   };
   const count = () => Math.max(1, Math.min(5, props.rows ?? 3));
   const indices = () => Array.from({ length: count() }, (_, idx) => idx);
@@ -1530,10 +1608,10 @@ export function MobileAlert(props: {
   });
   try {
     onFrame(() => {
-      if (isOpen()) syncTextColumnWidth();
+      if (isOpen() && needsMeasurement()) syncTextColumnWidth();
       else setNeedsMeasurement(false);
     }, {
-      active: routeActive,
+      active: () => routeActive() && needsMeasurement(),
       continuous: () => routeActive() && needsMeasurement(),
     });
   } catch {
@@ -1641,10 +1719,10 @@ export function MobileToast(props: {
   });
   try {
     onFrame(() => {
-      if (isOpen()) syncTextColumnWidth();
+      if (isOpen() && needsMeasurement()) syncTextColumnWidth();
       else setNeedsMeasurement(false);
     }, {
-      active: routeActive,
+      active: () => routeActive() && needsMeasurement(),
       continuous: () => routeActive() && needsMeasurement(),
     });
   } catch {
@@ -1721,16 +1799,21 @@ export interface MobilePopupAction {
 }
 
 /**
- * Put the optical backdrop in its own portal so the official Modal scrim is
- * painted above the real backdrop sample and below the dialog panel. The
- * native host resolves GlassSurface through the existing compositor provider;
- * a browser projection must consume the same `glass` host-surface op rather
- * than replacing it with a coloured approximation.
+ * Put a colorless, alpha-animated backdrop sample in its own portal. The
+ * official Modal backdrop is transparent for these Mobile overlays, so the
+ * native host can blur the already-painted page without a black scrim. The
+ * browser projection consumes the same `glass` host-surface op rather than
+ * replacing it with a coloured approximation.
  */
-function MobileModalBackdrop(): JSX.Element {
+function MobileModalBackdrop(props: { progress: () => number }): JSX.Element {
   return (
     <Portal>
-      <GlassSurface class="absolute inset-0 w-full h-full" />
+      <GlassSurface
+        class="absolute inset-0 w-full h-full"
+        effect="blur"
+        tintOpacity={0}
+        opacity={props.progress}
+      />
     </Portal>
   );
 }
@@ -1747,9 +1830,7 @@ export function MobilePopup(props: {
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
   const sizeClass = useWindowSizeClass();
-  const routeActive = useRouteActive();
-  const isOpen = () => routeActive() && (typeof props.open === "function" ? props.open() : props.open);
-  const progress = useStateTransition(() => `${isOpen()}:${props.title}`, 10, true);
+  const presence = useOverlayPresence(() => typeof props.open === "function" ? props.open() : props.open);
   const isBottomSheet = () => {
     const placement = props.placement ?? "auto";
     if (placement === "bottom") return true;
@@ -1757,10 +1838,11 @@ export function MobilePopup(props: {
     return sizeClass() === "compact";
   };
   return (
-    <Show when={isOpen()}>
-      <MobileModalBackdrop />
+    <Show when={presence.mounted()}>
+      <MobileModalBackdrop progress={presence.progress} />
       <Modal
         open
+        backdropClass="bg-transparent"
         class={isBottomSheet()
           ? "absolute inset-0 z-50 flex-col items-center justify-end p-3"
           : "absolute inset-0 z-50 flex-col items-center justify-center p-4"}
@@ -1773,14 +1855,15 @@ export function MobilePopup(props: {
             ? "flex-col gap-3 w-[344] p-4 rounded-xl shadow-lg bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-spring"
             : "flex-col gap-3 w-[344] p-4 rounded-xl shadow-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-spring"}
           style={{
-            opacity: progress(),
-            translateY: Math.round((1 - progress()) * 10),
+            opacity: presence.progress(),
+            translateY: Math.round((1 - presence.progress()) * 10),
+            scale: 0.92 + 0.08 * presence.progress(),
           }}
         >
           <View class="flex-row items-center justify-center w-full">
             <View
               class={theme().name === "dark" ? "w-[40] h-[4] bg-[#27272A]" : "w-[40] h-[4] bg-[#E4E4E7]"}
-              style={{ radius: 2, scaleX: progress() }}
+              style={{ radius: 2, scaleX: presence.progress() }}
             />
           </View>
           <View class="flex-row items-center justify-between gap-2">
@@ -1803,6 +1886,7 @@ export function MobilePopup(props: {
                         ? "flex-row items-center justify-between px-3 py-3 rounded-lg bg-[#18181B] border-[#27272A] transition-colors duration-150 ease-out"
                         : "flex-row items-center justify-between px-3 py-3 rounded-lg bg-[#FAFAFA] border-[#E4E4E7] transition-colors duration-150 ease-out")}
                     onPress={() => {
+                      if (!presence.interactive()) return;
                       props.onSelectAction?.(action.id);
                       props.onClose();
                     }}
@@ -1820,7 +1904,9 @@ export function MobilePopup(props: {
             </View>
           ) : null}
           {props.children}
-          <MobileOutlinedButton label="Dismiss popup" onPress={props.onClose} />
+          <MobileOutlinedButton label="Dismiss popup" onPress={() => {
+            if (presence.interactive()) props.onClose();
+          }} />
         </View>
       </Modal>
     </Show>
@@ -1841,14 +1927,13 @@ export function MobileDialog(props: {
   onClose: () => void;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const routeActive = useRouteActive();
-  const isOpen = () => routeActive() && (typeof props.open === "function" ? props.open() : props.open);
-  const progress = useStateTransition(() => `${isOpen()}:${props.title}:${props.tone ?? "default"}`, 10, true);
+  const presence = useOverlayPresence(() => typeof props.open === "function" ? props.open() : props.open);
   return (
-    <Show when={isOpen()}>
-      <MobileModalBackdrop />
+    <Show when={presence.mounted()}>
+      <MobileModalBackdrop progress={presence.progress} />
       <Modal
         open
+        backdropClass="bg-transparent"
         class="absolute inset-0 z-50 flex-col items-center justify-center p-4"
         panelClass="absolute inset-0 flex-col items-center justify-center p-4 bg-transparent"
       >
@@ -1857,8 +1942,8 @@ export function MobileDialog(props: {
             ? "flex-col gap-3 w-full max-w-[280] p-4 rounded-xl shadow-lg bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-spring"
             : "flex-col gap-3 w-full max-w-[280] p-4 rounded-xl shadow-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-spring"}
           style={{
-            opacity: progress(),
-            translateY: Math.round((1 - progress()) * 8),
+            opacity: presence.progress(),
+            scale: 0.92 + 0.08 * presence.progress(),
           }}
         >
           <Text class={theme().name === "dark" ? "text-sm text-[#FAFAFA] text-center font-bold" : "text-sm text-[#09090B] text-center font-bold"}>{props.title}</Text>
@@ -1868,7 +1953,9 @@ export function MobileDialog(props: {
             <View class="flex-row items-center gap-2 w-full">
               <MobileOutlinedButton
                 label={props.cancelLabel ?? "Cancel"}
-                onPress={props.onClose}
+                onPress={() => {
+                  if (presence.interactive()) props.onClose();
+                }}
                 style={{ grow: 1, shrink: 1, basis: 0 }}
               />
               <MobileButton
@@ -1876,6 +1963,7 @@ export function MobileDialog(props: {
                 kind={props.tone === "danger" ? "danger" : "filled"}
                 style={{ grow: 1, shrink: 1, basis: 0 }}
                 onPress={() => {
+                  if (!presence.interactive()) return;
                   props.onConfirm?.();
                   props.onClose();
                 }}
@@ -1883,7 +1971,12 @@ export function MobileDialog(props: {
             </View>
           ) : (
             <View class="flex-col items-stretch w-full">
-              <MobileOutlinedButton label={props.cancelLabel ?? "Close"} onPress={props.onClose} />
+              <MobileOutlinedButton
+                label={props.cancelLabel ?? "Close"}
+                onPress={() => {
+                  if (presence.interactive()) props.onClose();
+                }}
+              />
             </View>
           )}
         </View>
@@ -1927,31 +2020,57 @@ function flatBridgeObjectEquals(
   return true;
 }
 
+type GlassSurfaceEffect = "glass" | "blur";
+type GlassSurfaceNumber = number | (() => number);
+
+function resolveGlassSurfaceNumber(
+  value: GlassSurfaceNumber | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const resolved = typeof value === "function" ? value() : value;
+  if (typeof resolved !== "number" || !Number.isFinite(resolved)) return fallback;
+  return Math.max(minimum, Math.min(maximum, resolved));
+}
+
 export function GlassSurface(props: {
   children?: JSX.Element;
   shape?: GlassShape;
   pressed?: boolean;
+  /** `blur` is a colorless backdrop sample; `glass` keeps the liquid recipe. */
+  effect?: GlassSurfaceEffect;
+  /** Plain-backdrop-blur alpha; optical glass keeps its provider default. */
+  opacity?: GlassSurfaceNumber;
+  /** Optional tint override; a blur backdrop should pass zero. */
+  tintOpacity?: GlassSurfaceNumber;
   class?: string;
 }): JSX.Element {
   const [registered, setRegistered] = createSignal(false);
   const id = `guest.glass.${nextGlassSurface++}`;
   const recipe = createMemo(() => buildLiquidGlassRecipe({ shape: props.shape ?? "rounded", focused: props.pressed === true, warp: true }));
+  const effect = props.effect ?? "glass";
+  const surfaceOpacity = createMemo(() => effect === "blur" ? resolveGlassSurfaceNumber(props.opacity, 1, 0, 1) : 1);
+  const surfaceRadius = createMemo(() => effect === "blur" ? 0 : recipe().radius);
   // Keep the shell transparent when a native surface is registered; the
   // gradient layer below is only the unsupported-host fallback.
   const payload = createMemo<BridgeObject>(() => {
     const current = recipe();
+    const blurOnly = effect === "blur";
     return {
-      radius: current.radius,
+      radius: blurOnly ? 0 : current.radius,
       // The native glass provider calls this field `blur`; the local recipe
       // keeps the more descriptive `blurSigma` name for UI/tests.
       blur: current.blurSigma,
-      edgeIntensity: current.edgeIntensity,
-      rimIntensity: current.rimIntensity,
-      baseIntensity: current.baseIntensity,
-      tintOpacity: current.tintOpacity,
-      cornerBoost: current.cornerBoost,
-      rippleEffect: current.rippleEffect,
-      warp: current.warp,
+      effect,
+      opacity: surfaceOpacity(),
+      edgeIntensity: blurOnly ? 0 : current.edgeIntensity,
+      rimIntensity: blurOnly ? 0 : current.rimIntensity,
+      baseIntensity: blurOnly ? 0 : current.baseIntensity,
+      tintOpacity: resolveGlassSurfaceNumber(props.tintOpacity, current.tintOpacity, 0, 1),
+      cornerBoost: blurOnly ? 0 : current.cornerBoost,
+      rippleEffect: blurOnly ? 0 : current.rippleEffect,
+      warp: blurOnly ? false : current.warp,
       pressed: props.pressed === true,
       shape: current.shape,
     };
@@ -1971,19 +2090,29 @@ export function GlassSurface(props: {
   };
   // The host updates an existing package id in place. This keeps shape and
   // pressed/focus controls interactive without remounting the surface node.
-  // The object memo is kept as the one registration source; one effect owns
-  // it does not subscribe to the registered signal it updates.
+  // The object memo is the one registration source; one effect owns
+  // registration and does not subscribe to the registered signal it updates.
   createEffect(() => register(payload()));
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
     <ScrollContourItem class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"}>
       <Show when={registered()}>
-        <View class="absolute inset-0 overflow-hidden rounded-xl">
-          <CompositorGlass packageId={id} radius={recipe().radius} />
+        <View class={effect === "blur" ? "absolute inset-0 overflow-hidden" : "absolute inset-0 overflow-hidden rounded-xl"}>
+          <CompositorGlass packageId={id} radius={surfaceRadius()} />
         </View>
       </Show>
       <Show when={!registered()}>
-        <View class="absolute inset-0 overflow-hidden rounded-xl" style={{ gradFrom: recipe().bgColors[0], gradTo: recipe().bgColors[2], gradDir: 1, radius: recipe().radius, shadow: recipe().shadowBlur > 20 ? 2 : 1 }} />
+        <View
+          class={effect === "blur" ? "absolute inset-0 overflow-hidden" : "absolute inset-0 overflow-hidden rounded-xl"}
+          style={{
+            gradFrom: effect === "blur" ? 0x00000000 : recipe().bgColors[0],
+            gradTo: effect === "blur" ? 0x00000000 : recipe().bgColors[2],
+            gradDir: 1,
+            radius: surfaceRadius(),
+            opacity: surfaceOpacity(),
+            shadow: effect === "blur" ? 0 : recipe().shadowBlur > 20 ? 2 : 1,
+          }}
+        />
       </Show>
       <View class="relative flex-col gap-3">{props.children}</View>
     </ScrollContourItem>
@@ -2719,10 +2848,11 @@ export function ShadcnTable(props: {
 
 const SHADCN_WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 const SHADCN_CALENDAR_WEEKS = [
-  [28, 29, 30, 1, 2, 3, 4],
-  [5, 6, 7, 8, 9, 10, 11],
-  [12, 13, 14, 15, 16, 17, 18],
-  [19, 20, 21, 22, 23, 24, 25],
+  [1, 2, 3, 4, 5, 6, 7],
+  [8, 9, 10, 11, 12, 13, 14],
+  [15, 16, 17, 18, 19, 20, 21],
+  [22, 23, 24, 25, 26, 27, 28],
+  [29, 30, 1, 2, 3, 4, 5],
 ];
 
 export function ShadcnCalendar(props: {
@@ -2802,11 +2932,11 @@ export function ShadcnCalendar(props: {
         </For>
       </View>
       <For each={SHADCN_CALENDAR_WEEKS}>
-        {(week) => (
+        {(week, weekIndex) => (
           <View class="flex-row items-center justify-between w-full px-1">
             <For each={week}>
               {(day) => {
-                const isOutsideMonth = day >= 28 && week === SHADCN_CALENDAR_WEEKS[0];
+                const isOutsideMonth = weekIndex() === SHADCN_CALENDAR_WEEKS.length - 1 && day < 7;
                 const isSelected = () => !isOutsideMonth && props.selectedDay === day;
                 return (
                   <Pressable
@@ -4183,7 +4313,7 @@ export function ShadcnDataTable(props: {
         </For>
         <View class="flex-row items-center justify-between px-3 py-2">
           <Text class={dark() ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>
-            {String(selectedIds().length)} of {String(rows().length)} selected
+            {String(rows().filter((row) => selectedIds().includes(row.id)).length)} of {String(rows().length)} selected
           </Text>
           <Text class={dark() ? "text-xs font-bold text-[#FAFAFA]" : "text-xs font-bold text-[#09090B]"}>
             Columns ▾

@@ -34,13 +34,28 @@ final class _PocketGlassFilter extends StatefulWidget {
 
 final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
   static Future<ui.FragmentProgram>? _program;
+  Future<void>? _shaderLoad;
   ui.FragmentShader? _shader;
   bool _failed = false;
 
   @override
   void initState() {
     super.initState();
-    if (ui.ImageFilter.isShaderFilterSupported) unawaited(_load());
+    _ensureShader();
+  }
+
+  @override
+  void didUpdateWidget(_PocketGlassFilter oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _ensureShader();
+  }
+
+  void _ensureShader() {
+    if (widget.parameters['effect'] != 'blur' &&
+        ui.ImageFilter.isShaderFilterSupported &&
+        _shaderLoad == null) {
+      _shaderLoad = _load();
+    }
   }
 
   Future<void> _load() async {
@@ -66,6 +81,8 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
     final p = widget.parameters;
     final radius = _surfaceNumber(p, 'radius', 24, 0, 200) * widget.scale;
     final sigma = _surfaceNumber(p, 'blur', 5, 0, 20) * widget.scale;
+    final plainBlur = p['effect'] == 'blur';
+    final opacity = _surfaceNumber(p, 'opacity', 1, 0, 1);
     final tint = _surfaceNumber(p, 'tintOpacity', .16, 0, 1);
     final shape = p['shape'];
     final rounded = BorderRadius.circular(
@@ -73,11 +90,43 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
     );
     return LayoutBuilder(
       builder: (context, constraints) {
-        final shader = _shader;
+        // Modal blur samples the scene without the optical glass material's
+        // tint, refraction or rim. JS supplies the animation progress.
+        if (plainBlur && opacity == 0) return const SizedBox.expand();
+        final shader = plainBlur ? null : _shader;
         ui.ImageFilter filter = ui.ImageFilter.blur(
           sigmaX: sigma,
           sigmaY: sigma,
         );
+        if (plainBlur && opacity < 1) {
+          // Fade the filtered backdrop itself. An Opacity ancestor would put
+          // BackdropFilter in an isolated layer and change what it samples.
+          filter = ui.ImageFilter.compose(
+            outer: ui.ColorFilter.matrix(<double>[
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              opacity,
+              0,
+            ]),
+            inner: filter,
+          );
+        }
         if (shader != null) {
           // First vec2 and sampler 0 are set by ImageFilter.shader itself.
           final values = <double>[
@@ -110,7 +159,9 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
           // A preceding blur expands the input texture and shifts its SDF.
           filter = ui.ImageFilter.shader(shader);
         }
-        final mode = shader != null
+        final mode = plainBlur
+            ? 'blur'
+            : shader != null
             ? 'refractive'
             : _failed
             ? 'failed'
@@ -127,10 +178,10 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
               // claiming optical refraction. JS can inspect runtime.info.
               decoration: BoxDecoration(
                 borderRadius: rounded,
-                color: shader == null
+                color: !plainBlur && shader == null
                     ? Colors.white.withValues(alpha: tint)
                     : null,
-                border: shader == null
+                border: !plainBlur && shader == null
                     ? Border.all(
                         color: Colors.white.withValues(alpha: .4),
                         width: .75,

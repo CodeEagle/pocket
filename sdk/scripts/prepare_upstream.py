@@ -38,6 +38,8 @@ PATCHES = (
     ("demand-scheduler.patch", "demand scheduler"),
     ("offload-cancel.patch", "offload provider cancellation"),
     ("offload-direct-value.patch", "offload direct-value transport"),
+    ("focus-display-filter.patch", "focus display filtering"),
+    ("modal-transparent-backdrop.patch", "transparent modal backdrop"),
 )
 
 # Later patches can intentionally supersede one earlier diff hunk. The

@@ -1,0 +1,21 @@
+diff --git a/framework/src/components.ts b/framework/src/components.ts
+--- a/framework/src/components.ts
++++ b/framework/src/components.ts
+@@ -382,6 +382,8 @@
+ export interface ModalProps {
+   class?: string;
+   panelClass?: string;
++  /** Optional class for the official scrim; defaults to the dark backdrop. */
++  backdropClass?: string;
+   open?: boolean | (() => boolean);
+   children?: SolidJSX.Element;
+ }
+@@ -424,7 +427,7 @@
+       View({
+         ref: (node) => {
+           backdrop = node;
+         },
+-        class: "absolute inset-0 bg-slate-950",
++        class: props.backdropClass ?? "absolute inset-0 bg-slate-950",
+         style: { opacity: 0 },
+       }),

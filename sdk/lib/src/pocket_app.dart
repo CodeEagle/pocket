@@ -60,6 +60,9 @@ final class PocketGuestSession extends StatefulWidget {
     this.viewport,
     this.geometryRevision = 0,
     this.backgroundColor,
+    this.compositorBounds,
+    this.compositorViewport,
+    this.preserveCompositorDisplayGeometry = false,
   });
   final PocketAppConfig config;
   final PocketHostSurfaceBuilder? hostSurfaceBuilder;
@@ -72,6 +75,12 @@ final class PocketGuestSession extends StatefulWidget {
   /// child PocketView uses this as a post-layout safe-area invalidation token;
   /// it is deliberately not a copied root inset or a second geometry state.
   final int geometryRevision;
+
+  /// Parent compositor geometry used only for the child's environmental
+  /// display reference. Physical slot bounds still control clipping/input.
+  final Rect? compositorBounds;
+  final Size? compositorViewport;
+  final bool preserveCompositorDisplayGeometry;
 
   /// Optional host-owned Session.  When supplied, this widget only attaches
   /// its PocketView and never disposes the Session.
@@ -183,6 +192,10 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       backgroundColor: widget.backgroundColor,
       viewport: widget.viewport,
       geometryRevision: widget.geometryRevision,
+      compositorBounds: widget.compositorBounds,
+      compositorViewport: widget.compositorViewport,
+      preserveCompositorDisplayGeometry:
+          widget.preserveCompositorDisplayGeometry,
       hostSurfaceBuilder: widget.hostSurfaceBuilder,
       hostSurfaceResidents: widget.hostSurfaceResidents,
       compositorSurfaces: config.compositorSurfaces,

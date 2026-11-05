@@ -1743,7 +1743,7 @@ export function ScrollablePage(props: {
     },
     chainDrag: (deltaY: number) => {
       if (!routeActive() || deltaY === 0) return;
-      if (scroller.state() !== "dragging") {
+      if (scroller.state() !== "tracking") {
         endedOnThisTurn = false;
         scroller.stop();
         scroller.beginDrag();
@@ -1754,7 +1754,7 @@ export function ScrollablePage(props: {
     },
     chainEndDrag: (velocityY: number) => {
       if (!routeActive()) return;
-      if (scroller.state() === "dragging") {
+      if (scroller.state() === "tracking") {
         endedOnThisTurn = true;
         scroller.endDrag(velocityY);
       }

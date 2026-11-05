@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -189,6 +190,86 @@ void main() {
       await tester.pumpWidget(buildSurface(top: 0, revision: 1));
       await tester.pump();
       expect(_viewportMessages(runtime), hasLength(moved.length));
+    },
+  );
+
+  testWidgets(
+    'anchors display geometry for a translated fullscreen compositor child',
+    (tester) async {
+      _configureDuoLikeView(tester);
+      final runtime = _ViewportRuntime();
+
+      Widget buildSurface({
+        required double top,
+        required int revision,
+        bool anchored = true,
+      }) {
+        return MaterialApp(
+          home: Stack(
+            children: <Widget>[
+              Positioned(
+                left: 0,
+                top: top,
+                width: 320,
+                height: 480,
+                child: PocketView(
+                  runtime: runtime,
+                  jsSource: '',
+                  pakBytes: Uint8List(0),
+                  showDebugFps: false,
+                  geometryRevision: revision,
+                  compositorBounds: Rect.fromLTWH(0, top, 320, 480),
+                  compositorViewport: const Size(320, 480),
+                  preserveCompositorDisplayGeometry: anchored,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      // The physical child starts below the display, but its logical display
+      // reference is the parent's stable 320x480 viewport.
+      await tester.pumpWidget(buildSurface(top: 480, revision: 0));
+      await tester.pump();
+      final initial = _lastViewport(runtime);
+      expect(initial['safeArea'], <String, double>{
+        'top': 10,
+        'right': 20,
+        'bottom': 30,
+        'left': 5,
+      });
+
+      // Translating the slot must not make safe-area values animate through
+      // zero and back. Physical pointer/layout geometry remains translated.
+      final beforeMoveCount = _viewportMessages(runtime).length;
+      await tester.pumpWidget(buildSurface(top: 180, revision: 1));
+      await tester.pump();
+      await tester.pump();
+      await tester.pumpWidget(buildSurface(top: 0, revision: 2));
+      await tester.pump();
+      await tester.pump();
+      expect(_lastViewport(runtime)['safeArea'], initial['safeArea']);
+      expect(_viewportMessages(runtime), hasLength(beforeMoveCount));
+
+      // Ablation: disabling the stable reference recreates the shrinking
+      // inset and the extra child layout event during the same physical move.
+      await tester.pumpWidget(
+        buildSurface(top: 0, revision: 3, anchored: false),
+      );
+      await tester.pump();
+      await tester.pumpWidget(
+        buildSurface(top: 180, revision: 4, anchored: false),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect((_lastViewport(runtime)['safeArea'] as Map)['top'], 0);
+      expect(_viewportMessages(runtime).length, greaterThan(beforeMoveCount));
+
+      await tester.pumpWidget(buildSurface(top: 180, revision: 5));
+      await tester.pump();
+      await tester.pump();
+      expect(_lastViewport(runtime)['safeArea'], initial['safeArea']);
     },
   );
 

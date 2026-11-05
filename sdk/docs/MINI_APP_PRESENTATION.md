@@ -27,9 +27,10 @@ must retain their presentation when unrelated kernel notifications publish new
 binding objects.
 
 The `mini-app` presentation requires an `onClose` callback at the public type
-boundary. The plain presentation remains the default. Entry uses a 420ms cubic
-timeline; every normal return/cancel reverses that same timeline before
-stack removal. The close callback requests cancellation first; the kernel’s
+boundary. The plain presentation remains the default. Entry settles over 420ms with cubic deceleration; normal return/cancel
+dismisses over 360ms with gentler quadratic deceleration before stack removal.
+The single timeline stores the actual presented position, so interrupted entry
+reverses from that exact position and scales duration by the remaining distance. The close callback requests cancellation first; the kernel’s
 `onBeforeDismiss` boundary waits for the renderer, then delivers results and
 tears down the dismissed runtime. A close during entry reverses from the current timeline
 instead of jumping to a second animation. A rejected cancellation restores the
@@ -180,3 +181,37 @@ also pass (3/3). The updated 8792 service reports no build error.
 namespace separation, private app isolation, and rejection of direct child
 `system.storage` calls (1/1). Together with the native stack/identity test and
 three preview smoke tests, this correction has 5 passing focused tests.
+
+## Fullscreen transition continuity (2026-11-05)
+
+The supplied iPhone recording exposed an environmental feedback loop: translating
+a full-viewport application changed its global RenderBox origin, which reduced
+the reported top safe area. Child layout moved upward while the whole panel moved
+downward, cancelling the first approximately 62 logical pixels of dismissal.
+The recording's main moving frames were spaced at 16.7ms, so a high FPS badge alone
+was not evidence of continuous content motion.
+
+The retained parent `lib/render/pocket_ui_components.dart:524` keeps retained
+content separate from presentation transforms. The adaptation preserves that
+contract: fullscreen child environmental geometry uses the parent viewport
+reference, while physical compositor bounds and clipping continue to determine
+visibility and pointer routing. Embedded surfaces retain physical intersections.
+This removes animation-driven safe-area/occlusion relayout rather than adding a
+Dart animation, timer, or navigation state machine. Real viewport changes still
+update the display environment.
+
+JS retains one presented-position signal, removing the previous separate symmetric
+easing projection. Cubic entry and gentler quadratic dismissal respond immediately
+and decelerate; dismissal has a lower peak speed than the former 420ms symmetric
+cubic. Reversing midway uses the current presented position instead of interpreting
+it under another curve. Lifecycle teardown still awaits the same JS dismissal
+boundary. The pinned 60Hz guest clock remains unchanged.
+
+Validation: fresh pinned native `pocket_probe` plus isolated Playwright Chromium
+fullscreen entry/overlay close acceptance passed. Flutter viewport/compositor regressions (10 tests), System host tests and analysis
+passed. The iOS debug app compiled successfully with codesigning disabled.
+The viewport regression includes an ablation: disabling the stable reference
+reproduces a shrinking top inset and an extra child layout update; enabling it
+keeps the inset stable and emits no movement-driven display update. Physical
+iPhone smoothness must be compared with a newly built app; the old screen recording
+is diagnostic evidence, not a recording of this patch.

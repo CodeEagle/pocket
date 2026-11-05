@@ -360,6 +360,9 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       session: instance.session,
       inputEnabled: slot.visible && slot.focused,
       geometryRevision: instance.compositorGeometryRevision,
+      compositorBounds: slot.bounds,
+      compositorViewport: slot.logicalViewport,
+      preserveCompositorDisplayGeometry: slot.preserveDisplayGeometry,
       onFirstFrame: () => _onFirstFrame(instance!),
     );
   }
@@ -381,11 +384,11 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     }
     final visibilityChanged = instance.compositorVisible != visible;
     if (geometryChanged) {
-      // The JS mini-app sheet animates its host surface from the bottom of the
-      // root canvas to the top. A child PocketView's RenderBox moves without
-      // changing constraints, so Flutter emits no metrics/dependency signal;
-      // carry only a revision and let that child measure its own post-layout
-      // safe-area intersection. See sdk/docs/EDITOR_PREVIEW_RENDERING.md.
+      // A child PocketView's RenderBox can move without changing constraints.
+      // Carry the physical slot and logical parent viewport so fullscreen
+      // compositor children can keep environmental display facts anchored
+      // while their bounds animate. Smaller embedded surfaces continue using
+      // their physical intersection.
       instance.compositorGeometryRevision++;
       instance.compositorBounds = slot.bounds;
       instance.compositorVisibleClip = slot.visibleClip;

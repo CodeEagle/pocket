@@ -1,0 +1,79 @@
+diff --git a/framework/src/input.ts b/framework/src/input.ts
+--- a/framework/src/input.ts
++++ b/framework/src/input.ts
+@@ -110,6 +110,9 @@
+ 
+ /** Programmatic focus (also used internally). null clears. */
+ export function focusNode(node: NodeMirror | null): void {
++  // Retained routes remain connected to the mirror while display:none. Do
++  // not let a stale caller focus a node that is no longer interactive.
++  if (node && isDisplayNone(node)) node = null;
+   if (pressedNode && pressedNode !== node) setPressedNode(null);
+   focused = node;
+   getOps().setFocus(node ? node.id : 0);
+@@ -132,8 +135,29 @@
+   return focusScopeStack.length > 0 ? focusScopeStack[focusScopeStack.length - 1] : root;
+ }
+ 
++/**
++ * A retained route is still connected in the JS mirror, but its route slot
++ * carries the official inline `display: Display.None` style. The native
++ * renderer already omits that subtree from layout, paint and hit testing;
++ * keep keyboard focus semantics aligned with the same boundary. Classes are
++ * deliberately not inspected here: RouteView owns an inline display prop,
++ * which is the stable cross-host signal available in NodeMirror.
++ */
++function isDisplayNone(node: NodeMirror | null): boolean {
++  let current = node;
++  while (current) {
++    const style = current.domAttrs?.style;
++    if (style && typeof style === "object") {
++      const display = (style as Record<string, unknown>).display;
++      if (display === 1 || display === "none") return true;
++    }
++    current = current.parent;
++  }
++  return false;
++}
++
+ function collectFocusables(node: NodeMirror, out: NodeMirror[]): void {
+-  if (!node) return;
++  if (!node || isDisplayNone(node)) return;
+   if (node.focusable) out.push(node);
+   if (!Array.isArray(node.children)) return;
+   for (let i = 0; i < node.children.length; i++) {
+@@ -301,6 +325,7 @@
+ }
+ 
+ function firePressFrom(start: NodeMirror | null, defer: DeferredPress | undefined = deferredPressCapture): void {
++  if (start && isDisplayNone(start)) return;
+   let n: NodeMirror | null = start;
+   while (n) {
+     if (n.onPress) {
+@@ -348,7 +373,7 @@
+ }
+ 
+ function firstFocusable(node: NodeMirror): NodeMirror | null {
+-  if (!node) return null;
++  if (!node || isDisplayNone(node)) return null;
+   if (node.focusable) return node;
+   if (!Array.isArray(node.children)) return null;
+   for (let i = 0; i < node.children.length; i++) {
+@@ -689,6 +714,7 @@
+ function cursorTarget(hit: NodeMirror | null): NodeMirror | null {
+   const scope =
+     focusScopeStack.length > 0 ? focusScopeStack[focusScopeStack.length - 1] : null;
++  if (hit && isDisplayNone(hit)) return null;
+   let n = hit;
+   while (n) {
+     if (n.focusable && (!scope || isWithin(n, scope))) return n;
+@@ -852,6 +878,9 @@
+   const pressed = buttons & ~prevButtons;
+   const released = prevButtons & ~buttons;
+   prevButtons = buttons;
++  // A route can become display:none during the previous frame's JS update.
++  // Clear that stale focus before processing this frame's D-pad/Enter edge.
++  if (focused && isDisplayNone(focused)) focusNode(null);
+   if (cursor && cursorFrame(buttons, pressed, released, defer)) return;
+   if (released & BTN.CIRCLE) setPressedNode(null);
+   if (pressed === 0) return;

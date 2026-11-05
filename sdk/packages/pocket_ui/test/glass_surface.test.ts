@@ -29,6 +29,7 @@ writeFileSync(join(solidPackageRoot, "solid.js"), `export * from ${JSON.stringif
 // repository's source tree is not modified just to select the pinned runtime.
 writeFileSync(isolatedMobileSourcePath, readFileSync(mobileSourcePath));
 writeFileSync(join(isolatedSourceRoot, "legacy.ts"), readFileSync(join(import.meta.dir, "../src/legacy.ts")));
+writeFileSync(join(isolatedSourceRoot, "route.tsx"), readFileSync(join(import.meta.dir, "../src/route.tsx")));
 writeFileSync(join(isolatedSourceRoot, "ui.tsx"), `
 import { createContext } from "solid-js";
 export const ContourConsumedContext = createContext(() => false);
@@ -40,13 +41,14 @@ export const SafeAreaScaffoldContext = createContext({
   topRightContentReserve: () => 0,
   topRightReserveForBand: () => 0,
 });
+export const ScrollablePageContext = createContext({
+  offset: () => 0,
+  max: () => 0,
+});
 export const ScrollContourItem = (props: any) => ({ type: "scroll-contour-item", props });
 export const useScrollContourReserve = () => ({ nodeRef: () => {}, reserve: () => 0, syncLayout: () => false });
 `);
-writeFileSync(join(isolatedSourceRoot, "responsive.ts"), `
-export const deriveWindowSizeClass = () => "compact";
-export const deriveDesignDensity = () => "touch";
-`);
+writeFileSync(join(isolatedSourceRoot, "responsive.ts"), readFileSync(join(import.meta.dir, "../src/responsive.ts")));
 
 writeFileSync(runnerPath, `
 import { strict as assert } from "node:assert";
@@ -58,10 +60,17 @@ mock.module("react/jsx-dev-runtime", () => ({
   jsxs: (type, props) => ({ type, props }),
   jsxDEV: (type, props) => ({ type, props }),
 }));
+mock.module("@pocketjs/framework/gesture", () => ({
+  createGesture: () => ({}),
+}));
+mock.module("@pocketjs/framework/clock", () => ({
+  simulationHz: () => 60,
+}));
 mock.module("@pocketjs/framework/solid/components", () => ({
   CompositorSurface: (props) => ({ type: "compositor", props }),
   Focusable: (props) => ({ type: "focusable", props }),
   Modal: (props) => ({ type: "modal", props }),
+  Portal: (props) => ({ type: "portal", props }),
   Text: (props) => ({ type: "text", props }),
   View: (props) => ({ type: "view", props }),
 }));
@@ -74,9 +83,11 @@ const { GlassSurface } = await import(${JSON.stringify(isolatedMobileSourcePath)
 
 const registrations = [];
 const releases = [];
+const flush = async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); };
 const bridge = {
   registerSurface: (id, kind, payload) => {
     assert.equal(kind, "glass");
+    assert.equal(typeof payload, "object", "surface bridge emits the typed descriptor object directly");
     registrations.push({ id, payload });
     return true;
   },
@@ -95,27 +106,75 @@ createRoot((dispose) => {
     get pressed() { return pressed(); },
   });
 });
+await flush();
 assert.equal(registrations.length, 1, "the initial effect must register once");
+assert.deepEqual(registrations[0].payload, {
+  radius: 22,
+  blur: 7.5,
+  effect: "glass",
+  opacity: 1,
+  edgeIntensity: 0.015,
+  rimIntensity: 0.05,
+  baseIntensity: 0.01,
+  tintOpacity: 0.16,
+  cornerBoost: 0.02,
+  rippleEffect: 0.08,
+  warp: true,
+  pressed: false,
+  shape: "rounded",
+}, "default glass keeps the optical recipe and full alpha");
 setPressed(false);
+await flush();
 assert.equal(registrations.length, 1, "an unchanged payload must remain deduplicated");
 setPressed(true);
+await flush();
 assert.equal(registrations.length, 2, "a changed payload must update the existing surface");
 assert.notEqual(registrations[0].payload, registrations[1].payload);
 setPressed(true);
+await flush();
 assert.equal(registrations.length, 2, "the updated payload must also be deduplicated");
 const firstId = registrations[0].id;
 firstDispose();
 assert.deepEqual(releases, [firstId], "dispose must release the component's own id");
+
+let blurDispose;
+let setBlurOpacity;
+createRoot((dispose) => {
+  blurDispose = dispose;
+  const [opacity, updateOpacity] = createSignal(0);
+  setBlurOpacity = updateOpacity;
+  GlassSurface({
+    effect: "blur",
+    tintOpacity: 0,
+    get opacity() { return opacity(); },
+  });
+});
+await flush();
+assert.equal(registrations.length, 3, "a blur surface must register its initial payload");
+const blurInitial = registrations[2].payload;
+assert.equal(blurInitial.effect, "blur");
+assert.equal(blurInitial.opacity, 0);
+assert.equal(blurInitial.tintOpacity, 0);
+assert.equal(blurInitial.radius, 0, "a full-viewport blur must not round its corners");
+assert.equal(blurInitial.edgeIntensity, 0, "a backdrop blur must not add an optical rim");
+setBlurOpacity(0.5);
+await flush();
+assert.equal(registrations.length, 4, "opacity changes must update the registered blur in place");
+assert.equal(registrations[3].payload.opacity, 0.5);
+const blurId = registrations[2].id;
+blurDispose();
+assert.deepEqual(releases, [firstId, blurId]);
 
 let secondDispose;
 createRoot((dispose) => {
   secondDispose = dispose;
   GlassSurface({ shape: "rounded", pressed: true });
 });
-assert.equal(registrations.length, 3, "a new instance must register despite a matching payload");
-assert.notEqual(firstId, registrations[2].id, "surface ids must remain instance-local");
+await flush();
+assert.equal(registrations.length, 5, "a new instance must register despite a matching payload");
+assert.notEqual(firstId, registrations[4].id, "surface ids must remain instance-local");
 secondDispose();
-assert.deepEqual(releases, [firstId, registrations[2].id]);
+assert.deepEqual(releases, [firstId, blurId, registrations[4].id]);
 
 const attempts = [];
 let failFirstAttempt = true;
@@ -141,10 +200,13 @@ createRoot((dispose) => {
     get pressed() { return pressed(); },
   });
 });
+await flush();
 assert.deepEqual(attempts.map((attempt) => attempt.bridge), ["fail"]);
 setRetryPressed(true);
+await flush();
 assert.deepEqual(attempts.map((attempt) => attempt.bridge), ["fail", "retry"], "a changed payload must retry after failure");
 setRetryPressed(true);
+await flush();
 assert.deepEqual(attempts.map((attempt) => attempt.bridge), ["fail", "retry"], "the retried payload must then deduplicate");
 retryDispose();
 
@@ -161,7 +223,7 @@ test("GlassSurface uses the real pinned Solid runtime for registration lifecycle
     });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const output = result.stdout.trim().split(/\r?\n/).at(-1);
-    assert.deepEqual(JSON.parse(output ?? "{}"), { registrations: 3, attempts: 2, releases: 3 });
+    assert.deepEqual(JSON.parse(output ?? "{}"), { registrations: 5, attempts: 2, releases: 4 });
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }
