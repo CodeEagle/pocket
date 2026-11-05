@@ -7,6 +7,13 @@
 - [`lib/main.dart`](lib/main.dart)：薄 Flutter host，配置 `PocketSystemHost` 与可信应用目录；多应用策略在 JS SystemUI。
 - [`js/app.tsx`](js/app.tsx)：Showcase 的 JS 入口，负责页面、状态、路由、移动 UI、转场和硬件能力演示。液体玻璃演示入口暂时移除，SDK 组件仍保留。
 
+Showcase 的一级入口为 **Home / UI / Host / Settings**。二级页面使用固定顶部
+Navigation Bar 和 Back，隐藏底部 TabBar；返回后恢复当前一级入口。Settings 集中
+管理浅色/深色、四种强调色和界面密度，使用现有设备存储保存，下次启动恢复。
+Push 保留调用页实例与滚动、输入及局部选择；Back 只销毁退出的二级页。一级 Tab
+保留各自页面状态，隐藏页面停用手势、输入法和弹层。见 [路由生命周期](../sdk/docs/SHOWCASE_ROUTING.md)。
+实现来源、消融与交互验证见 [Showcase 重写记录](../sdk/docs/SHOWCASE_REWRITE.md)。
+
 Profile → Lobby 是嵌套的 JS guest 调用：Lobby 的 “Return visits to caller”
 只返回 Profile，Profile 的 selected/stored identity 会保留；用户再按 Profile
 自己的 “Return to Showcase” 才返回 Showcase。Lobby 被宿主取消时也只恢复 Profile，
@@ -59,7 +66,7 @@ flutter run --dart-define-from-file=../sdk/.pocket-build/editor-host.json
 
 Showcase 的 **Video Lab** 是独立的 JS 页面，使用本地真实小视频
 `assets/videos/clip-a.mp4` 与 `assets/videos/clip-b.mp4`。页面由 root 路由传入
-`platform`、`host` 和 `onNavigate`，自身持有 `MobileAppBar` 与
+`platform`、`host` 和 `onNavigate`，复用根部固定 `MobileAppBar`，自身持有
 `ScrollablePage`，不会复制 Flutter 播放器或使用计数器假视频。
 
 页面分为 Playback、Coverage、Scroll 三个分区，覆盖：

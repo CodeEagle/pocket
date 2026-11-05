@@ -41,9 +41,17 @@ Future<void> waitFor(WidgetTester tester, String text) async {
 }
 
 Future<void> waitForContaining(WidgetTester tester, String fragment) async {
+  // The guest's measured line wrapping inserts newlines into one text op.
+  // Match the same words independently of the device's wrapping width.
+  final whitespace = RegExp(r'\s+');
+  final expected = fragment.replaceAll(whitespace, ' ');
   for (var i = 0; i < 200; i++) {
     await tester.pump(const Duration(milliseconds: 50));
-    if (texts(tester).any((text) => text.contains(fragment))) return;
+    if (texts(
+      tester,
+    ).any((text) => text.replaceAll(whitespace, ' ').contains(expected))) {
+      return;
+    }
   }
   fail(
     'Real guest did not paint fragment "$fragment". Actual: ${texts(tester)}',

@@ -174,9 +174,9 @@ export function MobileUiPage(props: MobilePageProps): JSX.Element {
     setLastOverlayAction(`Dialog (${mode})`);
   };
   const showOverview = () => selected() === "overview";
-  const showFeedback = () => selected() === "overview" || selected() === "feedback";
-  const showControls = () => selected() === "overview" || selected() === "controls";
-  const showData = () => selected() === "overview" || selected() === "data";
+  const showFeedback = () => selected() === "feedback";
+  const showControls = () => selected() === "controls";
+  const showData = () => selected() === "data";
   return (
     <MobileScaffold class="flex-col gap-4 p-4">
         <MobileSegmentedControl

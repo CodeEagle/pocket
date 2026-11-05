@@ -78,9 +78,14 @@ void main() {
   testWidgets('Showcase uses the independent engine monitor', (tester) async {
     final monitor = FlutterFrameMonitorController(autoStart: false);
     try {
-      await tester.pumpWidget(PocketHostApp(frameMonitorController: monitor));
+      await tester.pumpWidget(
+        PocketHostApp(frameMonitorController: monitor, showFlutterFps: true),
+      );
       await guest.waitFor(tester, '00');
-      expect(find.byKey(const ValueKey('flutter-frame-monitor-hud')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('flutter-frame-monitor-hud')),
+        findsOneWidget,
+      );
       expect(find.textContaining('Guest ticks/s'), findsNothing);
       final before = monitor.totalFrames;
       await guest.tapGuest(tester, '+1');

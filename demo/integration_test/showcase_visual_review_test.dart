@@ -19,11 +19,24 @@ bool _isStructuredSensorText(String value) {
       lower.contains('denied');
 }
 
+bool _hasVisibleSensorError(List<String> painted) {
+  for (var index = 0; index < painted.length; index++) {
+    if (painted[index] != 'Sensors') continue;
+    final end = (index + 5 < painted.length) ? index + 5 : painted.length;
+    final cardTexts = painted.sublist(index, end);
+    if (cardTexts.contains('error') && cardTexts.contains('Sensor read')) {
+      return true;
+    }
+  }
+  return false;
+}
+
 Future<void> _waitForSensorTerminal(WidgetTester tester) async {
   for (var attempt = 0; attempt < 200; attempt++) {
     final painted = guest.texts(tester);
     if (painted.contains('Sensor read') &&
-        painted.any(_isStructuredSensorText)) {
+        (painted.any(_isStructuredSensorText) ||
+            _hasVisibleSensorError(painted))) {
       return;
     }
     await tester.pump(const Duration(milliseconds: 50));
@@ -56,27 +69,41 @@ void main() {
         ),
       );
       await guest.waitFor(tester, '00');
-      expect(guest.texts(tester), contains('Pocket Host Lab'));
+      expect(guest.texts(tester), contains('Pocket'));
 
-      await guest.tapGuest(tester, 'Gallery', scroll: false);
+      await guest.tapGuest(tester, 'UI', scroll: false);
       await guest.waitFor(tester, 'Official building blocks');
       expect(guest.texts(tester), contains('Text'));
       await guest.tapGuest(tester, 'Text');
-      await guest.waitForContaining(tester, 'Typography drawn by Flutter.');
+      await guest.waitForContaining(
+        tester,
+        'Typography drawn by the active host.',
+      );
       await guest.tapGuest(tester, 'Close', scroll: false);
       await guest.waitFor(tester, 'Official building blocks');
       await showcase.capture(tester, 'visual-gallery');
 
       await guest.tapGuest(tester, 'Host', scroll: false);
       await guest.waitFor(tester, 'Runtime');
-      await guest.waitForContaining(tester, 'Live host status and package identity.');
+      await guest.waitForContaining(
+        tester,
+        'Live host status and package identity.',
+      );
       await showcase.capture(tester, 'visual-host');
 
       await guest.tapGuest(tester, 'Home', scroll: false);
-      await guest.waitFor(tester, 'Pocket Host Lab');
+      await guest.waitFor(tester, 'Pocket');
 
       await guest.tapGuest(tester, 'Hardware');
       await guest.waitFor(tester, 'Hardware');
+      for (final label in ['Home', 'UI', 'Host', 'Settings']) {
+        expect(
+          guest.pointFor(tester, label),
+          isNull,
+          reason:
+              'secondary Hardware page must hide the primary $label navigation item',
+        );
+      }
       await guest.reveal(tester, 'Read sensors');
       await guest.tapGuest(tester, 'Read sensors', scroll: false);
       await guest.reveal(tester, 'Sensor read');
@@ -84,6 +111,11 @@ void main() {
       // or a real numeric sensor result. It never injects a fake response.
       await _waitForSensorTerminal(tester);
       await showcase.capture(tester, 'visual-hardware');
+
+      await showcase.tapBackIcon(tester);
+      await guest.waitFor(tester, 'Pocket');
+      await guest.tapGuest(tester, 'UI', scroll: false);
+      await guest.waitFor(tester, 'Official building blocks');
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();

@@ -922,19 +922,21 @@ function App() {
         class={mobileDark() ? "flex-col w-full h-full bg-[#09090B]" : "flex-col w-full h-full bg-[#FAFAFA]"}
       >
       <FocusScope class="flex-1 flex-col overflow-hidden" autoFocus restoreFocus>
-      <MobileAppBar
-        title={state().route === "home" ? demoTitle : state().route === "gallery" ? "UI Collection" : state().route === "about" ? "Host" : state().route === "settings" ? "Settings" : state().route === "mobile" ? "Mobile UI" : state().route === "transitions" ? "Transitions" : state().route === "hardware" ? "Hardware" : state().route === "video" ? "Video Lab" : hostTabs.find((tab) => tab.id === state().route)?.label ?? "Frame diagnostics"}
-        centered={!isPrimaryRoute(state().route)}
-        leading={isPrimaryRoute(state().route) ? undefined : <MobileBackButton onPress={() => dispatch({ type: "popRoute" })} />}
-      />
         {/* Visibility is derived from the route, without a second nav state. */}
         <View class="flex-1 flex-col h-full overflow-hidden">
-          <View class="flex-1 w-full h-full overflow-hidden" style={{ translateX: transitionDescriptor().inTx, translateY: transitionDescriptor().inTy, scale: transitionDescriptor().inScale }}>
-            <For each={mountedRoutes()}>{(route) => (
-              <RouteView active={state().route === route}>
-                {renderRoute(route)}
-              </RouteView>
-            )}</For>
+          <View class="flex-1 flex-col w-full h-full overflow-hidden" style={{ translateX: transitionDescriptor().inTx, translateY: transitionDescriptor().inTy, scale: transitionDescriptor().inScale }}>
+            <MobileAppBar
+              title={state().route === "home" ? demoTitle : state().route === "gallery" ? "UI Collection" : state().route === "about" ? "Host" : state().route === "settings" ? "Settings" : state().route === "mobile" ? "Mobile UI" : state().route === "transitions" ? "Transitions" : state().route === "hardware" ? "Hardware" : state().route === "video" ? "Video Lab" : hostTabs.find((tab) => tab.id === state().route)?.label ?? "Frame diagnostics"}
+              centered={!isPrimaryRoute(state().route)}
+              leading={isPrimaryRoute(state().route) ? undefined : <MobileBackButton onPress={() => dispatch({ type: "popRoute" })} />}
+            />
+            <View class="flex-1 w-full h-full overflow-hidden">
+              <For each={mountedRoutes()}>{(route) => (
+                <RouteView active={state().route === route}>
+                  {renderRoute(route)}
+                </RouteView>
+              )}</For>
+            </View>
           </View>
           <NavigationBar route={state().route} onNavigate={navigate} items={showcaseTabs} visible={isPrimaryRoute(state().route)} dark={mobileDark()} accentColor={theme().accentColor} geometry={() => displayGeometry()} />
         </View>
@@ -950,14 +952,12 @@ function App() {
           await host.request("platform.apps.cancel", { requestId: frame.requestId });
         }}
       />
-      <Show when={state().detailsOpen}>
-        <MobileDialog
-          open={state().detailsOpen}
-          title={state().selectedComponent ?? "Component"}
-          body={componentDetails[state().selectedComponent ?? ""] ?? "Official guest composition."}
-          onClose={() => dispatch({ type: "closeDetails" })}
-        />
-      </Show>
+      <MobileDialog
+        open={state().detailsOpen}
+        title={state().selectedComponent ?? "Component"}
+        body={componentDetails[state().selectedComponent ?? ""] ?? "Official guest composition."}
+        onClose={() => dispatch({ type: "closeDetails" })}
+      />
     </Screen>
     </MobileThemeProvider>
   );

@@ -855,13 +855,13 @@ test("source checks and boundary integrity", () => {
 });
 
 test("host bridge communication and limits", async () => {
-  const sentPackets: string[] = [];
-  const hostBridge = createHostBridge((line) => {
-    sentPackets.push(line);
+  const sentPackets: Record<string, unknown>[] = [];
+  const hostBridge = createHostBridge((packet) => {
+    sentPackets.push(packet);
     return true;
   });
   const runtimePromise = hostBridge.request("runtime.info", {});
-  const runtimePacket = JSON.parse(sentPackets[0]!) as {
+  const runtimePacket = sentPackets[0]! as {
     type: string;
     name: string;
     payload: { requestId: string; capability: string; params: Record<string, unknown> };
@@ -895,8 +895,8 @@ test("host bridge communication and limits", async () => {
 
 test("host request deadlines can sleep and cancel without frame polling", async () => {
   const callbacks = new Set<() => void>();
-  const packets: string[] = [];
-  const bridge = createHostBridge(line => { packets.push(line); return true; }, {
+  const packets: Record<string, unknown>[] = [];
+  const bridge = createHostBridge(packet => { packets.push(packet); return true; }, {
     timeoutFrames: 1800,
     scheduleTimeout: (frames, callback) => {
       assert.equal(frames, 1800);
@@ -908,7 +908,7 @@ test("host request deadlines can sleep and cancel without frame polling", async 
   // Legacy tick() callers must not count down a separately scheduled timer.
   for (let n = 0; n < 2000; n++) bridge.tick();
   assert.equal(callbacks.size, 1);
-  const requestId = JSON.parse(packets[0]!).payload.requestId;
+  const requestId = (packets[0] as { payload: { requestId: string } }).payload.requestId;
   bridge.handle({ type: "response", requestId, result: { ready: true } });
   assert.deepEqual(await response, { ready: true });
   assert.equal(callbacks.size, 0);

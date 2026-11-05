@@ -38,8 +38,8 @@ function payload(packet: Packet): JsonObject {
 
 test("hardware capability panels use real host packets for streams and GATT", async () => {
   const packets: Packet[] = [];
-  const host = createHostBridge((line) => {
-    packets.push(JSON.parse(line) as Packet);
+  const host = createHostBridge((packet) => {
+    packets.push(packet as Packet);
     return true;
   });
   const streams = createPocketStreamAdapter(host, {
@@ -169,8 +169,8 @@ test("hardware capability panels use real host packets for streams and GATT", as
 
 test("platform panel actions stay explicit and use the host capability names", async () => {
   const packets: Packet[] = [];
-  const host = createHostBridge((line) => {
-    packets.push(JSON.parse(line) as Packet);
+  const host = createHostBridge((packet) => {
+    packets.push(packet as Packet);
     return true;
   });
   const experience = createPlatformExperience(host);

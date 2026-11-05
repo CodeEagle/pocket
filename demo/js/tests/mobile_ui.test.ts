@@ -242,6 +242,7 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   const sdkRoot = join(root, "../../sdk");
   const appSource = readFileSync(join(root, "app.tsx"), "utf8");
   const mobileSource = readFileSync(join(sdkRoot, "packages/pocket_ui/src/mobile.tsx"), "utf8");
+  const videoSource = readFileSync(join(sdkRoot, "packages/pocket_ui/src/video.tsx"), "utf8");
   const pageSource = readFileSync(join(root, "mobile-pages.tsx"), "utf8");
   const uiSource = readFileSync(join(sdkRoot, "packages/pocket_ui/src/ui.tsx"), "utf8");
   const responsiveSource = readFileSync(join(sdkRoot, "packages/pocket_ui/src/responsive.ts"), "utf8");
@@ -320,7 +321,9 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(mobileSource, /radius\?: number/);
   assert.match(mobileSource, /Number\.isFinite/);
   assert.match(mobileSource, /radius: platformTextureRadius\(props\.radius\)/);
-  assert.match(mobileSource, /registerSurface\(id, "platformTexture", payload\(\)\) !== false/);
+  assert.match(mobileSource, /registerSurface\(id, "platformTexture", nextPayload\) !== false/);
+  assert.doesNotMatch(mobileSource, /registerSurface\([^\n]*JSON\.stringify/);
+  assert.doesNotMatch(videoSource, /registerSurface\([^\n]*JSON\.stringify/);
   assert.match(mobileSource, /typeof props\.open === "function" \? props\.open\(\) : props\.open/);
   assert.match(mobileSource, /focusable=\{!props\.disabled\}/);
   assert.match(pageSource, /hardware\.camera\.preview\.start/);

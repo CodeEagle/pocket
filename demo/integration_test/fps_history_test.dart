@@ -30,7 +30,9 @@ void main() {
     Timer? transitionTimer;
 
     try {
-      await tester.pumpWidget(PocketHostApp(frameMonitorController: monitor));
+      await tester.pumpWidget(
+        PocketHostApp(frameMonitorController: monitor, showFlutterFps: true),
+      );
       await guest.waitFor(tester, '00');
       final controller = tester
           .widget<PocketView>(find.byType(PocketView))

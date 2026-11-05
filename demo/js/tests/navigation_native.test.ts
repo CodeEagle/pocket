@@ -57,7 +57,7 @@ async function settleAnchor(
     previousY = currentY;
     latest = await session.frame();
   }
-  assert.fail(`timed out waiting for ${label} to settle`);
+  assert.fail(`timed out waiting for ${label} to settle\n${textOf(latest)}`);
 }
 
 async function revealVisibleText(
@@ -70,7 +70,7 @@ async function revealVisibleText(
   let latest = frame;
   let visible = findVisibleText(latest, label);
   for (let attempt = 0; !visible && attempt < 5; attempt += 1) {
-    latest = await settle(session, await session.drag({ x: 195, y: fromY }, { x: 195, y: toY }, 12));
+    latest = await settle(session, await session.drag({ x: 8, y: fromY }, { x: 8, y: toY }, 12, 12));
     visible = findVisibleText(latest, label);
   }
   assert.ok(visible, `${label} must be reachable after a real page scroll`);
@@ -160,7 +160,7 @@ test("native route stack preserves page scroll/local state and isolates popped r
 
     let input = findVisibleText(frame, "System keyboard input");
     if (!input) {
-      frame = await settle(stateSession, await stateSession.drag({ x: 195, y: 650 }, { x: 195, y: 420 }, 12));
+      frame = await settle(stateSession, await stateSession.drag({ x: 8, y: 650 }, { x: 8, y: 420 }, 12, 12));
       input = findVisibleText(frame, "System keyboard input");
     }
     assert.ok(input, "Mobile UI input must be reachable after a real page scroll");

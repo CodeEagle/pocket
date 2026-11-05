@@ -42,7 +42,7 @@ final class PocketHostApp extends StatelessWidget {
     this.frameMonitorController,
     this.showFlutterFps = const bool.fromEnvironment(
       'FLUTTER_FPS',
-      defaultValue: true,
+      defaultValue: false,
     ),
   });
 

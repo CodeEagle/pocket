@@ -76,7 +76,7 @@ class TraceHost implements HostBridge {
     return Promise.resolve(result as T);
   }
 
-  handle(_packet: string | Record<string, unknown>): boolean { return false; }
+  handle(_packet: Record<string, unknown>): boolean { return false; }
   tick(): void {}
   dispose(): void {}
 
@@ -127,7 +127,7 @@ test("SystemUI manifest covers the live runtime host capability contract", async
   }
 
   const globalObject = globalThis as typeof globalThis & {
-    __pocketEvent?: (line: string) => void;
+    __pocketEvent?: (packet: Record<string, unknown>) => void;
     ui?: { __surfaces?: Record<string, number> };
   };
   const previousEvent = globalObject.__pocketEvent;
@@ -161,7 +161,7 @@ test("SystemUI manifest covers the live runtime host capability contract", async
     );
     const eventSink = globalObject.__pocketEvent;
     assert.equal(typeof eventSink, "function");
-    eventSink!(JSON.stringify({
+    eventSink!({
       type: "event",
       name: "system.request",
       payload: {
@@ -172,7 +172,7 @@ test("SystemUI manifest covers the live runtime host capability contract", async
         capability: "platform.apps.open",
         params: { appId: PROFILE, arguments: null },
       },
-    }));
+    });
 
     await firstFrame;
     await launch;
