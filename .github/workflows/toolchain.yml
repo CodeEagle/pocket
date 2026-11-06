@@ -161,8 +161,17 @@ jobs:
         working-directory: sdk/.pocket-build/toolchain-package
         run: npm pack --ignore-scripts
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pocket-tools-${{ matrix.os }}-${{ matrix.arch }}
+          path: sdk/.pocket-build/toolchain-package/*.tgz
+          if-no-files-found: error
+          include-hidden-files: true
+
       - name: Verify clean Windows npm consumer
         if: runner.os == 'Windows'
+        env:
+          npm_config_loglevel: verbose
         shell: pwsh
         run: |
           Copy-Item sdk/.pocket-build/toolchain-package/*.tgz sdk/.pocket-build/
@@ -176,11 +185,17 @@ jobs:
           node sdk/scripts/tests/windows_package_smoke.mjs --sdk-root=./sdk/.pocket-build/windows-consumer | Tee-Object -FilePath sdk/.pocket-build/windows-acceptance.json
           if ($LASTEXITCODE -ne 0) { throw "Windows runtime acceptance failed" }
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pocket-tools-${{ matrix.os }}-${{ matrix.arch }}
-          path: sdk/.pocket-build/toolchain-package/*.tgz
-          if-no-files-found: error
+
+      - name: Collect Windows installation diagnostics
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dest = "sdk/.pocket-build/windows-acceptance-diagnostics"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Copy-Item sdk/.pocket-build/windows-consumer/package*.json $dest -ErrorAction SilentlyContinue
+          Get-ChildItem sdk/.pocket-build/windows-consumer/node_modules/@pocket -Force -ErrorAction SilentlyContinue | Format-List | Out-File "$dest/packages.txt"
+          $cache = npm config get cache
+          Copy-Item "$cache/_logs/*debug*.log" $dest -ErrorAction SilentlyContinue
 
       - name: Preserve Windows acceptance output
         if: always() && runner.os == 'Windows'
@@ -189,3 +204,4 @@ jobs:
           name: pocket-windows-acceptance
           path: sdk/.pocket-build/windows-acceptance*
           if-no-files-found: ignore
+          include-hidden-files: true
