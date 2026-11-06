@@ -3,11 +3,19 @@
  * tokens to the HTTP client. Unlike companion's isolated console, Studio needs
  * the user's existing provider and managed credential configuration.
  */
-import { CodexClient, findCodex, userCodexHome } from "../.cache/pocketjs/tools/companion/codex.ts";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolvePrebuiltTools } from "../scripts/prebuilt_tools.mjs";
+
+const sdkRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const upstreamRoot = process.env.POCKET_UPSTREAM_ROOT || (process.env.POCKET_SOURCE_BUILD === "1"
+  ? join(sdkRoot, ".cache", "pocketjs")
+  : resolvePrebuiltTools(sdkRoot).compiler);
+const { CodexClient, findCodex, userCodexHome } = await import(pathToFileURL(join(upstreamRoot, "tools", "companion", "codex.ts")).href);
+type CodexClient = InstanceType<typeof CodexClient>;
 
 type Json = Record<string, any>;
 type Rpc = Pick<CodexClient, "request" | "onNotification" | "onExit" | "handleRequests" | "stop">;
