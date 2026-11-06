@@ -381,6 +381,7 @@
     descriptor = descriptor || surfaceDescriptor(op);
     if (!descriptor) return false;
     const parameters = descriptor.parameters;
+    const opticalInset = clamp(number(parameters.opticalInset, 0), 0, 64);
     const effect = parameters.effect === "blur" ? "blur" : "glass";
     const opacity = effect === "blur" ? clamp(number(parameters.opacity, 1), 0, 1) : 1;
     // A transparent entrance frame has no filtered contribution. In
@@ -404,8 +405,12 @@
         context.save();
         const width = Math.max(0, number(op.w, op.width ?? 0));
         const height = Math.max(0, number(op.h, op.height ?? 0));
-        const radius = parameters.shape === "pill" || parameters.shape === "circle"
-          ? Math.min(width, height) / 2 : clamp(number(parameters.radius, 0), 0, Math.min(width, height) / 2);
+        const radius = opticalInset > 0 ? 0 : parameters.shape === "pill" || parameters.shape === "circle"
+          ? Math.min(width, height) / 2
+          : clamp(number(parameters.radius, 0), 0, Math.min(width, height) / 2);
+        // The shader returns the untouched backdrop outside its original SDF;
+        // the expanded rectangular clip only prevents the local optical halo
+        // from leaking into unrelated draw ops.
         roundedClip(context, number(op.x, 0), number(op.y, 0), width, height, radius);
         context.drawImage(optical.canvas, optical.x, optical.y, optical.width, optical.height);
         context.restore();
@@ -441,6 +446,7 @@
     // recent sample is retained in the existing scratch canvas; multiple
     // glass surfaces safely recalculate when their prefixes differ.
     const scaledSigma = sigma * scale;
+    if (typeof backdropKey === "function") backdropKey = backdropKey({ x: 0, y: 0, w: frameWidth, h: frameHeight });
     if (backdropKey === null || scratch.backdropKey !== backdropKey || scratch.sigma !== scaledSigma) {
       const scratchContext = scratch.context;
       scratchContext.setTransform(1, 0, 0, 1, 0, 0);
@@ -461,9 +467,13 @@
       context.rect(number(clip.x, 0), number(clip.y, 0), Math.max(0, number(clip.w ?? clip.width, 0)), Math.max(0, number(clip.h ?? clip.height, 0)));
       context.clip();
     }
+    const shapeX = x + opticalInset, shapeY = y + opticalInset;
+    const shapeWidth = Math.max(0, width - opticalInset * 2);
+    const shapeHeight = Math.max(0, height - opticalInset * 2);
     const radius = parameters.shape === "pill" || parameters.shape === "circle"
-      ? Math.min(width, height) / 2 : clamp(number(parameters.radius, 0), 0, Math.min(width, height) / 2);
-    roundedClip(context, x, y, width, height, radius);
+      ? Math.min(shapeWidth, shapeHeight) / 2
+      : clamp(number(parameters.radius, 0), 0, Math.min(shapeWidth, shapeHeight) / 2);
+    roundedClip(context, shapeX, shapeY, shapeWidth, shapeHeight, radius);
     context.globalAlpha = opacity;
     context.drawImage(scratch.canvas, 0, 0, backingWidth, backingHeight, 0, 0, frameWidth, frameHeight);
     if (tintOpacity > 0) {
@@ -487,6 +497,57 @@
       number(a.y, 0) === number(b.y, 0) &&
       number(a.w, 0) === number(b.w, 0) &&
       number(a.h, 0) === number(b.h, 0);
+  }
+
+  // Ordered paint dependencies for one optical sample, not the entire frame.
+  // Unknown geometry stays a dependency. An overlapping preceding filter can
+  // pull pixels in from outside this ROI, so retain its complete input prefix.
+  function glassBackdropKey(context, ops, end, region, resourceEpoch, width, height) {
+    const selected = [];
+    let keepThrough = -1;
+    const intersects = (bounds) => bounds.x < region.x + region.w && bounds.x + bounds.w > region.x &&
+      bounds.y < region.y + region.h && bounds.y + bounds.h > region.y;
+    for (let index = end - 1; index >= 0; index--) {
+      const op = ops[index];
+      if (!op || typeof op !== "object") continue;
+      if (index <= keepThrough) { selected.push(op); continue; }
+      let bounds = null;
+      if (op.type === "triangle" || op.type === "textureTriangle") {
+        if (Array.isArray(op.points) && op.points.length === 3) {
+          const xs = op.points.map((point) => Number(point.x));
+          const ys = op.points.map((point) => Number(point.y));
+          bounds = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+        }
+      } else if ([op.x, op.y, op.w, op.h].every((value) => Number.isFinite(Number(value)))) {
+        bounds = { x: Number(op.x), y: Number(op.y), w: Number(op.w), h: Number(op.h) };
+        if (op.type === "text") {
+          const size = fontSize(op.fontSlot);
+          if (bounds.y - size >= region.y + region.h || bounds.y + bounds.h + size <= region.y) continue;
+          const previousFont = context.font;
+          context.font = `${fontWeight(op.fontSlot)} ${size}px system-ui, -apple-system, sans-serif`;
+          const lines = String(op.text ?? "").split("\n");
+          const measured = Math.max(0, ...lines.map((line) => context.measureText(line).width));
+          context.font = previousFont;
+          const align = Number(op.align);
+          const offset = align === 1 ? (bounds.w - measured) / 2 : align === 2 ? bounds.w - measured : 0;
+          // Include glyph bearings/antialiasing beyond the advance box.
+          bounds = { x: bounds.x + Math.min(0, offset) - size, y: bounds.y - size,
+            w: Math.max(bounds.w, measured) + size * 2, h: bounds.h + size * 2 };
+        }
+      }
+      if (bounds && op.clip) {
+        const clip = op.clip;
+        const right = Math.min(bounds.x + bounds.w, number(clip.x, 0) + number(clip.w, 0));
+        const bottom = Math.min(bounds.y + bounds.h, number(clip.y, 0) + number(clip.h, 0));
+        bounds.x = Math.max(bounds.x, number(clip.x, 0));
+        bounds.y = Math.max(bounds.y, number(clip.y, 0));
+        bounds.w = Math.max(0, right - bounds.x); bounds.h = Math.max(0, bottom - bounds.y);
+      }
+      if (bounds && !intersects(bounds)) continue;
+      selected.push(op);
+      if (op.type === "hostSurface") keepThrough = index - 1;
+    }
+    return JSON.stringify([resourceEpoch, width, height, selected.reverse()]);
   }
 
   function drawFrame(context, frame, resources, videos, resourceEpoch = 0) {
@@ -560,7 +621,7 @@
           hasGlass = true;
           // Videos can change pixels without a new DrawOp. Resource updates
           // invalidate even when an image keeps the same asset identity.
-          const key = backdropHasVideo ? null : JSON.stringify([resourceEpoch, width, height, ops.slice(0, index)]);
+          const key = backdropHasVideo ? null : (region) => glassBackdropKey(context, ops, index, region, resourceEpoch, width, height);
           drawGlassSurface(context, op, width, height, descriptor, key);
         }
       }

@@ -830,6 +830,10 @@ export interface NavigationBarProps {
   indicator?: JSX.Element | (() => JSX.Element);
   /** Optional semantic node ref for each existing tab Focusable. */
   nodeRefForItem?: (item: NavigationItem) => ViewProps["nodeRef"];
+  /** Reuse the actual capsule subtree for shared material interactions. */
+  trackNodeRef?: ViewProps["nodeRef"];
+  /** An optical selection lens samples the already painted icons. */
+  selectionOverlay?: JSX.Element | (() => JSX.Element);
 }
 
 /**
@@ -992,14 +996,14 @@ export function NavigationBar(props: NavigationBarProps): JSX.Element {
           <View class="w-full h-[1]" style={{ bgColor: border() }} />
         </Show>
         <View
-          nodeRef={(node) => { trackNode = node; }}
+          nodeRef={(node) => { trackNode = node; props.trackNodeRef?.(node); }}
           class={isFloating()
-            ? "relative flex-row items-center w-full h-[58] px-2 overflow-hidden"
+            ? "relative flex-row items-center w-full h-[58] px-2"
             : "relative flex-row items-center w-full h-[54] px-2"}
           style={isFloating() ? undefined : { bgColor: surface() }}
         >
           <Show when={props.background !== undefined}>
-            <View class="absolute inset-0 overflow-hidden">{resolveBackground()}</View>
+            <View class="absolute inset-0">{resolveBackground()}</View>
           </Show>
           <Show when={props.selectionIndicator === true || props.indicator !== undefined}>
             <NavigationSelectionIndicator
@@ -1035,6 +1039,7 @@ export function NavigationBar(props: NavigationBarProps): JSX.Element {
               );
             }}
           </For>
+          {typeof props.selectionOverlay === "function" ? props.selectionOverlay() : props.selectionOverlay}
         </View>
       </View>
     </Show>

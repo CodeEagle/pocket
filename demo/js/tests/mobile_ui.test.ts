@@ -241,6 +241,7 @@ test("partial display geometry updates and clears", () => {
 test("source-backed mobile controls, transitions, and contracts", () => {
   const sdkRoot = join(root, "../../sdk");
   const appSource = readFileSync(join(root, "app.tsx"), "utf8");
+  const applePageSource = readFileSync(join(root, "apple-page.tsx"), "utf8");
   const mobileSource = readFileSync(join(sdkRoot, "packages/pocket_ui/src/mobile.tsx"), "utf8");
   const videoSource = readFileSync(join(sdkRoot, "packages/pocket_ui/src/video.tsx"), "utf8");
   const pageSource = readFileSync(join(root, "mobile-pages.tsx"), "utf8");
@@ -253,6 +254,9 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as { permissions?: { optional?: string[] } };
 
   for (const label of ["Mobile UI", "Transitions", "Hardware"]) assert.match(appSource, new RegExp(label));
+  assert.match(appSource, /Open Apple Glass/);
+  assert.match(appSource, /route === "apple"/);
+  assert.match(applePageSource, /AppleGlassNavigationBar/);
   assert.doesNotMatch(appSource, /LiquidGlassPage|route === "glass"|route: "glass"|label="Liquid Glass"/);
   assert.doesNotMatch(pageSource, /LiquidGlassPage|Liquid Glass|buildLiquidGlassRecipe|glassShapes|GlassSurface/);
   for (const label of [
@@ -292,7 +296,7 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(mobileSource, /useStateTransition/);
   assert.match(mobileSource, /useAnimatedNumber/);
   assert.match(mobileSource, /registerSurface/);
-  assert.match(mobileSource, /blur: current\.blurSigma/);
+  assert.match(mobileSource, /blur: resolveGlassSurfaceNumber\(props\.blur/);
   assert.match(mobileSource, /CompositorSurface/);
   assert.match(mobileSource, /releaseSurface/);
   assert.match(mobileSource, /<SafeAreaScaffold/);

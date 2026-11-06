@@ -571,7 +571,7 @@ export function usePresenceTransition(
  * preserve the painted position and velocity; settled controls park again.
  * `rate` remains a compatible speed hint for callers without durationMs.
  */
-export function useAnimatedNumber(target: () => number, rate = 0.38, durationMs?: number): () => number {
+export function useAnimatedNumber(target: () => number, rate = 0.38, durationMs?: number, dampingRatio = 1): () => number {
   const accessibility = useAccessibilityPreferences();
   const routeActive = useRouteActive();
   const initial = untrack(target);
@@ -586,12 +586,12 @@ export function useAnimatedNumber(target: () => number, rate = 0.38, durationMs?
   const advance = (delta: number): void => {
     if (delta <= 0) return;
     elapsed += delta;
-    const next = stepMotionSpring(untrack(current), velocity, goal, delta, responseMs);
+    const next = stepMotionSpring(untrack(current), velocity, goal, delta, responseMs, dampingRatio);
     velocity = next.velocity;
     // Bound the final snap below a hundredth of a logical pixel. Normalized
     // properties use a proportionally smaller tolerance.
     const tolerance = Math.max(0.0001, Math.min(0.01, distance * 0.005));
-    if (elapsed * 1000 >= responseMs && Math.abs(goal - next.position) <= tolerance) {
+    if (elapsed * 1000 >= responseMs && Math.abs(goal - next.position) <= tolerance && Math.abs(velocity) <= tolerance * 100) {
       velocity = 0;
       setCurrent(goal);
       setActive(false);
@@ -2061,6 +2061,7 @@ type SurfaceBridge = {
   /** The native ABI accepts the typed descriptor object directly. */
   registerSurface?: (packageId: string, kind: "glass" | "platformTexture", payload: BridgeObject) => unknown;
   releaseSurface?: (packageId: string) => void;
+  getLayout?: (nodeId: number) => unknown;
 };
 
 const surfaceGlobal = globalThis as typeof globalThis & { pocket?: SurfaceBridge };
@@ -2069,6 +2070,10 @@ let nextTextureSurface = 1;
 
 const DEFAULT_PLATFORM_TEXTURE_RADIUS = 12;
 const MAX_PLATFORM_TEXTURE_RADIUS = 200;
+// Opt-in glass controls reserve a small paint halo while their layout and hit
+// node remain unchanged. The descriptor tells both hosts where the original
+// shape lives inside the expanded compositor quad.
+const GLASS_OPTICAL_INSET = 36;
 
 function platformTextureRadius(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_PLATFORM_TEXTURE_RADIUS;
@@ -2106,15 +2111,125 @@ function resolveGlassSurfaceNumber(
   return Math.max(minimum, Math.min(maximum, resolved));
 }
 
+/** One local displacement field, shared by all opt-in glass controls. */
+function createGlassElasticity(options: {
+  enabled: () => boolean;
+  node: () => NodeMirror | undefined;
+  interactionNode: () => NodeMirror | undefined;
+  extentX: () => number | undefined;
+  extentY: () => number | undefined;
+}) {
+  const routeActive = useRouteActive();
+  const scrollPage = useContext(ScrollablePageContext);
+  const [offsetX, setOffsetX] = createSignal(0);
+  const [offsetY, setOffsetY] = createSignal(0);
+  const [anchor, setAnchor] = createSignal({ x: 0, y: 0, radius: 0 });
+  let targetX = 0, targetY = 0, velocityX = 0, velocityY = 0;
+  let distanceX = 0, distanceY = 0, baseX = 0, baseY = 0;
+  let phase: "idle" | "pressed" | "dragging" | "returning" = "idle";
+  let disposed = false, lastFrame = virtualNow();
+  let contactId: number | undefined;
+  const reset = () => {
+    targetX = targetY = velocityX = velocityY = 0;
+    phase = "idle";
+    contactId = undefined;
+    setOffsetX(0); setOffsetY(0);
+  };
+  const moving = () => phase === "returning" || (
+    (phase === "pressed" || phase === "dragging") && (
+      Math.abs(offsetX() - targetX) > .015 || Math.abs(offsetY() - targetY) > .015 ||
+      Math.abs(velocityX) > .15 || Math.abs(velocityY) > .15
+    )
+  );
+  const advance = (delta: number) => {
+    if (phase === "idle") return;
+    if (!options.enabled() || !routeActive()) { reset(); return; }
+    const returning = phase === "returning";
+    const x = stepMotionSpring(offsetX(), velocityX, targetX, delta, returning ? 560 : 180, returning ? .62 : 1);
+    const y = stepMotionSpring(offsetY(), velocityY, targetY, delta, returning ? 560 : 180, returning ? .62 : 1);
+    velocityX = x.velocity; velocityY = y.velocity;
+    setOffsetX(x.position); setOffsetY(y.position);
+    if (returning && Math.abs(x.position) < .015 && Math.abs(y.position) < .015 && Math.abs(velocityX) < .15 && Math.abs(velocityY) < .15) reset();
+  };
+  const release = () => {
+    contactId = undefined;
+    if (!options.enabled() || !routeActive()) { reset(); return; }
+    targetX = targetY = 0;
+    phase = "returning";
+    lastFrame = virtualNow();
+    advance(1 / simulationHz());
+  };
+  const gesture = createGesture({
+    axis: "any",
+    region: { node: () => routeActive() && options.enabled() && !disposed ? options.interactionNode() : undefined },
+    panSlop: 3,
+    onDown: (contact) => {
+      if (contactId !== undefined) return;
+      const node = options.node();
+      if (!node) return;
+      const raw = surfaceGlobal.pocket?.getLayout?.(node.id) as { x?: number; y?: number; width?: number; height?: number; w?: number; h?: number } | undefined;
+      const rect = scrollPage?.visualRect?.(node) ?? raw;
+      const width = (rect && ("width" in rect ? rect.width : undefined)) ?? raw?.w;
+      const height = (rect && ("height" in rect ? rect.height : undefined)) ?? raw?.h;
+      if (!rect || typeof width !== "number" || typeof height !== "number" || !width || !height) return;
+      // Optical paint padding is never an extra input target.
+      if (contact.x < (rect.x ?? 0) || contact.x > (rect.x ?? 0) + width || contact.y < (rect.y ?? 0) || contact.y > (rect.y ?? 0) + height) return;
+      // The field has compact support: a distant edge is mathematically fixed.
+      // Re-grabs keep the current field anchor until the body settles.
+      if (Math.abs(offsetX()) + Math.abs(offsetY()) < .05) setAnchor({
+        x: contact.x - (rect.x ?? 0) - width / 2,
+        y: contact.y - (rect.y ?? 0) - height / 2,
+        radius: Math.max(28, Math.min(84, Math.min(width, height) * .95)),
+      });
+      contactId = contact.id;
+      baseX = offsetX(); baseY = offsetY(); distanceX = distanceY = 0;
+      velocityX = velocityY = 0;
+      targetX = baseX; targetY = baseY + 1.2;
+      phase = "pressed"; lastFrame = virtualNow();
+      advance(1 / simulationHz());
+    },
+    onPanStart: (contact) => { if (contact.id === contactId) phase = "dragging"; },
+    onPanMove: (contact) => {
+      if (contact.id !== contactId || phase !== "dragging") return;
+      distanceX += contact.fdx; distanceY += contact.fdy;
+      const extentX = Math.max(1, Math.abs(options.extentX() ?? 80));
+      const extentY = Math.max(1, Math.abs(options.extentY() ?? 64));
+      // Saturating local pull, never an affine transform of the whole node.
+      targetX = Math.max(-12, Math.min(12, baseX + 12 * Math.tanh(distanceX / extentX)));
+      targetY = Math.max(-12, Math.min(12, baseY + 12 * Math.tanh(distanceY / extentY)));
+      advance(1 / simulationHz()); lastFrame = virtualNow();
+    },
+    onUp: (contact) => { if (contact.id === contactId && phase === "pressed") release(); },
+    onPanEnd: (contact) => { if (contact.id === contactId) release(); },
+    onCancel: (contact) => { if (contact.id === contactId) { velocityX = velocityY = 0; release(); } },
+  });
+  onFrame(() => {
+    const now = virtualNow(); const delta = Math.max(0, now - lastFrame); lastFrame = now;
+    advance(delta);
+  }, { active: () => !disposed && routeActive() && moving(), continuous: () => !disposed && routeActive() && moving() });
+  createEffect(() => { if (!options.enabled() || !routeActive()) { gesture.cancel?.(); reset(); } });
+  onCleanup(() => { disposed = true; gesture.cancel?.(); reset(); });
+  return createMemo(() => ({ anchorX: anchor().x, anchorY: anchor().y, offsetX: offsetX(), offsetY: offsetY(), radius: anchor().radius }));
+}
+
 export function GlassSurface(props: {
   children?: JSX.Element;
   shape?: GlassShape;
   pressed?: boolean;
-  /** Clear controls retain a sharper backdrop; regular is the existing material. */
+  /** Opt-in adaptive glass materials; omitting this preserves the legacy recipe. */
   material?: "regular" | "clear";
   /** Neutral regular-material tint; JS owns appearance, hosts only mix it. */
   materialTint?: number;
   materialStrength?: GlassSurfaceNumber;
+  /** Local elastic response defaults on for the independent Apple materials. */
+  elastic?: boolean;
+  elasticExtentX?: number;
+  elasticExtentY?: number;
+  /** Explicit optical fields for a shared draggable selection lens. */
+  deformation?: { anchorX: number; anchorY: number; offsetX: number; offsetY: number; radius: number };
+  magnification?: GlassSurfaceNumber;
+  /** A shared control group can expose its real hit subtree to the backdrop. */
+  interactionNode?: () => NodeMirror | undefined;
   radius?: GlassSurfaceNumber;
   blur?: GlassSurfaceNumber;
   warp?: boolean;
@@ -2135,6 +2250,14 @@ export function GlassSurface(props: {
   const accessibility = useAccessibilityPreferences();
   const theme = useMobileTheme();
   const id = `guest.glass.${nextGlassSurface++}`;
+  let shellNode: NodeMirror | undefined;
+  const deformation = createGlassElasticity({
+    enabled: () => props.effect !== "blur" && !!props.material && props.elastic !== false && !accessibility().reduceMotion && !accessibility().reduceTransparency && !accessibility().increaseContrast,
+    node: () => shellNode,
+    interactionNode: () => props.interactionNode ? props.interactionNode() : shellNode,
+    extentX: () => props.elasticExtentX,
+    extentY: () => props.elasticExtentY,
+  });
   const recipe = createMemo(() => buildLiquidGlassRecipe({
     shape: props.shape ?? "rounded",
     focused: props.pressed === true,
@@ -2154,15 +2277,16 @@ export function GlassSurface(props: {
       radius: surfaceRadius(),
       // The native glass provider calls this field `blur`; the local recipe
       // keeps the more descriptive `blurSigma` name for UI/tests.
-      blur: resolveGlassSurfaceNumber(props.blur, props.material === "clear" ? 1.5 : current.blurSigma, 0, 20),
+      blur: resolveGlassSurfaceNumber(props.blur, props.material === "clear" ? 1.5 : props.material === "regular" ? 12 : current.blurSigma, 0, 20),
       effect,
       opacity: surfaceOpacity(),
       edgeIntensity: blurOnly ? 0 : current.edgeIntensity,
       rimIntensity: blurOnly ? 0 : current.rimIntensity,
       baseIntensity: blurOnly ? 0 : current.baseIntensity,
       tintOpacity: resolveGlassSurfaceNumber(props.tintOpacity, current.tintOpacity, 0, 1),
+      ...(props.material ? { material: props.material, opticalInset: GLASS_OPTICAL_INSET, deformation: props.deformation ?? deformation(), magnification: resolveGlassSurfaceNumber(props.magnification, 1, 1, 1.35) } : {}),
       materialTint: props.materialTint ?? (props.material === "regular" && theme().name === "dark" ? 0xff1c1c1e : 0xfff2f2f7),
-      materialStrength: resolveGlassSurfaceNumber(props.materialStrength, props.material === "regular" ? 0.72 : 0, 0, 1),
+      materialStrength: resolveGlassSurfaceNumber(props.materialStrength, props.material === "regular" ? 0.24 : props.material === "clear" ? 0.02 : 0, 0, 1),
       cornerBoost: blurOnly ? 0 : current.cornerBoost,
       rippleEffect: blurOnly || props.material === "clear" ? 0 : current.rippleEffect,
       warp: blurOnly ? false : current.warp,
@@ -2198,13 +2322,13 @@ export function GlassSurface(props: {
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
     <ScrollContourItem
-      nodeRef={props.nodeRef}
+      nodeRef={(node) => { shellNode = node; props.nodeRef?.(node); }}
       class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"}
       style={props.style}
     >
       <Show when={registered()}>
-        <View class={effect === "blur" ? "absolute inset-0 overflow-hidden" : "absolute inset-0 overflow-hidden rounded-xl"}>
-          <CompositorGlass packageId={id} radius={surfaceRadius()} />
+        <View class={effect === "blur" ? "absolute inset-0 overflow-hidden" : "absolute inset-0"}>
+          <CompositorGlass packageId={id} radius={surfaceRadius()} inset={props.material ? GLASS_OPTICAL_INSET : 0} />
         </View>
       </Show>
       <Show when={!registered()}>
@@ -2225,10 +2349,21 @@ export function GlassSurface(props: {
   );
 }
 
-function CompositorGlass(props: { packageId: string; radius: number }): JSX.Element {
+function CompositorGlass(props: { packageId: string; radius: number; inset?: number }): JSX.Element {
   // Kept as a tiny adapter to make the required native surface primitive
   // explicit; callers still compose ordinary children above it.
-  return <CompositorSurface package={props.packageId} class="absolute inset-0" style={{ radius: props.radius }} />;
+  const inset = props.inset ?? 0;
+  return <CompositorSurface package={props.packageId} class="absolute inset-0" style={{
+    insetL: -inset,
+    insetT: -inset,
+    insetR: -inset,
+    insetB: -inset,
+    radius: inset > 0 ? 0 : props.radius,
+    // The optical paint quad is deliberately larger than its shell. Keep
+    // that compositor node transparent to the guest hit walk so the
+    // Focusable content remains the real input target.
+    hitPass: 1,
+  }} />;
 }
 
 /**

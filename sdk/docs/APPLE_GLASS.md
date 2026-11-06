@@ -52,29 +52,79 @@ Upstream candidates inspected on 2026-11-06:
 Both repositories use MIT licenses. No source code or assets from either
 repository were copied. Retained Pocket provenance remains authoritative.
 
+
+Additional user-supplied optical references inspected on 2026-11-06:
+
+| Source | Revision | Relevance to Pocket |
+| --- | --- | --- |
+| [xhzq233/liquid_glass_example](https://github.com/xhzq233/liquid_glass_example/tree/e40383467214384f86d2d08374848cc4df13afc6) | `e40383467214384f86d2d08374848cc4df13afc6` | Primary visual reference requested by the user. Actual screenshot/video and `shaders/liquidglass.frag` were reviewed: a clear center with stronger narrow-edge background remapping gives a visible glass lens without a milky fill. The demo uses Flutter FragmentProgram/ImageFilter.shader, compatible with Pocket's existing rendering boundary. Its mouse-centered fixed-size lens has no local deformation or spring; keep Pocket's JS-owned shared interaction. Blur, directional shadow and multi-glass behavior are listed as unfinished. MIT license file is present. |
+| [jeantimex/liquid-glass-html-in-canvas](https://github.com/jeantimex/liquid-glass-html-in-canvas/tree/51adb13197659ad8ca5d11525814a34903e87b8e) | `51adb13197659ad8ca5d11525814a34903e87b8e` | Secondary GPU pipeline reference: separable blur/downsample, SDF bevel and sharp/blur texture composition. Requires experimental HTML-in-canvas and a WebGPU/WGSL pipeline; its CSS position parser and DOM capture are not compatible with the pinned Pocket layout. Dragging changes a whole window's left/top, with no local jelly field. It crops/uploads per panel per render; target caching is by dimensions, not backdrop content. |
+
+Neither new repository's source or assets were copied into the shipped SDK.
+The Flutter example is an optical reference, not a replacement app/component
+library. The HTML project's README declares MIT and credits
+`ybouane/liquidglass`, but its exact checkout lacks a top-level LICENSE;
+source adoption would require preserving confirmed upstream provenance.
+Current optical calibration remains Pocket's retained canonical shader, and
+these references do not establish Apple renderer equivalence or a new frame
+rate claim.
+
 ## Rendering adaptation
 
 Flutter continues to use its retained `BackdropFilter` fragment shader.
-The regular material opts into a neutral appearance tint in that same shader
-pass (72% strength), adapted from the retained parent
-`PocketLiquidGlassSurface` material fill. This keeps background text from
-competing with foreground labels. Clear and legacy surfaces retain zero
-material strength. There is no second tint surface or blur pass.
+The explicit `regular` and `clear` materials select a shared optical profile in
+that shader. Omitting `material` keeps the legacy recipe and uniform defaults.
+The initial 72% appearance fill made controls excessively opaque when combined
+with the retained shader's white veil and cushion glow. It was rejected during
+visual review. The calibrated profile preserves backdrop hue, uses a narrower
+edge lens and directional highlight, and removes that stacked white treatment.
+JS defaults to 24% regular tint / 2% clear tint, with blur radii 12 / 1.5. A
+bounded 7×7 weighted kernel softens Regular, while Clear uses thirteen
+lightweight taps. Both stay in the existing rendering pass. Native and Web hosts only project the explicit material variant; they do
+not select application appearance or own UI state.
+
+Visual review uses Apple's actual reference images, not only API names:
+
+- [HIG controls: glass lensing over colored tracks](https://developer.apple.com/tutorials/images/com.apple.HIG/human-interface-guidelines-page-image-card@2x.png)
+- [Regular over light content](https://developer.apple.com/tutorials/images/com.apple.HIG/materials-ios-liquid-glass-over-light@2x.png)
+- [Regular over dark content](https://developer.apple.com/tutorials/images/com.apple.HIG/materials-ios-liquid-glass-over-dark@2x.png)
+- [Clear over detailed content](https://developer.apple.com/tutorials/images/com.apple.HIG/materials-ios-liquid-glass-clear@2x.png)
+
+These are visual targets for background continuity, thin edge reflection and
+refraction, and material hierarchy. Pocket parameters remain an approximation;
+Apple's private renderer is not reproduced or claimed.
+
 Web Preview previously projected optical surfaces as frost only. It now embeds
 the same shader asset and adapts only GLSL texture/coordinate IO for WebGL.
 JS execution, layout, routing and input still use the pinned native PocketJS
 runtime and the ordinary buildGuest bytecode pipeline.
 
-The Web renderer keeps one program, buffer, texture and optical output per
-preview canvas. Capture uses the existing 2D scratch canvas, cropped to the
-surface plus a conservative refraction/blur halo. No pixel array, readPixels,
-getImageData, DOM snapshot, secondary layout or historical image cache is used
-in production. Foreground-only changes reuse the current output. Background
-changes upload the current bounded sample; multiple surfaces share the same
-GPU resources rather than retaining a texture for each control. Closing the
-preview deletes resources and loses the context. A missing/lost GPU context
-uses real backdrop frost and reports `frosted`, never a fabricated optical
-success.
+The Web renderer keeps one program, buffer and texture per preview canvas.
+Capture uses the existing 2D scratch canvas, cropped to the optical sample ROI.
+`opticalInset: 36` is already inside the compositor paint quad; only the
+additional required sampling halo is captured. Magnification contracts sample
+coordinates toward the lens center and needs no extra capture margin.
+
+A bounded LRU retains at most eight projected static output canvases and four
+million pixels (16 MiB of RGBA storage). A moving deformation draws directly
+from the one GL canvas; it does not copy an additional output bitmap every
+spring frame. Resting or unchanged held fields can reuse their projection.
+The ordered backdrop key includes only paint intersecting the sample ROI;
+an overlapping preceding filter conservatively retains its complete input
+prefix so transitive refraction cannot reuse stale pixels. Video inputs remain
+uncacheable, and resource updates invalidate the key. No production pixel
+array, readPixels, getImageData, DOM snapshot or secondary layout is used.
+Closing the preview releases all retained bitmaps and GPU resources. A
+missing/lost GPU context uses real backdrop frost and reports `frosted`.
+
+The retained parent's `PocketLiquidGlassSurface` in
+`pocketjs_flutter_demo/lib/render/pocket_ui_components.dart` memoizes JS optical
+recipes, and its page renderer retains RepaintBoundary subtrees. Pocket keeps
+that reuse principle at its existing rendering boundary. Per-surface Web output
+retention is a necessary adaptation: the prior single scratch result was
+continually evicted when multiple controls alternated through the renderer.
+No parent app widget tree, second UI state store or per-control WebGL context
+is introduced.
 
 Where [KHR_parallel_shader_compile](https://registry.khronos.org/webgl/extensions/KHR_parallel_shader_compile/)
 is available, compilation/linking is prepared asynchronously. Only its
@@ -143,6 +193,21 @@ Foreground-only updates do not upload or rerun the shader; shape updates use
 uniforms without an upload. Tests prohibit production CPU readback and verify
 GPU resource release plus missing/lost-context real-frost fallback.
 
+`editor/test/preview_glass_output_cache.test.ts` removes only static-output reuse
+for its ablation. With five Regular surfaces at 390×844/DPR 2, 60 frames changing
+one local field require 60 optical draws and one texture upload; disabling
+retention requires 300 draws and 300 uploads. Uploaded pixels fall from
+64,911,600 to 216,840. Final full-resolution pixels are identical. An
+intersecting backdrop change invalidates the affected result, and a twelve
+surface stress verifies count/pixel bounds and disposal. In an exclusive headed ANGLE Metal run, browser callback gap P50/P95 was
+16.7/18.6ms with retention and 16.7/17.6ms without it. Canvas submission
+P50/P95 was 0.6/2.6ms with retention and 0.4/0.6ms without it. Those small
+CPU submission samples do not demonstrate a latency improvement: the proven
+benefit is eliminated optical draws/uploads while retaining full-resolution
+pixels. Browser callback cadence is not physical display FPS or GPU completion
+time; headless callback cadence varied substantially and is not used as an
+on-screen FPS claim.
+
 `packages/pocket_ui/test/glass_surface.test.ts` uses the pinned Solid runtime to
 verify material updates, descriptor deduplication and instance-local cleanup.
 It is bridge lifecycle coverage, not a substitute for real QJBC execution.
@@ -151,6 +216,28 @@ It is bridge lifecycle coverage, not a substitute for real QJBC execution.
 profile with two glass surfaces, a moving nonuniform backdrop, a no-glass
 ablation and idle parking. It reports delivered frames, browser rAF and canvas
 submission cost separately. These are not GPU completion timings.
+
+`editor/test/preview_glass_drag.test.ts` is the input-driven local-deformation
+acceptance: standalone and toolbar glass buttons receive real pointer input,
+an edge contact changes only the material's local field while its shell and
+label rect remain fixed, release returns the descriptor to zero and parks the
+preview, and elastic=false, Reduce Motion, route removal/re-entry, and the
+NavigationBar's cross-tab lens/selection path are all exercised. The latest
+headless Playwright + ANGLE Metal run passed 1/1 with 4–5 glass surfaces; the
+M4 renderer was `ANGLE (Apple, ANGLE Metal Renderer: Apple M4, Unspecified
+Version)`, and the canvas reported `webgl-refractive`. For that run, active
+frame-gap p50/p95 was 16.0/23.7ms, canvas paint p50/p95 was 1.1/6.3ms, and
+the settled release parked the native preview timer. The reported
+`previewFrameHz` is a preview-frame delivery aggregate that includes idle and
+interaction windows, not a physical display-FPS measurement. The test
+normalizes the descriptor's optical inset back to the shell for geometry
+assertions; the expanded compositor paint halo is not treated as an input
+target.
+
+The retained Web optical suite independently passed 4/4 under headless ANGLE
+Metal, including the real-frost fallback when a WebGL context is unavailable
+or lost and the asynchronous cold-preparation path. No CPU pixel readback was
+added to the production renderer.
 
 Measured on this M4 host in headed Playwright Chromium using ANGLE Metal,
 390x844 at DPR 2, three-second warm windows: two glass surfaces delivered
@@ -185,11 +272,13 @@ the elapsed-time baseline. Idle-modal browser acceptance remains separate.
 FrameTiming separately from optical screenshot assertions. Simulator/debug
 results must not be presented as physical-device release performance.
 
-On the Duo iOS 27.1 simulator, both retained refractive surfaces rendered 120
+Before the optical-profile calibration, on the Duo iOS 27.1 simulator both
+retained refractive surfaces rendered 120
 frames in each two-second window (60Hz). Two-glass build p50/p95 was
 1.726/3.880ms; raster 1.040/1.423ms. The same moving backdrop without glass had
 build 2.112/3.070ms and raster 0.502/0.730ms. Active-gap p95 was 16.670ms with glass and 16.669ms without.
-The fixture supplies the nonzero regular material uniforms. Pressed/shape
+That initial fixture supplies the previous nonzero material-tint uniforms;
+its results do not measure the later calibrated optical profiles. Pressed/shape
 changes altered 32,874 pixels and removal altered 49,764 pixels, with zero changes outside the glass regions in either check.
 This is a small simulator sample, not a universal device budget or evidence
 that glass improves build time. The added raster cost is the relevant optical
@@ -207,5 +296,5 @@ activation returning to JS and clearing stale nodes. Browser tests cover
 preference replay for current/future children, transparent semantic projection,
 and actual pinned QJBC keyboard activation and route cleanup.
 
-For the optional anchored drag and jelly return, see
+For the optional stationary pull and jelly return, see
 [Apple glass interaction](APPLE_GLASS_INTERACTION.md).

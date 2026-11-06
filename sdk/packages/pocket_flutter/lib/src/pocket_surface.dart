@@ -85,6 +85,11 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
     final opacity = _surfaceNumber(p, 'opacity', 1, 0, 1);
     final tint = _surfaceNumber(p, 'tintOpacity', .16, 0, 1);
     final materialStrength = _surfaceNumber(p, 'materialStrength', 0, 0, 1);
+    final materialVariant = switch (p['material']) {
+      'regular' => 1.0,
+      'clear' => 2.0,
+      _ => 0.0,
+    };
     final materialBits = _surfaceNumber(
       p,
       'materialTint',
@@ -93,6 +98,46 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
       0xffffffff,
     ).toInt();
     final materialColor = Color(materialBits);
+    final deformation = p['deformation'] is Map
+        ? Map<String, dynamic>.from(p['deformation'] as Map)
+        : const <String, dynamic>{};
+    // The interaction contract is intentionally local to this surface. JS
+    // supplies the contact anchor relative to the glass centre and a bounded
+    // logical-pixel offset; Flutter only forwards the immutable paint values.
+    final deformationExtent = math.max(
+      widget.geometry.width,
+      widget.geometry.height,
+    );
+    final deformationAnchorX = _surfaceNumber(
+      deformation,
+      'anchorX',
+      0,
+      -deformationExtent,
+      deformationExtent,
+    );
+    final deformationAnchorY = _surfaceNumber(
+      deformation,
+      'anchorY',
+      0,
+      -deformationExtent,
+      deformationExtent,
+    );
+    final deformationOffsetX = _surfaceNumber(
+      deformation,
+      'offsetX',
+      0,
+      -12,
+      12,
+    );
+    final deformationOffsetY = _surfaceNumber(
+      deformation,
+      'offsetY',
+      0,
+      -12,
+      12,
+    );
+    final deformationRadius = _surfaceNumber(deformation, 'radius', 0, 0, 128);
+    final magnification = _surfaceNumber(p, 'magnification', 1, 1, 1.35);
     final shape = p['shape'];
     final rounded = BorderRadius.circular(
       shape == 'pill' || shape == 'circle' ? 10000 : radius,
@@ -164,6 +209,13 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
             materialColor.r,
             materialColor.g,
             materialColor.b,
+            materialVariant,
+            deformationAnchorX,
+            deformationAnchorY,
+            deformationOffsetX,
+            deformationOffsetY,
+            deformationRadius,
+            magnification,
           ];
           for (var i = 0; i < values.length; i++) {
             shader.setFloat(i + 2, values[i]);
@@ -181,32 +233,39 @@ final class _PocketGlassFilterState extends State<_PocketGlassFilter> {
             : ui.ImageFilter.isShaderFilterSupported
             ? 'loading'
             : 'frosted';
-        return ClipRRect(
-          borderRadius: rounded,
-          child: BackdropFilter(
-            key: ValueKey('pocket-glass-$mode'),
-            filter: filter,
-            child: DecoratedBox(
-              // Non-Impeller explicitly retains a frosted material rather than
-              // claiming optical refraction. JS can inspect runtime.info.
-              decoration: BoxDecoration(
-                borderRadius: rounded,
-                color: !plainBlur && shader == null
-                    ? materialStrength > 0
-                          ? materialColor.withValues(alpha: materialStrength)
-                          : Colors.white.withValues(alpha: tint)
-                    : null,
-                border: !plainBlur && shader == null
-                    ? Border.all(
-                        color: Colors.white.withValues(alpha: .4),
-                        width: .75,
-                      )
-                    : null,
-              ),
-              child: const SizedBox.expand(),
+        final opticalInset = _surfaceNumber(p, 'opticalInset', 0, 0, 64);
+        final backdrop = BackdropFilter(
+          key: ValueKey('pocket-glass-$mode'),
+          filter: filter,
+          child: DecoratedBox(
+            // An unavailable shader retains real frost at the original shape.
+            decoration: BoxDecoration(
+              borderRadius: rounded,
+              color: !plainBlur && shader == null
+                  ? materialStrength > 0
+                        ? materialColor.withValues(alpha: materialStrength)
+                        : Colors.white.withValues(alpha: tint)
+                  : null,
+              border: !plainBlur && shader == null
+                  ? Border.all(
+                      color: Colors.white.withValues(alpha: .4),
+                      width: .75,
+                    )
+                  : null,
             ),
+            child: const SizedBox.expand(),
           ),
         );
+        // The optical shader owns the original SDF silhouette and may paint
+        // a local shoulder into the rectangular halo. Frost has no such SDF;
+        // inset its rounded clip so fallback cannot enlarge the control.
+        final surfaceChild = opticalInset > 0.001 && shader != null
+            ? ClipRect(child: backdrop)
+            : Padding(
+                padding: EdgeInsets.all(opticalInset * widget.scale),
+                child: ClipRRect(borderRadius: rounded, child: backdrop),
+              );
+        return surfaceChild;
       },
     );
   }

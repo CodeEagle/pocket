@@ -314,3 +314,38 @@ test("native route stack preserves page scroll/local state and isolates popped r
     await hardwareSession.quit();
   }
 });
+
+test("Apple Glass is a secondary UI route and returns to the four primary tabs", { timeout: 30_000 }, async () => {
+  const artifacts = readNativeArtifacts();
+  const session = new NativeSession(artifacts, { width, height });
+  try {
+    let frame = await session.boot();
+    const navBottom = (op: DrawOp): boolean => (op.y ?? 0) > (frame.height ?? height) - 90;
+
+    textOp(frame, "Home", navBottom);
+    textOp(frame, "UI", navBottom);
+    textOp(frame, "Host", navBottom);
+    textOp(frame, "Settings", navBottom);
+
+    frame = await session.tap("UI", frame, navBottom);
+    frame = await session.settle(frame);
+    assert.match(textOf(frame), /UI Collection/);
+
+    const appleEntry = await revealVisibleText(session, frame, "Open Apple Glass");
+    frame = await session.settle(session.tapPoint(center(appleEntry.op, "Open Apple Glass")));
+    assert.match(textOf(frame), /Apple Glass/);
+    for (const label of ["Home", "UI", "Host", "Settings"]) {
+      assert.equal(
+        textOps(frame, label).some((op) => (op.y ?? 0) > (frame.height ?? height) - 90),
+        false,
+        `secondary Apple Glass route must hide the primary ${label} tab`,
+      );
+    }
+
+    frame = await session.settle(session.tapPoint(backIconPoint(frame)));
+    assert.match(textOf(frame), /UI Collection/);
+    for (const label of ["Home", "UI", "Host", "Settings"]) textOp(frame, label, navBottom);
+  } finally {
+    await session.quit();
+  }
+});

@@ -5730,6 +5730,12 @@ class _PocketViewState extends State<PocketView>
       final op = ops[drawIndex];
       if (op is PocketHostSurfaceOp) {
         flushCanvas();
+        // Opt-in glass controls use an expanded compositor quad. `opticalInset`
+        // identifies the original shape inside that paint quad. JS retains
+        // the original interaction shell and marks the optical node hit-pass.
+        final glassOpticalInset = op.kind == 'glass'
+            ? _surfaceNumber(op.parameters, 'opticalInset', 0, 0, 64)
+            : 0.0;
         Widget? child;
         if (op.kind == 'application' && widget.hostSurfaceBuilder != null) {
           if (!mountedSurfaces.add(op.surfaceHandle)) {
@@ -5768,14 +5774,22 @@ class _PocketViewState extends State<PocketView>
           _lastCompositorSlots[op.surfaceHandle] = slot;
           child = widget.hostSurfaceBuilder!(slot);
         } else if (op.kind == 'glass') {
+          final shapeBounds = glassOpticalInset > 0
+              ? Rect.fromLTWH(
+                  op.x + glassOpticalInset,
+                  op.y + glassOpticalInset,
+                  math.max(0, op.width - glassOpticalInset * 2),
+                  math.max(0, op.height - glassOpticalInset * 2),
+                )
+              : Rect.fromLTWH(op.x, op.y, op.width, op.height);
           child = _PocketGlassFilter(
             key: ValueKey('glass-${op.id}'),
             parameters: op.parameters,
             geometry: Rect.fromLTWH(
-              op.x * scaleX,
-              op.y * scaleY,
-              op.width * scaleX,
-              op.height * scaleY,
+              shapeBounds.left * scaleX,
+              shapeBounds.top * scaleY,
+              shapeBounds.width * scaleX,
+              shapeBounds.height * scaleY,
             ),
             surfaceSize: size,
             scale: math.min(scaleX, scaleY),
@@ -5836,17 +5850,11 @@ class _PocketViewState extends State<PocketView>
         if (child != null) {
           final clip = op.clip;
           final bounds = Rect.fromLTWH(op.x, op.y, op.width, op.height);
+          final clipBounds = clip == null
+              ? null
+              : Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height);
           final visible =
-              (clip == null
-                      ? bounds
-                      : bounds.intersect(
-                          Rect.fromLTWH(
-                            clip.x,
-                            clip.y,
-                            clip.width,
-                            clip.height,
-                          ),
-                        ))
+              (clipBounds == null ? bounds : bounds.intersect(clipBounds))
                   .intersect(Rect.fromLTWH(0, 0, width, height));
           if (visible.isEmpty && op.kind == 'application') {
             sceneChildren.add(
@@ -5874,7 +5882,8 @@ class _PocketViewState extends State<PocketView>
             // The visible rectangle is only a viewport clip: applying the
             // RRect after intersecting it would manufacture new rounded
             // corners whenever a scrolling surface is partially visible.
-            final roundedChild = radius > 0
+            final roundedChild =
+                radius > 0 && !(op.kind == 'glass' && glassOpticalInset > 0)
                 ? ClipRRect(
                     clipBehavior: Clip.antiAlias,
                     borderRadius: BorderRadius.circular(radius),

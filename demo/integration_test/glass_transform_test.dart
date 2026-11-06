@@ -28,7 +28,9 @@ const group = ui.createNode(0);
 const glass = ui.createNode(3);
 const foreground = ui.createNode(0);
 let animate = false;
+let localAnimate = false;
 let phase = 0;
+let localPhase = 0;
 
 function box(node, x, y, width, height, color, z) {
   ui.setProp(node, 1, width);   // PROP.width
@@ -79,7 +81,7 @@ ui.insertBefore(group, foreground, 0);
 function payload() {
   return JSON.stringify({
     radius: 24,
-    blur: 7,
+    blur: 12,
     edgeIntensity: 0.08,
     rimIntensity: 0.16,
     baseIntensity: 0.02,
@@ -87,11 +89,22 @@ function payload() {
     cornerBoost: 0.12,
     rippleEffect: 0.08,
     warp: true,
-    materialStrength: 0.72,
+    materialStrength: 0.24,
+    material: 'regular',
     materialTint: 0xff1c1c1e,
     pressed: false,
     shape: 'rounded',
   });
+}
+
+function localPayload(data) {
+  const next = JSON.parse(payload());
+  next.opticalInset = 36;
+  next.deformation = data && data.deformation ? data.deformation : {
+    anchorX: 0, anchorY: 0, offsetX: 0, offsetY: 0, radius: 0,
+  };
+  next.magnification = data && data.magnification ? Number(data.magnification) : 1;
+  return JSON.stringify(next);
 }
 
 const handle = pocket.registerSurface('qa.glass.transform', 'glass', payload());
@@ -122,12 +135,53 @@ globalThis.__pocketEvent = function(message) {
   }
   if (event.name === 'qa.glass.transform.restore') {
     animate = false;
+    localAnimate = false;
     setTransform(0, 0, 1, 1);
+  }
+  if (event.name === 'qa.glass.transform.local') {
+    // Expand only the compositor paint quad. The opticalInset sent in the
+    // descriptor tells the renderer where the original shape lives; layout
+    // and hit testing remain owned by the original shell node.
+    box(glass, 104, 124, 272, 252, 0, 0);
+    pocket.registerSurface('qa.glass.transform', 'glass', localPayload(data));
+  }
+  if (event.name === 'qa.glass.transform.local.animate') {
+    animate = false;
+    localAnimate = true;
+    localPhase = 0;
+    box(glass, 104, 124, 272, 252, 0, 0);
+    pocket.registerSurface('qa.glass.transform', 'glass', localPayload({
+      deformation: { anchorX: 84, anchorY: 0, offsetX: 0, offsetY: 0, radius: 128 },
+    }));
+  }
+  if (event.name === 'qa.glass.transform.stretch') {
+    animate = false;
+    const scaleX = Number(data.scaleX || 1);
+    const scaleY = Number(data.scaleY || 1);
+    // Keep the glass center fixed while the existing paint transform stretches
+    // its two axes. This is the native-side equivalent of the draggable
+    // control's jelly response: the control does not travel with the finger.
+    const anchorX = Number(data.anchorX || 240);
+    const anchorY = Number(data.anchorY || 250);
+    setTransform(anchorX * (1 - scaleX), anchorY * (1 - scaleY), scaleX, scaleY);
   }
 };
 globalThis.__pocketEvent.__binaryCapable = true;
 
 globalThis.frame = function() {
+  if (localAnimate) {
+    localPhase += 0.12;
+    pocket.registerSurface('qa.glass.transform', 'glass', localPayload({
+      deformation: {
+        anchorX: 84,
+        anchorY: 0,
+        offsetX: Math.sin(localPhase) * 12,
+        offsetY: Math.cos(localPhase * 0.73) * 4,
+        radius: 128,
+      },
+    }));
+    return;
+  }
   if (!animate) return;
   phase += 0.12;
   setTransform(
@@ -647,6 +701,168 @@ void main() {
           reason: 'transform must not alter pixels outside the glass union',
         );
 
+        // A draggable glass control keeps its anchor in place while its own
+        // body stretches and cross-axis squashes. Exercise that transform
+        // through the same JS -> FFI -> Flutter path, compensating translation
+        // around the measured surface center rather than moving the control.
+        final anchorX = baseSurface.x + baseSurface.width / 2;
+        final anchorY = baseSurface.y + baseSurface.height / 2;
+        const stretchScaleX = 1.14;
+        const stretchScaleY = 0.86;
+        _send(controller, 'qa.glass.transform.stretch', <String, dynamic>{
+          'anchorX': anchorX,
+          'anchorY': anchorY,
+          'scaleX': stretchScaleX,
+          'scaleY': stretchScaleY,
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+        final stretchedFrame = await _waitForFrame(
+          tester,
+          () => latestFrame,
+          readError: () => viewError,
+          ready: (frame) {
+            try {
+              final surface = _surface(frame);
+              final centerX = surface.x + surface.width / 2;
+              final centerY = surface.y + surface.height / 2;
+              return (centerX - anchorX).abs() < 1.0 &&
+                  (centerY - anchorY).abs() < 1.0 &&
+                  (surface.width - baseSurface.width * stretchScaleX).abs() <
+                      1.0 &&
+                  (surface.height - baseSurface.height * stretchScaleY).abs() <
+                      1.0;
+            } catch (_) {
+              return false;
+            }
+          },
+        );
+        final stretchedSurface = _surface(stretchedFrame);
+        final stretchedForeground = _foreground(stretchedFrame);
+        final stretchedCapture = await _capture(tester);
+        final stretchTranslateX = anchorX * (1 - stretchScaleX);
+        final stretchTranslateY = anchorY * (1 - stretchScaleY);
+        expect(
+          stretchedSurface.x,
+          closeTo(baseSurface.x * stretchScaleX + stretchTranslateX, 1),
+        );
+        expect(
+          stretchedSurface.y,
+          closeTo(baseSurface.y * stretchScaleY + stretchTranslateY, 1),
+        );
+        expect(
+          stretchedSurface.width,
+          closeTo(baseSurface.width * stretchScaleX, 1),
+        );
+        expect(
+          stretchedSurface.height,
+          closeTo(baseSurface.height * stretchScaleY, 1),
+        );
+        expect(
+          stretchedSurface.x + stretchedSurface.width / 2,
+          closeTo(anchorX, 1),
+          reason: 'jelly stretch must keep the glass center stationary',
+        );
+        expect(
+          stretchedSurface.y + stretchedSurface.height / 2,
+          closeTo(anchorY, 1),
+          reason: 'jelly stretch must keep the glass center stationary',
+        );
+        expect(
+          stretchedForeground.x,
+          closeTo(baseForeground.x * stretchScaleX + stretchTranslateX, 1),
+        );
+        expect(
+          stretchedForeground.y,
+          closeTo(baseForeground.y * stretchScaleY + stretchTranslateY, 1),
+        );
+        expect(
+          stretchedForeground.width,
+          closeTo(baseForeground.width * stretchScaleX, 1),
+        );
+        expect(
+          stretchedForeground.height,
+          closeTo(baseForeground.height * stretchScaleY, 1),
+        );
+        final stretchClip = stretchedSurface.clip;
+        expect(stretchClip, isNotNull);
+        expect(stretchClip!.x, lessThanOrEqualTo(stretchedSurface.x + 1));
+        expect(
+          stretchClip.x + stretchClip.width,
+          greaterThanOrEqualTo(
+            math.min(
+                  _viewport.width,
+                  stretchedSurface.x + stretchedSurface.width,
+                ) -
+                1,
+          ),
+        );
+        expect(
+          stretchClip.y + stretchClip.height,
+          greaterThanOrEqualTo(
+            stretchedSurface.y + stretchedSurface.height - 1,
+          ),
+        );
+        final stretchedForegroundPixels = _colorBounds(
+          stretchedCapture,
+          _foregroundFlutterColor,
+        );
+        expect(stretchedForegroundPixels, isNotNull);
+        expect(
+          stretchedForegroundPixels!.left,
+          closeTo(
+            baseForegroundPixels!.left * stretchScaleX + stretchTranslateX,
+            2,
+          ),
+        );
+        expect(
+          stretchedForegroundPixels.top,
+          closeTo(
+            baseForegroundPixels.top * stretchScaleY + stretchTranslateY,
+            2,
+          ),
+        );
+        expect(
+          stretchedForegroundPixels.width,
+          closeTo(baseForegroundPixels.width * stretchScaleX, 3),
+        );
+        expect(
+          stretchedForegroundPixels.height,
+          closeTo(baseForegroundPixels.height * stretchScaleY, 3),
+        );
+        final stretchAffected = Rect.fromLTRB(
+          math.min(baseSurface.x, stretchedSurface.x) - 3,
+          math.min(baseSurface.y, stretchedSurface.y) - 3,
+          math.max(
+                baseSurface.x + baseSurface.width,
+                stretchedSurface.x + stretchedSurface.width,
+              ) +
+              3,
+          math.max(
+                baseSurface.y + baseSurface.height,
+                stretchedSurface.y + stretchedSurface.height,
+              ) +
+              3,
+        );
+        final stretchOutsideChanged = _changedPixels(
+          baseCapture,
+          stretchedCapture,
+          exclude: stretchAffected,
+        );
+        final stretchChanged = _changedPixels(
+          baseCapture,
+          stretchedCapture,
+          include: stretchAffected,
+        );
+        expect(stretchChanged, greaterThan(100));
+        expect(
+          stretchOutsideChanged,
+          lessThanOrEqualTo(128),
+          reason: 'stationary stretch must not paint outside its fixed anchor',
+        );
+
+        _send(controller, 'qa.glass.transform.restore');
+        await tester.pump(const Duration(milliseconds: 100));
+
         collector = FrameTimingCollector();
         collecting = true;
         _send(controller, 'qa.glass.transform.animate');
@@ -723,6 +939,14 @@ void main() {
           },
           'expandedGlassChangedPixels': expandedGlassChanged,
           'outsideChangedPixels': outsideChanged,
+          'stationaryStretch': <String, dynamic>{
+            'anchorX': anchorX,
+            'anchorY': anchorY,
+            'scaleX': stretchScaleX,
+            'scaleY': stretchScaleY,
+            'changedPixels': stretchChanged,
+            'outsideChangedPixels': stretchOutsideChanged,
+          },
           'restoredChangedPixels': restoredChanged,
           'timing': timing,
           'screenshotTiming':
@@ -733,6 +957,248 @@ void main() {
         binding.reportData = <String, dynamic>{
           ...?binding.reportData,
           'liquidGlassTransform': report,
+        };
+      } finally {
+        collecting = false;
+        collector?.dispose();
+        debugPocketFrameDeltaAtOverride = previousProbe;
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        runtime?.dispose();
+      }
+    },
+  );
+
+  testWidgets(
+    'local glass deformation paints an edge shoulder without moving its layout quad',
+    (tester) async {
+      if (!ui.ImageFilter.isShaderFilterSupported) {
+        final report = <String, dynamic>{
+          'status': 'unsupported',
+          'shaderFilterSupported': false,
+          'reason':
+              'host does not expose Flutter shader filters; no local deformation pixels claimed',
+        };
+        // ignore: avoid_print
+        print('LIQUID_GLASS_LOCAL_DEFORMATION ${jsonEncode(report)}');
+        binding.reportData = <String, dynamic>{
+          ...?binding.reportData,
+          'liquidGlassLocalDeformation': report,
+        };
+        return;
+      }
+
+      FfiPocketRuntime? runtime;
+      final controller = PocketViewController();
+      FrameTimingCollector? collector;
+      Object? viewError;
+      var collecting = false;
+      var localNativeFrames = 0;
+      final previousProbe = debugPocketFrameDeltaAtOverride;
+      debugPocketFrameDeltaAtOverride = (currentRuntime, delta) {
+        final frame = previousProbe == null
+            ? pocketFrameDeltaAt(currentRuntime, delta)
+            : previousProbe(currentRuntime, delta);
+        if (frame != null && collecting) localNativeFrames++;
+        return frame;
+      };
+      try {
+        runtime = FfiPocketRuntime.open(
+          width: _viewport.width,
+          height: _viewport.height,
+          tickHz: 60,
+        );
+        await tester.pumpWidget(
+          _scene(
+            runtime,
+            controller: controller,
+            onError: (error) => viewError = error,
+          ),
+        );
+        await _waitForShader(tester, readError: () => viewError);
+        final baseFrame = await _waitForFrame(
+          tester,
+          () => runtime!.frameAt(0),
+          readError: () => viewError,
+          ready: (frame) {
+            try {
+              _surface(frame);
+              return true;
+            } catch (_) {
+              return false;
+            }
+          },
+        );
+        final baseSurface = _surface(baseFrame);
+
+        _send(controller, 'qa.glass.transform.local', <String, dynamic>{
+          'deformation': <String, double>{
+            'anchorX': 0,
+            'anchorY': 0,
+            'offsetX': 0,
+            'offsetY': 0,
+            'radius': 84,
+          },
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+        final zeroFrame = await _waitForFrame(
+          tester,
+          () => runtime!.frameAt(0),
+          readError: () => viewError,
+          ready: (frame) => _surface(frame).parameters['opticalInset'] == 36,
+        );
+        final zeroSurface = _surface(zeroFrame);
+        final zeroCapture = await _capture(tester);
+
+        _send(controller, 'qa.glass.transform.local', <String, dynamic>{
+          'deformation': <String, double>{
+            'anchorX': 84,
+            'anchorY': 0,
+            'offsetX': 12,
+            'offsetY': 0,
+            'radius': 128,
+          },
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+        final pulledFrame = await _waitForFrame(
+          tester,
+          () => runtime!.frameAt(0),
+          readError: () => viewError,
+          ready: (frame) =>
+              ((_surface(frame).parameters['deformation'] as Map?)?['offsetX']
+                      as num?) ==
+                  12,
+        );
+        final pulledSurface = _surface(pulledFrame);
+        final pulledCapture = await _capture(tester);
+        expect(pulledSurface.x, zeroSurface.x);
+        expect(pulledSurface.y, zeroSurface.y);
+        expect(pulledSurface.width, zeroSurface.width);
+        expect(pulledSurface.height, zeroSurface.height);
+
+        _send(controller, 'qa.glass.transform.local', <String, dynamic>{
+          'deformation': <String, double>{
+            'anchorX': 84,
+            'anchorY': 0,
+            'offsetX': 0,
+            'offsetY': 0,
+            'radius': 84,
+          },
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+        final restoredFrame = await _waitForFrame(
+          tester,
+          () => runtime!.frameAt(0),
+          readError: () => viewError,
+          ready: (frame) =>
+              ((_surface(frame).parameters['deformation'] as Map?)?['offsetX']
+                      as num?) ==
+                  0,
+        );
+        final restoredCapture = await _capture(tester);
+
+        final visualRect = Rect.fromLTWH(
+          zeroSurface.x,
+          zeroSurface.y,
+          zeroSurface.width,
+          zeroSurface.height,
+        );
+        final originalRect = visualRect.deflate(36);
+        final shoulder = Rect.fromLTWH(
+          originalRect.right,
+          originalRect.top + 20,
+          36,
+          originalRect.height - 40,
+        );
+        final untouched = Rect.fromLTWH(
+          originalRect.left,
+          originalRect.top + 20,
+          40,
+          originalRect.height - 40,
+        );
+        final localChanged = _changedPixels(
+          zeroCapture,
+          pulledCapture,
+          include: visualRect,
+        );
+        final shoulderChanged = _changedPixels(
+          zeroCapture,
+          pulledCapture,
+          include: shoulder,
+        );
+        final untouchedChanged = _changedPixels(
+          zeroCapture,
+          pulledCapture,
+          include: untouched,
+        );
+        final outsideChanged = _changedPixels(
+          zeroCapture,
+          pulledCapture,
+          exclude: visualRect,
+        );
+        final restoredChanged = _changedPixels(zeroCapture, restoredCapture);
+        expect(
+          localChanged,
+          greaterThan(100),
+          reason: 'local pull must change real native shader pixels',
+        );
+        expect(
+          shoulderChanged,
+          greaterThan(20),
+          reason: 'local pull must paint beyond the original right edge',
+        );
+        expect(
+          untouchedChanged,
+          lessThanOrEqualTo(8),
+          reason: 'remote part of the same control must remain unchanged',
+        );
+        expect(
+          outsideChanged,
+          lessThanOrEqualTo(128),
+          reason: 'local deformation must remain inside its padded visual halo',
+        );
+        expect(
+          restoredChanged,
+          lessThanOrEqualTo(512),
+          reason: 'zero offset must restore the native source pixels',
+        );
+
+        collector = FrameTimingCollector();
+        collecting = true;
+        _send(controller, 'qa.glass.transform.local.animate');
+        await tester.pump(const Duration(milliseconds: 100));
+        final timing = await _measureTransform(
+          collector,
+          tester,
+          () => localNativeFrames,
+        );
+        collecting = false;
+        _send(controller, 'qa.glass.transform.restore');
+        await tester.pump(const Duration(milliseconds: 100));
+
+        final report = <String, dynamic>{
+          'status': 'measured',
+          'shaderFilterSupported': true,
+          'layoutQuad': <String, double>{
+            'x': baseSurface.x,
+            'y': baseSurface.y,
+            'w': baseSurface.width,
+            'h': baseSurface.height,
+          },
+          'opticalInset': 36,
+          'localChangedPixels': localChanged,
+          'shoulderChangedPixels': shoulderChanged,
+          'untouchedChangedPixels': untouchedChanged,
+          'outsideChangedPixels': outsideChanged,
+          'restoredChangedPixels': restoredChanged,
+          'timing': timing,
+          'timingWindow': 'continuous local deformation; toImage sampling outside window',
+        };
+        // ignore: avoid_print
+        print('LIQUID_GLASS_LOCAL_DEFORMATION ${jsonEncode(report)}');
+        binding.reportData = <String, dynamic>{
+          ...?binding.reportData,
+          'liquidGlassLocalDeformation': report,
         };
       } finally {
         collecting = false;

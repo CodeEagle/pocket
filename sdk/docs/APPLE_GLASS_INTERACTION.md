@@ -1,19 +1,25 @@
-# Apple glass interaction: drag, release, and motion boundary
+# Apple glass interaction: local deformation, release, and navigation
 
-Research and validation date: 2026-11-06. `AppleDraggableGlass` is an opt-in
-anchored drag component, alongside the existing Apple and Mobile components.
+Research and implementation note: 2026-11-06. Pocket's Apple glass controls
+are an opt-in approximation of the public Liquid Glass interaction model. They
+do not claim parity with private iOS 27 parameters.
 
-## Decision in one paragraph
+## Decision
 
-Pocket keeps interaction ownership in JS and keeps Flutter/Metal/WebGL as the
-existing rendering boundary. A drag follows the pointer directly while the
-contact is active. On release, this anchored component returns to its source
-with the existing velocity-carrying spring. Data-transfer and reordering destinations remain a
-separate application capability. Bounded velocity-driven
-paint scale and translation deform the same retained surface and its content.
-The visual hit region follows that transform; flex layout stays unchanged.
-Reduced Motion removes the elastic/depth deformation and settles the state without a bounce. No private
-iOS 27 Liquid Glass parameter is inferred.
+`GlassSurface` is the shared source of truth for Apple material interaction.
+Apple material variants enable the one shared `createGlassElasticity`
+controller in `sdk/packages/pocket_ui/src/mobile.tsx` by default; `elastic=false`
+and accessibility preferences are the explicit opt-outs.
+`AppleDraggableGlass` in `apple.tsx` is a thin compatibility composition: it
+passes its extents and content to `GlassSurface` and owns no second spring,
+gesture loop, or layout transform.
+
+The control's layout frame, center, clip, and foreground identity remain fixed.
+Contact changes a local deformation field in the surface paint; it does not
+move the node or create a second layout tree. This is the useful Pocket
+approximation of the stationary, touch-responsive glass effect. Apple's
+private deformation kernel, refraction coefficients, and physics constants are
+not available to copy and are not inferred here.
 
 ## Apple public surface and its boundary
 
@@ -32,12 +38,12 @@ published physics specification:
 - The iOS 27 release refreshes the appearance automatically for apps that use
   standard components and lets custom elements opt into interactive glass.
   Apple's public pages do not expose the internal deformation amplitude,
-  refraction coefficients, spring constants, or release velocity used by the
-  system. Treat any such value in Pocket as a Pocket parameter, never as an
-  Apple constant. See [What's new in SwiftUI (WWDC26)](https://developer.apple.com/videos/play/wwdc2026/269/)
-  and [Platforms State of the Union (WWDC26)](https://developer.apple.com/videos/play/wwdc2026/102/).
+  refraction coefficients, spring constants, or release velocity. Treat every
+  such value in Pocket as a Pocket tuning choice. See [What's new in SwiftUI
+  (WWDC26)](https://developer.apple.com/videos/play/wwdc2026/269/) and
+  [Platforms State of the Union (WWDC26)](https://developer.apple.com/videos/play/wwdc2026/102/).
 
-The new iOS 27 SwiftUI drag APIs (`reorderable`, `reorderContainer`,
+The iOS 27 SwiftUI drag APIs (`reorderable`, `reorderContainer`,
 `dragContainer`, preview formations, and drag/drop configuration) cover data
 movement, reordering, previews, and move-versus-copy semantics. They do not
 provide custom Liquid Glass shape physics. They are therefore an independent
@@ -45,113 +51,114 @@ optional native-UI capability, not a reason to add a native layout tree to
 Pocket. See [Build powerful drag and drop in SwiftUI (WWDC26)](https://developer.apple.com/videos/play/wwdc2026/271/)
 and [reordering in lists, stacks, grids, and custom layouts](https://developer.apple.com/documentation/swiftui/reordering-items-in-lists-stacks-grids-and-custom-layouts).
 
-## HIG interaction rules to preserve
+## HIG interaction rules
 
 The [Motion HIG](https://developer.apple.com/design/human-interface-guidelines/motion)
 asks for purposeful, optional, cancellable motion and warns against frequent
-gratuitous animation. It also notes that system Liquid Glass can emphasize
-direct touch more than trackpad interaction. The [Drag and drop HIG](https://developer.apple.com/design/human-interface-guidelines/drag-and-drop)
-provides the concrete interaction rules used here:
+gratuitous animation. The [Drag and drop HIG](https://developer.apple.com/design/human-interface-guidelines/drag-and-drop)
+also calls for continuous feedback, a reversible failure/cancel treatment, and
+a stable representation while a contact is active. This control is local
+elastic feedback, not a data-transfer drag session: it has no destination,
+drop acceptance state, or data-transfer preview.
 
-- Show a translucent drag representation shortly after movement begins and
-  keep feedback continuous.
-- Indicate whether the current destination accepts the item; remove the cue
-  when the item leaves it.
-- For an invalid drop, return the item to its source or use a clear failure
-  treatment; do not leave it at an ambiguous position.
-- Do not make the drag image constantly and radically change. Offer a
-  non-drag alternative and make an accidental move reversible where possible.
+The interaction therefore follows this contract:
 
-For Pocket this maps to one state sequence, without a second layout engine:
+1. `pointer down` records the current surface geometry and contact anchor. A
+   re-grab starts from the current local shape instead of jumping to rest.
+2. `pointer move` updates a compact anchor/radius deformation kernel around the
+   contact. The center, layout frame, clip, and foreground identity stay put.
+3. `pointer up` retargets the local field to zero and carries its current
+   velocity into the return spring.
+4. `pointer cancel`, route deactivation, or unmount clears the contact and
+   returns the field without a release-velocity kick.
 
-1. `pointer down`: capture the existing contact and remember the source
-   position.
-2. `pointer move`: apply the pointer translation directly. Estimate velocity
-   from the existing contact timestamps/deltas; clamp it before it reaches the
-   paint transform.
-3. `pointer up`: retarget the existing spring to the anchored source. Keep
-   the item interactive during its return, then park the demand scheduler.
-   This local component does not initiate a system data-transfer drag session.
-4. `pointer cancel`: use the source fallback with zero release velocity.
+The saturating local offset is bounded to ±12 logical pixels per axis. It is a
+paint-space displacement, not an interaction translation or whole-node scale.
+Holding the pointer keeps the deformation target stable. Once the field settles,
+its animation work hint parks; the native touch scheduler intentionally retains
+vsync while a contact remains down. The scheduler parks after release settles.
 
-## Spring and velocity provenance
+## Shared motion model
 
-Apple provides the following public concepts for a native SwiftUI/UIKit
-implementation:
+`createGlassElasticity` owns one phase (`idle`, `pressed`, `dragging`, or
+`returning`), one target, and one velocity pair for a surface. It advances both
+axes through the shared `stepMotionSpring` implementation:
 
-- `DragGesture.Value` exposes `velocity` and `predictedEndTranslation`; see
-  [DragGesture.Value](https://developer.apple.com/documentation/swiftui/draggesture/value).
-- Gesture updates automatically track velocity in a SwiftUI transaction, and
-  `interactiveSpring` is intended for interactive animations while preserving
-  velocity when a successor spring replaces the current one; see
-  [Transaction.tracksVelocity](https://developer.apple.com/documentation/swiftui/transaction/tracksvelocity)
-  and [interactiveSpring](https://developer.apple.com/documentation/swiftui/animation/interactivespring).
-- UIKit's `UISpringTimingParameters` accepts initial velocity and damping/
-  mass/stiffness values, while `UIViewPropertyAnimator` supports interrupting,
-  pausing, scrubbing, and continuing an animation; see
-  [UISpringTimingParameters](https://developer.apple.com/documentation/uikit/uispringtimingparameters)
-  and [UIViewPropertyAnimator](https://developer.apple.com/documentation/uikit/uiviewpropertyanimator).
+- During contact, the target follows the local anchor with a 180 ms critical
+  response.
+- On release, the same state returns with a 560 ms response and a 0.62 damping
+  ratio. The carried velocity allows a small, purposeful rebound before the
+  field settles at zero.
+- The controller retains the velocity when a target changes and tests both
+  position and velocity before settling. This prevents an underdamped crossing
+  from being mistaken for a completed animation.
 
-Pocket's equivalent source paths already exist:
+These are Pocket parameters, not Apple constants. `elastic=false` disables the
+field while retaining the original geometry. Reduced Motion disables the
+elastic warp and settles immediately. Reduced Transparency and increased
+contrast select the existing opaque material policy and also settle any active
+deformation; a preference change does not create another animation clock.
 
-- `sdk/packages/pocket_ui/src/motion.ts` defines `stepMotionSpring`. Critical
-  damping is the default; velocity is carried when a scalar target changes,
-  and underdamping is an explicit optional argument. `MOBILE_MOTION` values
-  are Pocket choices inspired by Apple guidance, not Apple-published timings.
-- `sdk/packages/pocket_ui/src/mobile.tsx` uses `useAnimatedNumber` for
-  state/selection/control values and parks the animation when settled. It
-  already resolves Reduced Motion by assigning the target immediately.
-- `sdk/packages/pocket_ui/src/ui.tsx` passes release velocity through
-  `ScrollablePageContext.chainEndDrag`, `scroller.endDrag(velocityY)`, and
-  `contact.vy`. The new component reuses the same gesture contact facts.
+## Renderer contract and source provenance
 
-The optional release “jelly” is local to the direct-manipulation component.
-It preserves the shared default spring. A real drag enables an underdamped
-return with bounded amplitude and a terminal zero-velocity state.
+Business UI, state, and routing remain in JS. Flutter/Dart transports the
+registered surface descriptor and renders the shader; it does not own a second
+interaction state machine. The relevant paths are:
 
-## Existing Pocket renderer boundary
-
-The source-first optical implementation and its retained paths are:
-
-- `sdk/packages/pocket_flutter/shaders/liquid_glass.frag` — one retained
-  surface SDF, bevel normal, Snell refraction, bounded frost taps, rim and
-  material uniforms. It is adapted from the retained parent
-  `pocketjs_flutter_demo/shaders/liquid_glass.frag`; application-specific
-  player/tab bodies were removed.
-- `sdk/packages/pocket_ui/src/mobile.tsx` — JS-owned `GlassSurface`, one
-  `registerSurface` descriptor per retained surface, and `pressed`/material
-  state. It is the JS-to-native surface boundary; it is not a layout engine.
+- `sdk/packages/pocket_ui/src/mobile.tsx` — `GlassSurface`, the shared
+  `createGlassElasticity` controller, and one `registerSurface` descriptor per
+  retained surface.
+- `sdk/packages/pocket_ui/src/apple.tsx` — the thin Apple compositions and the
+  navigation selection overlay.
+- `sdk/packages/pocket_flutter/lib/src/pocket_surface.dart` — the native
+  surface boundary, including paint padding and deformation/magnification
+  transport.
+- `sdk/packages/pocket_flutter/shaders/liquid_glass.frag` — the single
+  retained optical program.
 - `sdk/editor/client/liquid-glass.js` and `sdk/editor/client/preview.js` — the
-  existing WebGL preview optical path and its bounded backdrop capture. The
-  component reuses this program/resource path without a second canvas or a
-  DOM snapshot.
-- `sdk/docs/APPLE_GLASS.md` — retained parent shader provenance, surface
-  resource model, HIG material constraints, and existing accessibility facts.
+  existing WebGL preview path; one shared GPU program is retained; no DOM snapshot or secondary UI tree is introduced.
 
-The retained parent shader already has `uVelocity` and clamps each axis to
-±0.32 before applying an axis stretch with cross-axis compression. That is the
-source for the bounded directional-deformation idea. Its fixed player/tab/orb
-bodies are not restored.
+The base optical shader is source-first adapted from the retained parent:
+`/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/shaders/liquid_glass.frag`.
+That parent source provides the surface SDF, bevel/refraction, frost, rim, and
+material concepts, but it did not retain the local contact kernel used here.
+The local deformation is a necessary Pocket adaptation evidenced by the
+stationary, touch-pulled glass reference; it is not an Apple private shader
+parameter and is not a replacement optical path.
 
-Ablation decision: do not reintroduce a per-frame velocity descriptor and new
-shader uniform. The pinned renderer already transforms `SURFACE_QUAD` full
-bounds, clip and foreground together under axis-aligned `scaleX/scaleY` and
-translation. The prototype can drive those existing paint properties directly
-from JS. The shader derives its optical geometry from the resulting quad, so
-refraction and rim follow the shape through the existing rendering path. This
-removes a redundant parameter transport and keeps one material instance. It
-also works with the existing opaque accessibility fallback.
+The renderer transport is deliberately explicit:
 
-The deformation is limited to the direct-manipulation component, not shared
-layout or default control motion. The recognizer delegates hit geometry to the
-pinned native hit fact
-(`resolveTouchHit` / `hitTestBounds`), which already includes paint transforms,
-ancestor clipping and occlusion. Removing the additional JS rectangle fallback
-still passes a real re-grab outside the original layout bounds. This eliminates
-a duplicate geometry calculation and keeps native facts authoritative. Native
-pixel and QJBC validation below check both parts of that boundary.
+- deformation uniforms 24–28 carry the local anchor, local offset, and compact
+  influence radius;
+- uniform 29 carries optional local magnification, with `1.0` meaning disabled;
+- `opticalInset: 36` reserves a halo inside an expanded compositor paint quad for the outward bulge while
+  preserving the same layout rectangle and hit rectangle. Native hit facts and
+  clipping remain authoritative.
 
-## Accessibility policy
+This keeps the local field, material, clip, and foreground in one retained
+surface. There is no per-frame optical velocity uniform, CPU backdrop readback,
+whole-scale position spring, or duplicate native layout tree.
+
+## Apple navigation bar
+
+`AppleGlassNavigationBar` keeps a fixed outer bar and reuses the existing
+`NavigationBar` layout, semantic nodes, and selection overlay slot:
+
+- While dragging, the selection capsule follows the finger continuously. On
+  release it chooses the nearest tab and snaps the route to that item.
+- The foreground icon overlay is composited after the base icon. Contact lift
+  magnifies it from `1.0` to `1.22` and applies the same local deformation
+  surface; the icon's layout box, hit target, and semantic identity do not
+  change.
+- Navigation uses the shared `useAnimatedNumber` motion primitive. Its optional
+  damping-ratio argument keeps the default critical behavior for existing
+  callers while tuning this bar's Pocket response: `lensX` uses 400 ms / 0.72,
+  `lift` uses a 260 ms critical response, and `localPullY` uses 560 ms / 0.62.
+
+The four primary Showcase tabs are still Home, UI, Host, and Settings. The Apple showcase is a secondary route; its back chevron returns to UI
+and restores all four primary tabs. Its component entry points remain available.
+
+## Accessibility
 
 SwiftUI documents `accessibilityReduceMotion` as a request to avoid large
 animations, especially motion that simulates depth. When
@@ -161,97 +168,72 @@ and [accessibilityPrefersCrossFadeTransitions](https://developer.apple.com/docum
 Apple's Liquid Glass presentation also says Reduced Motion lowers effect
 intensity and disables elastic properties automatically.
 
-The existing Pocket preference transport is the source of truth for JS:
+Pocket keeps these preferences in JS as the source of truth. The control has a
+minimum-size hit target, no data-transfer semantics, and no required motion for
+understanding its label or action. Cross-fade/opaque fallback policy belongs to
+the surrounding consumer; the glass field never overrides it.
 
-- `reduceMotion=true`: keep direct manipulation necessary to understand the
-  contact, but remove scale, elastic warp, parallax, and underdamped rebound;
-  settle immediately or use a short fade/highlight for state communication.
-- `reduceTransparency=true` or increased contrast: use the existing opaque
-  material policy. Drag behavior still follows the separate motion preference;
-  this adds no optical velocity effect to that fallback.
-- A preference change must retarget the active state without creating a second
-  animation clock or leaving a permanent frame demand.
-
-## rdev comparison (not a runtime dependency)
-
-The current upstream `rdev/liquid-glass-react` source uses DOM `mousemove`
-position, distance from the glass bounds, an `elasticity` scalar, axis-specific
-scale/translation, and a CSS `ease-out 0.2s` transition. It also applies a
-pressed scale, but it does not expose a drag-release velocity or spring model.
-See the [source](https://raw.githubusercontent.com/rdev/liquid-glass-react/master/src/index.tsx)
-and its [MIT license](https://raw.githubusercontent.com/rdev/liquid-glass-react/master/LICENSE).
-
-The only portable idea worth retaining is the bounded direction/axis response.
-Do not transplant its React/DOM, CSS filter, or DOM layout assumptions into
-PocketJS. The retained Pocket renderer remains the single optical path.
-
-## API and implementation
+## Public API
 
 ```tsx
 import { AppleDraggableGlass } from "@pocket/ui/apple";
 
-// Place in a bounded parent, leaving room around the anchored control.
-<AppleDraggableGlass class="w-[176] h-[68]" maxX={40} maxY={20}>
-  <Text class="text-sm font-bold text-[#152238]">Drag the glass</Text>
+<AppleDraggableGlass class="w-[176] h-[68]" maxX={80} maxY={56}>
+  <Text class="text-sm font-bold text-[#152238]">Pull the glass</Text>
 </AppleDraggableGlass>;
 ```
 
-The snippet uses light-theme ink; choose foreground color from the consumer
-theme, as Showcase does. The Showcase consumer is `demo/js/apple-page.tsx`,
-under UI Collection → Apple Glass. The component is independently importable. Its regular pill material
-uses the same `GlassSurface`, and its nodeRef reaches that existing shell; no
-extra wrapper or second glass surface was introduced for gesture registration.
+`maxX` and `maxY` describe the finger distance needed to reach the bounded
+local response; they do not permit control travel. The component is
+independently importable, and its material still registers through the same
+`GlassSurface` shell. Showcase exposes it at UI Collection → Apple Glass.
 
-One JS phase (`idle`, `pressed`, `dragging`, `returning`) owns the contact and
-return. Pointer velocity is bounded before producing a <=12% directional scale
-target. The existing `useAnimatedNumber` eases that target with a 200ms response
-so a velocity change does not pop the shape. Release uses the existing scalar
-spring extended with an optional damping ratio, response 560ms / ratio 0.62.
-Exact integration carries velocity and is independent of host frame rate;
-critical damping remains the default for every existing caller. These are
-Pocket tuning choices, not published Apple physics constants.
+## Validation status
 
-Travel defaults to ±96/72 logical units and accepts `maxX`/`maxY`. `elastic=false`
-removes shape response while retaining drag and return. Reduced Motion retains
-direct pointer tracking and immediately settles release, including when the
-preference changes during a return. Cancel returns to source with zero input
-velocity. A retained inactive route resets transient drag state and stops frame
-demand; unmount detaches the recognizer. Native hit facts include the consumer's
-axis-aligned transform and clipping. This component does not implement a system data-transfer or reordering session.
+Validated with the final pinned buildGuest Demo and real JS execution:
 
-## Validation and limits
+- `demo/js/tests/navigation_native.test.ts`: 2/2, including Apple secondary
+  route → back chevron → the four main tabs, plus route scroll/state retention.
+- `demo/js/tests/mobile_ui.test.ts`, shared glass lifecycle and motion tests:
+  8/8 combined, with the existing default motion behavior preserved.
+- `editor/test/preview_glass_drag.test.ts`: real QJBC pointer input across
+  buttons, toolbar actions and tab navigation; fixed shell/label geometry,
+  local pull/hold/release, accessibility and route cleanup, magnification,
+  nearest-tab selection, and idle parking passed under headless ANGLE Metal.
+- `editor/test/preview_glass_local_deformation.test.ts`: padded outward
+  shoulder, unchanged remote part, reset and crop/full sample parity passed.
+- The native local shader test in
+  `demo/integration_test/glass_transform_test.dart` changed 6,613 pixels,
+  including 2,901 outside the original shape at the pulled edge. Remote,
+  outside-halo and restored differences were all zero.
+- The retained optical suite passed 4/4, including context-loss frost fallback
+  and nonblocking shader preparation. Five-surface output-cache ablation is
+  recorded in [Apple Glass rendering](APPLE_GLASS.md).
 
-- `packages/pocket_ui/test/motion.test.ts`: default critical motion remains
-  monotonic; underdamped and overdamped states agree at equal elapsed times at
-  30/60/120Hz; release crosses rest, settles and preserves velocity on retarget.
-- `editor/test/preview_glass_drag.test.ts`: actual pinned buildGuest QJBC,
-  native PocketJS and Chromium optical rendering; real pointer input changes
-  surface and foreground, bounded shape changes ease instead of popping,
-  release crosses rest, a moving surface can be grabbed again, cancel returns,
-  `elastic=false` removes only deformation, Reduced Motion preserves direct
-  drag and clears return, retained route/unmount clear frame demand.
-- `demo/integration_test/glass_transform_test.dart`: raw JS input through the
-  real Flutter/FFI rendering boundary. On the iPhone 18 Pro iOS 27.2 simulator,
-  a 200×180 surface became 224×169.2 under scale 1.12/0.94 and translation; its
-  foreground followed. 7,632 expanded-edge pixels changed, zero pixels outside
-  the union changed, and restoration matched the baseline exactly. No old clip
-  truncated the stretched glass.
+The native optical test paints through the real Flutter/FFI surface. The continuous local-field window produced 60 Flutter FrameTimings in one
+second: build P50/P95 0.906/1.647ms, raster 0.558/0.747ms, and active-gap P95
+16.668ms on the iOS simulator. Screenshot sampling is outside that window;
+simulator/debug timing is not an on-device release FPS claim.
 
-That simulator's one-second dynamic transform window produced 60 FrameTiming
-samples at 60Hz, build p50/p95 1.191/3.285ms and raster 0.955/1.317ms; active gap
-p95 was 16.669ms. Screenshots were outside the timing window. This validates the
-existing paint-transform path, not a new optical velocity uniform, and is a
-debug simulator sample rather than physical-device release performance.
+No private iOS 27 shader or exact system-physics parity is claimed. Pocket's
+implementation uses the retained optical material plus the one JS-owned local
+deformation controller and adds no SwiftUI/UIKit overlay, Dart interaction
+state machine, CPU readback, or permanent animation ticker.
 
-The headed Chromium M4 Metal QJBC release sample at 390×640/DPR2 delivered about
-60 frames/s with canvas submission p95 4.2ms, then parked with no page errors.
-The full Showcase also passed Light/Dark navigation, drag/release, transformed
-hit regions after page scrolling, and isolation from parent scrolling. Canvas
-submission is not GPU completion or a physical presentation timestamp.
-The base material's cold WebGL initialization limitation remains documented in
-`APPLE_GLASS.md`; the drag component reuses that same renderer and resources.
+## Public motion references
 
-No private iOS 27 shader or exact system-physics parity is claimed. The prototype
-uses the retained Pocket optical material and ordinary transformed content. It
-adds no SwiftUI/UIKit layout overlay, new shader uniform, Dart interaction state
-machine, CPU backdrop readback, or permanent animation ticker.
+The public motion primitives used as design references are
+`DragGesture.Value`, `Transaction.tracksVelocity`, `interactiveSpring`,
+`UISpringTimingParameters`, and `UIViewPropertyAnimator`: [DragGesture.Value](https://developer.apple.com/documentation/swiftui/draggesture/value),
+[Transaction.tracksVelocity](https://developer.apple.com/documentation/swiftui/transaction/tracksvelocity),
+[interactiveSpring](https://developer.apple.com/documentation/swiftui/animation/interactivespring),
+[UISpringTimingParameters](https://developer.apple.com/documentation/uikit/uispringtimingparameters),
+and [UIViewPropertyAnimator](https://developer.apple.com/documentation/uikit/uiviewpropertyanimator).
+
+They establish the public concepts of interactive replacement, velocity
+continuity, interruption, and accessibility—not Pocket's numeric tuning.
+
+For comparison only, [rdev/liquid-glass-react source](https://raw.githubusercontent.com/rdev/liquid-glass-react/master/src/index.tsx)
+and its [MIT license](https://raw.githubusercontent.com/rdev/liquid-glass-react/master/LICENSE)
+show a DOM/CSS elasticity approach. Pocket does not import that runtime,
+filter, or layout model.

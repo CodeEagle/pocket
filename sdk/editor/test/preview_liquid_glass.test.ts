@@ -1,4 +1,4 @@
-import { test } from "bun:test";
+import { afterAll, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { chromium } from "playwright";
@@ -6,6 +6,22 @@ import { chromium } from "playwright";
 const client = readFileSync(new URL("../client/preview.js", import.meta.url), "utf8");
 const optics = readFileSync(new URL("../client/liquid-glass.js", import.meta.url), "utf8");
 const shader = readFileSync(new URL("../../packages/pocket_flutter/shaders/liquid_glass.frag", import.meta.url), "utf8");
+
+type OpticalBrowser = Awaited<ReturnType<typeof chromium.launch>>;
+let opticalBrowser: OpticalBrowser | undefined;
+
+async function getOpticalBrowser(): Promise<OpticalBrowser> {
+  opticalBrowser ??= await chromium.launch({
+    headless: true,
+    args: process.platform === "darwin" ? ["--use-angle=metal"] : [],
+  });
+  return opticalBrowser;
+}
+
+afterAll(async () => {
+  await opticalBrowser?.close().catch(() => {});
+  opticalBrowser = undefined;
+});
 
 test("Web Liquid Glass executes the retained optical shader without CPU readback", { timeout: 30_000 }, async () => {
   const variants = {
@@ -26,7 +42,7 @@ test("Web Liquid Glass executes the retained optical shader without CPU readback
     return new Response(`<div data-pocket-preview data-project-id=optics></div><script>${`${source}\n${client}`.replaceAll("</script", "<\\/script")}</script>`,
       { headers: { "content-type": "text/html" } });
   } });
-  const browser = await chromium.launch({ headless: true });
+  const browser = await getOpticalBrowser();
   try {
     const images: Record<string, number[]> = {};
     for (const variant of ["optical", "flat", "uncropped"] as const) {
@@ -100,7 +116,7 @@ test("Web Liquid Glass executes the retained optical shader without CPU readback
         const dark = Array.from(canvas.getContext("2d")!.getImageData(200, 1520, 1, 1).data).slice(0, 3).reduce((a, b) => a + b, 0);
         (window as any).__sampling = false;
         const material = { uploads: (window as any).__uploads.length, draws: (window as any).__gpuDraws, bright, dark };
-        const mode = canvas.dataset.glassRenderer;
+        const mode = canvas.dataset.glassRenderer ?? "missing";
         const uploads = (window as any).__uploads;
         await (window as any).PocketEditorPreviewInstance.close();
         return { pixels, width: canvas.width, mode, cold, foreground, shape, material, uploads, deleted: (window as any).__deleted };
@@ -134,7 +150,91 @@ test("Web Liquid Glass executes the retained optical shader without CPU readback
     for (let index = 0; index < optical.length; index++) maximumCropError = Math.max(maximumCropError, Math.abs(optical[index]! - images.uncropped![index]!));
     assert.ok(maximumCropError <= 2, `bounded capture must match full-scene sampling: maximum channel error ${maximumCropError}`);
   } finally {
-    await browser.close();
+    server.stop(true);
+  }
+});
+
+test("Web Liquid Glass material variants preserve backdrop detail without a second renderer", { timeout: 30_000 }, async () => {
+  const server = Bun.serve({ port: 0, fetch() {
+    const source = optics.replace('"" /* pocket-liquid-glass-shader */', JSON.stringify(shader));
+    return new Response(`<div data-pocket-preview data-project-id=material></div><script>${`${source}\n${client}`.replaceAll("</script", "<\\/script")}</script>`, { headers: { "content-type": "text/html" } });
+  } });
+  const browser = await getOpticalBrowser();
+  const page = await browser.newPage({ viewport: { width: 160, height: 240 }, deviceScaleFactor: 2 });
+  const warnings: string[] = [];
+  page.on("pageerror", error => warnings.push(error.message));
+  page.on("console", message => { if (message.type() === "warning") warnings.push(message.text()); });
+  await page.addInitScript(() => {
+    class Source { constructor() { (window as any).__source = this; } close() {} }
+    Object.defineProperty(window, "EventSource", { value: Source });
+    WebGLRenderingContext.prototype.readPixels = function () { throw new Error("No production GPU readback"); };
+    const read = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function (...args) {
+      if (!(window as any).__sampling) throw new Error("No production Canvas readback");
+      return read.apply(this, args);
+    };
+  });
+  try {
+    await page.goto(`http://127.0.0.1:${server.port}/`);
+    await page.waitForFunction(() => Boolean((window as any).PocketEditorPreviewInstance));
+    const result = await page.evaluate(async () => {
+      const frameWidth = 120, frameHeight = 180;
+      let frame = 0;
+      const waitFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      const post = async (material?: "regular" | "clear", dark = false) => {
+        const first = dark ? 0xff182b43 : 0xffd15343;
+        const second = dark ? 0xff203a55 : 0xff246796;
+        const ops: any[] = Array.from({ length: 30 }, (_, index) => ({ type: "rect", x: index * 4, y: 0, w: 4, h: frameHeight, color: (index % 2 ? first : second) >>> 0 }));
+        if (material) ops.push({ type: "hostSurface", x: 4, y: 60, w: 112, h: 60,
+          asset: JSON.stringify({ kind: "glass", parameters: {
+            effect: "glass", material, shape: "rounded", radius: 24,
+            blur: material === "regular" ? 12 : 1.5,
+            materialStrength: material === "regular" ? .24 : .02,
+            materialTint: 0xfff2f2f7,
+            edgeIntensity: .015, rimIntensity: .05, baseIntensity: .01,
+            tintOpacity: .04, cornerBoost: .02, rippleEffect: 0, warp: false,
+          } }) });
+        (window as any).__source.onmessage({ data: JSON.stringify({ type: "frame", frame: { frame: ++frame, width: frameWidth, height: frameHeight, events: [], resources: [], ops } }) });
+        await waitFrame();
+      };
+      const sample = () => {
+        const canvas = (window as any).PocketEditorPreviewInstance.canvas as HTMLCanvasElement;
+        (window as any).__sampling = true;
+        const raw = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height).data;
+        (window as any).__sampling = false;
+        const pixel = (x: number, y: number) => {
+          const index = (Math.round(y * canvas.height / frameHeight) * canvas.width + Math.round(x * canvas.width / frameWidth)) * 4;
+          return [raw[index]!, raw[index + 1]!, raw[index + 2]!];
+        };
+        return { row: Array.from({ length: 20 }, (_, index) => pixel(12 + index * 5, 90)), color: pixel(60, 90) };
+      };
+      const contrast = (row: number[][]) => row.slice(1).reduce((sum, color, index) => sum + color.reduce((channels, value, component) => channels + Math.abs(value - row[index]![component]!), 0), 0) / (row.length - 1);
+      await post();
+      const baseline = sample();
+      await post("clear");
+      for (let attempt = 0; attempt < 180 && (window as any).PocketEditorPreviewInstance.canvas.dataset.glassRenderer !== "webgl-refractive"; attempt++) await waitFrame();
+      const clear = sample();
+      await post("regular");
+      const regular = sample();
+      await post("clear", true);
+      const darkClear = sample();
+      await post("regular", true);
+      const darkRegular = sample();
+      const mode = ((window as any).PocketEditorPreviewInstance.canvas as HTMLCanvasElement).dataset.glassRenderer ?? "missing";
+      await (window as any).PocketEditorPreviewInstance.close();
+      return { baseline, clear, regular, darkClear, darkRegular, mode, contrasts: {
+        baseline: contrast(baseline.row), clear: contrast(clear.row), regular: contrast(regular.row),
+      } };
+    });
+    assert.equal(result.mode, "webgl-refractive", warnings.join("; "));
+    assert.ok(result.contrasts.baseline > 20, "fixture must have actual background detail");
+    assert.ok(result.contrasts.clear > result.contrasts.baseline * .18, "clear must retain background detail");
+    assert.ok(result.contrasts.regular < result.contrasts.clear * .92, "regular must soften more than clear");
+    const saturation = (color: number[]) => (Math.max(...color) - Math.min(...color)) / Math.max(1, Math.max(...color));
+    assert.ok(saturation(result.clear.color) > .08 && saturation(result.regular.color) > .03, "both materials must preserve backdrop hue");
+    assert.ok(Math.max(...result.darkClear.color) < 180 && Math.max(...result.darkRegular.color) < 180, "dark content must stay dark with the same light-theme tint");
+  } finally {
+    await page.close().catch(() => {});
     server.stop(true);
   }
 });
@@ -144,7 +244,7 @@ test("Web Liquid Glass degrades to real frost when the GPU context is unavailabl
   const server = Bun.serve({ port: 0, fetch() {
     return new Response(`<div data-pocket-preview data-project-id=fallback></div><script>${`${source}\n${client}`.replaceAll("</script", "<\\/script")}</script>`, { headers: { "content-type": "text/html" } });
   } });
-  const browser = await chromium.launch({ headless: true });
+  const browser = await getOpticalBrowser();
   try {
     for (const unavailable of [true, false]) {
       const page = await browser.newPage({ viewport: { width: 100, height: 100 } });
@@ -167,7 +267,9 @@ test("Web Liquid Glass degrades to real frost when the GPU context is unavailabl
           frame, width: 100, height: 100, resources: [], events: [], ops: [
             { type: "rect", x: 0, y: 0, w: 50, h: 100, color: 0xffff0000 },
             { type: "rect", x: 50, y: 0, w: 50, h: 100, color: 0xff0000ff },
-            { type: "hostSurface", x: 0, y: 0, w: 100, h: 100, asset: JSON.stringify({ kind: "glass", parameters: { effect: "glass", blur: 8, radius: 0 } }) },
+            { type: "hostSurface", x: 0, y: 0, w: 100, h: 100, asset: JSON.stringify({ kind: "glass", parameters: {
+              effect: "glass", blur: 8, radius: 0, opticalInset: 20,
+            } }) },
           ],
         } }) });
         post(1);
@@ -178,15 +280,18 @@ test("Web Liquid Glass degrades to real frost when the GPU context is unavailabl
         }
         const canvas = instance.canvas as HTMLCanvasElement;
         const pixel = Array.from(canvas.getContext("2d")!.getImageData(49, 50, 1, 1).data);
+        const outside = Array.from(canvas.getContext("2d")!.getImageData(5, 50, 1, 1).data);
         const mode = canvas.dataset.glassRenderer;
         await instance.close();
-        return { pixel, mode };
+        return { pixel, outside, mode };
       }, unavailable);
       assert.equal(result.mode, "frosted");
       assert.ok(result.pixel[0]! > 30 && result.pixel[2]! > 30, `fallback must sample and blur the real backdrop: ${result.pixel}`);
+      assert.ok(result.outside[0]! > 240 && result.outside[1]! < 15 && result.outside[2]! < 15,
+        `fallback inset must preserve the original red backdrop outside the shape: ${result.outside}`);
       await page.close();
     }
-  } finally { await browser.close(); server.stop(true); }
+  } finally { server.stop(true); }
 });
 
 test("cold optical preparation yields without querying blocking link state and redraws a parked frame", { timeout: 30_000 }, async () => {
@@ -194,9 +299,9 @@ test("cold optical preparation yields without querying blocking link state and r
   const server = Bun.serve({ port: 0, fetch() {
     return new Response(`<div data-pocket-preview data-project-id=cold></div><script>${`${source}\n${client}`.replaceAll("</script", "<\\/script")}</script>`, { headers: { "content-type": "text/html" } });
   } });
-  const browser = await chromium.launch({ headless: true, args: process.platform === "darwin" ? ["--use-angle=metal"] : [] });
+  const browser = await getOpticalBrowser();
+  const page = await browser.newPage({ viewport: { width: 100, height: 100 } });
   try {
-    const page = await browser.newPage({ viewport: { width: 100, height: 100 } });
     const warnings: string[] = [];
     page.on("console", (message) => { if (message.type() === "warning") warnings.push(message.text()); });
     await page.addInitScript(() => {
@@ -246,5 +351,8 @@ test("cold optical preparation yields without querying blocking link state and r
     await page.waitForTimeout(100);
     assert.equal(await page.evaluate(() => (window as any).__completionPolls), settled.polls, "preparation must park when complete");
     await page.evaluate(() => (window as any).PocketEditorPreviewInstance.close());
-  } finally { await browser.close(); server.stop(true); }
+  } finally {
+    await page.close().catch(() => {});
+    server.stop(true);
+  }
 });
