@@ -785,11 +785,18 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
   ) {
     let id = peripheral.identifier.uuidString
     discovered[id] = peripheral
-    discoveredInfo[id] = [
+    var info: [String: Any] = [
       "id": id,
       "name": peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "",
       "rssi": RSSI.intValue,
     ]
+    // CoreBluetooth exposes manufacturer data without the AD length/type
+    // bytes. Preserve this exact payload for the JS TFTC resolver; the host
+    // must not interpret or normalize the vendor protocol here.
+    if let data = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+      info["manufacturerData"] = Array(data)
+    }
+    discoveredInfo[id] = info
   }
 
   public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {

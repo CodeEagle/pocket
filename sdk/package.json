@@ -1,16 +1,21 @@
 {
   "name": "pocketjs-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "workspaces": [
-    "packages/pocket_ui"
+    "packages/pocket_ui",
+    "packages/pocket_tftc"
   ],
   "dependencies": {
-    "@pocket/ui": "workspace:*"
+    "@pocket/ui": "0.1.0",
+    "find-process": "2.1.1",
+    "tree-kill": "1.2.2",
+    "bun": "1.3.9"
   },
   "devDependencies": {
     "@open-wxa/wxa-runner-core": "0.12.3",
+    "node-gyp": "12.3.0",
     "playwright": "1.64.1"
   },
   "description": "Embeddable PocketJS bytecode host SDK for Flutter applications.",
@@ -21,11 +26,31 @@
     "test:packages": "bun test scripts/tests/package_update.test.ts",
     "test:editor": "bun test editor/test/*.test.ts",
     "test:editor:live": "bun editor/test/editor_live_probe.ts",
-    "editor": "bun editor/server.ts",
-    "init": "bun pocket.ts init",
-    "build": "bun pocket.ts build",
-    "build:web": "bun scripts/build_web.ts",
-    "export:web-sdk": "bun scripts/export_web_sdk.ts",
-    "preview:wechat": "bun scripts/preview_wechat.ts"
-  }
+    "editor": "node scripts/editor_service.mjs start",
+    "init": "node scripts/toolchain.mjs run pocket.ts init",
+    "build": "node scripts/toolchain.mjs run pocket.ts build",
+    "build:web": "node scripts/toolchain.mjs run scripts/build_web.ts",
+    "export:web-sdk": "node scripts/toolchain.mjs run scripts/export_web_sdk.ts",
+    "preview:wechat": "node scripts/toolchain.mjs run scripts/preview_wechat.ts",
+    "editor:start": "node scripts/editor_service.mjs start",
+    "editor:restart": "node scripts/editor_service.mjs restart",
+    "editor:stop": "node scripts/editor_service.mjs stop",
+    "editor:status": "node scripts/editor_service.mjs status",
+    "setup": "node scripts/toolchain.mjs setup",
+    "bootstrap": "node scripts/toolchain.mjs bootstrap",
+    "build:guest": "node scripts/toolchain.mjs build:guest",
+    "build:probe": "node scripts/toolchain.mjs build:probe",
+    "doctor": "node scripts/toolchain.mjs doctor",
+    "setup:source": "node scripts/toolchain.mjs setup:source",
+    "bootstrap:source": "node scripts/toolchain.mjs bootstrap:source",
+    "build:probe:source": "node scripts/toolchain.mjs build:probe:source",
+    "package:tools": "bun scripts/package_toolchain.ts",
+    "build:engine:source": "bun scripts/build_web_engine.ts"
+  },
+  "optionalDependencies": {
+    "@abandonware/noble": "1.9.2-26"
+  },
+  "trustedDependencies": [
+    "@abandonware/noble"
+  ]
 }

@@ -1,0 +1,27 @@
+{
+  "name": "@pocket/tftc",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.js",
+    "./protocol": "./src/protocol.js",
+    "./security": "./src/security.js",
+    "./pocket": "./src/pocket-bluetooth.ts"
+  },
+  "peerDependencies": {
+    "@pocket/ui": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@pocket/ui": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "bun test test"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "pocket.host.demo",
+  "name": "Pocket Host Lab",
+  "title": "Pocket Host Lab",
+  "version": "0.1.0",
+  "engine": { "capabilities": { "requires": ["text.glyphs.baked"], "enhances": [] } },
+  "app": { "entry": "app.tsx", "output": "app", "framework": "solid" }
+}

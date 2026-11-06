@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -14,12 +15,15 @@ import 'pocket_worker.dart';
 import 'package_info_plugin.dart';
 import 'performance_history.dart';
 
+typedef PocketSessionGenerationMountHook =
+    Future<void> Function(String? mountedPayloadSha256, int targetGeneration);
+
 /// Platform orchestration only: package trust, runtime lifetime and capability
 /// providers. Pages, routing, UI components and application state live in JS.
 final class PocketSession extends ChangeNotifier {
   static const Duration _downloadOnOpenTimeout = Duration(seconds: 20);
 
-  PocketSession({required this.config})
+  PocketSession({required this.config, this.beforeGenerationMount})
     : performance = PerformanceHistory(namespace: config.appId) {
     config.validate();
     _sessionsByController[controller] = this;
@@ -38,6 +42,12 @@ final class PocketSession extends ChangeNotifier {
   }
 
   final PocketAppConfig config;
+
+  /// Runs after a signed package is admitted and before that generation is
+  /// published to Flutter. A host can use this official mount boundary to
+  /// prepare generation-bound native facts before PocketView performs its
+  /// pre-evaluation compositor registration.
+  final PocketSessionGenerationMountHook? beforeGenerationMount;
   PocketMemoryLimits? _memoryLimits;
   PocketMemoryLimits get memoryLimits => _memoryLimits ?? config.memoryLimits;
   String get appId => config.appId;
@@ -71,6 +81,15 @@ final class PocketSession extends ChangeNotifier {
   bool _firstFrameReady = false;
 
   bool get _downloadOnOpen => config.downloadOnOpen;
+
+  /// Hash of the signed payload currently mounted in this session. Embedded
+  /// bytes have no signed package identity and therefore return null; a host
+  /// catalog may only be refreshed after the official update mount boundary.
+  String? get mountedPayloadSha256 {
+    final package = active?.package;
+    if (package == null) return null;
+    return sha256.convert(package.manifest.payloadBytes).toString();
+  }
 
   /// App visibility, distinct from the Flutter process lifecycle. Hidden apps
   /// retain their realm but stop their clock and release active capabilities.
@@ -179,10 +198,13 @@ final class PocketSession extends ChangeNotifier {
 
   Future<void> _initialize({bool prepareForOpen = false}) async {
     await performance.initialize();
-    _metadata = Map<String, dynamic>.from(
-      jsonDecode(await rootBundle.loadString(config.metadataAsset)) as Map,
-    );
-    final manifestSource = await rootBundle.loadString(config.manifestAsset);
+    final metadataSource =
+        config.bootstrapMetadataJson ??
+        await rootBundle.loadString(config.metadataAsset);
+    _metadata = Map<String, dynamic>.from(jsonDecode(metadataSource) as Map);
+    final manifestSource =
+        config.bootstrapManifestJson ??
+        await rootBundle.loadString(config.manifestAsset);
     _embeddedManifest = PocketGuestManifest.fromJsonString(manifestSource);
     final manifestJson = jsonDecode(manifestSource);
     final updateConfig = config.updates;
@@ -314,6 +336,7 @@ final class PocketSession extends ChangeNotifier {
     try {
       await _withAdmittedPackage(active, () {});
       await _configureBridge(active);
+      await _prepareBeforeGenerationMount(active, generation);
       await _withAdmittedPackage(active, publishInitial);
     } catch (error) {
       if (_downloadOnOpen || prepareForOpen) {
@@ -326,6 +349,7 @@ final class PocketSession extends ChangeNotifier {
             active = fallback;
             try {
               await _configureBridge(fallback);
+              await _prepareBeforeGenerationMount(fallback, generation);
               await _withAdmittedPackage(fallback, publishInitial);
               return;
             } catch (_) {}
@@ -1091,6 +1115,18 @@ final class PocketSession extends ChangeNotifier {
     return updates.withVerifiedPrepared(package, publish);
   }
 
+  Future<void> _prepareBeforeGenerationMount(
+    PocketPreparedPackage? package,
+    int targetGeneration,
+  ) async {
+    final hook = beforeGenerationMount;
+    if (hook == null) return;
+    final payloadHash = package == null
+        ? null
+        : sha256.convert(package.package.manifest.payloadBytes).toString();
+    await hook(payloadHash, targetGeneration);
+  }
+
   Future<void> _mount(
     PocketPreparedPackage? next, {
     bool resetCache = false,
@@ -1148,11 +1184,19 @@ final class PocketSession extends ChangeNotifier {
     _healthTimer?.cancel();
     _startupTimer?.cancel();
     final previous = active;
-    // Invalidate old callbacks before awaiting plugin teardown or registration.
-    generation++;
-    _firstFrameReady = false;
+    final targetGeneration = generation + 1;
+    var generationAdvanced = false;
     try {
       await _withAdmittedPackage(next, () {});
+      // Select and verify the next root catalog before advancing the session
+      // generation. The old native runtime remains untouched until the
+      // generation-bound facts are ready for the new PocketView instance.
+      await _prepareBeforeGenerationMount(next, targetGeneration);
+      // Invalidate old callbacks before awaiting plugin teardown or
+      // registration.
+      generation = targetGeneration;
+      generationAdvanced = true;
+      _firstFrameReady = false;
       await _configureBridge(next);
       await _withAdmittedPackage(next, () {
         if (_disposed) return;
@@ -1173,6 +1217,9 @@ final class PocketSession extends ChangeNotifier {
       try {
         await _withAdmittedPackage(previous, () {});
         await _configureBridge(previous);
+        if (generationAdvanced) {
+          await _prepareBeforeGenerationMount(previous, generation);
+        }
         await _withAdmittedPackage(previous, () {
           if (_disposed) return;
           active = previous;
@@ -1276,7 +1323,7 @@ final class PocketSession extends ChangeNotifier {
     if (updates == null) {
       throw const PocketCapabilityException(
         'updates_not_configured',
-        'Configure PocketAppConfig.updates with a signed manifest URL and trusted public key',
+        'Configure PocketAppConfig.updates with a signed manifest/index URL and trusted public key',
       );
     }
     return updates;

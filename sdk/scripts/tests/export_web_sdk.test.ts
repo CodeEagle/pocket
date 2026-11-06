@@ -19,6 +19,17 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
 
   for (const path of [
     "editor/server.ts",
+    "scripts/project_templates.ts",
+    "scripts/editor_service.mjs",
+    "scripts/toolchain.mjs",
+    "scripts/prebuilt_tools.mjs",
+    "templates/app/app.tsx",
+    "templates/game/app.tsx",
+    "docs/PROJECT_TEMPLATES.md",
+    "docs/NPM_TOOLCHAIN.md",
+    "editor/native/noble-bluetooth.mjs",
+    "packages/pocket_tftc/src/index.js",
+    "packages/pocket_tftc/README.md",
     "editor/client/index.html",
     "native/src/bin/pocket_probe.rs",
     "scripts/build_guest.ts",
@@ -34,10 +45,26 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(existsSync(join(output, "native/target"))).toBe(false);
   expect(existsSync(join(output, ".cache"))).toBe(false);
   expect(existsSync(join(output, "editor/test"))).toBe(false);
+  expect(existsSync(join(output, "packages/pocket_tftc/test"))).toBe(false);
 
   const manifest = JSON.parse(readFileSync(join(output, "package.json"), "utf8"));
-  expect(manifest.scripts["build:web"]).toBe("bun scripts/build_web.ts");
-  expect(manifest.scripts.editor).toContain("editor/server.ts");
+  expect(manifest.version).toBe("0.1.1");
+  expect(manifest.workspaces).toContain("packages/pocket_tftc");
+  expect(manifest.workspaces).toContain("packages/pocket_ui");
+  expect(manifest.dependencies?.["@pocket/ui"]).toBeUndefined();
+  expect(manifest.dependencies?.["find-process"]).toBe("2.1.1");
+  expect(manifest.dependencies?.["tree-kill"]).toBe("1.2.2");
+  expect(manifest.devDependencies?.["@open-wxa/wxa-runner-core"]).toBe("0.12.3");
+  expect(manifest.scripts["build:web"]).toBe("node scripts/toolchain.mjs run scripts/build_web.ts");
+  expect(manifest.dependencies.bun).toBe("1.3.9");
+  expect(manifest.scripts.setup).toBe("node scripts/toolchain.mjs setup");
+  expect(manifest.scripts.bootstrap).toBe("node scripts/toolchain.mjs bootstrap");
+  expect(manifest.scripts["build:guest"]).toBe("node scripts/toolchain.mjs build:guest");
+  expect(manifest.scripts["build:probe"]).toBe("node scripts/toolchain.mjs build:probe");
+  expect(manifest.scripts.editor).toContain("scripts/editor_service.mjs");
   expect(manifest.scripts.setup).not.toContain("flutter");
-  expect(readFileSync(join(output, "README.md"), "utf8")).toContain("QJBC");
-});
+  expect(manifest.dependencies?.["@abandonware/noble"]).toBeUndefined();
+  expect(manifest.optionalDependencies?.["@abandonware/noble"]).toBe("1.9.2-26");
+  const readme = readFileSync(join(output, "README.md"), "utf8");
+  expect(readme).toContain("QJBC");
+}, 30_000);

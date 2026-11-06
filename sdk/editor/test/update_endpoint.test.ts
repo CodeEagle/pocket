@@ -17,6 +17,10 @@ test("device update endpoint serves only read-only published paths and closes it
     expect(response.headers.get("cache-control")).toBe("no-store");
     const canonical = await fetch(`${endpoint.origin}/pocket/3.2.0/com.example.notes/stable/latest.json`);
     expect(await canonical.text()).toBe("signed bytes");
+    const index = await fetch(`${endpoint.origin}/test/pocket/3.2.0/com.example.notes/latest.json`);
+    expect(await index.text()).toBe("signed bytes");
+    const prefixed = await fetch(`${endpoint.origin}/test/pocket/3.2.0/com.example.notes/0.1.0/latest.json`);
+    expect(await prefixed.text()).toBe("signed bytes");
     const canonicalBundle = await fetch(`${endpoint.origin}/pocket/3.2.0/com.example.notes/stable/bundles/bundle-${"a".repeat(64)}.7z`);
     expect(await canonicalBundle.text()).toBe("signed bytes");
     const canonicalBlob = await fetch(`${endpoint.origin}/pocket/3.2.0/com.example.notes/stable/blobs/${"b".repeat(64)}`, { method: "HEAD" });
@@ -33,6 +37,8 @@ test("device update endpoint serves only read-only published paths and closes it
     expect(reads).toEqual([
       "/updates/app/latest.json",
       "/pocket/3.2.0/com.example.notes/stable/latest.json",
+      "/test/pocket/3.2.0/com.example.notes/latest.json",
+      "/test/pocket/3.2.0/com.example.notes/0.1.0/latest.json",
       "/pocket/3.2.0/com.example.notes/stable/bundles/bundle-" + "a".repeat(64) + ".7z",
       "/pocket/3.2.0/com.example.notes/stable/blobs/" + "b".repeat(64),
       "/updates/app/blobs/abcdef",

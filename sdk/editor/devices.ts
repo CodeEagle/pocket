@@ -191,8 +191,8 @@ export type DeviceManagerOptions = {
   projectDirectory: (projectId: string) => string | Promise<string>;
   /** A trusted consumer Flutter-root resolver. Return undefined for an unbound project. */
   flutterDirectory: (projectId: string) => string | undefined | Promise<string | undefined>;
-  /** Public update trust only, supplied by the trusted Editor, never HTTP argv. */
-  updateConfig?: (projectId: string, device: FlutterDevice) => Promise<{ url: string; keyId: string; publicKey: string; namespace: string; debugHttpHost?: string } | undefined>;
+  /** Fixed public package index, supplied by the Editor, never HTTP argv. */
+  updateConfig?: (projectId: string, device: FlutterDevice) => Promise<{ hostConfigUrl: string } | undefined>;
   /** The SDK root is fixed to this checkout by default and is not request-controlled. */
   sdkRoot?: string;
   /** These executable overrides are server configuration, not request parameters. */
@@ -872,16 +872,12 @@ export class EditorDeviceManager {
     const runCommand = flutterRunCommand(this.flutterCommand, device.id, mode);
     const updates = await this.updateConfig?.(projectId, device);
     if (updates) {
-      const url = new URL(updates.url);
-      if (!['http:', 'https:'].includes(url.protocol) || !updates.keyId || !updates.publicKey || !/^[A-Za-z0-9_-]+$/.test(updates.namespace)) {
-        throw new DeviceManagerError("consumer_contract_mismatch", "Editor update trust configuration is invalid", 422);
+      const url = new URL(updates.hostConfigUrl);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash || url.search ||
+          !/^\/(?:test|stable)\/pocket\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/latest\.json$/.test(url.pathname)) {
+        throw new DeviceManagerError("consumer_contract_mismatch", "Editor host configuration must be a fixed package index URL", 422);
       }
-      if (updates.debugHttpHost !== undefined && updates.debugHttpHost !== url.hostname) {
-        throw new DeviceManagerError("consumer_contract_mismatch", "Editor debug HTTP host must match its update URL", 422);
-      }
-      for (const [name, value] of Object.entries({ ...(updates.debugHttpHost ? { POCKET_UPDATE_DEBUG_HTTP_HOST: updates.debugHttpHost } : {}), POCKET_UPDATE_URL: updates.url, POCKET_UPDATE_KEY_ID: updates.keyId, POCKET_UPDATE_PUBLIC_KEY: updates.publicKey, POCKET_STORE_NAMESPACE: updates.namespace })) {
-        runCommand.push(`--dart-define=${name}=${value}`);
-      }
+      runCommand.push(`--dart-define=POCKET_HOST_CONFIG_URL=${updates.hostConfigUrl}`);
     }
     return {
       projectId,

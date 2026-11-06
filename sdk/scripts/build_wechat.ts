@@ -838,6 +838,7 @@ export async function buildWechat(options: BuildWechatOptions): Promise<{ outDir
       }),
     } : undefined;
 
+    if (process.env.POCKET_SOURCE_BUILD !== "1") throw new Error("build_wechat: 微信整包引擎构建是发布者源码任务；产品开发请使用预编译的 Web/Studio。仅维护者设置 POCKET_SOURCE_BUILD=1 后执行。");
     const supportRoot = await ensureRquickjsSupportCache();
     const sysOverlay = join(tempRoot, "rquickjs-sys-0.12.2-wechat");
     patchRquickjsSys(registrySysRoot(), supportRoot, sysOverlay);

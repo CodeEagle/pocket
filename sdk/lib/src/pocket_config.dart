@@ -13,6 +13,7 @@ typedef PocketOffloadProviderFactory = PocketOffloadProvider Function();
 final class PocketUpdateConfig {
   const PocketUpdateConfig({
     this.url = '',
+    this.indexUrl = '',
     this.baseUrl = '',
     this.hostVersion = '',
     this.packageVersion = '',
@@ -26,6 +27,7 @@ final class PocketUpdateConfig {
   }) : _debugHttpHosts = debugHttpHosts;
   const PocketUpdateConfig.fromEnvironment()
     : url = const String.fromEnvironment('POCKET_UPDATE_URL'),
+      indexUrl = const String.fromEnvironment('POCKET_UPDATE_INDEX_URL'),
       baseUrl = const String.fromEnvironment('POCKET_UPDATE_BASE_URL'),
       hostVersion = const String.fromEnvironment('POCKET_HOST_VERSION'),
       packageVersion = const String.fromEnvironment('POCKET_PACKAGE_VERSION'),
@@ -45,16 +47,23 @@ final class PocketUpdateConfig {
       ];
   final String url;
 
-  /// Deployment origin (or origin plus a fixed prefix) for the canonical
-  /// `<base>/pocket/<hostVersion>/<packageId>/<packageVersion>/latest.json`
-  /// update layout. Use this with [hostVersion] and [packageVersion] instead
-  /// of supplying a raw [url].
+  /// Fixed package-index URL selected by the user-provided host entrypoint.
+  /// Aggregate host configs use this instead of deriving a route from a
+  /// remote release id or namespace.
+  final String indexUrl;
+
+  /// Deployment origin (or origin plus a fixed channel prefix) for the
+  /// canonical `<base>/pocket/<hostVersion>/<packageId>/latest.json` update
+  /// directory. The `latest.json` entry is the mutable version index; the
+  /// selected immutable descriptor carries the package version and signed
+  /// artifact URLs. [packageVersion] remains the compatibility/admission
+  /// branch, but is deliberately not part of the public entry URL.
   final String baseUrl;
   final String hostVersion;
 
-  /// Release slot in the URL. Use an immutable version for pinned delivery or
-  /// a stable slot such as `stable` when the server will replace only the
-  /// signed `latest.json` pointer while retaining immutable hashed artifacts.
+  /// Signed compatibility/admission branch for this package. It is carried in
+  /// the signed descriptor and is intentionally not a URL segment: the fixed
+  /// `latest.json` index is resolved on every coordinator check.
   final String packageVersion;
   final String keyId;
 
@@ -84,18 +93,20 @@ final class PocketUpdateConfig {
       : _debugHttpHosts;
   bool get _structuredEndpointConfigured =>
       baseUrl.isNotEmpty && hostVersion.isNotEmpty && packageVersion.isNotEmpty;
-  bool get _sourceConfigured => url.isNotEmpty || _structuredEndpointConfigured;
+  bool get _sourceConfigured =>
+      url.isNotEmpty || indexUrl.isNotEmpty || _structuredEndpointConfigured;
   bool get configured =>
       (_sourceConfigured && keyId.isNotEmpty && publicKey.isNotEmpty) ||
       trustPolicyConfigured;
 
-  /// Resolves the signed manifest endpoint for [packageId].
+  /// Resolves the mutable version-index endpoint for [packageId].
   ///
   /// [url] remains available for local Editor endpoints and existing hosts.
   /// Production deployments should use the structured fields so every app
   /// shares the same deterministic CDN layout.
   Uri manifestUri(String packageId) {
     validate();
+    if (indexUrl.isNotEmpty) return Uri.parse(indexUrl);
     if (url.isNotEmpty) return Uri.parse(url);
     final base = Uri.parse(baseUrl);
     return base.replace(
@@ -104,7 +115,6 @@ final class PocketUpdateConfig {
         'pocket',
         hostVersion,
         packageId,
-        packageVersion,
         'latest.json',
       ],
       query: null,
@@ -115,10 +125,23 @@ final class PocketUpdateConfig {
   void validate() {
     final endpointFields = <String>[baseUrl, hostVersion, packageVersion];
     final hasEndpoint = endpointFields.any((value) => value.isNotEmpty);
-    if (url.isNotEmpty && hasEndpoint) {
+    if (url.isNotEmpty && (indexUrl.isNotEmpty || hasEndpoint)) {
       throw const FormatException(
-        'Use either a direct update URL or the structured update endpoint',
+        'Use either a direct update URL or a package index/structured endpoint',
       );
+    }
+    if (indexUrl.isNotEmpty) {
+      final index = Uri.tryParse(indexUrl);
+      if (index == null ||
+          !index.hasScheme ||
+          index.host.isEmpty ||
+          (index.scheme != 'https' && index.scheme != 'http') ||
+          index.userInfo.isNotEmpty ||
+          index.hasQuery ||
+          index.hasFragment ||
+          !index.path.endsWith('/latest.json')) {
+        throw const FormatException('Invalid package index URL');
+      }
     }
     if (hasEndpoint && !_structuredEndpointConfigured) {
       throw const FormatException(
@@ -166,6 +189,7 @@ final class PocketUpdateConfig {
       other is PocketUpdateConfig &&
           runtimeType == other.runtimeType &&
           url == other.url &&
+          indexUrl == other.indexUrl &&
           baseUrl == other.baseUrl &&
           hostVersion == other.hostVersion &&
           packageVersion == other.packageVersion &&
@@ -180,6 +204,7 @@ final class PocketUpdateConfig {
   @override
   int get hashCode => Object.hash(
     url,
+    indexUrl,
     baseUrl,
     hostVersion,
     packageVersion,
@@ -212,6 +237,8 @@ final class PocketAppConfig {
     this.workerHttpOrigins = const {},
     this.offloadProviderFactory,
     this.memoryLimits = const PocketMemoryLimits(),
+    this.bootstrapMetadataJson,
+    this.bootstrapManifestJson,
   });
   final String appId;
   final String bytecodeAsset;
@@ -219,6 +246,14 @@ final class PocketAppConfig {
   final String metadataAsset;
   final String manifestAsset;
   final PocketMemoryLimits memoryLimits;
+
+  /// Verified bootstrap metadata fetched from a single host config document.
+  /// When present, [PocketSession] uses these bytes instead of pretending that
+  /// a remote file exists in `rootBundle`.
+  final String? bootstrapMetadataJson;
+
+  /// Verified guest manifest fetched from the same host config document.
+  final String? bootstrapManifestJson;
 
   /// Signed package source used by the native System runtime's optional
   /// before-open gate, including resident/prewarmed mini-apps. When omitted,
@@ -262,15 +297,19 @@ final class PocketAppConfig {
     Iterable<PocketPluginFactory>? pluginFactories,
     Iterable<String>? additionalCapabilities,
     PocketMemoryLimits? memoryLimits,
+    PocketUpdateConfig? updates,
     PocketRecordingController Function()? recordingFactory,
     bool? downloadOnOpen,
+    String? bootstrapMetadataJson,
+    String? bootstrapManifestJson,
+    Map<String, int>? compositorSurfaces,
   }) => PocketAppConfig(
     appId: appId,
     bytecodeAsset: bytecodeAsset,
     pakAsset: pakAsset,
     metadataAsset: metadataAsset,
     manifestAsset: manifestAsset,
-    updates: updates,
+    updates: updates ?? this.updates,
     downloadOnOpen: downloadOnOpen ?? this.downloadOnOpen,
     showFps: showFps,
     allowedPermissions: allowedPermissions,
@@ -281,15 +320,43 @@ final class PocketAppConfig {
         ? this.additionalCapabilities
         : Set<String>.unmodifiable(additionalCapabilities),
     recordingFactory: recordingFactory ?? this.recordingFactory,
-    compositorSurfaces: compositorSurfaces,
+    compositorSurfaces: compositorSurfaces ?? this.compositorSurfaces,
     workerHttpOrigins: workerHttpOrigins,
     offloadProviderFactory: offloadProviderFactory,
     memoryLimits: memoryLimits ?? this.memoryLimits,
+    bootstrapMetadataJson: bootstrapMetadataJson ?? this.bootstrapMetadataJson,
+    bootstrapManifestJson: bootstrapManifestJson ?? this.bootstrapManifestJson,
   );
 
   /// Attach compiled providers without changing the app's assets or policy.
   PocketAppConfig withPlugins(Iterable<PocketPluginFactory> factories) =>
       copyWith(pluginFactories: factories);
+
+  /// Keep this remotely selected package while applying host-approved native
+  /// policy. Remote data owns identity, artifacts, updates and bootstrap
+  /// metadata; [policy] owns permissions, plugins, native providers and
+  /// resource limits. This is the single boundary used by aggregate host
+  /// configuration so consumers do not duplicate a field-by-field merge.
+  PocketAppConfig withNativePolicy(PocketAppConfig policy) => PocketAppConfig(
+    appId: appId,
+    bytecodeAsset: bytecodeAsset,
+    pakAsset: pakAsset,
+    metadataAsset: metadataAsset,
+    manifestAsset: manifestAsset,
+    updates: updates,
+    downloadOnOpen: downloadOnOpen,
+    showFps: policy.showFps,
+    allowedPermissions: policy.allowedPermissions,
+    pluginFactories: policy.pluginFactories,
+    additionalCapabilities: policy.additionalCapabilities,
+    recordingFactory: policy.recordingFactory,
+    compositorSurfaces: compositorSurfaces,
+    workerHttpOrigins: policy.workerHttpOrigins,
+    offloadProviderFactory: policy.offloadProviderFactory,
+    memoryLimits: policy.memoryLimits,
+    bootstrapMetadataJson: bootstrapMetadataJson,
+    bootstrapManifestJson: bootstrapManifestJson,
+  );
 
   void validate() {
     if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$').hasMatch(appId)) {
@@ -323,6 +390,8 @@ final class PocketAppConfig {
           pakAsset == other.pakAsset &&
           metadataAsset == other.metadataAsset &&
           manifestAsset == other.manifestAsset &&
+          bootstrapMetadataJson == other.bootstrapMetadataJson &&
+          bootstrapManifestJson == other.bootstrapManifestJson &&
           updates == other.updates &&
           downloadOnOpen == other.downloadOnOpen &&
           memoryLimits == other.memoryLimits &&
@@ -342,6 +411,8 @@ final class PocketAppConfig {
     pakAsset,
     metadataAsset,
     manifestAsset,
+    bootstrapMetadataJson,
+    bootstrapManifestJson,
     updates,
     downloadOnOpen,
     memoryLimits,

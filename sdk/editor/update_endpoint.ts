@@ -8,8 +8,9 @@ function privateIPv4(address: string): boolean {
 }
 
 const legacyUpdatePathPattern = /^\/updates\/[a-z][a-z0-9-]{0,47}\/.+/;
+const packageIndexPathPattern = /^(?:\/(?:test|stable))?\/pocket\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/latest\.json$/;
 const canonicalUpdatePathPattern =
-  /^\/pocket\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/.+/;
+  /^(?:\/(?:test|stable))?\/pocket\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/.+/;
 const safePathSegmentPattern = /^[A-Za-z0-9_.-]+$/;
 
 function isPublishedPath(path: string): boolean {
@@ -17,11 +18,13 @@ function isPublishedPath(path: string): boolean {
   const parts = path.split("/").slice(1);
   if (!parts.every((part) => part.length > 0 && part !== "." && part !== ".." && safePathSegmentPattern.test(part))) return false;
   if (legacyUpdatePathPattern.test(path)) return true;
+  if (packageIndexPathPattern.test(path)) return true;
   if (!canonicalUpdatePathPattern.test(path)) return false;
   // A canonical release route may only expose public artifact roots. This
   // extra check also prevents a URL-normalized encoded `..` segment from
   // becoming an apparently valid release path before the callback sees it.
-  const artifactRoot = parts[4];
+  const canonicalOffset = (parts[0] === "test" || parts[0] === "stable") && parts[1] === "pocket" ? 1 : 0;
+  const artifactRoot = parts[canonicalOffset + 4];
   return artifactRoot !== undefined && new Set([
     "latest.json",
     "signed-manifest.json",

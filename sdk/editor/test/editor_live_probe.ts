@@ -9,7 +9,8 @@
 
 import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { verifySignedManifest } from "../../scripts/package_update.ts";
@@ -28,7 +29,12 @@ async function responseValue(response: Response): Promise<any> {
 }
 
 async function request(base: string, path: string, init?: RequestInit): Promise<{ response: Response; value: any }> {
-  const response = await fetch(path.startsWith("http") ? path : `${base}${path}`, init);
+  const headers = new Headers(init?.headers);
+  if (["POST", "PUT", "PATCH", "DELETE"].includes((init?.method ?? "GET").toUpperCase())) {
+    headers.set("x-pocket-editor", "1");
+    if (typeof init?.body === "string") headers.set("content-type", "application/json");
+  }
+  const response = await fetch(path.startsWith("http") ? path : `${base}${path}`, { ...init, headers });
   const value = await responseValue(response);
   if (!response.ok) throw new Error(`${init?.method ?? "GET"} ${path} -> HTTP ${response.status}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
   return { response, value };
@@ -64,7 +70,7 @@ async function main(): Promise<void> {
   let failure: Error | undefined;
   let report: JsonRecord = { ok: false, workspace };
   try {
-    server = await startEditor({ port: 0, workspace });
+    server = await startEditor({ port: 0, updateHost: "127.0.0.1", updatePort: 0, workspace });
     const base = serverBase(server);
     const created = (await request(base, "/api/projects", {
       method: "POST",
@@ -94,7 +100,7 @@ async function main(): Promise<void> {
     const latestText = await textAt(manifestUrl);
     const envelope = JSON.parse(latestText) as JsonRecord;
     const key = JSON.parse(readFileSync(join(workspace, "keys/editor-dev-key.json"), "utf8")) as JsonRecord;
-    assert.equal(hostConfig.POCKET_UPDATE_URL, manifestUrl);
+    assert.equal(new URL(manifestUrl).href, new URL(`${hostConfig.POCKET_UPDATE_BASE_URL}/pocket/${hostConfig.POCKET_HOST_VERSION}/pocket.host.demo/${hostConfig.POCKET_PACKAGE_VERSION}/latest.json`).href);
     assert.equal(hostConfig.POCKET_UPDATE_KEY_ID, envelope.keyId);
     assert.equal(hostConfig.POCKET_UPDATE_PUBLIC_KEY, key.publicKeyBase64);
     assert.equal(Buffer.from(hostConfig.POCKET_UPDATE_PUBLIC_KEY, "base64").byteLength, 32);
@@ -124,10 +130,60 @@ async function main(): Promise<void> {
     }
     assert.equal(hash(reconstructedPak), payload.pak.sha256);
 
+    // Real compiled bytes must remain downloadable through immutable history
+    // routes after another publication and a service restart.
+    await request(base, `/api/projects/${id}/publish`, { method: "POST", body: JSON.stringify({ channel: "test" }) });
+    const firstInventory = (await request(base, `/api/projects/${id}/versions`)).value;
+    assert.equal(firstInventory.history.length, 2);
+    const appConfigUrl = firstInventory.appConfigUrl;
+    assert.equal(new URL(appConfigUrl).pathname, `/test/pocket/${hostConfig.POCKET_HOST_VERSION}/pocket.host.demo/latest.json`);
+    const firstIndex = (await request(base, appConfigUrl)).value;
+    assert.equal(firstIndex.kind, "pocket-editor-package-index");
+    assert.equal(firstIndex.versions.length, 1);
+    assert.equal(firstIndex.latest.releaseId, firstIndex.versions[0].releaseId);
+    const resolvedDescriptor = new URL(firstIndex.latest.hostConfigUrl, appConfigUrl).href;
+    const indexedHost = (await request(base, resolvedDescriptor)).value;
+    assert.equal(indexedHost.systemUI, "pocket.host.demo");
+    const historicalTest = firstInventory.history.find((entry: JsonRecord) => entry.channel === "test");
+    const historicalPackage = historicalTest.packages.find((entry: JsonRecord) => entry.id === "pocket.host.demo");
+    assert.ok(historicalPackage, "history must include the root package");
+    const historicalManifestUrl = historicalPackage.manifestUrl;
+    const historicalText = await textAt(historicalManifestUrl);
+    const historicalHost = (await request(base, historicalPackage.hostConfigUrl)).value;
+    assert.equal(new URL(historicalManifestUrl).pathname, `/pocket/${historicalHost.POCKET_HOST_VERSION}/pocket.host.demo/${historicalHost.POCKET_PACKAGE_VERSION}/latest.json`);
+    await request(base, `/api/projects/${id}/publish`, { method: "POST", body: JSON.stringify({ channel: "test" }) });
+    assert.equal(await textAt(historicalManifestUrl), historicalText);
+    const advancedIndex = (await request(base, appConfigUrl)).value;
+    assert.equal(advancedIndex.versions.length, 2);
+    assert.ok(advancedIndex.latest.build > firstIndex.latest.build);
+    assert.ok(advancedIndex.versions.some((entry: JsonRecord) => entry.releaseId === firstIndex.latest.releaseId));
+
+    const beforeOfflineInventory = (await request(base, `/api/projects/${id}/versions`)).value;
+    const beforeOfflinePublish = (await request(base, `/api/projects/${id}/status`)).value.publish;
+    const offline = (await request(base, `/api/projects/${id}/package-offline`, { method: "POST", body: "{}" })).value;
+    const offlineBytes = await bytesAt(new URL(offline.archiveUrl, base).href);
+    const offlinePath = join(workspace, "downloaded-offline.tar.gz");
+    writeFileSync(offlinePath, offlineBytes);
+    const archiveListing = spawnSync("tar", ["-tzf", offlinePath], { encoding: "utf8" });
+    assert.equal(archiveListing.status, 0, archiveListing.stderr);
+    const archiveEntries = archiveListing.stdout.trim().split("\n");
+    const offlineManifestPath = archiveEntries.find((path) => path.endsWith("/latest.json"));
+    assert.ok(offlineManifestPath, "offline archive must contain a signed manifest");
+    assert.ok(archiveEntries.some((path) => path.includes("/blobs/")), "offline archive must include resource blobs");
+    const offlineManifest = spawnSync("tar", ["-xOzf", offlinePath, offlineManifestPath], { encoding: "utf8" });
+    assert.equal(offlineManifest.status, 0, offlineManifest.stderr);
+    const offlinePayload = JSON.parse(new TextDecoder().decode(verifySignedManifest(JSON.parse(offlineManifest.stdout), key.publicKeyPem)));
+    assert.equal(offlinePayload.entry.sha256, hash(qjbc));
+    assert.equal(offlinePayload.pak.sha256, hash(pak));
+    assert.deepEqual((await request(base, `/api/projects/${id}/versions`)).value, beforeOfflineInventory);
+    assert.deepEqual((await request(base, `/api/projects/${id}/status`)).value.publish, beforeOfflinePublish);
+
     // A failed build must not make the previous good qjbc publishable. The
     // signed latest.json must remain byte-for-byte unchanged as well.
     const sourcePath = `/api/projects/${id}/files/app.tsx`;
     const badSource = await request(base, sourcePath);
+    const legacySource = await request(base, `/api/projects/${id}/source`);
+    assert.equal(legacySource.value.source, badSource.value.content);
     const badRevision = (await request(base, sourcePath, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -139,12 +195,18 @@ async function main(): Promise<void> {
     assert.equal(failed.builtRevision, built.revision);
     assert.equal(failed.artifacts.revision, built.revision);
     assert.ok(typeof failed.error === "string" && failed.error.length > 0, "invalid source must report a compiler error");
-    const rejectedPublish = await fetch(`${base}/api/projects/${id}/publish`, { method: "POST", body: "{}" });
+    const rejectedPublish = await fetch(`${base}/api/projects/${id}/publish`, { method: "POST", headers: { "x-pocket-editor": "1", "content-type": "application/json" }, body: "{}" });
     assert.equal(rejectedPublish.status, 400);
     assert.equal(await textAt(manifestUrl), latestText);
-    // Keep the unused value explicit: the probe also proves the original
-    // source endpoint remains available for backwards-compatible clients.
-    assert.ok(String(badSource.value.content).includes("Hello PocketJS"));
+    const editorPort = server.port;
+    const updatePort = Number(new URL(manifestUrl).port);
+    server.stop(true);
+    server = await startEditor({ port: editorPort, updateHost: "127.0.0.1", updatePort, workspace });
+    const restoredInventory = (await request(base, `/api/projects/${id}/versions`)).value;
+    assert.equal(restoredInventory.history.length, 3);
+    assert.deepEqual((await request(base, appConfigUrl)).value, advancedIndex);
+    assert.equal(await textAt(historicalManifestUrl), historicalText);
+    assert.equal(await textAt(manifestUrl), latestText);
 
     report = {
       ok: true,
@@ -156,8 +218,13 @@ async function main(): Promise<void> {
       pakBytes: pak.byteLength,
       manifestUrl,
       hostConfigUrl,
+      appConfigUrl,
+      directoryVersionsAfterRestart: advancedIndex.versions.length,
+      historyEntriesAfterRestart: restoredInventory.history.length,
+      immutableHistoryManifestUrl: historicalManifestUrl,
+      offlinePackage: { bytes: offlineBytes.length, entries: archiveEntries.length, unchangedPublishedVersion: true },
       buildArtifactDir: join(workspace, "builds", id, String(built.revision)),
-      releaseDir: join(workspace, "updates", id),
+      releaseHistoryDir: join(workspace, "updates", ".history", id),
       rejectedBadBuild: { revision: failed.revision, error: failed.error },
     };
   } catch (error) {

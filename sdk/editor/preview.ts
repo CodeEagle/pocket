@@ -437,7 +437,7 @@ function isRecoverableInputFailure(message: string): boolean {
     message.startsWith("semantic action") ||
     message.includes("input.pointer") ||
     message.includes("input.text") ||
-    message.startsWith("web Bluetooth plugin");
+    message.startsWith("Noble Bluetooth adapter");
 }
 
 function resolveValue<T>(value: PreviewResolver<T> | undefined, projectId: string): Promise<T | undefined> {
@@ -497,7 +497,7 @@ async function systemCatalogFromProject(projectDirectory: string | undefined): P
  * the same trusted source manifest when it is present. This only allocates
  * handles for installed catalog children and never fabricates a child guest.
  */
-async function compositorSurfacesFromProject(projectDirectory: string | undefined): Promise<Record<string, number> | undefined> {
+export async function compositorSurfacesFromProject(projectDirectory: string | undefined): Promise<Record<string, number> | undefined> {
   const system = await systemCatalogFromProject(projectDirectory);
   if (!system) return undefined;
   const result: Record<string, number> = {};
@@ -1276,7 +1276,13 @@ class PreviewSession {
     child: PreviewRuntime; published: boolean;
     respond: (result: unknown, error?: JsonRecord) => Promise<void>;
   }>();
-  private webBluetoothOwner?: { clientId: string; lease: string; provider: "web" | "local"; queue: JsonRecord[] };
+  /**
+   * The editor has one Bluetooth transport: the local Noble helper.  The
+   * browser projection is intentionally not allowed to claim a second
+   * browser Bluetooth provider; keeping one owner also prevents two
+   * previews from racing the same host adapter.
+   */
+  private webBluetoothOwner?: { clientId: string; lease: string; provider: "local"; queue: JsonRecord[] };
   private readonly localBluetoothScopes = new Set<string>();
   private readonly browserPluginRequests = new Map<string, BrowserPluginRequest>();
   private readonly browserPluginStreams = new Map<string, BrowserPluginRequest>();
@@ -1782,14 +1788,16 @@ class PreviewSession {
     return `${token}\u0000${id}`;
   }
 
-  /** Claim the one browser Web Bluetooth adapter allowed to service this preview. */
-  claimWebBluetooth(clientId: string, provider: "web" | "local" = "web"): { clientId: string; lease: string } | undefined {
+  /** Claim the one Noble adapter allowed to service this preview. */
+  claimWebBluetooth(clientId: string, provider: "web" | "local" = "local"): { clientId: string; lease: string } | undefined {
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(clientId)) return undefined;
-    if (provider === "local" && !this.manager.options.localBluetooth) return undefined;
+    // `web` is retained as a wire-level compatibility value for older editor
+    // links, but it must never select a browser Bluetooth plugin.
+    if (provider !== "local" || !this.manager.options.localBluetooth) return undefined;
     const current = this.webBluetoothOwner;
     if (current && (current.clientId !== clientId || current.provider !== provider)) return undefined;
     if (current && this.pluginSubscriber()) return undefined;
-    if (!current) this.webBluetoothOwner = { clientId, lease: randomUUID(), provider, queue: [] };
+    if (!current) this.webBluetoothOwner = { clientId, lease: randomUUID(), provider: "local", queue: [] };
     this.touch();
     return { clientId, lease: this.webBluetoothOwner!.lease };
   }
@@ -1804,48 +1812,20 @@ class PreviewSession {
   private emitWebBluetoothRequest(request: BrowserPluginRequest, params: JsonRecord = {}): void {
     const owner = this.webBluetoothOwner;
     if (!owner || owner.clientId !== request.clientId || owner.lease !== request.lease) return;
-    if (owner.provider === "local") {
-      const provider = this.manager.options.localBluetooth!;
-      const scope = `${this.id}:${owner.lease}:${request.runtime.instanceId}:${request.runtime.generation}`;
-      if (request.kind === "scope.dispose") this.localBluetoothScopes.delete(scope);
-      else this.localBluetoothScopes.add(scope);
-      const deliver = (message: JsonRecord) => {
-        void this.enqueue(() => this.handleBrowserPluginMessage({ clientId: owner.clientId, token: request.token, message }))
-          .catch((error) => this.reportError(error));
-      };
-      void provider.handle({ scope, kind: request.kind, requestId: request.requestId, capability: request.capability, streamId: request.streamId, topic: request.kind === "stream.open" ? "hardware.bluetooth.notifications" : undefined, params }, deliver)
-        .catch((error) => {
-          const failure = hostError("hardware_bluetooth_error", errorText(error));
-          if (request.kind === "request") deliver({ type: "event", name: "host.response", payload: { requestId: request.requestId, capability: request.capability, ok: false, error: failure } });
-          else if (request.kind === "stream.open") deliver({ type: "event", name: "stream.error", payload: { streamId: request.streamId, error: failure } });
-        });
-      return;
-    }
-    const packet: JsonRecord = {
-      type: "plugin.request",
-      plugin: "web-bluetooth",
-      clientId: owner.clientId,
-      token: request.token,
-      scope: `${request.runtime.instanceId}:${request.runtime.generation}`,
-      kind: request.kind,
-      ...(request.kind === "stream.open" ? { topic: "hardware.bluetooth.notifications" } : {}),
-      ...(request.requestId ? { requestId: request.requestId } : {}),
-      ...(request.capability ? { capability: request.capability } : {}),
-      ...(request.streamId ? { streamId: request.streamId } : {}),
-      params,
+    const provider = this.manager.options.localBluetooth!;
+    const scope = `${this.id}:${owner.lease}:${request.runtime.instanceId}:${request.runtime.generation}`;
+    if (request.kind === "scope.dispose") this.localBluetoothScopes.delete(scope);
+    else this.localBluetoothScopes.add(scope);
+    const deliver = (message: JsonRecord) => {
+      void this.enqueue(() => this.handleBrowserPluginMessage({ clientId: owner.clientId, token: request.token, message }))
+        .catch((error) => this.reportError(error));
     };
-    const subscriber = this.pluginSubscriber();
-    if (!subscriber) {
-      if (owner.queue.length < 32) owner.queue.push(packet);
-      return;
-    }
-    try {
-      subscriber.controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(packet)}\n\n`));
-    } catch {
-      subscriber.closed = true;
-      this.subscribers.delete(subscriber);
-      this.releaseWebBluetoothOwner(owner.lease);
-    }
+    void provider.handle({ scope, kind: request.kind, requestId: request.requestId, capability: request.capability, streamId: request.streamId, topic: request.kind === "stream.open" ? "hardware.bluetooth.notifications" : undefined, params }, deliver)
+      .catch((error) => {
+        const failure = hostError("hardware_bluetooth_error", errorText(error));
+        if (request.kind === "request") deliver({ type: "event", name: "host.response", payload: { requestId: request.requestId, capability: request.capability, ok: false, error: failure } });
+        else if (request.kind === "stream.open") deliver({ type: "event", name: "stream.error", payload: { streamId: request.streamId, error: failure } });
+      });
   }
 
   private emitWebBluetoothScopeDispose(runtime: PreviewRuntime): void {
@@ -1867,7 +1847,7 @@ class PreviewSession {
       const map = stream ? this.browserPluginStreams : this.browserPluginRequests;
       if (map.get(key) !== request) return;
       map.delete(key);
-      const failure = hostError("hardware_bluetooth_error", "Web Bluetooth plugin response timed out");
+      const failure = hostError("hardware_bluetooth_error", "Noble Bluetooth adapter response timed out");
       void this.enqueue(async () => {
         if (stream) {
           await request.runtime.probe.checked({ op: "send", message: { type: "event", name: "stream.error", payload: { streamId: request.streamId, error: failure } } });
@@ -1960,7 +1940,7 @@ class PreviewSession {
     }
     if (requests.length || streams.length) {
       void this.enqueue(async () => {
-        const failure = hostError("hardware_bluetooth_disconnected", "Web Bluetooth preview plugin was disabled");
+        const failure = hostError("hardware_bluetooth_disconnected", "Noble Bluetooth preview adapter was disabled");
         for (const request of requests) {
           await this.sendHostResponse(request.runtime, request.requestId!, request.capability!, null, failure);
         }
@@ -2680,7 +2660,7 @@ class PreviewSession {
           kind: "stream.open",
         };
         if (this.browserPluginStreams.size >= maxBrowserPluginPending) {
-          await runtime.probe.checked({ op: "send", message: { type: "event", name: "stream.error", payload: { streamId, error: hostError("hardware_busy", "Web Bluetooth stream limit reached") } } });
+          await runtime.probe.checked({ op: "send", message: { type: "event", name: "stream.error", payload: { streamId, error: hostError("hardware_busy", "Noble Bluetooth stream limit reached") } } });
           runtime.needsPump = true;
           return;
         }
@@ -2694,7 +2674,7 @@ class PreviewSession {
           op: "send",
           message: { type: "event", name: "stream.error", payload: {
             streamId: eventValue.streamId,
-            error: hostError("unsupported_capability", "Web Bluetooth preview plugin is disabled"),
+            error: hostError("unsupported_capability", "Noble Bluetooth preview adapter is unavailable"),
           } },
         });
         runtime.needsPump = true;
@@ -2734,7 +2714,7 @@ class PreviewSession {
       const owner = this.webBluetoothOwner;
       if (owner) {
         if (this.browserPluginRequests.size >= maxBrowserPluginPending) {
-          await this.sendHostResponse(runtime, requestId, capability, null, hostError("hardware_busy", "Web Bluetooth request limit reached"));
+          await this.sendHostResponse(runtime, requestId, capability, null, hostError("hardware_busy", "Noble Bluetooth request limit reached"));
           return;
         }
         const request: BrowserPluginRequest = {
@@ -2826,7 +2806,7 @@ class PreviewSession {
     if (capability === "runtime.performance") return { supported: false, context: params.context ?? null };
     if (capability === "plugins.list") {
       return this.webBluetoothOwner
-        ? [{ id: this.webBluetoothOwner.provider === "local" ? "local-bluetooth" : "web-bluetooth", provider: this.webBluetoothOwner.provider === "local" ? "native-macos" : "browser", enabled: true, capabilities: ["hardware.permissions.request", "hardware.bluetooth.scan", "hardware.bluetooth.connect", "hardware.bluetooth.read", "hardware.bluetooth.write", "hardware.bluetooth.notifications"] }]
+        ? [{ id: "local-noble-bluetooth", provider: "noble", enabled: true, capabilities: ["hardware.permissions.request", "hardware.bluetooth.scan", "hardware.bluetooth.connect", "hardware.bluetooth.read", "hardware.bluetooth.write", "hardware.bluetooth.notifications"] }]
         : [];
     }
     if (capability === "plugins.packageInfo") return { provider: "editor-preview", appId: runtime.appId };
@@ -3956,10 +3936,10 @@ class PreviewSession {
     const message = input.message && typeof input.message === "object" && !Array.isArray(input.message)
       ? input.message as JsonRecord
       : undefined;
-    if (!message) throw new Error("web Bluetooth plugin message is invalid");
+    if (!message) throw new Error("Noble Bluetooth adapter message is invalid");
     const name = eventName(message);
     const payload = eventPayload(message);
-    if (!payload) throw new Error("web Bluetooth plugin message payload is invalid");
+    if (!payload) throw new Error("Noble Bluetooth adapter message payload is invalid");
     if (name === "host.response") {
       const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
       const request = this.browserPluginRequests.get(this.pluginRequestKey(token, requestId));
@@ -3988,7 +3968,7 @@ class PreviewSession {
       this.clearBrowserPluginTimer(stream);
       return;
     }
-    throw new Error(`unsupported web Bluetooth plugin message: ${name}`);
+    throw new Error(`unsupported Noble Bluetooth adapter message: ${name}`);
   }
 
   private handleBrowserPluginDisable(input: JsonRecord): void {
@@ -4149,13 +4129,9 @@ class PreviewManagerImpl implements PreviewManager {
       readFile(join(editorDirectory, "../packages/pocket_flutter/shaders/liquid_glass.frag"), "utf8"),
     ]);
     const projection = optics.replace('"" /* pocket-liquid-glass-shader */', JSON.stringify(shader));
-    const pluginPath = join(dirname(path), "plugins/web-bluetooth.js");
-    try {
-      const plugin = await readFile(pluginPath, "utf8");
-      return `${plugin}\n${projection}\n${source}`;
-    } catch {
-      return `${projection}\n${source}`;
-    }
+    // Bluetooth is served by the local Noble helper. Do not inject a browser
+    // browser Bluetooth adapter into the projection document.
+    return `${projection}\n${source}`;
   }
 
   private async document(projectId: string): Promise<Response> {
@@ -4168,7 +4144,6 @@ class PreviewManagerImpl implements PreviewManager {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "content-security-policy": "frame-ancestors 'self'",
-        "permissions-policy": "bluetooth=(self)",
         "x-frame-options": "SAMEORIGIN",
       },
     });
@@ -4192,11 +4167,13 @@ class PreviewManagerImpl implements PreviewManager {
       }
       if (route === "stream" && request.method === "GET") {
         const query = new URL(request.url).searchParams;
-        const webBluetooth = query.get("webBluetooth") === "1";
+        const webBluetooth = query.get("webBluetooth") === "1" || query.get("bluetooth") === "1";
         const clientId = query.get("clientId") ?? "";
-        const provider = query.get("bluetoothProvider") === "local" ? "local" : "web";
-        if (webBluetooth && provider === "local" && !this.options.localBluetooth) return failure("Local Bluetooth is unavailable on this editor host", 400);
-        const pluginOwner = webBluetooth ? session.claimWebBluetooth(clientId, provider) : undefined;
+        // The legacy `bluetoothProvider` query is ignored deliberately. Noble
+        // is the only supported editor transport.
+        if (webBluetooth && !this.options.localBluetooth) return failure("Noble Bluetooth is unavailable on this editor host", 400);
+        const pluginOwner = webBluetooth ? session.claimWebBluetooth(clientId, "local") : undefined;
+        if (webBluetooth && !pluginOwner) return failure("Noble Bluetooth client could not claim the preview", 409);
         await session.ensureStarted();
         return session.stream(query.get("presentation") === "browser", pluginOwner);
       }

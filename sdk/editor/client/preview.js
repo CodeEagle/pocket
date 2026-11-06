@@ -828,9 +828,10 @@
     let webBluetoothEnabled = (() => {
       try { return new URL(global.location.href).searchParams.get("webBluetooth") === "1"; } catch { return false; }
     })();
-    let bluetoothProvider = (() => {
-      try { return new URL(global.location.href).searchParams.get("bluetoothProvider") === "local" ? "local" : "web"; } catch { return "web"; }
-    })();
+    // The editor preview has one Bluetooth implementation: the server-side
+    // Noble helper. Keep the legacy query key only so old preview links still
+    // open; it can never select a browser Bluetooth adapter.
+    let bluetoothProvider = "local";
     const webBluetoothClientId = (() => {
       try {
         const created = global.crypto?.randomUUID?.() || `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -839,7 +840,6 @@
         return `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       }
     })();
-    let webBluetoothPlugin = null;
     let connectionGeneration = 0;
     const presentedTokens = new Set();
     let inputTail = Promise.resolve();
@@ -876,74 +876,30 @@
     }
 
     function announceWebBluetoothState(extra = {}) {
-      const available = bluetoothProvider === "local" || typeof global.PocketWebBluetooth?.create === "function";
+      const available = bluetoothProvider === "local";
       announce("preview.plugins-state", {
         webBluetooth: {
           enabled: webBluetoothEnabled,
           provider: bluetoothProvider,
           available,
-          secureContext: global.isSecureContext === true,
-          ...(available ? {} : { reason: "web Bluetooth plugin is unavailable" }),
+          secureContext: true,
+          ...(available ? {} : { reason: "Noble Bluetooth adapter is unavailable" }),
           ...extra,
         },
       });
     }
 
-    function disposeWebBluetoothPlugin() {
-      try {
-        const result = webBluetoothPlugin?.dispose?.();
-        Promise.resolve(result).catch((error) => announce("preview.error", { error: String(error?.message || error) }));
-      } catch (error) { announce("preview.error", { error: String(error?.message || error) }); }
-      webBluetoothPlugin = null;
-    }
-
-    function createWebBluetoothPlugin() {
-      disposeWebBluetoothPlugin();
-      if (!webBluetoothEnabled) {
-        announceWebBluetoothState();
-        return;
-      }
-      if (bluetoothProvider === "local") {
-        announceWebBluetoothState();
-        return;
-      }
-      const factory = global.PocketWebBluetooth?.create;
-      if (typeof factory !== "function") {
-        announceWebBluetoothState({ enabled: false, reason: "web Bluetooth plugin is unavailable" });
-        return;
-      }
-      try {
-        // Keep the browser permission action visible outside the scaled/clipped
-        // phone surface. Same-origin parent clicks activate this frame too.
-        let chooserDocument = global.document;
-        try {
-          if (global.parent !== global && global.parent.location.origin === global.location.origin) chooserDocument = global.parent.document;
-        } catch { /* Standalone or cross-origin embedding uses its own document. */ }
-        webBluetoothPlugin = factory({
-          send: (token, message) => input({ type: "plugin-message", clientId: webBluetoothClientId, token, message }),
-          document: chooserDocument,
-          bluetooth: global.navigator?.bluetooth,
-          isSecureContext: global.isSecureContext === true,
-        });
-        announceWebBluetoothState();
-      } catch (error) {
-        webBluetoothPlugin = null;
-        announceWebBluetoothState({ enabled: false, reason: String(error?.message || error) });
-        announce("preview.error", { error: String(error?.message || error) });
-      }
-    }
-
     function setWebBluetoothEnabled(enabled, provider = bluetoothProvider) {
       const next = enabled === true;
-      const nextProvider = provider === "local" ? "local" : "web";
-      if (next === webBluetoothEnabled && nextProvider === bluetoothProvider && (!next || bluetoothProvider === "local" || webBluetoothPlugin)) {
+      // Ignore the legacy provider argument. There is no browser adapter.
+      const nextProvider = "local";
+      if (next === webBluetoothEnabled && nextProvider === bluetoothProvider) {
         announceWebBluetoothState();
         return;
       }
       const replacingProvider = nextProvider !== bluetoothProvider;
       bluetoothProvider = nextProvider;
       webBluetoothEnabled = next;
-      disposeWebBluetoothPlugin();
       connectionGeneration += 1;
       stream?.close();
       stream = null;
@@ -2160,7 +2116,7 @@
         // capability to the user; the preview never invents plugin values.
         const unsupported = requests.filter((event) => {
           const capability = event?.payload?.capability;
-          if (webBluetoothEnabled && (bluetoothProvider === "local" || webBluetoothPlugin) && (typeof capability === "string" && capability.startsWith("hardware.bluetooth.") || capability === "hardware.permissions.request" && event.payload?.params?.permission === "hardware.bluetooth")) return false;
+          if (webBluetoothEnabled && bluetoothProvider === "local" && (typeof capability === "string" && capability.startsWith("hardware.bluetooth.") || capability === "hardware.permissions.request" && event.payload?.params?.permission === "hardware.bluetooth")) return false;
           return typeof capability !== "string" || !capability.startsWith("platform.systemUi.");
         });
         if (unsupported.length) {
@@ -2221,7 +2177,6 @@
       stream = current;
       current.onopen = () => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
-        if (webBluetoothEnabled && !webBluetoothPlugin) createWebBluetoothPlugin();
         installAccessibilityMediaQueryListeners();
         // Replay the current snapshot after every stream connection. The
         // server caches it for guests that mount after this page connects.
@@ -2232,15 +2187,6 @@
         try {
           const packet = JSON.parse(event.data);
           if (packet.type === "frame") installFrame(packet.frame);
-          else if (packet.type === "plugin.request" && packet.plugin === "web-bluetooth") {
-            if (!webBluetoothEnabled || !webBluetoothPlugin) {
-              announce("preview.unsupported", { capabilities: ["web-bluetooth"], reason: "Web Bluetooth is disabled" });
-            } else {
-              Promise.resolve(webBluetoothPlugin.handle(packet)).catch((error) => {
-                announce("preview.error", { error: String(error?.message || error) });
-              });
-            }
-          }
           else if (packet.type === "status") {
             const state = packet.status?.state;
             if (state === "error") cancelPointerContacts();
@@ -2259,7 +2205,6 @@
       };
       current.onerror = () => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
-        if (webBluetoothEnabled) disposeWebBluetoothPlugin();
         status.textContent = "PocketJS preview stream reconnecting…";
         announce("preview.error", { error: "preview stream reconnecting" });
       };
@@ -2639,7 +2584,7 @@
       observer.observe(canvas);
     }
     announce("preview.ready", { width: logicalWidth(), height: logicalHeight(), transport: "native-probe-full-frames" });
-    createWebBluetoothPlugin();
+    announceWebBluetoothState();
     connect();
     return { canvas, input, close: async () => {
       closed = true;

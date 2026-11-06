@@ -58,7 +58,7 @@ void main() {
     expect(config.configured, isTrue);
     expect(
       config.manifestUri('com.example.notes').toString(),
-      'https://cdn.example.com/releases/pocket/3.2.0/com.example.notes/1.4.7/latest.json',
+      'https://cdn.example.com/releases/pocket/3.2.0/com.example.notes/latest.json',
     );
   });
 
@@ -107,5 +107,29 @@ void main() {
       url: 'https://updates.example.test/manifest.json',
     );
     expect(() => urlOnly.validate(), throwsFormatException);
+  });
+
+  test('remote package keeps identity while native policy stays host-owned', () {
+    const remote = PocketAppConfig(
+      appId: 'pocket.remote.app',
+      bytecodeAsset: 'remote/app.qjbc',
+      compositorSurfaces: <String, int>{'pocket.remote.child': 7},
+      bootstrapMetadataJson: '{"runtimeAbi":"test"}',
+    );
+    const policy = PocketAppConfig(
+      appId: 'ignored.policy.id',
+      allowedPermissions: <String>{'hardware.bluetooth'},
+      additionalCapabilities: <String>{'native.approved'},
+      memoryLimits: PocketMemoryLimits(heapLimitBytes: 4096),
+    );
+
+    final merged = remote.withNativePolicy(policy);
+    expect(merged.appId, remote.appId);
+    expect(merged.bytecodeAsset, remote.bytecodeAsset);
+    expect(merged.compositorSurfaces, remote.compositorSurfaces);
+    expect(merged.bootstrapMetadataJson, remote.bootstrapMetadataJson);
+    expect(merged.allowedPermissions, policy.allowedPermissions);
+    expect(merged.additionalCapabilities, policy.additionalCapabilities);
+    expect(merged.memoryLimits, policy.memoryLimits);
   });
 }

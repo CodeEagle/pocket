@@ -8,7 +8,7 @@
  * entryFormat=quickjs-bytecode.
  */
 
-import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
+import { constants as fsConstants, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import {
   cp,
@@ -35,12 +35,26 @@ import {
 } from "../scripts/package_update.ts";
 import { buildGuest } from "../scripts/build_guest.ts";
 import { createStudioCodex, type StudioExecutionContext, type StudioScope } from "./codex.ts";
-import { createPreviewManager } from "./preview.ts";
+import { compositorSurfacesFromProject, createPreviewManager } from "./preview.ts";
 import { createLocalBluetoothProvider } from "./local_bluetooth.ts";
 import { previewDevice } from "./preview_device.ts";
 import { createEditorDeviceManager, type DeploymentSnapshot } from "./devices.ts";
 import { createWechatPreviewManager } from "./wechat.ts";
+import { resolveProjectTemplate } from "../scripts/project_templates.ts";
 import { chooseUpdateHost, startUpdateEndpoint } from "./update_endpoint.ts";
+import {
+  currentVersion,
+  emptyVersionHistory,
+  newReleaseId,
+  readVersionHistory,
+  versionBranchKey,
+  versionHistoryPath,
+  writeVersionHistoryAtomic,
+  type PublishedVersion,
+  type PublishedVersionPackage,
+  type VersionHistory,
+  type VersionSlot,
+} from "./version_store.ts";
 import {
   applyResourcePlacements,
   buildResourceSnapshot,
@@ -76,6 +90,7 @@ export type EditorConfig = {
   entry: string;
   output: string;
   framework: string;
+  template: "app" | "game";
 };
 
 export type ArtifactInfo = {
@@ -106,6 +121,7 @@ export type EditorStatus = {
     manifestUrl: string;
     hostConfigUrl: string;
     archiveUrl: string;
+    appConfigUrl?: string;
     keyId: string;
     runtimeAbi: string;
     payloadSha256: string;
@@ -115,6 +131,8 @@ export type EditorStatus = {
     hostVersion?: string;
     packageVersion?: string;
     lanOrigin?: string;
+    releaseId?: string;
+    publishedAt?: string;
     packages?: Array<{
       id: string;
       updateUrl: string;
@@ -152,6 +170,8 @@ export type StartEditorOptions = {
   updatePort?: number;
   /** Route segment used by the local version backend. Defaults to `editor`. */
   updateHostVersion?: string;
+  /** Frozen compatibility branch used by the single App host URL. */
+  updatePackageVersion?: string;
   workspace?: string;
   /** Edit/build one explicit external SDK project instead of copying guest/. */
   projectRoot?: string;
@@ -188,6 +208,27 @@ type EditorServer = ReturnType<typeof Bun.serve>;
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function pubspecHostVersion(directory: string): string | undefined {
+  try {
+    const raw = readFileSync(join(directory, "pubspec.yaml"), "utf8");
+    const match = raw.match(/^version:\s*([^\s#]+)\s*$/m);
+    if (!match) return undefined;
+    const version = match[1]!.split("+")[0]!;
+    return appIdPattern.test(version) ? version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function bytecodeAssetVersion(directory: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(directory, "assets", "app.bytecode.json"), "utf8")) as Record<string, unknown>;
+    return typeof parsed.version === "string" && appIdPattern.test(parsed.version) ? parsed.version : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function json(value: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -449,6 +490,163 @@ function safeArtifactFile(rootDir: string, relativePath: string): string {
   return resolved;
 }
 
+function versionSlot(channel: "test" | "release"): VersionSlot {
+  return channel === "test" ? "test" : "stable";
+}
+
+function compatibilityVersion(value: string): string {
+  const testSuffix = value.match(/^(.*)-test\.[0-9]+$/);
+  return testSuffix?.[1] || value;
+}
+
+function legacySemanticRouteVersion(version: string, build: number, slot: VersionSlot): string {
+  return slot === "stable" ? `${version}-build.${build}` : version;
+}
+
+function legacyPayloadMatchesRoute(payload: Record<string, unknown>, routeVersion: string): boolean {
+  if (payload.version === routeVersion) return true;
+  const build = Number(payload.build);
+  return typeof payload.version === "string" && Number.isSafeInteger(build) && build >= 0 &&
+    `${payload.version}-build.${build}` === routeVersion;
+}
+
+function channelUpdatePrefix(channel: "test" | "release"): string {
+  return channel === "test" ? "test" : "stable";
+}
+
+function updateNamespace(projectId: string, hostVersion: string, compatVersion: string, channel: "test" | "release", releaseId?: string): string {
+  const material = `${projectId}\n${hostVersion}\n${compatVersion}\n${channel}\n${releaseId ?? "branch"}`;
+  return `editor_${sha256Hex(new TextEncoder().encode(material)).slice(0, 24)}`;
+}
+
+function packageArtifactRoot(workspace: Workspace, projectId: string, releaseId: string, hostVersion: string, packageId: string, packageVersion: string): string {
+  return relative(
+    workspace.updates,
+    pocketReleaseDirectory(join(workspace.updates, ".history", projectId, releaseId), hostVersion, packageId, packageVersion),
+  ).replaceAll("\\", "/");
+}
+
+function historyPackagePath(hostVersion: string, packageId: string, releaseId: string): string {
+  return `/pocket/${hostVersion}/${encodeURIComponent(packageId)}/${releaseId}`;
+}
+
+function semanticPayload(payload: Record<string, unknown>): string {
+  const { signedAt: _signedAt, ...withoutSigningTime } = payload;
+  return JSON.stringify(withoutSigningTime);
+}
+
+function payloadsEqual(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
+  return semanticPayload(left) === semanticPayload(right);
+}
+
+function resultFromPublishedDirectory(directory: string): PackageResult {
+  const payload = JSON.parse(readFileSync(join(directory, "payload.json"), "utf8")) as PackageResult["payload"];
+  const envelope = JSON.parse(readFileSync(join(directory, "latest.json"), "utf8")) as PackageResult["envelope"];
+  return {
+    payload,
+    envelope,
+    payloadBytes: Buffer.from(envelope.payload, "base64"),
+    manifestPath: join(directory, "latest.json"),
+    bundlePath: existsSync(join(directory, "bundle.7z")) ? join(directory, "bundle.7z") : undefined,
+    pakParts: payload.pak.parts as PackageResult["pakParts"],
+  };
+}
+
+async function rewriteImmutableHostConfig(file: string, hostVersion: string, packageId: string, slot: VersionSlot, releaseId: string, channelBaseUrl?: string): Promise<void> {
+  const raw = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+  const oldPrefix = `/pocket/${hostVersion}/${encodeURIComponent(packageId)}/${slot}/`;
+  const newPrefix = `/pocket/${hostVersion}/${encodeURIComponent(packageId)}/${releaseId}/`;
+  const rewrite = (value: unknown): unknown => {
+    if (typeof value === "string") return value.replaceAll(oldPrefix, newPrefix);
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, rewrite(item)]));
+    return value;
+  };
+  const rewritten = rewrite(raw) as Record<string, unknown>;
+  if (typeof rewritten.POCKET_PACKAGE_VERSION === "string") rewritten.POCKET_PACKAGE_VERSION = releaseId;
+  if (channelBaseUrl && typeof rewritten.POCKET_UPDATE_BASE_URL === "string") rewritten.POCKET_UPDATE_BASE_URL = channelBaseUrl;
+  if (channelBaseUrl && isObject(rewritten.config) && isObject(rewritten.config.updates)) rewritten.config.updates.baseUrl = channelBaseUrl;
+  if (isObject(rewritten.config) && isObject(rewritten.config.updates)) rewritten.config.updates.packageVersion = releaseId;
+  await writeFile(file, JSON.stringify(rewritten, null, 2) + "\n");
+}
+
+type AggregateHostPackage = Record<string, unknown>;
+
+/**
+ * Build the one host descriptor consumed by an App. The old flat POCKET_*
+ * keys remain at the top level for the existing Flutter updater; structured
+ * fields are the source of truth for SystemUI and mini apps.
+ */
+function aggregateHostConfig(input: {
+  rootHost: Record<string, unknown>;
+  hostVersion: string;
+  rootAppId: string;
+  version: string;
+  build: number;
+  compatVersion: string;
+  channel: "test" | "release";
+  slot: VersionSlot;
+  routeVersion: string;
+  releaseId: string | null;
+  branchNamespace?: string;
+  packages: AggregateHostPackage[];
+  hostVersionSource?: string;
+  compositorSurfaces?: Record<string, number>;
+}): Record<string, unknown> {
+  const rootPackage = input.packages.find((pkg) => pkg.id === input.rootAppId);
+  const baseUrl = typeof input.rootHost.POCKET_UPDATE_BASE_URL === "string"
+    ? input.rootHost.POCKET_UPDATE_BASE_URL
+    : undefined;
+  const keyId = typeof input.rootHost.POCKET_UPDATE_KEY_ID === "string" ? input.rootHost.POCKET_UPDATE_KEY_ID : "";
+  const publicKey = typeof input.rootHost.POCKET_UPDATE_PUBLIC_KEY === "string" ? input.rootHost.POCKET_UPDATE_PUBLIC_KEY : "";
+  const packageVersion = typeof rootPackage?.packageVersion === "string"
+    ? rootPackage.packageVersion
+    : typeof input.rootHost.POCKET_PACKAGE_VERSION === "string"
+      ? input.rootHost.POCKET_PACKAGE_VERSION
+      : input.slot;
+  const namespace = typeof input.rootHost.POCKET_STORE_NAMESPACE === "string"
+    ? input.rootHost.POCKET_STORE_NAMESPACE
+    : `editor_${input.rootAppId}`;
+  const updates = {
+    baseUrl,
+    hostVersion: input.hostVersion,
+    packageVersion,
+    keyId,
+    publicKey,
+    namespace,
+    ...(typeof input.rootHost.POCKET_UPDATE_DEBUG_HTTP_HOST === "string"
+      ? { debugHttpHosts: [input.rootHost.POCKET_UPDATE_DEBUG_HTTP_HOST] }
+      : {}),
+  };
+  const applications: Record<string, AggregateHostPackage> = {};
+  for (const pkg of input.packages) {
+    const descriptor = { ...pkg, role: pkg.id === input.rootAppId ? "systemUI" : "miniapp" };
+    applications[String(pkg.id)] = descriptor;
+  }
+  return {
+    ...input.rootHost,
+    schemaVersion: 1,
+    kind: "pocket-editor-app-host",
+    ...(input.hostVersionSource ? { hostVersionSource: input.hostVersionSource } : {}),
+    systemUI: input.rootAppId,
+    release: {
+      appId: input.rootAppId,
+      version: input.version,
+      build: input.build,
+      ...(typeof rootPackage?.rootPayloadSha256 === "string" ? { rootPayloadSha256: rootPackage.rootPayloadSha256 } : {}),
+      compatVersion: input.compatVersion,
+      channel: input.channel,
+      slot: input.slot,
+      routeVersion: input.routeVersion,
+      releaseId: input.releaseId,
+      ...(input.branchNamespace ? { branchNamespace: input.branchNamespace } : {}),
+    },
+    updates,
+    applications,
+    ...(input.compositorSurfaces ? { compositorSurfaces: input.compositorSurfaces } : {}),
+  };
+}
+
 async function listEditableFiles(projectDir: string): Promise<Array<{ path: string; bytes: number }>> {
   await validateProjectInputTree(projectDir);
   const result: Array<{ path: string; bytes: number }> = [];
@@ -590,7 +788,8 @@ function defaultConfig(id: string, input: Record<string, unknown>): EditorConfig
   const entry = input.entry === undefined ? "app.tsx" : asString(input.entry, "entry", 256).trim();
   const output = input.output === undefined ? "app" : asString(input.output, "output", 128).trim();
   const framework = input.framework === undefined ? "solid" : asString(input.framework, "framework", 32).trim();
-  return { id, appId, name: requestedName, title: requestedName, version, build, tickHz, entry, output, framework };
+  const template = resolveProjectTemplate(input.template);
+  return { id, appId, name: requestedName, title: requestedName, version, build, tickHz, entry, output, framework, template };
 }
 
 function validateConfig(id: string, input: Record<string, unknown>): EditorConfig {
@@ -679,12 +878,11 @@ async function writeConfig(projectDir: string, config: EditorConfig): Promise<vo
 async function createProject(workspace: Workspace, id: string, input: Record<string, unknown>): Promise<EditorConfig> {
   const projectDir = safeChild(workspace.projects, id);
   if (existsSync(projectDir)) throw new Error(`project already exists: ${id}`);
-  await mkdir(workspace.projects, { recursive: true });
   const config = validateConfig(id, input);
-  // New projects start from the one SDK-owned starter shared with `pocket
-  // init`. The Showcase lives in the sibling demo entry and is deliberately
-  // not copied into editor projects.
-  await copyTree(join(root, "templates/starter"), projectDir);
+  // New projects start from an SDK-owned template. The Showcase lives in the
+  // sibling demo entry and is deliberately not copied into editor projects.
+  await mkdir(workspace.projects, { recursive: true });
+  await copyTree(join(root, "templates", config.template), projectDir);
   await writeConfig(projectDir, config);
   await mkdir(join(projectDir, "assets"), { recursive: true });
   return config;
@@ -699,9 +897,8 @@ async function listProjects(workspace: Workspace): Promise<Array<EditorConfig & 
   await mkdir(workspace.projects, { recursive: true });
   const entries = await readdir(workspace.projects, { withFileTypes: true });
   const projects: Array<EditorConfig & { status: EditorStatus }> = [];
-  const ids = workspace.projectRoot
-    ? [workspace.projectId!]
-    : entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
+  const ids = entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
+  if (workspace.projectRoot && !ids.includes(workspace.projectId!)) ids.push(workspace.projectId!);
   for (const id of ids) {
     try {
       const config = await loadConfig(projectDirectory(workspace, id), id);
@@ -972,6 +1169,12 @@ async function readArtifact(workspace: Workspace, id: string, file: string, stat
   try { return new Uint8Array(await readFile(path)); } catch { return undefined; }
 }
 
+type PublishResult = PackageResult & {
+  releaseId?: string;
+  offlineArchivePath?: string;
+  offlineFilename?: string;
+};
+
 async function publishProject(
   workspace: Workspace,
   id: string,
@@ -980,159 +1183,551 @@ async function publishProject(
   origin: string,
   hostVersion: string,
   channel: "test" | "release" = "release",
-): Promise<PackageResult> {
+  options: { offline?: boolean; hostVersionSource?: string; packageVersion?: string } = {},
+): Promise<PublishResult> {
   if (state.builtRevision !== state.revision || !state.artifacts) throw new Error("build the current source before publishing");
+  const offline = options.offline === true;
+  const parsedOrigin = new URL(origin);
+  if (!["http:", "https:"].includes(parsedOrigin.protocol) || parsedOrigin.username || parsedOrigin.password || parsedOrigin.pathname !== "/") {
+    throw new Error("Editor version backend origin must be an HTTP(S) origin without credentials or a path");
+  }
+  const safeOrigin = parsedOrigin.origin;
+  const slot = versionSlot(channel);
+  const releaseId = newReleaseId(slot, id);
+  const historyPath = versionHistoryPath(workspace.states, id);
+  const history = offline ? emptyVersionHistory() : await readVersionHistory(historyPath);
+  const compatVersion = options.packageVersion
+    ?? history.entries.find((entry) => entry.hostVersion === hostVersion && entry.compatVersion)?.compatVersion
+    ?? compatibilityVersion(state.publish?.version ?? config.version);
+  if (!appIdPattern.test(compatVersion)) throw new Error("Editor update package compatibility version is invalid");
   const buildDir = join(workspace.builds, id, String(state.builtRevision));
   const snapshotPath = safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`);
   const resourceSnapshot = await readResourceSnapshot(snapshotPath);
   const rootPackage = resourceSnapshot.packages.find((pkg) => pkg.id === config.appId);
   if (!rootPackage) throw new Error(`resource snapshot does not contain root package ${config.appId}`);
-  const packageVersion = channel === "test" ? "test" : "stable";
-  const releaseDir = pocketReleaseDirectory(workspace.updates, hostVersion, config.appId, packageVersion);
-  await mkdir(releaseDir, { recursive: true });
+  const packageVersion = slot;
+  // A fixed package index follows the newest host/slot release across every
+  // compatibility branch. Keep anti-rollback floors equally broad; otherwise
+  // a new compat branch could publish a lower stable build that the shared
+  // client namespace would correctly reject after downloading the index.
+  const slotEntries = offline
+    ? []
+    : history.entries.filter((entry) => entry.hostVersion === hostVersion && entry.slot === slot);
+  const historicalRootBuild = slotEntries.reduce((maximum, entry) => Math.max(maximum, entry.build), 0);
+  const historicalTestBuild = history.entries
+    .filter((entry) => entry.hostVersion === hostVersion && entry.slot === "test")
+    .reduce((maximum, entry) => Math.max(maximum, entry.build), 0);
+  const historicalPackageBuild = (packageId: string): number => slotEntries.reduce((maximum, entry) => {
+    const pkg = entry.packages.find((candidate) => candidate.id === packageId);
+    return Math.max(maximum, pkg?.build ?? 0);
+  }, 0);
+  const previousEntry = currentVersion(history, slot, hostVersion, compatVersion);
+  const previousRootPackage = previousEntry?.packages.find((pkg) => pkg.id === config.appId);
+  const legacyHostVersion = [hostVersion, state.publish?.hostVersion, "editor"]
+    .filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0)
+    .find((candidate) => existsSync(join(pocketReleaseDirectory(workspace.updates, candidate, config.appId, packageVersion), "latest.json")))
+    ?? hostVersion;
+  const legacyRootDir = pocketReleaseDirectory(workspace.updates, legacyHostVersion, config.appId, packageVersion);
+  const readPayload = async (artifactRoot: string | undefined): Promise<Record<string, unknown>> => {
+    if (!artifactRoot) return {};
+    try {
+      return await readJsonFile<Record<string, unknown>>(safeArtifactFile(workspace.updates, `${artifactRoot}/payload.json`));
+    } catch {
+      return {};
+    }
+  };
+  const previousRootPayload = offline
+    ? {}
+    : previousRootPackage
+      ? await readPayload(previousRootPackage.artifactRoot)
+      : await readJsonFile<Record<string, unknown>>(join(legacyRootDir, "payload.json"), {});
+  const previousRootBuild = Number(previousEntry?.build ?? previousRootPayload.build ?? 0);
+  const stableRootBuildFloor = Math.max(previousRootBuild, historicalRootBuild);
+  if (!offline && channel === "release" && Number.isSafeInteger(stableRootBuildFloor) && config.build < stableRootBuildFloor) {
+    throw new Error(`stable release build ${config.build} is older than the current build ${stableRootBuildFloor}`);
+  }
   const { keyPath, key } = await editorUpdateTrust(workspace, id);
-  const previous = await readJsonFile<Record<string, unknown>>(join(releaseDir, "payload.json"), {});
-  const counterPath = join(workspace.states, `${id}-test-release.json`);
-  const counter = await readJsonFile<{ build?: number }>(counterPath, {});
+  const legacyCounterPath = join(workspace.states, `${id}-test-release.json`);
+  const branchCounterPath = join(workspace.states, `${id}-${sha256Hex(new TextEncoder().encode(`${hostVersion}\n${compatVersion}\ntest`)).slice(0, 16)}-test-release.json`);
+  const counterPath = branchCounterPath;
+  const counter = offline
+    ? {}
+    : await readJsonFile<{ build?: number }>(counterPath, Object.keys(history.current).length === 0 ? await readJsonFile<{ build?: number }>(legacyCounterPath, {}) : {});
   const metadata = await readJsonFile<Record<string, unknown>>(join(buildDir, "app.bytecode.json"));
   // Test packages must advance beyond both the installed built-in package and
   // earlier published test packages. Do not weaken the host's replay checks.
-  const build = channel === "test" ? Math.max(config.build, Number(previous.build ?? 0), Number(metadata.build ?? 0), Number(counter.build ?? 0)) + 1 : config.build;
+  const build = channel === "test"
+    ? Math.max(config.build, Number(previousRootPayload.build ?? 0), Number(metadata.build ?? 0), Number(counter.build ?? 0), historicalTestBuild) + 1
+    : config.build;
   if (!Number.isSafeInteger(build) || build < 0) throw new Error("test package build is outside the safe integer range");
   const version = channel === "test" ? `${config.version}-test.${build}` : config.version;
   const rootDirectory = resourceArtifactDirectory(buildDir, rootPackage);
-  const rootAssets = join(rootDirectory, "assets");
-  const hasRootAssets = existsSync(rootAssets) && (await readdir(rootAssets)).length > 0;
-  const rootNetwork = resourcePackageNetwork(resourceSnapshot, rootPackage.id);
-  const rootPackageOptions = {
-    appId: config.appId,
-    version,
-    build,
-    bytecodePath: join(rootDirectory, "app.qjbc"),
-    entryFormat: "quickjs-bytecode",
-    runtimeAbi: String(metadata.runtimeAbi),
-    pakPath: join(rootDirectory, "app.pak"),
-    outDir: releaseDir,
-    keyFile: keyPath,
-    guestManifestPath: join(rootDirectory, "guest-manifest.json"),
-    ...(hasRootAssets ? { assetDir: rootAssets, assetPrefix: "assets" } : {}),
-    networkPakKeys: rootNetwork.pak,
-    networkAssets: rootNetwork.assets,
-  } as Parameters<typeof packageArtifacts>[0];
-  const result = packageArtifacts(rootPackageOptions);
-  if (channel === "test") await writeFile(counterPath, JSON.stringify({ build }) + "\n");
-  const parsedOrigin = new URL(origin);
-  if (!['http:', 'https:'].includes(parsedOrigin.protocol) || parsedOrigin.username || parsedOrigin.password || parsedOrigin.pathname !== '/') {
-    throw new Error("Editor version backend origin must be an HTTP(S) origin without credentials or a path");
-  }
-  const safeOrigin = parsedOrigin.origin;
-  const releasePath = `/pocket/${hostVersion}/${config.appId}/${packageVersion}`;
+  const releaseRoot = offline
+    ? join(workspace.updates, ".downloads", id, releaseId)
+    : join(workspace.updates, ".history", id, releaseId);
+  const immutablePackageVersion = releaseId;
+  const routeVersion = offline
+    ? immutablePackageVersion
+    : channel === "test"
+      ? version
+      : history.entries.some((entry) => entry.hostVersion === hostVersion && entry.slot === "stable" && entry.version === version && entry.build !== build)
+        ? `${version}-build.${build}`
+        : version;
+  const releaseDir = pocketReleaseDirectory(releaseRoot, hostVersion, config.appId, immutablePackageVersion);
+  const channelPrefix = channelUpdatePrefix(channel);
+  const releasePath = `/${channelPrefix}/pocket/${hostVersion}/${encodeURIComponent(config.appId)}/${compatVersion}`;
   const manifestUrl = `${safeOrigin}${releasePath}/latest.json`;
-  const hostConfigUrl = `${safeOrigin}${releasePath}/host.json`;
-  await writeFile(join(releaseDir, "host.json"), JSON.stringify({
-    POCKET_UPDATE_BASE_URL: safeOrigin,
-    POCKET_HOST_VERSION: hostVersion,
-    POCKET_PACKAGE_VERSION: packageVersion,
-    POCKET_UPDATE_KEY_ID: key.keyId,
-    POCKET_UPDATE_PUBLIC_KEY: key.publicKeyBase64,
-    POCKET_STORE_NAMESPACE: `editor_${id}`,
-    ...(parsedOrigin.protocol === "http:" ? { POCKET_UPDATE_DEBUG_HTTP_HOST: parsedOrigin.hostname } : {}),
-  }, null, 2) + "\n");
+  const aggregateHostConfigUrl = `${safeOrigin}/pocket/${hostVersion}/${encodeURIComponent(config.appId)}/${compatVersion}/host.json`;
+  const packageIndexUrl = `${safeOrigin}/${channelPrefix}/pocket/${hostVersion}/${encodeURIComponent(config.appId)}/latest.json`;
+  const hostConfigUrl = aggregateHostConfigUrl;
+  const packagePayloads = new Map<string, Record<string, unknown>>();
+  const packageRecords: PublishedVersionPackage[] = [];
   const publishedPackages: NonNullable<EditorStatus["publish"]>["packages"] = [];
-  for (const pkg of resourceSnapshot.packages) {
-    if (pkg.id === rootPackage.id) continue;
-    const packageDirectory = resourceArtifactDirectory(buildDir, pkg);
-    const packageMetadata = await readJsonFile<Record<string, unknown>>(join(packageDirectory, "app.bytecode.json"));
-    const packagePreviousDir = pocketReleaseDirectory(workspace.updates, hostVersion, pkg.id, packageVersion);
-    const packagePrevious = await readJsonFile<Record<string, unknown>>(join(packagePreviousDir, "payload.json"), {});
-    const packageBaseBuild = Number(packageMetadata.build ?? pkg.build);
-    const packageBuild = channel === "test"
-      ? Math.max(config.build, pkg.build, packageBaseBuild, Number(packagePrevious.build ?? 0)) + 1
-      : pkg.build;
-    const childVersion = channel === "test" ? `${pkg.version}-test.${packageBuild}` : pkg.version;
-    const packageReleaseDir = packagePreviousDir;
-    await mkdir(packageReleaseDir, { recursive: true });
-    const packageAssets = join(packageDirectory, "assets");
-    const hasPackageAssets = existsSync(packageAssets) && (await readdir(packageAssets)).length > 0;
-    const packageNetwork = resourcePackageNetwork(resourceSnapshot, pkg.id);
-    const packageOptions = {
-      appId: pkg.id,
-      version: childVersion,
-      build: packageBuild,
-      bytecodePath: join(packageDirectory, "app.qjbc"),
+  const legacyStablePublish = !offline && channel === "release" && !previousEntry && Object.keys(previousRootPayload).length > 0 &&
+    (typeof previousRootPayload.version !== "string" || compatibilityVersion(previousRootPayload.version) === compatVersion);
+  let legacyStableEquivalent = legacyStablePublish && config.build === previousRootBuild;
+  let historyCommitted = false;
+  let archivePath = "";
+  try {
+    await mkdir(releaseDir, { recursive: true });
+    const rootAssets = join(rootDirectory, "assets");
+    const hasRootAssets = existsSync(rootAssets) && (await readdir(rootAssets)).length > 0;
+    const rootNetwork = resourcePackageNetwork(resourceSnapshot, rootPackage.id);
+    const rootPackageOptions = {
+      appId: config.appId,
+      version,
+      build,
+      bytecodePath: join(rootDirectory, "app.qjbc"),
       entryFormat: "quickjs-bytecode",
-      runtimeAbi: pkg.runtimeAbi,
-      pakPath: join(packageDirectory, "app.pak"),
-      outDir: packageReleaseDir,
+      runtimeAbi: String(metadata.runtimeAbi),
+      pakPath: join(rootDirectory, "app.pak"),
+      outDir: releaseDir,
       keyFile: keyPath,
-      ...(existsSync(join(packageDirectory, "guest-manifest.json")) ? { guestManifestPath: join(packageDirectory, "guest-manifest.json") } : {}),
-      ...(hasPackageAssets ? { assetDir: packageAssets, assetPrefix: "assets" } : {}),
-      networkPakKeys: packageNetwork.pak,
-      networkAssets: packageNetwork.assets,
+      guestManifestPath: join(rootDirectory, "guest-manifest.json"),
+      ...(hasRootAssets ? { assetDir: rootAssets, assetPrefix: "assets" } : {}),
+      networkPakKeys: rootNetwork.pak,
+      networkAssets: rootNetwork.assets,
+      ...(offline ? { includeBundle: false } : {}),
     } as Parameters<typeof packageArtifacts>[0];
-    const packageResult = packageArtifacts(packageOptions);
-    const packageReleasePath = `/pocket/${hostVersion}/${encodeURIComponent(pkg.id)}/${packageVersion}`;
-    const packageManifestPath = `${packageReleasePath}/latest.json`;
-    const packageHostConfigPath = `${packageReleasePath}/host.json`;
-    const packageManifestUrl = `${safeOrigin}${packageManifestPath}`;
-    const bootstrapDirectory = join(packageReleaseDir, "bootstrap");
-    await mkdir(bootstrapDirectory, { recursive: true });
-    await cp(join(packageDirectory, "app.bytecode.json"), join(bootstrapDirectory, "app.bytecode.json"));
-    const hasGuestManifest = existsSync(join(packageDirectory, "guest-manifest.json"));
-    if (hasGuestManifest) await cp(join(packageDirectory, "guest-manifest.json"), join(bootstrapDirectory, "guest-manifest.json"));
-    const packageNamespace = `editor_${id}_${pkg.id.replace(/[^A-Za-z0-9_-]/g, "_")}_${sha256Hex(new TextEncoder().encode(pkg.id)).slice(0, 8)}`;
-    const metadataAsset = `assets/apps/${pkg.id}/app.bytecode.json`;
-    const manifestAsset = `assets/apps/${pkg.id}/guest-manifest.json`;
-    const bootstrapAssets: Record<string, { url: string; sha256: string; size: number }> = {};
-    const bootstrapFiles: Array<[string, string]> = [[metadataAsset, "app.bytecode.json"]];
-    if (hasGuestManifest) bootstrapFiles.push([manifestAsset, "guest-manifest.json"]);
-    for (const [asset, name] of bootstrapFiles) {
-      const bytes = new Uint8Array(await readFile(join(bootstrapDirectory, name)));
-      bootstrapAssets[asset] = { url: `${safeOrigin}${packageReleasePath}/bootstrap/${name}`, sha256: sha256Hex(bytes), size: bytes.length };
+    let result = packageArtifacts(rootPackageOptions);
+    packagePayloads.set(rootPackage.id, result.payload as unknown as Record<string, unknown>);
+    if (legacyStablePublish) {
+      if (config.build === previousRootBuild && !payloadsEqual(result.payload as unknown as Record<string, unknown>, previousRootPayload)) {
+        throw new Error(`stable release build ${config.build} already exists with different package contents`);
+      }
+      if (config.build !== previousRootBuild) legacyStableEquivalent = false;
     }
-    // A consumer explicitly installs these small local Flutter assets and
-    // constructs PocketAppConfig. This is a setup template, not an invented
-    // set of Dart environment variables or an unsigned runtime downloader.
-    await writeFile(join(packageReleaseDir, "host.json"), JSON.stringify({
-      kind: "pocket-mini-app-host-template",
-      requiresLocalBootstrap: true,
-      config: {
-        appId: pkg.id,
-        downloadOnOpen: true,
-        metadataAsset,
-        ...(hasGuestManifest ? { manifestAsset } : {}),
-        updates: { baseUrl: safeOrigin, hostVersion, packageVersion, keyId: packageResult.envelope.keyId, publicKey: key.publicKeyBase64, namespace: packageNamespace,
-          ...(parsedOrigin.protocol === "http:" ? { debugHttpHosts: [parsedOrigin.hostname] } : {}) },
-      },
-      bootstrapAssets,
-    }, null, 2) + "\n");
-    publishedPackages.push({
-      id: pkg.id,
-      updateUrl: packageManifestPath,
-      manifestUrl: packageManifestUrl,
-      hostConfigUrl: packageHostConfigPath,
-      keyId: packageResult.envelope.keyId,
-      version: childVersion,
-      build: packageBuild,
+    if (!offline && channel === "release") {
+      const currentPackageIds = new Set(resourceSnapshot.packages.map((pkg) => pkg.id));
+      for (const prior of slotEntries.filter((entry) => entry.build === config.build)) {
+        const priorPackageIds = new Set(prior.packages.map((pkg) => pkg.id));
+        if (priorPackageIds.size !== currentPackageIds.size || [...priorPackageIds].some((packageId) => !currentPackageIds.has(packageId))) {
+          throw new Error(`stable release build ${config.build} already exists with different package contents`);
+        }
+        const priorRoot = prior.packages.find((pkg) => pkg.id === config.appId);
+        const priorPayload = await readPayload(priorRoot?.artifactRoot);
+        if (Object.keys(priorPayload).length > 0 && !payloadsEqual(result.payload as unknown as Record<string, unknown>, priorPayload)) {
+          throw new Error(`stable release build ${config.build} already exists with different package contents`);
+        }
+      }
+    }
+    packageRecords.push({
+      id: rootPackage.id,
+      version,
+      build,
+      artifactRoot: packageArtifactRoot(workspace, id, releaseId, hostVersion, rootPackage.id, immutablePackageVersion),
     });
+    await writeFile(join(releaseDir, "host.json"), JSON.stringify({
+      POCKET_UPDATE_BASE_URL: safeOrigin,
+      POCKET_HOST_VERSION: hostVersion,
+      POCKET_PACKAGE_VERSION: immutablePackageVersion,
+      POCKET_UPDATE_KEY_ID: key.keyId,
+      POCKET_UPDATE_PUBLIC_KEY: key.publicKeyBase64,
+      POCKET_STORE_NAMESPACE: updateNamespace(id, hostVersion, compatVersion, channel, releaseId),
+      POCKET_UPDATE_BRANCH_NAMESPACE: updateNamespace(id, hostVersion, compatVersion, channel),
+      ...(parsedOrigin.protocol === "http:" ? { POCKET_UPDATE_DEBUG_HTTP_HOST: parsedOrigin.hostname } : {}),
+    }, null, 2) + "\n");
+    for (const pkg of resourceSnapshot.packages) {
+      if (pkg.id === rootPackage.id) continue;
+      const packageDirectory = resourceArtifactDirectory(buildDir, pkg);
+      const packageMetadata = await readJsonFile<Record<string, unknown>>(join(packageDirectory, "app.bytecode.json"));
+      const previousPackage = previousEntry?.packages.find((entry) => entry.id === pkg.id);
+      const legacyPackageDir = pocketReleaseDirectory(workspace.updates, legacyHostVersion, pkg.id, packageVersion);
+      const previousPackagePayload = offline
+        ? {}
+        : previousPackage
+          ? await readPayload(previousPackage.artifactRoot)
+          : await readJsonFile<Record<string, unknown>>(join(legacyPackageDir, "payload.json"), {});
+      if (legacyStablePublish && Object.keys(previousPackagePayload).length === 0) legacyStableEquivalent = false;
+      const packageBaseBuild = Number(packageMetadata.build ?? pkg.build);
+      const historicalChildBuild = historicalPackageBuild(pkg.id);
+      const packageBuild = channel === "test"
+        ? Math.max(config.build, pkg.build, packageBaseBuild, Number(previousPackagePayload.build ?? 0), historicalChildBuild) + 1
+        : pkg.build;
+      if (!offline && channel === "release" && packageBuild < historicalChildBuild) {
+        throw new Error(`stable package ${pkg.id} build ${packageBuild} is older than the current build ${historicalChildBuild}`);
+      }
+      if (channel === "release" && previousPackage && packageBuild < previousPackage.build) {
+        throw new Error(`stable package ${pkg.id} build ${packageBuild} is older than the current build ${previousPackage.build}`);
+      }
+      const childVersion = channel === "test" ? `${pkg.version}-test.${packageBuild}` : pkg.version;
+      const packageReleaseDir = pocketReleaseDirectory(releaseRoot, hostVersion, pkg.id, immutablePackageVersion);
+      await mkdir(packageReleaseDir, { recursive: true });
+      const packageAssets = join(packageDirectory, "assets");
+      const hasPackageAssets = existsSync(packageAssets) && (await readdir(packageAssets)).length > 0;
+      const packageNetwork = resourcePackageNetwork(resourceSnapshot, pkg.id);
+      const packageOptions = {
+        appId: pkg.id,
+        version: childVersion,
+        build: packageBuild,
+        bytecodePath: join(packageDirectory, "app.qjbc"),
+        entryFormat: "quickjs-bytecode",
+        runtimeAbi: pkg.runtimeAbi,
+        pakPath: join(packageDirectory, "app.pak"),
+        outDir: packageReleaseDir,
+        keyFile: keyPath,
+        ...(existsSync(join(packageDirectory, "guest-manifest.json")) ? { guestManifestPath: join(packageDirectory, "guest-manifest.json") } : {}),
+        ...(hasPackageAssets ? { assetDir: packageAssets, assetPrefix: "assets" } : {}),
+        networkPakKeys: packageNetwork.pak,
+        networkAssets: packageNetwork.assets,
+        ...(offline ? { includeBundle: false } : {}),
+      } as Parameters<typeof packageArtifacts>[0];
+      const packageResult = packageArtifacts(packageOptions);
+      packagePayloads.set(pkg.id, packageResult.payload as unknown as Record<string, unknown>);
+      if (channel === "release" && !previousEntry && Object.keys(previousPackagePayload).length > 0) {
+        const previousBuild = Number(previousPackagePayload.build ?? 0);
+        if (packageBuild < previousBuild) {
+          throw new Error(`stable package ${pkg.id} build ${packageBuild} is older than the current build ${previousBuild}`);
+        }
+        if (packageBuild === previousBuild && !payloadsEqual(packageResult.payload as unknown as Record<string, unknown>, previousPackagePayload)) {
+          throw new Error(`stable package ${pkg.id} build ${packageBuild} already exists with different package contents`);
+        }
+        if (packageBuild !== previousBuild) legacyStableEquivalent = false;
+      }
+      if (!offline && channel === "release") {
+        for (const prior of slotEntries) {
+          const priorPackage = prior.packages.find((candidate) => candidate.id === pkg.id && candidate.build === packageBuild);
+          if (!priorPackage) continue;
+          const priorPayload = await readPayload(priorPackage.artifactRoot);
+          if (Object.keys(priorPayload).length > 0 && !payloadsEqual(packageResult.payload as unknown as Record<string, unknown>, priorPayload)) {
+            throw new Error(`stable package ${pkg.id} build ${packageBuild} already exists with different package contents`);
+          }
+        }
+      }
+      packageRecords.push({
+        id: pkg.id,
+        version: childVersion,
+        build: packageBuild,
+        artifactRoot: packageArtifactRoot(workspace, id, releaseId, hostVersion, pkg.id, immutablePackageVersion),
+      });
+      const packageReleasePath = `/${channelPrefix}/pocket/${hostVersion}/${encodeURIComponent(pkg.id)}/${compatVersion}`;
+      const immutablePackageReleasePath = historyPackagePath(hostVersion, pkg.id, releaseId);
+      const packageManifestPath = `${packageReleasePath}/latest.json`;
+      const packageHostConfigPath = `${packageReleasePath}/host.json`;
+      const packageManifestUrl = `${safeOrigin}${packageManifestPath}`;
+      const bootstrapDirectory = join(packageReleaseDir, "bootstrap");
+      await mkdir(bootstrapDirectory, { recursive: true });
+      await cp(join(packageDirectory, "app.bytecode.json"), join(bootstrapDirectory, "app.bytecode.json"));
+      const hasGuestManifest = existsSync(join(packageDirectory, "guest-manifest.json"));
+      if (hasGuestManifest) await cp(join(packageDirectory, "guest-manifest.json"), join(bootstrapDirectory, "guest-manifest.json"));
+      const packageNamespace = updateNamespace(id, hostVersion, compatVersion, channel, releaseId);
+      const branchNamespace = updateNamespace(id, hostVersion, compatVersion, channel);
+      const metadataAsset = `assets/apps/${pkg.id}/app.bytecode.json`;
+      const manifestAsset = `assets/apps/${pkg.id}/guest-manifest.json`;
+      const bootstrapAssets: Record<string, { url: string; sha256: string; size: number }> = {};
+      const bootstrapFiles: Array<[string, string]> = [[metadataAsset, "app.bytecode.json"]];
+      if (hasGuestManifest) bootstrapFiles.push([manifestAsset, "guest-manifest.json"]);
+      for (const [asset, name] of bootstrapFiles) {
+        const bytes = new Uint8Array(await readFile(join(bootstrapDirectory, name)));
+        bootstrapAssets[asset] = { url: `${safeOrigin}${immutablePackageReleasePath}/bootstrap/${name}`, sha256: sha256Hex(bytes), size: bytes.length };
+      }
+      await writeFile(join(packageReleaseDir, "host.json"), JSON.stringify({
+        kind: "pocket-mini-app-host-template",
+        requiresLocalBootstrap: true,
+        config: {
+          appId: pkg.id,
+          downloadOnOpen: true,
+          metadataAsset,
+          ...(hasGuestManifest ? { manifestAsset } : {}),
+          updates: { baseUrl: `${safeOrigin}/${channelPrefix}`, hostVersion, packageVersion: immutablePackageVersion, compatVersion, keyId: packageResult.envelope.keyId, publicKey: key.publicKeyBase64, namespace: packageNamespace, branchNamespace,
+            ...(parsedOrigin.protocol === "http:" ? { debugHttpHosts: [parsedOrigin.hostname] } : {}) },
+        },
+        bootstrapAssets,
+      }, null, 2) + "\n");
+      publishedPackages.push({
+        id: pkg.id,
+        updateUrl: packageManifestPath,
+        manifestUrl: packageManifestUrl,
+        hostConfigUrl: packageHostConfigPath,
+        keyId: packageResult.envelope.keyId,
+        version: childVersion,
+        build: packageBuild,
+      });
+    }
+
+    if (legacyStableEquivalent) {
+      // A pre-journal Editor may already own the exact stable bytes in the
+      // mutable slot. Migrate those files into the first immutable release
+      // instead of re-signing them with a new signedAt timestamp.
+      await rm(releaseRoot, { recursive: true, force: true });
+      for (const pkg of packageRecords) {
+        const source = pocketReleaseDirectory(workspace.updates, legacyHostVersion, pkg.id, packageVersion);
+        if (!existsSync(join(source, "latest.json"))) {
+          throw new Error(`legacy stable package ${pkg.id} is missing its published manifest`);
+        }
+        const destination = pocketReleaseDirectory(releaseRoot, hostVersion, pkg.id, immutablePackageVersion);
+        await cp(source, destination, { recursive: true });
+        await rewriteImmutableHostConfig(join(destination, "host.json"), legacyHostVersion, pkg.id, packageVersion, releaseId, `${safeOrigin}/${channelPrefix}`);
+      }
+      if (legacyStableEquivalent) {
+        result = resultFromPublishedDirectory(pocketReleaseDirectory(releaseRoot, hostVersion, config.appId, immutablePackageVersion));
+      }
+    }
+
+    // Every package, including the root SystemUI package, gets a small
+    // immutable bootstrap descriptor. The root package used to omit this
+    // metadata, which made a single aggregate host config unable to describe
+    // how to hydrate all trusted applications after a cold start.
+    const snapshotPackages = new Map(resourceSnapshot.packages.map((pkg) => [pkg.id, pkg]));
+    for (const pkg of packageRecords) {
+      const packageReleaseDir = pocketReleaseDirectory(releaseRoot, hostVersion, pkg.id, immutablePackageVersion);
+      const sourceDirectory = pkg.id === rootPackage.id
+        ? rootDirectory
+        : resourceArtifactDirectory(buildDir, snapshotPackages.get(pkg.id)!);
+      const bootstrapDirectory = join(packageReleaseDir, "bootstrap");
+      await mkdir(bootstrapDirectory, { recursive: true });
+      const bootstrapFiles: Array<[string, string]> = [["app.bytecode.json", "app.bytecode.json"]];
+      if (existsSync(join(sourceDirectory, "guest-manifest.json"))) bootstrapFiles.push(["guest-manifest.json", "guest-manifest.json"]);
+      for (const [sourceName, destinationName] of bootstrapFiles) {
+        const destination = join(bootstrapDirectory, destinationName);
+        if (!existsSync(destination)) await cp(join(sourceDirectory, sourceName), destination);
+      }
+    }
+
+    const aggregatePackages: AggregateHostPackage[] = [];
+    for (const pkg of packageRecords) {
+      const packageReleaseDir = pocketReleaseDirectory(releaseRoot, hostVersion, pkg.id, immutablePackageVersion);
+      const packageHost = await readJsonFile<Record<string, unknown>>(join(packageReleaseDir, "host.json"), {});
+      let packagePayloadSha256: string | undefined;
+      try {
+        const packageEnvelope = await readJsonFile<Record<string, unknown>>(join(packageReleaseDir, "latest.json"));
+        if (typeof packageEnvelope.payload === "string") packagePayloadSha256 = sha256Hex(Buffer.from(packageEnvelope.payload, "base64"));
+      } catch {
+        // The signed manifest remains authoritative if a legacy package lacks
+        // an optional digest field.
+      }
+      const packageUpdates = isObject(packageHost.config) && isObject(packageHost.config.updates) ? packageHost.config.updates : undefined;
+      const packageKeyId = pkg.id === rootPackage.id
+        ? (typeof packageHost.POCKET_UPDATE_KEY_ID === "string" ? packageHost.POCKET_UPDATE_KEY_ID : result.envelope.keyId)
+        : (typeof packageUpdates?.keyId === "string" ? packageUpdates.keyId : result.envelope.keyId);
+      const packagePublicKey = pkg.id === rootPackage.id
+        ? (typeof packageHost.POCKET_UPDATE_PUBLIC_KEY === "string" ? packageHost.POCKET_UPDATE_PUBLIC_KEY : key.publicKeyBase64)
+        : (typeof packageUpdates?.publicKey === "string" ? packageUpdates.publicKey : key.publicKeyBase64);
+      const packagePath = historyPackagePath(hostVersion, pkg.id, releaseId);
+      const bootstrapAssets: Record<string, { url: string; sha256: string; size: number }> = {};
+      for (const name of ["app.bytecode.json", "guest-manifest.json"]) {
+        const bootstrapFile = join(packageReleaseDir, "bootstrap", name);
+        if (!existsSync(bootstrapFile)) continue;
+        const bytes = new Uint8Array(await readFile(bootstrapFile));
+        const asset = `assets/apps/${pkg.id}/${name}`;
+        bootstrapAssets[asset] = { url: `${safeOrigin}${packagePath}/bootstrap/${name}`, sha256: sha256Hex(bytes), size: bytes.length };
+      }
+      const descriptor: AggregateHostPackage = {
+        id: pkg.id,
+        appId: pkg.id,
+        version: pkg.version,
+        build: pkg.build,
+        packageVersion: immutablePackageVersion,
+        updateUrl: `${safeOrigin}${packagePath}/latest.json`,
+        manifestUrl: `${safeOrigin}${packagePath}/latest.json`,
+        hostConfigUrl: `${safeOrigin}${packagePath}/host.json`,
+        keyId: packageKeyId,
+        publicKey: packagePublicKey,
+        ...(packagePayloadSha256 ? { payloadSha256: packagePayloadSha256 } : {}),
+        ...(pkg.id === rootPackage.id && packagePayloadSha256 ? { rootPayloadSha256: packagePayloadSha256 } : {}),
+        bootstrapAssets,
+        ...(isObject(packageHost.config) ? { config: packageHost.config } : {}),
+      };
+      aggregatePackages.push(descriptor);
+    }
+    const rootHostPath = join(releaseDir, "host.json");
+    const rootHost = await readJsonFile<Record<string, unknown>>(rootHostPath, {});
+    // Immutable descriptors keep the channel prefix they were published
+    // under. The fixed index chooses the branch; an archive must not silently
+    // switch a release's base to the other channel after export.
+    rootHost.POCKET_UPDATE_BASE_URL = `${safeOrigin}/${channelPrefix}`;
+    // Keep the compositor handle allocation in the signed aggregate
+    // descriptor. This is derived from the same build snapshot/catalog used
+    // by Preview, so remote SystemUI does not need a native hard-coded child
+    // map to discover mini apps.
+    const compositorSurfaces = await compositorSurfacesFromProject(buildDir);
+    const aggregateHost = aggregateHostConfig({
+      rootHost,
+      hostVersion,
+      rootAppId: config.appId,
+      version,
+      build,
+      compatVersion,
+      channel,
+      slot,
+      routeVersion,
+      releaseId,
+      branchNamespace: updateNamespace(id, hostVersion, compatVersion, channel),
+      packages: aggregatePackages,
+      hostVersionSource: options.hostVersionSource,
+      ...(compositorSurfaces ? { compositorSurfaces } : {}),
+    });
+    await writeFile(rootHostPath, JSON.stringify(aggregateHost, null, 2) + "\n");
+    // Include the semantic root entry point in exported archives. The
+    // descriptor itself points at immutable releaseId package URLs, so this
+    // alias is self-contained and does not depend on the live journal.
+    for (const alias of new Set([routeVersion, compatVersion])) {
+      const aggregateAliasDirectory = pocketReleaseDirectory(releaseRoot, hostVersion, config.appId, alias);
+      if (aggregateAliasDirectory === releaseDir) continue;
+      await mkdir(aggregateAliasDirectory, { recursive: true });
+      await cp(rootHostPath, join(aggregateAliasDirectory, "host.json"));
+    }
+
+    if (channel === "release" && previousEntry) {
+      const allCurrentPackages = new Set(packageRecords.map((pkg) => pkg.id));
+      if (config.build === previousEntry.build) {
+        if (!payloadsEqual(packagePayloads.get(config.appId) ?? {}, previousRootPayload)) {
+          throw new Error(`stable release build ${config.build} already exists with different package contents`);
+        }
+        if (allCurrentPackages.size !== previousEntry.packages.length) {
+          throw new Error(`stable release build ${config.build} already exists with different package contents`);
+        }
+      }
+      let stableEquivalent = config.build === previousEntry.build && packageRecords.length === previousEntry.packages.length;
+      for (const previousPackage of previousEntry.packages) {
+        const nextPackage = packageRecords.find((pkg) => pkg.id === previousPackage.id);
+        if (!nextPackage) {
+          stableEquivalent = false;
+          continue;
+        }
+        if (nextPackage.build < previousPackage.build) {
+          throw new Error(`stable package ${nextPackage.id} build ${nextPackage.build} is older than the current build ${previousPackage.build}`);
+        }
+        const equivalentPackage = nextPackage.build === previousPackage.build && payloadsEqual(packagePayloads.get(nextPackage.id) ?? {}, await readPayload(previousPackage.artifactRoot));
+        if (nextPackage.build === previousPackage.build && !equivalentPackage) {
+          throw new Error(`stable package ${nextPackage.id} build ${nextPackage.build} already exists with different package contents`);
+        }
+        if (!equivalentPackage) stableEquivalent = false;
+      }
+      if (config.build === previousEntry.build && !stableEquivalent) {
+        throw new Error(`stable release build ${config.build} already exists with different package contents`);
+      }
+      if (stableEquivalent) {
+        // The package comparison above already checked each payload against its
+        // prior immutable copy. Do not create a second audit entry for a
+        // semantically identical stable publish merely because signedAt moved.
+        await rm(releaseRoot, { recursive: true, force: true });
+        const oldRoot = previousEntry.packages.find((pkg) => pkg.id === config.appId);
+        if (!oldRoot) throw new Error("stable history is missing its root package");
+        state.publish = {
+          revision: state.revision,
+          updateUrl: `${releasePath}/latest.json`,
+          manifestUrl,
+          hostConfigUrl: `${safeOrigin}/pocket/${hostVersion}/${encodeURIComponent(config.appId)}/${previousEntry.compatVersion ?? compatVersion}/host.json`,
+          appConfigUrl: packageIndexUrl,
+          archiveUrl: `/releases/${id}.tar.gz`,
+          keyId: previousEntry.keyId,
+          runtimeAbi: previousEntry.runtimeAbi,
+          payloadSha256: previousEntry.payloadSha256,
+          version: previousEntry.version,
+          build: previousEntry.build,
+          channel: "release",
+          hostVersion,
+          packageVersion: compatVersion,
+          releaseId: previousEntry.releaseId,
+          publishedAt: previousEntry.publishedAt,
+          ...(parsedOrigin.hostname === "127.0.0.1" ? {} : { lanOrigin: safeOrigin }),
+          ...(publishedPackages.length > 0 ? { packages: publishedPackages } : {}),
+        };
+        await saveState(workspace, id, state);
+        return resultFromPublishedDirectory(safeChild(workspace.updates, oldRoot.artifactRoot));
+      }
+    }
+
+    const archiveFilename = offline ? `offline-${releaseId}.tar.gz` : `${releaseId}.tar.gz`;
+    archivePath = join(workspace.updates, offline ? ".downloads" : ".history", id, archiveFilename);
+    await runProcess(["tar", "-czf", archivePath, "-C", releaseRoot, "."], root, offline ? () => {} : (line) => pushLog(state, line));
+    if (offline) {
+      await rm(releaseRoot, { recursive: true, force: true });
+      return { ...result, releaseId, offlineArchivePath: archivePath, offlineFilename: archiveFilename };
+    }
+    const entry: PublishedVersion = {
+      id: releaseId,
+      releaseId,
+      slot,
+      channel,
+      version,
+      build,
+      compatVersion,
+      routeVersion,
+      revision: state.revision,
+      publishedAt: now(),
+      hostVersion,
+      packageVersion: immutablePackageVersion,
+      keyId: result.envelope.keyId,
+      runtimeAbi: String(metadata.runtimeAbi),
+      payloadSha256: sha256Hex(result.payloadBytes),
+      archivePath: relative(workspace.updates, archivePath).replaceAll("\\", "/"),
+      packages: packageRecords,
+    };
+    const nextHistory: VersionHistory = {
+      schemaVersion: 1,
+      current: {
+        ...history.current,
+        [versionBranchKey(hostVersion, compatVersion, slot)]: releaseId,
+        ...(history.entries.length === 0 && !history.current[slot] ? { [slot]: releaseId } : {}),
+      },
+      entries: [entry, ...history.entries],
+    };
+    await writeVersionHistoryAtomic(historyPath, nextHistory);
+    historyCommitted = true;
+    if (channel === "test") {
+      try {
+        await writeFile(counterPath, JSON.stringify({ build }) + "\n");
+        // Keep the pre-branch sidecar for older Editor readers. New branches
+        // never consume it once their own counter exists.
+        await writeFile(legacyCounterPath, JSON.stringify({ build }) + "\n");
+      } catch (error) {
+        pushLog(state, `test release counter could not be persisted: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    state.publish = {
+      revision: state.revision,
+      updateUrl: `${releasePath}/latest.json`,
+      manifestUrl,
+      hostConfigUrl,
+      appConfigUrl: packageIndexUrl,
+      archiveUrl: `/releases/${id}.tar.gz`,
+      keyId: result.envelope.keyId,
+      runtimeAbi: String(metadata.runtimeAbi),
+      payloadSha256: sha256Hex(result.payloadBytes),
+      version, build, channel, hostVersion, packageVersion: compatVersion,
+      releaseId,
+      publishedAt: entry.publishedAt,
+      ...(parsedOrigin.hostname === "127.0.0.1" ? {} : { lanOrigin: safeOrigin }),
+      ...(publishedPackages.length > 0 ? { packages: publishedPackages } : {}),
+    };
+    try {
+      await saveState(workspace, id, state);
+    } catch (error) {
+      // The history journal is the publish commit point. A state mirror write
+      // must not turn an already-downloadable immutable release into a failed
+      // HTTP publish response.
+      pushLog(state, `publish state mirror could not be persisted: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return result;
+  } catch (error) {
+    if (!historyCommitted) {
+      await rm(releaseRoot, { recursive: true, force: true });
+      if (archivePath) await rm(archivePath, { force: true });
+    }
+    throw error;
   }
-  const archive = join(workspace.updates, `${id}.tar.gz`);
-  await runProcess(["tar", "-czf", archive, "-C", releaseDir, "."], root, (line) => pushLog(state, line));
-  state.publish = {
-    revision: state.revision,
-    updateUrl: `${releasePath}/latest.json`,
-    manifestUrl,
-    hostConfigUrl,
-    archiveUrl: `/releases/${id}.tar.gz`,
-    keyId: result.envelope.keyId,
-    runtimeAbi: String(metadata.runtimeAbi),
-    payloadSha256: sha256Hex(result.payloadBytes),
-    version, build, channel, hostVersion, packageVersion,
-    ...(parsedOrigin.hostname === '127.0.0.1' ? {} : { lanOrigin: safeOrigin }),
-    ...(publishedPackages.length > 0 ? { packages: publishedPackages } : {}),
-  };
-  await saveState(workspace, id, state);
-  return result;
 }
 
 async function editorUpdateTrust(workspace: Workspace, id: string): Promise<{ keyPath: string; key: PublicKeyConfig }> {
@@ -1304,13 +1899,24 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     states: join(workspaceRoot, "states"),
     ...(projectRoot ? { projectRoot, projectId } : {}),
   };
+  const flutterRoot = options.flutterRoot ?? process.env.POCKET_EDITOR_FLUTTER_ROOT;
+  if (flutterRoot && !workspace.projectRoot) throw new Error("a Flutter consumer must be bound to an explicit JS project root");
+  const explicitHostVersion = options.updateHostVersion ?? process.env.POCKET_EDITOR_HOST_VERSION;
+  const inferredHostVersion = pubspecHostVersion(flutterRoot ?? root);
+  const updateHostVersion = explicitHostVersion ?? inferredHostVersion ?? "editor";
+  const updateHostVersionSource = explicitHostVersion ? "explicit" : inferredHostVersion ? (flutterRoot ? "flutter-pubspec" : "sdk-pubspec") : "legacy-fallback";
+  const explicitPackageVersion = options.updatePackageVersion ?? process.env.POCKET_EDITOR_PACKAGE_VERSION;
+  const inferredPackageVersion = flutterRoot ? bytecodeAssetVersion(flutterRoot) : undefined;
+  const updatePackageVersion = explicitPackageVersion ?? inferredPackageVersion;
+  const updatePackageVersionSource = explicitPackageVersion ? "explicit" : inferredPackageVersion ? "flutter-asset" : "project-first-publish";
   await Promise.all([mkdir(workspace.projects, { recursive: true }), mkdir(workspace.builds, { recursive: true }), mkdir(workspace.updates, { recursive: true }), mkdir(workspace.keys, { recursive: true }), mkdir(workspace.states, { recursive: true })]);
   const states = new Map<string, EditorState>();
   const stateLoads = new Map<string, Promise<EditorState>>();
   const projectWrites = new Set<string>();
+  const publishSlots = new Set<string>();
   const runner = options.buildRunner ?? realBuild;
-  const updateHostVersion = options.updateHostVersion ?? process.env.POCKET_EDITOR_HOST_VERSION ?? "editor";
   if (!appIdPattern.test(updateHostVersion)) throw new Error("Editor update host version is invalid");
+  if (updatePackageVersion !== undefined && !appIdPattern.test(updatePackageVersion)) throw new Error("Editor update package version is invalid");
   const getState = async (id: string): Promise<EditorState> => {
     const cached = states.get(id);
     if (cached) return cached;
@@ -1330,12 +1936,847 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const sdkRoot = root;
   const sdkRootStat = lstatIfExists(sdkRoot);
   if (!sdkRootStat?.isDirectory() || sdkRootStat.isSymbolicLink()) throw new Error("editor SDK root must be a real directory");
-  const flutterRoot = options.flutterRoot ?? process.env.POCKET_EDITOR_FLUTTER_ROOT;
-  if (flutterRoot && !workspace.projectRoot) throw new Error("a Flutter consumer must be bound to an explicit JS project root");
+  type ResolvedPublishedPackage = { projectId: string; entry: PublishedVersion; package: PublishedVersionPackage };
+  const resolveCompatVersion = async (id: string, config: EditorConfig, state?: EditorState, history?: VersionHistory): Promise<string> => {
+    if (updatePackageVersion) return updatePackageVersion;
+    const sourceHistory = history ?? await readVersionHistory(versionHistoryPath(workspace.states, id));
+    const existing = sourceHistory.entries.find((entry) => entry.hostVersion === updateHostVersion && (entry.compatVersion ?? entry.version));
+    if (existing?.compatVersion) return existing.compatVersion;
+    if (existing?.version && !state?.publish) return existing.version;
+    return config.version;
+  };
+  const findPublishedPackage = async (host: string, packageId: string, packageVersion?: string, slot?: VersionSlot, allEntries = false, artifactPath?: string): Promise<ResolvedPublishedPackage | undefined> => {
+    let files: Array<import("node:fs").Dirent> = [];
+    try {
+      files = await readdir(workspace.states, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    for (const file of files) {
+      if (!file.isFile() || !file.name.endsWith(".versions.json")) continue;
+      const projectId = file.name.slice(0, -".versions.json".length);
+      if (!projectIdPattern.test(projectId)) continue;
+      let history: VersionHistory;
+      try {
+        history = await readVersionHistory(join(workspace.states, file.name));
+      } catch {
+        continue;
+      }
+      let preferredSlot = slot;
+      if (!preferredSlot && packageVersion !== undefined) {
+        try {
+          const projectState = await loadState(workspace, projectId);
+          preferredSlot = projectState.publish?.channel === "test" ? "test" : projectState.publish?.channel === "release" ? "stable" : undefined;
+        } catch {
+          // A missing state mirror must not hide an immutable history entry.
+        }
+      }
+      const candidates = slot && !allEntries
+        ? (packageVersion === undefined
+          ? [history.entries.find((entry) => entry.slot === slot && entry.hostVersion === host)]
+          : [
+            currentVersion(history, slot, host, packageVersion),
+            history.entries.find((entry) => entry.slot === slot && entry.hostVersion === host && entry.packageVersion === packageVersion),
+          ]).filter((entry, index, all): entry is PublishedVersion => !!entry && all.findIndex((candidate) => candidate?.id === entry.id) === index)
+        : slot
+          ? history.entries.filter((entry) => entry.slot === slot)
+          : preferredSlot && packageVersion !== undefined
+            ? [currentVersion(history, preferredSlot, host, packageVersion), ...history.entries].filter((entry, index, all): entry is PublishedVersion => !!entry && all.findIndex((candidate) => candidate?.id === entry.id) === index)
+            : history.entries;
+      for (const entry of candidates) {
+        const packageEntry = entry.packages.find((candidate) => candidate.id === packageId);
+        if (!packageEntry) continue;
+        const isRootPackage = entry.packages[0]?.id === packageId;
+        const routeVersion = entry.routeVersion ?? entry.version;
+        const matchesVersion = packageVersion === undefined || entry.packageVersion === packageVersion || (entry.compatVersion ?? entry.version) === packageVersion || (isRootPackage && routeVersion === packageVersion);
+        if (entry.hostVersion !== host || !matchesVersion) continue;
+        if (artifactPath) {
+          try {
+            safeArtifactFile(workspace.updates, `${packageEntry.artifactRoot}/${artifactPath}`);
+          } catch {
+            continue;
+          }
+        }
+        return { projectId, entry, package: packageEntry };
+      }
+    }
+    return undefined;
+  };
+  const findLegacyPublishedOwner = async (host: string, packageId: string, slot: VersionSlot, exceptProjectId: string): Promise<string | undefined> => {
+    let entries: Array<import("node:fs").Dirent> = [];
+    try {
+      entries = await readdir(workspace.projects, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    const ids = entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
+    if (workspace.projectRoot && workspace.projectId && !ids.includes(workspace.projectId)) ids.push(workspace.projectId);
+    for (const projectId of ids) {
+      if (projectId === exceptProjectId) continue;
+      try {
+        const projectConfig = await loadConfig(projectDirectory(workspace, projectId), projectId);
+        const packageIds = new Set<string>([projectConfig.appId]);
+        const projectState = await loadState(workspace, projectId);
+        if (projectState.builtRevision !== null) {
+          try {
+            const snapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${projectId}/${projectState.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`));
+            for (const pkg of snapshot.packages) packageIds.add(pkg.id);
+          } catch {
+            // Root ownership above is still sufficient for a legacy project
+            // whose child resource snapshot is no longer readable.
+          }
+        }
+        if (!packageIds.has(packageId)) continue;
+        const physicalHosts = new Set<string>([host, "editor"]);
+        if (projectState.publish?.hostVersion) physicalHosts.add(projectState.publish.hostVersion);
+        for (const physicalHost of physicalHosts) {
+          const directory = pocketReleaseDirectory(workspace.updates, physicalHost, packageId, slot);
+          if (existsSync(join(directory, "latest.json"))) return projectId;
+        }
+      } catch {
+        // Ignore malformed unrelated projects while checking slot ownership.
+      }
+    }
+    return undefined;
+  };
+  let deviceUpdates: ReturnType<typeof startUpdateEndpoint> | undefined;
+  const readPublishedArtifact = async (file: string, mutableSlot?: VersionSlot): Promise<Response> => {
+    let bytes = new Uint8Array(await readFile(file));
+    if (mutableSlot && basename(file) === "host.json") {
+      try {
+        const config = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+        const updates = isObject(config.config) && isObject(config.config.updates) ? config.config.updates : undefined;
+        const release = isObject(config.release) ? config.release : undefined;
+        const branchNamespace = typeof release?.branchNamespace === "string"
+          ? release.branchNamespace
+          : typeof updates?.branchNamespace === "string"
+            ? updates.branchNamespace
+            : typeof config.POCKET_UPDATE_BRANCH_NAMESPACE === "string"
+              ? config.POCKET_UPDATE_BRANCH_NAMESPACE
+              : undefined;
+        const compatVersion = typeof release?.compatVersion === "string"
+          ? release.compatVersion
+          : typeof updates?.compatVersion === "string"
+            ? updates.compatVersion
+            : undefined;
+        const rawBaseUrl = typeof config.POCKET_UPDATE_BASE_URL === "string"
+          ? config.POCKET_UPDATE_BASE_URL
+          : typeof updates?.baseUrl === "string"
+            ? updates.baseUrl
+            : "";
+        const baseOrigin = rawBaseUrl.replace(/\/(?:test|stable)\/$/, "").replace(/\/(?:test|stable)$/, "");
+        const channelBaseUrl = compatVersion ? `${baseOrigin}/${mutableSlot}` : rawBaseUrl;
+        if (typeof config.POCKET_UPDATE_BASE_URL === "string") config.POCKET_UPDATE_BASE_URL = channelBaseUrl;
+        if (typeof config.POCKET_PACKAGE_VERSION === "string") config.POCKET_PACKAGE_VERSION = compatVersion ?? mutableSlot;
+        if (branchNamespace && typeof config.POCKET_STORE_NAMESPACE === "string") config.POCKET_STORE_NAMESPACE = branchNamespace;
+        if (updates) {
+          updates.baseUrl = channelBaseUrl;
+          updates.packageVersion = compatVersion ?? mutableSlot;
+          if (branchNamespace) updates.namespace = branchNamespace;
+        }
+        if (config.kind === "pocket-editor-app-host") {
+          const baseUrl = channelBaseUrl;
+          const hostVersion = typeof config.POCKET_HOST_VERSION === "string" ? config.POCKET_HOST_VERSION : "";
+          const routePackageVersion = compatVersion ?? mutableSlot;
+          const rewritePackage = (value: unknown): void => {
+            if (!isObject(value) || typeof value.id !== "string") return;
+            const packagePath = `/pocket/${hostVersion}/${encodeURIComponent(value.id)}/${routePackageVersion}`;
+            value.packageVersion = routePackageVersion;
+            value.updateUrl = `${baseUrl}${packagePath}/latest.json`;
+            value.manifestUrl = `${baseUrl}${packagePath}/latest.json`;
+            value.hostConfigUrl = `${baseUrl}${packagePath}/host.json`;
+            if (isObject(value.config) && isObject(value.config.updates)) {
+              value.config.updates.baseUrl = baseUrl;
+              value.config.updates.packageVersion = routePackageVersion;
+              if (branchNamespace) value.config.updates.namespace = branchNamespace;
+            }
+          };
+          if (Array.isArray(config.packages)) for (const value of config.packages) rewritePackage(value);
+          if (isObject(config.applications)) for (const value of Object.values(config.applications)) rewritePackage(value);
+          if (Array.isArray(config.applications)) for (const value of config.applications) rewritePackage(value);
+          if (isObject(config.updates)) {
+            config.updates.baseUrl = baseUrl;
+            config.updates.packageVersion = routePackageVersion;
+          if (branchNamespace) config.updates.namespace = branchNamespace;
+          }
+        }
+        bytes = new TextEncoder().encode(JSON.stringify(config, null, 2) + "\n");
+      } catch {
+        // packageArtifacts already emitted this file; preserve the signed
+        // bytes if a future host template uses a non-JSON format.
+      }
+    }
+    return new Response(bytes, { headers: { "content-type": contentType(file), "cache-control": "no-store" } });
+  };
+  const findLegacyArtifact = async (host: string, packageId: string, slot: VersionSlot, artifactPath: string, routeVersion?: string): Promise<string | undefined> => {
+    let entries: Array<import("node:fs").Dirent> = [];
+    try {
+      entries = await readdir(workspace.projects, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    const projectIds = entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
+    if (workspace.projectRoot && workspace.projectId && !projectIds.includes(workspace.projectId)) projectIds.push(workspace.projectId);
+    for (const projectId of projectIds) {
+      try {
+        const projectConfig = await loadConfig(projectDirectory(workspace, projectId), projectId);
+        const projectState = await loadState(workspace, projectId);
+        const packageIds = new Set<string>([projectConfig.appId]);
+        if (projectState.builtRevision !== null) {
+          try {
+            const snapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${projectId}/${projectState.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`));
+            for (const pkg of snapshot.packages) packageIds.add(pkg.id);
+          } catch {
+            // The root id remains enough for a legacy root manifest.
+          }
+        }
+        if (!packageIds.has(packageId)) continue;
+        const physicalHosts = new Set<string>([host, "editor"]);
+        if (projectState.publish?.hostVersion) physicalHosts.add(projectState.publish.hostVersion);
+        for (const physicalHost of physicalHosts) {
+          const directory = pocketReleaseDirectory(workspace.updates, physicalHost, packageId, slot);
+          if (!existsSync(join(directory, "latest.json"))) continue;
+          if (routeVersion) {
+            const payload = await readJsonFile<Record<string, unknown>>(join(directory, "payload.json"), {});
+            if (!legacyPayloadMatchesRoute(payload, routeVersion)) continue;
+          }
+          try {
+            const candidate = safeArtifactFile(workspace.updates, relative(workspace.updates, join(directory, artifactPath)));
+            if (existsSync(candidate)) return candidate;
+          } catch {
+            // Keep searching another historical host alias.
+          }
+        }
+      } catch {
+        // Ignore malformed unrelated projects while resolving legacy aliases.
+      }
+    }
+    // A legacy state file may have been removed while its canonical package
+    // directory remains. Scan only the bounded `updates/pocket` host segment
+    // as a final read-only compatibility fallback.
+    try {
+      const hostRoot = join(workspace.updates, "pocket");
+      for (const entry of await readdir(hostRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !appIdPattern.test(entry.name)) continue;
+        const directory = pocketReleaseDirectory(workspace.updates, entry.name, packageId, slot);
+        if (!existsSync(join(directory, "latest.json"))) continue;
+        if (routeVersion) {
+          const payload = await readJsonFile<Record<string, unknown>>(join(directory, "payload.json"), {});
+          if (!legacyPayloadMatchesRoute(payload, routeVersion)) continue;
+        }
+        try {
+          const candidate = safeArtifactFile(workspace.updates, relative(workspace.updates, join(directory, artifactPath)));
+          if (existsSync(candidate)) return candidate;
+        } catch {
+          // Continue to the next retained host alias.
+        }
+      }
+    } catch {
+      // No legacy host directory is a normal pre-publish state.
+    }
+    return undefined;
+  };
+  const readLegacyAggregate = async (host: string, rootPackageId: string, routeVersion: string, requestedCompatVersion = routeVersion, revisionOverride?: number, projectIdFilter?: string): Promise<Response | undefined> => {
+    let entries: Array<import("node:fs").Dirent> = [];
+    try {
+      entries = await readdir(workspace.projects, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    const projectIds = entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
+    if (workspace.projectRoot && workspace.projectId && !projectIds.includes(workspace.projectId)) projectIds.push(workspace.projectId);
+    for (const projectId of projectIds) {
+      if (projectIdFilter && projectId !== projectIdFilter) continue;
+      let projectConfig: EditorConfig;
+      let projectState: EditorState;
+      try {
+        projectConfig = await loadConfig(projectDirectory(workspace, projectId), projectId);
+        if (projectConfig.appId !== rootPackageId) continue;
+        projectState = await loadState(workspace, projectId);
+      } catch {
+        continue;
+      }
+      const packageIds = new Set<string>([rootPackageId]);
+      // Legacy descriptors must describe the revision that was actually
+      // published.  The bound project may have been built again since then;
+      // using builtRevision here would silently mix newer child packages and
+      // bootstrap files into an older root release.
+      let matchingRevision: number | undefined;
+      try {
+        const history = await readVersionHistory(versionHistoryPath(workspace.states, projectId));
+        const routeSlot: VersionSlot = /-test\.[0-9]+$/.test(routeVersion) ? "test" : "stable";
+        const matchingEntry = history.entries.find((entry) =>
+          entry.hostVersion === host &&
+          entry.slot === routeSlot &&
+          (entry.routeVersion ?? entry.version) === routeVersion,
+        );
+        if (matchingEntry) matchingRevision = matchingEntry.revision;
+      } catch {
+        // Legacy workspaces may not have a journal sidecar.
+      }
+      const publishedRevision = revisionOverride ?? matchingRevision ?? projectState.publish?.revision ?? projectState.builtRevision;
+      let snapshot: Awaited<ReturnType<typeof readResourceSnapshot>> | undefined;
+      if (publishedRevision !== null && publishedRevision !== undefined) {
+        try {
+          snapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${projectId}/${publishedRevision}/${RESOURCE_SNAPSHOT_FILE}`));
+          for (const pkg of snapshot.packages) packageIds.add(pkg.id);
+        } catch {
+          // A legacy root package can still be exposed if its child snapshot
+          // was removed; do not invent child descriptors in that case.
+        }
+      }
+      const physicalHosts = new Set<string>([host, "editor"]);
+      if (projectState.publish?.hostVersion) physicalHosts.add(projectState.publish.hostVersion);
+      for (const physicalHost of physicalHosts) {
+        for (const slot of ["test", "stable"] as const) {
+        const rootDirectory = pocketReleaseDirectory(workspace.updates, physicalHost, rootPackageId, slot);
+        const rootPayload = await readJsonFile<Record<string, unknown>>(join(rootDirectory, "payload.json"), {});
+        if (typeof rootPayload.version !== "string") continue;
+        const build = Number(rootPayload.build);
+        if (!Number.isSafeInteger(build) || build < 0) continue;
+        const legacyRouteVersion = legacySemanticRouteVersion(String(rootPayload.version), build, slot);
+        if (routeVersion !== legacyRouteVersion && routeVersion !== rootPayload.version && routeVersion !== compatibilityVersion(String(rootPayload.version))) continue;
+        const rootHost = await readJsonFile<Record<string, unknown>>(join(rootDirectory, "host.json"), {});
+        const currentBaseUrl = deviceUpdates?.origin ?? (typeof rootHost.POCKET_UPDATE_BASE_URL === "string" ? rootHost.POCKET_UPDATE_BASE_URL : "");
+        const branchNamespace = updateNamespace(projectId, host, requestedCompatVersion, slot === "test" ? "test" : "release");
+        const channelBaseUrl = `${currentBaseUrl}/${slot}`.replace(/\/$/, "");
+        rootHost.POCKET_UPDATE_BASE_URL = channelBaseUrl;
+        rootHost.POCKET_HOST_VERSION = host;
+        rootHost.POCKET_PACKAGE_VERSION = legacyRouteVersion;
+        rootHost.POCKET_STORE_NAMESPACE = branchNamespace;
+        rootHost.POCKET_UPDATE_BRANCH_NAMESPACE = branchNamespace;
+        const aggregatePackages: AggregateHostPackage[] = [];
+        for (const packageId of packageIds) {
+          const packageDirectory = pocketReleaseDirectory(workspace.updates, physicalHost, packageId, slot);
+          const payload = await readJsonFile<Record<string, unknown>>(join(packageDirectory, "payload.json"), {});
+          const packageVersion = typeof payload.version === "string" ? payload.version : rootPayload.version;
+          const packageBuild = Number(payload.build);
+          if (!existsSync(join(packageDirectory, "latest.json")) || !Number.isSafeInteger(packageBuild) || packageBuild < 0) continue;
+          const packageRouteVersion = legacySemanticRouteVersion(packageVersion, packageBuild, slot);
+          const packageHost = await readJsonFile<Record<string, unknown>>(join(packageDirectory, "host.json"), {});
+          const packageUpdates = isObject(packageHost.config) && isObject(packageHost.config.updates) ? packageHost.config.updates : undefined;
+          const packageKeyId = packageId === rootPackageId
+            ? (typeof rootHost.POCKET_UPDATE_KEY_ID === "string" ? rootHost.POCKET_UPDATE_KEY_ID : "")
+            : (typeof packageUpdates?.keyId === "string" ? packageUpdates.keyId : "");
+          const packagePublicKey = packageId === rootPackageId
+            ? (typeof rootHost.POCKET_UPDATE_PUBLIC_KEY === "string" ? rootHost.POCKET_UPDATE_PUBLIC_KEY : "")
+            : (typeof packageUpdates?.publicKey === "string" ? packageUpdates.publicKey : "");
+          let packagePayloadSha256: string | undefined;
+          try {
+            const packageEnvelope = await readJsonFile<Record<string, unknown>>(join(packageDirectory, "latest.json"));
+            if (typeof packageEnvelope.payload === "string") packagePayloadSha256 = sha256Hex(Buffer.from(packageEnvelope.payload, "base64"));
+          } catch {
+            // Legacy payloads may predate the digest field.
+          }
+          const packagePath = `/pocket/${host}/${encodeURIComponent(packageId)}/${encodeURIComponent(packageRouteVersion)}`;
+          const bootstrapAssets: Record<string, { url: string; sha256: string; size: number }> = {};
+          const packageSnapshot = snapshot?.packages.find((pkg) => pkg.id === packageId);
+          const sourceDirectory = publishedRevision !== null && publishedRevision !== undefined
+            ? packageId === rootPackageId
+              ? join(workspace.builds, projectId, String(publishedRevision))
+              : packageSnapshot
+                ? resourceArtifactDirectory(join(workspace.builds, projectId, String(publishedRevision)), packageSnapshot)
+                : undefined
+            : undefined;
+          const bootstrapDirectory = join(packageDirectory, "bootstrap");
+          if (sourceDirectory) {
+            await mkdir(bootstrapDirectory, { recursive: true });
+            for (const name of ["app.bytecode.json", "guest-manifest.json"]) {
+              const source = join(sourceDirectory, name);
+              const destination = join(bootstrapDirectory, name);
+              if (existsSync(source) && !existsSync(destination)) await cp(source, destination);
+            }
+          }
+          for (const name of ["app.bytecode.json", "guest-manifest.json"]) {
+            const bootstrapFile = join(bootstrapDirectory, name);
+            if (!existsSync(bootstrapFile)) continue;
+            const bytes = new Uint8Array(await readFile(bootstrapFile));
+            const asset = `assets/apps/${packageId}/${name}`;
+            bootstrapAssets[asset] = { url: `${channelBaseUrl}${packagePath}/bootstrap/${name}`, sha256: sha256Hex(bytes), size: bytes.length };
+          }
+          let packageConfig: Record<string, unknown> | undefined;
+          if (isObject(packageHost.config)) {
+            packageConfig = JSON.parse(JSON.stringify(packageHost.config)) as Record<string, unknown>;
+            if (isObject(packageConfig.updates)) {
+              packageConfig.updates.baseUrl = channelBaseUrl;
+              packageConfig.updates.packageVersion = packageRouteVersion;
+            }
+          }
+          aggregatePackages.push({
+            id: packageId,
+            appId: packageId,
+            version: packageVersion,
+            build: packageBuild,
+            packageVersion: packageRouteVersion,
+            updateUrl: `${channelBaseUrl}${packagePath}/latest.json`,
+            manifestUrl: `${channelBaseUrl}${packagePath}/latest.json`,
+            hostConfigUrl: packageId === rootPackageId
+              ? `${currentBaseUrl}/pocket/${host}/${encodeURIComponent(rootPackageId)}/${encodeURIComponent(packageRouteVersion)}/host.json`
+              : `${channelBaseUrl}${packagePath}/host.json`,
+            keyId: packageKeyId,
+            publicKey: packagePublicKey,
+            ...(packagePayloadSha256 ? { payloadSha256: packagePayloadSha256 } : {}),
+            ...(packageId === rootPackageId && packagePayloadSha256 ? { rootPayloadSha256: packagePayloadSha256 } : {}),
+            bootstrapAssets,
+            ...(packageConfig ? { config: packageConfig } : {}),
+          });
+        }
+        if (!aggregatePackages.some((pkg) => pkg.id === rootPackageId)) continue;
+        const compositorSurfaces = publishedRevision !== null && publishedRevision !== undefined
+          ? await compositorSurfacesFromProject(join(workspace.builds, projectId, String(publishedRevision)))
+          : undefined;
+        return new Response(JSON.stringify(aggregateHostConfig({
+          rootHost,
+          hostVersion: host,
+          rootAppId: rootPackageId,
+          version: String(rootPayload.version),
+          build,
+          compatVersion: requestedCompatVersion,
+          channel: slot === "test" ? "test" : "release",
+          slot,
+          routeVersion: legacyRouteVersion,
+          releaseId: null,
+          branchNamespace,
+          packages: aggregatePackages,
+          hostVersionSource: updateHostVersionSource,
+          ...(compositorSurfaces ? { compositorSurfaces } : {}),
+        }), null, 2) + "\n", {
+          headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+        });
+      }
+      }
+    }
+    return undefined;
+  };
+  type LegacyArchiveResult = {
+    archivePath: string;
+    archiveUrl: string;
+    releaseId: string;
+    version: string;
+    build: number;
+  };
+  const legacyArchiveBuilds = new Map<string, Promise<LegacyArchiveResult | undefined>>();
+  const ensureLegacyArchive = async (projectId: string, config: EditorConfig, state: EditorState, host: string, slot: VersionSlot, revisionOverride?: number): Promise<LegacyArchiveResult | undefined> => {
+    const revision = revisionOverride ?? state.publish?.revision ?? state.builtRevision;
+    if (revision === null || revision === undefined) return undefined;
+    const cacheKey = `${projectId}\n${host}\n${slot}\n${revision}`;
+    const existing = legacyArchiveBuilds.get(cacheKey);
+    if (existing) return existing;
+    const build = (async (): Promise<LegacyArchiveResult | undefined> => {
+      let snapshot: Awaited<ReturnType<typeof readResourceSnapshot>> | undefined;
+      try {
+        snapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${projectId}/${revision}/${RESOURCE_SNAPSHOT_FILE}`));
+      } catch {
+        // A legacy root-only release can still be archived without a child
+        // snapshot; never substitute the current built revision here.
+      }
+      const packageIds = new Set<string>([config.appId]);
+      for (const pkg of snapshot?.packages ?? []) packageIds.add(pkg.id);
+      const physicalHosts = new Set<string>([host, "editor"]);
+      if (state.publish?.hostVersion) physicalHosts.add(state.publish.hostVersion);
+      const findDirectory = (packageId: string): string | undefined => {
+        for (const physicalHost of physicalHosts) {
+          const candidate = pocketReleaseDirectory(workspace.updates, physicalHost, packageId, slot);
+          if (existsSync(join(candidate, "latest.json"))) return candidate;
+        }
+        return undefined;
+      };
+      const rootDirectory = findDirectory(config.appId);
+      if (!rootDirectory) return undefined;
+      const rootPayload = await readJsonFile<Record<string, unknown>>(join(rootDirectory, "payload.json"), {});
+      if (typeof rootPayload.version !== "string") return undefined;
+      const rootBuild = Number(rootPayload.build);
+      if (!Number.isSafeInteger(rootBuild) || rootBuild < 0) return undefined;
+      // Never inherit the current state mirror's compat pointer: after a new
+      // branch publishes, that pointer may describe newer bytes than this
+      // retained legacy slot. Derive the legacy compat identity solely from
+      // the signed payload being archived.
+      const legacyCompat = compatibilityVersion(rootPayload.version);
+      let aggregateBody: Record<string, unknown> | undefined;
+      const legacyRouteVersion = legacySemanticRouteVersion(rootPayload.version, rootBuild, slot);
+      const aggregate = await readLegacyAggregate(host, config.appId, legacyRouteVersion, legacyCompat, revision, projectId);
+      if (aggregate) {
+        try {
+          const parsed = await aggregate.json() as Record<string, unknown>;
+          if (isObject(parsed.applications)) for (const packageId of Object.keys(parsed.applications)) packageIds.add(packageId);
+          aggregateBody = parsed;
+        } catch {
+          aggregateBody = undefined;
+        }
+      }
+      const packageSources: Array<{ id: string; source: string; manifestHash: string }> = [];
+      for (const packageId of packageIds) {
+        const source = findDirectory(packageId);
+        if (!source) {
+          // A published snapshot package must never silently disappear from a
+          // legacy backup. A root-only legacy project is the only exception.
+          if (snapshot?.packages.some((pkg) => pkg.id === packageId)) return undefined;
+          continue;
+        }
+        const manifestBytes = new Uint8Array(await readFile(join(source, "latest.json")));
+        packageSources.push({ id: packageId, source, manifestHash: sha256Hex(manifestBytes) });
+      }
+      if (!packageSources.some((pkg) => pkg.id === config.appId)) return undefined;
+      packageSources.sort((left, right) => left.id.localeCompare(right.id));
+      const digest = sha256Hex(new TextEncoder().encode(JSON.stringify({ host, slot, packages: packageSources.map((pkg) => ({ id: pkg.id, manifestHash: pkg.manifestHash })) })));
+      const releaseId = `legacy-${digest}`;
+      const archiveDirectory = join(workspace.updates, ".downloads", projectId);
+      const archivePath = join(archiveDirectory, `${releaseId}.tar.gz`);
+      if (!existsSync(archivePath)) {
+        const expanded = await mkdtemp(join(tmpdir(), "pocket-editor-legacy-archive-"));
+        const temporaryArchive = join(archiveDirectory, `.${releaseId}.${randomUUID()}.tmp.tar.gz`);
+        try {
+          for (const pkg of packageSources) {
+            // The aggregate descriptor points at each package's semantic
+            // version/build route, not the mutable `test`/`stable` slot or a
+            // shared compat alias. Keep every archive path pinned to the
+            // payload it contains.
+            const packagePayload = await readJsonFile<Record<string, unknown>>(join(pkg.source, "payload.json"), {});
+            const packageVersion = typeof packagePayload.version === "string" ? packagePayload.version : rootPayload.version;
+            const packageBuild = Number(packagePayload.build);
+            if (!Number.isSafeInteger(packageBuild) || packageBuild < 0) return undefined;
+            const packageRouteVersion = legacySemanticRouteVersion(packageVersion, packageBuild, slot);
+            await cp(pkg.source, join(expanded, "pocket", host, pkg.id, packageRouteVersion), { recursive: true });
+          }
+          if (aggregateBody) {
+            const aggregateRoot = join(expanded, "pocket", host, config.appId, legacySemanticRouteVersion(rootPayload.version, rootBuild, slot));
+            await writeFile(join(aggregateRoot, "host.json"), JSON.stringify(aggregateBody, null, 2) + "\n");
+          }
+          await mkdir(archiveDirectory, { recursive: true });
+          await runProcess(["tar", "-czf", temporaryArchive, "-C", expanded, "."], root, () => {});
+          await rename(temporaryArchive, archivePath);
+        } finally {
+          await rm(expanded, { recursive: true, force: true }).catch(() => undefined);
+          await rm(temporaryArchive, { force: true }).catch(() => undefined);
+        }
+      }
+      return { archivePath, archiveUrl: `/releases/${projectId}/${releaseId}.tar.gz`, releaseId, version: rootPayload.version, build: rootBuild };
+    })();
+    const tracked = build.finally(() => {
+      if (legacyArchiveBuilds.get(cacheKey) === tracked) legacyArchiveBuilds.delete(cacheKey);
+    });
+    legacyArchiveBuilds.set(cacheKey, tracked);
+    return tracked;
+  };
+  const packageIndexRecord = async (projectId: string, entry: PublishedVersion, packageId: string): Promise<Record<string, unknown> | undefined> => {
+    const pkg = entry.packages.find((candidate) => candidate.id === packageId);
+    if (!pkg) return undefined;
+    const compatVersion = entry.compatVersion ?? entry.version;
+    const immutable = historyPackagePath(entry.hostVersion, packageId, entry.releaseId);
+    let payloadSha256: string | undefined;
+    try {
+      const envelope = await readJsonFile<Record<string, unknown>>(safeArtifactFile(workspace.updates, `${pkg.artifactRoot}/latest.json`));
+      if (typeof envelope.payload === "string") payloadSha256 = sha256Hex(Buffer.from(envelope.payload, "base64"));
+    } catch {
+      // A malformed historical package remains listed, but without a false
+      // digest. The signed manifest remains the authoritative payload.
+    }
+    return {
+      id: packageId,
+      version: pkg.version,
+      build: pkg.build,
+      releaseId: entry.releaseId,
+      channel: entry.channel,
+      slot: entry.slot,
+      compatVersion,
+      routeVersion: entry.routeVersion ?? entry.version,
+      packageVersion: entry.packageVersion,
+      publishedAt: entry.publishedAt,
+      manifestUrl: `${immutable}/latest.json`,
+      hostConfigUrl: `${immutable}/host.json`,
+      archiveUrl: `/releases/${projectId}/${entry.releaseId}.tar.gz`,
+      ...(payloadSha256 ? { payloadSha256 } : {}),
+      rootPayloadSha256: entry.payloadSha256,
+    };
+  };
+  const legacyPackageIndexRecord = async (
+    projectId: string,
+    config: EditorConfig,
+    state: EditorState,
+    host: string,
+    slot: VersionSlot,
+    packageId: string,
+    historyEntries: PublishedVersion[] = [],
+  ): Promise<Record<string, unknown> | undefined> => {
+    const physicalHosts = new Set<string>([host, "editor"]);
+    if (state.publish?.hostVersion) physicalHosts.add(state.publish.hostVersion);
+    let directory: string | undefined;
+    for (const physicalHost of physicalHosts) {
+      const candidate = pocketReleaseDirectory(workspace.updates, physicalHost, packageId, slot);
+      if (existsSync(join(candidate, "latest.json"))) {
+        directory = candidate;
+        break;
+      }
+    }
+    if (!directory) return undefined;
+    const payload = await readJsonFile<Record<string, unknown>>(join(directory, "payload.json"), {});
+    if (typeof payload.version !== "string") return undefined;
+    const build = Number(payload.build);
+    if (!Number.isSafeInteger(build) || build < 0) return undefined;
+    let payloadSha256: string | undefined;
+    try {
+      const envelope = await readJsonFile<Record<string, unknown>>(join(directory, "latest.json"));
+      if (typeof envelope.payload === "string") payloadSha256 = sha256Hex(Buffer.from(envelope.payload, "base64"));
+    } catch {
+      // Keep a pre-journal index usable even when its optional digest is absent.
+    }
+    const legacyRouteVersion = legacySemanticRouteVersion(payload.version, build, slot);
+    const compatVersion = compatibilityVersion(payload.version);
+    const revisionOverride = historyEntries.find((entry) =>
+      entry.hostVersion === host &&
+      entry.slot === slot &&
+      (entry.routeVersion ?? entry.version) === legacyRouteVersion,
+    )?.revision;
+    const archive = await ensureLegacyArchive(projectId, config, state, host, slot, revisionOverride);
+    return {
+      id: packageId,
+      version: legacyRouteVersion,
+      build,
+      releaseId: archive?.releaseId ?? null,
+      channel: slot === "test" ? "test" : "release",
+      slot,
+      compatVersion,
+      routeVersion: legacyRouteVersion,
+      // There is no journal releaseId for a legacy package. Keep the
+      // semantic route pinned so a later publish cannot move this record to
+      // the mutable compatibility branch.
+      packageVersion: legacyRouteVersion,
+      publishedAt: null,
+      manifestUrl: `/pocket/${host}/${encodeURIComponent(packageId)}/${encodeURIComponent(legacyRouteVersion)}/latest.json`,
+      hostConfigUrl: `/pocket/${host}/${encodeURIComponent(packageId)}/${encodeURIComponent(legacyRouteVersion)}/host.json`,
+      archiveUrl: archive?.archiveUrl ?? null,
+      ...(payloadSha256 ? { payloadSha256 } : {}),
+      ...(packageId === config.appId && payloadSha256 ? { rootPayloadSha256: payloadSha256 } : {}),
+    };
+  };
+  const readPackageIndex = async (host: string, packageId: string, requestedSlot?: VersionSlot): Promise<Response | undefined> => {
+    let entries: Array<import("node:fs").Dirent> = [];
+    try {
+      entries = await readdir(workspace.states, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    const indexedOwners = new Set<string>();
+    for (const file of entries) {
+      if (!file.isFile() || !file.name.endsWith(".versions.json")) continue;
+      const projectId = file.name.slice(0, -".versions.json".length);
+      if (!projectIdPattern.test(projectId)) continue;
+      try {
+        const history = await readVersionHistory(join(workspace.states, file.name));
+        if (history.entries.some((entry) => entry.hostVersion === host && (!requestedSlot || entry.slot === requestedSlot) && entry.packages.some((pkg) => pkg.id === packageId))) indexedOwners.add(projectId);
+      } catch {
+        // Ignore malformed unrelated journals while resolving the index.
+      }
+    }
+    if (indexedOwners.size > 1) return failure("package index has multiple project owners", 409);
+    for (const file of entries) {
+      if (!file.isFile() || !file.name.endsWith(".versions.json")) continue;
+      const projectId = file.name.slice(0, -".versions.json".length);
+      if (!projectIdPattern.test(projectId)) continue;
+      let history: VersionHistory;
+      let state: EditorState;
+      let config: EditorConfig;
+      try {
+        history = await readVersionHistory(join(workspace.states, file.name));
+        state = await loadState(workspace, projectId);
+        config = await loadConfig(projectDirectory(workspace, projectId), projectId);
+      } catch {
+        continue;
+      }
+      const matching = history.entries.filter((entry) => entry.hostVersion === host && entry.packages.some((pkg) => pkg.id === packageId));
+      if (matching.length === 0) continue;
+      const slot = requestedSlot ?? (state.publish?.channel === "test" ? "test" : "stable");
+      const slotEntries = matching.filter((entry) => entry.slot === slot);
+      if (slotEntries.length === 0) continue;
+      // The fixed package index represents the newest successful release in
+      // this host/slot, independent of whichever compatibility branch the
+      // last Editor state mirror happened to record.
+      const latestEntry = slotEntries[0]!;
+      const compatVersion = latestEntry.compatVersion ?? latestEntry.version;
+      // Keep the package's complete channel history in the index. The
+      // selected compat branch controls `latest`; older compatibility branches
+      // remain available as immutable descriptors for rollback/audit.
+      const records = (await Promise.all(slotEntries.map((entry) => packageIndexRecord(projectId, entry, packageId)))).filter((entry): entry is Record<string, unknown> => !!entry);
+      const legacyRecord = await legacyPackageIndexRecord(projectId, config, state, host, slot, packageId, slotEntries);
+      if (legacyRecord && !records.some((entry) =>
+        (legacyRecord.releaseId && entry.releaseId === legacyRecord.releaseId) ||
+        (legacyRecord.payloadSha256 && entry.payloadSha256 === legacyRecord.payloadSha256 && entry.version === legacyRecord.version))) {
+        records.push(legacyRecord);
+      }
+      const latestRecord = records.find((entry) => entry.releaseId === latestEntry.releaseId) ?? records[0];
+      if (!latestRecord) continue;
+      const latest = latestRecord;
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        kind: "pocket-editor-package-index",
+        projectId,
+        hostVersion: host,
+        rootAppId: latestEntry.packages[0]?.id ?? config.appId,
+        systemUI: latestEntry.packages[0]?.id ?? config.appId,
+        packageId,
+        slot,
+        channel: slot === "test" ? "test" : "release",
+        compatVersion,
+        latest,
+        versions: records,
+      }, null, 2) + "\n", { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+    }
+    // Pre-journal workspaces still have a mutable slot directory. Return a
+    // derived index so a fixed App URL remains usable after an Editor restart;
+    // nothing is written and no second catalog is persisted.
+    let projects: Array<import("node:fs").Dirent> = [];
+    try {
+      projects = await readdir(workspace.projects, { withFileTypes: true });
+    } catch {
+      projects = [];
+    }
+    const projectIds = projects.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
+    if (workspace.projectRoot && workspace.projectId && !projectIds.includes(workspace.projectId)) projectIds.push(workspace.projectId);
+    for (const projectId of projectIds) {
+      let config: EditorConfig;
+      let state: EditorState;
+      try {
+        config = await loadConfig(projectDirectory(workspace, projectId), projectId);
+        state = await loadState(workspace, projectId);
+      } catch {
+        continue;
+      }
+      const slot = requestedSlot ?? (state.publish?.channel === "test" ? "test" : "stable");
+      const physicalHosts = new Set<string>([host, "editor"]);
+      if (state.publish?.hostVersion) physicalHosts.add(state.publish.hostVersion);
+      let directory: string | undefined;
+      for (const physicalHost of physicalHosts) {
+        const candidate = pocketReleaseDirectory(workspace.updates, physicalHost, packageId, slot);
+        if (existsSync(join(candidate, "latest.json"))) {
+          directory = candidate;
+          break;
+        }
+      }
+      if (!directory) continue;
+      const payload = await readJsonFile<Record<string, unknown>>(join(directory, "payload.json"), {});
+      if (typeof payload.version !== "string") continue;
+      const build = Number(payload.build);
+      if (!Number.isSafeInteger(build) || build < 0) continue;
+      let payloadSha256: string | null = null;
+      try {
+        const envelope = await readJsonFile<Record<string, unknown>>(join(directory, "latest.json"));
+        if (typeof envelope.payload === "string") payloadSha256 = sha256Hex(Buffer.from(envelope.payload, "base64"));
+      } catch {
+        // Keep the legacy index readable even if its optional digest is absent.
+      }
+      const compatVersion = compatibilityVersion(payload.version);
+      const legacyArchive = await ensureLegacyArchive(projectId, config, state, host, slot);
+      const legacyRouteVersion = legacySemanticRouteVersion(payload.version, build, slot);
+      const manifestUrl = `/pocket/${host}/${encodeURIComponent(packageId)}/${encodeURIComponent(legacyRouteVersion)}/latest.json`;
+      const hostConfigUrl = `/pocket/${host}/${encodeURIComponent(packageId)}/${encodeURIComponent(legacyRouteVersion)}/host.json`;
+      const record = {
+        id: packageId,
+        version: payload.version,
+        build,
+        releaseId: legacyArchive?.releaseId ?? null,
+        channel: slot === "test" ? "test" : "release",
+        slot,
+        compatVersion,
+        routeVersion: legacyRouteVersion,
+        packageVersion: legacyRouteVersion,
+        publishedAt: null,
+        manifestUrl,
+        hostConfigUrl,
+        archiveUrl: legacyArchive?.archiveUrl ?? null,
+        payloadSha256,
+        rootPayloadSha256: payloadSha256,
+      };
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        kind: "pocket-editor-package-index",
+        projectId,
+        hostVersion: host,
+        rootAppId: config.appId,
+        systemUI: config.appId,
+        packageId,
+        slot,
+        channel: slot === "test" ? "test" : "release",
+        compatVersion,
+        latest: record,
+        versions: [record],
+      }, null, 2) + "\n", { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+    }
+    return undefined;
+  };
   const readPublishedUpdate = async (path: string): Promise<Response> => {
     const parts = path.split("/").filter(Boolean);
     let file: string;
-    if (parts[0] === "pocket" && parts.length >= 5) {
+    const prefixedSlot = (parts[0] === "test" || parts[0] === "stable") && parts[1] === "pocket"
+      ? parts[0] as VersionSlot
+      : undefined;
+    const canonicalOffset = prefixedSlot ? 1 : 0;
+    // The fixed App entrypoint is a journal-derived package index. It has no
+    // compat/version segment, so it must be handled before the signed
+    // manifest route below; otherwise a client could mistake the directory
+    // index for an update envelope.
+    if (parts[canonicalOffset] === "pocket" && parts.length === canonicalOffset + 4 && parts[canonicalOffset + 3] === "latest.json") {
+      const host = parts[canonicalOffset + 1]!;
+      const packageId = decodeURIComponent(parts[canonicalOffset + 2]!);
+      const index = await readPackageIndex(host, packageId, prefixedSlot);
+      return index ?? failure("not found", 404);
+    }
+    if (parts[canonicalOffset] === "pocket" && parts.length >= canonicalOffset + 5) {
+      const host = parts[canonicalOffset + 1]!;
+      const packageId = decodeURIComponent(parts[canonicalOffset + 2]!);
+      const packageVersion = parts[canonicalOffset + 3]!;
+      const artifactPath = parts.slice(canonicalOffset + 4).join("/");
+      const legacySlot = !prefixedSlot && (packageVersion === "test" || packageVersion === "stable")
+        ? packageVersion as VersionSlot
+        : undefined;
+      const slot = prefixedSlot ?? legacySlot;
+      const lookupVersion = legacySlot ? undefined : packageVersion;
+      const resolved = await findPublishedPackage(host, packageId, lookupVersion, slot);
+      if (resolved) {
+        try {
+          file = safeArtifactFile(workspace.updates, `${resolved.package.artifactRoot}/${artifactPath}`);
+          let mutableSlot = slot;
+          // A prefixed route may also address an immutable releaseId. Only the
+          // compat branch is a mutable pointer; never rewrite a pinned host.
+          if (mutableSlot && resolved.entry.packageVersion === packageVersion) mutableSlot = undefined;
+          if (!mutableSlot && artifactPath === "host.json" && resolved.entry.packages[0]?.id === packageId &&
+            packageVersion === (resolved.entry.compatVersion ?? resolved.entry.version)) {
+            const history = await readVersionHistory(versionHistoryPath(workspace.states, resolved.projectId));
+            const current = currentVersion(history, resolved.entry.slot, resolved.entry.hostVersion, resolved.entry.compatVersion ?? resolved.entry.version);
+            if (current?.releaseId === resolved.entry.releaseId) mutableSlot = resolved.entry.slot;
+          }
+          return readPublishedArtifact(file, mutableSlot);
+        } catch (error) {
+          if (!slot || !(artifactPath.startsWith("blobs/") || artifactPath.startsWith("bundles/") || artifactPath.startsWith("assets/"))) throw error;
+          // A client may have fetched a prior signed manifest and still be
+          // downloading its content-addressed blobs after the latest pointer
+          // moved. Keep every immutable history entry readable for that race.
+          const old = await findPublishedPackage(host, packageId, undefined, slot, true, artifactPath);
+          if (old) {
+            file = safeArtifactFile(workspace.updates, `${old.package.artifactRoot}/${artifactPath}`);
+            return readPublishedArtifact(file);
+          }
+          throw error;
+        }
+      }
+      if (artifactPath === "host.json" && (prefixedSlot || !slot)) {
+        const legacyAggregate = await readLegacyAggregate(host, packageId, packageVersion, packageVersion);
+        if (legacyAggregate) return legacyAggregate;
+      }
+      if (!slot) {
+        // A pre-journal semantic route (for example 0.1.0-test.3) is pinned
+        // to the retained mutable legacy package, not to today's compat
+        // pointer. Match its payload version before serving any artifact so a
+        // later publish cannot make an old index record resolve to new bytes.
+        const legacySlot = /-test\.[0-9]+$/.test(packageVersion) ? "test" : "stable";
+        const legacyFile = await findLegacyArtifact(host, packageId, legacySlot, artifactPath, packageVersion);
+        if (legacyFile) return readPublishedArtifact(legacyFile);
+        return failure("not found", 404);
+      }
+      // Keep serving pre-history projects created by an older Editor build.
+      const legacyRouteVersion = slot === "test" && !/-test\.[0-9]+$/.test(packageVersion) ? undefined : packageVersion;
+      const legacyFile = await findLegacyArtifact(host, packageId, slot, artifactPath, legacyRouteVersion);
+      // legacy compatibility resolution intentionally remains read-only
+      if (legacyFile) return readPublishedArtifact(legacyFile, slot);
       file = safeArtifactFile(workspace.updates, parts.join("/"));
     } else if (parts[0] === "updates" && parts.length >= 3) {
       const id = asProjectId(parts[1]);
@@ -1349,14 +2790,22 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         packageId = artifactParts[1];
         artifactParts = artifactParts.slice(2);
       }
-      const releaseDir = pocketReleaseDirectory(workspace.updates, published.hostVersion, packageId, published.packageVersion);
-      file = safeArtifactFile(releaseDir, artifactParts.join("/"));
+      const slot = published.channel === "test" ? "test" : "stable";
+      const history = await readVersionHistory(versionHistoryPath(workspace.states, id));
+      const compatVersion = published.packageVersion;
+      const current = currentVersion(history, slot, published.hostVersion, compatVersion);
+      const packageEntry = current?.packages.find((candidate) => candidate.id === packageId);
+      if (current && packageEntry && current.hostVersion === published.hostVersion) {
+        file = safeArtifactFile(workspace.updates, `${packageEntry.artifactRoot}/${artifactParts.join("/")}`);
+        return readPublishedArtifact(file, slot);
+      }
+      const legacyReleaseDir = pocketReleaseDirectory(workspace.updates, published.hostVersion, packageId, slot);
+      file = safeArtifactFile(legacyReleaseDir, artifactParts.join("/"));
     } else {
       return failure("not found", 404);
     }
-    return new Response(await readFile(file), { headers: { "content-type": contentType(file), "cache-control": "no-store" } });
+    return readPublishedArtifact(file);
   };
-  let deviceUpdates: ReturnType<typeof startUpdateEndpoint> | undefined;
   const versionBackendOrigin = (): string => {
     if (!deviceUpdates) {
       const hostname = options.updateHost ?? (process.env.POCKET_EDITOR_UPDATE_HOST || chooseUpdateHost());
@@ -1375,10 +2824,11 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       error = cause instanceof Error ? cause.message : String(cause);
     }
     const packageIds = new Set<string>([config.appId]);
-    if (state.builtRevision !== null) {
+    const publishedRevision = state.publish?.revision ?? state.builtRevision;
+    if (publishedRevision !== null && publishedRevision !== undefined) {
       try {
         const snapshot = await readResourceSnapshot(
-          safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`),
+          safeArtifactFile(workspace.builds, `${id}/${publishedRevision}/${RESOURCE_SNAPSHOT_FILE}`),
         );
         for (const pkg of snapshot.packages) packageIds.add(pkg.id);
       } catch {
@@ -1386,20 +2836,90 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         // resource snapshot exists. Never invent child packages on failure.
       }
     }
+    const history = await readVersionHistory(versionHistoryPath(workspace.states, id));
+    const compatVersion = await resolveCompatVersion(id, config, state, history);
+    const visibleHistory = history.entries.filter((entry) => entry.hostVersion === updateHostVersion);
+    const historyEntries = visibleHistory.map((entry) => ({
+      id: entry.id,
+      releaseId: entry.releaseId,
+      slot: entry.slot,
+      channel: entry.channel,
+      version: entry.version,
+      build: entry.build,
+      revision: entry.revision,
+      publishedAt: entry.publishedAt,
+      hostVersion: entry.hostVersion,
+      packageVersion: entry.packageVersion,
+      payloadSha256: entry.payloadSha256,
+      compatVersion: entry.compatVersion ?? entry.version,
+      routeVersion: entry.routeVersion ?? entry.version,
+      archiveUrl: `/releases/${id}/${entry.releaseId}.tar.gz`,
+      appConfigUrl: `${origin}${historyPackagePath(entry.hostVersion, config.appId, entry.releaseId)}/host.json`,
+      packages: entry.packages.map((pkg) => {
+        const route = historyPackagePath(entry.hostVersion, pkg.id, entry.packageVersion);
+        return {
+          id: pkg.id,
+          version: pkg.version,
+          build: pkg.build,
+          updateUrl: `${origin}${route}/latest.json`,
+          manifestUrl: `${origin}${route}/latest.json`,
+          hostConfigUrl: `${origin}${route}/host.json`,
+        };
+      }),
+    }));
     const slots = [] as Array<{
       name: "test" | "stable";
+      version?: string;
+      build?: number;
+      releaseId?: string | null;
+      archiveUrl?: string;
       packages: Array<{ id: string; version: string; build: number; manifestUrl: string; hostConfigUrl: string }>;
     }>;
     for (const name of ["test", "stable"] as const) {
       const packages = [] as Array<{ id: string; version: string; build: number; manifestUrl: string; hostConfigUrl: string }>;
+      // Slot cards follow the newest successful release across all
+      // compatibility branches. The fixed index is the public selector;
+      // branch current pointers remain only for legacy compat routes.
+      const current = history.entries.find((entry) => entry.slot === name && entry.hostVersion === updateHostVersion);
+      if (current) {
+        const slotCompatVersion = current.compatVersion ?? current.version;
+        for (const pkg of current.packages) {
+          const route = `/${channelUpdatePrefix(name === "test" ? "test" : "release")}/pocket/${updateHostVersion}/${encodeURIComponent(pkg.id)}/${slotCompatVersion}`;
+          packages.push({
+            id: pkg.id,
+            version: pkg.version,
+            build: pkg.build,
+            manifestUrl: `${origin}${route}/latest.json`,
+            hostConfigUrl: `${origin}${route}/host.json`,
+          });
+        }
+        slots.push({ name, version: current.version, build: current.build, releaseId: current.releaseId, archiveUrl: `/releases/${id}/${current.releaseId}.tar.gz`, packages });
+        continue;
+      }
+      const physicalHosts = new Set<string>([updateHostVersion, "editor"]);
+      if (state.publish?.hostVersion) physicalHosts.add(state.publish.hostVersion);
+      let legacyVersion: string | undefined;
+      let legacyBuild: number | undefined;
       for (const packageId of packageIds) {
-        const directory = pocketReleaseDirectory(workspace.updates, updateHostVersion, packageId, name);
-        if (!existsSync(join(directory, "latest.json"))) continue;
+        let directory: string | undefined;
+        for (const physicalHost of physicalHosts) {
+          const candidate = pocketReleaseDirectory(workspace.updates, physicalHost, packageId, name);
+          if (existsSync(join(candidate, "latest.json"))) {
+            directory = candidate;
+            break;
+          }
+        }
+        if (!directory) continue;
         const payload = await readJsonFile<Record<string, unknown>>(join(directory, "payload.json"), {});
         const version = payload.version;
         const build = payload.build;
         if (typeof version !== "string" || !Number.isSafeInteger(build) || Number(build) < 0) continue;
-        const route = `/pocket/${updateHostVersion}/${packageId}/${name}`;
+        if (packageId === config.appId) {
+          legacyVersion = version;
+          legacyBuild = Number(build);
+        }
+        const routeVersion = legacySemanticRouteVersion(version, Number(build), name);
+        const route = `/${channelUpdatePrefix(name === "test" ? "test" : "release")}/pocket/${updateHostVersion}/${encodeURIComponent(packageId)}/${encodeURIComponent(routeVersion)}`;
         packages.push({
           id: packageId,
           version,
@@ -1408,14 +2928,45 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           hostConfigUrl: `${origin}${route}/host.json`,
         });
       }
-      slots.push({ name, packages });
+      const legacyArchive = packages.length > 0 ? await ensureLegacyArchive(id, config, state, updateHostVersion, name) : undefined;
+      slots.push({ name, ...(legacyVersion ? { version: legacyVersion } : {}), ...(legacyBuild !== undefined ? { build: legacyBuild } : {}), releaseId: legacyArchive?.releaseId ?? null, ...(legacyArchive ? { archiveUrl: legacyArchive.archiveUrl } : {}), packages });
+    }
+    const preferredSlots: VersionSlot[] = state.publish?.channel === "test" ? ["test", "stable"] : ["stable", "test"];
+    const selectedEntry = preferredSlots
+      .map((slot) => history.entries.find((entry) => entry.slot === slot && entry.hostVersion === updateHostVersion))
+      .find((entry): entry is PublishedVersion => !!entry);
+    let appConfigUrl: string | undefined;
+    if (selectedEntry) {
+      appConfigUrl = `${origin}/${channelUpdatePrefix(selectedEntry.slot === "test" ? "test" : "release")}/pocket/${updateHostVersion}/${encodeURIComponent(config.appId)}/latest.json`;
+    } else {
+      // Pre-journal releases remain discoverable through their signed payload
+      // version. This keeps a service restart from hiding an already deployed
+      // test.3 package merely because its history sidecar did not exist yet.
+      const physicalHosts = new Set<string>([updateHostVersion, "editor"]);
+      if (state.publish?.hostVersion) physicalHosts.add(state.publish.hostVersion);
+      for (const slot of preferredSlots) {
+        for (const physicalHost of physicalHosts) {
+          const directory = pocketReleaseDirectory(workspace.updates, physicalHost, config.appId, slot);
+          const payload = await readJsonFile<Record<string, unknown>>(join(directory, "payload.json"), {});
+          if (typeof payload.version !== "string") continue;
+          appConfigUrl = `${origin}/${channelUpdatePrefix(slot === "test" ? "test" : "release")}/pocket/${updateHostVersion}/${encodeURIComponent(config.appId)}/latest.json`;
+          break;
+        }
+        if (appConfigUrl) break;
+      }
     }
     return {
       origin,
       hostVersion: updateHostVersion,
+      packageVersion: compatVersion,
+      packageVersionSource: updatePackageVersionSource,
+      hostVersionSource: updateHostVersionSource,
       lan: new URL(origin).hostname !== "127.0.0.1",
       ...(error ? { error } : {}),
       slots,
+      current: { ...history.current },
+      history: historyEntries,
+      ...(appConfigUrl ? { appConfigUrl } : {}),
     };
   };
   const devices = createEditorDeviceManager({
@@ -1429,9 +2980,11 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       const origin = local ? `http://127.0.0.1:${server.port}` : versionBackendOrigin();
       if (!local && new URL(origin).hostname === "127.0.0.1") throw new Error("Physical device updates require a LAN address, not loopback");
       const config = await loadConfig(projectDir(id), id);
-      const { key } = await editorUpdateTrust(workspace, id);
-      return { url: `${origin}/pocket/${updateHostVersion}/${config.appId}/test/latest.json`, keyId: key.keyId, publicKey: key.publicKeyBase64,
-        namespace: `editor_${id}`, ...(!local ? { debugHttpHost: new URL(origin).hostname } : {}) };
+      const projectState = await getState(id);
+      if (!projectState.publish) return undefined;
+      const channel = projectState.publish?.channel === "test" ? "test" : "release";
+      const hostVersion = projectState.publish.hostVersion ?? updateHostVersion;
+      return { hostConfigUrl: `${origin}/${channelUpdatePrefix(channel === "test" ? "test" : "release")}/pocket/${hostVersion}/${encodeURIComponent(config.appId)}/latest.json` };
     },
   });
   const deploymentWriting = (id: string) => devices.isBusy(id) && !devices.listDeployments().some((job) => job.projectId === id && job.state === "running");
@@ -1441,7 +2994,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     logs: job.logs.map((entry) => `[${entry.phase}] ${entry.line}`),
     error: job.error, startedAt: job.startedAt, finishedAt: job.finishedAt,
   });
-  const localBluetooth = process.platform === "darwin" ? createLocalBluetoothProvider() : undefined;
+  const localBluetooth = ["darwin", "win32"].includes(process.platform) ? createLocalBluetoothProvider() : undefined;
   const preview = createPreviewManager({
     localBluetooth,
     width: previewDevice.screenWidth,
@@ -1542,7 +3095,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
 
   const server = Bun.serve({
     hostname: options.host ?? "127.0.0.1",
-    port: options.port ?? Number(process.env.POCKET_EDITOR_PORT ?? 8790),
+    port: options.port ?? Number(process.env.POCKET_EDITOR_PORT ?? 8791),
     idleTimeout: 120,
     maxRequestBodySize: maxAssetBytes,
     async fetch(request): Promise<Response> {
@@ -1552,6 +3105,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       const path = url.pathname;
       const method = request.method.toUpperCase();
       let releaseProjectWrite: (() => void) | undefined;
+      let releasePublishSlot: (() => void) | undefined;
       try {
         if (path === "/api/preview/device" && method === "GET") return json(previewDevice);
         if (path === "/health" && method === "GET") return json({ ok: true, service: "pocket-editor", csrfToken, bluetooth: { local: !!localBluetooth }, workspace: workspace.root, ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}) });
@@ -1573,13 +3127,42 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         if (path === "/api/codex/status" && method === "GET") return json(await codex.status());
         if (path === "/api/codex/models" && method === "GET") return json(await codex.models());
         if (path === "/api/devices" && method === "GET") return json({ devices: await devices.listDevices() });
-        if ((path.startsWith("/updates/") || path.startsWith("/pocket/")) && (method === "GET" || method === "HEAD")) {
+        if ((path.startsWith("/updates/") || path.startsWith("/pocket/") || path.startsWith("/test/pocket/") || path.startsWith("/stable/pocket/")) && (method === "GET" || method === "HEAD")) {
           return await readPublishedUpdate(path);
         }
         if (path.startsWith("/releases/") && method === "GET") {
+          const offline = path.match(/^\/releases\/([a-z][a-z0-9-]{0,47})\/(offline-[A-Za-z0-9][A-Za-z0-9._-]{0,127})\.tar\.gz$/);
+          if (offline) {
+            const archive = safeArtifactFile(join(workspace.updates, ".downloads", offline[1]!), `${offline[2]}.tar.gz`);
+            return new Response(await readFile(archive), { headers: { "content-type": "application/gzip", "content-disposition": `attachment; filename="${offline[2]}.tar.gz"` } });
+          }
+          const legacy = path.match(/^\/releases\/([a-z][a-z0-9-]{0,47})\/(legacy-[A-Za-z0-9][A-Za-z0-9._-]{0,127})\.tar\.gz$/);
+          if (legacy) {
+            const archive = safeArtifactFile(join(workspace.updates, ".downloads", legacy[1]!), `${legacy[2]}.tar.gz`);
+            return new Response(await readFile(archive), { headers: { "content-type": "application/gzip", "content-disposition": `attachment; filename="${legacy[1]}-${legacy[2]}.tar.gz"` } });
+          }
+          const historical = path.match(/^\/releases\/([a-z][a-z0-9-]{0,47})\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.tar\.gz$/);
+          if (historical) {
+            const history = await readVersionHistory(versionHistoryPath(workspace.states, historical[1]!));
+            const entry = history.entries.find((candidate) => candidate.releaseId === historical[2]);
+            if (!entry) return failure("not found", 404);
+            const archive = safeArtifactFile(workspace.updates, entry.archivePath);
+            return new Response(await readFile(archive), { headers: { "content-type": "application/gzip", "content-disposition": `attachment; filename="${historical[1]}-${historical[2]}.tar.gz"` } });
+          }
           const match = path.match(/^\/releases\/([a-z][a-z0-9-]{0,47})\.tar\.gz$/);
           if (!match) return failure("not found", 404);
-          const archive = safeArtifactFile(workspace.updates, `${match[1]}.tar.gz`);
+          const state = await getState(match[1]!);
+          const slot = state.publish?.channel === "test" ? "test" : "stable";
+          const history = await readVersionHistory(versionHistoryPath(workspace.states, match[1]!));
+          const current = currentVersion(history, slot);
+          let archive: string;
+          if (current) {
+            archive = safeArtifactFile(workspace.updates, current.archivePath);
+          } else {
+            const config = await loadConfig(projectDir(match[1]!), match[1]!);
+            const legacyArchive = await ensureLegacyArchive(match[1]!, config, state, updateHostVersion, slot);
+            archive = legacyArchive?.archivePath ?? safeArtifactFile(workspace.updates, `${match[1]}.tar.gz`);
+          }
           return new Response(await readFile(archive), { headers: { "content-type": "application/gzip", "content-disposition": `attachment; filename="${match[1]}.tar.gz"` } });
         }
         if (path === "/api/projects" && method === "GET") return json(await listProjects(workspace));
@@ -1846,23 +3429,63 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             const config = await loadConfig(projectDir(id), id);
             return json(await versionBackendSnapshot(id, state, config));
           }
+          if (parts[3] === "package-offline" && method === "POST") {
+            if (state.busy) return failure("build is still running", 409);
+            const config = await loadConfig(projectDir(id), id);
+            const offline = await publishProject(workspace, id, config, state, `http://127.0.0.1:${server.port}`, updateHostVersion, "release", { offline: true, hostVersionSource: updateHostVersionSource, packageVersion: await resolveCompatVersion(id, config, state) });
+            if (!offline.offlineFilename) throw new Error("offline package did not produce an archive");
+            return json({
+              archiveUrl: `/releases/${id}/${offline.offlineFilename}`,
+              filename: offline.offlineFilename,
+            });
+          }
           if ((parts[3] === "publish" || parts[3] === "package") && method === "POST") {
             const body = await parseJsonBody(request);
             if (body.channel !== undefined && !["test", "release"].includes(body.channel as string)) return failure("publish channel must be test or release", 400);
             if (state.busy) return failure("build is still running", 409);
             const config = await loadConfig(projectDir(id), id);
+            const publishChannel = body.channel === "test" ? "test" : "release";
+            const publishSlot = versionSlot(publishChannel);
+            const publishHistory = await readVersionHistory(versionHistoryPath(workspace.states, id));
+            const publishCompatVersion = await resolveCompatVersion(id, config, state, publishHistory);
+            const publishPackageIds = new Set<string>([config.appId]);
+            if (state.builtRevision !== null) {
+              try {
+                const snapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`));
+                for (const pkg of snapshot.packages) publishPackageIds.add(pkg.id);
+              } catch {
+                // publishProject performs the authoritative snapshot check;
+                // retain the root lock when a stale build has no snapshot.
+              }
+            }
+            // The public fixed index omits compatVersion, so a package slot is
+            // globally owned across compatibility branches. Serialize by
+            // host/slot/package before scanning all journal entries.
+            const publishLockKeys = [...publishPackageIds].sort().map((packageId) => `${updateHostVersion}/${packageId}/${publishSlot}`);
+            if (publishLockKeys.some((key) => publishSlots.has(key))) return failure("another publish is using this package slot; retry when it completes", 409);
+            for (const key of publishLockKeys) publishSlots.add(key);
+            releasePublishSlot = () => publishLockKeys.forEach((key) => publishSlots.delete(key));
+            for (const packageId of publishPackageIds) {
+              const occupied = await findPublishedPackage(updateHostVersion, packageId, undefined, publishSlot, true);
+              const legacyOwner = occupied ? undefined : await findLegacyPublishedOwner(updateHostVersion, packageId, publishSlot, id);
+              const owner = occupied?.projectId ?? legacyOwner;
+              if (owner && owner !== id) {
+                return failure(`package ${packageId} ${publishSlot} slot is owned by project ${owner}; use a unique appId`, 409);
+              }
+            }
             let boundOrigin = `http://127.0.0.1:${server.port}`;
             try {
               boundOrigin = versionBackendOrigin();
             } catch (error) {
               pushLog(state, `LAN version backend unavailable: ${error instanceof Error ? error.message : String(error)}`);
             }
-            const result = await publishProject(workspace, id, config, state, boundOrigin, updateHostVersion, body.channel === "test" ? "test" : "release");
+            const result = await publishProject(workspace, id, config, state, boundOrigin, updateHostVersion, publishChannel, { hostVersionSource: updateHostVersionSource, packageVersion: publishCompatVersion });
             return json({
               status: publicStatus(id, state),
               manifest: result.envelope,
               manifestUrl: state.publish?.manifestUrl,
               hostConfigUrl: state.publish?.hostConfigUrl,
+              appConfigUrl: state.publish?.appConfigUrl,
               updateUrl: state.publish?.updateUrl,
               archiveUrl: `/releases/${id}.tar.gz`,
               ...(state.publish?.packages ? { packages: state.publish.packages } : {}),
@@ -1882,6 +3505,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         const status = (error as unknown as { status?: number })?.status ?? (message.includes("not found") ? 404 : 400);
         return failure(message, status);
       } finally {
+        releasePublishSlot?.();
         releaseProjectWrite?.();
       }
     },
@@ -1919,12 +3543,13 @@ if (import.meta.main) {
   const updateHost = option("update-host");
   const updatePortValue = option("update-port");
   const updateHostVersion = option("update-host-version");
+  const updatePackageVersion = option("update-package-version");
   if (args.length > 0) throw new Error(`unknown editor option ${args[0]}`);
   const port = portValue === undefined ? undefined : Number(portValue);
   const updatePort = updatePortValue === undefined ? undefined : Number(updatePortValue);
   if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) throw new Error("--port must be an integer from 0 through 65535");
   if (updatePort !== undefined && (!Number.isInteger(updatePort) || updatePort < 0 || updatePort > 65535)) throw new Error("--update-port must be an integer from 0 through 65535");
-  const server = await startEditor({ projectRoot, flutterRoot, workspace, host, port, updateHost, updatePort, updateHostVersion });
+  const server = await startEditor({ projectRoot, flutterRoot, workspace, host, port, updateHost, updatePort, updateHostVersion, updatePackageVersion });
   console.log(`Pocket Studio listening at http://${server.hostname}:${server.port}`);
   console.log(`workspace: ${resolve(workspace ?? process.env.POCKET_EDITOR_WORKSPACE ?? join(root, ".pocket-build/editor-workspace"))}`);
   if (projectRoot) console.log(`project: ${resolve(projectRoot)}`);

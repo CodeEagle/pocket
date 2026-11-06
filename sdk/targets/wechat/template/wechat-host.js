@@ -173,9 +173,27 @@ class PocketWechatHost {
     this.exports = this.instance.exports;
     this.host = this.exports.web_create(this.logicalWidth, this.logicalHeight, this.scale, 0, 0);
     if (!this.host) throw new Error("PocketJS WASM could not allocate its runtime host.");
-    this.check(this.exports.web_wechat_boot_index
-      ? this.exports.web_wechat_boot_index(this.host, this.scale, this.config.index || 0)
-      : this.exports.web_wechat_boot(this.host, this.scale), "PocketJS QuickJS guest did not boot.");
+    const external = this.config.externalGuest;
+    if (external) {
+      if (!(external.qjbc instanceof Uint8Array) || !(external.pak instanceof Uint8Array) ||
+          typeof this.exports.web_boot !== "function" || typeof this.exports.web_set_identity !== "function") {
+        throw new Error("PocketJS external Guest requires QJBC, PAK and the generic Web boot ABI.");
+      }
+      const identity = encodeUtf8(String(this.config.appId || "pocket.web.guest"));
+      this.withBytes(identity, (identityPointer, identityLength) => this.check(
+        this.exports.web_set_identity(this.host, identityPointer, identityLength, Number(external.hostAbi || 1)),
+        "PocketJS Web Guest identity was rejected.",
+      ));
+      this.withBytes(external.qjbc, (qjbcPointer, qjbcLength) => this.withBytes(external.pak, (pakPointer, pakLength) => this.check(
+        this.exports.web_boot(this.host, qjbcPointer, qjbcLength, pakPointer, pakLength,
+          Number(external.tickHz || this.config.tickHz || 60), this.scale),
+        "PocketJS external QuickJS guest did not boot.",
+      )));
+    } else {
+      this.check(this.exports.web_wechat_boot_index
+        ? this.exports.web_wechat_boot_index(this.host, this.scale, this.config.index || 0)
+        : this.exports.web_wechat_boot(this.host, this.scale), "PocketJS QuickJS guest did not boot.");
+    }
     this.visible = !!this.isActive();
     this.reportViewport();
     this.draw();

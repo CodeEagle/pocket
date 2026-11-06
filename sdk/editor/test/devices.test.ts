@@ -134,20 +134,18 @@ test("plan uses only fixed build/run argv and the trusted consumer roots", async
   }
 });
 
-test("trusted Editor update public configuration reaches the simulator command", async () => {
+test("one fixed Editor index reaches the simulator command", async () => {
   const fixture = consumerFixture();
   const manager = new EditorDeviceManager({
     projectDirectory: () => fixture.js,
     flutterDirectory: () => fixture.root,
     commandDirectory: fixture.root,
     spawn: () => immediateProcess(0, machineDevices()),
-    updateConfig: async () => ({ url: "http://127.0.0.1:8791/updates/fixture-app/latest.json", keyId: "editor-fixture", publicKey: Buffer.alloc(32, 1).toString("base64"), namespace: "editor_fixture" }),
+    updateConfig: async () => ({ hostConfigUrl: "http://127.0.0.1:8791/test/pocket/0.1.0/fixture.app/latest.json" }),
   });
   try {
     const plan = await manager.planDeployment({ projectId: "fixture-app", deviceId: "ios-sim-1" });
-    expect(plan.run.command).toContain("--dart-define=POCKET_UPDATE_URL=http://127.0.0.1:8791/updates/fixture-app/latest.json");
-    expect(plan.run.command).toContain("--dart-define=POCKET_STORE_NAMESPACE=editor_fixture");
-    expect(plan.run.command).toContain(`--dart-define=POCKET_UPDATE_PUBLIC_KEY=${Buffer.alloc(32, 1).toString("base64")}`);
+    expect(plan.run.command.filter((arg) => arg.startsWith("--dart-define=POCKET_"))).toEqual(["--dart-define=POCKET_HOST_CONFIG_URL=http://127.0.0.1:8791/test/pocket/0.1.0/fixture.app/latest.json"]);
     expect(plan.run.command.some((arg) => /private|pem/.test(arg))).toBe(false);
   } finally {
     await manager.dispose();
@@ -155,22 +153,17 @@ test("trusted Editor update public configuration reaches the simulator command",
   }
 });
 
-test("physical device plans receive LAN update trust and its exact debug HTTP host", async () => {
+test("physical device plans receive only the fixed LAN host index", async () => {
   const fixture = consumerFixture();
   const manager = new EditorDeviceManager({
     projectDirectory: () => fixture.js, flutterDirectory: () => fixture.root,
     commandDirectory: fixture.root, spawn: () => immediateProcess(0, machineDevices()),
-    updateConfig: async () => ({ url: "http://192.168.50.230:8792/updates/fixture-app/latest.json",
-      keyId: "editor-fixture", publicKey: Buffer.alloc(32, 1).toString("base64"),
-      namespace: "editor_fixture", debugHttpHost: "192.168.50.230" }),
+    updateConfig: async () => ({ hostConfigUrl: "http://192.168.50.230:8791/test/pocket/0.1.0/fixture.app/latest.json" }),
   });
   try {
     for (const deviceId of ["00008101-000000000000001E", "emulator-5554"]) {
       const plan = await manager.planDeployment({ projectId: "fixture-app", deviceId });
-      expect(plan.run.command).toContain("--dart-define=POCKET_UPDATE_URL=http://192.168.50.230:8792/updates/fixture-app/latest.json");
-      expect(plan.run.command).toContain("--dart-define=POCKET_UPDATE_DEBUG_HTTP_HOST=192.168.50.230");
-      expect(plan.run.command).toContain("--dart-define=POCKET_UPDATE_KEY_ID=editor-fixture");
-      expect(plan.run.command).toContain("--dart-define=POCKET_STORE_NAMESPACE=editor_fixture");
+      expect(plan.run.command.filter((arg) => arg.startsWith("--dart-define=POCKET_"))).toEqual(["--dart-define=POCKET_HOST_CONFIG_URL=http://192.168.50.230:8791/test/pocket/0.1.0/fixture.app/latest.json"]);
     }
   } finally { await manager.dispose(); rmSync(fixture.root, { recursive: true, force: true }); }
 });
