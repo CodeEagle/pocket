@@ -56,6 +56,7 @@ function writeProject(project: string, build: number, version: string): void {
           "platform.storage.remove",
           "system.runtime.configure",
           "system.runtime.create",
+          "system.runtime.prepareOpen",
           "system.runtime.awaitFirstFrame",
           "system.runtime.destroy",
           "system.runtime.post",

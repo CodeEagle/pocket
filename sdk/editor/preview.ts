@@ -2981,7 +2981,31 @@ class PreviewSession {
           ? params.memory as JsonRecord
           : undefined;
         const child = await this.createChildRuntime(appId, memory);
-        await respond({ instanceId: child.instanceId, appId: child.appId, generation: child.generation });
+        await respond({
+          instanceId: child.instanceId,
+          appId: child.appId,
+          generation: child.generation,
+          // Artifact loading is complete when createChildRuntime resolves.
+          // Local preview has no trusted OTA source, so this is only the
+          // admission fact required by the JS runtime gate.
+          ...(params.prepareForOpen === true ? { preparedForOpen: true } : {}),
+        });
+        return;
+      }
+      if (capability === "system.runtime.prepareOpen") {
+        const child = this.runtimeByInstance(params.instanceId);
+        if (!child || child === this.rootRuntime) throw new Error("runtime.prepareOpen instance does not exist");
+        if (Number(params.generation) !== child.generation) throw new Error("runtime.prepareOpen generation is stale");
+        // Editor preview has no trusted OTA resolver. Keep the resident native
+        // runtime and generation unchanged instead of claiming an update.
+        await respond({
+          instanceId: child.instanceId,
+          appId: child.appId,
+          previousGeneration: child.generation,
+          generation: child.generation,
+          updated: false,
+          configured: false,
+        });
         return;
       }
       if (capability === "system.runtime.awaitFirstFrame") {

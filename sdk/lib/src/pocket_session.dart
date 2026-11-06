@@ -134,6 +134,7 @@ final class PocketSession extends ChangeNotifier {
   bool ready = false;
   bool _disposed = false;
   bool _busy = true;
+  bool _packageAdmissionInFlight = false;
   bool _recovering = false;
   Object? failure;
   Future<void>? _promotion;
@@ -141,6 +142,7 @@ final class PocketSession extends ChangeNotifier {
   String stage = 'initializing';
   String? lastError;
   Timer? _mountTimer;
+  Future<void>? _mountOperation;
   Timer? _healthTimer;
   Timer? _startupTimer;
   Future<void>? _shutdown;
@@ -161,16 +163,21 @@ final class PocketSession extends ChangeNotifier {
   /// A widget can be removed while the asset bundle or update store is still
   /// loading. Keeping the future lets [close] wait for that work and prevents
   /// a second caller from constructing a second plugin/update generation.
-  Future<void> initialize() {
+  ///
+  /// When [prepareForOpen] is true and signed updates are configured, the
+  /// remote manifest is checked and any candidate is staged before the bridge
+  /// is configured. This is intentionally a one-shot startup gate; callers
+  /// must pass it on the first initialize call.
+  Future<void> initialize({bool prepareForOpen = false}) {
     if (_disposed) return Future<void>.error(StateError('Session is closed'));
     final existing = _initializeFuture;
     if (existing != null) return existing;
-    final future = _initialize();
+    final future = _initialize(prepareForOpen: prepareForOpen);
     _initializeFuture = future;
     return future;
   }
 
-  Future<void> _initialize() async {
+  Future<void> _initialize({bool prepareForOpen = false}) async {
     await performance.initialize();
     _metadata = Map<String, dynamic>.from(
       jsonDecode(await rootBundle.loadString(config.metadataAsset)) as Map,
@@ -215,12 +222,15 @@ final class PocketSession extends ChangeNotifier {
         store: PocketPackageStore(packageRoot),
         expectedRuntimeAbi: _metadata['runtimeAbi'] as String,
         requireBytecode: true,
-        // There is no embedded package to activate in downloadOnOpen mode,
-        // but its required bootstrap build is still the host's release
-        // floor. The coordinator's strict-newer check uses build - 1 so a
-        // remote package at the same build is accepted while older builds
-        // remain rejected.
-        minimumBuild: _downloadOnOpen ? embeddedBuild - 1 : embeddedBuild,
+        // There is no embedded package to activate in downloadOnOpen mode.
+        // An explicit prepareForOpen gate also needs to admit a signed package
+        // at the embedded build when no remote baseline exists; older builds
+        // remain rejected by the coordinator's floor. Once a remote baseline
+        // exists, its version ID still prevents same-build replay.
+        // Keep one build of headroom so a signed package at the embedded
+        // build can be admitted on a first check. The final admission below
+        // still rejects every package below the embedded executable floor.
+        minimumBuild: embeddedBuild - 1,
         trustStore: trustStore,
         trustPolicyUri: updateConfig.trustPolicyConfigured
             ? Uri.parse(updateConfig.trustPolicyUrl!)
@@ -242,22 +252,35 @@ final class PocketSession extends ChangeNotifier {
         return;
       }
       _updates = updates;
-      if (_downloadOnOpen) {
+      if (_downloadOnOpen || prepareForOpen) {
         // Opening a remote mini-app first reuses only a verified healthy
         // package. With no healthy cache, the coordinator performs the full
         // signed-manifest/blob admission path and stages a candidate; no
-        // local qjbc/PAK fallback is available in this mode.
+        // local qjbc/PAK fallback is available in this mode. An explicit
+        // prepareForOpen gate always performs that signed check, even when a
+        // healthy cache exists. This is what makes a mini-app entry check
+        // different from the normal offline cache bootstrap.
         try {
-          active = await updates.lastGood(allowActiveFallback: false);
-          if (_disposed) return;
-          if (active != null && active!.build < _embeddedBuild) {
-            // Keep the old pointers as a downgrade baseline. A stale healthy
-            // cache must not run, but prepare() can still use it to enforce
-            // the bootstrap floor while fetching the current release.
-            active = null;
-          }
-          if (active == null) {
-            active = await _prepareOnOpen(updates);
+          if (prepareForOpen) {
+            active = await _prepareOnOpen(
+              updates,
+              mountedPackage: active?.package,
+            );
+          } else {
+            active = await updates.lastGood(allowActiveFallback: false);
+            if (_disposed) return;
+            if (active != null && active!.build < _embeddedBuild) {
+              // Keep the old pointers as a downgrade baseline. A stale healthy
+              // cache must not run, but prepare() can still use it to enforce
+              // the bootstrap floor while fetching the current release.
+              active = null;
+            }
+            if (active == null) {
+              active = await _prepareOnOpen(
+                updates,
+                mountedPackage: active?.package,
+              );
+            }
           }
         } catch (error) {
           if (_disposed) return;
@@ -293,18 +316,20 @@ final class PocketSession extends ChangeNotifier {
       await _configureBridge(active);
       await _withAdmittedPackage(active, publishInitial);
     } catch (error) {
-      if (_downloadOnOpen) {
+      if (_downloadOnOpen || prepareForOpen) {
         final failed = active;
-        final fallback = failed == null
-            ? null
-            : await _verifiedFallback(failed);
-        if (fallback != null && !_disposed) {
-          active = fallback;
-          try {
-            await _configureBridge(fallback);
-            await _withAdmittedPackage(fallback, publishInitial);
-            return;
-          } catch (_) {}
+        if (_downloadOnOpen && !prepareForOpen) {
+          final fallback = failed == null
+              ? null
+              : await _verifiedFallback(failed);
+          if (fallback != null && !_disposed) {
+            active = fallback;
+            try {
+              await _configureBridge(fallback);
+              await _withAdmittedPackage(fallback, publishInitial);
+              return;
+            } catch (_) {}
+          }
         }
         _failWithoutEmbedded(error);
         rethrow;
@@ -326,11 +351,13 @@ final class PocketSession extends ChangeNotifier {
   /// multiple blobs; awaiting the original future in `finally` lets its
   /// temporary files and transport stream finish their cancellation cleanup.
   Future<PocketPreparedPackage> _prepareOnOpen(
-    PocketUpdateCoordinator updates,
-  ) async {
+    PocketUpdateCoordinator updates, {
+    PocketPackage? mountedPackage,
+  }) async {
     final token = _download = PocketCancellationToken();
     final operation = updates.prepare(
       cancellation: token,
+      mountedPackage: mountedPackage,
       onProgress: (progress) {
         if (_disposed) return;
         stage = progress.stage.name;
@@ -355,6 +382,145 @@ final class PocketSession extends ChangeNotifier {
         // above. This second await is only for cancellation cleanup.
       }
       if (identical(_download, token)) _download = null;
+    }
+  }
+
+  /// Checks the signed update source immediately before an already resident
+  /// runtime is presented.
+  ///
+  /// This is deliberately separate from [updates.apply]. Applying through the
+  /// guest API schedules a remount and keeps [_busy] set until the visible
+  /// health window completes. A prewarmed runtime is hidden, so that health
+  /// window cannot complete yet. This method performs the signed preparation
+  /// and mount, then returns; normal [onReady] promotion still owns the
+  /// healthy-package pointer once the runtime is actually visible.
+  ///
+  /// The host validates the instance owner, generation and hidden state before
+  /// calling this method. A session may still be [_busy] because it is waiting
+  /// for its first hidden health frame; only a real package operation or
+  /// lifecycle transition is a conflict here.
+  Future<Map<String, Object?>> prepareForOpen({
+    bool Function()? canMount,
+  }) async {
+    if (_disposed) {
+      throw const PocketCapabilityException('host_closed', 'Session is closed');
+    }
+    final initialization = _initializeFuture;
+    if (initialization != null) {
+      await initialization;
+    } else {
+      await initialize();
+    }
+
+    final updates = _updates;
+    if (updates == null) {
+      // An embedded/local mini-app has no remote source to check. The caller
+      // still receives a fact that the gate was handled, without inventing a
+      // network operation or rejecting the existing local startup path.
+      if (canMount != null && !canMount()) {
+        throw const PocketCapabilityException(
+          'runtime_busy',
+          'Runtime became visible before its package was mounted',
+        );
+      }
+      return const <String, Object?>{'configured': false, 'updated': false};
+    }
+    if (_download != null ||
+        (_mountTimer?.isActive ?? false) ||
+        _mountOperation != null ||
+        _packageAdmissionInFlight ||
+        _recovering ||
+        _promotion != null) {
+      throw const PocketCapabilityException(
+        'busy',
+        'A package operation is in progress',
+      );
+    }
+
+    final previousBusy = _busy;
+    final previousStage = stage;
+    final previousError = lastError;
+    final previousFailure = failure;
+    final previousCandidate = _candidate;
+    _busy = true;
+    _packageAdmissionInFlight = true;
+    _candidate = null;
+    failure = null;
+    lastError = null;
+    var mounted = false;
+    try {
+      final next = await _prepareOnOpen(
+        updates,
+        mountedPackage: active?.package,
+      );
+      if (_disposed) {
+        throw const PocketCapabilityException(
+          'host_closed',
+          'Session is closed',
+        );
+      }
+      if (canMount != null && !canMount()) {
+        throw const PocketCapabilityException(
+          'runtime_busy',
+          'Runtime became visible before its package was mounted',
+        );
+      }
+      final sameActivePackage =
+          active?.package.versionId == next.package.versionId;
+      if (sameActivePackage) {
+        // A hidden prewarm can have loaded a package before its first health
+        // promotion, so the coordinator's store may not yet know that the
+        // session already runs this exact version. Re-admit it, but do not
+        // remount or advance the generation.
+        // Even a no-op must cross the final trust boundary again. This keeps a
+        // changed trust policy or on-disk bytes from turning a stale cache into
+        // an accepted open result.
+        await _withAdmittedPackage(next, () {});
+        _busy = previousBusy;
+        stage = previousStage;
+        lastError = previousError;
+        failure = previousFailure;
+        return const <String, Object?>{'configured': true, 'updated': false};
+      }
+
+      // _mount performs the same final admission and bridge teardown used by
+      // the normal update path. It may restore the previous package when the
+      // candidate fails; the identity check below makes that restoration a
+      // failed prepareOpen rather than a false success.
+      await _mount(next);
+      mounted = true;
+      final actual = active;
+      if (actual == null ||
+          actual.package.versionId != next.package.versionId) {
+        throw const PocketCapabilityException(
+          'update_mount_failed',
+          'Prepared package was not mounted',
+        );
+      }
+      return const <String, Object?>{'configured': true, 'updated': true};
+    } catch (error) {
+      if (!mounted) {
+        // Preparation failed before changing the runtime. Restore the visible
+        // state so a caller can retry without inheriting a stale loading/busy
+        // marker from this gate.
+        _busy = previousBusy;
+        stage = previousStage;
+        lastError = previousError;
+        failure = previousFailure;
+        _candidate = previousCandidate;
+      } else {
+        // A failed mount may have restored the old package internally. Do not
+        // leave a newly started hidden runtime permanently locked; the caller
+        // receives the failure and may retry the gate.
+        _busy = active == null || failure != null ? false : previousBusy;
+      }
+      if (error is PocketCapabilityException) rethrow;
+      if (error is PocketPackageException) {
+        throw PocketCapabilityException(error.code, error.message);
+      }
+      throw PocketCapabilityException('update_mount_failed', '$error');
+    } finally {
+      _packageAdmissionInFlight = false;
     }
   }
 
@@ -692,7 +858,7 @@ final class PocketSession extends ChangeNotifier {
     Map<String, dynamic> params = const <String, dynamic>{},
   ]) async {
     final updates = _requireUpdates();
-    if (_busy) {
+    if (_busy || _packageAdmissionInFlight) {
       throw const PocketCapabilityException(
         'busy',
         'A package operation is in progress',
@@ -732,6 +898,7 @@ final class PocketSession extends ChangeNotifier {
     try {
       _candidate = await updates.prepare(
         cancellation: token,
+        mountedPackage: active?.package,
         mode: mode,
         target: target,
         onProgress: (progress) {
@@ -767,7 +934,7 @@ final class PocketSession extends ChangeNotifier {
     Map<String, dynamic> params = const <String, dynamic>{},
   ]) async {
     _requireUpdates();
-    if (_busy) {
+    if (_busy || _packageAdmissionInFlight) {
       throw const PocketCapabilityException(
         'busy',
         'A package operation is in progress',
@@ -814,6 +981,7 @@ final class PocketSession extends ChangeNotifier {
     }
     _busy = true;
     if (!next.needsActivation) {
+      _packageAdmissionInFlight = true;
       // A check against the active package is a valid no-op. Re-admit the
       // cached package at the final trust boundary, but do not remount the
       // already healthy guest or emit updates.changed (which would cause an
@@ -835,6 +1003,7 @@ final class PocketSession extends ChangeNotifier {
         lastError = '$error';
         rethrow;
       } finally {
+        _packageAdmissionInFlight = false;
         _busy = false;
       }
     }
@@ -845,13 +1014,14 @@ final class PocketSession extends ChangeNotifier {
 
   Future<Map<String, dynamic>> _rollback() async {
     final updates = _requireUpdates();
-    if (_busy) {
+    if (_busy || _packageAdmissionInFlight) {
       throw const PocketCapabilityException(
         'busy',
         'A package operation is in progress',
       );
     }
     _busy = true;
+    _packageAdmissionInFlight = true;
     try {
       final versions = await updates.listVersions();
       final previous = versions.where(
@@ -884,8 +1054,10 @@ final class PocketSession extends ChangeNotifier {
           embeddedRollbackFallback: embeddedFallback,
         ),
       );
+      _packageAdmissionInFlight = false;
       return {'scheduled': true, 'version': next?.version ?? 'embedded'};
     } catch (_) {
+      _packageAdmissionInFlight = false;
       _busy = false;
       rethrow;
     }
@@ -901,7 +1073,7 @@ final class PocketSession extends ChangeNotifier {
     FutureOr<T> Function() publish,
   ) {
     if (package == null) return Future<T>.sync(publish);
-    if (_downloadOnOpen && package.build < _embeddedBuild) {
+    if (package.build < _embeddedBuild) {
       return Future<T>.error(
         PocketPackageException(
           'Cached package build ${package.build} is below bootstrap build '
@@ -920,6 +1092,47 @@ final class PocketSession extends ChangeNotifier {
   }
 
   Future<void> _mount(
+    PocketPreparedPackage? next, {
+    bool resetCache = false,
+    PocketPreparedPackage? embeddedRollbackFallback,
+    bool restorePreviousOnFailure = true,
+  }) {
+    final existing = _mountOperation;
+    final operation = existing == null
+        ? _mountUnlocked(
+            next,
+            resetCache: resetCache,
+            embeddedRollbackFallback: embeddedRollbackFallback,
+            restorePreviousOnFailure: restorePreviousOnFailure,
+          )
+        : existing.then<void>(
+            (_) => _mountUnlocked(
+              next,
+              resetCache: resetCache,
+              embeddedRollbackFallback: embeddedRollbackFallback,
+              restorePreviousOnFailure: restorePreviousOnFailure,
+            ),
+            onError: (Object _, StackTrace __) => _mountUnlocked(
+              next,
+              resetCache: resetCache,
+              embeddedRollbackFallback: embeddedRollbackFallback,
+              restorePreviousOnFailure: restorePreviousOnFailure,
+            ),
+          );
+    late final Future<void> tracked;
+    tracked = operation.then<void>(
+      (_) {
+        if (identical(_mountOperation, tracked)) _mountOperation = null;
+      },
+      onError: (Object _, StackTrace __) {
+        if (identical(_mountOperation, tracked)) _mountOperation = null;
+      },
+    );
+    _mountOperation = tracked;
+    return operation;
+  }
+
+  Future<void> _mountUnlocked(
     PocketPreparedPackage? next, {
     bool resetCache = false,
     PocketPreparedPackage? embeddedRollbackFallback,
@@ -968,7 +1181,14 @@ final class PocketSession extends ChangeNotifier {
           _watchStartup();
         });
       } catch (restoreError) {
+        active = null;
+        ready = false;
+        _firstFrameReady = false;
+        _candidate = null;
+        _resetCacheOnHealth = false;
+        _embeddedRollbackFallback = null;
         failure = restoreError;
+        lastError = '$restoreError';
         _busy = false;
         stage = 'error';
         if (!_disposed) notifyListeners();
@@ -1070,6 +1290,7 @@ final class PocketSession extends ChangeNotifier {
       _shutdown ?? Future<void>.value(),
       if (_initializeFuture != null) _initializeFuture!,
       if (_promotion != null) _promotion!,
+      if (_mountOperation != null) _mountOperation!,
       _bridgeOperation,
     ];
     return Future.wait<void>(pending).then<void>((_) {});

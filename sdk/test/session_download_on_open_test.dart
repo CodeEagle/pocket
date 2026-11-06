@@ -106,19 +106,20 @@ void main() {
     if (await directory.exists()) await directory.delete(recursive: true);
   });
 
-  PocketAppConfig config({String id = appId}) => PocketAppConfig(
-    appId: id,
-    metadataAsset: metadataAsset,
-    manifestAsset: manifestAsset,
-    // This is the new opt-in path under test. The legacy default remains
-    // false, so every test states the policy explicitly.
-    downloadOnOpen: true,
-    updates: PocketUpdateConfig(
-      url: 'http://127.0.0.1:${server.port}/manifest.json',
-      keyId: keyId,
-      publicKey: base64Encode(publicKey.bytes),
-    ),
-  );
+  PocketAppConfig config({String id = appId, bool downloadOnOpen = true}) =>
+      PocketAppConfig(
+        appId: id,
+        metadataAsset: metadataAsset,
+        manifestAsset: manifestAsset,
+        // This is the new opt-in path under test. The legacy default remains
+        // false, so every test states the policy explicitly.
+        downloadOnOpen: downloadOnOpen,
+        updates: PocketUpdateConfig(
+          url: 'http://127.0.0.1:${server.port}/manifest.json',
+          keyId: keyId,
+          publicKey: base64Encode(publicKey.bytes),
+        ),
+      );
 
   PocketSession session({String id = appId}) =>
       PocketSession(config: config(id: id));
@@ -243,9 +244,20 @@ void main() {
             .request!(const {});
         expect((checked as Map)['availableVersion'], '2.0.0');
 
-        final applied = await registry
-            .registrationFor('updates.apply')!
-            .request!(const {});
+        final applying = registry.registrationFor('updates.apply')!.request!(
+          const {},
+        );
+        await expectLater(
+          value.prepareForOpen(),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'busy',
+            ),
+          ),
+        );
+        final applied = await applying;
         expect((applied as Map)['scheduled'], isFalse);
         expect(applied['version'], '2.0.0');
         expect(value.generation, generation);
@@ -454,6 +466,595 @@ void main() {
         expect(reopened.lastError, isNull);
       } finally {
         await closeQuietly(reopened);
+      }
+    },
+  );
+
+  test(
+    'hidden mounted bundle is a same-content no-op without re-downloading it',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+        partialBundle: true,
+      );
+      updateServer.current = release;
+      final value = session();
+      try {
+        await value.initialize();
+        final baseRequests = updateServer.count('/base.zip');
+        final pakRequests = updateServer.count(release.pakPath);
+
+        final result = await value.prepareForOpen();
+
+        expect(result, <String, Object?>{'configured': true, 'updated': false});
+        expect(updateServer.count('/base.zip'), baseRequests);
+        expect(updateServer.count(release.pakPath), pakRequests);
+        expect(value.active?.version, '2.0.0');
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'hidden mounted bundle is the granular baseline for a newer release',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+        partialBundle: true,
+      );
+      updateServer.current = release2;
+      final value = session();
+      try {
+        await value.initialize();
+        final baseRequests = updateServer.count('/base.zip');
+        final entryRequests = updateServer.count(release2.entryPath);
+        final pakRequests = updateServer.count(release2.pakPath);
+        final release3 = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 3,
+          version: '3.0.0',
+          entryBytes: release2.entry,
+          pakBytes: release2.pak,
+          partialBundle: true,
+        );
+        updateServer.current = release3;
+
+        final result = await value.prepareForOpen();
+
+        expect(result, <String, Object?>{'configured': true, 'updated': true});
+        expect(updateServer.count('/base.zip'), baseRequests);
+        expect(updateServer.count(release3.entryPath), entryRequests);
+        expect(updateServer.count(release3.pakPath), pakRequests);
+        expect(value.active?.build, 3);
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'hidden mounted package prevents downgrade and same-build replacement',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release2;
+      final value = session();
+      try {
+        await value.initialize();
+        final generation = value.generation;
+        final release1 = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 1,
+          version: '1.0.0',
+        );
+        updateServer.current = release1;
+        await expectLater(
+          value.prepareForOpen(),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'manifest-format',
+            ),
+          ),
+        );
+        expect(value.active?.version, '2.0.0');
+        expect(value.generation, generation);
+
+        final sameBuildReplacement = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 2,
+          version: '2.0.1',
+          entryBytes: Uint8List.fromList(<int>[0x52, 2, 0x42]),
+          pakBytes: encodePocketPak(<PocketPakBlobEntry>[
+            PocketPakBlobEntry(key: 'bootstrap/2.0.1', data: <int>[2, 0x7e]),
+          ]),
+        );
+        updateServer.current = sameBuildReplacement;
+        await expectLater(
+          value.prepareForOpen(),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'manifest-format',
+            ),
+          ),
+        );
+        expect(value.active?.version, '2.0.0');
+        expect(value.generation, generation);
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'a disk-active package from another session does not make mounted code a no-op',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release2;
+      late PocketHostRegistry registry;
+      final resident = PocketSession(
+        config: config().copyWith(
+          pluginFactories: [
+            (_) => _CaptureUpdateRegistry((captured) => registry = captured),
+          ],
+        ),
+      );
+      PocketSession? promoted;
+      try {
+        await resident.initialize();
+        await waitForHealthy(resident);
+        await resident.setForeground(false);
+        final release3 = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 3,
+          version: '3.0.0',
+        );
+        updateServer.current = release3;
+        promoted = session();
+        await promoted.initialize();
+        await waitForHealthy(promoted);
+
+        final checked = await registry
+            .registrationFor('updates.check')!
+            .request!(const {});
+        expect((checked as Map)['availableVersion'], '3.0.0');
+        final applied = await registry
+            .registrationFor('updates.apply')!
+            .request!(const {});
+        expect((applied as Map)['scheduled'], isTrue);
+        expect(applied['version'], '3.0.0');
+      } finally {
+        final other = promoted;
+        if (other != null) await closeQuietly(other);
+        await closeQuietly(resident);
+      }
+    },
+  );
+
+  test(
+    'double mount failure clears the active package and leaves a retryable error',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release2;
+      var providerCreations = 0;
+      final value = PocketSession(
+        config: config().copyWith(
+          pluginFactories: [
+            (_) {
+              providerCreations++;
+              if (providerCreations >= 2) {
+                throw StateError('bridge failure');
+              }
+              return _CaptureUpdateRegistry((_) {});
+            },
+          ],
+        ),
+      );
+      try {
+        await value.initialize();
+        final release3 = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 3,
+          version: '3.0.0',
+        );
+        updateServer.current = release3;
+
+        Future<void> expectMountFailure() async {
+          await expectLater(
+            value.prepareForOpen(),
+            throwsA(
+              isA<PocketCapabilityException>().having(
+                (error) => error.code,
+                'code',
+                'update_mount_failed',
+              ),
+            ),
+          );
+        }
+
+        await expectMountFailure();
+        expect(value.active, isNull);
+        expect(value.ready, isFalse);
+        expect(value.failure, isNotNull);
+        expect(value.stage, 'error');
+
+        // A second attempt must reach package admission again rather than
+        // inheriting the hidden prewarm's previous busy state.
+        await expectMountFailure();
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'prepareForOpen checks a healthy cache and mounts the newer signed package',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release2;
+      final value = session();
+      try {
+        await value.initialize();
+        await waitForHealthy(value);
+        final previousManifestRequests = updateServer.count('/manifest.json');
+        final previousGeneration = value.generation;
+
+        final release3 = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 3,
+          version: '3.0.0',
+        );
+        updateServer.current = release3;
+        final result = await value.prepareForOpen();
+
+        expect(result, <String, Object?>{'configured': true, 'updated': true});
+        expect(
+          updateServer.count('/manifest.json'),
+          previousManifestRequests + 1,
+        );
+        expect(value.active?.package.versionId, isNotNull);
+        expect(value.active?.build, 3);
+        expect(value.generation, previousGeneration + 1);
+
+        // prepareForOpen does not wait for health while mounting. The normal
+        // visible-frame promotion remains responsible for the healthy pointer.
+        await waitForHealthy(value);
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'prepareForOpen re-verifies an unchanged package without remounting',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+      final value = session();
+      try {
+        await value.initialize();
+        await waitForHealthy(value);
+        final manifestRequests = updateServer.count('/manifest.json');
+        final entryRequests = updateServer.count(release.entryPath);
+        final pakRequests = updateServer.count(release.pakPath);
+        final generation = value.generation;
+
+        final result = await value.prepareForOpen();
+
+        expect(result, <String, Object?>{'configured': true, 'updated': false});
+        expect(updateServer.count('/manifest.json'), manifestRequests + 1);
+        expect(updateServer.count(release.entryPath), entryRequests);
+        expect(updateServer.count(release.pakPath), pakRequests);
+        expect(value.generation, generation);
+        expect(value.active?.build, 2);
+        expect(value.stage, 'ready');
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'prepareForOpen does not remount an unpromoted hidden package',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+      final value = session();
+      try {
+        await value.initialize();
+        // The package is active in the hidden/prewarm session, but no visible
+        // health window has promoted it to lastGood yet.
+        expect(value.active?.version, '2.0.0');
+        final generation = value.generation;
+        final manifestRequests = updateServer.count('/manifest.json');
+
+        final result = await value.prepareForOpen();
+
+        expect(result, <String, Object?>{'configured': true, 'updated': false});
+        expect(updateServer.count('/manifest.json'), manifestRequests + 1);
+        expect(value.generation, generation);
+        expect(value.active?.version, '2.0.0');
+        await waitForHealthy(value);
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'prepareForOpen reports a mount rollback instead of accepting the old package',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release2;
+      var providerCreations = 0;
+      final value = PocketSession(
+        config: config().copyWith(
+          pluginFactories: [
+            (_) {
+              providerCreations++;
+              if (providerCreations == 2) {
+                throw StateError('candidate bridge failed');
+              }
+              return _CaptureUpdateRegistry((_) {});
+            },
+          ],
+        ),
+      );
+      try {
+        await value.initialize();
+        await waitForHealthy(value);
+        final release3 = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 3,
+          version: '3.0.0',
+        );
+        updateServer.current = release3;
+
+        await expectLater(
+          value.prepareForOpen(),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'update_mount_failed',
+            ),
+          ),
+        );
+        expect(providerCreations, 3);
+        expect(value.active?.build, 2);
+
+        // The failed hidden mount must not leave the session permanently
+        // locked; the original package can be health-checked or retried.
+        await waitForHealthy(value);
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'prepareForOpen rejects a concurrent mount while bridge admission is blocked',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+        requiredCapabilities: const <String>[
+          'updates.rollback',
+          'updates.check',
+          'updates.apply',
+          'test.blocking',
+        ],
+        guestManifest: <String, dynamic>{
+          'capabilities': <String, dynamic>{
+            'requires': <String>['test.blocking'],
+          },
+        },
+      );
+      updateServer.current = release2;
+      fixtureManifest = <String, dynamic>{
+        'capabilities': <String, dynamic>{
+          'requires': <String>[
+            'updates.rollback',
+            'updates.check',
+            'updates.apply',
+            'test.blocking',
+          ],
+        },
+      };
+      final entered = Completer<void>();
+      final releasePlugin = Completer<void>();
+      var providerCreations = 0;
+      final value = PocketSession(
+        config: config().copyWith(
+          pluginFactories: [
+            (_) {
+              providerCreations++;
+              if (providerCreations == 2) {
+                return _BlockingPlugin(entered, releasePlugin.future);
+              }
+              final ready = Completer<void>()..complete();
+              return _BlockingPlugin(ready, Future<void>.value());
+            },
+          ],
+        ),
+      );
+      try {
+        await value.initialize();
+        await waitForHealthy(value);
+        final release3 = await _makeRelease(
+          keyPair: keyPair,
+          appId: appId,
+          abi: abi,
+          build: 3,
+          version: '3.0.0',
+          requiredCapabilities: const <String>[
+            'updates.rollback',
+            'updates.check',
+            'updates.apply',
+            'test.blocking',
+          ],
+          guestManifest: <String, dynamic>{
+            'capabilities': <String, dynamic>{
+              'requires': <String>['test.blocking'],
+            },
+          },
+        );
+        updateServer.current = release3;
+
+        final first = value.prepareForOpen();
+        await entered.future;
+        await expectLater(
+          value.prepareForOpen(),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'busy',
+            ),
+          ),
+        );
+        releasePlugin.complete();
+        final result = await first;
+        expect(result['updated'], isTrue);
+        expect(value.active?.build, 3);
+      } finally {
+        if (!releasePlugin.isCompleted) releasePlugin.complete();
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'prepareForOpen accepts a signed package at the embedded build floor',
+    () async {
+      fixtureMetadata = <String, dynamic>{
+        'runtimeAbi': abi,
+        'version': '2.0.0',
+        'build': 2,
+        'bytecodeBytes': 0,
+      };
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+      final value = PocketSession(config: config(downloadOnOpen: false));
+      try {
+        await value.initialize(prepareForOpen: true);
+        expect(value.active?.build, 2);
+        expect(value.active?.version, '2.0.0');
+        expect(updateServer.count('/manifest.json'), 1);
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'prepareForOpen startup failure does not fall back to embedded runtime',
+    () async {
+      fixtureMetadata = <String, dynamic>{
+        'runtimeAbi': abi,
+        'version': '2.0.0',
+        'build': 2,
+        'bytecodeBytes': 0,
+      };
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+      final value = PocketSession(
+        config: config(downloadOnOpen: false).copyWith(
+          pluginFactories: [(_) => throw StateError('candidate bridge failed')],
+        ),
+      );
+      try {
+        await expectLater(
+          value.initialize(prepareForOpen: true),
+          throwsStateError,
+        );
+        expect(value.active, isNull);
+        expect(value.ready, isFalse);
+        expect(value.failure, isNotNull);
+      } finally {
+        await closeQuietly(value);
       }
     },
   );
@@ -970,6 +1571,7 @@ Future<_Release> _makeRelease({
     'updates.check',
     'updates.apply',
   ],
+  Map<String, dynamic>? guestManifest,
   bool corruptSignature = false,
   bool corruptPak = false,
   bool partialBundle = false,
@@ -1002,6 +1604,7 @@ Future<_Release> _makeRelease({
     'build': build,
     'signedAt': DateTime.now().millisecondsSinceEpoch ~/ 1000,
     'capabilities': <String, dynamic>{'requires': requiredCapabilities},
+    if (guestManifest != null) 'guestManifest': guestManifest,
     'protocol': 1,
     'minHostVersion': 1,
     'entry': <String, dynamic>{'sha256': entryHash, 'size': entry.length},
@@ -1159,4 +1762,34 @@ final class _CaptureUpdateRegistry extends PocketPlugin {
   );
   @override
   void register(PocketPluginContext context) => capture(context.registry);
+}
+
+final class _BlockingPlugin extends PocketPlugin {
+  _BlockingPlugin(this.entered, this.release);
+
+  final Completer<void> entered;
+  final Future<void> release;
+
+  @override
+  PocketPluginDescriptor get descriptor => const PocketPluginDescriptor(
+    id: 'test.blocking',
+    version: '1.0.0',
+    capabilities: <String, PocketPluginCapability>{
+      'test.blocking': PocketPluginCapability(
+        name: 'test.blocking',
+        kind: PocketCapabilityKind.request,
+      ),
+    },
+  );
+
+  @override
+  void register(PocketPluginContext context) {
+    context.registerRequest('test.blocking', (_) => null);
+  }
+
+  @override
+  Future<void> activate(PocketPluginContext context) async {
+    if (!entered.isCompleted) entered.complete();
+    await release;
+  }
 }

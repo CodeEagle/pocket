@@ -40,6 +40,22 @@ class PocketWechatSystem {
         return { systemInstanceId: 'system-ui', generation: 1 };
       }
       if (!this.configured) throw this.root.error('system_not_configured', 'SystemUI must configure its runtime first');
+      if (cap === 'system.runtime.prepareOpen') {
+        const runtime = this.instance(p.instanceId);
+        if (!runtime || runtime === this.root) throw this.root.error('runtime_destroyed', 'App runtime is not live');
+        if (Number(p.generation) !== runtime.runtimeGeneration) throw this.root.error('runtime_destroyed', 'App generation is no longer live');
+        // The generated WeChat package has no trusted OTA resolver. Keep the
+        // resident Guest and generation unchanged instead of claiming an
+        // update was configured or applied.
+        return {
+          instanceId: runtime.instanceId,
+          appId: runtime.config.appId,
+          previousGeneration: runtime.runtimeGeneration,
+          generation: runtime.runtimeGeneration,
+          updated: false,
+          configured: false,
+        };
+      }
       if (cap === 'system.runtime.create') {
         const app = this.apps.find(app => app.appId === p.appId && app.index !== 0);
         if (!app) throw this.root.error('app_not_found', 'App is outside the installed project catalog');
@@ -57,7 +73,12 @@ class PocketWechatSystem {
           runtime.started = true;
           runtime.stopScheduled();
           runtime.visible = false;
-          return { instanceId: runtime.instanceId, appId: app.appId, generation: runtime.runtimeGeneration };
+          return {
+            instanceId: runtime.instanceId,
+            appId: app.appId,
+            generation: runtime.runtimeGeneration,
+            ...(p.prepareForOpen === true ? { preparedForOpen: true } : {}),
+          };
         } catch (error) {
           this.runtimes.delete(app.appId);
           runtime.dispose();

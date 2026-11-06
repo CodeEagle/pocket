@@ -55,6 +55,7 @@ const List<String> _platformRequestCapabilities = <String>[
 const List<String> _systemRequestCapabilities = <String>[
   'system.runtime.configure',
   'system.runtime.create',
+  'system.runtime.prepareOpen',
   'system.runtime.awaitFirstFrame',
   'system.runtime.destroy',
   'system.runtime.post',
@@ -508,6 +509,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     return await switch (capability) {
       'system.runtime.configure' => _configure(params, ownerGeneration),
       'system.runtime.create' => _create(params, ownerGeneration),
+      'system.runtime.prepareOpen' => _prepareOpen(params, ownerGeneration),
       'system.runtime.awaitFirstFrame' => _awaitFirstFrame(params),
       'system.runtime.destroy' => _destroy(params),
       'system.runtime.post' => _post(params),
@@ -669,6 +671,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     await _awaitConfigured();
     _ensureOwnerGeneration(ownerGeneration);
     final appId = _requiredString(params, 'appId');
+    final prepareForOpen = params['prepareForOpen'] == true;
     final trustedConfig = _trustedApplications[appId];
     if (trustedConfig == null) {
       throw PocketCapabilityException(
@@ -732,7 +735,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
 
     try {
       await instance.session.setForeground(false);
-      await instance.session.initialize();
+      await instance.session.initialize(prepareForOpen: prepareForOpen);
       if (!_isCurrent(instance) ||
           ownerGeneration != _systemUIGeneration ||
           instance.ownerGeneration != _systemUIGeneration) {
@@ -759,6 +762,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'instanceId': instanceId,
         'appId': appId,
         'generation': instance.session.generation,
+        if (prepareForOpen) 'preparedForOpen': true,
         if (!instance.session.memoryLimits.isEmpty)
           'memory': instance.session.memoryLimits.toJson(),
       };
@@ -773,6 +777,94 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         '$error',
       );
     }
+  }
+
+  Future<Map<String, Object?>> _prepareOpen(
+    Map<String, dynamic> params,
+    int ownerGeneration,
+  ) async {
+    await _awaitConfigured();
+    _ensureOwnerGeneration(ownerGeneration);
+    final instanceId = _requiredString(params, 'instanceId');
+    final rawGeneration = params['generation'];
+    if (rawGeneration is! num ||
+        !rawGeneration.isFinite ||
+        rawGeneration != rawGeneration.toInt()) {
+      throw const PocketCapabilityException(
+        'invalid_generation',
+        'generation must be an integer',
+      );
+    }
+    final instance = _applications[instanceId];
+    final generation = rawGeneration.toInt();
+    if (instance == null || instance.closing) {
+      throw const PocketCapabilityException(
+        'instance_not_found',
+        'Runtime instance does not exist',
+      );
+    }
+    if (!_isCurrent(instance) || instance.ownerGeneration != ownerGeneration) {
+      throw const PocketCapabilityException(
+        'stale_instance',
+        'Runtime instance belongs to a stale SystemUI generation',
+      );
+    }
+    if (instance.session.generation != generation) {
+      throw const PocketCapabilityException(
+        'stale_instance',
+        'Requested preparation belongs to a stale runtime generation',
+      );
+    }
+    if (instance.compositorVisible ||
+        instance.compositorFocused ||
+        instance.session.foreground) {
+      throw const PocketCapabilityException(
+        'runtime_busy',
+        'Only a hidden runtime can be prepared before presentation',
+      );
+    }
+
+    late final Map<String, Object?> result;
+    try {
+      result = await instance.session.prepareForOpen(
+        canMount: () =>
+            _isCurrent(instance) &&
+            _systemUIGeneration == ownerGeneration &&
+            instance.ownerGeneration == ownerGeneration &&
+            instance.session.generation == generation &&
+            !instance.compositorVisible &&
+            !instance.compositorFocused &&
+            !instance.session.foreground,
+      );
+    } catch (_) {
+      // A hidden prewarm may not have produced a frame yet, so the normal
+      // generation listener intentionally suppresses its event. If a failed
+      // mount still advanced the generation and restored the old package,
+      // force the fact through the same protocol so JS can retry with the
+      // current generation instead of being stranded on a stale one.
+      final nextGeneration = instance.session.generation;
+      if (nextGeneration != generation && !instance.hasEverProducedFrame) {
+        instance.announcedGeneration = generation;
+        _announceChildGeneration(instance, nextGeneration);
+      }
+      rethrow;
+    }
+    _ensureOwnerGeneration(ownerGeneration);
+    if (!_isCurrent(instance) || instance.closing) {
+      throw const PocketCapabilityException(
+        'stale_instance',
+        'Runtime instance was removed during preparation',
+      );
+    }
+    final nextGeneration = instance.session.generation;
+    return <String, Object?>{
+      'instanceId': instanceId,
+      'appId': instance.appId,
+      'previousGeneration': generation,
+      'generation': nextGeneration,
+      'updated': result['updated'] == true,
+      'configured': result['configured'] == true,
+    };
   }
 
   Future<Object?> _awaitFirstFrame(Map<String, dynamic> params) async {
@@ -955,6 +1047,18 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'invalid_event',
         'Event params must be an object',
       );
+    }
+    // A session generation advances before Flutter replaces the keyed
+    // PocketView. Until the new view has loaded and called onReady, the
+    // controller may still be attached to the retired runtime (or be between
+    // detach and attach). Returning accepted:false keeps lifecycle/launch
+    // messages in the JS-owned queue instead of accepting them into a stale
+    // controller queue that will be cleared by the remount. The resident
+    // SystemUI bootstrap retains its original ordering contract.
+    if (!target.isSystemUI &&
+        (target.observedGeneration != target.session.generation ||
+            !target.firstFrameReady)) {
+      return <String, Object?>{'accepted': false};
     }
     final accepted = target.session.controller.send(
       method: event,

@@ -141,6 +141,11 @@ final class PocketAppConfig {
   final String metadataAsset;
   final String manifestAsset;
   final PocketMemoryLimits memoryLimits;
+
+  /// Signed package source used by the native System runtime's optional
+  /// before-open gate, including resident/prewarmed mini-apps. When omitted,
+  /// the runtime keeps the local embedded/cache path and performs no remote
+  /// check.
   final PocketUpdateConfig? updates;
 
   /// Downloads the signed mini-app package when the runtime is opened.

@@ -66,6 +66,7 @@ class FakeHost implements HostBridge {
   readonly posted: Array<{ instanceId: string; event: string; params: JsonObject }> = [];
   readonly destroyed: string[] = [];
   readonly generations = new Map<string, string>();
+  readonly appIds = new Map<string, string>();
   readonly storage = new Map<string, JsonValue>();
   readonly handled: Array<Record<string, unknown>> = [];
   readonly rejectedPostEvents: string[] = [];
@@ -119,7 +120,16 @@ class FakeHost implements HostBridge {
       const instanceId = `instance-${this.nextInstance++}`;
       const generation = `generation-${instanceId}`;
       this.generations.set(instanceId, generation);
-      return { appId, instanceId, generation };
+      this.appIds.set(instanceId, appId);
+      return { appId, instanceId, generation, preparedForOpen: params.prepareForOpen === true };
+    }
+    if (capability === "system.runtime.prepareOpen") {
+      const instanceId = String(params.instanceId);
+      return {
+        instanceId, appId: this.appIds.get(instanceId)!,
+        previousGeneration: params.generation, generation: params.generation,
+        configured: false, updated: false,
+      };
     }
     if (capability === "system.runtime.awaitFirstFrame") {
       return { ready: true, generation: params.generation };

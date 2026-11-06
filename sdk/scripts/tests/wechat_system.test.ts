@@ -39,6 +39,32 @@ test("creating a second mini app retains the first independent runtime", async (
   system.dispose();
 });
 
+test("prepareOpen is an honest no-op without a WeChat OTA configuration", async () => {
+  const { root, system, request } = fixture();
+  await request(root, "system.runtime.configure", { systemUI: "host" });
+  const created = await request(root, "system.runtime.create", { appId: "profile", prepareForOpen: true });
+  expect(created).toMatchObject({ preparedForOpen: true, appId: "profile" });
+
+  const prepared = await request(root, "system.runtime.prepareOpen", {
+    instanceId: created.instanceId,
+    generation: created.generation,
+  });
+  expect(prepared).toEqual({
+    instanceId: created.instanceId,
+    appId: "profile",
+    previousGeneration: created.generation,
+    generation: created.generation,
+    updated: false,
+    configured: false,
+  });
+  expect(system.runtimes.get("profile").runtimeGeneration).toBe(created.generation);
+  await expect(request(root, "system.runtime.prepareOpen", {
+    instanceId: created.instanceId,
+    generation: Number(created.generation) + 1,
+  })).rejects.toMatchObject({ code: "runtime_destroyed" });
+  system.dispose();
+});
+
 test("platform requests use the real SystemUI response contract and abort removes pending work", async () => {
   const { root, system, request, events } = fixture();
   await request(root, "system.runtime.configure", { systemUI: "host" });

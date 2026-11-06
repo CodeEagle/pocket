@@ -113,11 +113,11 @@ final class HttpPocketUpdateTransport implements PocketUpdateTransport {
       cancellation.whenCancelled.then<T>(
         (_) => throw const PocketUpdateCancellation(),
       ),
-      Future<T>.delayed(
-        timeout,
-        () => throw PocketPackageException(message, code: 'http-timeout'),
-      ),
-    ]);
+    ]).timeout(
+      timeout,
+      onTimeout: () =>
+          throw PocketPackageException(message, code: 'http-timeout'),
+    );
   }
 }
 
@@ -322,6 +322,12 @@ final class PocketUpdateCoordinator {
     PocketUpdateProgressCallback? onProgress,
     PocketUpdateMode mode = PocketUpdateMode.auto,
     PocketUpdateTarget target = const PocketUpdateTarget.all(),
+
+    /// A package that the host has already mounted in memory but has not yet
+    /// promoted to the store's healthy pointer. This is a trusted runtime
+    /// fact, not a new store pointer: it participates in baseline reuse and
+    /// downgrade/replay admission without changing disk promotion semantics.
+    PocketPackage? mountedPackage,
   }) async {
     final token = cancellation ?? PocketCancellationToken();
     _validateManifestUri();
@@ -341,7 +347,12 @@ final class PocketUpdateCoordinator {
     await verifier.verify(signed);
     final currentGood = await _store.lastGood(verifier: verifier);
     final currentActive = await _store.active(verifier: verifier);
-    final baselinePackage = currentActive ?? currentGood;
+    // A hidden prewarm can have a fully admitted package in memory while both
+    // disk pointers are still empty. Diff against the package this session is
+    // actually running; the disk pointers still contribute independently to
+    // the anti-downgrade floor below. Never write this fact back to the store.
+    final effectiveActive = mountedPackage ?? currentActive;
+    final baselinePackage = effectiveActive ?? currentGood;
     if (target.scope != PocketUpdateScope.all && baselinePackage == null) {
       throw PocketPackageException(
         'granular ${target.scope.name} update requires an already-downloaded package baseline',
@@ -352,7 +363,10 @@ final class PocketUpdateCoordinator {
       minimumBuild,
       math.max(
         currentGood?.manifest.payload.build ?? 0,
-        currentActive?.manifest.payload.build ?? 0,
+        math.max(
+          currentActive?.manifest.payload.build ?? 0,
+          mountedPackage?.manifest.payload.build ?? 0,
+        ),
       ),
     );
     final establishedIdsAtFloor = <String>{
@@ -362,9 +376,11 @@ final class PocketUpdateCoordinator {
       if (currentActive != null &&
           currentActive.manifest.payload.build == floorBuild)
         currentActive.versionId,
+      if (mountedPackage != null &&
+          mountedPackage.manifest.payload.build == floorBuild)
+        mountedPackage.versionId,
     };
-    final hasBaseline =
-        minimumBuild > 0 || currentGood != null || currentActive != null;
+    final hasBaseline = minimumBuild > 0 || baselinePackage != null;
     final manifestVersionId = pocketVersionId(signed.payload);
     if (!allowDowngrade && hasBaseline) {
       if (signed.payload.build < floorBuild ||
@@ -391,15 +407,15 @@ final class PocketUpdateCoordinator {
       candidate: signed.payload,
       diff: diff,
     );
-    if (currentActive != null &&
-        currentActive.manifest.payload.contentHash ==
+    if (effectiveActive != null &&
+        effectiveActive.manifest.payload.contentHash ==
             signed.payload.contentHash) {
       _report(
         onProgress,
         const PocketUpdateProgress(stage: PocketUpdateStage.loading),
       );
       return PocketPreparedPackage(
-        package: currentActive,
+        package: effectiveActive,
         needsActivation: false,
         deliveryMode: PocketUpdateMode.granular,
         target: target,

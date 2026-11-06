@@ -1253,6 +1253,9 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     if (target.closing || target.failed) {
       throw new PocketSystemError("runtime_unavailable", "target runtime is closing or failed");
     }
+    // Keep the caller presented while a resident/prewarmed package is checked.
+    // A newly created runtime performs the same admission before it is ready.
+    if (!created) await this.prepareForOpen(target);
     try {
       await this.lifecycle(resume, "onWillDisappear", { targetAppId, requestId: callId });
       await this.lifecycle(resume, "frozenInStack", { targetAppId, requestId: callId });
@@ -1325,6 +1328,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.assertActive();
     const catalogEntry = this.catalog.get(appId);
     const createParams: JsonObject = { appId };
+    if (!prewarmed) createParams.prepareForOpen = true;
     if (catalogEntry?.memory) {
       const memory: JsonObject = {};
       if (catalogEntry.memory.heapLimitBytes !== undefined) {
@@ -1344,6 +1348,10 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     if (created.appId !== appId) {
       throw new PocketSystemError("host_protocol_error", "runtime.create returned a different appId");
     }
+    if (!prewarmed && created.preparedForOpen !== true) {
+      await this.hostRequest("system.runtime.destroy", { instanceId }).catch(() => {});
+      throw new PocketSystemError("host_protocol_error", "runtime.create did not complete package preparation");
+    }
     if (this.records.has(instanceId) || this.instanceForApp.has(appId)) {
       throw new PocketSystemError("duplicate_runtime", "runtime.create returned an already resident instance");
     }
@@ -1361,6 +1369,35 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.records.set(instanceId, record);
     this.instanceForApp.set(appId, instanceId);
     return record;
+  }
+
+  private async prepareForOpen(record: RuntimeRecord): Promise<void> {
+    const previousGeneration = record.generation;
+    if (previousGeneration === null) {
+      throw new PocketSystemError("host_protocol_error", "runtime.create omitted the child generation");
+    }
+    const prepared = await this.hostObject("system.runtime.prepareOpen", {
+      instanceId: record.instanceId,
+      generation: previousGeneration,
+    }, { timeoutFrames: 60 * simulationHz() });
+    this.assertActive();
+    const generation = this.readGeneration(prepared.generation);
+    if (prepared.instanceId !== record.instanceId || prepared.appId !== record.appId ||
+        prepared.previousGeneration !== previousGeneration || generation === null ||
+        typeof prepared.updated !== "boolean" || typeof prepared.configured !== "boolean" ||
+        (prepared.updated && !prepared.configured) ||
+        prepared.updated !== (generation !== previousGeneration)) {
+      throw new PocketSystemError("host_protocol_error", "runtime.prepareOpen returned inconsistent package facts");
+    }
+    // The normal generation event is queued behind this open transaction.
+    // Consume the returned fact here so only the admitted generation can be
+    // presented; the later duplicate event is ignored by the same handler.
+    await this.handleGenerationChange({
+      instanceId: record.instanceId,
+      appId: record.appId,
+      previousGeneration,
+      generation,
+    });
   }
 
   private async awaitFirstFrame(record: RuntimeRecord): Promise<void> {
@@ -1421,7 +1458,14 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       this.presentedInstanceIds = this.presentedInstanceIds.filter((id) => id !== record.instanceId);
       this.notifyPresentation();
     }
-    await this.hostRequest("system.runtime.destroy", { instanceId: record.instanceId });
+    try {
+      await this.hostRequest("system.runtime.destroy", { instanceId: record.instanceId });
+    } catch (error) {
+      // Native close can win the race with a generation/termination event.
+      // Absence is already the requested terminal state; transport failures
+      // still retain the closing record for the existing retry lane.
+      if (errorShape(error).code !== "instance_not_found") throw error;
+    }
     this.assertActive();
     this.records.delete(record.instanceId);
     if (this.instanceForApp.get(record.appId) === record.instanceId) {
@@ -1835,6 +1879,12 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       state,
       ...extra,
     };
+    // Preserve lifecycle order when a new native binding becomes ready between
+    // posts. Later events must not overtake an init already queued for retry.
+    if (record.lifecycleQueue.length > 0) {
+      if (record.lifecycleQueue.length < 32) record.lifecycleQueue.push(params);
+      return;
+    }
     const accepted = await this.post(record, "platform.lifecycle", params);
     if (!accepted && record.lifecycleQueue.length < 32) {
       record.lifecycleQueue.push(params);
@@ -1934,24 +1984,36 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     record.lifecycleQueue.length = 0;
     const frameIndex = this.stack.findIndex((frame) => frame.instanceId === instanceId);
     const isForeground = frameIndex === this.stack.length - 1;
-    if (isForeground) await this.presentTop();
-    await this.lifecycle(record, "onInit", { generationChanged: true });
-    await this.lifecycle(record, "onLoad", { generationChanged: true });
-    if (isForeground) {
-      await this.lifecycle(record, "onWillAppear", { generationChanged: true });
-      await this.lifecycle(record, "onDidAppear", { generationChanged: true });
-    } else {
-      await this.lifecycle(record, "frozenInStack", { generationChanged: true });
-    }
-    await this.flushLifecycle(record);
+    try {
+      if (isForeground) await this.presentTop();
+      await this.lifecycle(record, "onInit", { generationChanged: true });
+      await this.lifecycle(record, "onLoad", { generationChanged: true });
+      if (isForeground) {
+        await this.lifecycle(record, "onWillAppear", { generationChanged: true });
+        await this.lifecycle(record, "onDidAppear", { generationChanged: true });
+      } else {
+        await this.lifecycle(record, "frozenInStack", { generationChanged: true });
+      }
+      await this.flushLifecycle(record);
 
-    const frame = frameIndex >= 0 ? this.stack[frameIndex] : undefined;
-    const launchCall = frame?.requestId ? this.calls.get(frame.requestId) : undefined;
-    if (launchCall) {
-      // The new guest has no retained listeners or launch props from the old
-      // generation. Rehydrate its open context from the bounded JS call record.
-      launchCall.launchPending = true;
-      await this.flushPendingLaunches();
+      const frame = frameIndex >= 0 ? this.stack[frameIndex] : undefined;
+      const launchCall = frame?.requestId ? this.calls.get(frame.requestId) : undefined;
+      if (launchCall) {
+        // The new guest has no retained listeners or launch props from the old
+        // generation. Rehydrate its open context from the bounded JS call record.
+        launchCall.launchPending = true;
+        await this.flushPendingLaunches();
+      }
+    } catch (error) {
+      // Both an inline entry gate and a queued host event must fail closed.
+      // Reuse termination cleanup so transient destroy failures remain marked
+      // closing and are retried instead of stranding a half-initialized realm.
+      await this.handleRuntimeTermination({
+        instanceId,
+        appId: record.appId,
+        error: { code: "generation_boot_failed" },
+      }, true).catch(() => { record.failed = true; record.closing = true; });
+      throw error;
     }
   }
 

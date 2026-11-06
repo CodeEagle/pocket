@@ -43,6 +43,7 @@ interface HostCall {
 class TraceHost implements HostBridge {
   readonly calls: HostCall[] = [];
   private nextInstance = 1;
+  private readonly runtimes = new Map<string, { appId: string; generation: string }>();
   private readonly waiters: Array<{
     matches: (call: HostCall) => boolean;
     resolve: (call: HostCall) => void;
@@ -62,10 +63,29 @@ class TraceHost implements HostBridge {
     if (capability === "system.runtime.configure") {
       result = { systemInstanceId: "system-ui", generation: SYSTEM_GENERATION };
     } else if (capability === "system.runtime.create") {
+      const appId = String(params.appId);
+      const instanceId = `profile-instance-${this.nextInstance++}`;
+      const generation = "profile-generation";
+      this.runtimes.set(instanceId, { appId, generation });
       result = {
-        appId: String(params.appId),
-        instanceId: `profile-instance-${this.nextInstance++}`,
-        generation: "profile-generation",
+        appId,
+        instanceId,
+        generation,
+        ...(params.prepareForOpen === true ? { preparedForOpen: true } : {}),
+      };
+    } else if (capability === "system.runtime.prepareOpen") {
+      const instanceId = String(params.instanceId);
+      const runtime = this.runtimes.get(instanceId);
+      if (!runtime || params.generation !== runtime.generation) {
+        return Promise.reject(new Error("runtime.prepareOpen fixture received an unknown or stale runtime"));
+      }
+      result = {
+        instanceId,
+        appId: runtime.appId,
+        previousGeneration: runtime.generation,
+        generation: runtime.generation,
+        updated: false,
+        configured: false,
       };
     } else if (capability === "system.runtime.awaitFirstFrame") {
       result = { ready: true, generation: params.generation };

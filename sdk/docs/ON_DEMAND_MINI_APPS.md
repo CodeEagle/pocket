@@ -41,17 +41,22 @@ and trust anchors are host configuration; guest arguments cannot choose them.
 The normal JS catalog / allowed-open-app policy and `platform.launchApp` call
 remain in use. A catalog entry is host-authorized and available to open; it need
 not have downloaded bytes yet. Existing configurations default to embedded
-startup and retain their behavior.
+startup. When a signed update source is configured, the System kernel now gates
+actual page entry on that source, including for embedded and prewarmed apps.
+See [Mini-app update before entry](MINI_APP_UPDATE_BEFORE_OPEN.md).
 
 ## Admission, cache and failure behavior
 
 - First open without a healthy cached package downloads and verifies the signed
   package, all content hashes, PAK assembly and runtime ABI before exposing it
   to the guest surface. The existing automatic bundle/granular selection applies.
-- Subsequent opens reuse only the verified `lastGood` cache without a manifest request,
-  so cached mini-apps can open offline. An `active` pointer alone is insufficient.
-  Updates remain explicit through the
-  existing update API; newer releases reuse unchanged content blobs.
+- Actual page entry through the System kernel checks the signed manifest again,
+  even with a healthy cache or an already prewarmed runtime. A newer release is
+  fully prepared before presentation; unchanged content blobs are reused.
+  A configured source that cannot be checked fails the open while the caller
+  stays visible. Session initialization without the entry gate (including
+  prewarm) retains the verified `lastGood` offline bootstrap; an `active` pointer
+  alone is insufficient.
 - Downloading or preparing a package does not mark it healthy. The existing
   first-frame plus live health window controls promotion.
 - No embedded code fallback is attempted for this configuration. Startup,
