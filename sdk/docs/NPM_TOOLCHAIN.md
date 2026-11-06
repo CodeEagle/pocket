@@ -42,9 +42,9 @@ gh workflow run toolchain.yml -f publish_release=true
 ```
 
 `workflow_dispatch` 的 `publish_release` 默认值为 `true`。如果只想构建和验收而不创建
-Release，必须显式传入 `-f publish_release=false`。当前文档记录的是此前独立 Windows
-consumer 验收；新的完整双平台 Release gate 尚未运行通过，不能把本地 tarball 或单个
-平台 CI 结果当成已发布 Release。
+Release，必须显式传入 `-f publish_release=false`。下文保留此前独立 Windows consumer
+验收的来源；完整版本的发布状态以对应 GitHub Release 及随附的两平台验收 JSON 为准，
+不能把本地 tarball 或单个平台 CI 结果当成完整发布验收。
 
 完整 Guest 构建默认使用预先准备的 pinned compiler、预编译 `pocketjs_bytecode` 和 `pocket_probe`：
 
@@ -98,8 +98,8 @@ Editor 默认监听 `http://127.0.0.1:8791`。`build:web` 和 Editor 内部使�
 macOS 已使用真实预编译平台包生成 app/game 模板的 QJBC、PAK，并在 Pocket Preview 路径执行。导出测试会检查 `build_guest.ts`、`@pocket/ui`、templates、平台包解析器和 toolchain manager 都进入独立包，且不会带入源码缓存、`target` 或 Flutter 项目。
 
 Windows 的 npm 入口和 `win32-x64` 平台包已由此前独立 CI 完成 native 编译与打包；干净
-consumer 安装、Preview smoke 和 WinRT addon 加载也已通过历史验收。新的双平台完整
-Release gate 仍需由 `.github/workflows/toolchain.yml` 运行。Linux 仍需独立 CI 生成和验证；
+consumer 安装、Preview smoke 和 WinRT addon 加载也已通过历史验收。完整双平台发布
+验收由 `.github/workflows/toolchain.yml` 执行，报告附在对应 GitHub Release。Linux 仍需独立 CI 生成和验证；
 CI 通过不能替代 Windows DK-META2 等 BLE 硬件验收。
 
 ## 本次实际验收（macOS）
@@ -120,8 +120,8 @@ CI 通过不能替代 Windows DK-META2 等 BLE 硬件验收。
 `npm run doctor` 检查平台包、清单、ABI 和文件哈希；不能代替上述加载和交互验收。源码发布命令才需要 `patch`；产品开发不需要把它加入 PATH。Windows consumer/Preview smoke 已由最终 CI 完成；BLE 硬件验收仍需实体 Windows 机器。
 
 当前 macOS arm64 平台包已本地验收，Windows x64 平台包已完成此前 CI 编译和打包，
-Windows consumer/Preview 验收也已完成；新的双平台完整 Release 尚未运行，Linux CI 尚未
-完成，npm registry 也不会发布平台包。
+Windows consumer/Preview 验收也已完成。完整双平台发布状态见 GitHub Release；Linux CI
+尚未完成，本工作流不会执行 npm registry 发布。
 Flutter 真机/模拟器打包仍需要消费者自己的 Flutter SDK、对应平台 SDK、签名与设备环境，本轮没有进行手机实跑。
 
 额外执行 `python3 sdk/scripts/check_architecture.py` 时，当前共享工作区的 `demo/lib/main.dart` 为 203 行，超过薄宿主 100 行限制；该项未通过。本次 npm 工具链没有修改该 Dart 文件，也未将此检查记为通过。

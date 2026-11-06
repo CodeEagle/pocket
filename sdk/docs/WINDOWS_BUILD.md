@@ -23,8 +23,8 @@ gh workflow run toolchain.yml -f publish_release=true
 
 工作流不会发布 npm registry。`workflow_dispatch` 的 `publish_release` 默认值为
 `true`；如果只构建和验收而不创建 Release，必须显式传入
-`-f publish_release=false`。本文记录的 Windows native/consumer 结果来自此前独立 CI；
-新的完整双平台 Release gate 尚未运行通过，不能提前把它写成已发布版本。
+`-f publish_release=false`。本文保留此前独立 CI 的 Windows native/consumer 证据；
+完整双平台发布状态及最终压缩包验收结果以对应 GitHub Release 附件为准。
 
 ## 发布者构建
 
