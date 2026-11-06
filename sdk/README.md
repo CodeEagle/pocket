@@ -19,7 +19,7 @@ npm run init -- /path/to/my-app --template=app --sdk-root "$PWD"
 npm run init -- /path/to/my-game --template=game --sdk-root "$PWD"
 ```
 
-App 模板适合 screens、forms 和 product UI；Game 模板是基于官方 `onFrame` 的 3×3 目标格子、30 秒倒计时和计分示例。模板只提供 JS 起点，两个项目仍共用同一套 pinned `buildGuest`、QuickJS bytecode/PAK 和 Flutter 薄宿主。完整的生成文件、Studio 选择、能力边界和验收命令见 [`docs/PROJECT_TEMPLATES.md`](docs/PROJECT_TEMPLATES.md)。
+App 模板适合 screens、forms 和 product UI；Game 模板是基于官方 `onFrame` 的星空点击小游戏：追逐漂浮星核、命中粒子反馈和 30 秒计分挑战。模板只提供 JS 起点，两个项目仍共用同一套 pinned `buildGuest`、QuickJS bytecode/PAK 和 Flutter 薄宿主。完整的生成文件、Studio 选择、能力边界和验收命令见 [`docs/PROJECT_TEMPLATES.md`](docs/PROJECT_TEMPLATES.md)。
 
 硬件是可选 `--hardware`；系统栏/触觉是可选 `--platform-experience`。
 硬件还可按相机、蓝牙、传感器、定位、生物识别和天气独立选择；系统权限复用 Flutter `permission_handler`，见 [`docs/HARDWARE_MODULES.md`](docs/HARDWARE_MODULES.md)。

@@ -17,7 +17,9 @@
 
 ```text
 确认需求
-  → 选择 JS UI 与状态结构
+  → 用 TCA 风格完成 App/Game 的完整功能闭环
+  → 为 State/Action/Reducer/Effect 添加测试用例
+  → 选择 JS UI 并绑定已验证的状态与动作
   → 只选择必需的硬件/平台插件
   → 声明 manifest capability/permission
   → 使用 Editor 构建和真实 runtime 预览
@@ -26,6 +28,16 @@
   → package_update 签名并部署
   → 验证首次 bundle、后续 blob 增量与回退
 ```
+
+### App/Game 的功能优先顺序：TCA → 测试 → UI
+
+无论选择 `app` 还是 `game`，都先用 TCA（State、Action、Reducer、Effect）风格把完整功能做完，再补测试用例，最后做 UI。这里的 TCA 是业务组织方法，不要求引入或伪造一个当前仓库没有的第三方 TCA 包；实现仍放在项目自己的 JS/TS 中。
+
+1. **先完成功能**：先定义完整的 State 和 Action，用 Reducer 实现状态转移，用 Effect 编排计时、请求、持久化或其他异步边界。App 要先跑通业务流程，Game 要先跑通开始、进行中、暂停、恢复、重启、结束等完整状态，不依赖页面是否已经画出来。
+2. **再加测试用例**：覆盖初始状态、主路径、边界值、错误/失败、异步结果，以及 App 的提交/返回或 Game 的暂停/恢复/重开/倒计时结束。优先测试 State/Action/Reducer/Effect 的行为和状态转移；截图或静态文件检查不能替代逻辑测试。
+3. **最后做 UI**：只把已经验证的 State 和 Action 绑定到现有的 `@pocket/ui`、`View`、`Focusable` 等组件。UI 负责呈现和派发动作，不再创建第二份业务状态、计时器或流程编排；需要新的视觉时也保留已验证的交互语义。
+
+这个顺序是功能开发的门槛，不是发布后再补的文档工作。若功能、测试或 UI 需要调整，应先回到对应的 State/Action/Reducer/Effect 层修正，再重新验证后继续向后推进。
 
 开始修改前，AI 应先回答：
 

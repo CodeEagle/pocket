@@ -32,9 +32,19 @@ bun pocket.ts init /absolute/path/to/my-game \
 Pocket Studio 左上角的项目选择器可以切换已有项目。点击旁边的 **新建项目**，在创建对话框中先选择模板：
 
 - **App**：screens、forms 和 product UI。
-- **Game**：frame loop、input 和 game state。
+- **Game**：图形化游戏场景、frame loop、input 和 game state。
 
 Studio 将选择通过 `POST /api/projects` 的 `template` 字段提交，并将它保存到 `editor.json`。已有项目不会因为打开 Studio 而自动换模板。CLI 会另外生成 `vendor/pocket-ui/` 和 `flutter/`；Studio 工作区创建的是 JS 工程，直接使用 SDK 的公共 UI 包与 Preview。
+
+## App/Game 的开发顺序
+
+两个模板都按同一个功能优先顺序开发：先用 TCA（State、Action、Reducer、Effect）风格把 App 或 Game 的完整功能做完，再加测试用例，最后做 UI。这里的 TCA 是 JS/TS 的状态组织方法，不要求引入当前 SDK 没有的第三方 TCA 包。
+
+1. **功能先行**：在 UI 之前完成完整的业务或游戏状态机。App 先跑通页面流程、提交、错误和返回；Game 先跑通开始、进行中、暂停、恢复、重启、结束和计时等状态。
+2. **测试随后**：为 State/Action/Reducer/Effect 补主路径、边界、错误和异步测试；Game 还要覆盖暂停/恢复、重开和倒计时结束。测试必须验证状态转移和效果，不以静态 UI 文件存在作为通过条件。
+3. **UI 最后**：将已验证的状态和动作绑定到 `@pocket/ui`、`View`、`Focusable` 等组件。UI 只负责呈现与派发动作，不新增一套业务状态或计时循环。
+
+这条顺序适用于从模板生成的项目以及后续扩展；需要改动交互时，先修正并测试状态逻辑，再调整视觉层。
 
 ## App 模板
 
@@ -56,11 +66,11 @@ App 模板不自动启用相机、蓝牙、网络或其他原生能力。按需�
 
 ## Game 模板
 
-来源文件是 [`templates/game/app.tsx`](../templates/game/app.tsx)。它是一个可直接运行的 3×3 目标格子游戏：30 秒倒计时、命中计分、目标自动移动，以及 开始、暂停/继续、重新开始 控件。
+来源文件是 [`templates/game/app.tsx`](../templates/game/app.tsx)。它是一个可直接运行的图形化“星尘捕手”小游戏：深色星空场景、漂移星核、顶部 HUD、30 秒倒计时和命中计分。星核的可点击区域固定为 80 像素，等待点击时只做小幅漂移，命中后才换位置并显示粒子爆发和 `+1` 反馈；开始、暂停/继续、重新开始和结束后的再来一局都在游戏场景内完成。画面和交互由 JS 组合，避免把游戏退化成 App 模板式的说明卡片和表单页。
 
-Game 的状态（`phase`、`score`、`seconds`、`target`）全部由 JS 保存。计时使用 pinned PocketJS 的 `onFrame`、`simulationHz()` 和虚拟帧，不使用浏览器 `setInterval`、Dart 状态或持续后台轮询。按钮输入走现有 `ActionButton`；目标移动和倒计时只在 `playing` 阶段运行，暂停时不会偷偷消耗时间。
+Game 的状态（`phase`、`score`、`remaining`、`target`、动画进度和命中反馈）全部由 JS 保存；`remaining` 是唯一的时间信号，显示值直接由它计算，不再维护冗余的 `seconds` 状态。计时使用 pinned PocketJS 的 `onFrame`、`simulationHz()` 和虚拟帧，不使用浏览器 `setInterval`、Dart 状态或持续后台轮询。输入使用官方 `Focusable`；顶部 HUD 的暂停入口和场景内的开始、继续、重新开始入口共享同一套 phase 状态，目标移动、倒计时和粒子反馈只在 `playing` 阶段运行，暂停时不会偷偷消耗时间。
 
-这个模板的能力边界是当前 SDK 已验收的 Solid/UI 帧模型。它不声明或伪造 3D Scene、Rapier 物理、BLE 手柄、Canvas DrawList、共享 Float32Array、VRAM 或资源流能力。需要这些能力时，应先实现并验收对应的公共 transport/API，再扩展模板。
+这个模板的能力边界是当前 SDK 已验收的 Solid/UI 帧模型：使用 `View` 组合星点、行星、轨道、星核和粒子爆发，使用 `Focusable` 处理 80 像素星核命中区和场景内操作，并以 `onFrame` 驱动漂移、倒计时和反馈动画。它不声明或伪造 3D Scene、Rapier 物理、BLE 手柄、Canvas DrawList、共享 Float32Array、VRAM 或资源流能力。需要这些能力时，应先实现并验收对应的公共 transport/API，再扩展模板。
 
 ## 构建和 Preview
 
@@ -74,7 +84,7 @@ bun /Volumes/ORICO/Development/Github/pocket/sdk/pocket.ts editor . \
   --port=8791
 ```
 
-打开 Studio 后选择项目，点击 **构建**，再打开 Preview。App 模板应能点击标题栏的主题按钮并观察画面颜色变化；Game 模板应能点击目标格子、暂停/恢复和重启，并观察分数、目标位置及倒计时的实际 frame 变化。Preview 运行的是生成的 QuickJS bytecode/PAK，不是 source-eval 或静态成功页面。
+打开 Studio 后选择项目，点击 **构建**，再打开 Preview。App 模板应能点击标题栏的主题按钮并观察画面颜色变化；Game 模板应能点击漂移星核、观察粒子和 `+1` 反馈，使用顶部暂停和场景内继续/重开/再来一局，并观察分数、星核位置及倒计时的实际 frame 变化。Preview 运行的是生成的 QuickJS bytecode/PAK，不是 source-eval 或静态成功页面。
 
 也可以用 `bun editor/server.ts` 启动 Studio 工作区，通过新建对话框创建项目。两种入口使用同一份模板源码；修改 `app.tsx` 后都必须重新 Build，旧 Preview 不代表未构建的源码。
 
@@ -87,7 +97,7 @@ bun /Volumes/ORICO/Development/Github/pocket/sdk/pocket.ts editor . \
 - `pocketjs_super_app_demo.html` 的 `stepMasterTicker()`、输入按钮和倒计时/粒子演示用于确认交互需求；它是历史展示页，不是当前 PocketJS runtime 的模板来源。
 - 当前确定性时钟契约见 [`DETERMINISTIC_FRAMES.md`](DETERMINISTIC_FRAMES.md)：业务计时使用虚拟时钟和 frame hook，不能把墙钟 timer 当作逻辑状态来源。
 
-必要适配是把旧游戏的“固定帧更新 + 输入后改变状态”缩成当前可运行的 3×3 JS 游戏，并使用官方 `onFrame({ continuous })`。消融掉了旧 starter 独立目录、旧 Demo/宿主业务状态、3D/物理模拟、第二套游戏循环和 Dart orchestration；两个模板共用一条配置、编译和 Preview 管线。
+必要适配是把旧游戏的“固定帧更新 + 输入后改变状态”缩成当前可运行的星空图形化 JS 游戏，并使用官方 `onFrame({ continuous })`。消融掉了旧 starter 独立目录、旧 Demo/宿主业务状态、3×3 九宫格按钮层、`ActionButton` 游戏控制层、冗余 `seconds` 时间状态、3D/物理模拟、第二套游戏循环、静态占位画面和 Dart orchestration；两个模板共用一条配置、编译和 Preview 管线。
 
 ## 验收记录
 
@@ -102,8 +112,12 @@ python3 scripts/check_architecture.py
 bun editor/test/project_templates_live_probe.ts
 ```
 
-2026-11-06 已执行：23 项回归通过，包含模板选择、拒绝非法值、现有配置保留、外部项目与新项目同时列出、Editor 构建、导出和硬件脚手架；架构检查通过。两个中文模板均完成 `init → pinned buildGuest → QuickJS bytecode/PAK → native Preview → pointer input` 验收：App 明暗切换往返成功；Game 点击命中计分、暂停 1.2 秒时倒计时保持、继续后推进、重开归零、30 秒结束后再次重开均通过。
+2026-11-06 本轮已执行：7 项模板回归通过，覆盖模板选择、默认值、非法值拒绝、非空目录保护、现有配置保留、外部项目列表和 Editor 构建；架构检查通过。Native Preview live probe 也已通过：App `themeToggle`；Game `graphicMotion`、空白区域不计分、命中粒子/`+1`、指针计分、暂停 1.2 秒冻结倒计时、继续、重新开始、30 秒结束和再来一局均通过。另用 Playwright Chromium 检查了真实 Preview 的 ready、playing、hit 三个画面；截图确认星空场景、漂移星核、命中反馈和 HUD 均发生实际帧变化。
 
 `project_templates_live_probe.ts` 会创建临时工程、按顺序构建并在结束时清理 Preview 与临时文件。它只验收 JS 和 native Preview，不执行 Flutter 平台打包或手机实机验收。
 
 Studio 浏览器交互也已执行：从左上角 **新建项目** 分别创建 App/Game，展开项目列表切回 App，选择后列表关闭。桌面和 390px 窄屏检查通过，无横向溢出或浏览器脚本错误。验收浏览器与临时服务已关闭。
+
+### 点击可用性修正（2026-11-06）
+
+真实浏览器检查确认开始、暂停和鼠标按压能进入 JS；旧版星核每 1.2 秒自动瞬移，玩家瞄准后输入到达时可能已经点在空白处。消融自动换位计时器 `moveElapsed`，只在命中时更换目标位置，保留小幅连续漂移及 80 像素命中区。回归增加真实按压时长（120/300 ms）和等待 1.4 秒后目标仍在原命中范围内的验证；旧版在目标稳定性断言失败；修复后完整 native Preview 验收通过，包含计分、粒子、空白不计分、正常按压、暂停/恢复、重开和 30 秒结束。已同步修复当前 Studio 的 `my-pocket-game2` 工程并重新构建；系统 Chrome 中等待后使用 300 ms / 180 ms 真实鼠标按压，连续命中从 0 分增加到 2 分。

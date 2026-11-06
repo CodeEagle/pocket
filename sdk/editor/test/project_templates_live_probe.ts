@@ -7,7 +7,7 @@ import { initProject, buildProject } from "../../pocket.ts";
 import { resolveNativeProbePath } from "../../scripts/native_probe_path.ts";
 import { createPreviewManager } from "../preview.ts";
 
-type Frame = { ops: Array<{ type: string; text?: string; x: number; y: number; w: number; h: number }> };
+type Frame = { ops: Array<{ type: string; text?: string; x: number; y: number; w: number; h: number; color?: number }> };
 const sdk = resolve(import.meta.dir, "../..");
 const workspace = mkdtempSync(join(tmpdir(), "pocket-templates-live-"));
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -48,16 +48,21 @@ async function verify(template: "app" | "game") {
     throw new Error(`Template ${template} did not reach expected frame: ${JSON.stringify(current!.ops.filter(op => op.type === "text"))}`);
   }
   const has = (f: Frame, text: string) => f.ops.some(op => op.type === "text" && op.text === text);
+  async function tap(x: number, y: number, holdMs = 120) {
+    for (const phase of ["down", "up"]) {
+      const response = await manager.handle(new Request(route("input"), {
+        method: "POST", body: JSON.stringify({ type: "pointer", phase, id: 0, x, y }),
+      }), template, "input");
+      assert.equal(response.status, 200);
+      if (phase === "down") await delay(holdMs);
+    }
+  }
   async function click(label: string) {
     const current = await waitFor(f => has(f, label));
     const op = current.ops.find(op => op.type === "text" && op.text === label)!;
-    for (const phase of ["down", "up"]) {
-      const response = await manager.handle(new Request(route("input"), {
-        method: "POST", body: JSON.stringify({ type: "pointer", phase, id: 0, x: op.x + op.w / 2, y: op.y + op.h / 2 }),
-      }), template, "input");
-      assert.equal(response.status, 200);
-    }
+    await tap(op.x + op.w / 2, op.y + op.h / 2);
   }
+
   try {
     const stream = await manager.handle(new Request(route("stream")), template, "stream");
     assert.equal(stream.status, 200);
@@ -70,25 +75,44 @@ async function verify(template: "app" | "game") {
       await waitFor(f => has(f, "深色"));
       return { template, themeToggle: true };
     }
-    await waitFor(f => has(f, "准备开始") && has(f, "得分：0 | 剩余：30"));
+    await waitFor(f => has(f, "星尘捕手") && has(f, "得分：0") && has(f, "剩余：30 秒"));
     await click("开始游戏");
-    await waitFor(f => has(f, "进行中"));
-    await click("命中");
-    await waitFor(f => f.ops.some(op => op.text?.startsWith("得分：1 | 剩余：")));
+    const playing = await waitFor(f => has(f, "点击发光星核"));
+    // Locate the graphic core by its rendered color, not a hidden hit label.
+    const core = (f: Frame) => f.ops.find(op => op.color === 0xfffff8df);
+    const firstCore = core(playing)!;
+    assert.ok(firstCore, "playing frame must contain the graphic star core");
+    const moved = await waitFor(f => !!core(f) && (core(f)!.x !== firstCore.x || core(f)!.y !== firstCore.y));
+    await tap(8, 100);
+    assert.ok(has(await frame(), "得分：0"), "empty space must not score");
+    const target = core(moved)!;
+    await tap(target.x + target.w / 2, target.y + target.h / 2);
+    await waitFor(f => has(f, "+1"));
+    const scored = await waitFor(f => has(f, "得分：1"));
+    // Keep the next target trackable while the player aims. The former
+    // 1.2-second teleport could remove it before a normal click arrived.
+    const nextTarget = core(scored)!;
+    await delay(1400);
+    const heldTarget = core(await frame())!;
+    assert.ok(Math.abs(heldTarget.x - nextTarget.x) <= 20 && Math.abs(heldTarget.y - nextTarget.y) <= 20,
+      "target must stay near its visible position until hit");
+    await tap(heldTarget.x + heldTarget.w / 2, heldTarget.y + heldTarget.h / 2, 300);
+    await waitFor(f => has(f, "得分：2"));
     await click("暂停");
     const paused = await waitFor(f => has(f, "已暂停"));
-    const pausedScore = paused.ops.find(op => op.text?.startsWith("得分："))!.text;
+    const pausedTime = paused.ops.find(op => op.text?.startsWith("剩余："))!.text;
     await delay(1200);
-    assert.ok(has(await frame(), pausedScore!), "paused countdown must remain unchanged");
+    assert.ok(has(await frame(), pausedTime!), "paused countdown must remain unchanged");
     await click("继续");
-    await waitFor(f => has(f, "进行中"));
-    await waitFor(f => !has(f, pausedScore!), 3000);
+    await waitFor(f => has(f, "点击发光星核"));
+    await waitFor(f => !has(f, pausedTime!), 3000);
+    await click("暂停");
     await click("重新开始");
-    await waitFor(f => has(f, "得分：0 | 剩余：30"));
-    await waitFor(f => has(f, "本局结束") && has(f, "得分：0 | 剩余：0"), 35_000);
-    await click("重新开始");
-    await waitFor(f => has(f, "进行中") && has(f, "得分：0 | 剩余：30"));
-    return { template, scoreFromPointer: true, pauseFreezesTime: true, resume: true, restart: true, roundExpiry: true };
+    await waitFor(f => has(f, "得分：0") && has(f, "剩余：30 秒"));
+    await waitFor(f => has(f, "本局结束") && has(f, "得分：0") && has(f, "剩余：0 秒"), 35_000);
+    await click("再来一局");
+    await waitFor(f => has(f, "点击发光星核") && has(f, "得分：0") && has(f, "剩余：30 秒"));
+    return { template, graphicMotion: true, emptySpaceDoesNotScore: true, hitParticles: true, scoreFromPointer: true, heldPressAcrossFrames: true, pauseFreezesTime: true, resume: true, restart: true, roundExpiry: true };
   } finally {
     await reader?.cancel();
     await manager.dispose();
