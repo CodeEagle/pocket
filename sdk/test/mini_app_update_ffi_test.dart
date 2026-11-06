@@ -346,11 +346,10 @@ void main() {
         final oldChildInstanceId = childBefore.instanceId;
         updateServer.rootReleaseBuild = 2;
 
-        final result = (await tester.runAsync(
-          () => root.session.prepareForOpen(),
-        ))!;
-        expect(result['configured'], isTrue);
-        expect(result['updated'], isTrue);
+        // Keep pumping Flutter while the root bridge tears down and remounts;
+        // awaiting the whole operation inside runAsync would starve the
+        // first-frame continuation that completes the mount.
+        final prepare = root.session.prepareForOpen();
 
         await _waitUntil(
           tester,
@@ -365,6 +364,9 @@ void main() {
           diagnostic: () =>
               _hostDiagnostics(controller, updateServer, childRecordings),
         );
+        final result = await tester.runAsync(() => prepare);
+        expect(result?['configured'], isTrue);
+        expect(result?['updated'], isTrue);
         final promotedRoot = _findInstance(controller, configs.rootId);
         expect(promotedRoot.session.failure, isNull);
         expect(
@@ -1009,9 +1011,11 @@ final class _MiniUpdateServer {
       final fileAppId = isCanonicalFilePath
           ? Uri.decodeComponent(canonical[channelOffset + 2])
           : null;
-      final packageDirectory = fileAppId == rootAppId
-          ? 'root-v$releaseBuild'
-          : 'child-v$releaseBuild';
+      final isRootPackage = fileAppId != null && fileAppId == rootAppId;
+      final packageBuild = isRootPackage ? rootReleaseBuild : releaseBuild;
+      final packageDirectory = isRootPackage
+          ? 'root-v$packageBuild'
+          : 'child-v$packageBuild';
       final file = File('$fixtureRoot/$packageDirectory/$relative');
       filePaths.add(relative);
       if (!file.existsSync()) {

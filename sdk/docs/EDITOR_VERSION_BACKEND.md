@@ -138,3 +138,26 @@ path depth, index/manifest mismatch, cross-origin rejection and anti-rollback.
 The existing granular and bundle download tests exercise the same resolved
 manifest base. Signature, plugin and trust-policy admission regressions remain
 on the original coordinator and verifier.
+
+The version card exposes one download icon beside the concrete test/stable
+version and build. Its accessible name and tooltip identify that exact release;
+an unpublished slot is disabled. Playwright covers these controls and the saved
+resource settings (2 tests, 81 assertions). A live download of the existing
+legacy publication was also checked to contain the root and both associated
+mini apps without changing published state.
+
+The aggregate host descriptor adapts artifact origins to the address used by
+the requesting container. Loopback aliases and the LAN endpoint therefore work
+against the same immutable release. This adapter does not modify signed
+manifests, package digests or release identities. The actual LAN fixed index was
+loaded through `PocketHostConfig.load`, including verified bootstrap metadata,
+remote-root download policy and the published compositor registry.
+
+`mini_app_update_ffi_test.dart` also exercises a real signed root build 1 to
+build 2 promotion with the release native library. The fixture compiles the
+SystemUI once and reuses its bytecode/PAK for both signed release identities.
+The test downloads root build 2, selects its matching catalog before mount,
+changes the child's compositor handle from 2 to 3, and waits for the replacement
+root and child to produce their first native frames. The host gates transient
+rebuilds until the verified catalog generation equals the mounted session
+generation; it never changes a loaded native compositor registry in place.

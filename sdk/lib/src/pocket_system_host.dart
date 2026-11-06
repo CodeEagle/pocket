@@ -325,6 +325,16 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   bool get _lifecycleResumed =>
       _lifecycleState == null || _lifecycleState == AppLifecycleState.resumed;
 
+  // A signed root can advance its PocketSession generation while the bridge
+  // is still being reconfigured, before the generation listener commits the
+  // verified catalog. Do not let a transient rebuild create a PocketView with
+  // the previous compositor map; native registration is strictly pre-load.
+  bool get _catalogMatchesMountedGeneration =>
+      widget.catalogLoader == null ||
+      (_catalogReady &&
+          _catalogGeneration != null &&
+          _catalogGeneration == _systemUIInstance.session.generation);
+
   @override
   void initState() {
     super.initState();
@@ -465,7 +475,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
 
   @override
   Widget build(BuildContext context) {
-    if (!_catalogReady) {
+    if (!_catalogMatchesMountedGeneration) {
       return ColoredBox(color: widget.backgroundColor);
     }
     return PocketGuestSession(
@@ -483,6 +493,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   }
 
   Widget? _buildCompositorSurface(PocketCompositorSlot slot) {
+    if (!_catalogMatchesMountedGeneration) return null;
     final appId = _surfaceAppIds[slot.surfaceHandle];
     if (appId == null) return null;
     _RuntimeInstance? instance;

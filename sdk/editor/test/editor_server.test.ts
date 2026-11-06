@@ -239,6 +239,12 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     const immutableHistoryHost = await (await fetch(stableHistoryPackage.hostConfigUrl)).json();
     expect(immutableHistoryHost.POCKET_PACKAGE_VERSION).toBe(releaseVersions.value.history[0].releaseId);
     expect(immutableHistoryHost.POCKET_UPDATE_BASE_URL).toMatch(/\/stable$/);
+    const immutableHostPath = new URL(stableHistoryPackage.hostConfigUrl).pathname;
+    const loopbackHost = await (await fetch(`http://127.0.0.1:${server.port}${immutableHostPath}`)).json();
+    const aliasHost = await (await fetch(`http://localhost:${server.port}${immutableHostPath}`)).json();
+    expect(new URL(loopbackHost.applications["pocket.host.demo"].manifestUrl).origin).toBe(`http://127.0.0.1:${server.port}`);
+    expect(new URL(aliasHost.applications["pocket.host.demo"].manifestUrl).origin).toBe(`http://localhost:${server.port}`);
+    expect(loopbackHost.release.releaseId).toBe(aliasHost.release.releaseId);
     const immutableArchive = await request(server, `/releases/fixture-app/${releaseVersions.value.history[0].releaseId}.tar.gz`);
     expect(immutableArchive.response.status).toBe(200);
     expect(new Uint8Array(immutableArchive.value).byteLength).toBeGreaterThan(100);

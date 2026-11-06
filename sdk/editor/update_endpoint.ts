@@ -54,7 +54,7 @@ export function chooseUpdateHost(interfaces = networkInterfaces()): string {
 export function startUpdateEndpoint(options: {
   hostname: string;
   port: number;
-  read: (path: string) => Promise<Response>;
+  read: (path: string, servingOrigin: string) => Promise<Response>;
 }): { origin: string; stop: () => void } {
   if (!privateIPv4(options.hostname) && options.hostname !== "127.0.0.1") {
     throw new Error("Device update host must be a local private IPv4 address");
@@ -71,7 +71,7 @@ export function startUpdateEndpoint(options: {
         return new Response("Not found", { status: 404, headers: { "cache-control": "no-store" } });
       }
       try {
-        const response = await options.read(path);
+        const response = await options.read(path, new URL(request.url).origin);
         const headers = new Headers(response.headers);
         headers.set("cache-control", "no-store");
         headers.set("x-content-type-options", "nosniff");

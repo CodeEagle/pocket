@@ -2806,11 +2806,56 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     }
     return readPublishedArtifact(file);
   };
+  const rebaseAggregateHostResponse = async (response: Response, servingOrigin: string): Promise<Response> => {
+    if (response.status < 200 || response.status >= 300) return response;
+    const contentTypeHeader = response.headers.get("content-type") ?? "";
+    if (!contentTypeHeader.includes("application/json")) return response;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      return new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+    }
+    if (!isObject(parsed) || parsed.kind !== "pocket-editor-app-host") {
+      return new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+    }
+    const replaceArtifactOrigin = (value: unknown): unknown => {
+      if (typeof value === "string" && /^https?:\/\//i.test(value)) {
+        try {
+          const url = new URL(value);
+          if (/^(?:\/(?:test|stable))?\/pocket\//.test(url.pathname) ||
+              /^\/(?:test|stable)(?:\/)?$/.test(url.pathname) ||
+              /^\/updates\//.test(url.pathname) ||
+              /^\/releases\//.test(url.pathname)) {
+            return `${servingOrigin}${url.pathname}${url.search}${url.hash}`;
+          }
+        } catch {
+          // Preserve a non-URL string from a future descriptor extension.
+        }
+        return value;
+      }
+      if (Array.isArray(value)) return value.map(replaceArtifactOrigin);
+      if (isObject(value)) {
+        for (const [key, item] of Object.entries(value)) value[key] = replaceArtifactOrigin(item);
+      }
+      return value;
+    };
+    const rebased = replaceArtifactOrigin(parsed);
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    return new Response(JSON.stringify(rebased, null, 2) + "\n", { status: response.status, statusText: response.statusText, headers });
+  };
+  const readPublishedResponse = async (path: string, servingOrigin: string): Promise<Response> => {
+    const response = await readPublishedUpdate(path);
+    if (!path.endsWith("/host.json")) return response;
+    return rebaseAggregateHostResponse(response, servingOrigin);
+  };
   const versionBackendOrigin = (): string => {
     if (!deviceUpdates) {
       const hostname = options.updateHost ?? (process.env.POCKET_EDITOR_UPDATE_HOST || chooseUpdateHost());
       const port = options.updatePort ?? Number(process.env.POCKET_EDITOR_UPDATE_PORT || server.port);
-      deviceUpdates = startUpdateEndpoint({ hostname, port, read: readPublishedUpdate });
+      deviceUpdates = startUpdateEndpoint({ hostname, port, read: (path, servingOrigin) => readPublishedResponse(path, servingOrigin) });
       console.log(`Pocket version backend listening at ${deviceUpdates.origin} (signed published packages only)`);
     }
     return deviceUpdates.origin;
@@ -3128,7 +3173,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         if (path === "/api/codex/models" && method === "GET") return json(await codex.models());
         if (path === "/api/devices" && method === "GET") return json({ devices: await devices.listDevices() });
         if ((path.startsWith("/updates/") || path.startsWith("/pocket/") || path.startsWith("/test/pocket/") || path.startsWith("/stable/pocket/")) && (method === "GET" || method === "HEAD")) {
-          return await readPublishedUpdate(path);
+          return await readPublishedResponse(path, new URL(request.url).origin);
         }
         if (path.startsWith("/releases/") && method === "GET") {
           const offline = path.match(/^\/releases\/([a-z][a-z0-9-]{0,47})\/(offline-[A-Za-z0-9][A-Za-z0-9._-]{0,127})\.tar\.gz$/);

@@ -238,8 +238,10 @@ try {
 
   let runtimeAbi: string | undefined;
   const projects = [
+    // Compile the SystemUI once.  root-v1/root-v2 intentionally differ only
+    // in their signed release identity; the FFI test must exercise generation
+    // replacement, not a second root bytecode/PAK implementation.
     { appId: rootAppId, build: 1, version: "1.0.0", kind: "root" as const },
-    { appId: rootAppId, build: 2, version: "2.0.0", kind: "root" as const },
     { appId: childAppId, build: 1, version: "1.0.0", kind: "child" as const },
     { appId: childAppId, build: 2, version: "2.0.0", kind: "child" as const },
   ];
@@ -266,37 +268,27 @@ try {
         throw new Error(`fixture generations use different runtime ABIs: ${runtimeAbi} vs ${metadata.runtimeAbi}`);
       }
 
-      if (projectInfo.kind === "root" && projectInfo.build === 1) {
+      if (projectInfo.kind === "root") {
         copyRuntimeAssets(out, join(output, "root", "assets"));
-        packageArtifacts({
-          appId: rootAppId,
-          version: projectInfo.version,
-          build: projectInfo.build,
-          bytecodePath: built.bytecode,
-          entryFormat: "quickjs-bytecode",
-          runtimeAbi,
-          pakPath: built.pak,
-          outDir: join(output, "root-v1"),
-          keyFile,
-          guestManifestPath: join(out, "guest-manifest.json"),
-          includeBundle: true,
-          signedAt: 1,
-        });
-      } else if (projectInfo.kind === "root") {
-        packageArtifacts({
-          appId: rootAppId,
-          version: projectInfo.version,
-          build: projectInfo.build,
-          bytecodePath: built.bytecode,
-          entryFormat: "quickjs-bytecode",
-          runtimeAbi,
-          pakPath: built.pak,
-          outDir: join(output, "root-v2"),
-          keyFile,
-          guestManifestPath: join(out, "guest-manifest.json"),
-          includeBundle: true,
-          signedAt: 1,
-        });
+        for (const release of [
+          { version: "1.0.0", build: 1, directory: "root-v1" },
+          { version: "2.0.0", build: 2, directory: "root-v2" },
+        ]) {
+          packageArtifacts({
+            appId: rootAppId,
+            version: release.version,
+            build: release.build,
+            bytecodePath: built.bytecode,
+            entryFormat: "quickjs-bytecode",
+            runtimeAbi,
+            pakPath: built.pak,
+            outDir: join(output, release.directory),
+            keyFile,
+            guestManifestPath: join(out, "guest-manifest.json"),
+            includeBundle: true,
+            signedAt: 1,
+          });
+        }
       } else if (projectInfo.build === 1) {
         copyRuntimeAssets(out, join(output, "child-v1", "assets"));
         packageArtifacts({
