@@ -54,6 +54,7 @@
       "platform.haptics.perform",
       "system.runtime.configure",
       "system.runtime.create",
+      "system.runtime.prepareOpen",
       "system.runtime.awaitFirstFrame",
       "system.runtime.destroy",
       "system.runtime.post",
