@@ -36,6 +36,8 @@ jobs:
           bun install --frozen-lockfile --cwd .cache/pocketjs
       - name: Build WebAssembly engine
         working-directory: sdk
+        env:
+          POCKET_WECHAT_LLVM_AR: /usr/bin/llvm-ar
         run: bun scripts/build_web_engine.ts --outdir=.pocket-build/web-engine
       - uses: actions/upload-artifact@v4
         with:
@@ -158,6 +160,8 @@ jobs:
           Push-Location sdk/.pocket-build/windows-consumer
           npm run setup
           if ($LASTEXITCODE -ne 0) { throw "Clean Windows setup failed" }
+          npm run doctor
+          if ($LASTEXITCODE -ne 0) { throw "Windows doctor failed" }
           Pop-Location
           node sdk/scripts/tests/windows_package_smoke.mjs --sdk-root=./sdk/.pocket-build/windows-consumer | Tee-Object -FilePath sdk/.pocket-build/windows-acceptance.json
           if ($LASTEXITCODE -ne 0) { throw "Windows runtime acceptance failed" }
