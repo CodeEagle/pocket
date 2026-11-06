@@ -11,19 +11,20 @@ Windows CI 上生成平台包的步骤。
 版本 tag，或手动运行：
 
 ```sh
-gh workflow run toolchain.yml -f publish_release=true
+gh workflow run toolchain.yml -f publish_release=true -f update_existing_release=false
 ```
 
 工作流在 macOS arm64 与 Windows x64 上分别从 pinned source 构建平台包，随后合并
 `pocket-tools-darwin-arm64-0.1.1.tgz`、`pocket-tools-win32-x64-0.1.1.tgz` 和
-`npm-shrinkwrap.json`，生成完整 `pocket-web-sdk-tools-0.1.1.tgz`。两个 runner 都从
-完整包重新安装 npm 依赖并运行 `npm run doctor` 与
+`npm-shrinkwrap.json`，分别生成 `pocket-web-sdk-tools-darwin-arm64-0.1.1.tgz` 和
+`pocket-web-sdk-tools-win32-x64-0.1.1.tgz`。每个 runner 都从对应平台的独立包重新安装 npm 依赖并运行 `npm run doctor` 与
 `node scripts/tests/platform_package_smoke.mjs --sdk-root=...`；只有两平台全部通过，
-才上传完整 SDK、两个平台包、`SHA256SUMS` 和验收 JSON 并创建 GitHub Release。
+才上传两个分平台 SDK、两个裸平台包、`SHA256SUMS` 和验收 JSON 并创建 GitHub Release。
 
 工作流不会发布 npm registry。`workflow_dispatch` 的 `publish_release` 默认值为
-`true`；如果只构建和验收而不创建 Release，必须显式传入
-`-f publish_release=false`。本文保留此前独立 CI 的 Windows native/consumer 证据；
+`true`，`update_existing_release` 默认值为 `false`；如果只构建和验收而不创建 Release，
+必须显式传入 `-f publish_release=false`。普通版本 tag 不会覆盖已有正式 Release；只有明确
+传入 `-f update_existing_release=true` 才会更新同一 tag 的现有附件，不会移动 tag。本文保留此前独立 CI 的 Windows native/consumer 证据；
 完整双平台发布状态及最终压缩包验收结果以对应 GitHub Release 附件为准。
 
 ## 发布者构建
@@ -168,4 +169,4 @@ Node24 setup/doctor、Noble WinRT 预编译加载（无 consumer 本地 build）
 QJBC 190738/PAK 905744、Game QJBC 184898/PAK 905728、真实 Preview 主题/计分/
 暂停继续输入驱动的 frame changes，以及 Studio 固定 8791 的 start/health/status/stop。
 GitHub runner 没有 DK-META2，不能替代 Windows BLE 实机的连接、notify、battery 和
-断连验收。新的完整双平台 Release gate 仍待工作流运行。
+断连验收。分平台 Release 的最终状态以对应 GitHub Release 及其验收 JSON 为准。

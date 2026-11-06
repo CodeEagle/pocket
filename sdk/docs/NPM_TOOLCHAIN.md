@@ -15,16 +15,23 @@ npm run doctor
 
 当前仓库的本地验收包位于 `sdk/.pocket-build/pocket-tools-darwin-arm64-0.1.1.tgz` 和
 `sdk/.pocket-build/pocket-tools-win32-x64-0.1.1.tgz`。预编译包不会发布到 npm
-registry；开发者可将对应平台的 `.tgz` 放入 SDK 的 `prebuilt/` 目录，或设置
-`POCKET_TOOLS_PACKAGE=/absolute/path/to/unpacked/package`。缺少平台包、版本不匹配、
-ABI 不匹配或哈希校验失败时命令会直接报错。
+registry；开发者应下载与当前系统匹配的独立 SDK 包：
+
+- `pocket-web-sdk-tools-darwin-arm64-0.1.1.tgz`：macOS arm64；
+- `pocket-web-sdk-tools-win32-x64-0.1.1.tgz`：Windows x64。
+
+每个 SDK 包只携带对应平台的 `@pocket/tools-*` 平台依赖，并在 `package.json` 中声明
+对应的 `os`/`cpu`，不会把另一平台的 native 二进制安装到消费者目录。缺少平台包、
+版本不匹配、ABI 不匹配或哈希校验失败时命令会直接报错。维护者如需手工安装裸平台
+包，可将对应 `.tgz` 放入 SDK 的 `prebuilt/` 目录，或设置
+`POCKET_TOOLS_PACKAGE=/absolute/path/to/unpacked/package`。
 
 ## GitHub Actions 发布
 
 `.github/workflows/toolchain.yml` 是 0.1.1 的唯一发布入口。它在 macOS arm64 和
-Windows x64 runner 上从固定上游源码构建平台工具包，然后把两个平台包合并进一个带
-`npm-shrinkwrap.json` 的完整 SDK tarball。合并后的完整包会在两个目标平台的干净目录中
-分别执行 `npm run setup`、`npm run doctor`，并运行：
+Windows x64 runner 上从固定上游源码构建平台工具包，再分别生成两个带
+`npm-shrinkwrap.json` 的独立 SDK tarball。每个 SDK tarball 只保留自己的平台工具包，
+并在对应目标平台的干净目录中执行 `npm run setup`、`npm run doctor`，再运行：
 
 ```sh
 node scripts/tests/platform_package_smoke.mjs --sdk-root=/path/to/sdk
@@ -32,18 +39,21 @@ node scripts/tests/platform_package_smoke.mjs --sdk-root=/path/to/sdk
 
 该验收会实际加载平台 Noble addon，构建 App/Game 模板的 QJBC/PAK，驱动 Preview 输入
 并检查 Studio 固定 8791 端口的启动、健康检查、状态和停止。两个平台全部通过后，工作流
-才会生成 GitHub Release 附件：完整 SDK tarball、macOS arm64 和 Windows x64 平台包、
-`SHA256SUMS` 以及两平台验收 JSON。工作流不会执行 `npm publish`。
+才会生成 GitHub Release 附件：`pocket-web-sdk-tools-darwin-arm64-0.1.1.tgz`、
+`pocket-web-sdk-tools-win32-x64-0.1.1.tgz`、对应裸平台包、`SHA256SUMS` 以及两平台
+验收 JSON。工作流不会执行 `npm publish`。
 
 推送 `sdk-v0.1.1` 这类版本 tag，或手动运行带发布开关的工作流：
 
 ```sh
-gh workflow run toolchain.yml -f publish_release=true
+gh workflow run toolchain.yml -f publish_release=true -f update_existing_release=false
 ```
 
-`workflow_dispatch` 的 `publish_release` 默认值为 `true`。如果只想构建和验收而不创建
-Release，必须显式传入 `-f publish_release=false`。下文保留此前独立 Windows consumer
-验收的来源；完整版本的发布状态以对应 GitHub Release 及随附的两平台验收 JSON 为准，
+`workflow_dispatch` 的 `publish_release` 默认值为 `true`，`update_existing_release` 默认值为
+`false`。如果只想构建和验收而不创建 Release，必须显式传入 `-f publish_release=false`。
+普通版本 tag 不会覆盖已有正式 Release；只有明确传入 `-f update_existing_release=true` 时，
+工作流才会更新同一 tag 的现有 Release 附件，且不会移动 tag。下文保留此前独立 Windows
+consumer 验收的来源；完整版本的发布状态以对应 GitHub Release 及随附的两平台验收 JSON 为准，
 不能把本地 tarball 或单个平台 CI 结果当成完整发布验收。
 
 完整 Guest 构建默认使用预先准备的 pinned compiler、预编译 `pocketjs_bytecode` 和 `pocket_probe`：
@@ -114,7 +124,7 @@ CI 通过不能替代 Windows DK-META2 等 BLE 硬件验收。
 - Windows 平台包的 Rust/MSVC 构建及 consumer/Preview 验收已在此前 CI 完成；Linux 平台包
   仍需独立 CI 构建。本地开发者验收仍主要验证 macOS 的 npm 安装、ABI/哈希校验、QJBC/PAK
   生成和 Preview 运行。
-- 干净导出最终包为 `sdk/.pocket-build/pocket-web-sdk-tools-0.1.1.tgz`。最终 setup 日志为 `/tmp/pocket-node-only-final-setup.log`；Noble 的 N-API 预编译文件来自 `/tmp/pocket-node-only-sdk-final/node_modules/@pocket/tools-darwin-arm64/noble/prebuilds/darwin-arm64/node.napi.node`，`sourceBuildPresent:false`。`npm install --ignore-scripts` 不编译该 native 模块，作用域环境变量由 Node 负责设置。0.1.0 的旧验收日志可继续作为历史证据，但不代表当前分发版本。
+- 干净导出平台包的最终 setup 日志为 `/tmp/pocket-node-only-final-setup.log`；Noble 的 N-API 预编译文件来自 `/tmp/pocket-node-only-sdk-final/node_modules/@pocket/tools-darwin-arm64/noble/prebuilds/darwin-arm64/node.napi.node`，`sourceBuildPresent:false`。`npm install --ignore-scripts` 不编译该 native 模块，作用域环境变量由 Node 负责设置。0.1.0 的旧验收日志可继续作为历史证据，但不代表当前分发版本。
 - Noble `poweredOn` 后的实际扫描发现了附近 BLE 设备，日志为 `/tmp/pocket-node-only-final-ble.log`；本轮未扫到 DK-META2，因此不把这次扫描写成 DK-META2 的重新连接验收。Linux 当前明确为 `unsupported`；没有生成、发布或验收 Linux HCI 预编译包，也没有新增 loader，不会要求用户安装 Rust 或其他本机工具链。
 
 `npm run doctor` 检查平台包、清单、ABI 和文件哈希；不能代替上述加载和交互验收。源码发布命令才需要 `patch`；产品开发不需要把它加入 PATH。Windows consumer/Preview smoke 已由最终 CI 完成；BLE 硬件验收仍需实体 Windows 机器。
@@ -132,7 +142,7 @@ Flutter 真机/模拟器打包仍需要消费者自己的 Flutter SDK、对应�
 - 0.1.1 回归共 51 tests / 11 files / 359 expectations，全部通过（`/tmp/pocket-0.1.1-tests.log`、`/tmp/pocket-0.1.1-guest-tests.log`）。
 - 实际 Web 构建生成 QJBC、PAK 和 16384391 bytes 的 WASM；Playwright Chromium 主题切换与恢复通过，无浏览器错误（`/tmp/pocket-0.1.1-web-test.log`）。
 - 预编译 Noble 实际扫描通过，本地模块没有 `build/Release/binding.node`（`/tmp/pocket-0.1.1-ble.log`）；本轮未发现 DK-META2。
-- 分发包已包含 macOS arm64 平台包；Windows x64 平台包已由 CI 生成并通过 consumer 验收，Linux 平台包尚未完成。未发布 npm registry。
+- 分发包按平台拆分为 macOS arm64 和 Windows x64 两个 SDK tarball；Windows x64 平台包已由 CI 生成并通过 consumer 验收，Linux 平台包尚未完成。未发布 npm registry。
 
 ## Windows CI 最终验收
 

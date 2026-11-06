@@ -7,6 +7,10 @@ on:
         description: "验收通过后发布 GitHub Release"
         type: boolean
         default: true
+      update_existing_release:
+        description: "更新已有 Release 的已验收附件（保留版本 tag）"
+        type: boolean
+        default: false
   push:
     tags: ["sdk-v*"]
 
@@ -180,7 +184,7 @@ jobs:
 
       - name: Assemble npm package
         working-directory: sdk
-        run: bun scripts/package_toolchain.ts --out=.pocket-build/toolchain-package --force
+        run: bun scripts/package_toolchain.ts --out=.pocket-build/toolchain-package --force --version=${{ needs.web-engine.outputs.version }}
 
       - name: Pack npm artifact
         working-directory: sdk/.pocket-build/toolchain-package
@@ -196,9 +200,13 @@ jobs:
           include-hidden-files: true
 
   bundle:
-    name: Bundle standalone SDK
+    name: Bundle SDK (${{ matrix.platform }})
     needs: [web-engine, package]
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [darwin-arm64, win32-x64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -209,30 +217,29 @@ jobs:
           bun-version: 1.3.9
       - uses: actions/download-artifact@v4
         with:
-          pattern: pocket-tools-*
+          name: pocket-tools-${{ matrix.platform }}
           path: sdk/.pocket-build/downloaded
-          merge-multiple: true
-      - name: Assemble full SDK and checksums
+      - name: Assemble platform SDK and checksums
         shell: bash
         env:
           SDK_VERSION: ${{ needs.web-engine.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           mkdir -p release
           find sdk/.pocket-build/downloaded -name '*.tgz' -exec cp {} sdk/.pocket-build/ \;
           cp sdk/.pocket-build/pocket-tools-*.tgz release/
           find sdk/.pocket-build/downloaded -name '*dependencies.txt' -exec cp {} release/ \;
-          bun sdk/scripts/export_web_sdk.ts --out=sdk/.pocket-build/release-sdk
+          bun sdk/scripts/export_web_sdk.ts --out=sdk/.pocket-build/release-sdk --platform="$PLATFORM"
           cd sdk/.pocket-build/release-sdk
           npm install --package-lock-only --ignore-scripts --legacy-peer-deps --no-audit --no-fund
           npm shrinkwrap --ignore-scripts
           npm pack --ignore-scripts --pack-destination ../../../release
           cd ../../../release
-          test -f "pocket-web-sdk-tools-${SDK_VERSION}.tgz"
+          test -f "pocket-web-sdk-tools-${PLATFORM}-${SDK_VERSION}.tgz"
           for file in *.tgz; do sha256sum "$file" > "$file.sha256"; done
-          sha256sum -- *.tgz > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: pocket-sdk-release
+          name: pocket-sdk-release-${{ matrix.platform }}
           path: release/
           if-no-files-found: error
 
@@ -253,7 +260,7 @@ jobs:
           node-version: 24
       - uses: actions/download-artifact@v4
         with:
-          name: pocket-sdk-release
+          name: pocket-sdk-release-${{ matrix.os }}-${{ matrix.arch }}
           path: release
       - name: Install and exercise final release archive
         shell: bash
@@ -262,7 +269,7 @@ jobs:
           PLATFORM: ${{ matrix.os }}-${{ matrix.arch }}
         run: |
           mkdir -p .pocket-build/release-consumer
-          tar -xzf "release/pocket-web-sdk-tools-${SDK_VERSION}.tgz" -C .pocket-build/release-consumer
+          tar -xzf "release/pocket-web-sdk-tools-${PLATFORM}-${SDK_VERSION}.tgz" -C .pocket-build/release-consumer
           npm --prefix .pocket-build/release-consumer/package run setup
           npm --prefix .pocket-build/release-consumer/package run doctor
           node sdk/scripts/tests/platform_package_smoke.mjs --sdk-root=./.pocket-build/release-consumer/package | tee "release/acceptance-${PLATFORM}.json"
@@ -294,11 +301,13 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.web-engine.outputs.tag }}
       SDK_VERSION: ${{ needs.web-engine.outputs.version }}
+      ALLOW_RELEASE_UPDATE: ${{ inputs.update_existing_release && '1' || '0' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: pocket-sdk-release
+          pattern: pocket-sdk-release-*
           path: release
+          merge-multiple: true
       - uses: actions/download-artifact@v4
         with:
           pattern: pocket-acceptance-*
@@ -321,9 +330,13 @@ jobs:
           sha256sum -- *.tgz acceptance-*.json > SHA256SUMS
           cd ..
           cat > release-notes.md <<'NOTES'
-          独立 Pocket Web SDK，附带 Windows x64 和 macOS arm64 预编译工具。
+          独立 Pocket Web SDK，按平台提供完整开发包（每个包只附带对应平台工具）：
 
-          建议 Node.js 24 LTS（最低 22.22.2）。下载 pocket-web-sdk-tools 完整包，解压后运行：
+          - Windows x64：`pocket-web-sdk-tools-win32-x64-VERSION.tgz`
+          - macOS arm64：`pocket-web-sdk-tools-darwin-arm64-VERSION.tgz`
+          - `pocket-tools-*` 是单独的编译器工具包，已有 SDK 的用户才需要单独下载。
+
+          建议 Node.js 24 LTS（最低 22.22.2）。选择对应平台的完整 SDK 包，解压后运行：
           ```sh
           npm run setup
           npm start
@@ -334,16 +347,25 @@ jobs:
 
           Windows DK-META2 实机连接与 notify 尚未验收；CI 无 BLE 设备，原生模块加载测试不等于硬件连接验收。Linux 原生 BLE 暂不支持。详细说明见包内 docs/NPM_TOOLCHAIN.md 和 docs/WINDOWS_BUILD.md。
           NOTES
+          sed -i "s/-VERSION\.tgz/-${SDK_VERSION}.tgz/g" release-notes.md
+          printf '\n分发构建：[Action %s](https://github.com/%s/actions/runs/%s)，提交 %s。\n' "$GITHUB_RUN_ID" "$GH_REPO" "$GITHUB_RUN_ID" "$GITHUB_SHA" >> release-notes.md
           tag_commit="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null || true)"
-          if [ -n "$tag_commit" ] && [ "$tag_commit" != "$GITHUB_SHA" ]; then
+          if [ -n "$tag_commit" ] && [ "$tag_commit" != "$GITHUB_SHA" ] && [ "$ALLOW_RELEASE_UPDATE" != "1" ]; then
             echo "Release tag points to another commit: $tag_commit" >&2
             exit 1
           fi
           if gh release view "$RELEASE_TAG" --json isDraft,tagName > existing-release.json 2>/dev/null; then
-            node -e 'const r = require("./existing-release.json"); if (!r.isDraft || r.tagName !== process.env.RELEASE_TAG) throw new Error("Refusing to overwrite a published or mismatched release")'
+            node -e 'const r = require("./existing-release.json"); if ((!r.isDraft && process.env.ALLOW_RELEASE_UPDATE !== "1") || r.tagName !== process.env.RELEASE_TAG) throw new Error("Updating a published release requires update_existing_release=true")'
             gh release upload "$RELEASE_TAG" release/* --clobber
+            if [ "$ALLOW_RELEASE_UPDATE" = "1" ]; then
+              assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+              for obsolete in "pocket-web-sdk-tools-${SDK_VERSION}.tgz" "pocket-web-sdk-tools-${SDK_VERSION}.tgz.sha256"; do
+                if printf '%s\n' "$assets" | grep -Fqx -- "$obsolete"; then gh release delete-asset "$RELEASE_TAG" "$obsolete" --yes; fi
+              done
+            fi
             gh release edit "$RELEASE_TAG" --title "Pocket SDK ${SDK_VERSION}" --notes-file release-notes.md
           else
+            if [ "$ALLOW_RELEASE_UPDATE" = "1" ]; then echo "Release to update does not exist" >&2; exit 1; fi
             gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" --title "Pocket SDK ${SDK_VERSION}" --notes-file release-notes.md --draft
           fi
           gh release edit "$RELEASE_TAG" --draft=false --latest

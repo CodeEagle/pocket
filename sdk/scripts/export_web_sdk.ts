@@ -20,10 +20,11 @@ const DEFAULT_OUT = resolve(SDK_ROOT, ".pocket-build/web-sdk");
 const DEFAULT_REPO = "CodeEagle/pocket-web-sdk";
 const PINNED_REVISION = "99924de47c62fa36f526a8791055d91cbbdb3836";
 
-type Options = { out: string; repo: string; publish: boolean; force: boolean };
+type Platform = "darwin-arm64" | "win32-x64";
+type Options = { out: string; repo: string; publish: boolean; force: boolean; platform?: Platform };
 
 function usage(exitCode = 0): never {
-  console.log("usage: bun sdk/scripts/export_web_sdk.ts [--out PATH] [--repo OWNER/NAME] [--publish] [--force]");
+  console.log("usage: bun sdk/scripts/export_web_sdk.ts [--out PATH] [--platform darwin-arm64|win32-x64] [--repo OWNER/NAME] [--publish] [--force]");
   process.exit(exitCode);
 }
 
@@ -35,6 +36,18 @@ function option(args: string[], name: string, fallback: string): string {
   const value = args[index + 1];
   if (!value || value.startsWith("--")) throw new Error(`--${name} requires a value`);
   return value;
+}
+
+function platformOption(args: string[]): Platform | undefined {
+  const inline = args.find((value) => value.startsWith("--platform="));
+  const index = args.indexOf("--platform");
+  const raw = inline ? inline.slice("--platform=".length) : index >= 0 ? args[index + 1] : undefined;
+  if (index >= 0 && (!raw || raw.startsWith("--"))) throw new Error("--platform requires a value");
+  if (raw === undefined) return undefined;
+  if (raw !== "darwin-arm64" && raw !== "win32-x64") {
+    throw new Error(`--platform must be darwin-arm64 or win32-x64 (received ${raw})`);
+  }
+  return raw;
 }
 
 function run(command: string[], cwd: string, env: NodeJS.ProcessEnv = process.env, inherit = false): string {
@@ -141,14 +154,14 @@ function copySources(out: string): void {
   copyFile(join(REPOSITORY_ROOT, "LICENSE"), join(out, "LICENSE"));
 }
 
-function writeRepositoryFiles(out: string): void {
+function writeRepositoryFiles(out: string, platform?: Platform): void {
   const uiManifestPath = join(out, "packages/pocket_ui/package.json");
   const uiManifest = JSON.parse(readFileSync(uiManifestPath, "utf8")) as Record<string, unknown>;
   delete uiManifest.private;
   write(uiManifestPath, `${JSON.stringify(uiManifest, null, 2)}\n`);
 
   const packageJson = {
-    name: "@pocket/web-sdk-tools",
+    name: platform ? `@pocket/web-sdk-tools-${platform}` : "@pocket/web-sdk-tools",
     version: SDK_VERSION,
     description: "Standalone PocketJS Web SDK and Editor; no Flutter environment required",
     private: false,
@@ -185,12 +198,22 @@ function writeRepositoryFiles(out: string): void {
     },
   };
   const archives = (existsSync(join(SDK_ROOT, '.pocket-build')) ? readdirSync(join(SDK_ROOT, '.pocket-build')) : []).filter(name => /^pocket-tools-(darwin|linux|win32)-(arm64|x64)-[0-9.]+\.tgz$/.test(name) && name.endsWith(`-${SDK_VERSION}.tgz`));
-  if (archives.length) {
-    Object.assign(packageJson.optionalDependencies, Object.fromEntries(archives.map(name => {
+  const selectedArchives = platform
+    ? archives.filter((name) => name === `pocket-tools-${platform}-${SDK_VERSION}.tgz`)
+    : archives;
+  if (platform && selectedArchives.length !== 1) {
+    throw new Error(`missing ${platform} prebuilt archive: expected pocket-tools-${platform}-${SDK_VERSION}.tgz in ${join(SDK_ROOT, ".pocket-build")}`);
+  }
+  if (selectedArchives.length) {
+    Object.assign(packageJson.optionalDependencies, Object.fromEntries(selectedArchives.map(name => {
       copyFile(join(SDK_ROOT, '.pocket-build', name), join(out, 'prebuilt', name));
       const suffix = name.slice('pocket-tools-'.length, -`-${SDK_VERSION}.tgz`.length);
       return [`@pocket/tools-${suffix}`, `file:prebuilt/${name}`];
     })));
+  }
+  if (platform) {
+    const [os, cpu] = platform.split("-");
+    Object.assign(packageJson, { os: [os], cpu: [cpu] });
   }
   write(join(out, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
   write(join(out, ".gitignore"), [
@@ -199,6 +222,11 @@ function writeRepositoryFiles(out: string): void {
 
   write(join(out, "README.md"), `# Pocket Web SDK\n\nStandalone PocketJS Web SDK and Editor. Flutter, Dart, CocoaPods, Xcode and the Android SDK are not required for the Web toolchain.\n\nThe Web target uses the pinned PocketJS compiler, admitted QuickJS bytecode (QJBC), PAK resources and the real PocketJS runtime compiled to WebAssembly. The browser boundary is standard \`WebAssembly.instantiate\` + Canvas2D with Pointer, IME, resize and visibility lifecycle support. There is no mock runtime or source-evaluation fallback.\n\n## AI 开发入口：先读这些文档\n\nAI 在修改代码前应按下列顺序读取；不要只看 README 后直接创造第二套运行时、布局系统或控件行为。\n\n| 顺序 | 文档 | AI 应从中获得什么 |\n| --- | --- | --- |\n| 1 | [AI_APP_DEVELOPMENT.md](docs/AI_APP_DEVELOPMENT.md) | 完整开发流程、JS/宿主边界、控件用法、Editor、资源打包、发布和热更新约定。 |\n| 2 | [COMPONENTS.md](docs/COMPONENTS.md) | 现有组件契约；自定义皮肤时必须继承默认交互、焦点、键盘/手柄、IME、无障碍和生命周期行为。 |\n| 3 | [EDITOR_STUDIO.md](docs/EDITOR_STUDIO.md) | Editor 启动、真实预览、版本后台、局域网发布和预览入口。 |\n| 4 | [EDITOR_TEST_PACKAGES.md](docs/EDITOR_TEST_PACKAGES.md) | test/stable 包、签名产物、版本管理和局域网热更新测试。 |\n| 5 | [PACKAGE_UPDATE_MODES.md](docs/PACKAGE_UPDATE_MODES.md) | 首次整包以及后续按资源/内容哈希进行细粒度更新。 |\n| 6 | [HARDWARE_MODULES.md](docs/HARDWARE_MODULES.md) | 硬件和权限按需启用；浏览器没有的能力由应用注册真实 adapter。 |\n| 7 | [WEB_SDK_EXPORT.md](docs/WEB_SDK_EXPORT.md) | Web SDK 的来源、保留实现、必要适配、消融结果和真实验证证据。 |\n| 8 | [NPM_TOOLCHAIN.md](docs/NPM_TOOLCHAIN.md) | npm 安装、跨平台工具链入口、buildGuest/QJBC/PAK 构建和验证边界。 |\n| 9 | [PROVENANCE.md](docs/PROVENANCE.md) | 固定上游版本、来源和验证边界。 |\n| 10 | [WECHAT_HOST_IMPLEMENTATION.md](docs/WECHAT_HOST_IMPLEMENTATION.md) | 仅在需要微信目标时阅读：WXWebAssembly、Canvas2D 和平台限制。 |\n\nAI 必须遵守：业务 UI、状态、路由和组件组合放在 JS；硬件能力按需声明；缺失能力明确返回 unsupported/unconfigured；新界面默认继承现有控件行为；Web/Editor 都使用固定的 buildGuest/QJBC/PAK 管线，不增加 mock 或 source-eval fallback。\n\n## Install and build\n\nOnly Node.js 22.22.2+（建议 Node.js 24 LTS） and npm are required. Bun is installed and managed by npm; compiler/probe binaries and the prepared pinned compiler are supplied by the platform package. Run:\n\n\`\`\`sh\nnpm run setup\n\`\`\`\n\n\`npm run setup\` installs npm dependencies and verifies the prebuilt tools (platform, SDK revision, QuickJS ABI and SHA-256). It does not invoke Rust/Cargo, Python or C/C++ tools, and will fail clearly if the platform package is unavailable. Source builds are maintainer-only commands ending in :source. No Flutter command is run by setup or by the Web build.\n\nA project root contains \`pocket.json\`, \`manifest.json\` and its JS/TS entry. Build the complete guest artifacts directly with npm:\n\n\`\`\`sh\nnpm run build:guest -- --project-root=/path/to/app --outdir=/path/to/app/dist\nnpm run build:web -- --project-root=/path/to/app --outdir=/path/to/web\n\`\`\`\n\nThe guest build invokes the pinned \`buildGuest\` implementation, emits \`app.qjbc\`, \`app.bytecode.json\` and \`app.pak\`, and includes the vendored \`@pocket/ui\` workspace package. It does not require Flutter. The Web build additionally emits \`pocket-web.js\`, \`engine/pocketjs.wasm\`, \`pocket.config.json\`, build metadata, types and usage instructions.\n\nThe bundle includes macOS arm64 and Windows x64 platform archives. Windows CI has verified clean npm setup/doctor, Noble WinRT addon loading, real App/Game QJBC/PAK builds and input-driven Preview frames, plus Studio start/health/status/stop on fixed port 8791. Windows physical BLE device connections/notifications and Linux native BLE remain unverified or unsupported as documented. The npm packages have not been published to a registry yet. See docs/NPM_TOOLCHAIN.md and docs/WINDOWS_BUILD.md for evidence and limits.\n\n## Editor\n\n\`\`\`sh\nnpm run editor\n# open http://127.0.0.1:8791\n\`\`\`\n\nThe Editor includes project management, real Guest preview, input/IME inspection, version management, signed packages and LAN test publishing. Device deployment remains an optional host integration and is not required for Web development.\n\nTFTC control and live notify changes are provided by [@pocket/tftc](packages/pocket_tftc/README.md). Its guide covers Preview Bluetooth, Windows prerequisites, event contracts and hardware acceptance limits.\n\n## UI ownership\n\nBusiness UI, state, routing and component composition belong in JS. Reuse the existing controls and inherit their focus, press/cancel, disabled, keyboard/gamepad, scrolling, IME, safe-area, accessibility, route and lifecycle behavior before changing skins or adding evidenced behavior. See [AI_APP_DEVELOPMENT.md](docs/AI_APP_DEVELOPMENT.md) and [COMPONENTS.md](docs/COMPONENTS.md).\n\n## Updates\n\nThe canonical update route is \`<root>/<optional-prefix>/pocket/<hostVersion>/<packageId>/<packageVersion>/latest.json\`. Initial install may fetch the complete PAK; subsequent releases can fetch only changed content-addressed resource parts. The Editor version backend can publish and test this layout on a LAN.\n`);
 
+  if (platform) {
+    const readmePath = join(out, "README.md");
+    const readme = readFileSync(readmePath, "utf8");
+    write(readmePath, readme.replace("# Pocket Web SDK\n", `# Pocket Web SDK (${platform})\n\nThis package targets ${platform} and includes only the matching prebuilt native tool package. Install it on the matching operating system and CPU architecture.\n`));
+  }
   const sourceCommit = run(["git", "rev-parse", "HEAD"], REPOSITORY_ROOT).trim();
   write(join(out, "provenance.json"), `${JSON.stringify({
     sourceRepository: "CodeEagle/pocket",
@@ -238,9 +266,9 @@ function publish(out: string, repo: string): void {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.includes("--help")) usage();
-  const known = new Set(["--publish", "--force", "--help", "--out", "--repo"]);
+  const known = new Set(["--publish", "--force", "--help", "--out", "--repo", "--platform"]);
   for (const arg of args) {
-    if (arg.startsWith("--out=") || arg.startsWith("--repo=")) continue;
+    if (arg.startsWith("--out=") || arg.startsWith("--repo=") || arg.startsWith("--platform=")) continue;
     if (arg.startsWith("--") && !known.has(arg)) throw new Error(`unknown option: ${arg}`);
   }
   const options: Options = {
@@ -248,11 +276,12 @@ async function main(): Promise<void> {
     repo: option(args, "repo", DEFAULT_REPO),
     publish: args.includes("--publish"),
     force: args.includes("--force"),
+    platform: platformOption(args),
   };
   if ([REPOSITORY_ROOT, SDK_ROOT, resolve(REPOSITORY_ROOT, "demo")].includes(options.out)) throw new Error("refusing to export over a source directory");
   clearOutput(options.out, options.force);
   copySources(options.out);
-  writeRepositoryFiles(options.out);
+  writeRepositoryFiles(options.out, options.platform);
   if (options.publish) publish(options.out, options.repo);
   console.log(`export_web_sdk: generated ${options.out}`);
 }
