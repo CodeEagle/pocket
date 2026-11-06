@@ -992,11 +992,12 @@ export async function buildProject(directory: string, options: { outDir?: string
   }
 }
 
-async function runEditor(directory: string, options: { port?: number; workspace?: string; flutterRoot?: string }): Promise<void> {
+async function runEditor(directory: string, options: { port?: number; workspace?: string; flutterRoot?: string; updateHost?: string; updatePort?: number; updateHostVersion?: string }): Promise<void> {
   const project = resolve(directory);
   if (!existsSync(join(project, "pocket.json"))) fail(`not an initialized PocketJS project: ${project}`);
   const { startEditor } = await import("./editor/server.ts");
-  const server = await startEditor({ projectRoot: project, flutterRoot: options.flutterRoot, workspace: options.workspace ?? join(project, ".pocket-editor"), port: options.port });
+  const server = await startEditor({ projectRoot: project, flutterRoot: options.flutterRoot, workspace: options.workspace ?? join(project, ".pocket-editor"), port: options.port,
+    updateHost: options.updateHost, updatePort: options.updatePort, updateHostVersion: options.updateHostVersion });
   console.log(`Pocket Studio listening at http://${server.hostname}:${server.port}`);
   console.log(`project: ${project}`);
   await new Promise<void>((resolveExit) => {
@@ -1019,7 +1020,7 @@ export async function exportPluginTypes(inputPath: string, outputPath: string): 
 }
 
 function usage(): never {
-  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--camera] [--bluetooth] [--sensors] [--location] [--biometrics] [--weather] [--permissions=POLICY_KEYS] [--dio] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR] [--flutter-root=DIR]");
+  console.error("usage: bun pocket.ts init <directory> [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--camera] [--bluetooth] [--sensors] [--location] [--biometrics] [--weather] [--permissions=POLICY_KEYS] [--dio] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR] [--flutter-root=DIR] [--update-host=LAN_IP] [--update-port=N] [--update-host-version=VERSION]");
   process.exit(1);
 }
 
@@ -1062,10 +1063,15 @@ if (import.meta.main) {
       const portValue = takeFlag(args, "port");
       const workspace = takeFlag(args, "workspace");
       const flutterRoot = takeFlag(args, "flutter-root");
+      const updateHost = takeFlag(args, "update-host");
+      const updatePortValue = takeFlag(args, "update-port");
+      const updateHostVersion = takeFlag(args, "update-host-version");
       ensureNoArgs(args);
       const port = portValue === undefined ? undefined : Number(portValue);
+      const updatePort = updatePortValue === undefined ? undefined : Number(updatePortValue);
       if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) fail("--port must be an integer from 0 through 65535");
-      await runEditor(directory, { port, workspace, flutterRoot });
+      if (updatePort !== undefined && (!Number.isInteger(updatePort) || updatePort < 0 || updatePort > 65535)) fail("--update-port must be an integer from 0 through 65535");
+      await runEditor(directory, { port, workspace, flutterRoot, updateHost, updatePort, updateHostVersion });
     } else usage();
   } catch (error) {
     console.error(`pocket: ${error instanceof Error ? error.message : String(error)}`);

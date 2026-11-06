@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import {
   generateDevKey,
   packageArtifacts,
+  pocketReleaseDirectory,
   sha256Hex,
   type PackageResult,
   type PublicKeyConfig,
@@ -111,6 +112,9 @@ export type EditorStatus = {
     version?: string;
     build?: number;
     channel?: "test" | "release";
+    hostVersion?: string;
+    packageVersion?: string;
+    lanOrigin?: string;
     packages?: Array<{
       id: string;
       updateUrl: string;
@@ -143,9 +147,11 @@ type BuildRunner = (input: {
 export type StartEditorOptions = {
   host?: string;
   port?: number;
-  /** Optional LAN interface for the read-only device update listener. */
+  /** Optional LAN interface for the read-only signed version backend. */
   updateHost?: string;
   updatePort?: number;
+  /** Route segment used by the local version backend. Defaults to `editor`. */
+  updateHostVersion?: string;
   workspace?: string;
   /** Edit/build one explicit external SDK project instead of copying guest/. */
   projectRoot?: string;
@@ -972,6 +978,7 @@ async function publishProject(
   config: EditorConfig,
   state: EditorState,
   origin: string,
+  hostVersion: string,
   channel: "test" | "release" = "release",
 ): Promise<PackageResult> {
   if (state.builtRevision !== state.revision || !state.artifacts) throw new Error("build the current source before publishing");
@@ -980,7 +987,8 @@ async function publishProject(
   const resourceSnapshot = await readResourceSnapshot(snapshotPath);
   const rootPackage = resourceSnapshot.packages.find((pkg) => pkg.id === config.appId);
   if (!rootPackage) throw new Error(`resource snapshot does not contain root package ${config.appId}`);
-  const releaseDir = join(workspace.updates, id);
+  const packageVersion = channel === "test" ? "test" : "stable";
+  const releaseDir = pocketReleaseDirectory(workspace.updates, hostVersion, config.appId, packageVersion);
   await mkdir(releaseDir, { recursive: true });
   const { keyPath, key } = await editorUpdateTrust(workspace, id);
   const previous = await readJsonFile<Record<string, unknown>>(join(releaseDir, "payload.json"), {});
@@ -1013,41 +1021,43 @@ async function publishProject(
   } as Parameters<typeof packageArtifacts>[0];
   const result = packageArtifacts(rootPackageOptions);
   if (channel === "test") await writeFile(counterPath, JSON.stringify({ build }) + "\n");
-  let safeOrigin = origin;
-  try {
-    const parsed = new URL(origin);
-    safeOrigin = `http://127.0.0.1:${parsed.port || 80}`;
-  } catch {
-    safeOrigin = "http://127.0.0.1:8790";
+  const parsedOrigin = new URL(origin);
+  if (!['http:', 'https:'].includes(parsedOrigin.protocol) || parsedOrigin.username || parsedOrigin.password || parsedOrigin.pathname !== '/') {
+    throw new Error("Editor version backend origin must be an HTTP(S) origin without credentials or a path");
   }
-  const manifestUrl = `${safeOrigin}/updates/${id}/latest.json`;
-  const hostConfigUrl = `${safeOrigin}/updates/${id}/host.json`;
+  const safeOrigin = parsedOrigin.origin;
+  const releasePath = `/pocket/${hostVersion}/${config.appId}/${packageVersion}`;
+  const manifestUrl = `${safeOrigin}${releasePath}/latest.json`;
+  const hostConfigUrl = `${safeOrigin}${releasePath}/host.json`;
   await writeFile(join(releaseDir, "host.json"), JSON.stringify({
-    POCKET_UPDATE_URL: manifestUrl,
+    POCKET_UPDATE_BASE_URL: safeOrigin,
+    POCKET_HOST_VERSION: hostVersion,
+    POCKET_PACKAGE_VERSION: packageVersion,
     POCKET_UPDATE_KEY_ID: key.keyId,
     POCKET_UPDATE_PUBLIC_KEY: key.publicKeyBase64,
     POCKET_STORE_NAMESPACE: `editor_${id}`,
+    ...(parsedOrigin.protocol === "http:" ? { POCKET_UPDATE_DEBUG_HTTP_HOST: parsedOrigin.hostname } : {}),
   }, null, 2) + "\n");
   const publishedPackages: NonNullable<EditorStatus["publish"]>["packages"] = [];
   for (const pkg of resourceSnapshot.packages) {
     if (pkg.id === rootPackage.id) continue;
     const packageDirectory = resourceArtifactDirectory(buildDir, pkg);
     const packageMetadata = await readJsonFile<Record<string, unknown>>(join(packageDirectory, "app.bytecode.json"));
-    const packagePreviousDir = join(releaseDir, "packages", pkg.id);
+    const packagePreviousDir = pocketReleaseDirectory(workspace.updates, hostVersion, pkg.id, packageVersion);
     const packagePrevious = await readJsonFile<Record<string, unknown>>(join(packagePreviousDir, "payload.json"), {});
     const packageBaseBuild = Number(packageMetadata.build ?? pkg.build);
     const packageBuild = channel === "test"
       ? Math.max(config.build, pkg.build, packageBaseBuild, Number(packagePrevious.build ?? 0)) + 1
       : pkg.build;
-    const packageVersion = channel === "test" ? `${pkg.version}-test.${packageBuild}` : pkg.version;
-    const packageReleaseDir = join(releaseDir, "packages", pkg.id);
+    const childVersion = channel === "test" ? `${pkg.version}-test.${packageBuild}` : pkg.version;
+    const packageReleaseDir = packagePreviousDir;
     await mkdir(packageReleaseDir, { recursive: true });
     const packageAssets = join(packageDirectory, "assets");
     const hasPackageAssets = existsSync(packageAssets) && (await readdir(packageAssets)).length > 0;
     const packageNetwork = resourcePackageNetwork(resourceSnapshot, pkg.id);
     const packageOptions = {
       appId: pkg.id,
-      version: packageVersion,
+      version: childVersion,
       build: packageBuild,
       bytecodePath: join(packageDirectory, "app.qjbc"),
       entryFormat: "quickjs-bytecode",
@@ -1061,8 +1071,9 @@ async function publishProject(
       networkAssets: packageNetwork.assets,
     } as Parameters<typeof packageArtifacts>[0];
     const packageResult = packageArtifacts(packageOptions);
-    const packageManifestPath = `/updates/${id}/packages/${encodeURIComponent(pkg.id)}/latest.json`;
-    const packageHostConfigPath = `/updates/${id}/packages/${encodeURIComponent(pkg.id)}/host.json`;
+    const packageReleasePath = `/pocket/${hostVersion}/${encodeURIComponent(pkg.id)}/${packageVersion}`;
+    const packageManifestPath = `${packageReleasePath}/latest.json`;
+    const packageHostConfigPath = `${packageReleasePath}/host.json`;
     const packageManifestUrl = `${safeOrigin}${packageManifestPath}`;
     const bootstrapDirectory = join(packageReleaseDir, "bootstrap");
     await mkdir(bootstrapDirectory, { recursive: true });
@@ -1077,7 +1088,7 @@ async function publishProject(
     if (hasGuestManifest) bootstrapFiles.push([manifestAsset, "guest-manifest.json"]);
     for (const [asset, name] of bootstrapFiles) {
       const bytes = new Uint8Array(await readFile(join(bootstrapDirectory, name)));
-      bootstrapAssets[asset] = { url: `${safeOrigin}/updates/${id}/packages/${encodeURIComponent(pkg.id)}/bootstrap/${name}`, sha256: sha256Hex(bytes), size: bytes.length };
+      bootstrapAssets[asset] = { url: `${safeOrigin}${packageReleasePath}/bootstrap/${name}`, sha256: sha256Hex(bytes), size: bytes.length };
     }
     // A consumer explicitly installs these small local Flutter assets and
     // constructs PocketAppConfig. This is a setup template, not an invented
@@ -1090,7 +1101,8 @@ async function publishProject(
         downloadOnOpen: true,
         metadataAsset,
         ...(hasGuestManifest ? { manifestAsset } : {}),
-        updates: { url: packageManifestUrl, keyId: packageResult.envelope.keyId, publicKey: key.publicKeyBase64, namespace: packageNamespace },
+        updates: { baseUrl: safeOrigin, hostVersion, packageVersion, keyId: packageResult.envelope.keyId, publicKey: key.publicKeyBase64, namespace: packageNamespace,
+          ...(parsedOrigin.protocol === "http:" ? { debugHttpHosts: [parsedOrigin.hostname] } : {}) },
       },
       bootstrapAssets,
     }, null, 2) + "\n");
@@ -1100,7 +1112,7 @@ async function publishProject(
       manifestUrl: packageManifestUrl,
       hostConfigUrl: packageHostConfigPath,
       keyId: packageResult.envelope.keyId,
-      version: packageVersion,
+      version: childVersion,
       build: packageBuild,
     });
   }
@@ -1108,14 +1120,15 @@ async function publishProject(
   await runProcess(["tar", "-czf", archive, "-C", releaseDir, "."], root, (line) => pushLog(state, line));
   state.publish = {
     revision: state.revision,
-    updateUrl: `/updates/${id}/latest.json`,
+    updateUrl: `${releasePath}/latest.json`,
     manifestUrl,
     hostConfigUrl,
     archiveUrl: `/releases/${id}.tar.gz`,
     keyId: result.envelope.keyId,
     runtimeAbi: String(metadata.runtimeAbi),
     payloadSha256: sha256Hex(result.payloadBytes),
-    version, build, channel,
+    version, build, channel, hostVersion, packageVersion,
+    ...(parsedOrigin.hostname === '127.0.0.1' ? {} : { lanOrigin: safeOrigin }),
     ...(publishedPackages.length > 0 ? { packages: publishedPackages } : {}),
   };
   await saveState(workspace, id, state);
@@ -1296,6 +1309,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const stateLoads = new Map<string, Promise<EditorState>>();
   const projectWrites = new Set<string>();
   const runner = options.buildRunner ?? realBuild;
+  const updateHostVersion = options.updateHostVersion ?? process.env.POCKET_EDITOR_HOST_VERSION ?? "editor";
+  if (!appIdPattern.test(updateHostVersion)) throw new Error("Editor update host version is invalid");
   const getState = async (id: string): Promise<EditorState> => {
     const cached = states.get(id);
     if (cached) return cached;
@@ -1319,19 +1334,35 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   if (flutterRoot && !workspace.projectRoot) throw new Error("a Flutter consumer must be bound to an explicit JS project root");
   const readPublishedUpdate = async (path: string): Promise<Response> => {
     const parts = path.split("/").filter(Boolean);
-    if (parts[0] !== "updates" || parts.length < 3) return failure("not found", 404);
-    const id = asProjectId(parts[1]);
-    const file = safeArtifactFile(workspace.updates, `${id}/${parts.slice(2).join("/")}`);
+    let file: string;
+    if (parts[0] === "pocket" && parts.length >= 5) {
+      file = safeArtifactFile(workspace.updates, parts.join("/"));
+    } else if (parts[0] === "updates" && parts.length >= 3) {
+      const id = asProjectId(parts[1]);
+      const state = await getState(id);
+      const published = state.publish;
+      if (!published?.hostVersion || !published.packageVersion) return failure("not found", 404);
+      const config = await loadConfig(projectDir(id), id);
+      let packageId = config.appId;
+      let artifactParts = parts.slice(2);
+      if (artifactParts[0] === "packages" && artifactParts.length >= 3) {
+        packageId = artifactParts[1];
+        artifactParts = artifactParts.slice(2);
+      }
+      const releaseDir = pocketReleaseDirectory(workspace.updates, published.hostVersion, packageId, published.packageVersion);
+      file = safeArtifactFile(releaseDir, artifactParts.join("/"));
+    } else {
+      return failure("not found", 404);
+    }
     return new Response(await readFile(file), { headers: { "content-type": contentType(file), "cache-control": "no-store" } });
   };
   let deviceUpdates: ReturnType<typeof startUpdateEndpoint> | undefined;
-  const deviceUpdateOrigin = (): string => {
+  const versionBackendOrigin = (): string => {
     if (!deviceUpdates) {
       const hostname = options.updateHost ?? (process.env.POCKET_EDITOR_UPDATE_HOST || chooseUpdateHost());
-      if (hostname === "127.0.0.1") throw new Error("Physical device updates require a LAN address, not loopback");
       const port = options.updatePort ?? Number(process.env.POCKET_EDITOR_UPDATE_PORT || server.port);
       deviceUpdates = startUpdateEndpoint({ hostname, port, read: readPublishedUpdate });
-      console.log(`Device updates listening at ${deviceUpdates.origin} (published packages only)`);
+      console.log(`Pocket version backend listening at ${deviceUpdates.origin} (signed published packages only)`);
     }
     return deviceUpdates.origin;
   };
@@ -1343,9 +1374,11 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       // A phone's loopback points to the phone. Publish only signed update
       // artifacts on a LAN interface; the Editor APIs stay on loopback.
       const local = device.kind === "ios-simulator" || ["macos", "linux", "windows"].includes(device.platform);
-      const origin = local ? `http://127.0.0.1:${server.port}` : deviceUpdateOrigin();
+      const origin = local ? `http://127.0.0.1:${server.port}` : versionBackendOrigin();
+      if (!local && new URL(origin).hostname === "127.0.0.1") throw new Error("Physical device updates require a LAN address, not loopback");
+      const config = await loadConfig(projectDir(id), id);
       const { key } = await editorUpdateTrust(workspace, id);
-      return { url: `${origin}/updates/${id}/latest.json`, keyId: key.keyId, publicKey: key.publicKeyBase64,
+      return { url: `${origin}/pocket/${updateHostVersion}/${config.appId}/test/latest.json`, keyId: key.keyId, publicKey: key.publicKeyBase64,
         namespace: `editor_${id}`, ...(!local ? { debugHttpHost: new URL(origin).hostname } : {}) };
     },
   });
@@ -1488,7 +1521,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         if (path === "/api/codex/status" && method === "GET") return json(await codex.status());
         if (path === "/api/codex/models" && method === "GET") return json(await codex.models());
         if (path === "/api/devices" && method === "GET") return json({ devices: await devices.listDevices() });
-        if (path.startsWith("/updates/")) {
+        if ((path.startsWith("/updates/") || path.startsWith("/pocket/")) && (method === "GET" || method === "HEAD")) {
           return await readPublishedUpdate(path);
         }
         if (path.startsWith("/releases/") && method === "GET") {
@@ -1762,14 +1795,19 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             if (body.channel !== undefined && !["test", "release"].includes(body.channel as string)) return failure("publish channel must be test or release", 400);
             if (state.busy) return failure("build is still running", 409);
             const config = await loadConfig(projectDir(id), id);
-            const boundOrigin = `http://127.0.0.1:${server.port}`;
-            const result = await publishProject(workspace, id, config, state, boundOrigin, body.channel === "test" ? "test" : "release");
+            let boundOrigin = `http://127.0.0.1:${server.port}`;
+            try {
+              boundOrigin = versionBackendOrigin();
+            } catch (error) {
+              pushLog(state, `LAN version backend unavailable: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            const result = await publishProject(workspace, id, config, state, boundOrigin, updateHostVersion, body.channel === "test" ? "test" : "release");
             return json({
               status: publicStatus(id, state),
               manifest: result.envelope,
               manifestUrl: state.publish?.manifestUrl,
               hostConfigUrl: state.publish?.hostConfigUrl,
-              updateUrl: `/updates/${id}/latest.json`,
+              updateUrl: state.publish?.updateUrl,
               archiveUrl: `/releases/${id}.tar.gz`,
               ...(state.publish?.packages ? { packages: state.publish.packages } : {}),
             });
@@ -1792,6 +1830,9 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       }
     },
   });
+  if (options.updateHost !== undefined || process.env.POCKET_EDITOR_UPDATE_HOST) {
+    versionBackendOrigin();
+  }
   const stop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
     codex.dispose();
@@ -1819,10 +1860,15 @@ if (import.meta.main) {
   const workspace = option("workspace");
   const host = option("host");
   const portValue = option("port");
+  const updateHost = option("update-host");
+  const updatePortValue = option("update-port");
+  const updateHostVersion = option("update-host-version");
   if (args.length > 0) throw new Error(`unknown editor option ${args[0]}`);
   const port = portValue === undefined ? undefined : Number(portValue);
+  const updatePort = updatePortValue === undefined ? undefined : Number(updatePortValue);
   if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) throw new Error("--port must be an integer from 0 through 65535");
-  const server = await startEditor({ projectRoot, flutterRoot, workspace, host, port });
+  if (updatePort !== undefined && (!Number.isInteger(updatePort) || updatePort < 0 || updatePort > 65535)) throw new Error("--update-port must be an integer from 0 through 65535");
+  const server = await startEditor({ projectRoot, flutterRoot, workspace, host, port, updateHost, updatePort, updateHostVersion });
   console.log(`Pocket Studio listening at http://${server.hostname}:${server.port}`);
   console.log(`workspace: ${resolve(workspace ?? process.env.POCKET_EDITOR_WORKSPACE ?? join(root, ".pocket-build/editor-workspace"))}`);
   if (projectRoot) console.log(`project: ${resolve(projectRoot)}`);

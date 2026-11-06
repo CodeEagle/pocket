@@ -1127,6 +1127,11 @@ function renderArtifacts(status) {
       channel.textContent = publish.channel === "test" ? "Channel test" : "Channel release";
       publishInfo.append(channel);
     }
+    if (publish.lanOrigin) {
+      const lan = document.createElement("span");
+      lan.textContent = `LAN ${publish.lanOrigin}`;
+      publishInfo.append(lan);
+    }
     if (publish.version || publish.build !== undefined) {
       const identity = document.createElement("span");
       identity.textContent = [publish.version ? `v${publish.version}` : "", publish.build !== undefined ? `build ${publish.build}` : ""].filter(Boolean).join(" · ");
@@ -1151,11 +1156,13 @@ function renderArtifacts(status) {
       const heading = document.createElement("strong");
       heading.textContent = `Test package ${publish.version ? `v${publish.version}` : ""}${publish.build !== undefined ? ` · build ${publish.build}` : ""} is ready.`;
       const first = document.createElement("span");
-      first.textContent = "First time: use Editor Deploy to reinstall once so the simulator/desktop host receives the update URL and public key.";
+      first.textContent = publish.lanOrigin
+        ? `LAN version backend: ${publish.lanOrigin}. Install its host.json public configuration once, then later test publishes only replace the signed latest pointer.`
+        : "No private LAN interface was available, so this package is served on loopback for simulator/desktop testing.";
       const second = document.createElement("span");
       second.textContent = "Then open Demo Host → Updates → Check → Apply. Later test packages do not require rebuilding Flutter.";
       const caveat = document.createElement("span");
-      caveat.textContent = "Automatic update injection is currently limited to iOS Simulator and desktop; Android and physical-device URLs are not configured in this flow.";
+      caveat.textContent = "Only signed package artifacts are exposed on the LAN; Editor APIs, source files and signing keys remain loopback-only.";
       testPublishInfo.append(heading, first, second, caveat);
       testPublishInfo.hidden = false;
     }

@@ -170,6 +170,24 @@ export function NotesPage() {
 
 不要假设 DOM/CSS 浏览器库可以直接使用。Pocket UI 是 TSX + PocketJS 原生节点，不是 WebView。完整导出以 `sdk/packages/pocket_ui/src/index.ts` 为准。
 
+### 自定义游戏/App 界面时保留控件行为
+
+自定义视觉不等于重新实现控件。新游戏或 App 默认应继承现有控件的行为，只替换与产品
+匹配的皮肤、颜色、形状、字体、动效和布局。优先顺序是：
+
+1. 使用现有组件和 theme/appearance/class/style 参数换肤。
+2. 用现有基础组件组合新的视觉组件，同时保留其 Focusable、按压、禁用和语义行为。
+3. 只有产品确实需要不同交互模型时才覆盖行为，并记录为什么现有行为不适用。
+
+必须保留的默认体验包括：按下/取消/抬起事务、focus/键盘与手柄导航、disabled 状态、
+滚动竞争和惯性、IME 与键盘避让、safe area、触控热区、无障碍语义、路由失活、生命周期
+取消以及 reduced-motion 等既有约束。不要只复制外观后用裸 pointer handler 重写按钮、输入、
+列表或弹窗；这通常会失去取消手势、焦点、语义和设备一致性，造成明显的体验下降。
+
+如果必须新增行为，至少验证点击与拖出取消、连续快速操作、键盘/手柄、滚动嵌套、页面离开、
+横竖屏/尺寸变化、无障碍和真机触控。AI 应明确说明“复用了哪个现有行为、只改了哪层皮肤”；
+不能把静态截图相似当作交互验收。
+
 ## 6. HostBridge 与能力声明
 
 JS 通过同一个 `HostBridge` 请求原生能力：
@@ -261,6 +279,22 @@ bun pocket.ts editor /absolute/path/to/js-project \
   --flutter-root=/absolute/path/to/flutter-project \
   --port=8791
 ```
+
+局域网热更新测试可启用 Editor 内置只读版本后台：
+
+```sh
+bun pocket.ts editor /absolute/path/to/js-project \
+  --flutter-root=/absolute/path/to/flutter-project \
+  --port=8791 \
+  --update-host=192.168.1.20 \
+  --update-port=8792 \
+  --update-host-version=3.2.0
+```
+
+Publish test package 会产生
+`http://192.168.1.20:8792/pocket/3.2.0/<packageId>/test/latest.json`，
+并在页面显示可用的 `host.json`。LAN listener 只提供签名包、bundle、blob 和公开
+bootstrap，Editor API、源码及签名私钥仍只在 loopback。
 
 AI 使用 Editor 的标准步骤：
 

@@ -41,6 +41,9 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
   writeFileSync(pak, pack([{ key: "fixture:text", dtype: 0, data: new Uint8Array([1, 2, 3, 4]) }]));
   const server = await startEditor({
     port: 0,
+    updateHost: "127.0.0.1",
+    updatePort: 0,
+    updateHostVersion: "3.2.0",
     workspace,
     buildRunner: async ({ log }) => {
       log("fixture compiler: real runner is injected only by this service test");
@@ -197,8 +200,11 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     });
     expect(published.response.status).toBe(200);
     expect(published.value.status.publish.runtimeAbi).toBe("fixture-abi-v1");
-    expect(published.value.manifestUrl).toContain("/updates/fixture-app/latest.json");
-    expect(published.value.hostConfigUrl).toContain("/updates/fixture-app/host.json");
+    expect(published.value.manifestUrl).toContain("/pocket/3.2.0/pocket.host.demo/stable/latest.json");
+    expect(published.value.hostConfigUrl).toContain("/pocket/3.2.0/pocket.host.demo/stable/host.json");
+    expect((await fetch(published.value.manifestUrl)).status).toBe(200);
+    const canonicalLatest = await request(server, "/pocket/3.2.0/pocket.host.demo/stable/latest.json");
+    expect(canonicalLatest.response.status).toBe(200);
     const latest = await request(server, "/updates/fixture-app/latest.json");
     expect(latest.response.status).toBe(200);
     const envelope = latest.value;
@@ -208,7 +214,9 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     expect(payload.runtimeAbi).toBe("fixture-abi-v1");
     const hostConfig = await request(server, "/updates/fixture-app/host.json");
     expect(hostConfig.response.status).toBe(200);
-    expect(hostConfig.value.POCKET_UPDATE_URL).toContain("/updates/fixture-app/latest.json");
+    expect(hostConfig.value.POCKET_UPDATE_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect(hostConfig.value.POCKET_HOST_VERSION).toBe("3.2.0");
+    expect(hostConfig.value.POCKET_PACKAGE_VERSION).toBe("stable");
     expect(hostConfig.value.POCKET_UPDATE_KEY_ID).toBe(envelope.keyId);
     expect(Buffer.from(hostConfig.value.POCKET_UPDATE_PUBLIC_KEY, "base64")).toHaveLength(32);
     const archive = await request(server, "/releases/fixture-app.tar.gz");
@@ -222,6 +230,8 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
       });
       expect(testing.response.status).toBe(200);
       expect(testing.value.status.publish.build).toBe(expectedBuild);
+      expect(testing.value.manifestUrl).toContain("/pocket/3.2.0/pocket.host.demo/test/latest.json");
+      expect((await fetch(testing.value.manifestUrl)).status).toBe(200);
       const signed = (await request(server, "/updates/fixture-app/latest.json")).value;
       const publicPem = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(hostConfig.value.POCKET_UPDATE_PUBLIC_KEY, "base64")]), format: "der", type: "spki" }).export({ format: "pem", type: "spki" });
       const verified = JSON.parse(new TextDecoder().decode(verifySignedManifest(signed, publicPem)));
@@ -658,14 +668,17 @@ test("editor enforces security boundaries against CSRF, Host header poisoning, a
     expect(validBodyAsset.response.status).toBe(200);
     expect(existsSync(join(projectDir, "assets/valid-body.png"))).toBe(true);
 
-    // 12. Symlink in updates/victim -> external directory containing latest.json returns 400 and does NOT return external contents
+    // 12. A canonical release symlink to an external directory returns 400
+    // and never exposes the target contents.
     const victimDir = temporaryWorkspace();
     try {
       writeFileSync(join(victimDir, "latest.json"), JSON.stringify({ secret: "victim-secret-content" }));
-      const victimSymlink = join(workspace, "updates/victim");
+      const victimParent = join(workspace, "updates/pocket/3.2.0/com.example.victim");
+      mkdirSync(victimParent, { recursive: true });
+      const victimSymlink = join(victimParent, "stable");
       symlinkSync(victimDir, victimSymlink);
 
-      const victimResp = await request(server, "/updates/victim/latest.json");
+      const victimResp = await request(server, "/pocket/3.2.0/com.example.victim/stable/latest.json");
       expect(victimResp.response.status).toBe(400);
       expect(victimResp.value).not.toEqual({ secret: "victim-secret-content" });
     } finally {

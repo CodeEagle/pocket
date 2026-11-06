@@ -23,6 +23,33 @@ Flutter 根目录是启动时的可信配置，网页不能提交任意本地路
 
 若本机尚未构建网页预览需要的 probe，先完成 SDK bootstrap，再在仓库根目录执行 `cargo build --manifest-path sdk/native/Cargo.toml --bin pocket_probe`，然后启动 Editor。也可以通过启动环境变量 `POCKET_NATIVE_PROBE` 指定已有二进制。
 
+## 本地版本后台与局域网发布
+
+Editor 内置一个只读版本后台，复用正式 `packageArtifacts`、Ed25519 签名、bundle/blob
+和同一客户端更新协调器。点击 **Publish test package** 时会自动选择本机私有 IPv4，
+局域网只开放签名后的发布产物，不开放 Editor API、项目源码或私钥。地址遵循：
+
+```text
+http://<LAN_IP>:<port>/pocket/<hostVersion>/<packageId>/test/latest.json
+```
+
+多网卡或需要固定地址时显式启动：
+
+```sh
+bun pocket.ts editor /absolute/path/to/js-project \
+  --flutter-root=/absolute/path/to/flutter-project \
+  --port=8791 \
+  --update-host=192.168.1.20 \
+  --update-port=8792 \
+  --update-host-version=3.2.0
+```
+
+`test` 是单调递增的测试槽，正式 Publish 使用 `stable` 槽；实际 version/build 仍在
+签名 payload 中。首次需要让调试宿主取得页面给出的 `host.json` 公钥配置，之后只需
+Build → Publish → App Check/Apply，不再重新构建 Flutter。没有可用 LAN 时 Publish
+仍可回退 loopback 供模拟器/桌面测试；真机必须能访问显示的 LAN 地址。HTTP 只用于
+debug allowlist，生产发布仍应部署到 HTTPS。
+
 ## 编辑与预览
 
 1. 选择项目和源文件，修改并保存。

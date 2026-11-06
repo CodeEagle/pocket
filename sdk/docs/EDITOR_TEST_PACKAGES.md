@@ -1,4 +1,4 @@
-# Editor 测试包与模拟器热更新
+# Editor 本地版本后台与测试包热更新
 
 Editor 的测试发布复用现有 `packageArtifacts`、Ed25519 签名和 `PocketUpdateCoordinator`，不另做更新协议，也不绕过 build 防重放。
 
@@ -9,9 +9,9 @@ Editor 的测试发布复用现有 `packageArtifacts`、Ed25519 签名和 `Pocke
 
 测试包的 build 高于当前构建配置、字节码元数据、已发布 payload 和测试发布计数；version 为 `<配置版本>-test.<build>`。测试计数单独持久保存，不因源码保存清理 publish 状态或普通 release 发布而丢失。测试发布不改消费者 pocket.json/editor.json 的正式 release identity。
 
-iOS 模拟器及本机桌面继续使用 loopback。真机和 Android Run 会在选中的局域网 IPv4 地址上启动只读更新下载端点（默认复用 Editor 端口、绑定不同 IP），只提供 `/updates/` 下的已发布文件；编辑、Codex 和部署 API 不在这个端点开放。手机与电脑需能通过局域网互通。更新 URL、公钥、存储命名空间和精确 HTTP 调试主机在 Run 时传入 App；私钥不进入 App。HTTP 例外仅对 debug 生效，release 仍要求安全传输。
+iOS 模拟器及本机桌面可以继续使用 loopback。点击 Publish 或部署真机时，Editor 会在选中的局域网 IPv4 地址启动只读版本后台（默认复用 Editor 端口、绑定不同 IP），仅提供 `/pocket/<hostVersion>/<packageId>/<packageVersion>/` 下的签名发布文件；编辑、Codex 和部署 API 不在这个端点开放。测试发布使用 `test` 槽，正式发布使用 `stable` 槽，真实 version/build 仍以签名 payload 为准。手机与电脑需能通过局域网互通。更新 URL、公钥、存储命名空间和精确 HTTP 调试主机在 Run 时传入 App；私钥不进入 App。HTTP 例外仅对 debug 生效，release 仍要求安全传输。
 
-多网卡时可由启动环境 `POCKET_EDITOR_UPDATE_HOST` 指定本机局域网 IPv4，`POCKET_EDITOR_UPDATE_PORT` 可指定只读下载端口。没有可用地址或端口不能绑定时，部署应报错，而不是再安装缺少更新配置的 App。旧安装未携带这些编译参数，需要先用更新后的 Editor 重新 Run 一次；之后 Build → Publish test package → App Check → Apply 即可。
+多网卡时可用 `--update-host` / `POCKET_EDITOR_UPDATE_HOST` 指定本机局域网 IPv4，`--update-port` / `POCKET_EDITOR_UPDATE_PORT` 指定只读端口，`--update-host-version` / `POCKET_EDITOR_HOST_VERSION` 指定 URL 的宿主版本段。若 Publish 找不到 LAN，会回退 loopback 供模拟器测试；真机部署则明确报错。旧安装未携带这些编译参数，需要先用更新后的 Editor 重新 Run 一次；之后 Build → Publish test package → App Check → Apply 即可。
 
 来源与适配：旧 `pocketjs_flutter_demo/pocket_host/editor` 的签名发布/host.json 链路此前已迁移到 `sdk/editor/server.ts`；本轮继续复用已保留的构建、签名发布与 `demo/integration_test/editor_update_check_test.dart`、`update_lifecycle_test.dart` 验证思路。新增部分仅为已缺失的部署公钥配置传递、测试包单调 build 与测试发布入口，不引入第二套下载或验证器。
 
