@@ -28,7 +28,7 @@ SDK 不依赖 Demo。集成其他项目使用 `pocket_sdk`、`@pocket/ui` 和 `s
 | Bun / Python / Cargo | 脚手架、Editor、guest 与 native 构建、上游准备、签包和测试。 |
 | Ed25519 / SHA-256 | 更新发布者签名验证、内容完整性校验、内容寻址缓存与资源重建。 |
 
-当前仓库固定 Flutter **3.35.7**（`.fvmrc`）、Dart SDK 约束 **^3.9.2**、Rust 最低 **1.93**，`rquickjs` 由 Cargo 锁定；PocketJS 上游固定为 `99924de47c62fa36f526a8791055d91cbbdb3836`，下载归档会验证 SHA-256，随后应用字节码、执行预算和绘制等受控补丁。若使用 FVM，可将下文 `flutter` 替换为 `fvm flutter`。
+当前仓库固定 Flutter **3.47.9**（`.fvmrc`），同时保留 Flutter **3.35.x** / Dart **3.9.x** 的 SDK 最低兼容约束；当前固定工具链使用 Dart **3.13.7**。Rust 最低版本为 **1.93**，`rquickjs` 由 Cargo 锁定；PocketJS 上游固定为 `99924de47c62fa36f526a8791055d91cbbdb3836`，下载归档会验证 SHA-256，随后应用字节码、执行预算和绘制等受控补丁。若使用 FVM，可将下文 `flutter` 替换为 `fvm flutter`。
 
 上游 compiler 依赖另由准备出的 `sdk/.cache/pocketjs/bun.lock` 锁定，并执行 frozen install；该缓存从固定上游重建，不手工提交。
 

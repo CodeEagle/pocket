@@ -54,8 +54,13 @@ the application.
 
 ## Validation
 
-- All seven manifests pass `swift package dump-package` with Swift tools 5.9.
-- An isolated Flutter 3.35.7 app enabled SwiftPM and referenced all seven local
+- All seven manifests use Swift tools 5.9 and contain the current
+  `FlutterFramework` dependency declaration. The declaration is conditional so
+  Flutter 3.35 can keep using its implicit Flutter module path. In a Flutter
+  3.47 application, Flutter's generated aggregate package supplies
+  `FlutterFramework` to the application package graph; the standalone source
+  manifest does not claim to reproduce that generated application graph.
+- Isolated Flutter 3.35.7 and Flutter 3.47.9 apps enabled SwiftPM and referenced all seven local
   packages simultaneously.
 - `flutter build ios --release --no-codesign` completed for an arm64 device
   target.

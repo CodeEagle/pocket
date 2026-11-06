@@ -807,26 +807,27 @@ void main() {
           _foregroundFlutterColor,
         );
         expect(stretchedForegroundPixels, isNotNull);
+        final stretchedForegroundBounds = stretchedForegroundPixels!;
         expect(
-          stretchedForegroundPixels!.left,
+          stretchedForegroundBounds.left,
           closeTo(
-            baseForegroundPixels!.left * stretchScaleX + stretchTranslateX,
+            baseForegroundPixels.left * stretchScaleX + stretchTranslateX,
             2,
           ),
         );
         expect(
-          stretchedForegroundPixels.top,
+          stretchedForegroundBounds.top,
           closeTo(
             baseForegroundPixels.top * stretchScaleY + stretchTranslateY,
             2,
           ),
         );
         expect(
-          stretchedForegroundPixels.width,
+          stretchedForegroundBounds.width,
           closeTo(baseForegroundPixels.width * stretchScaleX, 3),
         );
         expect(
-          stretchedForegroundPixels.height,
+          stretchedForegroundBounds.height,
           closeTo(baseForegroundPixels.height * stretchScaleY, 3),
         );
         final stretchAffected = Rect.fromLTRB(
@@ -1086,7 +1087,7 @@ void main() {
           },
         });
         await tester.pump(const Duration(milliseconds: 100));
-        final restoredFrame = await _waitForFrame(
+        await _waitForFrame(
           tester,
           () => runtime!.frameAt(0),
           readError: () => viewError,

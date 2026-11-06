@@ -351,10 +351,9 @@ export function patchIosMinimum(
   const project = join(iosDirectory, "Runner.xcodeproj/project.pbxproj");
   if (existsSync(project)) {
     let projectText = readFileSync(project, "utf8").replace(/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;/g, "IPHONEOS_DEPLOYMENT_TARGET = 15.0;");
-    // Flutter 3.35's unpack step invokes lipo -verify_arch with a list of
-    // architectures; Xcode 27's lipo accepts one arch per invocation. Keep
-    // generated consumer projects arm64-only (the supported Apple Silicon
-    // simulator/device target) so the SDK build is deterministic.
+    // The shipped XCFramework contains arm64 device and Apple-Silicon
+    // simulator slices only. Keep generated consumer projects on that
+    // supported ABI so Xcode never requests an unavailable Intel slice.
     if (!/\n\s+ARCHS = arm64;/.test(projectText)) projectText = projectText.replace(/(\n\s+buildSettings = \{\n)/g, "$1\t\t\t\tARCHS = arm64;\n");
     writeFileSync(project, projectText);
   }
@@ -492,8 +491,8 @@ export function patchAndroidMinimum(androidDirectory: string): void {
 }
 
 /**
- * Flutter 3.35 still creates a UIKit AppDelegate-only project when asked for
- * an iOS platform. iOS 27's scene-lifecycle guard terminates that template
+ * Older Flutter versions create a UIKit AppDelegate-only project when asked
+ * for an iOS platform. iOS 27's scene-lifecycle guard terminates that template
  * before Flutter can attach its engine. Keep the generated host on Flutter's
  * supported scene path without copying any showcase business code: plugins
  * are registered through FlutterPluginRegistrant and FlutterSceneDelegate

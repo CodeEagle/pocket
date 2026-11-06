@@ -251,8 +251,9 @@ manifest 声明当作成功。若设备
 
 ### iOS Scene 生命周期自动适配
 
-`pocket init`/`pocket build --platform=ios-sim|ios` 会对 Flutter 3.35 生成的默认
-iOS 壳执行幂等的 Scene 适配（实现位于 `pocket.ts:patchIosSceneLifecycle`）：
+`pocket init`/`pocket build --platform=ios-sim|ios` 会对 Flutter 3.35 等旧版本生成的默认
+iOS 壳执行幂等的 Scene 适配；Flutter 3.47 已生成 Scene 壳时保持无操作
+（实现位于 `pocket.ts:patchIosSceneLifecycle`）：
 
 - 默认生成的 `AppDelegate.swift` 增加 `FlutterPluginRegistrant`，将插件注册交给
   `FlutterSceneDelegate` 使用的 registry；

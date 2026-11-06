@@ -1,6 +1,7 @@
 **/.cache/
 **/.dart_tool/
 **/.build/
+**/.swiftpm/
 **/.pocket-build/
 **/node_modules/
 **/__pycache__/

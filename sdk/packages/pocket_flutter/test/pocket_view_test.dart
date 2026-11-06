@@ -1387,6 +1387,7 @@ void main() {
               'label': 'Save',
               'role': 'button',
               'selected': true,
+              'checked': true,
               'disabled': false,
               'enabled': true,
               'rect': <String, double>{
@@ -1402,6 +1403,7 @@ void main() {
               'label': 'Delete',
               'role': 'button',
               'selected': false,
+              'checked': false,
               'disabled': true,
               'enabled': false,
               'rect': <String, double>{
@@ -1425,8 +1427,8 @@ void main() {
       matchesSemantics(
         label: 'Save',
         isButton: true,
-        hasSelectedState: true,
-        isSelected: true,
+        hasToggledState: true,
+        isToggled: true,
         hasEnabledState: true,
         isEnabled: true,
         hasTapAction: true,
@@ -1437,8 +1439,8 @@ void main() {
       matchesSemantics(
         label: 'Delete',
         isButton: true,
-        hasSelectedState: true,
-        isSelected: false,
+        hasToggledState: true,
+        isToggled: false,
         hasEnabledState: true,
         isEnabled: false,
       ),
