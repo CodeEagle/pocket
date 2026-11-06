@@ -1,5 +1,6 @@
 **/.cache/
 **/.dart_tool/
+**/.build/
 **/.pocket-build/
 **/node_modules/
 **/__pycache__/

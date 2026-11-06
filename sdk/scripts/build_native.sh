@@ -24,8 +24,8 @@ build_ios_slice() {
 package_ios_xcframework() {
   local device="$ROOT/native/target/aarch64-apple-ios/release/libpocket_flutter.a"
   local simulator="$ROOT/native/target/aarch64-apple-ios-sim/release/libpocket_flutter.a"
-  local output="$PACKAGE_ROOT/ios/Frameworks/PocketFlutter.xcframework"
-  local lock="$PACKAGE_ROOT/ios/Frameworks/.PocketFlutter.xcframework.lock"
+  local output="$PACKAGE_ROOT/ios/pocket_flutter/Frameworks/PocketFlutter.xcframework"
+  local lock="$PACKAGE_ROOT/ios/pocket_flutter/Frameworks/.PocketFlutter.xcframework.lock"
   # xcodebuild requires the output argument itself to end in .xcframework.
   local temporary="${output%.xcframework}.tmp.$$.xcframework"
   test -f "$device" && test -f "$simulator"
@@ -90,8 +90,8 @@ PY
     rm -rf "$temporary"
   fi
   # Remove the old single-architecture location. Leaving it in place makes a
-  # later Flutter/CocoaPods run silently select whichever target was built last.
-  rm -f "$PACKAGE_ROOT/ios/Frameworks/libpocket_flutter.a"
+  # later Flutter build silently select whichever target was built last.
+  rm -f "$PACKAGE_ROOT/ios/pocket_flutter/Frameworks/libpocket_flutter.a"
   trap - EXIT
   cleanup_xcframework_lock
 }
@@ -118,13 +118,13 @@ case "${1:-}" in
   ios-sim)
     build_ios_slice aarch64-apple-ios-sim iphonesimulator arm64-apple-ios15.0-simulator
     build_ios_slice aarch64-apple-ios iphoneos arm64-apple-ios15.0
-    mkdir -p "$PACKAGE_ROOT/ios/Frameworks"
+    mkdir -p "$PACKAGE_ROOT/ios/pocket_flutter/Frameworks"
     package_ios_xcframework
     ;;
   ios)
     build_ios_slice aarch64-apple-ios iphoneos arm64-apple-ios15.0
     build_ios_slice aarch64-apple-ios-sim iphonesimulator arm64-apple-ios15.0-simulator
-    mkdir -p "$PACKAGE_ROOT/ios/Frameworks"
+    mkdir -p "$PACKAGE_ROOT/ios/pocket_flutter/Frameworks"
     package_ios_xcframework
     ;;
   android)

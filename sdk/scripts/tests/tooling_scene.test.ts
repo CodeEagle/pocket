@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { patchIosMinimum, patchIosSceneLifecycle } from "../../pocket.ts";
@@ -75,10 +75,6 @@ function writeIos(root: string, appDelegate: string, plist: string): void {
   writeFileSync(join(root, "Runner/Info.plist"), plist);
 }
 
-function deploymentCount(text: string): number {
-  return text.split("target.build_configurations.each { |config|").length - 1;
-}
-
 const generatedRoot = fixture();
 try {
   writeIos(generatedRoot, generatedDelegate, plainPlist);
@@ -111,26 +107,4 @@ try {
   rmSync(customRoot, { recursive: true, force: true });
 }
 
-const podRoot = fixture();
-try {
-  writeIos(podRoot, generatedDelegate, plainPlist);
-  writeFileSync(join(podRoot, "Podfile"), `platform :ios, '13.0'
-
-post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    flutter_additional_ios_build_settings(target)
-  end
-end
-`);
-  patchIosMinimum(podRoot);
-  const once = readFileSync(join(podRoot, "Podfile"), "utf8");
-  patchIosMinimum(podRoot);
-  const twice = readFileSync(join(podRoot, "Podfile"), "utf8");
-  assert.equal(twice, once);
-  assert.equal(deploymentCount(twice), 1);
-  assert.ok(existsSync(join(podRoot, "Podfile")));
-} finally {
-  rmSync(podRoot, { recursive: true, force: true });
-}
-
-console.log("tooling_scene.test: generated scene patch, custom delegate preservation, and idempotent Podfile patch passed");
+console.log("tooling_scene.test: generated scene patch and custom delegate preservation passed");

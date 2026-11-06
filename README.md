@@ -232,11 +232,11 @@ flutter run -d macos --dart-define-from-file=js/.pocket-updates/host.json
 
 ### 环境
 
-需要 Flutter/Dart、Bun、Python 3、Rust/Cargo，以及目标平台工具链。Rust package 声明最低 Rust 1.93；iOS 构建需要 macOS/Xcode/CocoaPods；Android 需要 SDK/NDK。先确认 `flutter doctor` 能构建相应平台。
+需要 Flutter/Dart、Bun、Python 3、Rust/Cargo，以及目标平台工具链。Rust package 声明最低 Rust 1.93；iOS 构建需要 macOS/Xcode，并通过 Swift Package Manager 接入插件；Android 需要 SDK/NDK。先确认 `flutter doctor` 能构建相应平台。
 
 | 目标 | 当前 native 构建范围 | 最低版本 / 条件 |
 | --- | --- | --- |
-| iOS 真机 | arm64 | iOS 15.0；Xcode/CocoaPods。 |
+| iOS 真机 | arm64 | iOS 15.0；Xcode/SwiftPM。 |
 | iOS 模拟器 | Apple Silicon arm64 | 不包含 Intel x86_64 simulator slice。 |
 | macOS | Apple Silicon arm64 | macOS 12.0；不是全架构桌面发行包。 |
 | Android | arm64-v8a | API 24；Android SDK/NDK。 |

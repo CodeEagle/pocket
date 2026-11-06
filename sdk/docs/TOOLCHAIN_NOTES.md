@@ -16,18 +16,17 @@ both start at build `1`, while malformed or zero build values fail the build.
 pinned PocketJS revision. A newer mtime is not sufficient to reuse an archive,
 so editing a patch or build script invalidates the cache.
 
-Apple builds produce `packages/pocket_flutter/ios/Frameworks/PocketFlutter.xcframework`
+Apple builds produce `packages/pocket_flutter/ios/pocket_flutter/Frameworks/PocketFlutter.xcframework`
 with device and simulator arm64 slices. The previous single
 `libpocket_flutter.a` path is removed after packaging, which prevents a device
 build from silently replacing the simulator archive. Android builds publish
 the arm64 JNI library and are available through `pocket.ts build
 --platform=android`.
 
-The iOS podspec force-loads the selected archive from CocoaPods' resolved
-`PODS_XCFRAMEWORKS_BUILD_DIR/pocket_flutter/libpocket_flutter.a` path so Dart
-FFI symbols are not dead-stripped. Since this SDK intentionally ships no Intel
-simulator slice, the pod and user target exclude `x86_64` for simulator builds;
-Apple Silicon simulator/device builds remain supported.
+The iOS Swift package links the XCFramework binary target with `-all_load` and
+exports process symbols so Dart FFI symbols are not dead-stripped. Since this
+SDK intentionally ships no Intel simulator slice, Apple Silicon simulator and
+arm64 device builds are the supported targets.
 Packaging is serialized by an exclusive lock and uses macOS
 `renameatx_np(RENAME_SWAP)` when replacing an existing bundle, preserving the
 last complete artifact until the new one is ready.

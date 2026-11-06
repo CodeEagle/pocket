@@ -22,6 +22,7 @@ test("source-only init selects feature packages without the aggregate hardware p
       hardwareModules: ["camera", "bluetooth"] as const,
     });
     const scaffold = readProject(project);
+    expect(scaffold.pubspec).toContain("enable-swift-package-manager: true");
     expect(scaffold.pubspec).toContain("pocket_camera:");
     expect(scaffold.pubspec).toContain("pocket_bluetooth:");
     expect(scaffold.pubspec).toContain("pocket_permissions:");
@@ -75,12 +76,10 @@ test("feature platform declarations are minimal and idempotent", () => {
   const ios = join(root, "ios");
   const androidManifest = join(android, "app/src/main/AndroidManifest.xml");
   const plistPath = join(ios, "Runner/Info.plist");
-  const podfilePath = join(ios, "Podfile");
   mkdirSync(dirname(androidManifest), { recursive: true });
   mkdirSync(dirname(plistPath), { recursive: true });
   writeFileSync(androidManifest, '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application /></manifest>\n');
   writeFileSync(plistPath, '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleName</key><string>Test</string></dict></plist>\n');
-  writeFileSync(podfilePath, "platform :ios, '13.0'\ntarget 'Runner' do\nend\npost_install do |installer|\n  installer.pods_project.targets.each do |target|\n  end\nend\n");
   try {
     patchAndroidHardwareManifest(android, false, false, ["camera"], ["hardware.camera", "hardware.photos"]);
     const androidOnce = readFileSync(androidManifest, "utf8");
@@ -96,35 +95,13 @@ test("feature platform declarations are minimal and idempotent", () => {
     patchAndroidHardwareManifest(android, false, false, ["biometrics"]);
     expect(readFileSync(androidManifest, "utf8")).toBe(biometrics);
 
-
     patchIosMinimum(ios, false, ["camera"]);
-    const iosOnce = [readFileSync(plistPath, "utf8"), readFileSync(podfilePath, "utf8")];
-    expect(iosOnce[0]).toContain("NSCameraUsageDescription");
-    expect(iosOnce[0]).toContain("NSPhotoLibraryAddUsageDescription");
-    expect(iosOnce[0]).not.toContain("NSBluetoothAlwaysUsageDescription");
-    expect(iosOnce[1]).toContain("PERMISSION_CAMERA=1");
-    expect(iosOnce[1]).toContain("PERMISSION_PHOTOS_ADD_ONLY=1");
-    expect(iosOnce[1]).not.toContain("PERMISSION_BLUETOOTH=1");
+    const iosOnce = readFileSync(plistPath, "utf8");
+    expect(iosOnce).toContain("NSCameraUsageDescription");
+    expect(iosOnce).toContain("NSPhotoLibraryAddUsageDescription");
+    expect(iosOnce).not.toContain("NSBluetoothAlwaysUsageDescription");
     patchIosMinimum(ios, false, ["camera"]);
-    expect([readFileSync(plistPath, "utf8"), readFileSync(podfilePath, "utf8")]).toEqual(iosOnce);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("iOS macro fallback creates a complete target loop", () => {
-  const root = mkdtempSync(join(tmpdir(), "pocket-ios-macro-fallback-"));
-  const plistPath = join(root, "Runner/Info.plist");
-  const podfilePath = join(root, "Podfile");
-  mkdirSync(dirname(plistPath), { recursive: true });
-  writeFileSync(plistPath, "<plist><dict></dict></plist>\n");
-  writeFileSync(podfilePath, "post_install do |installer|\nend\n");
-  try {
-    patchIosMinimum(root, false, ["camera"]);
-    const podfile = readFileSync(podfilePath, "utf8");
-    expect(podfile).toContain("installer.pods_project.targets.each do |target|");
-    expect(podfile).toContain("PERMISSION_CAMERA=1");
-    expect(podfile.match(/installer\.pods_project\.targets\.each do \|target\|/g)).toHaveLength(1);
+    expect(readFileSync(plistPath, "utf8")).toEqual(iosOnce);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

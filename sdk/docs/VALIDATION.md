@@ -106,7 +106,7 @@ Duo 输入场景使用真实 Flutter TextInputClient 与 TestTextInput，包含�
 
 ## Editor production build / publish（2026-11-02）
 
-`bun test editor/test/editor_server.test.ts scripts/tests/build_guest.test.ts`：4 tests、61 assertions 通过。覆盖多文件读写边界、显式外部项目、真实 installed-only `@pocket/ui` 构建和 node_modules 原样恢复；同一项目构建有互斥，CLI/editor 共用 `buildGuest()`。`tooling_scene.test.ts` 的脚本断言验证默认 Scene 模板、自定义 AppDelegate 保留和 Podfile 幂等性，exit 0（不是 Bun 注册测试计数）。
+`bun test editor/test/editor_server.test.ts scripts/tests/build_guest.test.ts`：4 tests、61 assertions 通过。覆盖多文件读写边界、显式外部项目、真实 installed-only `@pocket/ui` 构建和 node_modules 原样恢复；同一项目构建有互斥，CLI/editor 共用 `buildGuest()`。`tooling_scene.test.ts` 的脚本断言验证默认 Scene 模板和自定义 AppDelegate 保留，exit 0（不是 Bun 注册测试计数）。
 
 生产 runner 的 `editor_live_probe.ts` 通过真实 QuickJS qjbc / PAK、Ed25519 签包、blob 摘要、PAK 重组，以及坏源码不能发布旧构建的验证。最终本地服务 `http://127.0.0.1:8790` 使用最新代码运行，showcase revision **17** 已通过多文件 API 同步冻结 guest 并 build/publish：
 

@@ -22,7 +22,7 @@ bun /Volumes/ORICO/Development/Github/pocket/sdk/pocket.ts init /path/to/my-pock
 - 可独立编辑的 `vendor/pocket-ui` 和预编译的 `node_modules/@pocket/ui`；
 - 独立的 `flutter/`（iOS、Android、macOS）应用；
 - `flutter/pubspec.yaml` 的本地 `pocket_sdk` 路径依赖，以及四个运行期 asset；
-- iOS 15.0 deployment target 和 Apple Silicon `arm64` 架构设置（Flutter 可用时会同时执行 `flutter pub get`，因此 Podfile 已物化）。
+- iOS 15.0 deployment target、Apple Silicon `arm64` 架构设置，以及默认启用的 SwiftPM 插件集成。
 
 `--hardware` 是显式选择：它添加独立 `pocket_hardware` 依赖、显式 plugin factory、硬件权限/能力的 optional
 manifest、iOS usage-description 和 Android `AndroidManifest.xml` 权限声明写入脚手架；

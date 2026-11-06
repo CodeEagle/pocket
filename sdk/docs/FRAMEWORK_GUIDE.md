@@ -188,7 +188,7 @@ pocket_host/
 | `src/pocket_package.dart` | 已准入包的本地 entry/PAK/asset 路径值对象，避免大 PAK 重复复制；不是验签器，也不同于 services 的签名包模型 |
 | `src/pocket_performance.dart` | 不可变 PocketPerformanceSample 指标模型和序列化；ticker 间隔和 renderer bridge 耗时采样在 PocketView；Flutter FrameTiming 由性能集成测试采集，历史落盘在 host |
 | `src/pocket_text_cache.dart` | TextPainter 布局缓存，避免每帧重复布局相同文本 |
-| `ios/*.podspec`、`macos/*.podspec`、`android/build.gradle` | 将目标平台 native 库连接进 Flutter 插件 |
+| `ios/pocket_flutter/Package.swift`、`macos/*.podspec`、`android/build.gradle` | 将目标平台 native 库连接进 Flutter 插件；iOS 只使用 SwiftPM |
 
 继承的优化包括增量帧、绘制分块/RepaintBoundary、文本 LRU、图片 identity/revision 缓存。`nativeMsP95` 包含 FFI、字符串复制和 Dart JSON 解码，不能解释成纯 QuickJS 执行耗时。
 
@@ -218,9 +218,9 @@ pocket_host/
 | `sdk/lib/src/performance_history.dart` | 应用级最多 600 条性能历史和持久化；不是 renderer 的第二份帧状态 |
 | `pocket_hardware/lib/src/hardware_plugin.dart` | `HardwarePlugin`、`HardwareCapabilities`、`HardwarePermissions` 及 MethodChannel/天气 adapter；结构化拒绝、超时、late-result 和 Texture cleanup |
 | `pocket_hardware/ios/Classes/PocketHardwarePlugin.swift` | 标准 Flutter 自动注册入口，调用同模块 `PocketHardwareManager`；外部 guest 不能下载/替换该原生实现 |
-| `pocket_flutter/ios/Classes/PocketFlutterPlugin.swift` | 标准自动注册入口，挂接 UIKit ReservedRegion geometry channel；Dart `PocketView` 在本地 canvas 中裁剪/变换后才发给 JS |
+| `pocket_flutter/ios/pocket_flutter/Sources/pocket_flutter/PocketFlutterPlugin.swift` | 标准自动注册入口，挂接 UIKit ReservedRegion geometry channel；Dart `PocketView` 在本地 canvas 中裁剪/变换后才发给 JS |
 
-`pocket_flutter` 的 iOS podspec 同时保留 `libpocket_flutter.a`、`-force_load`、`-export_dynamic` 和 Swift plugin source；这条 FFI 链不能被仅能编译 Swift channel 的简化 podspec 替换。当前 SDK package 的 iOS plugin scheme 与 Runner workspace arm64 simulator build 已验证；相机/BLE/GPS 等物理硬件仍需按设备和权限单独验收。
+`pocket_flutter` 的 iOS Swift package 同时连接 `PocketFlutter.xcframework`、以 `-all_load` 保留静态 archive，并用 `-export_dynamic` 导出进程符号；这条 FFI 链不能被仅能编译 Swift channel 的简化 package 替换。当前 SDK package 的 iOS device Release build 和最终 Runner FFI 符号已验证；相机/BLE/GPS 等物理硬件仍需按设备和权限单独验收。
 
 ### 3.6 `native/`：真实引擎与字节码
 
@@ -266,9 +266,9 @@ pocket_host/
 
 | 路径 | 作用与现状 |
 | --- | --- |
-| `host/ios/Podfile`、`Runner.xcodeproj`、`Flutter/` | CocoaPods/Flutter 链接与最低 iOS 版本，当前统一为 15.0 |
+| `host/ios/Runner.xcodeproj`、`Flutter/` | SwiftPM/Flutter 链接与最低 iOS 版本，当前统一为 15.0 |
 | `host/ios/Runner/AppDelegate.swift`、`Info.plist` | iOS/Scene 生命周期、`GeneratedPluginRegistrant` 调用与系统声明；hardware/geometry provider 由 package plugin 自动注册 |
-| `packages/pocket_flutter/ios/Classes/`、`packages/pocket_hardware/ios/Classes/` | 可复用 Swift plugin registration、UIKit ReservedRegion bridge、真实 hardware manager；消费应用通过 pubspec/CocoaPods 编译，不复制到 Runner |
+| `packages/pocket_flutter/ios/pocket_flutter/Sources/pocket_flutter/`、`packages/pocket_hardware/ios/Classes/` | 可复用 Swift plugin registration、UIKit ReservedRegion bridge、真实 hardware manager；消费应用通过 pubspec/SwiftPM 编译，不复制到 Runner |
 | `host/macos/Podfile`、`Runner/Configs/`、Xcode 工程 | macOS 构建与静态 native 链接，最低 12.0；当前验证平台为 Apple Silicon |
 | `host/macos/Runner/MainFlutterWindow.swift`、`AppDelegate.swift`、entitlements | 窗口、应用生命周期与平台权限配置 |
 | `demo/android/` | Gradle/Kotlin Flutter 壳、Manifest 和资源；硬件权限消融后保留相机/BLE/定位/生物识别、minSdk 24 与 arm64-v8a native，APK 构建通过，实体设备硬件仍待验收 |
@@ -458,7 +458,7 @@ Kit 的底层是本工程主要来源。**不能说“绘制没继承”，也�
 | mobile UI / 转场 / SDK glass | `packages/pocket_ui/src/mobile.tsx`、`demo/js/mobile-pages.tsx`、`packages/pocket_ui/src/legacy.ts`、`packages/pocket_flutter/lib/src/pocket_surface.dart` | `tests/mobile_ui.test.ts` + `pocket_surface_test.dart`；Demo 只验收可见的 mobile/transition 页面，SDK glass 再做真实 iOS visual/Impeller 验收 |
 | 显示几何/响应式 panes | `packages/pocket_ui/src/display.ts`、`packages/pocket_ui/src/responsive.ts`、`demo/js/app.tsx` | display.viewport 事件、division/occlusion、窄宽布局和真实 Duo 开合；不要添加机型硬编码 |
 | 输入框或页面滚动问题 | `packages/pocket_ui/src/ui.tsx` 与 `packages/pocket_flutter/lib/src/pocket_view.dart` 对照；先读 INPUT_REUSE/SCROLL_REUSE | 系统键盘、真实拖动、视口逐帧，不用业务延时掩盖框架问题 |
-| 新宿主能力/Flutter 插件 | `pocket_services`、`pocket_sdk`、`pocket_hardware`、guest manifest/client；消费应用只在配置中启用 provider | 真原生调用、权限拒绝、错误和卸载/切包；原生 plugin 由 pubspec/CocoaPods 自动注册 |
+| 新宿主能力/Flutter 插件 | `pocket_services`、`pocket_sdk`、`pocket_hardware`、guest manifest/client；消费应用只在配置中启用 provider | 真原生调用、权限拒绝、错误和卸载/切包；iOS 原生 plugin 由 pubspec/SwiftPM 自动注册 |
 | editor 工程脚手架 | `editor/server.ts`、`editor/client/`、`editor/test/editor_live_probe.ts` | 多文件越界保护、真实 qjbc/PAK、signed manifest/blob/host.json，坏源码不能发布旧 build |
 | 新绘制指令/资源格式 | 上游契约 → `native/src/lib.rs` → Dart model/painter/assets | Native 输出 + Flutter 像素/视觉回归；不靠注册一个名字表示支持 |
 | 更新与版本行为 | services package/update、`pocket_sdk/PocketSession`、发布脚本 | 签名包真实 apply/rollback/broken/restart |

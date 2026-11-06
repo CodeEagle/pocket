@@ -8,7 +8,7 @@ The alternative **Web Bluetooth · device chooser** remains available. Its brows
 
 The editor lazily compiles a signed local helper app with Swift/CoreBluetooth. Generated helper binaries live in the build cache, not source. Xcode command line tools are required for the first build. No additional network service or exposed hardware endpoint is created: the existing loopback editor preview transport routes requests to the helper's JSON-line stdin/stdout protocol.
 
-The native core is shared with the iOS plugin in `sdk/packages/pocket_bluetooth/ios/Classes/PocketBluetoothCore.swift`. `PocketBluetoothPlugin.swift` is only the Flutter channel adapter; `sdk/editor/native/macos-bluetooth/main.swift` is only the process adapter. The implementation does not introduce a second scanning/GATT state machine, simulated peripherals, or fabricated signal strength. Business UI and device selection remain in JS.
+The native core is shared with the iOS plugin in `sdk/packages/pocket_bluetooth/ios/pocket_bluetooth/Sources/pocket_bluetooth/PocketBluetoothCore.swift`. `PocketBluetoothPlugin.swift` is only the Flutter channel adapter; `sdk/editor/native/macos-bluetooth/main.swift` is only the process adapter. The implementation does not introduce a second scanning/GATT state machine, simulated peripherals, or fabricated signal strength. Business UI and device selection remain in JS.
 
 Preview leases and runtime generations isolate native scopes. Turning the plugin off, closing the preview, changing runtimes, or stopping the server disposes owned native work. Native stream identifiers are mapped independently from guest identifiers. A scope can only connect to devices returned by its own scan.
 

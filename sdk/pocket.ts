@@ -161,7 +161,6 @@ type HardwareModuleDefinition = {
   runtimePermissions: readonly string[];
   androidPermissions: readonly string[];
   iosUsageKeys: readonly string[];
-  iosMacros: readonly string[];
 };
 
 const runtimePermissionKeys = new Set([
@@ -188,7 +187,6 @@ const hardwareModuleDefinitions: Record<HardwareModule, HardwareModuleDefinition
     runtimePermissions: ["hardware.camera", "hardware.photos"],
     androidPermissions: ['<uses-permission android:name="android.permission.CAMERA" />'],
     iosUsageKeys: ["NSCameraUsageDescription", "NSPhotoLibraryAddUsageDescription"],
-    iosMacros: ["PERMISSION_CAMERA", "PERMISSION_PHOTOS_ADD_ONLY"],
   },
   bluetooth: {
     packageName: "pocket_bluetooth",
@@ -210,7 +208,6 @@ const hardwareModuleDefinitions: Record<HardwareModule, HardwareModuleDefinition
       '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
     ],
     iosUsageKeys: ["NSBluetoothAlwaysUsageDescription", "NSBluetoothPeripheralUsageDescription"],
-    iosMacros: ["PERMISSION_BLUETOOTH"],
   },
   sensors: {
     packageName: "pocket_sensors",
@@ -222,7 +219,6 @@ const hardwareModuleDefinitions: Record<HardwareModule, HardwareModuleDefinition
     runtimePermissions: ["hardware.sensors"],
     androidPermissions: [],
     iosUsageKeys: ["NSMotionUsageDescription"],
-    iosMacros: ["PERMISSION_SENSORS"],
   },
   location: {
     packageName: "pocket_location",
@@ -237,7 +233,6 @@ const hardwareModuleDefinitions: Record<HardwareModule, HardwareModuleDefinition
       '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
     ],
     iosUsageKeys: ["NSLocationWhenInUseUsageDescription"],
-    iosMacros: ["PERMISSION_LOCATION"],
   },
   biometrics: {
     packageName: "pocket_biometrics",
@@ -251,7 +246,6 @@ const hardwareModuleDefinitions: Record<HardwareModule, HardwareModuleDefinition
       '<uses-permission android:name="android.permission.USE_BIOMETRIC" />',
     ],
     iosUsageKeys: ["NSFaceIDUsageDescription"],
-    iosMacros: [],
   },
   weather: {
     packageName: "pocket_weather",
@@ -263,7 +257,6 @@ const hardwareModuleDefinitions: Record<HardwareModule, HardwareModuleDefinition
     runtimePermissions: [],
     androidPermissions: ['<uses-permission android:name="android.permission.INTERNET" />'],
     iosUsageKeys: [],
-    iosMacros: [],
   },
 };
 
@@ -348,66 +341,6 @@ function shouldRegisterPermissionPlugin(selection: HardwareSelection): boolean {
   return true;
 }
 
-const pocketStaticArchiveOutputMarker = "# POCKET_STATIC_XCFRAMEWORK_OUTPUTS_BEGIN";
-const pocketStaticArchiveOutputEndMarker = "# POCKET_STATIC_XCFRAMEWORK_OUTPUTS_END";
-const pocketStaticArchiveOutputOld = "${PODS_XCFRAMEWORKS_BUILD_DIR}/pocket_flutter/PocketFlutter.framework";
-const pocketStaticArchiveOutputNew = "${PODS_XCFRAMEWORKS_BUILD_DIR}/pocket_flutter/libpocket_flutter.a";
-
-const pocketStaticArchiveOutputBlock = [
-  pocketStaticArchiveOutputMarker,
-  'pocket_static_xcframework_output_path = File.join(__dir__, "Pods", "Target Support Files", "pocket_flutter", "pocket_flutter-xcframeworks-output-files.xcfilelist")',
-  "if File.file?(pocket_static_xcframework_output_path)",
-  `  pocket_static_xcframework_output_old = "${pocketStaticArchiveOutputOld}"`,
-  `  pocket_static_xcframework_output_new = "${pocketStaticArchiveOutputNew}"`,
-  "  pocket_static_xcframework_output_lines = File.read(pocket_static_xcframework_output_path).lines",
-  "  pocket_static_xcframework_output_changed = false",
-  "  pocket_static_xcframework_output_lines.map! do |line|",
-  "    if line.chomp == pocket_static_xcframework_output_old",
-  "      pocket_static_xcframework_output_changed = true",
-  "      if line.end_with?(\"\\r\\n\")",
-  "        \"#{pocket_static_xcframework_output_new}\\r\\n\"",
-  "      elsif line.end_with?(\"\\n\")",
-  "        \"#{pocket_static_xcframework_output_new}\\n\"",
-  "      else",
-  "        pocket_static_xcframework_output_new",
-  "      end",
-  "    else",
-  "      line",
-  "    end",
-  "  end",
-  "  if pocket_static_xcframework_output_changed",
-  "    File.write(pocket_static_xcframework_output_path, pocket_static_xcframework_output_lines.join)",
-  "  end",
-  "end",
-  pocketStaticArchiveOutputEndMarker,
-].join("\n");
-
-function assertSupportedPostInstallHook(podfile: string): void {
-  const headers = podfile.match(/^[ \t]*post_install\b[^\r\n]*$/gm) ?? [];
-  if (headers.length === 0) return;
-  const supported = /^[ \t]*post_install[ \t]+do[ \t]*\|[ \t]*installer[ \t]*\|[ \t]*(?:#.*)?$/;
-  if (headers.length !== 1 || !supported.test(headers[0]!)) {
-    fail("unsupported post_install hook shape; manual integration required");
-  }
-}
-
-/** Add the static XCFramework output correction immediately after the supported hook header. */
-function addPocketStaticArchiveOutputPatch(podfile: string): string {
-  if (podfile.includes(pocketStaticArchiveOutputMarker)) return podfile;
-
-  const header = /^[ \t]*post_install[ \t]+do[ \t]*\|[ \t]*installer[ \t]*\|[ \t]*(?:#.*)?(?=\r?$)/m.exec(podfile);
-  if (!header) fail("unsupported post_install hook shape; manual integration required");
-  const lineEnd = podfile.indexOf("\n", header.index);
-  if (lineEnd < 0) fail("post_install hook has no body line; manual integration required");
-  const newline = lineEnd > 0 && podfile[lineEnd - 1] === "\r" ? "\r\n" : "\n";
-  const indentation = header[0]!.match(/^[ \t]*/)?.[0] ?? "";
-  const indentedBlock = pocketStaticArchiveOutputBlock
-    .split("\n")
-    .map((blockLine) => `${indentation}  ${blockLine}`)
-    .join(newline);
-  return `${podfile.slice(0, lineEnd + 1)}${indentedBlock}${newline}${podfile.slice(lineEnd + 1)}`;
-}
-
 /** @internal Exported for scaffold regression tests; not an app SDK API. */
 export function patchIosMinimum(
   iosDirectory: string,
@@ -415,34 +348,6 @@ export function patchIosMinimum(
   modules: readonly HardwareModule[] = [],
   permissionKeys: readonly string[] = [],
 ): void {
-  const podfile = join(iosDirectory, "Podfile");
-  if (existsSync(podfile)) {
-    const text = readFileSync(podfile, "utf8");
-    assertSupportedPostInstallHook(text);
-    let updated = /^platform :ios,.*$/m.test(text)
-      ? text.replace(/^platform :ios,.*$/m, "platform :ios, '15.0'")
-      : `platform :ios, '15.0'\n${text}`;
-    const deploymentLine = "      target.build_configurations.each { |config| config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'; config.build_settings['ARCHS'] = 'arm64' }\n";
-    const deploymentMarker = "target.build_configurations.each { |config|";
-    let deploymentSeen = false;
-    updated = updated.replace(
-      /^[ \t]*target\.build_configurations\.each \{ \|config\| config\.build_settings\['IPHONEOS_DEPLOYMENT_TARGET'\] = '15\.0'; config\.build_settings\['ARCHS'\] = 'arm64' \}[ \t]*$/gm,
-      (line) => {
-        if (deploymentSeen) return "";
-        deploymentSeen = true;
-        return line;
-      },
-    );
-    if (/^[ \t]*post_install[ \t]+do[ \t]*\|[ \t]*installer[ \t]*\|/m.test(updated)) {
-      if (!deploymentSeen && !updated.includes(deploymentMarker)) {
-        updated = updated.replace(/(\s+flutter_additional_ios_build_settings\(target\)\s*\n)/, `$1${deploymentLine}`);
-      }
-    } else {
-      updated += `\npost_install do |installer|\n  installer.pods_project.targets.each do |target|\n${deploymentLine}  end\nend\n`;
-    }
-    updated = addPocketStaticArchiveOutputPatch(updated);
-    writeFileSync(podfile, updated);
-  }
   const project = join(iosDirectory, "Runner.xcodeproj/project.pbxproj");
   if (existsSync(project)) {
     let projectText = readFileSync(project, "utf8").replace(/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;/g, "IPHONEOS_DEPLOYMENT_TARGET = 15.0;");
@@ -497,47 +402,6 @@ function patchHardwareIosUsageDescriptions(
     additions += `\t<key>${key}</key>\n\t<string>${value}</string>\n`;
   }
   if (additions) text = text.replace(/\s*<\/dict>\s*<\/plist>\s*$/s, `\n${additions}</dict>\n</plist>\n`);
-  const macros = new Set(modules.flatMap((module) => hardwareModuleDefinitions[module].iosMacros));
-  for (const permission of permissionKeys) {
-    if (permission === "hardware.camera") macros.add("PERMISSION_CAMERA");
-    if (permission === "hardware.photos") macros.add("PERMISSION_PHOTOS_ADD_ONLY");
-    if (permission === "hardware.bluetooth") macros.add("PERMISSION_BLUETOOTH");
-    if (permission === "hardware.location") macros.add("PERMISSION_LOCATION");
-    if (permission === "hardware.microphone") macros.add("PERMISSION_MICROPHONE");
-    if (permission === "hardware.sensors") macros.add("PERMISSION_SENSORS");
-  }
-  if (macros.size > 0) {
-    const podfile = join(iosDirectory, "Podfile");
-    if (existsSync(podfile)) {
-      let podText = readFileSync(podfile, "utf8");
-      const missing = [...macros].filter((macro) => !podText.includes(`${macro}=1`));
-      if (missing.length > 0) {
-        const definitions = missing.map((macro) => `'${macro}=1'`).join(", ");
-        const setting = (indent: string): string =>
-          `${indent}target.build_configurations.each { |config| config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']; config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] += [${definitions}] }\n`;
-        const flutterLine = /^[ \t]*flutter_additional_ios_build_settings\(target\)\s*$/m.exec(podText);
-        if (flutterLine) {
-          const indent = flutterLine[0].match(/^[ \t]*/)?.[0] ?? "      ";
-          podText = podText.replace(flutterLine[0], `${flutterLine[0]}\n${setting(indent)}`);
-        } else {
-          const targetLoop = /^[ \t]*installer\.pods_project\.targets\.each do \|target\|[^\n]*\n/m.exec(podText);
-          if (targetLoop) {
-            const indent = targetLoop[0].match(/^[ \t]*/)?.[0] ?? "  ";
-            podText = podText.replace(targetLoop[0], `${targetLoop[0]}${setting(`${indent}  `)}`);
-          } else {
-            const postInstall = /^[ \t]*post_install[ \t]+do[ \t]*\|[ \t]*installer[ \t]*\|[^\n]*\n/m.exec(podText);
-            if (postInstall) {
-              const indent = postInstall[0].match(/^[ \t]*/)?.[0] ?? "";
-              const targetIndent = `${indent}  `;
-              const block = `${targetIndent}installer.pods_project.targets.each do |target|\n${setting(`${targetIndent}  `)}${targetIndent}end\n`;
-              podText = podText.replace(postInstall[0], `${postInstall[0]}${block}`);
-            }
-          }
-        }
-        writeFileSync(podfile, podText);
-      }
-    }
-  }
   writeFileSync(plist, text);
 }
 
@@ -725,18 +589,6 @@ import UIKit
   writeFileSync(plist, text);
 }
 
-function prepareFlutterDependencies(flutterDirectory: string, required: boolean): boolean {
-  if (!existsSync(join(flutterDirectory, "pubspec.yaml"))) return false;
-  const flutter = process.env.FLUTTER_BIN ?? "flutter";
-  const result = spawnSync(flutter, ["pub", "get"], { cwd: flutterDirectory, stdio: "inherit" });
-  if (result.error || result.status !== 0) {
-    if (required) fail(`Flutter dependency resolution failed: ${result.error?.message ?? `exit ${result.status ?? 1}`}`);
-    console.warn(`pocket init: Flutter dependency resolution was skipped (${result.error?.message ?? `exit ${result.status ?? 1}`})`);
-    return false;
-  }
-  return true;
-}
-
 type NativePlatform = "ios-sim" | "ios" | "macos" | "android";
 
 function nativeInputFingerprint(sdk: string): string {
@@ -783,7 +635,7 @@ function prepareNative(sdk: string, platform: NativePlatform): void {
     ? join(packageRoot, "macos/Frameworks/libpocket_flutter.a")
     : platform === "android"
       ? join(packageRoot, "android/src/main/jniLibs/arm64-v8a/libpocket_flutter.so")
-      : join(packageRoot, "ios/Frameworks/PocketFlutter.xcframework");
+      : join(packageRoot, "ios/pocket_flutter/Frameworks/PocketFlutter.xcframework");
   // Keep a stamp per target. A shared current.json lets an iOS simulator
   // build race a device/Android build and incorrectly satisfy the other
   // consumer's cache check.
@@ -881,7 +733,7 @@ function createFlutterHost(
     : "";
   // Compose feature-specific path dependencies in the generated host. This
   // keeps source-only init deterministic even when Flutter is unavailable.
-  writeFileSync(join(flutterDirectory, "pubspec.yaml"), `name: ${name}\ndescription: PocketJS Flutter host generated by the local SDK.\npublish_to: none\nversion: 0.1.0+1\n\nenvironment:\n  sdk: ^3.9.2\n  flutter: '>=3.35.0'\n\ndependencies:\n  flutter:\n    sdk: flutter\n  pocket_sdk:\n    path: ${sdkPath}${hardwareDependency}${moduleDependencies}${dioDependency}${permissionsDependency}${platformDependency}\n\ndev_dependencies:\n  flutter_lints: ^5.0.0\n  flutter_test:\n    sdk: flutter\n\nflutter:\n  uses-material-design: true\n  assets:\n    - assets/app.qjbc\n    - assets/app.bytecode.json\n    - assets/guest-manifest.json\n    - assets/app.pak\n`);
+  writeFileSync(join(flutterDirectory, "pubspec.yaml"), `name: ${name}\ndescription: PocketJS Flutter host generated by the local SDK.\npublish_to: none\nversion: 0.1.0+1\n\nenvironment:\n  sdk: ^3.9.2\n  flutter: '>=3.35.0'\n\ndependencies:\n  flutter:\n    sdk: flutter\n  pocket_sdk:\n    path: ${sdkPath}${hardwareDependency}${moduleDependencies}${dioDependency}${permissionsDependency}${platformDependency}\n\ndev_dependencies:\n  flutter_lints: ^5.0.0\n  flutter_test:\n    sdk: flutter\n\nflutter:\n  config:\n    enable-swift-package-manager: true\n  uses-material-design: true\n  assets:\n    - assets/app.qjbc\n    - assets/app.bytecode.json\n    - assets/guest-manifest.json\n    - assets/app.pak\n`);
   mkdirSync(join(flutterDirectory, "assets"), { recursive: true });
   const moduleImports = selection.modules
     .map((module) => `import '${hardwareModuleDefinitions[module].importPath}';\n`)
@@ -933,13 +785,9 @@ function createFlutterHost(
     : "");
   writeFileSync(join(flutterDirectory, "lib/main.dart"), `${hardwareImport}import 'package:flutter/material.dart';\nimport 'package:pocket_sdk/pocket_sdk.dart';\n\nvoid main() {\n  WidgetsFlutterBinding.ensureInitialized();\n  runApp(PocketApp(config: PocketAppConfig(\n    appId: '${appId.replaceAll("'", "\\'")}',\n    ${hardwareConfig})));\n}\n${hardwareFactory}${moduleFactories}${dioFactory}${permissionFactory}${platformFactory}`);
   scaffoldTest(flutterDirectory, appId);
-  // `flutter create --no-pub` does not materialize ios/Podfile. Resolve the
-  // generated local SDK dependency once so the iOS policy can be applied to
-  // the real Podfile, while retaining a useful source-only init without
-  // Flutter installed.
   const iosDirectory = join(flutterDirectory, "ios");
   const androidDirectory = join(flutterDirectory, "android");
-  if (prepareFlutterDependencies(flutterDirectory, false)) patchIosMinimum(iosDirectory, hardware, selection.modules, selection.runtimePermissions);
+  patchIosMinimum(iosDirectory, hardware, selection.modules, selection.runtimePermissions);
   patchAndroidHardwareManifest(androidDirectory, hardware, dio, selection.modules, selection.runtimePermissions);
   patchAndroidMinimum(androidDirectory);
   patchIosSceneLifecycle(iosDirectory);
@@ -1087,7 +935,7 @@ export async function buildProject(directory: string, options: { outDir?: string
     if (options.platform === "ios-sim" || options.platform === "ios") {
       const flutterDirectory = join(project, "flutter");
       const iosDirectory = join(flutterDirectory, "ios");
-      if (prepareFlutterDependencies(flutterDirectory, true)) patchIosMinimum(iosDirectory, config.hardware, config.selection.modules, config.selection.runtimePermissions);
+      patchIosMinimum(iosDirectory, config.hardware, config.selection.modules, config.selection.runtimePermissions);
       patchIosSceneLifecycle(iosDirectory);
     }
   }

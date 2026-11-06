@@ -132,7 +132,7 @@ function runCommand(command: string, args: string[], timeoutMs: number): Promise
 
 async function buildHelper(cacheDirectory?: string): Promise<string | undefined> {
   const sourceDirectory = resolve(import.meta.dir, "native/macos-bluetooth");
-  const corePath = resolve(import.meta.dir, "../packages/pocket_bluetooth/ios/Classes/PocketBluetoothCore.swift");
+  const corePath = resolve(import.meta.dir, "../packages/pocket_bluetooth/ios/pocket_bluetooth/Sources/pocket_bluetooth/PocketBluetoothCore.swift");
   const mainPath = join(sourceDirectory, "main.swift");
   const infoPath = join(sourceDirectory, "Info.plist");
   if (![corePath, mainPath, infoPath].every((path) => existsSync(path))) return undefined;

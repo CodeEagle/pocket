@@ -41,4 +41,4 @@ Editor 已从旧目录的 launchd job 切换到此目录，URL 继续使用
 `http://127.0.0.1:8790`，保留 revision 18 / 0.1.1 的签名信任链。
 本目录已初始化独立 Git 仓库，尚未提交；`.cache`、构建产物和 Editor 私钥保持忽略。
 
-最终设备验证：从新目录 `demo/` 执行 `flutter run -d 4D366210-290E-46DB-8BC6-3C5233700409` 已构建并启动 Duo；Flutter 的 package_config、Generated.xcconfig、环境脚本均未引用旧目录。当前 iOS XCFramework 提供 device/Apple-Silicon simulator arm64 slice，podspec 会为 simulator 排除未提供的 x86_64 slice；Intel simulator 不是支持目标。新路径 Editor 的实际重新编译也通过。
+最终设备验证：从新目录 `demo/` 执行 `flutter run -d 4D366210-290E-46DB-8BC6-3C5233700409` 已构建并启动 Duo；Flutter 的 package_config、Generated.xcconfig、环境脚本均未引用旧目录。当前 iOS XCFramework 提供 device/Apple-Silicon simulator arm64 slice，Swift package 只支持这些现有 slice；Intel simulator 不是支持目标。新路径 Editor 的实际重新编译也通过。

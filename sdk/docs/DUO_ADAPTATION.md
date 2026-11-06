@@ -15,8 +15,8 @@ Demo，而不是 SDK 的第二个入口。公共 SDK 已承担原生几何、窗
   注册，没有创建一个以 `UIScreen.main.bounds` 为尺寸的旧窗口。
 - `UIRequiresFullScreen` 不存在，等价于没有声明 full-screen-only；不要为了“修 letterbox”
   强行设置 true。当前没有必要新增配置键，避免改变 iPad multitasking 语义。
-- `host/ios/Podfile:1,38-48` 与 Xcode project 的 Debug/Profile/Release 均将最低部署版本
-  设为 iOS 15.0。这是最低运行系统，不是编译 SDK；不会阻止 Xcode 使用当前 SDK。
+- Xcode project 的 Debug/Profile/Release 均将最低部署版本设为 iOS 15.0。
+  这是最低运行系统，不是编译 SDK；不会阻止 Xcode 使用当前 SDK。
 - 本机只读工具输出为 `Xcode 27.2 (27B52)`、iPhoneOS SDK `27.2`，可用 iOS 27.1
   runtime 的 `iPhone Duo` simulator（当前 UDID：`4D366210-290E-46DB-8BC6-3C5233700409`）。
   Project 的 `SDKROOT = iphoneos` 没有旧 SDK 路径或 `SDKROOT = iphoneos15` 之类 pin。
@@ -61,7 +61,7 @@ collection、scene bounds；safe area/边距可能不对称，iOS 27.1 的 `Rese
 | `packages/pocket_sdk/lib/src/pocket_app.dart` | `PocketApp` 挂载 `PocketGuest` / `PocketView`，外层不使用 `SafeArea` 裁切画布 | 背景 edge-to-edge；系统几何经 bridge 提供给 JS，JS 安排交互控件 |
 | `packages/pocket_flutter/lib/src/pocket_view.dart:827-947` | 依据实际 host RenderBox、`View` DPR 和逐侧 `viewPadding` 计算 safe area，向 native/guest 发 `display.viewport` | 已能处理 nested SafeArea 和左右不对称 inset；不是把设备全局尺寸硬编码进 guest |
 
-`packages/pocket_flutter/ios/Classes/PocketDisplayGeometry.swift` 在 27.1+ SDK 编译、且运行系统提供 UIKit ReservedRegion 时，按
+`packages/pocket_flutter/ios/pocket_flutter/Sources/pocket_flutter/PocketDisplayGeometry.swift` 在 27.1+ SDK 编译、且运行系统提供 UIKit ReservedRegion 时，按
 布局/scene/hinge 变化读取 division/occlusion 区域，并通过 `display.viewport.reservedRegions`
 送给 JS；Dart 会把窗口坐标裁剪、变换到当前 PocketView 本地 guest 坐标。低于 iOS 27.1 的
 运行时会以 `supported=false`/空数组安全回退，不能把“旧运行系统返回空”误写成“旧 SDK 可
