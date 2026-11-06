@@ -1,6 +1,6 @@
 # Windows 预编译工具包与验收边界
 
-Windows 的产品使用路径是 Node.js 20+、npm 和 CI 生成的
+Windows 的产品使用路径是 Node.js 22.22.2+（建议 Node.js 24 LTS）、npm 和 CI 生成的
 `@pocket/tools-win32-x64@0.1.1`。产品开发者不需要 Rust、Cargo、Python、
 `patch`、Visual Studio 或 C++ 编译器。Rust/MSVC 和 C/C++ 只属于发布者在
 Windows CI 上生成平台包的步骤。
@@ -8,7 +8,7 @@ Windows CI 上生成平台包的步骤。
 ## 发布者构建
 
 发布工作流位于 [`.github/workflows/toolchain.yml`](../../.github/workflows/toolchain.yml)。
-Windows 2022 runner 使用 MSVC、Windows SDK 和 Rust 1.93，下载已经生成的
+Windows 2022 runner 使用 MSVC、Windows SDK 和 Rust 1.98.1，下载已经生成的
 通用 Web engine，然后准备固定版本的 PocketJS 源码并构建两个发布二进制：
 
 ```powershell
@@ -18,8 +18,13 @@ python scripts/prepare_upstream.py
 bun install --frozen --cwd .cache/pocketjs
 
 # Noble 的 install 脚本只执行 node-gyp-build；发布者必须明确编译 N-API addon
-node node_modules/node-gyp/bin/node-gyp.js rebuild `
+# node-gyp configure + the generated Visual Studio solution are required;
+# passing /p: properties through `node-gyp build` turns them into /t switches.
+node node_modules/node-gyp/bin/node-gyp.js configure `
   --directory node_modules/@abandonware/noble
+msbuild node_modules/@abandonware/noble/build/binding.sln `
+  /p:Configuration=Release /p:Platform=x64 `
+  /p:WindowsTargetPlatformVersion=10.0.26100.0
 
 cargo build --locked --release --manifest-path native/Cargo.toml `
   --bin pocket_probe --bin pocketjs_bytecode
@@ -34,8 +39,8 @@ npm pack --ignore-scripts
 `noble/prebuilds/win32-x64/node.napi.node`，并在 `manifest.json` 中记录哈希。
 SDK 启动时通过 `@ABANDONWARE/NOBLE_PREBUILD` 让 `node-gyp-build` 读取这个
 文件；用户安装时不会重新编译。Windows Noble 使用包内的 WinRT binding，
-其 gyp 配置位于 `node_modules/@abandonware/noble/lib/win/binding.gyp`，要求
-Windows SDK 10.0.18362 或更新版本。
+其 gyp 配置位于 `node_modules/@abandonware/noble/lib/win/binding.gyp`；CI 当前
+显式使用 Windows SDK 10.0.26100.0。
 
 `@abandonware/bluetooth-hci-socket` 使用 node-pre-gyp 的包内加载路径，当前
 没有可由 Pocket 平台包覆盖的外部 prebuild 入口，因此 manifest 会明确写入
@@ -112,3 +117,24 @@ Noble 依赖和 transport 约定。Pocket 侧保留的关键路径是：
 业务协议、TFTC notify 解析和状态编排仍在 JS；Flutter 后续接回
 `flutter_blue_plus` 时只需遵守同一 transport contract，不应在 Dart 再建一套
 TFTC 状态机。
+
+## Bootstrap 与 Windows CI 当前状态
+
+Pinned archive 的内容没有变化；失败根因是 GNU `patch` 对旧 unified-diff
+hunk 的上下文计数和边界比 macOS 的 `patch` 更严格。六个受影响 patch 已按
+实际 before/after 文件用标准三行上下文重新生成，语义保持 byte-for-byte
+一致。`/tmp/pocket-check-hybrid.log` 记录了 GNU patch 的首次应用、第二次
+幂等验证，以及最终 source 与预期结果相同；bootstrap 脚本没有加入 fuzzy 或
+fallback 分支。
+
+Windows 编译已在 CI 运行 `e6f337e`（run `42201916294`）完成：Noble WinRT
+binding、Rust 两个 exe、static CRT 和 `dumpbin /dependents` 检查均通过。
+Noble 使用 `node-gyp configure` 后直接调用 `MSBuild` 生成的 solution，并显式
+传递 `/p:Configuration=Release /p:Platform=x64`
+`/p:WindowsTargetPlatformVersion=10.0.26100.0`；不能把这些 `/p:` 参数交给
+`node-gyp build`，因为它会转换为错误的 `/t` 参数。CI 使用 Rust 1.98.1。
+
+随后提交 `fcc6e1f`（run `42203495372`）补充了 consumer 日志和验收前的包上传，
+当前仍在运行；此前发现 optional platform dependency 在 consumer 安装中被省略，
+因此在该 run 完成前不宣称 Windows npm consumer/Preview 已通过。GitHub runner
+没有 DK-META2，不能替代 Windows BLE 实机的连接、notify、battery 和断连验收。

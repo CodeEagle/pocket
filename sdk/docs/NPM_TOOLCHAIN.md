@@ -4,7 +4,7 @@ Standalone Web SDK 的 npm 入口只负责调度现有的 PocketJS 构建实现�
 
 ## 安装与命令
 
-产品开发者只需要 Node.js 20+ 和 npm。`npm run setup` 安装 npm 管理的 Bun 运行时、SDK workspace 依赖和当前系统对应的预编译工具包（例如 `@pocket/tools-darwin-arm64@0.1.1`）；它会校验 SDK 版本、QuickJS ABI、每个文件的 SHA-256 和平台，不会调用 Rust、Python、`patch`、C/C++ 编译器，也不会把 macOS 二进制当成 Windows/Linux 工具。
+产品开发者只需要 Node.js 22.22.2+（建议 Node.js 24 LTS） 和 npm。`npm run setup` 安装 npm 管理的 Bun 运行时、SDK workspace 依赖和当前系统对应的预编译工具包（例如 `@pocket/tools-darwin-arm64@0.1.1`）；它会校验 SDK 版本、QuickJS ABI、每个文件的 SHA-256 和平台，不会调用 Rust、Python、`patch`、C/C++ 编译器，也不会把 macOS 二进制当成 Windows/Linux 工具。
 
 在仓库根目录或导出的 SDK 根目录运行：
 

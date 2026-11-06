@@ -12,7 +12,7 @@ npm start
 
 浏览器固定打开 **http://127.0.0.1:8791**。`npm start` 和 `npm restart` 都会停止本仓库已有 Studio 后重新启动，并清理遗留的 8790、8792、8793 Studio 实例；不删除工作区或项目。`npm run status` 查看状态，`npm stop` 停止。其他程序占用 8791 时明确报错，不会换端口，也不会终止无关程序。在 `demo/js` 执行 `bun run editor` 也会调用同一个 npm 入口。
 
-启动器使用 Node.js 与 npm 库 [`find-process`](https://github.com/yibn2008/find-process)、[`tree-kill`](https://github.com/pkrumins/node-tree-kill)，复用平台进程查找和进程树终止能力。Windows、macOS、Linux 使用同一份启动逻辑；产品开发只需要 Node.js 20+ 和 npm。npm 会安装受 SDK 锁定的 Bun 运行时与当前系统预编译工具包，不要求全局安装 Bun、Rust、Python、`patch` 或 C/C++ 工具链。服务使用后台子进程并将日志写到 `sdk/.pocket-build/`，不安装登录项或系统服务。工作区固定保留在 `sdk/.pocket-build/editor-workspace-8791/`。旧 macOS launchd 任务只在升级清理时移除，新的启动不再依赖 launchctl。
+启动器使用 Node.js 与 npm 库 [`find-process`](https://github.com/yibn2008/find-process)、[`tree-kill`](https://github.com/pkrumins/node-tree-kill)，复用平台进程查找和进程树终止能力。Windows、macOS、Linux 使用同一份启动逻辑；产品开发只需要 Node.js 22.22.2+（建议 Node.js 24 LTS） 和 npm。npm 会安装受 SDK 锁定的 Bun 运行时与当前系统预编译工具包，不要求全局安装 Bun、Rust、Python、`patch` 或 C/C++ 工具链。服务使用后台子进程并将日志写到 `sdk/.pocket-build/`，不安装登录项或系统服务。工作区固定保留在 `sdk/.pocket-build/editor-workspace-8791/`。旧 macOS launchd 任务只在升级清理时移除，新的启动不再依赖 launchctl。
 
 首次执行 `npm run setup` 安装 SDK workspace 依赖、npm Bun 和平台预编译的 `pocketjs_bytecode`/`pocket_probe`，并校验 SDK 版本、QuickJS ABI 和文件哈希；不会在本机运行 Cargo。日常只需 `npm start`。完整命令、平台包目录和维护者源码构建入口见 [NPM_TOOLCHAIN.md](NPM_TOOLCHAIN.md)。启动器成功返回前会检查服务健康，不会将进程已创建当作启动成功。真实 Preview 需要上述 setup 成功完成；Windows/Linux 的 npm 调度入口已适配，但对应平台包和实机 Preview 尚未在这些系统验收。
 

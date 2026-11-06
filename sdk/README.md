@@ -46,7 +46,7 @@ TFTC 设备控制与实时反馈使用独立 JS 包 [`@pocket/tftc`](packages/po
 SDK 本身没有 Showcase app，构建时必须指定项目。SDK 0.1.1 的完整构建源码、`@pocket/ui`、编译器、字节码工具和 Preview probe 通过平台 npm 包提供，日常开发只需要 Node.js/npm；详见 [`docs/NPM_TOOLCHAIN.md`](docs/NPM_TOOLCHAIN.md)：
 
 ```sh
-# 仓库根目录；只需 Node.js 20+ 和 npm
+# 仓库根目录；只需 Node.js 22.22.2+（建议 Node.js 24 LTS） 和 npm
 npm run setup
 npm run build:guest -- --project-root=../demo/js --outdir=.pocket-build/npm-guest
 ```
