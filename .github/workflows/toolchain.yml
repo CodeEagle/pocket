@@ -115,7 +115,7 @@ jobs:
           # Noble pins an old SDK in its gyp file. Use the runner's installed
           # SDK via the official MSBuild property, leaving dependency sources intact.
           $config = Get-Content node_modules/@abandonware/noble/build/config.gypi | Where-Object { $_ -notmatch '^#' } | Out-String | ConvertFrom-Json
-          & $config.variables.msbuild_path node_modules/@abandonware/noble/build/binding.sln /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0.19041.0 /nologo /nodeReuse:false
+          & $config.variables.msbuild_path node_modules/@abandonware/noble/build/binding.sln /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0.26100.0 /nologo /nodeReuse:false
           if ($LASTEXITCODE -ne 0) { throw "Noble WinRT build failed" }
 
       - name: Build platform binaries
