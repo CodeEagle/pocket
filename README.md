@@ -15,6 +15,8 @@ Pocket 是一个可集成到 Flutter App 的 **PocketJS / QuickJS 字节码 SDK*
 
 SDK 不依赖 Demo。集成其他项目使用 `pocket_sdk`、`@pocket/ui` 和 `sdk/pocket.ts`，不需要复制 Showcase 的页面或维护另一份 bridge。
 
+使用 AI/Codex 开发应用时，先阅读 [Pocket AI 应用开发指南](sdk/docs/AI_APP_DEVELOPMENT.md)。其中统一说明 JS/Dart 边界、UI 控件、硬件按需开启、自定义插件、Editor、资源打包和生产热更新地址。
+
 ## 技术栈与职责
 
 | 技术 / 模块 | 负责什么 |

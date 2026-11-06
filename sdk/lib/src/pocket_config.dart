@@ -13,6 +13,9 @@ typedef PocketOffloadProviderFactory = PocketOffloadProvider Function();
 final class PocketUpdateConfig {
   const PocketUpdateConfig({
     this.url = '',
+    this.baseUrl = '',
+    this.hostVersion = '',
+    this.packageVersion = '',
     this.keyId = '',
     this.publicKey = '',
     this.namespace = 'default',
@@ -23,6 +26,9 @@ final class PocketUpdateConfig {
   }) : _debugHttpHosts = debugHttpHosts;
   const PocketUpdateConfig.fromEnvironment()
     : url = const String.fromEnvironment('POCKET_UPDATE_URL'),
+      baseUrl = const String.fromEnvironment('POCKET_UPDATE_BASE_URL'),
+      hostVersion = const String.fromEnvironment('POCKET_HOST_VERSION'),
+      packageVersion = const String.fromEnvironment('POCKET_PACKAGE_VERSION'),
       keyId = const String.fromEnvironment('POCKET_UPDATE_KEY_ID'),
       publicKey = const String.fromEnvironment('POCKET_UPDATE_PUBLIC_KEY'),
       namespace = const String.fromEnvironment(
@@ -38,6 +44,18 @@ final class PocketUpdateConfig {
         String.fromEnvironment('POCKET_UPDATE_DEBUG_HTTP_HOST'),
       ];
   final String url;
+
+  /// Deployment origin (or origin plus a fixed prefix) for the canonical
+  /// `<base>/pocket/<hostVersion>/<packageId>/<packageVersion>/latest.json`
+  /// update layout. Use this with [hostVersion] and [packageVersion] instead
+  /// of supplying a raw [url].
+  final String baseUrl;
+  final String hostVersion;
+
+  /// Release slot in the URL. Use an immutable version for pinned delivery or
+  /// a stable slot such as `stable` when the server will replace only the
+  /// signed `latest.json` pointer while retaining immutable hashed artifacts.
+  final String packageVersion;
   final String keyId;
 
   /// Base64-encoded Ed25519 public key.
@@ -52,7 +70,7 @@ final class PocketUpdateConfig {
   final String? trustPolicyUrl;
 
   bool get trustPolicyConfigured =>
-      url.isNotEmpty &&
+      _sourceConfigured &&
       trustRootKeyId?.isNotEmpty == true &&
       trustRootPublicKey?.isNotEmpty == true &&
       trustPolicyUrl?.isNotEmpty == true;
@@ -64,21 +82,75 @@ final class PocketUpdateConfig {
       _debugHttpHosts.length == 1 && _debugHttpHosts.first.isEmpty
       ? const <String>[]
       : _debugHttpHosts;
+  bool get _structuredEndpointConfigured =>
+      baseUrl.isNotEmpty && hostVersion.isNotEmpty && packageVersion.isNotEmpty;
+  bool get _sourceConfigured => url.isNotEmpty || _structuredEndpointConfigured;
   bool get configured =>
-      (url.isNotEmpty && keyId.isNotEmpty && publicKey.isNotEmpty) ||
+      (_sourceConfigured && keyId.isNotEmpty && publicKey.isNotEmpty) ||
       trustPolicyConfigured;
 
+  /// Resolves the signed manifest endpoint for [packageId].
+  ///
+  /// [url] remains available for local Editor endpoints and existing hosts.
+  /// Production deployments should use the structured fields so every app
+  /// shares the same deterministic CDN layout.
+  Uri manifestUri(String packageId) {
+    validate();
+    if (url.isNotEmpty) return Uri.parse(url);
+    final base = Uri.parse(baseUrl);
+    return base.replace(
+      pathSegments: <String>[
+        ...base.pathSegments.where((segment) => segment.isNotEmpty),
+        'pocket',
+        hostVersion,
+        packageId,
+        packageVersion,
+        'latest.json',
+      ],
+      query: null,
+      fragment: null,
+    );
+  }
+
   void validate() {
+    final endpointFields = <String>[baseUrl, hostVersion, packageVersion];
+    final hasEndpoint = endpointFields.any((value) => value.isNotEmpty);
+    if (url.isNotEmpty && hasEndpoint) {
+      throw const FormatException(
+        'Use either a direct update URL or the structured update endpoint',
+      );
+    }
+    if (hasEndpoint && !_structuredEndpointConfigured) {
+      throw const FormatException(
+        'Update base URL, host version, and package version must be configured together',
+      );
+    }
+    if (_structuredEndpointConfigured) {
+      final base = Uri.tryParse(baseUrl);
+      if (base == null ||
+          !base.hasScheme ||
+          base.host.isEmpty ||
+          (base.scheme != 'https' && base.scheme != 'http') ||
+          base.userInfo.isNotEmpty ||
+          base.hasQuery ||
+          base.hasFragment) {
+        throw const FormatException('Invalid update base URL');
+      }
+      final segment = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$');
+      if (!segment.hasMatch(hostVersion) || !segment.hasMatch(packageVersion)) {
+        throw const FormatException('Invalid update host/package version');
+      }
+    }
     final hasLegacy = keyId.isNotEmpty || publicKey.isNotEmpty;
     final hasTrust =
         trustRootKeyId?.isNotEmpty == true ||
         trustRootPublicKey?.isNotEmpty == true ||
         trustPolicyUrl?.isNotEmpty == true;
     final legacyComplete =
-        url.isNotEmpty && keyId.isNotEmpty && publicKey.isNotEmpty;
+        _sourceConfigured && keyId.isNotEmpty && publicKey.isNotEmpty;
     if ((hasLegacy && !legacyComplete) ||
         (hasTrust && !trustPolicyConfigured) ||
-        (url.isNotEmpty && !legacyComplete && !trustPolicyConfigured)) {
+        (_sourceConfigured && !legacyComplete && !trustPolicyConfigured)) {
       throw const FormatException(
         'Update URL/key ID/public key or trust root/policy must be configured together',
       );
@@ -94,6 +166,9 @@ final class PocketUpdateConfig {
       other is PocketUpdateConfig &&
           runtimeType == other.runtimeType &&
           url == other.url &&
+          baseUrl == other.baseUrl &&
+          hostVersion == other.hostVersion &&
+          packageVersion == other.packageVersion &&
           keyId == other.keyId &&
           publicKey == other.publicKey &&
           namespace == other.namespace &&
@@ -105,6 +180,9 @@ final class PocketUpdateConfig {
   @override
   int get hashCode => Object.hash(
     url,
+    baseUrl,
+    hostVersion,
+    packageVersion,
     keyId,
     publicKey,
     namespace,

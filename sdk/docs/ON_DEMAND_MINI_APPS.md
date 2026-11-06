@@ -24,7 +24,9 @@ final profile = PocketAppConfig(
   metadataAsset: 'assets/apps/profile/app.bytecode.json',
   manifestAsset: 'assets/apps/profile/guest-manifest.json',
   updates: PocketUpdateConfig(
-    url: 'https://updates.example.com/profile/latest.json',
+    baseUrl: 'https://updates.example.com',
+    hostVersion: '3.2.0',
+    packageVersion: 'stable',
     keyId: 'release-key',
     publicKey: profileReleasePublicKeyBase64,
   ),

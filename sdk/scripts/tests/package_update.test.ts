@@ -12,6 +12,7 @@ import {
   extractZipArchive,
   packPak,
   packageArtifacts,
+  pocketReleaseDirectory,
   patchPackageArtifacts,
   unpackPak,
   generateDevKey,
@@ -76,6 +77,20 @@ test("root trust policy signs exact payload bytes", () => {
 function tempDirectory(): string {
   return mkdtempSync(join(tmpdir(), "pocket-package-test-"));
 }
+
+test("canonical deployment layout scopes releases by host, package, and package version", () => {
+  const root = tempDirectory();
+  try {
+    const prefixedRoot = join(root, "some-other-path");
+    expect(
+      pocketReleaseDirectory(prefixedRoot, "3.2.0", "com.example.notes", "1.4.7"),
+    ).toBe(join(root, "some-other-path", "pocket", "3.2.0", "com.example.notes", "1.4.7"));
+    expect(() => pocketReleaseDirectory(root, "../host", "app", "1.0.0")).toThrow("invalid host version");
+    expect(() => pocketReleaseDirectory(root, "3.2.0", "bad/app", "1.0.0")).toThrow("invalid package ID");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function writeFixture(dir: string, secondImage: number): { js: string; pak: string; sourcePak: Uint8Array } {
   mkdirSync(dir, { recursive: true });

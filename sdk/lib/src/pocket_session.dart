@@ -212,7 +212,7 @@ final class PocketSession extends ChangeNotifier {
             )
           : null;
       final updates = PocketUpdateCoordinator(
-        manifestUri: Uri.parse(updateConfig.url),
+        manifestUri: updateConfig.manifestUri(appId),
         appId: appId,
         trustedKeys: updateConfig.trustPolicyConfigured
             ? const <String, List<int>>{}

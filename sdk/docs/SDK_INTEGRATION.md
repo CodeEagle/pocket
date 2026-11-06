@@ -200,7 +200,9 @@ await session.close(); // 等待插件退出和性能历史落盘
 
 ```dart
 const updates = PocketUpdateConfig(
-  url: 'https://updates.example.test/manifest.json',
+  baseUrl: 'https://updates.example.test/some-other-path',
+  hostVersion: '3.2.0',
+  packageVersion: 'stable',
   keyId: 'release-key-1',
   publicKey: 'BASE64_ED25519_PUBLIC_KEY',
   namespace: 'production',
@@ -216,11 +218,20 @@ const config = PocketAppConfig(
 
 ```sh
 flutter run \
-  --dart-define=POCKET_UPDATE_URL=https://updates.example.test/manifest.json \
+  --dart-define=POCKET_UPDATE_BASE_URL=https://updates.example.test/some-other-path \
+  --dart-define=POCKET_HOST_VERSION=3.2.0 \
+  --dart-define=POCKET_PACKAGE_VERSION=stable \
   --dart-define=POCKET_UPDATE_KEY_ID=release-key-1 \
   --dart-define=POCKET_UPDATE_PUBLIC_KEY=BASE64_ED25519_PUBLIC_KEY \
   --dart-define=POCKET_STORE_NAMESPACE=production
 ```
+
+结构化配置读取
+`/some-other-path/pocket/3.2.0/com.example.myapp/stable/latest.json`。base URL
+可包含任意固定路径前缀，不要求把 `pocket/` 部署到域名根目录。`stable` 是可变发布槽，
+签名 payload 内的 version/build 才是包身份和防重放依据。已有 Editor/loopback
+消费者仍可只传完整 `POCKET_UPDATE_URL`，但不能与结构化字段混用。完整发布目录、
+首次 bundle 和后续单资源更新见 [AI 应用开发指南](AI_APP_DEVELOPMENT.md)。
 
 更新包仍须是签名且 ABI 匹配的 qjbc/PAK/manifest；失败的 guest 不会提升为
 active，session 会保留上一个健康版本。原生插件或硬件 provider 不能由 JS 热更

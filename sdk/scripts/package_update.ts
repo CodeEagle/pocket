@@ -2119,6 +2119,34 @@ export type PackageResult = {
   pakParts: PakLayoutPart[];
 };
 
+function releaseSegment(value: string, label: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
+    throw new Error(`package: invalid ${label} ${value}`);
+  }
+  return value;
+}
+
+/**
+ * Canonical static hosting directory for a Pocket release:
+ * `<deployRoot>/pocket/<hostVersion>/<packageId>/<packageVersion>/`.
+ * The returned directory receives `latest.json`, the initial bundle and
+ * content-addressed `blobs/` produced by [packageArtifacts].
+ */
+export function pocketReleaseDirectory(
+  deployRoot: string,
+  hostVersion: string,
+  packageId: string,
+  packageVersion: string,
+): string {
+  return join(
+    resolve(deployRoot),
+    "pocket",
+    releaseSegment(hostVersion, "host version"),
+    releaseSegment(packageId, "package ID"),
+    releaseSegment(packageVersion, "package version"),
+  );
+}
+
 function writeBundleZip(
   outDir: string,
   files: ContentFile[],
@@ -2743,8 +2771,8 @@ export function generateDevKey(outPath: string, keyId?: string, force = false): 
 function usage(): never {
   throw new Error([
     "usage:",
-    "  bun scripts/package_update.ts package --app-id ID --version VERSION --build N --js app.js --pak app.pak --out DIR --key-file KEY [--signed-at UNIX_SECONDS] [--entry-format javascript|quickjs-bytecode --bytecode app.qjbc --runtime-abi ABI] [--guest-manifest manifest.json] [--asset-dir DIR] [--asset-prefix PREFIX] [--network-pak-key ui:img.NAME ...] [--network-asset NAME ...] [--no-bundle]",
-    "  bun scripts/package_update.ts patch --base-dir DIR --out DIR --version VERSION --build N --key-file KEY [--signed-at UNIX_SECONDS] [--js app.js | --bytecode app.qjbc] [--pak-entry KEY=FILE] [--asset NAME=FILE] [--remove-asset NAME] [--no-bundle]",
+    "  bun scripts/package_update.ts package --app-id ID --version VERSION --build N --js app.js --pak app.pak (--out DIR | --deploy-root DIR --host-version VERSION [--route-version SLOT]) --key-file KEY [--signed-at UNIX_SECONDS] [--entry-format javascript|quickjs-bytecode --bytecode app.qjbc --runtime-abi ABI] [--guest-manifest manifest.json] [--asset-dir DIR] [--asset-prefix PREFIX] [--network-pak-key ui:img.NAME ...] [--network-asset NAME ...] [--no-bundle]",
+    "  bun scripts/package_update.ts patch --base-dir DIR (--out DIR | --deploy-root DIR --host-version VERSION --app-id ID [--route-version SLOT]) --version VERSION --build N --key-file KEY [--signed-at UNIX_SECONDS] [--js app.js | --bytecode app.qjbc] [--pak-entry KEY=FILE] [--asset NAME=FILE] [--remove-asset NAME] [--no-bundle]",
     "  bun scripts/pocket_package.ts generate-dev-key --out KEY [--key-id ID] [--public-config-out PUBLIC_JSON] [--force]",
   ].join("\n"));
 }
@@ -2792,6 +2820,22 @@ function parseKeyValuePairs(items: string[] | undefined, flagName: string): Reco
   return out;
 }
 
+function cliReleaseOutDir(
+  parsed: ReturnType<typeof parseArgs>,
+  packageId: string,
+  packageVersion: string,
+  command: "package" | "patch",
+): string {
+  const out = parsed.flags.get("out");
+  const deployRoot = parsed.flags.get("deploy-root");
+  if (out && deployRoot) throw new Error(`${command}: use either --out or --deploy-root`);
+  if (out) return out;
+  if (!deployRoot) throw new Error(`${command}: missing --out or --deploy-root`);
+  const hostVersion = parsed.flags.get("host-version");
+  if (!hostVersion) throw new Error(`${command}: --deploy-root requires --host-version`);
+  return pocketReleaseDirectory(deployRoot, hostVersion, packageId, packageVersion);
+}
+
 if (import.meta.main) {
   try {
     const parsed = parseArgs(process.argv.slice(2));
@@ -2803,18 +2847,21 @@ if (import.meta.main) {
       if (publicConfigOut) writePublicKeyConfig(publicConfigOut, { keyId: key.keyId, publicKeyBase64: key.publicKeyBase64 });
       console.log(JSON.stringify({ out: resolve(out!), keyId: key.keyId, ...(publicConfigOut ? { publicConfig: resolve(publicConfigOut) } : {}) }));
     } else if (parsed.command === "package") {
-      const required = ["app-id", "version", "build", "pak", "out", "key-file"];
+      const required = ["app-id", "version", "build", "pak", "key-file"];
       for (const name of required) if (!parsed.flags.has(name)) throw new Error(`package: missing --${name}`);
+      const appId = parsed.flags.get("app-id")!;
+      const version = parsed.flags.get("version")!;
+      const outDir = cliReleaseOutDir(parsed, appId, parsed.flags.get("route-version") ?? version, "package");
       const entryFormat = parsed.flags.get("entry-format") as "javascript" | "quickjs-bytecode" | undefined;
       if (entryFormat === "quickjs-bytecode" && !parsed.flags.has("bytecode")) throw new Error("package: missing --bytecode");
       if (entryFormat !== "quickjs-bytecode" && !parsed.flags.has("js")) throw new Error("package: missing --js");
       const result = packageArtifacts({
-        appId: parsed.flags.get("app-id")!, version: parsed.flags.get("version")!,
+        appId, version,
         build: Number(parsed.flags.get("build")), jsPath: parsed.flags.get("js"), bytecodePath: parsed.flags.get("bytecode"),
         signedAt: parsed.flags.has("signed-at") ? Number(parsed.flags.get("signed-at")) : undefined,
         entryFormat,
         runtimeAbi: parsed.flags.get("runtime-abi"),
-        pakPath: parsed.flags.get("pak")!, outDir: parsed.flags.get("out")!, keyFile: parsed.flags.get("key-file")!,
+        pakPath: parsed.flags.get("pak")!, outDir, keyFile: parsed.flags.get("key-file")!,
         assetDir: parsed.flags.get("asset-dir"), assetPrefix: parsed.flags.get("asset-prefix"),
         networkPakKeys: parsed.multiFlags.get("network-pak-key"),
         networkAssets: parsed.multiFlags.get("network-asset"),
@@ -2826,12 +2873,17 @@ if (import.meta.main) {
       });
       console.log(JSON.stringify({ manifest: result.manifestPath, bundle: result.bundlePath, files: result.payload.files.length, pakParts: result.payload.pak.parts.length }));
     } else if (parsed.command === "patch") {
-      const required = ["base-dir", "out", "version", "build", "key-file"];
+      const required = ["base-dir", "version", "build", "key-file"];
       for (const name of required) if (!parsed.flags.has(name)) throw new Error(`patch: missing --${name}`);
+      const version = parsed.flags.get("version")!;
+      const deployRoot = parsed.flags.get("deploy-root");
+      const packageId = deployRoot ? parsed.flags.get("app-id") : "unused";
+      if (deployRoot && !packageId) throw new Error("patch: --deploy-root requires --app-id");
+      const outDir = cliReleaseOutDir(parsed, packageId!, parsed.flags.get("route-version") ?? version, "patch");
       const result = patchPackageArtifacts({
         baseDir: parsed.flags.get("base-dir")!,
-        outDir: parsed.flags.get("out")!,
-        version: parsed.flags.get("version")!,
+        outDir,
+        version,
         build: Number(parsed.flags.get("build")),
         signedAt: parsed.flags.has("signed-at") ? Number(parsed.flags.get("signed-at")) : undefined,
         keyFile: parsed.flags.get("key-file")!,

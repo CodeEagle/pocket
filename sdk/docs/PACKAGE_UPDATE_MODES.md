@@ -13,6 +13,14 @@ Before implementing dual update modes, the retained parent repository (`/Volumes
 
 ## 2. Dual Update Modes
 
+Production static releases use the canonical directory
+`<root>/pocket/<hostVersion>/<packageId>/<packageVersion>/`. The final segment
+can be an immutable version or a moving slot such as `stable`; the signed
+payload still owns the actual semantic version and monotonic build. The CLI
+creates this layout with `--deploy-root`, `--host-version`, and optional
+`--route-version`. See [Pocket AI application development](AI_APP_DEVELOPMENT.md)
+for deployment and host configuration.
+
 ### Mode 1: One-Shot 7z / ZIP Bundle (`mode: "zip"`)
 - **Publisher (`sdk/scripts/package_update.ts`)**:
   - `packageArtifacts` and `patchPackageArtifacts` generate a deterministic `.7z` archive by default (`bundles/bundle-<sha256>.7z`, with a convenience `bundle.7z` copy; `--bundle-format zip` remains supported for `.zip` archives) containing all content-addressed blobs (`blobs/<sha256>`) for code (`entry` + optional `worker`) and resources (`pak.parts` + external `assets`).

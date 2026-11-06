@@ -46,6 +46,42 @@ void main() {
     );
   });
 
+  test('structured endpoint resolves the canonical Pocket release layout', () {
+    const config = PocketUpdateConfig(
+      baseUrl: 'https://cdn.example.com/releases',
+      hostVersion: '3.2.0',
+      packageVersion: '1.4.7',
+      keyId: 'release-key',
+      publicKey: 'AA==',
+    );
+
+    expect(config.configured, isTrue);
+    expect(
+      config.manifestUri('com.example.notes').toString(),
+      'https://cdn.example.com/releases/pocket/3.2.0/com.example.notes/1.4.7/latest.json',
+    );
+  });
+
+  test('structured endpoint rejects partial or mixed configuration', () {
+    const partial = PocketUpdateConfig(
+      baseUrl: 'https://cdn.example.com',
+      hostVersion: '3.2.0',
+      keyId: 'release-key',
+      publicKey: 'AA==',
+    );
+    const mixed = PocketUpdateConfig(
+      url: 'https://cdn.example.com/latest.json',
+      baseUrl: 'https://cdn.example.com',
+      hostVersion: '3.2.0',
+      packageVersion: '1.4.7',
+      keyId: 'release-key',
+      publicKey: 'AA==',
+    );
+
+    expect(() => partial.validate(), throwsFormatException);
+    expect(() => mixed.validate(), throwsFormatException);
+  });
+
   test('trust-only update configuration validates without legacy keys', () {
     const config = PocketUpdateConfig(
       url: 'https://updates.example.test/manifest.json',
