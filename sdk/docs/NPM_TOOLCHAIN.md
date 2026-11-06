@@ -4,7 +4,7 @@ Standalone Web SDK 的 npm 入口只负责调度现有的 PocketJS 构建实现�
 
 ## 安装与命令
 
-产品开发者只需要 Node.js 20+ 和 npm。`npm run setup` 安装 npm 管理的 Bun 运行时、SDK workspace 依赖和当前系统对应的预编译工具包（例如 `@pocket/tools-darwin-arm64@0.1.1`）；它会校验 SDK 版本、QuickJS ABI、每个文件的 SHA-256 和平台，不会调用 Rust、Python、`patch`、C/C++ 编译器，也不会把 macOS 二进制当成 Windows/Linux 工具。
+产品开发者只需要 Node.js 22.22.2+（建议 Node.js 24 LTS） 和 npm。`npm run setup` 安装 npm 管理的 Bun 运行时、SDK workspace 依赖和当前系统对应的预编译工具包（例如 `@pocket/tools-darwin-arm64@0.1.1`）；它会校验 SDK 版本、QuickJS ABI、每个文件的 SHA-256 和平台，不会调用 Rust、Python、`patch`、C/C++ 编译器，也不会把 macOS 二进制当成 Windows/Linux 工具。
 
 在仓库根目录或导出的 SDK 根目录运行：
 
@@ -13,7 +13,38 @@ npm run setup
 npm run doctor
 ```
 
-当前仓库的本地验收包位于 `sdk/.pocket-build/pocket-tools-darwin-arm64-0.1.1.tgz`。预编译包尚未发布到 npm registry；发布前可将对应平台的 `.tgz` 放入 SDK 的 `prebuilt/` 目录，或设置 `POCKET_TOOLS_PACKAGE=/absolute/path/to/unpacked/package`。缺少平台包、版本不匹配、ABI 不匹配或哈希校验失败时命令会直接报错。
+当前仓库的本地验收包位于 `sdk/.pocket-build/pocket-tools-darwin-arm64-0.1.1.tgz` 和
+`sdk/.pocket-build/pocket-tools-win32-x64-0.1.1.tgz`。预编译包不会发布到 npm
+registry；开发者可将对应平台的 `.tgz` 放入 SDK 的 `prebuilt/` 目录，或设置
+`POCKET_TOOLS_PACKAGE=/absolute/path/to/unpacked/package`。缺少平台包、版本不匹配、
+ABI 不匹配或哈希校验失败时命令会直接报错。
+
+## GitHub Actions 发布
+
+`.github/workflows/toolchain.yml` 是 0.1.1 的唯一发布入口。它在 macOS arm64 和
+Windows x64 runner 上从固定上游源码构建平台工具包，然后把两个平台包合并进一个带
+`npm-shrinkwrap.json` 的完整 SDK tarball。合并后的完整包会在两个目标平台的干净目录中
+分别执行 `npm run setup`、`npm run doctor`，并运行：
+
+```sh
+node scripts/tests/platform_package_smoke.mjs --sdk-root=/path/to/sdk
+```
+
+该验收会实际加载平台 Noble addon，构建 App/Game 模板的 QJBC/PAK，驱动 Preview 输入
+并检查 Studio 固定 8791 端口的启动、健康检查、状态和停止。两个平台全部通过后，工作流
+才会生成 GitHub Release 附件：完整 SDK tarball、macOS arm64 和 Windows x64 平台包、
+`SHA256SUMS` 以及两平台验收 JSON。工作流不会执行 `npm publish`。
+
+推送 `sdk-v0.1.1` 这类版本 tag，或手动运行带发布开关的工作流：
+
+```sh
+gh workflow run toolchain.yml -f publish_release=true
+```
+
+`workflow_dispatch` 的 `publish_release` 默认值为 `true`。如果只想构建和验收而不创建
+Release，必须显式传入 `-f publish_release=false`。当前文档记录的是此前独立 Windows
+consumer 验收；新的完整双平台 Release gate 尚未运行通过，不能把本地 tarball 或单个
+平台 CI 结果当成已发布 Release。
 
 完整 Guest 构建默认使用预先准备的 pinned compiler、预编译 `pocketjs_bytecode` 和 `pocket_probe`：
 
@@ -66,7 +97,10 @@ Editor 默认监听 `http://127.0.0.1:8791`。`build:web` 和 Editor 内部使�
 
 macOS 已使用真实预编译平台包生成 app/game 模板的 QJBC、PAK，并在 Pocket Preview 路径执行。导出测试会检查 `build_guest.ts`、`@pocket/ui`、templates、平台包解析器和 toolchain manager 都进入独立包，且不会带入源码缓存、`target` 或 Flutter 项目。
 
-Windows/Linux 的 npm 入口和平台包结构已定义，发布 CI 负责分别生成对应的 `win32-x64`、`linux-x64` 等包；当前 checkout 尚未在这些系统实机完成工具包构建、Preview 或蓝牙硬件验收。因此只能声明“无需 Rust 的分发路径已接好”，不能声明 Windows/Linux 已实机通过。
+Windows 的 npm 入口和 `win32-x64` 平台包已由此前独立 CI 完成 native 编译与打包；干净
+consumer 安装、Preview smoke 和 WinRT addon 加载也已通过历史验收。新的双平台完整
+Release gate 仍需由 `.github/workflows/toolchain.yml` 运行。Linux 仍需独立 CI 生成和验证；
+CI 通过不能替代 Windows DK-META2 等 BLE 硬件验收。
 
 ## 本次实际验收（macOS）
 
@@ -77,13 +111,18 @@ Windows/Linux 的 npm 入口和平台包结构已定义，发布 CI 负责分别
 - 当前 source 编译出的 WASM 已替换旧的 binary-input 不兼容产物。Playwright Chromium 真实 Web 验收中，Canvas 背景从 `[248,250,252,255]` 切换为 `[13,23,38,255]` 后恢复，浏览器无错误；日志：`/tmp/pocket-node-only-web-test.log`。这验证当前 source WASM 与 QJBC/PAK 的契约，不代表 Windows/Linux Web 已验收。
 - 生成该 source WASM 时，维护者环境需要用一个仅存在于 `/tmp` 的临时 linker wrapper 修正损坏的 `rust-lld` 库搜索路径；wrapper 没有写入 SDK，也不进入 npm-only 用户路径。
 - Guest 模板的默认 Inter 字体目前缺少中文字形，Web 截图中的中文可能显示为方框；Studio DOM 中文正常。本轮没有把字体覆盖限制当作已修复。
-- 平台包发布侧仍需在 CI 运行 Rust 构建；本次开发者验收只验证 npm 安装、ABI/哈希校验、QJBC/PAK 生成和 Preview 运行。
+- Windows 平台包的 Rust/MSVC 构建及 consumer/Preview 验收已在此前 CI 完成；Linux 平台包
+  仍需独立 CI 构建。本地开发者验收仍主要验证 macOS 的 npm 安装、ABI/哈希校验、QJBC/PAK
+  生成和 Preview 运行。
 - 干净导出最终包为 `sdk/.pocket-build/pocket-web-sdk-tools-0.1.1.tgz`。最终 setup 日志为 `/tmp/pocket-node-only-final-setup.log`；Noble 的 N-API 预编译文件来自 `/tmp/pocket-node-only-sdk-final/node_modules/@pocket/tools-darwin-arm64/noble/prebuilds/darwin-arm64/node.napi.node`，`sourceBuildPresent:false`。`npm install --ignore-scripts` 不编译该 native 模块，作用域环境变量由 Node 负责设置。0.1.0 的旧验收日志可继续作为历史证据，但不代表当前分发版本。
 - Noble `poweredOn` 后的实际扫描发现了附近 BLE 设备，日志为 `/tmp/pocket-node-only-final-ble.log`；本轮未扫到 DK-META2，因此不把这次扫描写成 DK-META2 的重新连接验收。Linux 当前明确为 `unsupported`；没有生成、发布或验收 Linux HCI 预编译包，也没有新增 loader，不会要求用户安装 Rust 或其他本机工具链。
 
-`npm run doctor` 检查平台包、清单、ABI 和文件哈希；不能代替上述加载和交互验收。源码发布命令才需要 `patch`；产品开发不需要把它加入 PATH。完整 Worker 能力也尚未在 Windows 验收。
+`npm run doctor` 检查平台包、清单、ABI 和文件哈希；不能代替上述加载和交互验收。源码发布命令才需要 `patch`；产品开发不需要把它加入 PATH。Windows consumer/Preview smoke 已由最终 CI 完成；BLE 硬件验收仍需实体 Windows 机器。
 
-当前只生成并验收了 macOS arm64 平台包；Windows/Linux CI 尚未运行，npm registry 也尚未发布平台包。Flutter 真机/模拟器打包仍需要消费者自己的 Flutter SDK、对应平台 SDK、签名与设备环境，本轮没有进行手机实跑。
+当前 macOS arm64 平台包已本地验收，Windows x64 平台包已完成此前 CI 编译和打包，
+Windows consumer/Preview 验收也已完成；新的双平台完整 Release 尚未运行，Linux CI 尚未
+完成，npm registry 也不会发布平台包。
+Flutter 真机/模拟器打包仍需要消费者自己的 Flutter SDK、对应平台 SDK、签名与设备环境，本轮没有进行手机实跑。
 
 额外执行 `python3 sdk/scripts/check_architecture.py` 时，当前共享工作区的 `demo/lib/main.dart` 为 203 行，超过薄宿主 100 行限制；该项未通过。本次 npm 工具链没有修改该 Dart 文件，也未将此检查记为通过。
 
@@ -93,4 +132,28 @@ Windows/Linux 的 npm 入口和平台包结构已定义，发布 CI 负责分别
 - 0.1.1 回归共 51 tests / 11 files / 359 expectations，全部通过（`/tmp/pocket-0.1.1-tests.log`、`/tmp/pocket-0.1.1-guest-tests.log`）。
 - 实际 Web 构建生成 QJBC、PAK 和 16384391 bytes 的 WASM；Playwright Chromium 主题切换与恢复通过，无浏览器错误（`/tmp/pocket-0.1.1-web-test.log`）。
 - 预编译 Noble 实际扫描通过，本地模块没有 `build/Release/binding.node`（`/tmp/pocket-0.1.1-ble.log`）；本轮未发现 DK-META2。
-- 分发包仅包含当前已生成的 macOS arm64 平台包；Windows 平台包需 CI 生成并进行实机验收。未发布 npm registry。
+- 分发包已包含 macOS arm64 平台包；Windows x64 平台包已由 CI 生成并通过 consumer 验收，Linux 平台包尚未完成。未发布 npm registry。
+
+## Windows CI 最终验收
+
+native 构建 run `42204461550`（提交 `aaf37be`）完成 Windows MSVC/Rust、Noble
+WinRT 和平台包生成；该 run 最后的 Studio 检查曾因 `sdk/editor/codex.ts` 静态
+导入独立 SDK 不存在的 `.cache/pocketjs/tools/companion/codex.ts` 而失败。修复为
+通过 `POCKET_UPSTREAM_ROOT` 或 `resolvePrebuiltTools()` 动态解析编译器，只有显式
+source 模式才读取 `.cache`；因此没有添加第二套工具链或运行时 fallback。
+
+最终 consumer run `42205580194`（提交 `0247e30`，复用上述平台 artifact）通过：Node
+24 `setup`/`doctor`、Noble WinRT 预编译加载（consumer 无本地 `build`）、App
+`app.qjbc` 190738 bytes / `app.pak` 905744 bytes、Game `app.qjbc` 184898 bytes /
+`app.pak` 905728 bytes，真实 Preview 的主题、计分、暂停/继续输入均产生帧变化；Studio
+固定 8791 端口的 start/health/status/stop 全部通过。CI 没有 DK-META2，不能替代
+Windows BLE 实机的连接、notify、battery 和断连验收。
+
+## Windows 历史 consumer 验收
+
+Windows CI 已切换到 Node.js 24 LTS（最低 Node.js 22.22.2），因为
+`octane@0.1.26` 声明了 `engines >=22.22.2`；Node 20 会让 npm 的 optional
+platform dependency 检查失败并删除整个平台包。现已使用 Node 24 LTS，并由
+此前 consumer run `42205580194` 完成干净安装、平台包解析、Preview smoke 和 Noble
+WinRT 加载。Linux 仍未完成独立平台包构建；Windows CI 绿灯也不能替代 Windows
+BLE 实机连接、notify、battery 和断连验收。

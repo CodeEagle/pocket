@@ -1,6 +1,6 @@
 --- a/engine/guest-rquickjs/src/lib.rs
 +++ b/engine/guest-rquickjs/src/lib.rs
-@@ -61,6 +61,17 @@
+@@ -74,6 +74,17 @@
      }
      pub fn with<R>(&self, f: impl for<'js> FnOnce(Ctx<'js>) -> R) -> Option<R> {
          self.context.as_ref().map(|ctx| ctx.with(f))
@@ -11,11 +11,11 @@
 +    pub fn with_turn<R>(&self, f: impl for<'js> FnOnce(Ctx<'js>) -> R) -> Option<R> {
 +        self.begin_turn(Duration::from_millis(250));
 +        self.with(f)
-     }
++    }
 +    /// Whether QuickJS has Promise jobs waiting for a guest turn.
 +    pub fn has_pending_jobs(&self) -> bool {
 +        self.runtime.as_ref().is_some_and(|runtime| runtime.is_job_pending())
-+    }
+     }
      fn remember<T, E: std::fmt::Display>(
          &mut self,
 --- a/engine/core/src/anim.rs
@@ -1139,7 +1139,7 @@
  
    // Stick-to-bottom: follow appends while the INTENT was at the PREVIOUS
    // end (the im rule — at-bottom is judged before the append grew the range,
---- /dev/null
+--- a/framework/src/work-state.ts
 +++ b/framework/src/work-state.ts
 @@ -0,0 +1,50 @@
 +// Native hosts query this after each guest turn to decide whether the next

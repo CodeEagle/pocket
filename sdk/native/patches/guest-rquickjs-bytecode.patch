@@ -1,17 +1,15 @@
-diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
 --- a/engine/guest-rquickjs/src/lib.rs
 +++ b/engine/guest-rquickjs/src/lib.rs
-@@ -18,3 +18,3 @@ use rquickjs::{
+@@ -16,7 +16,7 @@
+ };
+ use rquickjs::{
      function::Rest, Array, ArrayBuffer, Coerced, Context, Ctx, Exception, FromJs, Function, IntoJs,
 -    Object, Runtime, Value,
 +    Object, Runtime, Value, qjs,
  };
-@@ -65,10 +65,46 @@
-     fn remember<T, E: std::fmt::Display>(
-         &mut self,
-         result: Result<T, E>,
-     ) -> Result<T, RuntimeError> {
-         result.map_err(|error| {
+ 
+ /// The canonical profile has required numeric arguments, JS integer coercion,
+@@ -70,6 +70,42 @@
              self.last_error = Some(error.to_string());
              RuntimeError::Guest
          })
@@ -53,3 +51,4 @@ diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
 +        self.collect()
      }
  }
+ impl Guest for RquickjsGuest {

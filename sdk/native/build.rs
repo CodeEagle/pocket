@@ -656,7 +656,13 @@ void pocket_worker_ui_detach(pocket_worker_ui *bridge) {"#,
     );
     fs::write(ui_header, header).expect("write adapted worker_ui.h");
     println!("cargo:rerun-if-changed={}", include.display());
-    cc::Build::new()
+    let mut worker_build = cc::Build::new();
+    // The pinned worker uses C11 atomics, as does rquickjs-sys. MSVC requires
+    // the same explicit opt-in used by that dependency's build script.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        worker_build.flag("/experimental:c11atomics");
+    }
+    worker_build
         .std("c11")
         .include(&include)
         .include(adapted.join("include"))

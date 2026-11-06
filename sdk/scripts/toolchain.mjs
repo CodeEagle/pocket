@@ -34,8 +34,15 @@ function python() {
   throw new Error('缺少 Python 3；安装后把 python/python3 加入 PATH，或设置 POCKET_PYTHON 为可执行文件路径');
 }
 
+function checkNodeVersion() {
+  const version = process.versions.node.split('.').map(Number);
+  const minimum = [22, 22, 2];
+  const comparison = version.reduce((result, part, index) => result || Math.sign(part - minimum[index]), 0);
+  if (comparison < 0) throw new Error('需要 Node.js >= 22.22.2（建议 Node.js 24 LTS）；固定编译器依赖不支持 Node.js 20');
+}
+
 function prerequisites(native) {
-  if (Number(process.versions.node.split('.')[0]) < 20) throw new Error('需要 Node.js >= 20');
+  checkNodeVersion();
   const py = python();
   check('bun', ['--version'], 'Bun');
   check(py, ['--version'], 'Python 3');
@@ -71,7 +78,7 @@ function nativeBuild(env) {
 }
 
 function setupPrebuilt() {
-  if (Number(process.versions.node.split('.')[0]) < 20) throw new Error('需要 Node.js >= 20');
+  checkNodeVersion();
   installDependencies(process.env);
   // Local release archives allow the same npm-only flow before registry publication.
   const archive = `${platformPackageName().replace('@', '').replace('/', '-')}-${SDK_VERSION}.tgz`;

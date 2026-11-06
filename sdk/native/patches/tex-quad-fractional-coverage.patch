@@ -1,9 +1,12 @@
 --- a/engine/core/src/draw.rs
 +++ b/engine/core/src/draw.rs
-@@ -244,5 +244,25 @@ fn wh_word(w: f32, h: f32) -> u32 {
-     wi | (hi << 16)
- }
- 
+@@ -244,6 +244,26 @@
+ fn wh_word(w: f32, h: f32) -> u32 {
+     let wi = roundf(w) as i32 as u16 as u32;
+     let hi = roundf(h) as i32 as u16 as u32;
++    wi | (hi << 16)
++}
++
 +/// Pack a textured quad from the same quantized edges used by `xy_word`.
 +///
 +/// TEX_QUAD boxes are often adjacent (DeepZoom tiles, sprites, and atlas
@@ -21,12 +24,10 @@
 +    let qy1 = roundf(y1);
 +    let wi = (qx1 - qx0).max(0.0) as i32 as u16 as u32;
 +    let hi = (qy1 - qy0).max(0.0) as i32 as u16 as u32;
-+    wi | (hi << 16)
-+}
-+
- /// Multiply a packed ABGR color's alpha by `opacity` (0..1).
- fn scale_alpha(color: u32, opacity: f32) -> u32 {
-@@ -1950,7 +1965,7 @@ impl<'a> Painter<'a> {
+     wi | (hi << 16)
+ }
+ 
+@@ -1949,7 +1969,7 @@
              spec::draw_op::TEX_QUAD,
              tex,
              xy_word(c.x0, c.y0),
@@ -35,7 +36,7 @@
              cu0.to_bits(),
              cv0.to_bits(),
              cu1.to_bits(),
-@@ -2696,7 +2711,7 @@ impl<'a> Painter<'a> {
+@@ -2695,7 +2715,7 @@
          dl.words.push(spec::draw_op::TEX_QUAD);
          dl.words.push(tex);
          dl.words.push(xy_word(c.x0, c.y0));
