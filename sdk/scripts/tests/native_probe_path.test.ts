@@ -6,6 +6,7 @@ import { test } from "bun:test";
 
 import {
   nativeProbeSourceInputs,
+  nativeProbeCandidates,
   selectNativeProbe,
 } from "../native_probe_path.ts";
 
@@ -91,4 +92,18 @@ test("stale defaults fail clearly while an explicit missing override fails immed
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("default preview selection finds a Windows Cargo executable", () => {
+  const root = mkdtempSync(join(tmpdir(), "pocket-native-probe-windows-"));
+  try {
+    const source = join(root, "native", "src");
+    const executable = join(root, "native", "target", "debug", "pocket_probe.exe");
+    mkdirSync(source, { recursive: true });
+    mkdirSync(join(root, "native", "target", "debug"), { recursive: true });
+    touch(join(source, "lib.rs"), 1_000_000);
+    touch(executable, 2_000_000);
+    assert.equal(selectNativeProbe({ candidates: nativeProbeCandidates(root), sourceInputs: [source] }), executable);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

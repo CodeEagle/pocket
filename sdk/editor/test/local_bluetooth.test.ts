@@ -18,7 +18,7 @@ function packet(overrides: Partial<LocalBluetoothPacket> = {}): LocalBluetoothPa
   return { scope: "system-ui:1", kind: "request", requestId: "guest-1", capability: "hardware.bluetooth.scan", params: {}, ...overrides };
 }
 
-test("local Bluetooth maps a Guest request to the CoreBluetooth helper protocol", async () => {
+test("local Bluetooth maps a Guest request to the Noble helper protocol", async () => {
   const helper = new FakeProcess();
   const messages: any[] = [];
   const provider = createLocalBluetoothProvider({ platform: "darwin", helperPath: "/test/helper", processFactory: () => helper });
@@ -29,7 +29,7 @@ test("local Bluetooth maps a Guest request to the CoreBluetooth helper protocol"
   helper.reply({ id: helper.commands[0].id, result: { ok: true, realBle: true, state: "poweredOn", devices: [{ id: "ble-1", name: "Pocket BLE", rssi: -44 }] } });
   await pending;
   assert.deepEqual(messages[0].payload.result.devices[0], { id: "ble-1", name: "Pocket BLE", rssi: -44 });
-  assert.equal(messages[0].payload.result.source, "local-core-bluetooth");
+  assert.equal(messages[0].payload.result.source, "local-noble");
   assert.equal(messages[0].payload.result.scanMode, "nearby");
   await provider.dispose();
 });
@@ -56,7 +56,7 @@ test("local Bluetooth forwards native notification events and scopes streams", a
   assert.equal(opened.payload.result.streamId, "stream-1");
   const data = messages.find((message) => message.name === "stream.data");
   assert.deepEqual(data.payload.data.value, [42]);
-  assert.equal(data.payload.data.source, "local-core-bluetooth");
+  assert.equal(data.payload.data.source, "local-noble");
   await provider.handle({ scope: "system-ui:1", kind: "stream.cancel", streamId: "stream-1" }, () => undefined);
   assert.equal(helper.commands.at(-1).method, "stopHardwareStream");
   assert.equal(helper.commands.at(-1).params.streamId, helper.commands[1].params.streamId);
@@ -95,7 +95,7 @@ test("local Bluetooth isolates devices and colliding stream ids by scope", async
   await provider.dispose();
 });
 
-test("local Bluetooth remains explicitly unsupported off macOS", async () => {
+test("local Bluetooth remains explicitly unsupported on Linux", async () => {
   const messages: any[] = [];
   const provider = createLocalBluetoothProvider({ platform: "linux" });
   await provider.handle(packet(), (message) => messages.push(message));
@@ -124,5 +124,28 @@ test("local Bluetooth does not spawn late when a scope is disposed during startu
   assert.equal(factoryCalls, 1);
   assert.equal(helper.commands.length, 0);
   assert.equal(messages[0].payload.error.code, "hardware_bluetooth_disconnected");
+  await provider.dispose();
+});
+
+
+test("Windows preview preserves manufacturer bytes and routes real helper notifications", async () => {
+  const helper = new FakeProcess();
+  const messages: any[] = [];
+  const provider = createLocalBluetoothProvider({ platform: "win32", helperPath: "C:/sdk/noble-bluetooth.mjs", processFactory: () => helper });
+  const scan = provider.handle(packet(), message => messages.push(message));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const manufacturerData = [197, 95, 179, 5, 0, 1, 20, 1, 32, 33, 34, 35, 36, 37];
+  helper.reply({ id: helper.commands[0].id, result: { ok: true, devices: [{ id: "win-ble", name: "DK-META2", manufacturerData }] } });
+  await scan;
+  assert.deepEqual(messages[0].payload.result.devices[0].manufacturerData, manufacturerData);
+  assert.equal(messages[0].payload.result.source, "local-noble");
+  await provider.handle(packet({ kind: "stream.open", streamId: "notify", capability: "hardware.bluetooth.notifications", params: { deviceId: "win-ble", serviceUuid: "ffac", characteristicUuid: "ffb8" } }), message => messages.push(message));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const open = helper.commands.at(-1);
+  helper.reply({ id: open.id, result: { ok: true, streamId: open.params.streamId } });
+  helper.reply({ event: { streamId: open.params.streamId, data: { value: [0, 1, 0, 3, 8, 10, 238] } } });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(messages.at(-1).payload.data.source, "local-noble");
+  assert.deepEqual(messages.at(-1).payload.data.value, [0, 1, 0, 3, 8, 10, 238]);
   await provider.dispose();
 });

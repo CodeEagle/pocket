@@ -6,8 +6,12 @@ use std::{
 fn cargo_home() -> PathBuf {
     env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
-        .expect("CARGO_HOME or HOME must be set")
+        .or_else(|| {
+            env::var_os("HOME")
+                .or_else(|| env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".cargo"))
+        })
+        .expect("CARGO_HOME, HOME or USERPROFILE must be set")
 }
 
 fn locked_version(manifest: &Path, package: &str) -> String {

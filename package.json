@@ -1,0 +1,23 @@
+{
+  "name": "pocket-workspace",
+  "version": "0.1.1",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "setup": "npm --prefix sdk run setup",
+    "start": "npm --prefix sdk run editor:start -- --project-root=../demo/js --flutter-root=../demo",
+    "restart": "npm start",
+    "stop": "npm --prefix sdk run editor:stop",
+    "status": "npm --prefix sdk run editor:status",
+    "bootstrap": "npm --prefix sdk run bootstrap --",
+    "doctor": "npm --prefix sdk run doctor --",
+    "build:guest": "npm --prefix sdk run build:guest --",
+    "build:probe": "npm --prefix sdk run build:probe --",
+    "build:web": "npm --prefix sdk run build:web --",
+    "setup:source": "npm --prefix sdk run setup:source --",
+    "bootstrap:source": "npm --prefix sdk run bootstrap:source --",
+    "package:tools": "npm --prefix sdk run package:tools --"
+  }
+}

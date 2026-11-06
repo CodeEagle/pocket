@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { resolveManagedBun, resolvePrebuiltTools } from "./prebuilt_tools.mjs";
 
 const root = resolve(import.meta.dir, "..");
 // Loaded lazily by buildGuest after the pinned cache has been installed.
@@ -144,6 +146,19 @@ function runOrThrow(command: string[], cwd: string, log?: (line: string) => void
   }
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command[0]} exited with status ${result.status ?? 1}`);
+}
+
+function bytecodeCompilerCommand(rootPath: string, args: string[]): string[] {
+  const configured = process.env.POCKET_BYTECODE_BIN?.trim();
+  if (configured) {
+    const binary = resolve(configured);
+    if (!existsSync(binary) || !lstatSync(binary).isFile()) {
+      throw new Error(`build_guest: POCKET_BYTECODE_BIN is missing or not a file: ${binary}`);
+    }
+    return [binary, ...args];
+  }
+  if (process.env.POCKET_SOURCE_BUILD !== "1") return [resolvePrebuiltTools(rootPath).bytecode, ...args];
+  return ["cargo", "run", "--locked", "--release", "--manifest-path", join(rootPath, "native/Cargo.toml"), "--bin", "pocketjs_bytecode", "--", ...args];
 }
 
 function report(message: string, log?: (line: string) => void): void {
@@ -482,15 +497,20 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     throw new Error("build_guest: projectRoot is required for the SDK; use pocket.ts build <project>");
   }
   const projectRoot = resolve(options.projectRoot ?? defaultProject!);
-  const upstream = join(root, ".cache/pocketjs");
-  report(`build_guest: validating the local pinned PocketJS cache (project=${projectRoot})`, options.log);
-  runOrThrow(["python3", join(root, "scripts/prepare_upstream.py")], root, options.log);
-  const compiler = join(upstream, "tools/build.ts");
+  const sourceBuild = process.env.POCKET_SOURCE_BUILD === "1";
+  const upstream = sourceBuild ? join(root, ".cache/pocketjs") : resolvePrebuiltTools(root).compiler;
+  const bun = sourceBuild ? "bun" : resolveManagedBun(root);
+  const packagedCompiler = process.env.POCKET_COMPILER_PATH?.trim();
+  if (sourceBuild && !packagedCompiler) {
+    report(`build_guest: validating the local pinned PocketJS cache (project=${projectRoot})`, options.log);
+    runOrThrow([process.env.POCKET_PYTHON || (process.platform === "win32" ? "python" : "python3"), join(root, "scripts/prepare_upstream.py")], root, options.log);
+  }
+  const compiler = resolve(packagedCompiler || join(upstream, "tools/build.ts"));
   if (!existsSync(compiler)) throw new Error(`build_guest: pinned PocketJS compiler not found after bootstrap: ${compiler}`);
 
   // Dependencies are part of the pinned cache, never the application. A
   // frozen install keeps compiler behavior reproducible for external projects.
-  if (existsSync(join(upstream, "package.json")) && existsSync(join(upstream, "bun.lock"))) {
+  if (sourceBuild && !packagedCompiler && existsSync(join(upstream, "package.json")) && existsSync(join(upstream, "bun.lock"))) {
     runOrThrow(["bun", "install", "--frozen-lockfile"], upstream, options.log);
   }
 
@@ -498,13 +518,13 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
   // this import after the bootstrap/install step: Bun evaluates static imports
   // before `prepare_upstream.py` can materialize the cache's node_modules, so
   // a clean standalone checkout otherwise fails before buildGuest starts.
-  transformFile = (await import("../.cache/pocketjs/framework/compiler/jsx-plugin.ts")).transformFile;
+  transformFile = (await import(pathToFileURL(join(upstream, "framework/compiler/jsx-plugin.ts")).href)).transformFile;
   if (typeof transformFile !== "function") {
     throw new Error("build_guest: pinned JSX transformer does not export transformFile");
   }
   const [{ WORKER_PROTOCOL_VERSION, WORKER_RESOURCES, workerDeclarationSchema }, { validateSchema }] = await Promise.all([
-    import("../.cache/pocketjs/contracts/spec/worker.ts"),
-    import("../.cache/pocketjs/framework/src/manifest/schema.ts"),
+    import(pathToFileURL(join(upstream, "contracts/spec/worker.ts")).href),
+    import(pathToFileURL(join(upstream, "framework/src/manifest/schema.ts")).href),
   ]);
 
   const ownsOutput = options.outDir === undefined;
@@ -525,7 +545,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     compilerEntryCleanup = compilerEntry.cleanup;
     report(`build_guest: compiler=${compiler}`, options.log);
     report(`build_guest: source=${entry}`, options.log);
-    runOrThrow(["bun", compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes"], root, options.log);
+    runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes"], root, options.log);
 
     const compilerBase = compilerEntry.path.replace(/^.*[\\/]/, "").replace(/\.(?:tsx?|vue)$/, "");
     const compilerSource = join(output, `${compilerBase}.js`);
@@ -575,7 +595,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       if (!existsSync(workerSource)) {
         throw new Error(`pinned compiler declared domains.worker but did not produce ${compilerBase}.worker.js`);
       }
-      runOrThrow(["cargo", "run", "--locked", "--manifest-path", join(root, "native/Cargo.toml"), "--bin", "pocketjs_bytecode", "--", "--input", workerSource, "--output", workerBytecode, "--metadata", workerMetadata, "--kind", "script", "--tick-hz", String(tickHz)], root, options.log);
+      runOrThrow(bytecodeCompilerCommand(root, ["--input", workerSource, "--output", workerBytecode, "--metadata", workerMetadata, "--kind", "script", "--tick-hz", String(tickHz)]), root, options.log);
       if (!existsSync(workerBytecode) || !existsSync(workerMetadata)) {
         throw new Error("QuickJS compiler did not produce app.worker.qjbc and app.worker.bytecode.json");
       }
@@ -586,7 +606,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     // Do not duplicate the ABI generation here. pocketjs_bytecode defaults to
     // pocket_spec::BINDING_GENERATION, the same contract consumed by the
     // runtime, so a generation bump cannot leave the build script stale.
-    runOrThrow(["cargo", "run", "--locked", "--manifest-path", join(root, "native/Cargo.toml"), "--bin", "pocketjs_bytecode", "--", "--input", source, "--output", bytecode, "--metadata", metadata, "--kind", "script", "--tick-hz", String(tickHz)], root, options.log);
+    runOrThrow(bytecodeCompilerCommand(root, ["--input", source, "--output", bytecode, "--metadata", metadata, "--kind", "script", "--tick-hz", String(tickHz)]), root, options.log);
     if (!existsSync(bytecode) || !existsSync(metadata)) throw new Error("QuickJS compiler did not produce app.qjbc and app.bytecode.json");
     const guestManifest = join(projectRoot, "manifest.json");
     const manifestObj = readJsonObject(guestManifest);

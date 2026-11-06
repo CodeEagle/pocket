@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:pocket_flutter/src/pocket_package.dart'
     show PocketPackageSource;
 
@@ -343,7 +344,9 @@ final class PocketUpdateCoordinator {
       const PocketUpdateProgress(stage: PocketUpdateStage.checking),
     );
     await _refreshTrustPolicy(token, onProgress);
-    final signed = await _fetchManifest(token, onProgress);
+    final fetched = await _fetchManifest(token, onProgress);
+    final signed = fetched.signed;
+    final artifactManifestUri = fetched.uri;
     await verifier.verify(signed);
     final currentGood = await _store.lastGood(verifier: verifier);
     final currentActive = await _store.active(verifier: verifier);
@@ -474,6 +477,7 @@ final class PocketUpdateCoordinator {
       final included = bundle.blobs?.toSet();
       blobs.addAll(
         await _downloadBundleZip(
+          artifactManifestUri: artifactManifestUri,
           bundle: bundle,
           expectedFiles: included == null
               ? files
@@ -529,6 +533,7 @@ final class PocketUpdateCoordinator {
       for (final file in missingFiles) {
         token.throwIfCancelled();
         final blob = await _download(
+          artifactManifestUri,
           file,
           token,
           onProgress,
@@ -647,11 +652,62 @@ final class PocketUpdateCoordinator {
   /// blobs remain available for diagnostics or a later explicit rollback.
   Future<void> resetToEmbedded() => _store.clearActivation();
 
-  Future<PocketSignedManifest> _fetchManifest(
+  // Resolve the fixed catalog on every check. Keep the resolved manifest URI
+  // local to this preparation so another check cannot change its blob base.
+  Future<({PocketSignedManifest signed, Uri uri})> _fetchManifest(
     PocketCancellationToken token,
     PocketUpdateProgressCallback? callback,
   ) async {
-    final response = await _openWithRetry(manifestUri, token, callback);
+    final first = await _fetchManifestBytes(manifestUri, token, callback);
+    final value = jsonDecode(utf8.decode(first));
+    if (value is! Map || value['kind'] != 'pocket-editor-package-index') {
+      return (signed: PocketSignedManifest.fromBytes(first), uri: manifestUri);
+    }
+    final latest = value['latest'];
+    if (value['schemaVersion'] != 1 ||
+        value['packageId'] != appId ||
+        latest is! Map ||
+        latest['id'] != appId ||
+        latest['manifestUrl'] is! String) {
+      throw const PocketPackageException(
+        'package index does not describe the requested app',
+        code: 'manifest-index',
+      );
+    }
+    final uri = manifestUri.resolve(latest['manifestUrl'] as String);
+    if (uri.scheme != manifestUri.scheme ||
+        uri.host != manifestUri.host ||
+        uri.port != manifestUri.port ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment ||
+        uri == manifestUri) {
+      throw const PocketPackageException(
+        'package index manifest escaped its origin or references itself',
+        code: 'manifest-url',
+      );
+    }
+    final signed = PocketSignedManifest.fromBytes(
+      await _fetchManifestBytes(uri, token, callback),
+    );
+    if (latest['version'] != signed.payload.version ||
+        latest['build'] != signed.payload.build ||
+        (latest['payloadSha256'] != null &&
+            latest['payloadSha256'] !=
+                crypto.sha256.convert(signed.payloadBytes).toString())) {
+      throw const PocketPackageException(
+        'package index and signed manifest describe different releases',
+        code: 'manifest-index',
+      );
+    }
+    return (signed: signed, uri: uri);
+  }
+
+  Future<Uint8List> _fetchManifestBytes(
+    Uri uri,
+    PocketCancellationToken token,
+    PocketUpdateProgressCallback? callback,
+  ) async {
+    final response = await _openWithRetry(uri, token, callback);
     if (response.contentLength != null &&
         response.contentLength! > maxManifestBytes) {
       throw const PocketPackageException(
@@ -664,14 +720,15 @@ final class PocketUpdateCoordinator {
     await for (final chunk in response.bytes) {
       token.throwIfCancelled();
       length += chunk.length;
-      if (length > maxManifestBytes)
+      if (length > maxManifestBytes) {
         throw const PocketPackageException(
           'manifest exceeds size limit',
           code: 'manifest-size',
         );
+      }
       builder.add(chunk);
     }
-    return PocketSignedManifest.fromBytes(builder.takeBytes());
+    return builder.takeBytes();
   }
 
   Future<void> _refreshTrustPolicy(
@@ -737,6 +794,7 @@ final class PocketUpdateCoordinator {
       }.contains(error.code);
 
   Future<File> _download(
+    Uri artifactManifestUri,
     PocketManifestFile file,
     PocketCancellationToken token,
     PocketUpdateProgressCallback? callback,
@@ -753,7 +811,7 @@ final class PocketUpdateCoordinator {
         code: 'manifest-url',
       );
     }
-    final uri = manifestUri.resolve(file.url);
+    final uri = artifactManifestUri.resolve(file.url);
     if (uri.scheme != manifestUri.scheme ||
         uri.host != manifestUri.host ||
         uri.port != manifestUri.port) {
@@ -829,6 +887,7 @@ final class PocketUpdateCoordinator {
   }
 
   Future<Map<String, File>> _downloadBundleZip({
+    required Uri artifactManifestUri,
     required PocketManifestBundle bundle,
     required List<PocketManifestFile> expectedFiles,
     required PocketCancellationToken token,
@@ -844,7 +903,7 @@ final class PocketUpdateCoordinator {
         code: 'manifest-url',
       );
     }
-    final uri = manifestUri.resolve(bundle.url);
+    final uri = artifactManifestUri.resolve(bundle.url);
     if (uri.scheme != manifestUri.scheme ||
         uri.host != manifestUri.host ||
         uri.port != manifestUri.port) {

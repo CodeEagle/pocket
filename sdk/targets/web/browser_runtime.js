@@ -76,6 +76,9 @@ class PocketWebRuntime {
     if (!options.engineUrl) throw new TypeError("PocketWebRuntime requires engineUrl");
     this.canvas = options.canvas;
     this.engineUrl = String(options.engineUrl);
+    const configured = options.config && typeof options.config === "object" ? options.config : {};
+    this.qjbcUrl = options.qjbcUrl ? String(options.qjbcUrl) : (configured.qjbcUrl ? String(configured.qjbcUrl) : null);
+    this.pakUrl = options.pakUrl ? String(options.pakUrl) : (configured.pakUrl ? String(configured.pakUrl) : null);
     this.cache = options.cache;
     this.config = { ...(options.config || {}), provider: "web", host: "web",
       hostRuntime: "WebAssembly + Canvas2D", enginePath: "engine/pocketjs.wasm" };
@@ -155,6 +158,25 @@ class PocketWebRuntime {
   async mount() {
     if (this.disposed) throw new Error("PocketWebRuntime is disposed");
     if (this.active) return this;
+    if (this.qjbcUrl || this.pakUrl) {
+      if (!this.qjbcUrl || !this.pakUrl) throw new Error("PocketWebRuntime requires both qjbcUrl and pakUrl");
+      const [qjbcResponse, pakResponse] = await Promise.all([
+        fetch(this.qjbcUrl, { cache: this.cache ?? "no-store" }),
+        fetch(this.pakUrl, { cache: this.cache ?? "no-store" }),
+      ]);
+      if (!qjbcResponse.ok) throw new Error(`PocketJS QJBC HTTP ${qjbcResponse.status}`);
+      if (!pakResponse.ok) throw new Error(`PocketJS PAK HTTP ${pakResponse.status}`);
+      const hostAbi = Number(this.config.bindingGeneration ?? this.config.hostAbi);
+      if (!Number.isInteger(hostAbi) || hostAbi < 1) {
+        throw new Error("PocketWebRuntime external Guest requires config.bindingGeneration");
+      }
+      this.config.externalGuest = {
+        qjbc: new Uint8Array(await qjbcResponse.arrayBuffer()),
+        pak: new Uint8Array(await pakResponse.arrayBuffer()),
+        tickHz: Number(this.config.tickHz || 60),
+        hostAbi,
+      };
+    }
     this.active = true;
     addEventListener("resize", this.handleResize); addEventListener("visibilitychange", this.handleVisibility);
     for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"]) this.canvas.addEventListener(type, this.handlePointer, { passive: false });

@@ -1,0 +1,117 @@
+name: PocketJS prebuilt toolchain
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["sdk-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  web-engine:
+    name: package-web-engine
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          targets: wasm32-unknown-unknown
+      - name: Install WebAssembly linker tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm lld patch
+      - name: Prepare pinned PocketJS
+        working-directory: sdk
+        run: |
+          python3 scripts/prepare_upstream.py
+          bun install --frozen-lockfile --cwd .cache/pocketjs
+      - name: Build WebAssembly engine
+        working-directory: sdk
+        run: bun scripts/build_web_engine.ts --outdir=.pocket-build/web-engine
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pocket-web-engine
+          path: sdk/.pocket-build/web-engine
+          if-no-files-found: error
+
+  package:
+    name: package-${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    needs: web-engine
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub's published runner labels: macOS 15 arm64 and the
+          # time-limited macOS 15 Intel image. macOS 13/14 are retired.
+          - { runner: macos-15, os: darwin, arch: arm64 }
+          - { runner: macos-15-intel, os: darwin, arch: x64 }
+          - { runner: ubuntu-24.04, os: linux, arch: x64 }
+          - { runner: windows-2022, os: win32, arch: x64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pocket-web-engine
+          path: sdk/.pocket-build/web-engine
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - name: Install patch on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install patch -y --no-progress
+
+      - name: Prepare pinned PocketJS
+        working-directory: sdk
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then python scripts/prepare_upstream.py; else python3 scripts/prepare_upstream.py; fi
+          bun install --frozen-lockfile --cwd .cache/pocketjs
+
+      - name: Install SDK dependencies without install scripts
+        working-directory: sdk
+        run: npm install --ignore-scripts --legacy-peer-deps --no-audit --no-fund
+
+      - name: Build Noble N-API binding
+        working-directory: sdk
+        continue-on-error: ${{ runner.os == 'Linux' }}
+        run: npm rebuild @abandonware/noble
+
+      - name: Build platform binaries
+        working-directory: sdk
+        run: cargo build --locked --release --manifest-path native/Cargo.toml --bin pocket_probe --bin pocketjs_bytecode
+
+      - name: Assemble npm package
+        working-directory: sdk
+        run: bun scripts/package_toolchain.ts --out=.pocket-build/toolchain-package --force
+
+      - name: Pack npm artifact
+        working-directory: sdk/.pocket-build/toolchain-package
+        run: npm pack --ignore-scripts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pocket-tools-${{ matrix.os }}-${{ matrix.arch }}
+          path: sdk/.pocket-build/toolchain-package/*.tgz
+          if-no-files-found: error

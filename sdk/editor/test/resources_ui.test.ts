@@ -85,6 +85,7 @@ test("Editor edits package resource delivery and retains saved values per mini-a
             origin: `http://192.168.50.20:${server!.port}`,
             hostVersion: "3.2.0",
             lan: true,
+            appConfigUrl: `http://192.168.50.20:${server!.port}/test/pocket/3.2.0/pocket.resources/latest.json`,
             slots: [
               { name: "test", packages: [{ id: "pocket.resources", version: "0.1.0-test.8", build: 8, manifestUrl: "/pocket/3.2.0/pocket.resources/test/latest.json", hostConfigUrl: "/pocket/3.2.0/pocket.resources/test/host.json" }] },
               { name: "stable", packages: [] },
@@ -124,10 +125,10 @@ test("Editor edits package resource delivery and retains saved values per mini-a
     await page.locator("#resource-package-picker").waitFor({ state: "attached" });
     await page.waitForFunction(() => document.querySelectorAll("#resource-package-picker option").length === 2);
     await page.locator("#versions-open").click();
-    await page.waitForFunction(() => document.getElementById("version-manager-state")?.textContent === "1 published");
+    await page.waitForFunction(() => document.getElementById("version-manager-state")?.textContent === "1 个资源包");
     expect(await page.locator("#version-backend-origin").textContent()).toContain("192.168.50.20");
     expect(await page.locator("#version-manager").textContent()).toContain("0.1.0-test.8");
-    expect(await page.locator('#version-manager a:has-text("latest.json")').getAttribute("href")).toContain("/pocket/3.2.0/pocket.resources/test/latest.json");
+    expect(await page.locator("#version-app-config-link").getAttribute("href")).toContain("/test/pocket/3.2.0/pocket.resources/latest.json");
     await page.locator("#resources-panel > summary").click();
     expect(await page.locator("#resource-package-picker option").allTextContents()).toEqual([
       "Profile · pocket.demo.profile",
@@ -135,7 +136,7 @@ test("Editor edits package resource delivery and retains saved values per mini-a
     ]);
     expect(await page.locator("#resource-package-list .resource-package-button").count()).toBe(2);
     expect(await page.locator("#resource-package-list .resource-package-button[aria-pressed=\"true\"]").textContent()).toContain("Profile");
-    expect(await page.locator('a:has-text("Update manifest")').getAttribute("href")).toBe("/updates/profile/latest.json");
+    expect(await page.locator("#resource-package-meta a").count()).toBe(0);
 
     const profileAvatar = page.locator('select[data-resource-key="pak:profile.avatar"]');
     const requiredFont = page.locator('.resource-row[data-resource-key="pak:required.font"]');

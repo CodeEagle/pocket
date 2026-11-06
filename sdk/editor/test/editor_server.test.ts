@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createPublicKey } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pack } from "../../.cache/pocketjs/framework/compiler/pak.ts";
@@ -54,7 +54,7 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     const index = await request(server, "/");
     expect(index.response.status).toBe(200);
     expect(index.response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
-    expect(new TextDecoder().decode(new Uint8Array(index.value))).toContain("Pocket Preview");
+    expect(new TextDecoder().decode(new Uint8Array(index.value))).toContain("Pocket");
     const editorScript = await request(server, "/editor.js");
     expect(editorScript.response.status).toBe(200);
     expect(new TextDecoder().decode(new Uint8Array(editorScript.value))).toContain("publishProject");
@@ -74,7 +74,7 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
 
     const source = await request(server, "/api/projects/fixture-app/source");
     expect(source.response.status).toBe(200);
-    expect(source.value.source).toContain("Hello PocketJS");
+    expect(source.value.source).toContain("PocketJS");
 
     // The editor starter deliberately contains only the shared page source;
     // projects may add an optional UI compatibility entry themselves.
@@ -200,8 +200,8 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     });
     expect(published.response.status).toBe(200);
     expect(published.value.status.publish.runtimeAbi).toBe("fixture-abi-v1");
-    expect(published.value.manifestUrl).toContain("/pocket/3.2.0/pocket.host.demo/stable/latest.json");
-    expect(published.value.hostConfigUrl).toContain("/pocket/3.2.0/pocket.host.demo/stable/host.json");
+    expect(published.value.manifestUrl).toContain("/stable/pocket/3.2.0/pocket.host.demo/0.2.0/latest.json");
+    expect(published.value.hostConfigUrl).toContain("/pocket/3.2.0/pocket.host.demo/0.2.0/host.json");
     expect((await fetch(published.value.manifestUrl)).status).toBe(200);
     const canonicalLatest = await request(server, "/pocket/3.2.0/pocket.host.demo/stable/latest.json");
     expect(canonicalLatest.response.status).toBe(200);
@@ -214,9 +214,9 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     expect(payload.runtimeAbi).toBe("fixture-abi-v1");
     const hostConfig = await request(server, "/updates/fixture-app/host.json");
     expect(hostConfig.response.status).toBe(200);
-    expect(hostConfig.value.POCKET_UPDATE_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect(hostConfig.value.POCKET_UPDATE_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/stable$/);
     expect(hostConfig.value.POCKET_HOST_VERSION).toBe("3.2.0");
-    expect(hostConfig.value.POCKET_PACKAGE_VERSION).toBe("stable");
+    expect(hostConfig.value.POCKET_PACKAGE_VERSION).toBe("0.2.0");
     expect(hostConfig.value.POCKET_UPDATE_KEY_ID).toBe(envelope.keyId);
     expect(Buffer.from(hostConfig.value.POCKET_UPDATE_PUBLIC_KEY, "base64")).toHaveLength(32);
     const releaseVersions = await request(server, "/api/projects/fixture-app/versions");
@@ -225,18 +225,44 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     expect(releaseVersions.value.slots.find((slot: any) => slot.name === "stable").packages[0]).toMatchObject({
       id: "pocket.host.demo", version: "0.2.0", build: 2,
     });
+    expect(releaseVersions.value.history).toHaveLength(1);
+    expect(releaseVersions.value.history[0]).toMatchObject({ channel: "release", slot: "stable", version: "0.2.0", build: 2 });
+    expect(releaseVersions.value.appConfigUrl).toContain("/stable/pocket/3.2.0/pocket.host.demo/latest.json");
+    const packageIndex = await request(server, new URL(releaseVersions.value.appConfigUrl).pathname);
+    expect(packageIndex.response.status).toBe(200);
+    expect(packageIndex.value.kind).toBe("pocket-editor-package-index");
+    expect(packageIndex.value.latest.releaseId).toBe(releaseVersions.value.history[0].releaseId);
+    expect(packageIndex.value.versions[0].payloadSha256).toBe(releaseVersions.value.history[0].payloadSha256);
+    const stableHistoryPackage = releaseVersions.value.history[0].packages.find((pkg: any) => pkg.id === "pocket.host.demo");
+    expect(stableHistoryPackage.manifestUrl).toContain(`/pocket/3.2.0/pocket.host.demo/${releaseVersions.value.history[0].releaseId}/latest.json`);
+    expect((await fetch(stableHistoryPackage.manifestUrl)).status).toBe(200);
+    const immutableHistoryHost = await (await fetch(stableHistoryPackage.hostConfigUrl)).json();
+    expect(immutableHistoryHost.POCKET_PACKAGE_VERSION).toBe(releaseVersions.value.history[0].releaseId);
+    expect(immutableHistoryHost.POCKET_UPDATE_BASE_URL).toMatch(/\/stable$/);
+    const immutableArchive = await request(server, `/releases/fixture-app/${releaseVersions.value.history[0].releaseId}.tar.gz`);
+    expect(immutableArchive.response.status).toBe(200);
+    expect(new Uint8Array(immutableArchive.value).byteLength).toBeGreaterThan(100);
+    const brokenBytecodePath = join(buildRevDir, "app.qjbc");
+    const brokenBytecode = readFileSync(brokenBytecodePath);
+    rmSync(brokenBytecodePath);
+    const failedPublish = await request(server, "/api/projects/fixture-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(failedPublish.response.status).toBe(400);
+    const preservedLatest = await request(server, "/pocket/3.2.0/pocket.host.demo/stable/latest.json");
+    expect(JSON.parse(Buffer.from(preservedLatest.value.payload, "base64").toString("utf8")).build).toBe(2);
+    writeFileSync(brokenBytecodePath, brokenBytecode);
     const archive = await request(server, "/releases/fixture-app.tar.gz");
     expect(archive.response.status).toBe(200);
     expect(new Uint8Array(archive.value).byteLength).toBeGreaterThan(100);
     // Test publishing must remain admissible after an embedded build or a
     // previous test package, while preserving the consumer's release config.
+    let firstTestEntryUrl = "";
     for (const expectedBuild of [3, 4]) {
       const testing = await request(server, "/api/projects/fixture-app/publish", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "test" }),
       });
       expect(testing.response.status).toBe(200);
       expect(testing.value.status.publish.build).toBe(expectedBuild);
-      expect(testing.value.manifestUrl).toContain("/pocket/3.2.0/pocket.host.demo/test/latest.json");
+      expect(testing.value.manifestUrl).toContain("/test/pocket/3.2.0/pocket.host.demo/0.2.0/latest.json");
       expect((await fetch(testing.value.manifestUrl)).status).toBe(200);
       const signed = (await request(server, "/updates/fixture-app/latest.json")).value;
       const publicPem = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(hostConfig.value.POCKET_UPDATE_PUBLIC_KEY, "base64")]), format: "der", type: "spki" }).export({ format: "pem", type: "spki" });
@@ -244,15 +270,47 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
       expect(verified.build).toBe(expectedBuild);
       expect(verified.version).toBe(`0.2.0-test.${expectedBuild}`);
       expect(verified.entry.sha256).toBe(payload.entry.sha256);
+      if (expectedBuild === 3) firstTestEntryUrl = new URL(`/test/pocket/3.2.0/pocket.host.demo/0.2.0/blobs/${verified.entry.sha256}`, testing.value.manifestUrl).toString();
     }
+    expect((await fetch(firstTestEntryUrl)).status).toBe(200);
     const testVersions = await request(server, "/api/projects/fixture-app/versions");
     expect(testVersions.value.slots.find((slot: any) => slot.name === "test").packages[0]).toMatchObject({
       id: "pocket.host.demo", version: "0.2.0-test.4", build: 4,
     });
+    expect(testVersions.value.history).toHaveLength(3);
+    const oldStableManifest = testVersions.value.history.find((entry: any) => entry.slot === "stable").packages[0].manifestUrl;
+    expect((await fetch(oldStableManifest)).status).toBe(200);
+    const statePath = join(workspace, "states/fixture-app.json");
+    const counterPath = join(workspace, "states/fixture-app-test-release.json");
+    const historyPath = join(workspace, "states/fixture-app.versions.json");
+    const beforeOfflineState = readFileSync(statePath);
+    const beforeOfflineCounter = readFileSync(counterPath);
+    const beforeOfflineHistory = readFileSync(historyPath);
+    const offlinePackage = await request(server, "/api/projects/fixture-app/package-offline", {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    });
+    expect(offlinePackage.response.status).toBe(200);
+    expect(offlinePackage.value.filename).toMatch(/^offline-fixture-app-/);
+    const offlineArchive = await request(server, offlinePackage.value.archiveUrl);
+    expect(offlineArchive.response.status).toBe(200);
+    expect(offlineArchive.response.headers.get("content-disposition")).toContain(offlinePackage.value.filename);
+    expect(new Uint8Array(offlineArchive.value).byteLength).toBeGreaterThan(100);
+    expect(readFileSync(statePath)).toEqual(beforeOfflineState);
+    expect(readFileSync(counterPath)).toEqual(beforeOfflineCounter);
+    expect(readFileSync(historyPath)).toEqual(beforeOfflineHistory);
+    const downloadsDirectory = join(workspace, "updates/.downloads/fixture-app");
+    const downloadsBeforeFailure = readdirSync(downloadsDirectory).sort();
+    rmSync(brokenBytecodePath);
+    const failedOffline = await request(server, "/api/projects/fixture-app/package-offline", { method: "POST" });
+    expect(failedOffline.response.status).toBe(400);
+    writeFileSync(brokenBytecodePath, brokenBytecode);
+    expect(readdirSync(downloadsDirectory).sort()).toEqual(downloadsBeforeFailure);
     const unchangedConfig = await request(server, "/api/projects/fixture-app/config");
     expect(unchangedConfig.value.build).toBe(2);
     expect(unchangedConfig.value.version).toBe("0.2.0");
-    await request(server, "/api/projects/fixture-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const duplicateRelease = await request(server, "/api/projects/fixture-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(duplicateRelease.response.status).toBe(200);
+    expect(duplicateRelease.value.status.publish.releaseId).toBe(testVersions.value.history.find((entry: any) => entry.slot === "stable").releaseId);
     const afterRelease = await request(server, "/api/projects/fixture-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "test" }) });
     expect(afterRelease.value.status.publish.build).toBe(5);
   } finally {

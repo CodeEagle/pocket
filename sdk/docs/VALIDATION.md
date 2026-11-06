@@ -225,7 +225,7 @@ Editor 服务补充：已从工具 PTY 切换为本用户临时 launchd job（PP
 顶层仅 `sdk/`、`demo/` 两个工作目录。`sdk/pubspec.yaml` 是公共 Flutter 包，
 `demo/` 是 Flutter 工程根，页面和 JS 工具位于 `demo/js/`。
 Demo 运行依赖只有 Flutter 与 `pocket_sdk`，其他直接包引用只用于测试。
-CLI 与 Editor 共用 `sdk/templates/starter/app.tsx`，本地更新服务只有
+CLI 与 Editor 共用 `sdk/templates/app/app.tsx`（App）与 `sdk/templates/game/app.tsx`（Game），本地更新服务只有
 `sdk/scripts/serve_updates.ts` 一份实现。
 
 新路径下：独立 CLI init/build、Editor live build/publish、SDK Flutter 测试、

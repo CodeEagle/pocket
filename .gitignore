@@ -4,6 +4,7 @@
 **/.swiftpm/
 **/.pocket-build/
 **/node_modules/
+sdk/prebuilt/
 **/__pycache__/
 **/*.pyc
 **/artifacts/

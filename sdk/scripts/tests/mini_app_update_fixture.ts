@@ -15,9 +15,11 @@ import { packageArtifacts } from "../package_update.ts";
  * Build the real SystemUI + mini-app fixture used by
  * `mini_app_update_ffi_test.dart`.
  *
- * The child is embedded at build 1 and has signed build 1/build 2 releases.
- * The SystemUI prewarms the child, while the Dart host's prepareOpen boundary
- * admits build 2 before the kernel freezes or presents the caller.
+ * The root and child are embedded at build 1 and have signed build 1/build 2
+ * releases. The SystemUI is therefore exercised through the same signed
+ * package path as a remote host bootstrap; the child prewarm/open flow then
+ * proves the Dart host's prepareOpen boundary admits build 2 before the
+ * kernel freezes or presents the caller.
  */
 const outputArgument = process.argv[2];
 if (!outputArgument) throw new Error("Pass the fixture output directory");
@@ -237,6 +239,7 @@ try {
   let runtimeAbi: string | undefined;
   const projects = [
     { appId: rootAppId, build: 1, version: "1.0.0", kind: "root" as const },
+    { appId: rootAppId, build: 2, version: "2.0.0", kind: "root" as const },
     { appId: childAppId, build: 1, version: "1.0.0", kind: "child" as const },
     { appId: childAppId, build: 2, version: "2.0.0", kind: "child" as const },
   ];
@@ -263,8 +266,37 @@ try {
         throw new Error(`fixture generations use different runtime ABIs: ${runtimeAbi} vs ${metadata.runtimeAbi}`);
       }
 
-      if (projectInfo.kind === "root") {
+      if (projectInfo.kind === "root" && projectInfo.build === 1) {
         copyRuntimeAssets(out, join(output, "root", "assets"));
+        packageArtifacts({
+          appId: rootAppId,
+          version: projectInfo.version,
+          build: projectInfo.build,
+          bytecodePath: built.bytecode,
+          entryFormat: "quickjs-bytecode",
+          runtimeAbi,
+          pakPath: built.pak,
+          outDir: join(output, "root-v1"),
+          keyFile,
+          guestManifestPath: join(out, "guest-manifest.json"),
+          includeBundle: true,
+          signedAt: 1,
+        });
+      } else if (projectInfo.kind === "root") {
+        packageArtifacts({
+          appId: rootAppId,
+          version: projectInfo.version,
+          build: projectInfo.build,
+          bytecodePath: built.bytecode,
+          entryFormat: "quickjs-bytecode",
+          runtimeAbi,
+          pakPath: built.pak,
+          outDir: join(output, "root-v2"),
+          keyFile,
+          guestManifestPath: join(out, "guest-manifest.json"),
+          includeBundle: true,
+          signedAt: 1,
+        });
       } else if (projectInfo.build === 1) {
         copyRuntimeAssets(out, join(output, "child-v1", "assets"));
         packageArtifacts({

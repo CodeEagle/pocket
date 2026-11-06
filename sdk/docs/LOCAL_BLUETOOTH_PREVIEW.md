@@ -1,29 +1,91 @@
-# Local Bluetooth in Chrome preview
+# Noble Bluetooth in Preview
 
-On macOS the optional preview Bluetooth plugin defaults to **Native macOS · nearby scan**. Enable it in preview options. In the App, request `hardware.bluetooth` permission, then scan and select a device from the App list. macOS owns the system permission prompt; Chrome does not show a device chooser in this mode. Scans return a bounded snapshot of nearby BLE peripherals, including their actual RSSI. Connect/read/write/notification operations use CoreBluetooth.
+The Preview **Noble Bluetooth** provider scans from the computer running the
+editor service. It is the only Web SDK/Editor Bluetooth provider: the browser
+Canvas projection never calls `navigator.bluetooth` or owns a GATT object. The
+provider returns a bounded snapshot of nearby BLE peripherals, then uses the
+same device's GATT services, characteristics, reads, writes, and notification
+stream.
 
-The alternative **Web Bluetooth · device chooser** remains available. Its browser permission flow selects a device; subsequent scans enumerate authorized devices, not all nearby peripherals. HTTPS does not remove that browser API restriction.
+macOS and Windows use the npm backend already used by dokidoki,
+`@abandonware/noble@1.9.2-26`. The SDK's
+[`noble-bluetooth.mjs`](../editor/native/noble-bluetooth.mjs) is only a thin
+JSONL adapter around Noble. Noble owns the platform bindings (CoreBluetooth on
+macOS and its WinRT binding on supported Windows versions); the adapter does
+not contain TFTC parsing, product selection, a native protocol implementation,
+or a second BLE state machine.
 
-## Architecture and ablation
+## Using Preview
 
-The editor lazily compiles a signed local helper app with Swift/CoreBluetooth. Generated helper binaries live in the build cache, not source. Xcode command line tools are required for the first build. No additional network service or exposed hardware endpoint is created: the existing loopback editor preview transport routes requests to the helper's JSON-line stdin/stdout protocol.
+1. Install the SDK workspace dependencies with `bun install`, install Noble in
+   the consuming host (`npm install @abandonware/noble@1.9.2-26`), and run the
+   editor (`bun run editor` from `sdk/`).
+2. Enable **Noble Bluetooth** in Preview and use the product's scan/connect
+   action. The device must be advertising and the adapter must be powered on.
+3. Select a device returned by that scope's scan. A connect request for an ID
+   that was not returned by the same scope is rejected.
+4. Open the notification stream before issuing TFTC controls. The JS package
+   derives state and field-level `change` events from those real device
+   notifications; a successful write is not an execution acknowledgement.
+5. Close the product or stop the Preview to release its streams and native
+   connections.
 
-The native core is shared with the iOS plugin in `sdk/packages/pocket_bluetooth/ios/pocket_bluetooth/Sources/pocket_bluetooth/PocketBluetoothCore.swift`. `PocketBluetoothPlugin.swift` is only the Flutter channel adapter; `sdk/editor/native/macos-bluetooth/main.swift` is only the process adapter. The implementation does not introduce a second scanning/GATT state machine, simulated peripherals, or fabricated signal strength. Business UI and device selection remain in JS.
+Noble has no explicit permission-request API. The local provider therefore
+   returns `hardware_unsupported` for
+   `hardware.permissions.request` / `requestBlePermission`; the operating
+   system handles Bluetooth access when a real scan or GATT operation runs.
+   This response is intentional and must not be replaced with a fabricated
+   `granted` result. If the OS denies access, fix its Bluetooth permission or
+   adapter state and retry the operation.
 
-Preview leases and runtime generations isolate native scopes. Turning the plugin off, closing the preview, changing runtimes, or stopping the server disposes owned native work. Native stream identifiers are mapped independently from guest identifiers. A scope can only connect to devices returned by its own scan.
+The local provider runs on macOS and Windows. It needs Node.js, a usable BLE
+adapter, and the current pinned native `pocket_probe` for the rest of Preview.
+The SDK does not ship a generated Windows executable. Building one requires
+the pinned Rust/MSVC environment, Bun, executable `python3`, and GNU
+`patch`; the current repository's macOS launchctl wrapper is not a Windows
+launcher. Windows transport routing has regression coverage, but this change
+has not been physically validated on a Windows computer.
 
-## Retained source
+Browser Web Bluetooth is intentionally unavailable. A browser-only deployment
+without a local Noble host receives an explicit unsupported/unconfigured
+hardware result; it never falls back to a browser chooser or a fabricated
+device list.
 
-Before implementing this capability, the retained parent `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` was inspected outside `pocket_host/`. Its `lib/core/real_hardware_bridge.dart` is a platform-channel wrapper with simulated fallback, not a usable production macOS scanner. That fallback was not retained. The SDK's existing `pocket_bluetooth` iOS CoreBluetooth implementation supplied real scanning, connection, characteristic discovery, read/write and notification behavior. Those implementations were extracted into the shared core; the necessary adaptations are conditional platform imports/authorization handling, a permission entry point, scope cleanup and the JSON-line process boundary. The existing JS hardware capabilities and Showcase device list are reused.
+## Scope and lifecycle
 
-For comparison, SyncDo's Electron host intercepts Chromium's `select-bluetooth-device` event and forwards candidate lists over IPC. Ordinary Chrome has no equivalent host hook; CoreBluetooth supplies the missing local capability here.
+Preview scopes are generation-fenced. Each scope owns its discovered device
+IDs, GATT streams, and pending requests. Disabling the provider, closing the
+Preview, changing runtimes, or stopping the server retires the scope and
+cancels its scan, streams, and connections. Late native replies cannot revive
+a retired scope. Stream cancellation removes only that stream's listener;
+other streams remain active.
 
-## Validation boundaries
+The helper reports a physical disconnect as a stream error, so JS can end the
+old TFTC session and clear pending work. Preview currently has no separate
+per-device disconnect capability; `client.disconnect()` ends the JS session
+and the provider's scope disposal releases the native connection.
 
-`local_bluetooth.test.ts` verifies helper protocol, errors, lifecycle and scope isolation using explicit test processes. The browser acceptance fixture runs pinned PocketJS bytecode in the actual native guest and sends pointer input through Playwright Chromium; its local-native provider is explicitly a test fixture. It verifies App permission/scan updates, RSSI rendering, no browser chooser and disabling cleanup. The separate Web Bluetooth path tests Chromium's real chooser with CDP test devices, followed by a test GATT provider.
+## Source and validation boundary
 
-Swift helper compilation and JSON-line smoke checks validate the real native boundary. Physical peripheral discovery, connection and GATT traffic require a powered-on adapter, macOS permission and a suitable peripheral; test fixture results are not evidence of physical radio traffic. The bridge currently supports macOS preview hosts only.
+The retained parent
+`/Volumes/ORICO/Development/TryJoy.c/TryJoyMono/App/repos/dokidoki` supplied
+the Noble dependency and its platform binding configuration. The retained
+`pocketjs_flutter_demo` was inspected outside `pocket_host/` for the existing
+host transport boundary. No Swift helper or PowerShell BLE implementation is
+maintained in the editor; the native BLE implementation remains in the npm
+backend.
 
-Verified in this change: Swift compilation with warnings as errors and type checking; JSONL unknown-method/dispose responses and EOF/SIGTERM exit; six browser-plugin/preview transport regressions; the preview settings browser regression; and pinned native Guest plus Chromium acceptance for both provider modes. The Showcase was rebuilt through the editor build endpoint. No physical GATT read/write has been claimed.
+`editor/test/local_bluetooth.test.ts` checks the Preview routing, structured
+errors, stream lifecycle, and scope isolation with explicit test processes.
+`editor/test/noble_bluetooth.test.ts` executes the production Noble adapter
+against explicit test IO and checks scan advertisements, GATT inventory,
+read/write response mode, first-notification delivery, ownership, cancellation,
+and disconnect handling. These tests do not prove radio traffic.
 
-The production factory also successfully compiled and launched its cached helper app. `codesign --verify --deep --strict` passed. A real short scan request returned structured `hardware_permission_denied` before macOS authorization, and scope/provider disposal exited normally. Nearby discovery on this machine therefore still requires the user to grant Bluetooth access through the App Request action.
+Physical acceptance on macOS drove a DK-META2 through the retained CoreBluetooth
+path and then through the final `@abandonware/noble@1.9.2-26` Preview path.
+The Noble run clicked Vibration, Linear, and Rotation 10 for one second and
+observed notify-derived `0 → 10 → 0` levels, `isWorking: false → true → false`,
+and a spontaneous battery update `32 → 31`; Stop all finished at all-zero
+levels. Windows hardware and Flutter Blue Plus hardware are still unverified;
+see [the transport contract](TFTC_TRANSPORT_CONTRACT.md).

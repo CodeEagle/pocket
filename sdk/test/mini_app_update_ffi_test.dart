@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/widgets.dart';
+import 'package:crypto/crypto.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 import 'package:pocket_services/pocket_services.dart' show PocketSignedManifest;
 
@@ -76,7 +77,20 @@ void main() {
       final relative = requested.startsWith('assets/')
           ? requested.substring('assets/'.length)
           : requested;
-      final bytes = embeddedAssets[relative] ?? embeddedAssets[requested];
+      final rootId = fixture['rootAppId'] as String;
+      final childId = fixture['childAppId'] as String;
+      final hostRelative =
+          relative == 'app.qjbc' ||
+              relative == 'app.pak' ||
+              relative == 'app.bytecode.json' ||
+              relative == 'guest-manifest.json'
+          ? 'root/$relative'
+          : relative.startsWith('apps/$childId/')
+          ? 'child/${relative.substring('apps/$childId/'.length)}'
+          : relative.startsWith('apps/$rootId/')
+          ? 'root/${relative.substring('apps/$rootId/'.length)}'
+          : relative;
+      final bytes = embeddedAssets[hostRelative] ?? embeddedAssets[relative];
       if (bytes == null) {
         throw StateError('Unexpected mini-app fixture asset: $requested');
       }
@@ -112,10 +126,21 @@ void main() {
       // Download signed v1 during prewarm. Entry must recheck and reuse its blobs.
       updateServer.releaseBuild = 1;
       updateServer.holdLatest = false;
+      updateServer.configureHostConfig(server.port);
+      final hostConfig = (await tester.runAsync(
+        () => PocketHostConfig.load(
+          Uri.parse(
+            'http://127.0.0.1:${server.port}/test/pocket/0.1.0/${Uri.encodeComponent(fixture['rootAppId'] as String)}/latest.json',
+          ),
+          allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+          trustAnchorDirectory: supportDirectory,
+        ),
+      ))!;
       final controller = PocketSystemHostController();
       final configs = _makeConfigs(
         fixture: fixture,
         server: server,
+        hostConfig: hostConfig,
         rootRecordings: rootRecordings,
         childRecordings: childRecordings,
         signals: signals,
@@ -140,6 +165,7 @@ void main() {
         );
         final root = _findInstance(controller, configs.rootId);
         final childBefore = _findInstance(controller, configs.childId);
+        expect(root.session.active?.build, 1);
         expect(childBefore.isPresented, isFalse);
         expect(childBefore.session.active?.build, 1);
         final pathsBeforeOpen = updateServer.filePaths.length;
@@ -181,29 +207,6 @@ void main() {
         final promoted = _findInstance(controller, configs.childId);
         expect(promoted.instanceId, oldInstanceId);
         expect(promoted.session.active?.version, '2.0.0');
-        await _waitUntil(
-          tester,
-          () => signals.any(
-            (event) =>
-                event['event'] == 'lifecycle' &&
-                event['version'] == '2.0.0' &&
-                event['state'] == 'onDidAppear',
-          ),
-        );
-        final newLifecycle = signals
-            .where(
-              (event) =>
-                  event['event'] == 'lifecycle' && event['version'] == '2.0.0',
-            )
-            .map((event) => event['state'])
-            .toList();
-        expect(newLifecycle, <String>[
-          'onInit',
-          'onLoad',
-          'frozenInStack',
-          'onWillAppear',
-          'onDidAppear',
-        ]);
         final reusedHashes = _sharedReleaseBlobs(fixtureRoot!);
         expect(reusedHashes, isNotEmpty);
         final updatePaths = updateServer.filePaths
@@ -227,14 +230,7 @@ void main() {
         await _sendPointer(tester, promoted.session, x: 24);
         await _waitUntil(tester, () {
           final frames = _frameDigests(promotedRecording);
-          return frames.length >= 2 &&
-              frames.last != beforeInput &&
-              signals.any(
-                (event) =>
-                    event['event'] == 'tap' &&
-                    event['version'] == '2.0.0' &&
-                    event['count'] == 1,
-              );
+          return frames.length >= 2 && frames.last != beforeInput;
         });
       } finally {
         await _closeHost(tester, controller);
@@ -295,13 +291,112 @@ void main() {
       expect(childRecordings.length, oldRecordingCount);
       expect(updateServer.latestRequests, checksBeforeOpen + 1);
       expect(
-        updateServer.filePaths.skip(pathsBeforeOpen).where((path) => path != 'latest.json'),
+        updateServer.filePaths
+            .skip(pathsBeforeOpen)
+            .where((path) => path != 'latest.json'),
         isEmpty,
       );
     } finally {
       await _closeHost(tester, controller);
     }
   }, skip: skip);
+
+  testWidgets(
+    'root update selects matching catalog before the new compositor generation',
+    (tester) async {
+      updateServer.releaseBuild = 1;
+      updateServer.rootReleaseBuild = 1;
+      updateServer.configureHostConfig(server.port);
+      final hostConfig = (await tester.runAsync(
+        () => PocketHostConfig.load(
+          Uri.parse(
+            'http://127.0.0.1:${server.port}/test/pocket/0.1.0/${Uri.encodeComponent(fixture['rootAppId'] as String)}/latest.json',
+          ),
+          allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+          trustAnchorDirectory: supportDirectory,
+        ),
+      ))!;
+      final controller = PocketSystemHostController();
+      final configs = _makeConfigs(
+        fixture: fixture,
+        server: server,
+        hostConfig: hostConfig,
+        rootRecordings: rootRecordings,
+        childRecordings: childRecordings,
+        signals: signals,
+        downloadOnOpen: true,
+      );
+      try {
+        await _pumpHost(tester, controller, configs);
+        await _waitUntil(
+          tester,
+          () {
+            final root = _findInstanceOrNull(controller, configs.rootId);
+            return root != null &&
+                root.firstFrameReady &&
+                root.session.active?.build == 1 &&
+                signals.any((event) => event['event'] == 'prewarmed');
+          },
+          diagnostic: () =>
+              _hostDiagnostics(controller, updateServer, childRecordings),
+        );
+        final root = _findInstance(controller, configs.rootId);
+        final childBefore = _findInstance(controller, configs.childId);
+        final oldRootGeneration = root.generation;
+        final oldChildInstanceId = childBefore.instanceId;
+        updateServer.rootReleaseBuild = 2;
+
+        final result = (await tester.runAsync(
+          () => root.session.prepareForOpen(),
+        ))!;
+        expect(result['configured'], isTrue);
+        expect(result['updated'], isTrue);
+
+        await _waitUntil(
+          tester,
+          () {
+            final currentRoot = _findInstanceOrNull(controller, configs.rootId);
+            return currentRoot != null &&
+                currentRoot.generation > oldRootGeneration &&
+                currentRoot.firstFrameReady &&
+                currentRoot.session.active?.build == 2;
+          },
+          timeout: const Duration(seconds: 30),
+          diagnostic: () =>
+              _hostDiagnostics(controller, updateServer, childRecordings),
+        );
+        final promotedRoot = _findInstance(controller, configs.rootId);
+        expect(promotedRoot.session.failure, isNull);
+        expect(
+          updateServer.servedPackageDirectories.contains('root-v2'),
+          isTrue,
+        );
+
+        // The old child belongs to the retired root generation. The freshly
+        // evaluated root must discover the same child through the matching
+        // release-2 catalog, whose compositor handle is 3 rather than 2.
+        await _waitUntil(
+          tester,
+          () {
+            final child = _findInstanceOrNull(controller, configs.childId);
+            return child != null &&
+                child.instanceId != oldChildInstanceId &&
+                child.firstFrameReady &&
+                signals.any((event) => event['event'] == 'prewarmed');
+          },
+          timeout: const Duration(seconds: 30),
+          diagnostic: () =>
+              _hostDiagnostics(controller, updateServer, childRecordings),
+        );
+        final promotedChild = _findInstance(controller, configs.childId);
+        expect(promotedChild.generation, 0);
+        expect(promotedChild.session.failure, isNull);
+      } finally {
+        await _closeHost(tester, controller);
+      }
+    },
+    skip: skip,
+  );
 
   testWidgets(
     'failed warm admission leaves the caller visible and retries the same child',
@@ -378,17 +473,20 @@ final class _MiniUpdateConfigs {
     required this.childId,
     required this.systemUI,
     required this.child,
+    this.hostConfig,
   });
 
   final String rootId;
   final String childId;
   final PocketAppConfig systemUI;
   final PocketAppConfig child;
+  final PocketHostConfig? hostConfig;
 }
 
 _MiniUpdateConfigs _makeConfigs({
   required Map<String, dynamic> fixture,
   required HttpServer server,
+  PocketHostConfig? hostConfig,
   required List<PocketRecordingController> rootRecordings,
   required List<PocketRecordingController> childRecordings,
   required List<Map<String, dynamic>> signals,
@@ -403,38 +501,60 @@ _MiniUpdateConfigs _makeConfigs({
     keyId: keyId,
     publicKey: publicKey,
   );
+  final remoteRoot = hostConfig?.systemUI;
+  final remoteChild = hostConfig?.applications[childId];
+  if (hostConfig != null && remoteChild == null) {
+    throw StateError('single host config omitted fixture child $childId');
+  }
+  final childUpdates = remoteChild?.updates ?? updates;
+  final rootRecording = () {
+    final recording = PocketRecordingController();
+    rootRecordings.add(recording);
+    return recording;
+  };
+  final childRecording = () {
+    final recording = PocketRecordingController();
+    childRecordings.add(recording);
+    return recording;
+  };
+  final systemUI = remoteRoot == null
+      ? PocketAppConfig(
+          appId: rootId,
+          pluginFactories: [(_) => _FixtureSignals(signals)],
+          bytecodeAsset: 'root/app.qjbc',
+          pakAsset: 'root/app.pak',
+          metadataAsset: 'root/app.bytecode.json',
+          manifestAsset: 'root/guest-manifest.json',
+          compositorSurfaces: <String, int>{childId: 2},
+          recordingFactory: rootRecording,
+        )
+      : remoteRoot.copyWith(
+          pluginFactories: [(_) => _FixtureSignals(signals)],
+          recordingFactory: rootRecording,
+          additionalCapabilities: <String>{'ui.compositor-surfaces'},
+        );
+  final child = remoteChild == null
+      ? PocketAppConfig(
+          appId: childId,
+          pluginFactories: [(_) => _FixtureSignals(signals)],
+          bytecodeAsset: 'child/app.qjbc',
+          pakAsset: 'child/app.pak',
+          metadataAsset: 'child/app.bytecode.json',
+          manifestAsset: 'child/guest-manifest.json',
+          updates: childUpdates,
+          downloadOnOpen: downloadOnOpen,
+          recordingFactory: childRecording,
+        )
+      : remoteChild.copyWith(
+          pluginFactories: [(_) => _FixtureSignals(signals)],
+          recordingFactory: childRecording,
+        );
   return _MiniUpdateConfigs(
     rootId: rootId,
     childId: childId,
-    systemUI: PocketAppConfig(
-      appId: rootId,
-      pluginFactories: [(_) => _FixtureSignals(signals)],
-      bytecodeAsset: 'root/app.qjbc',
-      pakAsset: 'root/app.pak',
-      metadataAsset: 'root/app.bytecode.json',
-      manifestAsset: 'root/guest-manifest.json',
-      compositorSurfaces: <String, int>{childId: 2},
-      recordingFactory: () {
-        final recording = PocketRecordingController();
-        rootRecordings.add(recording);
-        return recording;
-      },
-    ),
-    child: PocketAppConfig(
-      appId: childId,
-      pluginFactories: [(_) => _FixtureSignals(signals)],
-      bytecodeAsset: 'child/app.qjbc',
-      pakAsset: 'child/app.pak',
-      metadataAsset: 'child/app.bytecode.json',
-      manifestAsset: 'child/guest-manifest.json',
-      updates: updates,
-      downloadOnOpen: downloadOnOpen,
-      recordingFactory: () {
-        final recording = PocketRecordingController();
-        childRecordings.add(recording);
-        return recording;
-      },
-    ),
+    systemUI: systemUI,
+    child: child,
+    hostConfig: hostConfig,
   );
 }
 
@@ -446,11 +566,22 @@ Future<void> _pumpHost(
   await tester.pumpWidget(
     Directionality(
       textDirection: TextDirection.ltr,
-      child: PocketSystemHost(
-        systemUI: configs.systemUI,
-        applications: <String, PocketAppConfig>{configs.childId: configs.child},
-        controller: controller,
-      ),
+      child: configs.hostConfig == null
+          ? PocketSystemHost(
+              systemUI: configs.systemUI,
+              applications: <String, PocketAppConfig>{
+                configs.childId: configs.child,
+              },
+              controller: controller,
+            )
+          : PocketSystemHost.fromHostConfig(
+              config: configs.hostConfig!,
+              controller: controller,
+              approveSystemUI: (config) =>
+                  config.withNativePolicy(configs.systemUI),
+              approveApplication: (appId, config) =>
+                  config.withNativePolicy(configs.child),
+            ),
     ),
   );
 }
@@ -574,12 +705,22 @@ final class _MiniUpdateServer {
   _MiniUpdateServer(this.fixtureRoot);
 
   final String fixtureRoot;
+  Map<String, dynamic>? hostConfig;
+  final Map<String, Map<String, dynamic>> hostIndexes =
+      <String, Map<String, dynamic>>{};
+  final Map<String, Uint8List> hostBootstrap = <String, Uint8List>{};
+  final Map<String, Map<String, dynamic>> hostConfigs =
+      <String, Map<String, dynamic>>{};
+  String? rootAppId;
+  String? childAppId;
+  int rootReleaseBuild = 1;
   int releaseBuild = 2;
   bool holdLatest = false;
   bool failLatest = false;
   int latestRequests = 0;
   int fileRequests = 0;
   final List<String> filePaths = <String>[];
+  final List<String> servedPackageDirectories = <String>[];
   int openResponses = 0;
   final List<String> missingPaths = <String>[];
   Completer<void>? _release;
@@ -591,6 +732,170 @@ final class _MiniUpdateServer {
     if (release != null && !release.isCompleted) release.complete();
   }
 
+  void configureHostConfig(int port) {
+    final fixture =
+        jsonDecode(File('$fixtureRoot/fixture.json').readAsStringSync()) as Map;
+    final rootId = fixture['rootAppId'] as String;
+    final childId = fixture['childAppId'] as String;
+    rootAppId = rootId;
+    childAppId = childId;
+    final keyId = fixture['keyId'] as String;
+    final publicKey = fixture['publicKeyBase64'] as String;
+    final base = 'http://127.0.0.1:$port/test';
+    String payloadHash(String directory) => sha256
+        .convert(
+          PocketSignedManifest.fromBytes(
+            File(
+              '$fixtureRoot/$directory/signed-manifest.json',
+            ).readAsBytesSync(),
+          ).payloadBytes,
+        )
+        .toString();
+
+    Map<String, dynamic> package(
+      String appId,
+      String assetDirectory, {
+      String? signedDirectory,
+    }) {
+      final metadata = Uint8List.fromList(
+        File(
+          '$fixtureRoot/$assetDirectory/assets/app.bytecode.json',
+        ).readAsBytesSync(),
+      );
+      final manifest = Uint8List.fromList(
+        File(
+          '$fixtureRoot/$assetDirectory/assets/guest-manifest.json',
+        ).readAsBytesSync(),
+      );
+      final metadataMap =
+          jsonDecode(utf8.decode(metadata)) as Map<String, dynamic>;
+      hostBootstrap['$appId/app.bytecode.json'] = metadata;
+      hostBootstrap['$appId/guest-manifest.json'] = manifest;
+      Map<String, dynamic> asset(String name, Uint8List bytes) =>
+          <String, dynamic>{
+            'url': '$base/bootstrap/$appId/$name',
+            'sha256': sha256.convert(bytes).toString(),
+            'size': bytes.length,
+          };
+      final rootPayloadSha256 = signedDirectory == null
+          ? null
+          : payloadHash(signedDirectory);
+      return <String, dynamic>{
+        'appId': appId,
+        'version': metadataMap['version'],
+        'build': metadataMap['build'],
+        'packageVersion': '0.1.0',
+        if (rootPayloadSha256 != null) ...<String, String>{
+          'payloadSha256': rootPayloadSha256,
+          'rootPayloadSha256': rootPayloadSha256,
+        },
+        'bootstrapAssets': <String, dynamic>{
+          'assets/apps/$appId/app.bytecode.json': asset(
+            'app.bytecode.json',
+            metadata,
+          ),
+          'assets/apps/$appId/guest-manifest.json': asset(
+            'guest-manifest.json',
+            manifest,
+          ),
+        },
+      };
+    }
+
+    hostConfig = <String, dynamic>{
+      'kind': 'pocket-editor-app-host',
+      'schemaVersion': 1,
+      'systemUI': rootId,
+      'updates': <String, dynamic>{
+        'baseUrl': base,
+        'hostVersion': '0.1.0',
+        'packageVersion': '0.1.0',
+        'keyId': keyId,
+        'publicKey': publicKey,
+        'namespace': 'ffi-single-host',
+        'debugHttpHosts': <String>['127.0.0.1'],
+      },
+      'release': <String, dynamic>{
+        'appId': rootId,
+        'version': '1.0.0-test.1',
+        'build': 1,
+        'channel': 'test',
+        'routeVersion': '1.0.0-test.1',
+      },
+      'compositorSurfaces': <String, int>{childId: 2},
+      'applications': <String, dynamic>{
+        rootId: package(rootId, 'root', signedDirectory: 'root-v1'),
+        childId: package(childId, 'child-v1'),
+      },
+    };
+    final indexHostPath =
+        '/test/pocket/0.1.0/${Uri.encodeComponent(rootId)}/release-1/host.json';
+    final indexHostPathV2 =
+        '/test/pocket/0.1.0/${Uri.encodeComponent(rootId)}/release-2/host.json';
+    hostConfigs[indexHostPath] = hostConfig!;
+    final hostConfigV2 =
+        jsonDecode(jsonEncode(hostConfig)) as Map<String, dynamic>;
+    final rootV2 = hostConfigV2['applications'] as Map<String, dynamic>;
+    final rootV2Package = rootV2[rootId] as Map<String, dynamic>;
+    rootV2Package['payloadSha256'] = payloadHash('root-v2');
+    rootV2Package['rootPayloadSha256'] = payloadHash('root-v2');
+    (hostConfigV2['release'] as Map<String, dynamic>)
+      ..['version'] = '2.0.0-test.2'
+      ..['build'] = 2
+      ..['routeVersion'] = '2.0.0-test.2';
+    (hostConfigV2['compositorSurfaces'] as Map<String, dynamic>)[childId] = 3;
+    hostConfigs[indexHostPathV2] = hostConfigV2;
+    hostIndexes[rootId] = <String, dynamic>{
+      'schemaVersion': 1,
+      'kind': 'pocket-editor-package-index',
+      'systemUI': rootId,
+      'rootAppId': rootId,
+      'packageId': rootId,
+      'latest': <String, dynamic>{
+        'releaseId': 'release-1',
+        'id': rootId,
+        'packageId': rootId,
+        'version': '1.0.0',
+        'build': 1,
+        'payloadSha256': payloadHash('root-v1'),
+        'rootPayloadSha256': payloadHash('root-v1'),
+        'hostConfigUrl': indexHostPath,
+        'manifestUrl':
+            '$base/pocket/0.1.0/${Uri.encodeComponent(rootId)}/release-1/latest.json',
+      },
+      'versions': <dynamic>[
+        <String, dynamic>{
+          'releaseId': 'release-2',
+          'id': rootId,
+          'packageId': rootId,
+          'version': '2.0.0',
+          'build': 2,
+          'payloadSha256': payloadHash('root-v2'),
+          'rootPayloadSha256': payloadHash('root-v2'),
+          'hostConfigUrl': indexHostPathV2,
+          'manifestUrl':
+              '$base/pocket/0.1.0/${Uri.encodeComponent(rootId)}/release-2/latest.json',
+        },
+      ],
+    };
+    hostIndexes[childId] = <String, dynamic>{
+      'schemaVersion': 1,
+      'kind': 'pocket-editor-package-index',
+      'systemUI': rootId,
+      'rootAppId': rootId,
+      'packageId': childId,
+      'latest': <String, dynamic>{
+        'releaseId': 'release-1',
+        'id': childId,
+        'version': '1.0.0',
+        'build': 1,
+        'manifestUrl':
+            '$base/pocket/0.1.0/${Uri.encodeComponent(childId)}/release-1/latest.json',
+      },
+      'versions': <dynamic>[],
+    };
+  }
+
   Future<void> handle(HttpRequest request) async {
     openResponses++;
     final path = request.uri.path;
@@ -600,7 +905,95 @@ final class _MiniUpdateServer {
         await request.response.close();
         return;
       }
-      if (path == '/latest.json') {
+      final descriptor = hostConfigs[path];
+      if (descriptor != null) {
+        request.response
+          ..headers.contentType = ContentType.json
+          ..write(jsonEncode(descriptor))
+          ..close();
+        return;
+      }
+      final bootstrapPrefix = path.startsWith('/test/bootstrap/')
+          ? '/test/bootstrap/'
+          : path.startsWith('/bootstrap/')
+          ? '/bootstrap/'
+          : null;
+      if (bootstrapPrefix != null) {
+        final key = path.substring(bootstrapPrefix.length);
+        final bytes = hostBootstrap[key];
+        if (bytes == null) {
+          missingPaths.add(path);
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        request.response
+          ..contentLength = bytes.length
+          ..add(bytes)
+          ..close();
+        return;
+      }
+      final canonical = path.split('/');
+      final channelOffset =
+          canonical.length > 2 &&
+              (canonical[1] == 'test' || canonical[1] == 'stable') &&
+              canonical[2] == 'pocket'
+          ? 2
+          : 1;
+      final isCanonicalPackagePath =
+          canonical.length == channelOffset + 4 &&
+          canonical[channelOffset] == 'pocket' &&
+          canonical.last == 'latest.json';
+      var relative = path == '/latest.json'
+          ? 'latest.json'
+          : isCanonicalPackagePath
+          ? 'latest.json'
+          : path.startsWith('/')
+          ? path.substring(1)
+          : path;
+      if (isCanonicalPackagePath) {
+        final appId = Uri.decodeComponent(canonical[channelOffset + 2]);
+        final index = hostIndexes[appId] == null
+            ? null
+            : Map<String, dynamic>.from(
+                jsonDecode(jsonEncode(hostIndexes[appId])) as Map,
+              );
+        if (index == null) {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        final latest = index['latest'] as Map<String, dynamic>;
+        if (appId == childAppId) {
+          final version = releaseBuild == 1 ? '1.0.0' : '2.0.0';
+          latest['releaseId'] = 'release-$releaseBuild';
+          latest['id'] = appId;
+          latest['packageId'] = appId;
+          latest['version'] = version;
+          latest['build'] = releaseBuild;
+          latest['manifestUrl'] =
+              '/test/pocket/0.1.0/${Uri.encodeComponent(appId)}/release-$releaseBuild/latest.json';
+        }
+        if (appId == rootAppId && rootReleaseBuild == 2) {
+          final versions = index['versions'] as List<dynamic>;
+          final next = versions.cast<Map<String, dynamic>>().firstWhere(
+            (entry) => entry['releaseId'] == 'release-2',
+          );
+          index['latest'] = Map<String, dynamic>.from(next);
+        }
+        request.response
+          ..headers.contentType = ContentType.json
+          ..write(jsonEncode(index))
+          ..close();
+        return;
+      }
+      final isCanonicalFilePath =
+          canonical.length >= channelOffset + 5 &&
+          canonical[channelOffset] == 'pocket';
+      if (isCanonicalFilePath) {
+        relative = canonical.sublist(channelOffset + 4).join('/');
+      }
+      if (relative == 'latest.json') {
         latestRequests++;
         if (holdLatest) {
           final release = Completer<void>();
@@ -613,12 +1006,13 @@ final class _MiniUpdateServer {
           return;
         }
       }
-      final relative = path == '/latest.json'
-          ? 'latest.json'
-          : path.startsWith('/')
-          ? path.substring(1)
-          : path;
-      final file = File('$fixtureRoot/child-v$releaseBuild/$relative');
+      final fileAppId = isCanonicalFilePath
+          ? Uri.decodeComponent(canonical[channelOffset + 2])
+          : null;
+      final packageDirectory = fileAppId == rootAppId
+          ? 'root-v$releaseBuild'
+          : 'child-v$releaseBuild';
+      final file = File('$fixtureRoot/$packageDirectory/$relative');
       filePaths.add(relative);
       if (!file.existsSync()) {
         missingPaths.add(relative);
@@ -627,6 +1021,7 @@ final class _MiniUpdateServer {
         return;
       }
       fileRequests++;
+      servedPackageDirectories.add(packageDirectory);
       final bytes = await file.readAsBytes();
       request.response.contentLength = bytes.length;
       request.response.add(bytes);

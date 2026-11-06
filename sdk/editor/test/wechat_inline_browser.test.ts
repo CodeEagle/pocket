@@ -99,22 +99,11 @@ test("Editor keeps Canvas and WeChat previews visible together and cleans the in
     await page.goto(`http://127.0.0.1:${server.port}/`);
     await page.locator("#preview-frame").waitFor({ state: "visible" });
     await page.locator("#wechat-preview-pane").waitFor({ state: "hidden" });
-    expect(await page.locator('#preview-frame').getAttribute('allow')).toBe('bluetooth');
+    expect(await page.locator('#preview-frame').getAttribute('allow')).toBeNull();
     await page.locator('.preview-options > summary').click();
     const bluetoothToggle = page.locator('#web-bluetooth-toggle');
     expect(await bluetoothToggle.isChecked()).toBe(false);
-    const supportsBluetooth = await page.evaluate(() => isSecureContext && typeof navigator.bluetooth?.requestDevice === 'function');
-    expect(await bluetoothToggle.isDisabled()).toBe(!supportsBluetooth);
-    if (supportsBluetooth) {
-      const frame = page.frames().find(frame => frame.url().includes('/api/projects/inline-a/preview'))!;
-      await frame.evaluate(() => { (window as any).__pluginMessages = []; window.addEventListener('message', event => { if (event.data?.type === 'preview.plugins') (window as any).__pluginMessages.push(event.data); }); });
-      await bluetoothToggle.check();
-      await frame.waitForFunction(() => (window as any).__pluginMessages?.at(-1)?.webBluetooth === true);
-      expect(await page.evaluate(() => localStorage.getItem('pocket.editor.webBluetooth'))).toBe('1');
-      await bluetoothToggle.uncheck();
-      await frame.waitForFunction(() => (window as any).__pluginMessages?.at(-1)?.webBluetooth === false);
-      expect(await page.evaluate(() => localStorage.getItem('pocket.editor.webBluetooth'))).toBe('0');
-    }
+    expect(await bluetoothToggle.isDisabled()).toBe(true);
     await page.locator('.preview-options > summary').click();
 
     await page.evaluate(() => {
@@ -198,9 +187,9 @@ test("Editor keeps Canvas and WeChat previews visible together and cleans the in
     await page.reload();
     await page.locator("#preview-frame").waitFor({ state: "visible" });
     await page.locator(".preview-options > summary").click();
-    await page.locator("#bluetooth-provider").waitFor({ state: "visible" });
+    await page.locator("#bluetooth-provider").waitFor({ state: "hidden" });
     expect(await page.locator("#bluetooth-provider").inputValue()).toBe("local");
-    expect(await page.locator("#bluetooth-provider-label").textContent()).toBe("Local Bluetooth");
+    expect(await page.locator("#bluetooth-provider-label").textContent()).toBe("Noble 蓝牙");
     expect(await page.locator("#web-bluetooth-toggle").isDisabled()).toBe(false);
     await page.locator("#web-bluetooth-toggle").check();
     await page.locator("#refresh-preview").click();

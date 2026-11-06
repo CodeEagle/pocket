@@ -253,11 +253,20 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     } catch (_: SecurityException) {
                         result.scanRecord?.deviceName ?: ""
                     }
+                    val manufacturerData = LinkedHashMap<String, Any?>()
+                    result.scanRecord?.manufacturerSpecificData?.let { entries ->
+                        for (index in 0 until entries.size()) {
+                            val companyId = entries.keyAt(index)
+                            val bytes = entries.valueAt(index) ?: ByteArray(0)
+                            manufacturerData[companyId.toString()] = bytes.map { it.toInt() and 0xff }
+                        }
+                    }
                     discoveredBluetoothDevices[id] = device
                     discoveredDevices[id] = mapOf(
                         "id" to id,
                         "name" to name,
                         "rssi" to result.rssi,
+                        "manufacturerData" to manufacturerData,
                     )
                 }
 

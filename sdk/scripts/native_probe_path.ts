@@ -1,5 +1,6 @@
 import { lstatSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { resolvePrebuiltTools } from "./prebuilt_tools.mjs";
 
 /**
  * The native cache invalidation inputs used by pocket.ts prepareNative.
@@ -168,6 +169,12 @@ export function nativeProbeCandidates(sdkRoot: string): string[] {
   return [
     join(root, "native/target/debug/pocket_probe"),
     join(root, "native/target/release/pocket_probe"),
+    join(root, "native/target/debug/pocket_probe.exe"),
+    join(root, "native/target/release/pocket_probe.exe"),
+    join(root, "native/target/x86_64-pc-windows-msvc/debug/pocket_probe.exe"),
+    join(root, "native/target/x86_64-pc-windows-msvc/release/pocket_probe.exe"),
+    join(root, "native/target/aarch64-pc-windows-msvc/debug/pocket_probe.exe"),
+    join(root, "native/target/aarch64-pc-windows-msvc/release/pocket_probe.exe"),
     join(root, "native/target/aarch64-apple-darwin/debug/pocket_probe"),
     join(root, "native/target/aarch64-apple-darwin/release/pocket_probe"),
   ];
@@ -175,6 +182,7 @@ export function nativeProbeCandidates(sdkRoot: string): string[] {
 
 /** Resolve the shared Editor/test probe, optionally honoring an explicit build. */
 export function resolveNativeProbePath(sdkRoot: string, configuredPath = process.env.POCKET_NATIVE_PROBE): string {
+  if (!configuredPath && process.env.POCKET_SOURCE_BUILD !== "1") return resolvePrebuiltTools(sdkRoot).probe;
   return selectNativeProbe({
     configuredPath,
     candidates: nativeProbeCandidates(sdkRoot),

@@ -13,6 +13,7 @@ import 'package:pocket_flutter/src/pocket_memory_limits.dart';
 
 import 'pocket_app.dart' show PocketGuestSession, PocketGuestSessionState;
 import 'pocket_config.dart';
+import 'pocket_host_config.dart';
 import 'package:pocket_flutter/src/pocket_compositor.dart';
 import 'pocket_platform_data.dart';
 import 'pocket_recordings.dart';
@@ -66,6 +67,40 @@ const List<String> _systemRequestCapabilities = <String>[
   'system.storage.keys',
 ];
 
+typedef PocketSystemHostCatalogLoader =
+    Future<PocketSystemHostCatalog?> Function(String? rootPayloadSha256);
+
+typedef PocketSystemHostSystemUIApprover =
+    PocketAppConfig Function(PocketAppConfig config);
+
+typedef PocketSystemHostApplicationApprover =
+    PocketAppConfig Function(String appId, PocketAppConfig config);
+
+/// A verified, native-approved catalog selected for one signed root payload.
+/// The loader must return a catalog whose [rootPayloadSha256] matches the
+/// mounted root generation before the host installs its child registry.
+final class PocketSystemHostCatalog {
+  const PocketSystemHostCatalog({
+    required this.systemUI,
+    required this.applications,
+    required this.rootPayloadSha256,
+  });
+
+  final PocketAppConfig systemUI;
+  final Map<String, PocketAppConfig> applications;
+  final String? rootPayloadSha256;
+}
+
+final class _PendingSystemHostCatalog {
+  const _PendingSystemHostCatalog({
+    required this.generation,
+    required this.catalog,
+  });
+
+  final int generation;
+  final PocketSystemHostCatalog catalog;
+}
+
 /// Flutter's thin runtime surface for a trusted SystemUI and guest apps.
 ///
 /// The consuming application owns the root MaterialApp. SystemUI emits child
@@ -79,8 +114,83 @@ final class PocketSystemHost extends StatefulWidget {
     this.maxInstances = 8,
     this.controller,
     this.recordings,
+    this.catalogLoader,
     this.backgroundColor = const Color(0xFF000000),
   });
+
+  /// Construct the host from one bootstrap document.
+  ///
+  /// [PocketHostConfig.load] is intentionally performed before `runApp` (or
+  /// by a host-owned loading screen). Once constructed, this is the exact same
+  /// SystemHost and signed `downloadOnOpen` flow as the explicit constructor;
+  /// the factory only removes duplicate child URL/configuration inputs.
+  factory PocketSystemHost.fromHostConfig({
+    Key? key,
+    required PocketHostConfig config,
+    int maxInstances = 8,
+    PocketSystemHostController? controller,
+    PocketRecordingLibrary? recordings,
+    PocketSystemHostSystemUIApprover? approveSystemUI,
+    PocketSystemHostApplicationApprover? approveApplication,
+    Future<PocketHostConfig?> Function(String? rootPayloadSha256)?
+    reloadHostConfig,
+    Color backgroundColor = const Color(0xFF000000),
+  }) {
+    PocketAppConfig approveRoot(PocketAppConfig value) =>
+        approveSystemUI?.call(value) ?? value;
+    PocketAppConfig approveChild(String appId, PocketAppConfig value) =>
+        approveApplication?.call(appId, value) ?? value;
+
+    PocketSystemHostCatalog approvedCatalog(PocketHostConfig value) {
+      final applications = <String, PocketAppConfig>{};
+      for (final entry in value.applications.entries) {
+        applications[entry.key] = approveChild(entry.key, entry.value);
+      }
+      return PocketSystemHostCatalog(
+        systemUI: approveRoot(value.systemUI),
+        applications: Map<String, PocketAppConfig>.unmodifiable(applications),
+        rootPayloadSha256: value.rootPayloadSha256,
+      );
+    }
+
+    final initial = approvedCatalog(config);
+    final reload =
+        reloadHostConfig ??
+        (config.catalog.isEmpty
+            ? null
+            : (String? rootPayloadSha256) async {
+                // A generation carrying the same signed root can reuse the
+                // already verified descriptor. Otherwise the single source
+                // URL is fetched again and its immutable version record is
+                // selected by the mounted payload hash.
+                if (rootPayloadSha256 != null &&
+                    config.rootPayloadSha256?.toLowerCase() ==
+                        rootPayloadSha256.toLowerCase()) {
+                  return config;
+                }
+                return PocketHostConfig.load(
+                  config.source,
+                  requiredRootPayloadSha256: rootPayloadSha256,
+                );
+              });
+    final loader = reload == null
+        ? null
+        : (String? rootPayloadSha256) async {
+            final next = await reload(rootPayloadSha256);
+            if (next == null) return null;
+            return approvedCatalog(next);
+          };
+    return PocketSystemHost(
+      key: key,
+      systemUI: initial.systemUI,
+      applications: initial.applications,
+      maxInstances: maxInstances,
+      controller: controller,
+      recordings: recordings,
+      catalogLoader: loader,
+      backgroundColor: backgroundColor,
+    );
+  }
 
   /// The trusted host-selected SystemUI package and authorization boundary.
   final PocketAppConfig systemUI;
@@ -99,6 +209,13 @@ final class PocketSystemHost extends StatefulWidget {
   /// Explicit bounded debug recording for every native guest generation.
   /// Only SystemUI receives the optional export/replay diagnostic controls.
   final PocketRecordingLibrary? recordings;
+
+  /// Optional signed-root catalog reload boundary. The loader runs at the
+  /// native session's pre-mount boundary and is also reused by the
+  /// SystemUI `runtime.configure` gate. It must return a catalog for the
+  /// supplied root payload hash; the host installs its child registry
+  /// atomically only after that match is verified.
+  final PocketSystemHostCatalogLoader? catalogLoader;
 
   /// Opaque root fill for the SystemUI surface, including startup and error
   /// states. Child compositor sessions stay transparent and reveal this fill.
@@ -190,7 +307,13 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       <String, _PendingPlatformRequest>{};
 
   Future<void>? _configurationFuture;
+  int? _configurationFutureGeneration;
   String? _configurationSignature;
+  Future<void>? _catalogFuture;
+  int? _catalogFutureGeneration;
+  int? _catalogGeneration;
+  _PendingSystemHostCatalog? _pendingCatalog;
+  bool _catalogReady = true;
   Future<PocketPlatformData>? _platformDataFuture;
   PocketPlatformData? _platformData;
   AppLifecycleState? _lifecycleState;
@@ -206,6 +329,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   void initState() {
     super.initState();
     _validateHostConfiguration(widget.systemUI, widget.applications);
+    _catalogReady = widget.catalogLoader == null;
     _trustedApplications.addAll(widget.applications);
     _surfaceAppIds.addEntries(
       widget.systemUI.compositorSurfaces.entries.map(
@@ -248,8 +372,20 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       isSystemUI: true,
       ownerGeneration: 0,
     );
-    _systemUIInstance.session = PocketSession(config: systemConfig);
+    _systemUIInstance.session = PocketSession(
+      config: systemConfig,
+      beforeGenerationMount: widget.catalogLoader == null
+          ? null
+          : _prepareSystemUIGeneration,
+    );
     _systemUIGeneration = _systemUIInstance.session.generation;
+    // A fixed-index bootstrap may advance between Flutter loading the host
+    // document and the signed root mount. Dynamic hosts must therefore resolve
+    // the catalog once more at generation 0 against the actually mounted
+    // payload. Explicit constructor users keep their historical static map.
+    _catalogGeneration = widget.catalogLoader == null
+        ? _systemUIGeneration
+        : null;
     _systemUIInstance.observedGeneration = _systemUIGeneration;
     _systemUIInstance.firstFrame = Completer<void>();
     unawaited(_systemUIInstance.firstFrame!.future.catchError((Object _) {}));
@@ -329,6 +465,9 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
 
   @override
   Widget build(BuildContext context) {
+    if (!_catalogReady) {
+      return ColoredBox(color: widget.backgroundColor);
+    }
     return PocketGuestSession(
       config: _systemUIInstance.config,
       session: _systemUIInstance.session,
@@ -537,6 +676,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'Configured SystemUI does not match the trusted host package',
       );
     }
+    await _ensureCatalogForGeneration(ownerGeneration);
+    _ensureOwnerGeneration(ownerGeneration);
     final grants = _parseGrants(params['grants']);
     final signature = jsonEncode(<Object?>[
       for (final grant
@@ -557,7 +698,9 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'generation': _systemUIInstance.session.generation,
       };
     }
-    final inFlight = _configurationFuture;
+    final inFlight = _configurationFutureGeneration == ownerGeneration
+        ? _configurationFuture
+        : null;
     if (inFlight != null) {
       await inFlight;
       _ensureOwnerGeneration(ownerGeneration);
@@ -575,16 +718,219 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
 
     final future = _configureStorage(grants, signature, ownerGeneration);
     _configurationFuture = future;
+    _configurationFutureGeneration = ownerGeneration;
     try {
       await future;
       _ensureOwnerGeneration(ownerGeneration);
     } finally {
-      if (identical(_configurationFuture, future)) _configurationFuture = null;
+      if (identical(_configurationFuture, future)) {
+        _configurationFuture = null;
+        _configurationFutureGeneration = null;
+      }
     }
     return <String, Object?>{
       'systemInstanceId': _systemInstanceId,
       'generation': _systemUIInstance.session.generation,
     };
+  }
+
+  Future<void> _prepareSystemUIGeneration(
+    String? rootPayloadSha256,
+    int targetGeneration,
+  ) async {
+    final loader = widget.catalogLoader;
+    if (loader == null) return;
+    if (rootPayloadSha256 == null || rootPayloadSha256.isEmpty) {
+      if (targetGeneration == 0) {
+        // Embedded root startup has no signed payload identity. The document
+        // already supplied the initial approved registry; later generations
+        // must not silently reuse it.
+        _pendingCatalog = null;
+        _catalogReady = true;
+        return;
+      }
+      throw const PocketCapabilityException(
+        'catalog_unavailable',
+        'A signed root payload is required before refreshing the app catalog',
+      );
+    }
+
+    PocketSystemHostCatalog? catalog;
+    try {
+      catalog = await loader(rootPayloadSha256);
+    } catch (error) {
+      if (error is PocketCapabilityException) rethrow;
+      throw PocketCapabilityException(
+        'catalog_unavailable',
+        'Unable to load the signed app catalog: $error',
+      );
+    }
+    if (catalog == null ||
+        catalog.rootPayloadSha256?.toLowerCase() !=
+            rootPayloadSha256.toLowerCase()) {
+      throw const PocketCapabilityException(
+        'catalog_unavailable',
+        'The app catalog does not match the mounted signed root payload',
+      );
+    }
+    _validateCatalog(catalog);
+    _pendingCatalog = _PendingSystemHostCatalog(
+      generation: targetGeneration,
+      catalog: catalog,
+    );
+    // Keep the old root visible while a later generation is being prepared.
+    // Generation 0 has no mounted view yet, so it stays gated until commit.
+    if (targetGeneration == 0) _catalogReady = false;
+  }
+
+  void _validateCatalog(PocketSystemHostCatalog catalog) {
+    if (catalog.systemUI.appId != widget.systemUI.appId) {
+      throw const PocketCapabilityException(
+        'system_ui_mismatch',
+        'The refreshed app catalog selects a different SystemUI package',
+      );
+    }
+    try {
+      _validateHostConfiguration(catalog.systemUI, catalog.applications);
+    } on Object catch (error) {
+      throw PocketCapabilityException(
+        'catalog_unavailable',
+        'The signed app catalog is invalid: $error',
+      );
+    }
+  }
+
+  void _commitPendingCatalog(int generation) {
+    final pending = _pendingCatalog;
+    if (pending == null || pending.generation != generation) return;
+    final catalog = pending.catalog;
+    final mountedHash = _systemUIInstance.session.mountedPayloadSha256;
+    if (catalog.rootPayloadSha256 == null ||
+        mountedHash == null ||
+        catalog.rootPayloadSha256!.toLowerCase() != mountedHash.toLowerCase()) {
+      // The session's active package is the final native fact. If it differs
+      // from the package that was selected before mount publication, do not
+      // expose either registry; the configure gate will remain closed.
+      _pendingCatalog = null;
+      _catalogGeneration = null;
+      _catalogReady = false;
+      _trustedApplications.clear();
+      _surfaceAppIds.clear();
+      _surfaceHandles.clear();
+      return;
+    }
+    final nextApplications = Map<String, PocketAppConfig>.unmodifiable(
+      catalog.applications,
+    );
+    final nextSurfaceAppIds = <int, String>{};
+    final nextSurfaceHandles = <String, int>{};
+    for (final entry in catalog.systemUI.compositorSurfaces.entries) {
+      nextSurfaceAppIds[entry.value] = entry.key;
+      nextSurfaceHandles[entry.key] = entry.value;
+    }
+    // Apply the new map immediately before the generation-keyed
+    // PocketGuestSession rebuild. Its fresh PocketView will therefore call
+    // native configureCompositor with this verified map before JS evaluates.
+    _systemUIInstance.config = _systemUIInstance.config.copyWith(
+      compositorSurfaces: Map<String, int>.unmodifiable(nextSurfaceHandles),
+    );
+    _trustedApplications
+      ..clear()
+      ..addAll(nextApplications);
+    _surfaceAppIds
+      ..clear()
+      ..addAll(nextSurfaceAppIds);
+    _surfaceHandles
+      ..clear()
+      ..addAll(nextSurfaceHandles);
+    _catalogGeneration = generation;
+    _catalogReady = true;
+    _pendingCatalog = null;
+  }
+
+  Future<void> _ensureCatalogForGeneration(int ownerGeneration) async {
+    _ensureOwnerGeneration(ownerGeneration);
+    if (_catalogGeneration == ownerGeneration) return;
+
+    final inFlight = _catalogFutureGeneration == ownerGeneration
+        ? _catalogFuture
+        : null;
+    if (inFlight != null) {
+      await inFlight;
+      _ensureOwnerGeneration(ownerGeneration);
+      return;
+    }
+
+    // Explicit PocketSystemHost consumers own a static native registry. The
+    // dynamic single-host bootstrap supplies a loader and therefore takes the
+    // signed-root/catalog path below. Keeping this branch preserves the old
+    // public constructor without creating a second update state machine.
+    final loader = widget.catalogLoader;
+    if (loader == null) {
+      _catalogGeneration = ownerGeneration;
+      return;
+    }
+
+    final rootPayloadSha256 = _systemUIInstance.session.mountedPayloadSha256;
+    if (rootPayloadSha256 == null || rootPayloadSha256.isEmpty) {
+      if (ownerGeneration == 0) {
+        // A host may intentionally run its embedded root while the first
+        // signed package is still absent. The bootstrap catalog is already
+        // verified in this case; later signed generations must carry a hash
+        // and cannot reuse this fallback.
+        _catalogGeneration = ownerGeneration;
+        return;
+      }
+      throw const PocketCapabilityException(
+        'catalog_unavailable',
+        'A signed root payload is required before refreshing the app catalog',
+      );
+    }
+
+    final future = _refreshCatalog(ownerGeneration, rootPayloadSha256, loader);
+    _catalogFuture = future;
+    _catalogFutureGeneration = ownerGeneration;
+    try {
+      await future;
+      _ensureOwnerGeneration(ownerGeneration);
+    } finally {
+      if (identical(_catalogFuture, future)) {
+        _catalogFuture = null;
+        _catalogFutureGeneration = null;
+      }
+    }
+  }
+
+  Future<void> _refreshCatalog(
+    int ownerGeneration,
+    String rootPayloadSha256,
+    PocketSystemHostCatalogLoader loader,
+  ) async {
+    PocketSystemHostCatalog? catalog;
+    try {
+      catalog = await loader(rootPayloadSha256);
+    } catch (error) {
+      if (error is PocketCapabilityException) rethrow;
+      throw PocketCapabilityException(
+        'catalog_unavailable',
+        'Unable to load the signed app catalog: $error',
+      );
+    }
+    _ensureOwnerGeneration(ownerGeneration);
+    if (catalog == null ||
+        catalog.rootPayloadSha256?.toLowerCase() !=
+            rootPayloadSha256.toLowerCase()) {
+      throw const PocketCapabilityException(
+        'catalog_unavailable',
+        'The app catalog does not match the mounted signed root payload',
+      );
+    }
+    _validateCatalog(catalog);
+    _pendingCatalog = _PendingSystemHostCatalog(
+      generation: ownerGeneration,
+      catalog: catalog,
+    );
+    _commitPendingCatalog(ownerGeneration);
   }
 
   Map<String, Set<String>> _parseGrants(Object? rawGrants) {
@@ -1334,7 +1680,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   Future<void> _awaitConfigured() async {
     if (_configurationSignature != null) return;
     final configuring = _configurationFuture;
-    if (configuring != null) await configuring;
+    if (configuring != null &&
+        _configurationFutureGeneration == _systemUIGeneration) {
+      await configuring;
+    }
     if (_configurationSignature == null) {
       throw const PocketCapabilityException(
         'not_configured',
@@ -1462,6 +1811,24 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final generation = _systemUIInstance.session.generation;
     if (generation != _systemUIGeneration) {
       _systemUIGeneration = generation;
+      _configurationSignature = null;
+      final prepared = _pendingCatalog?.generation == generation;
+      if (prepared) {
+        // The mount hook verified the descriptor before the new generation
+        // was published. Commit its child registry only at this official
+        // generation notification, after the old root has stopped producing
+        // requests.
+        _commitPendingCatalog(generation);
+      } else if (widget.catalogLoader != null) {
+        _catalogGeneration = null;
+        _catalogReady = false;
+        // Do not let a previous root generation's child IDs or compositor
+        // handles survive while the signed catalog for the new root is being
+        // selected at the next `runtime.configure` boundary.
+        _trustedApplications.clear();
+        _surfaceAppIds.clear();
+        _surfaceHandles.clear();
+      }
       _systemUIInstance.observedGeneration = generation;
       _systemUIInstance.firstFrameReady = false;
       final oldFrame = _systemUIInstance.firstFrame;
@@ -1485,6 +1852,16 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         );
       }
       _retireOwnedChildren();
+    }
+    if (_pendingCatalog?.generation == generation) {
+      _commitPendingCatalog(generation);
+    } else if (generation == _systemUIGeneration &&
+        widget.catalogLoader != null &&
+        _catalogReady &&
+        _catalogGeneration == null) {
+      // Generation 0 with an embedded root has no pending signed catalog, but
+      // its initial host document is already the approved registry.
+      _catalogGeneration = generation;
     }
     final failure = _systemUIInstance.session.failure;
     final firstFrame = _systemUIInstance.firstFrame;

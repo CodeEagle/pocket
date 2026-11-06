@@ -86,6 +86,168 @@ void main() {
     }
 
     test(
+      'fixed package index advances without replacing the coordinator',
+      () async {
+        final source = Uri.parse(
+          'http://127.0.0.1:39123/test/pocket/1.0.0/test.app/latest.json',
+        );
+        final transport = _MemoryTransport(<String, List<int>>{});
+        final coordinator = PocketUpdateCoordinator(
+          manifestUri: source,
+          appId: 'test.app',
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          store: PocketPackageStore(tempDir),
+          transport: transport,
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+        );
+        final records = <Map<String, Object?>>[];
+        Future<void> publish(int build) async {
+          final entry = <int>[1, 2, build];
+          final pak = <int>[4, 5, build];
+          final signed = await makeSignedManifest(
+            build: build,
+            version: '1.0.$build',
+            entryBytes: entry,
+            pakBytes: pak,
+          );
+          // The actual manifest lives at a different depth from the fixed index.
+          final manifest = source.resolve('releases/$build/latest.json');
+          transport.responses[manifest.toString()] = signed.envelopeBytes;
+          transport.responses[manifest
+                  .resolve('blobs/${_sha256(entry)}')
+                  .toString()] =
+              entry;
+          transport.responses[manifest
+                  .resolve('blobs/${_sha256(pak)}')
+                  .toString()] =
+              pak;
+          records.insert(0, <String, Object?>{
+            'id': 'test.app',
+            'version': '1.0.$build',
+            'build': build,
+            'manifestUrl': 'releases/$build/latest.json',
+            'payloadSha256': _sha256(signed.payloadBytes),
+          });
+          transport.responses[source.toString()] = utf8.encode(
+            jsonEncode({
+              'schemaVersion': 1,
+              'kind': 'pocket-editor-package-index',
+              'packageId': 'test.app',
+              'latest': records.first,
+              'versions': records,
+            }),
+          );
+        }
+
+        await publish(1);
+        final first = await coordinator.prepare();
+        expect(first.package.manifest.payload.build, 1);
+        await coordinator.commitHealthy(first);
+        await publish(2);
+        final second = await coordinator.prepare();
+        expect(second.package.manifest.payload.build, 2);
+        await coordinator.commitHealthy(second);
+        // The catalog cannot turn an older signed package into an allowed rollback.
+        transport.responses[source.toString()] = utf8.encode(
+          jsonEncode({
+            'schemaVersion': 1,
+            'kind': 'pocket-editor-package-index',
+            'packageId': 'test.app',
+            'latest': records.last,
+            'versions': records,
+          }),
+        );
+        await expectLater(
+          coordinator.prepare(),
+          throwsA(isA<PocketPackageFormatException>()),
+        );
+        expect(
+          (await coordinator.store
+                  .scoped('test.app')
+                  .active(verifier: coordinator.verifier))!
+              .manifest
+              .payload
+              .build,
+          2,
+        );
+      },
+    );
+
+    test(
+      'package index rejects escaped and inconsistent manifest pointers',
+      () async {
+        final source = Uri.parse(
+          'http://127.0.0.1:39123/test/pocket/1/test.app/latest.json',
+        );
+        final transport = _MemoryTransport(<String, List<int>>{});
+        final coordinator = PocketUpdateCoordinator(
+          manifestUri: source,
+          appId: 'test.app',
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          store: PocketPackageStore(tempDir),
+          transport: transport,
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+        );
+        void point(String manifestUrl) {
+          transport.responses[source.toString()] = utf8.encode(
+            jsonEncode({
+              'schemaVersion': 1,
+              'kind': 'pocket-editor-package-index',
+              'packageId': 'test.app',
+              'latest': {
+                'id': 'test.app',
+                'version': '1.0.99',
+                'build': 99,
+                'manifestUrl': manifestUrl,
+              },
+            }),
+          );
+        }
+
+        point('http://other.test/latest.json');
+        await expectLater(
+          coordinator.prepare(),
+          throwsA(
+            isA<PocketPackageException>().having(
+              (e) => e.code,
+              'code',
+              'manifest-url',
+            ),
+          ),
+        );
+        final signed = await makeSignedManifest(
+          build: 1,
+          version: '1.0.1',
+          entryBytes: [1],
+          pakBytes: [2],
+        );
+        transport.responses[source
+                .resolve('releases/1/latest.json')
+                .toString()] =
+            signed.envelopeBytes;
+        point('releases/1/latest.json');
+        await expectLater(
+          coordinator.prepare(),
+          throwsA(
+            isA<PocketPackageException>().having(
+              (e) => e.code,
+              'code',
+              'manifest-index',
+            ),
+          ),
+        );
+        expect(
+          await coordinator.store
+              .scoped('test.app')
+              .active(verifier: coordinator.verifier),
+          isNull,
+        );
+      },
+    );
+
+    test(
       '1. Downgrade rejection: build 2 active -> build 1 manifest rejected with PocketPackageFormatException',
       () async {
         final store = PocketPackageStore(tempDir);

@@ -32,13 +32,13 @@ function App() {
   return (
     <MobileThemeProvider theme={() => dark() ? MOBILE_THEME_DARK : MOBILE_THEME_LIGHT}>
       <MobileScaffold appBar={
-        <MobileAppBar title="Pocket App" subtitle="SDK scaffold" trailing={
-          <MobileButton label={dark() ? "Light" : "Dark"} kind="text" onPress={() => setDark(!dark())} />
+        <MobileAppBar title="Pocket 应用" subtitle="应用模板" trailing={
+          <MobileButton label={dark() ? "浅色" : "深色"} kind="text" onPress={() => setDark(!dark())} />
         } />
       }>
         <View style={contentStyle()} class={dark() ? "flex-col gap-2 p-4 bg-[#0d1726]" : "flex-col gap-2 p-4 bg-slate-50"}>
-          <Text class={dark() ? "text-xl text-white font-bold" : "text-xl text-slate-950 font-bold"}>Hello PocketJS</Text>
-          <Text class={dark() ? "text-sm text-slate-300" : "text-sm text-slate-600"}>Edit app.tsx, then run pocket build.</Text>
+          <Text class={dark() ? "text-xl text-white font-bold" : "text-xl text-slate-950 font-bold"}>你好，PocketJS</Text>
+          <Text class={dark() ? "text-sm text-slate-300" : "text-sm text-slate-600"}>编辑 app.tsx，然后运行 pocket build。</Text>
         </View>
       </MobileScaffold>
     </MobileThemeProvider>
