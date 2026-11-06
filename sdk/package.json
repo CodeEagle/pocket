@@ -24,6 +24,8 @@
     "editor": "bun editor/server.ts",
     "init": "bun pocket.ts init",
     "build": "bun pocket.ts build",
+    "build:web": "bun scripts/build_web.ts",
+    "export:web-sdk": "bun scripts/export_web_sdk.ts",
     "preview:wechat": "bun scripts/preview_wechat.ts"
   }
 }

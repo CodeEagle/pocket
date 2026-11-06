@@ -250,6 +250,10 @@ function wechatBuiltinCapability(source, capability, params = {}) {
     const value = source.config.metadata;
     const metadata = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const appId = String(source.config.appId);
+    const provider = typeof source.config.provider === 'string' && source.config.provider ? source.config.provider : 'wechat';
+    const host = typeof source.config.host === 'string' && source.config.host ? source.config.host : provider;
+    const hostRuntime = typeof source.config.hostRuntime === 'string' && source.config.hostRuntime
+      ? source.config.hostRuntime : 'WXWebAssembly + Canvas2D';
     const qjbc = metadata.qjbc && typeof metadata.qjbc === 'object' && !Array.isArray(metadata.qjbc)
       ? metadata.qjbc : {};
     const version = metadata.version === undefined ? qjbc.version : metadata.version;
@@ -257,8 +261,8 @@ function wechatBuiltinCapability(source, capability, params = {}) {
     if (capability === 'runtime.info') {
       return {
         appId,
-        provider: 'wechat',
-        host: 'wechat',
+        provider,
+        host,
         source: 'embedded',
         entryFormat: qjbc.entryFormat || 'quickjs-bytecode',
         runtimeAbi: qjbc.runtimeAbi || null,
@@ -267,7 +271,7 @@ function wechatBuiltinCapability(source, capability, params = {}) {
         build: build === undefined ? null : build,
         entryBytes: qjbc.bytecodeBytes === undefined ? null : qjbc.bytecodeBytes,
         tickHz: source?.config?.tickHz || qjbc.tickHz || 60,
-        hostRuntime: 'WXWebAssembly + Canvas2D',
+        hostRuntime,
         logicalWidth: Number(source?.logicalWidth || 0),
         logicalHeight: Number(source?.logicalHeight || 0),
         scale: Number(source?.scale || 1),
@@ -280,13 +284,13 @@ function wechatBuiltinCapability(source, capability, params = {}) {
       return {
         supported: false,
         nativeFlutterTiming: false,
-        provider: 'wechat',
-        reason: 'WXWebAssembly target does not expose Flutter FrameTiming',
+        provider,
+        reason: `${hostRuntime} does not expose Flutter FrameTiming`,
         context: params && params.context === undefined ? null : (params || {}).context,
       };
     }
     if (capability === 'plugins.list') {
-      return { protocolVersion: 1, appId, provider: 'wechat', plugins: [] };
+      return { protocolVersion: 1, appId, provider, plugins: [] };
     }
     if (capability === 'plugins.packageInfo') {
       const packageInfo = metadata.package && typeof metadata.package === 'object' && !Array.isArray(metadata.package)
@@ -304,7 +308,7 @@ function wechatBuiltinCapability(source, capability, params = {}) {
         }
       } catch (_) { /* Older base libraries may not expose account metadata. */ }
       return {
-        provider: 'wechat',
+        provider,
         appId,
         appName: packageInfo.name || packageInfo.title || appId,
         packageName: appId,
@@ -326,10 +330,10 @@ function wechatBuiltinCapability(source, capability, params = {}) {
         preparedUpdate: null,
         versions: [active],
         lastError: null,
-        provider: 'wechat',
+        provider,
       };
     }
-    throw source.error('unsupported', `Unsupported WeChat builtin capability: ${capability}`);
+    throw source.error('unsupported', `Unsupported ${provider === 'web' ? 'Web' : 'WeChat'} builtin capability: ${capability}`);
 }
 
 module.exports = { PocketWechatSystem, wechatBuiltinCapability, isWechatBuiltinCapability };

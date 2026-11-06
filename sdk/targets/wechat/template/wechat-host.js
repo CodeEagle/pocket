@@ -145,6 +145,10 @@ class PocketWechatHost {
     return this.lastClockUs;
   }
 
+  hostLabel() {
+    return this.config.provider === "web" ? "Web" : "WeChat";
+  }
+
   async start(width, height, devicePixelRatio) {
     this.logicalWidth = Math.max(1, Math.floor(width));
     this.logicalHeight = Math.max(1, Math.floor(height));
@@ -432,7 +436,7 @@ class PocketWechatHost {
       return;
     }
     if (this.pending.size >= MAX_REQUESTS) {
-      this.respond(request, false, null, { code: "request_quota", message: "WeChat host request limit reached" });
+      this.respond(request, false, null, { code: "request_quota", message: `${this.hostLabel()} host request limit reached` });
       return;
     }
     if (!this.declared(request.capability)) {
@@ -447,7 +451,7 @@ class PocketWechatHost {
       if (!this.pending.delete(request.requestId)) return;
       record.cancelled = true;
       record.controller.abort();
-      this.respond(request, false, null, { code: "timeout", message: "WeChat host request timed out" });
+      this.respond(request, false, null, { code: "timeout", message: `${this.hostLabel()} host request timed out` });
     }, REQUEST_TIMEOUT_MS);
     try {
       const authorize = permissionHandler;
@@ -460,7 +464,7 @@ class PocketWechatHost {
         });
         if (!allowed) throw this.error("permission_denied", "Permission request was cancelled");
       } else if (!request.capability.startsWith("platform.storage.")) {
-        throw this.error("unconfigured", `No WeChat handler is configured for ${request.capability}`);
+        throw this.error("unconfigured", `No ${this.hostLabel()} handler is configured for ${request.capability}`);
       }
       if (record.cancelled || generation !== this.generation) return;
       const result = systemTransport
@@ -489,7 +493,7 @@ class PocketWechatHost {
     if (isWechatBuiltinCapability(capability)) return wechatBuiltinCapability(this, capability, params);
     if (capability.startsWith("platform.storage.")) return this.storage(capability, params);
     const handler = capabilityHandlers[capability];
-    if (typeof handler !== "function") throw this.error("unconfigured", `No WeChat handler is configured for ${capability}`);
+    if (typeof handler !== "function") throw this.error("unconfigured", `No ${this.hostLabel()} handler is configured for ${capability}`);
     return handler(params, { signal, wx: this.wx });
   }
 
@@ -512,7 +516,7 @@ class PocketWechatHost {
         fail: (error) => {
           const message = String(error && error.errMsg || "");
           if (message.includes("not found") || message.includes("data not found")) resolve(null);
-          else reject(this.error("storage_failed", message || "WeChat storage read failed"));
+          else reject(this.error("storage_failed", message || `${this.hostLabel()} storage read failed`));
         },
       }));
     }
@@ -521,12 +525,12 @@ class PocketWechatHost {
       let value;
       try { value = JSON.stringify(params.value); }
       catch (_) { throw this.error("invalid_argument", "Storage value must be JSON serializable"); }
-      if (value === undefined || utf8Length(value) > MAX_STORAGE_ITEM_BYTES) throw this.error("quota_exceeded", "WeChat storage values are limited to 1 MiB per key");
+      if (value === undefined || utf8Length(value) > MAX_STORAGE_ITEM_BYTES) throw this.error("quota_exceeded", `${this.hostLabel()} storage values are limited to 1 MiB per key`);
       return new Promise((resolve, reject) => this.wx.setStorage({
         key,
         data: value,
         success: () => resolve(null),
-        fail: (error) => reject(this.error("storage_failed", String(error && error.errMsg || "WeChat storage write failed"))),
+        fail: (error) => reject(this.error("storage_failed", String(error && error.errMsg || `${this.hostLabel()} storage write failed`))),
       }));
     }
     if (operation === "remove") {
@@ -534,17 +538,17 @@ class PocketWechatHost {
       return new Promise((resolve, reject) => this.wx.removeStorage({
         key,
         success: () => resolve(null),
-        fail: (error) => reject(this.error("storage_failed", String(error && error.errMsg || "WeChat storage removal failed"))),
+        fail: (error) => reject(this.error("storage_failed", String(error && error.errMsg || `${this.hostLabel()} storage removal failed`))),
       }));
     }
     if (operation === "keys") {
       const prefix = `pocketjs:v1:${this.config.appId}:${params.namespace || "app"}:`;
       return new Promise((resolve, reject) => this.wx.getStorageInfo({
         success: (info) => resolve((info.keys || []).filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)).sort()),
-        fail: (error) => reject(this.error("storage_failed", String(error && error.errMsg || "WeChat storage listing failed"))),
+        fail: (error) => reject(this.error("storage_failed", String(error && error.errMsg || `${this.hostLabel()} storage listing failed`))),
       }));
     }
-    throw this.error("unsupported", `Unsupported WeChat storage operation: ${operation}`);
+    throw this.error("unsupported", `Unsupported ${this.hostLabel()} storage operation: ${operation}`);
   }
 
   respond(request, ok, result, error) {

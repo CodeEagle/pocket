@@ -1,0 +1,32 @@
+# Standalone Web SDK export
+
+## Source-first audit
+
+The retained parent `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` was inspected with `pocket_host/` excluded. Its `web_wasm_preview/index.html` is a ring-buffer/update simulator and does not boot the PocketJS Runtime or execute QJBC, so it was not reused as a runtime. The retained `wechat_host/` is bound to `WXWebAssembly`, `wx.*`, WXML and WeChat storage/BLE; it was treated as platform evidence, not a standard-browser implementation.
+
+The implementation instead retains these working repository paths:
+
+- `sdk/scripts/build_guest.ts`: the pinned Guest compiler and QJBC/PAK admission pipeline.
+- `sdk/scripts/build_wechat.ts`: the verified QuickJS 0.12.2 WASM build and embedded-bytecode path.
+- `sdk/targets/wechat/template/{wechat-host,wechat-system,binary-bridge}.js`: bounded request transport, storage admission, runtime lifecycle and Canvas2D frame delivery.
+- `sdk/editor/`: the real `pocket_probe` preview, input/IME projection, version management and signed LAN publishing backend.
+- `sdk/packages/pocket_ui/`: JS-owned UI and component behavior.
+
+## Necessary Web adaptation
+
+`sdk/scripts/build_web.ts` invokes the same QJBC + PAK + WASM build stage and converts only the outer host boundary. `sdk/targets/web/browser_runtime.js` supplies standard `WebAssembly.instantiate`, Canvas2D, Pointer events, a native browser input overlay, resize/visibility lifecycle and app-scoped `localStorage`. Guest-visible runtime metadata reports `web`; the WeChat target keeps its existing defaults.
+
+No source-evaluation or mock-runtime fallback is provided. Missing browser hardware stays unsupported until a consumer registers a real capability handler.
+
+`sdk/scripts/export_web_sdk.ts` creates a reproducible source repository containing the Web/WeChat builders, browser target, Editor, native probe source, pinned bootstrap, JS UI package, shader resource, license and selected integration documentation. It deliberately excludes `.cache`, native `target`, `node_modules`, Flutter/Dart packages and generated binaries. With `--publish`, it uses the CodeEagle GitHub credential for API creation and an SSH Git remote.
+
+## Validation
+
+- Focused Web/export tests: 3 passed, 0 failed.
+- Architecture boundary check passed.
+- A clean exported directory downloaded and patched pinned PocketJS `99924de47c62fa36f526a8791055d91cbbdb3836`, installed dependencies, and built release `pocket_probe` without Flutter.
+- The exported Editor served `/health` and its browser UI without a Flutter root.
+- A real Lobby build produced a 16,465,194-byte standard WASM engine plus ESM `pocket-web.js`, config, types and provenance metadata.
+- Playwright Chromium booted the QJBC Guest with no page/runtime error. The Canvas rendered 130,560 non-empty pixels at 480×272. At 480×800, a pointer down/up on “Increment lobby counter” changed the real Guest frame and both `visits` and `count` from 0 to 1.
+
+The release build emitted a local `rust-objcopy` warning because that optional stripping tool could not find `libLLVM.dylib`; Cargo still completed the optimized `pocket_probe` successfully. This does not affect runtime correctness, but the local Rust installation should be repaired before requiring stripped release binaries.
