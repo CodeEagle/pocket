@@ -1,7 +1,6 @@
-diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
 --- a/engine/guest-rquickjs/src/lib.rs
 +++ b/engine/guest-rquickjs/src/lib.rs
-@@ -1,4 +1,7 @@
+@@ -1,5 +1,8 @@
  //! A QuickJS realm whose UI calls dispatch through the runtime's generated contract.
 -use std::sync::{Arc, Mutex};
 +use std::sync::{
@@ -10,14 +9,16 @@ diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
 +};
  use std::time::{Duration, Instant};
  use pocket_runtime::generated_ops::{
-@@ -37,5 +40,6 @@ pub struct RquickjsGuest {
+     ArgKind, OpDescriptor, ResultKind, BINDING_GENERATION, IDF_OPS, LEGACY_C_OPS, OP_DESCRIPTORS,
+@@ -37,6 +40,7 @@
      last_error: Option<String>,
      // Shared by the interrupt handler and the host-side microtask drain.
      turn_deadline: Arc<Mutex<Option<Instant>>>,
 +    turn_interrupted: Arc<AtomicBool>,
  }
  impl Default for RquickjsGuest {
-@@ -51,9 +55,18 @@ impl RquickjsGuest {
+     fn default() -> Self {
+@@ -51,10 +55,19 @@
              profile,
              last_error: None,
              turn_deadline: Arc::new(Mutex::new(None)),
@@ -27,22 +28,29 @@ diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
      fn begin_turn(&self, duration: Duration) {
 +        self.turn_interrupted.store(false, Ordering::Release);
          *self.turn_deadline.lock().unwrap() = Some(Instant::now() + duration);
-     }
++    }
 +    fn classify_error(&self, detail: String) -> String {
 +        if self.turn_interrupted.load(Ordering::Acquire) {
 +            format!("Pocket guest execution interrupted by budget: {detail}")
 +        } else {
 +            detail
 +        }
-+    }
+     }
      pub fn last_error(&self) -> Option<&str> {
-diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
+         self.last_error.as_deref()
 --- a/engine/guest-rquickjs/src/lib.rs
 +++ b/engine/guest-rquickjs/src/lib.rs
-@@ -94,1 +94,1 @@
+@@ -80,7 +80,7 @@
+         result: Result<T, E>,
+     ) -> Result<T, RuntimeError> {
+         result.map_err(|error| {
 -            self.last_error = Some(error.to_string());
 +            self.last_error = Some(self.classify_error(error.to_string()));
-@@ -143,5 +156,10 @@ impl Guest for RquickjsGuest {
+             RuntimeError::Guest
+         })
+     }
+@@ -144,8 +144,13 @@
+         runtime.set_max_stack_size(4 * 1024 * 1024);
          // The guest cannot block Flutter forever with a loop or promise storm.
          let deadline = Arc::clone(&self.turn_deadline);
 +        let interrupted = Arc::clone(&self.turn_interrupted);
@@ -54,18 +62,23 @@ diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
 +            }
 +            expired
          })));
-@@ -170,5 +188,5 @@ impl Guest for RquickjsGuest {
+         self.begin_turn(Duration::from_secs(5));
+         let context = self.remember(Context::full(&runtime))?;
+@@ -171,7 +176,7 @@
+     fn frame(&mut self, frame: &GuestFrame<'_>) -> Result<(), RuntimeError> {
          self.begin_turn(Duration::from_millis(250));
          let context = self.context.as_ref().ok_or(RuntimeError::Guest)?;
 -        let result = context.with(|ctx| call_frame(&ctx, frame));
 +        let result = context.with(|ctx| call_frame(&ctx, frame).map_err(|error| engine_error(&ctx, error)));
          self.remember(result)?;
          self.collect()
-@@ -181,9 +199,16 @@ impl Guest for RquickjsGuest {
+     }
+@@ -181,11 +186,18 @@
+                 // Individual tiny jobs can evade QuickJS's instruction callback;
                  // never reset the deadline while draining a guest turn.
                  if self.turn_deadline.lock().unwrap().is_some_and(|end| Instant::now() >= end) {
-+                    self.turn_interrupted.store(true, Ordering::Release);
 -                    self.last_error = Some("Pocket guest turn exceeded execution budget".to_owned());
++                    self.turn_interrupted.store(true, Ordering::Release);
 +                    self.last_error = Some(
 +                        "Pocket guest execution interrupted by budget while draining pending jobs"
 +                            .to_owned(),
@@ -80,25 +93,23 @@ diff --git a/engine/guest-rquickjs/src/lib.rs b/engine/guest-rquickjs/src/lib.rs
 +                    self.last_error = Some(self.classify_error(detail));
                      return Err(RuntimeError::Guest);
                  }
-@@ -192,5 +217,6 @@ impl Guest for RquickjsGuest {
+             }
+@@ -194,6 +206,7 @@
      }
      fn shutdown(&mut self) {
          *self.turn_deadline.lock().unwrap() = None;
 +        self.turn_interrupted.store(false, Ordering::Release);
          self.context = None;
          self.runtime = None;
-@@ -284,11 +310,22 @@ pub fn call_frame(ctx: &Ctx<'_>, frame: &GuestFrame<'_>) -> rquickjs::Result<()> {
- }
- 
+     }
+@@ -288,9 +301,20 @@
  fn engine_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
      if matches!(error, rquickjs::Error::Exception) {
          let value = ctx.catch();
 -        return Coerced::<String>::from_js(ctx, value)
--            .map(|value| value.0)
--            .unwrap_or_else(|_| error.to_string());
 +        let fallback = Coerced::<String>::from_js(ctx, value.clone())
-+            .map(|value| value.0)
-+            .unwrap_or_else(|_| error.to_string());
+             .map(|value| value.0)
+             .unwrap_or_else(|_| error.to_string());
 +        if let Some(exception) = value.as_exception() {
 +            let message = exception
 +                .message()

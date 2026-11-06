@@ -89,13 +89,57 @@ jobs:
         run: npm install --ignore-scripts --legacy-peer-deps --no-audit --no-fund
 
       - name: Build Noble N-API binding
+        if: runner.os != 'Windows'
         working-directory: sdk
         continue-on-error: ${{ runner.os == 'Linux' }}
         run: node node_modules/node-gyp/bin/node-gyp.js rebuild --directory=node_modules/@abandonware/noble
 
+      - name: Build Noble WinRT binding
+        if: runner.os == 'Windows'
+        working-directory: sdk
+        shell: pwsh
+        run: |
+          node node_modules/node-gyp/bin/node-gyp.js configure --directory=node_modules/@abandonware/noble
+          if ($LASTEXITCODE -ne 0) { throw "Noble configure failed" }
+          # Noble pins an old SDK in its gyp file. Use the runner's installed
+          # SDK via the official MSBuild property, leaving dependency sources intact.
+          node node_modules/node-gyp/bin/node-gyp.js build --directory=node_modules/@abandonware/noble -- /p:WindowsTargetPlatformVersion=10.0.19041.0
+          if ($LASTEXITCODE -ne 0) { throw "Noble WinRT build failed" }
+
       - name: Build platform binaries
+        if: runner.os != 'Windows'
         working-directory: sdk
         run: cargo build --locked --release --manifest-path native/Cargo.toml --bin pocket_probe --bin pocketjs_bytecode
+
+      - name: Build Windows binaries with static CRT
+        if: runner.os == 'Windows'
+        working-directory: sdk
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --locked --release --target x86_64-pc-windows-msvc --manifest-path native/Cargo.toml --bin pocket_probe --bin pocketjs_bytecode
+          if ($LASTEXITCODE -ne 0) { throw "Windows native build failed" }
+          New-Item -ItemType Directory -Force native/target/release | Out-Null
+          Copy-Item native/target/x86_64-pc-windows-msvc/release/pocket_probe.exe native/target/release/
+          Copy-Item native/target/x86_64-pc-windows-msvc/release/pocketjs_bytecode.exe native/target/release/
+
+      - name: Verify Windows runtime dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) { throw "dumpbin not found" }
+          New-Item -ItemType Directory -Force sdk/.pocket-build | Out-Null
+          $files = @("sdk/native/target/release/pocket_probe.exe", "sdk/native/target/release/pocketjs_bytecode.exe", "sdk/node_modules/@abandonware/noble/build/Release/binding.node")
+          foreach ($file in $files) {
+            $deps = & $dumpbin /dependents $file
+            if ($LASTEXITCODE -ne 0) { throw "Cannot inspect $file" }
+            $deps | Tee-Object -FilePath sdk/.pocket-build/windows-acceptance-dependencies.txt -Append
+            if ($deps -match '(?i)\b(?:VCRUNTIME|MSVCP)\d+[^\s]*\.dll') { throw "Unexpected external VC runtime dependency in $file" }
+          }
 
       - name: Assemble npm package
         working-directory: sdk
@@ -115,7 +159,7 @@ jobs:
           npm run setup
           if ($LASTEXITCODE -ne 0) { throw "Clean Windows setup failed" }
           Pop-Location
-          node sdk/scripts/tests/windows_package_smoke.mjs --sdk-root=./sdk/.pocket-build/windows-consumer
+          node sdk/scripts/tests/windows_package_smoke.mjs --sdk-root=./sdk/.pocket-build/windows-consumer | Tee-Object -FilePath sdk/.pocket-build/windows-acceptance.json
           if ($LASTEXITCODE -ne 0) { throw "Windows runtime acceptance failed" }
 
       - uses: actions/upload-artifact@v4

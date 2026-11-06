@@ -141,15 +141,34 @@ for (const template of ["app", "game"]) {
     artifacts: { bytecode: builds[template].bytecode, pak: builds[template].pak, revision: 1, tickHz: 60 } });
   const url = suffix => "http://127.0.0.1/api/projects/" + template + "/preview/" + suffix;
   const call = (suffix, init) => manager.handle(new Request(url(suffix), init), template, suffix);
+  let reader;
   const snapshot = async () => { const response = await call("snapshot"); assert.equal(response.status, 200); const value = await response.json(); assert.equal(value.status.state, "ready", JSON.stringify(value.status)); return value.frame; };
   const has = (frame, text) => frame.ops.some(op => op.type === "text" && op.text === text);
   const waitFor = async predicate => { const deadline = Date.now() + 5000; do { const frame = await snapshot(); if (predicate(frame)) return frame; await wait(30); } while (Date.now() < deadline); throw new Error("Preview frame did not reach expected state for " + template); };
   const click = async text => { const frame = await waitFor(value => has(value, text)); const op = frame.ops.find(value => value.type === "text" && value.text === text); for (const phase of ["down", "up"]) { const response = await call("input", { method: "POST", body: JSON.stringify({ type: "pointer", phase, id: 0, x: op.x + op.w / 2, y: op.y + op.h / 2 }) }); assert.equal(response.status, 200); } };
   try {
+    const stream = await call("stream");
+    assert.equal(stream.status, 200);
+    reader = stream.body?.getReader();
+    await reader?.read();
     if (template === "app") { await click("深色"); await waitFor(frame => has(frame, "浅色")); await click("浅色"); await waitFor(frame => has(frame, "深色")); }
-    else { await click("开始游戏"); await click("命中"); await waitFor(frame => frame.ops.some(op => op.text?.startsWith("得分：1 | 剩余："))); await click("暂停"); await waitFor(frame => has(frame, "已暂停")); await click("继续"); await waitFor(frame => has(frame, "进行中")); }
+    else {
+      await click("开始游戏");
+      await click("命中");
+      await waitFor(frame => frame.ops.some(op => op.text?.startsWith("得分：1 | 剩余：")));
+      await click("暂停");
+      const paused = await waitFor(frame => has(frame, "已暂停"));
+      const pausedScore = paused.ops.find(op => op.type === "text" && op.text?.startsWith("得分："))?.text;
+      assert.ok(pausedScore, "paused game frame must expose its score/timer text");
+      await wait(1200);
+      const frozen = await snapshot();
+      assert.ok(has(frozen, pausedScore), "game timer changed while paused");
+      await click("继续");
+      const continued = await waitFor(frame => has(frame, "进行中") && frame.ops.some(op => op.type === "text" && op.text?.startsWith("得分：") && op.text !== pausedScore));
+      assert.ok(continued.ops.some(op => op.type === "text" && op.text?.startsWith("得分：") && op.text !== pausedScore), "game timer did not resume");
+    }
     result.push({ template, qjbcBytes: builds[template].qjbcBytes, pakBytes: builds[template].pakBytes, inputChangesFrame: true });
-  } finally { await manager.dispose(); }
+  } finally { await reader?.cancel(); await manager.dispose(); }
 }
 console.log("WINDOWS_PREVIEW_ACCEPTANCE " + JSON.stringify({ ok: true, results: result }));
 `;

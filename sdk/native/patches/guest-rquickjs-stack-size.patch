@@ -1,6 +1,6 @@
 --- a/engine/guest-rquickjs/src/lib.rs
 +++ b/engine/guest-rquickjs/src/lib.rs
-@@ -82,4 +82,7 @@ impl Guest for RquickjsGuest {
+@@ -82,6 +82,9 @@
          if environment.heap_limit != 0 {
              runtime.set_memory_limit(environment.heap_limit);
          }
@@ -8,3 +8,5 @@
 +        // Solid mount graph to resolve its initial reactive styles.
 +        runtime.set_max_stack_size(4 * 1024 * 1024);
          let context = self.remember(Context::full(&runtime))?;
+         let result = context.with(|ctx| mount_ui(&ctx, ops, environment, self.profile));
+         self.remember(result)?;
