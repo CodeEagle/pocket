@@ -47,7 +47,7 @@ import {
 } from "./responsive.ts";
 import { useRouteActive } from "./route.tsx";
 import type { BridgeObject } from "./host.ts";
-import { MOBILE_MOTION, motionEaseInOut, stepMotionSpring } from "./motion.ts";
+import { MOBILE_MOTION, motionEaseInOut, motionEaseOut, stepMotionSpring } from "./motion.ts";
 import { useAccessibilityPreferences } from "./accessibility.ts";
 export { MOBILE_MOTION } from "./motion.ts";
 
@@ -496,7 +496,7 @@ export type MobilePresenceTransition = {
  */
 export function usePresenceTransition(
   open: () => boolean,
-  options: { durationMs?: number; animateOnMount?: boolean } = {},
+  options: { durationMs?: number; animateOnMount?: boolean; easing?: (phase: number) => number } = {},
 ): MobilePresenceTransition {
   const accessibility = useAccessibilityPreferences();
   const routeActive = useRouteActive();
@@ -553,7 +553,7 @@ export function usePresenceTransition(
       // Avoid an extra transparent interception frame from floating-point
       // residue after exactly N fixed ticks.
       if (Math.abs(phase - target) < 0.000001) phase = target;
-      setProgress(motionEaseInOut(phase));
+      setProgress((options.easing ?? motionEaseInOut)(phase));
       if (phase === target && !requested) setMounted(false);
     }, {
       active: () => routeActive() && mounted() && phase !== (requested ? 1 : 0),
@@ -1890,6 +1890,22 @@ function MobileModalBackdrop(props: { progress: () => number }): JSX.Element {
   );
 }
 
+/** Scale the panel paint, keeping text and action geometry at natural size. */
+function MobileModalPanel(props: { progress: () => number; class: string; children?: JSX.Element }): JSX.Element {
+  const theme = useMobileThemeAccessor();
+  return (
+    <View class={props.class} style={{ opacity: props.progress() }}>
+      <View
+        class={theme().name === "dark"
+          ? "absolute inset-0 rounded-xl shadow-lg bg-[#09090B] border-[#27272A]"
+          : "absolute inset-0 rounded-xl shadow-lg bg-white border-[#E4E4E7]"}
+        style={{ scale: 0.96 + 0.04 * props.progress() }}
+      />
+      <View class="relative flex-col gap-3 w-full p-4">{props.children}</View>
+    </View>
+  );
+}
+
 export function MobilePopup(props: {
   open: boolean | (() => boolean);
   title: string;
@@ -1902,7 +1918,9 @@ export function MobilePopup(props: {
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
   const sizeClass = useWindowSizeClass();
-  const presence = usePresenceTransition(() => typeof props.open === "function" ? props.open() : props.open);
+  const presence = usePresenceTransition(() => typeof props.open === "function" ? props.open() : props.open, {
+    durationMs: MOBILE_MOTION.overlay, easing: motionEaseOut,
+  });
   const isBottomSheet = () => {
     const placement = props.placement ?? "auto";
     if (placement === "bottom") return true;
@@ -1922,16 +1940,7 @@ export function MobilePopup(props: {
           ? "absolute inset-0 flex-col items-center justify-end p-3 bg-transparent"
           : "absolute inset-0 flex-col items-center justify-center p-4 bg-transparent"}
       >
-        <View
-          class={theme().name === "dark"
-            ? "flex-col gap-3 w-[344] p-4 rounded-xl shadow-lg bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-spring"
-            : "flex-col gap-3 w-[344] p-4 rounded-xl shadow-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-spring"}
-          style={{
-            opacity: presence.progress(),
-            translateY: (1 - presence.progress()) * 10,
-            scale: 0.92 + 0.08 * presence.progress(),
-          }}
-        >
+        <MobileModalPanel class="relative flex-col w-[344]" progress={presence.progress}>
           <View class="flex-row items-center justify-center w-full">
             <View
               class={theme().name === "dark" ? "w-[40] h-[4] bg-[#27272A]" : "w-[40] h-[4] bg-[#E4E4E7]"}
@@ -1979,7 +1988,7 @@ export function MobilePopup(props: {
           <MobileOutlinedButton label="Dismiss popup" onPress={() => {
             if (presence.interactive()) props.onClose();
           }} />
-        </View>
+        </MobileModalPanel>
       </Modal>
     </Show>
   );
@@ -1999,7 +2008,9 @@ export function MobileDialog(props: {
   onClose: () => void;
 }): JSX.Element {
   const theme = useMobileThemeAccessor();
-  const presence = usePresenceTransition(() => typeof props.open === "function" ? props.open() : props.open);
+  const presence = usePresenceTransition(() => typeof props.open === "function" ? props.open() : props.open, {
+    durationMs: MOBILE_MOTION.overlay, easing: motionEaseOut,
+  });
   return (
     <Show when={presence.mounted()}>
       <MobileModalBackdrop progress={presence.progress} />
@@ -2009,15 +2020,7 @@ export function MobileDialog(props: {
         class="absolute inset-0 z-50 flex-col items-center justify-center p-4"
         panelClass="absolute inset-0 flex-col items-center justify-center p-4 bg-transparent"
       >
-        <View
-          class={theme().name === "dark"
-            ? "flex-col gap-3 w-full max-w-[280] p-4 rounded-xl shadow-lg bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-spring"
-            : "flex-col gap-3 w-full max-w-[280] p-4 rounded-xl shadow-lg bg-white border-[#E4E4E7] transition-colors duration-200 ease-spring"}
-          style={{
-            opacity: presence.progress(),
-            scale: 0.92 + 0.08 * presence.progress(),
-          }}
-        >
+        <MobileModalPanel class="relative flex-col w-full max-w-[280]" progress={presence.progress}>
           <Text class={theme().name === "dark" ? "text-sm text-[#FAFAFA] text-center font-bold" : "text-sm text-[#09090B] text-center font-bold"}>{props.title}</Text>
           {props.body ? <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA] text-center" : "text-xs text-[#71717A] text-center"}>{wrapTextLines(props.body, 36, 240)}</Text> : null}
           {props.children}
@@ -2051,7 +2054,7 @@ export function MobileDialog(props: {
               />
             </View>
           )}
-        </View>
+        </MobileModalPanel>
       </Modal>
     </Show>
   );

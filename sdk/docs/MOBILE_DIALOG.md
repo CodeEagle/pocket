@@ -7,10 +7,47 @@ and the existing optical provider derived from that parent's
 visibility, focus and dismissal. Flutter only samples/composites the backdrop;
 there is no second native dialog or animation state machine.
 
-The latest reference is `Screen Recording 2026-11-05 at 16.23.47.mov` (4.017s,
+The earlier reference is `Screen Recording 2026-11-05 at 16.23.47.mov` (4.017s,
 824×1614, 60fps). Its abrupt, tinted modal appearance is replaced by a colorless
 backdrop blur that fades in, with a centered scale-and-fade transition for the
 JS dialog. This supersedes the earlier black translucent scrim request.
+
+## Current panel and text rendering (2026-11-06)
+
+`ScreenRecording_11-06-2026 12-38-13_1.MP4` (1290×2796, 120fps,
+4.927s) exposed a different problem: the complete panel subtree scaled from
+0.92 to 1, so glyphs and action labels were visibly compressed before settling.
+The 300ms symmetric ease also spent too much of its entrance near transparent.
+The retained parent supplies Modal/Portal, focus isolation and native property
+animation; it does not require text to inherit a presentation scale.
+
+Dialog and Popup now share `MobileModalPanel`: a natural-size content layout
+fades in place, while only the absolute background/border/shadow paint scales
+from 0.96 to 1. Text never enters the transformed glyph-triangle path merely
+because the panel is opening. The shared overlay phase is 220ms with cubic
+ease-out. This is a Pocket setting, not an Apple timing requirement. Backdrop
+blur and content opacity follow that same phase; exit and interrupted reopen
+still traverse it backward/forward without remounting or resetting the phase.
+Other presence consumers keep the existing 300ms default.
+
+The native QJBC regression checks 320/390 widths, requires untransformed text
+ops in visible fractional frames, compares title/body/action x/y/w/h throughout
+entry and exit, and still verifies background scale, transparent blur, reverse
+exit/reopen and single confirm dispatch. A text check based only on settled
+frames would miss the original transformed-glyph defect.
+
+Fresh Settings Web Preview verification used actual pointer clicks on Reset
+appearance, two open/Cancel cycles, 390×844 at DPR 2 with Playwright Chromium
+and ANGLE Metal. Before: first visible backdrop at 139/184ms and settled phase
+at 367/400ms. After: 114/72ms and 296/273ms, respectively. The new title remains
+at x=71, y=357, w=248, h=17 through fractional opacity frames; formerly its
+normal text op appeared only after the inherited transform settled. These are
+browser frame-delivery observations including input overhead, not GPU timings
+or a guarantee for the recorded phone. The native regression plus scalar
+motion suite passed 4 tests; the default Toast/Alert/Accordion/control-presence
+suite passed another 4, including 30/60Hz and idle parking. Gallery Popup also
+opened and dismissed with fixed title geometry in fractional frames and no
+browser exceptions. The new Demo QJBC is 643,186 bytes.
 
 The shared Mobile backdrop reuses `GlassSurface` in a portal before the Modal
 panel. Its descriptor supplies `effect: "blur"` and `opacity` from JS animation

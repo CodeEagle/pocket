@@ -6,11 +6,18 @@ export const MOBILE_MOTION = {
   selection: 240,
   control: 280,
   presentation: 300,
+  overlay: 220,
 } as const;
 
 export function motionEaseInOut(phase: number): number {
   const t = Math.max(0, Math.min(1, phase));
   return t * t * (3 - 2 * t);
+}
+
+/** Prompt overlay reveal; the same phase can run backward on dismissal. */
+export function motionEaseOut(phase: number): number {
+  const t = Math.max(0, Math.min(1, phase));
+  return 1 - (1 - t) ** 3;
 }
 
 /** The same damped-oscillator model as the pinned core's anim.rs, used for

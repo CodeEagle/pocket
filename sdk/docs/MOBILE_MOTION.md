@@ -25,7 +25,8 @@ There is no new Dart animation/state machine or alternate layout engine.
 ## Shared behavior
 
 `pocket_ui/src/motion.ts` defines state 200ms, selection 240ms, control 280ms
-and presentation 300ms response settings. `useAnimatedNumber` uses an exactly
+and presentation 300ms response settings. Dialog/Popup use a separate 220ms
+overlay phase with ease-out for a prompt reveal. `useAnimatedNumber` uses an exactly
 integrated critically damped oscillator for JS scalars. Retargeting retains
 position and velocity, rather than restarting a fixed easing curve. Springs
 settle to their latest destination and release frame demand. The first resting
@@ -37,7 +38,9 @@ A single phase drives appearance; dismissal reverses that phase, retaining
 the subtree until zero. Interrupted open/close continues at the current phase.
 Interactive actions stop immediately when closing. Toast, Alert, Accordion,
 Checkbox and Radio reuse it instead of independently resetting opacity.
-Dialog and Popup retain their colorless backdrop, scale/fade and focus isolation.
+Dialog and Popup retain their colorless backdrop and focus isolation. Their
+background paint scales/fades while natural-size text and actions only fade;
+the panel no longer scales the glyph tree. Exit reverses the same phase.
 
 Switch (including pending/rollback), slider/stepper, segmented selection,
 progress, tags and skeleton state use shared scalar motion. Fractional offsets

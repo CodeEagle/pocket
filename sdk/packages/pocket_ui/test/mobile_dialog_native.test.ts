@@ -191,15 +191,71 @@ function assertMonotonic(values: number[], direction: "up" | "down", name: strin
   }
 }
 
-function assertApproxThreeHundredMs(samples: Frame[], name: string): void {
-  const firstFrame = Number(samples[0]?.frame);
-  const lastFrame = Number(samples.at(-1)?.frame);
+function assertApproxTwoHundredTwentyMs(
+  samples: Frame[],
+  width: number,
+  name: string,
+  direction: "up" | "down",
+): void {
+  const settled = samples.at(-1)!;
+  const settledPanel = modalPanel(settled, width);
+  const settledWidth = settledPanel ? Number(settledPanel.w) : 0;
+  const active = direction === "up"
+    ? samples.filter((frame) => {
+      const panel = modalPanel(frame, width);
+      const opacity = Number(glassParameters(frame)?.opacity ?? 0);
+      return opacity < 0.999 || (panel && Number(panel.w) < settledWidth - 1);
+    })
+    : samples;
+  const firstFrame = Number(active[0]?.frame);
+  const lastFrame = Number(active.at(-1)?.frame);
   assert.ok(Number.isFinite(firstFrame) && Number.isFinite(lastFrame), `${name} must expose probe frame ids`);
   const elapsedFrames = lastFrame - firstFrame;
-  // pocket_probe runs the pinned 60 Hz simulation. Allow one frame at either
-  // edge for the input edge and final teardown, while rejecting the old
-  // 10/12-frame (<200 ms) motion.
-  assert.ok(elapsedFrames >= 15 && elapsedFrames <= 22, `${name} must last about 300 ms at 60 Hz: ${elapsedFrames} frames`);
+  // pocket_probe runs the pinned 60 Hz simulation. The overlay uses a
+  // deliberately short 220 ms response; allow one frame around that target
+  // for the input edge and final teardown while rejecting the old 300 ms
+  // presentation that made the dialog feel late.
+  assert.ok(elapsedFrames >= 10 && elapsedFrames <= 16, `${name} must last about 220 ms at 60 Hz: ${elapsedFrames} frames`);
+}
+
+function assertTextGeometryStable(
+  frames: Frame[],
+  labels: string[],
+  name: string,
+): void {
+  const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
+  const fractional = frames.filter((frame) => {
+    const opacity = Number(glassParameters(frame)?.opacity ?? 0);
+    return opacity > 0.05 && opacity < 0.95;
+  });
+  assert.ok(fractional.length >= 3, `${name} needs visible intermediate glyph frames`);
+  for (const label of labels) {
+    const expected = normalize(label);
+    for (const frame of fractional) {
+      assert.ok((frame.ops ?? []).some((op) => op.type === "text" && normalize(String(op.text ?? "")) === expected),
+        `${name} ${label} must remain an untransformed text op in fractional frame ${frame.frame}`);
+    }
+    const samples = frames.flatMap((frame) => (frame.ops ?? [])
+      .filter((op) => op.type === "text" && normalize(String(op.text ?? "")) === expected));
+    assert.ok(samples.length >= 3, `${name} must retain ${label} for geometry checks: ${samples.length}`);
+    const settled = samples.at(-1)!;
+    for (const sample of samples) {
+      for (const key of ["x", "y", "w", "h"] as const) {
+        assert.ok(Math.abs(Number(sample[key]) - Number(settled[key])) <= 0.1,
+          `${name} ${label} ${key} changed during panel animation: ${samples.map((item) => item[key]).join(",")}`);
+      }
+    }
+  }
+}
+
+function dialogContentLabels(title: string): string[] {
+  switch (title) {
+    case "SingleTitle": return [title, "Dismiss this compact dialog.", "Close"];
+    case "DetailsTitle": return [title, "Mounted by parent route.", "Close"];
+    case "RapidTitle": return [title, "Reverse and reopen.", "RapidReopen", "Close"];
+    case "DoubleTitle": return [title, "Choose one action.", "Cancel", "Confirm"];
+    default: return [title];
+  }
 }
 
 function assertDialogEntrance(frames: Frame[], width: number, height: number, title: string, name: string): void {
@@ -218,7 +274,8 @@ function assertDialogEntrance(frames: Frame[], width: number, height: number, ti
   assertMonotonic(panelWidth, "up", `${name} panel scale`, 2);
   assertMonotonic(panelHeight, "up", `${name} panel scale height`, 2);
   assertMonotonic(glassOpacity, "up", `${name} blur opacity`, 0.000001);
-  assertApproxThreeHundredMs(samples, `${name} entrance`);
+  assertApproxTwoHundredTwentyMs(samples, width, `${name} entrance`, "up");
+  assertTextGeometryStable(frames, dialogContentLabels(title), `${name} entrance`);
   assert.ok(
     Number(firstPanel.w) < Number(settledPanel.w),
     `${name} panel must start below settled scale: first=${JSON.stringify(firstPanel)} settled=${JSON.stringify(settledPanel)} blur=${JSON.stringify(glassOpacity)}`,
@@ -240,7 +297,8 @@ function assertDialogExit(frames: Frame[], width: number, title: string, name: s
   assertMonotonic(panelWidth, "down", `${name} panel scale`, 2);
   assertMonotonic(panelHeight, "down", `${name} panel scale height`, 2);
   assertMonotonic(glassOpacity, "down", `${name} blur opacity`, 0.000001);
-  assertApproxThreeHundredMs(samples, `${name} exit`);
+  assertApproxTwoHundredTwentyMs(samples, width, `${name} exit`, "down");
+  assertTextGeometryStable(frames, dialogContentLabels(title), `${name} exit`);
   assert.ok(Number(first.frame) < Number(settled.frame), `${name} must advance virtual time during exit`);
   assert.ok(panelWidth[0]! > panelWidth.at(-1)!, `${name} panel must shrink during exit`);
   assert.ok(glassOpacity[0]! > glassOpacity.at(-1)!, `${name} blur must fade during exit`);
