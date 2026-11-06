@@ -96,6 +96,7 @@ try {
     fail(`native Preview interaction failed (${preview.status ?? "spawn"}):\n${preview.stdout ?? ""}\n${preview.stderr ?? preview.error?.message ?? ""}`);
   }
   const report = parseReport(preview.stdout);
+  await verifyStudioLifecycle(root, env, projects.app);
   console.log(JSON.stringify({
     ok: true,
     sdkVersion: SDK_VERSION,
@@ -105,6 +106,7 @@ try {
     nobleSourceBuildPresent: false,
     builds,
     preview: report,
+    studio: { port: 8791, start: true, health: true, status: true, stop: true },
   }));
 } finally {
   rmSync(work, { recursive: true, force: true });
@@ -125,6 +127,64 @@ function parseReport(stdout) {
   if (!line) fail(`Preview did not emit WINDOWS_PREVIEW_ACCEPTANCE:\n${stdout}`);
   try { return JSON.parse(line.slice("WINDOWS_PREVIEW_ACCEPTANCE ".length)); }
   catch (error) { fail(`invalid Preview report: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
+async function verifyStudioLifecycle(rootPath, toolEnv, projectRoot) {
+  const service = join(rootPath, "scripts/editor_service.mjs");
+  const start = spawnSync(process.execPath, [service, "start", `--project-root=${projectRoot}`], {
+    cwd: rootPath,
+    env: toolEnv,
+    encoding: "utf8",
+    timeout: 30000,
+    windowsHide: true,
+  });
+  if (start.error || start.status !== 0) {
+    fail(`Studio start failed (${start.status ?? "spawn"}):\n${start.stdout ?? ""}\n${start.stderr ?? start.error?.message ?? ""}`);
+  }
+  const workspace = resolve(rootPath, ".pocket-build", "editor-workspace-8791");
+  try {
+    const health = await waitForStudioHealth(workspace, 30000);
+    if (!health) fail("Studio /health did not become ready on fixed port 8791");
+    const status = spawnSync(process.execPath, [service, "status"], {
+      cwd: rootPath,
+      env: toolEnv,
+      encoding: "utf8",
+      timeout: 30000,
+      windowsHide: true,
+    });
+    if (status.error || status.status !== 0 || !/8791/.test(`${status.stdout ?? ""}${status.stderr ?? ""}`)) {
+      fail(`Studio status failed on fixed port 8791 (${status.status ?? "spawn"}):\n${status.stdout ?? ""}\n${status.stderr ?? status.error?.message ?? ""}`);
+    }
+  } finally {
+    const stop = spawnSync(process.execPath, [service, "stop"], {
+      cwd: rootPath,
+      env: toolEnv,
+      encoding: "utf8",
+      timeout: 30000,
+      windowsHide: true,
+    });
+    if (stop.error || stop.status !== 0) {
+      fail(`Studio stop failed (${stop.status ?? "spawn"}):\n${stop.stdout ?? ""}\n${stop.stderr ?? stop.error?.message ?? ""}`);
+    }
+    if (await waitForStudioHealth(workspace, 3000)) {
+      fail("Studio remained reachable after stop on fixed port 8791");
+    }
+  }
+}
+
+async function waitForStudioHealth(workspace, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch("http://127.0.0.1:8791/health", { signal: AbortSignal.timeout(750) });
+      if (response.ok) {
+        const health = await response.json();
+        if (health.ok === true && health.service === "pocket-editor" && resolve(health.workspace || "") === workspace) return true;
+      }
+    } catch { /* startup or shutdown is still in progress */ }
+    await new Promise((done) => setTimeout(done, 250));
+  }
+  return false;
 }
 
 function previewSource(rootPath, probePath, projectMap, buildMap) {
@@ -175,6 +235,5 @@ console.log("WINDOWS_PREVIEW_ACCEPTANCE " + JSON.stringify({ ok: true, results: 
 }
 
 function fail(message) {
-  console.error(`windows_package_smoke: ${message}`);
-  process.exit(1);
+  throw new Error(`windows_package_smoke: ${message}`);
 }
