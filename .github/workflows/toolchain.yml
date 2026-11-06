@@ -202,11 +202,13 @@ jobs:
   bundle:
     name: Bundle SDK (${{ matrix.platform }})
     needs: [web-engine, package]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        platform: [darwin-arm64, win32-x64]
+        include:
+          - { runner: macos-15, platform: darwin-arm64 }
+          - { runner: windows-2022, platform: win32-x64 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
