@@ -97,14 +97,13 @@ function AppleGlassActionContent(props: {
 export interface AppleGlassButtonProps {
   label: string;
   icon?: JSX.Element;
-  material?: "regular" | "clear";
   onPress?: () => void;
   selected?: boolean;
   disabled?: boolean;
 }
 
 /**
- * A 44pt Apple-style action. Standalone use gets one regular glass surface;
+ * A 44pt Apple-style action. Standalone use gets one clear glass surface;
  * when created by `AppleGlassToolbar.actions`, the provider context keeps it
  * as a tinted child so a toolbar action does not register a second surface.
  */
@@ -119,7 +118,9 @@ export function AppleGlassButton(props: AppleGlassButtonProps): JSX.Element {
   const dark = () => theme().name === "dark";
   const textScale = () => accessibility().textScale;
   const accentColor = () => toMobileColor(theme().accentColor);
-  const selectedInk = () => selectedInkColor(theme().accentColor);
+  const selectedInk = () => inGlassGroup
+    ? selectedInkColor(theme().accentColor)
+    : toMobileColor(theme().accentInkColor ?? theme().accentColor);
   const semanticNodeRef = semantics?.register({
     id: nextAppleSemanticId("button"),
     label: () => props.label,
@@ -159,10 +160,10 @@ export function AppleGlassButton(props: AppleGlassButtonProps): JSX.Element {
   return (
     <GlassSurface
       shape="pill"
-      material={props.material ?? "regular"}
-      elastic={!props.disabled}
-      materialTint={selected() ? theme().accentColor : undefined}
-      materialStrength={selected() ? 0.72 : undefined}
+      material="clear"
+      blur={0}
+      elastic={false}
+      materialStrength={0}
       radius={999}
       warp={false}
       class="flex-col"
@@ -173,25 +174,20 @@ export function AppleGlassButton(props: AppleGlassButtonProps): JSX.Element {
   );
 }
 
-/** Compatibility composition: every Apple material now shares local elasticity. */
+/** Compatibility surface name; local dragging is currently disabled. */
 export interface AppleDraggableGlassProps {
   children?: JSX.Element;
   class?: string;
   style?: ViewProps["style"];
-  elastic?: boolean;
-  material?: "regular" | "clear";
-  /** Finger travel required to reach the bounded local deformation. */
-  maxX?: number;
-  maxY?: number;
 }
 
 export function AppleDraggableGlass(props: AppleDraggableGlassProps): JSX.Element {
   return <GlassSurface
     class={props.class ?? "min-h-[44] flex-col"}
-    material={props.material ?? "regular"}
-    elastic={props.elastic}
-    elasticExtentX={props.maxX}
-    elasticExtentY={props.maxY}
+    material="clear"
+    blur={0}
+    materialStrength={0}
+    elastic={false}
     shape="pill"
     radius={999}
     warp={false}
@@ -209,7 +205,7 @@ export interface AppleGlassToolbarProps {
   actions?: () => JSX.Element;
 }
 
-/** One regular material surface for a toolbar and its ordinary tint actions. */
+/** One clear material surface for a toolbar and its ordinary tint actions. */
 export function AppleGlassToolbar(props: AppleGlassToolbarProps): JSX.Element {
   const theme = useMobileTheme();
   const accessibility = useAccessibilityPreferences();
@@ -218,7 +214,10 @@ export function AppleGlassToolbar(props: AppleGlassToolbarProps): JSX.Element {
     <AppleGlassGroupContext.Provider value={true}>
       <GlassSurface
         shape="rounded"
-        material="regular"
+        material="clear"
+        elastic={false}
+        blur={0}
+        materialStrength={0}
         radius={28}
         warp={false}
         class="w-full flex-col"
@@ -242,8 +241,6 @@ export interface AppleGlassNavigationBarProps extends Omit<NavigationBarProps, "
   active: string;
   items: readonly NavigationItem[];
   onChange: (id: string) => void;
-  /** Clear preserves the backdrop; regular adds the shared frosted material. */
-  material?: "regular" | "clear";
 }
 
 /**
@@ -315,7 +312,6 @@ export function AppleGlassNavigationBar(props: AppleGlassNavigationBarProps): JS
   });
   createEffect(() => { if (!routeActive() || props.visible === false) { navigationGesture.cancel(); stopContact(); } });
   const dark = () => props.dark ?? theme().name === "dark";
-  const material = () => props.material ?? "clear";
   const opaqueMaterial = () => accessibility().reduceTransparency || accessibility().increaseContrast;
   const tabSemanticRefs = new Map<string, AppleSemanticNodeRef>();
   const tabSemanticPrefix = nextAppleSemanticId("tab");
@@ -372,9 +368,9 @@ export function AppleGlassNavigationBar(props: AppleGlassNavigationBarProps): JS
       background={
         <GlassSurface
           shape="pill"
-          material={material()}
-          blur={material() === "clear" ? 0 : 12}
-          materialStrength={material() === "clear" ? 0 : 0.24}
+          material="clear"
+          blur={0}
+          materialStrength={0}
           radius={999}
           warp={false}
           class="absolute inset-0"

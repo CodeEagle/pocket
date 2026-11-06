@@ -4,22 +4,20 @@ Research and implementation note: 2026-11-06. Pocket's Apple glass controls
 are an opt-in approximation of the public Liquid Glass interaction model. They
 do not claim parity with private iOS 27 parameters.
 
-## Decision
+## Current decision
 
-`GlassSurface` is the shared source of truth for Apple material interaction.
-Apple material variants enable the one shared `createGlassElasticity`
-controller in `sdk/packages/pocket_ui/src/mobile.tsx` by default; `elastic=false`
-and accessibility preferences are the explicit opt-outs.
-`AppleDraggableGlass` in `apple.tsx` is a thin compatibility composition: it
-passes its extents and content to `GlassSurface` and owns no second spring,
-gesture loop, or layout transform.
+Apple components expose only Clear with zero blur and material fill.
+Buttons, toolbars and ordinary compatibility surfaces pass `elastic={false}`.
+Bottom navigation is the explicit exception: its drag selection, contact
+magnification, local pull and release spring remain enabled. Button clicks
+and tab clicks remain active. `AppleDraggableGlass` is retained as a
+compatibility component name, with ordinary surface props and no drag/material
+selector.
 
-The control's layout frame, center, clip, and foreground identity remain fixed.
-Contact changes a local deformation field in the surface paint; it does not
-move the node or create a second layout tree. This is the useful Pocket
-approximation of the stationary, touch-responsive glass effect. Apple's
-private deformation kernel, refraction coefficients, and physics constants are
-not available to copy and are not inferred here.
+The shared generic `GlassSurface` elasticity and shader ABI remain available
+in the SDK. The motion model and earlier measurements below document those
+retained capabilities and prior experiments; ordinary Apple component
+dragging is currently disabled.
 
 ## Apple public surface and its boundary
 
@@ -145,8 +143,8 @@ whole-scale position spring, or duplicate native layout tree.
 `NavigationBar` layout, semantic nodes, and selection overlay slot:
 
 - Its outer capsule and foreground lens default to Clear with no blur or
-  neutral fill, preserving the center backdrop. `material="regular"` opts the
-  outer capsule into the shared frosted profile. Accessibility can still
+  neutral fill, preserving the center backdrop. This is its only material
+  appearance. Accessibility can still
   select the opaque material and ordinary selection indicator.
 - While dragging, the selection capsule follows the finger continuously. On
   release it chooses the nearest tab and snaps the route to that item.
@@ -182,17 +180,17 @@ the surrounding consumer; the glass field never overrides it.
 ```tsx
 import { AppleDraggableGlass } from "@pocket/ui/apple";
 
-<AppleDraggableGlass class="w-[176] h-[68]" maxX={80} maxY={56}>
-  <Text class="text-sm font-bold text-[#152238]">Pull the glass</Text>
+<AppleDraggableGlass class="w-[176] h-[68]">
+  <Text class="text-sm font-bold text-[#152238]">Clear surface</Text>
 </AppleDraggableGlass>;
 ```
 
-`maxX` and `maxY` describe the finger distance needed to reach the bounded
-local response; they do not permit control travel. The component is
-independently importable, and its material still registers through the same
+The legacy component name remains independently importable, with dragging
+currently disabled and the extent/material selectors removed. Its material
+still registers through the same
 `GlassSurface` shell. Showcase exposes it at UI Collection → Apple Glass.
 
-## Validation status
+## Earlier interaction validation
 
 Validated with the final pinned buildGuest Demo and real JS execution:
 

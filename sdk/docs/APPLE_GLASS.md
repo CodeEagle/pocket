@@ -22,10 +22,16 @@ import { AppleGlassButton, AppleGlassToolbar } from "@pocket/ui/apple";
 the shared NavigationBar's icon, safe-area and focus behavior. Local tab state
 stays with its consumer; this library adds no second router. Light/dark and
 accent styling use the existing MobileThemeProvider.
-The navigation bar defaults to `material="clear"`, with zero blur and zero
-material fill on both the outer capsule and the selection lens. Background
+Apple buttons, toolbars, compatibility surfaces and navigation expose one
+Clear appearance, with zero blur and zero material fill. Their public props
+no longer offer a Regular selector. Buttons, toolbars and ordinary surfaces
+have local dragging disabled. The bottom navigation retains drag selection,
+contact magnification and release rebound; button and tab clicks remain active.
+The navigation's outer capsule and selection lens share the zero-blur/fill
+appearance. Background
 detail remains visible through its center; refraction and highlights stay at
-the edge. Pass `material="regular"` for the shared frosted backdrop instead.
+the edge. Shared generic `GlassSurface` rendering capabilities remain available
+for other SDK consumers; they are not a second Apple component appearance.
 Reduced-transparency and increased-contrast preferences retain the opaque
 accessible fallback.
 The toolbar action slot is lazy so the pinned renderer creates those controls
@@ -84,11 +90,12 @@ The initial 72% appearance fill made controls excessively opaque when combined
 with the retained shader's white veil and cushion glow. It was rejected during
 visual review. The calibrated profile preserves backdrop hue, uses a narrower
 edge lens and directional highlight, and removes that stacked white treatment.
-Standalone surfaces default to 24% regular tint / 2% clear tint, with blur
+Generic `GlassSurface` defaults to 24% regular tint / 2% clear tint, with blur
 radii 12 / 1.5. Regular uses a bounded, radially weighted 48-point disk plus
 one center sample, replacing the old Cartesian 7×7 lattice at the same
 49-read budget. Clear uses thirteen lightweight taps. Zero blur uses a single
-sample; the navigation bar explicitly uses zero blur and fill. Both materials
+sample; all Apple component compositions explicitly use zero blur and fill
+for Clear. Both materials
 stay in the existing rendering pass. Native and Web hosts only project the explicit material variant; they do
 not select application appearance or own UI state.
 
@@ -175,10 +182,9 @@ and [custom Liquid Glass guidance](https://developer.apple.com/documentation/swi
 
 - Glass belongs to navigation and actions. Ordinary page content stays on
   ordinary surfaces; avoid glass stacked over glass.
-- Buttons and toolbars default to Regular. The navigation bar uses the
-  requested transparent Clear appearance; consumers can choose Regular when
-  background detail competes with labels. Check foreground contrast over the
-  actual content.
+- Apple components use one transparent Clear appearance. Check foreground
+  contrast over the actual content. Local drag effects are disabled outside
+  bottom navigation.
 - A toolbar shares one material with its actions. A standalone glass button
   creates its own material.
 - Interactive targets have a minimum height and width of 44 logical units.
@@ -250,8 +256,11 @@ profile with two glass surfaces, a moving nonuniform backdrop, a no-glass
 ablation and idle parking. It reports delivered frames, browser rAF and canvas
 submission cost separately. These are not GPU completion timings.
 
-`editor/test/preview_glass_drag.test.ts` is the input-driven local-deformation
-acceptance: standalone and toolbar glass buttons receive real pointer input,
+`editor/test/preview_glass_drag.test.ts` now verifies click actions, fixed
+Clear material/pixels during ordinary-control drags, bottom-tab drag/click selection and
+route cleanup. The earlier local-deformation acceptance described below is
+historical evidence for the retained generic renderer, not the current Apple
+interaction: standalone and toolbar glass buttons receive real pointer input,
 an edge contact changes only the material's local field while its shell and
 label rect remain fixed, release returns the descriptor to zero and parks the
 preview, and elastic=false, Reduce Motion, route removal/re-entry, and the

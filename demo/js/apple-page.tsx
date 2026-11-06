@@ -123,18 +123,15 @@ export function ApplePage(): JSX.Element {
             />
 
             <View class={dark() ? "flex-col gap-2 p-3 rounded-[24] bg-[#111D32CC] border-[#2D3D5A]" : "flex-col gap-2 p-3 rounded-[24] bg-[#FFFFFFCC] border-[#DCE3F0]"}>
-              <Text class="text-sm font-bold" style={{ textColor: dark() ? "#F8FAFC" : "#152238" }}>Local touch response</Text>
-              <Text class="text-sm" style={{ textColor: dark() ? "#B9C5D8" : "#66758A" }}>Try a button, toolbar or tab.</Text>
+              <Text class="text-sm font-bold" style={{ textColor: dark() ? "#F8FAFC" : "#152238" }}>Clear glass</Text>
+              <Text class="text-sm" style={{ textColor: dark() ? "#B9C5D8" : "#66758A" }}>One clear material for buttons, toolbars and tabs.</Text>
               <View class="relative w-full h-[132] flex-row items-center justify-center overflow-hidden rounded-[20]" style={{ radius: 20, bgColor: dark() ? "#243756" : "#E8EFFF" }}>
                 <View class="absolute left-[-18] top-[18] w-[180] h-[96] rounded-full" style={{ bgColor: "#248BE8", opacity: 0.95, rotate: -12 }} />
                 <View class="absolute right-[-10] bottom-[-28] w-[176] h-[104] rounded-full" style={{ bgColor: "#35B75B", opacity: 0.95, rotate: 12 }} />
                 <AppleDraggableGlass
                   class="w-[176] h-[68] flex-col items-center justify-center"
-                  material="clear"
-                  maxX={80}
-                  maxY={56}
                 >
-                  <Text class="text-sm font-bold" style={{ textColor: dark() ? "#F8FAFC" : "#152238" }}>Pull the glass</Text>
+                  <Text class="text-sm font-bold" style={{ textColor: dark() ? "#F8FAFC" : "#152238" }}>Clear surface</Text>
                 </AppleDraggableGlass>
               </View>
             </View>
