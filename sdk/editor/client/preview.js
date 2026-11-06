@@ -2192,7 +2192,14 @@
       if (!context) return;
       const width = logicalWidth();
       const height = logicalHeight();
-      const density = Math.max(1, number(global.devicePixelRatio, 1));
+      // Use one integer supersampling factor for both axes. A fractional
+      // browser DPR (normally produced by page zoom) makes independently
+      // rounded backing dimensions differ in scale, so adjacent native fill
+      // strips can land on different coverage rows and expose a dark seam.
+      // Render the complete logical frame at the next integer density and
+      // let the browser downsample one finished raster instead of snapping
+      // arbitrary DrawOps or treating each tile as a separate component.
+      const density = Math.max(1, Math.ceil(number(global.devicePixelRatio, 1)));
       const backingWidth = Math.min(MAX_DIMENSION, Math.max(1, Math.round(width * density)));
       const backingHeight = Math.min(MAX_DIMENSION, Math.max(1, Math.round(height * density)));
       if (canvas.width !== backingWidth) canvas.width = backingWidth;

@@ -146,7 +146,8 @@ async function runPreviewDensityAcceptance(): Promise<void> {
     });
     browser = await chromium.launch({ headless: true });
 
-    for (const dpr of [1, 2, 3]) {
+    for (const dpr of [1, 1.25, 1.5, 1.8, 2, 3]) {
+      const rasterDensity = Math.ceil(dpr);
       const context = await browser.newContext({
         viewport: { width: logicalWidth, height: logicalHeight },
         deviceScaleFactor: dpr,
@@ -186,19 +187,19 @@ async function runPreviewDensityAcceptance(): Promise<void> {
           const frame = (window as any).PocketEditorPreviewInstance.getFrame();
           return { canvasWidth: canvas.width, canvasHeight: canvas.height, cssWidth: rect.width, cssHeight: rect.height, frameWidth: frame.width, frameHeight: frame.height };
         });
-        assert.equal(dimensions.canvasWidth, logicalWidth * dpr, `DPR${dpr} backing width`);
-        assert.equal(dimensions.canvasHeight, logicalHeight * dpr, `DPR${dpr} backing height`);
+        assert.equal(dimensions.canvasWidth, logicalWidth * rasterDensity, `DPR${dpr} backing width`);
+        assert.equal(dimensions.canvasHeight, logicalHeight * rasterDensity, `DPR${dpr} backing height`);
         assert.ok(Math.abs(dimensions.cssWidth - logicalWidth) < 1, `DPR${dpr} canvas CSS width stays logical`);
         assert.ok(Math.abs(dimensions.cssHeight - logicalHeight) < 1, `DPR${dpr} canvas CSS height stays logical`);
         assert.equal(dimensions.frameWidth, logicalWidth, `DPR${dpr} FrameResult logical width`);
         assert.equal(dimensions.frameHeight, logicalHeight, `DPR${dpr} FrameResult logical height`);
 
         const initialCapture = await capture(page, `initial-${dpr}`);
-        assert.equal(initialCapture.width, logicalWidth * dpr, `DPR${dpr} capture pixel width`);
-        assert.equal(initialCapture.height, logicalHeight * dpr, `DPR${dpr} capture pixel height`);
+        assert.equal(initialCapture.width, logicalWidth * rasterDensity, `DPR${dpr} capture pixel width`);
+        assert.equal(initialCapture.height, logicalHeight * rasterDensity, `DPR${dpr} capture pixel height`);
         assert.equal(initialCapture.logicalWidth, logicalWidth, `DPR${dpr} capture logical width`);
         assert.equal(initialCapture.logicalHeight, logicalHeight, `DPR${dpr} capture logical height`);
-        assert.deepEqual(await captureImageSize(page, initialCapture.dataUrl), { width: logicalWidth * dpr, height: logicalHeight * dpr });
+        assert.deepEqual(await captureImageSize(page, initialCapture.dataUrl), { width: logicalWidth * rasterDensity, height: logicalHeight * rasterDensity });
 
         const canvas = await page.locator("canvas").boundingBox();
         assert.ok(canvas, `DPR${dpr} canvas layout box`);

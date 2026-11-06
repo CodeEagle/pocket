@@ -102,14 +102,30 @@ PocketJS 输出的圆角填充不是一个浏览器 rounded-rect：它由四个�
 - 不在浏览器通过角纹理 UV、颜色、连续矩形猜测组件类型，不对全部 DrawOps 坐标取整。先前的局部圆角识别补偿已被删除，避免错误匹配 sprite 和改变半透明填充。
 - 保留角纹理本身的透明度与滤波。不要用关闭全部图像平滑、删除 clip 或重新推算圆角形状的方式消除接缝。
 - clip 仍来自 native DrawOps。输入区域同时受 native 十位坐标范围和 root viewport 约束；子应用从画布底部进入时，只能把已进入画布的区域暴露给输入。
-- `renderCurrentFrame` 的 backing store 跟随屏幕 DPR；FrameResult、输入和截图协议仍用逻辑坐标。`setTransform` 只负责映射到 backing pixels。DPR 清晰度与 child viewport 修复是两个独立处理，不能把清晰度提升当作接缝修复的证据。
+- `renderCurrentFrame` 的 backing store 使用屏幕 DPR 的整数上取整作为统一 supersampling 因子；FrameResult、输入和截图协议仍用逻辑坐标。`setTransform` 只负责映射到 backing pixels。DPR 清晰度与 child viewport 修复是两个独立处理，不能把清晰度提升当作接缝修复的证据。
 - 浏览器还可能把整个 iframe 按 CSS 比例缩放。屏幕截图与原始 canvas 像素是不同验收对象，排查时应同时记录逻辑尺寸、backing store 尺寸、CSS 尺寸和 DPR。
+
+### 分数浏览器缩放的条带接缝（2026-11-06）
+
+Chrome 页面缩放会让 `window.devicePixelRatio` 变成分数。旧投影按
+`round(width * dpr)` 与 `round(height * dpr)` 分别生成 backing 尺寸；例如
+390×844 在 DPR 1.8 下为 702×1519，使 x/y 变换比例不同（1.8 与
+1.79976）。PocketJS 的圆角控件由同色的中间条和上下条 DrawOps 拼接，边界
+落在不同 coverage 行时会露出暗横线；同一问题也会出现在输入框。
+
+现在对整个逻辑帧使用 `ceil(devicePixelRatio)` 的单一整数 supersampling
+因子（DPR 1.8 → 2，780×1688），再由浏览器对完成的 Canvas 栅格做一次缩放。
+这保留了 DrawOps 的原始坐标、tile 纹理透明度和 native clip，没有关闭图像
+滤波或猜测 rounded-rect。`preview_density_seam.test.ts` 用真实 native
+Showcase FrameResult 在 DPR 1.8 逐行采样按钮内部；当前投影为零坏行，旧
+fractional-density 消融稳定出现坏行，作为负对照。
 
 ## 验证与消融
 
 相关测试位于 `sdk/editor/test/`：
 
 - `preview_density.test.ts`：真实浏览器验证 DPR 变化、逻辑输入与截图尺寸。
+- `preview_density_seam.test.ts`：真实 native Showcase 在分数 DPR 下验证圆角条带无接缝，并运行旧 density 的负对照。
 - `preview_pointer.test.ts`：验证多指、滚轮和丢失 capture 后的输入顺序。
 - `preview_viewport.test.ts`：验证 child 按区域调整尺寸、重复 resize 去重、隐藏 child 尺寸保持、转场裁剪和输入映射。
 - `preview.test.ts`：真实 native Profile → Lobby → Showcase 完整链路。自动点击前等待区域几何稳定，不能在入口动画的首个带标题帧就使用其坐标。
