@@ -238,7 +238,14 @@ jobs:
           npm pack --ignore-scripts --pack-destination ../../../release
           cd ../../../release
           test -f "pocket-web-sdk-tools-${PLATFORM}-${SDK_VERSION}.tgz"
-          for file in *.tgz; do sha256sum "$file" > "$file.sha256"; done
+          node --input-type=module <<'JS'
+          import { createHash } from 'node:crypto';
+          import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+          for (const file of readdirSync('.').filter(name => name.endsWith('.tgz'))) {
+            const hash = createHash('sha256').update(readFileSync(file)).digest('hex');
+            writeFileSync(`${file}.sha256`, `${hash}  ${file}\n`);
+          }
+          JS
       - uses: actions/upload-artifact@v4
         with:
           name: pocket-sdk-release-${{ matrix.platform }}
