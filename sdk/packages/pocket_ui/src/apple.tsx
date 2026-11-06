@@ -242,12 +242,14 @@ export interface AppleGlassNavigationBarProps extends Omit<NavigationBarProps, "
   active: string;
   items: readonly NavigationItem[];
   onChange: (id: string) => void;
+  /** Clear preserves the backdrop; regular adds the shared frosted material. */
+  material?: "regular" | "clear";
 }
 
 /**
  * Opt-in capsule navigation. It delegates icon layout, safe-area handling,
  * focus targets and the spring selection indicator to `NavigationBar`; this
- * wrapper only supplies the regular glass background and Apple defaults.
+ * wrapper supplies the clear glass background and Apple interaction defaults.
  */
 export function AppleGlassNavigationBar(props: AppleGlassNavigationBarProps): JSX.Element {
   const theme = useMobileTheme();
@@ -313,6 +315,7 @@ export function AppleGlassNavigationBar(props: AppleGlassNavigationBarProps): JS
   });
   createEffect(() => { if (!routeActive() || props.visible === false) { navigationGesture.cancel(); stopContact(); } });
   const dark = () => props.dark ?? theme().name === "dark";
+  const material = () => props.material ?? "clear";
   const opaqueMaterial = () => accessibility().reduceTransparency || accessibility().increaseContrast;
   const tabSemanticRefs = new Map<string, AppleSemanticNodeRef>();
   const tabSemanticPrefix = nextAppleSemanticId("tab");
@@ -358,7 +361,7 @@ export function AppleGlassNavigationBar(props: AppleGlassNavigationBarProps): JS
           class="absolute"
           shape="pill" radius={999} material="clear" elastic={false} warp={false}
           blur={0}
-          materialStrength={0.10 * (1 - lift())}
+          materialStrength={0}
           materialTint={dark() ? 0xff151515 : 0xfff2f2f7}
           magnification={1 + lift() * 0.22}
           deformation={{ anchorX: Math.sign(targetX() - lensX()) * Math.min(28, segmentWidth() * .28), anchorY: Math.sign(localPullY()) * 12, offsetX: (targetX() - lensX()) * .12 * lift(), offsetY: localPullY(), radius: 56 }}
@@ -369,7 +372,9 @@ export function AppleGlassNavigationBar(props: AppleGlassNavigationBarProps): JS
       background={
         <GlassSurface
           shape="pill"
-          material="regular"
+          material={material()}
+          blur={material() === "clear" ? 0 : 12}
+          materialStrength={material() === "clear" ? 0 : 0.24}
           radius={999}
           warp={false}
           class="absolute inset-0"

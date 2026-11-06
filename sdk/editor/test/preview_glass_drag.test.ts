@@ -177,7 +177,7 @@ mount(App);
       return target[0];
     };
     const frameNavLens = async (): Promise<Surface> => {
-      const nav = (await surfaces()).filter(surface => surface.y > 500 && surface.parameters.material === "clear");
+      const nav = (await surfaces()).filter(surface => surface.y > 500 && surface.w < 200 && surface.parameters.material === "clear");
       if (!nav[0]) throw new Error(`missing navigation lens: ${JSON.stringify(await surfaces())}`);
       return nav[0];
     };
@@ -228,8 +228,8 @@ mount(App);
 
     const initialSurfaces = await surfaces();
     assert.ok(initialSurfaces.length >= 5, `button, toolbar, target, nav background and nav lens must all paint: ${initialSurfaces.length}`);
-    assert.equal(initialSurfaces.filter(surface => surface.y > 500 && surface.parameters.material === "clear").length, 1, "navigation selection adds one front glass lens");
-    assert.ok(initialSurfaces.some(surface => surface.y > 500 && surface.parameters.material === "regular"), "navigation keeps a shared regular background");
+    assert.equal(initialSurfaces.filter(surface => surface.y > 500 && surface.w < 200 && surface.parameters.material === "clear").length, 1, "navigation selection adds one front glass lens");
+    assert.ok(initialSurfaces.some(surface => surface.y > 500 && surface.w > 300 && surface.parameters.material === "clear"), "navigation keeps a shared transparent background");
 
     // Let the initial accessibility snapshot and first frame delivery settle
     // before the first admitted pointer contact.
@@ -324,6 +324,11 @@ mount(App);
     await page.waitForTimeout(120);
 
     const home = await textRect("Home");
+    const navigationBackdrop = (await surfaces()).find(surface => surface.y > 500 && surface.w > 300);
+    assert.ok(navigationBackdrop, "the shared navigation backdrop must be present");
+    assert.equal(navigationBackdrop.parameters.material, "clear", "navigation defaults to the transparent shared optical material");
+    assert.equal(navigationBackdrop.parameters.blur, 0, "clear navigation must not introduce a frosted sampling lattice");
+    assert.equal(navigationBackdrop.parameters.materialStrength, 0, "clear navigation must preserve the center backdrop without a neutral wash");
     const gallery = await textRect("Gallery");
     const homePoint = await canvasPoint(home);
     const galleryPoint = await canvasPoint(gallery);

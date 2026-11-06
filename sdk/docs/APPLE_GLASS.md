@@ -22,6 +22,12 @@ import { AppleGlassButton, AppleGlassToolbar } from "@pocket/ui/apple";
 the shared NavigationBar's icon, safe-area and focus behavior. Local tab state
 stays with its consumer; this library adds no second router. Light/dark and
 accent styling use the existing MobileThemeProvider.
+The navigation bar defaults to `material="clear"`, with zero blur and zero
+material fill on both the outer capsule and the selection lens. Background
+detail remains visible through its center; refraction and highlights stay at
+the edge. Pass `material="regular"` for the shared frosted backdrop instead.
+Reduced-transparency and increased-contrast preferences retain the opaque
+accessible fallback.
 The toolbar action slot is lazy so the pinned renderer creates those controls
 inside the shared material scope; no manual grouping flag is needed.
 
@@ -78,10 +84,35 @@ The initial 72% appearance fill made controls excessively opaque when combined
 with the retained shader's white veil and cushion glow. It was rejected during
 visual review. The calibrated profile preserves backdrop hue, uses a narrower
 edge lens and directional highlight, and removes that stacked white treatment.
-JS defaults to 24% regular tint / 2% clear tint, with blur radii 12 / 1.5. A
-bounded 7×7 weighted kernel softens Regular, while Clear uses thirteen
-lightweight taps. Both stay in the existing rendering pass. Native and Web hosts only project the explicit material variant; they do
+Standalone surfaces default to 24% regular tint / 2% clear tint, with blur
+radii 12 / 1.5. Regular uses a bounded, radially weighted 48-point disk plus
+one center sample, replacing the old Cartesian 7×7 lattice at the same
+49-read budget. Clear uses thirteen lightweight taps. Zero blur uses a single
+sample; the navigation bar explicitly uses zero blur and fill. Both materials
+stay in the existing rendering pass. Native and Web hosts only project the explicit material variant; they do
 not select application appearance or own UI state.
+
+The Web transparency review found two separate causes of the old bottom bar:
+12-unit Regular frost plus its 24% fill hid the backdrop, and periodic samples
+repeated glyph edges into a visible grid. The SDK navigation default removes
+the frost/fill rather than adding a second backdrop or a Demo mask. Regular's
+non-periodic samples reduce the remaining lattice artifact in other controls.
+`preview_liquid_glass_material_artifact.test.ts` freezes the former 49-tap
+branch and compares both GPU outputs over decoded glyph images. In the
+33×33 dense glyph region, local second-difference energy fell from 6.92 to
+6.02, axis energy from 9.19 to 7.65, and diagonal energy from 3.40 to 2.79.
+This measures reduced sampling artifacts, not equivalence to Apple's renderer
+or a claim that all blurred text is invisible. Clear's center and pixels
+outside the lens are separately compared with the no-glass backdrop.
+
+Validation of this change included actual Showcase light/dark, body scrolling
+under the fixed bar, pointer-driven lens selection and release in both local
+Web previews, plus native shader deformation on the iOS simulator. The native
+60-frame measurement restored the original pixels and left pixels outside
+the optical halo unchanged. The optical, local-deformation, output-cache and
+glyph-artifact Web test files each passed. Two combined Bun runs timed out in
+browser waits after the output-cache test, although the same local-deformation
+file passed independently; those combined runs are not reported as passing.
 
 Visual review uses Apple's actual reference images, not only API names:
 
@@ -144,8 +175,10 @@ and [custom Liquid Glass guidance](https://developer.apple.com/documentation/swi
 
 - Glass belongs to navigation and actions. Ordinary page content stays on
   ordinary surfaces; avoid glass stacked over glass.
-- Regular material is the default. Clear material is an explicit choice for
-  controls over rich media, with foreground contrast checked by the consumer.
+- Buttons and toolbars default to Regular. The navigation bar uses the
+  requested transparent Clear appearance; consumers can choose Regular when
+  background detail competes with labels. Check foreground contrast over the
+  actual content.
 - A toolbar shares one material with its actions. A standalone glass button
   creates its own material.
 - Interactive targets have a minimum height and width of 44 logical units.

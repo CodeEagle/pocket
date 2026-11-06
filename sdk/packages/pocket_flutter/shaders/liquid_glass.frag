@@ -169,65 +169,71 @@ void main() {
                  texture(uTexture, clamp(uvG + vec2( blurStep.x, -blurStep.y), 0.002, 0.998)).rgb * 0.16 +
                  texture(uTexture, clamp(uvG + vec2(-blurStep.x, -blurStep.y), 0.002, 0.998)).rgb * 0.16;
   } else if (materialVariant < 1.5) {
-    // Regular Apple material uses a dense fixed 7x7 weighted grid. The old
-    // sparse corner taps left repeated glyphs in busy navigation bars; this
-    // bounded kernel fills those gaps without a second backdrop surface.
-    vec2 blurStep = vec2(
-      uBlur * 0.28 / uSurfaceSize.x,
-      uBlur * 0.24 / uSurfaceSize.y
-    );
-    // Explicit fixed taps avoid nested integer-loop lowering in WebGL1.
-    vec3 accumulated = vec3(0.0);
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-3.0, -3.0), 0.002, 0.998)).rgb * 1.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-2.0, -3.0), 0.002, 0.998)).rgb * 3.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-1.0, -3.0), 0.002, 0.998)).rgb * 6.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.0, -3.0), 0.002, 0.998)).rgb * 8.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(1.0, -3.0), 0.002, 0.998)).rgb * 6.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(2.0, -3.0), 0.002, 0.998)).rgb * 3.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(3.0, -3.0), 0.002, 0.998)).rgb * 1.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-3.0, -2.0), 0.002, 0.998)).rgb * 3.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-2.0, -2.0), 0.002, 0.998)).rgb * 9.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-1.0, -2.0), 0.002, 0.998)).rgb * 18.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.0, -2.0), 0.002, 0.998)).rgb * 24.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(1.0, -2.0), 0.002, 0.998)).rgb * 18.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(2.0, -2.0), 0.002, 0.998)).rgb * 9.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(3.0, -2.0), 0.002, 0.998)).rgb * 3.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-3.0, -1.0), 0.002, 0.998)).rgb * 6.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-2.0, -1.0), 0.002, 0.998)).rgb * 18.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-1.0, -1.0), 0.002, 0.998)).rgb * 36.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.0, -1.0), 0.002, 0.998)).rgb * 48.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(1.0, -1.0), 0.002, 0.998)).rgb * 36.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(2.0, -1.0), 0.002, 0.998)).rgb * 18.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(3.0, -1.0), 0.002, 0.998)).rgb * 6.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-3.0, 0.0), 0.002, 0.998)).rgb * 8.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-2.0, 0.0), 0.002, 0.998)).rgb * 24.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-1.0, 0.0), 0.002, 0.998)).rgb * 48.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.0, 0.0), 0.002, 0.998)).rgb * 64.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(1.0, 0.0), 0.002, 0.998)).rgb * 48.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(2.0, 0.0), 0.002, 0.998)).rgb * 24.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(3.0, 0.0), 0.002, 0.998)).rgb * 8.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-3.0, 1.0), 0.002, 0.998)).rgb * 6.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-2.0, 1.0), 0.002, 0.998)).rgb * 18.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-1.0, 1.0), 0.002, 0.998)).rgb * 36.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.0, 1.0), 0.002, 0.998)).rgb * 48.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(1.0, 1.0), 0.002, 0.998)).rgb * 36.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(2.0, 1.0), 0.002, 0.998)).rgb * 18.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(3.0, 1.0), 0.002, 0.998)).rgb * 6.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-3.0, 2.0), 0.002, 0.998)).rgb * 3.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-2.0, 2.0), 0.002, 0.998)).rgb * 9.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-1.0, 2.0), 0.002, 0.998)).rgb * 18.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.0, 2.0), 0.002, 0.998)).rgb * 24.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(1.0, 2.0), 0.002, 0.998)).rgb * 18.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(2.0, 2.0), 0.002, 0.998)).rgb * 9.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(3.0, 2.0), 0.002, 0.998)).rgb * 3.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-3.0, 3.0), 0.002, 0.998)).rgb * 1.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-2.0, 3.0), 0.002, 0.998)).rgb * 3.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-1.0, 3.0), 0.002, 0.998)).rgb * 6.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.0, 3.0), 0.002, 0.998)).rgb * 8.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(1.0, 3.0), 0.002, 0.998)).rgb * 6.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(2.0, 3.0), 0.002, 0.998)).rgb * 3.0;
-    accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(3.0, 3.0), 0.002, 0.998)).rgb * 1.0;
-    glassColor = accumulated / 784.0;
+    // Regular uses a low-discrepancy disk instead of a Cartesian grid. The
+    // hardware bilinear filter makes every tap continuous while the
+    // deliberately non-periodic offsets reduce glyphs being repeated
+    // at the old 7x7 lattice positions behind the glass.
+    if (uBlur <= 0.001) {
+      glassColor = texture(uTexture, uvG).rgb;
+    } else {
+      vec2 blurStep = vec2(
+        uBlur * 0.72 / uSurfaceSize.x,
+        uBlur * 0.62 / uSurfaceSize.y
+      );
+      // A 48-point golden-angle disk keeps the blur continuous while
+      // avoiding a Cartesian sampling lattice. Radial weights retain a
+      // Gaussian-like center with smaller gaps between backdrop samples.
+      vec3 accumulated = texture(uTexture, uvG).rgb * 0.0800;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.113, 0.036), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.186, 0.086), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.102, -0.244), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.106, 0.295), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.314, -0.166), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.380, -0.100), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.231, 0.359), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.077, -0.452), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.386, 0.299), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.514, 0.042), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.369, -0.398), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.003, 0.568), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.397, -0.439), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.612, 0.057), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.508, 0.385), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.119, -0.648), 0.002, 0.998)).rgb * 0.0350;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.362, 0.576), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.675, -0.186), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.641, -0.328), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.258, 0.693), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.285, -0.702), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.701, 0.333), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.759, 0.233), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.411, -0.700), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.173, 0.810), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.689, -0.490), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.855, -0.106), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.570, 0.668), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.032, -0.893), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.638, 0.648), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.923, -0.048), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.725, -0.598), 0.002, 0.998)).rgb * 0.0180;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.133, 0.945), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.549, -0.799), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.958, 0.222), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.869, 0.491), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.313, -0.962), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.424, 0.933), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.956, -0.407), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.992, -0.350), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.501, 0.940), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.269, -1.045), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.915, 0.596), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-1.089, 0.180), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.689, -0.879), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(0.086, 1.126), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(-0.833, -0.780), 0.002, 0.998)).rgb * 0.0045;
+      accumulated += texture(uTexture, clamp(uvG + blurStep * vec2(1.154, 0.013), 0.002, 0.998)).rgb * 0.0045;
+      glassColor = accumulated;
+    }
   } else {
     // Clear keeps the lighter 13-tap bounded path. It preserves a sharper
     // local background than regular while avoiding the legacy ghosting.

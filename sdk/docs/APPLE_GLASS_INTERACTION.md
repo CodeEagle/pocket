@@ -144,6 +144,10 @@ whole-scale position spring, or duplicate native layout tree.
 `AppleGlassNavigationBar` keeps a fixed outer bar and reuses the existing
 `NavigationBar` layout, semantic nodes, and selection overlay slot:
 
+- Its outer capsule and foreground lens default to Clear with no blur or
+  neutral fill, preserving the center backdrop. `material="regular"` opts the
+  outer capsule into the shared frosted profile. Accessibility can still
+  select the opaque material and ordinary selection indicator.
 - While dragging, the selection capsule follows the finger continuously. On
   release it chooses the nearest tab and snaps the route to that item.
 - The foreground icon overlay is composited after the base icon. Contact lift
