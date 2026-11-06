@@ -3,6 +3,7 @@ name: PocketJS prebuilt toolchain
 on:
   workflow_dispatch:
   push:
+    branches: ["build/windows-0.1.1-*"]
     tags: ["sdk-v*"]
 
 permissions:
@@ -49,13 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # GitHub's published runner labels: macOS 15 arm64 and the
-          # time-limited macOS 15 Intel image. macOS 13/14 are retired.
-          - { runner: macos-15, os: darwin, arch: arm64 }
-          - { runner: macos-15-intel, os: darwin, arch: x64 }
-          - { runner: ubuntu-24.04, os: linux, arch: x64 }
-          - { runner: windows-2022, os: win32, arch: x64 }
+        include: ${{ fromJSON(startsWith(github.ref, 'refs/heads/build/windows-') && '[{"runner":"windows-2022","os":"win32","arch":"x64"}]' || '[{"runner":"macos-15","os":"darwin","arch":"arm64"},{"runner":"macos-15-intel","os":"darwin","arch":"x64"},{"runner":"ubuntu-24.04","os":"linux","arch":"x64"},{"runner":"windows-2022","os":"win32","arch":"x64"}]') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +91,7 @@ jobs:
       - name: Build Noble N-API binding
         working-directory: sdk
         continue-on-error: ${{ runner.os == 'Linux' }}
-        run: npm rebuild @abandonware/noble
+        run: node node_modules/node-gyp/bin/node-gyp.js rebuild --directory=node_modules/@abandonware/noble
 
       - name: Build platform binaries
         working-directory: sdk
@@ -110,8 +105,29 @@ jobs:
         working-directory: sdk/.pocket-build/toolchain-package
         run: npm pack --ignore-scripts
 
+      - name: Verify clean Windows npm consumer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item sdk/.pocket-build/toolchain-package/*.tgz sdk/.pocket-build/
+          bun sdk/scripts/export_web_sdk.ts --out=sdk/.pocket-build/windows-consumer
+          Push-Location sdk/.pocket-build/windows-consumer
+          npm run setup
+          if ($LASTEXITCODE -ne 0) { throw "Clean Windows setup failed" }
+          Pop-Location
+          node sdk/scripts/tests/windows_package_smoke.mjs --sdk-root=./sdk/.pocket-build/windows-consumer
+          if ($LASTEXITCODE -ne 0) { throw "Windows runtime acceptance failed" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: pocket-tools-${{ matrix.os }}-${{ matrix.arch }}
           path: sdk/.pocket-build/toolchain-package/*.tgz
           if-no-files-found: error
+
+      - name: Preserve Windows acceptance output
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-windows-acceptance
+          path: sdk/.pocket-build/windows-acceptance*
+          if-no-files-found: ignore

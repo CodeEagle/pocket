@@ -135,6 +135,7 @@ function copySources(out: string): void {
     "TFTC_TRANSPORT_CONTRACT.md",
     "WEB_SDK_EXPORT.md",
     "NPM_TOOLCHAIN.md",
+    "WINDOWS_BUILD.md",
     "WECHAT_HOST_IMPLEMENTATION.md",
   ]) copyFile(join(SDK_ROOT, "docs", file), join(out, "docs", file));
   copyFile(join(REPOSITORY_ROOT, "LICENSE"), join(out, "LICENSE"));
