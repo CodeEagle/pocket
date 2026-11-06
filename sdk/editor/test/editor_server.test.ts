@@ -219,6 +219,12 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     expect(hostConfig.value.POCKET_PACKAGE_VERSION).toBe("stable");
     expect(hostConfig.value.POCKET_UPDATE_KEY_ID).toBe(envelope.keyId);
     expect(Buffer.from(hostConfig.value.POCKET_UPDATE_PUBLIC_KEY, "base64")).toHaveLength(32);
+    const releaseVersions = await request(server, "/api/projects/fixture-app/versions");
+    expect(releaseVersions.response.status).toBe(200);
+    expect(releaseVersions.value.hostVersion).toBe("3.2.0");
+    expect(releaseVersions.value.slots.find((slot: any) => slot.name === "stable").packages[0]).toMatchObject({
+      id: "pocket.host.demo", version: "0.2.0", build: 2,
+    });
     const archive = await request(server, "/releases/fixture-app.tar.gz");
     expect(archive.response.status).toBe(200);
     expect(new Uint8Array(archive.value).byteLength).toBeGreaterThan(100);
@@ -239,6 +245,10 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
       expect(verified.version).toBe(`0.2.0-test.${expectedBuild}`);
       expect(verified.entry.sha256).toBe(payload.entry.sha256);
     }
+    const testVersions = await request(server, "/api/projects/fixture-app/versions");
+    expect(testVersions.value.slots.find((slot: any) => slot.name === "test").packages[0]).toMatchObject({
+      id: "pocket.host.demo", version: "0.2.0-test.4", build: 4,
+    });
     const unchangedConfig = await request(server, "/api/projects/fixture-app/config");
     expect(unchangedConfig.value.build).toBe(2);
     expect(unchangedConfig.value.version).toBe("0.2.0");

@@ -24,6 +24,7 @@
               <div class="preview-actions" role="group" aria-label="Shared preview tools">
                 <label class="viewport-select-label"><span class="sr-only">Preview size</span><select id="viewport-picker" aria-label="Preview viewport"><option value="mobile">Mobile</option><option value="tablet">Tablet · 768 × 1023</option><option value="desktop">Desktop · 1023 × 768</option></select></label>
                 <button id="build" class="button secondary small-button" type="button" disabled>Build</button>
+                <button id="versions-open" class="button secondary small-button" type="button" disabled>Versions</button>
                 <button id="refresh-preview" class="button secondary small-button" type="button" disabled>Refresh</button>
                 <button id="capture-preview" class="button secondary small-button" type="button" title="Capture the Flutter preview" disabled>Capture</button>
                 <button id="toggle-regions" class="button secondary small-button" type="button" aria-pressed="false" title="Show region IDs in the Flutter preview" disabled>Region IDs</button>
@@ -161,6 +162,27 @@
             </div>
             <div id="test-publish-info" class="test-publish-info" hidden></div>
           </section>
+
+          <details class="panel version-manager" id="version-manager">
+            <summary class="version-manager-summary">
+              <div>
+                <div class="eyebrow">LOCAL VERSION BACKEND</div>
+                <h2>Version management</h2>
+                <p>Inspect signed test/stable slots served to simulators and LAN devices.</p>
+              </div>
+              <div class="version-manager-actions">
+                <span id="version-manager-state" class="meta-chip">Select a project</span>
+                <span class="resources-chevron" aria-hidden="true">⌄</span>
+              </div>
+            </summary>
+            <div class="version-manager-content">
+              <div class="version-backend-heading">
+                <div><span class="eyebrow">BACKEND</span><strong id="version-backend-origin">Not started</strong><span id="version-backend-detail" class="muted">Open this panel to start the read-only backend.</span></div>
+                <button id="versions-refresh" class="button secondary small-button" type="button" disabled>Refresh</button>
+              </div>
+              <div id="version-slots" class="version-slots"><span class="muted">Publish a test or stable package to create a version slot.</span></div>
+            </div>
+          </details>
 
           <details class="editor-tools" id="editor-tools">
             <summary><span>Project, source, device &amp; diagnostics</span><span class="advanced-summary">Advanced tools are tucked away until needed</span></summary>

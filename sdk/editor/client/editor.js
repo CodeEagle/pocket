@@ -74,6 +74,9 @@ let resourcesDirty = false;
 let resourcesLoading = false;
 let resourcesSaving = false;
 let resourcesGeneration = 0;
+let versionSnapshot = null;
+let versionsLoading = false;
+let versionsGeneration = 0;
 
 function storedPreviewPaneHeight() {
   try {
@@ -302,6 +305,8 @@ function updateActionStates() {
   }
   $("publish").disabled = !hasProject || !built || workLocked;
   $("publish-test").disabled = !hasProject || !built || workLocked;
+  $("versions-open").disabled = !hasProject;
+  $("versions-refresh").disabled = !hasProject || versionsLoading;
   updateResourceActionStates(workLocked);
 }
 
@@ -1070,6 +1075,103 @@ async function saveResources() {
   }
 }
 
+function renderVersionManagement() {
+  const state = $("version-manager-state");
+  const origin = $("version-backend-origin");
+  const detail = $("version-backend-detail");
+  const slots = $("version-slots");
+  slots.replaceChildren();
+  if (!currentId) {
+    state.textContent = "Select a project";
+    origin.textContent = "Not started";
+    detail.textContent = "Select a project to inspect published versions.";
+    slots.append(Object.assign(document.createElement("span"), { className: "muted", textContent: "No project selected." }));
+    return;
+  }
+  if (versionsLoading) {
+    state.textContent = "Loading…";
+    detail.textContent = "Starting or refreshing the read-only version backend.";
+    slots.append(Object.assign(document.createElement("span"), { className: "muted", textContent: "Loading version slots…" }));
+    return;
+  }
+  if (!versionSnapshot) {
+    state.textContent = "Open to load";
+    origin.textContent = "Not started";
+    detail.textContent = "Open this panel to start the read-only backend.";
+    slots.append(Object.assign(document.createElement("span"), { className: "muted", textContent: "Publish a test or stable package to create a version slot." }));
+    return;
+  }
+  origin.textContent = versionSnapshot.origin || "Unavailable";
+  detail.textContent = versionSnapshot.error
+    ? `LAN unavailable: ${versionSnapshot.error}. Loopback remains available.`
+    : `${versionSnapshot.lan ? "LAN" : "Loopback"} · host ${versionSnapshot.hostVersion || "editor"} · signed artifacts only`;
+  const publishedCount = (versionSnapshot.slots || []).reduce((count, slot) => count + (slot.packages?.length || 0), 0);
+  state.textContent = publishedCount ? `${publishedCount} published` : "No versions";
+  for (const slot of versionSnapshot.slots || []) {
+    const card = document.createElement("section");
+    card.className = "version-slot";
+    const heading = document.createElement("div");
+    heading.className = "version-slot-heading";
+    const title = document.createElement("strong");
+    title.textContent = slot.name;
+    const count = document.createElement("span");
+    count.className = "meta-chip";
+    count.textContent = `${slot.packages?.length || 0} package${slot.packages?.length === 1 ? "" : "s"}`;
+    heading.append(title, count);
+    card.append(heading);
+    if (!slot.packages?.length) {
+      card.append(Object.assign(document.createElement("span"), { className: "muted", textContent: `No ${slot.name} package published.` }));
+    }
+    for (const pkg of slot.packages || []) {
+      const item = document.createElement("div");
+      item.className = "version-package";
+      const packageTitle = document.createElement("div");
+      packageTitle.className = "version-package-title";
+      const id = document.createElement("strong");
+      id.textContent = pkg.id;
+      id.title = pkg.id;
+      const identity = document.createElement("span");
+      identity.textContent = `v${pkg.version} · build ${pkg.build}`;
+      packageTitle.append(id, identity);
+      const links = document.createElement("div");
+      links.className = "version-package-links";
+      for (const [label, href] of [["latest.json ↗", pkg.manifestUrl], ["host.json ↗", pkg.hostConfigUrl]]) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = label;
+        links.append(link);
+      }
+      item.append(packageTitle, links);
+      card.append(item);
+    }
+    slots.append(card);
+  }
+}
+
+async function loadVersions() {
+  if (!currentId || versionsLoading) return;
+  const projectId = currentId;
+  const generation = ++versionsGeneration;
+  versionsLoading = true;
+  renderVersionManagement();
+  updateActionStates();
+  try {
+    const snapshot = await api(`/api/projects/${encodeURIComponent(projectId)}/versions`);
+    if (currentId !== projectId || generation !== versionsGeneration) return;
+    versionSnapshot = snapshot;
+  } catch (error) {
+    if (currentId === projectId && generation === versionsGeneration) showNotice(error);
+  } finally {
+    if (currentId === projectId && generation === versionsGeneration) {
+      versionsLoading = false;
+      renderVersionManagement();
+      updateActionStates();
+    }
+  }
+}
+
 function renderArtifacts(status) {
   const artifacts = $("artifacts");
   artifacts.replaceChildren();
@@ -1246,6 +1348,10 @@ async function selectProject(id) {
   invalidateWechatRequests();
   const selectionGeneration = wechatGeneration;
   currentId = id;
+  versionSnapshot = null;
+  versionsLoading = false;
+  versionsGeneration += 1;
+  renderVersionManagement();
   resetResources();
   currentFile = "app.tsx";
   currentStatus = null;
@@ -1325,6 +1431,10 @@ async function loadProjects(preferred) {
   else {
     invalidateWechatRequests();
     currentId = null;
+    versionSnapshot = null;
+    versionsLoading = false;
+    versionsGeneration += 1;
+    renderVersionManagement();
     resetResources();
     resetWechatPresentation();
     setEnabled(false);
@@ -1409,6 +1519,12 @@ async function publishProject(channel = "release") {
       body: JSON.stringify(channel === "test" ? { channel: "test" } : {}),
     });
     renderStatus(result.status || result);
+    versionSnapshot = null;
+    if (versionsLoading) {
+      versionsGeneration += 1;
+      versionsLoading = false;
+    }
+    void loadVersions();
     if (!resourcesDirty) {
       const projectId = currentId;
       void loadResources(projectId).catch(showNotice);
@@ -1965,6 +2081,16 @@ $("save").addEventListener("click", () => { void saveProject().catch(() => {}); 
 $("build").addEventListener("click", () => { void buildProject(); });
 $("publish").addEventListener("click", () => { void publishProject("release"); });
 $("publish-test").addEventListener("click", () => { void publishProject("test"); });
+$("versions-open").addEventListener("click", () => {
+  const panel = $("version-manager");
+  panel.open = true;
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  void loadVersions();
+});
+$("versions-refresh").addEventListener("click", () => { void loadVersions(); });
+$("version-manager").addEventListener("toggle", (event) => {
+  if (event.currentTarget.open && !versionSnapshot) void loadVersions();
+});
 $("refresh-preview").addEventListener("click", () => { void refreshPreview(); });
 $("preview-open").addEventListener("click", () => { if (previewPath) window.open(previewBrowserUrl().href, "_blank", "noopener"); });
 $("clear-log").addEventListener("click", () => { logEl.textContent = ""; });

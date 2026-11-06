@@ -1366,6 +1366,58 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     }
     return deviceUpdates.origin;
   };
+  const versionBackendSnapshot = async (id: string, state: EditorState, config: EditorConfig) => {
+    let origin = `http://127.0.0.1:${server.port}`;
+    let error: string | undefined;
+    try {
+      origin = versionBackendOrigin();
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+    const packageIds = new Set<string>([config.appId]);
+    if (state.builtRevision !== null) {
+      try {
+        const snapshot = await readResourceSnapshot(
+          safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`),
+        );
+        for (const pkg of snapshot.packages) packageIds.add(pkg.id);
+      } catch {
+        // A version view remains useful for the root package before/after a
+        // resource snapshot exists. Never invent child packages on failure.
+      }
+    }
+    const slots = [] as Array<{
+      name: "test" | "stable";
+      packages: Array<{ id: string; version: string; build: number; manifestUrl: string; hostConfigUrl: string }>;
+    }>;
+    for (const name of ["test", "stable"] as const) {
+      const packages = [] as Array<{ id: string; version: string; build: number; manifestUrl: string; hostConfigUrl: string }>;
+      for (const packageId of packageIds) {
+        const directory = pocketReleaseDirectory(workspace.updates, updateHostVersion, packageId, name);
+        if (!existsSync(join(directory, "latest.json"))) continue;
+        const payload = await readJsonFile<Record<string, unknown>>(join(directory, "payload.json"), {});
+        const version = payload.version;
+        const build = payload.build;
+        if (typeof version !== "string" || !Number.isSafeInteger(build) || Number(build) < 0) continue;
+        const route = `/pocket/${updateHostVersion}/${packageId}/${name}`;
+        packages.push({
+          id: packageId,
+          version,
+          build: Number(build),
+          manifestUrl: `${origin}${route}/latest.json`,
+          hostConfigUrl: `${origin}${route}/host.json`,
+        });
+      }
+      slots.push({ name, packages });
+    }
+    return {
+      origin,
+      hostVersion: updateHostVersion,
+      lan: new URL(origin).hostname !== "127.0.0.1",
+      ...(error ? { error } : {}),
+      slots,
+    };
+  };
   const devices = createEditorDeviceManager({
     projectDirectory: (id) => projectDir(asProjectId(id)),
     flutterDirectory: (id) => id === workspace.projectId && flutterRoot ? resolve(flutterRoot) : undefined,
@@ -1789,6 +1841,10 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             await parseJsonBody(request);
             queueBuild(workspace, id, states, runner);
             return json({ status: publicStatus(id, state) }, 202);
+          }
+          if (parts[3] === "versions" && method === "GET") {
+            const config = await loadConfig(projectDir(id), id);
+            return json(await versionBackendSnapshot(id, state, config));
           }
           if ((parts[3] === "publish" || parts[3] === "package") && method === "POST") {
             const body = await parseJsonBody(request);

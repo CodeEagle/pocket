@@ -81,6 +81,15 @@ test("Editor edits package resource delivery and retains saved values per mini-a
           if (tail === "files") return json({ files: [{ path: "app.tsx" }] });
           if (tail === "files/app.tsx") return json({ path: "app.tsx", content: "export default () => null;", bytes: 27 });
           if (tail === "status") return json({ revision: 7, builtRevision: 7, busy: false, logs: [], artifacts: { generation: "resources-ui" } });
+          if (tail === "versions") return json({
+            origin: `http://192.168.50.20:${server!.port}`,
+            hostVersion: "3.2.0",
+            lan: true,
+            slots: [
+              { name: "test", packages: [{ id: "pocket.resources", version: "0.1.0-test.8", build: 8, manifestUrl: "/pocket/3.2.0/pocket.resources/test/latest.json", hostConfigUrl: "/pocket/3.2.0/pocket.resources/test/host.json" }] },
+              { name: "stable", packages: [] },
+            ],
+          });
           if (tail === "preview") return previewDocument();
           if (tail === "deploy") return json({ jobs: [] });
           if (tail === "wechat") return json({ state: "idle", logs: [] });
@@ -114,6 +123,11 @@ test("Editor edits package resource delivery and retains saved values per mini-a
     await page.goto(`http://127.0.0.1:${server.port}/`);
     await page.locator("#resource-package-picker").waitFor({ state: "attached" });
     await page.waitForFunction(() => document.querySelectorAll("#resource-package-picker option").length === 2);
+    await page.locator("#versions-open").click();
+    await page.waitForFunction(() => document.getElementById("version-manager-state")?.textContent === "1 published");
+    expect(await page.locator("#version-backend-origin").textContent()).toContain("192.168.50.20");
+    expect(await page.locator("#version-manager").textContent()).toContain("0.1.0-test.8");
+    expect(await page.locator('#version-manager a:has-text("latest.json")').getAttribute("href")).toContain("/pocket/3.2.0/pocket.resources/test/latest.json");
     await page.locator("#resources-panel > summary").click();
     expect(await page.locator("#resource-package-picker option").allTextContents()).toEqual([
       "Profile · pocket.demo.profile",

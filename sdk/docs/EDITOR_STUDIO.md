@@ -50,6 +50,11 @@ Build → Publish → App Check/Apply，不再重新构建 Flutter。没有可�
 仍可回退 loopback 供模拟器/桌面测试；真机必须能访问显示的 LAN 地址。HTTP 只用于
 debug allowlist，生产发布仍应部署到 HTTPS。
 
+Editor 顶部的 **Versions** 按钮和页面中的 **Version management** 面板是版本后台入口。
+打开后会启动/刷新只读 listener，同时展示后台 origin、hostVersion、`test`/`stable`
+两个槽，以及根应用和 mini-app 当前签名 payload 的 version/build、`latest.json` 与
+`host.json`。列表直接读取真实发布目录，不维护可能漂移的第二份版本数据库。
+
 ## 编辑与预览
 
 1. 选择项目和源文件，修改并保存。

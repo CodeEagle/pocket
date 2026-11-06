@@ -254,6 +254,28 @@ label input { width: 100%; min-width: 0; border: 1px solid var(--line); border-r
 .test-publish-info { display: grid; gap: 5px; margin: -3px 15px 11px; padding: 9px 11px; border: 1px solid rgba(244, 203, 119, .3); border-radius: 8px; color: var(--warning); background: rgba(244, 203, 119, .08); font-size: 10px; line-height: 1.45; }
 .test-publish-info strong { color: var(--text); font-size: 10px; }
 .test-publish-info span { color: var(--muted); }
+.version-manager { overflow: hidden; }
+.version-manager-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 17px; cursor: pointer; list-style: none; }
+.version-manager-summary::-webkit-details-marker { display: none; }
+.version-manager-summary h2 { margin: 2px 0 0; font-size: 14px; }
+.version-manager-summary p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.version-manager-actions { display: flex; align-items: center; gap: 9px; }
+.version-manager-content { display: grid; gap: 12px; padding: 0 17px 17px; border-top: 1px solid var(--line-soft); }
+.version-backend-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 13px; }
+.version-backend-heading > div { min-width: 0; display: grid; gap: 3px; }
+.version-backend-heading strong { overflow: hidden; font: 11px/1.45 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.version-slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.version-slot { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 11px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(255,255,255,.025); }
+.version-slot-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.version-slot-heading strong { font-size: 11px; text-transform: uppercase; }
+.version-package { display: grid; gap: 5px; min-width: 0; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.version-package:first-of-type { padding-top: 0; border-top: 0; }
+.version-package-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.version-package-title strong { overflow: hidden; font: 10px/1.4 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.version-package-title span { flex: none; color: var(--muted); font-size: 9px; }
+.version-package-links { display: flex; flex-wrap: wrap; gap: 5px 9px; }
+.version-package-links a { color: var(--blue); font-size: 9px; text-decoration: none; }
+.version-package-links a:hover { text-decoration: underline; }
 .project-panel-status { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .project-picker-body { padding: 12px 15px 15px; }
 .project-picker-body .sidebar-heading { padding: 0 0 9px; }
@@ -316,6 +338,8 @@ dialog label input { padding: 9px; }
   .preview-stage.viewport-mobile, .wechat-preview-pane { width: 240px; }
   .test-publish-card { align-items: stretch; flex-direction: column; }
   .test-publish-card .button { width: 100%; }
+  .version-slots { grid-template-columns: 1fr; }
+  .version-backend-heading { align-items: stretch; flex-direction: column; }
   .publish-heading { align-items: stretch; flex-direction: column; }
   .publish-actions { justify-content: space-between; }
 }

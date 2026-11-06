@@ -296,6 +296,10 @@ Publish test package 会产生
 并在页面显示可用的 `host.json`。LAN listener 只提供签名包、bundle、blob 和公开
 bootstrap，Editor API、源码及签名私钥仍只在 loopback。
 
+点击 Editor 顶部 **Versions** 打开 **Version management**，可同时查看 `test` 和
+`stable` 槽、各根包/mini-app 的实际 version/build，以及局域网 manifest/host 配置。
+该视图从已签名发布目录读取，不是另一份版本真相来源。
+
 AI 使用 Editor 的标准步骤：
 
 1. 修改并保存 JS/TS/TSX。
