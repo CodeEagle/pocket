@@ -1,0 +1,53 @@
+name: Windows prebuilt consumer acceptance
+on:
+  push:
+    branches: ["build/windows-0.1.1-*"]
+    paths:
+      - '.github/workflows/windows-consumer-check.yml'
+      - 'sdk/scripts/tests/windows_package_smoke.mjs'
+      - 'sdk/scripts/editor_service.mjs'
+      - 'sdk/editor/**'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  consumer:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - uses: actions/download-artifact@v4
+        with:
+          name: pocket-tools-win32-x64
+          path: sdk/.pocket-build
+          run-id: 42204461550
+          github-token: ${{ github.token }}
+      - name: Install and exercise prebuilt SDK
+        shell: pwsh
+        run: |
+          bun sdk/scripts/export_web_sdk.ts --out=sdk/.pocket-build/windows-consumer
+          Push-Location sdk/.pocket-build/windows-consumer
+          npm run setup
+          if ($LASTEXITCODE -ne 0) { throw "setup failed" }
+          npm run doctor
+          if ($LASTEXITCODE -ne 0) { throw "doctor failed" }
+          Pop-Location
+          node sdk/scripts/tests/windows_package_smoke.mjs --sdk-root=./sdk/.pocket-build/windows-consumer | Tee-Object sdk/.pocket-build/windows-acceptance.json
+          if ($LASTEXITCODE -ne 0) { throw "runtime acceptance failed" }
+      - name: Preserve service diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $log = "sdk/.pocket-build/windows-consumer/.pocket-build/editor-service-8791.log"
+          if (Test-Path $log) { Get-Content $log; Copy-Item $log sdk/.pocket-build/windows-acceptance-service.log }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocket-windows-consumer-acceptance
+          path: sdk/.pocket-build/windows-acceptance*
+          include-hidden-files: true

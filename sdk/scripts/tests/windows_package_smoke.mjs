@@ -12,7 +12,7 @@
  * The CI job installs the platform tarball before invoking this script.
  */
 import { createRequire } from "node:module";
-import { cpSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -139,7 +139,9 @@ async function verifyStudioLifecycle(rootPath, toolEnv, projectRoot) {
     windowsHide: true,
   });
   if (start.error || start.status !== 0) {
-    fail(`Studio start failed (${start.status ?? "spawn"}):\n${start.stdout ?? ""}\n${start.stderr ?? start.error?.message ?? ""}`);
+    const logPath = join(rootPath, ".pocket-build", "editor-service-8791.log");
+    const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "(no service log)";
+    fail(`Studio start failed (${start.status ?? "spawn"}):\n${start.stdout ?? ""}\n${start.stderr ?? start.error?.message ?? ""}\n${log}`);
   }
   const workspace = resolve(rootPath, ".pocket-build", "editor-workspace-8791");
   try {
