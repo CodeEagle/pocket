@@ -51,7 +51,11 @@ Explicit prewarming retains the existing healthy-cache bootstrap. Cache-first
 entry consumes an already staged signed version before starting another remote
 check. Without a staged candidate, a healthy cache remains presentable while its
 update check runs. A cold remote-only open performs one preparation and uses the
-existing 20-second overall I/O budget and cancellation cleanup.
+the preparation inactivity watchdog and cancellation cleanup: 20 seconds without
+network progress, 120 seconds during local verification/preparation, and a
+bounded two-second cancellation drain. Continuously advancing downloads can
+therefore take longer than 20 seconds in total. Outer SystemHost/JS request
+deadlines remain separate.
 
 The returned generation is consumed through the kernel's existing generation
 handler before presentation. Child event admission requires the native observed

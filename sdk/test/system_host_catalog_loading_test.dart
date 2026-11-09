@@ -135,6 +135,9 @@ void main() {
       try {
         await tester.pumpWidget(
           MaterialApp(
+            // This HTTP/progress fixture intercepts flutter/assets. Keep the
+            // outer action independent of Material's shader asset loading.
+            theme: ThemeData(splashFactory: NoSplash.splashFactory),
             home: Scaffold(
               body: Column(
                 children: [

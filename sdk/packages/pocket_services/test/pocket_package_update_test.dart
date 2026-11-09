@@ -22,7 +22,7 @@ void main() {
         final archiveFile = File(path.join(tempDir.path, '$format.archive'));
         await archiveFile.writeAsBytes(archiveBytes, flush: true);
         final store = PocketPackageStore(Directory(path.join(tempDir.path, format)));
-        var receivedArchive = false;
+        var verifiedArchive = false;
         var heartbeatsDuringProcessing = 0;
         var lastHeartbeatMilliseconds = 0;
         var largestHeartbeatGapMilliseconds = 0;
@@ -46,23 +46,21 @@ void main() {
           ],
           bytes: archiveFile.openRead(),
           cancellation: PocketCancellationToken(),
-          onBytes: (received) {
-            if (received == archiveBytes.length && !receivedArchive) {
-              receivedArchive = true;
-              // Start measuring after the last network/file chunk was read.
-              // The real decoder and per-entry hash now run in the worker.
-              processingStartedMilliseconds = stopwatch.elapsedMilliseconds;
-              lastHeartbeatMilliseconds = processingStartedMilliseconds;
-              heartbeat = Timer.periodic(const Duration(milliseconds: 1), (_) {
-                final now = stopwatch.elapsedMilliseconds;
-                final gap = now - lastHeartbeatMilliseconds;
-                if (gap > largestHeartbeatGapMilliseconds) {
-                  largestHeartbeatGapMilliseconds = gap;
-                }
-                lastHeartbeatMilliseconds = now;
-                heartbeatsDuringProcessing++;
-              });
-            }
+          onArchiveVerified: () {
+            verifiedArchive = true;
+            // This boundary is after EOF and archive hash validation, but
+            // before extraction and per-entry validation run in the worker.
+            processingStartedMilliseconds = stopwatch.elapsedMilliseconds;
+            lastHeartbeatMilliseconds = processingStartedMilliseconds;
+            heartbeat = Timer.periodic(const Duration(milliseconds: 1), (_) {
+              final now = stopwatch.elapsedMilliseconds;
+              final gap = now - lastHeartbeatMilliseconds;
+              if (gap > largestHeartbeatGapMilliseconds) {
+                largestHeartbeatGapMilliseconds = gap;
+              }
+              lastHeartbeatMilliseconds = now;
+              heartbeatsDuringProcessing++;
+            });
           },
         );
         final processingMilliseconds = stopwatch.elapsedMilliseconds - processingStartedMilliseconds;
@@ -71,7 +69,7 @@ void main() {
         stopwatch.stop();
         heartbeat?.cancel();
 
-        expect(receivedArchive, isTrue, reason: format);
+        expect(verifiedArchive, isTrue, reason: format);
         expect(
           heartbeatsDuringProcessing,
           greaterThanOrEqualTo(10),
@@ -92,6 +90,174 @@ void main() {
     }
   });
 
+  test('bundle verification boundary rejects truncated or bad-hash archives', () async {
+    final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-verified-boundary-');
+    try {
+      final blobBytes = <int>[1, 2, 3, 4];
+      final blobSha256 = _sha256(blobBytes);
+      final archiveBytes = encodePocketZip(<String, List<int>>{
+        'blobs/$blobSha256': blobBytes,
+      });
+      final cases = <({String name, List<int> bytes, String sha256})>[
+        (
+          name: 'truncated body',
+          bytes: archiveBytes.sublist(0, archiveBytes.length - 1),
+          sha256: _sha256(archiveBytes),
+        ),
+        (name: 'wrong archive digest', bytes: archiveBytes, sha256: '0' * 64),
+      ];
+
+      for (final fixture in cases) {
+        var verificationSignals = 0;
+        await expectLater(
+          PocketPackageStore(Directory(path.join(tempDir.path, fixture.name)))
+              .writeBundleZip(
+                bundle: PocketManifestBundle(
+                  format: 'zip',
+                  sha256: fixture.sha256,
+                  size: archiveBytes.length,
+                  url: 'bundle.zip',
+                ),
+                expectedFiles: <PocketManifestFile>[
+                  PocketManifestFile(
+                    sha256: blobSha256,
+                    size: blobBytes.length,
+                    url: 'blobs/$blobSha256',
+                  ),
+                ],
+                bytes: Stream<List<int>>.value(fixture.bytes),
+                cancellation: PocketCancellationToken(),
+                onArchiveVerified: () => verificationSignals++,
+              ),
+          throwsA(isA<PocketPackageException>().having(
+            (error) => error.code,
+            'code',
+            'download-hash',
+          )),
+          reason: fixture.name,
+        );
+        expect(verificationSignals, 0, reason: fixture.name);
+      }
+    } finally {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
+  test('full bundle reports verifying during extraction without returning to downloading', () async {
+    final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-verifying-progress-');
+    try {
+      final algorithm = Ed25519();
+      final keyPair = await algorithm.newKeyPair();
+      final publicKey = await keyPair.extractPublicKey();
+      final entryBytes = _largeDeterministicBytes(12 * 1024 * 1024);
+      final pakBytes = <int>[1, 2, 3, 4];
+      final entryHash = _sha256(entryBytes);
+      final pakHash = _sha256(pakBytes);
+      final archiveBytes = encodePocket7z(<String, List<int>>{
+        'blobs/$entryHash': entryBytes,
+        'blobs/$pakHash': pakBytes,
+      });
+      final files = <Map<String, Object?>>[
+        <String, Object?>{
+          'sha256': entryHash,
+          'size': entryBytes.length,
+          'url': 'blobs/$entryHash',
+        },
+        <String, Object?>{
+          'sha256': pakHash,
+          'size': pakBytes.length,
+          'url': 'blobs/$pakHash',
+        },
+      ]..sort((a, b) => (a['sha256'] as String).compareTo(b['sha256'] as String));
+      final payloadBytes = Uint8List.fromList(utf8.encode(jsonEncode(<String, Object?>{
+        'schemaVersion': 1,
+        'appId': 'test.app',
+        'version': '1.0.0',
+        'build': 1,
+        'protocol': 1,
+        'minHostVersion': 1,
+        'entry': <String, Object?>{'sha256': entryHash, 'size': entryBytes.length},
+        'entryFormat': 'bytecode',
+        'runtimeAbi': 'abi-v1',
+        'pak': <String, Object?>{
+          'sha256': pakHash,
+          'size': pakBytes.length,
+          'parts': <Map<String, Object?>>[
+            <String, Object?>{'offset': 0, 'sha256': pakHash, 'size': pakBytes.length},
+          ],
+        },
+        'files': files,
+        'bundle': <String, Object?>{
+          'format': '7z',
+          'sha256': _sha256(archiveBytes),
+          'size': archiveBytes.length,
+          'url': 'bundle.7z',
+        },
+      })));
+      final signature = await algorithm.sign(payloadBytes, keyPair: keyPair);
+      final signed = PocketSignedManifest.fromBytes(_envelopeBytes(
+        keyId: 'test-key',
+        payloadBytes: payloadBytes,
+        signatureBytes: signature.bytes,
+      ));
+      final manifestUri = Uri.parse('http://127.0.0.1:39123/latest.json');
+      final transport = _MemoryTransport(<String, List<int>>{
+        manifestUri.toString(): signed.envelopeBytes,
+        manifestUri.resolve('bundle.7z').toString(): archiveBytes,
+      });
+      final coordinator = PocketUpdateCoordinator(
+        manifestUri: manifestUri,
+        appId: 'test.app',
+        trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+        store: PocketPackageStore(tempDir),
+        transport: transport,
+        expectedRuntimeAbi: 'abi-v1',
+        requireBytecode: true,
+      );
+      final progress = <PocketUpdateProgress>[];
+      var verificationHeartbeats = 0;
+      Timer? heartbeat;
+      final stopwatch = Stopwatch()..start();
+      final prepared = await coordinator.prepare(onProgress: (value) {
+        progress.add(value);
+        if (value.stage == PocketUpdateStage.verifying && heartbeat == null) {
+          // Archive verification is reported before the large worker decode.
+          heartbeat = Timer.periodic(const Duration(milliseconds: 1), (_) {
+            verificationHeartbeats++;
+          });
+        }
+      });
+      stopwatch.stop();
+      heartbeat?.cancel();
+      coordinator.dispose();
+
+      expect(prepared.deliveryMode, PocketUpdateMode.zip);
+      final verifyingIndex = progress.indexWhere(
+        (value) => value.stage == PocketUpdateStage.verifying,
+      );
+      expect(verifyingIndex, greaterThan(0));
+      final downloads = progress
+          .where((value) => value.stage == PocketUpdateStage.downloading)
+          .toList();
+      expect(downloads, isNotEmpty);
+      expect(downloads.last.downloadedBytes, archiveBytes.length);
+      expect(
+        progress.skip(verifyingIndex).where(
+          (value) => value.stage == PocketUpdateStage.downloading,
+        ),
+        isEmpty,
+      );
+      expect(
+        progress.where((value) => value.stage == PocketUpdateStage.verifying),
+        hasLength(1),
+      );
+      expect(verificationHeartbeats, greaterThanOrEqualTo(10));
+      expect(stopwatch.elapsed, greaterThan(const Duration(milliseconds: 20)));
+    } finally {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
   test('cancelling a bundle worker leaves no cached blob or package pointer', () async {
     final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-worker-cancel-');
     try {
@@ -104,7 +270,7 @@ void main() {
       final cancellation = PocketCancellationToken();
       Timer? cancelWorker;
       Timer? cancellationHeartbeat;
-      var receivedArchive = false;
+      var verifiedArchive = false;
       var heartbeatsBeforeCancellation = 0;
 
       await expectLater(
@@ -124,19 +290,15 @@ void main() {
           ],
           bytes: archiveFile.openRead(),
           cancellation: cancellation,
-          onBytes: (received) {
-            if (received == archiveBytes.length && !receivedArchive) {
-              receivedArchive = true;
-              cancellationHeartbeat = Timer.periodic(
-                const Duration(milliseconds: 1),
-                (_) => heartbeatsBeforeCancellation++,
-              );
-            }
-            if (receivedArchive && cancelWorker == null) {
-              // Give the spawned decoder time to start on this real 32 MiB
-              // archive, then cancel while its pure-Dart work is in flight.
-              cancelWorker = Timer(const Duration(milliseconds: 100), cancellation.cancel);
-            }
+          onArchiveVerified: () {
+            verifiedArchive = true;
+            cancellationHeartbeat = Timer.periodic(
+              const Duration(milliseconds: 1),
+              (_) => heartbeatsBeforeCancellation++,
+            );
+            // Give the spawned decoder time to start on this real 32 MiB
+            // archive, then cancel while its pure-Dart work is in flight.
+            cancelWorker = Timer(const Duration(milliseconds: 100), cancellation.cancel);
           },
         ),
         throwsA(isA<PocketUpdateCancellation>()),
@@ -144,7 +306,7 @@ void main() {
       cancelWorker?.cancel();
       cancellationHeartbeat?.cancel();
 
-      expect(receivedArchive, isTrue);
+      expect(verifiedArchive, isTrue);
       expect(heartbeatsBeforeCancellation, greaterThanOrEqualTo(10));
       expect(await File(path.join(tempDir.path, 'blobs', blobSha256)).exists(), isFalse);
       expect(await File(path.join(tempDir.path, 'active')).exists(), isFalse);

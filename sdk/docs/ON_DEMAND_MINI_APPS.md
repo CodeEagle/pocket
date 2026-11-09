@@ -66,10 +66,15 @@ See [Mini-app update before entry](MINI_APP_UPDATE_BEFORE_OPEN.md).
   download and verification failures reach the normal open error path; runtime
   failure can recover only to a verified healthy package. Rollback without a
   previous healthy package fails explicitly.
-- Closing the session cancels its in-flight download. Cold download has an
-  20-second overall preparation deadline in addition to transport timeouts. JS create/open deadlines
-  allow this I/O and the existing first-frame wait without lengthening ordinary
-  shared-bridge requests.
+- Closing the session cancels its in-flight download. Cold preparation uses
+  a no-progress watchdog rather than a 20-second total download deadline:
+  network/checking phases allow 20 seconds without observed progress, while
+  local verification/preparation allows 120 seconds. Changing phase, receiving
+  more bytes, changing artifact or beginning a retry renews the budget; duplicate
+  progress facts do not. A timed-out operation is cancelled, with at most two
+  seconds of foreground cleanup waiting. HTTP request/body idle limits remain.
+  SystemHost/JS open requests retain their separate request deadlines; this
+  change does not make those entry points wait indefinitely.
 
 ## Editor resource delivery
 

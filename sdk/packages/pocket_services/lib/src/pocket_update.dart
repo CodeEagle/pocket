@@ -484,21 +484,23 @@ final class PocketUpdateCoordinator {
               : files.where((file) => included.contains(file.sha256)).toList(),
           token: token,
           callback: onProgress,
+          onArchiveVerified: () {
+            _report(
+              onProgress,
+              PocketUpdateProgress(
+                stage: PocketUpdateStage.verifying,
+                downloadedBytes: bundle.size,
+                totalBytes: bundle.size,
+                fileSha256: bundle.sha256,
+              ),
+            );
+          },
         ),
       );
       downloadedFiles = 1;
       reusedFiles = 0;
       downloadedBytes = bundle.size;
       reusedBytes = 0;
-      _report(
-        onProgress,
-        PocketUpdateProgress(
-          stage: PocketUpdateStage.downloading,
-          downloadedBytes: bundle.size,
-          totalBytes: bundle.size,
-          fileSha256: bundle.sha256,
-        ),
-      );
     }
     // A partial base archive is an explicitly signed subset, never an excuse
     // to accept an incomplete archive. Fetch its remaining declared blobs via
@@ -522,14 +524,16 @@ final class PocketUpdateCoordinator {
         downloadedBytes,
         (sum, file) => sum + file.size,
       );
-      _report(
-        onProgress,
-        PocketUpdateProgress(
-          stage: PocketUpdateStage.downloading,
-          downloadedBytes: downloadedBytes,
-          totalBytes: totalToDownload,
-        ),
-      );
+      if (missingFiles.isNotEmpty) {
+        _report(
+          onProgress,
+          PocketUpdateProgress(
+            stage: PocketUpdateStage.downloading,
+            downloadedBytes: downloadedBytes,
+            totalBytes: totalToDownload,
+          ),
+        );
+      }
       for (final file in missingFiles) {
         token.throwIfCancelled();
         final blob = await _download(
@@ -555,10 +559,12 @@ final class PocketUpdateCoordinator {
       }
     }
     token.throwIfCancelled();
-    _report(
-      onProgress,
-      const PocketUpdateProgress(stage: PocketUpdateStage.verifying),
-    );
+    if (resolvedMode != PocketUpdateMode.zip || downloadedFiles > 1) {
+      _report(
+        onProgress,
+        const PocketUpdateProgress(stage: PocketUpdateStage.verifying),
+      );
+    }
     final entryBlob = blobs[signed.payload.entry.sha256];
     if (entryBlob == null)
       throw const PocketPackageException(
@@ -892,6 +898,7 @@ final class PocketUpdateCoordinator {
     required List<PocketManifestFile> expectedFiles,
     required PocketCancellationToken token,
     PocketUpdateProgressCallback? callback,
+    void Function()? onArchiveVerified,
   }) async {
     final declared = Uri.tryParse(bundle.url);
     if (declared == null ||
@@ -930,6 +937,7 @@ final class PocketUpdateCoordinator {
           cancellation: token,
           maxArchiveBytes: maxTotalBytes,
           maxTotalBytes: maxTotalBytes,
+          onArchiveVerified: onArchiveVerified,
           onBytes: (received) => _report(
             callback,
             PocketUpdateProgress(

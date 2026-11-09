@@ -122,4 +122,26 @@ void main() {
     );
     expect(find.text('准备首帧'), findsOneWidget);
   });
+
+  testWidgets(
+    'verification never presents completed download as startup percent',
+    (tester) async {
+      await tester.pumpWidget(
+        _app(
+          const PocketStartupIndicator(
+            stage: 'verifying',
+            downloadedBytes: 1024,
+            totalBytes: 1024,
+          ),
+        ),
+      );
+      final progress = tester.widget<LinearProgressIndicator>(
+        find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      );
+      expect(progress.value, isNull);
+      expect(find.text('校验资源'), findsOneWidget);
+      expect(find.textContaining('%'), findsNothing);
+      expect(find.textContaining('已下载'), findsNothing);
+    },
+  );
 }

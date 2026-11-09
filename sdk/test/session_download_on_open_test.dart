@@ -230,6 +230,92 @@ void main() {
   );
 
   test(
+    'downloadOnOpen allows a slow transfer while real byte progress continues',
+    () async {
+      const chunkSize = 32 * 1024;
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+        entryBytes: Uint8List.fromList(
+          List<int>.generate(3 * chunkSize, (index) => index % 251),
+        ),
+      );
+      updateServer.current = release;
+      updateServer.chunkedPath = release.entryPath;
+      updateServer.chunkSize = chunkSize;
+      updateServer.chunkDelay = const Duration(seconds: 11);
+
+      final value = session();
+      final progress = <PocketUpdateProgress>[];
+      void observeProgress() {
+        final current = value.transferProgress;
+        if (current != null) progress.add(current);
+      }
+
+      value.addListener(observeProgress);
+      final elapsed = Stopwatch()..start();
+      try {
+        await value.initialize();
+
+        expect(elapsed.elapsed, greaterThan(const Duration(seconds: 20)));
+        expect(value.active?.build, 2);
+        expect(value.transferProgress, isNull);
+        expect(
+          progress
+              .where((fact) => fact.stage == PocketUpdateStage.downloading)
+              .map((fact) => fact.downloadedBytes)
+              .toSet()
+              .length,
+          greaterThanOrEqualTo(3),
+        );
+      } finally {
+        value.removeListener(observeProgress);
+        await closeQuietly(value);
+      }
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
+
+  test(
+    'downloadOnOpen times out a stalled preparation and cancels the request',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+      updateServer.holdPath = '/manifest.json';
+
+      final value = session();
+      final initializing = value.initialize();
+      try {
+        await waitUntil(() => updateServer.count('/manifest.json') > 0);
+        await expectLater(
+          initializing.timeout(const Duration(seconds: 24)),
+          throwsA(
+            isA<PocketPackageException>().having(
+              (error) => error.code,
+              'code',
+              'download-timeout',
+            ),
+          ),
+        );
+        expect(value.transferProgress, isNull);
+      } finally {
+        updateServer.releaseHeldResponse();
+        await closeQuietly(value);
+      }
+    },
+    timeout: const Timeout(Duration(seconds: 40)),
+  );
+
+  test(
     'downloadOnOpen reports real streamed bytes and clears on cancellation',
     () async {
       const chunkSize = 64 * 1024;
@@ -2067,6 +2153,7 @@ final class _UpdateServer {
   String? holdPath;
   String? chunkedPath;
   int chunkSize = 64 * 1024;
+  Duration chunkDelay = Duration.zero;
   final Map<String, int> _counts = <String, int>{};
   Completer<void>? _releaseHeld;
 
@@ -2103,6 +2190,9 @@ final class _UpdateServer {
           final end = (offset + chunkSize).clamp(0, bytes.length).toInt();
           request.response.add(bytes.sublist(offset, end));
           await request.response.flush();
+          if (offset + chunkSize < bytes.length && chunkDelay > Duration.zero) {
+            await Future<void>.delayed(chunkDelay);
+          }
           if (path == holdPath && offset == 0) {
             _releaseHeld ??= Completer<void>();
             await _releaseHeld!.future;

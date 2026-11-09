@@ -19,12 +19,15 @@ final class PocketStartupIndicator extends StatelessWidget {
   final int? totalBytes;
   final Color? foregroundColor;
 
+  bool get _isTransferring => stage == 'downloading' || stage == 'retry';
+
   String get _stageLabel => switch (stage) {
     'index' => '读取应用索引',
     'descriptor' => '读取宿主配置',
     'bootstrapAsset' => '读取启动资源',
     'checking' => '检查更新',
     'downloading' => '下载资源',
+    'retry' => '重试下载资源',
     'verifying' || 'verified' => '校验资源',
     'loading' || 'ready' => '准备首帧',
     _ => '初始化',
@@ -54,6 +57,7 @@ final class PocketStartupIndicator extends StatelessWidget {
   }
 
   String? get _byteSummary {
+    if (!_isTransferring) return null;
     final received = downloadedBytes;
     if (received == null || received < 0) return null;
     final total = totalBytes;
@@ -72,7 +76,8 @@ final class PocketStartupIndicator extends StatelessWidget {
         foregroundColor ?? Theme.of(context).colorScheme.onSurface;
     final hasKnownTotal = totalBytes != null && totalBytes! > 0;
     final hasKnownReceived = downloadedBytes != null && downloadedBytes! >= 0;
-    final double? fraction = hasKnownTotal && hasKnownReceived
+    final double? fraction =
+        _isTransferring && hasKnownTotal && hasKnownReceived
         ? (downloadedBytes! / totalBytes!).clamp(0.0, 1.0)
         : null;
 

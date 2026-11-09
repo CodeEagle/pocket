@@ -912,6 +912,7 @@ final class PocketPackageStore {
     int maxArchiveBytes = 768 * 1024 * 1024,
     int maxTotalBytes = 768 * 1024 * 1024,
     void Function(int received)? onBytes,
+    void Function()? onArchiveVerified,
   }) async {
     await initialize();
     if (bundle.size <= 0 || bundle.size > maxArchiveBytes) {
@@ -952,6 +953,10 @@ final class PocketPackageStore {
         );
       }
       cancellation.throwIfCancelled();
+      // The response reached EOF and its signed byte count and digest passed.
+      // Publish this boundary before ZIP extraction and per-entry validation,
+      // which can take much longer than the network transfer.
+      onArchiveVerified?.call();
       await extractionDirectory.create();
       final extractedFiles = await _decodeBundleInWorker(
         archivePath: archiveFile.path,

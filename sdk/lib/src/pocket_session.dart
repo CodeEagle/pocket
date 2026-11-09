@@ -21,7 +21,11 @@ typedef PocketSessionGenerationMountHook =
 /// Platform orchestration only: package trust, runtime lifetime and capability
 /// providers. Pages, routing, UI components and application state live in JS.
 final class PocketSession extends ChangeNotifier {
-  static const Duration _downloadOnOpenTimeout = Duration(seconds: 20);
+  static const Duration _downloadOnOpenIdleTimeout = Duration(seconds: 20);
+  static const Duration _downloadOnOpenPreparationTimeout = Duration(
+    seconds: 120,
+  );
+  static const Duration _downloadOnOpenCleanupTimeout = Duration(seconds: 2);
 
   PocketSession({required this.config, this.beforeGenerationMount})
     : performance = PerformanceHistory(namespace: config.appId) {
@@ -488,13 +492,14 @@ final class PocketSession extends ChangeNotifier {
     }
   }
 
-  /// Prepares the first remote package with one bounded wall-clock budget.
+  /// Prepares the first remote package with a no-progress timeout.
   ///
-  /// `PocketUpdateCoordinator` already checks the signed manifest, content
-  /// hashes and cancellation at every download boundary. The timeout only
-  /// supplies an outer bound for a cold open that may contain a manifest plus
-  /// multiple blobs; awaiting the original future in `finally` lets its
-  /// temporary files and transport stream finish their cancellation cleanup.
+  /// Real phase changes, byte advances, artifact changes, and retry attempts
+  /// restart the idle budget. A package may therefore take longer than one
+  /// timeout interval when it continues making measurable progress. Network
+  /// phases have a 20-second idle budget; package verification and local
+  /// extraction have two minutes for slower devices. The coordinator's HTTP
+  /// transport also bounds each request and response-body gap.
   Future<PocketPreparedPackage> _prepareOnOpen(
     PocketUpdateCoordinator updates, {
     PocketPackage? mountedPackage,
@@ -504,32 +509,90 @@ final class PocketSession extends ChangeNotifier {
     // completed or interrupted transfer from an earlier attempt.
     _clearTransferProgress();
     final token = _download = PocketCancellationToken();
+    final idleTimeoutReached = Completer<PocketPreparedPackage>();
+    var acceptProgress = true;
+    PocketPackageException? timeoutError;
+    PocketUpdateProgress? lastProgress;
+    Timer? idleTimer;
+
+    Duration timeoutFor(PocketUpdateStage? stage) => switch (stage) {
+      PocketUpdateStage.verifying ||
+      PocketUpdateStage.loading => _downloadOnOpenPreparationTimeout,
+      _ => _downloadOnOpenIdleTimeout,
+    };
+
+    void restartIdleTimer(PocketUpdateStage? stage) {
+      idleTimer?.cancel();
+      final timeout = timeoutFor(stage);
+      final phase = stage?.name ?? 'startup';
+      idleTimer = Timer(timeout, () {
+        if (!acceptProgress || timeoutError != null) return;
+        final error = timeoutError = PocketPackageException(
+          'downloadOnOpen package preparation timed out without progress '
+          '(stage: $phase, idle: ${timeout.inSeconds}s)',
+          code: 'download-timeout',
+        );
+        idleTimeoutReached.completeError(error, StackTrace.current);
+        token.cancel();
+      });
+    }
+
+    restartIdleTimer(null);
     final operation = updates.prepare(
       cancellation: token,
       mountedPackage: mountedPackage,
       onProgress: (progress) {
+        if (!acceptProgress || _disposed) return;
+        final previous = lastProgress;
+        final advanced =
+            previous == null ||
+            progress.stage != previous.stage ||
+            progress.downloadedBytes > previous.downloadedBytes ||
+            progress.fileSha256 != previous.fileSha256 ||
+            progress.attempt != previous.attempt;
+        lastProgress = progress;
+        if (advanced) restartIdleTimer(progress.stage);
         _recordTransferProgress(progress, updateStage: updateStage);
       },
     );
     try {
-      return await operation.timeout(
-        _downloadOnOpenTimeout,
-        onTimeout: () {
-          token.cancel();
-          throw const PocketPackageException(
-            'downloadOnOpen package preparation timed out',
-            code: 'download-timeout',
-          );
-        },
-      );
-    } finally {
-      try {
-        await operation;
-      } catch (_) {
-        // The bounded operation's error is reported by the awaited call
-        // above. This second await is only for cancellation cleanup.
+      final prepared = await Future.any<PocketPreparedPackage>([
+        operation,
+        idleTimeoutReached.future,
+      ]);
+      if (timeoutError case final error?) throw error;
+      return prepared;
+    } on Object catch (error, stackTrace) {
+      // Cancellation can make the coordinator finish at the same time as
+      // the idle watchdog. Preserve the watchdog's diagnostic in that race.
+      if (timeoutError case final timeoutError?) {
+        Error.throwWithStackTrace(timeoutError, stackTrace);
       }
-      if (identical(_download, token)) _download = null;
+      Error.throwWithStackTrace(error, stackTrace);
+    } finally {
+      acceptProgress = false;
+      idleTimer?.cancel();
+      void releaseDownload() {
+        if (identical(_download, token)) _download = null;
+      }
+
+      // Keep one settlement listener on the underlying operation so a late
+      // transport completion releases the busy token after the bounded wait.
+      final drained = operation.then<void>(
+        (_) => releaseDownload(),
+        onError: (Object _, StackTrace __) => releaseDownload(),
+      );
+      if (timeoutError != null) {
+        try {
+          await drained.timeout(_downloadOnOpenCleanupTimeout);
+        } on TimeoutException {
+          // A transport may ignore cancellation; do not make cleanup unbounded.
+        }
+      } else {
+        // Future.any only completes normally or with an operation error after
+        // this preparation future has settled.
+        unawaited(drained);
+      }
       // Progress describes a live transfer only. Keep the broader session
       // phase in `stage`, but do not leave a completed download fact behind.
       _clearTransferProgress();
