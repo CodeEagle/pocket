@@ -10,7 +10,7 @@
 import { createRequire } from "node:module";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prebuiltEnvironment } from "./prebuilt_tools.mjs";
@@ -60,10 +60,18 @@ function checkFixedEnvironment() {
  * override is limited to the Editor child and never changes standalone SDK
  * selection. An explicit POCKET_NATIVE_PROBE remains authoritative.
  */
-function editorToolEnvironment() {
-  if (process.env.POCKET_SOURCE_BUILD === "1") return process.env;
+function editorToolEnvironment(options = {}) {
+  const explicitCompiler = options.compilerPath || process.env.POCKET_COMPILER_PATH;
+  const explicitProbe = options.nativeProbe || process.env.POCKET_NATIVE_PROBE;
+  const explicitOverrides = {};
+  if (explicitCompiler?.trim()) explicitOverrides.POCKET_COMPILER_PATH = resolve(explicitCompiler);
+  if (explicitProbe?.trim()) explicitOverrides.POCKET_NATIVE_PROBE = resolve(explicitProbe);
+  if (process.env.POCKET_SOURCE_BUILD === "1") return { ...process.env, ...explicitOverrides };
   const toolEnv = prebuiltEnvironment(SDK_ROOT);
-  if (process.env.POCKET_NATIVE_PROBE?.trim()) return toolEnv;
+  // Preserve the two supported explicit tool overrides. The npm defaults stay
+  // in place when neither is supplied.
+  if (explicitOverrides.POCKET_NATIVE_PROBE) return { ...toolEnv, ...explicitOverrides };
+  if (explicitOverrides.POCKET_COMPILER_PATH) toolEnv.POCKET_COMPILER_PATH = explicitOverrides.POCKET_COMPILER_PATH;
 
   const candidates = nativeProbeCandidates(SDK_ROOT);
   if (!candidates.some(candidate => existsSync(candidate))) return toolEnv;
@@ -162,7 +170,7 @@ async function waitProcessesGone(pids, timeoutMs = 10_000) {
 async function stopOwnedPort(port, required) {
   const state = await assertPortOwnership(port, !required);
   const record = port === PORT ? readPidRecord() : undefined;
-  if (record && !state.owned.some(info => Number(info.pid) === record.pid)) {
+  if (record && Number.isInteger(record.pid) && !state.owned.some(info => Number(info.pid) === record.pid)) {
     const found = await findProcess("pid", record.pid);
     state.owned.push(...found.filter(info => sameCheckoutServer(info, port)));
   }
@@ -191,31 +199,81 @@ function cleanupLegacyLaunchd() {
   }
 }
 
-function readPidRecord() {
+const CONFIG_FIELDS = ["projectRoot", "flutterRoot", "updatePackageVersion", "compilerPath", "nativeProbe"];
+
+function serviceConfig(value = {}) {
+  const config = {};
+  for (const field of CONFIG_FIELDS) {
+    const candidate = value?.[field];
+    if (typeof candidate !== "string" || !candidate.trim()) continue;
+    config[field] = field === "updatePackageVersion" ? candidate.trim() : resolve(candidate.trim());
+  }
+  return config;
+}
+
+/** The PID record also carries the launch settings needed by a later start. */
+function makePidRecord(pid, config, startedAt = new Date().toISOString()) {
+  return { pid, server: SERVER, workspace: WORKSPACE, port: PORT, startedAt, config: serviceConfig(config) };
+}
+
+function parsePidRecord(raw) {
   try {
-    const record = JSON.parse(readFileSync(PID_FILE, "utf8"));
-    if (record.server !== SERVER || record.workspace !== WORKSPACE || !Number.isInteger(record.pid)) return undefined;
-    return record;
+    const record = JSON.parse(raw);
+    if (record.server !== SERVER || record.workspace !== WORKSPACE || record.port !== PORT) return undefined;
+    if (record.pid !== null && (!Number.isInteger(record.pid) || record.pid <= 0)) return undefined;
+    // Older PID records have no config. A live server's health response can
+    // supply its existing binding during the first restart after this update.
+    return { ...record, config: serviceConfig(record.config ?? record) };
   } catch { return undefined; }
 }
 
-function writePidRecord(pid) {
+function readPidRecord() {
+  try { return parsePidRecord(readFileSync(PID_FILE, "utf8")); }
+  catch { return undefined; }
+}
+
+function writePidRecord(pid, config) {
   mkdirSync(dirname(PID_FILE), { recursive: true });
-  writeFileSync(PID_FILE, `${JSON.stringify({ pid, server: SERVER, workspace: WORKSPACE, port: PORT, startedAt: new Date().toISOString() }, null, 2)}\n`);
+  writeFileSync(PID_FILE, `${JSON.stringify(makePidRecord(pid, config), null, 2)}\n`);
 }
 
-function clearPidRecord() {
-  try { rmSync(PID_FILE, { force: true }); } catch { /* best effort */ }
+function writeStoppedRecord(config) {
+  // Keep the same record after stop, with no live PID, so `start` can restore
+  // the last explicit project and tool overrides without another state file.
+  writePidRecord(null, config);
 }
 
-async function waitForHealth(timeoutMs = 10000) {
+function configFromHealth(health) {
+  if (!health || health.ok !== true || health.service !== "pocket-editor" || resolve(health.workspace || "") !== WORKSPACE) return {};
+  return serviceConfig(health);
+}
+
+function mergeLaunchOptions(explicit, previous) {
+  const requested = serviceConfig(explicit);
+  const current = serviceConfig(previous);
+  // A different explicit project starts a new binding. Do not pair it with
+  // the prior project's Flutter consumer or package version by accident.
+  const switchedProject = Object.hasOwn(requested, "projectRoot") && requested.projectRoot !== current.projectRoot;
+  const base = { ...current };
+  if (switchedProject) {
+    delete base.flutterRoot;
+    delete base.updatePackageVersion;
+  }
+  return { ...base, ...requested };
+}
+
+async function readHealth() {
+  try {
+    const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(750) });
+    return response.ok ? await response.json() : undefined;
+  } catch { return undefined; }
+}
+
+async function waitForHealth(timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(750) });
-      const health = response.ok ? await response.json() : {};
-      if (health.ok === true && health.service === "pocket-editor" && resolve(health.workspace || "") === WORKSPACE) return true;
-    } catch { /* startup is still in progress */ }
+    const health = await readHealth();
+    if (health?.ok === true && health.service === "pocket-editor" && resolve(health.workspace || "") === WORKSPACE) return true;
     await sleep(250);
   }
   return false;
@@ -225,9 +283,16 @@ async function startChild(options, toolEnv, bun) {
   mkdirSync(dirname(LOG), { recursive: true });
   const logFd = openSync(LOG, "a");
   const env = { ...toolEnv, POCKET_EDITOR_PORT: String(PORT), POCKET_EDITOR_UPDATE_PORT: String(PORT) };
+  // Remove inherited service bindings before applying the selected config;
+  // otherwise a changed explicit project can silently retain an old root.
+  delete env.POCKET_EDITOR_PROJECT_ROOT;
+  delete env.POCKET_EDITOR_FLUTTER_ROOT;
+  delete env.POCKET_EDITOR_PACKAGE_VERSION;
   if (options.projectRoot) env.POCKET_EDITOR_PROJECT_ROOT = options.projectRoot;
   if (options.flutterRoot) env.POCKET_EDITOR_FLUTTER_ROOT = options.flutterRoot;
   if (options.updatePackageVersion) env.POCKET_EDITOR_PACKAGE_VERSION = options.updatePackageVersion;
+  if (options.compilerPath) env.POCKET_COMPILER_PATH = options.compilerPath;
+  if (options.nativeProbe) env.POCKET_NATIVE_PROBE = options.nativeProbe;
   let child;
   try {
     child = spawn(bun, [SERVER, `--host=${HOST}`, `--port=${PORT}`, `--workspace=${WORKSPACE}`], {
@@ -240,12 +305,15 @@ async function startChild(options, toolEnv, bun) {
     child.once("error", error => reject(new Error(`无法启动 Bun：${error.message}`)));
   });
   child.unref();
-  writePidRecord(child.pid);
+  writePidRecord(child.pid, options);
   return child;
 }
 
-async function restart(options) {
-  const toolEnv = editorToolEnvironment();
+async function restart(explicitOptions) {
+  const record = readPidRecord();
+  const previous = { ...(record?.config ?? {}), ...configFromHealth(await readHealth()) };
+  const options = mergeLaunchOptions(explicitOptions, previous);
+  const toolEnv = editorToolEnvironment(options);
   const bun = toolEnv.POCKET_BUN || toolEnv.POCKET_EDITOR_BUN || "bun";
   const runtime = spawnSync(bun, ["--version"], { encoding: "utf8", timeout: 5000, windowsHide: true });
   if (runtime.status !== 0) throw new Error("npm Bun 不可用，请执行 npm run setup");
@@ -256,11 +324,10 @@ async function restart(options) {
   cleanupLegacyLaunchd();
   await stopOwnedPort(PORT, true);
   for (const port of LEGACY_PORTS) await stopOwnedPort(port, false);
-  clearPidRecord();
   await startChild(options, toolEnv, bun);
   if (!(await waitForHealth())) {
     await stopOwnedPort(PORT, true).catch(() => {});
-    clearPidRecord();
+    writeStoppedRecord(options);
     throw new Error(`Studio 在固定端口 ${PORT} 启动失败，请查看 ${LOG}`);
   }
   console.log(`Pocket Studio 已重启：http://${HOST}:${PORT}`);
@@ -269,11 +336,13 @@ async function restart(options) {
 }
 
 async function stop() {
+  const record = readPidRecord();
+  const previous = { ...(record?.config ?? {}), ...configFromHealth(await readHealth()) };
   await assertPortOwnership(PORT, false);
   cleanupLegacyLaunchd();
   await stopOwnedPort(PORT, true);
   for (const port of LEGACY_PORTS) await stopOwnedPort(port, false);
-  clearPidRecord();
+  writeStoppedRecord(previous);
   console.log("Pocket Studio 已停止（8791 及同仓库旧端口已清理）");
 }
 
@@ -294,7 +363,7 @@ async function status() {
   process.exitCode = 1;
 }
 
-function parseArgs(argv) {
+function parseArgs(argv, env = process.env) {
   const args = [...argv];
   const command = ["start", "restart", "stop", "status"].includes(args[0]) ? args.shift() : "restart";
   const options = {};
@@ -306,12 +375,12 @@ function parseArgs(argv) {
       if (arg.slice("--port=".length) !== String(PORT)) throw new Error("Studio 固定使用 8791，不能指定其他端口");
     } else throw new Error(`未知参数：${arg}`);
   }
-  options.projectRoot ??= process.env.POCKET_EDITOR_PROJECT_ROOT || undefined;
-  options.flutterRoot ??= process.env.POCKET_EDITOR_FLUTTER_ROOT || undefined;
-  options.updatePackageVersion ??= process.env.POCKET_EDITOR_PACKAGE_VERSION || undefined;
-  if (options.projectRoot) options.projectRoot = resolve(options.projectRoot);
-  if (options.flutterRoot) options.flutterRoot = resolve(options.flutterRoot);
-  return { command, options };
+  options.projectRoot ??= env.POCKET_EDITOR_PROJECT_ROOT || undefined;
+  options.flutterRoot ??= env.POCKET_EDITOR_FLUTTER_ROOT || undefined;
+  options.updatePackageVersion ??= env.POCKET_EDITOR_PACKAGE_VERSION || undefined;
+  options.compilerPath = env.POCKET_COMPILER_PATH || undefined;
+  options.nativeProbe = env.POCKET_NATIVE_PROBE || undefined;
+  return { command, options: serviceConfig(options) };
 }
 
 async function main() {
@@ -324,7 +393,11 @@ async function main() {
   return restart(options);
 }
 
-main().catch(error => {
-  console.error(`Pocket Studio：${error?.message || error}`);
-  process.exitCode = 1;
-});
+export { configFromHealth, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig };
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => {
+    console.error(`Pocket Studio：${error?.message || error}`);
+    process.exitCode = 1;
+  });
+}

@@ -97,6 +97,12 @@ npm run editor
 
 Editor 默认监听 `http://127.0.0.1:8791`。`build:web` 和 Editor 内部使用 npm 安装的 Bun；用户无需全局安装 Bun。浏览器 WebAssembly 运行时必须与所用平台包的 QJBC ABI 匹配，通用预编译 WASM 包的 Windows/Linux 实机验收尚未完成，不把 Web 输出或 native Preview 的 macOS 结果当作全平台证明。
 
+`editor:start` 和 `editor:restart` 在已有服务时会沿用当前项目绑定、Flutter consumer 和更新包版本；首次启动没有绑定时仍使用通用 SDK。服务配置跟 PID 一起写入同一记录，执行 `editor:stop` 后再 `editor:start` 也会恢复它。切换到不同的显式 `--project-root` 会清掉原 Flutter consumer 和更新包版本，除非同次命令重新指定；显式 `POCKET_COMPILER_PATH` 与 `POCKET_NATIVE_PROBE` 也会保存在该记录中，重启时优先于自动选择，默认 npm compiler 与 probe 则继续自动解析。
+
+2026-11-09：修复无参数重启丢失 Showcase 外部项目绑定的问题。沿用现有 PID 记录，停止后以 `pid: null` 保留启动配置，没有增加项目注册表或第二份配置文件。旧记录可从同工作区的 `/health` 迁移项目、Flutter 路径和更新包版本；只保留明确支持的配置字段，不保存完整环境变量。冷启动健康检查最多等待 30 秒，未就绪仍会清理子进程并报告失败。
+
+验收：启动配置回归 6 项通过；固定端口 8791 的真实服务经过无参数 restart、stop/start 后仍选择 `PocketJS Flutter host showcase`。使用既有 pinned buildGuest 编译 Demo 与目录中的子应用，Playwright Chromium 打开真实原生预览并点击 `+1`，Guest 计数 `00 → 01`、页面无 JS 异常；停止后再启动重复通过。原来的 `node_modules` symlink 错误属于旧构建记录，现有复制流程已跳过该缓存，不放宽 symlink 规则。
+
 ## 来源与保留边界
 
 本入口复用当前 SDK 中的 `scripts/build_guest.ts`、固定编译器、平台工具包和 `packages/pocket_ui`。本次先检查了保留父工程 `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` 的 `pubspec.yaml`、`tools/compile_pocket_syslib_aot.py` 和 `native/pocket_runtime_multi.c`（排除旧的 `pocket_host/`）。父工程保留宿主/资源分工，但没有完整的 `buildGuest` 或 `@pocket/ui` npm 包；因此继续复用当前 SDK 已有的固定上游构建管线，不退回历史 AOT 工具。npm 用户路径只消费发布侧生成的平台包；`prepare_upstream.py`、Rust 和补丁脚本留在发布/CI 侧。固定上游版本、归档校验和补丁清单由 `prepare_upstream.py` 作为单一来源维护。

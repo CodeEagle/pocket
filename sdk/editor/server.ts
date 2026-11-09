@@ -3295,7 +3295,16 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       let releasePublishSlot: (() => void) | undefined;
       try {
         if (path === "/api/preview/device" && method === "GET") return json(previewDevice);
-        if (path === "/health" && method === "GET") return json({ ok: true, service: "pocket-editor", csrfToken, bluetooth: { local: !!localBluetooth }, workspace: workspace.root, ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}) });
+        if (path === "/health" && method === "GET") return json({
+          ok: true,
+          service: "pocket-editor",
+          csrfToken,
+          bluetooth: { local: !!localBluetooth },
+          workspace: workspace.root,
+          ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}),
+          ...(flutterRoot ? { flutterRoot } : {}),
+          ...(updatePackageVersion ? { updatePackageVersion } : {}),
+        });
         if ((path === "/novel" || path === "/novel/resource") && method === "GET") {
           const id = asProjectId(url.searchParams.get("project"));
           if (!existsSync(projectDir(id))) return failure("project not found", 404);
