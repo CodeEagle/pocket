@@ -627,6 +627,11 @@ function aggregateHostConfig(input: {
     const descriptor = { ...pkg, role: pkg.id === input.rootAppId ? "systemUI" : "miniapp" };
     applications[String(pkg.id)] = descriptor;
   }
+  const compositorSurfaces = input.compositorSurfaces
+    ? Object.fromEntries(
+      Object.entries(input.compositorSurfaces).filter(([appId]) => appId !== input.rootAppId && Object.hasOwn(applications, appId)),
+    )
+    : undefined;
   return {
     ...input.rootHost,
     schemaVersion: 1,
@@ -647,7 +652,7 @@ function aggregateHostConfig(input: {
     },
     updates,
     applications,
-    ...(input.compositorSurfaces ? { compositorSurfaces: input.compositorSurfaces } : {}),
+    ...(compositorSurfaces ? { compositorSurfaces } : {}),
   };
 }
 
@@ -2034,6 +2039,18 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     if (existing?.version && !state?.publish) return existing.version;
     return config.version;
   };
+  // Resolve the root from its published signed payload, never package order.
+  const entryRootPackage = async (entry: PublishedVersion): Promise<PublishedVersionPackage | undefined> => {
+    for (const pkg of entry.packages) {
+      try {
+        const envelope = await readJsonFile<Record<string, unknown>>(safeArtifactFile(workspace.updates, `${pkg.artifactRoot}/latest.json`));
+        if (typeof envelope.payload === "string" && sha256Hex(Buffer.from(envelope.payload, "base64")) === entry.payloadSha256) return pkg;
+      } catch {
+        // A missing artifact cannot establish the root identity.
+      }
+    }
+    return undefined;
+  };
   const findPublishedPackage = async (host: string, packageId: string, packageVersion?: string, slot?: VersionSlot, allEntries = false, artifactPath?: string): Promise<ResolvedPublishedPackage | undefined> => {
     let files: Array<import("node:fs").Dirent> = [];
     try {
@@ -2075,7 +2092,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       for (const entry of candidates) {
         const packageEntry = entry.packages.find((candidate) => candidate.id === packageId);
         if (!packageEntry) continue;
-        const isRootPackage = entry.packages[0]?.id === packageId;
+        const isRootPackage = (await entryRootPackage(entry))?.id === packageId;
         const routeVersion = entry.routeVersion ?? entry.version;
         const matchesVersion = packageVersion === undefined || entry.packageVersion === packageVersion || (entry.compatVersion ?? entry.version) === packageVersion || (isRootPackage && routeVersion === packageVersion);
         if (entry.hostVersion !== host || !matchesVersion) continue;
@@ -2638,6 +2655,17 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       ...(packageId === config.appId && payloadSha256 ? { rootPayloadSha256: payloadSha256 } : {}),
     };
   };
+  const indexSystemUI = async (record: Record<string, unknown>, publishedRoot?: string): Promise<string | undefined> => {
+    if (typeof record.hostConfigUrl !== "string") return undefined;
+    const response = await readPublishedUpdate(record.hostConfigUrl);
+    if (!response.ok) return undefined;
+    const descriptor = await response.json() as Record<string, unknown>;
+    if (descriptor.kind === "pocket-editor-app-host" && typeof descriptor.systemUI === "string" && descriptor.systemUI.length > 0) return descriptor.systemUI;
+    // Mini-app descriptors intentionally have no SystemUI. Their parent is
+    // established by the owning published release, rather than package order.
+    if (descriptor.kind === "pocket-mini-app-host-template" && isObject(descriptor.config) && descriptor.config.appId === record.id) return publishedRoot;
+    return undefined;
+  };
   const readPackageIndex = async (host: string, packageId: string, requestedSlot?: VersionSlot): Promise<Response | undefined> => {
     let entries: Array<import("node:fs").Dirent> = [];
     try {
@@ -2695,13 +2723,15 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       const latestRecord = records.find((entry) => entry.releaseId === latestEntry.releaseId) ?? records[0];
       if (!latestRecord) continue;
       const latest = latestRecord;
+      const systemUI = await indexSystemUI(latest, (await entryRootPackage(latestEntry))?.id);
+      if (!systemUI) return failure("package index descriptor has no SystemUI", 409);
       return new Response(JSON.stringify({
         schemaVersion: 1,
         kind: "pocket-editor-package-index",
         projectId,
         hostVersion: host,
-        rootAppId: latestEntry.packages[0]?.id ?? config.appId,
-        systemUI: latestEntry.packages[0]?.id ?? config.appId,
+        rootAppId: systemUI,
+        systemUI,
         packageId,
         slot,
         channel: slot === "test" ? "test" : "release",
@@ -2730,6 +2760,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       } catch {
         continue;
       }
+      if (config.appId !== packageId && !state.publish?.packages?.some((pkg) => pkg.id === packageId)) continue;
       const slot = requestedSlot ?? (state.publish?.channel === "test" ? "test" : "stable");
       const physicalHosts = new Set<string>([host, "editor"]);
       if (state.publish?.hostVersion) physicalHosts.add(state.publish.hostVersion);
@@ -2775,13 +2806,15 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         payloadSha256,
         rootPayloadSha256: payloadSha256,
       };
+      const systemUI = await indexSystemUI(record, config.appId);
+      if (!systemUI) return failure("package index descriptor has no SystemUI", 409);
       return new Response(JSON.stringify({
         schemaVersion: 1,
         kind: "pocket-editor-package-index",
         projectId,
         hostVersion: host,
-        rootAppId: config.appId,
-        systemUI: config.appId,
+        rootAppId: systemUI,
+        systemUI,
         packageId,
         slot,
         channel: slot === "test" ? "test" : "release",
@@ -2827,7 +2860,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           // A prefixed route may also address an immutable releaseId. Only the
           // compat branch is a mutable pointer; never rewrite a pinned host.
           if (mutableSlot && resolved.entry.packageVersion === packageVersion) mutableSlot = undefined;
-          if (!mutableSlot && artifactPath === "host.json" && resolved.entry.packages[0]?.id === packageId &&
+          if (!mutableSlot && artifactPath === "host.json" && (await entryRootPackage(resolved.entry))?.id === packageId &&
             packageVersion === (resolved.entry.compatVersion ?? resolved.entry.version)) {
             const history = await readVersionHistory(versionHistoryPath(workspace.states, resolved.projectId));
             const current = currentVersion(history, resolved.entry.slot, resolved.entry.hostVersion, resolved.entry.compatVersion ?? resolved.entry.version);

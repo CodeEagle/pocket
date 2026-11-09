@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pack } from "../../.cache/pocketjs/framework/compiler/pak.ts";
 import { startEditor } from "../server.ts";
+import { RESOURCE_SNAPSHOT_FILE } from "../resources.ts";
 import { verifySignedManifest } from "../../scripts/package_update.ts";
 
 function temporaryWorkspace(): string {
@@ -111,7 +112,7 @@ test("editor version journal covers immutable child releases and offline archive
     const firstBuild = await request(server, "/api/projects/root-app/build", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(firstBuild.response.status).toBe(202);
     const firstStatus = await waitForBuild(server, "root-app");
-    expect(firstStatus.error).toBeUndefined();
+    expect(firstStatus.error, firstStatus.logs.join("\n")).toBeUndefined();
     expect(firstStatus.builtRevision).toBe(firstStatus.revision);
     const firstPublish = await request(server, "/api/projects/root-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(firstPublish.response.status).toBe(200);
@@ -136,6 +137,8 @@ test("editor version journal covers immutable child releases and offline archive
     expect(aggregateResponse.value.versions[0].payloadSha256).toBeTruthy();
     const aggregateHostResponse = await request(server, new URL(aggregateResponse.value.latest.hostConfigUrl, firstVersions.value.appConfigUrl).pathname);
     expect(aggregateHostResponse.value.kind).toBe("pocket-editor-app-host");
+    expect(aggregateResponse.value.systemUI).toBe("root.app");
+    expect(aggregateResponse.value.rootAppId).toBe(aggregateHostResponse.value.systemUI);
     expect(Object.keys(aggregateHostResponse.value.applications).sort()).toEqual(["child.app", "root.app"]);
     expect(aggregateHostResponse.value.compositorSurfaces).toEqual({ "child.app": 2 });
     const firstRoot = firstEntry.packages.find((pkg: any) => pkg.id === "root.app");
@@ -296,6 +299,10 @@ test("legacy stable publish migrates signed bytes into the first journal entry",
   } as const;
   const firstServer = await startEditor(options);
   try {
+    // A shared updates directory must not be claimed by the first project in
+    // the scan when the requested package has no journal sidecar.
+    const unrelated = await request(firstServer, "/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "aaa-unrelated", name: "Unrelated", appId: "wrong.root", version: "1.0.0", build: 1 }) });
+    expect(unrelated.response.status).toBe(201);
     const created = await request(firstServer, "/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-app", name: "Legacy", appId: "legacy.app", version: "1.0.0", build: 1 }) });
     expect(created.response.status).toBe(201);
     await request(firstServer, "/api/projects/legacy-app/build", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
@@ -306,12 +313,62 @@ test("legacy stable publish migrates signed bytes into the first journal entry",
     const entry = versions.value.history[0];
     const journal = JSON.parse(readFileSync(join(workspace, "states/legacy-app.versions.json"), "utf8"));
     const oldRoot = journal.entries[0].packages.find((pkg: any) => pkg.id === "legacy.app");
+    // An unavailable historical child may precede the root in a journal.
+    // The root's signed payload digest still identifies the actual SystemUI.
+    journal.entries[0].packages.unshift({ id: "child.before.root", version: "1.0.0", build: 1, artifactRoot: ".history/missing-child" });
+    writeFileSync(join(workspace, "states/legacy-app.versions.json"), JSON.stringify(journal));
+    const reorderedIndex = await request(firstServer, "/stable/pocket/4.0.0/legacy.app/latest.json");
+    expect(reorderedIndex.response.status).toBe(200);
+    expect(reorderedIndex.value.systemUI).toBe("legacy.app");
+    const reorderedHost = await request(firstServer, reorderedIndex.value.latest.hostConfigUrl);
+    expect(reorderedHost.response.status).toBe(200);
+    expect(reorderedHost.value.systemUI).toBe(reorderedIndex.value.systemUI);
     const oldArtifactRoot = join(workspace, "updates", oldRoot.artifactRoot);
     const canonical = join(workspace, "updates/pocket/4.0.0/legacy.app/stable");
     cpSync(oldArtifactRoot, canonical, { recursive: true });
     const canonicalHost = JSON.parse(readFileSync(join(canonical, "host.json"), "utf8"));
     canonicalHost.POCKET_PACKAGE_VERSION = "stable";
     writeFileSync(join(canonical, "host.json"), JSON.stringify(canonicalHost, null, 2) + "\n");
+    const legacyChild = join(workspace, "updates/pocket/4.0.0/legacy.child/stable");
+    cpSync(canonical, legacyChild, { recursive: true });
+    writeFileSync(join(legacyChild, "host.json"), JSON.stringify({ kind: "pocket-mini-app-host-template", config: { appId: "legacy.child" } }));
+    const legacySnapshotPath = join(workspace, "builds/legacy-app", String(status.builtRevision), RESOURCE_SNAPSHOT_FILE);
+    const legacySnapshot = JSON.parse(readFileSync(legacySnapshotPath, "utf8"));
+    legacySnapshot.packages.push({
+      id: "legacy.child",
+      title: "Legacy child",
+      manifest: "child/pocket.json",
+      version: "1.0.0",
+      build: 1,
+      runtimeAbi: "legacy-abi",
+      artifactDirectory: ".",
+      resources: [],
+    });
+    writeFileSync(legacySnapshotPath, JSON.stringify(legacySnapshot, null, 2) + "\n");
+    writeFileSync(join(workspace, "builds/legacy-app", String(status.builtRevision), "pocket.system.json"), JSON.stringify({
+      "$schema": "https://pocketjs.dev/schema/pocket-system-1.json",
+      pocketSystem: 1,
+      id: "legacy.system",
+      name: "legacy-system",
+      title: "Legacy system",
+      version: "1.0.0",
+      roles: { systemUI: "legacy.app" },
+      applications: {
+        installPolicy: { model: "managed", mutable: false },
+        backgroundExecution: "suspend",
+        catalog: [
+          { package: "legacy.app", manifest: "pocket.json", required: true },
+          { package: "unpublished.before", manifest: "before/pocket.json", required: false },
+          { package: "legacy.child", manifest: "child/pocket.json", required: true },
+          { package: "pocket.demo.lantern", manifest: "lantern/pocket.json", required: false },
+        ],
+      },
+      installation: { installedPackages: ["legacy.app", "unpublished.before", "legacy.child", "pocket.demo.lantern"] },
+    }, null, 2) + "\n");
+    const legacyStatePath = join(workspace, "states/legacy-app.json");
+    const legacyState = JSON.parse(readFileSync(legacyStatePath, "utf8"));
+    legacyState.publish.packages = [{ id: "legacy.child" }];
+    writeFileSync(legacyStatePath, JSON.stringify(legacyState));
     rmSync(join(workspace, "states/legacy-app.versions.json"));
     const oldState = readFileSync(join(workspace, "states/legacy-app.json"));
     expect(oldState.byteLength).toBeGreaterThan(0);
@@ -329,6 +386,17 @@ test("legacy stable publish migrates signed bytes into the first journal entry",
     const legacyAggregate = await request(aliasServer, new URL(legacyVersions.value.appConfigUrl).pathname);
     expect(legacyAggregate.response.status).toBe(200);
     expect(legacyAggregate.value.kind).toBe("pocket-editor-package-index");
+    expect(legacyAggregate.value.projectId).toBe("legacy-app");
+    expect(legacyAggregate.value.systemUI).toBe("legacy.app");
+    const selectedHost = await request(aliasServer, legacyAggregate.value.latest.hostConfigUrl);
+    expect(selectedHost.response.status).toBe(200);
+    expect(legacyAggregate.value.rootAppId).toBe(selectedHost.value.systemUI);
+    expect(Object.keys(selectedHost.value.applications).sort()).toEqual(["legacy.app", "legacy.child"]);
+    expect(selectedHost.value.compositorSurfaces).toEqual({ "legacy.child": 3 });
+    const childIndex = await request(aliasServer, "/stable/pocket/5.0.0/legacy.child/latest.json");
+    expect(childIndex.response.status).toBe(200);
+    expect(childIndex.value.systemUI).toBe("legacy.app");
+    expect(childIndex.value.projectId).toBe("legacy-app");
     expect(legacyAggregate.value.latest.hostConfigUrl).toContain("/pocket/5.0.0/legacy.app/1.0.0-build.1/host.json");
     expect(legacyAggregate.value.latest.archiveUrl).toContain("/releases/legacy-app/legacy-");
     const legacyArchive = await request(aliasServer, legacyAggregate.value.latest.archiveUrl);
@@ -351,10 +419,17 @@ test("legacy stable publish migrates signed bytes into the first journal entry",
     cpSync(externalProject, join(workspace, "projects/legacy-app"), { recursive: true });
     rmSync(externalProject, { recursive: true, force: true });
   }
+  // The next publish contains the original root only. Keep the newer system
+  // surface declarations, so migration must also clear all unpublished handles.
+  const migrationState = JSON.parse(readFileSync(join(workspace, "states/legacy-app.json"), "utf8"));
+  const migrationSnapshotPath = join(workspace, "builds/legacy-app", String(migrationState.builtRevision), RESOURCE_SNAPSHOT_FILE);
+  const migrationSnapshot = JSON.parse(readFileSync(migrationSnapshotPath, "utf8"));
+  migrationSnapshot.packages = migrationSnapshot.packages.filter((pkg: any) => pkg.id === "legacy.app");
+  writeFileSync(migrationSnapshotPath, JSON.stringify(migrationSnapshot));
   const secondServer = await startEditor(options);
   try {
     const migrated = await request(secondServer, "/api/projects/legacy-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    expect(migrated.response.status).toBe(200);
+    expect(migrated.response.status, JSON.stringify(migrated.value)).toBe(200);
     const history = await request(secondServer, "/api/projects/legacy-app/versions");
     expect(history.value.history).toHaveLength(1);
     const migratedJournal = JSON.parse(readFileSync(join(workspace, "states/legacy-app.versions.json"), "utf8"));
@@ -362,6 +437,8 @@ test("legacy stable publish migrates signed bytes into the first journal entry",
     const migratedRootPath = join(workspace, "updates", migratedRoot.artifactRoot);
     expect(readFileSync(join(migratedRootPath, "latest.json"))).toEqual(readFileSync(join(workspace, "updates/pocket/4.0.0/legacy.app/stable/latest.json")));
     expect(readFileSync(join(migratedRootPath, "payload.json"))).toEqual(readFileSync(join(workspace, "updates/pocket/4.0.0/legacy.app/stable/payload.json")));
+    const migratedHost = JSON.parse(readFileSync(join(migratedRootPath, "host.json"), "utf8"));
+    expect(migratedHost.compositorSurfaces).toEqual({});
   } finally {
     secondServer.stop(true);
     rmSync(workspace, { recursive: true, force: true });
