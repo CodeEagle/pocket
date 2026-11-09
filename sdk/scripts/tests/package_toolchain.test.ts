@@ -14,6 +14,11 @@ function fixture(withNoble = true, withRenderWorker = true): string {
     mkdirSync(join(upstream, directory), { recursive: true });
     writeFileSync(join(upstream, directory, "entry.ts"), `export const ${directory.replace(/[^a-z]/g, "_")} = true;\n`);
   }
+  mkdirSync(join(upstream, "framework", "compiler"), { recursive: true });
+  writeFileSync(join(upstream, "framework", "compiler", "subpaths.ts"), 'export const SUBPATHS = { "inline-fonts": { file: "framework/src/inline-fonts.ts" } };\n');
+  mkdirSync(join(upstream, "framework", "src"), { recursive: true });
+  writeFileSync(join(upstream, "framework", "src", "inline-fonts.ts"), "export function inlineFontSlot(): number { return 0; }\n");
+  writeFileSync(join(upstream, "tools", "inline-text-slots.ts"), "export function addInlineTextFontSlots(): boolean { return false; }\n");
   writeFileSync(join(upstream, "pocket.json"), "{}\n");
   writeFileSync(join(upstream, "tsconfig.json"), "{}\n");
   writeFileSync(join(upstream, "LICENSE"), "license\n");
@@ -116,6 +121,18 @@ test("reads ABI by executing the supplied bytecode binary", () => {
       return { status: 0 };
     });
     expect(abi).toBe("quickjs-bytecode-v1:executed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects packaging when inline-fonts compiler sources are missing", () => {
+  const root = fixture();
+  const output = join(root, ".pocket-build", "out");
+  rmSync(join(root, ".cache", "pocketjs", "framework", "src", "inline-fonts.ts"));
+  try {
+    expect(() => packageToolchain({ sdkRoot: root, out: output, force: false, version: "0.1.1" }, { readAbi: () => "quickjs-bytecode-v1:test-abi" })).toThrow(/missing patched compiler source.*inline-fonts\.ts/);
+    expect(existsSync(output)).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

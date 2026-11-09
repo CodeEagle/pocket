@@ -149,6 +149,17 @@ export function packageToolchain(options: PackageToolchainOptions, injected: Pac
   }
   const sourceDirs = ["framework", "contracts", "tools", "microts", "profiles", "assets"];
   for (const directory of sourceDirs) if (!existsSync(join(options.sdkRoot, ".cache", "pocketjs", directory))) fail(`missing pinned compiler source: ${directory}`);
+  const requiredCompilerFiles = [
+    join("framework", "compiler", "subpaths.ts"),
+    join("framework", "src", "inline-fonts.ts"),
+    join("tools", "inline-text-slots.ts"),
+  ];
+  for (const file of requiredCompilerFiles) {
+    const filePath = join(options.sdkRoot, ".cache", "pocketjs", file);
+    if (!existsSync(filePath) || !lstatSync(filePath).isFile()) fail(`missing patched compiler source: ${file}`);
+  }
+  const subpathsSource = readFileSync(join(options.sdkRoot, ".cache", "pocketjs", "framework", "compiler", "subpaths.ts"), "utf8");
+  if (!subpathsSource.includes('"inline-fonts"')) fail("compiler/framework/compiler/subpaths.ts is missing @pocketjs/framework/inline-fonts");
   const output = resolve(options.out);
   const sdkRoot = resolve(options.sdkRoot);
   const pocketBuild = join(sdkRoot, ".pocket-build");

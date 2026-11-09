@@ -16,7 +16,15 @@ export function validateToolsPackage(directory, platform = process.platform, arc
   }
   if (manifest.platform !== platform || manifest.arch !== arch) throw new Error(`Pocket 工具平台不匹配：需要 ${platform}/${arch}，实际 ${manifest.platform}/${manifest.arch}`);
   const suffix = platform === 'win32' ? '.exe' : '';
-  const required = [`bin/pocketjs_bytecode${suffix}`, `bin/pocket_probe${suffix}`, 'compiler/tools/build.ts', 'compiler/framework/compiler/jsx-plugin.ts'];
+  const required = [
+    `bin/pocketjs_bytecode${suffix}`,
+    `bin/pocket_probe${suffix}`,
+    'compiler/tools/build.ts',
+    'compiler/framework/compiler/jsx-plugin.ts',
+    'compiler/framework/compiler/subpaths.ts',
+    'compiler/framework/src/inline-fonts.ts',
+    'compiler/tools/inline-text-slots.ts',
+  ];
   for (const name of required) if (!manifest.files?.[name]) throw new Error(`Pocket 工具清单缺少 ${name}`);
   for (const [name, expected] of Object.entries(manifest.files)) {
     const path = resolve(root, name);

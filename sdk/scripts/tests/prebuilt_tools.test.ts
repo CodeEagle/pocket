@@ -10,7 +10,15 @@ function fixture() {
   const manifest: any = { schemaVersion: 1, sdkVersion: '0.1.1', upstreamRevision: UPSTREAM_REVISION,
     bytecodeAbi: BYTECODE_ABI, platform: process.platform, arch: process.arch, files: {} };
   const suffix = process.platform === 'win32' ? '.exe' : '';
-  for (const file of [`bin/pocketjs_bytecode${suffix}`, `bin/pocket_probe${suffix}`, 'compiler/tools/build.ts', 'compiler/framework/compiler/jsx-plugin.ts']) {
+  for (const file of [
+    `bin/pocketjs_bytecode${suffix}`,
+    `bin/pocket_probe${suffix}`,
+    'compiler/tools/build.ts',
+    'compiler/framework/compiler/jsx-plugin.ts',
+    'compiler/framework/compiler/subpaths.ts',
+    'compiler/framework/src/inline-fonts.ts',
+    'compiler/tools/inline-text-slots.ts',
+  ]) {
     const bytes = Buffer.from(file);
     mkdirSync(dirname(join(root, file)), { recursive: true });
     writeFileSync(join(root, file), bytes);

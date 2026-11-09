@@ -83,10 +83,13 @@ function setupPrebuilt() {
   // Local release archives allow the same npm-only flow before registry publication.
   const archive = `${platformPackageName().replace('@', '').replace('/', '-')}-${SDK_VERSION}.tgz`;
   const local = [join(root, 'prebuilt', archive), join(root, '.pocket-build', archive)].find(existsSync);
-  let missing = false;
+  let needsInstall = false;
   try { resolvePrebuiltTools(root); }
-  catch (error) { if (error.code !== 'POCKET_TOOLS_MISSING') throw error; missing = true; }
-  if (missing && local && !process.env.POCKET_TOOLS_PACKAGE) {
+  catch (error) {
+    if (error.code !== 'POCKET_TOOLS_MISSING' && !local) throw error;
+    needsInstall = true;
+  }
+  if (needsInstall && local && !process.env.POCKET_TOOLS_PACKAGE) {
     run(process.execPath, [process.env.npm_execpath, 'install', '--no-save', '--package-lock=false', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', local]);
   }
   const env = prebuiltEnvironment(root);
