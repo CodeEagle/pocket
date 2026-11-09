@@ -104,3 +104,11 @@ Lantern startup fallback 的装饰 `NovelSkinFrame` 图片被消融，改为已�
 消融对照：同一新增断言运行旧 bundled QJBC，启动首帧检测到 18 条图片绘制而失败；运行重新编译的新 QJBC 则为 0 并通过全部三项。随后 macOS Demo 使用固定测试链接实际显示 Lantern 标题、当前“正在读取语言偏好”、`已完成 0 / 4 项启动读取` 及四项各自状态，宿主返回入口持续显示。没有把 native Guest 测试当作 Flutter 可见性的替代。
 
 收尾结果：包更新单文件 17 项全部通过。心跳测试记录最后下载块到处理完成的完整时长与最大 timer 间隔，要求至少 10 次响应且最大间隔小于处理窗口一半；取消用例覆盖真实 32 MiB 7z。连同上述 55 项，本轮最终 72 项通过，无跳过。收窄后的 package 实现及测试静态分析无问题，`git diff --check` 通过。
+
+### 动态目录等待期间的黑底修复
+
+`PocketSystemHost.fromHostConfig` 使用动态签名目录。该宿主在目录未绑定到当前运行时 generation 时，原先直接返回 `ColoredBox`，把 `PocketGuestSession` 的包进度和错误一并挡住；因此只验收外层配置加载或单独的 `PocketGuest` 不足以覆盖消费者的完整路径。现在保留同一目录准入门，等待期间直接复用 `PocketStartupIndicator`，读取根 Session 的 `stage` 与 `transferProgress`，错误优先显示。目录校验完成前仍不创建 `PocketView`，不会先启动旧 compositor map，也不增加启动状态或下载器。
+
+FUN App 的实际入口是 `funapp/common_lib/packages/tryfun_pocket/lib/src/pocket_remote_container.dart`。它在进入 SDK 前自行读取 Host 配置，必须订阅 `PocketHostConfig.load(onProgress:)`；仅升级 SDK 并不能给一个未接回调的消费者固定 spinner 补出字节数。其重试、换链接和卸载也应取消已有 IO，避免迟到进度覆盖新容器。FUN App 使用 Git 固定提交，更新源码后还需更新对应的依赖提交并重新编译/重启手机端。
+
+回归：Flutter 3.35.7 的 `system_host_catalog_loading_test.dart` 使用真实签名包与分块 HTTP，让收到的字节从 64 KB 变为 128 KB，断言阶段文案随通知刷新；动态目录仍被 hold 时保持无 `PocketView`，外层按钮可操作，目录失败后显示错误。连同 `pocket_system_host_test.dart` 共 5 项通过，定向静态分析通过。消融时在隔离目录仅换回 `9765d2a` 的旧 gate，相同回归在“找不到进度条”处失败；恢复新实现通过。该记录是 Flutter widget/真实 HTTP 的路径验收，不代替 FUN 手机页面验收。

@@ -51,3 +51,7 @@ SDK Loading负责JS游戏画面出现前的运行资源；游戏画面出现后�
 - 原始日志和哈希：`sdk/.pocket-build/sdk-loading-20261109/acceptance.json`；上层依赖环境见 `sdk/.pocket-build/flutter-startup-loading-20261109/manifest.json`。上层原有忽略package config指向Flutter 3.35.7，测试前离线刷新为3.47.9兼容依赖，测试后恢复原pubspec.lock；不声称旧锁定依赖已被这次测试覆盖。底层package锁文件未改变。
 
 物理手机的冷启动耗时、整个PAK内部原生细分进度及后续动态资源Loading不计作本次验收。当前是SDK源码补全；接入App需要引用更新后的SDK并重新构建安装才能看到变化。
+
+## 动态远程容器
+
+`PocketSystemHost.fromHostConfig` 在签名目录尚未与根 runtime generation 匹配时，也显示既有 Session 的真实包进度和错误。此阶段仍禁止构造 `PocketView`，但不再返回没有反馈的纯色占位。自定义 Debug 容器在调用 SDK 之前自行读取 Host 配置时，仍须接入 `PocketHostConfig.load` 的 `onProgress` 与取消令牌；`PocketView.loadingBuilder` 只处理它实际挂载之后的启动阶段。
