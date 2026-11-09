@@ -2234,6 +2234,9 @@ window.addEventListener("message", (event) => {
     } else if (status === "starting") {
       previewReady = false;
       setPreviewState("启动中", "loading");
+    } else if (status === "reconnecting") {
+      previewReady = false;
+      setPreviewState("重连中…", "loading");
     } else if (status === "ready" && previewHasFrame) {
       previewReady = true;
       setPreviewState("就绪", "ready");

@@ -3420,7 +3420,14 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             // Existing SSE clients retain their loaded runtime during a build.
             // New subscriptions/input must not load a partly copied snapshot.
             if (state.busy && !["status", "snapshot"].includes(parts[4] ?? "")) return failure("Build in progress; retry preview when the build completes", 409);
-            return preview.handle(request, id);
+            const response = await preview.handle(request, id);
+            // A demand-driven guest can stay silent indefinitely. Keep only
+            // successful SSE responses outside the ordinary HTTP idle limit;
+            // no polling, synthetic frames or heartbeat timer is necessary.
+            if (response.ok && response.headers.get("content-type")?.startsWith("text/event-stream")) {
+              server.timeout(request, 0);
+            }
+            return response;
           }
           if (parts[3] === "wechat" && parts.length === 4) {
             if (method === "GET") return json(await wechat.status(id));

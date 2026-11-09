@@ -1292,7 +1292,7 @@
       if (!response.ok) throw new Error((await response.text()) || `preview input failed (${response.status})`);
     }
 
-    function enqueueInput(operation, onFailure, guard, moveKey = null) {
+    function enqueueInput(operation, onFailure, guard, moveKey = null, reportFailure = true) {
       if (moveKey && pendingMove && !pendingMove.sent && pendingMove.key === moveKey) {
         pendingMove.operation = operation;
         pendingMove.onFailure = onFailure;
@@ -1304,6 +1304,7 @@
         operation,
         onFailure,
         guard,
+        reportFailure,
         sent: false,
       };
       // Any non-move or different-contact operation closes the coalescing
@@ -1317,8 +1318,10 @@
         return entry.operation();
       });
       inputTail = queued.catch(async (error) => {
-        status.textContent = `Input error: ${error.message || error}`;
-        announce("preview.error", { error: String(error?.message || error) });
+        if (entry.reportFailure) {
+          status.textContent = `Input error: ${error.message || error}`;
+          announce("preview.error", { error: String(error?.message || error) });
+        }
         try { await entry.onFailure?.(error); } catch (callbackError) {
           announce("preview.error", { error: String(callbackError?.message || callbackError) });
         }
@@ -1332,8 +1335,8 @@
       return `${surface}:${String(payload.id)}`;
     }
 
-    function input(payload, onFailure, guard) {
-      return enqueueInput(() => sendInputPayload(payload), onFailure, guard, pointerMoveKey(payload));
+    function input(payload, onFailure, guard, reportFailure = true) {
+      return enqueueInput(() => sendInputPayload(payload), onFailure, guard, pointerMoveKey(payload), reportFailure);
     }
 
     const MAX_SEMANTIC_CONTROLS = 128;
@@ -2005,6 +2008,18 @@
       }
     }
 
+    function cancelPointerContactsAfterStreamLoss() {
+      const contacts = [...pointerContacts.values()];
+      if (wheelContact) contacts.push(wheelContact);
+      // Invalidate queued MOVE/UP records before queuing cleanup. Cleanup
+      // CANCELs are unconditional barriers, so a disconnected stream cannot
+      // replay an old gesture after the next SSE connection opens.
+      resetPointerContacts();
+      for (const contact of contacts) {
+        input({ type: "pointer", phase: "cancel", id: contact.id, x: contact.x ?? 0, y: contact.y ?? 0 }, undefined, undefined, false);
+      }
+    }
+
     function resetPointerContacts() {
       pointerGeneration += 1;
       for (const [pointerId, contact] of pointerContacts) {
@@ -2212,8 +2227,14 @@
       };
       current.onerror = () => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
+        cancelPointerContactsAfterStreamLoss();
+        if (current.readyState === global.EventSource.CLOSED || current.readyState === 2) {
+          status.textContent = "PocketJS preview stream closed";
+          announce("preview.error", { error: "preview stream closed" });
+          return;
+        }
         status.textContent = "PocketJS preview stream reconnecting…";
-        announce("preview.error", { error: "preview stream reconnecting" });
+        announce("preview.status", { status: { state: "reconnecting" } });
       };
     }
 
