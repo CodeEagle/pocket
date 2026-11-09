@@ -14,6 +14,8 @@
 //! * `{"op":"eval","source":"..."}` for source-only guests
 //! * `{"op":"send","message":{"type":"event",...}}`
 //! * `{"op":"frame","deltaMs":16}` -> `{ "ok": true, "frame": {...} }`
+//!   Add `"rawFrame":true` on an untraced frame command to pass through the
+//!   validated native JSON without converting it through a serde_json value.
 //! * `{"op":"resize","width":390,"height":400}` updates the live viewport
 //! * `{"op":"traceMode","mode":1}` selects the existing native recording
 //!   clock (0 live, 1 record, 2 replay) before load/eval.
@@ -29,11 +31,12 @@
 use pocket_flutter::{
     pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_configure_guest_security,
     pocket_configure_worker, pocket_create, pocket_create_with_density_and_tick_hz,
-    pocket_create_with_memory_limits,
-    pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
-    pocket_load_files, pocket_next_wake_delay_ms, pocket_resize_viewport, pocket_send,
-    pocket_trace_clock_begin_json, pocket_trace_clock_end_json, pocket_trace_clock_mode,
+    pocket_create_with_memory_limits, pocket_destroy, pocket_eval, pocket_frame, pocket_last_error,
+    pocket_load_bytecode_files, pocket_load_files, pocket_next_wake_delay_ms,
+    pocket_resize_viewport, pocket_send, pocket_trace_clock_begin_json,
+    pocket_trace_clock_end_json, pocket_trace_clock_mode,
 };
+use serde::de::Deserialize;
 use serde_json::{json, Value};
 use std::ffi::{c_void, CStr, CString};
 use std::io::{self, BufRead, Write};
@@ -41,6 +44,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 type Handle = *mut c_void;
+
+const MAX_RAW_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+enum ProbeResponse {
+    Json(Value),
+    RawFrame(Vec<u8>),
+}
 
 // Worker/provider completion happens on a native thread. Keep the line
 // protocol responsive by emitting a tiny out-of-band wake record; the Node
@@ -54,7 +64,9 @@ unsafe extern "C" fn worker_notify() {
     if PROBE_WORKER_WAKE.swap(true, Ordering::AcqRel) {
         return;
     }
-    let _guard = PROBE_OUTPUT_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = PROBE_OUTPUT_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let mut stdout = io::stdout().lock();
     let _ = serde_json::to_writer(&mut stdout, &json!({"__pocket_probe_event":"worker"}));
     let _ = stdout.write_all(b"\n");
@@ -127,7 +139,9 @@ fn worker_bytecode_file(path: &str) -> Result<Vec<u8>, Value> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| error_response(format!("worker bytecode metadata: {error}")))?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 64 * 1024 * 1024 {
-        return Err(error_response("worker bytecode must be a non-empty file of at most 64 MiB"));
+        return Err(error_response(
+            "worker bytecode must be a non-empty file of at most 64 MiB",
+        ));
     }
     let bytes = std::fs::read(path)
         .map_err(|error| error_response(format!("worker bytecode read: {error}")))?;
@@ -137,16 +151,94 @@ fn worker_bytecode_file(path: &str) -> Result<Vec<u8>, Value> {
     Ok(bytes)
 }
 
-unsafe fn frame_response(handle: Handle, delta_ms: f64) -> Value {
+fn validate_raw_json(bytes: &[u8]) -> Result<(), serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    serde::de::IgnoredAny::deserialize(&mut deserializer)?;
+    deserializer.end()
+}
+
+unsafe fn frame_response_mode(handle: Handle, delta_ms: f64, raw_frame: bool) -> ProbeResponse {
     let pointer = pocket_frame(handle.cast(), delta_ms);
     if pointer.is_null() {
-        return native_error(handle, "pocket_frame");
+        return ProbeResponse::Json(native_error(handle, "pocket_frame"));
     }
-    let text = CStr::from_ptr(pointer).to_string_lossy();
-    match serde_json::from_str::<Value>(&text) {
-        Ok(frame) => json!({"ok": true, "frame": frame}),
-        Err(error) => error_response(format!("pocket_frame returned invalid JSON: {error}")),
+
+    let bytes = CStr::from_ptr(pointer).to_bytes();
+    if raw_frame {
+        if bytes.len() > MAX_RAW_FRAME_BYTES {
+            return ProbeResponse::Json(error_response(
+                "pocket_frame returned JSON larger than 64 MiB",
+            ));
+        }
+        // The runtime owns this JSON and normally emits canonical UTF-8. Validate
+        // it without materializing a serde_json::Value tree, then keep its bytes
+        // unchanged for the probe's response writer.
+        return match validate_raw_json(bytes) {
+            Ok(()) => ProbeResponse::RawFrame(bytes.to_vec()),
+            Err(error) => ProbeResponse::Json(error_response(format!(
+                "pocket_frame returned invalid JSON: {error}"
+            ))),
+        };
     }
+
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(frame) => ProbeResponse::Json(json!({"ok": true, "frame": frame})),
+        Err(error) => ProbeResponse::Json(error_response(format!(
+            "pocket_frame returned invalid JSON: {error}"
+        ))),
+    }
+}
+
+unsafe fn frame_response(handle: Handle, delta_ms: f64) -> Value {
+    match frame_response_mode(handle, delta_ms, false) {
+        ProbeResponse::Json(response) => response,
+        ProbeResponse::RawFrame(_) => unreachable!("parsed frame response cannot be raw"),
+    }
+}
+
+unsafe fn frame_command(command: &Value, handle: Handle, raw_frame: bool) -> ProbeResponse {
+    if handle.is_null() {
+        return ProbeResponse::Json(error_response("create a native runtime before framing"));
+    }
+    let delta_ms = match finite_number(command, "deltaMs", 16.0) {
+        Ok(value) => value,
+        Err(error) => return ProbeResponse::Json(error_response(error)),
+    };
+    // The preceding UI frame latches the coalesced Worker wake. Allow the next
+    // provider completion to publish a fresh event.
+    PROBE_WORKER_WAKE.store(false, Ordering::Release);
+    frame_response_mode(handle, delta_ms, raw_frame)
+}
+
+fn raw_frame_requested(command: &Value) -> bool {
+    command.get("traceClock").is_none()
+        && command.get("rawFrame") == Some(&Value::Bool(true))
+        && command
+            .get("op")
+            .or_else(|| command.get("command"))
+            .and_then(Value::as_str)
+            == Some("frame")
+}
+
+unsafe fn command_response(command_value: &Value, handle: &mut Handle) -> (bool, ProbeResponse) {
+    if raw_frame_requested(command_value) {
+        return (false, frame_command(command_value, *handle, true));
+    }
+    let (quit, response) = command(command_value, handle);
+    (quit, ProbeResponse::Json(response))
+}
+
+fn write_response<W: Write>(writer: &mut W, response: ProbeResponse) -> io::Result<()> {
+    match response {
+        ProbeResponse::Json(response) => serde_json::to_writer(&mut *writer, &response)?,
+        ProbeResponse::RawFrame(frame) => {
+            writer.write_all(br#"{"ok":true,"frame":"#)?;
+            writer.write_all(&frame)?;
+            writer.write_all(b"}")?;
+        }
+    }
+    writer.write_all(b"\n")?;
+    writer.flush()
 }
 
 unsafe fn destroy(handle: &mut Handle) {
@@ -280,11 +372,21 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
             }
             let bytecode_path = match command.get("bytecodePath").and_then(Value::as_str) {
                 Some(value) => value,
-                None => return (false, error_response("configureWorker requires bytecodePath")),
+                None => {
+                    return (
+                        false,
+                        error_response("configureWorker requires bytecodePath"),
+                    )
+                }
             };
             let config = match command.get("config") {
                 Some(value) if value.is_object() => value,
-                Some(_) => return (false, error_response("configureWorker config must be an object")),
+                Some(_) => {
+                    return (
+                        false,
+                        error_response("configureWorker config must be an object"),
+                    )
+                }
                 None => return (false, error_response("configureWorker requires config")),
             };
             let bytes = match worker_bytecode_file(bytecode_path) {
@@ -293,7 +395,12 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
             };
             let config_json = match CString::new(config.to_string()) {
                 Ok(value) => value,
-                Err(_) => return (false, error_response("configureWorker config contains a NUL byte")),
+                Err(_) => {
+                    return (
+                        false,
+                        error_response("configureWorker config contains a NUL byte"),
+                    )
+                }
             };
             PROBE_WORKER_WAKE.store(false, Ordering::Release);
             if pocket_configure_worker(
@@ -532,20 +639,11 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
             (false, json!({"ok": true}))
         }
         "frame" => {
-            if handle.is_null() {
-                return (
-                    false,
-                    error_response("create a native runtime before framing"),
-                );
-            }
-            let delta_ms = match finite_number(command, "deltaMs", 16.0) {
-                Ok(value) => value,
-                Err(error) => return (false, error_response(error)),
+            let response = match frame_command(command, *handle, false) {
+                ProbeResponse::Json(response) => response,
+                ProbeResponse::RawFrame(_) => unreachable!("parsed frame command cannot be raw"),
             };
-            // The preceding UI frame latches the coalesced Worker wake. Allow
-            // the next provider completion to publish a fresh event.
-            PROBE_WORKER_WAKE.store(false, Ordering::Release);
-            (false, frame_response(*handle, delta_ms))
+            (false, response)
         }
         "lastError" => {
             if handle.is_null() {
@@ -581,15 +679,15 @@ fn main() -> io::Result<()> {
         }
         let response = match serde_json::from_str::<Value>(&line) {
             Ok(command_value) => {
-                // `command` is the only unsafe boundary in this process; the
+                // Dispatch is the only unsafe boundary in this process; the
                 // native C ABI owns the handle and all returned C strings.
-                let (quit, response) = unsafe { command(&command_value, &mut handle) };
-                let _guard = PROBE_OUTPUT_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-                if serde_json::to_writer(&mut stdout, &response).is_err() {
+                let (quit, response) = unsafe { command_response(&command_value, &mut handle) };
+                let _guard = PROBE_OUTPUT_LOCK
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if write_response(&mut stdout, response).is_err() {
                     break;
                 }
-                stdout.write_all(b"\n")?;
-                stdout.flush()?;
                 if quit {
                     return Ok(());
                 }
@@ -597,10 +695,10 @@ fn main() -> io::Result<()> {
             }
             Err(error) => error_response(format!("invalid command JSON: {error}")),
         };
-        let _guard = PROBE_OUTPUT_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-        serde_json::to_writer(&mut stdout, &response)?;
-        stdout.write_all(b"\n")?;
-        stdout.flush()?;
+        let _guard = PROBE_OUTPUT_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        write_response(&mut stdout, ProbeResponse::Json(response))?;
     }
 
     unsafe { destroy(&mut handle) };
@@ -615,6 +713,63 @@ mod tests {
         let (_, response) = command(&value, handle);
         assert_eq!(response["ok"], true, "{response}");
         response
+    }
+
+    #[test]
+    fn raw_frame_matches_default_envelope_and_trace_uses_value_path() {
+        unsafe {
+            let source = "globalThis.__pocketEvent=function(){}; globalThis.frame=function(){pocket._emit(JSON.stringify({method:'frame.sample',params:{value:7}}));};";
+            let mut standard = std::ptr::null_mut();
+            run(
+                &mut standard,
+                json!({"op":"create", "width":80, "height":80}),
+            );
+            run(&mut standard, json!({"op":"eval", "source":source}));
+
+            let mut passthrough = std::ptr::null_mut();
+            run(
+                &mut passthrough,
+                json!({"op":"create", "width":80, "height":80}),
+            );
+            run(&mut passthrough, json!({"op":"eval", "source":source}));
+
+            let expected = run(&mut standard, json!({"op":"frame", "deltaMs":16}));
+            let (_, raw_response) = command_response(
+                &json!({"op":"frame", "deltaMs":16, "rawFrame":true}),
+                &mut passthrough,
+            );
+            let ProbeResponse::RawFrame(frame) = raw_response else {
+                panic!("untraced rawFrame request did not use the raw response");
+            };
+            assert_eq!(
+                serde_json::from_slice::<Value>(&frame).unwrap(),
+                expected["frame"]
+            );
+
+            let mut wire = Vec::new();
+            write_response(&mut wire, ProbeResponse::RawFrame(frame)).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&wire).unwrap(), expected);
+
+            let (_, traced_response) = command_response(
+                &json!({"op":"frame", "deltaMs":16, "rawFrame":true, "traceClock":{}}),
+                &mut passthrough,
+            );
+            let ProbeResponse::Json(traced_response) = traced_response else {
+                panic!("traced frame request bypassed the JSON value path");
+            };
+            assert_eq!(traced_response["ok"], true);
+            assert!(traced_response.get("traceClock").is_some());
+
+            destroy(&mut standard);
+            destroy(&mut passthrough);
+        }
+    }
+
+    #[test]
+    fn raw_frame_validation_rejects_trailing_data_and_invalid_utf8() {
+        assert!(validate_raw_json(br#"{"ops":[1,2]}"#).is_ok());
+        assert!(validate_raw_json(br#"{"ops":[]} trailing"#).is_err());
+        assert!(validate_raw_json(b"[\xff]").is_err());
     }
 
     #[test]

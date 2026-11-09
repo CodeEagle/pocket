@@ -166,3 +166,57 @@ loading 卡片，再进入完整标题页。当前工作区有并行的 Profile 
 修改导致新构建失败（`app.presentation` 未被当前编译器接受），因此本轮
 使用保留的成功 revision 19；未覆盖并行修改。相关7项回归全部通过；
 AGY `gemini-4-argon-medium` 对本次改动和安全区提交统一只读审核，无阻断发现。
+
+## 游戏入场期间的纹理与调度边界
+
+启动首帧不等于标题资源已经全部就绪。Lantern 的真实首帧是游戏自己的
+`0/4` 存储加载界面；标题图片在随后的存储响应后才产生。不能把
+`awaitFirstFrame` 改成等待标题资源，否则会改变所有 Guest 的协议语义，
+并可能堵住由 SystemUI 转发的存储请求。
+
+继续沿用父工程 `lib/core/pocketjs_bundle_runner.dart`、
+`lib/ui/mini_app_host_page.dart` 与 `native/pocket_runtime_multi.c` 的实际
+帧、资源和多 runtime 边界（排除 `pocket_host/`）。当前 Editor 的子探针
+异步调度和浏览器资源传输是这些原生事实在 Node/浏览器之间的适配；
+没有增加 Flutter 业务状态机、第二渲染器或加载成功占位。
+
+本轮消融移除三个不必要的阻塞：
+
+- 原生探针支持显式 `rawFrame:true`。未开启 trace 时，流式校验 native JSON
+  后直接输出原有响应封套，省掉整帧构造 serde Value 再序列化。默认命令和
+  trace 保留原行为。Node 已知整条响应在预算内时，不再 stringify 一遍来
+  重复计算帧大小；无法由整条响应证明时仍做原来的精确检查。
+- 子 Guest 的普通帧 IO 不占用 root 的串行输入/帧队列。同一子探针最多一项
+  帧请求，完成后回到原队列校验 generation 并安装真实帧；期间保留上次
+  绘制结果。录制保留确定性的同步路径，生命周期命令仍按探针顺序执行。
+- 浏览器以 `resources=http` 订阅时，SSE 只携带资源描述，像素与调色板通过
+  原始字节 HTTP 获取。URL 包含 session scope、asset 和 revision，旧版本或
+  已释放资源返回404；重启轮换 scope，禁止旧请求覆盖新资源。原生帧、录制
+  与资源缓存仍使用原格式。浏览器未解码当前引用的资源并实际绘制前，不发送
+  呈现 ACK；等待期间继续处理几何帧，保留已解码的旧图片。
+
+SystemUI 的准备提示只读取已有 opening stage 和 surface binding：
+`preparing` 时显示；进入 `firstFrame` 后，匹配 binding 已 ready 就隐藏。
+这使提示在游戏入场前消失，也保留已有 resident 重新准备时的提示，未引入
+额外计时器或第二份加载状态。
+
+同一份已编译 Showcase/Lantern 的独立原生实跑消融：仅优化原生封套后，
+入场几何帧的最大间隔约269 ms；异步子帧但图片仍走 base64 SSE 时约246 ms；
+图片走 HTTP 后约84 ms；再关闭已无大字节负载的 SSE Worker 后约67 ms。
+最后两组均未检测到浏览器 long task。该机器仍有约29–31 ms的原生 JSON
+解析开销，不能把这些样本解释为所有平台持续60 FPS的保证。保留原生执行、
+输入和绘制链路，不用缩短动画或静态截图掩盖停顿。
+
+最终代码重复实跑的最大入场帧间隔约80 ms（无浏览器长任务或页面异常），
+且每个入场帧均不再包含 SystemUI 的“正在加载应用…”卡片。游戏自己的
+存储加载文案保持可见。真实操作“启程 → 手札 → 继续阅读”通过，正文背景
+仍铺满整个视口。性能、延迟资源与审核证据位于本地生成目录
+`sdk/.pocket-build/editor-entry-hitch-20261109/`，不把生成二进制作为源码提交。
+12项定向回归及1项原生 loading 绘制回归通过；AGY
+`gemini-4-argon-medium` 统一只读审核未发现阻断问题。
+
+补充验证：显式使用当前已准备的 compiler 后，真实探针录制、导出和原生回放
+测试通过。现场一次手动 Bun 重启未带 `POCKET_COMPILER_PATH`，选中了尚缺
+`inline-fonts` 的旧安装工具包；恢复 npm 启动脚本保存的编译器配置即可。
+现有 `inline-text-core.patch` 和 `prepare_upstream.py` 已包含该模块与子路径，
+本次没有为这一环境问题增加第二份源码修复。

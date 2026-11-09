@@ -31,6 +31,13 @@ export function SystemAppSurfaces(props: SurfaceProps): JSX.Element {
   const readPresentation = () => ({ bindings: readBindings(), opening: props.system.snapshot?.().opening ?? null });
   const [presentation, setPresentation] = createSignal(readPresentation());
   const bindings = () => presentation().bindings;
+  const loadingOpening = () => {
+    const opening = presentation().opening;
+    if (!opening) return null;
+    if (opening.stage === "preparing") return opening;
+    const binding = bindings().find(value => value.appId === opening.appId);
+    return binding && binding.ready !== false ? null : opening;
+  };
   const unsubscribe = props.system.subscribe(() => setPresentation(readPresentation()));
   onCleanup(unsubscribe);
   const dismissers = new Map<string, AnimateDismiss>();
@@ -61,7 +68,7 @@ export function SystemAppSurfaces(props: SurfaceProps): JSX.Element {
         }} />
     </Show>;
   }}</For>
-    <Show when={props.presentation === "mini-app" ? presentation().opening : null}>
+    <Show when={props.presentation === "mini-app" ? loadingOpening() : null}>
       {opening => <MiniAppLoading opening={opening} />}
     </Show>
   </>;

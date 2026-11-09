@@ -82,61 +82,6 @@
     return bytes;
   }
 
-  function previewStream(url, offMainThread) {
-    if (!offMainThread || typeof global.Worker !== "function") return new EventSource(url);
-    // Keep the browser's own SSE/reconnect implementation. Only its IO,
-    // JSON parsing and byte unpacking move off the editor's rendering thread.
-    function receive() {
-      self.onmessage = ({ data: url }) => {
-        const source = new EventSource(url);
-        source.onopen = () => self.postMessage({ kind: "open", state: source.readyState });
-        source.onerror = () => self.postMessage({ kind: "error", state: source.readyState });
-        source.onmessage = ({ data }) => {
-          try {
-            const packet = JSON.parse(data);
-            const buffers = [];
-            for (const resource of packet.frame?.resources ?? []) {
-              if (resource.bytesEncoding !== "base64") continue;
-              for (const key of ["pixels", "palette"]) {
-                if (typeof resource[key] !== "string") continue;
-                const bytes = resourceBytes(resource[key], "base64");
-                resource[key] = bytes;
-                buffers.push(bytes.buffer);
-              }
-              delete resource.bytesEncoding;
-            }
-            self.postMessage({ kind: "message", packet }, buffers);
-          } catch (error) {
-            self.postMessage({ kind: "message", packet: { type: "error", error: String(error?.message || error) } });
-          }
-        };
-      };
-    }
-    const blobUrl = URL.createObjectURL(new Blob([
-      `const global=self;const resourceBytes=${resourceBytes.toString()};(${receive.toString()})();`,
-    ], { type: "text/javascript" }));
-    let worker;
-    try { worker = new Worker(blobUrl); }
-    catch { URL.revokeObjectURL(blobUrl); return new EventSource(url); }
-    const stream = {
-      readyState: 0, onopen: null, onmessage: null, onerror: null,
-      close() { stream.readyState = 2; worker.terminate(); URL.revokeObjectURL(blobUrl); },
-    };
-    worker.onmessage = ({ data }) => {
-      URL.revokeObjectURL(blobUrl);
-      if (stream.readyState === 2) return;
-      if (data.kind === "message") stream.onmessage?.({ data: data.packet });
-      else {
-        stream.readyState = data.state;
-        if (data.kind === "open") stream.onopen?.();
-        else stream.onerror?.();
-      }
-    };
-    worker.onerror = () => { stream.close(); stream.onerror?.(); };
-    worker.postMessage(new URL(url, global.location.href).href);
-    return stream;
-  }
-
   function decodeResource(resource) {
     if (!resource || !resource.width || !resource.height) return null;
     const width = Number(resource.width);
@@ -214,8 +159,10 @@
       height: resource.height ?? null,
       psm: resource.psm ?? null,
       linear: resource.linear ?? null,
-      pixelsBytes: byteLength(resource.pixels),
-      paletteBytes: resource.palette == null ? null : byteLength(resource.palette),
+      pixelsBytes: byteLength(resource.pixels) ?? resource.pixelsBytes ?? null,
+      paletteBytes: resource.palette == null
+        ? (resource.paletteBytes ?? null)
+        : byteLength(resource.palette),
     };
   }
 
@@ -919,6 +866,7 @@
     root.appendChild(semanticLayer);
     const semanticNodes = new Map();
     const resources = new Map();
+    const externalResourceLoads = new Map();
     let resourceEpoch = 0;
     // Browser videos are real HTMLMediaElements used as Canvas sources. The
     // maps retain only bounded intent/retired identities when a DrawOp is
@@ -937,6 +885,7 @@
     let frame = null;
     let stream = null;
     let closed = false;
+    let resourceReconnectTimer = 0;
     let webBluetoothEnabled = (() => {
       try { return new URL(global.location.href).searchParams.get("webBluetooth") === "1"; } catch { return false; }
     })();
@@ -2158,6 +2107,133 @@
       }
     }
 
+    function externalResourceKey(resource) {
+      if (resource?.bytesEncoding !== "external") return null;
+      return JSON.stringify([
+        String(resource.asset ?? ""),
+        resource.revision ?? null,
+        resource.pixelsUrl ?? null,
+        resource.paletteUrl ?? null,
+      ]);
+    }
+
+    function cancelExternalResourceLoad(asset) {
+      const load = externalResourceLoads.get(asset);
+      if (!load) return;
+      externalResourceLoads.delete(asset);
+      if (!load.ready) load.controller.abort();
+    }
+
+    function cancelAllExternalResourceLoads() {
+      for (const asset of externalResourceLoads.keys()) cancelExternalResourceLoad(asset);
+    }
+
+    function reconnectAfterResourceFailure() {
+      if (closed || resourceReconnectTimer) return;
+      const previous = stream;
+      stream = null;
+      connectionGeneration += 1;
+      previous?.close();
+      resourceReconnectTimer = setTimeout(() => {
+        resourceReconnectTimer = 0;
+        if (!closed) connect();
+      }, 250);
+    }
+
+    async function fetchResourcePart(urlValue, expectedBytes, load, part) {
+      if (typeof urlValue !== "string" || !urlValue) throw new Error(`missing ${part} URL`);
+      const url = new URL(urlValue, global.location.href);
+      if (url.origin !== global.location.origin) throw new Error(`${part} URL must use the preview origin`);
+      const response = await global.fetch(url.href, {
+        cache: "no-store",
+        credentials: "same-origin",
+        signal: load.controller.signal,
+      });
+      if (!response.ok) throw new Error(`${part} fetch failed (${response.status})`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (expectedBytes !== undefined && expectedBytes !== null) {
+        const expected = Number(expectedBytes);
+        if (!Number.isSafeInteger(expected) || expected < 0 || bytes.byteLength !== expected) {
+          throw new Error(`${part} byte length ${bytes.byteLength} did not match ${expectedBytes}`);
+        }
+      }
+      return bytes;
+    }
+
+    function hydrateExternalFrameResource(load, pixels, palette) {
+      if (!Array.isArray(frame?.resources)) return;
+      for (let index = 0; index < frame.resources.length; index += 1) {
+        const resource = frame.resources[index];
+        if (externalResourceKey(resource) !== load.key) continue;
+        const hydrated = { ...resource, pixels, ...(palette ? { palette } : {}) };
+        delete hydrated.bytesEncoding;
+        delete hydrated.pixelsUrl;
+        delete hydrated.pixelsBytes;
+        delete hydrated.paletteUrl;
+        delete hydrated.paletteBytes;
+        frame.resources[index] = hydrated;
+      }
+    }
+
+    function loadExternalResource(resource) {
+      const asset = String(resource.asset ?? "");
+      const key = externalResourceKey(resource);
+      if (!asset || !key) return Promise.resolve(false);
+      const current = externalResourceLoads.get(asset);
+      if (current?.key === key) {
+        if (current.ready) {
+          const decoded = resources.get(asset);
+          if (decoded?.externalBytes) {
+            hydrateExternalFrameResource(current, decoded.externalBytes.pixels, decoded.externalBytes.palette);
+          }
+        }
+        return current.promise;
+      }
+      const decoded = resources.get(asset);
+      if (decoded?.resourceKey === key) {
+        const bytes = decoded.externalBytes;
+        if (bytes) hydrateExternalFrameResource({ key }, bytes.pixels, bytes.palette);
+        externalResourceLoads.set(asset, { key, ready: true, promise: Promise.resolve(true) });
+        return Promise.resolve(true);
+      }
+      cancelExternalResourceLoad(asset);
+      const load = { asset, key, ready: false, controller: new global.AbortController(), promise: null };
+      externalResourceLoads.set(asset, load);
+      const isCurrent = () => !closed && externalResourceLoads.get(asset) === load;
+      load.promise = (async () => {
+        try {
+          const [pixels, palette] = await Promise.all([
+            fetchResourcePart(resource.pixelsUrl, resource.pixelsBytes, load, "pixels"),
+            resource.paletteUrl == null
+              ? Promise.resolve(null)
+              : fetchResourcePart(resource.paletteUrl, resource.paletteBytes, load, "palette"),
+          ]);
+          if (!isCurrent()) return false;
+          const hydrated = { ...resource, pixels, ...(palette ? { palette } : {}) };
+          const next = decodeResource(hydrated);
+          if (!next) throw new Error(`resource ${asset} could not be decoded`);
+          next.resourceKey = key;
+          next.externalBytes = { pixels, palette };
+          disposeResource(resources.get(asset));
+          resources.set(asset, next);
+          load.ready = true;
+          hydrateExternalFrameResource(load, pixels, palette);
+          resourceEpoch += 1;
+          renderCurrentFrame();
+          return true;
+        } catch (error) {
+          if (!isCurrent() || error?.name === "AbortError") return false;
+          externalResourceLoads.delete(asset);
+          const detail = String(error?.message || error);
+          status.textContent = `Preview resource error: ${detail}`;
+          announce("preview.error", { error: `preview resource ${asset}: ${detail}` });
+          reconnectAfterResourceFailure();
+          return false;
+        }
+      })();
+      return load.promise;
+    }
+
     function installFrame(next) {
       // A fresh probe/runtime starts its frame counter over. Any browser
       // contact captured by the previous generation is no longer known to
@@ -2165,14 +2241,24 @@
       if (frame && Number(next.frame) < Number(frame.frame)) {
         resetPointerContacts();
         resetVideoProjection(true);
+        cancelAllExternalResourceLoads();
         closeTextInputElement();
         clearSemanticDOM();
       }
       frame = next;
+      const externalResourcesReady = new Map();
       for (const resource of Array.isArray(next.resources) ? next.resources : []) {
         if (!resource || typeof resource !== "object") continue;
         const asset = String(resource.asset ?? "");
         if (!asset) continue;
+        if (resource.bytesEncoding === "external") {
+          externalResourcesReady.set(asset, {
+            key: externalResourceKey(resource),
+            promise: loadExternalResource(resource),
+          });
+          continue;
+        }
+        cancelExternalResourceLoad(asset);
         const decoded = decodeResource(resource);
         disposeResource(resources.get(asset));
         if (decoded) resources.set(asset, decoded);
@@ -2181,10 +2267,17 @@
       }
       for (const asset of Array.isArray(next.releasedResources) ? next.releasedResources : []) {
         if (typeof asset === "string") {
+          cancelExternalResourceLoad(asset);
           disposeResource(resources.get(asset));
           resources.delete(asset);
           resourceEpoch += 1;
         }
+      }
+      for (const op of Array.isArray(next.ops) ? next.ops : []) {
+        if (!op || !["image", "triangle", "textureTriangle"].includes(op.type)) continue;
+        const asset = String(op.asset ?? "");
+        const load = externalResourceLoads.get(asset);
+        if (load) externalResourcesReady.set(asset, { key: load.key, promise: load.promise });
       }
       for (const event of Array.isArray(next.events) ? next.events : []) applyVideoCommand(event);
       syncVideoOps(next.ops);
@@ -2215,19 +2308,34 @@
         .filter(token => typeof token === "string" && !presentedTokens.has(token));
       if (tokens.length) {
         for (const token of tokens) presentedTokens.add(token);
-        // Resource decode and Canvas projection above are synchronous. Two
-        // animation frames give the prepared bottom edge a real paint before
-        // JS launch admission starts the entry animation.
-        global.requestAnimationFrame(() => global.requestAnimationFrame(() => {
-          if (closed) return;
-          void input({ type: "presented", tokens }, () => {
+        const requirements = [...externalResourcesReady.entries()];
+        const stillCurrent = () => requirements.every(([asset, requirement]) => {
+          const load = externalResourceLoads.get(asset);
+          return load?.key === requirement.key && load.ready;
+        });
+        const tokensCurrent = () => tokens.every(token =>
+          Array.isArray(frame?.presentationTokens) && frame.presentationTokens.includes(token));
+        Promise.all(requirements.map(([, requirement]) => requirement.promise)).then((ready) => {
+          if (!ready.every(Boolean) || !stillCurrent() || !tokensCurrent()) {
             for (const token of tokens) presentedTokens.delete(token);
-            // A failed ACK must not strand launch admission. Reconnect to
-            // replay the real prepared frame and retry its presentation.
-            stream?.close();
-            setTimeout(() => { if (!closed) connect(); }, 250);
-          });
-        }));
+            return;
+          }
+          // External bytes decode and redraw asynchronously. Wait for their
+          // readiness first, then leave a full browser paint before launch ACK.
+          global.requestAnimationFrame(() => global.requestAnimationFrame(() => {
+            if (closed || !stillCurrent() || !tokensCurrent()) {
+              for (const token of tokens) presentedTokens.delete(token);
+              return;
+            }
+            void input({ type: "presented", tokens }, () => {
+              for (const token of tokens) presentedTokens.delete(token);
+              // A failed ACK must not strand launch admission. Reconnect to
+              // replay the real prepared frame and retry its presentation.
+              stream?.close();
+              setTimeout(() => { if (!closed) connect(); }, 250);
+            });
+          }));
+        });
       }
       status.textContent = `PocketJS native preview · frame ${next.frame} · ${next.width}×${next.height} · full FrameResult transport`;
       announce("preview.frame", { frame: frameNotification(next) });
@@ -2298,9 +2406,9 @@
     function connect() {
       const generation = ++connectionGeneration;
       const endpoint = `${options.basePath || `/api/projects/${encodeURIComponent(projectId)}/preview`}/stream`;
-      const params = new URLSearchParams({ presentation: "browser", resources: "base64", clientId: webBluetoothClientId });
+      const params = new URLSearchParams({ presentation: "browser", resources: "http", clientId: webBluetoothClientId });
       if (webBluetoothEnabled) { params.set("webBluetooth", "1"); params.set("bluetoothProvider", bluetoothProvider); }
-      const current = previewStream(`${endpoint}?${params.toString()}`, root.dataset.streamWorker === "true");
+      const current = new EventSource(`${endpoint}?${params.toString()}`);
       stream = current;
       current.onopen = () => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
@@ -2728,6 +2836,9 @@
       resetVideoProjection(true);
       clearSemanticDOM();
       semanticLayer.remove();
+      cancelAllExternalResourceLoads();
+      clearTimeout(resourceReconnectTimer);
+      resourceReconnectTimer = 0;
       for (const image of resources.values()) disposeResource(image);
       resources.clear();
       const glassScratch = glassScratchCache.get(canvas);

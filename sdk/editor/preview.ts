@@ -184,6 +184,11 @@ const EMPTY_PREVIEW_SAFE_AREA: PreviewSafeArea = { top: 0, right: 0, bottom: 0, 
 const editorRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const maxInputBytes = 64 * 1024;
 const maxFrameBytes = 64 * 1024 * 1024;
+// A native response's UTF-8 size bounds the size of its nested frame. Keep
+// that fact at the parse boundary instead of serializing texture arrays a
+// second time merely to check the same limit. Oversized envelopes and frames
+// constructed by tooling still take the exact frame-only check below.
+const nativeFrameWireBytes = new WeakMap<object, number>();
 const maxBrowserPluginPending = 64;
 // A hot replacement can publish one old generation's cleanup edges together
 // with the next generation's media state. The SDK permits 128 media entries,
@@ -797,6 +802,7 @@ function routeName(request: Request, explicit?: string): string {
   if (pathname.endsWith("/snapshot")) return "snapshot";
   if (pathname.endsWith("/status")) return "status";
   if (pathname.endsWith("/media")) return "media";
+  if (pathname.endsWith("/resource")) return "resource";
   return "page";
 }
 
@@ -841,6 +847,9 @@ class NativeProbe {
     try {
       const parsed = JSON.parse(line) as unknown;
       const response = asRecord(parsed, "probe response");
+      if (response.frame && typeof response.frame === "object") {
+        nativeFrameWireBytes.set(response.frame, Buffer.byteLength(line));
+      }
       // pocket_probe emits this record from the native Worker/provider wake
       // callback. It is deliberately not a command response and must leave
       // the serialized request queue untouched.
@@ -1229,6 +1238,12 @@ type PreviewRuntime = {
   accessibilitySnapshot?: PreviewAccessibilitySnapshot;
   needsPump: boolean;
   pumping: number;
+  /** Keep one child native frame request off the root session queue. */
+  frameInFlight?: { generation: number };
+  /** Elapsed child time accumulated while its native frame request is pending. */
+  pendingFrameDeltaMs?: number;
+  /** A slot resize observed during a child frame is applied after that response. */
+  pendingViewport?: { width: number; height: number; safeArea: PreviewSafeArea };
 };
 
 /** Keep lifecycle edges tied to the runtime generation that emitted them. */
@@ -1503,6 +1518,7 @@ type Subscriber = {
   closed: boolean;
   browserPresentation: boolean;
   compactResources: boolean;
+  externalResources: boolean;
   webBluetooth?: { clientId: string; lease: string };
 };
 
@@ -1610,6 +1626,8 @@ class PreviewSession {
   /** Native FrameResult resources are deltas; retain live assets for a fresh
    * SSE subscriber/snapshot without inflating every animation frame. */
   private readonly resourceCache = new Map<string, Record<string, unknown>>();
+  private resourceScope = randomUUID();
+  private readonly resourceWireVersions = new WeakMap<object, string>();
   /** Resources removed between compositor frames must be explicitly retired
    * in the browser projection; deleting only the server cache cannot update an
    * already-connected canvas client. */
@@ -2011,7 +2029,50 @@ class PreviewSession {
     this.nextWakeDelay = null;
     for (const asset of this.resourceCache.keys()) this.pendingReleasedResources.add(asset);
     this.resourceCache.clear();
+    this.resourceScope = randomUUID();
     if (probe) await probe.stop();
+  }
+
+  /** Resource bytes travel independently so a large texture cannot hold up animation SSE. */
+  private resourceWireVersion(resource: Record<string, unknown>): string {
+    let version = this.resourceWireVersions.get(resource);
+    if (!version) {
+      version = randomUUID();
+      this.resourceWireVersions.set(resource, version);
+    }
+    return version;
+  }
+
+  serveResource(request: Request): Response {
+    const query = new URL(request.url).searchParams;
+    const resource = this.resourceCache.get(query.get("asset") ?? "");
+    const part = query.get("part");
+    if (query.get("scope") !== this.resourceScope || !resource ||
+        this.resourceWireVersion(resource) !== query.get("revision") ||
+        (part !== "pixels" && part !== "palette") || !Array.isArray(resource[part])) {
+      return new Response("resource not found", { status: 404, headers: { "cache-control": "no-store" } });
+    }
+    const bytes = Buffer.from(resource[part] as number[]);
+    return new Response(request.method === "HEAD" ? null : bytes, { headers: {
+      "content-type": "application/octet-stream", "cache-control": "no-store",
+      "content-length": String(bytes.byteLength),
+    } });
+  }
+
+  private encodeExternalPacket(value: unknown): Uint8Array {
+    const candidate = value as { type?: string; frame?: PreviewFrame } | null;
+    if (candidate?.type !== "frame" || !Array.isArray(candidate.frame?.resources)) return encodePreviewStreamPacket(value);
+    const resources = candidate.frame.resources.map(resource => {
+      if (!Array.isArray(resource.pixels)) return resource;
+      const { pixels, palette, ...metadata } = resource;
+      const url = (part: string) => {
+        const query = new URLSearchParams({ asset: String(resource.asset), revision: this.resourceWireVersion(resource), scope: this.resourceScope, part });
+        return `/api/projects/${encodeURIComponent(this.id)}/preview/resource?${query}`;
+      };
+      return { ...metadata, bytesEncoding: "external", pixelsUrl: url("pixels"), pixelsBytes: pixels.length,
+        ...(Array.isArray(palette) ? { paletteUrl: url("palette"), paletteBytes: palette.length } : {}) };
+    });
+    return encodePreviewStreamPacket({ ...candidate, frame: { ...candidate.frame, resources } });
   }
 
   private updateResourceCache(frame: PreviewFrame): void {
@@ -2075,11 +2136,14 @@ class PreviewSession {
   private emit(value: unknown): void {
     let canonical: Uint8Array | undefined;
     let compact: Uint8Array | undefined;
+    let external: Uint8Array | undefined;
     let subscriberDropped = false;
     for (const subscriber of this.subscribers) {
       if (subscriber.closed) continue;
       try {
-        const bytes = subscriber.compactResources
+        const bytes = subscriber.externalResources
+          ? (external ??= this.encodeExternalPacket(value))
+          : subscriber.compactResources
           ? (compact ??= encodePreviewStreamPacket(value, true))
           : (canonical ??= encodePreviewStreamPacket(value));
         subscriber.controller.enqueue(bytes);
@@ -2888,9 +2952,148 @@ class PreviewSession {
     runtime.needsPump = true;
   }
 
+  private publishCompositedFrame(root: PreviewFrame): void {
+    this.frame = this.compositeFrame(root);
+    this.updateResourceCache(this.frame);
+    // The release delta has now been published in `this.frame`; retain it
+    // there for replay, but do not repeat it on every subsequent frame.
+    this.pendingReleasedResources.clear();
+    for (const token of this.frame.presentationTokens ?? []) {
+      const pending = this.pendingPresentations.get(token);
+      if (pending && !pending.published) {
+        pending.published = true;
+        // Launch/decoding is a resource barrier, not elapsed animation time.
+        // Native still owns idle settlement after this published boundary.
+        this.lastTickAt = monotonicNow();
+      }
+    }
+    this.emit({ type: "frame", revision: this.artifactRevision ?? null, frame: this.frame });
+    if (this.rootRuntime) this.rootRuntime.pendingBrowserEvents.length = 0;
+    for (const child of this.childRuntimes.values()) child.pendingBrowserEvents.length = 0;
+  }
+
+  /**
+   * Run a child native frame outside the root's serialized turn. The probe
+   * response is installed only after re-entering `operationTail`; the retained
+   * child frame remains composited while texture extraction is in progress.
+   */
+  private startChildFramePump(
+    runtime: PreviewRuntime,
+    deltaMs: number,
+    settlePasses = 0,
+    pass = 0,
+    depth = 0,
+  ): void {
+    const inFlight = runtime.frameInFlight;
+    if (inFlight) {
+      if (inFlight.generation === runtime.generation && deltaMs > 0 && this.hasFocusedVisibleSurface(runtime)) {
+        runtime.pendingFrameDeltaMs = (runtime.pendingFrameDeltaMs ?? 0) + Math.max(0, deltaMs);
+      }
+      return;
+    }
+    const root = this.rootRuntime;
+    if (this.disposed || this.childRuntimes.get(runtime.appId) !== runtime || !root) return;
+
+    const generation = runtime.generation;
+    const rootGeneration = root.generation;
+    const requestedPump = runtime.needsPump;
+    runtime.needsPump = false;
+    const frameDelta = Math.max(0, deltaMs) + (runtime.pendingFrameDeltaMs ?? 0);
+    runtime.pendingFrameDeltaMs = 0;
+    const flight = { generation };
+    runtime.frameInFlight = flight;
+    void runtime.probe.checked({ op: "frame", deltaMs: frameDelta, rawFrame: true }).then(
+      (response) => {
+        void this.enqueue(async () => {
+          if (runtime.frameInFlight !== flight) return;
+          const stillResident = !this.disposed && this.rootRuntime === root && root.generation === rootGeneration &&
+            this.childRuntimes.get(runtime.appId) === runtime;
+          const sameGeneration = stillResident && runtime.generation === generation;
+          let frame: PreviewFrame | undefined;
+          try {
+            if (sameGeneration && response.frame !== undefined) {
+              frame = await this.ingestRuntimeFrame(runtime, response.frame, depth + 1);
+            }
+            if (sameGeneration && runtime.pendingViewport) {
+              const viewport = runtime.pendingViewport;
+              runtime.pendingViewport = undefined;
+              if (runtime.viewportWidth !== viewport.width || runtime.viewportHeight !== viewport.height) {
+                await runtime.probe.checked({ op: "resize", width: viewport.width, height: viewport.height });
+              }
+              await sendDisplayViewport(runtime.probe, viewport.width, viewport.height, viewport.safeArea);
+              runtime.viewportWidth = viewport.width;
+              runtime.viewportHeight = viewport.height;
+              runtime.safeArea = viewport.safeArea;
+              runtime.needsPump = true;
+            }
+          } finally {
+            if (runtime.frameInFlight === flight) runtime.frameInFlight = undefined;
+          }
+
+          if (!stillResident) return;
+          if (!sameGeneration) {
+            // A response from an older guest generation must not replace its
+            // resources or DrawOps. The same probe is still serialized, so the
+            // current generation may start only after this response settles.
+            runtime.pendingFrameDeltaMs = 0;
+            this.startChildFramePump(runtime, 0, 0, 0, depth);
+          }
+
+          const needsSettle = !frame || runtime.needsPump || requestedPump ||
+            (frame?.events.length ?? 0) > 0 || settlePasses > 0;
+          if (sameGeneration && needsSettle && pass < 31) {
+            const nextSettlePasses = runtime.needsPump
+              ? 1
+              : settlePasses > 0 ? settlePasses - 1 : 1;
+            this.startChildFramePump(runtime, 0, nextSettlePasses, pass + 1, depth);
+          } else if (sameGeneration) {
+            const focusedVisible = this.hasFocusedVisibleSurface(runtime);
+            if (!focusedVisible) runtime.pendingFrameDeltaMs = 0;
+            if (frame && root.frame && this.rootRuntime === root && root.generation === rootGeneration) {
+              // Match synchronous pumpRuntime: settle frames update runtime
+              // state and lifecycle queues, but only the settled composite is
+              // sent to the browser. This avoids duplicate large frame packets.
+              this.publishCompositedFrame(root.frame!);
+            }
+            if (focusedVisible && (runtime.pendingFrameDeltaMs ?? 0) > 0) {
+              this.startChildFramePump(runtime, 0, 0, 0, depth);
+            }
+          }
+          await this.schedule();
+        }).catch((error) => this.reportError(error));
+      },
+      (error) => {
+        void this.enqueue(async () => {
+          if (runtime.frameInFlight !== flight) return;
+          runtime.frameInFlight = undefined;
+          if (!this.disposed && this.rootRuntime === root && root.generation === rootGeneration &&
+              this.childRuntimes.get(runtime.appId) === runtime && runtime.generation === generation) {
+            throw error;
+          }
+          if (!this.disposed && this.rootRuntime === root && root.generation === rootGeneration &&
+              this.childRuntimes.get(runtime.appId) === runtime) {
+            runtime.pendingFrameDeltaMs = 0;
+            this.startChildFramePump(runtime, 0, 0, 0, depth);
+          }
+          await this.schedule();
+        }).catch((failure) => this.reportError(failure));
+      },
+    );
+  }
+
   private async pumpRuntime(runtime: PreviewRuntime, deltaMs: number, depth = 0): Promise<void> {
     if (this.disposed) return;
     if (depth > 48) throw new Error("preview system runtime event depth exceeded");
+    if (runtime.frameInFlight) {
+      // Async child frames own the next response on this probe. Mark the
+      // runtime for a follow-up instead of installing a newer synchronous
+      // frame ahead of it.
+      runtime.needsPump = true;
+      if (deltaMs > 0 && this.hasFocusedVisibleSurface(runtime)) {
+        runtime.pendingFrameDeltaMs = (runtime.pendingFrameDeltaMs ?? 0) + Math.max(0, Number.isFinite(deltaMs) ? deltaMs : 0);
+      }
+      return;
+    }
     runtime.pumping += 1;
     if (runtime.pumping > 16) {
       runtime.pumping -= 1;
@@ -2911,7 +3114,7 @@ class PreviewSession {
       for (let pass = 0; pass < 32; pass += 1) {
         const requestedPump = runtime.needsPump;
         runtime.needsPump = false;
-        const response = await runtime.probe.checked({ op: "frame", deltaMs: delta });
+        const response = await runtime.probe.checked({ op: "frame", deltaMs: delta, rawFrame: true });
         delta = 0;
         if (response.frame === undefined) continue;
         const frame = await this.ingestRuntimeFrame(runtime, response.frame, depth + 1);
@@ -2938,8 +3141,11 @@ class PreviewSession {
     depth: number,
     processEvents = true,
   ): Promise<PreviewFrame> {
-    const frameJson = JSON.stringify(value);
-    if (Buffer.byteLength(frameJson) > maxFrameBytes) throw new Error(`native preview frame for ${runtime.appId} exceeds the safety limit`);
+    const wireBytes = value && typeof value === "object" ? nativeFrameWireBytes.get(value) : undefined;
+    if (wireBytes === undefined || wireBytes > maxFrameBytes) {
+      const frameJson = JSON.stringify(value);
+      if (Buffer.byteLength(frameJson) > maxFrameBytes) throw new Error(`native preview frame for ${runtime.appId} exceeds the safety limit`);
+    }
     const frame = asFrame(value);
     runtime.frame = frame;
     for (const event of frame.events) {
@@ -3273,6 +3479,39 @@ class PreviewSession {
     root.needsPump = true;
   }
 
+  /** Keep SystemUI lifecycle posts from waiting behind a child texture frame. */
+  private deferChildRuntimePost(
+    root: PreviewRuntime,
+    child: PreviewRuntime,
+    requestId: string,
+    event: string,
+    params: JsonRecord,
+  ): void {
+    const generation = child.generation;
+    const rootGeneration = root.generation;
+    const post = child.probe.checked({
+      op: "send",
+      message: { type: "event", name: event, payload: params },
+    });
+    const finish = (error?: unknown): void => {
+      void this.enqueue(async () => {
+        if (this.disposed || this.rootRuntime !== root || root.generation !== rootGeneration) return;
+        if (error) {
+          await this.sendHostResponse(root, requestId, "system.runtime.post", null,
+            hostError("runtime_post_failed", errorText(error)));
+        } else if (this.childRuntimes.get(child.appId) !== child || child.generation !== generation) {
+          await this.sendHostResponse(root, requestId, "system.runtime.post", null,
+            hostError("runtime_destroyed", "runtime was destroyed before its post was accepted"));
+        } else {
+          child.needsPump = true;
+          await this.sendHostResponse(root, requestId, "system.runtime.post", { accepted: true });
+        }
+        if (this.rootRuntime === root && root.generation === rootGeneration && this.probe) await this.tickNow(0);
+      }).catch((failure) => this.reportError(failure));
+    };
+    void post.then(() => finish(), finish);
+  }
+
   private async handleSystemRuntimeRequest(
     requester: PreviewRuntime,
     requestId: string,
@@ -3383,6 +3622,12 @@ class PreviewSession {
         const event = params.event;
         if (!child || typeof event !== "string" || !event) throw new Error("runtime.post target/event is invalid");
         const eventParams = params.params && typeof params.params === "object" && !Array.isArray(params.params) ? params.params : {};
+        if (child.frameInFlight && !this.previewRecordingActive()) {
+          // Queue the child post behind its current native frame, but let
+          // SystemUI and the root animation continue while that frame settles.
+          this.deferChildRuntimePost(requester, child, requestId, event, eventParams);
+          return;
+        }
         await child.probe.checked({ op: "send", message: { type: "event", name: event, payload: eventParams } });
         child.needsPump = true;
         await respond({ accepted: true });
@@ -3407,7 +3652,7 @@ class PreviewSession {
             : hostError("system_request_failed", "SystemUI rejected the platform request");
           await this.sendHostResponse(pending.source, pending.requestId, pending.capability, null, error);
         }
-        if (pending.source.pumping > 0) pending.source.needsPump = true;
+        if (pending.source.pumping > 0 || pending.source.frameInFlight) pending.source.needsPump = true;
         else await this.pumpRuntime(pending.source, 0, depth + 1);
         pending.resolve(params.ok === true);
         // Acknowledge the SystemUI host request itself as well as forwarding
@@ -3669,6 +3914,13 @@ class PreviewSession {
     return result;
   }
 
+  private hasFocusedVisibleSurface(runtime: PreviewRuntime): boolean {
+    const root = this.rootRuntime?.frame;
+    const slot = this.preferredViewportSlots(root).get(runtime.appId);
+    return !!root && !!slot && slot.focused && slot.x < Number(root.width) && slot.y < Number(root.height) &&
+      slot.x + slot.w > 0 && slot.y + slot.h > 0;
+  }
+
   /** Resize only mounted children that have a current host surface. A child
    * kept alive in the background must retain its own last viewport; forcing
    * it to the root size would diverge from Flutter's surface constraints and
@@ -3691,6 +3943,13 @@ class PreviewSession {
       const sizeChanged = runtime.viewportWidth !== width || runtime.viewportHeight !== height;
       const safeAreaChanged = !sameSafeArea(runtime.safeArea, safeArea);
       if (!sizeChanged && !safeAreaChanged) continue;
+      if (runtime.frameInFlight) {
+        // Do not put a resize command behind the expensive child frame and
+        // make the root's serialized animation turn wait for it.
+        runtime.pendingViewport = { width, height, safeArea };
+        resized.add(runtime);
+        continue;
+      }
       if (sizeChanged) await runtime.probe.checked({ op: "resize", width, height });
       // Native resize emits a width/height-only fact. Always follow it with
       // the slot's safe-area projection, including when only the root insets
@@ -3994,7 +4253,7 @@ class PreviewSession {
     // stop the timer while the visible app is still flinging/animating.
     const focused = this.focusedSurface();
     const child = focused ? this.childRuntimes.get(focused.appId) : undefined;
-    if (child) {
+    if (child && !child.frameInFlight) {
       const childResponse = await child.probe.checked({ op: "schedule" });
       if (generation !== this.scheduleGeneration || !this.probe || this.disposed || this.subscribers.size === 0) return;
       const childDelay = Number(childResponse.nextWakeDelayMs);
@@ -4067,6 +4326,9 @@ class PreviewSession {
     if (explicitDelta === undefined || delta > 0) this.lastTickAt = now;
     await this.pumpRuntime(runtime, delta);
     const visibleSlots = this.preferredViewportSlots(runtime.frame);
+    for (const child of this.childRuntimes.values()) {
+      if (child.frameInFlight && !this.hasFocusedVisibleSurface(child)) child.pendingFrameDeltaMs = 0;
+    }
     const resizedChildren = runtime.frame ? await this.syncChildViewports(runtime.frame) : new Set<PreviewRuntime>();
     // Resize-induced host requests must be consumed even for a currently
     // inactive surface. Focused children receive the real elapsed delta;
@@ -4075,7 +4337,13 @@ class PreviewSession {
     for (const [appId, slot] of visibleSlots) {
       const child = this.childRuntimes.get(appId);
       if (!child || (!slot.focused && !resizedChildren.has(child))) continue;
-      await this.pumpRuntime(child, slot.focused ? delta : 0);
+      const childDelta = slot.focused && this.hasFocusedVisibleSurface(child) ? delta : 0;
+      if (this.previewRecordingActive()) {
+        // Recordings replay the exact serialized probe transaction sequence.
+        await this.pumpRuntime(child, childDelta);
+      } else {
+        this.startChildFramePump(child, childDelta);
+      }
     }
     // A child may emit its first-frame host request while the root is inside
     // system.runtime.awaitFirstFrame. That request is deferred to avoid
@@ -4092,23 +4360,7 @@ class PreviewSession {
       await this.pumpRuntime(this.rootRuntime, 0);
     }
     if (runtime.frame) {
-      this.frame = this.compositeFrame(runtime.frame);
-      this.updateResourceCache(this.frame);
-      // The release delta has now been published in `this.frame`; retain it
-      // there for replay, but do not repeat it on every subsequent frame.
-      this.pendingReleasedResources.clear();
-      for (const token of this.frame.presentationTokens ?? []) {
-        const pending = this.pendingPresentations.get(token);
-        if (pending && !pending.published) {
-          pending.published = true;
-          // Launch/decoding is a resource barrier, not elapsed animation time.
-          // Native still owns idle settlement after this published boundary.
-          this.lastTickAt = monotonicNow();
-        }
-      }
-      this.emit({ type: "frame", revision: this.artifactRevision ?? null, frame: this.frame });
-      runtime.pendingBrowserEvents.length = 0;
-      for (const child of this.childRuntimes.values()) child.pendingBrowserEvents.length = 0;
+      this.publishCompositedFrame(runtime.frame);
     }
     await this.schedule();
   }
@@ -4420,17 +4672,17 @@ class PreviewSession {
     this.releaseWebBluetoothOwner(owner.lease);
   }
 
-  stream(browserPresentation = false, webBluetooth?: { clientId: string; lease: string }, compactResources = false): Response {
+  stream(browserPresentation = false, webBluetooth?: { clientId: string; lease: string }, compactResources = false, externalResources = false): Response {
     this.touch();
     const encoder = new TextEncoder();
     let subscriber!: Subscriber;
     const body = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        subscriber = { controller, closed: false, browserPresentation, compactResources, ...(webBluetooth ? { webBluetooth } : {}) };
+        subscriber = { controller, closed: false, browserPresentation, compactResources, externalResources, ...(webBluetooth ? { webBluetooth } : {}) };
         this.subscribers.add(subscriber);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "status", status: this.status() })}\n\n`));
         const replay = this.replayFrame();
-        if (replay) controller.enqueue(encodePreviewStreamPacket({ type: "frame", revision: this.artifactRevision ?? null, frame: replay }, compactResources));
+        if (replay) controller.enqueue(externalResources ? this.encodeExternalPacket({ type: "frame", revision: this.artifactRevision ?? null, frame: replay }) : encodePreviewStreamPacket({ type: "frame", revision: this.artifactRevision ?? null, frame: replay }, compactResources));
         this.flushWebBluetoothQueue(subscriber);
         void this.schedule().catch((error) => this.reportError(error));
       },
@@ -4589,7 +4841,7 @@ class PreviewManagerImpl implements PreviewManager {
     const source = (await this.clientSource()).replace(/<\/script/gi, "<\\/script");
     const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PocketJS Preview</title></head>
-<body data-pocket-preview data-stream-worker="true" data-project-id=${JSON.stringify(projectId)}><script>${source}</script></body></html>`;
+<body data-pocket-preview data-project-id=${JSON.stringify(projectId)}><script>${source}</script></body></html>`;
     return new Response(html, {
       headers: {
         "content-type": "text/html; charset=utf-8",
@@ -4606,6 +4858,7 @@ class PreviewManagerImpl implements PreviewManager {
     let session: PreviewSession | undefined;
     try {
       session = this.session(projectId);
+      if (route === "resource" && (request.method === "GET" || request.method === "HEAD")) return session.serveResource(request);
       if (route === "media" && (request.method === "GET" || request.method === "HEAD")) {
         // Media is an ordinary loose project asset. It must not start a
         // native runtime merely because a browser decoder asks for bytes.
@@ -4626,7 +4879,7 @@ class PreviewManagerImpl implements PreviewManager {
         const pluginOwner = webBluetooth ? session.claimWebBluetooth(clientId, "local") : undefined;
         if (webBluetooth && !pluginOwner) return failure("Noble Bluetooth client could not claim the preview", 409);
         await session.ensureStarted();
-        return session.stream(query.get("presentation") === "browser", pluginOwner, query.get("resources") === "base64");
+        return session.stream(query.get("presentation") === "browser", pluginOwner, query.get("resources") === "base64", query.get("resources") === "http");
       }
       if (route === "status" && request.method === "GET") return json(session.status());
       if (route === "snapshot" && request.method === "GET") return json(session.snapshot());

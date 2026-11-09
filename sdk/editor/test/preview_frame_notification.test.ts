@@ -154,7 +154,7 @@ test("parent frame notifications omit texture bytes while Chromium keeps pixels 
   }
 });
 
-test("production preview transfers texture buffers from its SSE worker and reconnects with resource replay", { timeout: 30_000 }, async () => {
+test("production preview fetches HTTP textures and reconnects with resource replay", { timeout: 30_000 }, async () => {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   let connections = 0;
   const makeFrame = (index: number, pixels: number[] = [12, 34, 56, 255]) => ({
@@ -163,14 +163,24 @@ test("production preview transfers texture buffers from its SSE worker and recon
       resources: [{ asset: "worker-pixel", revision: index, width: 1, height: 1, psm: 3, pixels }],
     },
   });
+  const resourceBytes = new Map<string, number[]>();
+  const packet = (value: ReturnType<typeof makeFrame>) => {
+    const resources = value.frame.resources.map(({ pixels, ...metadata }) => {
+      const url = `/resource/${metadata.revision}`;
+      resourceBytes.set(url, pixels);
+      return { ...metadata, bytesEncoding: "external", pixelsUrl: url, pixelsBytes: pixels.length };
+    });
+    return encodePreviewStreamPacket({ ...value, frame: { ...value.frame, resources } });
+  };
   const server = Bun.serve({ port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
+    if (resourceBytes.has(path)) return new Response(new Uint8Array(resourceBytes.get(path)!));
     if (path.endsWith("/stream")) {
-      assert.equal(new URL(request.url).searchParams.get("resources"), "base64");
+      assert.equal(new URL(request.url).searchParams.get("resources"), "http");
       connections += 1;
       return new Response(new ReadableStream({ start(value) {
         controller = value;
-        value.enqueue(encodePreviewStreamPacket(makeFrame(connections), true));
+        value.enqueue(packet(makeFrame(connections)));
       } }), { headers: { "content-type": "text/event-stream" } });
     }
     if (path.endsWith("/input")) return Response.json({ ok: true });
@@ -179,13 +189,6 @@ test("production preview transfers texture buffers from its SSE worker and recon
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 16, height: 16 } });
-    await page.addInitScript(() => {
-      const parse = JSON.parse;
-      JSON.parse = function (text, ...rest) {
-        if (typeof text === "string" && text.includes('"type":"frame"')) throw new Error("Frame JSON reached the rendering thread");
-        return Reflect.apply(parse, this, [text, ...rest]);
-      };
-    });
     await page.goto(`http://127.0.0.1:${server.port}/`);
     const wait = (index: number) => page.waitForFunction(expected => (window as any).PocketEditorPreviewInstance?.getFrame()?.frame === expected, index);
     const sample = () => page.evaluate(() => {
@@ -194,13 +197,16 @@ test("production preview transfers texture buffers from its SSE worker and recon
       return { typed: resource?.pixels instanceof Uint8Array, pixel: Array.from((preview.canvas as HTMLCanvasElement).getContext("2d")!.getImageData(8, 8, 1, 1).data) };
     });
     await wait(1);
+    await page.waitForFunction(() => (window as any).PocketEditorPreviewInstance.getFrame().resources[0]?.pixels instanceof Uint8Array);
     assert.deepEqual(await sample(), { typed: true, pixel: [12, 34, 56, 255] });
     controller!.close();
     await wait(2);
-    assert.equal(connections, 2, "native EventSource reconnects in the same worker");
+    await page.waitForFunction(() => (window as any).PocketEditorPreviewInstance.getFrame().resources[0]?.pixels instanceof Uint8Array);
+    assert.equal(connections, 2, "native EventSource reconnects with a fresh texture replay");
     assert.deepEqual(await sample(), { typed: true, pixel: [12, 34, 56, 255] });
-    controller!.enqueue(encodePreviewStreamPacket(makeFrame(3, [201, 98, 45, 255]), true));
+    controller!.enqueue(packet(makeFrame(3, [201, 98, 45, 255])));
     await wait(3);
+    await page.waitForFunction(() => (window as any).PocketEditorPreviewInstance.getFrame().resources[0]?.pixels?.[0] === 201);
     assert.deepEqual(await sample(), { typed: true, pixel: [201, 98, 45, 255] });
     controller!.enqueue(encodePreviewStreamPacket({ type: "frame", frame: { ...makeFrame(4).frame, resources: [], releasedResources: ["worker-pixel"] } }, true));
     await wait(4);

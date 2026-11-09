@@ -19,7 +19,7 @@ function frameDrawSignature(frame: Frame): string {
   return JSON.stringify((frame.ops ?? []).map(op => [op.type, op.text, op.x, op.y, op.w, op.h, op.color]));
 }
 
-test("real SystemAppSurfaces loading card tracks open facts without blocking its caller and stays mini-app-only", { timeout: 90_000 }, async () => {
+test("real SystemAppSurfaces loading card tracks preparation and child admission without blocking its caller", { timeout: 90_000 }, async () => {
   const project = mkdtempSync(join(tmpdir(), "pocket-mini-app-loading-native-"));
   let session: NativeSession | undefined;
   try {
@@ -48,11 +48,14 @@ import { Button } from "@pocket/ui";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
 
 type Opening = { appId: string; title: string; stage: "preparing" | "firstFrame" } | null;
+type Binding = { appId: string; instanceId: string; surfaceHandle: number; focused: boolean; ready?: boolean };
 let opening: Opening = null;
+let surfaceBindings: Binding[] = [];
+const [openingStage, setOpeningStage] = createSignal("idle");
 const listeners = new Set<() => void>();
 const system = {
   snapshot: () => ({ opening }),
-  surfaceBindings: () => [],
+  surfaceBindings: () => surfaceBindings,
   subscribe(listener: () => void) {
     listeners.add(listener);
     return () => listeners.delete(listener);
@@ -61,6 +64,11 @@ const system = {
 };
 function publishOpening(value: Opening): void {
   opening = value;
+  setOpeningStage(value?.stage ?? "idle");
+  for (const listener of [...listeners]) listener();
+}
+function publishBindings(value: Binding[]): void {
+  surfaceBindings = value;
   for (const listener of [...listeners]) listener();
 }
 
@@ -68,12 +76,25 @@ function Fixture(): JSX.Element {
   const [count, setCount] = createSignal(0);
   const [presentation, setPresentation] = createSignal<"mini-app" | "surface">("mini-app");
   const [message, setMessage] = createSignal("Idle");
+  const [admissionControls, setAdmissionControls] = createSignal(false);
   const begin = (): void => {
     setMessage("Launch pending");
     publishOpening({ appId: "pocket.demo.profile", title: "Pocket Profile", stage: "preparing" });
   };
   const firstFrame = (): void => {
     if (opening) publishOpening({ ...opening, stage: "firstFrame" });
+  };
+  const publishReadyResident = (): void => {
+    publishBindings([{ appId: "pocket.demo.profile", instanceId: "profile-1", surfaceHandle: 2, focused: false, ready: true }]);
+  };
+  const waitForChildFrame = (): void => {
+    if (!opening) return;
+    publishOpening({ ...opening, stage: "firstFrame" });
+    publishBindings([{ appId: "pocket.demo.profile", instanceId: "profile-1", surfaceHandle: 2, focused: false, ready: false }]);
+  };
+  const admitChild = (): void => {
+    if (!opening || opening.stage !== "firstFrame") return;
+    publishBindings(surfaceBindings.map(binding => ({ ...binding, ready: true })));
   };
   const finish = (): void => {
     publishOpening(null);
@@ -82,25 +103,31 @@ function Fixture(): JSX.Element {
   const fail = (): void => {
     publishOpening(null);
     setMessage("Launch failed: package unavailable");
+    setAdmissionControls(true);
   };
 
   return <>
-    <View class="absolute left-[0] top-[120] flex-col gap-2 p-4">
-      <Text>{"Counter: " + count()}</Text>
-      <Text>{message()}</Text>
-      <Button label="Increment counter" onPress={() => setCount(value => value + 1)} />
-      <Button label="Begin mini app" onPress={begin} />
-      <Button label="First frame ready" onPress={firstFrame} />
-      <Button label="Complete launch" onPress={finish} />
-      <Button label="Fail launch" onPress={fail} />
-      <Button label={presentation() === "mini-app" ? "Use plain surface" : "Use mini-app surface"}
-        onPress={() => setPresentation(value => value === "mini-app" ? "surface" : "mini-app")} />
-    </View>
     <Show when={presentation() === "mini-app"} fallback={
       <SystemAppSurfaces system={system} presentation="surface" />
     }>
       <SystemAppSurfaces system={system} presentation="mini-app" onClose={() => {}} />
     </Show>
+    <View class="absolute left-[0] top-[120] flex-col gap-2 p-4">
+      <Text>{"Counter: " + count()}</Text>
+      <Text>{message() + " · Opening fact: " + openingStage()}</Text>
+      <Button label="Increment counter" onPress={() => setCount(value => value + 1)} />
+      <Button label="Begin mini app" onPress={begin} />
+      <Button label="First frame ready" onPress={firstFrame} />
+      <Button label="Complete launch" onPress={finish} />
+      <Button label="Fail launch" onPress={fail} />
+      <Show when={admissionControls()}>
+        <Button label="Publish ready resident" onPress={publishReadyResident} />
+        <Button label="Wait for child frame" onPress={waitForChildFrame} />
+        <Button label="Admit child" onPress={admitChild} />
+      </Show>
+      <Button label={presentation() === "mini-app" ? "Use plain surface" : "Use mini-app surface"}
+        onPress={() => setPresentation(value => value === "mini-app" ? "surface" : "mini-app")} />
+    </View>
   </>;
 }
 mount(() => <Fixture />);
@@ -116,8 +143,21 @@ mount(() => <Fixture />);
       runtimeAbi: String(metadata.runtimeAbi),
     };
 
-    session = new NativeSession(artifacts, { width: 360, height: 640, deadlineMs: 60_000 });
+    session = new NativeSession(artifacts, { width: 360, height: 1000, deadlineMs: 60_000 });
     let frame = await session.boot();
+    frame = await session.tap("Begin mini app", frame);
+    frame = await session.tap("Fail launch", frame);
+    frame = await session.tap("Begin mini app", frame);
+    frame = await session.tap("Publish ready resident", frame);
+    assert.ok(contains(frame, "Opening fact: preparing"), "preparation remains active with a ready binding");
+    assert.ok(contains(frame, loadingTitle), "a ready same-app resident does not hide the preparation card");
+    assert.ok(contains(frame, loadingPackage), "preparation feedback remains visible before first-frame admission");
+    assert.ok((frame.ops ?? []).some(op => op.type === "text" && op.text === loadingTitle),
+      "the prepared resident state must paint the loading title as a native DrawOp");
+
+    await session.quit();
+    session = new NativeSession(artifacts, { width: 360, height: 1000, deadlineMs: 60_000 });
+    frame = await session.boot();
     assert.ok(contains(frame, "Counter: 0"), `caller starts at zero; painted=${textOf(frame)}`);
     assert.ok(!contains(frame, loadingTitle), "idle mini-app presentation must not paint a loading card");
     const idleSignature = frameDrawSignature(frame);
@@ -154,6 +194,22 @@ mount(() => <Fixture />);
     assert.ok(!contains(frame, loadingTitle), "failed open must clear the loading card");
     assert.equal((frame.ops ?? []).some(op => op.type === "text" && op.text === loadingTitle), false,
       "failed state must remove the actual loading text DrawOp");
+
+    frame = await session.tap("Begin mini app", frame);
+    frame = await session.tap("Wait for child frame", frame);
+    assert.ok(contains(frame, "Opening fact: firstFrame"), "the first-frame opening fact remains pending");
+    assert.ok(contains(frame, loadingTitle), "the loading card stays while the bound child is not ready");
+    assert.ok(contains(frame, loadingFrame), "the first-frame feedback stays before admission");
+    assert.ok((frame.ops ?? []).some(op => op.type === "text" && op.text === loadingTitle),
+      "the pending state must paint the loading title as a native DrawOp");
+
+    frame = await session.tap("Admit child", frame);
+    assert.ok(contains(frame, "Opening fact: firstFrame"), "admission does not clear the still-pending opening fact");
+    assert.ok(contains(frame, "Launch pending"), "caller remains in the pending launch state at admission");
+    assert.ok(!contains(frame, loadingTitle), `the loading card disappears as soon as its binding is admitted; painted=${textOf(frame)}`);
+    assert.ok(!contains(frame, loadingFrame), "the loading status does not overlap the admitted child entry");
+    assert.equal((frame.ops ?? []).some(op => op.type === "text" && op.text === loadingTitle), false,
+      "admission removes the actual loading title DrawOp without clearing opening");
   } finally {
     await session?.quit();
     rmSync(project, { recursive: true, force: true });
