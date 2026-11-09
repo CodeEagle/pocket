@@ -67,7 +67,7 @@ void main() {
       );
       expect(_expectedVersion, isNotEmpty);
       try {
-        await tester.pumpWidget(const PocketHostApp());
+        await tester.pumpWidget(pocketHostApp());
         await guest.waitFor(tester, '00');
         await _openUpdates(tester);
 

@@ -34,7 +34,7 @@ void main() {
                   child: SizedBox(
                     width: available.width,
                     height: available.height,
-                    child: const PocketHostApp(),
+                    child: pocketHostApp(),
                   ),
                 ),
               );

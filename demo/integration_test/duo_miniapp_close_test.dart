@@ -39,7 +39,7 @@ void main() {
     void receive(PocketDisplayGeometrySnapshot value) => latest = value;
     final cycles = <Map<String, Object?>>[];
     try {
-      await tester.pumpWidget(PocketHostApp(systemController: host, showFlutterFps: false));
+      await tester.pumpWidget(pocketHostApp(systemController: host, showFlutterFps: false));
       await guest.waitFor(tester, '00');
       latest = await geometry.start(onUpdate: receive);
       expect(latest!.supported, isTrue);

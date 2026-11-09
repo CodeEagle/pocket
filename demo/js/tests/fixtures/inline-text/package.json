@@ -1,0 +1,6 @@
+{
+  "name": "pocket-inline-text-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@pocket/ui": "file:../../../../../sdk/packages/pocket_ui" }
+}

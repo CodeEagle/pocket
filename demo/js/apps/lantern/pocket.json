@@ -1,0 +1,49 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "pocket.demo.lantern",
+  "name": "pocket-demo-lantern",
+  "title": "雾港末班信",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "text.glyphs.baked",
+        "platform.storage.get",
+        "platform.storage.set"
+      ],
+      "enhances": [
+        "platform.storage.keys",
+        "platform.storage.remove",
+        "platform.storage.batch",
+        "media.audio.play",
+        "media.audio.stop",
+        "media.audio.pause",
+        "media.audio.resume",
+        "media.audio.volume",
+        "platform.images.capture",
+        "platform.images.read",
+        "platform.images.list",
+        "platform.images.remove"
+      ]
+    }
+  },
+  "app": {
+    "entry": "app.tsx",
+    "output": "lantern-app",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [
+          360,
+          640
+        ],
+        "presentation": "native"
+      }
+    }
+  },
+  "fonts": {
+    "regular": "fonts/lantern.otf",
+    "bold": "fonts/lantern.otf"
+  }
+}

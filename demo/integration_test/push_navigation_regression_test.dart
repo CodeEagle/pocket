@@ -72,7 +72,7 @@ void main() {
       PocketSystemInstanceSnapshot? systemUi;
       String? initialLastError;
       try {
-        await tester.pumpWidget(PocketHostApp(systemController: host));
+        await tester.pumpWidget(pocketHostApp(systemController: host));
         await guest.waitFor(tester, '00');
         systemUi = await _systemUi(tester, host);
         final session = systemUi.session;

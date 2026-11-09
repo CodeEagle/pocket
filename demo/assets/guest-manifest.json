@@ -29,6 +29,7 @@
       "platform.storage.set",
       "platform.storage.remove",
       "platform.storage.keys",
+      "platform.storage.batch",
       "platform.messages.send",
       "platform.messages.receive",
       "hardware.permissions",
@@ -62,7 +63,8 @@
       "system.storage.get",
       "system.storage.set",
       "system.storage.remove",
-      "system.storage.keys"
+      "system.storage.keys",
+      "system.storage.batch"
     ]
   },
   "permissions": {

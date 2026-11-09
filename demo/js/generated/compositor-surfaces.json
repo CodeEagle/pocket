@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "surfaces": {
+    "pocket.demo.profile": 2,
+    "pocket.demo.lobby": 3,
+    "pocket.demo.lantern": 63,
+    "dev.pocket-nexus.blackberry-classic-demo": 4,
+    "dev.pocket-nexus.cafe": 5,
+    "dev.pocket-nexus.cards": 6,
+    "dev.pocket-nexus.chrome": 7,
+    "dev.pocket-nexus.clear": 8,
+    "dev.pocket-nexus.companion-zero": 9,
+    "dev.pocket-nexus.cursor": 10,
+    "dev.pocket-nexus.devkit": 11,
+    "dev.pocket-nexus.gallery": 12,
+    "dev.pocket-nexus.gba.hero": 13,
+    "dev.pocket-nexus.hero": 14,
+    "dev.pocket-nexus.im": 15,
+    "dev.pocket-nexus.iphone16-demo": 16,
+    "dev.pocket-nexus.iphone2g-demo": 17,
+    "dev.pocket-nexus.iphone4s-demo": 18,
+    "dev.pocket-nexus.ipodnano.hero": 19,
+    "dev.pocket-nexus.ipodtouch-demo": 20,
+    "dev.pocket-nexus.launcher": 21,
+    "dev.pocket-nexus.library": 22,
+    "dev.pocket-nexus.meizu-m8-demo": 23,
+    "dev.pocket-nexus.motions": 24,
+    "dev.pocket-nexus.music": 25,
+    "dev.pocket-nexus.note": 27,
+    "dev.pocket-nexus.notifications": 28,
+    "dev.pocket-nexus.nsengine": 29,
+    "dev.pocket-nexus.settings": 30,
+    "dev.pocket-nexus.solid.aot.lab": 31,
+    "dev.pocket-nexus.stats": 32,
+    "dev.pocket-nexus.worker-http": 35,
+    "dev.pocket-nexus.zoomlab": 36
+  },
+  "applications": {
+    "dev.pocket-nexus.blackberry-classic-demo": {
+      "title": "PocketJS: BlackBerry Classic Hero",
+      "assetDirectory": "apps/official/blackberry-classic-demo"
+    },
+    "dev.pocket-nexus.cafe": {
+      "title": "PocketJS: Café",
+      "assetDirectory": "apps/official/cafe"
+    },
+    "dev.pocket-nexus.cards": {
+      "title": "PocketJS: Feature Cards",
+      "assetDirectory": "apps/official/cards"
+    },
+    "dev.pocket-nexus.chrome": {
+      "title": "PocketJS: Chrome",
+      "assetDirectory": "apps/official/chrome"
+    },
+    "dev.pocket-nexus.clear": {
+      "title": "Pocket Clear",
+      "assetDirectory": "apps/official/clear"
+    },
+    "dev.pocket-nexus.companion-zero": {
+      "title": "Pocket Companion",
+      "assetDirectory": "apps/official/companion-zero"
+    },
+    "dev.pocket-nexus.cursor": {
+      "title": "PocketJS: Cursor",
+      "assetDirectory": "apps/official/cursor"
+    },
+    "dev.pocket-nexus.devkit": {
+      "title": "Pocket Devkit",
+      "assetDirectory": "apps/official/devkit"
+    },
+    "dev.pocket-nexus.gallery": {
+      "title": "PocketJS: Gallery (L / R paging)",
+      "assetDirectory": "apps/official/gallery"
+    },
+    "dev.pocket-nexus.gba.hero": {
+      "title": "PocketJS: GBA MicroTS Hero",
+      "assetDirectory": "apps/official/gba-hero"
+    },
+    "dev.pocket-nexus.hero": {
+      "title": "PocketJS: Hero",
+      "assetDirectory": "apps/official/hero"
+    },
+    "dev.pocket-nexus.im": {
+      "title": "PocketJS: Talk",
+      "assetDirectory": "apps/official/im"
+    },
+    "dev.pocket-nexus.iphone16-demo": {
+      "title": "PocketJS: iPhone 16 Hero",
+      "assetDirectory": "apps/official/iphone16-demo"
+    },
+    "dev.pocket-nexus.iphone2g-demo": {
+      "title": "PocketJS: iPhone 2G Hero",
+      "assetDirectory": "apps/official/iphone2g-demo"
+    },
+    "dev.pocket-nexus.iphone4s-demo": {
+      "title": "PocketJS: iPhone 4S Hero",
+      "assetDirectory": "apps/official/iphone4s-demo"
+    },
+    "dev.pocket-nexus.ipodnano.hero": {
+      "title": "PocketJS: iPod nano MicroTS Hero",
+      "assetDirectory": "apps/official/ipodnano-hero"
+    },
+    "dev.pocket-nexus.ipodtouch-demo": {
+      "title": "PocketJS: iPod touch Hero",
+      "assetDirectory": "apps/official/ipodtouch-demo"
+    },
+    "dev.pocket-nexus.launcher": {
+      "title": "PocketJS: Launcher",
+      "assetDirectory": "apps/official/launcher"
+    },
+    "dev.pocket-nexus.library": {
+      "title": "PocketJS: Game Library",
+      "assetDirectory": "apps/official/library"
+    },
+    "dev.pocket-nexus.meizu-m8-demo": {
+      "title": "PocketJS: Meizu M8 Hero",
+      "assetDirectory": "apps/official/meizu-m8-demo"
+    },
+    "dev.pocket-nexus.motions": {
+      "title": "PocketJS: Motion Lab (yui540 studies on baked keyframe timelines)",
+      "assetDirectory": "apps/official/motions"
+    },
+    "dev.pocket-nexus.music": {
+      "title": "PocketJS: Now Playing",
+      "assetDirectory": "apps/official/music"
+    },
+    "dev.pocket-nexus.note": {
+      "title": "Pocket Note",
+      "assetDirectory": "apps/official/note"
+    },
+    "dev.pocket-nexus.notifications": {
+      "title": "PocketJS: Notifications",
+      "assetDirectory": "apps/official/notifications"
+    },
+    "dev.pocket-nexus.nsengine": {
+      "title": "PocketJS NS Engine",
+      "assetDirectory": "apps/official/nsengine"
+    },
+    "dev.pocket-nexus.settings": {
+      "title": "PocketJS: Settings",
+      "assetDirectory": "apps/official/settings"
+    },
+    "dev.pocket-nexus.solid.aot.lab": {
+      "title": "PocketJS: Solid AOT Feature Lab",
+      "assetDirectory": "apps/official/solid-aot-lab"
+    },
+    "dev.pocket-nexus.stats": {
+      "title": "PocketJS: Mission Control",
+      "assetDirectory": "apps/official/stats"
+    },
+    "dev.pocket-nexus.worker-http": {
+      "title": "Worker HTTP",
+      "assetDirectory": "apps/official/worker-http"
+    },
+    "dev.pocket-nexus.zoomlab": {
+      "title": "Zoom Lab",
+      "assetDirectory": "apps/official/zoomlab"
+    }
+  }
+}

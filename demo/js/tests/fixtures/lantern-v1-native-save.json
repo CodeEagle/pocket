@@ -1,0 +1,858 @@
+{
+  "provenance": {
+    "bytecodeSha256": "748913c419272953f049637630705f5d12c61ac07f8f6877372395faa1ae07fc",
+    "pakSha256": "9fcc419358ed70f2a83ca4ef2f8808a8d1c795ff6fb2b8165e438907a2d1a1d1",
+    "origin": "NativeSession real pointer input: new game → listen_mira → memory_response",
+    "viewport": [
+      360,
+      640
+    ]
+  },
+  "storage": {
+    "lantern.slot.auto": {
+      "format": "pocket-vn-save",
+      "formatVersion": 3,
+      "state": {
+        "active": {
+          "id": "memory_response",
+          "kind": "choice",
+          "location": {
+            "index": 3,
+            "label": "memory_first_visit"
+          },
+          "options": [
+            {
+              "id": "trust_mira",
+              "target": "memory_trust",
+              "text": "我会听你说完，再判断这束光。"
+            },
+            {
+              "id": "protect_letter",
+              "target": "memory_protect",
+              "text": "先守住封口，不替你或 Ren 做决定。"
+            },
+            {
+              "id": "keep_record",
+              "target": "memory_record",
+              "text": "我会记下证据，也记下还不知道的部分。"
+            }
+          ],
+          "prompt": "你怎么回应 Mira？",
+          "timeRemainingMs": null
+        },
+        "audioIntents": {
+          "music": {
+            "action": "play",
+            "cue": "music_storm",
+            "loop": true
+          },
+          "sfx": {
+            "action": "play",
+            "cue": "station_bell",
+            "loop": false
+          }
+        },
+        "backlog": [
+          [
+            1,
+            "arrival_01",
+            "start",
+            17,
+            null,
+            null,
+            "23点08分。雾港灯塔站的检票钟停在 23:14，二十年没动。你低头摸过车票，指针忽然倒退一格；站台尽头的黄灯也亮了——透镜明明锁在仓库里。"
+          ],
+          [
+            2,
+            "arrival_02",
+            "start",
+            19,
+            "Mira",
+            "worried",
+            "我送一封信。信封是干的，路上却下着雨。邮戳写着二十年后的雾港站——你们这里，应该还没有那一天。"
+          ],
+          [
+            3,
+            "arrival_03",
+            "start",
+            20,
+            "Ren",
+            "neutral",
+            "那盏灯不该亮。旧中继只把光送过海峡，送不到二十年后。二十年前妹妹在对岸失去消息后，我把控制箱封了；这些年，我只敢把那晚记成一场故障。"
+          ],
+          [
+            4,
+            "arrival_04",
+            "start",
+            21,
+            "Mira",
+            "worried",
+            "Mira没有回答，只把信举到检票灯下。邮戳比今夜晚二十年；海堤警报已经开始倒数，最后一班车不会等雾散。"
+          ],
+          [
+            5,
+            "arrival_05",
+            "start",
+            23,
+            null,
+            null,
+            "你核对站钟：它停在 23:14，墙上的值班表却是 23:08。末班车 23:47 离站，封堤前还有三十九分钟。先问 Mira、问 Ren，或只检查信封。"
+          ],
+          [
+            6,
+            "arrival_mira_01",
+            "arrival.listen_mira",
+            0,
+            "Mira",
+            "worried",
+            "寄件栏空着，收件栏只写了 Ren。字迹是我母亲的。她让我把信亲手交给你，不许我替她拆封，也不许我先说她是谁。"
+          ],
+          [
+            7,
+            "memory_01",
+            "memory_first_visit",
+            0,
+            "Mira",
+            "worried",
+            "我母亲六岁那年，海雾压住收信亭。外婆看见北向单光，带她离开堤岸；第二声响起，安全闸就落了。她活了下来，却一直不知道站房那头是谁敲的钟。"
+          ],
+          [
+            8,
+            "memory_02",
+            "memory_first_visit",
+            1,
+            "Mira",
+            "neutral",
+            "她长大后才查到那晚的记录。二十年后，四十六岁的她把信交给二十四岁的我，只说：“别替你舅舅解释。让他看见证据，再决定该怎么记住我。”"
+          ]
+        ],
+        "callStack": [
+          {
+            "returnTo": {
+              "index": 2,
+              "label": "arrival.listen_mira"
+            }
+          }
+        ],
+        "eventSequence": 2,
+        "location": {
+          "index": 4,
+          "label": "memory_first_visit"
+        },
+        "meta": {
+          "cgIds": [],
+          "endingIds": [],
+          "musicIds": [
+            "music_storm"
+          ],
+          "persistentVariables": {},
+          "readLineIds": [
+            "arrival_01",
+            "arrival_02",
+            "arrival_03",
+            "arrival_04",
+            "arrival_05",
+            "arrival_mira_01",
+            "memory_01",
+            "memory_02"
+          ]
+        },
+        "nextBacklogSequence": 9,
+        "paused": false,
+        "preferences": {
+          "autoDelayMs": 2500,
+          "mode": "manual",
+          "skipSeenOnly": true,
+          "textSpeedCharsPerSecond": 32
+        },
+        "rollbackHistory": {
+          "entries": [
+            [
+              "start",
+              18,
+              [],
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              "start",
+              20,
+              [],
+              1,
+              0,
+              1,
+              1,
+              0
+            ],
+            [
+              "start",
+              21,
+              [],
+              2,
+              0,
+              2,
+              2,
+              0
+            ],
+            [
+              "start",
+              22,
+              [],
+              3,
+              0,
+              3,
+              3,
+              0
+            ],
+            [
+              "start",
+              24,
+              [],
+              4,
+              0,
+              4,
+              4,
+              1
+            ],
+            [
+              "arrival.listen_mira",
+              1,
+              [],
+              5,
+              0,
+              5,
+              5,
+              1
+            ],
+            [
+              "memory_first_visit",
+              1,
+              [
+                {
+                  "returnTo": {
+                    "index": 2,
+                    "label": "arrival.listen_mira"
+                  }
+                }
+              ],
+              6,
+              0,
+              6,
+              6,
+              1
+            ],
+            [
+              "memory_first_visit",
+              2,
+              [
+                {
+                  "returnTo": {
+                    "index": 2,
+                    "label": "arrival.listen_mira"
+                  }
+                }
+              ],
+              7,
+              0,
+              7,
+              7,
+              1
+            ]
+          ],
+          "pools": {
+            "active": [
+              [
+                "start",
+                17,
+                "arrival_01",
+                null,
+                null,
+                "23点08分。雾港灯塔站的检票钟停在 23:14，二十年没动。你低头摸过车票，指针忽然倒退一格；站台尽头的黄灯也亮了——透镜明明锁在仓库里。",
+                70,
+                null
+              ],
+              [
+                "start",
+                19,
+                "arrival_02",
+                "Mira",
+                "worried",
+                "我送一封信。信封是干的，路上却下着雨。邮戳写着二十年后的雾港站——你们这里，应该还没有那一天。",
+                47,
+                null
+              ],
+              [
+                "start",
+                20,
+                "arrival_03",
+                "Ren",
+                "neutral",
+                "那盏灯不该亮。旧中继只把光送过海峡，送不到二十年后。二十年前妹妹在对岸失去消息后，我把控制箱封了；这些年，我只敢把那晚记成一场故障。",
+                66,
+                null
+              ],
+              [
+                "start",
+                21,
+                "arrival_04",
+                "Mira",
+                "worried",
+                "Mira没有回答，只把信举到检票灯下。邮戳比今夜晚二十年；海堤警报已经开始倒数，最后一班车不会等雾散。",
+                51,
+                null
+              ],
+              [
+                "start",
+                23,
+                "arrival_05",
+                null,
+                null,
+                "你核对站钟：它停在 23:14，墙上的值班表却是 23:08。末班车 23:47 离站，封堤前还有三十九分钟。先问 Mira、问 Ren，或只检查信封。",
+                76,
+                null
+              ],
+              [
+                "arrival.listen_mira",
+                0,
+                "arrival_mira_01",
+                "Mira",
+                "worried",
+                "寄件栏空着，收件栏只写了 Ren。字迹是我母亲的。她让我把信亲手交给你，不许我替她拆封，也不许我先说她是谁。",
+                54,
+                null
+              ],
+              [
+                "memory_first_visit",
+                0,
+                "memory_01",
+                "Mira",
+                "worried",
+                "我母亲六岁那年，海雾压住收信亭。外婆看见北向单光，带她离开堤岸；第二声响起，安全闸就落了。她活了下来，却一直不知道站房那头是谁敲的钟。",
+                67,
+                null
+              ],
+              [
+                "memory_first_visit",
+                1,
+                "memory_02",
+                "Mira",
+                "neutral",
+                "她长大后才查到那晚的记录。二十年后，四十六岁的她把信交给二十四岁的我，只说：“别替你舅舅解释。让他看见证据，再决定该怎么记住我。”",
+                65,
+                null
+              ]
+            ],
+            "audioIntents": [
+              {
+                "music": {
+                  "action": "play",
+                  "cue": "music_storm",
+                  "loop": true
+                }
+              },
+              {
+                "music": {
+                  "action": "play",
+                  "cue": "music_storm",
+                  "loop": true
+                },
+                "sfx": {
+                  "action": "play",
+                  "cue": "station_bell",
+                  "loop": false
+                }
+              }
+            ],
+            "stages": [
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 66.66666666666671,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": {
+                  "durationMs": 900,
+                  "elapsedMs": 66.66666666666671,
+                  "from": {
+                    "background": null,
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {}
+                  },
+                  "id": 1,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 833.333333333334,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": {
+                  "durationMs": 900,
+                  "elapsedMs": 833.333333333334,
+                  "from": {
+                    "background": null,
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {}
+                  },
+                  "id": 1,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 900.0000000000008,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 966.6666666666675,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1033.3333333333342,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1133.3333333333337,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1200,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1266.6666666666663,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              }
+            ],
+            "variables": [
+              {
+                "code_misses": 0,
+                "dial_1": 0,
+                "dial_2": 0,
+                "dial_3": 0,
+                "found_clock": false,
+                "found_lens": false,
+                "found_route": false,
+                "investigation_count": 0,
+                "letter_protected": false,
+                "letter_seen": false,
+                "memory_seen": false,
+                "mira_trust": 0,
+                "proof_complete": false,
+                "ren_trust": 0,
+                "timed_out": false
+              }
+            ]
+          }
+        },
+        "stage": {
+          "background": "station",
+          "camera": {
+            "motion": {
+              "durationMs": 2400,
+              "easing": "easeInOut",
+              "elapsedMs": 1266.6666666666663,
+              "from": {
+                "scale": 1,
+                "x": 0,
+                "y": 0
+              }
+            },
+            "scale": 1.04,
+            "x": -6,
+            "y": -4
+          },
+          "characters": {
+            "mira": {
+              "expression": "worried",
+              "id": "mira",
+              "layer": 2,
+              "model": {
+                "animation": "alert",
+                "key": "mira_spine",
+                "loop": true,
+                "skin": "worried"
+              },
+              "position": "left",
+              "rotation": -2,
+              "scale": 1,
+              "visible": true
+            },
+            "ren": {
+              "expression": "neutral",
+              "id": "ren",
+              "layer": 0,
+              "position": "right",
+              "rotation": 2,
+              "scale": 0.92,
+              "visible": true
+            }
+          },
+          "transition": null,
+          "video": null
+        },
+        "started": true,
+        "transitionSequence": 1,
+        "variables": {
+          "code_misses": 0,
+          "dial_1": 0,
+          "dial_2": 0,
+          "dial_3": 0,
+          "found_clock": false,
+          "found_lens": false,
+          "found_route": false,
+          "investigation_count": 0,
+          "letter_protected": false,
+          "letter_seen": false,
+          "memory_seen": true,
+          "mira_trust": 0,
+          "proof_complete": false,
+          "ren_trust": 0,
+          "timed_out": false
+        }
+      },
+      "storyId": "demo.lantern.misty-last-letter",
+      "storyVersion": 1
+    }
+  }
+}

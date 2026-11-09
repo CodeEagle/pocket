@@ -1,0 +1,26 @@
+mira-neutral.png
+size: 512,512
+format: RGBA8888
+filter: Linear,Linear
+repeat: none
+mira-neutral
+  bounds: 0,0,512,512
+  offsets: 0,0,512,512
+
+mira-worried.png
+size: 512,512
+format: RGBA8888
+filter: Linear,Linear
+repeat: none
+mira-worried
+  bounds: 0,0,512,512
+  offsets: 0,0,512,512
+
+mira-hopeful.png
+size: 512,512
+format: RGBA8888
+filter: Linear,Linear
+repeat: none
+mira-hopeful
+  bounds: 0,0,512,512
+  offsets: 0,0,512,512

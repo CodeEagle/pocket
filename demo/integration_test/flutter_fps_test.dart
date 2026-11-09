@@ -79,7 +79,7 @@ void main() {
     final monitor = FlutterFrameMonitorController(autoStart: false);
     try {
       await tester.pumpWidget(
-        PocketHostApp(frameMonitorController: monitor, showFlutterFps: true),
+        pocketHostApp(frameMonitorController: monitor, showFlutterFps: true),
       );
       await guest.waitFor(tester, '00');
       expect(

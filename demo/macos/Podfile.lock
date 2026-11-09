@@ -1,40 +1,26 @@
 PODS:
   - FlutterMacOS (1.0.0)
-  - package_info_plus (0.0.1):
-    - FlutterMacOS
-  - path_provider_foundation (0.0.1):
-    - Flutter
-    - FlutterMacOS
   - pocket_flutter (0.1.0)
-  - video_player_avfoundation (0.0.1):
-    - Flutter
+  - pocket_live2d (0.1.0):
     - FlutterMacOS
 
 DEPENDENCIES:
   - FlutterMacOS (from `Flutter/ephemeral`)
-  - package_info_plus (from `Flutter/ephemeral/.symlinks/plugins/package_info_plus/macos`)
-  - path_provider_foundation (from `Flutter/ephemeral/.symlinks/plugins/path_provider_foundation/darwin`)
   - pocket_flutter (from `Flutter/ephemeral/.symlinks/plugins/pocket_flutter/macos`)
-  - video_player_avfoundation (from `Flutter/ephemeral/.symlinks/plugins/video_player_avfoundation/darwin`)
+  - pocket_live2d (from `Flutter/ephemeral/.symlinks/plugins/pocket_live2d/macos`)
 
 EXTERNAL SOURCES:
   FlutterMacOS:
     :path: Flutter/ephemeral
-  package_info_plus:
-    :path: Flutter/ephemeral/.symlinks/plugins/package_info_plus/macos
-  path_provider_foundation:
-    :path: Flutter/ephemeral/.symlinks/plugins/path_provider_foundation/darwin
   pocket_flutter:
     :path: Flutter/ephemeral/.symlinks/plugins/pocket_flutter/macos
-  video_player_avfoundation:
-    :path: Flutter/ephemeral/.symlinks/plugins/video_player_avfoundation/darwin
+  pocket_live2d:
+    :path: Flutter/ephemeral/.symlinks/plugins/pocket_live2d/macos
 
 SPEC CHECKSUMS:
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
-  package_info_plus: f0052d280d17aa382b932f399edf32507174e870
-  path_provider_foundation: bb55f6dbba17d0dccd6737fe6f7f34fbd0376880
   pocket_flutter: 973217006f34977ede6cd660a5bfb131fab945d2
-  video_player_avfoundation: dd410b52df6d2466a42d28550e33e4146928280a
+  pocket_live2d: 08c1500611234d4e27cec65825064e2482a43d2f
 
 PODFILE CHECKSUM: 13edfb9e70ac3646927b8e6c9a212ad1d0fa29b2
 

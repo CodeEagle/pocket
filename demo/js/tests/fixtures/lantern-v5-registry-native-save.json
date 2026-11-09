@@ -1,0 +1,3301 @@
+{
+  "provenance": {
+    "bytecodeSha256": "f40f9d690e6621f98ac69ce0d505fa8c6ae741cc984fec612361ef9342d3167a",
+    "pakSha256": "339305235efc0b42f98853f6f046a343929533fd30bbea83b738c6817eb8e47f",
+    "metadataSha256": "e8bb83c2abc20f39450ce47f2028b05ee956c609d8dc4249ad445cc00f79f7d9",
+    "storyVersion": 5,
+    "saveFormatVersion": 4,
+    "activeLineId": "registry_recipient",
+    "activeLocation": {
+      "index": 1,
+      "label": "registry_open"
+    },
+    "activeInputDraft": "小满平安归港",
+    "nativeInputPath": [
+      "title start",
+      "arrival_approach/ask_ren",
+      "investigation_hub/archive",
+      "archive_read/copy_route",
+      "investigation_hub/leave_reply_address",
+      "registry_open/registry_recipient"
+    ],
+    "nativeTextInputEvent": "textInput.edit",
+    "bytecodeMetadata": {
+      "bindingGeneration": 12,
+      "bytecodeBytes": 1075907,
+      "engineAbi": "5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
+      "entryFormat": "quickjs-bytecode",
+      "formatVersion": 1,
+      "headerBytes": 124,
+      "kind": "script",
+      "payloadSha256": "befb6991042933deab634c63900951424c1e37a17cd6874aad63786a745b8091",
+      "runtimeAbi": "quickjs-bytecode-v1:5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
+      "sourceSha256": "088a2a49a7ce043d441e2254f0c92a5077a43ba9dafba2429594db8d5f95c80f",
+      "tickHz": 60,
+      "version": "0.1.0",
+      "build": 1
+    }
+  },
+  "storage": {
+    "lantern.slot.auto": {
+      "format": "pocket-vn-save",
+      "formatVersion": 4,
+      "state": {
+        "active": {
+          "canCancel": true,
+          "draft": "小满平安归港",
+          "error": null,
+          "id": "registry_recipient",
+          "inputType": "text",
+          "kind": "input",
+          "location": {
+            "index": 1,
+            "label": "registry_open"
+          },
+          "placeholder": "例如：小岚🙂",
+          "prompt": "收件人姓名（1–16 个字符）",
+          "variable": "reply_name"
+        },
+        "audioIntents": {
+          "ambience": {
+            "action": "play",
+            "cue": "roof_gust",
+            "loop": true
+          },
+          "music": {
+            "action": "play",
+            "cue": "music_storm",
+            "loop": true
+          },
+          "sfx": {
+            "action": "play",
+            "cue": "station_bell",
+            "loop": false
+          }
+        },
+        "backlog": [
+          [
+            1,
+            "arrival_01",
+            "start",
+            19,
+            null,
+            null,
+            0
+          ],
+          [
+            2,
+            "arrival_02",
+            "start",
+            21,
+            "Mira",
+            "worried",
+            1
+          ],
+          [
+            3,
+            "arrival_03",
+            "start",
+            22,
+            "Ren",
+            "neutral",
+            2
+          ],
+          [
+            4,
+            "arrival_04",
+            "start",
+            23,
+            "Mira",
+            "worried",
+            3
+          ],
+          [
+            5,
+            "arrival_05",
+            "start",
+            25,
+            null,
+            null,
+            4
+          ],
+          [
+            6,
+            "add_start_01",
+            "start",
+            26,
+            null,
+            null,
+            5
+          ],
+          [
+            7,
+            "add_start_02",
+            "start",
+            27,
+            null,
+            null,
+            6
+          ],
+          [
+            8,
+            "add_start_03",
+            "start",
+            28,
+            null,
+            null,
+            7
+          ],
+          [
+            9,
+            "add_start_04",
+            "start",
+            29,
+            null,
+            null,
+            8
+          ],
+          [
+            10,
+            "add_start_05",
+            "start",
+            30,
+            null,
+            null,
+            9
+          ],
+          [
+            11,
+            "add_start_06",
+            "start",
+            31,
+            null,
+            null,
+            10
+          ],
+          [
+            12,
+            "add_start_07",
+            "start",
+            32,
+            null,
+            null,
+            11
+          ],
+          [
+            13,
+            "add_start_08",
+            "start",
+            33,
+            null,
+            null,
+            12
+          ],
+          [
+            14,
+            "add_start_09",
+            "start",
+            34,
+            null,
+            null,
+            13
+          ],
+          [
+            15,
+            "add_start_10",
+            "start",
+            35,
+            null,
+            null,
+            14
+          ],
+          [
+            16,
+            "arrival_ren_01",
+            "arrival.ask_ren",
+            0,
+            "Ren",
+            "worried",
+            15
+          ],
+          [
+            17,
+            "arrival_ren_02",
+            "arrival.ask_ren",
+            2,
+            "Ren",
+            "neutral",
+            16
+          ],
+          [
+            18,
+            "add_ren_01",
+            "arrival.ask_ren",
+            3,
+            null,
+            null,
+            17
+          ],
+          [
+            19,
+            "add_ren_02",
+            "arrival.ask_ren",
+            4,
+            null,
+            null,
+            18
+          ],
+          [
+            20,
+            "add_ren_03",
+            "arrival.ask_ren",
+            5,
+            null,
+            null,
+            19
+          ],
+          [
+            21,
+            "add_ren_04",
+            "arrival.ask_ren",
+            6,
+            null,
+            null,
+            20
+          ],
+          [
+            22,
+            "add_ren_05",
+            "arrival.ask_ren",
+            7,
+            null,
+            null,
+            21
+          ],
+          [
+            23,
+            "add_ren_06",
+            "arrival.ask_ren",
+            8,
+            null,
+            null,
+            22
+          ],
+          [
+            24,
+            "hub_01",
+            "investigation_hub",
+            1,
+            null,
+            null,
+            23
+          ],
+          [
+            25,
+            "archive_01",
+            "archive_entry",
+            2,
+            null,
+            null,
+            24
+          ],
+          [
+            26,
+            "archive_02",
+            "archive_entry",
+            3,
+            "Mira",
+            "neutral",
+            25
+          ],
+          [
+            27,
+            "add_archive_01",
+            "archive_entry",
+            4,
+            null,
+            null,
+            26
+          ],
+          [
+            28,
+            "add_archive_02",
+            "archive_entry",
+            5,
+            null,
+            null,
+            27
+          ],
+          [
+            29,
+            "add_archive_03",
+            "archive_entry",
+            6,
+            null,
+            null,
+            28
+          ],
+          [
+            30,
+            "add_archive_04",
+            "archive_entry",
+            7,
+            null,
+            null,
+            29
+          ],
+          [
+            31,
+            "add_archive_05",
+            "archive_entry",
+            8,
+            null,
+            null,
+            30
+          ],
+          [
+            32,
+            "archive_route_01",
+            "archive_route",
+            0,
+            null,
+            null,
+            31
+          ],
+          [
+            33,
+            "archive_route_02",
+            "archive_route",
+            4,
+            "Mira",
+            "hopeful",
+            32
+          ],
+          [
+            34,
+            "add_route_01",
+            "archive_route",
+            5,
+            null,
+            null,
+            33
+          ],
+          [
+            35,
+            "add_route_02",
+            "archive_route",
+            6,
+            null,
+            null,
+            34
+          ],
+          [
+            36,
+            "add_route_03",
+            "archive_route",
+            7,
+            null,
+            null,
+            35
+          ],
+          [
+            37,
+            "add_route_04",
+            "archive_route",
+            8,
+            null,
+            null,
+            36
+          ],
+          [
+            38,
+            "hub_01",
+            "investigation_hub",
+            1,
+            null,
+            null,
+            23
+          ],
+          [
+            39,
+            "registry_01",
+            "registry_open",
+            0,
+            "Mira",
+            "neutral",
+            37
+          ]
+        ],
+        "callStack": [],
+        "eventSequence": 3,
+        "location": {
+          "index": 2,
+          "label": "registry_open"
+        },
+        "meta": {
+          "cgIds": [],
+          "endingIds": [],
+          "musicIds": [
+            "music_storm"
+          ],
+          "persistentVariables": {
+            "record_ren": true
+          },
+          "readLineIds": [
+            "arrival_01",
+            "arrival_02",
+            "arrival_03",
+            "arrival_04",
+            "arrival_05",
+            "add_start_01",
+            "add_start_02",
+            "add_start_03",
+            "add_start_04",
+            "add_start_05",
+            "add_start_06",
+            "add_start_07",
+            "add_start_08",
+            "add_start_09",
+            "add_start_10",
+            "arrival_ren_01",
+            "arrival_ren_02",
+            "add_ren_01",
+            "add_ren_02",
+            "add_ren_03",
+            "add_ren_04",
+            "add_ren_05",
+            "add_ren_06",
+            "hub_01",
+            "archive_01",
+            "archive_02",
+            "add_archive_01",
+            "add_archive_02",
+            "add_archive_03",
+            "add_archive_04",
+            "add_archive_05",
+            "archive_route_01",
+            "archive_route_02",
+            "add_route_01",
+            "add_route_02",
+            "add_route_03",
+            "add_route_04",
+            "registry_01"
+          ]
+        },
+        "nextBacklogSequence": 40,
+        "paused": false,
+        "preferences": {
+          "autoDelayMs": 2500,
+          "mode": "manual",
+          "skipSeenOnly": true,
+          "textSpeedCharsPerSecond": 32
+        },
+        "rollbackHistory": {
+          "entries": [
+            [
+              "start",
+              20,
+              [],
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              "start",
+              22,
+              [],
+              1,
+              0,
+              1,
+              1,
+              0
+            ],
+            [
+              "start",
+              23,
+              [],
+              2,
+              0,
+              2,
+              2,
+              0
+            ],
+            [
+              "start",
+              24,
+              [],
+              3,
+              0,
+              3,
+              3,
+              0
+            ],
+            [
+              "start",
+              26,
+              [],
+              4,
+              0,
+              4,
+              4,
+              1
+            ],
+            [
+              "start",
+              27,
+              [],
+              5,
+              0,
+              5,
+              5,
+              1
+            ],
+            [
+              "start",
+              28,
+              [],
+              6,
+              0,
+              6,
+              6,
+              1
+            ],
+            [
+              "start",
+              29,
+              [],
+              7,
+              0,
+              7,
+              7,
+              1
+            ],
+            [
+              "start",
+              30,
+              [],
+              8,
+              0,
+              8,
+              8,
+              1
+            ],
+            [
+              "start",
+              31,
+              [],
+              9,
+              0,
+              9,
+              9,
+              1
+            ],
+            [
+              "start",
+              32,
+              [],
+              10,
+              0,
+              10,
+              10,
+              1
+            ],
+            [
+              "start",
+              33,
+              [],
+              11,
+              0,
+              11,
+              11,
+              1
+            ],
+            [
+              "start",
+              34,
+              [],
+              12,
+              0,
+              12,
+              12,
+              1
+            ],
+            [
+              "start",
+              35,
+              [],
+              13,
+              0,
+              13,
+              13,
+              1
+            ],
+            [
+              "start",
+              36,
+              [],
+              14,
+              0,
+              14,
+              14,
+              1
+            ],
+            [
+              "arrival.ask_ren",
+              1,
+              [],
+              15,
+              0,
+              15,
+              15,
+              1
+            ],
+            [
+              "arrival.ask_ren",
+              3,
+              [],
+              16,
+              1,
+              16,
+              16,
+              1
+            ],
+            [
+              "arrival.ask_ren",
+              4,
+              [],
+              17,
+              1,
+              16,
+              17,
+              1
+            ],
+            [
+              "arrival.ask_ren",
+              5,
+              [],
+              18,
+              1,
+              16,
+              18,
+              1
+            ],
+            [
+              "arrival.ask_ren",
+              6,
+              [],
+              19,
+              1,
+              16,
+              19,
+              1
+            ],
+            [
+              "arrival.ask_ren",
+              7,
+              [],
+              20,
+              1,
+              16,
+              20,
+              1
+            ],
+            [
+              "arrival.ask_ren",
+              8,
+              [],
+              21,
+              1,
+              16,
+              21,
+              1
+            ],
+            [
+              "arrival.ask_ren",
+              9,
+              [],
+              22,
+              1,
+              16,
+              22,
+              1
+            ],
+            [
+              "investigation_hub",
+              2,
+              [],
+              23,
+              1,
+              17,
+              23,
+              1
+            ],
+            [
+              "archive_entry",
+              3,
+              [],
+              24,
+              1,
+              18,
+              24,
+              2
+            ],
+            [
+              "archive_entry",
+              4,
+              [],
+              25,
+              1,
+              19,
+              25,
+              2
+            ],
+            [
+              "archive_entry",
+              5,
+              [],
+              26,
+              1,
+              20,
+              26,
+              2
+            ],
+            [
+              "archive_entry",
+              6,
+              [],
+              27,
+              1,
+              21,
+              27,
+              2
+            ],
+            [
+              "archive_entry",
+              7,
+              [],
+              28,
+              1,
+              22,
+              28,
+              2
+            ],
+            [
+              "archive_entry",
+              8,
+              [],
+              29,
+              1,
+              23,
+              29,
+              2
+            ],
+            [
+              "archive_entry",
+              9,
+              [],
+              30,
+              1,
+              24,
+              30,
+              2
+            ],
+            [
+              "archive_route",
+              1,
+              [],
+              31,
+              1,
+              25,
+              31,
+              2
+            ],
+            [
+              "archive_route",
+              5,
+              [],
+              32,
+              2,
+              26,
+              32,
+              2
+            ],
+            [
+              "archive_route",
+              6,
+              [],
+              33,
+              2,
+              27,
+              33,
+              2
+            ],
+            [
+              "archive_route",
+              7,
+              [],
+              34,
+              2,
+              28,
+              34,
+              2
+            ],
+            [
+              "archive_route",
+              8,
+              [],
+              35,
+              2,
+              29,
+              35,
+              2
+            ],
+            [
+              "archive_route",
+              9,
+              [],
+              36,
+              2,
+              30,
+              36,
+              2
+            ],
+            [
+              "investigation_hub",
+              2,
+              [],
+              37,
+              2,
+              31,
+              23,
+              2
+            ],
+            [
+              "registry_open",
+              1,
+              [],
+              38,
+              2,
+              32,
+              37,
+              2
+            ]
+          ],
+          "pools": {
+            "active": [
+              [
+                "start",
+                19,
+                "arrival_01",
+                null,
+                null,
+                0,
+                70,
+                null
+              ],
+              [
+                "start",
+                21,
+                "arrival_02",
+                "Mira",
+                "worried",
+                1,
+                47,
+                null
+              ],
+              [
+                "start",
+                22,
+                "arrival_03",
+                "Ren",
+                "neutral",
+                2,
+                66,
+                null
+              ],
+              [
+                "start",
+                23,
+                "arrival_04",
+                "Mira",
+                "worried",
+                3,
+                51,
+                null
+              ],
+              [
+                "start",
+                25,
+                "arrival_05",
+                null,
+                null,
+                4,
+                76,
+                null
+              ],
+              [
+                "start",
+                26,
+                "add_start_01",
+                null,
+                null,
+                5,
+                49,
+                null
+              ],
+              [
+                "start",
+                27,
+                "add_start_02",
+                null,
+                null,
+                6,
+                50,
+                null
+              ],
+              [
+                "start",
+                28,
+                "add_start_03",
+                null,
+                null,
+                7,
+                52,
+                null
+              ],
+              [
+                "start",
+                29,
+                "add_start_04",
+                null,
+                null,
+                8,
+                53,
+                null
+              ],
+              [
+                "start",
+                30,
+                "add_start_05",
+                null,
+                null,
+                9,
+                50,
+                null
+              ],
+              [
+                "start",
+                31,
+                "add_start_06",
+                null,
+                null,
+                10,
+                58,
+                null
+              ],
+              [
+                "start",
+                32,
+                "add_start_07",
+                null,
+                null,
+                11,
+                56,
+                null
+              ],
+              [
+                "start",
+                33,
+                "add_start_08",
+                null,
+                null,
+                12,
+                53,
+                null
+              ],
+              [
+                "start",
+                34,
+                "add_start_09",
+                null,
+                null,
+                13,
+                61,
+                null
+              ],
+              [
+                "start",
+                35,
+                "add_start_10",
+                null,
+                null,
+                14,
+                55,
+                null
+              ],
+              [
+                "arrival.ask_ren",
+                0,
+                "arrival_ren_01",
+                "Ren",
+                "worried",
+                15,
+                62,
+                null
+              ],
+              [
+                "arrival.ask_ren",
+                2,
+                "arrival_ren_02",
+                "Ren",
+                "neutral",
+                16,
+                49,
+                null
+              ],
+              [
+                "arrival.ask_ren",
+                3,
+                "add_ren_01",
+                null,
+                null,
+                17,
+                56,
+                null
+              ],
+              [
+                "arrival.ask_ren",
+                4,
+                "add_ren_02",
+                null,
+                null,
+                18,
+                54,
+                null
+              ],
+              [
+                "arrival.ask_ren",
+                5,
+                "add_ren_03",
+                null,
+                null,
+                19,
+                56,
+                null
+              ],
+              [
+                "arrival.ask_ren",
+                6,
+                "add_ren_04",
+                null,
+                null,
+                20,
+                55,
+                null
+              ],
+              [
+                "arrival.ask_ren",
+                7,
+                "add_ren_05",
+                null,
+                null,
+                21,
+                48,
+                null
+              ],
+              [
+                "arrival.ask_ren",
+                8,
+                "add_ren_06",
+                null,
+                null,
+                22,
+                57,
+                null
+              ],
+              [
+                "investigation_hub",
+                1,
+                "hub_01",
+                null,
+                null,
+                23,
+                69,
+                null
+              ],
+              [
+                "archive_entry",
+                2,
+                "archive_01",
+                null,
+                null,
+                24,
+                55,
+                null
+              ],
+              [
+                "archive_entry",
+                3,
+                "archive_02",
+                "Mira",
+                "neutral",
+                25,
+                58,
+                null
+              ],
+              [
+                "archive_entry",
+                4,
+                "add_archive_01",
+                null,
+                null,
+                26,
+                55,
+                null
+              ],
+              [
+                "archive_entry",
+                5,
+                "add_archive_02",
+                null,
+                null,
+                27,
+                48,
+                null
+              ],
+              [
+                "archive_entry",
+                6,
+                "add_archive_03",
+                null,
+                null,
+                28,
+                54,
+                null
+              ],
+              [
+                "archive_entry",
+                7,
+                "add_archive_04",
+                null,
+                null,
+                29,
+                52,
+                null
+              ],
+              [
+                "archive_entry",
+                8,
+                "add_archive_05",
+                null,
+                null,
+                30,
+                54,
+                null
+              ],
+              [
+                "archive_route",
+                0,
+                "archive_route_01",
+                null,
+                null,
+                31,
+                66,
+                null
+              ],
+              [
+                "archive_route",
+                4,
+                "archive_route_02",
+                "Mira",
+                "hopeful",
+                32,
+                57,
+                null
+              ],
+              [
+                "archive_route",
+                5,
+                "add_route_01",
+                null,
+                null,
+                33,
+                55,
+                null
+              ],
+              [
+                "archive_route",
+                6,
+                "add_route_02",
+                null,
+                null,
+                34,
+                54,
+                null
+              ],
+              [
+                "archive_route",
+                7,
+                "add_route_03",
+                null,
+                null,
+                35,
+                49,
+                null
+              ],
+              [
+                "archive_route",
+                8,
+                "add_route_04",
+                null,
+                null,
+                36,
+                50,
+                null
+              ],
+              [
+                "registry_open",
+                0,
+                "registry_01",
+                "Mira",
+                "neutral",
+                37,
+                54,
+                null
+              ]
+            ],
+            "audioIntents": [
+              {
+                "music": {
+                  "action": "play",
+                  "cue": "music_storm",
+                  "loop": true
+                }
+              },
+              {
+                "music": {
+                  "action": "play",
+                  "cue": "music_storm",
+                  "loop": true
+                },
+                "sfx": {
+                  "action": "play",
+                  "cue": "station_bell",
+                  "loop": false
+                }
+              },
+              {
+                "ambience": {
+                  "action": "play",
+                  "cue": "roof_gust",
+                  "loop": true
+                },
+                "music": {
+                  "action": "play",
+                  "cue": "music_storm",
+                  "loop": true
+                },
+                "sfx": {
+                  "action": "play",
+                  "cue": "station_bell",
+                  "loop": false
+                }
+              }
+            ],
+            "stages": [
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 116.66666666666669,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": {
+                  "durationMs": 900,
+                  "elapsedMs": 116.66666666666669,
+                  "from": {
+                    "background": null,
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {}
+                  },
+                  "id": 1,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 900.0000000000008,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1000.000000000001,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1100.0000000000005,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1200,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1299.9999999999993,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1399.9999999999989,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1499.9999999999984,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1599.9999999999977,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1699.999999999997,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1783.33333333333,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1883.3333333333296,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1983.3333333333292,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 2083.3333333333285,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 2183.333333333328,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 2400,
+                    "easing": "easeInOut",
+                    "elapsedMs": 2316.6666666666606,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": null,
+                  "scale": 1.04,
+                  "x": -6,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "worried",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "alert",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "worried"
+                    },
+                    "position": "left",
+                    "rotation": -2,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 2,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1200,
+                    "easing": "easeInOut",
+                    "elapsedMs": 100.00000000000009,
+                    "from": {
+                      "scale": 1.04,
+                      "x": -6,
+                      "y": -4
+                    }
+                  },
+                  "scale": 1,
+                  "x": 0,
+                  "y": 0
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "left",
+                    "rotation": 0,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": {
+                  "durationMs": 500,
+                  "elapsedMs": 100.00000000000009,
+                  "from": {
+                    "background": "station",
+                    "camera": {
+                      "scale": 1.04,
+                      "x": -6,
+                      "y": -4
+                    },
+                    "characters": {
+                      "mira": {
+                        "expression": "worried",
+                        "id": "mira",
+                        "layer": 2,
+                        "model": {
+                          "animation": "alert",
+                          "key": "mira_spine",
+                          "loop": true,
+                          "skin": "worried"
+                        },
+                        "position": "left",
+                        "rotation": -2,
+                        "scale": 1,
+                        "visible": true
+                      },
+                      "ren": {
+                        "expression": "neutral",
+                        "id": "ren",
+                        "layer": 0,
+                        "position": "right",
+                        "rotation": 2,
+                        "scale": 0.92,
+                        "visible": true
+                      }
+                    }
+                  },
+                  "id": 2,
+                  "kind": "dissolve"
+                },
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 83.33333333333391,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": {
+                  "durationMs": 700,
+                  "elapsedMs": 83.33333333333391,
+                  "from": {
+                    "background": "station",
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {
+                      "mira": {
+                        "expression": "neutral",
+                        "id": "mira",
+                        "layer": 2,
+                        "model": {
+                          "animation": "idle",
+                          "key": "mira_spine",
+                          "loop": true,
+                          "skin": "default"
+                        },
+                        "position": "left",
+                        "rotation": 0,
+                        "scale": 1,
+                        "visible": true
+                      },
+                      "ren": {
+                        "expression": "neutral",
+                        "id": "ren",
+                        "layer": 0,
+                        "position": "right",
+                        "rotation": 0,
+                        "scale": 0.92,
+                        "visible": true
+                      }
+                    }
+                  },
+                  "id": 3,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 183.3333333333335,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": {
+                  "durationMs": 700,
+                  "elapsedMs": 183.3333333333335,
+                  "from": {
+                    "background": "station",
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {
+                      "mira": {
+                        "expression": "neutral",
+                        "id": "mira",
+                        "layer": 2,
+                        "model": {
+                          "animation": "idle",
+                          "key": "mira_spine",
+                          "loop": true,
+                          "skin": "default"
+                        },
+                        "position": "left",
+                        "rotation": 0,
+                        "scale": 1,
+                        "visible": true
+                      },
+                      "ren": {
+                        "expression": "neutral",
+                        "id": "ren",
+                        "layer": 0,
+                        "position": "right",
+                        "rotation": 0,
+                        "scale": 0.92,
+                        "visible": true
+                      }
+                    }
+                  },
+                  "id": 3,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 283.33333333333314,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": {
+                  "durationMs": 700,
+                  "elapsedMs": 283.33333333333314,
+                  "from": {
+                    "background": "station",
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {
+                      "mira": {
+                        "expression": "neutral",
+                        "id": "mira",
+                        "layer": 2,
+                        "model": {
+                          "animation": "idle",
+                          "key": "mira_spine",
+                          "loop": true,
+                          "skin": "default"
+                        },
+                        "position": "left",
+                        "rotation": 0,
+                        "scale": 1,
+                        "visible": true
+                      },
+                      "ren": {
+                        "expression": "neutral",
+                        "id": "ren",
+                        "layer": 0,
+                        "position": "right",
+                        "rotation": 0,
+                        "scale": 0.92,
+                        "visible": true
+                      }
+                    }
+                  },
+                  "id": 3,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 416.666666666667,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": {
+                  "durationMs": 700,
+                  "elapsedMs": 416.666666666667,
+                  "from": {
+                    "background": "station",
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {
+                      "mira": {
+                        "expression": "neutral",
+                        "id": "mira",
+                        "layer": 2,
+                        "model": {
+                          "animation": "idle",
+                          "key": "mira_spine",
+                          "loop": true,
+                          "skin": "default"
+                        },
+                        "position": "left",
+                        "rotation": 0,
+                        "scale": 1,
+                        "visible": true
+                      },
+                      "ren": {
+                        "expression": "neutral",
+                        "id": "ren",
+                        "layer": 0,
+                        "position": "right",
+                        "rotation": 0,
+                        "scale": 0.92,
+                        "visible": true
+                      }
+                    }
+                  },
+                  "id": 3,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 516.6666666666667,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": {
+                  "durationMs": 700,
+                  "elapsedMs": 516.6666666666667,
+                  "from": {
+                    "background": "station",
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {
+                      "mira": {
+                        "expression": "neutral",
+                        "id": "mira",
+                        "layer": 2,
+                        "model": {
+                          "animation": "idle",
+                          "key": "mira_spine",
+                          "loop": true,
+                          "skin": "default"
+                        },
+                        "position": "left",
+                        "rotation": 0,
+                        "scale": 1,
+                        "visible": true
+                      },
+                      "ren": {
+                        "expression": "neutral",
+                        "id": "ren",
+                        "layer": 0,
+                        "position": "right",
+                        "rotation": 0,
+                        "scale": 0.92,
+                        "visible": true
+                      }
+                    }
+                  },
+                  "id": 3,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 616.6666666666674,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": {
+                  "durationMs": 700,
+                  "elapsedMs": 616.6666666666674,
+                  "from": {
+                    "background": "station",
+                    "camera": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "characters": {
+                      "mira": {
+                        "expression": "neutral",
+                        "id": "mira",
+                        "layer": 2,
+                        "model": {
+                          "animation": "idle",
+                          "key": "mira_spine",
+                          "loop": true,
+                          "skin": "default"
+                        },
+                        "position": "left",
+                        "rotation": 0,
+                        "scale": 1,
+                        "visible": true
+                      },
+                      "ren": {
+                        "expression": "neutral",
+                        "id": "ren",
+                        "layer": 0,
+                        "position": "right",
+                        "rotation": 0,
+                        "scale": 0.92,
+                        "visible": true
+                      }
+                    }
+                  },
+                  "id": 3,
+                  "kind": "fade"
+                },
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 716.6666666666672,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 850.0000000000011,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 950.0000000000009,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1050.0000000000014,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1150.0000000000005,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1249.9999999999995,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "archive",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1800,
+                    "easing": "easeInOut",
+                    "elapsedMs": 1349.9999999999995,
+                    "from": {
+                      "scale": 1,
+                      "x": 0,
+                      "y": 0
+                    }
+                  },
+                  "scale": 1.06,
+                  "x": 0,
+                  "y": -4
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "center",
+                    "rotation": 0,
+                    "scale": 1.08,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": false
+                  }
+                },
+                "transition": null,
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": {
+                    "durationMs": 1200,
+                    "easing": "easeInOut",
+                    "elapsedMs": 99.99999999999963,
+                    "from": {
+                      "scale": 1.0506250000000001,
+                      "x": 0,
+                      "y": -3.374999999999999
+                    }
+                  },
+                  "scale": 1,
+                  "x": 0,
+                  "y": 0
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "left",
+                    "rotation": 0,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": {
+                  "durationMs": 500,
+                  "elapsedMs": 99.99999999999963,
+                  "from": {
+                    "background": "archive",
+                    "camera": {
+                      "scale": 1.0506250000000001,
+                      "x": 0,
+                      "y": -3.374999999999999
+                    },
+                    "characters": {
+                      "mira": {
+                        "expression": "neutral",
+                        "id": "mira",
+                        "layer": 2,
+                        "model": {
+                          "animation": "idle",
+                          "key": "mira_spine",
+                          "loop": true,
+                          "skin": "default"
+                        },
+                        "position": "center",
+                        "rotation": 0,
+                        "scale": 1.08,
+                        "visible": true
+                      },
+                      "ren": {
+                        "expression": "neutral",
+                        "id": "ren",
+                        "layer": 0,
+                        "position": "right",
+                        "rotation": 0,
+                        "scale": 0.92,
+                        "visible": false
+                      }
+                    }
+                  },
+                  "id": 4,
+                  "kind": "dissolve"
+                },
+                "video": null
+              },
+              {
+                "background": "station",
+                "camera": {
+                  "motion": null,
+                  "scale": 1,
+                  "x": 0,
+                  "y": 0
+                },
+                "characters": {
+                  "mira": {
+                    "expression": "neutral",
+                    "id": "mira",
+                    "layer": 2,
+                    "model": {
+                      "animation": "idle",
+                      "key": "mira_spine",
+                      "loop": true,
+                      "skin": "default"
+                    },
+                    "position": "left",
+                    "rotation": 0,
+                    "scale": 1,
+                    "visible": true
+                  },
+                  "ren": {
+                    "expression": "neutral",
+                    "id": "ren",
+                    "layer": 0,
+                    "position": "right",
+                    "rotation": 0,
+                    "scale": 0.92,
+                    "visible": true
+                  }
+                },
+                "transition": null,
+                "video": null
+              }
+            ],
+            "variables": [
+              {
+                "code_misses": 0,
+                "dial_1": 0,
+                "dial_2": 0,
+                "dial_3": 0,
+                "found_clock": false,
+                "found_lens": false,
+                "found_route": false,
+                "investigation_count": 0,
+                "letter_protected": false,
+                "letter_seen": false,
+                "memory_recorded": false,
+                "memory_seen": false,
+                "mira_trust": 0,
+                "proof_complete": false,
+                "ren_trust": 0,
+                "roof_log_read": false,
+                "timed_out": false
+              },
+              {
+                "code_misses": 0,
+                "dial_1": 0,
+                "dial_2": 0,
+                "dial_3": 0,
+                "found_clock": false,
+                "found_lens": false,
+                "found_route": false,
+                "investigation_count": 0,
+                "letter_protected": false,
+                "letter_seen": false,
+                "memory_recorded": false,
+                "memory_seen": false,
+                "mira_trust": 0,
+                "proof_complete": false,
+                "ren_trust": 1,
+                "roof_log_read": false,
+                "timed_out": false
+              },
+              {
+                "code_misses": 0,
+                "dial_1": 0,
+                "dial_2": 0,
+                "dial_3": 0,
+                "found_clock": false,
+                "found_lens": false,
+                "found_route": true,
+                "investigation_count": 1,
+                "letter_protected": false,
+                "letter_seen": false,
+                "memory_recorded": false,
+                "memory_seen": false,
+                "mira_trust": 0,
+                "proof_complete": false,
+                "ren_trust": 1,
+                "roof_log_read": false,
+                "route_digit": 7,
+                "timed_out": false
+              }
+            ]
+          }
+        },
+        "stage": {
+          "background": "station",
+          "camera": {
+            "motion": null,
+            "scale": 1,
+            "x": 0,
+            "y": 0
+          },
+          "characters": {
+            "mira": {
+              "expression": "neutral",
+              "id": "mira",
+              "layer": 2,
+              "model": {
+                "animation": "idle",
+                "key": "mira_spine",
+                "loop": true,
+                "skin": "default"
+              },
+              "position": "left",
+              "rotation": 0,
+              "scale": 1,
+              "visible": true
+            },
+            "ren": {
+              "expression": "neutral",
+              "id": "ren",
+              "layer": 0,
+              "position": "right",
+              "rotation": 0,
+              "scale": 0.92,
+              "visible": true
+            }
+          },
+          "transition": null,
+          "video": null
+        },
+        "started": true,
+        "textPool": [
+          "23点08分。雾港灯塔站的检票钟停在 23:14，二十年没动。你低头摸过车票，指针忽然倒退一格；站台尽头的黄灯也亮了——透镜明明锁在仓库里。",
+          "我送一封信。信封是干的，路上却下着雨。邮戳写着二十年后的雾港站——你们这里，应该还没有那一天。",
+          "那盏灯不该亮。旧中继只把光送过海峡，送不到二十年后。二十年前妹妹在对岸失去消息后，我把控制箱封了；这些年，我只敢把那晚记成一场故障。",
+          "Mira没有回答，只把信举到检票灯下。邮戳比今夜晚二十年；海堤警报已经开始倒数，最后一班车不会等雾散。",
+          "你核对站钟：它停在 23:14，墙上的值班表却是 23:08。末班车 23:47 离站，封堤前还有三十九分钟。先问 Mira、问 Ren，或只检查信封。",
+          "站台的木缝里积着一线水，水面却映出晴天的灯塔。你眨眼再看，倒影已经被雨声撕碎，只剩一片晃动的黄光。",
+          "检票窗里的旧日历停在二十年前的今天。纸张没有受潮，只有这一页被人折起，折痕恰好压住了海峡上的收信亭。",
+          "你把车票翻到背面，墨迹沿着纤维慢慢浮出一个七字。那不是站名，也不是座位号，像有人把邮路图缩成了掌心大小。",
+          "站台广播刚通电时，扬声器先吐出半句天气预报，随后只剩纸张摩擦般的底噪。Ren在值班簿上记下旧线路接触不良。",
+          "海堤上的红色警灯隔着雾闪了三次，第三次没有亮完。值班簿把它记作线路老化，可站钟恰在同一刻倒退了一格。",
+          "信封在Mira掌心里没有一点雨痕，袖口却湿透了。她一直用拇指压着封蜡，像在确认那粒盐还留在那里，没有被路上的水冲走。",
+          "Ren把钥匙串握得太紧，最旧那把钥匙在掌心留下月牙形的红印。那把钥匙没有挂在控制箱旁，像是他一直把那晚锁在身边。",
+          "远处没有列车，铁轨却发出一声轻响，像车轮刚刚压过湿轨。那声音沿站台传来，到了你的脚边忽然停下，不肯再往前。",
+          "雨水在票根边缘画出两条平行线，随后其中一条被风抹去。你想起旧图上被撕掉的那一角，突然不确定缺失的是纸，还是一段被删掉的路。",
+          "站房的墙钟、检票钟和你的腕表各差六分钟。三只钟都在走，只有站台尽头那面朝海的钟停着，仿佛它只替另一个夜晚守时。",
+          "透镜能借海雾把光送过海峡，不可能把二十年折成一条路。那晚我只记得第二声；等我赶到，对岸已经没有人回答。我不想再靠记忆修一次。",
+          "别把我的记忆当证据。查清旧邮路、铃箱的回声标记，以及潮汐日志里的时刻。三处记录对不上，就不要通电。",
+          "Ren没有否认自己锁过控制箱。他只补充，那把锁后来换了三次，钥匙却一次也没丢；每次搬站，他都把它装进自己的行李。",
+          "“我记得浪声盖过了第二声，”他说，“可箱盖的刻字比我的记忆早。若第一声真有回音，为什么我当年没有等它回来？”",
+          "他从值班簿夹层取出一截发黑的细线，外皮被海盐磨裂。旧报告记着雷雨后的短路；断口已经氧化，不能说明当晚是谁碰过它。",
+          "Ren记得父亲那晚让他留在站房，却记不清自己是否答应过。门上的身高刻痕显示他只到桌沿，他敲铃时甚至看不见对岸。",
+          "“我一直把两声写成一个错误，”他低声说，“只要叫故障，就不用承认我那个年纪根本不知道该做什么。”",
+          "他把钥匙放到桌面，没有推给你，也没有收回去。那是他第一次让别人看见锁芯；他仍不知道开箱以后，会不会比记忆更难承受。",
+          "雨开始敲站顶。档案柜锁边浸开，控制箱里有新鲜盐水，屋顶透镜却无故亮过——三处各留下一笔。每来回一次，潮水就逼近站台；按顺序查，别丢了现场。",
+          "档案室只剩台灯亮着。《雾港邮路表》封面压着一个 7，近年被撕去一角。纸缝里夹着一粒盐，和信封蜡封里的那粒一样。",
+          "旧图上，七号邮路横过海峡，终点不是邮局，而是对岸的收信亭。信封边缘有一道压痕，和图上的线路重合；邮戳写的不只有日期。",
+          "档案柜最底层的防潮纸没有发霉，只有边缘被人反复揭起。那一页不是被海水毁掉，而是有人每次查完都把它重新压回原处。",
+          "图例里“北向单束”用红墨标出，旁边却有一道更旧的铅笔线。两条线几乎重合，只有最后一段绕开了礁石。",
+          "纸上的潮痕不是从窗边流下，而是从折叠处往外散开。有人在暴雨中握着这张图，却一直把它护在身侧，没有让海水浸透。",
+          "七号线旁有三处针孔，像钉过三次又被移走。每个孔都对应一个可能的落点；最终留下的那处，正落在收信亭窄窗上。",
+          "你把信封的压痕与图纸折线叠在一起，边缘严丝合缝。这个吻合仍可能是巧合，但已经足够让你不再把邮戳当作唯一线索。",
+          "旧图把七号线从灯塔窗沿引到收信亭。红笔备注写着：“雾最厚时只发第一束；第二束会把船引回暗礁。”下面一行被水泡掉，只剩“先确认落点”。",
+          "Mira的手指停在收信亭上：“我母亲说过，雾里有一束光替她照过路。我一直以为那是渔船灯，没想到有人把它对准了她。”",
+          "红笔备注下还有一行褪色字：“若听见回声，先核对窗，不要追着光跑。”句子像写给夜里的孩子，也像写给后来查档的人。",
+          "收信亭在海图上只有一扇窄窗，窗外是向南的避风坡。第一束光只需确认有人看见，船只便能离开堤岸，不必再冒险靠近。",
+          "Mira认出图边那道短划，是母亲记账时的习惯。她从不画完整的太阳，只在纸角留下光照到物件时的方向。",
+          "你在副本上标出礁石，不把被撕掉的部分补齐。空缺也必须保留在证据里，否则后来的路线会把猜测误当成原图。",
+          "我不知道这封信最终会走哪条路。倘若有人想回信，我可以先留一张回邮签：写上收件人的名字，再填进站内的信箱编号。"
+        ],
+        "transitionSequence": 4,
+        "variables": {
+          "code_misses": 0,
+          "dial_1": 0,
+          "dial_2": 0,
+          "dial_3": 0,
+          "found_clock": false,
+          "found_lens": false,
+          "found_route": true,
+          "investigation_count": 1,
+          "letter_protected": false,
+          "letter_seen": false,
+          "memory_recorded": false,
+          "memory_seen": false,
+          "mira_trust": 0,
+          "proof_complete": false,
+          "ren_trust": 1,
+          "roof_log_read": false,
+          "route_digit": 7,
+          "timed_out": false
+        }
+      },
+      "storyId": "demo.lantern.misty-last-letter",
+      "storyVersion": 5
+    }
+  }
+}

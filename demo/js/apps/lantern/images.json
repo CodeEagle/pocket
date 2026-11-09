@@ -1,0 +1,69 @@
+{
+  "art/station.png": {
+    "linear": true
+  },
+  "art/archive.png": {
+    "linear": true
+  },
+  "art/roof.png": {
+    "linear": true
+  },
+  "art/dawn.png": {
+    "linear": true
+  },
+  "art/mira-neutral.png": {
+    "linear": true
+  },
+  "art/mira-worried.png": {
+    "linear": true
+  },
+  "art/mira-hopeful.png": {
+    "linear": true
+  },
+  "art/ren-neutral.png": {
+    "linear": true
+  },
+  "art/ren-worried.png": {
+    "linear": true
+  },
+  "art/ren-hopeful.png": {
+    "linear": true
+  },
+  "art/truth-letter.png": {
+    "linear": true
+  },
+  "art/dawn-departure.png": {
+    "linear": true
+  },
+  "art/harbor-light.png": {
+    "linear": true
+  },
+  "art/ui/harbor-frame-refined.png": {
+    "linear": true
+  },
+  "art/ui/harbor-primary.png": {
+    "linear": true
+  },
+  "art/ui/harbor-icons.png": {
+    "linear": true
+  },
+  "art/fx/sea-mist.png": {
+    "linear": true
+  },
+  "art/fx/parallax-lantern.png": {
+    "linear": true,
+    "sourceSize": true
+  },
+  "art/fx/rain-streak.svg": {
+    "linear": true
+  },
+  "art/ui/relay-dial.png": {
+    "linear": true
+  },
+  ".pocket-build/live2d/Hiyori/Hiyori.2048/texture_00.png": {
+    "linear": true
+  },
+  ".pocket-build/live2d/Hiyori/Hiyori.2048/texture_01.png": {
+    "linear": true
+  }
+}

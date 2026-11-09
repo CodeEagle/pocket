@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { backIconPoint } from "./navigation_geometry.ts";
+import { showcaseCompositorSurfaces } from "../official_demos.ts";
 
 type JsonObject = Record<string, unknown>;
 type ProbeResponse = {
@@ -44,6 +45,7 @@ const flutterRoot = resolve(root, "..");
 const bytecodePath = resolve(process.env.POCKET_GUEST_BYTECODE ?? join(flutterRoot, "assets/app.qjbc"));
 const pakPath = resolve(process.env.POCKET_GUEST_PAK ?? join(flutterRoot, "assets/app.pak"));
 const metadataPath = resolve(process.env.POCKET_GUEST_METADATA ?? join(flutterRoot, "assets/app.bytecode.json"));
+const compositorSurfaces = showcaseCompositorSurfaces();
 
 function bytecodeCapable(path: string): boolean {
   if (!existsSync(path)) return false;
@@ -107,7 +109,7 @@ function hostResponse(
 function bootstrap(width = 360, height = 640): JsonObject[] {
   const runtimeAbi = String(metadata.runtimeAbi);
   return [
-    { op: "create", width, height, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } },
+    { op: "create", width, height, compositorSurfaces },
     { op: "loadBytecode", bytecodePath, pakPath },
     { op: "frame", deltaMs: 16 },
     hostResponse(bootRequestId("platform.systemUi.set"), "platform.systemUi.set", {
@@ -131,7 +133,7 @@ function bootstrap(width = 360, height = 640): JsonObject[] {
       version: "0.1.0",
       buildNumber: "1",
     }),
-    hostResponse(bootRequestId("updates.status"), "updates.status", {
+    ...updatesStatusRequestIds.map((requestId) => hostResponse(requestId, "updates.status", {
       configured: false,
       stage: "not_configured",
       activeVersion: "embedded",
@@ -139,7 +141,7 @@ function bootstrap(width = 360, height = 640): JsonObject[] {
       availableVersion: null,
       versions: [],
       lastError: null,
-    }),
+    })),
     // This single-instance probe deliberately has no System runtime adapter.
     // Reject that capability explicitly rather than leaving a stray RPC alive.
     event("host.response", {
@@ -220,16 +222,28 @@ function frameMatching(
 // Discover real request IDs from actual bytecode execution. Adding an unrelated
 // bootstrap capability must not redirect a synthetic response to another RPC.
 const bootRequests = framesOf(runProbe([
-  { op: "create", width: 360, height: 640, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } },
+  { op: "create", width: 360, height: 640, compositorSurfaces },
   { op: "loadBytecode", bytecodePath, pakPath },
   { op: "frame", deltaMs: 16 },
   { op: "quit" },
 ])).flatMap((frame) => frameEvents(frame, "host.request"));
-function bootRequestId(capability: string): string {
-  const packet = bootRequests.find((request) => request.payload?.capability === capability);
-  assert.equal(typeof packet?.payload?.requestId, "string", `missing bootstrap RPC ${capability}`);
-  return packet!.payload!.requestId as string;
+function bootRequestIds(capability: string): string[] {
+  const packets = bootRequests.filter((request) => request.payload?.capability === capability);
+  assert.ok(packets.length > 0, `missing bootstrap RPC ${capability}`);
+  return packets.map((packet, index) => {
+    assert.equal(typeof packet.payload?.requestId, "string", `bootstrap RPC ${capability}[${index}] has no request ID`);
+    return packet.payload!.requestId as string;
+  });
 }
+function bootRequestId(capability: string): string {
+  const requestIds = bootRequestIds(capability);
+  assert.equal(requestIds.length, 1, `expected one bootstrap RPC ${capability}, got ${requestIds.length}`);
+  return requestIds[0]!;
+}
+
+const updatesStatusRequestIds = bootRequestIds("updates.status");
+assert.equal(updatesStatusRequestIds.length, 2, "automatic refresh and the Showcase status view each request updates.status");
+assert.equal(new Set(updatesStatusRequestIds).size, updatesStatusRequestIds.length, "each updates.status request must have its own correlation ID");
 
 // First exercise each host result on the page that renders it. This also gives
 // the pointer test measured coordinates rather than embedding Dart hit boxes.
@@ -781,7 +795,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   initialEvents.map((item) => item.payload?.capability).sort(),
-  ["platform.systemUi.set", "runtime.info", "runtime.performance", "plugins.list", "plugins.packageInfo", "updates.status", "system.runtime.configure"].sort(),
+  ["platform.systemUi.set", "runtime.info", "runtime.performance", "plugins.list", "plugins.packageInfo", "updates.status", "updates.status", "system.runtime.configure"].sort(),
   "initial guest host.request capability set drifted",
 );
 const loadResponse = checked(resultResponses[1], "pocket_load_bytecode_files");

@@ -1,0 +1,22 @@
+PODS:
+  - Flutter (1.0.0)
+  - pocket_live2d (0.1.0):
+    - Flutter
+
+DEPENDENCIES:
+  - Flutter (from `Flutter`)
+  - pocket_live2d (from `.symlinks/plugins/pocket_live2d/ios`)
+
+EXTERNAL SOURCES:
+  Flutter:
+    :path: Flutter
+  pocket_live2d:
+    :path: ".symlinks/plugins/pocket_live2d/ios"
+
+SPEC CHECKSUMS:
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  pocket_live2d: e14787457de3c417ed8dd791124fd2f176a37e62
+
+PODFILE CHECKSUM: 3ba3a73b1b12adcf321a227a745625fe0888cc82
+
+COCOAPODS: 1.16.2

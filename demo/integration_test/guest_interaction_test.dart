@@ -289,7 +289,7 @@ void main() {
   testWidgets('real native guest responds through Flutter pointer bridge', (
     tester,
   ) async {
-    await tester.pumpWidget(const PocketHostApp());
+    await tester.pumpWidget(pocketHostApp());
     await waitFor(tester, '00');
     await tapGuest(tester, '+1');
     await waitFor(tester, '01');

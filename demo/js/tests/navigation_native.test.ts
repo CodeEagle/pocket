@@ -117,7 +117,10 @@ test("native route stack preserves page scroll/local state and isolates popped r
   try {
     let frame = await homeSession.boot();
     const initialPlayground = textOp(frame, "Playground");
-    frame = await settleAnchor(homeSession, await homeSession.drag({ x: 195, y: 650 }, { x: 195, y: 500 }, 12), "Playground");
+    frame = await homeSession.settle(
+      await homeSession.drag({ x: 195, y: 650 }, { x: 195, y: 600 }, 12),
+      120,
+    );
     const scrolledPlayground = textOp(frame, "Playground");
     assert.ok(
       scrolledPlayground.y! < initialPlayground.y! - 20,

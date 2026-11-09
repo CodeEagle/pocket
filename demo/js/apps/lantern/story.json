@@ -1,0 +1,6265 @@
+{
+  "id": "demo.lantern.misty-last-letter",
+  "version": 6,
+  "start": "start",
+  "script": {
+    "start": [
+      {
+        "type": "set",
+        "variable": "found_route",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "found_clock",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "found_lens",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "proof_complete",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "memory_seen",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "letter_seen",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "letter_protected",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "timed_out",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "mira_trust",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "ren_trust",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "code_misses",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "dial_1",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "dial_2",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "dial_3",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "investigation_count",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "roof_log_read",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "memory_recorded",
+        "value": false
+      },
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "worried",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "alert",
+              "loop": true,
+              "skin": "worried"
+            },
+            "scale": 1,
+            "rotation": -2,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "neutral",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 2,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 900
+        },
+        "camera": {
+          "x": -6,
+          "y": -4,
+          "scale": 1.04
+        },
+        "cameraMotion": {
+          "durationMs": 2400,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "music_storm",
+        "action": "play",
+        "channel": "music",
+        "loop": true
+      },
+      {
+        "type": "say",
+        "id": "arrival_01",
+        "text": "23点08分。雾港灯塔站的检票钟停在 23:14，二十年没动。你低头摸过车票，指针忽然倒退一格；站台尽头的黄灯也亮了——透镜明明锁在仓库里。"
+      },
+      {
+        "type": "wait",
+        "durationMs": 700
+      },
+      {
+        "type": "say",
+        "id": "arrival_02",
+        "speaker": "Mira",
+        "portrait": "worried",
+        "text": "我送一封信。信封是干的，路上却下着雨。邮戳写着二十年后的雾港站——你们这里，应该还没有那一天。",
+        "voice": "voice_mira_arrival_02"
+      },
+      {
+        "type": "say",
+        "id": "arrival_03",
+        "speaker": "Ren",
+        "portrait": "neutral",
+        "text": "那盏灯不该亮。旧中继只把光送过海峡，送不到二十年后。二十年前妹妹在对岸失去消息后，我把控制箱封了；这些年，我只敢把那晚记成一场故障。"
+      },
+      {
+        "type": "say",
+        "id": "arrival_04",
+        "speaker": "Mira",
+        "portrait": "worried",
+        "text": "Mira没有回答，只把信举到检票灯下。邮戳比今夜晚二十年；海堤警报已经开始倒数，最后一班车不会等雾散。"
+      },
+      {
+        "type": "audio",
+        "cue": "station_bell",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "say",
+        "id": "arrival_05",
+        "text": "你核对站钟：它停在 23:14，墙上的值班表却是 23:08。末班车 23:47 离站，封堤前还有三十九分钟。先问 Mira、问 Ren，或只检查信封。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_01",
+        "text": "站台的木缝里积着一线水，水面却映出晴天的灯塔。你眨眼再看，倒影已经被雨声撕碎，只剩一片晃动的黄光。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_02",
+        "text": "检票窗里的旧日历停在二十年前的今天。纸张没有受潮，只有这一页被人折起，折痕恰好压住了海峡上的收信亭。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_03",
+        "text": "你把车票翻到背面，墨迹沿着纤维慢慢浮出一个七字。那不是站名，也不是座位号，像有人把邮路图缩成了掌心大小。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_04",
+        "text": "站台广播刚通电时，扬声器先吐出半句天气预报，随后只剩纸张摩擦般的底噪。Ren在值班簿上记下旧线路接触不良。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_05",
+        "text": "海堤上的红色警灯隔着雾闪了三次，第三次没有亮完。值班簿把它记作线路老化，可站钟恰在同一刻倒退了一格。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_06",
+        "text": "信封在Mira掌心里没有一点雨痕，袖口却湿透了。她一直用拇指压着封蜡，像在确认那粒盐还留在那里，没有被路上的水冲走。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_07",
+        "text": "Ren把钥匙串握得太紧，最旧那把钥匙在掌心留下月牙形的红印。那把钥匙没有挂在控制箱旁，像是他一直把那晚锁在身边。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_08",
+        "text": "远处没有列车，铁轨却发出一声轻响，像车轮刚刚压过湿轨。那声音沿站台传来，到了你的脚边忽然停下，不肯再往前。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_09",
+        "text": "雨水在票根边缘画出两条平行线，随后其中一条被风抹去。你想起旧图上被撕掉的那一角，突然不确定缺失的是纸，还是一段被删掉的路。"
+      },
+      {
+        "type": "say",
+        "id": "add_start_10",
+        "text": "站房的墙钟、检票钟和你的腕表各差六分钟。三只钟都在走，只有站台尽头那面朝海的钟停着，仿佛它只替另一个夜晚守时。"
+      },
+      {
+        "type": "choice",
+        "id": "arrival_approach",
+        "prompt": "第一件先验什么？",
+        "options": [
+          {
+            "id": "listen_mira",
+            "text": "先不拆信，问 Mira 为什么赶来。",
+            "target": "arrival.listen_mira"
+          },
+          {
+            "id": "ask_ren",
+            "text": "问 Ren：那晚中继熄灭时发生了什么？",
+            "target": "arrival.ask_ren"
+          },
+          {
+            "id": "check_seal",
+            "text": "核对邮戳、收件栏和蜡封，不打开信。",
+            "target": "arrival.check_seal"
+          }
+        ]
+      }
+    ],
+    "arrival.listen_mira": [
+      {
+        "type": "say",
+        "id": "arrival_mira_01",
+        "speaker": "Mira",
+        "portrait": "worried",
+        "text": "寄件栏空着，收件栏只写了 Ren。字迹是我母亲的。她让我把信亲手交给你，不许我替她拆封，也不许我先说她是谁。"
+      },
+      {
+        "type": "call",
+        "target": "memory_note"
+      },
+      {
+        "type": "say",
+        "id": "add_listen_01",
+        "text": "Mira没有看Ren，只盯着那块空白寄件栏。她说母亲把信交给她时，窗外正是同样的雨声；母亲却没有听见任何一声铃。"
+      },
+      {
+        "type": "say",
+        "id": "add_listen_02",
+        "text": "她说母亲把路线图折了两次，第一次沿着邮路，第二次沿着姓名。展开后，所有线条都在收信亭相交，唯独寄件人的位置留白。"
+      },
+      {
+        "type": "say",
+        "id": "add_listen_03",
+        "text": "Mira把信递近灯下，却仍不让它碰到玻璃。蜡封边缘有一道浅浅的指甲痕，像写信的人封口前又犹豫过一次。"
+      },
+      {
+        "type": "say",
+        "id": "add_listen_04",
+        "text": "她没有说母亲想得到什么，只说那封信被放进一个干燥的铁盒，旁边压着一张没有寄出的回程票。票面日期正是今晚。"
+      },
+      {
+        "type": "say",
+        "id": "add_listen_05",
+        "text": "“她让我自己走到这里，”Mira说，“不是因为她不想来，而是怕她一出现，你就只会回答过去的那个人。”"
+      },
+      {
+        "type": "say",
+        "id": "add_listen_06",
+        "text": "她把手缩回袖口，留下一点盐白的边。那不是信封里的盐，是一路握住封口时，海风和汗水一起干下来的痕迹。"
+      },
+      {
+        "type": "set",
+        "variable": "record_mira",
+        "value": true
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "arrival.ask_ren": [
+      {
+        "type": "say",
+        "id": "arrival_ren_01",
+        "speaker": "Ren",
+        "portrait": "worried",
+        "text": "透镜能借海雾把光送过海峡，不可能把二十年折成一条路。那晚我只记得第二声；等我赶到，对岸已经没有人回答。我不想再靠记忆修一次。"
+      },
+      {
+        "type": "inc",
+        "variable": "ren_trust",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "arrival_ren_02",
+        "speaker": "Ren",
+        "portrait": "neutral",
+        "text": "别把我的记忆当证据。查清旧邮路、铃箱的回声标记，以及潮汐日志里的时刻。三处记录对不上，就不要通电。"
+      },
+      {
+        "type": "say",
+        "id": "add_ren_01",
+        "text": "Ren没有否认自己锁过控制箱。他只补充，那把锁后来换了三次，钥匙却一次也没丢；每次搬站，他都把它装进自己的行李。"
+      },
+      {
+        "type": "say",
+        "id": "add_ren_02",
+        "text": "“我记得浪声盖过了第二声，”他说，“可箱盖的刻字比我的记忆早。若第一声真有回音，为什么我当年没有等它回来？”"
+      },
+      {
+        "type": "say",
+        "id": "add_ren_03",
+        "text": "他从值班簿夹层取出一截发黑的细线，外皮被海盐磨裂。旧报告记着雷雨后的短路；断口已经氧化，不能说明当晚是谁碰过它。"
+      },
+      {
+        "type": "say",
+        "id": "add_ren_04",
+        "text": "Ren记得父亲那晚让他留在站房，却记不清自己是否答应过。门上的身高刻痕显示他只到桌沿，他敲铃时甚至看不见对岸。"
+      },
+      {
+        "type": "say",
+        "id": "add_ren_05",
+        "text": "“我一直把两声写成一个错误，”他低声说，“只要叫故障，就不用承认我那个年纪根本不知道该做什么。”"
+      },
+      {
+        "type": "say",
+        "id": "add_ren_06",
+        "text": "他把钥匙放到桌面，没有推给你，也没有收回去。那是他第一次让别人看见锁芯；他仍不知道开箱以后，会不会比记忆更难承受。"
+      },
+      {
+        "type": "set",
+        "variable": "record_ren",
+        "value": true
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "arrival.check_seal": [
+      {
+        "type": "say",
+        "id": "arrival_seal_01",
+        "text": "邮戳落在二十年后的同一天。收件栏写着 Ren，寄件栏空白；封蜡完整，纸边干燥，蜡纹里却压着一粒咸水结晶。"
+      },
+      {
+        "type": "set",
+        "variable": "letter_seen",
+        "value": true
+      },
+      {
+        "type": "say",
+        "id": "add_seal_01",
+        "text": "信封底部没有邮局的滚轮压痕，只有一道很窄的玻璃纹。它更像贴着透镜边缘走过，而不是经过任何一台普通的分拣机器。"
+      },
+      {
+        "type": "say",
+        "id": "add_seal_02",
+        "text": "邮戳日期的最后一位被盐粒盖住，移开灯光才看清是四。那个数字与潮汐日志上的转向校验相同，却不能单独证明信来自未来。"
+      },
+      {
+        "type": "say",
+        "id": "add_seal_03",
+        "text": "封蜡没有被重新加热的光泽，边缘却有两处微小凹点，间距与旧透镜的固定螺钉一致。它像曾贴在机器旁，又被小心取下。"
+      },
+      {
+        "type": "say",
+        "id": "add_seal_04",
+        "text": "你没有打开信，便看见纸背透出一行倒写的浅痕。那不是正文，只像写信人练习过几次的开头，最后一次才终于落笔。"
+      },
+      {
+        "type": "say",
+        "id": "add_seal_05",
+        "text": "Mira把封口朝向自己，像要替母亲遮住一个迟来的秘密。她说这次不必由她决定是否拆信；先把所有能从外面读出的事实记下来。"
+      },
+      {
+        "type": "say",
+        "id": "add_seal_06",
+        "text": "信封的纸边有四层压纹，每一层都朝着海面弯曲。你把它记进笔记，却没有把它解释成某种奇迹，免得答案先于证据。"
+      },
+      {
+        "type": "say",
+        "id": "arrival_seal_02",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "谢谢你没拆开。它不是秘密，是别人等了很久才写下来的话。"
+      },
+      {
+        "type": "inc",
+        "variable": "mira_trust",
+        "amount": 1
+      },
+      {
+        "type": "set",
+        "variable": "record_seal",
+        "value": true
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "investigation_hub": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "neutral",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 0,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 500
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "say",
+        "id": "hub_01",
+        "text": "雨开始敲站顶。档案柜锁边浸开，控制箱里有新鲜盐水，屋顶透镜却无故亮过——三处各留下一笔。每来回一次，潮水就逼近站台；按顺序查，别丢了现场。"
+      },
+      {
+        "type": "choice",
+        "id": "investigation_hub",
+        "prompt": "你要到哪里找记录？",
+        "options": [
+          {
+            "id": "archive",
+            "text": "把信封和旧七号邮路图对照。",
+            "target": "archive_entry",
+            "when": {
+              "op": "falsy",
+              "value": {
+                "type": "variable",
+                "name": "found_route"
+              }
+            }
+          },
+          {
+            "id": "clock",
+            "text": "查看铃箱内侧的刻字和回声。",
+            "target": "clock_entry",
+            "when": {
+              "op": "falsy",
+              "value": {
+                "type": "variable",
+                "name": "found_clock"
+              }
+            }
+          },
+          {
+            "id": "roof",
+            "text": "上屋顶检查透镜和风暴日志。",
+            "target": "roof_entry",
+            "when": {
+              "op": "falsy",
+              "value": {
+                "type": "variable",
+                "name": "found_lens"
+              }
+            }
+          },
+          {
+            "id": "memory",
+            "text": "问 Mira：这封信还隐瞒了什么？",
+            "target": "hub_memory"
+          },
+          {
+            "id": "leave_reply_address",
+            "text": "趁窗口还在，留一张回邮签。",
+            "target": "registry_open",
+            "when": {
+              "op": "or",
+              "conditions": [
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_route"
+                  }
+                },
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_clock"
+                  }
+                },
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_lens"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "relay",
+            "text": "三份记录已对上，回中继盘。",
+            "target": "relay_entry",
+            "when": {
+              "op": "and",
+              "conditions": [
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_route"
+                  }
+                },
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_clock"
+                  }
+                },
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_lens"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "last_train",
+            "text": "让信暂时留在今夜，准备赶末班车。",
+            "target": "signal_window"
+          }
+        ]
+      }
+    ],
+    "hub_memory": [
+      {
+        "type": "call",
+        "target": "memory_note"
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "registry_open": [
+      {
+        "type": "call",
+        "target": "platform_stall"
+      },
+      {
+        "type": "say",
+        "id": "registry_01",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "我不知道这封信最终会走哪条路。倘若有人想回信，我可以先留一张回邮签：写上收件人的名字，再填进站内的信箱编号。"
+      },
+      {
+        "type": "input",
+        "id": "registry_recipient",
+        "variable": "reply_name",
+        "inputType": "text",
+        "prompt": "收件人姓名（1–16 个字符）",
+        "placeholder": "例如：小岚🙂",
+        "minLength": 1,
+        "maxLength": 16,
+        "cancelTarget": "investigation_hub"
+      },
+      {
+        "type": "say",
+        "id": "registry_02",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "回邮签上的收件人写着 {{reply_name}}。名字留在这里，往后的信才有地方去。"
+      },
+      {
+        "type": "input",
+        "id": "registry_mailbox",
+        "variable": "reply_box",
+        "inputType": "number",
+        "prompt": "站内回信格编号（0–999）",
+        "placeholder": "0–999",
+        "min": 0,
+        "max": 999,
+        "integer": true,
+        "cancelTarget": "investigation_hub"
+      },
+      {
+        "type": "say",
+        "id": "registry_03",
+        "text": "编号 {{reply_box}} 的格口只等回信；封口仍由当班人保管。"
+      },
+      {
+        "type": "input",
+        "id": "registry_public_consent",
+        "variable": "reply_public",
+        "inputType": "boolean",
+        "prompt": "若对岸收到回信，你同意把自己的署名也记进站史簿吗？",
+        "defaultValue": false,
+        "cancelTarget": "investigation_hub"
+      },
+      {
+        "type": "say",
+        "id": "add_registry_01",
+        "text": "登记本的前一页写着“回信不等于回到过去”。字迹很新，墨水却在纸背留下二十年前的旧式钢笔压痕。"
+      },
+      {
+        "type": "say",
+        "id": "add_registry_02",
+        "text": "你先确认收件格没有被雨水泡开，再把回邮签夹在透明内页。即使这扇雾窗消失，名字仍有机会沿着普通邮路抵达。"
+      },
+      {
+        "type": "say",
+        "id": "add_registry_03",
+        "text": "编号不是魔术密码，只是站务员能找到的一格抽屉。Mira说母亲特意要她填这个数，因为普通的地址也值得被认真送达。"
+      },
+      {
+        "type": "say",
+        "id": "add_registry_04",
+        "text": "你把笔尖停在公开记录的勾选框外。是否留下名字不改变灯会照向何处，只决定今后的人是否知道这封信曾被谁托住。"
+      },
+      {
+        "type": "branch",
+        "when": {
+          "op": "truthy",
+          "value": {
+            "type": "variable",
+            "name": "reply_public"
+          }
+        },
+        "then": "registry_public_yes",
+        "else": "registry_public_no"
+      }
+    ],
+    "registry_public_yes": [
+      {
+        "type": "say",
+        "id": "registry_04_yes",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "我会把你的署名和 {{reply_name}} 的回邮格一起收好。等回信的人能看见，灯塔站也记得是谁替这段路留了灯。"
+      },
+      {
+        "type": "say",
+        "id": "add_registry_yes_01",
+        "text": "Mira把登记页的角压平，没有把你的名字念出来。她说公开不是把你交给别人议论，而是让来路不再被写成一场无人负责的故障。"
+      },
+      {
+        "type": "say",
+        "id": "add_registry_yes_02",
+        "text": "Ren在值班簿旁添了一条索引，把回邮格、时间和见证人分开记下。记录不替未来保证答案，只让寻找答案的人少走一段雾路。"
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "registry_public_no": [
+      {
+        "type": "say",
+        "id": "registry_04_no",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "好，信可以送回去，你的名字不必公开。回邮格仍属于 {{reply_name}}，这就足够了。"
+      },
+      {
+        "type": "say",
+        "id": "add_registry_no_01",
+        "text": "Mira没有追问你为什么拒绝。她把纸页翻到背面，只留下格口号码和送达日期，让私人姓名仍属于你自己。"
+      },
+      {
+        "type": "say",
+        "id": "add_registry_no_02",
+        "text": "Ren把回邮签收进值班簿，却不补写任何推测。沉默可以是一种边界；只要路线清楚，别人仍能把信送到该去的地方。"
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "archive_entry": [
+      {
+        "type": "scene",
+        "background": "archive",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "center",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1.08,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 700
+        },
+        "camera": {
+          "x": 0,
+          "y": -4,
+          "scale": 1.06
+        },
+        "cameraMotion": {
+          "durationMs": 1800,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "roof_gust",
+        "action": "play",
+        "channel": "ambience",
+        "loop": true
+      },
+      {
+        "type": "say",
+        "id": "archive_01",
+        "text": "档案室只剩台灯亮着。《雾港邮路表》封面压着一个 7，近年被撕去一角。纸缝里夹着一粒盐，和信封蜡封里的那粒一样。"
+      },
+      {
+        "type": "say",
+        "id": "archive_02",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "旧图上，七号邮路横过海峡，终点不是邮局，而是对岸的收信亭。信封边缘有一道压痕，和图上的线路重合；邮戳写的不只有日期。"
+      },
+      {
+        "type": "say",
+        "id": "add_archive_01",
+        "text": "档案柜最底层的防潮纸没有发霉，只有边缘被人反复揭起。那一页不是被海水毁掉，而是有人每次查完都把它重新压回原处。"
+      },
+      {
+        "type": "say",
+        "id": "add_archive_02",
+        "text": "图例里“北向单束”用红墨标出，旁边却有一道更旧的铅笔线。两条线几乎重合，只有最后一段绕开了礁石。"
+      },
+      {
+        "type": "say",
+        "id": "add_archive_03",
+        "text": "纸上的潮痕不是从窗边流下，而是从折叠处往外散开。有人在暴雨中握着这张图，却一直把它护在身侧，没有让海水浸透。"
+      },
+      {
+        "type": "say",
+        "id": "add_archive_04",
+        "text": "七号线旁有三处针孔，像钉过三次又被移走。每个孔都对应一个可能的落点；最终留下的那处，正落在收信亭窄窗上。"
+      },
+      {
+        "type": "say",
+        "id": "add_archive_05",
+        "text": "你把信封的压痕与图纸折线叠在一起，边缘严丝合缝。这个吻合仍可能是巧合，但已经足够让你不再把邮戳当作唯一线索。"
+      },
+      {
+        "type": "choice",
+        "id": "archive_read",
+        "prompt": "你先核对哪条记录？",
+        "options": [
+          {
+            "id": "copy_route",
+            "text": "从灯塔窗沿沿七号线追到收信亭。",
+            "target": "archive_route"
+          },
+          {
+            "id": "ask_mira_archive",
+            "text": "问 Mira：她为什么认得这条线路？",
+            "target": "archive_mira"
+          },
+          {
+            "id": "leave_archive",
+            "text": "先把图带回站台，再对照邮戳。",
+            "target": "investigation_hub"
+          },
+          {
+            "id": "watch_archive_reel",
+            "text": "放映柜底关于七号线的静音胶片。",
+            "target": "archive_reel_entry"
+          }
+        ]
+      }
+    ],
+    "archive_route": [
+      {
+        "type": "say",
+        "id": "archive_route_01",
+        "text": "旧图把七号线从灯塔窗沿引到收信亭。红笔备注写着：“雾最厚时只发第一束；第二束会把船引回暗礁。”下面一行被水泡掉，只剩“先确认落点”。"
+      },
+      {
+        "type": "set",
+        "variable": "found_route",
+        "value": true
+      },
+      {
+        "type": "set",
+        "variable": "route_digit",
+        "value": 7
+      },
+      {
+        "type": "inc",
+        "variable": "investigation_count",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "archive_route_02",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "Mira的手指停在收信亭上：“我母亲说过，雾里有一束光替她照过路。我一直以为那是渔船灯，没想到有人把它对准了她。”"
+      },
+      {
+        "type": "say",
+        "id": "add_route_01",
+        "text": "红笔备注下还有一行褪色字：“若听见回声，先核对窗，不要追着光跑。”句子像写给夜里的孩子，也像写给后来查档的人。"
+      },
+      {
+        "type": "say",
+        "id": "add_route_02",
+        "text": "收信亭在海图上只有一扇窄窗，窗外是向南的避风坡。第一束光只需确认有人看见，船只便能离开堤岸，不必再冒险靠近。"
+      },
+      {
+        "type": "say",
+        "id": "add_route_03",
+        "text": "Mira认出图边那道短划，是母亲记账时的习惯。她从不画完整的太阳，只在纸角留下光照到物件时的方向。"
+      },
+      {
+        "type": "say",
+        "id": "add_route_04",
+        "text": "你在副本上标出礁石，不把被撕掉的部分补齐。空缺也必须保留在证据里，否则后来的路线会把猜测误当成原图。"
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "archive_mira": [
+      {
+        "type": "call",
+        "target": "memory_note"
+      },
+      {
+        "type": "say",
+        "id": "archive_mira_01",
+        "speaker": "Mira",
+        "portrait": "worried",
+        "text": "寄信人只留了一句：“别追第二声。看第一束光落在哪扇窗。”我以前把它当谜语；现在才知道，她在说那一夜。"
+      },
+      {
+        "type": "say",
+        "id": "add_archive_mira_01",
+        "text": "她说母亲讲过一扇窗，却从没讲过站房里那个孩子。那时Mira以为故事少了一个名字；现在才知道，名字被故意留给Ren自己认出。"
+      },
+      {
+        "type": "say",
+        "id": "add_archive_mira_02",
+        "text": "信纸背面的横线和旧图的经线一样宽。她曾把它当成普通信纸，直到看见那条线恰好穿过七号邮路的终点。"
+      },
+      {
+        "type": "say",
+        "id": "add_archive_mira_03",
+        "text": "Mira把“别追第二声”念了两遍，第二遍比第一遍轻。她不是怕铃响，而是担心自己又会把母亲留下的提醒听成命令。"
+      },
+      {
+        "type": "jump",
+        "target": "archive_route"
+      }
+    ],
+    "clock_entry": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "worried",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 0,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 600
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "say",
+        "id": "clock_01",
+        "text": "三根铃线穿过控制箱。最细的一根挂着“旧中继”铜牌，旁边的钟停在 23:14。箱盖内刻着：第一声确认，第二声封闸；“故障”两个字是后来添的。"
+      },
+      {
+        "type": "say",
+        "id": "clock_02",
+        "speaker": "Ren",
+        "portrait": "worried",
+        "text": "第一声把回音送过海峡，第二声让安全闸落下。它不是更响的呼叫，而是阻止第二束光误入风暴航道。箱内防潮纸上，还留着一句孩子写的：“她听见了吗？”"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_01",
+        "text": "箱盖铰链有新油，锁孔却积着旧盐。有人维护过这台机器，却刻意不碰那把钥匙；维修和封存同时留在这里。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_02",
+        "text": "三根线分别接向扬声器、确认灯和安全闸。旧图把它们画成一条回路，箱盖却提醒：声音、回答与停止，不能混成同一件事。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_03",
+        "text": "孩子写下的问题下面有一小段擦痕，像有人想替他回答又收回了手。纸没有被撕掉，问题便一直留到了今天。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_04",
+        "text": "站钟的玻璃内侧没有指纹，只有沿着边框的一圈水汽。那晚负责读钟的人可能没碰过它，只在雾散前隔着玻璃看了一眼。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_05",
+        "text": "你给每一根线单独贴上标签，再拍下原来的接法。若下一步出错，至少能回到还没有把三种功能混为一谈的地方。"
+      },
+      {
+        "type": "choice",
+        "id": "clock_test",
+        "prompt": "你怎样处理这只旧铃？",
+        "options": [
+          {
+            "id": "single_pulse",
+            "text": "按记录敲一下，听回声落在哪里。",
+            "target": "clock_single"
+          },
+          {
+            "id": "double_pulse",
+            "text": "先敲两下，确认第二声如何封闸。",
+            "target": "clock_double"
+          },
+          {
+            "id": "ask_ren_clock",
+            "text": "请 Ren 说清楚他那晚几岁、做了什么。",
+            "target": "clock_ren"
+          }
+        ]
+      }
+    ],
+    "clock_single": [
+      {
+        "type": "audio",
+        "cue": "station_bell",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "wait",
+        "durationMs": 500
+      },
+      {
+        "type": "say",
+        "id": "clock_single_01",
+        "text": "第一声之后，回音碰到站台木梁，再从控制箱里返回。指针没动，只有确认线亮了一下。旧中继等的不是更大的声音，而是这一下回声。"
+      },
+      {
+        "type": "set",
+        "variable": "found_clock",
+        "value": true
+      },
+      {
+        "type": "set",
+        "variable": "pulse_digit",
+        "value": 1
+      },
+      {
+        "type": "inc",
+        "variable": "investigation_count",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "clock_single_02",
+        "speaker": "Ren",
+        "portrait": "hopeful",
+        "text": "我把两声都当成呼叫，以为第二声才能穿过雾。我从没想过，第一声也许已经够了。谢谢你让我听完回音。"
+      },
+      {
+        "type": "inc",
+        "variable": "ren_trust",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "add_clock_single_01",
+        "text": "回声不是从远处传来，而是贴着箱壁转了一圈。确认灯亮起时，玻璃上没有新的裂纹；保护闸也仍稳稳卡在原位。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_single_02",
+        "text": "你把时间、声级和灯线状态分别写下。三项记录互相吻合，却没有一项能单独说明那晚是谁敲铃。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_single_03",
+        "text": "Ren看着回声标记，把手从停止键上移开。他没有道谢，只把复位杆让出位置，让你也能检查那一圈磨损。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_single_04",
+        "text": "那一道磨痕只出现在第一声之后的回弹位置，第二声留下的是另一条更深的闸痕。机器一直把两种结果分开，只有回忆把它们叠在一起。"
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "clock_double": [
+      {
+        "type": "audio",
+        "cue": "station_bell",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "audio",
+        "cue": "relay_break",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "say",
+        "id": "clock_double_01",
+        "speaker": "Ren",
+        "portrait": "worried",
+        "text": "停。第二声让安全闸落下了。它不是故障，也不是把声音放大；它是在拦住第二束光。我们复位之后，只按记录再试一次。"
+      },
+      {
+        "type": "inc",
+        "variable": "storm_pressure",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "add_clock_double_01",
+        "text": "保护闸落下时，确认灯没有亮。两个动作被机械地隔开，说明第二声不是对第一声的补充，而是一次明确的停止。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_double_02",
+        "text": "Ren复位时先把手停在一半，等你确认轨道无船才继续。那道迟疑不像害怕机器，更像他终于肯为当年的决定重新核对条件。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_double_03",
+        "text": "箱内的金属片仍在振动，最后一下回响落在保护闸之后。你把它记作余震，不把它误读成对岸传回的回答。"
+      },
+      {
+        "type": "jump",
+        "target": "clock_entry"
+      }
+    ],
+    "clock_ren": [
+      {
+        "type": "say",
+        "id": "clock_ren_01",
+        "speaker": "Ren",
+        "portrait": "worried",
+        "text": "我二十八岁。那晚我八岁，父亲把我留在站房；妹妹六岁，跟母亲躲在对岸收信亭。我擅自敲了两下，以为第二声能让她听见。闸落下后，我再没听见她回话。"
+      },
+      {
+        "type": "inc",
+        "variable": "ren_trust",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "add_clock_ren_01",
+        "text": "他说父亲当时去确认潮位，只让他守住控制箱。Ren把“守住”理解成不要让机器停下，却没人告诉他，第二声本身就是停止。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_ren_02",
+        "text": "他用指节量了量门框上的刻线，停在自己的肩膀高度。那晚他很小，却一直用成年人的责任审判那个孩子。"
+      },
+      {
+        "type": "say",
+        "id": "add_clock_ren_03",
+        "text": "“如果她听见了第一声，”他说，“那我该记住的也许不是没能把她叫回来，而是她确实平安离开了海堤。”"
+      },
+      {
+        "type": "jump",
+        "target": "clock_single"
+      }
+    ],
+    "roof_entry": [
+      {
+        "type": "scene",
+        "background": "roof",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "worried",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "alert",
+              "loop": true,
+              "skin": "worried"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "neutral",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 0,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 800
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1.025
+        },
+        "cameraMotion": {
+          "durationMs": 900,
+          "easing": "easeInOut",
+          "shake": {
+            "amplitude": 2,
+            "cycles": 3
+          }
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "roof_gust",
+        "action": "play",
+        "channel": "ambience",
+        "loop": true
+      },
+      {
+        "type": "say",
+        "id": "roof_01",
+        "text": "盐霜遮住了屋顶透镜，但镜片没有裂。螺栓下压着风暴日志，折角处的湿墨正往回晕。你听见对岸传来一下敲玻璃，和箱里那句孩子笔迹对上了。"
+      },
+      {
+        "type": "say",
+        "id": "roof_02",
+        "speaker": "Mira",
+        "portrait": "worried",
+        "text": "旧收信亭的避难守则写着：看见北向单光就离开堤岸，不必等第二束。页边的儿童字迹只剩四个字：“我看见了。”"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_01",
+        "text": "屋顶排水槽堵着一片旧值班表，表格上的名字被雨水冲淡，只有交班时间完整。最后一栏写着“灯已见，不再补发”。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_02",
+        "text": "透镜外框朝北的一侧有枚浅凹，像被小船缆绳擦过，也可能只是旧工具留下的痕迹。它没有新漆屑，不能替当年的发光时刻作证。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_03",
+        "text": "潮痕沿着栏杆向站房退去，而不是朝海面漫来。风把水推上堤岸后又带走一部分，留下了能倒着读出的退潮方向。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_04",
+        "text": "你把风暴日志摊在避雨板下，纸角仍向上卷。若用手压平，日期会被遮住；于是你只固定四角，让原来的折痕继续说话。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_05",
+        "text": "对岸窗框上有一条极细的反光，随着浪峰短暂出现。它不是第二束灯，只是旧玻璃把月色折进海面。"
+      },
+      {
+        "type": "choice",
+        "id": "roof_inspection",
+        "prompt": "你要怎样查屋顶？",
+        "options": [
+          {
+            "id": "read_log",
+            "text": "读完透镜背后的潮位与时间记录。",
+            "target": "roof_log"
+          },
+          {
+            "id": "ask_mira_roof",
+            "text": "问 Mira：寄信人和她是什么关系？",
+            "target": "roof_mira"
+          },
+          {
+            "id": "check_lens",
+            "text": "擦掉盐霜，对准旧邮路的北向缺口。",
+            "target": "roof_lens"
+          }
+        ]
+      }
+    ],
+    "roof_mira": [
+      {
+        "type": "call",
+        "target": "memory_note"
+      },
+      {
+        "type": "say",
+        "id": "roof_mira_01",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "我母亲是你的妹妹。按这夜的年历，她二十六岁，我四岁；二十年后的我二十四岁，带着她的信回到这里。她一直活着，只是你把那夜的沉默当成了失去她。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_mira_01",
+        "text": "Mira说母亲从未把那晚叫作获救，只说“我看见了，然后跟着外婆走”。这句简单的话，比任何后来补写的解释都更早。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_mira_02",
+        "text": "她母亲记得窗上有光，不记得站房有声。如今两份记忆终于能并排放着，不必强迫其中一个替另一个证明全部。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_mira_03",
+        "text": "“我一直以为她忘了那座站，”Mira说，“现在我知道，她只是没有理由知道是谁在里面。”"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_mira_04",
+        "text": "她伸手去碰窗框，又在玻璃前停住。那是母亲曾看见光的地方；她不想让自己的手印盖住对方留下的那一点记忆。"
+      },
+      {
+        "type": "jump",
+        "target": "roof_lens"
+      }
+    ],
+    "roof_log": [
+      {
+        "type": "say",
+        "id": "roof_log_01",
+        "text": "日志把潮位转向记在 23:14，校验只取分钟末位。旁边的 23:15 被划掉，注着“第二束取消”。这不是停钟的读数，是风暴记录里的发光时刻。"
+      },
+      {
+        "type": "set",
+        "variable": "found_lens",
+        "value": true
+      },
+      {
+        "type": "set",
+        "variable": "minute_digit",
+        "value": 4
+      },
+      {
+        "type": "set",
+        "variable": "roof_log_read",
+        "value": true
+      },
+      {
+        "type": "inc",
+        "variable": "investigation_count",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "add_roof_log_01",
+        "text": "日志边缘的墨迹分成两层：先写“23:14”，后用更深的笔划掉“15”。这不是钟在跳动，而是记录者在最后一刻改变了发光决定。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_log_02",
+        "text": "页脚还记着当时风速的方向，和今晚完全相反。真正可重复的是潮位转向与校验位，不是某一阵风碰巧吹开的窗。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_log_03",
+        "text": "有人在“二束”旁画了一个小小的叉，叉尖没有压穿纸背。那不是匆忙的划掉，更像清醒后留下的一次克制。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_log_04",
+        "text": "你把日志上的时间与站钟分栏抄录。两种读数分别属于海上的风暴与站内的机械，混写才会把23:14误认成闹钟坏掉。"
+      },
+      {
+        "type": "jump",
+        "target": "roof_lens"
+      }
+    ],
+    "roof_lens": [
+      {
+        "type": "say",
+        "id": "roof_lens_01",
+        "speaker": "Ren",
+        "portrait": "neutral",
+        "text": "透镜北向缺口与七号线重合。它一次只能把一束光聚到收信亭，不能照亮整段海岸。镜框刻着：“收到回声即停；不得补第二束。”"
+      },
+      {
+        "type": "set",
+        "variable": "found_lens",
+        "value": true
+      },
+      {
+        "type": "set",
+        "variable": "minute_digit",
+        "value": 4
+      },
+      {
+        "type": "say",
+        "id": "roof_lens_02",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "我母亲只记得那一束光，以为是渔船打来的。看到这张图，我才知道有人替她校准了方向；那晚她确实看见了。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_lens_01",
+        "text": "透镜底座有三个刻度，只有第一格被长期擦亮。第二格上积着完整的盐壳，证明它很久没有转过，也没有被人偷偷补发。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_lens_02",
+        "text": "你把镜框方向、窗户位置和潮汐校验写在同一张透明纸上。叠起来时三条线交于一处；分开保存时，每条仍能独立复查。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_lens_03",
+        "text": "海峡上浮起一团低雾，刚好遮掉礁石最高处。按旧图，收信亭在雾带后仍能看见第一束，不会因此需要加亮或追加信号。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_lens_04",
+        "text": "镜面上的水珠被风带向东侧，和日志画出的撤离方向一致。你没有擦掉它们，免得把正在发生的天气伪装成当年的证据。"
+      },
+      {
+        "type": "say",
+        "id": "add_roof_lens_05",
+        "text": "站在镜后向北看，第一束光只需碰到窄窗上沿。这个角度能被标尺复现，不需要任何人凭记忆再把灯往海上抬高。"
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "memory_note": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "falsy",
+          "value": {
+            "type": "variable",
+            "name": "memory_seen"
+          }
+        },
+        "then": "memory_first_visit",
+        "else": "memory_repeat_visit"
+      }
+    ],
+    "memory_first_visit": [
+      {
+        "type": "say",
+        "id": "memory_01",
+        "speaker": "Mira",
+        "portrait": "worried",
+        "text": "我母亲六岁那年，海雾压住收信亭。外婆看见北向单光，带她离开堤岸；第二声响起，安全闸就落了。她活了下来，却一直不知道站房那头是谁敲的钟。"
+      },
+      {
+        "type": "say",
+        "id": "memory_02",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "她长大后才查到那晚的记录。二十年后，四十六岁的她把信交给二十四岁的我，只说：“别替你舅舅解释。让他看见证据，再决定该怎么记住我。”"
+      },
+      {
+        "type": "set",
+        "variable": "memory_seen",
+        "value": true
+      },
+      {
+        "type": "say",
+        "id": "add_memory_01",
+        "text": "Mira说外婆当年没有听见铃，只看见窗上一下白光。她先带孩子离开海堤，后来才问那束光从哪里来；次序比答案更重要。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_02",
+        "text": "母亲从不把自己描述成等待被救的人。她记得的是自己走下堤岸、握住外婆的手，以及在安全处回头看见的那扇窗。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_03",
+        "text": "那封信没有告诉Mira该怎样回答舅舅，只提醒她带上邮路图。她可以说出自己的名字，也可以让证据先替她开口。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_04",
+        "text": "Mira把“我看见了”写在纸边，和箱内的孩子字迹并排。笔画不同，意思却终于落在同一件事上：那一束光确实抵达了。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_05",
+        "text": "Ren没有打断她。他第一次听见妹妹的女儿讲述那晚，却没有要求她把母亲的一生压缩成一个证明。"
+      },
+      {
+        "type": "choice",
+        "id": "memory_response",
+        "prompt": "你怎么回应 Mira？",
+        "options": [
+          {
+            "id": "trust_mira",
+            "text": "我会听你说完，再判断这束光。",
+            "target": "memory_trust"
+          },
+          {
+            "id": "protect_letter",
+            "text": "先守住封口，不替你或 Ren 做决定。",
+            "target": "memory_protect"
+          },
+          {
+            "id": "keep_record",
+            "text": "我会记下证据，也记下还不知道的部分。",
+            "target": "memory_record"
+          }
+        ]
+      }
+    ],
+    "memory_repeat_visit": [
+      {
+        "type": "say",
+        "id": "memory_03",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "我进站时没有说出母亲是谁。我怕你先认出她的影子，就听不见我自己。可那只钟一响，我还是看见了六岁的她站在雾里。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_repeat_01",
+        "text": "她没有重复那封信的内容，只问你是否看见窗上的光。Mira记得的不是一句台词，而是母亲说这句话时仍能呼吸的停顿。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_repeat_02",
+        "text": "她把登记簿轻轻合上，确保没有夹住回邮签。无论你如何选择，她都不愿让母亲留下的话被一页表格压住。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_repeat_03",
+        "text": "远处又传来一阵雨，Mira没有转身。她知道这次回来不是为了重演那夜，而是让每个人都能带着自己的记忆离开。"
+      },
+      {
+        "type": "choice",
+        "id": "memory_repeat_response",
+        "prompt": "你还要对 Mira 说什么？",
+        "options": [
+          {
+            "id": "affirm_mira",
+            "text": "我相信你知道自己何时该走。",
+            "target": "memory_trust"
+          },
+          {
+            "id": "return_quiet",
+            "text": "先回去核对记录，别让回忆替我们拨盘。",
+            "target": "memory_record"
+          }
+        ]
+      }
+    ],
+    "memory_trust": [
+      {
+        "type": "inc",
+        "variable": "mira_trust",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "memory_trust_01",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "谢谢。别急着把我当成答案；先把我当作一个带着母亲秘密赶来的人。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_trust_01",
+        "text": "“我母亲从没要求你原谅她，”Mira说，“她只希望那夜的记录别再把她写成失踪的人。”她把信放到你和Ren之间。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_trust_02",
+        "text": "“你可以问我任何事，”她说，“但别把我当作能替她作证的那个人。我只知道她把信交给了我。”"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "memory_protect": [
+      {
+        "type": "set",
+        "variable": "letter_protected",
+        "value": true
+      },
+      {
+        "type": "say",
+        "id": "memory_protect_01",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "好，先不拆。信是她写的，可封口里装的不是命令；要不要读，等我们弄清她为什么寄回来。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_protect_01",
+        "text": "Ren把封口朝上放回桌中央，没有让它靠近控制箱。先保护纸张和蜡纹，才有可能在以后把你们的判断重新核对。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_protect_02",
+        "text": "Mira点头，却没有把信收走。她愿意等证据，也愿意承认等待本身会让那扇雾窗一点点缩小。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "memory_record": [
+      {
+        "type": "set",
+        "variable": "memory_recorded",
+        "value": true
+      },
+      {
+        "type": "say",
+        "id": "memory_record_01",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "那就分开记：第一束光被收信亭看见，第二声让闸门落下。你当年只记住了后半句。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_record_01",
+        "text": "Ren把维修簿翻到空白页，写下“值班员：八岁”。这是他第一次把当年的年龄放进记录，不再只留下一个故障代码。"
+      },
+      {
+        "type": "say",
+        "id": "add_memory_record_02",
+        "text": "Ren在旁边签下时间，笔迹比箱盖上的字更稳。他没有补写“故障”，也没有把那个孩子从记录里删除。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "relay_entry": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "and",
+          "conditions": [
+            {
+              "op": "truthy",
+              "value": {
+                "type": "variable",
+                "name": "found_route"
+              }
+            },
+            {
+              "op": "truthy",
+              "value": {
+                "type": "variable",
+                "name": "found_clock"
+              }
+            },
+            {
+              "op": "truthy",
+              "value": {
+                "type": "variable",
+                "name": "found_lens"
+              }
+            }
+          ]
+        },
+        "then": "relay_ready",
+        "else": "relay_need_clues"
+      }
+    ],
+    "relay_need_clues": [
+      {
+        "type": "say",
+        "id": "relay_missing_01",
+        "speaker": "Ren",
+        "portrait": "worried",
+        "text": "还少一份现场证据。不是要你相信谁；对照邮路图、箱盖和屋顶日志，少一笔就先别拨盘。"
+      },
+      {
+        "type": "say",
+        "id": "add_relay_missing_01",
+        "text": "中继盘没有被锁住，缺的是三处记录之间的对应关系。现在拨动它只会让你得到一个数，无法说明这个数是否把人带离危险。"
+      },
+      {
+        "type": "say",
+        "id": "add_relay_missing_02",
+        "text": "档案给出落点，箱盖给出先后，屋顶日志给出时刻。任何一份单独看都可能被误读；要到三条线相交，才能开始校准。"
+      },
+      {
+        "type": "say",
+        "id": "add_relay_missing_03",
+        "text": "Ren把盘罩重新盖好，留出一条观察缝。等证据齐全再动手，不是拖延，而是拒绝让一场猜测替海堤上的人承担后果。"
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "relay_ready": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "worried",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "alert",
+              "loop": true,
+              "skin": "worried"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "neutral",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 0,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 700
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "music_letter",
+        "action": "play",
+        "channel": "music",
+        "loop": true
+      },
+      {
+        "type": "call",
+        "target": "v3_relay_log_check"
+      },
+      {
+        "type": "call",
+        "target": "v3_relay_ren_echo"
+      },
+      {
+        "type": "say",
+        "id": "relay_01",
+        "speaker": "Ren",
+        "portrait": "neutral",
+        "text": "三处记录终于对上：档案指向收信亭，箱盖解释两声的先后，屋顶日志标出潮位转向。盘上三只轮各管一件事；别把它们混成一句记忆。"
+      },
+      {
+        "type": "say",
+        "id": "relay_02",
+        "speaker": "Mira",
+        "portrait": "worried",
+        "text": "未来寄来的字不是命令。你可以停下，也可以按我们找到的记录，给过去一个答复。雾窗只剩片刻，但没人替你按下去。"
+      },
+      {
+        "type": "say",
+        "id": "add_relay_ready_01",
+        "text": "三份材料的边角终于对齐：邮路图的针孔、箱盖的回声刻线和日志的分钟末位落在同一页。没有哪一份必须被舍弃。"
+      },
+      {
+        "type": "say",
+        "id": "add_relay_ready_02",
+        "text": "Mira把手指从开关上移开，等你先读完所有标记。她不是要求你相信她，只希望这次的回答不再被误写成一次故障。"
+      },
+      {
+        "type": "say",
+        "id": "add_relay_ready_03",
+        "text": "Ren把第二声的闸痕圈起来，却没有把第一声擦掉。终于，两种声音都能留在记录里，不再互相抵消。"
+      },
+      {
+        "type": "say",
+        "id": "add_relay_ready_04",
+        "text": "风从站台尽头吹来，纸页边缘没有再翻动。可供选择的时间仍在减少，校准必须依据记录，而不能等雾替你们决定。"
+      },
+      {
+        "type": "say",
+        "id": "add_relay_ready_05",
+        "text": "你把三只轮盘的功能重新念了一遍：落点、回路、时刻。每一个答案都能追溯到一件实物，不需要把谁的记忆当作唯一钥匙。"
+      },
+      {
+        "type": "choice",
+        "id": "relay_open",
+        "prompt": "要让中继回应过去吗？",
+        "options": [
+          {
+            "id": "open_dial",
+            "text": "按三份证据的顺序拨盘。",
+            "target": "dial_reset"
+          },
+          {
+            "id": "revisit_clues",
+            "text": "回站里再核对一次原始记录。",
+            "target": "investigation_hub"
+          },
+          {
+            "id": "skip_relay",
+            "text": "不冒险，带着信去赶末班车。",
+            "target": "signal_window"
+          }
+        ]
+      }
+    ],
+    "dial_reset": [
+      {
+        "type": "set",
+        "variable": "dial_1",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "dial_2",
+        "value": 0
+      },
+      {
+        "type": "set",
+        "variable": "dial_3",
+        "value": 0
+      },
+      {
+        "type": "jump",
+        "target": "dial_one"
+      }
+    ],
+    "dial_one": [
+      {
+        "type": "say",
+        "id": "dial_01",
+        "text": "第一只轮盘选线路。旧图上的几条线穿过海峡，只有一条停在收信亭。把光送到哪条线上？"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_one_01",
+        "text": "收信亭的标记最旧，针孔周围却没有反复移动留下的毛边。它一直是记录的落点，后来被擦掉的只是旁边那条危险航线。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_one_02",
+        "text": "你先看海图比例尺，再看窗框宽度。两者相差的那一格，正好解释了为什么第一束可以落在窗沿，而第二束会扫向礁石。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_one_03",
+        "text": "拨盘旁的铅笔记号没有写答案，只留了一个问号。有人曾希望后来者亲自检查落点，而不是照抄一串没人能复核的数字。"
+      },
+      {
+        "type": "choice",
+        "id": "dial_one",
+        "prompt": "第一只轮盘：光要落在哪里？",
+        "options": [
+          {
+            "id": "route_7",
+            "text": "7 · 收信路",
+            "target": "dial_one_7"
+          },
+          {
+            "id": "route_1",
+            "text": "1 · 铃线",
+            "target": "dial_one_1"
+          },
+          {
+            "id": "route_4",
+            "text": "4 · 潮位线",
+            "target": "dial_one_4"
+          }
+        ]
+      }
+    ],
+    "dial_one_7": [
+      {
+        "type": "set",
+        "variable": "dial_1",
+        "value": 7
+      },
+      {
+        "type": "jump",
+        "target": "dial_two"
+      }
+    ],
+    "dial_one_1": [
+      {
+        "type": "set",
+        "variable": "dial_1",
+        "value": 1
+      },
+      {
+        "type": "jump",
+        "target": "dial_two"
+      }
+    ],
+    "dial_one_4": [
+      {
+        "type": "set",
+        "variable": "dial_1",
+        "value": 4
+      },
+      {
+        "type": "jump",
+        "target": "dial_two"
+      }
+    ],
+    "dial_two": [
+      {
+        "type": "say",
+        "id": "dial_02",
+        "text": "第二只轮盘决定回路怎样闭合。记录把一声标为确认，第二声标为封闸。你听见的是哪一种？"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_two_01",
+        "text": "确认线接回声灯，保护线接安全闸，两条线路在箱底分开后再也没有交叉。你依据的是线路去向，不是当年谁说过什么。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_two_02",
+        "text": "第一声之后灯亮、闸不动；第二声之后闸落、确认灯暗。两组状态互为校验，足以让你区分呼叫与停止。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_two_03",
+        "text": "Ren没有替你选择，只用指尖指出箱盖上的两个符号。符号之间隔着一道空白，像在提醒你不要把它们连成一句话。"
+      },
+      {
+        "type": "choice",
+        "id": "dial_two",
+        "prompt": "第二只轮盘：怎样闭合回路？",
+        "options": [
+          {
+            "id": "pulse_7",
+            "text": "7 · 加强呼叫",
+            "target": "dial_two_7"
+          },
+          {
+            "id": "pulse_1",
+            "text": "1 · 单响确认",
+            "target": "dial_two_1"
+          },
+          {
+            "id": "pulse_4",
+            "text": "4 · 四声校验",
+            "target": "dial_two_4"
+          }
+        ]
+      }
+    ],
+    "dial_two_7": [
+      {
+        "type": "set",
+        "variable": "dial_2",
+        "value": 7
+      },
+      {
+        "type": "jump",
+        "target": "dial_three"
+      }
+    ],
+    "dial_two_1": [
+      {
+        "type": "set",
+        "variable": "dial_2",
+        "value": 1
+      },
+      {
+        "type": "jump",
+        "target": "dial_three"
+      }
+    ],
+    "dial_two_4": [
+      {
+        "type": "set",
+        "variable": "dial_2",
+        "value": 4
+      },
+      {
+        "type": "jump",
+        "target": "dial_three"
+      }
+    ],
+    "dial_three": [
+      {
+        "type": "say",
+        "id": "dial_03",
+        "text": "最后一只轮盘按潮汐日志校时。不要照着眼前停住的钟猜；记录写的是潮位转向时的分钟末位。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_three_01",
+        "text": "日志的校验写在“转向”旁边，不写在站钟旁边。你把日期、潮位变化和分钟末位连成一条可重复的计算，不靠停住的指针。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_three_02",
+        "text": "23:14出现两次，却属于不同的钟：一处是停住的机械读数，一处是风暴转向的记录。相同数字不代表同一件事。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_three_03",
+        "text": "你把计算结果写在盘边，不立刻转动。让下一位值班人能看见推导过程，比只留下一个正确答案更可靠。"
+      },
+      {
+        "type": "choice",
+        "id": "dial_three",
+        "prompt": "第三只轮盘：用哪一刻校时？",
+        "options": [
+          {
+            "id": "minute_7",
+            "text": "7 · 路线末位",
+            "target": "dial_three_7"
+          },
+          {
+            "id": "minute_1",
+            "text": "1 · 脉冲末位",
+            "target": "dial_three_1"
+          },
+          {
+            "id": "minute_4",
+            "text": "4 · 分钟末位",
+            "target": "dial_three_4"
+          }
+        ]
+      }
+    ],
+    "dial_three_7": [
+      {
+        "type": "set",
+        "variable": "dial_3",
+        "value": 7
+      },
+      {
+        "type": "jump",
+        "target": "dial_check"
+      }
+    ],
+    "dial_three_1": [
+      {
+        "type": "set",
+        "variable": "dial_3",
+        "value": 1
+      },
+      {
+        "type": "jump",
+        "target": "dial_check"
+      }
+    ],
+    "dial_three_4": [
+      {
+        "type": "set",
+        "variable": "dial_3",
+        "value": 4
+      },
+      {
+        "type": "jump",
+        "target": "dial_check"
+      }
+    ],
+    "dial_check": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "and",
+          "conditions": [
+            {
+              "op": "and",
+              "conditions": [
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_route"
+                  }
+                },
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_clock"
+                  }
+                },
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "found_lens"
+                  }
+                }
+              ]
+            },
+            {
+              "op": "and",
+              "conditions": [
+                {
+                  "op": "eq",
+                  "left": {
+                    "type": "variable",
+                    "name": "dial_1"
+                  },
+                  "right": {
+                    "type": "literal",
+                    "value": 7
+                  }
+                },
+                {
+                  "op": "eq",
+                  "left": {
+                    "type": "variable",
+                    "name": "dial_2"
+                  },
+                  "right": {
+                    "type": "literal",
+                    "value": 1
+                  }
+                },
+                {
+                  "op": "eq",
+                  "left": {
+                    "type": "variable",
+                    "name": "dial_3"
+                  },
+                  "right": {
+                    "type": "literal",
+                    "value": 4
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "then": "dial_success",
+        "else": "dial_failure"
+      }
+    ],
+    "dial_success": [
+      {
+        "type": "audio",
+        "cue": "relay_click",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "set",
+        "variable": "proof_complete",
+        "value": true
+      },
+      {
+        "type": "say",
+        "id": "dial_success_01",
+        "text": "轮盘咬合，灯线从站台窗沿滑过海面，落在收信亭的窄窗。箱内只响一声确认，安全闸没有落下。"
+      },
+      {
+        "type": "say",
+        "id": "dial_success_02",
+        "speaker": "Ren",
+        "portrait": "hopeful",
+        "text": "雾那边传来两下敲玻璃。不是钟，是有人在回答。我以为这二十年里，再也听不到这声音。"
+      },
+      {
+        "type": "say",
+        "id": "dial_success_03",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "封蜡开始发暖，蜡纹里的盐粒化成一圈水迹。寄件栏仍然空着，背面却浮出一行字：“我听见了。”"
+      },
+      {
+        "type": "call",
+        "target": "memory_note"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_success_01",
+        "text": "回声标记停在第一格，保护闸没有松动。你们没有把灯推向海面，只让它短暂碰到那扇一直留着一道缝的窗。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_success_02",
+        "text": "对岸先亮起一小片白，再有手掌落在玻璃上。那不是信号灯的反射，指节的停顿与箱里的旧回声恰好同样长。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_success_03",
+        "text": "Mira没有扑向开关，也没有把信拆开。她等着那扇窗再次亮起，像终于允许答案以自己的速度抵达。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_success_04",
+        "text": "蜡封上的盐粒化成一圈细水，却没有让纸张变软。所有外部线索都指向同一个方向，信仍然保持完整。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_success_05",
+        "text": "Ren把“故障”两字从新记录标题里划掉，改写为“第一次收到回音”。旧记录没有被销毁，只是终于多了一行后来发生的事。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_success_06",
+        "text": "站钟没有前进，海堤警报仍在倒数。你们得到的不是改变天气的力量，而是一段能被下一班人验证的回答。"
+      },
+      {
+        "type": "jump",
+        "target": "signal_window"
+      }
+    ],
+    "dial_failure": [
+      {
+        "type": "audio",
+        "cue": "relay_break",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "inc",
+        "variable": "code_misses",
+        "amount": 1
+      },
+      {
+        "type": "inc",
+        "variable": "storm_pressure",
+        "amount": 1
+      },
+      {
+        "type": "say",
+        "id": "add_dial_failure_01",
+        "text": "盘针停下时，三处证据仍各自完好。失败的只是这一次排列，不是那些记录；你可以退回去核对，也可以保留已经看到的边界。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_failure_02",
+        "text": "你把本次组合写入旁页，不覆盖先前的计算。错误路线也能说明什么会触发保护闸，只要不把试错伪装成成功。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_failure_03",
+        "text": "Ren检查每根线都回到原位，再把钥匙放回桌上。机器没有替你们选择，只把不可忽略的后果展示出来。"
+      },
+      {
+        "type": "say",
+        "id": "dial_failure_01",
+        "speaker": "Ren",
+        "portrait": "worried",
+        "text": "电源断开，安全闸却撑住了。不是机器拒绝，是回路顺序不对。已经试过 {{code_misses}} 次；还能回去核对，也能停在这里。"
+      },
+      {
+        "type": "branch",
+        "when": {
+          "op": "lt",
+          "left": {
+            "type": "variable",
+            "name": "code_misses"
+          },
+          "right": {
+            "type": "literal",
+            "value": 2
+          }
+        },
+        "then": "dial_retry_available",
+        "else": "dial_lockout"
+      }
+    ],
+    "dial_retry_available": [
+      {
+        "type": "choice",
+        "id": "dial_retry",
+        "prompt": "风暴窗口正在变窄。",
+        "options": [
+          {
+            "id": "retry_now",
+            "text": "按线路、脉冲、时间的顺序再试一次。",
+            "target": "dial_reset"
+          },
+          {
+            "id": "check_first",
+            "text": "先回调查点核对原始证据。",
+            "target": "investigation_hub"
+          },
+          {
+            "id": "abandon_relay",
+            "text": "停止拨盘，准备末班车。",
+            "target": "signal_window"
+          }
+        ]
+      }
+    ],
+    "dial_lockout": [
+      {
+        "type": "say",
+        "id": "dial_lockout_01",
+        "speaker": "Ren",
+        "portrait": "worried",
+        "text": "保护闸锁死了。再硬拨会烧毁透镜，也会带走站里唯一可靠的警报灯。信还可以等，乘客不能。"
+      },
+      {
+        "type": "set",
+        "variable": "relay_locked",
+        "value": true
+      },
+      {
+        "type": "say",
+        "id": "add_dial_lockout_01",
+        "text": "保护闸的铅封断开后，电源被机械隔离。再试一次不会带来更多证据，只会把警报灯与中继一同烧坏。"
+      },
+      {
+        "type": "say",
+        "id": "add_dial_lockout_02",
+        "text": "你把未完成的记录装进防水套，没有把它写成成功。此刻承认不能继续，本身也是对堤岸上那些人负责。"
+      },
+      {
+        "type": "jump",
+        "target": "signal_window"
+      }
+    ],
+    "signal_window": [
+      {
+        "type": "scene",
+        "background": "roof",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "worried",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "alert",
+              "loop": true,
+              "skin": "worried"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "worried",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 0,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 600
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "roof_gust",
+        "action": "play",
+        "channel": "ambience",
+        "loop": true
+      },
+      {
+        "type": "say",
+        "id": "window_01",
+        "text": "风暴压过屋顶。中继窗最多还能撑十六秒，海堤外已响起末班车的汽笛。灯只够照亮一条路：回到过去、带人离港，或照亮安全屋。"
+      },
+      {
+        "type": "say",
+        "id": "window_02",
+        "speaker": "Ren",
+        "portrait": "worried",
+        "text": "先把乘客送进安全屋。车、信和旧照片都不能替他们挡住海水。接下来每种选择只剩一次机会。"
+      },
+      {
+        "type": "say",
+        "id": "add_signal_01",
+        "text": "倒数声每隔四拍就被风截掉一次。你能听见车站里有人搬动长椅，安全屋的门已经打开，等待中的乘客正在看向你们。"
+      },
+      {
+        "type": "say",
+        "id": "add_signal_02",
+        "text": "三条路没有一条能同时保住所有东西。中继只能送出一次答复，列车只能赶上一趟，警报灯却能让眼前的人先活下来。"
+      },
+      {
+        "type": "say",
+        "id": "add_signal_03",
+        "text": "Mira把信放在防水罩旁，Ren把钥匙放回掌心。两个人都没有把选择推给你；他们只把能确认的代价摆在面前。"
+      },
+      {
+        "type": "say",
+        "id": "add_signal_04",
+        "text": "风压使透镜轻轻颤动，第一束光已经偏离收信亭的窗沿。若要回信，现在必须先决定把谁的安全放在这一次机会之前。"
+      },
+      {
+        "type": "say",
+        "id": "add_signal_05",
+        "text": "你能把记录带出风暴，却不能替别人决定该怎样记住这一夜。任何选择都要留下一个不能被另一条路抹掉的人。"
+      },
+      {
+        "type": "call",
+        "target": "v3_signal_pressure_echo"
+      },
+      {
+        "type": "call",
+        "target": "v3_signal_letter_echo"
+      },
+      {
+        "type": "call",
+        "target": "v3_signal_record_echo"
+      },
+      {
+        "type": "choice",
+        "id": "signal_window",
+        "prompt": "十六秒后，雾窗就会关闭。",
+        "timeLimitMs": 16000,
+        "timeoutTarget": "signal_timeout",
+        "options": [
+          {
+            "id": "send_truth",
+            "text": "按证据校准中继，把回信送回二十年前。",
+            "target": "ending_truth",
+            "when": {
+              "op": "and",
+              "conditions": [
+                {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "proof_complete"
+                  }
+                },
+                {
+                  "op": "gte",
+                  "left": {
+                    "type": "variable",
+                    "name": "mira_trust"
+                  },
+                  "right": {
+                    "type": "literal",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "send_train",
+            "text": "不碰中继；带着封信搭末班车去找母亲。",
+            "target": "ending_train"
+          },
+          {
+            "id": "keep_light",
+            "text": "放弃时间信号，拉响全站警报并留下守灯。",
+            "target": "ending_shelter"
+          }
+        ]
+      }
+    ],
+    "signal_timeout": [
+      {
+        "type": "set",
+        "variable": "timed_out",
+        "value": true
+      },
+      {
+        "type": "audio",
+        "cue": "station_bell",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "say",
+        "id": "timeout_01",
+        "text": "十六秒过去，疏散铃自动响起。你先把乘客送进安全屋，Mira带着封好的信登上末班车。中继窗关闭了，她会去找这夜二十六岁的母亲与四岁的自己；你和Ren留在站里，没有收到来自过去的回声。"
+      },
+      {
+        "type": "say",
+        "id": "add_timeout_01",
+        "text": "疏散铃压过了中继的低鸣。乘客一个接一个穿过安全屋门口，没人知道刚才失去的窗口能否再开，也没人被留在堤岸上等答案。"
+      },
+      {
+        "type": "say",
+        "id": "add_timeout_02",
+        "text": "Mira没有把这次错过说成谁的失误。她带着封好的信上车，Ren把记录收进防水袋；两个人都知道，沉默仍需要被认真保存。"
+      },
+      {
+        "type": "say",
+        "id": "add_timeout_03",
+        "text": "车灯拐过堤岸后，站台上只剩警报的余音。你没有听见过去的回声，却看见乘客都在安全屋里等到天亮。"
+      },
+      {
+        "type": "jump",
+        "target": "ending_train"
+      }
+    ],
+    "ending_truth": [
+      {
+        "type": "scene",
+        "background": "dawn",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "hopeful",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "settle",
+              "loop": true,
+              "skin": "hopeful"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "hopeful",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 0,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 1000
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "music_dawn",
+        "action": "play",
+        "channel": "music",
+        "loop": true
+      },
+      {
+        "type": "audio",
+        "cue": "relay_click",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "say",
+        "id": "truth_01",
+        "text": "校准后的光越过海峡，落在二十年前的收信亭。信封在手里变轻，蜡封仍完整；这不是改写那场风暴，而是把一声迟到二十年的回答送回去。"
+      },
+      {
+        "type": "say",
+        "id": "truth_02",
+        "speaker": "Ren",
+        "portrait": "hopeful",
+        "text": "Ren终于听见了妹妹的回音。她不是没听见，而是以为哥哥没有再敲；两个人在不同的夜里，都把沉默当成了告别。"
+      },
+      {
+        "type": "say",
+        "id": "truth_03",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "二十年前，六岁的妹妹跟着母亲避开堤岸。她看见了第一束光，听见第二声后闸门落下；她活了下来，却直到长大才知道，那是八岁的Ren在站房里敲的钟。"
+      },
+      {
+        "type": "say",
+        "id": "truth_04",
+        "text": "风停后，信从站史柜消失，只剩干燥邮戳。雾中的Mira也随光回到二十年后，回到四十六岁的母亲身边；她再不能遇见这夜二十六岁的母亲与四岁的自己。Ren得到回答，却寄不出第二封信。"
+      },
+      {
+        "type": "say",
+        "id": "add_truth_01",
+        "text": "回音没有把海峡变成一座桥。它只穿过了那一刻的雾，让两个相隔二十年的孩子知道，自己曾经真的被看见。"
+      },
+      {
+        "type": "say",
+        "id": "add_truth_02",
+        "text": "Mira把母亲的回信贴在透明页上，确保邮戳和封蜡仍能被看见。她不打算拿它证明人生可以逆转，只想证明沉默并非唯一留下的东西。"
+      },
+      {
+        "type": "say",
+        "id": "add_truth_03",
+        "text": "Ren亲自写下妹妹已平安长大的事实，却没有补出她之后的每一年。那些年属于她自己，不是这间站房迟到的解释。"
+      },
+      {
+        "type": "say",
+        "id": "add_truth_04",
+        "text": "你把那粒盐装进小纸袋，标明来自封蜡而非海水。微小的来源也必须写清，才不会让后来的人把巧合当成凭证。"
+      },
+      {
+        "type": "say",
+        "id": "add_truth_05",
+        "text": "天亮前，海堤警报终于停止。没有人把它当作奇迹的尾声；只是这一夜的危险过去了，活着的人各自带走一份可以复查的记录。"
+      },
+      {
+        "type": "ending",
+        "id": "truth_letter",
+        "cg": "truth_letter",
+        "text": "灯亮过，信也抵达了。"
+      }
+    ],
+    "ending_train": [
+      {
+        "type": "scene",
+        "background": "dawn",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "worried",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "alert",
+              "loop": true,
+              "skin": "worried"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "neutral",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 0,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 800
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "train_depart",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "audio",
+        "cue": "music_dawn",
+        "action": "play",
+        "channel": "music",
+        "loop": true
+      },
+      {
+        "type": "say",
+        "id": "train_01",
+        "text": "你把封好的信交还Mira。末班车不会穿过二十年的雾，却能把她送到这座城：去找二十六岁的母亲，也去远远看一眼四岁的自己。她带走了信，却没有给过去的Ren送回声音。"
+      },
+      {
+        "type": "say",
+        "id": "train_02",
+        "speaker": "Mira",
+        "portrait": "worried",
+        "text": "我先去见妈妈，再看一眼四岁的我。她们都不知道我从哪里来；我也不会把她们的生活变成一场解释。今晚，我终于能自己走到那扇门前。"
+      },
+      {
+        "type": "say",
+        "id": "train_03",
+        "speaker": "Ren",
+        "portrait": "hopeful",
+        "text": "你把三份记录抄进维修簿。Ren知道妹妹活着，却没听见二十年前的那声回话；他可以去找她，却不能再把那束光当作两人之间的答案。"
+      },
+      {
+        "type": "say",
+        "id": "train_04",
+        "text": "天亮后，Ren把钟调到 23:15。指针终于向前走了一格。他没有忘掉那两声铃，只是不再把妹妹的沉默记成自己的判决。"
+      },
+      {
+        "type": "say",
+        "id": "add_train_01",
+        "text": "车门关上后，Mira把信放在膝上，没有立即拆开。她要先走到母亲住的街口，再决定那句回音是否该由自己亲口说出。"
+      },
+      {
+        "type": "say",
+        "id": "add_train_02",
+        "text": "站台上的Ren没有追着列车跑。他知道今晚还有一班值守，也知道第一次听见妹妹活着，不等于可以要求她立刻回来。"
+      },
+      {
+        "type": "say",
+        "id": "add_train_03",
+        "text": "你把三份原件装入不同的夹层，复印件留给档案室。即使信没有送回过去，下一位查阅者也能沿着同一条证据路线走到这里。"
+      },
+      {
+        "type": "say",
+        "id": "add_train_04",
+        "text": "末班车驶入雾里时，检票钟仍停在23:14。它没有替任何人证明那封信，只提醒你们，时间错位不会因一个选择自动消失。"
+      },
+      {
+        "type": "say",
+        "id": "add_train_05",
+        "text": "清晨，Ren把这夜的维修记录随站史副本送进档案柜。普通邮路跨不过二十年，却能把证据交给下一班查阅的人。"
+      },
+      {
+        "type": "ending",
+        "id": "last_train",
+        "cg": "dawn_departure",
+        "text": "信随末班车离港。"
+      }
+    ],
+    "ending_shelter": [
+      {
+        "type": "scene",
+        "background": "dawn",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "expression": "hopeful",
+            "position": "right",
+            "visible": true,
+            "scale": 0.92,
+            "rotation": 0,
+            "layer": 0
+          }
+        ],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 900
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "music_dawn",
+        "action": "play",
+        "channel": "music",
+        "loop": true
+      },
+      {
+        "type": "audio",
+        "cue": "station_bell",
+        "action": "play",
+        "channel": "sfx"
+      },
+      {
+        "type": "say",
+        "id": "shelter_01",
+        "text": "你转开透镜，先拉响全站警报。Ren带乘客进安全屋，Mira把信塞进防水柜。风暴退去时所有人都在；海水却灌进控制箱，旧中继再也不能把信送回过去。"
+      },
+      {
+        "type": "say",
+        "id": "shelter_02",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "我本来可以坐车去见妈妈和四岁的我。但如果我今晚离开，站里的人就只剩你们守灯。我会留下来；那趟车和那次重逢，我都让给了风暴。"
+      },
+      {
+        "type": "say",
+        "id": "shelter_03",
+        "speaker": "Ren",
+        "portrait": "hopeful",
+        "text": "盐水泡坏了原始日志，回声也再没传来。你们保住了警报灯和整座站，却失去核对那夜最后一笔记录的机会。"
+      },
+      {
+        "type": "say",
+        "id": "shelter_04",
+        "text": "天亮后，Mira仍留在站里，信没有拆开，透镜也碎了。她再找不到回到二十年后的路；你们把灯塔重新点亮，给今夜以后的人留一盏真正能指路的灯。"
+      },
+      {
+        "type": "say",
+        "id": "add_shelter_01",
+        "text": "安全屋里的人逐一报出姓名，Ren把名单念到最后一行才放下笔。没有谁被留在雾里，这份名单比中继的灯更能说明你们救下了什么。"
+      },
+      {
+        "type": "say",
+        "id": "add_shelter_02",
+        "text": "Mira把信放进防水柜最里层，外面又套了一张写着日期的纸。没有回音也没有拆封，可她仍替未来留住了这封信的去处。"
+      },
+      {
+        "type": "say",
+        "id": "add_shelter_03",
+        "text": "透镜碎裂前没有再亮第二次。Ren把碎片按方向装进木盒，承认机器已经不能回答，却没有把这段记录一并丢掉。"
+      },
+      {
+        "type": "say",
+        "id": "add_shelter_04",
+        "text": "有人问信里的母亲会不会知道这一切。Mira只说她会继续生活，继续写信；不确定的答案没有被伪装成遗忘。"
+      },
+      {
+        "type": "say",
+        "id": "add_shelter_05",
+        "text": "清晨，灯塔只照着安全屋门前一小段路。它不再穿越海峡，却能让迟归的人看清脚下，足够成为下一夜的起点。"
+      },
+      {
+        "type": "ending",
+        "id": "keep_the_light",
+        "cg": "harbor_light",
+        "text": "留下来，等雾散。"
+      }
+    ],
+    "archive_reel_entry": [
+      {
+        "type": "scene",
+        "background": "archive",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "center",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1.08,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 500
+        },
+        "camera": {
+          "x": 0,
+          "y": -4,
+          "scale": 1.06
+        },
+        "cameraMotion": {
+          "durationMs": 1800,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "say",
+        "id": "archive_reel_01",
+        "text": "米拉从柜底抽出一卷没有声音的旧胶片。片盒写着“七号线巡夜”，画面留下当年档案室的一角。"
+      },
+      {
+        "type": "video",
+        "action": "play",
+        "cue": "archive_route_reel",
+        "loop": false
+      },
+      {
+        "type": "say",
+        "id": "archive_reel_02",
+        "speaker": "Mira",
+        "portrait": "neutral",
+        "text": "镜头慢慢靠近那张海峡邮路图。胶片颗粒在灯影里轻轻浮动，泛黄纸页上的旧线条随画面渐渐清晰。影像只留下当年的巡夜一隅；七号线仍需与原始记录核对。"
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "jump",
+        "target": "investigation_hub"
+      }
+    ],
+    "model_showcase": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false,
+            "model": null
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "say",
+        "id": "model_showcase_intro",
+        "text": "这里是独立的角色试映，不改主线记录。选一个模型看动作；随时点右上角“返回原旅程”离开。"
+      },
+      {
+        "type": "choice",
+        "id": "model_showcase_catalog",
+        "prompt": "想先看哪一个模型？",
+        "options": [
+          {
+            "id": "showcase_mira_spine",
+            "text": "原创 Mira · Spine",
+            "target": "model_showcase_mira"
+          },
+          {
+            "id": "showcase_hiyori_live2d",
+            "text": "官方 Hiyori · Live2D",
+            "target": "model_showcase_hiyori"
+          }
+        ]
+      }
+    ],
+    "model_showcase_mira": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "center",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false,
+            "model": null
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "say",
+        "id": "model_showcase_mira_note",
+        "text": "这是雾港原创 Mira Spine 模型。下面可以切换 idle、alert、settle 三种动作。"
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_mira_menu"
+      }
+    ],
+    "model_showcase_mira_menu": [
+      {
+        "type": "choice",
+        "id": "model_showcase_mira_actions",
+        "prompt": "选择 Mira 的动作，或返回试映目录。",
+        "options": [
+          {
+            "id": "mira_show_idle",
+            "text": "idle · 待机",
+            "target": "model_showcase_mira_idle"
+          },
+          {
+            "id": "mira_show_alert",
+            "text": "alert · 警觉",
+            "target": "model_showcase_mira_alert"
+          },
+          {
+            "id": "mira_show_settle",
+            "text": "settle · 收势",
+            "target": "model_showcase_mira_settle"
+          },
+          {
+            "id": "return_to_showcase_catalog",
+            "text": "返回试映目录",
+            "target": "model_showcase"
+          }
+        ]
+      }
+    ],
+    "model_showcase_mira_idle": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "center",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false,
+            "model": null
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "say",
+        "id": "model_showcase_mira_idle_display",
+        "text": "idle 展示中，轻触继续回动作目录。"
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_mira_menu"
+      }
+    ],
+    "model_showcase_mira_alert": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "worried",
+            "position": "center",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "alert",
+              "loop": true,
+              "skin": "worried"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false,
+            "model": null
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "say",
+        "id": "model_showcase_mira_alert_display",
+        "text": "alert 展示中，轻触继续回动作目录。"
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_mira_menu"
+      }
+    ],
+    "model_showcase_mira_settle": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "hopeful",
+            "position": "center",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "settle",
+              "loop": true,
+              "skin": "hopeful"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false,
+            "model": null
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "say",
+        "id": "model_showcase_mira_settle_display",
+        "text": "settle 展示中，轻触继续回动作目录。"
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_mira_menu"
+      }
+    ],
+    "model_showcase_hiyori": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "expression": "neutral",
+            "position": "center",
+            "visible": true,
+            "model": {
+              "key": "hiyori_sample",
+              "animation": "Idle:0",
+              "loop": true
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "say",
+        "id": "model_showcase_hiyori_note",
+        "text": "这里展示 Live2D 官方 Hiyori 样例，不是雾港主线角色，也不是本作原创素材。下面是官方素材声明。"
+      },
+      {
+        "type": "say",
+        "id": "model_showcase_hiyori_attribution",
+        "text": "This content uses sample data owned and copyrighted by Live2D Inc. The sample data are utilized in accordance with terms and conditions set by Live2D Inc. This content itself is created at the author’s sole discretion."
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_hiyori_menu"
+      }
+    ],
+    "model_showcase_hiyori_menu": [
+      {
+        "type": "choice",
+        "id": "model_showcase_hiyori_actions",
+        "prompt": "选择 Hiyori 的示例动作。每个动作先展示无遮挡的全身画面。",
+        "options": [
+          {
+            "id": "hiyori_show_idle_0",
+            "text": "Idle 0 · 呼吸",
+            "target": "model_showcase_hiyori_idle_0"
+          },
+          {
+            "id": "hiyori_show_idle_1",
+            "text": "Idle 1 · 摆动",
+            "target": "model_showcase_hiyori_idle_1"
+          },
+          {
+            "id": "hiyori_show_tap_body",
+            "text": "TapBody · 触碰反应",
+            "target": "model_showcase_hiyori_tap_body"
+          },
+          {
+            "id": "return_hiyori_to_catalog",
+            "text": "返回试映目录",
+            "target": "model_showcase"
+          }
+        ]
+      }
+    ],
+    "model_showcase_hiyori_idle_0": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "expression": "neutral",
+            "position": {
+              "x": 0,
+              "y": 80
+            },
+            "visible": true,
+            "model": {
+              "key": "hiyori_sample",
+              "animation": "Idle:0",
+              "loop": true
+            },
+            "scale": 1.5,
+            "rotation": 0,
+            "layer": 2
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "wait",
+        "durationMs": 2600
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_hiyori_idle_0_framing"
+      }
+    ],
+    "model_showcase_hiyori_idle_0_framing": [
+      {
+        "type": "choice",
+        "id": "model_showcase_hiyori_idle_0_framing",
+        "prompt": "选择取景。每种画面无遮挡展示 2.6 秒，再回到这里。",
+        "options": [
+          {
+            "id": "hiyori_idle_0_face",
+            "text": "Idle 0 · 面部近景",
+            "target": "model_showcase_hiyori_idle_0_closeup"
+          },
+          {
+            "id": "hiyori_idle_0_wide",
+            "text": "Idle 0 · 全身",
+            "target": "model_showcase_hiyori_idle_0"
+          },
+          {
+            "id": "hiyori_idle_0_menu",
+            "text": "返回动作目录",
+            "target": "model_showcase_hiyori_menu"
+          }
+        ]
+      }
+    ],
+    "model_showcase_hiyori_idle_0_closeup": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "expression": "neutral",
+            "position": {
+              "x": -210,
+              "y": 35
+            },
+            "visible": true,
+            "model": {
+              "key": "hiyori_sample",
+              "animation": "Idle:0",
+              "loop": true
+            },
+            "scale": 3.5,
+            "rotation": 0,
+            "layer": 2
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "wait",
+        "durationMs": 2600
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_hiyori_idle_0_framing"
+      }
+    ],
+    "model_showcase_hiyori_idle_1": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "expression": "neutral",
+            "position": {
+              "x": 0,
+              "y": 80
+            },
+            "visible": true,
+            "model": {
+              "key": "hiyori_sample",
+              "animation": "Idle:1",
+              "loop": true
+            },
+            "scale": 1.5,
+            "rotation": 0,
+            "layer": 2
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "wait",
+        "durationMs": 2600
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_hiyori_idle_1_framing"
+      }
+    ],
+    "model_showcase_hiyori_idle_1_framing": [
+      {
+        "type": "choice",
+        "id": "model_showcase_hiyori_idle_1_framing",
+        "prompt": "选择取景。每种画面无遮挡展示 2.6 秒，再回到这里。",
+        "options": [
+          {
+            "id": "hiyori_idle_1_face",
+            "text": "Idle 1 · 面部近景",
+            "target": "model_showcase_hiyori_idle_1_closeup"
+          },
+          {
+            "id": "hiyori_idle_1_wide",
+            "text": "Idle 1 · 全身",
+            "target": "model_showcase_hiyori_idle_1"
+          },
+          {
+            "id": "hiyori_idle_1_menu",
+            "text": "返回动作目录",
+            "target": "model_showcase_hiyori_menu"
+          }
+        ]
+      }
+    ],
+    "model_showcase_hiyori_idle_1_closeup": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "expression": "neutral",
+            "position": {
+              "x": -210,
+              "y": 35
+            },
+            "visible": true,
+            "model": {
+              "key": "hiyori_sample",
+              "animation": "Idle:1",
+              "loop": true
+            },
+            "scale": 3.5,
+            "rotation": 0,
+            "layer": 2
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "wait",
+        "durationMs": 2600
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_hiyori_idle_1_framing"
+      }
+    ],
+    "model_showcase_hiyori_tap_body": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "expression": "neutral",
+            "position": {
+              "x": 0,
+              "y": 80
+            },
+            "visible": true,
+            "model": {
+              "key": "hiyori_sample",
+              "animation": "TapBody:0",
+              "loop": false
+            },
+            "scale": 1.5,
+            "rotation": 0,
+            "layer": 2
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "wait",
+        "durationMs": 2600
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_hiyori_tap_body_framing"
+      }
+    ],
+    "model_showcase_hiyori_tap_body_framing": [
+      {
+        "type": "choice",
+        "id": "model_showcase_hiyori_tap_body_framing",
+        "prompt": "选择取景。每种画面无遮挡展示 2.6 秒，再回到这里。",
+        "options": [
+          {
+            "id": "hiyori_tap_body_face",
+            "text": "TapBody · 面部近景",
+            "target": "model_showcase_hiyori_tap_body_closeup"
+          },
+          {
+            "id": "hiyori_tap_body_wide",
+            "text": "TapBody · 全身",
+            "target": "model_showcase_hiyori_tap_body"
+          },
+          {
+            "id": "hiyori_tap_body_menu",
+            "text": "返回动作目录",
+            "target": "model_showcase_hiyori_menu"
+          }
+        ]
+      }
+    ],
+    "model_showcase_hiyori_tap_body_closeup": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false,
+            "model": null
+          },
+          {
+            "id": "sample_hiyori",
+            "expression": "neutral",
+            "position": {
+              "x": -210,
+              "y": 35
+            },
+            "visible": true,
+            "model": {
+              "key": "hiyori_sample",
+              "animation": "TapBody:0",
+              "loop": false
+            },
+            "scale": 3.5,
+            "rotation": 0,
+            "layer": 2
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "wait",
+        "durationMs": 2600
+      },
+      {
+        "type": "jump",
+        "target": "model_showcase_hiyori_tap_body_framing"
+      }
+    ],
+    "feature_tour": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 500
+        },
+        "camera": {
+          "x": -6,
+          "y": -4,
+          "scale": 1.04
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "set",
+        "variable": "tour_word",
+        "value": ""
+      },
+      {
+        "type": "set",
+        "variable": "tour_route",
+        "value": 0
+      },
+      {
+        "type": "audio",
+        "cue": "music_storm",
+        "action": "play",
+        "channel": "music",
+        "loop": true
+      },
+      {
+        "type": "say",
+        "id": "tour_01",
+        "text": "欢迎来到雾港的五分钟巡演。先看一盏灯怎样穿过雾，再亲手留下一个回音。"
+      },
+      {
+        "type": "say",
+        "id": "tour_02",
+        "text": "镜头正在缓慢靠近站台；雾、雨和灯光随背景一起变化。你可以选择观看无声胶片、试拨中继，或留一句话给未来。"
+      },
+      {
+        "type": "jump",
+        "target": "feature_tour_hub"
+      }
+    ],
+    "feature_tour_input": [
+      {
+        "type": "say",
+        "id": "tour_05",
+        "text": "你可以留下一句短话。这个小小的输入会经过同一套校验与提交流程，随后显示在巡演的回声里。"
+      },
+      {
+        "type": "input",
+        "id": "tour_note",
+        "variable": "tour_word",
+        "inputType": "text",
+        "prompt": "留一句给未来的雾港读者",
+        "placeholder": "一句话即可",
+        "minLength": 1,
+        "maxLength": 48
+      },
+      {
+        "type": "say",
+        "id": "tour_06",
+        "text": "雾窗把你的话带回眼前：{{tour_word}}。一段故事能记住读者的选择，也能把它留在独立的体验里。"
+      },
+      {
+        "type": "jump",
+        "target": "feature_tour_finish"
+      }
+    ],
+    "feature_tour_finish": [
+      {
+        "type": "say",
+        "id": "tour_07",
+        "text": "巡演到这里结束。回到扉页后选择“启程”继续主线；读到第一段对白后打开“手札”，就能实际存档、回溯并进入鉴赏。"
+      }
+    ],
+    "feature_tour_hub": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 300
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "choice",
+        "id": "tour_hub",
+        "prompt": "先体验哪一段？",
+        "options": [
+          {
+            "id": "tour_reel",
+            "text": "观看一段无声胶片。",
+            "target": "feature_tour_reel"
+          },
+          {
+            "id": "tour_signal",
+            "text": "试拨三只中继轮盘。",
+            "target": "feature_tour_dial"
+          },
+          {
+            "id": "tour_write",
+            "text": "留一句话给未来的读者。",
+            "target": "feature_tour_input"
+          }
+        ]
+      }
+    ],
+    "feature_tour_reel": [
+      {
+        "type": "scene",
+        "background": "archive",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "alert",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1.04,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false
+          }
+        ],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 500
+        },
+        "camera": {
+          "x": 0,
+          "y": -4,
+          "scale": 1.06
+        },
+        "cameraMotion": {
+          "durationMs": 900,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "video",
+        "action": "play",
+        "cue": "archive_route_reel",
+        "loop": false
+      },
+      {
+        "type": "say",
+        "id": "tour_03",
+        "text": "无声胶片盖在舞台背景上，人物与下方文字仍然可见。Mira的动作、档案室的薄雾和镜头都由同一段故事推进。"
+      },
+      {
+        "type": "video",
+        "action": "close"
+      },
+      {
+        "type": "jump",
+        "target": "feature_tour_hub"
+      }
+    ],
+    "feature_tour_dial": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "position": "left",
+            "visible": true,
+            "model": {
+              "key": "mira_spine",
+              "animation": "idle",
+              "loop": true,
+              "skin": "default"
+            },
+            "scale": 1,
+            "rotation": 0,
+            "layer": 2
+          },
+          {
+            "id": "ren",
+            "visible": false
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 350
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "say",
+        "id": "tour_04",
+        "text": "三只轮盘分别代表线路、回路和时刻。这里的选择只在巡演里记下，不会改写主线已经找到的证据。"
+      },
+      {
+        "type": "choice",
+        "id": "tour_dial",
+        "prompt": "把第一束光送向哪一处？",
+        "options": [
+          {
+            "id": "tour_dial_7",
+            "text": "7 · 收信路",
+            "target": "feature_tour_dial_correct"
+          },
+          {
+            "id": "tour_dial_1",
+            "text": "1 · 礁外",
+            "target": "feature_tour_dial_route_wrong"
+          },
+          {
+            "id": "tour_dial_4",
+            "text": "4 · 海堤",
+            "target": "feature_tour_dial_route_wrong"
+          }
+        ]
+      }
+    ],
+    "feature_tour_dial_correct": [
+      {
+        "type": "set",
+        "variable": "tour_route",
+        "value": 7
+      },
+      {
+        "type": "say",
+        "id": "tour_dial_success",
+        "text": "七号线落在收信亭窄窗上。证据和选择彼此对上；回到巡演目录，还可以再次查看胶片或留下回音。"
+      },
+      {
+        "type": "jump",
+        "target": "feature_tour_hub"
+      }
+    ],
+    "feature_tour_dial_route_wrong": [
+      {
+        "type": "say",
+        "id": "tour_dial_retry",
+        "text": "这条线会把光扫向礁石。试拨只展示选择带来的结果，不会触碰主线；可以回到目录再核对邮路图。"
+      },
+      {
+        "type": "jump",
+        "target": "feature_tour_hub"
+      }
+    ],
+    "v3_relay_log_check": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "truthy",
+          "value": {
+            "type": "variable",
+            "name": "roof_log_read"
+          }
+        },
+        "then": "v3_relay_log_already_read",
+        "else": "v3_relay_log_read_now"
+      }
+    ],
+    "v3_relay_log_already_read": [
+      {
+        "type": "return"
+      }
+    ],
+    "v3_relay_log_read_now": [
+      {
+        "type": "say",
+        "id": "v3_relay_log_read",
+        "text": "透镜校出北向后，第三轮仍需要一条可复查的分钟记录。Ren翻开潮汐日志读出 23:14；你把末位四抄进副本，并注明这是日志读数。"
+      },
+      {
+        "type": "set",
+        "variable": "roof_log_read",
+        "value": true
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "v3_relay_ren_echo": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "gte",
+          "left": {
+            "type": "variable",
+            "name": "ren_trust"
+          },
+          "right": {
+            "type": "literal",
+            "value": 2
+          }
+        },
+        "then": "v3_relay_ren_trusted",
+        "else": "v3_relay_ren_quiet"
+      }
+    ],
+    "v3_relay_ren_trusted": [
+      {
+        "type": "say",
+        "id": "v3_relay_ren_trust",
+        "speaker": "Ren",
+        "portrait": "neutral",
+        "text": "Ren把钥匙放进你掌心：“你先让我把那晚说完，这次我不替你改记录。按核过的顺序来。”"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "v3_relay_ren_quiet": [
+      {
+        "type": "return"
+      }
+    ],
+    "v3_signal_pressure_echo": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "truthy",
+          "value": {
+            "type": "variable",
+            "name": "relay_locked"
+          }
+        },
+        "then": "v3_signal_relay_locked",
+        "else": "v3_signal_pressure_check"
+      }
+    ],
+    "v3_signal_pressure_check": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "gt",
+          "left": {
+            "type": "variable",
+            "name": "storm_pressure"
+          },
+          "right": {
+            "type": "literal",
+            "value": 0
+          }
+        },
+        "then": "v3_signal_pressure_seen",
+        "else": "v3_signal_pressure_clear"
+      }
+    ],
+    "v3_signal_pressure_seen": [
+      {
+        "type": "say",
+        "id": "v3_signal_pressure",
+        "text": "保护闸已经承受过一次冲击。它不会延长雾窗；无论如何选择，这次倒数仍只有十六秒。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "v3_signal_pressure_clear": [
+      {
+        "type": "return"
+      }
+    ],
+    "v3_signal_relay_locked": [
+      {
+        "type": "say",
+        "id": "v3_signal_relay_locked",
+        "text": "两次错序已经锁死中继，不能再通电。现在能做的，是把乘客送到安全屋，或带着封好的信离港。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "v3_signal_letter_echo": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "truthy",
+          "value": {
+            "type": "variable",
+            "name": "letter_protected"
+          }
+        },
+        "then": "v3_signal_letter_protected",
+        "else": "v3_signal_letter_seen_check"
+      }
+    ],
+    "v3_signal_letter_protected": [
+      {
+        "type": "say",
+        "id": "v3_signal_letter_kept",
+        "text": "Mira记得你要求保留封口。蜡纹没有被拆开；信仍由她决定何时交给该收到的人。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "v3_signal_letter_seen_check": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "truthy",
+          "value": {
+            "type": "variable",
+            "name": "letter_seen"
+          }
+        },
+        "then": "v3_signal_letter_seen",
+        "else": "v3_signal_letter_no_note"
+      }
+    ],
+    "v3_signal_letter_seen": [
+      {
+        "type": "say",
+        "id": "v3_signal_letter_noted",
+        "text": "你只记录了封口外的日期和盐痕，没有拆信。那几项外部证据已经留在维修簿里，内页仍交由 Mira 决定。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "v3_signal_letter_no_note": [
+      {
+        "type": "return"
+      }
+    ],
+    "v3_signal_record_echo": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "truthy",
+          "value": {
+            "type": "variable",
+            "name": "memory_recorded"
+          }
+        },
+        "then": "v3_signal_record_kept",
+        "else": "v3_signal_record_none"
+      }
+    ],
+    "v3_signal_record_kept": [
+      {
+        "type": "say",
+        "id": "v3_signal_record",
+        "text": "那页副本已封进防水套。就算雾窗关闭，下一班人仍能核对第一束光与安全闸的记录。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "v3_signal_record_none": [
+      {
+        "type": "return"
+      }
+    ],
+    "parallax_showcase": [
+      {
+        "type": "scene",
+        "background": "parallax_station",
+        "backgroundLayers": [
+          {
+            "background": "parallax_lantern",
+            "parallax": 0.42
+          },
+          {
+            "background": "sea_mist",
+            "parallax": 0.12
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "say",
+        "id": "parallax_01",
+        "text": "灯塔站的灯火和海雾分在远近两处。选一种镜头变化；每次都能回来继续试，也可以结束这段试映。"
+      },
+      {
+        "type": "jump",
+        "target": "parallax_showcase_menu"
+      }
+    ],
+    "parallax_showcase_menu": [
+      {
+        "type": "choice",
+        "id": "parallax_showcase_menu",
+        "prompt": "选择下一步镜头或图层动作。",
+        "options": [
+          {
+            "id": "parallax_pan",
+            "text": "平移镜头，比较远近层。",
+            "target": "parallax_showcase_pan"
+          },
+          {
+            "id": "parallax_zoom",
+            "text": "推近灯塔，观察景深。",
+            "target": "parallax_showcase_zoom"
+          },
+          {
+            "id": "parallax_clear",
+            "text": "暂时清空叠层。",
+            "target": "parallax_showcase_clear"
+          },
+          {
+            "id": "parallax_restore",
+            "text": "恢复灯火与雾。",
+            "target": "parallax_showcase_restore"
+          },
+          {
+            "id": "parallax_exit",
+            "text": "结束试映，返回原旅程。",
+            "target": "parallax_showcase_exit"
+          }
+        ]
+      }
+    ],
+    "parallax_showcase_pan": [
+      {
+        "type": "scene",
+        "background": "parallax_station",
+        "camera": {
+          "x": -38,
+          "y": -12,
+          "scale": 1.08
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "say",
+        "id": "parallax_pan_note",
+        "text": "镜头向左掠过，灯塔的光留在远处，近处雾带先一步滑过窗沿。回到目录，还可以试试推近。"
+      },
+      {
+        "type": "jump",
+        "target": "parallax_showcase_menu"
+      }
+    ],
+    "parallax_showcase_zoom": [
+      {
+        "type": "scene",
+        "background": "parallax_station",
+        "camera": {
+          "x": 18,
+          "y": -24,
+          "scale": 1.2
+        },
+        "cameraMotion": {
+          "durationMs": 1200,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "say",
+        "id": "parallax_zoom_note",
+        "text": "镜头慢慢推近，灯塔轮廓渐渐融进雾里。看远处的光和近处的雾，怎样以不同速度掠过窗沿。"
+      },
+      {
+        "type": "jump",
+        "target": "parallax_showcase_menu"
+      }
+    ],
+    "parallax_showcase_clear": [
+      {
+        "type": "scene",
+        "background": "parallax_station",
+        "backgroundLayers": [],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 650,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "say",
+        "id": "parallax_clear_note",
+        "text": "灯火与雾暂时收起，站台只剩静止的背景。还可以把它们重新放回画面，或继续比较镜头。"
+      },
+      {
+        "type": "jump",
+        "target": "parallax_showcase_menu"
+      }
+    ],
+    "parallax_showcase_restore": [
+      {
+        "type": "scene",
+        "background": "parallax_station",
+        "backgroundLayers": [
+          {
+            "background": "parallax_lantern",
+            "parallax": 0.42
+          },
+          {
+            "background": "sea_mist",
+            "parallax": 0.12
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "cameraMotion": {
+          "durationMs": 650,
+          "easing": "easeInOut"
+        }
+      },
+      {
+        "type": "say",
+        "id": "parallax_restore_note",
+        "text": "雾与灯火回到画面。把镜头从平移切换到推近，看看窗沿和灯塔之间的距离如何变化。"
+      },
+      {
+        "type": "jump",
+        "target": "parallax_showcase_menu"
+      }
+    ],
+    "parallax_showcase_exit": [
+      {
+        "type": "ending",
+        "id": "parallax_showcase_exit",
+        "text": "试映结束。点击右上角“返回原旅程”，回到你刚才停下的地方；主线没有改变。"
+      }
+    ],
+    "letter_showcase": [
+      {
+        "type": "scene",
+        "background": "archive",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false
+          },
+          {
+            "id": "ren",
+            "visible": false
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false
+          }
+        ],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 400
+        },
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "say",
+        "id": "letter_showcase_01",
+        "speaker": "旧站长",
+        "presentation": "fullscreen",
+        "text": "读到这封信的人：\n\n如果站台上的钟停在十一点四十七分，请不要校准它。那不是坏掉的时刻，是我们最后一次听见七号邮路回声的时刻。钟每走一格，我就会以为有人已经走到了堤岸，而我不能再让自己的愿望冒充消息。\n\n抽屉里有三枚备用透镜。我把最清楚的一枚留给了值夜的孩子，把有裂纹的一枚留给自己。裂缝会把灯光分成两束：一束照向海，一束落在桌上。过去我总觉得，桌上那束光毫无用处；后来才知道，守灯的人也需要看见自己的手，才不会在黑暗里把别人的名字写错。\n\n倘若末班车还会进站，请替我告诉车上的人：雾港没有忘记他们。我们只是还没有学会，怎样在告别之前，把每一句想说的话都说完。\n\n不要为了等一封信，把自己也留成一封无人拆阅的信。天亮以后，带着它出发。"
+      },
+      {
+        "type": "say",
+        "id": "letter_showcase_02",
+        "presentation": "floating",
+        "text": "玻璃后浮起一行浅浅的字：\n“守灯的人，也应该拥有自己的天亮。”"
+      },
+      {
+        "type": "say",
+        "id": "letter_showcase_03",
+        "speaker": "Mira",
+        "text": "原来这封信的收件人，是每一个不肯离开的人。我们把它读完了；现在，该把窗打开。"
+      }
+    ],
+    "platform_stall": [
+      {
+        "type": "say",
+        "id": "stall_intro_01",
+        "text": "邮务窗后，Ren 把两只木匣推到灯下：一匣蜡纸封套，一匣备用灯芯。窗外的雨把价签打湿，他用检票钳压住纸角。",
+        "speaker": "Ren"
+      },
+      {
+        "type": "say",
+        "id": "stall_intro_02",
+        "text": "“旅资券在你的行囊里。打开手札，能看到每样物品的买入价、退回价和持有数量。封套能留下，灯芯点过就没有了；不买也不耽误寄信。”",
+        "speaker": "Ren"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_menu": [
+      {
+        "type": "choice",
+        "id": "platform_stall_menu",
+        "prompt": "邮务窗 · 补给与整理",
+        "options": [
+          {
+            "id": "buy_sleeve",
+            "text": "购买一只防潮封套",
+            "target": "stall_buy_sleeve"
+          },
+          {
+            "id": "sell_sleeve",
+            "text": "退回一只防潮封套",
+            "target": "stall_sell_sleeve"
+          },
+          {
+            "id": "buy_wick",
+            "text": "购买一截备用灯芯",
+            "target": "stall_buy_wick"
+          },
+          {
+            "id": "sell_wick",
+            "text": "退回一截备用灯芯",
+            "target": "stall_sell_wick"
+          },
+          {
+            "id": "use_wick",
+            "text": "点亮一截灯芯，等候雨势稍缓",
+            "target": "stall_use_wick"
+          },
+          {
+            "id": "leave_stall",
+            "text": "收好行囊，继续寄信",
+            "target": "stall_return"
+          }
+        ]
+      }
+    ],
+    "stall_buy_sleeve": [
+      {
+        "type": "trade",
+        "item": "weather_sleeve",
+        "action": "buy",
+        "quantity": 1,
+        "onFailure": "stall_buy_refused"
+      },
+      {
+        "type": "say",
+        "id": "stall_buy_sleeve_01",
+        "text": "Ren 数好旅资券，把一只干燥的封套放进你的行囊。纸面留着木匣的气味，封口边缘还亮着一线蜡光。",
+        "speaker": "Ren"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_sell_sleeve": [
+      {
+        "type": "trade",
+        "item": "weather_sleeve",
+        "action": "sell",
+        "quantity": 1,
+        "onFailure": "stall_sell_refused"
+      },
+      {
+        "type": "say",
+        "id": "stall_sell_sleeve_01",
+        "text": "Ren 摸过封套的边角，确认没有沾水，再把退回的旅资券放到柜台上。行囊里少了一只封套。",
+        "speaker": "Ren"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_buy_wick": [
+      {
+        "type": "trade",
+        "item": "spare_wick",
+        "action": "buy",
+        "quantity": 1,
+        "onFailure": "stall_buy_refused"
+      },
+      {
+        "type": "say",
+        "id": "stall_buy_wick_01",
+        "text": "一截新灯芯被纸绳系好，落进你手里。Ren 收走挂牌所需的旅资券，示意你收稳它。",
+        "speaker": "Ren"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_sell_wick": [
+      {
+        "type": "trade",
+        "item": "spare_wick",
+        "action": "sell",
+        "quantity": 1,
+        "onFailure": "stall_sell_refused"
+      },
+      {
+        "type": "say",
+        "id": "stall_sell_wick_01",
+        "text": "没有点过的灯芯回到木匣，退回的旅资券进入行囊。柜台前的风比刚才小了一些。",
+        "speaker": "Ren"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_use_wick": [
+      {
+        "type": "trade",
+        "item": "spare_wick",
+        "action": "consume",
+        "quantity": 1,
+        "onFailure": "stall_use_refused"
+      },
+      {
+        "type": "say",
+        "id": "stall_use_wick_01",
+        "text": "你把一截灯芯放进柜台的小油盏。火苗贴着玻璃长起来，映得 Mira 的指尖暖了一瞬。行囊里的灯芯少了一截，旅资券没有变化。"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_buy_refused": [
+      {
+        "type": "say",
+        "id": "stall_buy_refused_01",
+        "text": "Ren 没有收券：“先看一眼行囊。旅资不足，或者这一样已经装到上限；等整理好了再来。”这次没有扣款，也没有增加物品。",
+        "speaker": "Ren"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_sell_refused": [
+      {
+        "type": "say",
+        "id": "stall_sell_refused_01",
+        "text": "Ren 看过空着的手，轻轻摇头：“行囊里没有这一样可退。”物品和旅资券都留在原处。",
+        "speaker": "Ren"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_use_refused": [
+      {
+        "type": "say",
+        "id": "stall_use_refused_01",
+        "text": "你摸到行囊底部，没有找到备用灯芯。柜台上的油盏仍旧暗着，物品数量与旅资券都没有变化。"
+      },
+      {
+        "type": "jump",
+        "target": "stall_menu"
+      }
+    ],
+    "stall_return": [
+      {
+        "type": "return"
+      }
+    ],
+    "inventory_showcase": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "ren",
+            "expression": "neutral",
+            "position": "right",
+            "visible": true
+          }
+        ],
+        "transition": {
+          "kind": "fade",
+          "durationMs": 400
+        }
+      },
+      {
+        "type": "say",
+        "id": "inventory_showcase_01",
+        "text": "邮务窗的灯还亮着。这是一段独立的补给体验：可以买入、退回或使用道具，也能打开手札查看行囊。它不会改写主线自动存档。"
+      },
+      {
+        "type": "call",
+        "target": "platform_stall"
+      },
+      {
+        "type": "ending",
+        "id": "inventory_showcase_done",
+        "text": "小铺已打烊。带着行囊里的选择，回到真正的旅程。"
+      }
+    ],
+    "transition_showcase": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false
+          },
+          {
+            "id": "ren",
+            "visible": false
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "transition": {
+          "kind": "reveal",
+          "direction": "left",
+          "durationMs": 1200
+        }
+      },
+      {
+        "type": "say",
+        "id": "reveal_01",
+        "text": "灯光沿窗沿向右铺开。雾港仍在原处，只是夜色里多了一条可以走的路。"
+      },
+      {
+        "type": "scene",
+        "background": "archive",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false
+          },
+          {
+            "id": "ren",
+            "visible": false
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "transition": {
+          "kind": "reveal",
+          "direction": "right",
+          "durationMs": 1200
+        }
+      },
+      {
+        "type": "say",
+        "id": "reveal_02",
+        "text": "档案室从右侧显露。那张折过的邮路图还压在灯下，等着被重新读懂。"
+      },
+      {
+        "type": "scene",
+        "background": "roof",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false
+          },
+          {
+            "id": "ren",
+            "visible": false
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "transition": {
+          "kind": "reveal",
+          "direction": "up",
+          "durationMs": 1200
+        }
+      },
+      {
+        "type": "say",
+        "id": "reveal_03",
+        "text": "抬头以后，屋顶与海面从上方展入眼前。灯塔的光不必推走旧景，也能找到新的落点。"
+      },
+      {
+        "type": "scene",
+        "background": "dawn",
+        "characters": [
+          {
+            "id": "mira",
+            "visible": false
+          },
+          {
+            "id": "ren",
+            "visible": false
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "transition": {
+          "kind": "reveal",
+          "direction": "down",
+          "durationMs": 1200
+        }
+      },
+      {
+        "type": "say",
+        "id": "reveal_04",
+        "text": "晨光自下而上漫进来。四次换景之后，旅程依旧留在你离开前的那一页。"
+      }
+    ],
+    "timeline_showcase": [
+      {
+        "type": "scene",
+        "background": "station",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "neutral",
+            "visible": true,
+            "position": {
+              "x": -24,
+              "y": 116
+            },
+            "scale": 1,
+            "rotation": 0,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "say",
+        "id": "timeline_01",
+        "text": "站台的钟声与海风各有自己的节拍。轻触继续，让信使和灯光一起迎向海面。"
+      },
+      {
+        "type": "scene",
+        "timeline": "beacon_sweep"
+      },
+      {
+        "type": "say",
+        "id": "timeline_02",
+        "text": "Mira迈向窗边，灯塔的视野随之靠近。第一声钟落下，她停住脚步；继电器轻响时，目光又慢慢回到你面前。"
+      },
+      {
+        "type": "scene",
+        "background": "roof",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "hopeful"
+          }
+        ],
+        "timeline": "beacon_sweep"
+      },
+      {
+        "type": "say",
+        "id": "timeline_03",
+        "text": "同一段节拍来到屋顶。风、脚步与镜头再次相遇，而海面把刚才没说完的话接了下去。"
+      },
+      {
+        "type": "scene",
+        "timeline": null,
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "characters": [
+          {
+            "id": "mira",
+            "position": {
+              "x": -24,
+              "y": 116
+            },
+            "scale": 1,
+            "rotation": 0
+          }
+        ]
+      },
+      {
+        "type": "say",
+        "id": "timeline_04",
+        "text": "合奏停下，雾港仍等着下一封信。你可以回到原旅程，也可以回溯，再听一遍风里的节拍。"
+      },
+      {
+        "type": "say",
+        "id": "timeline_05",
+        "text": "你正要离开，Mira却把手贴在玻璃上。“再听一会儿。风小的时候，海那边有人敲钟。”"
+      },
+      {
+        "type": "scene",
+        "timeline": "harbor_crescendo",
+        "background": "roof",
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "say",
+        "id": "timeline_06",
+        "text": "潮声从耳边慢慢涌起。Mira没有催你回答；等钟声越过海峡，风又一点一点退远，像把一句话轻轻放进信封。"
+      },
+      {
+        "type": "audio",
+        "cue": "roof_gust",
+        "action": "stop",
+        "channel": "harbor-wind"
+      },
+      {
+        "type": "scene",
+        "timeline": null,
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "say",
+        "id": "timeline_07",
+        "text": "“以前我总怕，声音小了，就再也听不见。”她把信收进大衣。“现在知道，有些话会留下。我们走吧。”"
+      }
+    ],
+    "score_handoff_showcase": [
+      {
+        "type": "scene",
+        "background": "roof",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "hopeful",
+            "position": {
+              "x": -20,
+              "y": 116
+            },
+            "scale": 1,
+            "rotation": 0,
+            "visible": true,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "transition": {
+          "kind": "fade",
+          "durationMs": 700
+        }
+      },
+      {
+        "type": "say",
+        "id": "score_handoff_01",
+        "text": "雾退到海峡另一边时，Mira把回信放在栏杆上。信末还空着一行；她借着最后一盏风暴灯，重新拆开了笔帽。"
+      },
+      {
+        "type": "say",
+        "id": "score_handoff_02",
+        "speaker": "Mira",
+        "portrait": "hopeful",
+        "text": "以前我总写：“请等我回来。”可她已经替我等了那么久。这一次，我想让她知道，我会好好往前走。"
+      },
+      {
+        "type": "scene",
+        "background": "dawn",
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 10400
+        },
+        "timeline": "score_handoff"
+      },
+      {
+        "type": "wait",
+        "durationMs": 14000
+      },
+      {
+        "type": "say",
+        "id": "score_handoff_03",
+        "text": "最后一笔落下，塔楼的低鸣渐远，晨钟从海面上传来。你们把信交给驶向对岸的第一班船；Mira一直站在码头，直到船影融进金色的水面。"
+      },
+      {
+        "type": "ending",
+        "id": "score_handoff_complete",
+        "text": "有些告别很轻，海峡也会听见。天亮了，雾港开始投递新一天的信。"
+      }
+    ],
+    "blueprint_opening_body": [
+      {
+        "type": "scene",
+        "background": "roof",
+        "characters": [
+          {
+            "id": "mira",
+            "expression": "hopeful",
+            "position": {
+              "x": -20,
+              "y": 116
+            },
+            "scale": 1,
+            "rotation": 0,
+            "visible": true,
+            "model": null
+          },
+          {
+            "id": "ren",
+            "visible": false
+          },
+          {
+            "id": "sample_hiyori",
+            "visible": false
+          }
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        },
+        "transition": {
+          "kind": "fade",
+          "durationMs": 700
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "music_storm",
+        "channel": "music",
+        "loop": true,
+        "group": "music"
+      },
+      {
+        "type": "say",
+        "id": "blueprint_opening_01",
+        "text": "凌晨四点五十九分，雾港的船队已经起锚。Ren在无线电里报出最后一页潮汐表，Mira却按住了你的船票。"
+      },
+      {
+        "type": "say",
+        "id": "blueprint_opening_02",
+        "text": "账本只记了五十九道光。我们要是按表出港，那艘晚归的船就只能摸黑回来。",
+        "speaker": "Mira"
+      },
+      {
+        "type": "say",
+        "id": "blueprint_opening_03",
+        "text": "最后一根备用灯芯在你掌心发热。把它留在塔上，回信就要等下一班船；带着信立刻走，海峡那头的人能早一点安心。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "blueprint_lit_body": [
+      {
+        "type": "scene",
+        "background": "dawn",
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 900
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "music_dawn",
+        "channel": "music",
+        "loop": true,
+        "group": "music"
+      },
+      {
+        "type": "say",
+        "id": "blueprint_lit_01",
+        "text": "第{{blueprint_lights}}道光亮了。她等过我那么多年，我也能替一个陌生人多等一班船。",
+        "speaker": "Mira"
+      },
+      {
+        "type": "say",
+        "id": "blueprint_lit_02",
+        "text": "潮声里传来一声短笛。晚归的小船擦着礁线驶进港口，舷边站着一个抱紧邮袋的年轻人。你们的回信，恰好有了新的同行者。"
+      },
+      {
+        "type": "return"
+      }
+    ],
+    "blueprint_depart_body": [
+      {
+        "type": "say",
+        "id": "blueprint_depart_01",
+        "text": "五十九道光已经指向对岸。留在岸上的人有他们的灯，我们先把这封信送出去。",
+        "speaker": "Mira"
+      },
+      {
+        "type": "say",
+        "id": "blueprint_depart_02",
+        "text": "船开时，塔上的最后一格仍空着。天亮后你们会回来，把今晚没说完的选择写进值班簿；此刻，海峡先替你们托住了这封信。"
+      }
+    ],
+    "blueprint_end_lit": [
+      {
+        "type": "ending",
+        "id": "blueprint-end-blueprint_end_lit-r163fo",
+        "text": "第六十道光没有改变潮汐，却让一艘船认出了家。"
+      }
+    ],
+    "blueprint_end_depart": [
+      {
+        "type": "ending",
+        "id": "blueprint-end-blueprint_end_depart-2zfkm9",
+        "text": "信先到了，灯会补上。雾港把两个未完的约定，都留给清晨。"
+      }
+    ],
+    "blueprint_lit": [
+      {
+        "type": "call",
+        "target": "blueprint_lit_body"
+      },
+      {
+        "type": "jump",
+        "target": "blueprint_end_lit"
+      }
+    ],
+    "blueprint_depart": [
+      {
+        "type": "call",
+        "target": "blueprint_depart_body"
+      },
+      {
+        "type": "jump",
+        "target": "blueprint_end_depart"
+      }
+    ],
+    "blueprint_threshold": [
+      {
+        "type": "branch",
+        "when": {
+          "op": "gte",
+          "left": {
+            "type": "variable",
+            "name": "blueprint_lights"
+          },
+          "right": {
+            "type": "literal",
+            "value": 60
+          }
+        },
+        "then": "blueprint_lit",
+        "else": "blueprint_depart"
+      }
+    ],
+    "blueprint_set_60": [
+      {
+        "type": "set",
+        "variable": "blueprint_lights",
+        "value": 60
+      },
+      {
+        "type": "jump",
+        "target": "blueprint_threshold"
+      }
+    ],
+    "blueprint_set_59": [
+      {
+        "type": "set",
+        "variable": "blueprint_lights",
+        "value": 59
+      },
+      {
+        "type": "jump",
+        "target": "blueprint_threshold"
+      }
+    ],
+    "blueprint_choice": [
+      {
+        "type": "choice",
+        "id": "blueprint-choice-blueprint_choice-u3sb8u",
+        "prompt": "最后一根灯芯，留给谁？",
+        "options": [
+          {
+            "id": "keep_light",
+            "text": "为晚归的船留灯（六十道光）",
+            "target": "blueprint_set_60"
+          },
+          {
+            "id": "send_letter",
+            "text": "让回信先过海（五十九道光）",
+            "target": "blueprint_set_59"
+          }
+        ]
+      }
+    ],
+    "blueprint_opening": [
+      {
+        "type": "call",
+        "target": "blueprint_opening_body"
+      },
+      {
+        "type": "jump",
+        "target": "blueprint_choice"
+      }
+    ],
+    "blueprint_initialize": [
+      {
+        "type": "set",
+        "variable": "blueprint_lights",
+        "value": 59
+      },
+      {
+        "type": "jump",
+        "target": "blueprint_opening"
+      }
+    ],
+    "blueprint_entry": [
+      {
+        "type": "jump",
+        "target": "blueprint_initialize"
+      }
+    ],
+    "object_inspection_entry": [
+      {
+        "type": "set",
+        "variable": "object_letter_seen",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "object_lamp_seen",
+        "value": false
+      },
+      {
+        "type": "set",
+        "variable": "object_clue_count",
+        "value": 0
+      },
+      {
+        "type": "scene",
+        "background": "station",
+        "backgroundLayers": [],
+        "objects": [
+          {
+            "id": "tide_letter",
+            "image": "object_letter",
+            "frame": {
+              "x": 0.1,
+              "y": 0.2,
+              "w": 0.38,
+              "h": 0.3
+            },
+            "crop": {
+              "x": 0.375,
+              "y": 0.48,
+              "w": 0.32,
+              "h": 0.32
+            },
+            "layer": 2,
+            "interaction": {
+              "label": "检查信笺的水痕",
+              "hit": {
+                "x": 0.06,
+                "y": 0.06,
+                "w": 0.88,
+                "h": 0.88
+              },
+              "when": {
+                "op": "not",
+                "condition": {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "object_letter_seen"
+                  }
+                }
+              },
+              "effects": [
+                {
+                  "type": "set",
+                  "variable": "object_letter_seen",
+                  "value": true
+                },
+                {
+                  "type": "inc",
+                  "variable": "object_clue_count",
+                  "amount": 1
+                }
+              ]
+            },
+            "aspectRatio": 1
+          },
+          {
+            "id": "tide_lamp",
+            "image": "parallax_lantern",
+            "frame": {
+              "x": 0.58,
+              "y": 0.15,
+              "w": 0.27,
+              "h": 0.4
+            },
+            "crop": {
+              "x": 0.47,
+              "y": 0.035,
+              "w": 0.2,
+              "h": 0.55
+            },
+            "layer": 2,
+            "interaction": {
+              "label": "查看灯罩里的盐晶",
+              "hit": {
+                "x": 0.06,
+                "y": 0.06,
+                "w": 0.88,
+                "h": 0.88
+              },
+              "when": {
+                "op": "not",
+                "condition": {
+                  "op": "truthy",
+                  "value": {
+                    "type": "variable",
+                    "name": "object_lamp_seen"
+                  }
+                }
+              },
+              "effects": [
+                {
+                  "type": "set",
+                  "variable": "object_lamp_seen",
+                  "value": true
+                },
+                {
+                  "type": "inc",
+                  "variable": "object_clue_count",
+                  "amount": 1
+                }
+              ]
+            },
+            "aspectRatio": 0.7272727272727273
+          }
+        ],
+        "remove": [
+          "mira",
+          "ren"
+        ],
+        "camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 1
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "music_letter",
+        "channel": "music",
+        "loop": true
+      },
+      {
+        "type": "say",
+        "id": "object_intro_01",
+        "text": "临走前，Ren从储物间拿来一盏旧灯。Mira把信笺放到桌上。信纸的折痕和灯罩里的盐晶，或许能说明那夜的光究竟抵达过哪里。"
+      },
+      {
+        "type": "say",
+        "id": "object_intro_02",
+        "speaker": "Ren",
+        "text": "有人说是海水漫进了站台。可我记得，灯一直挂在横梁上。若盐是从海里来的，它为什么只留在罩子的内侧？"
+      },
+      {
+        "type": "jump",
+        "target": "object_inspection_wait"
+      }
+    ],
+    "object_inspection_wait": [
+      {
+        "type": "say",
+        "id": "object_inspect_01",
+        "text": "点亮信笺与旧灯上的标记，分别检查两件证物。它们可以按任意顺序查看；检查完后，再继续对白，把记录放在一起。"
+      },
+      {
+        "type": "branch",
+        "when": {
+          "op": "and",
+          "conditions": [
+            {
+              "op": "truthy",
+              "value": {
+                "type": "variable",
+                "name": "object_letter_seen"
+              }
+            },
+            {
+              "op": "truthy",
+              "value": {
+                "type": "variable",
+                "name": "object_lamp_seen"
+              }
+            }
+          ]
+        },
+        "then": "object_inspection_compare",
+        "else": "object_inspection_incomplete"
+      }
+    ],
+    "object_inspection_incomplete": [
+      {
+        "type": "say",
+        "id": "object_incomplete_01",
+        "text": "桌上已经留下{{object_clue_count}}份检查记录。仅凭一件证物，我们还不能断定光路是否穿过海雾。"
+      },
+      {
+        "type": "choice",
+        "id": "object_inspection_retry",
+        "prompt": "要继续核对吗？",
+        "options": [
+          {
+            "id": "retry",
+            "text": "再检查桌上的物件",
+            "target": "object_inspection_wait"
+          },
+          {
+            "id": "leave",
+            "text": "保留疑问，先离开",
+            "target": "object_inspection_leave"
+          }
+        ]
+      }
+    ],
+    "object_inspection_compare": [
+      {
+        "type": "scene",
+        "background": "roof",
+        "objects": [],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 650
+        }
+      },
+      {
+        "type": "say",
+        "id": "object_compare_01",
+        "text": "信纸边缘的水痕停在折线处，里面却干燥。灯罩外侧被雨洗净，内侧留下细小盐晶。海水没有越过站台；是一股带盐的雾，从封闭的灯罩里散了出来。"
+      },
+      {
+        "type": "say",
+        "id": "object_compare_02",
+        "speaker": "Mira",
+        "text": "那盏灯不是在照海面。它先接住对岸的回光，把海雾留在了罩子里。我们一直把接收的灯，当成了发出的灯。"
+      },
+      {
+        "type": "say",
+        "id": "object_compare_03",
+        "text": "Ren把灯放回横梁下。二十年前的记录没有说谎，只是少画了一支朝向车站的箭头。你们在邮路图上补上它，再决定要把下一束光送到哪里。"
+      },
+      {
+        "type": "ending",
+        "id": "object_evidence_complete",
+        "text": "两件证物，一条返航的光路。你保留了两份记录，也保留了重新解释那个夜晚的可能。"
+      }
+    ],
+    "object_inspection_leave": [
+      {
+        "type": "scene",
+        "objects": []
+      },
+      {
+        "type": "say",
+        "id": "object_leave_01",
+        "text": "你把还没核对的记录夹在值班簿里。没有人为了赶上末班车，就把猜测写成事实。灯仍留在桌上，等下一次有人回来检查。"
+      },
+      {
+        "type": "ending",
+        "id": "object_evidence_unfinished",
+        "text": "线索尚未齐备。你带走了{{object_clue_count}}份记录，没有替余下的空白作答。"
+      }
+    ],
+    "rich_letter_entry": [
+      {
+        "type": "scene",
+        "background": "archive",
+        "objects": [],
+        "characters": [],
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 450
+        }
+      },
+      {
+        "type": "audio",
+        "cue": "music_letter",
+        "channel": "music",
+        "loop": true
+      },
+      {
+        "type": "say",
+        "id": "rich_letter_01",
+        "speaker": "Mira",
+        "text": "有人把邮路说明写在信纸背面，又把它折了进去。等金色的RETURN显出来，轻点那几个字，就能展开页边补注。母亲不是要我们照做。她想让下一位读信的人，有机会把那一夜重新读一遍。"
+      },
+      {
+        "type": "say",
+        "id": "rich_letter_02",
+        "text": "灯下，纸背浮出一行小字：潮痕不是终点。RETURN 不是返航指令，是“请回信”。最后一笔，停在收件人的名字旁。",
+        "rich": {
+          "spans": [
+            {
+              "id": "tide-reading",
+              "start": 12,
+              "end": 14,
+              "ruby": "cháo hén",
+              "style": {
+                "color": "muted"
+              }
+            },
+            {
+              "id": "return-note",
+              "start": 19,
+              "end": 25,
+              "style": {
+                "color": "accent",
+                "emphasis": "strong"
+              },
+              "link": {
+                "title": "铅笔补写的注记",
+                "text": "RETURN写给值班人，不是写给船。第一束光是在询问对岸接收屋是否有人。请等对岸回答；若再向海面补发一束光，船就会被引向礁石。"
+              }
+            },
+            {
+              "id": "reply-emphasis",
+              "start": 35,
+              "end": 38,
+              "style": {
+                "color": "warning",
+                "emphasis": "strong"
+              }
+            }
+          ],
+          "pauses": [
+            {
+              "id": "listen-to-paper",
+              "at": 19,
+              "durationMs": 700
+            },
+            {
+              "id": "read-margin",
+              "at": 25,
+              "durationMs": null
+            }
+          ]
+        }
+      },
+      {
+        "type": "say",
+        "id": "rich_letter_03",
+        "speaker": "Ren",
+        "text": "我一直记得灯闪了两次，却从没问过第二次是谁发来的。你看过页边的补注了吗？现在，你来决定这封信该怎样回答。"
+      },
+      {
+        "type": "choice",
+        "id": "rich_letter_answer",
+        "prompt": "第一束光发出后，你会——",
+        "options": [
+          {
+            "id": "wait_for_reply",
+            "text": "遮住灯，等对岸的回答",
+            "target": "rich_letter_wait"
+          },
+          {
+            "id": "send_second_beam",
+            "text": "再发一道光，催船返航",
+            "target": "rich_letter_second"
+          }
+        ]
+      }
+    ],
+    "rich_letter_wait": [
+      {
+        "type": "scene",
+        "background": "roof",
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 600
+        }
+      },
+      {
+        "type": "say",
+        "id": "rich_letter_wait_01",
+        "text": "你压下遮光板。海面暂时只剩雨声，直到对岸的小屋亮起一次短光。Ren没有去扳第二次开关。他把这次停顿也记进值班簿：回答来自另一个人。"
+      },
+      {
+        "type": "say",
+        "id": "rich_letter_wait_02",
+        "speaker": "Mira",
+        "text": "有些空白，不是漏写。是为了让收信的人也能说一句话。"
+      },
+      {
+        "type": "ending",
+        "id": "rich_letter_reply",
+        "text": "一封信里，终于容得下两个人的声音。"
+      }
+    ],
+    "rich_letter_second": [
+      {
+        "type": "scene",
+        "background": "roof",
+        "transition": {
+          "kind": "dissolve",
+          "durationMs": 600
+        }
+      },
+      {
+        "type": "say",
+        "id": "rich_letter_second_01",
+        "text": "第二束光刚扫过海面，Ren便截断了电源。远处的船笛偏向礁区，又在最后一声警铃里转了回来。没有人受伤，但你们失去了今晚的回信窗口。"
+      },
+      {
+        "type": "say",
+        "id": "rich_letter_second_02",
+        "speaker": "Ren",
+        "text": "我们总想把沉默补满。可那一格，本来是留给对岸的。把错误也记下来，下次别让另一个人重读它。"
+      },
+      {
+        "type": "ending",
+        "id": "rich_letter_silence",
+        "text": "你保留了补注，也留下了一次没能听完的回答。"
+      }
+    ]
+  },
+  "replayEntries": [
+    {
+      "id": "truth_ending_replay",
+      "title": "灯亮过，信也抵达了",
+      "location": {
+        "label": "ending_truth",
+        "index": 0
+      },
+      "unlockEndingId": "truth_letter"
+    },
+    {
+      "id": "train_ending_replay",
+      "title": "信随末班车离港",
+      "location": {
+        "label": "ending_train",
+        "index": 0
+      },
+      "unlockEndingId": "last_train"
+    },
+    {
+      "id": "shelter_ending_replay",
+      "title": "留下来，等雾散",
+      "location": {
+        "label": "ending_shelter",
+        "index": 0
+      },
+      "unlockEndingId": "keep_the_light"
+    },
+    {
+      "id": "archive_reel_memory",
+      "title": "七号邮路的旧胶片",
+      "location": {
+        "label": "archive_reel_entry",
+        "index": 0
+      },
+      "unlockEndingId": "truth_letter"
+    },
+    {
+      "id": "model_showcase",
+      "title": "立绘试映",
+      "location": {
+        "label": "model_showcase",
+        "index": 0
+      }
+    },
+    {
+      "id": "feature_tour",
+      "title": "5分钟能力巡演",
+      "location": {
+        "label": "feature_tour",
+        "index": 0
+      }
+    },
+    {
+      "id": "parallax_showcase",
+      "title": "灯火与雾的层次",
+      "location": {
+        "label": "parallax_showcase",
+        "index": 0
+      }
+    },
+    {
+      "id": "letter_showcase",
+      "title": "未寄出的信",
+      "location": {
+        "label": "letter_showcase",
+        "index": 0
+      }
+    },
+    {
+      "id": "inventory_showcase",
+      "title": "雾港补给铺 · 买卖与行囊",
+      "location": {
+        "label": "inventory_showcase",
+        "index": 0
+      }
+    },
+    {
+      "id": "transition_showcase",
+      "title": "穿雾换景",
+      "location": {
+        "label": "transition_showcase",
+        "index": 0
+      }
+    },
+    {
+      "id": "timeline_showcase",
+      "title": "灯塔合奏",
+      "location": {
+        "label": "timeline_showcase",
+        "index": 0
+      }
+    },
+    {
+      "id": "score_handoff_showcase",
+      "title": "风暴交给晨光",
+      "location": {
+        "label": "score_handoff_showcase",
+        "index": 0
+      }
+    },
+    {
+      "id": "chapter_blueprint_showcase",
+      "title": "第六十道光",
+      "location": {
+        "label": "blueprint_entry",
+        "index": 0
+      }
+    },
+    {
+      "id": "scene_objects_showcase",
+      "title": "灯下的两件证物",
+      "location": {
+        "label": "object_inspection_entry",
+        "index": 0
+      }
+    },
+    {
+      "id": "rich_letter_showcase",
+      "title": "信纸上的第二层海",
+      "location": {
+        "label": "rich_letter_entry",
+        "index": 0
+      }
+    }
+  ],
+  "variableDefinitions": {
+    "record_mira": {
+      "lifetime": "persistent",
+      "defaultValue": false
+    },
+    "record_ren": {
+      "lifetime": "persistent",
+      "defaultValue": false
+    },
+    "record_seal": {
+      "lifetime": "persistent",
+      "defaultValue": false
+    },
+    "travel_tokens": {
+      "lifetime": "save",
+      "defaultValue": 12
+    },
+    "weather_sleeves": {
+      "lifetime": "save",
+      "defaultValue": 0
+    },
+    "spare_wicks": {
+      "lifetime": "save",
+      "defaultValue": 0
+    },
+    "object_letter_seen": {
+      "lifetime": "save",
+      "defaultValue": false
+    },
+    "object_lamp_seen": {
+      "lifetime": "save",
+      "defaultValue": false
+    },
+    "object_clue_count": {
+      "lifetime": "save",
+      "defaultValue": 0
+    }
+  },
+  "inventory": {
+    "currency": {
+      "title": "旅资券",
+      "variable": "travel_tokens"
+    },
+    "items": {
+      "weather_sleeve": {
+        "title": "防潮封套",
+        "body": "旧站邮务窗留下的蜡纸封套。可以挡住检票灯下飘进的雨，购买后收入行囊；也可原样交还换回部分旅资。",
+        "quantityVariable": "weather_sleeves",
+        "buyPrice": 4,
+        "sellPrice": 2,
+        "maxQuantity": 3
+      },
+      "spare_wick": {
+        "title": "备用灯芯",
+        "body": "一截用棉线拧紧的灯芯。点亮一次便会耗尽，但能替柜台前的人争取片刻暖意。",
+        "quantityVariable": "spare_wicks",
+        "buyPrice": 7,
+        "sellPrice": 3,
+        "maxQuantity": 2
+      }
+    }
+  },
+  "timelines": {
+    "beacon_sweep": {
+      "durationMs": 6000,
+      "camera": [
+        {
+          "atMs": 0,
+          "value": {
+            "x": 0,
+            "y": 0,
+            "scale": 1
+          }
+        },
+        {
+          "atMs": 1800,
+          "value": {
+            "x": -12,
+            "y": -4,
+            "scale": 1.12
+          },
+          "easing": "easeInOut"
+        },
+        {
+          "atMs": 4200,
+          "value": {
+            "x": 8,
+            "y": -2,
+            "scale": 1.06
+          },
+          "easing": "easeInOut"
+        },
+        {
+          "atMs": 6000,
+          "value": {
+            "x": 0,
+            "y": 0,
+            "scale": 1
+          },
+          "easing": "easeInOut"
+        }
+      ],
+      "actors": [
+        {
+          "id": "mira",
+          "keyframes": [
+            {
+              "atMs": 0,
+              "value": {
+                "position": {
+                  "x": -24,
+                  "y": 116
+                },
+                "scale": 1,
+                "rotation": 0
+              }
+            },
+            {
+              "atMs": 1800,
+              "value": {
+                "position": {
+                  "x": 4,
+                  "y": 108
+                },
+                "scale": 1.04,
+                "rotation": -2
+              },
+              "easing": "easeInOut"
+            },
+            {
+              "atMs": 4200,
+              "value": {
+                "position": {
+                  "x": -8,
+                  "y": 112
+                },
+                "scale": 1.02,
+                "rotation": 1
+              },
+              "easing": "easeInOut"
+            },
+            {
+              "atMs": 6000,
+              "value": {
+                "position": {
+                  "x": -24,
+                  "y": 116
+                },
+                "scale": 1,
+                "rotation": 0
+              },
+              "easing": "easeInOut"
+            }
+          ]
+        }
+      ],
+      "audio": [
+        {
+          "atMs": 0,
+          "cue": "roof_gust"
+        },
+        {
+          "atMs": 1800,
+          "cue": "station_bell"
+        },
+        {
+          "atMs": 4200,
+          "cue": "relay_click"
+        }
+      ]
+    },
+    "harbor_crescendo": {
+      "durationMs": 6000,
+      "camera": [
+        {
+          "atMs": 0,
+          "value": {
+            "x": 0,
+            "y": 0,
+            "scale": 1
+          }
+        },
+        {
+          "atMs": 3000,
+          "value": {
+            "x": -14,
+            "y": -6,
+            "scale": 1.12
+          },
+          "easing": "easeInOut"
+        },
+        {
+          "atMs": 6000,
+          "value": {
+            "x": 0,
+            "y": 0,
+            "scale": 1
+          },
+          "easing": "easeInOut"
+        }
+      ],
+      "audio": [
+        {
+          "atMs": 0,
+          "cue": "roof_gust",
+          "channel": "harbor-wind",
+          "loop": true
+        },
+        {
+          "atMs": 1800,
+          "cue": "station_bell"
+        },
+        {
+          "atMs": 6000,
+          "cue": "roof_gust",
+          "action": "stop",
+          "channel": "harbor-wind"
+        }
+      ],
+      "audioGains": [
+        {
+          "channel": "harbor-wind",
+          "keyframes": [
+            {
+              "atMs": 0,
+              "value": 0
+            },
+            {
+              "atMs": 1500,
+              "value": 0.85,
+              "easing": "easeInOut"
+            },
+            {
+              "atMs": 3800,
+              "value": 0.4,
+              "easing": "easeInOut"
+            },
+            {
+              "atMs": 6000,
+              "value": 0,
+              "easing": "easeInOut"
+            }
+          ]
+        }
+      ]
+    },
+    "score_handoff": {
+      "durationMs": 14000,
+      "camera": [
+        {
+          "atMs": 0,
+          "value": {
+            "x": 0,
+            "y": 0,
+            "scale": 1
+          }
+        },
+        {
+          "atMs": 4800,
+          "value": {
+            "x": -12,
+            "y": -5,
+            "scale": 1.08
+          },
+          "easing": "easeInOut"
+        },
+        {
+          "atMs": 10400,
+          "value": {
+            "x": 10,
+            "y": -2,
+            "scale": 1.04
+          },
+          "easing": "easeInOut"
+        },
+        {
+          "atMs": 14000,
+          "value": {
+            "x": 0,
+            "y": 0,
+            "scale": 1
+          },
+          "easing": "easeInOut"
+        }
+      ],
+      "actors": [
+        {
+          "id": "mira",
+          "keyframes": [
+            {
+              "atMs": 0,
+              "value": {
+                "position": {
+                  "x": -20,
+                  "y": 116
+                },
+                "scale": 1,
+                "rotation": 0
+              }
+            },
+            {
+              "atMs": 4800,
+              "value": {
+                "position": {
+                  "x": -4,
+                  "y": 108
+                },
+                "scale": 1.03,
+                "rotation": -1
+              },
+              "easing": "easeInOut"
+            },
+            {
+              "atMs": 10400,
+              "value": {
+                "position": {
+                  "x": 10,
+                  "y": 100
+                },
+                "scale": 1.07,
+                "rotation": 2
+              },
+              "easing": "easeInOut"
+            },
+            {
+              "atMs": 14000,
+              "value": {
+                "position": {
+                  "x": -20,
+                  "y": 116
+                },
+                "scale": 1,
+                "rotation": 0
+              },
+              "easing": "easeInOut"
+            }
+          ]
+        }
+      ],
+      "audio": [
+        {
+          "atMs": 0,
+          "cue": "music_storm",
+          "channel": "score-storm",
+          "loop": true,
+          "group": "music"
+        },
+        {
+          "atMs": 4800,
+          "cue": "music_dawn",
+          "channel": "score-dawn",
+          "loop": true,
+          "group": "music"
+        },
+        {
+          "atMs": 7600,
+          "cue": "station_bell"
+        },
+        {
+          "atMs": 10400,
+          "cue": "music_storm",
+          "action": "stop",
+          "channel": "score-storm"
+        },
+        {
+          "atMs": 14000,
+          "cue": "music_dawn",
+          "action": "stop",
+          "channel": "score-dawn"
+        }
+      ],
+      "audioGains": [
+        {
+          "channel": "score-storm",
+          "keyframes": [
+            {
+              "atMs": 0,
+              "value": 1
+            },
+            {
+              "atMs": 4800,
+              "value": 1
+            },
+            {
+              "atMs": 10400,
+              "value": 0,
+              "easing": "easeInOut"
+            }
+          ]
+        },
+        {
+          "channel": "score-dawn",
+          "keyframes": [
+            {
+              "atMs": 0,
+              "value": 0
+            },
+            {
+              "atMs": 4800,
+              "value": 0
+            },
+            {
+              "atMs": 10400,
+              "value": 1,
+              "easing": "easeInOut"
+            },
+            {
+              "atMs": 12200,
+              "value": 1
+            },
+            {
+              "atMs": 14000,
+              "value": 0,
+              "easing": "easeInOut"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "editor": {
+    "blueprint": {
+      "version": 1,
+      "nodes": {
+        "blueprint_end_lit": {
+          "kind": "end",
+          "title": "留一盏灯"
+        },
+        "blueprint_end_depart": {
+          "kind": "end",
+          "title": "先送回信"
+        },
+        "blueprint_lit": {
+          "kind": "chapter",
+          "title": "晚归的船"
+        },
+        "blueprint_depart": {
+          "kind": "chapter",
+          "title": "先渡海峡"
+        },
+        "blueprint_threshold": {
+          "kind": "condition",
+          "title": "最后一道光"
+        },
+        "blueprint_set_60": {
+          "kind": "assignment",
+          "title": "点亮第六十道光"
+        },
+        "blueprint_set_59": {
+          "kind": "assignment",
+          "title": "按原航线出港"
+        },
+        "blueprint_choice": {
+          "kind": "choice",
+          "title": "灯与回信"
+        },
+        "blueprint_opening": {
+          "kind": "chapter",
+          "title": "末班船前"
+        },
+        "blueprint_initialize": {
+          "kind": "assignment",
+          "title": "五十九道光"
+        },
+        "blueprint_entry": {
+          "kind": "entry",
+          "title": "第六十道光"
+        }
+      }
+    },
+    "graph": {
+      "version": 1,
+      "positions": {
+        "blueprint_entry": {
+          "x": 48,
+          "y": 48
+        },
+        "blueprint_initialize": {
+          "x": 48,
+          "y": 260
+        },
+        "blueprint_opening": {
+          "x": 48,
+          "y": 500
+        },
+        "blueprint_choice": {
+          "x": 48,
+          "y": 800
+        },
+        "blueprint_set_60": {
+          "x": -350,
+          "y": 1150
+        },
+        "blueprint_set_59": {
+          "x": 450,
+          "y": 1150
+        },
+        "blueprint_threshold": {
+          "x": 48,
+          "y": 1400
+        },
+        "blueprint_lit": {
+          "x": -350,
+          "y": 1700
+        },
+        "blueprint_depart": {
+          "x": 450,
+          "y": 1700
+        },
+        "blueprint_end_lit": {
+          "x": -350,
+          "y": 1990
+        },
+        "blueprint_end_depart": {
+          "x": 450,
+          "y": 1990
+        }
+      }
+    }
+  }
+}

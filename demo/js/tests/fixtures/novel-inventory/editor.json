@@ -1,0 +1,10 @@
+{
+  "id": "novel-inventory-fixture",
+  "appId": "dev.pocket.vn-inventory-fixture",
+  "name": "Novel inventory acceptance",
+  "version": "0.1.0",
+  "entry": "app.tsx",
+  "framework": "solid",
+  "build": 1,
+  "tickHz": 60
+}

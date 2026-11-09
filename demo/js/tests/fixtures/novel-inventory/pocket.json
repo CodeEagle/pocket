@@ -1,0 +1,10 @@
+{
+  "pocket": 2,
+  "id": "dev.pocket.vn-inventory-fixture",
+  "version": "0.1.0",
+  "app": {
+    "entry": "app.tsx",
+    "output": "vn-inventory-fixture",
+    "framework": "solid"
+  }
+}

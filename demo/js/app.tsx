@@ -1052,6 +1052,29 @@ function miniAppResultSummary(value: JsonValue | undefined): string {
 function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatformClient>; system: ReturnType<typeof installShowcaseSystem> }): JSX.Element {
   const theme = useMobileTheme();
   const [status, setStatus] = createSignal("Preparing apps...");
+  const [showAllOfficial, setShowAllOfficial] = createSignal(false);
+  const officialDemos = createMemo(() => props.system.snapshot().catalog.flatMap((entry) => {
+    const presentation = entry.presentation as Record<string, unknown> | undefined;
+    if (presentation?.officialDemo !== true) return [];
+    const strings = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
+    return [{
+      id: typeof presentation.id === "string" ? presentation.id : entry.appId,
+      appId: entry.appId,
+      title: typeof presentation.title === "string" ? presentation.title : entry.appId,
+      status: typeof presentation.status === "string" ? presentation.status : "unverified",
+      statusReason: typeof presentation.statusReason === "string" ? presentation.statusReason : "",
+      launchability: typeof presentation.launchability === "string" ? presentation.launchability : "platform-limited",
+      missingCapabilities: strings(presentation.missingSessionCapabilities),
+      pointerFallbackCapabilities: strings(presentation.pointerFallbackCapabilities),
+      installed: entry.installed,
+    }];
+  }).sort((a, b) => {
+    const featured = new Map([["hero", 0], ["motions", 1]]);
+    return (featured.get(a.id) ?? 2) - (featured.get(b.id) ?? 2) || a.id.localeCompare(b.id);
+  }));
+  const visibleOfficialDemos = createMemo(() => officialDemos().slice(0, showAllOfficial() ? officialDemos().length : 6));
   onMount(() => {
     void props.system.ready.then(
       () => setStatus("Ready to explore"),
@@ -1074,11 +1097,47 @@ function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatf
     <MobileCard>
       <View class="flex-row items-center justify-between">
         <MobileListTile title="Mini Apps" detail="A little more to explore." />
-        <MobileBadge label="2 APPS" tone="neutral" />
+        <MobileBadge label={`${3 + officialDemos().filter((demo) => demo.installed).length} INSTALLED`} tone="neutral" />
       </View>
       <View class="flex-col gap-2">
         <MobileButton label="Open profile app" onPress={() => void open("pocket.demo.profile")} />
         <MobileButton label="Open lobby app" kind="text" onPress={() => void open("pocket.demo.lobby")} />
+        <MobileButton label="雾港末班信 · Visual Novel" kind="tonal" onPress={() => void open("pocket.demo.lantern")} />
+      </View>
+      <View class="flex-col gap-1.5 pt-2">
+        <Text class={theme().name === "dark" ? "text-sm text-[#FAFAFA] font-bold" : "text-sm text-[#09090B] font-bold"}>Official upstream demos</Text>
+        <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>Pointer/touch fallback is available where listed; it does not emulate a physical gamepad.</Text>
+        <For each={visibleOfficialDemos()}>{(demo) => {
+          const fallback = demo.pointerFallbackCapabilities.length > 0
+            ? `Pointer/touch fallback for ${demo.pointerFallbackCapabilities.join(", ")}`
+            : "No pointer fallback declared";
+          const capabilityDetail = demo.missingCapabilities.length > 0
+            ? `Host gap: ${demo.missingCapabilities.join(", ")}`
+            : fallback;
+          const details = [demo.status, demo.launchability === "portable_pointer_fallback" ? fallback : "", capabilityDetail, demo.statusReason]
+            .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index)
+            .join(" · ");
+          return (
+            <View class="flex-col gap-1 p-2 rounded-lg bg-[#09090B] border-[#27272A]" style={{ radius: 8, borderWidth: 1 }}>
+              <MobileListTile title={demo.title} detail={details} />
+              <MobileButton
+                label={demo.installed ? `Open ${demo.id} demo` : "Platform-limited"}
+                disabled={!demo.installed}
+                onPress={() => void open(demo.appId)}
+              />
+            </View>
+          );
+        }}</For>
+        <Show when={officialDemos().length > 6}>
+          <MobileButton
+            kind="text"
+            label={showAllOfficial() ? "Show fewer demos" : `Show all ${officialDemos().length} demos`}
+            onPress={() => setShowAllOfficial(!showAllOfficial())}
+          />
+        </Show>
+        <Show when={officialDemos().length === 0}>
+          <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>No official demos are staged in this build.</Text>
+        </Show>
       </View>
       <For each={summaryLines(status())}>{(line) => <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-slate-500"}>{line}</Text>}</For>
       <Show when={message() !== "No app messages yet"}>

@@ -25,9 +25,9 @@ void main() {
     final original = debugPocketFrameDeltaAtOverride;
     try {
       await tester.pumpWidget(
-        const Align(
+        Align(
           alignment: Alignment.topLeft,
-          child: SizedBox(width: 390, height: 760, child: PocketHostApp()),
+          child: SizedBox(width: 390, height: 760, child: pocketHostApp()),
         ),
       );
       await guest.waitFor(tester, 'Home');

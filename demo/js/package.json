@@ -25,6 +25,7 @@
     "perf:save": "bun scripts/save_interaction_capture.ts",
     "profile:macos": "bash scripts/profile_macos.sh",
     "build:system": "bun scripts/build_mini_apps.ts && bun run build",
+    "stage:official": "bun scripts/build_mini_apps.ts --official-only",
     "test:settings": "bun tests/settings_native.test.ts",
     "test:navigation": "bun test tests/navigation_native.test.ts"
   }

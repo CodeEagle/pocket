@@ -1,0 +1,25 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-guest-manifest.json",
+  "protocolVersion": 1,
+  "capabilities": {
+    "requires": [
+      "text.glyphs.baked"
+    ],
+    "optional": [
+      "input.analog.left",
+      "input.buttons"
+    ]
+  },
+  "permissions": {
+    "optional": []
+  },
+  "version": "0.6.0",
+  "build": 1,
+  "hostAdaptation": {
+    "kind": "flutter_pointer_fallback",
+    "demotedRequirements": [
+      "input.buttons"
+    ],
+    "note": "The mounted official source keeps its physical-button handler and adds a Focusable pointer/touch control where needed."
+  }
+}

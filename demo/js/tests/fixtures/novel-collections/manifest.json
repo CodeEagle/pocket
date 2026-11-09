@@ -1,0 +1,11 @@
+{
+  "capabilities": {
+    "requires": [
+      "platform.storage.get",
+      "platform.storage.set",
+      "platform.storage.remove",
+      "platform.storage.keys",
+      "platform.storage.batch"
+    ]
+  }
+}

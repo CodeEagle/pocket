@@ -17,9 +17,9 @@ void main() {
       // Use the narrow mobile layout so a scroll is required even when the
       // real Duo window is wide enough for columns and a side navigation rail.
       await tester.pumpWidget(
-        const Align(
+        Align(
           alignment: Alignment.topLeft,
-          child: SizedBox(width: 390, height: 600, child: PocketHostApp()),
+          child: SizedBox(width: 390, height: 600, child: pocketHostApp()),
         ),
       );
       await guest.waitFor(tester, 'Input round-trip');
@@ -79,9 +79,9 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
       await tester.pumpWidget(
-        const Align(
+        Align(
           alignment: Alignment.topCenter,
-          child: SizedBox(width: 390, height: 360, child: PocketHostApp()),
+          child: SizedBox(width: 390, height: 360, child: pocketHostApp()),
         ),
       );
       // The 360pt preview deliberately clips the lower Home controls. Its

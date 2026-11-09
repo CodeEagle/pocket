@@ -1,0 +1,6 @@
+{
+  "pocket": 2,
+  "id": "dev.pocket.inline-text-fixture",
+  "version": "0.1.0",
+  "app": { "entry": "app.tsx", "output": "inline-text-fixture", "framework": "solid" }
+}

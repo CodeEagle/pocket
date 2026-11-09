@@ -17,7 +17,7 @@ void main() {
     // device-level keyboard remains covered by the separate screenshot run.
     tester.testTextInput.register();
     try {
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(pocketHostApp());
       await guest.waitFor(tester, '00');
       await guest.waitForContaining(tester, 'Tap to type');
       await guest.tapGuest(tester, 'Tap to type');

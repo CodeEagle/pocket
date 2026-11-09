@@ -15,6 +15,7 @@ import {
   type DemoState,
 } from "../state.ts";
 import { createHostBridge } from "@pocket/ui/host";
+import { showcaseCompositorSurfaces } from "../official_demos.ts";
 
 function test(name: string, fn: () => void | Promise<void>): void {
   try {
@@ -563,8 +564,8 @@ test("stress and performance snapshots", () => {
 test("tracked app.qjbc renders performance state through native probe", () => {
   const probeCandidates = [
     process.env.POCKET_NATIVE_PROBE,
-    join(root, "../../sdk/native/target/debug/pocket_probe"),
     join(root, "../../sdk/native/target/release/pocket_probe"),
+    join(root, "../../sdk/native/target/debug/pocket_probe"),
   ].filter((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
   assert.ok(
     probeCandidates.length > 0,
@@ -597,7 +598,7 @@ test("tracked app.qjbc renders performance state through native probe", () => {
       .map((line) => JSON.parse(line) as Record<string, any>);
   };
   const baseCommands = [
-    { op: "create", width: 720, height: 2000, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } },
+    { op: "create", width: 720, height: 2000, compositorSurfaces: showcaseCompositorSurfaces() },
     { op: "loadBytecode", bytecodePath, pakPath },
     { op: "frame", deltaMs: 16 },
   ];

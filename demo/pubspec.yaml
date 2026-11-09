@@ -16,6 +16,10 @@ dependencies:
     path: ../sdk/packages/pocket_hardware
   pocket_platform:
     path: ../sdk/packages/pocket_platform
+  pocket_audio:
+    path: ../sdk/packages/pocket_audio
+  pocket_live2d:
+    path: ../sdk/packages/pocket_live2d
 
 dev_dependencies:
   pocket_permissions:
@@ -25,6 +29,7 @@ dev_dependencies:
   pocket_services:
     path: ../sdk/packages/pocket_services
   path_provider: ^2.1.5
+  path_provider_platform_interface: ^2.1.2
   integration_test:
     sdk: flutter
   flutter_lints: ^5.0.0
@@ -36,6 +41,10 @@ flutter:
   config:
     enable-swift-package-manager: true
   uses-material-design: true
+  fonts:
+    - family: LanternSerif
+      fonts:
+        - asset: js/apps/lantern/fonts/lantern.otf
   assets:
     - assets/app.qjbc
     - assets/app.bytecode.json
@@ -44,3 +53,44 @@ flutter:
     - assets/videos/
     - assets/apps/profile/
     - assets/apps/lobby/
+    - assets/apps/lantern/
+    - assets/apps/lantern/audio/
+    - assets/apps/lantern/videos/
+    - assets/apps/lantern/native-models/
+    - assets/apps/official/
+    # BEGIN GENERATED OFFICIAL DEMO ASSETS
+    - assets/apps/official/catalog.json
+    - assets/apps/official/blackberry-classic-demo/
+    - assets/apps/official/cafe/
+    - assets/apps/official/cards/
+    - assets/apps/official/chrome/
+    - assets/apps/official/clear/
+    - assets/apps/official/companion-zero/
+    - assets/apps/official/cursor/
+    - assets/apps/official/devkit/
+    - assets/apps/official/gallery/
+    - assets/apps/official/gba-hero/
+    - assets/apps/official/hero/
+    - assets/apps/official/im/
+    - assets/apps/official/iphone16-demo/
+    - assets/apps/official/iphone2g-demo/
+    - assets/apps/official/iphone4s-demo/
+    - assets/apps/official/ipodnano-hero/
+    - assets/apps/official/ipodtouch-demo/
+    - assets/apps/official/launcher/
+    - assets/apps/official/library/
+    - assets/apps/official/meizu-m8-demo/
+    - assets/apps/official/motions/
+    - assets/apps/official/music/
+    - assets/apps/official/nexus-touch/
+    - assets/apps/official/note/
+    - assets/apps/official/notifications/
+    - assets/apps/official/nsengine/
+    - assets/apps/official/settings/
+    - assets/apps/official/solid-aot-lab/
+    - assets/apps/official/stats/
+    - assets/apps/official/text-cjk/
+    - assets/apps/official/text-offload/
+    - assets/apps/official/worker-http/
+    - assets/apps/official/zoomlab/
+    # END GENERATED OFFICIAL DEMO ASSETS

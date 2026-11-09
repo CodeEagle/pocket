@@ -240,10 +240,10 @@ void main() {
             onPointerCancel: recordDarkPointer,
             child: RepaintBoundary(
               key: captureKey,
-              child: const SizedBox(
+              child: SizedBox(
                 width: 390,
                 height: 780,
-                child: PocketHostApp(),
+                child: pocketHostApp(),
               ),
             ),
           ),
@@ -379,9 +379,9 @@ void main() {
   testWidgets('Home and UI omit the deferred Glass entry', (tester) async {
     try {
       await tester.pumpWidget(
-        const Align(
+        Align(
           alignment: Alignment.topLeft,
-          child: SizedBox(width: 390, height: 780, child: PocketHostApp()),
+          child: SizedBox(width: 390, height: 780, child: pocketHostApp()),
         ),
       );
       await guest.waitFor(tester, '00');

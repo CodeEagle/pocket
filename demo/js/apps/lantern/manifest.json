@@ -1,0 +1,32 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-guest-manifest.json",
+  "protocolVersion": 1,
+  "capabilities": {
+    "requires": [
+      "text.glyphs.baked",
+      "platform.storage.get",
+      "platform.storage.set"
+    ],
+    "optional": [
+      "platform.storage.keys",
+      "platform.storage.remove",
+      "platform.storage.batch",
+      "media.audio.play",
+      "media.audio.stop",
+      "media.audio.pause",
+      "media.audio.resume",
+      "media.audio.volume",
+      "media.live2d.model.load",
+      "media.live2d.model.update",
+      "media.live2d.model.release",
+      "platform.apps.return",
+      "platform.images.capture",
+      "platform.images.read",
+      "platform.images.list",
+      "platform.images.remove"
+    ]
+  },
+  "permissions": {
+    "optional": []
+  }
+}

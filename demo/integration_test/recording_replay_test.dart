@@ -98,7 +98,7 @@ void main() {
       var captureStopped = false;
       Map<String, dynamic>? replayReport;
       try {
-        await tester.pumpWidget(PocketHostApp(recordings: library));
+        await tester.pumpWidget(pocketHostApp(recordings: library));
         await guest.waitFor(tester, '00');
         await guest.tapGuest(tester, '+1');
         await guest.waitFor(tester, '01');
@@ -256,7 +256,7 @@ void main() {
       final library = PocketRecordingLibrary();
       Directory? exported;
       try {
-        await tester.pumpWidget(PocketHostApp(recordings: library));
+        await tester.pumpWidget(pocketHostApp(recordings: library));
         await guest.waitFor(tester, '00');
         await guest.tapGuest(tester, 'Open Host details');
         await guest.waitFor(tester, 'Runtime');

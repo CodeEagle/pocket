@@ -31,7 +31,7 @@ void main() {
 
     try {
       await tester.pumpWidget(
-        PocketHostApp(frameMonitorController: monitor, showFlutterFps: true),
+        pocketHostApp(frameMonitorController: monitor, showFlutterFps: true),
       );
       await guest.waitFor(tester, '00');
       final controller = tester
@@ -146,7 +146,7 @@ void main() {
 
       // A fresh host instance must read the same on-disk history and expose it
       // through the real JS runtime.performance capability.
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(pocketHostApp());
       await guest.waitFor(tester, '00');
       await guest.tapGuest(tester, 'Host');
       await guest.waitFor(tester, 'Runtime');

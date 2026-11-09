@@ -1,0 +1,382 @@
+{
+  "backgrounds": {
+    "station": "art/station.png",
+    "archive": "art/archive.png",
+    "roof": "art/roof.png",
+    "dawn": "art/dawn.png",
+    "parallax_station": "art/station.png",
+    "parallax_lantern": "art/fx/parallax-lantern.png",
+    "sea_mist": "art/fx/sea-mist.png",
+    "object_letter": "art/truth-letter.png"
+  },
+  "characters": {
+    "mira": {
+      "neutral": "art/mira-neutral.png",
+      "worried": "art/mira-worried.png",
+      "hopeful": "art/mira-hopeful.png"
+    },
+    "ren": {
+      "neutral": "art/ren-neutral.png",
+      "worried": "art/ren-worried.png",
+      "hopeful": "art/ren-hopeful.png"
+    }
+  },
+  "cgs": {
+    "truth_letter": {
+      "image": "art/truth-letter.png",
+      "title": "跨越二十年的回信"
+    },
+    "dawn_departure": {
+      "image": "art/dawn-departure.png",
+      "title": "天亮以前，信已启程"
+    },
+    "harbor_light": {
+      "image": "art/harbor-light.png",
+      "title": "有人为雾港守灯"
+    }
+  },
+  "audio": {
+    "music_storm": "audio/music_storm.wav",
+    "music_letter": "audio/music_letter.wav",
+    "music_dawn": "audio/music_dawn.wav",
+    "roof_gust": "audio/roof_gust.wav",
+    "station_bell": "audio/station_bell.wav",
+    "relay_break": "audio/relay_break.wav",
+    "relay_click": "audio/relay_click.wav",
+    "train_depart": "audio/train_depart.wav",
+    "text_narrator": "audio/text_narrator.wav",
+    "text_mira": "audio/text_mira.wav",
+    "text_ren": "audio/text_ren.wav",
+    "voice_mira_arrival_02": "audio/voice_mira_arrival_02.wav",
+    "voice_mira_arrival_02_en": "audio/voice_mira_arrival_02_en.wav"
+  },
+  "videos": {
+    "archive_route_reel": "videos/archive-route-reel.mp4"
+  },
+  "textSounds": {
+    "defaultCue": "text_narrator",
+    "speakers": {
+      "Mira": "text_mira",
+      "Ren": "text_ren"
+    },
+    "minIntervalMs": 100
+  },
+  "skin": {
+    "frame": {
+      "image": "art/ui/harbor-frame-refined.png",
+      "width": 512,
+      "height": 512,
+      "inset": 32
+    },
+    "accentFrame": {
+      "image": "art/ui/harbor-primary.png",
+      "width": 512,
+      "height": 512,
+      "inset": 48
+    },
+    "icons": {
+      "image": "art/ui/harbor-icons.png",
+      "width": 512,
+      "height": 512,
+      "columns": 4,
+      "rows": 4,
+      "names": [
+        "compass",
+        "book",
+        "rewind",
+        "wave",
+        "play",
+        "skip",
+        "envelope",
+        "quill",
+        "lighthouse",
+        "anchor",
+        "save",
+        "download",
+        "settings",
+        "gallery",
+        "home",
+        "back"
+      ]
+    }
+  },
+  "models": {
+    "mira_spine": {
+      "kind": "spine",
+      "source": "models/mira.spine.json",
+      "atlas": "models/mira.atlas",
+      "textures": {
+        "mira-neutral.png": "art/mira-neutral.png",
+        "mira-worried.png": "art/mira-worried.png",
+        "mira-hopeful.png": "art/mira-hopeful.png"
+      },
+      "animations": [
+        "idle",
+        "alert",
+        "settle"
+      ]
+    },
+    "hiyori_sample": {
+      "kind": "live2d",
+      "source": ".pocket-build/live2d/Hiyori/Hiyori.model3.json",
+      "animations": [
+        "Idle:0",
+        "Idle:1",
+        "TapBody:0"
+      ],
+      "textures": {
+        "Hiyori.2048/texture_00.png": ".pocket-build/live2d/Hiyori/Hiyori.2048/texture_00.png",
+        "Hiyori.2048/texture_01.png": ".pocket-build/live2d/Hiyori/Hiyori.2048/texture_01.png"
+      }
+    }
+  },
+  "atmospheres": {
+    "station": {
+      "mist": "art/fx/sea-mist.png",
+      "rain": "art/fx/rain-streak.svg",
+      "intensity": 0.58,
+      "lightning": true
+    },
+    "roof": {
+      "mist": "art/fx/sea-mist.png",
+      "rain": "art/fx/rain-streak.svg",
+      "intensity": 0.85,
+      "lightning": true
+    },
+    "archive": {
+      "mist": "art/fx/sea-mist.png",
+      "intensity": 0.12
+    }
+  },
+  "choiceSurfaces": {
+    "investigation_hub": {
+      "kind": "scene",
+      "targets": {
+        "archive": {
+          "x": 0.04,
+          "y": 0.26,
+          "w": 0.26,
+          "h": 0.16
+        },
+        "clock": {
+          "x": 0.37,
+          "y": 0.26,
+          "w": 0.26,
+          "h": 0.16
+        },
+        "roof": {
+          "x": 0.7,
+          "y": 0.26,
+          "w": 0.26,
+          "h": 0.16
+        },
+        "memory": {
+          "x": 0.04,
+          "y": 0.46,
+          "w": 0.26,
+          "h": 0.16
+        },
+        "leave_reply_address": {
+          "x": 0.37,
+          "y": 0.46,
+          "w": 0.26,
+          "h": 0.16
+        },
+        "relay": {
+          "x": 0.7,
+          "y": 0.46,
+          "w": 0.26,
+          "h": 0.16
+        },
+        "last_train": {
+          "x": 0.37,
+          "y": 0.66,
+          "w": 0.26,
+          "h": 0.16
+        }
+      }
+    },
+    "tour_hub": {
+      "kind": "scene",
+      "targets": {
+        "tour_reel": {
+          "x": 0.04,
+          "y": 0.26,
+          "w": 0.26,
+          "h": 0.16
+        },
+        "tour_signal": {
+          "x": 0.37,
+          "y": 0.26,
+          "w": 0.26,
+          "h": 0.16
+        },
+        "tour_write": {
+          "x": 0.7,
+          "y": 0.26,
+          "w": 0.26,
+          "h": 0.16
+        }
+      }
+    },
+    "tour_dial": {
+      "kind": "dial",
+      "image": "art/ui/relay-dial.png",
+      "frame": {
+        "x": 0.08,
+        "y": 0.2,
+        "w": 0.84,
+        "h": 0.69
+      },
+      "targets": {
+        "tour_dial_7": {
+          "x": 0.155,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        },
+        "tour_dial_1": {
+          "x": 0.395,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        },
+        "tour_dial_4": {
+          "x": 0.635,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        }
+      }
+    },
+    "dial_one": {
+      "kind": "dial",
+      "image": "art/ui/relay-dial.png",
+      "frame": {
+        "x": 0.08,
+        "y": 0.2,
+        "w": 0.84,
+        "h": 0.69
+      },
+      "targets": {
+        "route_7": {
+          "x": 0.155,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        },
+        "route_1": {
+          "x": 0.395,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        },
+        "route_4": {
+          "x": 0.635,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        }
+      }
+    },
+    "dial_two": {
+      "kind": "dial",
+      "image": "art/ui/relay-dial.png",
+      "frame": {
+        "x": 0.08,
+        "y": 0.2,
+        "w": 0.84,
+        "h": 0.69
+      },
+      "targets": {
+        "pulse_7": {
+          "x": 0.155,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        },
+        "pulse_1": {
+          "x": 0.395,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        },
+        "pulse_4": {
+          "x": 0.635,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        }
+      }
+    },
+    "dial_three": {
+      "kind": "dial",
+      "image": "art/ui/relay-dial.png",
+      "frame": {
+        "x": 0.08,
+        "y": 0.2,
+        "w": 0.84,
+        "h": 0.69
+      },
+      "targets": {
+        "minute_7": {
+          "x": 0.155,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        },
+        "minute_1": {
+          "x": 0.395,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        },
+        "minute_4": {
+          "x": 0.635,
+          "y": 0.445,
+          "w": 0.21,
+          "h": 0.21
+        }
+      }
+    }
+  },
+  "collections": {
+    "people": {
+      "title": "雾港人物",
+      "entries": {
+        "mira": {
+          "title": "Mira · 携信人",
+          "body": "她替母亲带来一封不能代拆的信，也带来一张日期属于今晚的回程票。路线图曾沿邮路与姓名各折过一次，展开以后，所有线条都在收信亭相交。\n\n她希望收件人先读信，而不是先认出寄信的人。你听完她的讲述，将她的托付记在这里：让一个人亲口回答另一个人，而不让过去替他们作答。",
+          "portrait": {
+            "character": "mira",
+            "expression": "neutral"
+          },
+          "unlockVariable": "record_mira"
+        },
+        "ren": {
+          "title": "Ren · 守站人",
+          "body": "他保留着控制箱的钥匙，也保留着对第二声铃的记忆。锁换过三次，钥匙却从未离开他的行李。\n\n他要求先核对旧邮路、回声标记与潮汐时刻。记忆可以成为查找的起点，却不能独自成为证据。在你听完他的讲述后，这份档案留下的不是故障判词，而是一个仍愿意查证的人的名字。",
+          "portrait": {
+            "character": "ren",
+            "expression": "neutral"
+          },
+          "unlockVariable": "record_ren"
+        }
+      }
+    },
+    "evidence": {
+      "title": "旅途证物",
+      "entries": {
+        "station": {
+          "title": "雾港旧站",
+          "body": "海风把盐带进站房，也把远处的声响带到玻璃后。收信亭、旧透镜和铃箱曾属于同一条邮路。\n\n你可以在手札里回看沿途对白，并分别记下人物说过的话、纸面留下的记录，以及机器实际给出的回应。三者相互印证以前，先保留问题。"
+        },
+        "sealed_letter": {
+          "title": "未拆封的信",
+          "body": "收件栏写着 Ren，寄件栏空白。封蜡完整，纸边干燥，蜡纹里却有一粒咸水结晶。信封没有普通分拣机器的滚轮压痕，窄窄的玻璃纹与旧透镜相似。\n\n这些是你在不拆信的情况下读到的事实。它们值得记录，却不足以证明一个奇迹。Mira感谢的，也正是你把查证与替别人作决定分开。",
+          "unlockVariable": "record_seal"
+        }
+      }
+    }
+  }
+}

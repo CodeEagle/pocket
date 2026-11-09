@@ -39,7 +39,7 @@ void main() {
       final system = PocketSystemHostController();
       try {
         await tester.pumpWidget(
-          PocketHostApp(systemController: system, showFlutterFps: false),
+          pocketHostApp(systemController: system, showFlutterFps: false),
         );
         await guest.waitFor(tester, '00');
         final root = system.instances.singleWhere((item) => item.isSystemUI);

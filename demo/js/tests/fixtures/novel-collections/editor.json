@@ -1,0 +1,10 @@
+{
+  "id": "novel-collections-fixture",
+  "appId": "dev.pocket.vn-collections-fixture",
+  "name": "Novel collections acceptance",
+  "version": "0.1.0",
+  "entry": "app.tsx",
+  "framework": "solid",
+  "build": 1,
+  "tickHz": 60
+}

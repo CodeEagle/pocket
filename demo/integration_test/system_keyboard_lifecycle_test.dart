@@ -251,7 +251,7 @@ void main() {
       });
     });
     try {
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(pocketHostApp());
       await guest.waitForContaining(tester, 'Tap to type');
       referenceAnchors = await _waitForStableGuestLayout(tester, layoutAnchors);
       const scrollSyncAnchors = <String>{

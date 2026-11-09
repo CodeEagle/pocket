@@ -1,0 +1,28 @@
+{
+  "backgrounds": {},
+  "characters": {
+    "mira": {
+      "neutral": "art/mira.svg",
+      "smile": "art/mira.svg"
+    }
+  },
+  "cgs": {},
+  "audio": {},
+  "collections": {
+    "harborRecords": {
+      "title": "港口人物档案",
+      "entries": {
+        "harborStation": {
+          "title": "旧车站",
+          "body": "旧车站公示牌上留下了 preview.png 字样，那只是故事正文，不是图片资源。"
+        },
+        "mira": {
+          "title": "Mira 的档案",
+          "body": "PRIVATE_RECORD_BODY：Mira 曾在雾港灯塔守夜，直到最后一班列车离开。",
+          "portrait": { "character": "mira", "expression": "neutral" },
+          "unlockVariable": "miraRecordUnlocked"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,685 @@
+{
+  "format": "pocket-vn-revision-map",
+  "formatVersion": 1,
+  "storyId": "demo.lantern.misty-last-letter",
+  "fromVersion": 2,
+  "toVersion": 6,
+  "legacySourceSha256": "9d07c142410058295bc88b9367803ec5da7b0c8e9b35427b260bcb463c60865e",
+  "legacyStorySha256": "db616b917644168486e7922607dd9d6db09f6ee9b183a6cf1c9e4661b8303d35",
+  "labelIndexes": {
+    "archive_entry": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "archive_mira": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "archive_reel_entry": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "archive_route": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "arrival.ask_ren": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      10,
+      11
+    ],
+    "arrival.check_seal": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      11,
+      12
+    ],
+    "arrival.listen_mira": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      9,
+      10
+    ],
+    "clock_double": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "clock_entry": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "clock_ren": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "clock_single": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "dial_check": [
+      0,
+      1
+    ],
+    "dial_failure": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "dial_lockout": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "dial_one": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "dial_one_1": [
+      0,
+      1,
+      2
+    ],
+    "dial_one_4": [
+      0,
+      1,
+      2
+    ],
+    "dial_one_7": [
+      0,
+      1,
+      2
+    ],
+    "dial_reset": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "dial_retry_available": [
+      0,
+      1
+    ],
+    "dial_success": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "dial_three": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "dial_three_1": [
+      0,
+      1,
+      2
+    ],
+    "dial_three_4": [
+      0,
+      1,
+      2
+    ],
+    "dial_three_7": [
+      0,
+      1,
+      2
+    ],
+    "dial_two": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "dial_two_1": [
+      0,
+      1,
+      2
+    ],
+    "dial_two_4": [
+      0,
+      1,
+      2
+    ],
+    "dial_two_7": [
+      0,
+      1,
+      2
+    ],
+    "ending_shelter": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "ending_train": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "ending_truth": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "feature_tour": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "feature_tour_dial": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "feature_tour_dial_correct": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "feature_tour_dial_route_wrong": [
+      0,
+      1,
+      2
+    ],
+    "feature_tour_finish": [
+      0,
+      1
+    ],
+    "feature_tour_hub": [
+      0,
+      1,
+      2
+    ],
+    "feature_tour_input": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "feature_tour_reel": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "hub_memory": [
+      0,
+      1,
+      2
+    ],
+    "investigation_hub": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "memory_first_visit": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "memory_note": [
+      0,
+      1
+    ],
+    "memory_protect": [
+      0,
+      1,
+      4,
+      2,
+      3,
+      5
+    ],
+    "memory_record": [
+      1,
+      4,
+      2,
+      3,
+      5
+    ],
+    "memory_repeat_visit": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "memory_trust": [
+      0,
+      1,
+      4,
+      2,
+      3,
+      5
+    ],
+    "model_showcase": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_hiyori": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "model_showcase_hiyori_idle_0": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_hiyori_idle_0_closeup": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_hiyori_idle_0_framing": [
+      0,
+      1
+    ],
+    "model_showcase_hiyori_idle_1": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_hiyori_idle_1_closeup": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_hiyori_idle_1_framing": [
+      0,
+      1
+    ],
+    "model_showcase_hiyori_menu": [
+      0,
+      1
+    ],
+    "model_showcase_hiyori_tap_body": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_hiyori_tap_body_closeup": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_hiyori_tap_body_framing": [
+      0,
+      1
+    ],
+    "model_showcase_mira": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_mira_alert": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_mira_idle": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "model_showcase_mira_menu": [
+      0,
+      1
+    ],
+    "model_showcase_mira_settle": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "registry_open": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "registry_public_no": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "registry_public_yes": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "relay_entry": [
+      0,
+      1
+    ],
+    "relay_need_clues": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "relay_ready": [
+      0,
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "roof_entry": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "roof_lens": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "roof_log": [
+      0,
+      1,
+      2,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "roof_mira": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "signal_timeout": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "signal_window": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      12,
+      13
+    ],
+    "start": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37
+    ]
+  }
+}

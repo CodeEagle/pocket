@@ -116,7 +116,7 @@ void main() {
   testWidgets('measure actual frame timings without synthetic pump cadence', (
     tester,
   ) async {
-    await tester.pumpWidget(const PocketHostApp());
+    await tester.pumpWidget(pocketHostApp());
     await guest.waitFor(tester, '00');
     await Future<void>.delayed(const Duration(seconds: 2));
     final results = <Map<String, Object>>[];

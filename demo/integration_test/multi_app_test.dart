@@ -8,10 +8,12 @@ import 'package:pocket_sdk/pocket_sdk.dart';
 import 'guest_interaction_test.dart' as guest;
 
 final _surfaceFacts = <int, List<String>>{};
+late PocketBundledApplicationCatalog _bundledApplications;
 
 const _showcase = 'pocket.host.demo';
 const _profile = 'pocket.demo.profile';
 const _lobby = 'pocket.demo.lobby';
+const _officialHero = 'dev.pocket-nexus.hero';
 
 Future<PocketSystemInstanceSnapshot> _instance(
   WidgetTester tester,
@@ -52,9 +54,12 @@ void _hiddenTickerStopped(WidgetTester tester, PocketSession session) {
 
 Future<int> _openLatency(
   WidgetTester tester,
-  PocketSystemHostController host,
-) async {
-  final point = await guest.reveal(tester, 'Open lobby app');
+  PocketSystemHostController host, {
+  bool revealFromBelow = false,
+}) async {
+  final point = revealFromBelow
+      ? await _revealLobbyFromBelow(tester)
+      : await guest.reveal(tester, 'Open lobby app');
   final down = await tester.startGesture(point);
   await tester.pump(const Duration(milliseconds: 50));
   final clock = Stopwatch()..start();
@@ -63,11 +68,38 @@ Future<int> _openLatency(
   return clock.elapsedMilliseconds;
 }
 
+Future<Offset> _revealLobbyFromBelow(WidgetTester tester) async {
+  for (var attempt = 0; attempt < 12; attempt++) {
+    if (guest.pointFor(tester, 'Open lobby app') != null) {
+      return guest.reveal(tester, 'Open lobby app', scroll: false);
+    }
+    final box = tester.renderObject<RenderBox>(guest.activePocketViewFinder());
+    final gesture = await tester.startGesture(
+      box.localToGlobal(Offset(box.size.width * .35, box.size.height * .4)),
+    );
+    for (var sample = 0; sample < 10; sample++) {
+      await gesture.moveBy(const Offset(0, 23));
+      await tester.pump(const Duration(milliseconds: 16));
+      if (guest.pointFor(tester, 'Open lobby app') != null) break;
+    }
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+  return guest.reveal(tester, 'Open lobby app', scroll: false);
+}
+
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
 
-  setUp(() {
+  setUp(() async {
+    _bundledApplications = await PocketBundledApplicationCatalog.loadFromBundle(
+      'assets/apps/official/catalog.json',
+      assetPrefix: 'assets/',
+      firstCompositorHandle: 4,
+      lastCompositorHandle: 62,
+      reservedAppIds: const <String>{'pocket.host.demo'},
+    );
     _surfaceFacts.clear();
     debugPocketFrameDeltaAtOverride = (runtime, delta) {
       final frame = pocketFrameDeltaAt(runtime, delta);
@@ -87,7 +119,12 @@ void main() {
     (tester) async {
       final host = PocketSystemHostController();
       try {
-        await tester.pumpWidget(PocketHostApp(systemController: host));
+        await tester.pumpWidget(
+          pocketHostApp(
+            systemController: host,
+            bundledApplications: _bundledApplications,
+          ),
+        );
         await guest.waitFor(tester, '00');
         await guest.tapGuest(tester, '+1');
         await guest.waitFor(tester, '01');
@@ -165,7 +202,12 @@ void main() {
     (tester) async {
       final host = PocketSystemHostController();
       try {
-        await tester.pumpWidget(PocketHostApp(systemController: host));
+        await tester.pumpWidget(
+          pocketHostApp(
+            systemController: host,
+            bundledApplications: _bundledApplications,
+          ),
+        );
         await guest.waitFor(tester, '00');
         final coldMs = await _openLatency(tester, host);
         await guest.waitFor(tester, 'Pocket Lobby');
@@ -183,7 +225,7 @@ void main() {
         );
         _hiddenTickerStopped(tester, warm.session);
         expect(host.instances.length, lessThanOrEqualTo(3));
-        final warmMs = await _openLatency(tester, host);
+        final warmMs = await _openLatency(tester, host, revealFromBelow: true);
         final opened = await _instance(tester, host, _lobby, presented: true);
         expect(
           opened.instanceId,
@@ -209,6 +251,41 @@ void main() {
     },
   );
   testWidgets(
+    'Showcase opens the staged official Hero through platform.openApp',
+    (tester) async {
+      final host = PocketSystemHostController();
+      try {
+        await tester.pumpWidget(
+          pocketHostApp(
+            systemController: host,
+            bundledApplications: _bundledApplications,
+          ),
+        );
+        await guest.waitFor(tester, '00');
+        await guest.tapGuest(tester, 'Open hero demo');
+        final hero = await _instance(
+          tester,
+          host,
+          _officialHero,
+          presented: true,
+        );
+        await guest.waitFor(tester, 'PocketJS: Hero');
+        await guest.waitFor(tester, 'Count: 0');
+        expect(hero.session.failure, isNull);
+        expect(hero.compositorFocused, isTrue);
+
+        // Flutter pointer input activates the guest's Focusable. This verifies
+        // the pointer fallback path without claiming physical button support.
+        await guest.tapGuest(tester, 'Press Circle');
+        await guest.waitFor(tester, 'Count: 1');
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        host.dispose();
+      }
+    },
+  );
+  testWidgets(
     'runtime failure releases native slots and owner failure retires children',
     (tester) async {
       final host = PocketSystemHostController();
@@ -226,7 +303,12 @@ void main() {
       }
 
       try {
-        await tester.pumpWidget(PocketHostApp(systemController: host));
+        await tester.pumpWidget(
+          pocketHostApp(
+            systemController: host,
+            bundledApplications: _bundledApplications,
+          ),
+        );
         await guest.waitFor(tester, '00');
         await guest.tapGuest(tester, 'Open lobby app');
         await guest.waitFor(tester, 'Pocket Lobby');

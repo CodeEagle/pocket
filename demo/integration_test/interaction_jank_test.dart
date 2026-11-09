@@ -73,7 +73,7 @@ void main() {
     final previousPaintProfiling = debugProfilePaintsEnabled;
     try {
       await tester.pumpWidget(
-        PocketHostApp(systemController: host, recordings: recordings),
+        pocketHostApp(systemController: host, recordings: recordings),
       );
       await guest.waitFor(tester, '00');
       await Future<void>.delayed(const Duration(seconds: 1));

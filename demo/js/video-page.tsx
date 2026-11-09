@@ -205,6 +205,26 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
   const [retryAsset, setRetryAsset] = createSignal(VIDEO_LAB_ASSETS.missing);
   const [retryPlaying, setRetryPlaying] = createSignal(videoLabIntent(RETRY_ID));
   const [miniAppStatus, setMiniAppStatus] = createSignal("Not opened");
+  const [progressStatus, setProgressStatus] = createSignal("Native progress not inspected");
+  const [progressBusy, setProgressBusy] = createSignal(false);
+  let progressAlive = true;
+  onCleanup(() => { progressAlive = false; });
+
+  const inspectProgress = async (seek = false): Promise<void> => {
+    if (!media || progressBusy()) return;
+    setProgressBusy(true);
+    try {
+      let fact = await media.inspect(HERO_ID);
+      if (seek) fact = await media.seek(HERO_ID, 1000);
+      if (progressAlive) setProgressStatus(
+        `${seek ? "Seek complete" : "Native time"} · ${fact.positionMs ?? "unknown"} / ${fact.durationMs ?? "unknown"} ms · ${fact.state}`,
+      );
+    } catch (error) {
+      if (progressAlive) setProgressStatus(`Video request failed · ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (progressAlive) setProgressBusy(false);
+    }
+  };
 
   const nativeStateFor = (id: string): string => nativeStates()[id] ?? "unknown";
   const nativeLabelFor = (id: string): string => `${id} · ${nativeStateFor(id)}`;
@@ -404,6 +424,11 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
                 </Show>
                 <VideoControls entry={hero} log={log} label="hero" />
                 <View class="flex-row flex-wrap gap-2">
+                  <MobileButton label="Inspect progress" compact disabled={progressBusy()} onPress={() => void inspectProgress()} />
+                  <MobileButton label="Seek to 1s" kind="outlined" compact disabled={progressBusy()} onPress={() => void inspectProgress(true)} />
+                </View>
+                <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>{progressStatus()}</Text>
+                <View class="flex-row flex-wrap gap-2">
                   <MobileButton
                     label="Remove Video"
                     kind="outlined"
@@ -476,7 +501,7 @@ export function VideoPage(props: VideoPageProps): JSX.Element {
                 </MobileCard>
                 <MobileCard title="Supported scope" detail="This page exposes the current Video API only.">
                   <Text class={theme().name === "dark" ? "text-xs text-white" : "text-xs text-[#17233B]"}>Supported: bundled local MP4 assets, fixed loop + muted playback, play/pause intent, lifecycle/coverage gates, feed exclusivity, and native draw visibility.</Text>
-                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>Not exposed: seek/progress, volume, playback-completion callbacks, and network URL assets. These are not part of this test page.</Text>
+                  <Text class={theme().name === "dark" ? "text-xs text-[#B9C5D8]" : "text-xs text-[#7C8799]"}>Inspect and seek use real native position/duration facts. Volume, playback-completion callbacks and network URL assets are not exposed by this page.</Text>
                 </MobileCard>
               </Show>
               <Show when={tab() === "coverage"}>

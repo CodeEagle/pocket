@@ -29,7 +29,7 @@ void main() {
         return frame;
       };
       try {
-        await tester.pumpWidget(PocketHostApp(systemController: controller));
+        await tester.pumpWidget(pocketHostApp(systemController: controller));
         await guest.waitFor(tester, '00');
         final session = controller.instances
             .singleWhere((instance) => instance.isSystemUI)

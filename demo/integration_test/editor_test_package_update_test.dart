@@ -29,7 +29,7 @@ void main() {
       reason: 'Acceptance must not delete the interactive Editor package store');
     expect(showcaseConfig.updates!.configured, isTrue);
     try {
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(pocketHostApp());
       await guest.waitFor(tester, '00');
       await _updates(tester);
       await guest.tapGuest(tester, 'Check');
@@ -52,7 +52,7 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump(const Duration(milliseconds: 100));
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(pocketHostApp());
       await guest.waitFor(tester, '00');
       await _updates(tester);
       await guest.waitForContaining(tester, 'active=$_version');

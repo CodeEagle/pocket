@@ -122,7 +122,7 @@ void main() {
     );
 
     try {
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(pocketHostApp());
       await guest.waitFor(tester, '00');
       await guest.tapGuest(tester, '+1');
       await guest.waitFor(tester, '01');
@@ -168,7 +168,7 @@ void main() {
       // Restart the host shell: the last healthy signed package is persistent.
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump(const Duration(milliseconds: 100));
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(pocketHostApp());
       await _waitForContaining(tester, 'Pocket Host Lab v1');
       await _openUpdates(tester);
       await _waitForContaining(tester, 'active=1.0.1');

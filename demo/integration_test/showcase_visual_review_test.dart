@@ -60,10 +60,10 @@ void main() {
           alignment: Alignment.topLeft,
           child: RepaintBoundary(
             key: showcase.captureKey,
-            child: const SizedBox(
+            child: SizedBox(
               width: 390,
               height: 780,
-              child: PocketHostApp(),
+              child: pocketHostApp(),
             ),
           ),
         ),

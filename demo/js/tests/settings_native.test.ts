@@ -84,6 +84,20 @@ function clone<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 }
 
+async function waitForTextToDisappear(
+  session: NativeSession,
+  frame: Frame,
+  label: string,
+  maxFrames = 30,
+): Promise<Frame> {
+  let latest = frame;
+  for (let index = 0; index < maxFrames && textOps(latest, label).length > 0; index += 1) {
+    latest = await session.frame();
+  }
+  assert.equal(textOps(latest, label).length, 0, `${label} should be gone after its exit transition`);
+  return latest;
+}
+
 async function run(): Promise<void> {
   const artifacts = readNativeArtifacts("POCKET_SETTINGS");
   const first = new NativeSession(artifacts, { width, height, deadlineMs: 25_000 });
@@ -168,7 +182,9 @@ async function run(): Promise<void> {
   assert.match(textOf(frame), /Reset appearance\?/);
   textOp(frame, "Reset");
   frame = await first.tap("Reset", frame);
-  frame = await first.settle(frame, 12);
+  // The real overlay exit lasts 220ms (more than 12 probe frames). Wait until
+  // the dialog is actually unmounted before sending the scroll gesture below.
+  frame = await waitForTextToDisappear(first, frame, "Reset appearance?");
   assert.equal(rootColor(frame), 0xfff5f6fa, "Reset must restore the light root canvas");
   frame = await first.drag({ x: 180, y: 300 }, { x: 180, y: 600 }, 1);
   frame = await first.settle(frame, 8);

@@ -32,7 +32,7 @@ void main() {
       const biometricsChannel = MethodChannel(
         'com.pocketnexus.host/hardware/biometrics',
       );
-      await tester.pumpWidget(const PocketHostApp());
+      await tester.pumpWidget(pocketHostApp());
       await guest.waitFor(tester, '00');
 
       // This is the same service registered by PocketPermissionsPlugin. It

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { showcaseCompositorSurfaces } from "../official_demos.ts";
 
 type JsonObject = Record<string, unknown>;
 type ProbeResponse = { ok?: boolean; error?: string; runtimeAbi?: string; frame?: Frame };
@@ -17,6 +18,7 @@ const flutterRoot = resolve(root, "..");
 const bytecodePath = resolve(process.env.POCKET_GUEST_BYTECODE ?? join(flutterRoot, "assets/app.qjbc"));
 const pakPath = resolve(process.env.POCKET_GUEST_PAK ?? join(flutterRoot, "assets/app.pak"));
 const metadataPath = resolve(process.env.POCKET_GUEST_METADATA ?? join(flutterRoot, "assets/app.bytecode.json"));
+const compositorSurfaces = showcaseCompositorSurfaces();
 
 function bytecodeCapable(path: string): boolean {
   if (!existsSync(path)) return false;
@@ -75,7 +77,7 @@ function runProbe(commands: JsonObject[]): ProbeResponse[] {
 
 function frameFor(bytecode: string, pak: string): Frame {
   const baseCommands = [
-    command("create", { width: 360, height: 640, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } }),
+    command("create", { width: 360, height: 640, compositorSurfaces }),
     command("loadBytecode", { bytecodePath: bytecode, pakPath: pak }),
     command("frame", { deltaMs: 16 }),
   ];

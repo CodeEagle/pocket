@@ -1,0 +1,120 @@
+{
+  "id": "dev.pocket.vn-inventory-fixture",
+  "version": 1,
+  "start": "start",
+  "variableDefinitions": {
+    "harborCoins": { "lifetime": "save", "defaultValue": 30 },
+    "lampCount": { "lifetime": "save", "defaultValue": 0 },
+    "editorLampStock": { "lifetime": "save", "defaultValue": 0 },
+    "rationCount": { "lifetime": "save", "defaultValue": 1 },
+    "chartCount": { "lifetime": "save", "defaultValue": 0 }
+  },
+  "inventory": {
+    "currency": { "title": "雾港银币", "variable": "harborCoins" },
+    "items": {
+      "lamp": {
+        "title": "潮灯",
+        "body": "铜制灯罩里封着一颗蓝色微光，能照亮雾里的石阶。",
+        "quantityVariable": "lampCount",
+        "buyPrice": 12,
+        "sellPrice": 7,
+        "maxQuantity": 1
+      },
+      "ration": {
+        "title": "咸鱼干",
+        "body": "海风吹干的鱼肉，足够撑过一段雾路。",
+        "quantityVariable": "rationCount",
+        "buyPrice": 3,
+        "sellPrice": 1,
+        "maxQuantity": 2
+      },
+      "chart": {
+        "title": "远洋罗盘",
+        "body": "以银针刻出的航海罗盘，标价高过旅人身上的银币。",
+        "quantityVariable": "chartCount",
+        "buyPrice": 50,
+        "maxQuantity": 1
+      }
+    }
+  },
+  "script": {
+    "start": [
+      { "type": "say", "id": "market_open", "text": "雾港集市开张了。每笔交易都由故事里的选择完成。" },
+      { "type": "call", "target": "merchant" },
+      { "type": "call", "target": "merchant" },
+      { "type": "call", "target": "merchant" },
+      { "type": "call", "target": "merchant" },
+      { "type": "call", "target": "merchant" },
+      { "type": "call", "target": "merchant" },
+      { "type": "call", "target": "merchant" },
+      { "type": "ending", "id": "market_close", "text": "集市收摊，雾港的灯仍亮着。" }
+    ],
+    "merchant": [
+      {
+        "type": "choice",
+        "id": "market_choice",
+        "prompt": "摊主等着你的决定。",
+        "options": [
+          { "id": "buy-lamp", "text": "买一盏潮灯", "target": "buy_lamp" },
+          { "id": "cap-lamp", "text": "再买一盏潮灯（测试携带上限）", "target": "cap_lamp" },
+          { "id": "buy-chart", "text": "试买远洋罗盘（测试余额）", "target": "buy_chart" },
+          { "id": "sell-lamp", "text": "卖出潮灯", "target": "sell_lamp" },
+          { "id": "sell-empty-lamp", "text": "卖出空仓潮灯", "target": "sell_empty_lamp" },
+          { "id": "consume-ration", "text": "吃一份咸鱼干", "target": "consume_ration" },
+          { "id": "consume-empty-ration", "text": "再吃一份咸鱼干", "target": "consume_empty_ration" }
+        ]
+      }
+    ],
+    "buy_lamp": [
+      { "type": "trade", "item": "lamp", "action": "buy", "quantity": 1, "onFailure": "lamp_limit" },
+      { "type": "say", "id": "lamp_bought", "text": "潮灯买好了。" },
+      { "type": "return" }
+    ],
+    "lamp_limit": [
+      { "type": "say", "id": "lamp_limit_failed", "text": "潮灯已达到携带上限。" },
+      { "type": "return" }
+    ],
+    "cap_lamp": [
+      { "type": "trade", "item": "lamp", "action": "buy", "quantity": 1, "onFailure": "lamp_limit" },
+      { "type": "say", "id": "lamp_bought_again", "text": "第二盏潮灯也买好了。" },
+      { "type": "return" }
+    ],
+    "buy_chart": [
+      { "type": "trade", "item": "chart", "action": "buy", "quantity": 1, "onFailure": "insufficient_funds" },
+      { "type": "say", "id": "chart_bought", "text": "远洋罗盘买好了。" },
+      { "type": "return" }
+    ],
+    "insufficient_funds": [
+      { "type": "say", "id": "funds_failed", "text": "银币不足，这笔交易没有扣款。" },
+      { "type": "return" }
+    ],
+    "sell_lamp": [
+      { "type": "trade", "item": "lamp", "action": "sell", "quantity": 1, "onFailure": "insufficient_lamp_stock" },
+      { "type": "say", "id": "lamp_sold", "text": "潮灯已卖出。" },
+      { "type": "return" }
+    ],
+    "sell_empty_lamp": [
+      { "type": "trade", "item": "lamp", "action": "sell", "quantity": 1, "onFailure": "insufficient_lamp_stock" },
+      { "type": "say", "id": "lamp_sold_empty", "text": "空仓潮灯也卖出去了。" },
+      { "type": "return" }
+    ],
+    "insufficient_lamp_stock": [
+      { "type": "say", "id": "lamp_stock_failed", "text": "没有潮灯可卖，交易没有改变行囊。" },
+      { "type": "return" }
+    ],
+    "consume_ration": [
+      { "type": "trade", "item": "ration", "action": "consume", "quantity": 1, "onFailure": "insufficient_ration_stock" },
+      { "type": "say", "id": "ration_consumed", "text": "咸鱼干吃完了。" },
+      { "type": "return" }
+    ],
+    "consume_empty_ration": [
+      { "type": "trade", "item": "ration", "action": "consume", "quantity": 1, "onFailure": "insufficient_ration_stock" },
+      { "type": "say", "id": "ration_consumed_empty", "text": "又吃了一份咸鱼干。" },
+      { "type": "return" }
+    ],
+    "insufficient_ration_stock": [
+      { "type": "say", "id": "ration_stock_failed", "text": "咸鱼干已经用完，行囊没有变化。" },
+      { "type": "return" }
+    ]
+  }
+}

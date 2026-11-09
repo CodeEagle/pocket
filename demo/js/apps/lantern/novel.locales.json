@@ -1,0 +1,866 @@
+{
+  "format": "pocket-vn-locales",
+  "formatVersion": 1,
+  "catalogs": {
+    "en": {
+      "format": "pocket-vn-locale",
+      "formatVersion": 1,
+      "locale": "en",
+      "lines": {
+        "arrival_01": "11:08 p.m. The ticket clock at Mist Harbor Lighthouse Station has been stopped at 11:14 for twenty years. As you check a ticket, its hand slips backward one mark; the yellow lamp at the end of the platform lights too—the lens is locked in storage.",
+        "arrival_02": "I have a letter to deliver. The envelope is dry, though it rained all the way here. The postmark says Mist Harbor Station, twenty years from now. That date does not exist here yet.",
+        "arrival_03": "That lamp should not be lit. The old relay sends light across the strait, not twenty years ahead. My sister went missing across the water twenty years ago. I sealed the signal box afterward, and for years I called that night a simple malfunction.",
+        "arrival_04": "Mira does not answer. She holds the envelope beneath the ticket lamp. Its postmark is twenty years ahead of tonight; the seawall alarm has started counting down, and the last train will not wait for the fog to lift.",
+        "arrival_05": "You check the clocks: the station clock is stuck at 11:14, while the duty sheet says 11:08. The last train leaves at 11:47; the seawall closes in thirty-nine minutes. Ask Mira, ask Ren, or examine the envelope first.",
+        "arrival_mira_01": "The sender line is blank; only Ren is written in the recipient box. I know the handwriting—it is my mother’s. She told me to place the letter in your hands, leave it sealed, and not tell you who she is yet.",
+        "arrival_ren_01": "The lens can use sea fog to carry light across the strait; it cannot fold twenty years into a road. I remember only the second chime that night. By the time I reached the far shore, no one answered. I will not repair it from memory again.",
+        "arrival_ren_02": "Do not treat my memory as evidence. Find the old mail route, the echo marks inside the bell box, and the time in the tide log. If those records disagree, we do not power it on.",
+        "arrival_seal_01": "The postmark is dated the same night, twenty years from now. Ren is in the recipient box; the sender line is blank. The wax is whole and the paper dry, but a grain of salt is pressed into the seal.",
+        "arrival_seal_02": "Thank you for leaving it sealed. It is not a secret. It is something someone has waited a long time to say.",
+        "hub_01": "Rain begins tapping the roof. The archive lock is swollen with water, fresh salt lies inside the signal box, and the rooftop lens flashed without warning. Three places, three traces. Each trip brings the tide closer; follow the evidence in order.",
+        "archive_01": "Only the desk lamp still works in the archive. A 7 is stamped on the Harbor Mail Routes chart, whose corner was torn away years ago. A grain of salt is wedged in the paper seam, just like the one in the envelope seal.",
+        "archive_02": "The old chart sends Route 7 across the strait, not to a post office but to the receiving hut on the far shore. A crease in the envelope matches that line. The postmark tells more than the date.",
+        "archive_reel_01": "Mira pulls a silent reel from the bottom of the cabinet. The box reads ‘Route 7 night watch.’ The image holds one corner of the archive as it was years ago.",
+        "archive_reel_02": "The camera drifts toward the old strait mail-route chart. Film grain shimmers in the lamplight, and the faded lines grow clearer as the frame draws close. The reel preserves only a fragment of that night's watch; Route 7 still needs to be checked against the original record.",
+        "archive_route_01": "The chart draws Route 7 from the lighthouse window to the receiving hut. A red note reads: “In the thickest fog, send only the first beam. A second will drive a boat back toward the reef.” Water erased the next line, leaving only: “Confirm the landing point.”",
+        "archive_route_02": "Mira’s finger stops at the receiving hut. “My mother used to describe a single light over the water. I thought it was a fishing boat. I never knew someone had aimed it for her.”",
+        "archive_mira_01": "The sender left one instruction: “Do not follow the second chime. Watch which window the first beam finds.” I thought it was a riddle until I saw this chart.",
+        "clock_01": "Three bell wires run through the signal box. A brass tag marked “Old Relay” hangs on the thinnest one beside the clock, stopped at 11:14. The lid reads: first chime confirms; second seals the line. “Fault” was written over the original label later.",
+        "clock_02": "The first chime carries an echo across the strait. The second drops the safety gate. It is not a louder call; it prevents a second beam from entering the storm route. A damp sheet inside the box still bears a child’s words: “Did she hear?”",
+        "clock_single_01": "After the first chime, its echo reaches the platform beams and returns through the box. The hand does not move, but the confirmation wire lights once. The old relay is listening for that echo, not a louder sound.",
+        "clock_single_02": "I treated both chimes as calls. I thought the second would carry through the fog. It never occurred to me that the first might have been enough. Thank you for letting me hear the echo.",
+        "clock_double_01": "Stop. The second chime dropped the safety gate. It was neither a fault nor an amplifier; it was blocking the second beam. Reset the latch, then follow the record for one more test.",
+        "clock_ren_01": "I am twenty-eight now. That night I was eight. Father left me at the station; my six-year-old sister was with Mother in the receiving hut across the strait. I struck the bell twice, thinking the second chime would reach her. After the safety gate fell, I never heard her answer.",
+        "roof_01": "Salt clouds the rooftop lens, but the glass is unbroken. A storm log is pinned beneath a bolt, its wet ink bleeding backward at the fold. Across the water, you hear one knock on glass, matching the child’s words inside the box.",
+        "roof_02": "The old receiving-hut safety rule reads: at the first northbound beam, leave the seawall. Do not wait for a second. A child’s writing in the margin has only four words left: “I saw it.”",
+        "roof_mira_01": "My mother is your sister. On this night she is twenty-six, and I am four; twenty years later I am twenty-four, carrying her letter back here. She has been alive all along. You mistook that night’s silence for losing her.",
+        "roof_log_01": "The log marks the tide turn at 11:14 and uses the minute’s last digit as its check. Someone crossed out 11:15 with the note “second beam cancelled.” This is the time of the storm record, not the stopped clock’s reading.",
+        "roof_lens_01": "The lens’s north notch lines up with Route 7. It can focus one beam on the receiving hut, not light the whole coast. The frame is engraved: “Stop when the echo returns. Never send a second beam.”",
+        "roof_lens_02": "My mother remembered only that one light, and thought it came from a fishing boat. Now I see someone had aimed it for her. She really did see it that night.",
+        "memory_01": "When my mother was six, sea fog swallowed the receiving hut. Grandmother saw a single northbound beam and led her away from the seawall; the safety gate fell at the second chime. She survived, but never knew who rang the bell from the station.",
+        "memory_02": "Only as an adult did she find the record. Twenty years later, at forty-six, she gave the letter to me, at twenty-four, and said: “Do not explain your uncle to himself. Let him see the evidence and decide how to remember me.”",
+        "memory_03": "I did not tell you who my mother was when I arrived. I was afraid you would see her shadow and never hear my own voice. But when that bell sounded, I still saw her at six in the fog.",
+        "registry_01": "I do not know where this letter will go in the end. If someone wants to write back, I can leave a return label first: the recipient's name, then a number for the station mailbox.",
+        "registry_02": "The recipient on the return label is {{reply_name}}. The name stays here so a later letter has somewhere to go.",
+        "registry_03": "Mailbox {{reply_box}} is only for waiting letters; the person on duty still keeps the seal.",
+        "registry_04_yes": "I will keep your name with {{reply_name}}'s return box. Whoever writes back can see it, and the station will remember who left a light along this route.",
+        "registry_04_no": "All right. The letter can go back, but your name need not be public. The return box still belongs to {{reply_name}}; that is enough.",
+        "memory_trust_01": "Thank you. Do not rush to treat me as an answer. For now, I am someone who came here carrying my mother’s secret.",
+        "memory_protect_01": "All right. We will leave it sealed. The letter is hers, but the words inside are not an order. Let us find out why she sent it back before we decide to read it.",
+        "memory_record_01": "Then write these separately: the receiving hut saw the first beam; the second chime dropped the gate. Back then, you remembered only the second half.",
+        "relay_missing_01": "One piece of evidence is still missing. This is not about trusting anyone. Compare the route chart, the box lid, and the rooftop log; do not touch the dial while one is missing.",
+        "relay_01": "The three records finally agree: the chart points to the receiving hut, the box explains the order of the chimes, and the rooftop log marks the tide turn. Each wheel has one job. Do not turn them into a single remembered phrase.",
+        "relay_02": "A letter from the future is not an order. You can stop, or use the records we found to answer the past. The fog window is almost gone, but no one will press the switch for you.",
+        "dial_01": "The first wheel chooses a route. Several old lines cross the strait, but only one ends at the receiving hut. Where should the beam land?",
+        "dial_02": "The second wheel closes the signal circuit. The record marks one chime as confirmation and the second as a lockout. Which did you hear?",
+        "dial_03": "The final wheel follows the tide log. Do not guess from the stopped clock; use the minute’s last digit at the turn of the tide.",
+        "dial_success_01": "The wheels catch. A line of light slips from the station window across the water and lands on the receiving hut’s narrow pane. One confirmation chime sounds; the safety gate stays open.",
+        "dial_success_02": "Two knocks come through the fog, against glass. Not a bell. Someone is answering. I thought I would never hear that sound again.",
+        "dial_success_03": "The wax warms, and the grain of salt in the seal melts into a ring of water. The sender line stays blank, but words appear on the back: “I heard you.”",
+        "dial_failure_01": "The power cuts, but the safety gate holds. The machine is not refusing us; the circuit is in the wrong order. We have tried {{code_misses}} time(s). We can check again or stop here.",
+        "dial_lockout_01": "The safety latch is locked. Forcing the dial would burn the lens and take the station’s only reliable warning light with it. The letter can wait; the passengers cannot.",
+        "window_01": "The storm rolls over the roof. The relay window may hold for sixteen more seconds; the last train sounds beyond the seawall. The light can serve one route: back to the past, out of the harbor, or toward the shelter.",
+        "window_02": "Get the passengers into shelter first. A train, a letter, and an old photograph cannot stop the water. After that, each choice has only one chance.",
+        "timeout_01": "Sixteen seconds pass, and the evacuation bell rings automatically. You lead the passengers to shelter while Mira boards the last train with the sealed letter. The relay window closes. She will find her twenty-six-year-old mother and four-year-old self in this night; you and Ren stay behind without an answer from the past.",
+        "truth_01": "The aligned beam crosses the strait and reaches the receiving hut twenty years ago. The envelope grows lighter in your hands, its seal still whole. This does not rewrite the storm; it sends a reply twenty years late.",
+        "truth_02": "At last, Ren hears his sister answer. She had heard him; she thought he never rang again. In two different nights, each mistook the other’s silence for goodbye.",
+        "truth_03": "Twenty years ago, the six-year-old sister followed her mother away from the seawall. She saw the first beam, then heard the gate fall at the second chime. She survived, but only learned as an adult that eight-year-old Ren had rung the bell from the station.",
+        "truth_04": "After the wind dies, the letter disappears from the station history cabinet; only a dry postmark remains. Mira returns with the light to twenty years ahead, to her forty-six-year-old mother. She can no longer meet that night’s twenty-six-year-old mother or her four-year-old self. Ren gets an answer, but cannot send a second letter.",
+        "train_01": "You return the sealed letter to Mira. The last train cannot cross twenty years of fog, but it can take her into town: to find her twenty-six-year-old mother and glimpse her own four-year-old self. She carries the letter away, but sends no reply to the Ren of the past.",
+        "train_02": "I will see my mother first, then look in on the four-year-old me. They do not know where I came from, and I will not turn their lives into an explanation. Tonight, I can finally choose to walk up to that door.",
+        "train_03": "You copy the three records into the repair log. Ren knows his sister is alive, but he never hears her answer from twenty years ago. He may go find her; he cannot make that beam answer for them both.",
+        "train_04": "At dawn, Ren turns the clock to 11:15. The hand finally moves forward one mark. He has not forgotten the two chimes; he just stops recording his sister’s silence as a verdict against himself.",
+        "shelter_01": "You turn the lens away and sound the station-wide alarm first. Ren leads the passengers to shelter, and Mira puts the letter in a waterproof cabinet. Everyone survives the storm, but seawater floods the signal box. The old relay can never send the letter back.",
+        "shelter_02": "I could take the train to see my mother and the four-year-old me. But if I leave now, you will be the only ones keeping the station light alive. I will stay. I give up that train and that reunion to the storm.",
+        "shelter_03": "Saltwater ruins the original log, and the echo never comes again. You save the warning light and the station, but lose the last record that could settle what happened that night.",
+        "shelter_04": "At dawn, Mira is still at the station. The letter remains sealed, and the lens is broken. She can no longer return twenty years ahead. You relight the lighthouse, leaving a real guiding light for everyone who comes after tonight.",
+        "model_showcase_intro": "This is a standalone character showcase; it does not change the main story record. Choose a model to see its motion, and use Return to journey at the top right to leave at any time.",
+        "model_showcase_mira_note": "This is the original Mist Harbor Mira Spine model. Choose idle, alert, or settle below.",
+        "model_showcase_hiyori_note": "This is the official Live2D Hiyori sample, not a Mist Harbor story character or an original asset. The official sample attribution follows.",
+        "model_showcase_hiyori_attribution": "This content uses sample data owned and copyrighted by Live2D Inc. The sample data are utilized in accordance with terms and conditions set by Live2D Inc. This content itself is created at the author’s sole discretion.",
+        "model_showcase_mira_idle_display": "The idle animation is showing. Tap to continue to the action menu.",
+        "model_showcase_mira_alert_display": "The alert animation is showing. Tap to continue to the action menu.",
+        "model_showcase_mira_settle_display": "The settle animation is showing. Tap to continue to the action menu.",
+        "add_start_01": "A thin line of water fills the platform's floorboards, yet it reflects the lighthouse beneath a clear sky. When you look again, rain has torn the reflection apart; only a trembling yellow glow remains.",
+        "add_start_02": "The old calendar behind the ticket window is open to this date, twenty years ago. Its pages are dry; only this one has been folded, with the crease running straight through the receiving hut across the strait.",
+        "add_start_03": "You turn over the ticket. Ink slowly surfaces along its fibers: a seven. It is neither a station nor a seat number; it looks like someone has folded the mail route down to the size of your palm.",
+        "add_start_04": "When the platform speaker powers on, half a weather report breaks through, then only a papery hiss remains. Ren notes the old line’s poor contact in the duty book.",
+        "add_start_05": "The red seawall beacon flashes through the fog three times; the third flash fails halfway. The duty book calls it a worn circuit, but the station clock slips backward at that very moment.",
+        "add_start_06": "The envelope in Mira's palm bears no rain marks, but her cuff is soaked. Her thumb stays pressed to the wax, as if checking that the grain of salt is still there and was not washed away on the journey.",
+        "add_start_07": "Ren grips his keys until the oldest one leaves a crescent mark in his palm. It is not kept beside the signal box; he has carried the lock to that night with him all these years.",
+        "add_start_08": "There is no train in the distance, yet the rails give a soft clank, as if wheels have just crossed the wet track. The sound travels down the platform and stops at your feet, unwilling to go farther.",
+        "add_start_09": "Rain draws two parallel lines along the ticket stub; the wind erases one. You remember the missing corner of the old chart and wonder whether what is gone is only paper, or a stretch of road someone erased.",
+        "add_start_10": "The office clock, ticket clock, and your watch differ by six minutes. All three are running. Only the clock facing the sea at the end of the platform is stopped, as if it keeps time for another night alone.",
+        "add_listen_01": "Mira does not look at Ren. She watches the blank sender line. When her mother handed her the letter, she says, the rain sounded just like this; her mother heard no bell at all.",
+        "add_listen_02": "Her mother folded the chart twice: once along the route, then once through the names. Unfolded, every line meets at the receiving hut. Only the sender's place remains blank.",
+        "add_listen_03": "Mira brings the letter toward the lamp but keeps it from touching the glass. A faint nail mark crosses the wax, as if its writer hesitated once more before sealing it.",
+        "add_listen_04": "She will not say what her mother hopes to receive. The letter was kept in a dry metal box beside an unused return ticket. Its date is tonight.",
+        "add_listen_05": "“She asked me to make the journey myself,” Mira says. “Not because she did not want to come, but because if she stood here, you might answer only the person you remember.”",
+        "add_listen_06": "She draws her hand back into her sleeve, leaving a pale line of salt. It is not from the envelope; it dried there from sea wind and the sweat of holding the seal all the way here.",
+        "add_ren_01": "Ren does not deny sealing the signal box. He adds that its lock has been replaced three times, but the key never lost; whenever the station moved, he packed it with his own things.",
+        "add_ren_02": "“I remember the waves swallowing the second chime,” he says. “But the marks on the lid are older than my memory. If the first chime brought an echo, why did I not wait for it?”",
+        "add_ren_03": "He takes a blackened wire from the duty book. Salt has cracked its coating, and the old report records a short after a storm. The oxidized end cannot show who last touched it.",
+        "add_ren_04": "Ren remembers his father telling him to stay in the station, but not whether he agreed. The height marks on the door show he barely reached the desk when he rang; he could not even see the far shore.",
+        "add_ren_05": "“I wrote the two chimes down as one mistake,” he says quietly. “If I called it a fault, I did not have to admit that at that age I had no idea what to do.”",
+        "add_ren_06": "He sets the key on the table without pushing it toward you or taking it back. It is the first time he has let someone see the lock; he still does not know whether opening it will be harder than remembering.",
+        "add_seal_01": "There is no roller mark from a post office on the envelope, only a narrow trace of glass. It looks as if the letter passed beside a lens, not through an ordinary sorting machine.",
+        "add_seal_02": "A grain of salt masks the final digit of the postmark. In a different light, it is a four—the tide log's turning check. It matches, but cannot by itself prove the letter came from the future.",
+        "add_seal_03": "The wax has no sheen from reheating, but two tiny dents along its edge match the spacing of the old lens screws. It may have rested against the machine before someone carefully removed it.",
+        "add_seal_04": "Without opening the letter, you can see faint reversed strokes on the back. They are not the message itself, only several attempts at its opening; the last one finally held.",
+        "add_seal_05": "Mira turns the seal toward herself, as if shielding a secret that arrived late. She says she need not decide whether to open it; first, record every fact visible from the outside.",
+        "add_seal_06": "Four pressed ridges mark the paper's edge, each bending toward the sea. You note them without calling them a miracle; you do not want an answer to arrive before the evidence.",
+        "add_registry_01": "The previous page reads, “A reply is not the same as returning to the past.” The ink is fresh, but its pressure marks resemble an old fountain pen from twenty years ago.",
+        "add_registry_02": "You check that the receiving box has not been soaked, then place the return slip inside a clear sleeve. Even if this fog window closes, a name may still travel by ordinary post.",
+        "add_registry_03": "The number is no magic code, only a drawer a station clerk can find. Mira says her mother asked her to write it because ordinary addresses deserve to be delivered carefully too.",
+        "add_registry_04": "You pause the pen outside the public-record box. Whether your name is kept will not change where the light points; it only decides whether someone later knows who held the letter steady.",
+        "add_registry_yes_01": "Mira smooths the page without reading your name aloud. She says making it public is not an invitation to gossip; it keeps the route from being written off as a fault no one owns.",
+        "add_registry_yes_02": "Ren adds an index beside the duty book, recording the box, time, and witness separately. A record cannot promise a future answer, but it can spare someone a stretch of fog.",
+        "add_registry_no_01": "Mira does not ask why you refused. She turns the page over and keeps only the box number and delivery date, leaving your private name in your hands.",
+        "add_registry_no_02": "Ren files the return slip without adding a guess. Silence can be a boundary; if the route is clear, someone can still deliver the letter where it belongs.",
+        "add_archive_01": "The moisture paper at the bottom of the cabinet has not mildewed; only its corners have been lifted repeatedly. The page was not ruined by seawater. Someone kept checking it and pressing it back.",
+        "add_archive_02": "The legend marks a “single northbound beam” in red, with an older pencil line beside it. They nearly overlap; only the final stretch turns away from the reef.",
+        "add_archive_03": "The tide stain spreads outward from the fold, not down from the window. Someone held this chart in the storm, keeping it close enough to protect it from the sea.",
+        "add_archive_04": "Three pinholes sit beside Route 7, as if it had been marked and moved three times. Each points to a possible landing place; the one left behind aligns with the receiving hut's narrow window.",
+        "add_archive_05": "You lay the envelope crease over the chart's fold. Their edges fit exactly. It may still be coincidence, but the postmark is no longer your only clue.",
+        "add_route_01": "Below the red note, faded words remain: “If the echo returns, check the window first; do not chase the light.” It could be advice to a child in the storm, or to anyone reading this later.",
+        "add_route_02": "The sea chart gives the receiving hut one narrow window and a sheltered slope to the south. The first beam need only confirm it was seen; boats can leave the seawall without approaching again.",
+        "add_route_03": "Mira recognizes the short mark along the chart: her mother's way of keeping notes. She never drew a whole sun, only the direction the light reached an object.",
+        "add_route_04": "You mark the reef on a copy without filling the missing corner. The gap belongs in the evidence too; otherwise a later route could mistake a guess for the original chart.",
+        "add_archive_mira_01": "Her mother spoke of a window, never of the child in the station. Mira thought one name was missing from the story; now she sees it was left for Ren to recognize on his own.",
+        "add_archive_mira_02": "The ruling on the letter's back is as wide as the chart's longitude lines. She thought it was ordinary stationery until she saw it cross Route 7's endpoint exactly.",
+        "add_archive_mira_03": "Mira reads “do not follow the second chime” twice, more softly the second time. She is not afraid of the bell; she fears mistaking her mother's warning for an order.",
+        "add_clock_01": "The lid hinge has fresh oil, but old salt crusts the keyhole. Someone maintained the machine while deliberately avoiding its key; repair and refusal both remain here.",
+        "add_clock_02": "Three wires lead to a speaker, a confirmation lamp, and the safety gate. The old diagram draws one circuit, but the lid warns that calling, answering, and stopping are different acts.",
+        "add_clock_03": "A short erasure sits beneath the child's question, as if someone began to answer and then stopped. The paper was not torn out, so the question survived until now.",
+        "add_clock_04": "No fingerprints mark the inside of the station clock's glass, only a ring of condensation. Whoever read it that night may never have touched it, only looked through the mist.",
+        "add_clock_05": "You label each wire separately and photograph its original connection. If the next step goes wrong, you can return to a point before the three functions were confused again.",
+        "add_clock_single_01": "The echo does not come from far away; it travels once around the inside of the box. When the confirmation lamp lights, no new crack appears in the glass and the safety gate stays put.",
+        "add_clock_single_02": "You record the time, sound level, and lamp state separately. They agree, but none of them alone tells you who rang the bell that night.",
+        "add_clock_single_03": "Ren studies the echo mark and moves his hand away from the stop switch. He does not thank you; he simply steps aside so you can inspect the worn ring too.",
+        "add_clock_single_04": "The wear appears only where the first chime rebounds; the second leaves a separate, deeper gate mark. The machine kept the outcomes distinct. Memory alone layered them together.",
+        "add_clock_double_01": "When the safety gate drops, the confirmation lamp stays dark. The mechanisms are separated: the second chime is not an addition to the first but a deliberate stop.",
+        "add_clock_double_02": "Ren pauses halfway through resetting the switch and waits for you to confirm the channel is clear. His hesitation is not fear of the machine; he is finally checking the conditions he once acted on.",
+        "add_clock_double_03": "A metal strip still vibrates inside the box. Its last resonance comes after the safety gate. You record it as an after-vibration, not an answer from across the strait.",
+        "add_clock_ren_01": "His father had gone to check the tide and asked him to watch the box. Ren understood “watch it” as keeping the machine running; no one explained that the second chime itself meant stop.",
+        "add_clock_ren_02": "He measures the marks on the doorframe with his knuckles and stops at his own shoulder. He was a child that night, yet has judged that child with an adult's burden ever since.",
+        "add_clock_ren_03": "“If she heard the first chime,” he says, “perhaps what I should remember is not that I failed to call her back, but that she really did leave the seawall safely.”",
+        "add_roof_01": "A piece of an old duty roster blocks the roof drain. Rain has washed away the names, but the handover times remain. The final note reads, “Light seen; do not send again.”",
+        "add_roof_02": "A shallow dent marks the north side of the lens frame. It may be a boat line or an old tool mark; with no fresh paint flakes, it cannot testify to when the light was on.",
+        "add_roof_03": "The tide stain recedes along the rail toward the station instead of spreading out to sea. After the wind pushed water over the seawall, it drew some back, leaving the retreat visible in reverse.",
+        "add_roof_04": "You lay the storm log under the rain shield. Its corners still curl upward. Pressing it flat would cover the date, so you hold only the edges and let the original fold remain visible.",
+        "add_roof_05": "A hairline glint appears on the far window with each wave crest. It is not a second beam, only old glass bending moonlight onto the sea.",
+        "add_roof_mira_01": "Mira says her mother never called that night a rescue. She only said, “I saw it, then I followed Grandmother.” Those plain words came before every later explanation.",
+        "add_roof_mira_02": "Her mother remembers light on the window, not sound from the station. At last the two memories can sit side by side; neither has to prove everything for the other.",
+        "add_roof_mira_03": "“I thought she had forgotten this station,” Mira says. “Now I know she simply had no reason to know who was inside it.”",
+        "add_roof_mira_04": "She reaches toward the window frame and stops before the glass. This is where her mother saw the light; she does not want her own fingerprint to cover that small memory.",
+        "add_roof_log_01": "Two layers of ink mark the log: “11:14 p.m.,” then a darker hand crosses out “15.” It is not a clock changing its mind; the recorder changed the light’s timing at the last moment.",
+        "add_roof_log_02": "The page records a wind direction opposite to tonight's. What can be repeated is the tide turn and its check digit, not the lucky gust that opened a window.",
+        "add_roof_log_03": "A small cross sits beside “second beam,” but its points do not pierce the page. It is not a hurried deletion; it looks like restraint left behind after a clear decision.",
+        "add_roof_log_04": "You copy the log time and station clock into separate columns. One belongs to the storm outside, the other to the mechanism inside; mixing them makes 11:14 look like a broken clock.",
+        "add_roof_lens_01": "The lens base has three marks, but only the first has been polished by use. A whole crust of salt covers the second, proof it has not moved or been secretly fired again.",
+        "add_roof_lens_02": "You mark the frame direction, window, and tide check on one transparent sheet. Their lines meet when layered, yet each can still be checked separately when stored apart.",
+        "add_roof_lens_03": "A low bank of fog rises across the strait, hiding the reef's highest point. The chart says the hut can still see the first beam beyond it; no extra brightness or signal is needed.",
+        "add_roof_lens_04": "Wind carries droplets east across the lens, matching the log's evacuation direction. You leave them in place, unwilling to disguise tonight's weather as evidence from the past.",
+        "add_roof_lens_05": "From behind the lens, the first beam needs only to touch the window's upper edge. A ruler can reproduce the angle; no one needs to raise the light by memory again.",
+        "add_memory_01": "Mira says her grandmother heard no bell, only saw one white flash on the window. She led the child away from the seawall first, then asked where it came from; the order matters more than the answer.",
+        "add_memory_02": "Her mother never described herself as someone waiting to be rescued. She remembers walking off the seawall, holding her grandmother's hand, and looking back at the window from safety.",
+        "add_memory_03": "The letter did not tell Mira how to answer her uncle; it only reminded her to bring the route chart. She may speak her own name, or let the evidence speak first.",
+        "add_memory_04": "Mira writes “I saw it” beside the child's words in the box. The handwriting differs, but both now point to the same fact: the beam really did arrive.",
+        "add_memory_05": "Ren does not interrupt. For the first time he hears his sister's daughter tell that night's story, without asking her to compress a whole life into proof.",
+        "add_memory_repeat_01": "She does not repeat the letter. She asks whether you saw the light on the window. Mira remembers not a line, but the breathing pause her mother left before saying it.",
+        "add_memory_repeat_02": "She closes the register gently, making sure the return slip is not caught inside. Whatever you choose, she will not let her mother's words be flattened beneath a form.",
+        "add_memory_repeat_03": "Another shower passes in the distance, and Mira does not turn around. This return is not meant to replay that night; it is meant to let everyone leave with their own memory.",
+        "add_memory_trust_01": "“My mother never asked you to forgive her,” Mira says. “She only hoped that record would stop calling her missing.” She places the letter between you and Ren.",
+        "add_memory_trust_02": "“You may ask me anything,” she says, “but do not treat me as the one who can testify for her. I only know that she gave me the letter.”",
+        "add_memory_protect_01": "Ren places the seal face up in the center of the table, away from the signal box. Protecting the paper and wax is the only way to check your conclusions later.",
+        "add_memory_protect_02": "Mira nods but does not take the letter back. She is willing to wait for evidence, and to admit that waiting will slowly narrow the fog window.",
+        "add_memory_record_01": "Ren turns to a blank page in the maintenance book and writes, “Clerk on duty: eight years old.” For the first time, the record includes his age instead of only a fault code.",
+        "add_memory_record_02": "Ren signs the time beside it, his handwriting steadier than the marks on the box. He does not add “fault,” or erase the child from the record.",
+        "add_relay_missing_01": "The relay dial is not locked; what is missing is the link between the three records. Turning it now would give you a number, but not tell you whether that number leads anyone away from danger.",
+        "add_relay_missing_02": "The archive gives the destination, the lid gives the order, and the roof log gives the time. Each can be misread alone; calibration begins only where all three lines meet.",
+        "add_relay_missing_03": "Ren covers the dial again, leaving a narrow gap to watch it. Waiting for evidence is not delay; it is refusing to make people on the seawall bear the cost of a guess.",
+        "add_relay_ready_01": "The three documents finally align: pinholes on the chart, echo marks on the lid, and the log's final minute digit share one page. None of them has to be discarded.",
+        "add_relay_ready_02": "Mira moves her finger away from the switch and waits for you to read every mark. She is not asking you to believe her, only hoping this reply will not be filed as another fault.",
+        "add_relay_ready_03": "Ren circles the gate mark from the second chime without erasing the first. At last, both sounds can remain in the record without cancelling each other out.",
+        "add_relay_ready_04": "Wind crosses the platform, but the pages stop turning. The available time is still shrinking; calibration must follow the record instead of waiting for the fog to decide.",
+        "add_relay_ready_05": "You repeat the three dials' jobs: destination, circuit, time. Each answer can be traced to a physical record; no one's memory needs to be the only key.",
+        "add_dial_one_01": "The receiving hut mark is oldest, but its pinhole shows no sign of repeated movement. It was always the destination; only the dangerous route beside it was later rubbed away.",
+        "add_dial_one_02": "You compare the chart's scale with the window frame. The one-mark difference explains why the first beam touches the sill while a second would sweep toward the reef.",
+        "add_dial_one_03": "A pencil mark beside the dial gives no answer, only a question mark. Someone wanted the next person to check the destination instead of copying numbers no one could verify.",
+        "add_dial_two_01": "The confirmation wire leads to the echo lamp, and the safety wire to the gate. They separate at the bottom of the box and never cross again. Your answer comes from the wiring, not someone's old account.",
+        "add_dial_two_02": "After the first chime, the lamp lights and the gate stays up; after the second, the gate falls and the lamp goes dark. The two states check each other, separating call from stop.",
+        "add_dial_two_03": "Ren does not choose for you; he points to the two marks on the lid. A blank space separates them, a reminder not to turn them into one sentence.",
+        "add_dial_three_01": "The log's check sits beside “turn,” not beside the station clock. You connect date, tide change, and final minute digit into a repeatable calculation, not a stopped hand.",
+        "add_dial_three_02": "11:14 appears twice, but on different clocks: a stopped mechanical reading and a storm-turn record. Identical numbers do not mean identical events.",
+        "add_dial_three_03": "You write the calculation beside the dial before turning it. Leaving the reasoning visible to the next clerk is safer than leaving only a correct answer.",
+        "add_dial_success_01": "The echo mark settles on the first notch and the safety gate holds. You do not push the beam out over the sea; you let it briefly touch the window left ajar.",
+        "add_dial_success_02": "A small patch of white appears across the water, then a palm touches the glass. It is not a reflected signal; the pause between the knuckles matches the old echo in the box.",
+        "add_dial_success_03": "Mira does not rush the switch or open the letter. She waits for the window to light again, finally allowing an answer to arrive at its own pace.",
+        "add_dial_success_04": "The grain of salt leaves a fine ring of water on the wax without softening the paper. Every outside clue points the same way, and the letter remains sealed.",
+        "add_dial_success_05": "Ren crosses out “fault” in the new record's heading and writes “first echo received.” The old report is not destroyed; it finally gains a line about what happened afterward.",
+        "add_dial_success_06": "The station clock has not moved, and the seawall alarm keeps counting down. What you have gained is not power over the weather, but an answer the next shift can verify.",
+        "add_dial_failure_01": "When the dial stops, all three records remain intact. Only this arrangement failed, not the evidence; you can go back and check, or keep the boundary you have learned.",
+        "add_dial_failure_02": "You note this combination on a separate page without overwriting the earlier calculation. A wrong route can show what triggers the safety gate, as long as a test is not disguised as success.",
+        "add_dial_failure_03": "Ren checks every wire and returns the key to the table. The machine did not choose for you; it only made the consequence impossible to ignore.",
+        "add_dial_lockout_01": "When the safety seal breaks, the power is mechanically isolated. Another attempt would add no evidence; it would only burn out both the warning lamp and the relay.",
+        "add_dial_lockout_02": "You place the unfinished record in a waterproof sleeve without calling it a success. Admitting you cannot continue is also a way to take responsibility for the people on the seawall.",
+        "add_signal_01": "Every fourth beat of the countdown is cut off by wind. Someone inside moves a bench; the shelter door is open, and the waiting passengers are looking toward you.",
+        "add_signal_02": "None of the three routes can preserve everything. The relay can send one reply, the train can catch one departure, but the warning lamp can get the people here to safety first.",
+        "add_signal_03": "Mira places the letter beside the waterproof cover; Ren closes his hand around the key. Neither pushes the choice onto you. They only lay out the costs they can confirm.",
+        "add_signal_04": "Wind makes the lens tremble, and the first beam has slipped from the receiving window's sill. Before answering, you must decide whose safety comes ahead of this one remaining chance.",
+        "add_signal_05": "You can carry the record out of the storm, but cannot decide how someone else remembers this night. Every choice leaves someone the other routes cannot erase.",
+        "add_timeout_01": "The evacuation bell drowns out the relay's low hum. Passengers pass through the shelter one by one. No one knows whether the lost window will reopen, but no one is left on the seawall waiting for an answer.",
+        "add_timeout_02": "Mira does not call the missed chance anyone's fault. She boards with the sealed letter while Ren packs the records away; both know that silence still deserves to be preserved carefully.",
+        "add_timeout_03": "After the train lights turn beyond the seawall, only the warning bell echoes over the platform. No reply comes from the past, but every passenger waits safely for dawn.",
+        "add_truth_01": "The echo does not turn the strait into a bridge. It only crosses the fog of that moment, letting two children twenty years apart know they were truly seen.",
+        "add_truth_02": "Mira places her mother's reply beneath a clear page, keeping the postmark and seal visible. She will not use it to prove life can be undone, only that silence was not the only thing left behind.",
+        "add_truth_03": "Ren records that his sister grew up safely, but does not fill in every year that followed. Those years belong to her, not to the station's overdue explanation.",
+        "add_truth_04": "You put the grain of salt in a small envelope and mark that it came from the wax, not the sea. Even a tiny object's origin must be recorded so coincidence is not mistaken for proof.",
+        "add_truth_05": "Before dawn, the seawall alarm finally falls silent. No one calls it the end of a miracle; the danger has passed, and each survivor carries a record that can be checked again.",
+        "add_train_01": "After the doors close, Mira rests the letter on her knees without opening it. She will first reach her mother's street, then decide whether to speak the echo herself.",
+        "add_train_02": "Ren does not run after the train. He knows there is still a shift to cover tonight, and that learning his sister is alive does not mean he can ask her to return at once.",
+        "add_train_03": "You place the three originals in separate sleeves and leave copies in the archive. Even without a reply sent to the past, the next reader can follow the same evidence here.",
+        "add_train_04": "When the last train enters the fog, the ticket clock still reads 11:14. It proves nothing about the letter; it reminds you that one choice cannot automatically repair time.",
+        "add_train_05": "At dawn, Ren files the night’s maintenance record with a station-history copy. Ordinary mail cannot cross twenty years, but the next clerk can still receive the evidence.",
+        "add_shelter_01": "People in the shelter call their names one by one. Ren lowers his pen only after the last line. No one was left in the fog; this list shows more clearly than the relay what you saved.",
+        "add_shelter_02": "Mira places the letter in the deepest part of the waterproof cabinet and wraps it with a dated note. No reply came and the seal remains closed, but she has kept a place for it in the future.",
+        "add_shelter_03": "The lens never lights a second time before it breaks. Ren stores its shards in directional order, admitting the machine can no longer answer without throwing away the record too.",
+        "add_shelter_04": "Someone asks whether the mother in the letter will ever know. Mira says she will keep living and writing; uncertainty is not dressed up as forgetting.",
+        "add_shelter_05": "At dawn, the lighthouse lights only the short path before the shelter. It no longer crosses the strait, but it helps latecomers see their way—a good enough beginning for another night.",
+        "tour_01": "Welcome to Mist Harbor's five-minute tour. Watch one light cross the fog, then leave an echo of your own.",
+        "tour_02": "The camera moves slowly toward the platform; mist, rain, and lamplight change with the scene. Watch the silent reel, try the relay, or leave a line for the future.",
+        "tour_03": "The silent reel overlays the stage background while characters and dialogue remain visible. Mira’s motion, the archive mist, and camera all follow the same story.",
+        "tour_04": "The three dials stand for route, circuit, and time. This choice is recorded only in the tour; it will not change evidence already found in the main story.",
+        "tour_05": "Leave a short line if you like. This small input uses the same validation and submission flow, then appears in the tour’s echo.",
+        "tour_06": "The fog window brings your words back: {{tour_word}}. A story can remember a reader’s choice and keep it inside a separate experience.",
+        "tour_07": "The tour ends here. Return to the title page and choose Start Journey for the main story; after the opening, open Journal to save, roll back, and explore the gallery.",
+        "tour_dial_success": "Route 7 reaches the receiving hut’s narrow window. The choice matches the evidence. Return to the tour menu to watch the reel or leave an echo.",
+        "tour_dial_retry": "This route would sweep the light toward the reef. The trial only shows a choice’s result and cannot alter the main story; return to the menu to check the chart again.",
+        "v3_relay_log_read": "The lens confirms north, but the third dial still needs a verifiable minute. Ren opens the tide log at 11:14; you copy its final digit, four, and label the source.",
+        "v3_relay_ren_trust": "Ren places the key in your palm. “You let me finish telling that night. I will not alter your notes this time. Use the order we checked.”",
+        "v3_signal_pressure": "The safety gate has already absorbed one shock. It will not lengthen the fog window; this decision still has only sixteen seconds.",
+        "v3_signal_relay_locked": "Two bad sequences have locked the relay. It cannot be powered again. Now you can get the passengers to shelter or leave with the sealed letter.",
+        "v3_signal_letter_kept": "Mira remembers that you asked to keep the seal intact. The wax is untouched; she will decide when to give the letter to the person meant to receive it.",
+        "v3_signal_letter_noted": "You recorded only the date and salt outside the seal without opening the letter. Those external clues are in the maintenance book; the inner page is still Mira’s to decide about.",
+        "v3_signal_record": "The copy is sealed in a waterproof sleeve. Even if the fog window closes, the next shift can check the record of the first beam and the safety gate.",
+        "parallax_01": "The lighthouse lamp and sea mist rest at different depths. Choose a camera move; return here after each one or end this separate preview.",
+        "parallax_pan_note": "The camera sweeps left. The lantern stays distant while nearer fog drifts across the window first. Return and try moving closer.",
+        "parallax_zoom_note": "The camera pushes in, and the lighthouse outline slips into the mist. Watch how the distant lamp and near fog cross the window at different speeds.",
+        "parallax_clear_note": "The lantern and fog recede, leaving the station image still. Bring them back or keep comparing the camera.",
+        "parallax_restore_note": "The mist and lantern return. Switch from the pan to the closer view and notice how the gap between the window and the light changes.",
+        "letter_showcase_01": "To whoever finds this letter:\n\nIf the platform clock has stopped at eleven forty-seven, please do not reset it. That is when we last heard an echo from postal route seven. Each time the hand moved, I imagined someone had reached the dyke. I cannot let my hopes pass for news again.\n\nThere are three spare lenses in the drawer. I left the clearest one for the child on night duty and kept the cracked one. Its fracture splits the lamp into two beams: one falls on the sea, the other on my desk. I used to think the second beam was wasted. Now I know that a lighthouse keeper must see their own hands, too, or they may write someone else's name incorrectly in the dark.\n\nIf the last train still comes, please tell its passengers that Mist Harbor has not forgotten them. We have simply not learned how to say everything we mean before it is time to say goodbye.\n\nDo not wait for a letter until you become an unopened letter yourself. When morning comes, take it with you and go.",
+        "letter_showcase_02": "A faint line appears behind the glass:\n“Those who keep the light deserve a dawn of their own.”",
+        "letter_showcase_03": "This letter was meant for everyone who could not leave. We have read it to the end. Now, let us open the window.",
+        "stall_intro_01": "Behind the postal window, Ren slides two wooden boxes into the lamplight: waxed envelopes and spare wicks. Rain spatters the price card; he pins it down with his ticket punch.",
+        "stall_intro_02": "“Your travel tokens are in your bag. Open the journal to check buying prices, refunds and quantities. Keep an envelope if you like; a wick is gone once lit. You can send your letter without buying anything.”",
+        "stall_buy_sleeve_01": "Ren counts out the tokens and slips a dry envelope into your bag. It smells of the wooden box, with a thin sheen of wax along the seal.",
+        "stall_sell_sleeve_01": "Ren checks that the envelope is still dry and places your refund on the counter. There is one fewer envelope in your bag.",
+        "stall_buy_wick_01": "A fresh wick, tied with paper cord, lands in your palm. Ren takes the listed number of tokens and gestures for you to put it away.",
+        "stall_sell_wick_01": "The unlit wick returns to its box, and the refunded tokens return to your bag. The wind at the counter has eased.",
+        "stall_use_wick_01": "You set one wick in the little oil lamp. A flame grows against the glass, warming Mira’s fingertips for a moment. Your bag holds one fewer wick; your tokens are unchanged.",
+        "stall_buy_refused_01": "Ren takes no tokens. “Check your bag first. You may be short of tokens, or already carrying the limit.” Nothing is charged and no item is added.",
+        "stall_sell_refused_01": "Ren glances at your empty hand. “There is none of that item in your bag to return.” Your items and tokens stay as they were.",
+        "stall_use_refused_01": "You reach the bottom of your bag without finding a spare wick. The oil lamp stays dark; your items and tokens are unchanged.",
+        "inventory_showcase_01": "The postal window is still lit. This separate supply-stop experience lets you buy, return or use items, and inspect your bag through the journal. It does not overwrite the main story autosave.",
+        "reveal_01": "Light spreads rightward along the window. Mist Harbor has not moved; the night has opened another path.",
+        "reveal_02": "The archive appears from the right. The folded mail-route chart still waits beneath the lamp to be read again.",
+        "reveal_03": "Look up: the roof and sea unfold from above. The lighthouse beam finds a new shore without pushing the old scene aside.",
+        "reveal_04": "Dawn rises into the frame from below. Four changes of scene later, your journey still waits on the page you left.",
+        "timeline_01": "The station bell and sea wind each keep their own beat. Tap to let the messenger and lighthouse turn toward the water together.",
+        "timeline_02": "Mira steps toward the window as the view draws closer. At the first bell she pauses; when the relay clicks, her gaze slowly returns to you.",
+        "timeline_03": "The same rhythm reaches the roof. Wind, footsteps, and camera meet again, while the sea carries on what the station left unsaid.",
+        "timeline_04": "The ensemble falls quiet. Mist Harbor waits for another letter. Return to your journey, or roll back to hear the rhythm in the wind again.",
+        "timeline_05": "You turn to leave, but Mira rests her hand against the glass. “Listen a little longer. When the wind quiets, someone rings a bell across the sea.”",
+        "timeline_06": "The tide rises gently around you. Mira does not hurry your answer. Once the bell has crossed the strait, the wind slowly falls away, as if tucking a sentence into an envelope.",
+        "timeline_07": "“I used to worry that once a sound grew quiet, I would never hear it again.” She slips the letter inside her coat. “Now I know some words stay. Shall we go?”",
+        "score_handoff_01": "As the fog retreats to the far side of the strait, Mira sets her reply on the rail. One line is still blank; by the last storm lamp, she uncaps her pen again.",
+        "score_handoff_02": "“I used to write, ‘Please wait for me to come home.’ My mother has waited long enough. This time I want her to know I will be all right as I move forward.”",
+        "score_handoff_03": "The last stroke falls. The tower's low hum fades, and a morning bell carries over the water. You give the letter to the first boat bound for the far shore; Mira stays on the pier until its silhouette melts into golden water.",
+        "blueprint_opening_01": "At 4:59 a.m., the Mist Harbor fleet weighs anchor. Ren reads the final tide-table entry over the radio, but Mira holds down your ticket.",
+        "blueprint_opening_02": "The ledger lists fifty-nine lights. If we leave on schedule, the last boat will have to find its way home in darkness.",
+        "blueprint_opening_03": "The last spare wick warms your palm. Leave it in the tower and the reply must wait for another boat; take the letter now and someone across the strait can stop worrying sooner.",
+        "blueprint_lit_01": "Light number {{blueprint_lights}} is burning. She waited for me for so many years. I can wait one more boat for a stranger.",
+        "blueprint_lit_02": "A short whistle rises above the tide. The late boat slips past the reef, a young courier holding a mailbag against the rail. Your reply has found a new traveling companion.",
+        "blueprint_depart_01": "Fifty-nine lights already point across the water. Those staying ashore have their lamps. Let us deliver this letter first.",
+        "blueprint_depart_02": "When the boat leaves, the tower still has one dark window. You will return after dawn and finish this choice in the duty log. For now, the strait carries the letter for you.",
+        "object_intro_01": "Before you leave, Ren brings an old lamp from the storeroom. Mira places the letter on the table. Its folds and the salt inside the glass may reveal where the light reached that night.",
+        "object_intro_02": "They said seawater flooded the platform. But the lamp hung from a roof beam. If the salt came from the sea, why is it only on the inside of the glass?",
+        "object_inspect_01": "Tap the marked letter and lamp to inspect both objects, in either order. Then continue the dialogue to compare your records.",
+        "object_incomplete_01": "You have made {{object_clue_count}} inspection records. One object alone cannot tell us whether the light passed through the sea fog.",
+        "object_compare_01": "Water stained only the letter’s outer folds; the paper inside stayed dry. Rain washed the lamp’s exterior clean, while salt crystals remained within. The sea never crossed the platform. Salt-laden fog emerged from inside the sealed lamp.",
+        "object_compare_02": "The lamp was not shining out to sea. It received the returning beam and held the fog inside its glass. We mistook the receiving lamp for the sending one.",
+        "object_compare_03": "Ren sets the lamp beneath the beam. The old record was accurate, but it lacked an arrow pointing back toward the station. You add it to the mail-route chart before deciding where to send the next light.",
+        "object_leave_01": "You place the unfinished notes inside the duty book. No one turns a guess into a fact just to catch the last train. The lamp stays on the table, waiting for someone to inspect it again.",
+        "rich_letter_01": "Someone wrote the mail-route instructions on the back of the letter, then folded them inside. When RETURN appears in gold, touch the word to open the pencilled note. Mother did not want us simply to obey. She wanted the next reader to have a chance to read that night again.",
+        "rich_letter_02": "Under the lamp, words emerge through the paper: A tide mark is not a destination. RETURN is not an order to sail home; it means please write back. The last stroke rests beside the recipient’s name.",
+        "rich_letter_03": "I remembered two flashes, but never asked who sent the second. Have you read the pencilled correction? This time, you decide how we answer.",
+        "rich_letter_wait_01": "You lower the shutter. Only rain speaks over the water, until the far hut gives one brief flash. Ren leaves the switch alone. He records the pause in the duty book too: the answer came from someone else.",
+        "rich_letter_wait_02": "Some blanks are deliberate. They leave room for the person receiving the letter to speak.",
+        "rich_letter_second_01": "The second beam sweeps the water before Ren cuts the power. A distant horn veers toward the reef, then turns at the final warning bell. Nobody is hurt, but tonight’s chance to receive an answer is gone.",
+        "rich_letter_second_02": "We keep trying to fill the silence. That space belonged to the other shore. Write down our mistake, so the next reader does not repeat it."
+      },
+      "speakers": {
+        "Mira": "Mira",
+        "Ren": "Ren",
+        "旧站长": "The old stationmaster"
+      },
+      "choices": {
+        "arrival_approach": {
+          "prompt": "What should you examine first?",
+          "options": {
+            "listen_mira": "Keep the seal closed and ask Mira why she came.",
+            "ask_ren": "Ask Ren what happened the night the relay went dark.",
+            "check_seal": "Check the postmark, recipient, and wax without opening it."
+          }
+        },
+        "investigation_hub": {
+          "prompt": "Where will you look for the records?",
+          "options": {
+            "archive": "Compare the envelope with the old Route 7 chart.",
+            "clock": "Read the marks and echoes inside the bell box.",
+            "roof": "Climb up to inspect the lens and storm log.",
+            "memory": "Ask Mira what else the letter leaves out.",
+            "leave_reply_address": "Leave a return label while the window is open.",
+            "relay": "The three records agree. Return to the relay.",
+            "last_train": "Leave the letter in tonight and prepare for the last train."
+          }
+        },
+        "archive_read": {
+          "prompt": "Which record will you check first?",
+          "options": {
+            "copy_route": "Trace Route 7 from the station window to the receiving hut.",
+            "ask_mira_archive": "Ask Mira why she recognizes this route.",
+            "leave_archive": "Take the chart to the platform and compare the postmark.",
+            "watch_archive_reel": "Play the silent reel about Route 7 from the cabinet."
+          }
+        },
+        "clock_test": {
+          "prompt": "What will you do with the old bell?",
+          "options": {
+            "single_pulse": "Ring once as the record says and listen for the echo.",
+            "double_pulse": "Ring twice to confirm how the second chime locks the line.",
+            "ask_ren_clock": "Ask Ren how old he was and what he did that night."
+          }
+        },
+        "roof_inspection": {
+          "prompt": "How will you investigate the roof?",
+          "options": {
+            "read_log": "Read the tide and time marks behind the lens.",
+            "ask_mira_roof": "Ask Mira how she is related to the sender.",
+            "check_lens": "Wipe away the salt and align the north notch with the route."
+          }
+        },
+        "memory_response": {
+          "prompt": "How will you answer Mira?",
+          "options": {
+            "trust_mira": "I will hear you out before I judge the beam.",
+            "protect_letter": "I will keep the seal intact and decide for neither of you.",
+            "keep_record": "I will write down the evidence and what we still do not know."
+          }
+        },
+        "memory_repeat_response": {
+          "prompt": "Is there anything else you want to tell Mira?",
+          "options": {
+            "affirm_mira": "I trust you to know when it is time to leave.",
+            "return_quiet": "Let us check the records before memory turns the dial for us."
+          }
+        },
+        "relay_open": {
+          "prompt": "Will you let the relay answer the past?",
+          "options": {
+            "open_dial": "Set the dial in the order supported by the records.",
+            "revisit_clues": "Return to the station and check the original notes.",
+            "skip_relay": "Do not risk it. Take the letter to the last train."
+          }
+        },
+        "dial_one": {
+          "prompt": "First wheel: where should the beam land?",
+          "options": {
+            "route_7": "7 - Mail route",
+            "route_1": "1 - Bell route",
+            "route_4": "4 - Tide check"
+          }
+        },
+        "dial_two": {
+          "prompt": "Second wheel: how should the circuit close?",
+          "options": {
+            "pulse_7": "7 - Louder call",
+            "pulse_1": "1 - Confirm",
+            "pulse_4": "4 - Four chimes"
+          }
+        },
+        "dial_three": {
+          "prompt": "Third wheel: which minute check?",
+          "options": {
+            "minute_7": "7 - Route digit",
+            "minute_1": "1 - Pulse digit",
+            "minute_4": "4 - Minute digit"
+          }
+        },
+        "dial_retry": {
+          "prompt": "The storm window is narrowing.",
+          "options": {
+            "retry_now": "Try again in route, pulse, time order.",
+            "check_first": "Revisit the sites and check the original records.",
+            "abandon_relay": "Stop the dial and prepare the last train."
+          }
+        },
+        "signal_window": {
+          "prompt": "The fog window closes in sixteen seconds.",
+          "options": {
+            "send_truth": "Align the relay by the evidence and send a reply twenty years back.",
+            "send_train": "Leave the relay untouched; take the sealed letter to find her mother.",
+            "keep_light": "Abandon the time signal, sound the station alarm, and stay to keep the light."
+          }
+        },
+        "model_showcase_catalog": {
+          "prompt": "Which model would you like to see first?",
+          "options": {
+            "showcase_mira_spine": "Original Mira · Spine",
+            "showcase_hiyori_live2d": "Official Hiyori · Live2D"
+          }
+        },
+        "model_showcase_mira_actions": {
+          "prompt": "Choose a Mira animation, or return to the showcase catalog.",
+          "options": {
+            "mira_show_idle": "idle · Standby",
+            "mira_show_alert": "alert · Alert",
+            "mira_show_settle": "settle · Settle",
+            "return_to_showcase_catalog": "Return to showcase catalog"
+          }
+        },
+        "model_showcase_hiyori_actions": {
+          "prompt": "Choose a Hiyori sample animation. It opens on an unobstructed full-body view.",
+          "options": {
+            "hiyori_show_idle_0": "Idle 0 · Breathing",
+            "hiyori_show_idle_1": "Idle 1 · Sway",
+            "hiyori_show_tap_body": "TapBody · Touch reaction",
+            "return_hiyori_to_catalog": "Return to showcase catalog"
+          }
+        },
+        "model_showcase_hiyori_idle_0_framing": {
+          "prompt": "Choose a framing. Each unobstructed preview lasts 2.6 seconds.",
+          "options": {
+            "hiyori_idle_0_face": "Idle 0 · Face close-up",
+            "hiyori_idle_0_wide": "Idle 0 · Full body",
+            "hiyori_idle_0_menu": "Return to action menu"
+          }
+        },
+        "model_showcase_hiyori_idle_1_framing": {
+          "prompt": "Choose a framing. Each unobstructed preview lasts 2.6 seconds.",
+          "options": {
+            "hiyori_idle_1_face": "Idle 1 · Face close-up",
+            "hiyori_idle_1_wide": "Idle 1 · Full body",
+            "hiyori_idle_1_menu": "Return to action menu"
+          }
+        },
+        "model_showcase_hiyori_tap_body_framing": {
+          "prompt": "Choose a framing. Each unobstructed preview lasts 2.6 seconds.",
+          "options": {
+            "hiyori_tap_body_face": "TapBody · Face close-up",
+            "hiyori_tap_body_wide": "TapBody · Full body",
+            "hiyori_tap_body_menu": "Return to action menu"
+          }
+        },
+        "tour_hub": {
+          "prompt": "Which part would you like to try first?",
+          "options": {
+            "tour_reel": "Watch a silent reel.",
+            "tour_signal": "Try the three relay dials.",
+            "tour_write": "Leave a line for a future reader."
+          }
+        },
+        "tour_dial": {
+          "prompt": "Where should the first beam land?",
+          "options": {
+            "tour_dial_7": "7 · Hut",
+            "tour_dial_1": "1 · Reef",
+            "tour_dial_4": "4 · Dyke"
+          }
+        },
+        "parallax_showcase_menu": {
+          "prompt": "Choose a camera or layer change.",
+          "options": {
+            "parallax_pan": "Pan the camera and compare the layers.",
+            "parallax_zoom": "Move closer to the lighthouse.",
+            "parallax_clear": "Clear the overlay layers.",
+            "parallax_restore": "Restore the lantern and mist.",
+            "parallax_exit": "End the preview and return to the journey."
+          }
+        },
+        "platform_stall_menu": {
+          "prompt": "Postal window · supplies and packing",
+          "options": {
+            "buy_sleeve": "Buy one weatherproof envelope",
+            "sell_sleeve": "Return one weatherproof envelope",
+            "buy_wick": "Buy one spare wick",
+            "sell_wick": "Return one spare wick",
+            "use_wick": "Light one wick and wait out the rain",
+            "leave_stall": "Pack up and continue posting"
+          }
+        },
+        "blueprint-choice-blueprint_choice-u3sb8u": {
+          "prompt": "Who should receive the last wick?",
+          "options": {
+            "keep_light": "Keep a light for the late boat (sixty lights)",
+            "send_letter": "Send the reply across first (fifty-nine lights)"
+          }
+        },
+        "object_inspection_retry": {
+          "prompt": "Keep checking?",
+          "options": {
+            "retry": "Inspect the objects again",
+            "leave": "Keep the question open and leave"
+          }
+        },
+        "rich_letter_answer": {
+          "prompt": "After sending the first beam, you will—",
+          "options": {
+            "wait_for_reply": "Close the shutter and wait for an answer",
+            "send_second_beam": "Send a second beam to call the boat home"
+          }
+        }
+      },
+      "inputs": {
+        "registry_recipient": {
+          "prompt": "Recipient name (1–16 characters)",
+          "placeholder": "For example: Lan🙂"
+        },
+        "registry_mailbox": {
+          "prompt": "Station return mailbox number (0–999)",
+          "placeholder": "0–999"
+        },
+        "registry_public_consent": {
+          "prompt": "If a reply arrives across the strait, may the station record your name in its history?"
+        },
+        "tour_note": {
+          "prompt": "Leave a short line for a future Mist Harbor reader",
+          "placeholder": "One sentence is enough"
+        }
+      },
+      "endings": {
+        "truth_letter": "A reply crosses twenty years, but the way back closes.",
+        "last_train": "The messenger finds her family; the past stays silent.",
+        "keep_the_light": "Everyone reaches shelter; the relay is lost.",
+        "parallax_showcase_exit": "Preview ended. Choose “Return to journey” in the upper-right to pick up where you left off; your main story stays untouched.",
+        "inventory_showcase_done": "The supply window is closed. Carry your choices back to the real journey.",
+        "score_handoff_complete": "Some farewells are quiet, yet the strait still hears them. Morning comes, and Mist Harbor begins delivering letters for a new day.",
+        "blueprint-end-blueprint_end_lit-r163fo": "The sixtieth light did not change the tide. It helped one boat recognize home.",
+        "blueprint-end-blueprint_end_depart-2zfkm9": "The letter arrives first; the lamp will follow. Mist Harbor leaves both unfinished promises to the morning.",
+        "object_evidence_complete": "Two objects reveal a returning beam. You keep both records—and the possibility of understanding that night differently.",
+        "object_evidence_unfinished": "The evidence is incomplete. You leave with {{object_clue_count}} records, without filling the remaining gaps with guesses.",
+        "rich_letter_reply": "At last, one letter holds two voices.",
+        "rich_letter_silence": "You keep the correction—and the memory of an answer you did not wait to hear."
+      },
+      "replays": {
+        "truth_ending_replay": "A reply crosses twenty years, but the way back closes.",
+        "train_ending_replay": "The messenger finds her family; the past stays silent.",
+        "shelter_ending_replay": "Everyone reaches shelter; the relay is lost.",
+        "archive_reel_memory": "The old Route 7 reel",
+        "model_showcase": "Model theater",
+        "feature_tour": "5-Minute Feature Tour",
+        "parallax_showcase": "Lantern, Fog, and Distance",
+        "letter_showcase": "An Unsent Letter",
+        "inventory_showcase": "Harbor supplies · trading and inventory",
+        "transition_showcase": "Through the Fog",
+        "timeline_showcase": "Lighthouse Ensemble",
+        "score_handoff_showcase": "When Dawn Takes the Score",
+        "chapter_blueprint_showcase": "The Sixtieth Light",
+        "scene_objects_showcase": "Two Objects beneath the Lamp",
+        "rich_letter_showcase": "A Second Sea inside the Letter"
+      },
+      "assets": {
+        "audio": {
+          "voice_mira_arrival_02": "voice_mira_arrival_02_en"
+        },
+        "cgs": {
+          "truth_letter": {
+            "asset": "truth_letter",
+            "title": "A reply across twenty years"
+          },
+          "dawn_departure": {
+            "asset": "dawn_departure",
+            "title": "The letter departs before dawn"
+          },
+          "harbor_light": {
+            "asset": "harbor_light",
+            "title": "Someone keeps a light for the harbor"
+          }
+        }
+      },
+      "ui": {
+        "player.brand": "MIST HARBOR",
+        "player.subtitle": "Every letter never sent is waiting for a light.",
+        "player.menu": "Journal",
+        "player.narrator": "Chronicle",
+        "player.reveal": "Tap to reveal all",
+        "player.continue": "Tap to continue  ›",
+        "player.voiceReplay": "Replay voice",
+        "player.choiceTimer": "The storm is coming · {{seconds}} sec",
+        "player.wait": "Listen, an echo stirs in the fog…",
+        "player.endingTitle": "The end of a letter",
+        "player.endingCount": "{{count}} endings reached",
+        "player.newStory": "Begin another letter",
+        "player.titlePage": "Return to title",
+        "player.rollback": "Rewind",
+        "player.log": "Log",
+        "player.auto": "Auto",
+        "player.autoActive": "Auto on",
+        "player.skip": "Skip read",
+        "player.skipActive": "Skipping",
+        "title.start": "Begin · Start a new story",
+        "title.resume": "Continue · Resume your journey",
+        "title.load": "Load a letter",
+        "title.gallery": "Harbor memories",
+        "title.settings": "Reading preferences",
+        "title.exit": "Leave the harbor",
+        "panel.menu": "Journey journal",
+        "panel.save": "Save this moment",
+        "panel.load": "Load a letter",
+        "panel.log": "Echoes along the way",
+        "panel.settings": "Reading preferences",
+        "panel.slots": "Manage saves",
+        "panel.gallery": "Harbor memories",
+        "panel.back": "Back",
+        "menu.continue": "Continue reading",
+        "menu.save": "Save this moment",
+        "menu.load": "Load a letter",
+        "menu.log": "Reading log",
+        "menu.settings": "Reading preferences",
+        "menu.gallery": "Memories",
+        "menu.title": "Return to title",
+        "save.hint": "Choose a slot to replace its saved journey.",
+        "load.hint": "Continue from the moment saved in a letter.",
+        "slot.auto": "Auto save",
+        "slot.quick": "Quick save",
+        "slot.quickSave": "Quick save now",
+        "slot.quickSaved": "Quick save updated",
+        "slot.named": "Letter {{slot}}",
+        "slot.saved": "Letter {{slot}} saved",
+        "slot.currentJourney": "Saved journey",
+        "slot.empty": "Empty letter",
+        "slot.loading": "Loading…",
+        "slot.readError": "Could not read",
+        "slot.missing": "This letter has no saved journey",
+        "slot.manage": "Manage saves",
+        "slot.manageHint": "Choose a source, then enter a destination ID. Overwrite, delete, and swap ask for confirmation.",
+        "slot.selected": "Source · {{slot}}",
+        "slot.selectedShort": "Selected source",
+        "slot.idPlaceholder": "Enter a save ID",
+        "slot.create": "Save to this ID",
+        "slot.copy": "Copy to ID",
+        "slot.move": "Move to ID",
+        "slot.swap": "Swap with ID",
+        "slot.delete": "Delete source",
+        "slot.confirm": "Confirm",
+        "slot.cancel": "Cancel",
+        "slot.confirmSave": "Overwrite save {{slot}}?",
+        "slot.confirmDelete": "Delete save {{slot}}?",
+        "slot.confirmCopy": "Overwrite {{destination}} with a copy of {{source}}?",
+        "slot.confirmMove": "Move {{source}} to {{destination}} and overwrite it?",
+        "slot.confirmSwap": "Swap {{first}} and {{second}}?",
+        "slot.copyDone": "Copied {{source}} to {{destination}}",
+        "slot.moveDone": "Moved {{source}} to {{destination}}",
+        "slot.swapDone": "Swapped {{first}} and {{second}}",
+        "slot.deleteDone": "Deleted save {{slot}}",
+        "slot.invalidId": "Enter a valid save ID.",
+        "slot.reservedAuto": "auto is reserved for autosave.",
+        "slot.sameId": "The source and destination IDs must differ.",
+        "slot.selectTwoExisting": "Choose two different saved slots.",
+        "slot.previousPage": "Previous page",
+        "slot.nextPage": "Next page",
+        "slot.page": "Page {{current}} of {{total}}",
+        "slot.listLimited": "Showing the first 512 save IDs; {{count}} more are hidden.",
+        "log.older": "Earlier echoes",
+        "log.newer": "Later echoes",
+        "settings.textSpeed": "Text speed · {{speed}} chars/sec",
+        "settings.textSpeedHelp": "Tap to cycle: {{slow}} / {{standard}} / {{fast}} / {{instant}}",
+        "settings.textSpeedSlow": "Slow",
+        "settings.textSpeedStandard": "Normal",
+        "settings.textSpeedFast": "Fast",
+        "settings.textSpeedInstant": "Instant",
+        "settings.autoDelay": "Auto delay · {{seconds}} sec",
+        "settings.audio.master": "Master · {{percent}}%",
+        "settings.audio.music": "Music · {{percent}}%",
+        "settings.audio.effects": "Effects · {{percent}}%",
+        "settings.audio.voice": "Voice · {{percent}}%",
+        "settings.textSounds.on": "Text reveal sounds · On",
+        "settings.textSounds.off": "Text reveal sounds · Off",
+        "settings.muted": "Sound · muted",
+        "settings.unmuted": "Sound · on",
+        "settings.hostAudio": "Audio is provided by the host",
+        "settings.readingPolicy": "Skip stops at unread dialogue and choices. Opening the journal pauses the story and timed choices.",
+        "settings.locale": "Game language · {{language}}",
+        "settings.localeHelp": "Tap to change language",
+        "gallery.count": "Collected {{count}} / {{total}} memories",
+        "gallery.notCollected": "Memory not yet reached",
+        "gallery.sealed": "Sealed",
+        "gallery.nextPage": "Turn to the next page",
+        "gallery.replaySection": "Story replays",
+        "gallery.replay": "Replay · {{title}}",
+        "gallery.replayLocked": "Unlock by reaching this ending",
+        "gallery.musicSection": "Heard music",
+        "gallery.previewMusic": "Preview · {{title}}",
+        "gallery.stopMusicPreview": "Stop preview",
+        "replay.exit": "Return to journey",
+        "stage.missingModel": "Model resource is missing: {{key}}",
+        "input.submit": "Submit",
+        "input.cancel": "Cancel",
+        "input.defaultText": "Enter text",
+        "input.defaultNumber": "Enter a number",
+        "input.defaultBoolean": "Choose a value",
+        "input.true": "Yes",
+        "input.false": "No",
+        "input.error.required": "This field is required.",
+        "input.error.tooShort": "Enter at least {{limit}} characters.",
+        "input.error.tooLong": "Enter no more than {{limit}} characters.",
+        "input.error.number": "Enter a valid number.",
+        "input.error.integer": "Enter a whole number.",
+        "input.error.min": "The value must be at least {{limit}}.",
+        "input.error.max": "The value must be no more than {{limit}}.",
+        "video.pause": "Pause video",
+        "video.resume": "Resume video",
+        "video.seekBack": "Back 1s",
+        "video.seekForward": "Forward 1s",
+        "video.seekStart": "Go to start",
+        "video.restart": "Replay",
+        "video.close": "Close video",
+        "video.error": "Video unavailable: {{detail}}",
+        "panel.collections": "Journey records",
+        "collections.count": "Collected {{count}} / {{total}}",
+        "collections.locked": "Continue your journey to unlock this record",
+        "collections.list": "Back to records",
+        "collections.next": "More records · {{page}} / {{total}}",
+        "collection.people.title": "People of the harbor",
+        "collection.people.mira.title": "Mira · The letter bearer",
+        "collection.people.mira.body": "She carries a letter her mother asked her not to open, and a return ticket dated tonight. The route map was folded once along the postal line and once along a name. Unfolded, every line met at the receiving booth.\n\nShe wants the recipient to read the letter before recognizing its sender. After hearing her account, you record her request here: let one person answer another, instead of letting the past answer for them.",
+        "collection.people.ren.title": "Ren · The station keeper",
+        "collection.people.ren.body": "He has kept the control-box key and his memory of the second bell. The lock changed three times; the key never left his luggage.\n\nHe asks you to compare the old postal route, the echo markings, and the tide times. Memory can begin an inquiry, but cannot serve as its only evidence. After hearing him out, this record keeps the name of someone still willing to investigate, rather than a verdict of malfunction.",
+        "collection.evidence.title": "Notes and evidence",
+        "collection.evidence.station.title": "The old harbor station",
+        "collection.evidence.station.body": "Sea wind carries salt into the station and distant sounds past its glass. The receiving booth, old lens, and bell box once belonged to the same postal route.\n\nUse the journal to revisit dialogue. Keep separate notes of what people recall, what the records show, and how the machinery responds. Until they support one another, keep the question open.",
+        "collection.evidence.sealed_letter.title": "The unopened letter",
+        "collection.evidence.sealed_letter.body": "The recipient is Ren; the sender is blank. The wax is intact and the paper dry, yet a salt crystal sits in the seal. There are no sorting-machine roller marks, only a narrow glass impression resembling the old lens.\n\nThese are facts you observed without opening the letter. They deserve a record, but do not establish a miracle. Mira thanks you for distinguishing an inquiry from a decision made on someone else's behalf.",
+        "inventory.currency.title": "Travel tokens",
+        "inventory.item.weather_sleeve.title": "Weatherproof envelope",
+        "inventory.item.weather_sleeve.body": "A waxed-paper envelope left at the old station postal window. It keeps out stray rain under the inspection lamp. Buy one to carry it, or return it unused for part of its price.",
+        "inventory.item.spare_wick.title": "Spare wick",
+        "inventory.item.spare_wick.body": "A short length of tightly twisted cotton. Lighting it uses it up, but buys a little warmth for the people waiting at the counter.",
+        "panel.inventory": "Travel bag",
+        "inventory.balance": "{{currency}} · {{count}}",
+        "inventory.quantity": "Owned: {{count}}",
+        "inventory.prices": "Buy {{buy}} · Sell {{sell}}",
+        "inventory.notSellable": "Not for resale",
+        "inventory.limit": "Carry up to {{count}}",
+        "inventory.invalid": "Invalid value",
+        "inventory.list": "Back to items",
+        "inventory.next": "More items · {{page}} / {{total}}",
+        "sceneObject.tide_letter.label": "Inspect the letter’s water stain",
+        "sceneObject.tide_lamp.label": "Examine the salt inside the glass",
+        "panel.note": "Note",
+        "player.resumeText": "Tap to continue reading  ›",
+        "note.unavailable": "This note is no longer in the current record."
+      },
+      "sayRich": {
+        "rich_letter_02": {
+          "spans": [
+            {
+              "id": "tide-reading",
+              "start": 48,
+              "end": 59,
+              "ruby": "a trace of water",
+              "style": {
+                "color": "muted"
+              }
+            },
+            {
+              "id": "return-note",
+              "start": 82,
+              "end": 88,
+              "style": {
+                "color": "accent",
+                "emphasis": "strong"
+              },
+              "link": {
+                "title": "The pencilled correction",
+                "text": "RETURN is addressed to the watchkeeper, not the boat. The first beam asks whether the receiving hut is occupied. Wait for its answer; a second outward beam would drive the boat toward the reef."
+              }
+            },
+            {
+              "id": "reply-emphasis",
+              "start": 128,
+              "end": 145,
+              "style": {
+                "color": "warning",
+                "emphasis": "strong"
+              }
+            }
+          ],
+          "pauses": [
+            {
+              "id": "listen-to-paper",
+              "at": 81,
+              "durationMs": 700
+            },
+            {
+              "id": "read-margin",
+              "at": 88,
+              "durationMs": null
+            }
+          ]
+        }
+      }
+    },
+    "zh": {
+      "format": "pocket-vn-locale",
+      "formatVersion": 1,
+      "locale": "zh",
+      "lines": {
+        "model_showcase_hiyori_attribution": "This content uses sample data owned and copyrighted by Live2D Inc. The sample data are utilized in accordance with terms and conditions set by Live2D Inc. This content itself is created at the author’s sole discretion.",
+        "parallax_01": "灯塔站的灯火和海雾分在远近两处。选一种镜头变化；每次都能回来继续试，也可以结束这段试映。",
+        "parallax_pan_note": "镜头向左掠过，灯塔的光留在远处，近处雾带先一步滑过窗沿。回到目录，还可以试试推近。",
+        "parallax_zoom_note": "镜头慢慢推近，灯塔轮廓渐渐融进雾里。看远处的光和近处的雾，怎样以不同速度掠过窗沿。",
+        "parallax_clear_note": "灯火与雾暂时收起，站台只剩静止的背景。还可以把它们重新放回画面，或继续比较镜头。",
+        "parallax_restore_note": "雾与灯火回到画面。把镜头从平移切换到推近，看看窗沿和灯塔之间的距离如何变化。",
+        "reveal_01": "灯光沿窗沿向右铺开。雾港仍在原处，只是夜色里多了一条可以走的路。",
+        "reveal_02": "档案室从右侧显露。那张折过的邮路图还压在灯下，等着被重新读懂。",
+        "reveal_03": "抬头以后，屋顶与海面从上方展入眼前。灯塔的光不必推走旧景，也能找到新的落点。",
+        "reveal_04": "晨光自下而上漫进来。四次换景之后，旅程依旧留在你离开前的那一页。",
+        "timeline_01": "站台的钟声与海风各有自己的节拍。轻触继续，让信使和灯光一起迎向海面。",
+        "timeline_02": "Mira迈向窗边，灯塔的视野随之靠近。第一声钟落下，她停住脚步；继电器轻响时，目光又慢慢回到你面前。",
+        "timeline_03": "同一段节拍来到屋顶。风、脚步与镜头再次相遇，而海面把刚才没说完的话接了下去。",
+        "timeline_04": "合奏停下，雾港仍等着下一封信。你可以回到原旅程，也可以回溯，再听一遍风里的节拍。",
+        "timeline_05": "你正要离开，Mira却把手贴在玻璃上。“再听一会儿。风小的时候，海那边有人敲钟。”",
+        "timeline_06": "潮声从耳边慢慢涌起。Mira没有催你回答；等钟声越过海峡，风又一点一点退远，像把一句话轻轻放进信封。",
+        "timeline_07": "“以前我总怕，声音小了，就再也听不见。”她把信收进大衣。“现在知道，有些话会留下。我们走吧。”",
+        "score_handoff_01": "雾退到海峡另一边时，Mira把回信放在栏杆上。信末还空着一行；她借着最后一盏风暴灯，重新拆开了笔帽。",
+        "score_handoff_02": "以前我总写：“请等我回来。”可她已经替我等了那么久。这一次，我想让她知道，我会好好往前走。",
+        "score_handoff_03": "最后一笔落下，塔楼的低鸣渐远，晨钟从海面上传来。你们把信交给驶向对岸的第一班船；Mira一直站在码头，直到船影融进金色的水面。"
+      },
+      "ui": {
+        "player.brand": "MIST HARBOR"
+      },
+      "replays": {
+        "parallax_showcase": "灯火与雾的层次",
+        "transition_showcase": "穿雾换景",
+        "timeline_showcase": "灯塔合奏",
+        "score_handoff_showcase": "风暴交给晨光"
+      },
+      "endings": {
+        "score_handoff_complete": "有些告别很轻，海峡也会听见。天亮了，雾港开始投递新一天的信。"
+      },
+      "choices": {
+        "parallax_showcase_menu": {
+          "prompt": "选择下一步镜头或图层动作。",
+          "options": {
+            "parallax_pan": "平移镜头，比较远近层。",
+            "parallax_zoom": "推近灯塔，观察景深。",
+            "parallax_clear": "暂时收起叠层。",
+            "parallax_restore": "恢复灯火与雾。",
+            "parallax_exit": "结束试映，返回原旅程。"
+          }
+        }
+      }
+    }
+  }
+}

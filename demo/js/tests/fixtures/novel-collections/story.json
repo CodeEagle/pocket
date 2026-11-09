@@ -1,0 +1,45 @@
+{
+  "id": "dev.pocket.vn-collections-fixture",
+  "version": 1,
+  "start": "start",
+  "variableDefinitions": {
+    "travellerName": { "lifetime": "session", "defaultValue": "旅人" },
+    "miraRecordUnlocked": { "lifetime": "persistent", "defaultValue": false }
+  },
+  "script": {
+    "start": [
+      { "type": "say", "id": "opening", "text": "你收到一张没有署名的港口车票。" },
+      {
+        "type": "choice",
+        "id": "route",
+        "prompt": "要沿着灯火继续走吗？",
+        "options": [
+          { "id": "continue", "text": "继续前往雾港", "target": "meet_mira" },
+          { "id": "leave", "text": "先在车站等候", "target": "wait" }
+        ]
+      }
+    ],
+    "meet_mira": [
+      {
+        "type": "input",
+        "id": "traveller_name",
+        "variable": "travellerName",
+        "inputType": "text",
+        "prompt": "请留下你的名字",
+        "placeholder": "写下名字",
+        "defaultValue": "旅人",
+        "minLength": 1,
+        "maxLength": 24
+      },
+      { "type": "set", "variable": "miraRecordUnlocked", "value": true },
+      { "type": "say", "id": "record_unlocked", "text": "{{travellerName}}，Mira 把自己的故事交给了你。" },
+      { "type": "wait", "durationMs": 120 },
+      { "type": "say", "id": "after_wait", "text": "雾散开后，灯塔仍在远处亮着。" },
+      { "type": "ending", "id": "arrival_end", "text": "你抵达了雾港。" }
+    ],
+    "wait": [
+      { "type": "say", "id": "station_wait", "text": "车站的钟慢慢走着。" },
+      { "type": "ending", "id": "wait_end", "text": "这一程暂时停在车站。" }
+    ]
+  }
+}

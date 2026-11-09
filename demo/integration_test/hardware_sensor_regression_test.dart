@@ -599,7 +599,7 @@ void main() {
     };
     try {
       await tester.pumpWidget(
-        PocketHostApp(systemController: host, recordings: recordings),
+        pocketHostApp(systemController: host, recordings: recordings),
       );
       await guest.waitFor(tester, '00');
       final activeSystemUi = await _systemUi(tester, host);

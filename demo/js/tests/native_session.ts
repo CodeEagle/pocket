@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
 import { existsSync, readFileSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { join, resolve } from "node:path";
+import { showcaseCompositorSurfaces } from "../official_demos.ts";
 
 export type JsonObject = Record<string, any>;
 
@@ -14,6 +16,8 @@ export type DrawOp = {
   w?: number;
   h?: number;
   points?: Array<{ x: number; y: number }>;
+  uvs?: number[];
+  repeatTexture?: boolean;
   clip?: { x?: number; y?: number; w?: number; h?: number };
 };
 
@@ -35,6 +39,90 @@ export type NativeArtifacts = {
   metadataPath: string;
   runtimeAbi: string;
 };
+
+type NativeStorageBatchOperation =
+  | { type: "set"; key: string; value: unknown }
+  | { type: "remove"; key: string };
+
+class NativeStorageBatchError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "NativeStorageBatchError";
+  }
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function snapshotStorageJson(value: unknown, ancestors = new Set<object>()): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new NativeStorageBatchError("invalid_json", "Storage values must contain finite numbers.");
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (ancestors.has(value)) throw new NativeStorageBatchError("invalid_json", "Storage values cannot contain cycles.");
+    ancestors.add(value);
+    try { return value.map(item => snapshotStorageJson(item, ancestors)); }
+    finally { ancestors.delete(value); }
+  }
+  if (isObjectRecord(value)) {
+    if (ancestors.has(value)) throw new NativeStorageBatchError("invalid_json", "Storage values cannot contain cycles.");
+    ancestors.add(value);
+    try {
+      const copied: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(value)) {
+        Object.defineProperty(copied, key, {
+          value: snapshotStorageJson(item, ancestors),
+          configurable: true,
+          enumerable: true,
+          writable: true,
+        });
+      }
+      return copied;
+    } finally { ancestors.delete(value); }
+  }
+  throw new NativeStorageBatchError("invalid_json", "Storage values must be JSON-safe.");
+}
+
+function storageJsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function validStorageKey(key: string): boolean {
+  return key.length > 0 && key !== "." && key !== ".." && !key.includes("/") &&
+    !key.includes("\\") && !/[\u0000-\u001f\u007f]/.test(key) &&
+    Buffer.byteLength(key, "utf8") <= 256;
+}
+
+/** Validate and deep-copy a whole batch before the test host mutates its store. */
+function snapshotStorageBatch(value: unknown): NativeStorageBatchOperation[] {
+  if (!Array.isArray(value)) throw new NativeStorageBatchError("invalid_storage_batch", "Storage batch operations must be an array.");
+  if (value.length > 256) throw new NativeStorageBatchError("too_many_storage_operations", "Storage batches are limited to 256 operations.");
+  const seen = new Set<string>();
+  const copied: NativeStorageBatchOperation[] = [];
+  for (const [index, raw] of value.entries()) {
+    if (!isObjectRecord(raw) || (raw.type !== "set" && raw.type !== "remove") || typeof raw.key !== "string" || !validStorageKey(raw.key)) {
+      throw new NativeStorageBatchError("invalid_storage_operation", `Storage batch operation ${index} is invalid.`);
+    }
+    const allowed = raw.type === "set" ? ["type", "key", "value"] : ["type", "key"];
+    if (Object.keys(raw).length !== allowed.length || Object.keys(raw).some(key => !allowed.includes(key)) ||
+        raw.type === "set" && !Object.hasOwn(raw, "value")) {
+      throw new NativeStorageBatchError("invalid_storage_operation", `Storage batch operation ${index} has an invalid shape.`);
+    }
+    if (seen.has(raw.key)) throw new NativeStorageBatchError("duplicate_storage_key", `Storage batch contains duplicate key '${raw.key}'.`);
+    seen.add(raw.key);
+    if (raw.type === "set") {
+      const snapshot = snapshotStorageJson(raw.value);
+      if (storageJsonBytes(snapshot) > 65_536) throw new NativeStorageBatchError("value_too_large", `Value for '${raw.key}' exceeds 64 KiB.`);
+      copied.push({ type: "set", key: raw.key, value: snapshot });
+    } else {
+      copied.push({ type: "remove", key: raw.key });
+    }
+  }
+  return copied;
+}
 
 const testRoot = resolve(import.meta.dir, "..");
 const sdkRoot = resolve(testRoot, "..", "..", "sdk");
@@ -122,15 +210,19 @@ export class NativeSession {
   readonly requests: HostRequest[] = [];
   readonly storageGets: JsonObject[] = [];
   readonly storageSets: JsonObject[] = [];
+  /** Successfully committed native-test storage batches. */
+  readonly storageBatches: NativeStorageBatchOperation[][] = [];
   readonly storage: Record<string, any>;
-  readonly width: number;
-  readonly height: number;
+  width: number;
+  height: number;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly artifacts: NativeArtifacts;
+  private readonly memory: { heapLimitBytes?: number; maxPakBytes?: number } | undefined;
   private output = "";
   private stderr = "";
   private readonly deadline: ReturnType<typeof setTimeout>;
   private readonly deferredCapabilities: Set<string>;
+  private readonly supportsStorageBatch: boolean;
   private readonly deferredRequests: HostRequest[] = [];
   private frameWaiters: Array<{ resolve: (frame: Frame) => void; reject: (error: Error) => void }> = [];
   private lineWaiters: Array<{ resolve: (output: ProbeOutput) => void; reject: (error: Error) => void }> = [];
@@ -142,17 +234,23 @@ export class NativeSession {
       width?: number;
       height?: number;
       storage?: Record<string, any>;
+      supportsStorageBatch?: boolean;
       deferCapabilities?: readonly string[];
       deadlineMs?: number;
+      memory?: { heapLimitBytes?: number; maxPakBytes?: number };
     } = {},
   ) {
     this.artifacts = artifacts;
+    this.memory = options.memory;
     this.width = options.width ?? 390;
     this.height = options.height ?? 760;
     this.storage = options.storage ?? {};
+    this.supportsStorageBatch = options.supportsStorageBatch ?? true;
     this.deferredCapabilities = new Set(options.deferCapabilities ?? []);
     this.child = spawn(probePath(), [], { stdio: ["pipe", "pipe", "pipe"] });
-    this.child.stdout.on("data", (chunk: Buffer) => this.acceptOutput(chunk.toString("utf8")));
+    const stdoutDecoder = new StringDecoder("utf8");
+    this.child.stdout.on("data", (chunk: Buffer) => this.acceptOutput(stdoutDecoder.write(chunk)));
+    this.child.stdout.on("end", () => this.acceptOutput(stdoutDecoder.end()));
     this.child.stderr.on("data", (chunk: Buffer) => { this.stderr += chunk.toString("utf8"); });
     this.child.on("error", (error) => this.fail(error));
     this.child.on("exit", (code, signal) => {
@@ -210,12 +308,17 @@ export class NativeSession {
     this.send(event(name, payload));
   }
 
-  private response(request: HostRequest, result: unknown, ok = true): void {
+  private response(
+    request: HostRequest,
+    result: unknown,
+    ok = true,
+    error?: { code: string; message: string },
+  ): void {
     this.send(event("host.response", {
       requestId: request.requestId,
       capability: request.capability,
       ok,
-      ...(ok ? { result } : { error: { code: "capability_unavailable", message: "navigation probe capability unavailable" } }),
+      ...(ok ? { result } : { error: error ?? { code: "capability_unavailable", message: "navigation probe capability unavailable" } }),
     }));
   }
 
@@ -248,6 +351,63 @@ export class NativeSession {
           break;
         case "platform.storage.keys":
           this.response(request, Object.keys(this.storage));
+          break;
+        case "platform.storage.batch":
+          if (!this.supportsStorageBatch) {
+            this.response(request, null, false);
+            break;
+          }
+          try {
+            const operations = snapshotStorageBatch(request.params.operations);
+            if (operations.length === 0) {
+              this.response(request, null);
+              break;
+            }
+            const staged = cloneJson(this.storage) as Record<string, any>;
+            for (const operation of operations) {
+              if (operation.type === "set") {
+                Object.defineProperty(staged, operation.key, {
+                  value: operation.value,
+                  configurable: true,
+                  enumerable: true,
+                  writable: true,
+                });
+              }
+              else delete staged[operation.key];
+            }
+            const usage = Object.entries(staged).reduce(
+              (total, [key, value]) => total + storageJsonBytes({ [key]: value }),
+              0,
+            );
+            if (usage > 1_048_576) {
+              throw new NativeStorageBatchError("quota_exceeded", "Storage bucket exceeds 1 MiB.");
+            }
+            // All shapes, keys, JSON snapshots, per-value bounds and the final
+            // bucket quota are checked before mutating the injected store.
+            for (const key of Object.keys(this.storage)) {
+              if (!Object.hasOwn(staged, key)) delete this.storage[key];
+            }
+            const assignable = { ...staged };
+            const hasPrototypeKey = Object.hasOwn(assignable, "__proto__");
+            const prototypeValue = assignable.__proto__;
+            delete assignable.__proto__;
+            Object.assign(this.storage, assignable);
+            if (hasPrototypeKey) {
+              Object.defineProperty(this.storage, "__proto__", {
+                value: prototypeValue,
+                configurable: true,
+                enumerable: true,
+                writable: true,
+              });
+            }
+            this.storageBatches.push(cloneJson(operations) as NativeStorageBatchOperation[]);
+            this.response(request, null);
+          } catch (error) {
+            const failure = error instanceof NativeStorageBatchError
+              ? { code: error.code, message: error.message }
+              : { code: "invalid_storage_batch", message: String(error) };
+            this.response(request, null, false, failure);
+          }
           break;
         case "platform.systemUi.set":
           this.response(request, { applied: true });
@@ -308,10 +468,11 @@ export class NativeSession {
   }
 
   async boot(): Promise<Frame> {
-    this.send({ op: "create", width: this.width, height: this.height, compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 } });
+    this.send({ op: "create", width: this.width, height: this.height, compositorSurfaces: showcaseCompositorSurfaces(), ...(this.memory ? { memory: this.memory } : {}) });
     assert.equal((await this.waitLine()).ok, true, "pocket_probe create failed");
     this.send({ op: "loadBytecode", bytecodePath: this.artifacts.bytecodePath, pakPath: this.artifacts.pakPath });
-    assert.equal((await this.waitLine()).ok, true, "pocket_probe bytecode load failed");
+    const loaded = await this.waitLine();
+    assert.equal(loaded.ok, true, `pocket_probe bytecode load failed: ${loaded.error ?? "unknown load error"}`);
     let latest = await this.frame();
     for (let index = 0; index < 20; index += 1) latest = await this.frame();
     return latest;
@@ -340,6 +501,22 @@ export class NativeSession {
     let latest = frame;
     for (let index = 0; index < count; index += 1) latest = await this.frame();
     return latest;
+  }
+
+  /** Resize the live native guest viewport without replacing its JS session. */
+  async resize(width: number, height: number): Promise<Frame> {
+    assert.ok(Number.isFinite(width) && width > 0, "resize width must be a positive finite number");
+    assert.ok(Number.isFinite(height) && height > 0, "resize height must be a positive finite number");
+    const response = this.waitLine();
+    this.send({ op: "resize", width, height });
+    const result = await response;
+    assert.equal(result.ok, true, `pocket_probe resize failed: ${result.error ?? "unknown resize error"}`);
+    this.width = width;
+    this.height = height;
+    const frame = await this.frame();
+    assert.equal(frame.width, width, "native frame width must reflect the live resize");
+    assert.equal(frame.height, height, "native frame height must reflect the live resize");
+    return frame;
   }
 
   async tapPoint(point: { x: number; y: number }): Promise<Frame> {
