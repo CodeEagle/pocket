@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pocket_archive/pocket_archive.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_services/pocket_services.dart';
 
@@ -314,7 +315,10 @@ final class PocketSession extends ChangeNotifier {
             : <String, List<int>>{
                 updateConfig.keyId: base64Decode(updateConfig.publicKey),
               },
-        store: PocketPackageStore(packageRoot),
+        store: PocketPackageStore(
+          packageRoot,
+          archiveExtractor: PocketNativeArchive.extract,
+        ),
         expectedRuntimeAbi: _metadata['runtimeAbi'] as String,
         requireBytecode: true,
         // There is no embedded package to activate in downloadOnOpen mode.
@@ -527,9 +531,15 @@ final class PocketSession extends ChangeNotifier {
       final phase = stage?.name ?? 'startup';
       idleTimer = Timer(timeout, () {
         if (!acceptProgress || timeoutError != null) return;
+        final preparation = lastProgress?.preparationProgress;
+        final detail = preparation == null
+            ? ''
+            : ', work: ${preparation.stage.name}, '
+                  'bytes: ${preparation.processedBytes}/${preparation.totalBytes}, '
+                  'files: ${preparation.processedFiles}/${preparation.totalFiles}';
         final error = timeoutError = PocketPackageException(
           'downloadOnOpen package preparation timed out without progress '
-          '(stage: $phase, idle: ${timeout.inSeconds}s)',
+          '(stage: $phase, idle: ${timeout.inSeconds}s$detail)',
           code: 'download-timeout',
         );
         idleTimeoutReached.completeError(error, StackTrace.current);
@@ -549,7 +559,13 @@ final class PocketSession extends ChangeNotifier {
             progress.stage != previous.stage ||
             progress.downloadedBytes > previous.downloadedBytes ||
             progress.fileSha256 != previous.fileSha256 ||
-            progress.attempt != previous.attempt;
+            progress.attempt != previous.attempt ||
+            progress.preparationProgress?.stage !=
+                previous.preparationProgress?.stage ||
+            (progress.preparationProgress?.processedBytes ?? 0) >
+                (previous.preparationProgress?.processedBytes ?? 0) ||
+            (progress.preparationProgress?.processedFiles ?? 0) >
+                (previous.preparationProgress?.processedFiles ?? 0);
         lastProgress = progress;
         if (advanced) restartIdleTimer(progress.stage);
         _recordTransferProgress(progress, updateStage: updateStage);

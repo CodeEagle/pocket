@@ -11,6 +11,8 @@ dependencies:
     sdk: flutter
   pocket_flutter:
     path: packages/pocket_flutter
+  pocket_archive:
+    path: packages/pocket_archive
   pocket_services:
     path: packages/pocket_services
   package_info_plus: 8.3.0

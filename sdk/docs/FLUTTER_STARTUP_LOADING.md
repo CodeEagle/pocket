@@ -62,6 +62,31 @@ SDK Loading负责JS游戏画面出现前的运行资源；游戏画面出现后�
 
 本次回归：包服务20项通过；默认指示器/公开builder共9项通过；真实HTTP宿主中间进度与外层按钮1项通过；下载真实QJBC后的原生pointer交互1项通过且未跳过。阶段超时版本完整Session套件45通过、1项缺少原生环境而跳过；随后等价简化watchdog后重跑“超过20秒且持续进展”和“停滞超时”两条路径，2/2通过，分析无问题，原生交互也用最终源码再次单独通过。完整Session套件没有在最后这次等价简化后全量重复。完整套件和服务套件输出通过工具观察但未保存原始日志，其余日志、已保存元数据与源码哈希见上述目录的 `acceptance.json`。物理手机与120秒校验超时的墙钟验收仍未执行。
 
+## iPhone校验停留与下载条交接（2026-11-09后续）
+
+后续真机反馈明确为 `verifying, idle: 120s`。该报错表示本地准备阶段无进展，并不是局域网下载耗时；上轮仅在归档EOF/hash通过时报告一次verifying，无法区分解码、文件校验、写盘或资源组装。当前补上这些现有IO边界的实际完成事实，不再把“worker尚未返回最终结果”当作无进展。无变化的回调不会续期，真正停滞仍受原20/120秒门限限制。
+
+- 服务层新增 `PocketPackagePreparationProgress`：`decodingArchive`、`verifyingFiles`、`assemblingPackage`，按阶段提供可知的 `processedBytes/totalBytes` 与 `processedFiles/totalFiles`。解码在实际输出至少推进256KiB后通过原worker端口报告，文件计数在SHA验证与写盘后推进，组装计数沿原IO边界推进。`PocketUpdateProgress.preparationProgress` 使用同一个事实对象，未新增轮询、假心跳或下载器。
+- `PocketStartupProgress` 对自定义builder提供对应的 `packagePreparationStage`、`packageProcessedBytes/packageProcessingTotalBytes`、`packageProcessedFiles/packageProcessingTotalFiles`；它们与网络字节和首帧图片数量相互独立。默认提示区分解压、校验文件与组装资源，并展示实际数量。
+- 默认下载条保留到verifying阶段，已有真实完成字节时明确显示“已下载…100%”。条形填充用200ms插值呈现已观察到的字节目标，百分比文字和辅助语义仍是实际字节事实，后续处理另用活动指示器和完成计数；下载、解包、onReady均不等待动画。首次只收到verifying=100%的快下载也能看到条形填充，不虚构逐个百分比或总启动百分比。未知总量、缓存未下载路径不展示下载完成。
+- 解码消融：LZMA回溯原本每输出一字节都调用读写方法、重复检查字典与边界，现改为一次检查后以不重叠 `Uint8List.setRange` 分段扩展，保留距离1重叠、字典重置和输出限制。7z分文件结果直接使用各自不重叠的视图，避免再复制约76MB内容；回归检查不同文件仍独立可修改。未放松归档或文件哈希验证。
+
+在同一电脑、同一真实归档、Dart VM `--optimization-counter-threshold=-1` 下，解码对照为旧15.396秒、新11.695秒，约减少24%；这是CPU路径对照，不能当作iPhone修复验收。保留父工程排除pocket_host后只有装饰性YooAsset进度，无可复用的生产解包进度；本改动适配当前已保留的worker和签名包管线。
+
+证据目录：`sdk/.pocket-build/iphone-preparation-20261109/`。当前真机只读探测确认iPhone 15 Pro Max上存在FunApp debug会话，但未获取VM isolate状态，日志窗口未出现可归属的解包信息，因此不能断言worker被暂停或真机120秒问题已经消失。需更新依赖并重启运行后，观察新增解压字节和文件进度完成真机验收。
+
 ## 动态远程容器
 
 `PocketSystemHost.fromHostConfig` 在签名目录尚未与根 runtime generation 匹配时，也显示既有 Session 的真实包进度和错误。此阶段仍禁止构造 `PocketView`，但不再返回没有反馈的纯色占位。自定义 Debug 容器在调用 SDK 之前自行读取 Host 配置时，仍须接入 `PocketHostConfig.load` 的 `onProgress` 与取消令牌；`PocketView.loadingBuilder` 只处理它实际挂载之后的启动阶段。
+
+## 默认原生解压与 App 单份源码（2026-11-09）
+
+后续已将 `pocket_archive` 纳入 `pocket_sdk` 默认依赖，Session 对已验证的 7z 包使用原生 7-Zip；不再让 Flutter debug isolate 承担该默认解码路径。归档签名、长度/SHA 和解出文件的逐项大小/SHA 校验保留。原生按文件路径解压到私有暂存目录，校验后同文件系统 rename 入库，取消时等待实际 native future 结束才清理。按用户要求移除纯 Dart 7z 编码器、解码器及 LZMA 实现；7z 只走原生，独立 services 未注入原生解压器时明确报错。旧 ZIP 路径不受此项删除影响，默认 SDK 的原生失败直接上报。
+
+FunApp 原有 `unzip_kit` 原生 ZIP 核心迁入公共包，App 移除重复的原生源码、插件和编译入口，仅保留 Dart 兼容接口；ZIP 密码、目录替换与失败回滚测试保留。FunApp Dev 的五个 Pocket 包直接引用本地工作区，发布配置继续使用固定 Git 提交。详细来源、平台范围和安装要求见 [NATIVE_ARCHIVE_INTEGRATION.md](NATIVE_ARCHIVE_INTEGRATION.md)。
+
+本次真实 Flutter/macOS 容器经 MethodChannel 解出同一 14,536,995 字节资源包，两次用时804ms和1989ms；每次55文件、76,090,251字节全部哈希通过，包含Dart复核分别为1315ms和2646ms。这是变化宿主负载下的观测值。FunApp iOS的原生插件目标编译成功，Android真实宿主的插件AAR构建成功。它们证明默认插件能安装、编译和完成真实解压，尚不能替代iPhone重新安装后的启动耗时验收。Flutter 3.35.7完整Session套件46/46通过（包含原生QJBC输入验收且无跳过），加载界面/宿主套件15/15通过，FunApp兼容层9/9通过。
+
+纯 Dart LZMA 回溯优化和对应耗时记录保留为此前的调查证据；它们已被后续的原生单一实现替代，不属于当前运行路径。其 Dart 专用测试会随算法移除，压缩 fixture 迁入原生核心回归。
+
+移除 Dart 7z 后，服务完整测试在 Flutter runner 下86/86通过、分析无问题；Session和Loading组合套件61/61通过，仍包含真实QJBC输入验证。缺少原生解压器的回归验证资源流未被读取。

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pocket_services/pocket_services.dart'
+    show PocketPackagePreparationProgress, PocketPackagePreparationStage;
 import 'package:pocket_sdk/src/pocket_startup_indicator.dart';
 
 Widget _app(
@@ -23,6 +25,7 @@ void main() {
         ),
       ),
     );
+    await tester.pump(const Duration(milliseconds: 200));
 
     final progress = tester.widget<LinearProgressIndicator>(
       find.byKey(const ValueKey<String>('pocket-startup-progress')),
@@ -51,6 +54,23 @@ void main() {
     );
     expect(progress.value, isNull);
     expect(find.text('已下载 512 B'), findsOneWidget);
+    expect(find.textContaining('%'), findsNothing);
+    expect(find.textContaining('/'), findsNothing);
+  });
+
+  testWidgets('does not infer a completed transfer without observed totals', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(const PocketStartupIndicator(stage: 'verifying')),
+    );
+
+    final progress = tester.widget<LinearProgressIndicator>(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+    );
+    expect(progress.value, isNull);
+    expect(find.text('校验资源'), findsOneWidget);
+    expect(find.textContaining('已下载'), findsNothing);
     expect(find.textContaining('%'), findsNothing);
     expect(find.textContaining('/'), findsNothing);
   });
@@ -124,8 +144,167 @@ void main() {
   });
 
   testWidgets(
-    'verification never presents completed download as startup percent',
+    'hands a 1% transfer snapshot to completed download and pending verification',
     (tester) async {
+      await tester.pumpWidget(
+        _app(
+          const PocketStartupIndicator(
+            stage: 'downloading',
+            downloadedBytes: 1,
+            totalBytes: 100,
+          ),
+        ),
+      );
+      var transfer = tester.widget<LinearProgressIndicator>(
+        find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      );
+      expect(transfer.value, 0.0);
+      expect(find.text('已下载 1 B / 100 B · 1%'), findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 200));
+      transfer = tester.widget<LinearProgressIndicator>(
+        find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      );
+      expect(transfer.value, 0.01);
+
+      await tester.pumpWidget(
+        _app(
+          const PocketStartupIndicator(
+            stage: 'verifying',
+            downloadedBytes: 100,
+            totalBytes: 100,
+          ),
+        ),
+      );
+
+      transfer = tester.widget<LinearProgressIndicator>(
+        find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      );
+      final processing = tester.widget<LinearProgressIndicator>(
+        find.byKey(
+          const ValueKey<String>('pocket-startup-processing-progress'),
+        ),
+      );
+      expect(transfer.value, 0.01);
+      expect(transfer.semanticsValue, '100%');
+      expect(processing.value, isNull);
+      expect(processing.semanticsLabel, '正在校验资源');
+      expect(find.text('下载已完成'), findsOneWidget);
+      expect(find.text('已下载 100 B / 100 B · 100%'), findsOneWidget);
+      expect(find.text('校验资源'), findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 100));
+      transfer = tester.widget<LinearProgressIndicator>(
+        find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      );
+      expect(transfer.value, closeTo(0.505, 0.01));
+
+      await tester.pump(const Duration(milliseconds: 100));
+      transfer = tester.widget<LinearProgressIndicator>(
+        find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      );
+      expect(transfer.value, 1.0);
+    },
+  );
+
+  testWidgets('animates only between observed determinate transfer snapshots', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const PocketStartupIndicator(
+          stage: 'downloading',
+          downloadedBytes: 20,
+          totalBytes: 100,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 200));
+    var progress = tester.widget<LinearProgressIndicator>(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+    );
+    expect(progress.value, 0.2);
+
+    await tester.pumpWidget(
+      _app(
+        const PocketStartupIndicator(
+          stage: 'downloading',
+          downloadedBytes: 80,
+          totalBytes: 100,
+        ),
+      ),
+    );
+    expect(find.text('已下载 80 B / 100 B · 80%'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 100));
+    progress = tester.widget<LinearProgressIndicator>(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+    );
+    expect(progress.value, closeTo(0.5, 0.01));
+  });
+
+  testWidgets('animates a first known verification total from indeterminate', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const PocketStartupIndicator(
+          stage: 'verifying',
+          downloadedBytes: 1024,
+          totalBytes: 1024,
+        ),
+      ),
+    );
+    var progress = tester.widget<LinearProgressIndicator>(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+    );
+    expect(progress.value, 0.0);
+
+    await tester.pump(const Duration(milliseconds: 100));
+    progress = tester.widget<LinearProgressIndicator>(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+    );
+    expect(progress.value, closeTo(0.5, 0.01));
+  });
+
+  testWidgets('shows observed package preparation bytes and file counts', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const PocketStartupIndicator(
+          stage: 'verifying',
+          downloadedBytes: 1024,
+          totalBytes: 1024,
+          preparationProgress: PocketPackagePreparationProgress(
+            stage: PocketPackagePreparationStage.decodingArchive,
+            processedBytes: 512,
+            totalBytes: 1024,
+            processedFiles: 2,
+            totalFiles: 4,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('下载已完成'), findsOneWidget);
+    expect(find.text('解包资源'), findsOneWidget);
+    expect(find.text('已处理 512 B / 1 KB · 50% · 文件 2 / 4'), findsOneWidget);
+    final processing = tester.widget<LinearProgressIndicator>(
+      find.byKey(const ValueKey<String>('pocket-startup-processing-progress')),
+    );
+    expect(processing.value, isNull);
+    expect(processing.semanticsLabel, '正在解包资源');
+  });
+
+  testWidgets(
+    'keeps completed-transfer and processing states compact and accessible',
+    (tester) async {
+      tester.view.physicalSize = const Size(240, 140);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
       await tester.pumpWidget(
         _app(
           const PocketStartupIndicator(
@@ -135,13 +314,17 @@ void main() {
           ),
         ),
       );
-      final progress = tester.widget<LinearProgressIndicator>(
-        find.byKey(const ValueKey<String>('pocket-startup-progress')),
-      );
-      expect(progress.value, isNull);
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('下载已完成'), findsOneWidget);
       expect(find.text('校验资源'), findsOneWidget);
-      expect(find.textContaining('%'), findsNothing);
-      expect(find.textContaining('已下载'), findsNothing);
+      final processing = tester.widget<LinearProgressIndicator>(
+        find.byKey(
+          const ValueKey<String>('pocket-startup-processing-progress'),
+        ),
+      );
+      expect(processing.value, isNull);
+      expect(processing.semanticsLabel, '正在校验资源');
     },
   );
 }

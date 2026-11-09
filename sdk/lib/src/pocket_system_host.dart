@@ -1128,6 +1128,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         color: widget.backgroundColor,
         child: PocketStartupIndicator(
           stage: session.stage,
+          preparationProgress: progress?.preparationProgress,
           downloadedBytes: progress?.downloadedBytes,
           totalBytes: progress?.totalBytes,
           foregroundColor: foreground,

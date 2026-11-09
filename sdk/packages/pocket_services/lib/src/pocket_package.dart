@@ -31,6 +31,46 @@ final class PocketPackageFormatException extends PocketPackageException {
   });
 }
 
+/// Work reported while a downloaded package moves through extraction,
+/// per-file verification, and local package assembly.
+enum PocketPackagePreparationStage {
+  decodingArchive,
+  verifyingFiles,
+  assemblingPackage,
+}
+
+/// A snapshot of work that has actually completed during package preparation.
+///
+/// Byte and file counts are optional because not every phase has both kinds of
+/// measurable work. Callers should use [stage] to interpret the counts.
+final class PocketPackagePreparationProgress {
+  const PocketPackagePreparationProgress({
+    required this.stage,
+    this.processedBytes,
+    this.totalBytes,
+    this.processedFiles,
+    this.totalFiles,
+  });
+
+  final PocketPackagePreparationStage stage;
+  final int? processedBytes;
+  final int? totalBytes;
+  final int? processedFiles;
+  final int? totalFiles;
+}
+
+/// Optional host capability for extracting a verified 7z archive directly
+/// from its staged file into a fresh destination directory.
+///
+/// Implementations must enforce [maxOutputBytes], reject unsafe paths and
+/// links, and finish all filesystem work before the returned future completes.
+typedef PocketArchiveExtractor =
+    Future<void> Function({
+      required String archivePath,
+      required String destinationPath,
+      required int maxOutputBytes,
+    });
+
 final class PocketUpdateCancellation implements Exception {
   const PocketUpdateCancellation();
 
@@ -366,7 +406,11 @@ final class PocketPackageManifest {
           : null,
       assets: Map<String, PocketManifestAsset>.unmodifiable(assets),
       guestManifest: PocketGuestManifest.fromJson(guestJson),
-      worker: json['worker'] == null ? null : Map<String, dynamic>.unmodifiable(_object(json['worker'], 'worker descriptor')),
+      worker: json['worker'] == null
+          ? null
+          : Map<String, dynamic>.unmodifiable(
+              _object(json['worker'], 'worker descriptor'),
+            ),
     );
   }
 
@@ -479,8 +523,7 @@ final class PocketPackageManifest {
         code: 'manifest-entry-format',
       );
     }
-    if (isBytecode &&
-        (runtimeAbi == null || runtimeAbi!.trim().isEmpty)) {
+    if (isBytecode && (runtimeAbi == null || runtimeAbi!.trim().isEmpty)) {
       throw const PocketPackageException(
         'bytecode entry requires runtimeAbi',
         code: 'manifest-runtime-abi',
@@ -556,17 +599,32 @@ final class PocketPackageManifest {
       final bytes = _int(bytecode['bytes'], 'worker bytecode bytes');
       final asset = assets[name];
       final required = descriptor['requiredCaps'];
-      final declared = {...guestManifest.requiredCapabilities, ...guestManifest.optionalCapabilities};
-      if (!isBytecode || descriptor['kind'] != 'quickjs-bytecode' ||
-          descriptor['protocolVersion'] != 1 || descriptor['runtimeAbi'] != runtimeAbi ||
-          asset == null || asset.sha256 != hash || asset.size != bytes || bytes <= 124 ||
-          bytes > 64 * 1024 * 1024 || required is! List ||
+      final declared = {
+        ...guestManifest.requiredCapabilities,
+        ...guestManifest.optionalCapabilities,
+      };
+      if (!isBytecode ||
+          descriptor['kind'] != 'quickjs-bytecode' ||
+          descriptor['protocolVersion'] != 1 ||
+          descriptor['runtimeAbi'] != runtimeAbi ||
+          asset == null ||
+          asset.sha256 != hash ||
+          asset.size != bytes ||
+          bytes <= 124 ||
+          bytes > 64 * 1024 * 1024 ||
+          required is! List ||
           required.any((c) => c is! String || !declared.contains(c)) ||
           !declared.contains('runtime.worker')) {
-        throw const PocketPackageException('worker descriptor is not bound to admitted bytecode/assets/capabilities', code: 'manifest-worker');
+        throw const PocketPackageException(
+          'worker descriptor is not bound to admitted bytecode/assets/capabilities',
+          code: 'manifest-worker',
+        );
       }
     } else if (guestManifest.requiredCapabilities.contains('runtime.worker')) {
-      throw const PocketPackageException('required worker descriptor is missing', code: 'manifest-worker');
+      throw const PocketPackageException(
+        'required worker descriptor is missing',
+        code: 'manifest-worker',
+      );
     }
     final total = byHash.values.fold<int>(0, (sum, file) => sum + file.size);
     if (total > maxTotalBytes ||
@@ -753,15 +811,24 @@ final class PocketVersionInfo {
 }
 
 final class PocketPackageStore {
-  const PocketPackageStore(this.rootDirectory, {this.appId});
+  const PocketPackageStore(
+    this.rootDirectory, {
+    this.appId,
+    this.archiveExtractor,
+  });
 
   final Directory rootDirectory;
   final String? appId;
+  final PocketArchiveExtractor? archiveExtractor;
 
   PocketPackageStore scoped(String applicationId) {
     if (applicationId.trim().isEmpty)
       throw const PocketPackageException('app id must not be empty');
-    return PocketPackageStore(rootDirectory, appId: applicationId);
+    return PocketPackageStore(
+      rootDirectory,
+      appId: applicationId,
+      archiveExtractor: archiveExtractor,
+    );
   }
 
   static int _tempCounter = 0;
@@ -901,9 +968,9 @@ final class PocketPackageStore {
     }
   }
 
-  /// Downloads and verifies a signed one-shot ZIP bundle (`bundle.zip`),
-  /// extracts all content-addressed blobs into `_blobs/<sha256>`, and returns
-  /// the verified blob files keyed by SHA-256.
+  /// Downloads and verifies a signed package bundle, extracts its
+  /// content-addressed blobs, and returns the verified files keyed by SHA-256.
+  /// ZIP decoding runs in a Dart isolate; 7z requires [archiveExtractor].
   Future<Map<String, File>> writeBundleZip({
     required PocketManifestBundle bundle,
     required List<PocketManifestFile> expectedFiles,
@@ -913,14 +980,34 @@ final class PocketPackageStore {
     int maxTotalBytes = 768 * 1024 * 1024,
     void Function(int received)? onBytes,
     void Function()? onArchiveVerified,
+    void Function(PocketPackagePreparationProgress progress)?
+    onPreparationProgress,
   }) async {
+    if (bundle.format != 'zip' && bundle.format != '7z') {
+      throw PocketPackageException(
+        'unsupported bundle format ${bundle.format}',
+        code: 'manifest-bundle',
+      );
+    }
+    if (bundle.format == '7z' && archiveExtractor == null) {
+      throw const PocketPackageException(
+        '7z bundles require native archive extraction',
+        code: 'native-archive-unavailable',
+      );
+    }
     await initialize();
     if (bundle.size <= 0 || bundle.size > maxArchiveBytes) {
-      throw const PocketPackageException('bundle exceeds size limit', code: 'download-size');
+      throw const PocketPackageException(
+        'bundle exceeds size limit',
+        code: 'download-size',
+      );
     }
-    final temporaryId = '${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}';
+    final temporaryId =
+        '${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}';
     final archiveFile = File(path.join(_blobs.path, '.bundle-$temporaryId'));
-    final extractionDirectory = Directory(path.join(_blobs.path, '.bundle-extract-$temporaryId'));
+    final extractionDirectory = Directory(
+      path.join(_blobs.path, '.bundle-extract-$temporaryId'),
+    );
     final sink = archiveFile.openWrite();
     final digests = <crypto.Digest>[];
     final converter = crypto.sha256.startChunkedConversion(
@@ -946,7 +1033,8 @@ final class PocketPackageStore {
       await sink.flush();
       await sink.close();
       sinkClosed = true;
-      if (received != bundle.size || digests.single.toString() != bundle.sha256) {
+      if (received != bundle.size ||
+          digests.single.toString() != bundle.sha256) {
         throw const PocketPackageException(
           'bundle download hash or size mismatch',
           code: 'download-hash',
@@ -958,18 +1046,118 @@ final class PocketPackageStore {
       // which can take much longer than the network transfer.
       onArchiveVerified?.call();
       await extractionDirectory.create();
-      final extractedFiles = await _decodeBundleInWorker(
-        archivePath: archiveFile.path,
-        outputDirectory: extractionDirectory.path,
-        format: bundle.format,
-        maxTotalBytes: maxTotalBytes,
-        expectedFiles: expectedFiles,
-        requireExactEntries: bundle.blobs != null,
-        cancellation: cancellation,
-      );
+      final PocketArchiveExtractor? nativeExtractor = bundle.format == '7z'
+          ? archiveExtractor
+          : null;
+      final Map<String, File> extractedFiles;
+      if (nativeExtractor != null) {
+        cancellation.throwIfCancelled();
+        onPreparationProgress?.call(
+          const PocketPackagePreparationProgress(
+            stage: PocketPackagePreparationStage.decodingArchive,
+          ),
+        );
+        // Native extraction is not cancellable through this interface. Await
+        // its actual completion before honoring cancellation or deleting the
+        // archive and destination directory in the finally block.
+        await nativeExtractor(
+          archivePath: archiveFile.path,
+          destinationPath: extractionDirectory.path,
+          maxOutputBytes: maxTotalBytes,
+        );
+        cancellation.throwIfCancelled();
+        final nativeOutput = await _indexNativeBundleFiles(
+          extractionDirectory: extractionDirectory,
+          expectedFiles: expectedFiles,
+          maxTotalBytes: maxTotalBytes,
+        );
+        onPreparationProgress?.call(
+          PocketPackagePreparationProgress(
+            stage: PocketPackagePreparationStage.decodingArchive,
+            processedBytes: nativeOutput.totalBytes,
+            totalBytes: expectedFiles.fold<int>(
+              0,
+              (sum, file) => sum + file.size,
+            ),
+            processedFiles: nativeOutput.files.length,
+            totalFiles: expectedFiles.length,
+          ),
+        );
+        extractedFiles = nativeOutput.files;
+      } else {
+        extractedFiles = await _decodeBundleInWorker(
+          archivePath: archiveFile.path,
+          outputDirectory: extractionDirectory.path,
+          maxTotalBytes: maxTotalBytes,
+          expectedFiles: expectedFiles,
+          requireExactEntries: bundle.blobs != null,
+          cancellation: cancellation,
+          onPreparationProgress: onPreparationProgress,
+        );
+      }
       final blobs = <String, File>{};
+      var verifiedBytes = 0;
+      var verifiedFiles = 0;
+      final verifyTotalBytes = expectedFiles.fold<int>(
+        0,
+        (sum, file) => sum + file.size,
+      );
+      if (nativeExtractor != null) {
+        onPreparationProgress?.call(
+          PocketPackagePreparationProgress(
+            stage: PocketPackagePreparationStage.verifyingFiles,
+            processedBytes: 0,
+            totalBytes: verifyTotalBytes,
+            processedFiles: 0,
+            totalFiles: expectedFiles.length,
+          ),
+        );
+      }
       for (final file in expectedFiles) {
         cancellation.throwIfCancelled();
+        final extracted = extractedFiles[file.sha256];
+        if (nativeExtractor != null) {
+          if (extracted == null ||
+              !await extracted.exists() ||
+              await extracted.length() != file.size) {
+            throw PocketPackageException(
+              'bundle is missing or has corrupted blob ${file.sha256}',
+              code: 'bundle-content',
+            );
+          }
+          var lastFileBytes = 0;
+          final actualHash = await _fileHash(extracted, cancellation, (
+            readBytes,
+          ) {
+            verifiedBytes += readBytes - lastFileBytes;
+            lastFileBytes = readBytes;
+            onPreparationProgress?.call(
+              PocketPackagePreparationProgress(
+                stage: PocketPackagePreparationStage.verifyingFiles,
+                processedBytes: verifiedBytes,
+                totalBytes: verifyTotalBytes,
+                processedFiles: verifiedFiles,
+                totalFiles: expectedFiles.length,
+              ),
+            );
+          });
+          if (actualHash != file.sha256) {
+            throw PocketPackageException(
+              'bundle is missing or has corrupted blob ${file.sha256}',
+              code: 'bundle-content',
+            );
+          }
+          verifiedFiles++;
+          onPreparationProgress?.call(
+            PocketPackagePreparationProgress(
+              stage: PocketPackagePreparationStage.verifyingFiles,
+              processedBytes: verifiedBytes,
+              totalBytes: verifyTotalBytes,
+              processedFiles: verifiedFiles,
+              totalFiles: expectedFiles.length,
+            ),
+          );
+        }
         final existing = await validBlob(file, cancellation: cancellation);
         if (existing != null) {
           // Partial archives promise the exact signed subset. Their extracted
@@ -977,16 +1165,23 @@ final class PocketPackageStore {
           blobs[file.sha256] = existing;
           continue;
         }
-        final extracted = extractedFiles[file.sha256];
         if (extracted == null) {
           throw PocketPackageException(
             'bundle is missing blob ${file.sha256}',
             code: 'bundle-content',
           );
         }
-        final target = File(path.join(_blobs.path, file.sha256));
-        await _copyAtomic(extracted, target);
-        blobs[file.sha256] = target;
+        if (nativeExtractor != null) {
+          blobs[file.sha256] = await _promoteNativeExtractedFile(
+            extracted,
+            file,
+            cancellation,
+          );
+        } else {
+          final target = File(path.join(_blobs.path, file.sha256));
+          await _copyAtomic(extracted, target);
+          blobs[file.sha256] = target;
+        }
       }
       return blobs;
     } finally {
@@ -996,6 +1191,97 @@ final class PocketPackageStore {
         await extractionDirectory.delete(recursive: true);
       }
     }
+  }
+
+  Future<({Map<String, File> files, int totalBytes})> _indexNativeBundleFiles({
+    required Directory extractionDirectory,
+    required List<PocketManifestFile> expectedFiles,
+    required int maxTotalBytes,
+  }) async {
+    final rootType = await FileSystemEntity.type(
+      extractionDirectory.path,
+      followLinks: false,
+    );
+    if (rootType != FileSystemEntityType.directory) {
+      throw const PocketPackageException(
+        'native bundle extractor replaced its destination directory',
+        code: 'bundle-content',
+      );
+    }
+
+    final aliases = <String, String>{};
+    void addAlias(String name, String sha256) {
+      final normalized = name.replaceAll('\\', '/');
+      _validateAssetName(normalized);
+      final previous = aliases[normalized];
+      if (previous != null && previous != sha256) {
+        throw const PocketPackageException(
+          'native bundle entries have ambiguous signed paths',
+          code: 'bundle-content',
+        );
+      }
+      aliases[normalized] = sha256;
+    }
+
+    for (final file in expectedFiles) {
+      addAlias(file.url, file.sha256);
+      addAlias('blobs/${file.sha256}', file.sha256);
+      addAlias(file.sha256, file.sha256);
+    }
+
+    final files = <String, File>{};
+    var totalBytes = 0;
+    await for (final entity in extractionDirectory.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      final relative = path.relative(
+        entity.path,
+        from: extractionDirectory.path,
+      );
+      if (path.isAbsolute(relative) ||
+          relative == '..' ||
+          relative.startsWith('..${path.separator}')) {
+        throw const PocketPackageException(
+          'native bundle extractor returned a path outside its destination',
+          code: 'bundle-content',
+        );
+      }
+      final normalized = relative.replaceAll(path.separator, '/');
+      _validateAssetName(normalized);
+      final type = await FileSystemEntity.type(entity.path, followLinks: false);
+      if (type == FileSystemEntityType.directory) continue;
+      if (type != FileSystemEntityType.file) {
+        throw PocketPackageException(
+          'native bundle extractor returned an unsupported entry $normalized',
+          code: 'bundle-content',
+        );
+      }
+      final sha256 = aliases[normalized];
+      if (sha256 == null || files.containsKey(sha256)) {
+        throw PocketPackageException(
+          'native bundle entries differ from the signed file set at $normalized',
+          code: 'bundle-content',
+        );
+      }
+      final file = File(entity.path);
+      final size = await file.length();
+      totalBytes += size;
+      if (totalBytes > maxTotalBytes) {
+        throw const PocketPackageException(
+          'native bundle output exceeds the configured size limit',
+          code: 'bundle-content',
+        );
+      }
+      files[sha256] = file;
+    }
+    if (files.length != expectedFiles.length) {
+      throw const PocketPackageException(
+        'native bundle is missing signed files',
+        code: 'bundle-content',
+      );
+    }
+    return (files: files, totalBytes: totalBytes);
   }
 
   /// Seeds content-addressed blobs into `_blobs/<sha256>` from an already-staged
@@ -1121,16 +1407,18 @@ final class PocketPackageStore {
     required File entryBlob,
     required Map<String, File> blobs,
     required PocketCancellationToken cancellation,
-  }) =>
-      _synchronized(
-        () => _stageUnlocked(
-          signed: signed,
-          verifier: verifier,
-          entryBlob: entryBlob,
-          blobs: blobs,
-          cancellation: cancellation,
-        ),
-      );
+    void Function(PocketPackagePreparationProgress progress)?
+    onPreparationProgress,
+  }) => _synchronized(
+    () => _stageUnlocked(
+      signed: signed,
+      verifier: verifier,
+      entryBlob: entryBlob,
+      blobs: blobs,
+      cancellation: cancellation,
+      onPreparationProgress: onPreparationProgress,
+    ),
+  );
 
   Future<PocketPackage> prepare(
     dynamic packageOrSigned, {
@@ -1138,44 +1426,43 @@ final class PocketPackageStore {
     File? entryBlob,
     Map<String, File>? blobs,
     PocketCancellationToken? cancellation,
-  }) =>
-      _synchronized(() async {
-        await initialize();
-        if (packageOrSigned is PocketPackage) {
-          final id = _versionId(packageOrSigned.manifest.payload);
-          final directory = Directory(path.join(_versions.path, id));
-          if (await directory.exists()) {
-            return packageOrSigned;
-          }
-          if (verifier == null) {
-            return packageOrSigned;
-          }
-          return _stageUnlocked(
-            signed: packageOrSigned.manifest,
-            verifier: verifier,
-            entryBlob: entryBlob ?? packageOrSigned.entryFile,
-            blobs: blobs ?? <String, File>{},
-            cancellation: cancellation ?? PocketCancellationToken(),
-          );
-        } else if (packageOrSigned is PocketSignedManifest) {
-          if (verifier == null ||
-              entryBlob == null ||
-              blobs == null ||
-              cancellation == null) {
-            throw ArgumentError(
-              'verifier, entryBlob, blobs, and cancellation are required for PocketSignedManifest',
-            );
-          }
-          return _stageUnlocked(
-            signed: packageOrSigned,
-            verifier: verifier,
-            entryBlob: entryBlob,
-            blobs: blobs,
-            cancellation: cancellation,
-          );
-        }
-        throw ArgumentError.value(packageOrSigned, 'packageOrSigned');
-      });
+  }) => _synchronized(() async {
+    await initialize();
+    if (packageOrSigned is PocketPackage) {
+      final id = _versionId(packageOrSigned.manifest.payload);
+      final directory = Directory(path.join(_versions.path, id));
+      if (await directory.exists()) {
+        return packageOrSigned;
+      }
+      if (verifier == null) {
+        return packageOrSigned;
+      }
+      return _stageUnlocked(
+        signed: packageOrSigned.manifest,
+        verifier: verifier,
+        entryBlob: entryBlob ?? packageOrSigned.entryFile,
+        blobs: blobs ?? <String, File>{},
+        cancellation: cancellation ?? PocketCancellationToken(),
+      );
+    } else if (packageOrSigned is PocketSignedManifest) {
+      if (verifier == null ||
+          entryBlob == null ||
+          blobs == null ||
+          cancellation == null) {
+        throw ArgumentError(
+          'verifier, entryBlob, blobs, and cancellation are required for PocketSignedManifest',
+        );
+      }
+      return _stageUnlocked(
+        signed: packageOrSigned,
+        verifier: verifier,
+        entryBlob: entryBlob,
+        blobs: blobs,
+        cancellation: cancellation,
+      );
+    }
+    throw ArgumentError.value(packageOrSigned, 'packageOrSigned');
+  });
 
   Future<PocketPackage> _stageUnlocked({
     required PocketSignedManifest signed,
@@ -1183,13 +1470,19 @@ final class PocketPackageStore {
     required File entryBlob,
     required Map<String, File> blobs,
     required PocketCancellationToken cancellation,
+    void Function(PocketPackagePreparationProgress progress)?
+    onPreparationProgress,
   }) async {
     await initialize();
     final id = _versionId(signed.payload);
     final directory = Directory(path.join(_versions.path, id));
     if (await directory.exists()) {
       try {
-        final loaded = await _loadVersion(id, verifier: verifier);
+        final loaded = await _loadVersion(
+          id,
+          verifier: verifier,
+          onPreparationProgress: onPreparationProgress,
+        );
         if (loaded.manifest.payload.contentHash == signed.payload.contentHash) {
           return loaded;
         }
@@ -1201,17 +1494,73 @@ final class PocketPackageStore {
     }
     await directory.create(recursive: true);
     try {
+      final packageBytes =
+          signed.payload.entry.size +
+          signed.payload.pak.size +
+          signed.payload.assets.values.fold<int>(
+            0,
+            (sum, asset) => sum + asset.size,
+          );
+      final packageFiles = 2 + signed.payload.assets.length;
+      var assembledBytes = 0;
+      var assembledFiles = 0;
+      var nextProgressBytes = 256 * 1024;
+
+      void reportAssemblyProgress({bool force = false}) {
+        final report = onPreparationProgress;
+        if (report == null || (!force && assembledBytes < nextProgressBytes)) {
+          return;
+        }
+        report(
+          PocketPackagePreparationProgress(
+            stage: PocketPackagePreparationStage.assemblingPackage,
+            processedBytes: assembledBytes,
+            totalBytes: packageBytes,
+            processedFiles: assembledFiles,
+            totalFiles: packageFiles,
+          ),
+        );
+        nextProgressBytes = assembledBytes + 256 * 1024;
+      }
+
+      reportAssemblyProgress(force: true);
       await _writeAtomic(
         File(path.join(directory.path, 'manifest.json')),
         signed.envelopeBytes,
       );
-      await _copyAtomic(entryBlob, File(path.join(directory.path, 'entry.js')));
+      Future<void> copyPackageFile(File source, File destination) async {
+        var fileBytes = 0;
+        await _copyAtomic(
+          source,
+          destination,
+          onBytes: (copiedBytes) {
+            assembledBytes += copiedBytes - fileBytes;
+            fileBytes = copiedBytes;
+            reportAssemblyProgress();
+          },
+        );
+        assembledFiles++;
+        reportAssemblyProgress(force: true);
+      }
+
+      await copyPackageFile(
+        entryBlob,
+        File(path.join(directory.path, 'entry.js')),
+      );
+      var pakBytes = 0;
       await _assemblePak(
         signed.payload,
         blobs,
         File(path.join(directory.path, 'package.pak')),
         cancellation,
+        onBytes: (copiedBytes) {
+          assembledBytes += copiedBytes - pakBytes;
+          pakBytes = copiedBytes;
+          reportAssemblyProgress();
+        },
       );
+      assembledFiles++;
+      reportAssemblyProgress(force: true);
       for (final item in signed.payload.assets.entries) {
         final blob = blobs[item.value.sha256];
         if (blob == null) {
@@ -1224,7 +1573,7 @@ final class PocketPackageStore {
           path.join(directory.path, 'loose-assets', item.key),
         );
         await target.parent.create(recursive: true);
-        await _copyAtomic(blob, target);
+        await copyPackageFile(blob, target);
       }
       return PocketPackage(
         manifest: signed,
@@ -1317,15 +1666,14 @@ final class PocketPackageStore {
     required PocketManifestVerifier verifier,
     int minimumBuild = 0,
     bool allowDowngrade = false,
-  }) =>
-      _synchronized(
-        () => _commitHealthyUnlocked(
-          package,
-          verifier: verifier,
-          minimumBuild: minimumBuild,
-          allowDowngrade: allowDowngrade,
-        ),
-      );
+  }) => _synchronized(
+    () => _commitHealthyUnlocked(
+      package,
+      verifier: verifier,
+      minimumBuild: minimumBuild,
+      allowDowngrade: allowDowngrade,
+    ),
+  );
 
   Future<void> _commitHealthyUnlocked(
     PocketPackage package, {
@@ -1359,9 +1707,7 @@ final class PocketPackageStore {
       );
       if (!await manifestFile.exists()) return null;
       final bytes = await manifestFile.readAsBytes();
-      final signed = PocketSignedManifest.fromBytes(
-        Uint8List.fromList(bytes),
-      );
+      final signed = PocketSignedManifest.fromBytes(Uint8List.fromList(bytes));
       return signed.payload.build;
     } catch (_) {
       return null;
@@ -1606,14 +1952,13 @@ final class PocketPackageStore {
     String? applicationId,
     int keep = 2,
     PocketManifestVerifier? verifier,
-  ]) =>
-      _synchronized(() {
-        final target = applicationId != null ? scoped(applicationId) : this;
-        return target._pruneInactiveVersionsUnlocked(
-          keep: keep,
-          verifier: verifier,
-        );
-      });
+  ]) => _synchronized(() {
+    final target = applicationId != null ? scoped(applicationId) : this;
+    return target._pruneInactiveVersionsUnlocked(
+      keep: keep,
+      verifier: verifier,
+    );
+  });
 
   Future<void> _pruneInactiveVersionsUnlocked({
     int keep = 2,
@@ -1698,6 +2043,8 @@ final class PocketPackageStore {
   Future<PocketPackage> _loadVersion(
     String id, {
     required PocketManifestVerifier verifier,
+    void Function(PocketPackagePreparationProgress progress)?
+    onPreparationProgress,
   }) async {
     final safeId = _requireSafeToken(id, 'versionId');
     final directory = Directory(path.join(_versions.path, safeId));
@@ -1716,10 +2063,62 @@ final class PocketPackageStore {
       Uint8List.fromList(await manifestFile.readAsBytes()),
     );
     await verifier.verify(signed);
-    if (await entry.length() != signed.payload.entry.size ||
-        await _fileHash(entry) != signed.payload.entry.sha256 ||
-        await pak.length() != signed.payload.pak.size ||
-        await _fileHash(pak) != signed.payload.pak.sha256) {
+
+    final totalBytes =
+        signed.payload.entry.size +
+        signed.payload.pak.size +
+        signed.payload.assets.values.fold<int>(
+          0,
+          (sum, asset) => sum + asset.size,
+        );
+    final totalFiles = 2 + signed.payload.assets.length;
+    var processedBytes = 0;
+    var processedFiles = 0;
+    void reportVerificationProgress() {
+      final report = onPreparationProgress;
+      if (report == null) return;
+      report(
+        PocketPackagePreparationProgress(
+          stage: PocketPackagePreparationStage.verifyingFiles,
+          processedBytes: processedBytes,
+          totalBytes: totalBytes,
+          processedFiles: processedFiles,
+          totalFiles: totalFiles,
+        ),
+      );
+    }
+
+    Future<bool> matchesFile(
+      File file,
+      int expectedSize,
+      String expectedSha256,
+    ) async {
+      if (!await file.exists() || await file.length() != expectedSize) {
+        return false;
+      }
+      var lastFileBytes = 0;
+      final actualSha256 = await _fileHash(file, null, (readBytes) {
+        processedBytes += readBytes - lastFileBytes;
+        lastFileBytes = readBytes;
+        reportVerificationProgress();
+      });
+      final matches = actualSha256 == expectedSha256;
+      if (matches) processedFiles++;
+      reportVerificationProgress();
+      return matches;
+    }
+
+    reportVerificationProgress();
+    if (!await matchesFile(
+          entry,
+          signed.payload.entry.size,
+          signed.payload.entry.sha256,
+        ) ||
+        !await matchesFile(
+          pak,
+          signed.payload.pak.size,
+          signed.payload.pak.sha256,
+        )) {
       throw const PocketPackageException(
         'staged package failed integrity validation',
         code: 'cache-hash',
@@ -1727,24 +2126,27 @@ final class PocketPackageStore {
     }
     for (final item in signed.payload.assets.entries) {
       final file = File(path.join(directory.path, 'loose-assets', item.key));
-      if (!await file.exists() ||
-          await file.length() != item.value.size ||
-          await _fileHash(file) != item.value.sha256) {
+      if (!await matchesFile(file, item.value.size, item.value.sha256)) {
         throw PocketPackageException(
           'staged asset ${item.key} failed integrity validation',
           code: 'cache-assets',
         );
       }
     }
-    return PocketPackage(manifest: signed, versionId: safeId, directory: directory);
+    return PocketPackage(
+      manifest: signed,
+      versionId: safeId,
+      directory: directory,
+    );
   }
 
   Future<void> _assemblePak(
     PocketPackageManifest manifest,
     Map<String, File> blobs,
     File destination,
-    PocketCancellationToken cancellation,
-  ) async {
+    PocketCancellationToken cancellation, {
+    void Function(int copiedBytes)? onBytes,
+  }) async {
     final temporary = File(
       '${destination.path}.tmp-${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}',
     );
@@ -1753,6 +2155,8 @@ final class PocketPackageStore {
     final converter = crypto.sha256.startChunkedConversion(
       ChunkedConversionSink<crypto.Digest>.withCallback(digest.addAll),
     );
+    var copiedBytes = 0;
+    var lastReportedBytes = 0;
     try {
       for (final part in [
         ...manifest.pak.parts,
@@ -1769,7 +2173,16 @@ final class PocketPackageStore {
           cancellation.throwIfCancelled();
           sink.add(chunk);
           converter.add(chunk);
+          copiedBytes += chunk.length;
+          if (onBytes != null &&
+              copiedBytes - lastReportedBytes >= 256 * 1024) {
+            onBytes(copiedBytes);
+            lastReportedBytes = copiedBytes;
+          }
         }
+      }
+      if (onBytes != null && lastReportedBytes < copiedBytes) {
+        onBytes(copiedBytes);
       }
       converter.close();
       await sink.flush();
@@ -1795,17 +2208,72 @@ final class PocketPackageStore {
     }
   }
 
-  Future<void> _copyAtomic(File source, File destination) async {
+  Future<void> _copyAtomic(
+    File source,
+    File destination, {
+    void Function(int copiedBytes)? onBytes,
+  }) async {
     final temporary = File(
       '${destination.path}.tmp-${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}',
     );
-    await source.openRead().pipe(temporary.openWrite());
+    final sink = temporary.openWrite();
+    var copiedBytes = 0;
+    var lastReportedBytes = 0;
+    try {
+      await for (final chunk in source.openRead()) {
+        sink.add(chunk);
+        copiedBytes += chunk.length;
+        if (onBytes != null && copiedBytes - lastReportedBytes >= 256 * 1024) {
+          onBytes(copiedBytes);
+          lastReportedBytes = copiedBytes;
+        }
+      }
+      await sink.flush();
+      await sink.close();
+      if (onBytes != null && lastReportedBytes < copiedBytes) {
+        onBytes(copiedBytes);
+      }
+    } catch (_) {
+      await sink.close();
+      if (await temporary.exists()) await temporary.delete();
+      rethrow;
+    }
     try {
       await temporary.rename(destination.path);
     } catch (_) {
       if (await destination.exists()) await destination.delete();
       await temporary.rename(destination.path);
     }
+  }
+
+  Future<File> _promoteNativeExtractedFile(
+    File extracted,
+    PocketManifestFile expected,
+    PocketCancellationToken cancellation,
+  ) async {
+    final target = File(path.join(_blobs.path, expected.sha256));
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        // The native output was streamed through its signed size and hash
+        // checks above and lives on the same filesystem as the blob store.
+        // Rename avoids writing another full copy of large package files.
+        return await extracted.rename(target.path);
+      } on FileSystemException {
+        final concurrentWinner = await validBlob(
+          expected,
+          cancellation: cancellation,
+        );
+        if (concurrentWinner != null) return concurrentWinner;
+        if (attempt == 0) {
+          // validBlob removes a corrupt target. Retry once in case a writer
+          // recreated it between validation and rename.
+          if (await target.exists()) await target.delete();
+          continue;
+        }
+        rethrow;
+      }
+    }
+    throw StateError('unreachable native blob promotion state');
   }
 
   Future<void> _writeAtomic(File destination, List<int> bytes) async {
@@ -2258,11 +2726,12 @@ Future<void> _verifyPakAnnotations(
 Future<Map<String, File>> _decodeBundleInWorker({
   required String archivePath,
   required String outputDirectory,
-  required String format,
   required int maxTotalBytes,
   required List<PocketManifestFile> expectedFiles,
   required bool requireExactEntries,
   required PocketCancellationToken cancellation,
+  void Function(PocketPackagePreparationProgress progress)?
+  onPreparationProgress,
 }) async {
   cancellation.throwIfCancelled();
   final responsePort = ReceivePort();
@@ -2294,6 +2763,38 @@ Future<Map<String, File>> _decodeBundleInWorker({
       );
       return;
     }
+    if (message is Map && message['progress'] == true) {
+      final rawStage = message['stage'];
+      final rawProcessedBytes = message['processedBytes'];
+      final rawTotalBytes = message['totalBytes'];
+      final rawProcessedFiles = message['processedFiles'];
+      final rawTotalFiles = message['totalFiles'];
+      if (rawStage is! int ||
+          rawStage < 0 ||
+          rawStage >= PocketPackagePreparationStage.values.length ||
+          (rawProcessedBytes != null && rawProcessedBytes is! int) ||
+          (rawTotalBytes != null && rawTotalBytes is! int) ||
+          (rawProcessedFiles != null && rawProcessedFiles is! int) ||
+          (rawTotalFiles != null && rawTotalFiles is! int)) {
+        outcome.completeError(
+          const PocketPackageException(
+            'bundle decoder returned invalid progress',
+            code: 'bundle-worker',
+          ),
+        );
+        return;
+      }
+      onPreparationProgress?.call(
+        PocketPackagePreparationProgress(
+          stage: PocketPackagePreparationStage.values[rawStage],
+          processedBytes: rawProcessedBytes as int?,
+          totalBytes: rawTotalBytes as int?,
+          processedFiles: rawProcessedFiles as int?,
+          totalFiles: rawTotalFiles as int?,
+        ),
+      );
+      return;
+    }
     if (message is! Map || message['ok'] is! bool) {
       outcome.completeError(
         const PocketPackageException(
@@ -2306,15 +2807,21 @@ Future<Map<String, File>> _decodeBundleInWorker({
     if (message['ok'] != true) {
       outcome.completeError(
         PocketPackageException(
-          message['message'] is String ? message['message'] as String : 'bundle decoder failed',
-          code: message['code'] is String ? message['code'] as String : 'bundle-worker',
+          message['message'] is String
+              ? message['message'] as String
+              : 'bundle decoder failed',
+          code: message['code'] is String
+              ? message['code'] as String
+              : 'bundle-worker',
         ),
       );
       return;
     }
     final rawFiles = message['files'];
     if (rawFiles is! Map ||
-        rawFiles.entries.any((entry) => entry.key is! String || entry.value is! String)) {
+        rawFiles.entries.any(
+          (entry) => entry.key is! String || entry.value is! String,
+        )) {
       outcome.completeError(
         const PocketPackageException(
           'bundle decoder returned invalid file paths',
@@ -2324,7 +2831,8 @@ Future<Map<String, File>> _decodeBundleInWorker({
       return;
     }
     outcome.complete(<String, String>{
-      for (final entry in rawFiles.entries) entry.key as String: entry.value as String,
+      for (final entry in rawFiles.entries)
+        entry.key as String: entry.value as String,
     });
   });
 
@@ -2354,12 +2862,13 @@ Future<Map<String, File>> _decodeBundleInWorker({
             responsePort.sendPort,
             archivePath,
             outputDirectory,
-            format,
             maxTotalBytes,
             <List<Object?>>[
-              for (final file in expectedFiles) <Object?>[file.sha256, file.size, file.url],
+              for (final file in expectedFiles)
+                <Object?>[file.sha256, file.size, file.url],
             ],
             requireExactEntries,
+            onPreparationProgress != null,
           ],
           onError: responsePort.sendPort,
           onExit: responsePort.sendPort,
@@ -2372,7 +2881,9 @@ Future<Map<String, File>> _decodeBundleInWorker({
         });
     worker = await Future.any<Isolate>(<Future<Isolate>>[
       spawn,
-      cancellation.whenCancelled.then<Isolate>((_) => throw const PocketUpdateCancellation()),
+      cancellation.whenCancelled.then<Isolate>(
+        (_) => throw const PocketUpdateCancellation(),
+      ),
     ]);
     // Unlike Isolate.run, this worker has an explicit lifetime. Closing the
     // package/session kills the decoder immediately instead of waiting for a
@@ -2380,7 +2891,9 @@ Future<Map<String, File>> _decodeBundleInWorker({
     cancellation.throwIfCancelled();
     final paths = await result;
     cancellation.throwIfCancelled();
-    return <String, File>{for (final entry in paths.entries) entry.key: File(entry.value)};
+    return <String, File>{
+      for (final entry in paths.entries) entry.key: File(entry.value),
+    };
   } finally {
     if (worker == null) {
       // Cancellation may win while Isolate.spawn is still resolving. Wait for
@@ -2410,17 +2923,48 @@ Future<void> _decodeBundleWorkerMain(List<Object?> request) async {
   try {
     final archivePath = request[1] as String;
     final outputDirectory = request[2] as String;
-    final format = request[3] as String;
-    final maxTotalBytes = request[4] as int;
-    final expectedFiles = (request[5] as List<Object?>).cast<List<Object?>>();
-    final requireExactEntries = request[6] as bool;
+    final maxTotalBytes = request[3] as int;
+    final expectedFiles = (request[4] as List<Object?>).cast<List<Object?>>();
+    final requireExactEntries = request[5] as bool;
+    final reportProgress = request[6] as bool;
+    final totalBytes = expectedFiles.fold<int>(
+      0,
+      (sum, file) => sum + (file[1] as int),
+    );
+    void sendProgress(PocketPackagePreparationProgress progress) {
+      if (!reportProgress) return;
+      reply.send(<String, Object?>{
+        'progress': true,
+        'stage': progress.stage.index,
+        if (progress.processedBytes case final value?) 'processedBytes': value,
+        if (progress.totalBytes case final value?) 'totalBytes': value,
+        if (progress.processedFiles case final value?) 'processedFiles': value,
+        if (progress.totalFiles case final value?) 'totalFiles': value,
+      });
+    }
 
     // Path-based transfer avoids duplicating an archive or extracted payload
     // of hundreds of MiB across isolate message queues.
     final archive = await File(archivePath).readAsBytes();
-    final extracted = decodePocketBundle(archive, format: format, maxTotalBytes: maxTotalBytes);
+    final extracted = decodePocketZip(
+      archive,
+      maxTotalBytes: maxTotalBytes,
+      onOutputBytes: reportProgress
+          ? (decodedBytes) => sendProgress(
+              PocketPackagePreparationProgress(
+                stage: PocketPackagePreparationStage.decodingArchive,
+                processedBytes: decodedBytes,
+                totalBytes: totalBytes,
+                processedFiles: 0,
+                totalFiles: expectedFiles.length,
+              ),
+            )
+          : null,
+    );
     if (requireExactEntries) {
-      final expectedPaths = expectedFiles.map((file) => file[2] as String).toSet();
+      final expectedPaths = expectedFiles
+          .map((file) => file[2] as String)
+          .toSet();
       if (extracted.length != expectedPaths.length ||
           extracted.keys.any((name) => !expectedPaths.contains(name))) {
         throw const PocketPackageException(
@@ -2431,11 +2975,14 @@ Future<void> _decodeBundleWorkerMain(List<Object?> request) async {
     }
 
     final files = <String, String>{};
+    var verifiedBytes = 0;
+    var verifiedFiles = 0;
     for (final file in expectedFiles) {
       final sha256 = file[0] as String;
       final size = file[1] as int;
       final url = file[2] as String;
-      final entryBytes = extracted[url] ?? extracted['blobs/$sha256'] ?? extracted[sha256];
+      final entryBytes =
+          extracted[url] ?? extracted['blobs/$sha256'] ?? extracted[sha256];
       if (entryBytes == null ||
           entryBytes.length != size ||
           crypto.sha256.convert(entryBytes).toString() != sha256) {
@@ -2449,28 +2996,58 @@ Future<void> _decodeBundleWorkerMain(List<Object?> request) async {
         await File(outputPath).writeAsBytes(entryBytes, flush: true);
         files[sha256] = outputPath;
       }
+      verifiedBytes += size;
+      verifiedFiles++;
+      sendProgress(
+        PocketPackagePreparationProgress(
+          stage: PocketPackagePreparationStage.verifyingFiles,
+          processedBytes: verifiedBytes,
+          totalBytes: totalBytes,
+          processedFiles: verifiedFiles,
+          totalFiles: expectedFiles.length,
+        ),
+      );
     }
     reply.send(<String, Object?>{'ok': true, 'files': files});
   } on PocketPackageException catch (error) {
-    reply.send(<String, Object?>{'ok': false, 'code': error.code, 'message': error.message});
+    reply.send(<String, Object?>{
+      'ok': false,
+      'code': error.code,
+      'message': error.message,
+    });
   } on Object catch (error) {
-    reply.send(<String, Object?>{'ok': false, 'code': 'bundle-worker', 'message': '$error'});
+    reply.send(<String, Object?>{
+      'ok': false,
+      'code': 'bundle-worker',
+      'message': '$error',
+    });
   }
 }
 
 Future<String> _fileHash(
   File file, [
   PocketCancellationToken? cancellation,
+  void Function(int readBytes)? onBytes,
 ]) async {
   final output = <crypto.Digest>[];
   final converter = crypto.sha256.startChunkedConversion(
     ChunkedConversionSink<crypto.Digest>.withCallback(output.addAll),
   );
+  var readBytes = 0;
+  var lastReportedBytes = 0;
   await for (final chunk in file.openRead()) {
     cancellation?.throwIfCancelled();
     converter.add(chunk);
+    readBytes += chunk.length;
+    if (onBytes != null && readBytes - lastReportedBytes >= 256 * 1024) {
+      onBytes(readBytes);
+      lastReportedBytes = readBytes;
+    }
   }
   converter.close();
+  if (onBytes != null && lastReportedBytes < readBytes) {
+    onBytes(readBytes);
+  }
   return output.single.toString();
 }
 
@@ -2628,7 +3205,10 @@ Uint8List encodePocketZip(Map<String, List<int>> entries) {
     localOffset += localHeader.length + compressed.length;
   }
 
-  final centralSize = centralParts.fold<int>(0, (sum, part) => sum + part.length);
+  final centralSize = centralParts.fold<int>(
+    0,
+    (sum, part) => sum + part.length,
+  );
   if (centralSize > 0xffffffff ||
       localOffset > 0xffffffff ||
       localOffset + centralSize + 22 > 0xffffffff) {
@@ -2655,11 +3235,70 @@ Uint8List encodePocketZip(Map<String, List<int>> entries) {
   return builder.takeBytes();
 }
 
+final class _BoundedByteSink extends ByteConversionSinkBase {
+  _BoundedByteSink({
+    required this.maxAllowedBytes,
+    required this.declaredUnpackSize,
+    required this.exceedsLimitMessage,
+    required this.exceedsDeclaredMessage,
+    this.onBytes,
+  });
+
+  final int maxAllowedBytes;
+  final int declaredUnpackSize;
+  final String exceedsLimitMessage;
+  final String exceedsDeclaredMessage;
+  final void Function(int producedBytes)? onBytes;
+  final BytesBuilder _builder = BytesBuilder(copy: false);
+  int _produced = 0;
+  int _nextProgressBytes = 256 * 1024;
+
+  @override
+  void add(List<int> chunk) {
+    addSlice(chunk, 0, chunk.length, false);
+  }
+
+  @override
+  void addSlice(List<int> chunk, int start, int end, bool isLast) {
+    final len = end - start;
+    if (len <= 0) return;
+    _produced += len;
+    if (_produced > maxAllowedBytes) {
+      throw PocketPackageException(exceedsLimitMessage, code: 'manifest-size');
+    }
+    if (_produced > declaredUnpackSize) {
+      throw PocketPackageException(
+        exceedsDeclaredMessage,
+        code: 'bundle-format',
+      );
+    }
+    if (start == 0 && end == chunk.length) {
+      _builder.add(chunk);
+    } else if (chunk is Uint8List) {
+      _builder.add(Uint8List.sublistView(chunk, start, end));
+    } else {
+      _builder.add(chunk.sublist(start, end));
+    }
+    final report = onBytes;
+    if (report != null &&
+        (_produced >= _nextProgressBytes || _produced == declaredUnpackSize)) {
+      report(_produced);
+      _nextProgressBytes = _produced + 256 * 1024;
+    }
+  }
+
+  @override
+  void close() {}
+
+  Uint8List takeBytes() => _builder.takeBytes();
+}
+
 /// Validates and extracts a PKZIP archive into memory with strict path,
 /// size, and CRC-32 verification.
 Map<String, Uint8List> decodePocketZip(
   Uint8List archive, {
   int maxTotalBytes = 768 * 1024 * 1024,
+  void Function(int decodedBytes)? onOutputBytes,
 }) {
   if (archive.length < 22) {
     throw const PocketPackageException(
@@ -2789,6 +3428,9 @@ Map<String, Uint8List> decodePocketZip(
         exceedsLimitMessage: 'zip uncompressed size exceeds limit',
         exceedsDeclaredMessage:
             'zip entry $name inflated past declared size $uncompressedSize',
+        onBytes: onOutputBytes == null
+            ? null
+            : (produced) => onOutputBytes(totalUncompressed + produced),
       );
       final sink = rawInflater.startChunkedConversion(boundedSink);
       try {
@@ -2836,1619 +3478,8 @@ Map<String, Uint8List> decodePocketZip(
       );
     }
     extracted[name] = uncompressedBytes;
+    onOutputBytes?.call(totalUncompressed);
     cursor += headerTotal;
   }
   return extracted;
-}
-
-const List<int> _sevenZipMagic = <int>[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c];
-
-List<int> _write7zU64(int value) {
-  if (value < 0) {
-    throw PocketPackageException(
-      'invalid 7z uint64 $value',
-      code: 'bundle-format',
-    );
-  }
-  var mask = 0x80;
-  var firstByte = 0;
-  for (var i = 0; i < 8; i++) {
-    final limit = i < 7 ? (1 << (7 * (i + 1))) : -1;
-    if (i < 7 && value < limit) {
-      firstByte |= (value >>> (8 * i)) & (mask - 1);
-      final out = <int>[firstByte];
-      for (var j = 0; j < i; j++) {
-        out.add((value >>> (8 * j)) & 0xff);
-      }
-      return out;
-    }
-    firstByte |= mask;
-    mask >>>= 1;
-  }
-  final out = <int>[0xff];
-  for (var j = 0; j < 8; j++) {
-    out.add((value >>> (8 * j)) & 0xff);
-  }
-  return out;
-}
-
-Uint8List _encodeLzma2Uncompressed(Uint8List data) {
-  if (data.isEmpty) return Uint8List.fromList(const <int>[0x00]);
-  final builder = BytesBuilder(copy: false);
-  var offset = 0;
-  var first = true;
-  while (offset < data.length) {
-    final chunkLen = math.min(0x10000, data.length - offset);
-    builder.add(<int>[
-      first ? 0x01 : 0x02,
-      ((chunkLen - 1) >>> 8) & 0xff,
-      (chunkLen - 1) & 0xff,
-    ]);
-    first = false;
-    builder.add(Uint8List.sublistView(data, offset, offset + chunkLen));
-    offset += chunkLen;
-  }
-  builder.addByte(0x00);
-  return builder.takeBytes();
-}
-
-List<int> _write7zBitVector(List<bool> bits) {
-  final out = <int>[];
-  var cur = 0;
-  var mask = 0x80;
-  for (final bit in bits) {
-    if (bit) cur |= mask;
-    mask >>>= 1;
-    if (mask == 0) {
-      out.add(cur);
-      cur = 0;
-      mask = 0x80;
-    }
-  }
-  if (mask != 0x80) out.add(cur);
-  return out;
-}
-
-/// Deterministic `.7z` (LZMA2) encoder in pure Dart.
-Uint8List encodePocket7z(Map<String, List<int>> entries) {
-  if (entries.length > 0xffff) {
-    throw const PocketPackageException(
-      '7z entry count exceeds 65535 limit',
-      code: 'bundle-format',
-    );
-  }
-  final normalizedEntries = <({String name, Uint8List data})>[];
-  for (final item in entries.entries) {
-    final normalized = item.key.replaceAll('\\', '/');
-    _validateAssetName(normalized);
-    if (utf8.encode(normalized).length > 0xffff) {
-      throw PocketPackageException(
-        '7z entry name exceeds 65535 bytes: $normalized',
-        code: 'bundle-format',
-      );
-    }
-    normalizedEntries.add((
-      name: normalized,
-      data: Uint8List.fromList(item.value),
-    ));
-  }
-  normalizedEntries.sort((a, b) => a.name.compareTo(b.name));
-  for (var i = 1; i < normalizedEntries.length; i++) {
-    if (normalizedEntries[i].name == normalizedEntries[i - 1].name) {
-      throw PocketPackageException(
-        'duplicate 7z entry ${normalizedEntries[i].name}',
-        code: 'bundle-format',
-      );
-    }
-  }
-
-  final nonEmpty = normalizedEntries
-      .where((entry) => entry.data.isNotEmpty)
-      .toList(growable: false);
-  final rawBuilder = BytesBuilder(copy: false);
-  for (final entry in nonEmpty) {
-    rawBuilder.add(entry.data);
-  }
-  final rawPayload = rawBuilder.takeBytes();
-  final packedPayload = nonEmpty.isNotEmpty
-      ? _encodeLzma2Uncompressed(rawPayload)
-      : Uint8List(0);
-
-  final header = <int>[0x01]; // kHeader
-  if (nonEmpty.isNotEmpty) {
-    header
-      ..add(0x04) // kMainStreamsInfo
-      ..add(0x06) // kPackInfo
-      ..addAll(_write7zU64(0))
-      ..addAll(_write7zU64(1))
-      ..add(0x09) // kSize
-      ..addAll(_write7zU64(packedPayload.length))
-      ..add(0x00) // kEnd PackInfo
-      ..add(0x07) // kUnPackInfo
-      ..add(0x0b) // kFolder
-      ..addAll(_write7zU64(1))
-      ..add(0x00) // external = 0
-      ..addAll(_write7zU64(1)) // 1 coder
-      ..add(0x21) // flags: idSize=1, hasAttrs=true
-      ..add(0x21) // codecId: LZMA2
-      ..addAll(_write7zU64(1)) // props size = 1
-      ..add(0x18) // dict prop (4 MiB)
-      ..add(0x0c) // kCodersUnPackSize
-      ..addAll(_write7zU64(rawPayload.length));
-    if (nonEmpty.length == 1) {
-      final c = pocketCrc32(nonEmpty.first.data);
-      header.addAll(<int>[
-        0x0a,
-        0x01,
-        c & 0xff,
-        (c >>> 8) & 0xff,
-        (c >>> 16) & 0xff,
-        (c >>> 24) & 0xff,
-      ]);
-    }
-    header.add(0x00); // kEnd UnPackInfo
-    if (nonEmpty.length > 1) {
-      header
-        ..add(0x08) // kSubStreamsInfo
-        ..add(0x0d) // kNumUnPackStream
-        ..addAll(_write7zU64(nonEmpty.length))
-        ..add(0x09); // kSize
-      for (var i = 0; i < nonEmpty.length - 1; i++) {
-        header.addAll(_write7zU64(nonEmpty[i].data.length));
-      }
-      header
-        ..add(0x0a)
-        ..add(0x01);
-      for (final entry in nonEmpty) {
-        final c = pocketCrc32(entry.data);
-        header.addAll(<int>[
-          c & 0xff,
-          (c >>> 8) & 0xff,
-          (c >>> 16) & 0xff,
-          (c >>> 24) & 0xff,
-        ]);
-      }
-      header.add(0x00); // kEnd SubStreamsInfo
-    }
-    header.add(0x00); // kEnd MainStreamsInfo
-  }
-
-  header
-    ..add(0x05) // kFilesInfo
-    ..addAll(_write7zU64(normalizedEntries.length));
-  final emptyFlags = normalizedEntries
-      .map((entry) => entry.data.isEmpty)
-      .toList(growable: false);
-  final emptyCount = emptyFlags.where((flag) => flag).length;
-  if (emptyCount > 0) {
-    final emptyStreamVec = _write7zBitVector(emptyFlags);
-    header
-      ..add(0x0e)
-      ..addAll(_write7zU64(emptyStreamVec.length))
-      ..addAll(emptyStreamVec);
-    final emptyFileVec = _write7zBitVector(
-      List<bool>.filled(emptyCount, true),
-    );
-    header
-      ..add(0x0f)
-      ..addAll(_write7zU64(emptyFileVec.length))
-      ..addAll(emptyFileVec);
-  }
-  if (normalizedEntries.isNotEmpty) {
-    final nameProp = <int>[0x00]; // external = 0
-    for (final entry in normalizedEntries) {
-      for (var i = 0; i < entry.name.length; i++) {
-        final code = entry.name.codeUnitAt(i);
-        nameProp
-          ..add(code & 0xff)
-          ..add((code >>> 8) & 0xff);
-      }
-      nameProp
-        ..add(0x00)
-        ..add(0x00);
-    }
-    header
-      ..add(0x11)
-      ..addAll(_write7zU64(nameProp.length))
-      ..addAll(nameProp);
-  }
-  header
-    ..add(0x00) // kEnd FilesInfo
-    ..add(0x00); // kEnd Header
-
-  final headerBytes = Uint8List.fromList(header);
-  final out = Uint8List(32 + packedPayload.length + headerBytes.length);
-  out.setRange(0, _sevenZipMagic.length, _sevenZipMagic);
-  out[6] = 0x00;
-  out[7] = 0x04;
-  final view = ByteData.sublistView(out);
-  view.setUint64(12, packedPayload.length, Endian.little);
-  view.setUint64(20, headerBytes.length, Endian.little);
-  view.setUint32(28, pocketCrc32(headerBytes), Endian.little);
-  view.setUint32(
-    8,
-    pocketCrc32(Uint8List.sublistView(out, 12, 32)),
-    Endian.little,
-  );
-  out.setRange(32, 32 + packedPayload.length, packedPayload);
-  out.setRange(
-    32 + packedPayload.length,
-    32 + packedPayload.length + headerBytes.length,
-    headerBytes,
-  );
-  return out;
-}
-
-final class _LzmaBufferDecoder {
-  _LzmaBufferDecoder(int expectedSize) : out = Uint8List(expectedSize);
-
-  final Uint8List out;
-  int outPos = 0;
-  int dictResetPos = 0;
-  int lc = 3;
-  int lp = 0;
-  int pb = 2;
-  int state = 0;
-  final List<int> reps = <int>[0, 0, 0, 0];
-  final Uint16List isMatch = Uint16List(192);
-  final Uint16List isRep = Uint16List(12);
-  final Uint16List isRepG0 = Uint16List(12);
-  final Uint16List isRepG1 = Uint16List(12);
-  final Uint16List isRepG2 = Uint16List(12);
-  final Uint16List isRep0Long = Uint16List(192);
-  final List<Uint16List> posSlotDecoder = List<Uint16List>.generate(
-    4,
-    (_) => Uint16List(64),
-  );
-  final Uint16List posDecoders = Uint16List(114);
-  final Uint16List alignDecoder = Uint16List(16);
-  Uint16List litProbs = Uint16List(0x300);
-  int lenChoice = 0x400;
-  int lenChoice2 = 0x400;
-  final List<Uint16List> lenLow = List<Uint16List>.generate(
-    16,
-    (_) => Uint16List(8),
-  );
-  final List<Uint16List> lenMid = List<Uint16List>.generate(
-    16,
-    (_) => Uint16List(8),
-  );
-  final Uint16List lenHigh = Uint16List(256);
-  int repLenChoice = 0x400;
-  int repLenChoice2 = 0x400;
-  final List<Uint16List> repLenLow = List<Uint16List>.generate(
-    16,
-    (_) => Uint16List(8),
-  );
-  final List<Uint16List> repLenMid = List<Uint16List>.generate(
-    16,
-    (_) => Uint16List(8),
-  );
-  final Uint16List repLenHigh = Uint16List(256);
-  bool propsInitialized = false;
-
-  void resetDictionary() {
-    dictResetPos = outPos;
-  }
-
-  void resetProps(int propByte) {
-    if (propByte >= 9 * 5 * 5) {
-      throw const PocketPackageException(
-        'invalid 7z LZMA properties byte',
-        code: 'bundle-format',
-      );
-    }
-    lc = propByte % 9;
-    final rem = propByte ~/ 9;
-    lp = rem % 5;
-    pb = rem ~/ 5;
-    litProbs = Uint16List(0x300 << (lc + lp));
-    propsInitialized = true;
-  }
-
-  void resetState() {
-    if (!propsInitialized) {
-      throw const PocketPackageException(
-        '7z LZMA properties not initialized',
-        code: 'bundle-format',
-      );
-    }
-    state = 0;
-    reps[0] = 0;
-    reps[1] = 0;
-    reps[2] = 0;
-    reps[3] = 0;
-    isMatch.fillRange(0, isMatch.length, 0x400);
-    isRep.fillRange(0, isRep.length, 0x400);
-    isRepG0.fillRange(0, isRepG0.length, 0x400);
-    isRepG1.fillRange(0, isRepG1.length, 0x400);
-    isRepG2.fillRange(0, isRepG2.length, 0x400);
-    isRep0Long.fillRange(0, isRep0Long.length, 0x400);
-    for (final a in posSlotDecoder) {
-      a.fillRange(0, a.length, 0x400);
-    }
-    posDecoders.fillRange(0, posDecoders.length, 0x400);
-    alignDecoder.fillRange(0, alignDecoder.length, 0x400);
-    litProbs.fillRange(0, litProbs.length, 0x400);
-    lenChoice = 0x400;
-    lenChoice2 = 0x400;
-    for (final a in lenLow) {
-      a.fillRange(0, a.length, 0x400);
-    }
-    for (final a in lenMid) {
-      a.fillRange(0, a.length, 0x400);
-    }
-    lenHigh.fillRange(0, lenHigh.length, 0x400);
-    repLenChoice = 0x400;
-    repLenChoice2 = 0x400;
-    for (final a in repLenLow) {
-      a.fillRange(0, a.length, 0x400);
-    }
-    for (final a in repLenMid) {
-      a.fillRange(0, a.length, 0x400);
-    }
-    repLenHigh.fillRange(0, repLenHigh.length, 0x400);
-  }
-
-  void copyUncompressed(Uint8List src, int offset, int len) {
-    if (offset < 0 || len < 0 || offset + len > src.length) {
-      throw const PocketPackageException(
-        'truncated 7z LZMA2 uncompressed chunk',
-        code: 'bundle-format',
-      );
-    }
-    if (outPos + len > out.length) {
-      throw const PocketPackageException(
-        '7z LZMA2 output exceeds declared unpack size',
-        code: 'bundle-format',
-      );
-    }
-    out.setRange(outPos, outPos + len, src, offset);
-    outPos += len;
-  }
-
-  int _getByte(int dist) {
-    final avail = outPos - dictResetPos;
-    if (dist <= 0 || dist > avail) {
-      throw const PocketPackageException(
-        'corrupted 7z LZMA back-reference distance',
-        code: 'bundle-format',
-      );
-    }
-    return out[outPos - dist];
-  }
-
-  void _putByte(int b) {
-    if (outPos >= out.length) {
-      throw const PocketPackageException(
-        '7z LZMA output exceeds declared unpack size',
-        code: 'bundle-format',
-      );
-    }
-    out[outPos++] = b & 0xff;
-  }
-
-  void decodeChunk(Uint8List inBuf, int unpackSize) {
-    if (!propsInitialized) {
-      throw const PocketPackageException(
-        '7z LZMA properties not initialized',
-        code: 'bundle-format',
-      );
-    }
-    if (inBuf.length < 5 || inBuf[0] != 0) {
-      throw const PocketPackageException(
-        'invalid or truncated 7z LZMA stream',
-        code: 'bundle-format',
-      );
-    }
-    if (outPos + unpackSize > out.length) {
-      throw const PocketPackageException(
-        '7z LZMA chunk exceeds declared unpack size',
-        code: 'bundle-format',
-      );
-    }
-    var inPos = 1;
-    var range = 0xffffffff;
-    var code = 0;
-    for (var i = 0; i < 4; i++) {
-      code = ((code << 8) | inBuf[inPos++]) & 0xffffffff;
-    }
-    int readByte() {
-      if (inPos >= inBuf.length) {
-        throw const PocketPackageException(
-          'truncated 7z LZMA input stream',
-          code: 'bundle-format',
-        );
-      }
-      return inBuf[inPos++];
-    }
-
-    int decodeBit(Uint16List probs, int idx) {
-      if (range < 0x01000000) {
-        code = ((code << 8) | readByte()) & 0xffffffff;
-        range = (range << 8) & 0xffffffff;
-      }
-      final prob = probs[idx];
-      final bound = ((range >>> 11) * prob) & 0xffffffff;
-      if (code < bound) {
-        range = bound;
-        probs[idx] = (prob + ((2048 - prob) >>> 5)) & 0xffff;
-        return 0;
-      } else {
-        range = (range - bound) & 0xffffffff;
-        code = (code - bound) & 0xffffffff;
-        probs[idx] = (prob - (prob >>> 5)) & 0xffff;
-        return 1;
-      }
-    }
-
-    (int, int) decodeBitScalar(int prob) {
-      if (range < 0x01000000) {
-        code = ((code << 8) | readByte()) & 0xffffffff;
-        range = (range << 8) & 0xffffffff;
-      }
-      final bound = ((range >>> 11) * prob) & 0xffffffff;
-      late final int bit;
-      late final int nextProb;
-      if (code < bound) {
-        range = bound;
-        nextProb = (prob + ((2048 - prob) >>> 5)) & 0xffff;
-        bit = 0;
-      } else {
-        range = (range - bound) & 0xffffffff;
-        code = (code - bound) & 0xffffffff;
-        nextProb = (prob - (prob >>> 5)) & 0xffff;
-        bit = 1;
-      }
-      return (bit, nextProb);
-    }
-
-    int decodeBitTree(Uint16List probs, int numBits) {
-      var m = 1;
-      for (var i = 0; i < numBits; i++) {
-        m = (m << 1) | decodeBit(probs, m);
-      }
-      return m - (1 << numBits);
-    }
-
-    int decodeReverseBitTree(Uint16List probs, int offset, int numBits) {
-      var m = 1;
-      var symbol = 0;
-      for (var i = 0; i < numBits; i++) {
-        final bit = decodeBit(probs, offset + m);
-        m = (m << 1) | bit;
-        symbol |= bit << i;
-      }
-      return symbol;
-    }
-
-    int decodeDirectBits(int numBits) {
-      var res = 0;
-      for (var i = numBits; i > 0; i--) {
-        if (range < 0x01000000) {
-          code = ((code << 8) | readByte()) & 0xffffffff;
-          range = (range << 8) & 0xffffffff;
-        }
-        range = (range >>> 1) & 0xffffffff;
-        res <<= 1;
-        if (code >= range) {
-          code = (code - range) & 0xffffffff;
-          res |= 1;
-        }
-      }
-      return res;
-    }
-
-    int decodeLen(bool isRepLen, int posState) {
-      if (isRepLen) {
-        final (b1, next1) = decodeBitScalar(repLenChoice);
-        repLenChoice = next1;
-        if (b1 == 0) return decodeBitTree(repLenLow[posState], 3);
-        final (b2, next2) = decodeBitScalar(repLenChoice2);
-        repLenChoice2 = next2;
-        if (b2 == 0) return 8 + decodeBitTree(repLenMid[posState], 3);
-        return 16 + decodeBitTree(repLenHigh, 8);
-      } else {
-        final (b1, next1) = decodeBitScalar(lenChoice);
-        lenChoice = next1;
-        if (b1 == 0) return decodeBitTree(lenLow[posState], 3);
-        final (b2, next2) = decodeBitScalar(lenChoice2);
-        lenChoice2 = next2;
-        if (b2 == 0) return 8 + decodeBitTree(lenMid[posState], 3);
-        return 16 + decodeBitTree(lenHigh, 8);
-      }
-    }
-
-    final posStateMask = (1 << pb) - 1;
-    final lpMask = (1 << lp) - 1;
-    var chunkWritten = 0;
-    while (chunkWritten < unpackSize) {
-      final totalPos = outPos - dictResetPos;
-      final posState = totalPos & posStateMask;
-      if (decodeBit(isMatch, (state << 4) + posState) == 0) {
-        final prevByte = totalPos > 0 ? _getByte(1) : 0;
-        final litState = ((totalPos & lpMask) << lc) + (prevByte >>> (8 - lc));
-        final probsOffset = 0x300 * litState;
-        var symbol = 1;
-        if (state >= 7) {
-          var matchByte = _getByte(reps[0] + 1);
-          do {
-            final matchBit = (matchByte >>> 7) & 1;
-            matchByte <<= 1;
-            final bit = decodeBit(
-              litProbs,
-              probsOffset + ((1 + matchBit) << 8) + symbol,
-            );
-            symbol = (symbol << 1) | bit;
-            if (matchBit != bit) break;
-          } while (symbol < 0x100);
-        }
-        while (symbol < 0x100) {
-          symbol = (symbol << 1) | decodeBit(litProbs, probsOffset + symbol);
-        }
-        _putByte(symbol & 0xff);
-        chunkWritten++;
-        state = state < 4
-            ? 0
-            : state < 10
-            ? state - 3
-            : state - 6;
-      } else {
-        late final int len;
-        if (decodeBit(isRep, state) == 1) {
-          if (decodeBit(isRepG0, state) == 0) {
-            if (decodeBit(isRep0Long, (state << 4) + posState) == 0) {
-              state = state < 7 ? 9 : 11;
-              _putByte(_getByte(reps[0] + 1));
-              chunkWritten++;
-              continue;
-            }
-          } else {
-            late final int dist;
-            if (decodeBit(isRepG1, state) == 0) {
-              dist = reps[1];
-            } else {
-              if (decodeBit(isRepG2, state) == 0) {
-                dist = reps[2];
-              } else {
-                dist = reps[3];
-                reps[3] = reps[2];
-              }
-              reps[2] = reps[1];
-            }
-            reps[1] = reps[0];
-            reps[0] = dist;
-          }
-          len = decodeLen(true, posState) + 2;
-          state = state < 7 ? 8 : 11;
-        } else {
-          reps[3] = reps[2];
-          reps[2] = reps[1];
-          reps[1] = reps[0];
-          len = decodeLen(false, posState) + 2;
-          state = state < 7 ? 7 : 10;
-          final posSlot = decodeBitTree(
-            posSlotDecoder[len - 2 < 4 ? len - 2 : 3],
-            6,
-          );
-          if (posSlot >= 4) {
-            final numDirectBits = (posSlot >>> 1) - 1;
-            var dist = (2 | (posSlot & 1)) << numDirectBits;
-            if (posSlot < 14) {
-              dist += decodeReverseBitTree(
-                posDecoders,
-                dist - posSlot - 1,
-                numDirectBits,
-              );
-            } else {
-              dist += decodeDirectBits(numDirectBits - 4) << 4;
-              dist += decodeReverseBitTree(alignDecoder, 0, 4);
-            }
-            reps[0] = dist;
-          } else {
-            reps[0] = posSlot;
-          }
-        }
-        if (chunkWritten + len > unpackSize) {
-          throw const PocketPackageException(
-            '7z LZMA match exceeds declared chunk unpack size',
-            code: 'bundle-format',
-          );
-        }
-        for (var i = 0; i < len; i++) {
-          _putByte(_getByte(reps[0] + 1));
-          chunkWritten++;
-        }
-      }
-    }
-  }
-
-  Uint8List finish() {
-    if (outPos != out.length) {
-      throw PocketPackageException(
-        '7z decoded $outPos bytes, expected ${out.length}',
-        code: 'bundle-format',
-      );
-    }
-    return out;
-  }
-}
-
-Uint8List _decodeLzma1Stream(
-  Uint8List props,
-  Uint8List inBuf,
-  int expectedSize,
-) {
-  if (props.length < 5) {
-    throw const PocketPackageException(
-      '7z LZMA1 coder properties too short',
-      code: 'bundle-format',
-    );
-  }
-  if (expectedSize == 0) return Uint8List(0);
-  final decoder = _LzmaBufferDecoder(expectedSize)
-    ..resetProps(props[0])
-    ..resetState()
-    ..decodeChunk(inBuf, expectedSize);
-  return decoder.finish();
-}
-
-Uint8List _decodeLzma2Stream(
-  Uint8List props,
-  Uint8List inBuf,
-  int expectedSize,
-) {
-  if (props.isEmpty || (props[0] & 0x3f) > 40) {
-    throw const PocketPackageException(
-      'invalid 7z LZMA2 coder properties',
-      code: 'bundle-format',
-    );
-  }
-  final decoder = _LzmaBufferDecoder(expectedSize);
-  var pos = 0;
-  var sawEnd = false;
-  while (pos < inBuf.length) {
-    final control = inBuf[pos++];
-    if (control == 0x00) {
-      sawEnd = true;
-      break;
-    }
-    if (control == 0x01 || control == 0x02) {
-      if (pos + 2 > inBuf.length) {
-        throw const PocketPackageException(
-          'truncated 7z LZMA2 uncompressed chunk header',
-          code: 'bundle-format',
-        );
-      }
-      final unpackSize = ((inBuf[pos] << 8) | inBuf[pos + 1]) + 1;
-      pos += 2;
-      if (control == 0x01) decoder.resetDictionary();
-      decoder.copyUncompressed(inBuf, pos, unpackSize);
-      pos += unpackSize;
-    } else if (control >= 0x80) {
-      if (pos + 4 > inBuf.length) {
-        throw const PocketPackageException(
-          'truncated 7z LZMA2 compressed chunk header',
-          code: 'bundle-format',
-        );
-      }
-      final unpackSize =
-          (((control & 0x1f) << 16) | (inBuf[pos] << 8) | inBuf[pos + 1]) + 1;
-      final packSize = ((inBuf[pos + 2] << 8) | inBuf[pos + 3]) + 1;
-      pos += 4;
-      final mode = (control >>> 5) & 3;
-      if (mode >= 2) {
-        if (pos >= inBuf.length) {
-          throw const PocketPackageException(
-            'missing 7z LZMA2 property byte',
-            code: 'bundle-format',
-          );
-        }
-        final propByte = inBuf[pos++];
-        if (mode == 3) decoder.resetDictionary();
-        decoder
-          ..resetProps(propByte)
-          ..resetState();
-      } else if (mode == 1) {
-        decoder.resetState();
-      }
-      if (pos + packSize > inBuf.length) {
-        throw const PocketPackageException(
-          'truncated 7z LZMA2 compressed chunk data',
-          code: 'bundle-format',
-        );
-      }
-      decoder.decodeChunk(
-        Uint8List.sublistView(inBuf, pos, pos + packSize),
-        unpackSize,
-      );
-      pos += packSize;
-    } else {
-      throw PocketPackageException(
-        'invalid 7z LZMA2 control byte 0x${control.toRadixString(16)}',
-        code: 'bundle-format',
-      );
-    }
-  }
-  if (!sawEnd && expectedSize > 0) {
-    throw const PocketPackageException(
-      '7z LZMA2 stream missing end marker',
-      code: 'bundle-format',
-    );
-  }
-  return decoder.finish();
-}
-
-final class _SevenZipHeaderReader {
-  _SevenZipHeaderReader(this.buf);
-
-  final Uint8List buf;
-  int pos = 0;
-
-  int readByte() {
-    if (pos >= buf.length) {
-      throw const PocketPackageException(
-        'unexpected EOF in 7z header',
-        code: 'bundle-format',
-      );
-    }
-    return buf[pos++];
-  }
-
-  Uint8List readBytes(int len) {
-    if (len < 0 || pos + len > buf.length) {
-      throw const PocketPackageException(
-        'unexpected EOF in 7z header slice',
-        code: 'bundle-format',
-      );
-    }
-    final sub = Uint8List.sublistView(buf, pos, pos + len);
-    pos += len;
-    return sub;
-  }
-
-  int readU32() {
-    if (pos + 4 > buf.length) {
-      throw const PocketPackageException(
-        'unexpected EOF reading 7z uint32',
-        code: 'bundle-format',
-      );
-    }
-    final v =
-        (buf[pos] |
-            (buf[pos + 1] << 8) |
-            (buf[pos + 2] << 16) |
-            (buf[pos + 3] << 24)) &
-        0xffffffff;
-    pos += 4;
-    return v;
-  }
-
-  int readU64() {
-    final b0 = readByte();
-    var mask = 0x80;
-    var extra = 0;
-    for (var i = 0; i < 8; i++) {
-      if ((b0 & mask) == 0) {
-        extra = i;
-        break;
-      }
-      mask >>>= 1;
-      if (i == 7) extra = 8;
-    }
-    var val = 0;
-    for (var i = 0; i < extra; i++) {
-      val |= readByte() << (8 * i);
-    }
-    if (extra < 8) {
-      final high = b0 & (mask - 1);
-      val |= high << (8 * extra);
-    }
-    if (val < 0) {
-      throw const PocketPackageException(
-        '7z uint64 overflow',
-        code: 'bundle-format',
-      );
-    }
-    return val;
-  }
-
-  List<bool> readBitVector(int count) {
-    if (count < 0 || count > 0xffff || pos + ((count + 7) >> 3) > buf.length) {
-      throw const PocketPackageException(
-        '7z bit vector count out of bounds',
-        code: 'bundle-format',
-      );
-    }
-    final bits = List<bool>.filled(count, false);
-    var mask = 0;
-    var cur = 0;
-    for (var i = 0; i < count; i++) {
-      if (mask == 0) {
-        cur = readByte();
-        mask = 0x80;
-      }
-      bits[i] = (cur & mask) != 0;
-      mask >>>= 1;
-    }
-    return bits;
-  }
-
-  List<bool> readAllOrBits(int count) {
-    if (count < 0 || count > 0xffff) {
-      throw const PocketPackageException(
-        '7z defined-vector count out of bounds',
-        code: 'bundle-format',
-      );
-    }
-    final allDefined = readByte();
-    if (allDefined != 0) return List<bool>.filled(count, true);
-    return readBitVector(count);
-  }
-
-  List<int?> readDigests(int count) {
-    final defined = readAllOrBits(count);
-    var definedCount = 0;
-    for (final isDef in defined) {
-      if (isDef) definedCount++;
-    }
-    if (pos + definedCount * 4 > buf.length) {
-      throw const PocketPackageException(
-        'unexpected EOF reading 7z CRC digests',
-        code: 'bundle-format',
-      );
-    }
-    return <int?>[for (final isDef in defined) isDef ? readU32() : null];
-  }
-}
-
-final class _BoundedByteSink extends ByteConversionSinkBase {
-  _BoundedByteSink({
-    required this.maxAllowedBytes,
-    required this.declaredUnpackSize,
-    required this.exceedsLimitMessage,
-    required this.exceedsDeclaredMessage,
-  });
-
-  final int maxAllowedBytes;
-  final int declaredUnpackSize;
-  final String exceedsLimitMessage;
-  final String exceedsDeclaredMessage;
-  final BytesBuilder _builder = BytesBuilder(copy: false);
-  int _produced = 0;
-
-  @override
-  void add(List<int> chunk) {
-    addSlice(chunk, 0, chunk.length, false);
-  }
-
-  @override
-  void addSlice(List<int> chunk, int start, int end, bool isLast) {
-    final len = end - start;
-    if (len <= 0) return;
-    _produced += len;
-    if (_produced > maxAllowedBytes) {
-      throw PocketPackageException(
-        exceedsLimitMessage,
-        code: 'manifest-size',
-      );
-    }
-    if (_produced > declaredUnpackSize) {
-      throw PocketPackageException(
-        exceedsDeclaredMessage,
-        code: 'bundle-format',
-      );
-    }
-    if (start == 0 && end == chunk.length) {
-      _builder.add(chunk);
-    } else if (chunk is Uint8List) {
-      _builder.add(Uint8List.sublistView(chunk, start, end));
-    } else {
-      _builder.add(chunk.sublist(start, end));
-    }
-  }
-
-  @override
-  void close() {}
-
-  Uint8List takeBytes() => _builder.takeBytes();
-}
-
-final class _SevenZipCoder {
-  const _SevenZipCoder({
-    required this.codecId,
-    required this.props,
-    required this.numInStreams,
-    required this.numOutStreams,
-  });
-
-  final Uint8List codecId;
-  final Uint8List props;
-  final int numInStreams;
-  final int numOutStreams;
-}
-
-final class _SevenZipFolder {
-  _SevenZipFolder({
-    required this.coders,
-    required this.packedStreamIndices,
-  });
-
-  final List<_SevenZipCoder> coders;
-  final List<int> packedStreamIndices;
-  final List<int> unpackSizes = <int>[];
-  int unpackSize = 0;
-  int? crc;
-}
-
-final class _SevenZipStreamsInfo {
-  const _SevenZipStreamsInfo({
-    required this.packPos,
-    required this.packSizes,
-    required this.packCrcs,
-    required this.folders,
-    required this.subStreamSizes,
-    required this.subStreamCrcs,
-  });
-
-  final int packPos;
-  final List<int> packSizes;
-  final List<int?> packCrcs;
-  final List<_SevenZipFolder> folders;
-  final List<List<int>> subStreamSizes;
-  final List<List<int?>> subStreamCrcs;
-}
-
-_SevenZipStreamsInfo _parse7zStreamsInfo(_SevenZipHeaderReader r) {
-  var id = r.readByte();
-  var packPos = 0;
-  var packSizes = <int>[];
-  var packCrcs = <int?>[];
-  if (id == 0x06) {
-    packPos = r.readU64();
-    final numPackStreams = r.readU64();
-    if (numPackStreams > 0xffff) {
-      throw const PocketPackageException(
-        '7z pack stream count exceeds 65535 limit',
-        code: 'bundle-format',
-      );
-    }
-    id = r.readByte();
-    while (id != 0x00) {
-      if (id == 0x09) {
-        packSizes = <int>[for (var i = 0; i < numPackStreams; i++) r.readU64()];
-      } else if (id == 0x0a) {
-        packCrcs = r.readDigests(numPackStreams);
-      } else {
-        final skip = r.readU64();
-        r.readBytes(skip);
-      }
-      id = r.readByte();
-    }
-    id = r.readByte();
-  }
-
-  final folders = <_SevenZipFolder>[];
-  if (id == 0x07) {
-    id = r.readByte();
-    if (id != 0x0b) {
-      throw const PocketPackageException(
-        'invalid 7z UnPackInfo folder marker',
-        code: 'bundle-format',
-      );
-    }
-    final numFolders = r.readU64();
-    if (numFolders > 0xffff) {
-      throw const PocketPackageException(
-        '7z folder count exceeds 65535 limit',
-        code: 'bundle-format',
-      );
-    }
-    if (r.readByte() != 0) {
-      throw const PocketPackageException(
-        'external 7z folders are not supported',
-        code: 'bundle-format',
-      );
-    }
-    for (var f = 0; f < numFolders; f++) {
-      final numCoders = r.readU64();
-      if (numCoders == 0 || numCoders > 64) {
-        throw const PocketPackageException(
-          '7z coder count out of bounds',
-          code: 'bundle-format',
-        );
-      }
-      final coders = <_SevenZipCoder>[];
-      var totalIn = 0;
-      var totalOut = 0;
-      for (var c = 0; c < numCoders; c++) {
-        final flags = r.readByte();
-        final idSize = flags & 0x0f;
-        final isComplex = (flags & 0x10) != 0;
-        final hasAttrs = (flags & 0x20) != 0;
-        final codecId = r.readBytes(idSize);
-        final numIn = isComplex ? r.readU64() : 1;
-        final numOut = isComplex ? r.readU64() : 1;
-        if (numIn == 0 || numIn > 64 || numOut == 0 || numOut > 64) {
-          throw const PocketPackageException(
-            '7z coder stream arity out of bounds',
-            code: 'bundle-format',
-          );
-        }
-        final props = hasAttrs ? r.readBytes(r.readU64()) : Uint8List(0);
-        coders.add(
-          _SevenZipCoder(
-            codecId: codecId,
-            props: props,
-            numInStreams: numIn,
-            numOutStreams: numOut,
-          ),
-        );
-        totalIn += numIn;
-        totalOut += numOut;
-      }
-      final numBindPairs = totalOut - 1;
-      final boundIn = <int>{};
-      for (var b = 0; b < numBindPairs; b++) {
-        boundIn.add(r.readU64());
-        r.readU64();
-      }
-      final numPacked = totalIn - numBindPairs;
-      final packedIndices = <int>[];
-      if (numPacked == 1) {
-        for (var i = 0; i < totalIn; i++) {
-          if (!boundIn.contains(i)) {
-            packedIndices.add(i);
-            break;
-          }
-        }
-      } else {
-        for (var i = 0; i < numPacked; i++) {
-          packedIndices.add(r.readU64());
-        }
-      }
-      folders.add(
-        _SevenZipFolder(coders: coders, packedStreamIndices: packedIndices),
-      );
-    }
-    id = r.readByte();
-    if (id != 0x0c) {
-      throw const PocketPackageException(
-        'missing 7z kCodersUnPackSize marker',
-        code: 'bundle-format',
-      );
-    }
-    for (final folder in folders) {
-      final totalOut = folder.coders.fold<int>(
-        0,
-        (sum, c) => sum + c.numOutStreams,
-      );
-      for (var i = 0; i < totalOut; i++) {
-        folder.unpackSizes.add(r.readU64());
-      }
-      folder.unpackSize = folder.unpackSizes.isEmpty
-          ? 0
-          : folder.unpackSizes.last;
-    }
-    id = r.readByte();
-    if (id == 0x0a) {
-      final crcs = r.readDigests(folders.length);
-      for (var i = 0; i < folders.length; i++) {
-        folders[i].crc = crcs[i];
-      }
-      id = r.readByte();
-    }
-    if (id != 0x00) {
-      throw const PocketPackageException(
-        'missing 7z UnPackInfo end marker',
-        code: 'bundle-format',
-      );
-    }
-    id = r.readByte();
-  }
-
-  final numUnPackStreams = List<int>.filled(folders.length, 1);
-  final subStreamSizes = <List<int>>[
-    for (final f in folders) <int>[f.unpackSize],
-  ];
-  final subStreamCrcs = <List<int?>>[
-    for (final f in folders) <int?>[f.crc],
-  ];
-  if (id == 0x08) {
-    var sawSubStreamCrcs = false;
-    id = r.readByte();
-    while (id != 0x00) {
-      if (id == 0x0d) {
-        var totalSubStreams = 0;
-        for (var i = 0; i < folders.length; i++) {
-          final subCount = r.readU64();
-          if (subCount > 0xffff || totalSubStreams + subCount > 0xffff) {
-            throw const PocketPackageException(
-              '7z substream count exceeds 65535 limit',
-              code: 'bundle-format',
-            );
-          }
-          totalSubStreams += subCount;
-          numUnPackStreams[i] = subCount;
-        }
-      } else if (id == 0x09) {
-        for (var i = 0; i < folders.length; i++) {
-          final count = numUnPackStreams[i];
-          if (count == 0) {
-            subStreamSizes[i] = const <int>[];
-            continue;
-          }
-          final sizes = <int>[];
-          var sum = 0;
-          for (var j = 0; j < count - 1; j++) {
-            final s = r.readU64();
-            sizes.add(s);
-            sum += s;
-          }
-          if (sum > folders[i].unpackSize) {
-            throw const PocketPackageException(
-              '7z substream sizes exceed folder unpack size',
-              code: 'bundle-format',
-            );
-          }
-          sizes.add(folders[i].unpackSize - sum);
-          subStreamSizes[i] = sizes;
-        }
-      } else if (id == 0x0a) {
-        sawSubStreamCrcs = true;
-        var unknownCrcs = 0;
-        for (var i = 0; i < folders.length; i++) {
-          final count = numUnPackStreams[i];
-          if (!(count == 1 && folders[i].crc != null)) {
-            unknownCrcs += count;
-          }
-        }
-        final digests = r.readDigests(unknownCrcs);
-        var dIdx = 0;
-        for (var i = 0; i < folders.length; i++) {
-          final count = numUnPackStreams[i];
-          if (count == 1 && folders[i].crc != null) {
-            subStreamCrcs[i] = <int?>[folders[i].crc];
-          } else {
-            subStreamCrcs[i] = <int?>[
-              for (var j = 0; j < count; j++) digests[dIdx++],
-            ];
-          }
-        }
-      } else {
-        final skip = r.readU64();
-        r.readBytes(skip);
-      }
-      id = r.readByte();
-    }
-    for (var i = 0; i < folders.length; i++) {
-      if (numUnPackStreams[i] == 1 && subStreamSizes[i].length != 1) {
-        subStreamSizes[i] = <int>[folders[i].unpackSize];
-      }
-      if (!sawSubStreamCrcs && numUnPackStreams[i] != 1) {
-        subStreamCrcs[i] = List<int?>.filled(numUnPackStreams[i], null);
-      }
-    }
-    id = r.readByte();
-  }
-  if (id != 0x00) {
-    throw const PocketPackageException(
-      'missing 7z StreamsInfo end marker',
-      code: 'bundle-format',
-    );
-  }
-  return _SevenZipStreamsInfo(
-    packPos: packPos,
-    packSizes: packSizes,
-    packCrcs: packCrcs,
-    folders: folders,
-    subStreamSizes: subStreamSizes,
-    subStreamCrcs: subStreamCrcs,
-  );
-}
-
-Uint8List _decode7zFolder(
-  Uint8List archive,
-  _SevenZipStreamsInfo streams,
-  int folderIdx,
-  int packStreamOffset,
-  int packSize,
-  int maxAllowedBytes,
-) {
-  final folder = streams.folders[folderIdx];
-  if (folder.unpackSize > maxAllowedBytes) {
-    throw const PocketPackageException(
-      '7z uncompressed size exceeds limit',
-      code: 'manifest-size',
-    );
-  }
-  final dataStart = 32 + streams.packPos + packStreamOffset;
-  if (dataStart < 32 ||
-      packSize < 0 ||
-      dataStart + packSize > archive.length) {
-    throw const PocketPackageException(
-      '7z packed stream out of bounds',
-      code: 'bundle-format',
-    );
-  }
-  if (folder.coders.length != 1) {
-    throw const PocketPackageException(
-      'unsupported multi-coder 7z filter chain',
-      code: 'bundle-format',
-    );
-  }
-  final coder = folder.coders.single;
-  final packed = Uint8List.sublistView(archive, dataStart, dataStart + packSize);
-  final expectedPackCrc =
-      folderIdx < streams.packCrcs.length ? streams.packCrcs[folderIdx] : null;
-  if (expectedPackCrc != null && pocketCrc32(packed) != expectedPackCrc) {
-    throw const PocketPackageException(
-      '7z packed stream CRC-32 mismatch',
-      code: 'bundle-format',
-    );
-  }
-  late final Uint8List unpacked;
-  if (coder.codecId.length == 1 && coder.codecId[0] == 0x00) {
-    if (packed.length != folder.unpackSize) {
-      throw const PocketPackageException(
-        '7z Copy coder size mismatch',
-        code: 'bundle-format',
-      );
-    }
-    unpacked = Uint8List.fromList(packed);
-  } else if (coder.codecId.length == 1 && coder.codecId[0] == 0x21) {
-    unpacked = _decodeLzma2Stream(coder.props, packed, folder.unpackSize);
-  } else if (coder.codecId.length == 3 &&
-      coder.codecId[0] == 0x03 &&
-      coder.codecId[1] == 0x01 &&
-      coder.codecId[2] == 0x01) {
-    unpacked = _decodeLzma1Stream(coder.props, packed, folder.unpackSize);
-  } else if (coder.codecId.length == 3 &&
-      coder.codecId[0] == 0x04 &&
-      coder.codecId[1] == 0x01 &&
-      coder.codecId[2] == 0x08) {
-    final boundedSink = _BoundedByteSink(
-      maxAllowedBytes: maxAllowedBytes,
-      declaredUnpackSize: folder.unpackSize,
-      exceedsLimitMessage: '7z uncompressed size exceeds limit',
-      exceedsDeclaredMessage:
-          '7z Deflate stream exceeded declared unpack size',
-    );
-    final sink = ZLibDecoder(raw: true).startChunkedConversion(boundedSink);
-    try {
-      const sliceSize = 16 * 1024;
-      if (packed.isEmpty) {
-        sink.add(const <int>[]);
-      } else {
-        for (var offset = 0; offset < packed.length; offset += sliceSize) {
-          final end = math.min(offset + sliceSize, packed.length);
-          sink.addSlice(packed, offset, end, end == packed.length);
-        }
-      }
-      sink.close();
-      unpacked = boundedSink.takeBytes();
-    } on PocketPackageException {
-      rethrow;
-    } on Object catch (error) {
-      throw PocketPackageException(
-        'failed to inflate 7z Deflate stream: $error',
-        code: 'bundle-format',
-      );
-    }
-    if (unpacked.length != folder.unpackSize) {
-      throw const PocketPackageException(
-        '7z Deflate coder size mismatch',
-        code: 'bundle-format',
-      );
-    }
-  } else {
-    throw const PocketPackageException(
-      'unsupported 7z compression coder',
-      code: 'bundle-format',
-    );
-  }
-  if (folder.crc != null && pocketCrc32(unpacked) != folder.crc) {
-    throw const PocketPackageException(
-      '7z folder CRC-32 mismatch',
-      code: 'bundle-format',
-    );
-  }
-  return unpacked;
-}
-
-/// Validates and extracts a `.7z` archive into memory in pure Dart with strict
-/// path, size (`maxTotalBytes`), and CRC-32 verification.
-Map<String, Uint8List> decodePocket7z(
-  Uint8List archive, {
-  int maxTotalBytes = 768 * 1024 * 1024,
-}) {
-  if (archive.length < 32) {
-    throw const PocketPackageException(
-      '7z archive is truncated',
-      code: 'bundle-format',
-    );
-  }
-  for (var i = 0; i < _sevenZipMagic.length; i++) {
-    if (archive[i] != _sevenZipMagic[i]) {
-      throw const PocketPackageException(
-        'invalid 7z signature magic',
-        code: 'bundle-format',
-      );
-    }
-  }
-  if (archive[6] != 0) {
-    throw PocketPackageException(
-      'unsupported 7z major version ${archive[6]}',
-      code: 'bundle-format',
-    );
-  }
-  final view = ByteData.sublistView(archive);
-  final startHeaderCrc = view.getUint32(8, Endian.little);
-  if (pocketCrc32(Uint8List.sublistView(archive, 12, 32)) != startHeaderCrc) {
-    throw const PocketPackageException(
-      '7z StartHeader CRC-32 mismatch',
-      code: 'bundle-format',
-    );
-  }
-  final nextHeaderOffset = view.getUint64(12, Endian.little);
-  final nextHeaderSize = view.getUint64(20, Endian.little);
-  final nextHeaderCrc = view.getUint32(28, Endian.little);
-  if (nextHeaderOffset < 0 ||
-      nextHeaderSize < 0 ||
-      nextHeaderOffset > archive.length - 32 ||
-      nextHeaderSize > archive.length - 32 - nextHeaderOffset) {
-    throw const PocketPackageException(
-      '7z NextHeader range out of bounds',
-      code: 'bundle-format',
-    );
-  }
-  final nextHeaderStart = 32 + nextHeaderOffset;
-  var headerSlice = Uint8List.sublistView(
-    archive,
-    nextHeaderStart,
-    nextHeaderStart + nextHeaderSize,
-  );
-  if (pocketCrc32(headerSlice) != nextHeaderCrc) {
-    throw const PocketPackageException(
-      '7z NextHeader CRC-32 mismatch',
-      code: 'bundle-format',
-    );
-  }
-
-  var hr = _SevenZipHeaderReader(headerSlice);
-  var headerId = hr.readByte();
-  if (headerId == 0x17) {
-    final encInfo = _parse7zStreamsInfo(hr);
-    if (encInfo.folders.length != 1 || encInfo.packSizes.isEmpty) {
-      throw const PocketPackageException(
-        'unsupported 7z multi-folder EncodedHeader',
-        code: 'bundle-format',
-      );
-    }
-    headerSlice = _decode7zFolder(
-      archive,
-      encInfo,
-      0,
-      0,
-      encInfo.packSizes.first,
-      math.min(maxTotalBytes, 16 * 1024 * 1024),
-    );
-    hr = _SevenZipHeaderReader(headerSlice);
-    headerId = hr.readByte();
-  }
-  if (headerId != 0x01) {
-    throw const PocketPackageException(
-      'missing 7z kHeader marker',
-      code: 'bundle-format',
-    );
-  }
-
-  var sectionId = hr.readByte();
-  if (sectionId == 0x02) {
-    var propId = hr.readByte();
-    while (propId != 0x00) {
-      hr.readBytes(hr.readU64());
-      propId = hr.readByte();
-    }
-    sectionId = hr.readByte();
-  }
-  if (sectionId == 0x03) {
-    throw const PocketPackageException(
-      '7z AdditionalStreamsInfo is not supported',
-      code: 'bundle-format',
-    );
-  }
-
-  _SevenZipStreamsInfo? mainStreams;
-  if (sectionId == 0x04) {
-    mainStreams = _parse7zStreamsInfo(hr);
-    sectionId = hr.readByte();
-  }
-
-  final extracted = <String, Uint8List>{};
-  if (sectionId == 0x00) {
-    return extracted;
-  }
-  if (sectionId != 0x05) {
-    throw const PocketPackageException(
-      'missing 7z kFilesInfo marker',
-      code: 'bundle-format',
-    );
-  }
-
-  final numFiles = hr.readU64();
-  if (numFiles > 0xffff) {
-    throw const PocketPackageException(
-      '7z file count exceeds 65535 limit',
-      code: 'bundle-format',
-    );
-  }
-  var emptyStreams = List<bool>.filled(numFiles, false);
-  List<bool>? emptyFiles;
-  List<bool>? antiFiles;
-  final names = List<String>.filled(numFiles, '');
-  var fileCrcs = List<int?>.filled(numFiles, null);
-
-  var propType = hr.readByte();
-  while (propType != 0x00) {
-    final propSize = hr.readU64();
-    final endPos = hr.pos + propSize;
-    if (endPos > hr.buf.length) {
-      throw const PocketPackageException(
-        '7z FilesInfo property exceeds header',
-        code: 'bundle-format',
-      );
-    }
-    if (propType == 0x0e) {
-      emptyStreams = hr.readBitVector(numFiles);
-    } else if (propType == 0x0f) {
-      final emptyCount = emptyStreams.where((flag) => flag).length;
-      emptyFiles = hr.readBitVector(emptyCount);
-    } else if (propType == 0x10) {
-      final emptyCount = emptyStreams.where((flag) => flag).length;
-      antiFiles = hr.readBitVector(emptyCount);
-    } else if (propType == 0x11) {
-      if (hr.readByte() != 0) {
-        throw const PocketPackageException(
-          'external 7z file names are not supported',
-          code: 'bundle-format',
-        );
-      }
-      for (var i = 0; i < numFiles; i++) {
-        final codeUnits = <int>[];
-        while (hr.pos + 2 <= endPos) {
-          final unit = hr.buf[hr.pos] | (hr.buf[hr.pos + 1] << 8);
-          hr.pos += 2;
-          if (unit == 0) break;
-          codeUnits.add(unit);
-        }
-        names[i] = String.fromCharCodes(codeUnits);
-      }
-    } else if (propType == 0x0a) {
-      fileCrcs = hr.readDigests(numFiles);
-    }
-    hr.pos = endPos;
-    propType = hr.readByte();
-  }
-
-  var totalUncompressed = 0;
-  final unpackedSubStreams = <({Uint8List data, int? crc})>[];
-  if (mainStreams != null) {
-    var packOffset = 0;
-    for (var f = 0; f < mainStreams.folders.length; f++) {
-      final packSize = f < mainStreams.packSizes.length
-          ? mainStreams.packSizes[f]
-          : 0;
-      final folderBytes = _decode7zFolder(
-        archive,
-        mainStreams,
-        f,
-        packOffset,
-        packSize,
-        maxTotalBytes - totalUncompressed,
-      );
-      totalUncompressed += folderBytes.length;
-      packOffset += packSize;
-      final sizes = mainStreams.subStreamSizes[f];
-      final crcs = mainStreams.subStreamCrcs[f];
-      var subCursor = 0;
-      for (var s = 0; s < sizes.length; s++) {
-        final size = sizes[s];
-        if (subCursor + size > folderBytes.length) {
-          throw const PocketPackageException(
-            '7z substream exceeds decoded folder size',
-            code: 'bundle-format',
-          );
-        }
-        unpackedSubStreams.add((
-          data: Uint8List.sublistView(folderBytes, subCursor, subCursor + size),
-          crc: crcs[s],
-        ));
-        subCursor += size;
-      }
-    }
-  }
-
-  var emptyIdx = 0;
-  var streamIdx = 0;
-  for (var i = 0; i < numFiles; i++) {
-    if (emptyStreams[i]) {
-      final isAnti = antiFiles != null && emptyIdx < antiFiles.length
-          ? antiFiles[emptyIdx]
-          : false;
-      final isEmptyFile = emptyFiles != null && emptyIdx < emptyFiles.length
-          ? emptyFiles[emptyIdx]
-          : false;
-      emptyIdx++;
-      if (isAnti) {
-        throw const PocketPackageException(
-          '7z anti-files are not supported',
-          code: 'bundle-format',
-        );
-      }
-      if (!isEmptyFile) {
-        continue;
-      }
-      final name = names[i].replaceAll('\\', '/');
-      _validateAssetName(name);
-      if (extracted.containsKey(name)) {
-        throw PocketPackageException(
-          'duplicate 7z entry $name',
-          code: 'bundle-format',
-        );
-      }
-      extracted[name] = Uint8List(0);
-    } else {
-      if (streamIdx >= unpackedSubStreams.length) {
-        throw const PocketPackageException(
-          '7z archive missing substream for non-empty file',
-          code: 'bundle-format',
-        );
-      }
-      final name = names[i].replaceAll('\\', '/');
-      _validateAssetName(name);
-      if (extracted.containsKey(name)) {
-        throw PocketPackageException(
-          'duplicate 7z entry $name',
-          code: 'bundle-format',
-        );
-      }
-      final sub = unpackedSubStreams[streamIdx++];
-      final expectedCrc = fileCrcs[i] ?? sub.crc;
-      if (expectedCrc != null && pocketCrc32(sub.data) != expectedCrc) {
-        throw PocketPackageException(
-          '7z entry $name failed CRC-32 check',
-          code: 'bundle-format',
-        );
-      }
-      extracted[name] = Uint8List.fromList(sub.data);
-    }
-  }
-  return extracted;
-}
-
-/// Validates and extracts a `.7z` or `.zip` bundle archive into memory.
-Map<String, Uint8List> decodePocketBundle(
-  Uint8List archive, {
-  String? format,
-  int maxTotalBytes = 768 * 1024 * 1024,
-}) {
-  final is7z =
-      archive.length >= 6 &&
-      archive[0] == 0x37 &&
-      archive[1] == 0x7a &&
-      archive[2] == 0xbc &&
-      archive[3] == 0xaf &&
-      archive[4] == 0x27 &&
-      archive[5] == 0x1c;
-  if (format == '7z' || (format == null && is7z)) {
-    return decodePocket7z(archive, maxTotalBytes: maxTotalBytes);
-  }
-  if (format == 'zip' || format == null) {
-    return decodePocketZip(archive, maxTotalBytes: maxTotalBytes);
-  }
-  throw PocketPackageException(
-    'unsupported bundle format $format',
-    code: 'manifest-bundle',
-  );
 }

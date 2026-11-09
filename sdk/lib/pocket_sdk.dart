@@ -49,6 +49,8 @@ export 'package:pocket_services/pocket_services.dart'
         PocketPermissionRequestHandler,
         PocketUpdateProgress,
         PocketUpdateStage,
+        PocketPackagePreparationStage,
+        PocketPackagePreparationProgress,
         PocketCancellationToken,
         PocketUpdateCancellation,
         PocketCapabilityKind,

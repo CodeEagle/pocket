@@ -31,6 +31,11 @@ final class PocketStartupProgress {
     this.totalBytes,
     this.resourcesDecoded,
     this.resourcesTotal,
+    this.packagePreparationStage,
+    this.packageProcessedBytes,
+    this.packageProcessingTotalBytes,
+    this.packageProcessedFiles,
+    this.packageProcessingTotalFiles,
   });
 
   final PocketStartupStage stage;
@@ -54,6 +59,13 @@ final class PocketStartupProgress {
   /// primary and auxiliary DrawLists. This is not a whole-package count.
   final int? resourcesTotal;
 
+  /// Local package work, separate from network bytes and first-frame images.
+  final String? packagePreparationStage;
+  final int? packageProcessedBytes;
+  final int? packageProcessingTotalBytes;
+  final int? packageProcessedFiles;
+  final int? packageProcessingTotalFiles;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -63,7 +75,12 @@ final class PocketStartupProgress {
           other.downloadedBytes == downloadedBytes &&
           other.totalBytes == totalBytes &&
           other.resourcesDecoded == resourcesDecoded &&
-          other.resourcesTotal == resourcesTotal;
+          other.resourcesTotal == resourcesTotal &&
+          other.packagePreparationStage == packagePreparationStage &&
+          other.packageProcessedBytes == packageProcessedBytes &&
+          other.packageProcessingTotalBytes == packageProcessingTotalBytes &&
+          other.packageProcessedFiles == packageProcessedFiles &&
+          other.packageProcessingTotalFiles == packageProcessingTotalFiles;
 
   @override
   int get hashCode => Object.hash(
@@ -73,6 +90,11 @@ final class PocketStartupProgress {
     totalBytes,
     resourcesDecoded,
     resourcesTotal,
+    packagePreparationStage,
+    packageProcessedBytes,
+    packageProcessingTotalBytes,
+    packageProcessedFiles,
+    packageProcessingTotalFiles,
   );
 }
 

@@ -224,11 +224,21 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
             packageStage: session.stage,
             downloadedBytes: progress?.downloadedBytes,
             totalBytes: progress?.totalBytes,
+            packagePreparationStage: progress?.preparationProgress?.stage.name,
+            packageProcessedBytes:
+                progress?.preparationProgress?.processedBytes,
+            packageProcessingTotalBytes:
+                progress?.preparationProgress?.totalBytes,
+            packageProcessedFiles:
+                progress?.preparationProgress?.processedFiles,
+            packageProcessingTotalFiles:
+                progress?.preparationProgress?.totalFiles,
           ),
         );
       }
       return PocketStartupIndicator(
         stage: session.stage,
+        preparationProgress: progress?.preparationProgress,
         downloadedBytes: progress?.downloadedBytes,
         totalBytes: progress?.totalBytes,
         foregroundColor: background == null

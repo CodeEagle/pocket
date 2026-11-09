@@ -1,0 +1,31 @@
+Upstream: 7-Zip 26.05
+Release source URL: https://github.com/ip7z/7zip/releases/download/26.05/7z2605-src.tar.xz
+Release source SHA-256: 0b6080b8c3e7a579161d2d495224c0e51c467576cb4c7048b0ab485ef44cc22e
+
+The retained ZIP implementation came from the prior FunApp package:
+`common_lib/packages/unzip_kit/ios/Classes/native/`. Its extraction-only ZIP
+handler, selected 7-Zip 26.05 codec sources, C++ GUID definitions, and license
+were copied into this package before the old native package source was removed.
+The retained wrapper was adapted into `src/pocket_archive_zip.cpp`; its streaming
+output now enforces the caller's byte limit.
+
+The 7z implementation adds these C SDK files from the official archive above:
+`C/7zArcIn.c`, `C/7zBuf.c`, `C/7zDec.c`, `C/7zFile.c`, and `C/Bcj2.c`. The rest
+of the C LZMA/LZMA2, CRC, branch-filter, allocation, and stream implementation is
+shared with the already selected ZIP core so there is one 7-Zip source copy.
+`src/pocket_archive_7z.cpp` adapts the upstream `C/Util/7z/7zMain.c` input,
+folder-cache, and `SzArEx_Extract` flow to safe staging output. It rejects
+links, unsafe paths, case-fold collisions, and archives over the requested
+unpacked-byte limit before creating files.
+
+The package uses only the ZIP handler and the 7z C decoder; it does not vendor
+the 7-Zip CLI or unrelated archive handlers. 7z supports the upstream C decoder's
+Copy, LZMA, LZMA2, BCJ/BCJ2 and Delta paths. The 7z C API does not implement 7z
+AES/header-password decoding; optional passwords are passed only to the ZIP
+handler.
+
+`pocket_archive_sources.cmake` lists the local ABI adapters and
+`7zip_sources.cmake` lists the one shared upstream extraction core. CMake,
+Android, and CocoaPods consume those retained source lists, so no generated
+binary is required for bootstrap. `LICENSE` includes the upstream 7-Zip copying
+terms and notices.

@@ -1,0 +1,6 @@
+{
+  "source": "7zz a -t7z -m0=LZMA2 -mx=5 -mtc=off -mtm=off -mta=off compressed-progress.7z payload.bin",
+  "pattern": "payload[i] = (i * 17) % 251, length = 1048576",
+  "archiveBase64": "N3q8ryccAAQMOwJGzwEAAAAAAABSAAAAAAAAAFSEpIbv//8Bx10AAATPaDgLW8GRnDoe5VtW5AZdn5QitykSRSdt6DZd2vx+QYuUlka8tkKlDcUo7zkvitNmJEETheaJBOsP5jbpVGfc9r9bGVc+lGiDVucy2+pKKNFONVqga+bVwCEeqdmmHzHHjxoveOinLE+0Eb5kOGu9xnnCqqtLSmqKhz4WnVEBDQpzv0kR7Y7lzUPNaE4y8IR9F5orZTW31qsxXi253zvIvVa886JGv9V/EGAnlIE9seIyzzxNBknv1sq3QUJrf5evPDha23zOLnyIayj+v852dSoxiaZSZXkIzu9sIES8J6HgPmO8QjDbslQ3l7sxS2MAipM07fhL/KBMVeJCgnnNoNqfgWbG8Hf0QWQNnd+x1Obm0N3g4VSgywhHuTG5wTIIMwgWK+kdisp8mR1QpunC0NWeMbf+da92nEjmQLR4lIATTI9bt5owLlbAj4Xzg4HAZcQlU/j1kTYxBaWw7m/BcE1HDNGREaqtYB26zrEnGFxZhulmUli+6XasWeTlWwUI+cfarfz7Uit0zR5bIEL53VM9+ClkCTuAyyps37U78MS9Ll+qDz5LZkKQEw7/EJP4cXhZ+AvN/5UoRg+p/Hze0/AYuQAAAQQGAAEJgc8ABwsBAAEhIQEQDNAAAAAICgGVk3pqAAAFARkJAAAAAAAAAAAAERkAcABhAHkAbABvAGEAZAAuAGIAaQBuAAAAFQYBACCApIEAAA==",
+  "payloadSha256": "4e36271cced61a01f5c6c575306bdef387beb6849837295a963ff293bd819148"
+}

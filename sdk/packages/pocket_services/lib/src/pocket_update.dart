@@ -140,6 +140,7 @@ final class PocketUpdateProgress {
     this.fileSha256,
     this.attempt = 0,
     this.message,
+    this.preparationProgress,
   });
 
   final PocketUpdateStage stage;
@@ -148,6 +149,10 @@ final class PocketUpdateProgress {
   final String? fileSha256;
   final int attempt;
   final String? message;
+
+  /// Observed local decode, verification, or package-assembly work. These
+  /// counters are independent of network transfer bytes.
+  final PocketPackagePreparationProgress? preparationProgress;
   double? get fraction => totalBytes <= 0
       ? null
       : (downloadedBytes / totalBytes).clamp(0.0, 1.0).toDouble();
@@ -156,23 +161,12 @@ final class PocketUpdateProgress {
 typedef PocketUpdateProgressCallback =
     void Function(PocketUpdateProgress progress);
 
-enum PocketUpdateMode {
-  auto,
-  zip,
-  granular,
-}
+enum PocketUpdateMode { auto, zip, granular }
 
-enum PocketUpdateScope {
-  all,
-  code,
-  resource,
-}
+enum PocketUpdateScope { all, code, resource }
 
 final class PocketUpdateTarget {
-  const PocketUpdateTarget._({
-    required this.scope,
-    this.resource,
-  });
+  const PocketUpdateTarget._({required this.scope, this.resource});
 
   const PocketUpdateTarget.all() : this._(scope: PocketUpdateScope.all);
   const PocketUpdateTarget.codeOnly() : this._(scope: PocketUpdateScope.code);
@@ -225,6 +219,7 @@ final class PocketPreparedPackage {
   PocketPackageSource get source => package.source;
   String get version => package.manifest.payload.version;
   int get build => package.manifest.payload.build;
+
   /// Reads cached bytes without performing runtime admission. Use the
   /// coordinator's final admission boundary before executing those bytes.
   Future<PocketPackageArtifact> readArtifact() => package.readArtifact();
@@ -452,10 +447,9 @@ final class PocketUpdateCoordinator {
         target.scope != PocketUpdateScope.all) {
       resolvedMode = PocketUpdateMode.granular;
     } else {
-      resolvedMode =
-          (baselinePackage == null && signed.payload.bundle != null)
-              ? PocketUpdateMode.zip
-              : PocketUpdateMode.granular;
+      resolvedMode = (baselinePackage == null && signed.payload.bundle != null)
+          ? PocketUpdateMode.zip
+          : PocketUpdateMode.granular;
     }
 
     final blobs = <String, File>{};
@@ -495,6 +489,16 @@ final class PocketUpdateCoordinator {
               ),
             );
           },
+          onPreparationProgress: (progress) => _report(
+            onProgress,
+            PocketUpdateProgress(
+              stage: PocketUpdateStage.verifying,
+              downloadedBytes: bundle.size,
+              totalBytes: bundle.size,
+              fileSha256: bundle.sha256,
+              preparationProgress: progress,
+            ),
+          ),
         ),
       );
       downloadedFiles = 1;
@@ -577,6 +581,15 @@ final class PocketUpdateCoordinator {
       entryBlob: entryBlob,
       blobs: blobs,
       cancellation: token,
+      onPreparationProgress: (progress) => _report(
+        onProgress,
+        PocketUpdateProgress(
+          stage: PocketUpdateStage.verifying,
+          downloadedBytes: downloadedBytes,
+          totalBytes: downloadedBytes,
+          preparationProgress: progress,
+        ),
+      ),
     );
     return PocketPreparedPackage(
       package: package,
@@ -622,6 +635,7 @@ final class PocketUpdateCoordinator {
       allowDowngrade: allowDowngrade,
     );
   }
+
   Future<void> activate(PocketPreparedPackage prepared) =>
       commitHealthy(prepared);
 
@@ -899,6 +913,7 @@ final class PocketUpdateCoordinator {
     required PocketCancellationToken token,
     PocketUpdateProgressCallback? callback,
     void Function()? onArchiveVerified,
+    void Function(PocketPackagePreparationProgress)? onPreparationProgress,
   }) async {
     final declared = Uri.tryParse(bundle.url);
     if (declared == null ||
@@ -938,6 +953,7 @@ final class PocketUpdateCoordinator {
           maxArchiveBytes: maxTotalBytes,
           maxTotalBytes: maxTotalBytes,
           onArchiveVerified: onArchiveVerified,
+          onPreparationProgress: onPreparationProgress,
           onBytes: (received) => _report(
             callback,
             PocketUpdateProgress(
@@ -1014,8 +1030,9 @@ final class PocketUpdateCoordinator {
       final basePakBlobs = _pakBlobMap(baseline);
       final nextPakBlobs = _pakBlobMap(candidate);
       if (basePakBlobs.isEmpty && nextPakBlobs.isEmpty) {
-        final baseHashes =
-            baseline.pak.parts.map((part) => part.sha256).toSet();
+        final baseHashes = baseline.pak.parts
+            .map((part) => part.sha256)
+            .toSet();
         for (final part in candidate.pak.parts) {
           if (!baseHashes.contains(part.sha256)) {
             changedPakEntries.add(part.key ?? 'offset:${part.offset}');
@@ -1030,8 +1047,9 @@ final class PocketUpdateCoordinator {
                   part.offset % 16 == 0,
             )
             .toList();
-        final baseCandidateParts =
-            baseAlignedParts.isNotEmpty ? baseAlignedParts : baseline.pak.parts;
+        final baseCandidateParts = baseAlignedParts.isNotEmpty
+            ? baseAlignedParts
+            : baseline.pak.parts;
         final baseCounts = <String, int>{};
         for (final part in baseCandidateParts) {
           final token = '${part.sha256}:${part.size}';
@@ -1057,8 +1075,7 @@ final class PocketUpdateCoordinator {
         final allKeys = <String>{
           ...basePakBlobs.keys,
           ...nextPakBlobs.keys,
-        }.toList()
-          ..sort();
+        }.toList()..sort();
         for (final key in allKeys) {
           final prev = basePakBlobs[key];
           final next = nextPakBlobs[key];
@@ -1079,10 +1096,7 @@ final class PocketUpdateCoordinator {
     } else {
       final baseAssets = _looseAssetMap(baseline);
       final nextAssets = _looseAssetMap(candidate);
-      final allNames = <String>{
-        ...baseAssets.keys,
-        ...nextAssets.keys,
-      }.toList()
+      final allNames = <String>{...baseAssets.keys, ...nextAssets.keys}.toList()
         ..sort();
       for (final name in allNames) {
         final prev = baseAssets[name];
@@ -1180,15 +1194,13 @@ final class PocketUpdateCoordinator {
       );
     }
     final candidateAssets = _looseAssetMap(candidate);
-    final baselineAssets =
-        baseline == null
-            ? const <String, PocketManifestAsset>{}
-            : _looseAssetMap(baseline);
+    final baselineAssets = baseline == null
+        ? const <String, PocketManifestAsset>{}
+        : _looseAssetMap(baseline);
     final candidatePak = _pakBlobMap(candidate);
-    final baselinePak =
-        baseline == null
-            ? const <String, PocketPakPart>{}
-            : _pakBlobMap(baseline);
+    final baselinePak = baseline == null
+        ? const <String, PocketPakPart>{}
+        : _pakBlobMap(baseline);
 
     bool hasAsset(String name) =>
         candidateAssets.containsKey(name) || baselineAssets.containsKey(name);
@@ -1200,8 +1212,8 @@ final class PocketUpdateCoordinator {
       final name = hasAsset(exact)
           ? exact
           : hasAsset(exact.trim())
-              ? exact.trim()
-              : exact;
+          ? exact.trim()
+          : exact;
       if (name.trim().isEmpty || !hasAsset(name)) {
         throw PocketPackageException(
           'target asset $name does not exist in manifest',
@@ -1215,8 +1227,8 @@ final class PocketUpdateCoordinator {
       final key = hasPak(exact)
           ? exact
           : hasPak(exact.trim())
-              ? exact.trim()
-              : exact;
+          ? exact.trim()
+          : exact;
       if (key.trim().isEmpty || !hasPak(key)) {
         throw PocketPackageException(
           'target PAK entry $key does not exist in manifest',

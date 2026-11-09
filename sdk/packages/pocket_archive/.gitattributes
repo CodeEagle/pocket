@@ -1,0 +1,2 @@
+# Preserve upstream 7-Zip formatting, including its original CRLF files.
+ios/native/7zip/** -whitespace

@@ -1,0 +1,6 @@
+{
+  "source": "7zz a -t7z -m0=LZMA2 -mx=5 -mtc=off -mtm=off -mta=off compressed-distance-one.7z payload.bin",
+  "pattern": "1048576 zero bytes; LZMA overlapping distance-one matches",
+  "archiveBase64": "N3q8ryccAAQy0H/M4QAAAAAAAABSAAAAAAAAAJGOnEHv//8A2V0AAG/9//+jt/9HPkgVcjlhUbiSKOajhgf57uQegtMvxTo8AUuxfsmKik0vow3Zf6bjjCMRU+BZGMV1iuJ3+LaUfwxqwN50SWTi6VxTsgTY90QMq18NbUbp5cN2iLeWV6y2TeFpHW/7S4gQbELLiD9cAI/QTq8mKJRxHz2PJOFwnqcjX+woy4XRlZiKfiqR8id19xnABphNmP3Yr9WQD8QlU/j1kTYxBaWw7m/BcE1HDNGREaqtYB26zrEnGFxZhulmUli+6XasWeTlWwUI+cfarfz7Uir35JUlAAABBAYAAQmA4QAHCwEAASEhARAM0AAAAAgKARzqOKcAAAUBGQkAAAAAAAAAAAARGQBwAGEAeQBsAG8AYQBkAC4AYgBpAG4AAAAVBgEAIICkgQAA",
+  "payloadSha256": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58"
+}

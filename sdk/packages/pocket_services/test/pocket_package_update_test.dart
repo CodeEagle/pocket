@@ -10,320 +10,397 @@ import 'package:pocket_services/pocket_services.dart';
 import 'package:test/test.dart';
 
 void main() {
-  test('large ZIP and 7z bundles leave the caller isolate responsive', () async {
-    final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-worker-heartbeat-');
+  test('large ZIP bundle leaves the caller isolate responsive', () async {
+    final tempDir = await Directory.systemTemp.createTemp(
+      'pocket-bundle-worker-heartbeat-',
+    );
     try {
-      for (final format in <String>['zip', '7z']) {
-        final blobBytes = _largeDeterministicBytes(12 * 1024 * 1024);
-        final blobSha256 = _sha256(blobBytes);
-        final archiveBytes = format == 'zip'
-            ? encodePocketZip(<String, List<int>>{'blobs/$blobSha256': blobBytes})
-            : encodePocket7z(<String, List<int>>{'blobs/$blobSha256': blobBytes});
-        final archiveFile = File(path.join(tempDir.path, '$format.archive'));
-        await archiveFile.writeAsBytes(archiveBytes, flush: true);
-        final store = PocketPackageStore(Directory(path.join(tempDir.path, format)));
-        var verifiedArchive = false;
-        var heartbeatsDuringProcessing = 0;
-        var lastHeartbeatMilliseconds = 0;
-        var largestHeartbeatGapMilliseconds = 0;
-        var processingStartedMilliseconds = 0;
-        Timer? heartbeat;
-        final stopwatch = Stopwatch()..start();
-
-        final result = await store.writeBundleZip(
-          bundle: PocketManifestBundle(
-            format: format,
-            sha256: _sha256(archiveBytes),
-            size: archiveBytes.length,
-            url: 'bundle.$format',
-          ),
-          expectedFiles: <PocketManifestFile>[
-            PocketManifestFile(
-              sha256: blobSha256,
-              size: blobBytes.length,
-              url: 'blobs/$blobSha256',
-            ),
-          ],
-          bytes: archiveFile.openRead(),
-          cancellation: PocketCancellationToken(),
-          onArchiveVerified: () {
-            verifiedArchive = true;
-            // This boundary is after EOF and archive hash validation, but
-            // before extraction and per-entry validation run in the worker.
-            processingStartedMilliseconds = stopwatch.elapsedMilliseconds;
-            lastHeartbeatMilliseconds = processingStartedMilliseconds;
-            heartbeat = Timer.periodic(const Duration(milliseconds: 1), (_) {
-              final now = stopwatch.elapsedMilliseconds;
-              final gap = now - lastHeartbeatMilliseconds;
-              if (gap > largestHeartbeatGapMilliseconds) {
-                largestHeartbeatGapMilliseconds = gap;
-              }
-              lastHeartbeatMilliseconds = now;
-              heartbeatsDuringProcessing++;
-            });
-          },
-        );
-        final processingMilliseconds = stopwatch.elapsedMilliseconds - processingStartedMilliseconds;
-        final finalGap = stopwatch.elapsedMilliseconds - lastHeartbeatMilliseconds;
-        if (finalGap > largestHeartbeatGapMilliseconds) largestHeartbeatGapMilliseconds = finalGap;
-        stopwatch.stop();
-        heartbeat?.cancel();
-
-        expect(verifiedArchive, isTrue, reason: format);
-        expect(
-          heartbeatsDuringProcessing,
-          greaterThanOrEqualTo(10),
-          reason: '$format decode must keep yielding to the caller isolate',
-        );
-        expect(processingMilliseconds, greaterThanOrEqualTo(20), reason: format);
-        expect(
-          largestHeartbeatGapMilliseconds,
-          lessThan(processingMilliseconds ~/ 2),
-          reason: '$format decode must not block the caller isolate',
-        );
-        expect(stopwatch.elapsed, greaterThan(const Duration(milliseconds: 5)));
-        expect(result[blobSha256]?.lengthSync(), blobBytes.length);
-        expect(await _fileSha256(result[blobSha256]!), blobSha256);
-      }
-    } finally {
-      await tempDir.delete(recursive: true);
-    }
-  });
-
-  test('bundle verification boundary rejects truncated or bad-hash archives', () async {
-    final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-verified-boundary-');
-    try {
-      final blobBytes = <int>[1, 2, 3, 4];
+      final blobBytes = _largeDeterministicBytes(12 * 1024 * 1024);
       final blobSha256 = _sha256(blobBytes);
       final archiveBytes = encodePocketZip(<String, List<int>>{
         'blobs/$blobSha256': blobBytes,
       });
-      final cases = <({String name, List<int> bytes, String sha256})>[
-        (
-          name: 'truncated body',
-          bytes: archiveBytes.sublist(0, archiveBytes.length - 1),
-          sha256: _sha256(archiveBytes),
-        ),
-        (name: 'wrong archive digest', bytes: archiveBytes, sha256: '0' * 64),
-      ];
-
-      for (final fixture in cases) {
-        var verificationSignals = 0;
-        await expectLater(
-          PocketPackageStore(Directory(path.join(tempDir.path, fixture.name)))
-              .writeBundleZip(
-                bundle: PocketManifestBundle(
-                  format: 'zip',
-                  sha256: fixture.sha256,
-                  size: archiveBytes.length,
-                  url: 'bundle.zip',
-                ),
-                expectedFiles: <PocketManifestFile>[
-                  PocketManifestFile(
-                    sha256: blobSha256,
-                    size: blobBytes.length,
-                    url: 'blobs/$blobSha256',
-                  ),
-                ],
-                bytes: Stream<List<int>>.value(fixture.bytes),
-                cancellation: PocketCancellationToken(),
-                onArchiveVerified: () => verificationSignals++,
-              ),
-          throwsA(isA<PocketPackageException>().having(
-            (error) => error.code,
-            'code',
-            'download-hash',
-          )),
-          reason: fixture.name,
-        );
-        expect(verificationSignals, 0, reason: fixture.name);
-      }
-    } finally {
-      await tempDir.delete(recursive: true);
-    }
-  });
-
-  test('full bundle reports verifying during extraction without returning to downloading', () async {
-    final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-verifying-progress-');
-    try {
-      final algorithm = Ed25519();
-      final keyPair = await algorithm.newKeyPair();
-      final publicKey = await keyPair.extractPublicKey();
-      final entryBytes = _largeDeterministicBytes(12 * 1024 * 1024);
-      final pakBytes = <int>[1, 2, 3, 4];
-      final entryHash = _sha256(entryBytes);
-      final pakHash = _sha256(pakBytes);
-      final archiveBytes = encodePocket7z(<String, List<int>>{
-        'blobs/$entryHash': entryBytes,
-        'blobs/$pakHash': pakBytes,
-      });
-      final files = <Map<String, Object?>>[
-        <String, Object?>{
-          'sha256': entryHash,
-          'size': entryBytes.length,
-          'url': 'blobs/$entryHash',
-        },
-        <String, Object?>{
-          'sha256': pakHash,
-          'size': pakBytes.length,
-          'url': 'blobs/$pakHash',
-        },
-      ]..sort((a, b) => (a['sha256'] as String).compareTo(b['sha256'] as String));
-      final payloadBytes = Uint8List.fromList(utf8.encode(jsonEncode(<String, Object?>{
-        'schemaVersion': 1,
-        'appId': 'test.app',
-        'version': '1.0.0',
-        'build': 1,
-        'protocol': 1,
-        'minHostVersion': 1,
-        'entry': <String, Object?>{'sha256': entryHash, 'size': entryBytes.length},
-        'entryFormat': 'bytecode',
-        'runtimeAbi': 'abi-v1',
-        'pak': <String, Object?>{
-          'sha256': pakHash,
-          'size': pakBytes.length,
-          'parts': <Map<String, Object?>>[
-            <String, Object?>{'offset': 0, 'sha256': pakHash, 'size': pakBytes.length},
-          ],
-        },
-        'files': files,
-        'bundle': <String, Object?>{
-          'format': '7z',
-          'sha256': _sha256(archiveBytes),
-          'size': archiveBytes.length,
-          'url': 'bundle.7z',
-        },
-      })));
-      final signature = await algorithm.sign(payloadBytes, keyPair: keyPair);
-      final signed = PocketSignedManifest.fromBytes(_envelopeBytes(
-        keyId: 'test-key',
-        payloadBytes: payloadBytes,
-        signatureBytes: signature.bytes,
-      ));
-      final manifestUri = Uri.parse('http://127.0.0.1:39123/latest.json');
-      final transport = _MemoryTransport(<String, List<int>>{
-        manifestUri.toString(): signed.envelopeBytes,
-        manifestUri.resolve('bundle.7z').toString(): archiveBytes,
-      });
-      final coordinator = PocketUpdateCoordinator(
-        manifestUri: manifestUri,
-        appId: 'test.app',
-        trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
-        store: PocketPackageStore(tempDir),
-        transport: transport,
-        expectedRuntimeAbi: 'abi-v1',
-        requireBytecode: true,
+      final archiveFile = File(path.join(tempDir.path, 'zip.archive'));
+      await archiveFile.writeAsBytes(archiveBytes, flush: true);
+      final store = PocketPackageStore(
+        Directory(path.join(tempDir.path, 'zip')),
       );
-      final progress = <PocketUpdateProgress>[];
-      var verificationHeartbeats = 0;
+      var verifiedArchive = false;
+      var heartbeatsDuringProcessing = 0;
+      var lastHeartbeatMilliseconds = 0;
+      var largestHeartbeatGapMilliseconds = 0;
+      var processingStartedMilliseconds = 0;
       Timer? heartbeat;
       final stopwatch = Stopwatch()..start();
-      final prepared = await coordinator.prepare(onProgress: (value) {
-        progress.add(value);
-        if (value.stage == PocketUpdateStage.verifying && heartbeat == null) {
-          // Archive verification is reported before the large worker decode.
+
+      final result = await store.writeBundleZip(
+        bundle: PocketManifestBundle(
+          format: 'zip',
+          sha256: _sha256(archiveBytes),
+          size: archiveBytes.length,
+          url: 'bundle.zip',
+        ),
+        expectedFiles: <PocketManifestFile>[
+          PocketManifestFile(
+            sha256: blobSha256,
+            size: blobBytes.length,
+            url: 'blobs/$blobSha256',
+          ),
+        ],
+        bytes: archiveFile.openRead(),
+        cancellation: PocketCancellationToken(),
+        onArchiveVerified: () {
+          verifiedArchive = true;
+          // This boundary is after EOF and archive hash validation, but
+          // before extraction and per-entry validation run in the worker.
+          processingStartedMilliseconds = stopwatch.elapsedMilliseconds;
+          lastHeartbeatMilliseconds = processingStartedMilliseconds;
           heartbeat = Timer.periodic(const Duration(milliseconds: 1), (_) {
-            verificationHeartbeats++;
+            final now = stopwatch.elapsedMilliseconds;
+            final gap = now - lastHeartbeatMilliseconds;
+            if (gap > largestHeartbeatGapMilliseconds) {
+              largestHeartbeatGapMilliseconds = gap;
+            }
+            lastHeartbeatMilliseconds = now;
+            heartbeatsDuringProcessing++;
           });
-        }
-      });
+        },
+      );
+      final processingMilliseconds =
+          stopwatch.elapsedMilliseconds - processingStartedMilliseconds;
+      final finalGap =
+          stopwatch.elapsedMilliseconds - lastHeartbeatMilliseconds;
+      if (finalGap > largestHeartbeatGapMilliseconds) {
+        largestHeartbeatGapMilliseconds = finalGap;
+      }
       stopwatch.stop();
       heartbeat?.cancel();
-      coordinator.dispose();
-
-      expect(prepared.deliveryMode, PocketUpdateMode.zip);
-      final verifyingIndex = progress.indexWhere(
-        (value) => value.stage == PocketUpdateStage.verifying,
-      );
-      expect(verifyingIndex, greaterThan(0));
-      final downloads = progress
-          .where((value) => value.stage == PocketUpdateStage.downloading)
-          .toList();
-      expect(downloads, isNotEmpty);
-      expect(downloads.last.downloadedBytes, archiveBytes.length);
-      expect(
-        progress.skip(verifyingIndex).where(
-          (value) => value.stage == PocketUpdateStage.downloading,
-        ),
-        isEmpty,
-      );
-      expect(
-        progress.where((value) => value.stage == PocketUpdateStage.verifying),
-        hasLength(1),
-      );
-      expect(verificationHeartbeats, greaterThanOrEqualTo(10));
-      expect(stopwatch.elapsed, greaterThan(const Duration(milliseconds: 20)));
-    } finally {
-      await tempDir.delete(recursive: true);
-    }
-  });
-
-  test('cancelling a bundle worker leaves no cached blob or package pointer', () async {
-    final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-worker-cancel-');
-    try {
-      final blobBytes = _largeDeterministicBytes(32 * 1024 * 1024);
-      final blobSha256 = _sha256(blobBytes);
-      final archiveBytes = encodePocket7z(<String, List<int>>{'blobs/$blobSha256': blobBytes});
-      final archiveFile = File(path.join(tempDir.path, 'cancel.7z'));
-      await archiveFile.writeAsBytes(archiveBytes, flush: true);
-      final store = PocketPackageStore(tempDir);
-      final cancellation = PocketCancellationToken();
-      Timer? cancelWorker;
-      Timer? cancellationHeartbeat;
-      var verifiedArchive = false;
-      var heartbeatsBeforeCancellation = 0;
-
-      await expectLater(
-        store.writeBundleZip(
-          bundle: PocketManifestBundle(
-            format: '7z',
-            sha256: _sha256(archiveBytes),
-            size: archiveBytes.length,
-            url: 'bundle.7z',
-          ),
-          expectedFiles: <PocketManifestFile>[
-            PocketManifestFile(
-              sha256: blobSha256,
-              size: blobBytes.length,
-              url: 'blobs/$blobSha256',
-            ),
-          ],
-          bytes: archiveFile.openRead(),
-          cancellation: cancellation,
-          onArchiveVerified: () {
-            verifiedArchive = true;
-            cancellationHeartbeat = Timer.periodic(
-              const Duration(milliseconds: 1),
-              (_) => heartbeatsBeforeCancellation++,
-            );
-            // Give the spawned decoder time to start on this real 32 MiB
-            // archive, then cancel while its pure-Dart work is in flight.
-            cancelWorker = Timer(const Duration(milliseconds: 100), cancellation.cancel);
-          },
-        ),
-        throwsA(isA<PocketUpdateCancellation>()),
-      );
-      cancelWorker?.cancel();
-      cancellationHeartbeat?.cancel();
 
       expect(verifiedArchive, isTrue);
-      expect(heartbeatsBeforeCancellation, greaterThanOrEqualTo(10));
-      expect(await File(path.join(tempDir.path, 'blobs', blobSha256)).exists(), isFalse);
-      expect(await File(path.join(tempDir.path, 'active')).exists(), isFalse);
-      expect(await File(path.join(tempDir.path, 'previous')).exists(), isFalse);
-      expect(await File(path.join(tempDir.path, 'lastGood')).exists(), isFalse);
-      final blobs = Directory(path.join(tempDir.path, 'blobs'));
+      expect(heartbeatsDuringProcessing, greaterThanOrEqualTo(10));
+      expect(processingMilliseconds, greaterThanOrEqualTo(20));
       expect(
-        (await blobs.list().toList()).where(
-          (entry) => path.basename(entry.path).startsWith('.bundle'),
-        ),
-        isEmpty,
+        largestHeartbeatGapMilliseconds,
+        lessThan(processingMilliseconds ~/ 2),
       );
-      expect((await Directory(path.join(tempDir.path, 'versions')).list().toList()), isEmpty);
+      expect(stopwatch.elapsed, greaterThan(const Duration(milliseconds: 5)));
+      expect(result[blobSha256]?.lengthSync(), blobBytes.length);
+      expect(await _fileSha256(result[blobSha256]!), blobSha256);
     } finally {
       await tempDir.delete(recursive: true);
     }
   });
+
+  test(
+    'bundle verification boundary rejects truncated or bad-hash archives',
+    () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'pocket-bundle-verified-boundary-',
+      );
+      try {
+        final blobBytes = <int>[1, 2, 3, 4];
+        final blobSha256 = _sha256(blobBytes);
+        final archiveBytes = encodePocketZip(<String, List<int>>{
+          'blobs/$blobSha256': blobBytes,
+        });
+        final cases = <({String name, List<int> bytes, String sha256})>[
+          (
+            name: 'truncated body',
+            bytes: archiveBytes.sublist(0, archiveBytes.length - 1),
+            sha256: _sha256(archiveBytes),
+          ),
+          (name: 'wrong archive digest', bytes: archiveBytes, sha256: '0' * 64),
+        ];
+
+        for (final fixture in cases) {
+          var verificationSignals = 0;
+          await expectLater(
+            PocketPackageStore(
+              Directory(path.join(tempDir.path, fixture.name)),
+            ).writeBundleZip(
+              bundle: PocketManifestBundle(
+                format: 'zip',
+                sha256: fixture.sha256,
+                size: archiveBytes.length,
+                url: 'bundle.zip',
+              ),
+              expectedFiles: <PocketManifestFile>[
+                PocketManifestFile(
+                  sha256: blobSha256,
+                  size: blobBytes.length,
+                  url: 'blobs/$blobSha256',
+                ),
+              ],
+              bytes: Stream<List<int>>.value(fixture.bytes),
+              cancellation: PocketCancellationToken(),
+              onArchiveVerified: () => verificationSignals++,
+            ),
+            throwsA(
+              isA<PocketPackageException>().having(
+                (error) => error.code,
+                'code',
+                'download-hash',
+              ),
+            ),
+            reason: fixture.name,
+          );
+          expect(verificationSignals, 0, reason: fixture.name);
+        }
+      } finally {
+        await tempDir.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
+    'full bundle reports verifying during extraction without returning to downloading',
+    () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'pocket-bundle-verifying-progress-',
+      );
+      try {
+        final algorithm = Ed25519();
+        final keyPair = await algorithm.newKeyPair();
+        final publicKey = await keyPair.extractPublicKey();
+        final entryBytes = _largeDeterministicBytes(12 * 1024 * 1024);
+        final pakBytes = <int>[1, 2, 3, 4];
+        final entryHash = _sha256(entryBytes);
+        final pakHash = _sha256(pakBytes);
+        final archiveBytes = encodePocketZip(<String, List<int>>{
+          'blobs/$entryHash': entryBytes,
+          'blobs/$pakHash': pakBytes,
+        });
+        final files =
+            <Map<String, Object?>>[
+              <String, Object?>{
+                'sha256': entryHash,
+                'size': entryBytes.length,
+                'url': 'blobs/$entryHash',
+              },
+              <String, Object?>{
+                'sha256': pakHash,
+                'size': pakBytes.length,
+                'url': 'blobs/$pakHash',
+              },
+            ]..sort(
+              (a, b) =>
+                  (a['sha256'] as String).compareTo(b['sha256'] as String),
+            );
+        final payloadBytes = Uint8List.fromList(
+          utf8.encode(
+            jsonEncode(<String, Object?>{
+              'schemaVersion': 1,
+              'appId': 'test.app',
+              'version': '1.0.0',
+              'build': 1,
+              'protocol': 1,
+              'minHostVersion': 1,
+              'entry': <String, Object?>{
+                'sha256': entryHash,
+                'size': entryBytes.length,
+              },
+              'entryFormat': 'bytecode',
+              'runtimeAbi': 'abi-v1',
+              'pak': <String, Object?>{
+                'sha256': pakHash,
+                'size': pakBytes.length,
+                'parts': <Map<String, Object?>>[
+                  <String, Object?>{
+                    'offset': 0,
+                    'sha256': pakHash,
+                    'size': pakBytes.length,
+                  },
+                ],
+              },
+              'files': files,
+              'bundle': <String, Object?>{
+                'format': 'zip',
+                'sha256': _sha256(archiveBytes),
+                'size': archiveBytes.length,
+                'url': 'bundle.zip',
+              },
+            }),
+          ),
+        );
+        final signature = await algorithm.sign(payloadBytes, keyPair: keyPair);
+        final signed = PocketSignedManifest.fromBytes(
+          _envelopeBytes(
+            keyId: 'test-key',
+            payloadBytes: payloadBytes,
+            signatureBytes: signature.bytes,
+          ),
+        );
+        final manifestUri = Uri.parse('http://127.0.0.1:39123/latest.json');
+        final transport = _MemoryTransport(<String, List<int>>{
+          manifestUri.toString(): signed.envelopeBytes,
+          manifestUri.resolve('bundle.zip').toString(): archiveBytes,
+        });
+        final coordinator = PocketUpdateCoordinator(
+          manifestUri: manifestUri,
+          appId: 'test.app',
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          store: PocketPackageStore(tempDir),
+          transport: transport,
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+        );
+        final progress = <PocketUpdateProgress>[];
+        var verificationHeartbeats = 0;
+        Timer? heartbeat;
+        final stopwatch = Stopwatch()..start();
+        final prepared = await coordinator.prepare(
+          onProgress: (value) {
+            progress.add(value);
+            if (value.stage == PocketUpdateStage.verifying &&
+                heartbeat == null) {
+              // Archive verification is reported before the large worker decode.
+              heartbeat = Timer.periodic(const Duration(milliseconds: 1), (_) {
+                verificationHeartbeats++;
+              });
+            }
+          },
+        );
+        stopwatch.stop();
+        heartbeat?.cancel();
+        coordinator.dispose();
+
+        expect(prepared.deliveryMode, PocketUpdateMode.zip);
+        final verifyingIndex = progress.indexWhere(
+          (value) => value.stage == PocketUpdateStage.verifying,
+        );
+        expect(verifyingIndex, greaterThan(0));
+        final downloads = progress
+            .where((value) => value.stage == PocketUpdateStage.downloading)
+            .toList();
+        expect(downloads, isNotEmpty);
+        expect(downloads.last.downloadedBytes, archiveBytes.length);
+        expect(
+          progress
+              .skip(verifyingIndex)
+              .where((value) => value.stage == PocketUpdateStage.downloading),
+          isEmpty,
+        );
+        expect(
+          progress.asMap().entries.where(
+            (entry) =>
+                entry.value.stage == PocketUpdateStage.verifying &&
+                (entry.key == 0 ||
+                    progress[entry.key - 1].stage !=
+                        PocketUpdateStage.verifying),
+          ),
+          hasLength(1),
+          reason: 'Local progress may advance within one verification phase.',
+        );
+        expect(
+          progress.any(
+            (value) =>
+                value.preparationProgress?.stage ==
+                    PocketPackagePreparationStage.verifyingFiles &&
+                value.preparationProgress?.processedFiles == 2,
+          ),
+          isTrue,
+        );
+        expect(verificationHeartbeats, greaterThanOrEqualTo(10));
+        expect(
+          stopwatch.elapsed,
+          greaterThan(const Duration(milliseconds: 20)),
+        );
+      } finally {
+        await tempDir.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
+    'cancelling a bundle worker leaves no cached blob or package pointer',
+    () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'pocket-bundle-worker-cancel-',
+      );
+      try {
+        final blobBytes = _largeDeterministicBytes(32 * 1024 * 1024);
+        final blobSha256 = _sha256(blobBytes);
+        final archiveBytes = encodePocketZip(<String, List<int>>{
+          'blobs/$blobSha256': blobBytes,
+        });
+        final archiveFile = File(path.join(tempDir.path, 'cancel.zip'));
+        await archiveFile.writeAsBytes(archiveBytes, flush: true);
+        final store = PocketPackageStore(tempDir);
+        final cancellation = PocketCancellationToken();
+        Timer? cancelWorker;
+        Timer? cancellationHeartbeat;
+        var verifiedArchive = false;
+        var heartbeatsBeforeCancellation = 0;
+
+        await expectLater(
+          store.writeBundleZip(
+            bundle: PocketManifestBundle(
+              format: 'zip',
+              sha256: _sha256(archiveBytes),
+              size: archiveBytes.length,
+              url: 'bundle.zip',
+            ),
+            expectedFiles: <PocketManifestFile>[
+              PocketManifestFile(
+                sha256: blobSha256,
+                size: blobBytes.length,
+                url: 'blobs/$blobSha256',
+              ),
+            ],
+            bytes: archiveFile.openRead(),
+            cancellation: cancellation,
+            onArchiveVerified: () {
+              verifiedArchive = true;
+              cancellationHeartbeat = Timer.periodic(
+                const Duration(milliseconds: 1),
+                (_) => heartbeatsBeforeCancellation++,
+              );
+              // Give the spawned decoder time to start on this real 32 MiB
+              // archive, then cancel while its pure-Dart work is in flight.
+              cancelWorker = Timer(
+                const Duration(milliseconds: 100),
+                cancellation.cancel,
+              );
+            },
+          ),
+          throwsA(isA<PocketUpdateCancellation>()),
+        );
+        cancelWorker?.cancel();
+        cancellationHeartbeat?.cancel();
+
+        expect(verifiedArchive, isTrue);
+        expect(heartbeatsBeforeCancellation, greaterThanOrEqualTo(10));
+        expect(
+          await File(path.join(tempDir.path, 'blobs', blobSha256)).exists(),
+          isFalse,
+        );
+        expect(await File(path.join(tempDir.path, 'active')).exists(), isFalse);
+        expect(
+          await File(path.join(tempDir.path, 'previous')).exists(),
+          isFalse,
+        );
+        expect(
+          await File(path.join(tempDir.path, 'lastGood')).exists(),
+          isFalse,
+        );
+        final blobs = Directory(path.join(tempDir.path, 'blobs'));
+        expect(
+          (await blobs.list().toList()).where(
+            (entry) => path.basename(entry.path).startsWith('.bundle'),
+          ),
+          isEmpty,
+        );
+        expect(
+          (await Directory(
+            path.join(tempDir.path, 'versions'),
+          ).list().toList()),
+          isEmpty,
+        );
+      } finally {
+        await tempDir.delete(recursive: true);
+      }
+    },
+  );
 
   group('PocketPackageUpdate', () {
     late Directory tempDir;
@@ -591,7 +668,9 @@ void main() {
         final hashEntry2 = _sha256(entry2);
         final hashPak2 = _sha256(pak2);
         transport.responses[manifestUri.toString()] = signed2.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry2').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry2')
+                .toString()] =
             entry2;
         transport.responses[manifestUri.resolve('blobs/$hashPak2').toString()] =
             pak2;
@@ -614,7 +693,9 @@ void main() {
         final hashEntry1 = _sha256(entry1);
         final hashPak1 = _sha256(pak1);
         transport.responses[manifestUri.toString()] = signed1.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry1').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry1')
+                .toString()] =
             entry1;
         transport.responses[manifestUri.resolve('blobs/$hashPak1').toString()] =
             pak1;
@@ -626,7 +707,9 @@ void main() {
             isA<PocketPackageFormatException>().having(
               (e) => e.message,
               'message',
-              contains('Refusing downgrade or replay: package build 1 is not newer than current build 2'),
+              contains(
+                'Refusing downgrade or replay: package build 1 is not newer than current build 2',
+              ),
             ),
           ),
         );
@@ -742,16 +825,15 @@ void main() {
         expect(await Directory(staged[4]!.directory.path).exists(), isTrue);
         expect(await Directory(staged[5]!.directory.path).exists(), isTrue);
         expect(
-          (await store.listVersions(verifier: verifier))
-              .map((version) => version.build),
+          (await store.listVersions(
+            verifier: verifier,
+          )).map((version) => version.build),
           <int>[5, 4, 1],
         );
 
-        await PocketPackageStore(tempDir).pruneInactiveVersions(
-          'test.app',
-          1,
-          verifier,
-        );
+        await PocketPackageStore(
+          tempDir,
+        ).pruneInactiveVersions('test.app', 1, verifier);
         expect(await Directory(staged[4]!.directory.path).exists(), isFalse);
         expect(await Directory(staged[5]!.directory.path).exists(), isTrue);
         expect(await Directory(staged[1]!.directory.path).exists(), isTrue);
@@ -787,7 +869,9 @@ void main() {
         final hashEntry1 = _sha256(entry1);
         final hashPak1 = _sha256(pak1);
         transport.responses[manifestUri.toString()] = signed1.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry1').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry1')
+                .toString()] =
             entry1;
         transport.responses[manifestUri.resolve('blobs/$hashPak1').toString()] =
             pak1;
@@ -813,7 +897,9 @@ void main() {
         final hashEntry2 = _sha256(entry2);
         final hashPak2 = _sha256(pak2);
         transport.responses[manifestUri.toString()] = signed2.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry2').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry2')
+                .toString()] =
             entry2;
         transport.responses[manifestUri.resolve('blobs/$hashPak2').toString()] =
             pak2;
@@ -843,7 +929,9 @@ void main() {
         }
 
         final scoped = store.scoped('test.app');
-        final currentActive = await scoped.active(verifier: coordinator.verifier);
+        final currentActive = await scoped.active(
+          verifier: coordinator.verifier,
+        );
         expect(currentActive?.manifest.payload.version, isNot('1.0.2'));
       },
     );
@@ -918,7 +1006,9 @@ void main() {
         final hashEntry1 = _sha256(entry1);
         final hashPak1 = _sha256(pak1);
         transport.responses[manifestUri.toString()] = signed1.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry1').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry1')
+                .toString()] =
             entry1;
         transport.responses[manifestUri.resolve('blobs/$hashPak1').toString()] =
             pak1;
@@ -930,13 +1020,18 @@ void main() {
         final hashEntry3 = _sha256(entry3);
         final hashPak3 = _sha256(pak3);
         transport.responses[manifestUri.toString()] = signed3.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry3').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry3')
+                .toString()] =
             entry3;
         transport.responses[manifestUri.resolve('blobs/$hashPak3').toString()] =
             pak3;
 
         final prepared3 = await coordinator.prepare();
-        await scoped.activate(prepared3.package, verifier: coordinator.verifier);
+        await scoped.activate(
+          prepared3.package,
+          verifier: coordinator.verifier,
+        );
 
         final good = await scoped.lastGood(verifier: coordinator.verifier);
         final act = await scoped.active(verifier: coordinator.verifier);
@@ -955,7 +1050,9 @@ void main() {
         final hashEntry2 = _sha256(entry2);
         final hashPak2 = _sha256(pak2);
         transport.responses[manifestUri.toString()] = signed2.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry2').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry2')
+                .toString()] =
             entry2;
         transport.responses[manifestUri.resolve('blobs/$hashPak2').toString()] =
             pak2;
@@ -966,7 +1063,9 @@ void main() {
             isA<PocketPackageFormatException>().having(
               (e) => e.message,
               'message',
-              contains('Refusing downgrade or replay: package build 2 is not newer than current build 3'),
+              contains(
+                'Refusing downgrade or replay: package build 2 is not newer than current build 3',
+              ),
             ),
           ),
         );
@@ -983,9 +1082,13 @@ void main() {
         final hashEntry3Alt = _sha256(entry3Alt);
         final hashPak3Alt = _sha256(pak3Alt);
         transport.responses[manifestUri.toString()] = signed3Alt.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry3Alt').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry3Alt')
+                .toString()] =
             entry3Alt;
-        transport.responses[manifestUri.resolve('blobs/$hashPak3Alt').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashPak3Alt')
+                .toString()] =
             pak3Alt;
 
         await expectLater(
@@ -994,7 +1097,9 @@ void main() {
             isA<PocketPackageFormatException>().having(
               (e) => e.message,
               'message',
-              contains('Refusing downgrade or replay: package build 3 is not newer than current build 3'),
+              contains(
+                'Refusing downgrade or replay: package build 3 is not newer than current build 3',
+              ),
             ),
           ),
         );
@@ -1020,9 +1125,13 @@ void main() {
         final hashEntry10 = _sha256(entry10);
         final hashPak10 = _sha256(pak10);
         transport.responses[manifestUri.toString()] = signed10.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry10').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry10')
+                .toString()] =
             entry10;
-        transport.responses[manifestUri.resolve('blobs/$hashPak10').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashPak10')
+                .toString()] =
             pak10;
 
         final coordinator = PocketUpdateCoordinator(
@@ -1042,7 +1151,9 @@ void main() {
             isA<PocketPackageFormatException>().having(
               (e) => e.message,
               'message',
-              contains('Refusing downgrade or replay: package build 10 is not newer than current build 10'),
+              contains(
+                'Refusing downgrade or replay: package build 10 is not newer than current build 10',
+              ),
             ),
           ),
         );
@@ -1088,7 +1199,9 @@ void main() {
         final hashEntry2 = _sha256(entry2);
         final hashPak2 = _sha256(pak2);
         transport.responses[manifestUri.toString()] = signed2.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry2').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry2')
+                .toString()] =
             entry2;
         transport.responses[manifestUri.resolve('blobs/$hashPak2').toString()] =
             pak2;
@@ -1099,7 +1212,9 @@ void main() {
         final hashEntry3 = _sha256(entry3);
         final hashPak3 = _sha256(pak3);
         transport.responses[manifestUri.toString()] = signed3.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry3').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry3')
+                .toString()] =
             entry3;
         transport.responses[manifestUri.resolve('blobs/$hashPak3').toString()] =
             pak3;
@@ -1118,7 +1233,9 @@ void main() {
             isA<PocketPackageFormatException>().having(
               (e) => e.message,
               'message',
-              contains('Refusing downgrade or replay: package build 2 is not newer than current build 3'),
+              contains(
+                'Refusing downgrade or replay: package build 2 is not newer than current build 3',
+              ),
             ),
           ),
         );
@@ -1137,7 +1254,12 @@ void main() {
 
         // Create sentinel directory outside versions
         final sentinelDir = Directory(
-          path.join(tempDir.path, 'apps', 'test.app', 'sentinel-outside-versions'),
+          path.join(
+            tempDir.path,
+            'apps',
+            'test.app',
+            'sentinel-outside-versions',
+          ),
         );
         await sentinelDir.create(recursive: true);
         final sentinelFile = File(path.join(sentinelDir.path, 'data.txt'));
@@ -1149,10 +1271,7 @@ void main() {
         );
 
         await expectLater(
-          store.fallbackFor(
-            '../sentinel-outside-versions',
-            verifier: verifier,
-          ),
+          store.fallbackFor('../sentinel-outside-versions', verifier: verifier),
           throwsA(
             isA<PocketPackageException>().having(
               (e) => e.code,
@@ -1169,35 +1288,32 @@ void main() {
       },
     );
 
-    test(
-      '9. store.readPointerId("../outside") throws unsafe-token',
-      () async {
-        final store = PocketPackageStore(tempDir).scoped('test.app');
-        await store.initialize();
+    test('9. store.readPointerId("../outside") throws unsafe-token', () async {
+      final store = PocketPackageStore(tempDir).scoped('test.app');
+      await store.initialize();
 
-        await expectLater(
-          store.readPointerId('../outside'),
-          throwsA(
-            isA<PocketPackageException>().having(
-              (e) => e.code,
-              'code',
-              'unsafe-token',
-            ),
+      await expectLater(
+        store.readPointerId('../outside'),
+        throwsA(
+          isA<PocketPackageException>().having(
+            (e) => e.code,
+            'code',
+            'unsafe-token',
           ),
-        );
+        ),
+      );
 
-        await expectLater(
-          store.readPointerId('unknownPointer'),
-          throwsA(
-            isA<PocketPackageException>().having(
-              (e) => e.code,
-              'code',
-              'unsafe-token',
-            ),
+      await expectLater(
+        store.readPointerId('unknownPointer'),
+        throwsA(
+          isA<PocketPackageException>().having(
+            (e) => e.code,
+            'code',
+            'unsafe-token',
           ),
-        );
-      },
-    );
+        ),
+      );
+    });
 
     test(
       '10. Session rollback promotion path: commitHealthy(isRollback: true) and coordinator.rollback() promote previous to active and lastGood',
@@ -1238,7 +1354,9 @@ void main() {
         final hashEntry1 = _sha256(entry1);
         final hashPak1 = _sha256(pak1);
         transport.responses[manifestUri.toString()] = signed1.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry1').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry1')
+                .toString()] =
             entry1;
         transport.responses[manifestUri.resolve('blobs/$hashPak1').toString()] =
             pak1;
@@ -1250,7 +1368,9 @@ void main() {
         final hashEntry2 = _sha256(entry2);
         final hashPak2 = _sha256(pak2);
         transport.responses[manifestUri.toString()] = signed2.envelopeBytes;
-        transport.responses[manifestUri.resolve('blobs/$hashEntry2').toString()] =
+        transport.responses[manifestUri
+                .resolve('blobs/$hashEntry2')
+                .toString()] =
             entry2;
         transport.responses[manifestUri.resolve('blobs/$hashPak2').toString()] =
             pak2;
@@ -1294,7 +1414,9 @@ void main() {
         expect(afterRollback?.build, 1);
 
         final versionsAfter = await coordinator.listVersions();
-        final v1Info = versionsAfter.firstWhere((v) => v.versionId == previous.versionId);
+        final v1Info = versionsAfter.firstWhere(
+          (v) => v.versionId == previous.versionId,
+        );
         expect(v1Info.isActive, isTrue);
         expect(v1Info.isLastGood, isTrue);
         expect(v1Info.isPrevious, isFalse);
@@ -1390,21 +1512,23 @@ void main() {
             'blobs/$videoHash': videoBytes,
             'blobs/$posterHash': posterBytes,
           };
-          final zipBytes = encodePocket7z(blobEntries);
+          final zipBytes = encodePocketZip(blobEntries);
           final zipHash = _sha256(zipBytes);
 
-          final files = blobEntries.entries
-              .map(
-                (e) => <String, dynamic>{
-                  'sha256': e.key.substring('blobs/'.length),
-                  'size': e.value.length,
-                  'url': e.key,
-                },
-              )
-              .toList()
-            ..sort(
-              (a, b) => (a['sha256'] as String).compareTo(b['sha256'] as String),
-            );
+          final files =
+              blobEntries.entries
+                  .map(
+                    (e) => <String, dynamic>{
+                      'sha256': e.key.substring('blobs/'.length),
+                      'size': e.value.length,
+                      'url': e.key,
+                    },
+                  )
+                  .toList()
+                ..sort(
+                  (a, b) =>
+                      (a['sha256'] as String).compareTo(b['sha256'] as String),
+                );
 
           final payload = <String, dynamic>{
             'schemaVersion': 1,
@@ -1465,10 +1589,10 @@ void main() {
             },
             'files': files,
             'bundle': <String, dynamic>{
-              'format': '7z',
+              'format': 'zip',
               'sha256': zipHash,
               'size': zipBytes.length,
-              'url': 'bundle.7z',
+              'url': 'bundle.zip',
             },
             'assets': <String, dynamic>{
               'assets/images/poster.png': <String, dynamic>{
@@ -1485,7 +1609,10 @@ void main() {
           final payloadBytes = Uint8List.fromList(
             utf8.encode(jsonEncode(payload)),
           );
-          final signature = await algorithm.sign(payloadBytes, keyPair: keyPair);
+          final signature = await algorithm.sign(
+            payloadBytes,
+            keyPair: keyPair,
+          );
           final signed = PocketSignedManifest.fromBytes(
             _envelopeBytes(
               keyId: 'test-key',
@@ -1512,8 +1639,8 @@ void main() {
         final v1Video = <int>[100, 101, 102, 103];
         final v1Poster = <int>[200, 201, 202];
 
-        // --- Phase 1: Fresh install via one-shot bundle.7z ---
-        // Notice we ONLY populate latest.json and bundle.7z in transport (no individual blobs/*)
+        // --- Phase 1: Fresh install via one-shot bundle.zip ---
+        // Notice we ONLY populate latest.json and bundle.zip in transport (no individual blobs/*)
         final v1Release = await buildMultiPartRelease(
           build: 1,
           version: '1.0.0',
@@ -1526,7 +1653,7 @@ void main() {
         transport.responses
           ..clear()
           ..[manifestUri.toString()] = v1Release.signed.envelopeBytes
-          ..[manifestUri.resolve('bundle.7z').toString()] = v1Release.zipBytes;
+          ..[manifestUri.resolve('bundle.zip').toString()] = v1Release.zipBytes;
         transport.requestedUris.clear();
 
         final preparedV1 = await coordinator.prepare();
@@ -1535,7 +1662,7 @@ void main() {
         expect(preparedV1.downloadedBytes, v1Release.zipBytes.length);
         expect(transport.requestedUris, <String>[
           manifestUri.toString(),
-          manifestUri.resolve('bundle.7z').toString(),
+          manifestUri.resolve('bundle.zip').toString(),
         ]);
         await coordinator.commitHealthy(preparedV1);
 
@@ -1575,10 +1702,7 @@ void main() {
             .where((p) => p.stage == PocketUpdateStage.downloading)
             .toList();
         expect(dlProgress, isNotEmpty);
-        expect(
-          dlProgress.every((p) => p.totalBytes == v2Entry.length),
-          isTrue,
-        );
+        expect(dlProgress.every((p) => p.totalBytes == v2Entry.length), isTrue);
         expect(dlProgress.last.downloadedBytes, v2Entry.length);
         expect(transport.requestedUris, <String>[
           manifestUri.toString(),
@@ -1649,10 +1773,9 @@ void main() {
           v4Release.signed.payload.files.length - 1,
         );
         expect(preparedV4.downloadedBytes, v4Poster.length);
-        expect(
-          preparedV4.updatedComponents,
-          <String>['asset:assets/images/poster.png'],
-        );
+        expect(preparedV4.updatedComponents, <String>[
+          'asset:assets/images/poster.png',
+        ]);
         expect(transport.requestedUris, <String>[
           manifestUri.toString(),
           manifestUri.resolve('blobs/$v4PosterHash').toString(),
@@ -1765,11 +1888,13 @@ void main() {
 
         // Install v1 as baseline
         transport.responses[manifestUri
-            .resolve('blobs/${_sha256(entry1)}')
-            .toString()] = entry1;
+                .resolve('blobs/${_sha256(entry1)}')
+                .toString()] =
+            entry1;
         transport.responses[manifestUri
-            .resolve('blobs/${_sha256(pak1)}')
-            .toString()] = pak1;
+                .resolve('blobs/${_sha256(pak1)}')
+                .toString()] =
+            pak1;
         final prepared1 = await coordinator.prepare();
         await coordinator.commitHealthy(prepared1);
 
@@ -1923,8 +2048,9 @@ void main() {
         );
         transport.responses[manifestUri.toString()] = signed.envelopeBytes;
         transport.responses[manifestUri
-            .resolve('bundles/bundle-$incompleteZipHash.zip')
-            .toString()] = incompleteZip;
+                .resolve('bundles/bundle-$incompleteZipHash.zip')
+                .toString()] =
+            incompleteZip;
 
         final coordinator = PocketUpdateCoordinator(
           manifestUri: manifestUri,
@@ -1948,94 +2074,6 @@ void main() {
         );
         // Must not retry deterministic bundle-content failures
         expect(transport.requestedUris, hasLength(2));
-
-        // 4. 7z encoder/decoder roundtrip, bounded decompression, and 7zz CLI interop
-        final sample7z = encodePocket7z(<String, List<int>>{
-          'blobs/alpha': <int>[1, 2, 3, 4, 5],
-          'blobs/beta': List<int>.generate(2048, (i) => (i * 13) & 0xff),
-          'blobs/empty': const <int>[],
-        });
-        final decoded7z = decodePocketBundle(sample7z, format: '7z');
-        expect(decoded7z['blobs/alpha'], <int>[1, 2, 3, 4, 5]);
-        expect(
-          decoded7z['blobs/beta'],
-          List<int>.generate(2048, (i) => (i * 13) & 0xff),
-        );
-        expect(decoded7z['blobs/empty'], isEmpty);
-        expect(
-          () => decodePocket7z(sample7z, maxTotalBytes: 128),
-          throwsA(
-            isA<PocketPackageException>().having(
-              (e) => e.code,
-              'code',
-              'manifest-size',
-            ),
-          ),
-        );
-
-        final sevenZipBin = File('/opt/homebrew/bin/7zz').existsSync()
-            ? '/opt/homebrew/bin/7zz'
-            : null;
-        if (sevenZipBin != null) {
-          final cliDir = await Directory.systemTemp.createTemp('pocket-7zz-');
-          try {
-            final blobsDir = Directory(path.join(cliDir.path, 'blobs'));
-            await blobsDir.create(recursive: true);
-            final fileA = File(path.join(blobsDir.path, 'a'));
-            final fileB = File(path.join(blobsDir.path, 'b'));
-            await fileA.writeAsBytes(
-              utf8.encode('Hello from 7-Zip LZMA2 solid archive! ' * 25),
-            );
-            await fileB.writeAsBytes(
-              List<int>.generate(1024, (i) => (i * 7) & 0xff),
-            );
-            final archivePath = path.join(cliDir.path, 'cli.7z');
-            final proc = await Process.run(
-              sevenZipBin,
-              <String>[
-                'a',
-                '-t7z',
-                '-m0=lzma2',
-                '-mf=off',
-                '-ms=on',
-                '-mhc=on',
-                archivePath,
-                'blobs/a',
-                'blobs/b',
-              ],
-              workingDirectory: cliDir.path,
-            );
-            expect(proc.exitCode, 0);
-            final cliBytes = await File(archivePath).readAsBytes();
-            final extractedCli = decodePocket7z(Uint8List.fromList(cliBytes));
-            expect(
-              utf8.decode(extractedCli['blobs/a']!),
-              'Hello from 7-Zip LZMA2 solid archive! ' * 25,
-            );
-            expect(
-              extractedCli['blobs/b'],
-              List<int>.generate(1024, (i) => (i * 7) & 0xff),
-            );
-          } finally {
-            if (await cliDir.exists()) {
-              await cliDir.delete(recursive: true);
-            }
-          }
-        }
-
-        // Reject mutated LZMA2 first range-coder byte (Finding 6)
-        final mutated7z = Uint8List.fromList(sample7z);
-        mutated7z[38] = 0x01;
-        expect(
-          () => decodePocket7z(mutated7z),
-          throwsA(
-            isA<PocketPackageException>().having(
-              (e) => e.code,
-              'code',
-              'bundle-format',
-            ),
-          ),
-        );
       },
     );
   });
@@ -2045,16 +2083,15 @@ Uint8List _envelopeBytes({
   required String keyId,
   required List<int> payloadBytes,
   required List<int> signatureBytes,
-}) =>
-    Uint8List.fromList(
-      utf8.encode(
-        jsonEncode(<String, dynamic>{
-          'keyId': keyId,
-          'payload': base64Encode(payloadBytes),
-          'signature': base64Encode(signatureBytes),
-        }),
-      ),
-    );
+}) => Uint8List.fromList(
+  utf8.encode(
+    jsonEncode(<String, dynamic>{
+      'keyId': keyId,
+      'payload': base64Encode(payloadBytes),
+      'signature': base64Encode(signatureBytes),
+    }),
+  ),
+);
 
 String _sha256(List<int> bytes) => crypto.sha256.convert(bytes).toString();
 
