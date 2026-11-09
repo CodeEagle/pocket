@@ -1,6 +1,6 @@
 import { startEditor } from '../server.ts';
 import { test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
@@ -23,7 +23,9 @@ test('Editor builds the complete System catalog and opens a snapshot child throu
     const health = await api('/health');
     const base = `/api/projects/${health.projectId}`;
     const catalog = await api(base + '/resources');
-    assert.equal(catalog.packages.length, 3);
+    const system = JSON.parse(readFileSync(resolve(import.meta.dir, '../../../demo/js/pocket.system.json'), 'utf8'));
+    const expectedPackages = system.applications.catalog.map((entry: { package: string }) => entry.package).sort();
+    assert.deepEqual(catalog.packages.map((pkg: { id: string }) => pkg.id).sort(), expectedPackages);
     await api(base + '/build', {});
     const deadline = Date.now() + 120_000;
     let status: any;
@@ -35,7 +37,7 @@ test('Editor builds the complete System catalog and opens a snapshot child throu
     assert.equal(status.busy, false, 'build timeout');
     assert.equal(status.error, undefined, JSON.stringify(status));
     const resources = await api(base + '/resources');
-    assert.equal(resources.packages.length, 3);
+    assert.deepEqual(resources.packages.map((pkg: { id: string }) => pkg.id).sort(), expectedPackages);
     for (const pkg of resources.packages) assert.ok(pkg.resources.length > 0, pkg.id);
     const stream = await fetch(origin + base + '/preview/stream');
     assert.equal(stream.status, 200, stream.status === 200 ? '' : await stream.text());

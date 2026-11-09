@@ -443,8 +443,8 @@ export class NativeSession {
     }
   }
 
-  respondPending(capability: string, result: unknown, ok = true): void {
-    const index = this.deferredRequests.findIndex((request) => request.capability === capability);
+  respondPending(capability: string, result: unknown, ok = true, matches?: (request: HostRequest) => boolean): void {
+    const index = this.deferredRequests.findIndex((request) => request.capability === capability && (matches?.(request) ?? true));
     assert.ok(index >= 0, `no deferred ${capability} request is pending`);
     const [request] = this.deferredRequests.splice(index, 1);
     this.response(request!, result, ok);

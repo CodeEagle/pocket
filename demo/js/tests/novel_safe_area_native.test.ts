@@ -63,3 +63,39 @@ test("mobile game header and toolbar follow safe-area updates and retain real po
     expect(textOf(frame)).toContain("旅途手札");
   } finally { await session.quit(); }
 }, 120_000);
+
+test("mobile safe-area facts survive storage-delayed game view mounting", async () => {
+  for (const device of [
+    { width: 411, height: 731, safeArea: { top: 24, right: 0, bottom: 23.5714, left: 0 } },
+    { width: 390, height: 844, safeArea: { top: 59, right: 0, bottom: 34, left: 0 } },
+  ]) {
+    const session = new NativeSession(artifacts, { ...device, deferCapabilities: ["platform.storage.get"], deadlineMs: 90_000 });
+    try {
+      let frame = await session.boot();
+      expect(textOf(frame)).toContain("正在翻开雾港手札");
+      session.sendEvent("display.viewport", { ...device, keyboardInset: 0, reservedRegions: [] });
+      frame = await session.frame();
+      let replied = 0;
+      for (let attempt = 0; attempt < 80 && !textOf(frame).includes("启程 · 开始新的故事"); attempt++) {
+        if (session.requests.filter(request => request.capability === "platform.storage.get").length > replied) {
+          session.respondPending("platform.storage.get", null);
+          replied++;
+        }
+        frame = await session.frame();
+      }
+      expect(textOf(frame)).toContain("启程 · 开始新的故事");
+      frame = await session.tap("启程 · 开始新的故事", frame);
+      frame = await session.settle(frame, 4);
+      for (const label of ["手札", "回声"]) {
+        const op = textOps(frame, label)[0];
+        expect(op).toBeDefined();
+        expect(op!.y!, `${label} retains the one early host fact`).toBeGreaterThanOrEqual(device.safeArea.top);
+        expect(op!.y! + op!.h!).toBeLessThanOrEqual(device.height - device.safeArea.bottom);
+      }
+      frame = await session.tap("手札", frame);
+      expect(textOf(frame)).toContain("旅途手札");
+      frame = await session.tap("继续阅读", frame);
+      expect(textOf(frame)).not.toContain("旅途手札");
+    } finally { await session.quit(); }
+  }
+}, 120_000);

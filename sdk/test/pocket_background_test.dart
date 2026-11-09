@@ -99,7 +99,7 @@ void main() {
     state.session.failure = StateError('background test failure');
     state.session.notifyListeners();
     await tester.pump();
-    expect(find.textContaining('Pocket startup failed'), findsOneWidget);
+    expect(find.textContaining('Pocket 启动失败'), findsOneWidget);
     expect(_backgroundBox(tester).color, const Color(0xff030712));
     expect(
       tester.widget<SelectableText>(find.byType(SelectableText)).style?.color,

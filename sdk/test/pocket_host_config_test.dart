@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 import 'package:crypto/crypto.dart';
+import 'package:pocket_services/pocket_services.dart'
+    show PocketCancellationToken, PocketUpdateCancellation;
 
 Map<String, dynamic> _document({
   String baseUrl = 'https://updates.example.test/test',
@@ -189,6 +192,136 @@ void main() {
       throwsA(isA<HttpException>()),
     );
   });
+
+  test(
+    'cancellation before response headers aborts request but keeps client',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final client = HttpClient();
+      final requestSeen = Completer<void>();
+      var bootstrapRequests = 0;
+      addTearDown(() async {
+        await server.close(force: true);
+        client.close(force: true);
+      });
+      server.listen((request) {
+        if (request.uri.path == '/host.json') {
+          bootstrapRequests++;
+          if (!requestSeen.isCompleted) requestSeen.complete();
+          // Keep the socket open without sending response headers.
+          return;
+        }
+        if (request.uri.path == '/health') {
+          request.response
+            ..write('ok')
+            ..close();
+          return;
+        }
+        request.response
+          ..statusCode = HttpStatus.notFound
+          ..close();
+      });
+
+      final token = PocketCancellationToken();
+      final progress = <PocketHostLoadProgress>[];
+      final loading = PocketHostConfig.load(
+        Uri.parse('http://127.0.0.1:${server.port}/host.json'),
+        client: client,
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        cancellation: token,
+        onProgress: progress.add,
+      );
+      await requestSeen.future.timeout(const Duration(seconds: 2));
+      token.cancel();
+      await expectLater(
+        loading.timeout(const Duration(seconds: 2)),
+        throwsA(isA<PocketUpdateCancellation>()),
+      );
+      expect(progress, isEmpty);
+
+      final health = await client.getUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/health'),
+      );
+      final healthResponse = await health.close();
+      expect(await utf8.decoder.bind(healthResponse).join(), 'ok');
+      expect(bootstrapRequests, 1);
+    },
+  );
+
+  test(
+    'cancellation while reading body stops progress and later bootstrap requests',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final client = HttpClient();
+      final bodyStarted = Completer<void>();
+      final releaseResponse = Completer<void>();
+      var bootstrapRequests = 0;
+      var progressAfterCancellation = 0;
+      addTearDown(() async {
+        if (!releaseResponse.isCompleted) releaseResponse.complete();
+        await server.close(force: true);
+        client.close(force: true);
+      });
+      server.listen((request) async {
+        if (request.uri.path == '/host.json') {
+          bootstrapRequests++;
+          request.response.headers.contentType = ContentType.json;
+        request.response
+          ..bufferOutput = false
+          ..contentLength = 1024;
+          request.response.add(utf8.encode('{"kind":"'));
+          await request.response.flush();
+          if (!bodyStarted.isCompleted) bodyStarted.complete();
+          await releaseResponse.future;
+          try {
+            await request.response.close();
+          } on Object {
+            // The client aborts this deliberately incomplete response.
+          }
+          return;
+        }
+        if (request.uri.path == '/health') {
+          request.response
+            ..write('ok')
+            ..close();
+          return;
+        }
+        request.response
+          ..statusCode = HttpStatus.notFound
+          ..close();
+      });
+
+      final token = PocketCancellationToken();
+      final progress = <PocketHostLoadProgress>[];
+      final loading = PocketHostConfig.load(
+        Uri.parse('http://127.0.0.1:${server.port}/host.json'),
+        client: client,
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        cancellation: token,
+        onProgress: (sample) {
+          progress.add(sample);
+          if (token.isCancelled) progressAfterCancellation++;
+          if (sample.downloadedBytes > 0 && !token.isCancelled) token.cancel();
+        },
+      );
+      await bodyStarted.future.timeout(const Duration(seconds: 2));
+      await expectLater(
+        loading.timeout(const Duration(seconds: 2)),
+        throwsA(isA<PocketUpdateCancellation>()),
+      );
+      expect(progress, isNotEmpty);
+      expect(progressAfterCancellation, 0);
+
+      final health = await client.getUrl(
+        Uri.parse('http://127.0.0.1:${server.port}/health'),
+      );
+      final healthResponse = await health.close();
+      expect(await utf8.decoder.bind(healthResponse).join(), 'ok');
+      expect(bootstrapRequests, 1);
+    },
+  );
 
   test(
     'fixed package index resolves immutable host descriptor and relative bootstrap',
@@ -491,6 +624,142 @@ void main() {
           trustAnchorDirectory: trustDirectory,
         ),
         throwsA(isA<FormatException>()),
+      );
+    },
+  );
+
+  test(
+    'bootstrap progress reports bytes from chunked index, descriptor and assets',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(server.close);
+      final base = 'http://127.0.0.1:${server.port}';
+      final metadata = utf8.encode(
+        '{"runtimeAbi":"quickjs-bytecode-v1","bytecodeBytes":1,'
+        '"padding":"${List<String>.filled(1536, 'm').join()}"}',
+      );
+      final manifest = utf8.encode(
+        '{"requires":[],"optional":[],"padding":"${List<String>.filled(1024, 'g').join()}"}',
+      );
+      final descriptor = _document(baseUrl: base);
+      final applications = descriptor['applications'] as Map<String, dynamic>;
+      for (final entry in applications.entries) {
+        final package = Map<String, dynamic>.from(entry.value as Map);
+        package['bootstrapAssets'] = <String, dynamic>{
+          'assets/apps/${entry.key}/app.bytecode.json': <String, Object>{
+            'url': '/bootstrap/metadata',
+            'sha256': sha256.convert(metadata).toString(),
+            'size': metadata.length,
+          },
+          'assets/apps/${entry.key}/guest-manifest.json': <String, Object>{
+            'url': '/bootstrap/manifest',
+            'sha256': sha256.convert(manifest).toString(),
+            'size': manifest.length,
+          },
+        };
+        if (entry.key == 'pocket.host.demo') {
+          package['payloadSha256'] = 'a' * 64;
+        }
+        applications[entry.key] = package;
+      }
+      final index = <String, dynamic>{
+        'kind': 'pocket-editor-package-index',
+        'schemaVersion': 1,
+        'systemUI': 'pocket.host.demo',
+        'latest': <String, dynamic>{
+          'rootPayloadSha256': 'a' * 64,
+          'hostConfigUrl': '/releases/root/host.json',
+        },
+      };
+      final indexBytes = utf8.encode(jsonEncode(index));
+      final descriptorBytes = utf8.encode(jsonEncode(descriptor));
+
+      Future<void> writeChunked(HttpResponse response, List<int> body) async {
+        response
+          ..statusCode = HttpStatus.ok
+          ..headers.contentType = ContentType.json
+          ..headers.chunkedTransferEncoding = true;
+        final first = body.length ~/ 3;
+        final second = (body.length * 2) ~/ 3;
+        for (final range in <(int, int)>[
+          (0, first),
+          (first, second),
+          (second, body.length),
+        ]) {
+          response.add(body.sublist(range.$1, range.$2));
+          await response.flush();
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        await response.close();
+      }
+
+      server.listen((request) async {
+        final body = switch (request.uri.path) {
+          '/test/pocket/0.1.0/pocket.host.demo/latest.json' => indexBytes,
+          '/releases/root/host.json' => descriptorBytes,
+          '/bootstrap/metadata' => metadata,
+          '/bootstrap/manifest' => manifest,
+          _ => null,
+        };
+        if (body == null) {
+          request.response
+            ..statusCode = HttpStatus.notFound
+            ..close();
+          return;
+        }
+        await writeChunked(request.response, body);
+      });
+
+      final progress = <PocketHostLoadProgress>[];
+      final loaded = await PocketHostConfig.load(
+        Uri.parse('$base/test/pocket/0.1.0/pocket.host.demo/latest.json'),
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        onProgress: progress.add,
+      );
+      expect(loaded.systemUI.appId, 'pocket.host.demo');
+      expect(loaded.systemUI.bootstrapMetadataJson, utf8.decode(metadata));
+
+      for (final stage in <String>['index', 'descriptor']) {
+        final samples = progress
+            .where((entry) => entry.stage == stage)
+            .toList();
+        final expectedLength = stage == 'index'
+            ? indexBytes.length
+            : descriptorBytes.length;
+        expect(samples, isNotEmpty);
+        expect(samples.first.downloadedBytes, 0);
+        expect(samples.every((entry) => entry.totalBytes == null), isTrue);
+        expect(samples.last.downloadedBytes, expectedLength);
+      }
+
+      final assetSamples = progress
+          .where((entry) => entry.stage == 'bootstrapAsset')
+          .toList();
+      expect(assetSamples, isNotEmpty);
+      expect(
+        assetSamples.every(
+          (entry) =>
+              entry.totalBytes == metadata.length ||
+              entry.totalBytes == manifest.length,
+        ),
+        isTrue,
+      );
+      expect(
+        assetSamples.any(
+          (entry) =>
+              entry.downloadedBytes == metadata.length &&
+              entry.totalBytes == metadata.length,
+        ),
+        isTrue,
+      );
+      expect(
+        assetSamples.any(
+          (entry) =>
+              entry.downloadedBytes == manifest.length &&
+              entry.totalBytes == manifest.length,
+        ),
+        isTrue,
       );
     },
   );

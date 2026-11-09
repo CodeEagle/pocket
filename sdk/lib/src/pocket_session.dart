@@ -172,10 +172,40 @@ final class PocketSession extends ChangeNotifier {
   bool _packageAdmissionInFlight = false;
   bool _recovering = false;
   Object? failure;
+  PocketUpdateProgress? _transferProgress;
   Future<void>? _promotion;
   int generation = 0;
   String stage = 'initializing';
   String? lastError;
+
+  /// The latest immutable progress fact from the active signed-package
+  /// transfer. It is null when no update preparation is currently reporting
+  /// progress; consumers should use [stage] for the broader session phase.
+  PocketUpdateProgress? get transferProgress => _transferProgress;
+
+  void _recordTransferProgress(
+    PocketUpdateProgress progress, {
+    bool sendToGuest = false,
+  }) {
+    if (_disposed) return;
+    stage = progress.stage.name;
+    _transferProgress = progress;
+    if (sendToGuest) {
+      _send('updates.progress', {
+        'stage': stage,
+        'downloadedBytes': progress.downloadedBytes,
+        'totalBytes': progress.totalBytes,
+      });
+    }
+    if (hasListeners) notifyListeners();
+  }
+
+  void _clearTransferProgress() {
+    if (_transferProgress == null) return;
+    _transferProgress = null;
+    if (!_disposed && hasListeners) notifyListeners();
+  }
+
   Timer? _mountTimer;
   Future<void>? _mountOperation;
   Timer? _healthTimer;
@@ -405,13 +435,15 @@ final class PocketSession extends ChangeNotifier {
     PocketUpdateCoordinator updates, {
     PocketPackage? mountedPackage,
   }) async {
+    // A new open or refresh owns a fresh progress lifetime. Do not expose a
+    // completed or interrupted transfer from an earlier attempt.
+    _clearTransferProgress();
     final token = _download = PocketCancellationToken();
     final operation = updates.prepare(
       cancellation: token,
       mountedPackage: mountedPackage,
       onProgress: (progress) {
-        if (_disposed) return;
-        stage = progress.stage.name;
+        _recordTransferProgress(progress);
       },
     );
     try {
@@ -433,6 +465,9 @@ final class PocketSession extends ChangeNotifier {
         // above. This second await is only for cancellation cleanup.
       }
       if (identical(_download, token)) _download = null;
+      // Progress describes a live transfer only. Keep the broader session
+      // phase in `stage`, but do not leave a completed download fact behind.
+      _clearTransferProgress();
     }
   }
 
@@ -956,12 +991,7 @@ final class PocketSession extends ChangeNotifier {
         mode: mode,
         target: target,
         onProgress: (progress) {
-          stage = progress.stage.name;
-          _send('updates.progress', {
-            'stage': stage,
-            'downloadedBytes': progress.downloadedBytes,
-            'totalBytes': progress.totalBytes,
-          });
+          _recordTransferProgress(progress, sendToGuest: true);
         },
       );
       stage = 'verified';
@@ -981,6 +1011,7 @@ final class PocketSession extends ChangeNotifier {
     } finally {
       _busy = false;
       _download = null;
+      _clearTransferProgress();
     }
   }
 
@@ -1379,6 +1410,7 @@ final class PocketSession extends ChangeNotifier {
     _disposed = true;
     _foregroundRequested = false;
     _foreground = false;
+    _transferProgress = null;
     controller.setAppActive(false);
     _mountTimer?.cancel();
     _healthTimer?.cancel();

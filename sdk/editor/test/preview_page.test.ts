@@ -118,20 +118,22 @@ async function runPreviewPageAcceptance(): Promise<void> {
     expect(rootResponse?.status()).toBe(200);
     await page.waitForFunction(() => {
       const frame = document.querySelector<HTMLIFrameElement>("#preview-frame");
-      return Boolean(frame && !frame.hidden && document.querySelector("#preview-state")?.textContent?.includes("Ready"));
+      return Boolean(frame && !frame.hidden && document.querySelector("#preview-state")?.classList.contains("ready"));
     }, undefined, { timeout: 30_000 });
     await page.waitForFunction(() => {
       const frame = document.querySelector<HTMLIFrameElement>("#preview-frame");
       return Boolean(frame?.contentWindow && (frame.contentWindow as any).PocketEditorPreviewInstance?.getFrame?.());
     }, undefined, { timeout: 30_000 });
 
-    expect(await page.locator("#project-title").textContent()).not.toBe("Select a project");
+    const config = await request(server, `/api/projects/${encodeURIComponent(projectId)}/config`);
+    expect(config.response.status).toBe(200);
+    expect(await page.locator("#project-title").textContent()).toBe(config.value.name || projectId);
     expect(await page.locator("#preview-url").count()).toBe(0);
     expect(await page.locator("#toggle-regions").getAttribute("aria-pressed")).toBe("false");
     expect(await page.locator("#toggle-regions").isDisabled()).toBe(false);
     expect(await page.locator(".preview-toolbar #device-picker").count()).toBe(1);
-    expect(await page.locator(".preview-toolbar #deploy").textContent()).toBe("Run");
-    expect(await page.locator(".preview-toolbar #deploy-cancel").textContent()).toBe("Stop");
+    expect(await page.locator(".preview-toolbar #deploy").textContent()).toBe("运行");
+    expect(await page.locator(".preview-toolbar #deploy-cancel").textContent()).toBe("停止");
     expect(await page.locator(".deploy-panel #device-picker").count()).toBe(0);
     expect(await page.locator(".deploy-panel #deploy").count()).toBe(0);
     const logicalBefore = await page.evaluate(() => {

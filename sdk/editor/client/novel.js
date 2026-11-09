@@ -475,14 +475,9 @@ function localValidation() {
   } else if (state.story.timelines !== undefined) {
     diagnostics.push({ severity: "error", code: "story.timeline.validator", message: "时间轴 schema helper 不可用；请重新打开编辑器后再保存或构建。", location: { field: "timelines" } });
   }
-  for (const [timelineId, timeline] of Object.entries(state.story.timelines ?? {})) {
-    if (!isObjectValue(timeline) || !Array.isArray(timeline.audio)) continue;
-    for (const [index, event] of timeline.audio.entries()) {
-      if (typeof event?.cue === "string" && event.cue && !Object.hasOwn(state.assets.audio ?? {}, event.cue)) {
-        diagnostics.push({ severity: "error", code: "assets.reference", message: `时间轴 ${timelineId} 的音频事件引用了未登记的 Cue ${event.cue}。`, location: { field: `timelines.${timelineId}.audio[${index}].cue` } });
-      }
-    }
-  }
+  const assetReferencesCurrent = typeof state.engineModule?.validateNovelAssetReferences === "function";
+  if (assetReferencesCurrent) diagnostics.push(...state.engineModule.validateNovelAssetReferences(state.story, state.assets));
+  else diagnostics.push({ severity: "error", code: "assets.reference.validator", message: "资源引用 SDK 校验器不可用；请重新打开编辑器后再保存或构建。" });
   for (const [label, instructions] of Object.entries(script)) {
     if (!Array.isArray(instructions)) continue;
     for (const [index, instruction] of instructions.entries()) {
@@ -565,16 +560,6 @@ function localValidation() {
           if (objectsIssue) diagnostics.push({ severity: "error", code: "instruction.sceneObjects", message: objectsIssue, location: { label, index, field: "objects" } });
           else if (typeof state.engineModule?.novelSceneObjectsIssue !== "function") diagnostics.push({ severity: "error", code: "instruction.sceneObjects.validator", message: "场景对象 SDK 校验器不可用；请重新打开编辑器后再保存或构建。", location: { label, index, field: "objects" } });
         }
-        if (Array.isArray(instruction.backgroundLayers)) for (const layer of instruction.backgroundLayers) {
-          if (!Object.hasOwn(state.assets.backgrounds ?? {}, String(layer?.background ?? ""))) {
-            diagnostics.push({ severity: "error", code: "assets.reference", message: `场景叠加背景引用了未登记的背景键 ${String(layer?.background)}。`, location: { label, index, field: "backgroundLayers" } });
-          }
-        }
-        if (Array.isArray(instruction.objects)) for (const [objectIndex, object] of instruction.objects.entries()) {
-          if (typeof object?.image === "string" && !Object.hasOwn(state.assets.backgrounds ?? {}, object.image)) {
-            diagnostics.push({ severity: "error", code: "assets.reference", message: `场景对象 ${object.id ?? objectIndex} 引用了未登记的背景键 ${object.image}。`, location: { label, index, field: `objects[${objectIndex}].image` } });
-          }
-        }
       }
       if (instruction.type === "ending") endings++;
       if (instruction.type === "input") {
@@ -585,9 +570,6 @@ function localValidation() {
       if (instruction.type === "video") {
         const issue = state.engineModule?.novelVideoInstructionIssue(instruction);
         if (issue) diagnostics.push({ severity: "error", code: "instruction.schema", message: issue, location: { label, index } });
-        if (instruction.action === "play" && !Object.hasOwn(state.assets.videos ?? {}, String(instruction.cue ?? ""))) {
-          diagnostics.push({ severity: "error", code: "assets.reference", message: `视频指令引用了未注册的 cue ${String(instruction.cue)}。`, location: { label, index, field: "cue" } });
-        }
       }
       if (instruction.type === "jump" || instruction.type === "call") references.push([label, index, instruction.target, instruction.type]);
       if (instruction.type === "branch") {
@@ -601,16 +583,10 @@ function localValidation() {
   }
   if (state.story?.start && !known.has(state.story.start)) diagnostics.push({ severity: "error", code: "story.start.missing", message: `起始标签 ${state.story.start} 不存在。` });
   if (state.validation?.diagnostics) {
-    const localCodes = new Set(diagnostics.map(item => `${item.code}:${item.location?.label ?? ""}:${item.location?.index ?? ""}`));
+    const diagnosticKey = item => `${item.code}:${item.location?.label ?? ""}:${item.location?.index ?? ""}:${item.location?.field ?? ""}`;
+    const localCodes = new Set(diagnostics.map(diagnosticKey));
     for (const item of state.validation.diagnostics) {
-      const sceneObjectImage = item.code === "assets.reference"
-        ? item.location?.field?.match(/^objects\[(\d+)\]\.image$/)
-        : null;
-      if (sceneObjectImage && item.location?.label && Number.isInteger(item.location?.index)) {
-        const scene = state.story.script[item.location.label]?.[item.location.index];
-        const object = Array.isArray(scene?.objects) ? scene.objects[Number(sceneObjectImage[1])] : null;
-        if (!object || typeof object.image !== "string" || Object.hasOwn(state.assets.backgrounds ?? {}, object.image)) continue;
-      }
+      if (assetReferencesCurrent && ["assets.reference", "assets.choiceSurface.choice", "assets.choiceSurface.options", "assets.atmosphere.background", "assets.model.animation"].includes(item.code)) continue;
       if (item.code === "story.editor.blueprint" && typeof state.engineModule?.novelBlueprintMetadataIssue === "function") continue;
       if (item.code === "instruction.camera" && typeof state.engineModule?.novelCameraInstructionIssue === "function") continue;
       if (item.code === "instruction.backgroundLayers" && typeof state.engineModule?.novelBackgroundLayersInstructionIssue === "function") continue;
@@ -618,7 +594,7 @@ function localValidation() {
       if (item.code === "instruction.audioGroup" && typeof state.engineModule?.novelAuthoredAudioGroupIssue === "function" && state.engineModule?.NOVEL_VOICE_CHANNEL) continue;
       if (item.location?.field === "rich" && item.location?.label && Number.isInteger(item.location?.index)
           && typeof state.engineModule?.novelSayRichTemplateIssue === "function") continue;
-      const key = `${item.code}:${item.location?.label ?? ""}:${item.location?.index ?? ""}`;
+      const key = diagnosticKey(item);
       if (!localCodes.has(key) && !["reference.label", "id.duplicate", "story.variableDefinitions", "story.replayEntries"].includes(item.code)) diagnostics.push(item);
     }
   }
@@ -5151,6 +5127,7 @@ function renderDiagnostics(validation) {
     });
     const location = item.location?.label ? node("span", "nv-diagnostic-code", `${item.location.label}${Number.isInteger(item.location.index) ? ` · 第 ${item.location.index + 1} 条指令` : ""}`) : null;
     if (location) entry.append(location);
+    if (item.location?.field) entry.append(node("span", "nv-diagnostic-code", item.location.field));
     entry.append(node("span", "", item.message));
     container.append(entry);
   }
@@ -5202,7 +5179,6 @@ function changeContextPreviewRoot(rootOption) {
     renderPreviewNow();
     return;
   }
-  if (state.contextPreviewEngineRoot) invalidateStageSourceFacts();
   invalidateContextPreview();
 }
 

@@ -100,14 +100,28 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
         // requiring byte-identical clip objects shared by every page control.
         const targetY = Number(targetText.y);
         const nearLabel = (op: any) => Math.abs(Number(op.y) - targetY) < 32;
-        const images = frame.ops.filter((op: any) => op.type === "image" && String(op.asset).includes("pocket.demo.profile") && Number(op.w) >= 10 && Number(op.w) <= 16 && Number(op.h) >= 10 && Number(op.h) <= 16 && nearLabel(op));
         const rects = frame.ops.filter((op: any) => op.type === "rect" && Number(op.color) === 0xff315deb && Number(op.w) >= 300 && nearLabel(op));
+        const left = rects.length > 0 ? Math.min(...rects.map((op: any) => Number(op.x))) : Number.NaN;
+        const top = rects.length > 0 ? Math.min(...rects.map((op: any) => Number(op.y))) : Number.NaN;
+        const right = rects.length > 0 ? Math.max(...rects.map((op: any) => Number(op.x) + Number(op.w))) : Number.NaN;
+        const bottom = rects.length > 0 ? Math.max(...rects.map((op: any) => Number(op.y) + Number(op.h))) : Number.NaN;
+        const atEdge = (a: number, b: number) => Math.abs(a - b) <= 0.01;
+        // The current rounded-lg profile button has 8px native corner masks.
+        // Find masks by their app/color and the four outer corners implied by
+        // the three fill rects, rather than assuming a historical 10px radius.
+        const images = frame.ops.filter((op: any) => {
+          if (op.type !== "image" || !String(op.asset).includes("pocket.demo.profile") || Number(op.color) !== 0xff315deb || !nearLabel(op)) return false;
+          const x = Number(op.x);
+          const y = Number(op.y);
+          const width = Number(op.w);
+          const height = Number(op.h);
+          return width > 0 && height > 0 &&
+            (atEdge(x, left) || atEdge(x + width, right)) &&
+            (atEdge(y, top) || atEdge(y + height, bottom));
+        });
         if (images.length !== 4 || rects.length !== 3) return null;
-        const left = Math.min(...rects.map((op: any) => Number(op.x)), ...images.map((op: any) => Number(op.x)));
-        const top = Math.min(...rects.map((op: any) => Number(op.y)), ...images.map((op: any) => Number(op.y)));
-        const bottom = Math.max(...rects.map((op: any) => Number(op.y) + Number(op.h)), ...images.map((op: any) => Number(op.y) + Number(op.h)));
         if (![left, top, bottom].every(Number.isFinite) || left < 0 || top < 0 || bottom > canvas.height || bottom <= top) return null;
-        const geometry = { left, top, bottom, rects, images, text: frame.ops.find((op: any) => op.type === "text" && op.text === "Save identity & open Lobby") };
+        const geometry = { left, top, bottom, rects, images, clip: rects[0]?.clip, text: frame.ops.find((op: any) => op.type === "text" && op.text === "Save identity & open Lobby") };
         const x = Math.max(0, Math.min(canvas.width - 1, Math.round(left + 20)));
         const pixel = (atY: number, atX = x) => Array.from(context.getImageData(atX, atY, 1, 1).data);
         const core = [49, 93, 235, 255];
@@ -138,7 +152,41 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
       }
       await Bun.sleep(16);
     }
-    assert.ok(rendered, "native Profile rounded button did not settle inside the preview canvas");
+    const failureDiagnostics = rendered ? undefined : await preview!.evaluate(() => {
+      const frame = (window as any).PocketEditorPreviewInstance.getFrame();
+      const canvas = document.querySelector("canvas") as HTMLCanvasElement | null;
+      const targetText = frame.ops.find((op: any) => op.type === "text" && op.text === "Save identity & open Lobby");
+      if (!targetText) return { frame: { width: frame.width, height: frame.height }, ops: frame.ops.filter((op: any) => op.type === "text").map((op: any) => ({ text: op.text, x: op.x, y: op.y, w: op.w, h: op.h })) };
+      const targetY = Number(targetText.y);
+      const nearLabel = (op: any) => Math.abs(Number(op.y) - targetY) < 32;
+      const rects = frame.ops.filter((op: any) => op.type === "rect" && Number(op.color) === 0xff315deb && Number(op.w) >= 300 && nearLabel(op));
+      const left = rects.length ? Math.min(...rects.map((op: any) => Number(op.x))) : Number(targetText.x);
+      const top = rects.length ? Math.min(...rects.map((op: any) => Number(op.y))) : targetY;
+      const right = rects.length ? Math.max(...rects.map((op: any) => Number(op.x) + Number(op.w))) : left;
+      const bottom = rects.length ? Math.max(...rects.map((op: any) => Number(op.y) + Number(op.h))) : targetY + Number(targetText.h);
+      const atEdge = (a: number, b: number) => Math.abs(a - b) <= 0.01;
+      const images = frame.ops.filter((op: any) => {
+        if (op.type !== "image" || !String(op.asset).includes("pocket.demo.profile") || Number(op.color) !== 0xff315deb || !nearLabel(op)) return false;
+        const x = Number(op.x);
+        const y = Number(op.y);
+        return (atEdge(x, left) || atEdge(x + Number(op.w), right)) &&
+          (atEdge(y, top) || atEdge(y + Number(op.h), bottom));
+      });
+      const px = Math.max(0, Math.min((canvas?.width ?? 1) - 1, Math.round(left + 20)));
+      const pixelRows: Array<{ y: number; rgba: number[] }> = [];
+      const context = canvas?.getContext("2d");
+      if (context) {
+        for (let y = Math.max(0, Math.floor(top) + 2); y < Math.min(canvas!.height, Math.ceil(bottom) - 2); y += 1) {
+          pixelRows.push({ y, rgba: Array.from(context.getImageData(px, y, 1, 1).data) });
+        }
+      }
+      const clip = rects[0]?.clip;
+      const outsideClip = context && clip
+        ? Array.from(context.getImageData(Math.round(frame.width / 2), Math.max(0, Math.floor(Number(clip.y) - 1)), 1, 1).data)
+        : [];
+      return { frame: { width: frame.width, height: frame.height }, canvas: canvas && { width: canvas.width, height: canvas.height }, targetText, rects, images, clip, pixelColumnX: px, pixelRows, outsideClip };
+    });
+    assert.ok(rendered, `native Profile rounded button did not settle inside the preview canvas: ${JSON.stringify(failureDiagnostics)}`);
     assert.equal(rendered.rects.length, 3, `Profile button should have 3 rounded fill rects: ${JSON.stringify(rendered.rects)}`);
     assert.equal(rendered.images.length, 4, `Profile button should have 4 corner masks: ${JSON.stringify(rendered.images)}`);
     return rendered;

@@ -452,6 +452,15 @@ test("Editor selects only safe context roots and the same replay route runs in p
     await page.waitForFunction(() => document.querySelector("#novel-context-preview-status")?.getAttribute("data-status") === "choice");
     const oldRootKind = await status(page).getAttribute("data-root-kind");
     const oldRootIdentity = await status(page).getAttribute("data-root-identity");
+    const oldStageSourceSelector = '#novel-live-view .nv-preview-source[data-source-kind="background"], #novel-live-view .nv-preview-source[data-source-kind="character"]';
+    const oldStageSources = await page.locator(oldStageSourceSelector).evaluateAll(sources => sources.map(source => ({
+      kind: source.getAttribute("data-source-kind"),
+      location: source.getAttribute("data-source-location"),
+      executionLocation: source.getAttribute("data-source-execution-location"),
+      disabled: (source as HTMLButtonElement).disabled,
+    })));
+    assert.ok(oldStageSources.length > 0, "the blocked context has source controls for its still-visible committed stage");
+    assert.ok(oldStageSources.every(source => source.location && !source.disabled), "the blocked context stage controls point at real committed scene sources");
     await roots.selectOption("blueprint:wrong_root");
     assert.ok(!["choice", "input", "replaying"].includes((await status(page).getAttribute("data-status")) ?? ""), "selecting another root cancels the old context session");
     assert.equal(await page.locator("#novel-context-preview-facts").isHidden(), true);
@@ -460,10 +469,19 @@ test("Editor selects only safe context roots and the same replay route runs in p
     const retainedChoice = page.locator('#novel-live-view .nv-button.choice-button').filter({ hasText: "进入章节" });
     assert.equal(await retainedChoice.count(), 1, "the old unresolved choice remains visible while its engine is paused");
     assert.equal(await retainedChoice.isDisabled(), true, "a cancelled root cannot accept a choice against its stale continuation");
-    for (const source of await page.locator('#novel-live-view .nv-preview-source[data-source-kind="background"], #novel-live-view .nv-preview-source[data-source-kind="character"]').all()) {
-      assert.equal(await source.isDisabled(), true, "old stage pixels cannot claim provenance from the selected new root");
-      assert.equal(await source.getAttribute("data-source-location"), "");
-    }
+    const retainedStageSources = await page.locator(oldStageSourceSelector).evaluateAll(sources => sources.map(source => ({
+      kind: source.getAttribute("data-source-kind"),
+      location: source.getAttribute("data-source-location"),
+      executionLocation: source.getAttribute("data-source-execution-location"),
+      disabled: (source as HTMLButtonElement).disabled,
+    })));
+    assert.deepEqual(retainedStageSources, oldStageSources, "old visible stage pixels retain their exact committed source facts while the selected root changes");
+    const retainedSource = page.locator(oldStageSourceSelector).first();
+    await retainedSource.click();
+    assert.equal(await page.locator(".nv-label.active .nv-label-name").innerText(), oldStageSources[0]!.location!.split(":")[0], "retained source navigation opens the old committed instruction");
+    await page.getByRole("button", { name: "试玩与调试", exact: true }).click();
+    assert.equal(await retainedChoice.count(), 1, "source navigation does not resolve the cancelled old choice");
+    assert.equal(await retainedChoice.isDisabled(), true, "source navigation cannot re-enable the stale continuation");
     await page.waitForTimeout(timeoutMs * 3);
     assert.equal(await retainedChoice.count(), 1, "the paused timed choice does not auto-select after root invalidation");
     assert.equal(await status(page).getAttribute("data-root-identity"), oldRootIdentity);

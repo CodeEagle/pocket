@@ -1,5 +1,10 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
-import { forwardHostPacket, type BridgeObject, type HostEvent } from "./host.ts";
+import {
+  forwardHostPacket,
+  type BridgeObject,
+  type HostDisplayViewportSnapshot,
+  type HostEvent,
+} from "./host.ts";
 import {
   EMPTY_DISPLAY_GEOMETRY,
   parseDisplayGeometry,
@@ -13,7 +18,11 @@ export type DisplayEventHandler = ((packet: Record<string, unknown>) => void) & 
 export interface DisplayGeometryBridge {
   __pocketEvent?: DisplayEventHandler;
   onEvent?: (listener: (event: HostEvent) => void) => () => void;
-  __pocketHostBridge?: { onEvent?: (listener: (event: HostEvent) => void) => () => void };
+  getLatestDisplayViewport?: () => HostDisplayViewportSnapshot | undefined;
+  __pocketHostBridge?: {
+    onEvent?: (listener: (event: HostEvent) => void) => () => void;
+    getLatestDisplayViewport?: () => HostDisplayViewportSnapshot | undefined;
+  };
   ui?: { __viewport?: { w?: unknown; h?: unknown } };
 }
 
@@ -70,11 +79,14 @@ function subscribeDisplayBridge(
     const listeners = new Set<DisplayListener>();
     const dispatch = (event: HostEvent): void => {
       if (event.method === "display.viewport") {
-        const previous = latestDisplayFacts.get(bridge)?.geometry ?? initialGeometry;
-        latestDisplayFacts.set(bridge, {
-          event,
-          geometry: parseDisplayGeometry(event.params, previous),
-        });
+        // Modern HostBridge owns this fact at ingress so it is available even
+        // before the first display subscriber mounts. Keep the old local cache
+        // only for custom/legacy event sources without that capability.
+        if (typeof bridge.getLatestDisplayViewport !== "function") {
+          const previous = latestDisplayFacts.get(bridge)?.geometry ?? initialGeometry;
+          const geometry = parseDisplayGeometry(event.params, previous);
+          latestDisplayFacts.set(bridge, { event, geometry });
+        }
       }
       for (const current of [...listeners]) {
         try { current(event); } catch { /* keep the display event lane live */ }
@@ -117,8 +129,12 @@ function subscribeDisplayBridge(
   }
   const currentState = state;
   currentState.listeners.add(listener);
-  const latest = latestDisplayFacts.get(bridge)?.event;
-  if (latest && latest !== alreadyApplied) {
+  const latestFact = latestDisplayFact(bridge);
+  if (latestFact && latestFact.event !== alreadyApplied) {
+    const latest = {
+      ...latestFact.event,
+      params: displayGeometryBridgeObject(latestFact.geometry),
+    };
     try { listener(latest); } catch { /* keep subscription setup non-throwing */ }
   }
   return () => {
@@ -130,6 +146,11 @@ function subscribeDisplayBridge(
     if (active.receive && bridge.__pocketEvent === active.receive) bridge.__pocketEvent = active.previous;
     displayBridgeStates.delete(bridge);
   };
+}
+
+function latestDisplayFact(bridge: DisplayGeometryBridge): LatestDisplayFact | HostDisplayViewportSnapshot | undefined {
+  if (typeof bridge.getLatestDisplayViewport === "function") return bridge.getLatestDisplayViewport();
+  return latestDisplayFacts.get(bridge);
 }
 
 function finite(value: unknown, fallback: number): number {
@@ -175,7 +196,7 @@ function initialDisplayGeometry(
   fallback: DisplayGeometry,
   viewportBridge: DisplayGeometryBridge = bridge,
 ): DisplayGeometry {
-  const latest = latestDisplayFacts.get(bridge);
+  const latest = latestDisplayFact(bridge);
   if (latest) {
     // The canonical host snapshot is more authoritative than the
     // width/height-only ui.__viewport fallback. It includes reserved regions
@@ -212,7 +233,7 @@ export function createDisplayGeometry(options: DisplayGeometryOptions = {}): () 
   const fallback = options.fallback ?? EMPTY_DISPLAY_GEOMETRY;
   const initialBridge = resolvedDisplayBridge(bridge);
   const initialGeometry = initialDisplayGeometry(initialBridge, fallback, bridge);
-  const initialEvent = latestDisplayFacts.get(initialBridge)?.event;
+  const initialEvent = latestDisplayFact(initialBridge)?.event;
   const [geometry, setGeometry] = createSignal<DisplayGeometry>(initialGeometry);
   let disposed = false;
   onMount(() => {
@@ -236,5 +257,21 @@ export function createDisplayGeometry(options: DisplayGeometryOptions = {}): () 
     });
   });
   return geometry;
+}
+
+function displayGeometryBridgeObject(geometry: DisplayGeometry): BridgeObject {
+  return {
+    width: geometry.width,
+    height: geometry.height,
+    safeArea: { ...geometry.safeArea },
+    keyboardInset: geometry.keyboardInset,
+    reservedRegions: geometry.reservedRegions.map((region) => ({
+      id: region.id,
+      kind: region.kind,
+      frame: { ...region.frame },
+      margins: { ...region.margins },
+      active: region.active,
+    })),
+  };
 }
 

@@ -11,7 +11,9 @@ class _FirstFrameRuntime implements PocketRuntime {
 
   final PocketFrame initialFrame;
   int frameCalls = 0;
+  final List<int> frameDeltas = <int>[];
   final List<Map<String, dynamic>> sentMessages = <Map<String, dynamic>>[];
+  bool sawDisplayViewportBeforeFrame = false;
 
   @override
   PocketFrame eval(String source) => initialFrame;
@@ -22,6 +24,10 @@ class _FirstFrameRuntime implements PocketRuntime {
   @override
   PocketFrame frame(int deltaMilliseconds) {
     frameCalls += 1;
+    frameDeltas.add(deltaMilliseconds);
+    sawDisplayViewportBeforeFrame = sentMessages.any(
+      (message) => message['name'] == 'display.viewport',
+    );
     return initialFrame;
   }
 
@@ -185,11 +191,17 @@ void main() {
       final decode = Completer<ui.Image>();
       var ready = false;
       final runtime = _FirstFrameRuntime(_imageFrame());
+      var readyFrameCalls = 0;
+      var readySawDisplayViewport = false;
       await tester.pumpWidget(
         _host(
           runtime,
           decoder: (_) => decode.future,
-          onReady: () => ready = true,
+          onReady: () {
+            ready = true;
+            readyFrameCalls = runtime.frameCalls;
+            readySawDisplayViewport = runtime.sawDisplayViewportBeforeFrame;
+          },
         ),
       );
       await tester.pump();
@@ -207,6 +219,9 @@ void main() {
 
       expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(ready, isTrue);
+      expect(readyFrameCalls, greaterThan(0));
+      expect(readySawDisplayViewport, isTrue);
+      expect(runtime.frameDeltas.first, 0);
     },
   );
 
@@ -413,7 +428,10 @@ void main() {
       expect(ready, isFalse);
 
       // Queue controller work while the first-frame resource barrier is active.
-      expect(controller.send(method: 'during-barrier', params: const {'seq': 1}), isTrue);
+      expect(
+        controller.send(method: 'during-barrier', params: const {'seq': 1}),
+        isTrue,
+      );
       expect(runtime.sentMessages, isEmpty);
       expect(runtime.frameCalls, 0);
 
@@ -434,11 +452,17 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 16));
 
-      expect(errors, isEmpty, reason: 'normal OS lifecycle must not fail startup');
+      expect(
+        errors,
+        isEmpty,
+        reason: 'normal OS lifecycle must not fail startup',
+      );
       expect(ready, isTrue);
       expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(
-        runtime.sentMessages.any((message) => message['name'] == 'during-barrier'),
+        runtime.sentMessages.any(
+          (message) => message['name'] == 'during-barrier',
+        ),
         isTrue,
       );
       expect(runtime.frameCalls, greaterThan(0));

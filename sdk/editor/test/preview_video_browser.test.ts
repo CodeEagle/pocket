@@ -144,19 +144,27 @@ async function runVideoBrowserAcceptance(): Promise<void> {
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage({ viewport: { width: 900, height: 900 } });
     const pageErrors: string[] = [];
-    const previewRequests: Array<{ method: string; url: string; body?: string }> = [];
+    const previewRequests: Array<{ method: string; url: string; body?: string; at: number }> = [];
     const mediaResponses: Array<{ status: number; url: string; contentType: string }> = [];
     await page.addInitScript(() => {
-      (window as any).__previewVideoTrace = { frameMessages: 0 };
+      (window as any).__previewVideoTrace = { frameMessages: [] };
       window.addEventListener("message", (event) => {
         const packet = event.data;
         if (packet?.source === "pocket-editor-preview" && packet?.type === "preview.frame") {
-          (window as any).__previewVideoTrace.frameMessages += 1;
+          const frame = packet.frame;
+          (window as any).__previewVideoTrace.frameMessages.push({
+            at: performance.now(),
+            revision: packet.revision,
+            frame: frame?.frame,
+            width: frame?.width,
+            height: frame?.height,
+            labels: Array.isArray(frame?.ops) ? frame.ops.filter((op: any) => op?.type === "text").map((op: any) => op.text) : [],
+          });
         }
       });
     });
     page.on("request", (request: any) => {
-      if (request.url().includes(prefix)) previewRequests.push({ method: request.method(), url: request.url(), body: request.postData() ?? undefined });
+      if (request.url().includes(prefix)) previewRequests.push({ method: request.method(), url: request.url(), body: request.postData() ?? undefined, at: Date.now() });
     });
     page.on("response", (response: any) => {
       if (!response.url().includes("/media")) return;
@@ -238,8 +246,8 @@ async function runVideoBrowserAcceptance(): Promise<void> {
         };
       }),
     ) as Promise<BrowserVideo[]>;
-    const readTrace = async (): Promise<{ frameMessages: number }> => page.evaluate(
-      () => (window as any).__previewVideoTrace as { frameMessages: number },
+    const readTrace = async (): Promise<{ frameMessages: Array<Record<string, unknown>> }> => page.evaluate(
+      () => (window as any).__previewVideoTrace as { frameMessages: Array<Record<string, unknown>> },
     );
     const readCanvasVideoHash = async (op: Record<string, unknown>): Promise<string> => previewFrame!.evaluate((target) => {
       const canvas = document.querySelector("canvas") as HTMLCanvasElement | null;
@@ -344,22 +352,88 @@ async function runVideoBrowserAcceptance(): Promise<void> {
     const playingTime = playing!.currentTime;
     const heroVideoOp = videoOps(settledVideoFrame).find((value) => value.id === "video-lab-hero");
     assert.ok(heroVideoOp, "settled Video Lab frame must retain the hero video DrawOp");
+    // `playing` and `ready` are event-driven host facts and can arrive after
+    // currentTime first advances. Let that initial state burst settle before
+    // measuring steady playback; continuous SSE polling cannot satisfy this
+    // bounded quiet window because each delivered FrameResult resets it.
+    let lastObservedFrameCount = -1;
+    let stableFrameSince = 0;
+    const stablePlayback = await waitFor(async () => {
+      const [frame, trace, videos] = await Promise.all([readCurrent(), readTrace(), readVideos()]);
+      return { frame, trace, videos };
+    }, ({ frame, trace, videos }) => {
+      const frameCount = trace.frameMessages.length;
+      if (frameCount !== lastObservedFrameCount) {
+        lastObservedFrameCount = frameCount;
+        stableFrameSince = Date.now();
+      }
+      const liveVideo = videos.find((value) => value.currentSrc.includes("clip-a.mp4"));
+      const currentFrameSaysPlaying = frame.ops.some((value) => value.type === "text" && value.text === "video-lab-hero · playing");
+      if (!liveVideo || liveVideo.paused || liveVideo.currentTime <= playingTime + 0.1 || !currentFrameSaysPlaying) {
+        stableFrameSince = Date.now();
+        return false;
+      }
+      return stableFrameSince > 0 && Date.now() - stableFrameSince >= 600;
+    }, "settled playing media state without new FrameResult events", 8_000);
+    const stableVideo = stablePlayback.videos.find((value) => value.currentSrc.includes("clip-a.mp4"));
+    assert.ok(stableVideo && !stableVideo.paused,
+      "the quiet playback measurement must begin with the real MP4 still playing");
     const canvasHashBefore = await readCanvasVideoHash(heroVideoOp!);
     const requestsBeforePlayback = previewRequests.length;
-    const framesBeforePlayback = (await readTrace()).frameMessages;
+    const framesBeforePlayback = stablePlayback.trace.frameMessages.length;
     await Bun.sleep(700);
     const progressed = (await readVideos()).find((value) => value.currentSrc.includes("clip-a.mp4"));
-    assert.ok(progressed && progressed.currentTime > playingTime + 0.2,
-      `explicit Play must advance currentTime: ${playingTime} -> ${progressed?.currentTime}`);
+    assert.ok(progressed && !progressed.paused && progressed.currentTime > stableVideo!.currentTime + 0.2,
+      `the quiet playback window must retain playing state and advance currentTime: ${stableVideo!.currentTime} -> ${progressed?.currentTime} (paused=${progressed?.paused})`);
     const canvasHashAfter = await readCanvasVideoHash(heroVideoOp!);
     assert.notEqual(canvasHashAfter, canvasHashBefore,
       `Canvas video ROI must change with decoded frames, not remain a static first frame (${canvasHashBefore})`);
-    const playbackRequests = previewRequests.slice(requestsBeforePlayback).filter((value) =>
-      value.method === "POST" || /\/(?:stream|snapshot)(?:\?|$)/.test(new URL(value.url).pathname + new URL(value.url).search),
-    );
-    assert.deepEqual(playbackRequests, [], "video playback must not poll preview stream/snapshot or input");
-    const framesDuringPlayback = (await readTrace()).frameMessages - framesBeforePlayback;
+    const playbackRequests = previewRequests.slice(requestsBeforePlayback).filter((value) => {
+      const url = new URL(value.url);
+      if (/\/(?:stream|snapshot)(?:\?|$)/.test(url.pathname + url.search)) return true;
+      if (value.method !== "POST") return false;
+      try {
+        const body = JSON.parse(value.body ?? "") as Record<string, any>;
+        const message = body.message as Record<string, any> | undefined;
+        return !(body.type === "message" && message?.type === "event" && message.name === "video.state");
+      } catch {
+        return true;
+      }
+    });
+    assert.deepEqual(playbackRequests, [], "video frame progression must not poll preview stream/snapshot or send interactive input; event-driven video.state notifications are allowed");
+    const traceDuringPlayback = await readTrace();
+    const framesDuringPlayback = traceDuringPlayback.frameMessages.length - framesBeforePlayback;
+    if (framesDuringPlayback > 2) console.error("Video frame update diagnosis:", JSON.stringify({
+      framesBeforePlayback,
+      newFrames: traceDuringPlayback.frameMessages.slice(framesBeforePlayback),
+      requestsDuringPlayback: previewRequests.filter((value) => value.at >= Date.now() - 1500),
+    }));
     assert.ok(framesDuringPlayback <= 2, `video playback must not create a continuous SSE frame poll (${framesDuringPlayback} extra frames)`);
+    const videoStateEvents = previewRequests.flatMap((value) => {
+      if (value.method !== "POST") return [];
+      try {
+        const body = JSON.parse(value.body ?? "") as Record<string, any>;
+        const message = body.message as Record<string, any> | undefined;
+        const payload = message?.payload as Record<string, any> | undefined;
+        if (body.type !== "message" || message?.type !== "event" || message.name !== "video.state" || payload?.id !== "video-lab-hero") return [];
+        return [{ state: payload.state, at: value.at }];
+      } catch {
+        return [];
+      }
+    });
+    console.log("Video playback facts:", JSON.stringify({
+      source: progressed!.currentSrc,
+      readyState: progressed!.readyState,
+      startedAt: playingTime,
+      afterStableQuietWindow: stableVideo!.currentTime,
+      afterMeasuredWindow: progressed!.currentTime,
+      stableQuietWindowMs: 600,
+      measuredPlaybackWindowMs: 700,
+      additionalFrameResults: framesDuringPlayback,
+      streamOrSnapshotRequests: playbackRequests.filter((value) => /\/(?:stream|snapshot)(?:\?|$)/.test(new URL(value.url).pathname + new URL(value.url).search)).length,
+      otherInputPosts: playbackRequests.filter((value) => value.method === "POST").length,
+      observedStateEvents: videoStateEvents.map((value) => value.state),
+    }));
 
     // Explicit Pause must stop the same media clock, not merely hide the
     // canvas layer. Allow a short decoder scheduling tail, then require a
@@ -382,17 +456,100 @@ async function runVideoBrowserAcceptance(): Promise<void> {
 
     // Back removes the Video Lab route. The HTML video must be paused and
     // detached rather than surviving as a stale decoder over the Home route.
-    await clickText("Back");
-    await waitFor(readCurrent, (frame) =>
-      frame.ops.some((value) => value.type === "text" && value.text === "Pocket Host Lab") && videoOps(frame).length === 0,
-      "Video Lab route cleanup",
-    );
+    const beforeBackFrame = await readCurrent();
+    const beforeBackInspection = {
+      frame: { frame: beforeBackFrame.frame, width: beforeBackFrame.width, height: beforeBackFrame.height },
+      frameKeys: Object.keys(beforeBackFrame),
+      opTypeCounts: Object.fromEntries([...new Set(beforeBackFrame.ops.map((op) => String(op.type)))].map((type) => [
+        type,
+        beforeBackFrame.ops.filter((op) => op.type === type).length,
+      ])),
+      visibleText: beforeBackFrame.ops
+        .filter((op) => op.type === "text")
+        .map((op) => ({ text: op.text, x: op.x, y: op.y, w: op.w, h: op.h })),
+      headerOps: beforeBackFrame.ops
+        .filter((op) => Number(op.y) >= 0 && Number(op.y) < 88)
+        .map((op) => Object.fromEntries(Object.entries(op).filter(([key]) => [
+          "type", "text", "x", "y", "w", "h", "color", "asset", "id", "debugName", "action", "focused", "shape",
+        ].includes(key)))),
+      semanticOrHitOps: beforeBackFrame.ops
+        .filter((op) => /semantic|focus|hit|target|action/i.test(String(op.type)))
+        .map((op) => Object.fromEntries(Object.entries(op).filter(([key]) => [
+          "type", "text", "x", "y", "w", "h", "id", "debugName", "action", "focused",
+        ].includes(key)))),
+    };
+    const videoLabTitle = textOp(beforeBackFrame, "Video Lab");
+    const headerChevron = beforeBackFrame.ops.filter((op) => {
+      if (op.type !== "triangle") return false;
+      const right = Number(op.x) + Number(op.w);
+      const top = Number(op.y);
+      const bottom = top + Number(op.h);
+      return right <= Number(videoLabTitle.x) && top < Number(videoLabTitle.y) + Number(videoLabTitle.h) && bottom > Number(videoLabTitle.y);
+    });
+    const backTargetDiagnostics = JSON.stringify({
+      inspection: beforeBackInspection,
+      videos: await readVideos(),
+      canvas: await canvas.boundingBox(),
+      previewRequests: previewRequests.slice(-8),
+    });
+    assert.ok(headerChevron.length >= 2,
+      `icon-only app-bar Back control must expose its visible chevron DrawOps beside the Video Lab title; ${backTargetDiagnostics}`);
+    const backBounds = {
+      left: Math.min(...headerChevron.map((op) => Number(op.x))),
+      top: Math.min(...headerChevron.map((op) => Number(op.y))),
+      right: Math.max(...headerChevron.map((op) => Number(op.x) + Number(op.w))),
+      bottom: Math.max(...headerChevron.map((op) => Number(op.y) + Number(op.h))),
+    };
+    const backPoint = {
+      x: (backBounds.left + backBounds.right) / 2,
+      y: (backBounds.top + backBounds.bottom) / 2,
+    };
+    const requestsBeforeBack = previewRequests.length;
+    const framesBeforeBack = (await readTrace()).frameMessages.length;
+    await clickLogical(backPoint.x, backPoint.y);
+    try {
+      await waitFor(readCurrent, (frame) =>
+        frame.ops.some((value) => value.type === "text" && value.text === "POCKET SHOWCASE") && videoOps(frame).length === 0,
+        "Video Lab route cleanup",
+      );
+    } catch (error) {
+      const currentFrame = await readCurrent();
+      throw new Error(`${String(error)}; postBack=${JSON.stringify({
+        backPoint,
+        backBounds,
+        beforeBackInspection,
+        currentFrame: {
+          frame: currentFrame.frame,
+          labels: currentFrame.ops.filter((op) => op.type === "text").map((op) => op.text),
+          videoOps: videoOps(currentFrame),
+        },
+        videos: await readVideos(),
+        frameMessages: (await readTrace()).frameMessages.slice(framesBeforeBack).map((message) => ({
+          frame: message.frame,
+          labels: message.labels,
+        })),
+        inputRequests: previewRequests.slice(requestsBeforeBack),
+      })}`);
+    }
     await previewFrame!.waitForFunction(
       () => document.querySelectorAll("video").length === 0,
       undefined,
       { timeout: 10_000 },
     );
     assert.equal((await readVideos()).length, 0, "switching away from Video Lab must clean up HTML video elements");
+    const disposedVideoState = previewRequests.slice(requestsBeforeBack).some((value) => {
+      if (value.method !== "POST") return false;
+      try {
+        const body = JSON.parse(value.body ?? "") as Record<string, any>;
+        const message = body.message as Record<string, any> | undefined;
+        const payload = message?.payload as Record<string, any> | undefined;
+        return body.type === "message" && message?.type === "event" && message.name === "video.state" &&
+          payload?.id === "video-lab-hero" && payload.state === "disposed";
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(disposedVideoState, "leaving Video Lab must emit the hero's disposed video.state fact");
     assert.deepEqual(pageErrors, [], "browser preview must not report page errors");
   } finally {
     await browser?.close();

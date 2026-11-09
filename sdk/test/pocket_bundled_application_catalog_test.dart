@@ -1,8 +1,23 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
+import 'package:pocket_sdk/src/pocket_app.dart' show PocketGuestSession;
+
+final class _RootPolicyProbePlugin extends PocketPlugin {
+  @override
+  PocketPluginDescriptor get descriptor => const PocketPluginDescriptor(
+    id: 'test.root-policy-probe',
+    version: '1.0.0',
+    capabilities: <String, PocketPluginCapability>{},
+  );
+
+  @override
+  void register(PocketPluginContext context) {}
+}
 
 final class _CountingAssetBundle extends AssetBundle {
   _CountingAssetBundle(this.contents);
@@ -18,6 +33,8 @@ final class _CountingAssetBundle extends AssetBundle {
 }
 
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
+
   Map<String, Object?> application({
     required String appId,
     required bool launchable,
@@ -340,6 +357,140 @@ void main() {
         1,
         reason: 'the equal bundled catalog source must not reload bootstrap',
       );
+    },
+  );
+
+  testWidgets(
+    'system host selects a matching root native policy and keeps its system surface',
+    (tester) async {
+      final directory = Directory.systemTemp.createTempSync(
+        'pocket-root-native-policy-',
+      );
+      binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/path_provider'),
+        (_) async => directory.path,
+      );
+      addTearDown(() async {
+        binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          null,
+        );
+        if (directory.existsSync()) directory.deleteSync(recursive: true);
+      });
+
+      const rootSurfaces = <String, int>{'example.child': 42};
+      PocketAppConfig package(
+        String appId, {
+        Map<String, int> surfaces = const {},
+      }) => PocketAppConfig(
+        appId: appId,
+        bytecodeAsset: 'remote/$appId.qjbc',
+        pakAsset: 'remote/$appId.pak',
+        metadataAsset: 'remote/$appId.metadata.json',
+        manifestAsset: 'remote/$appId.manifest.json',
+        compositorSurfaces: surfaces,
+        bootstrapMetadataJson: jsonEncode(<String, Object?>{
+          'runtimeAbi': 'root-policy-test-abi',
+          'bytecodeBytes': 1,
+          'build': 1,
+          'version': '1.0.0',
+        }),
+        bootstrapManifestJson: jsonEncode(<String, Object?>{
+          'capabilities': <String, Object?>{'requires': <String>[]},
+        }),
+      );
+
+      final fallbackFactory = (PocketViewController _) =>
+          _RootPolicyProbePlugin();
+      final lanternFactory = (PocketViewController _) =>
+          _RootPolicyProbePlugin();
+      const fallbackPolicy = PocketAppConfig(
+        appId: 'example.generic-system-ui',
+        allowedPermissions: <String>{'system.default'},
+        additionalCapabilities: <String>{'policy.system-default'},
+        memoryLimits: PocketMemoryLimits(maxPakBytes: 8 * 1024 * 1024),
+      );
+      final generic = fallbackPolicy.withPlugins(<PocketPluginFactory>[
+        fallbackFactory,
+      ]);
+      final lanternPolicy = const PocketAppConfig(
+        appId: 'example.lantern',
+        allowedPermissions: <String>{'audio.play'},
+        additionalCapabilities: <String>{'policy.lantern-audio-live2d'},
+        memoryLimits: PocketMemoryLimits(maxPakBytes: 72 * 1024 * 1024),
+      ).withPlugins(<PocketPluginFactory>[lanternFactory]);
+      final localApplications = <String, PocketAppConfig>{
+        lanternPolicy.appId: lanternPolicy,
+      };
+      final emptyCatalog = PocketBundledApplicationCatalog.empty;
+
+      PocketHostConfig remoteHost(String rootId) => PocketHostConfig(
+        source: Uri.parse('https://host.example/latest.json'),
+        systemUI: package(rootId, surfaces: rootSurfaces),
+        applications: <String, PocketAppConfig>{
+          'example.child': package('example.child'),
+        },
+        hostVersion: '0.1.0',
+        packageVersion: '0.1.0',
+      );
+
+      Widget shell(String rootId) => PocketSystemHostApplication(
+        key: ValueKey<String>(rootId),
+        loadBundledApplications: () async => emptyCatalog,
+        buildSystemUI: (_) => generic.copyWith(
+          compositorSurfaces: const <String, int>{'example.child': 7},
+        ),
+        buildApplications: (_) => localApplications,
+        initialHostConfig: remoteHost(rootId),
+        initialBundledApplications: emptyCatalog,
+      );
+
+      Future<PocketSystemHost> mount(String rootId) async {
+        await tester.pumpWidget(shell(rootId));
+        for (
+          var attempt = 0;
+          attempt < 3 && find.byType(PocketSystemHost).evaluate().isEmpty;
+          attempt++
+        ) {
+          await tester.pump();
+        }
+        return tester.widget<PocketSystemHost>(find.byType(PocketSystemHost));
+      }
+
+      final matching = await mount('example.lantern');
+      expect(matching.systemUI.appId, 'example.lantern');
+      expect(matching.systemUI.bytecodeAsset, 'remote/example.lantern.qjbc');
+      expect(matching.systemUI.memoryLimits.maxPakBytes, 72 * 1024 * 1024);
+      expect(matching.systemUI.allowedPermissions, <String>{'audio.play'});
+      expect(matching.systemUI.additionalCapabilities, <String>{
+        'policy.lantern-audio-live2d',
+      });
+      expect(matching.systemUI.pluginFactories.single, same(lanternFactory));
+      expect(matching.systemUI.compositorSurfaces, rootSurfaces);
+
+      final rootGuest = tester.widget<PocketGuestSession>(
+        find.byType(PocketGuestSession),
+      );
+      expect(rootGuest.config.compositorSurfaces, rootSurfaces);
+      expect(
+        rootGuest.config.additionalCapabilities,
+        contains('ui.compositor-surfaces'),
+      );
+      expect(rootGuest.config.pluginFactories.first, same(lanternFactory));
+      expect(rootGuest.config.pluginFactories, hasLength(4));
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+
+      final fallback = await mount('example.unmapped-root');
+      expect(fallback.systemUI.memoryLimits.maxPakBytes, 8 * 1024 * 1024);
+      expect(fallback.systemUI.allowedPermissions, <String>{'system.default'});
+      expect(fallback.systemUI.additionalCapabilities, <String>{
+        'policy.system-default',
+      });
+      expect(fallback.systemUI.pluginFactories.single, same(fallbackFactory));
+      expect(fallback.systemUI.compositorSurfaces, rootSurfaces);
+      await tester.pumpWidget(const SizedBox.shrink());
     },
   );
 }

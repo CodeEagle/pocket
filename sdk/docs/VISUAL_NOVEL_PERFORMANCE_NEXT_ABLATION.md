@@ -8,6 +8,11 @@ only if a small Profile trace confirms that partition construction is a
 material part of UI-thread build time. This is a measurement proposal, not a
 claim that this copy currently causes the game's stutter.
 
+The 2026-11-09 scratch sample measured the largest model-window partition P95
+at 0.273 ms and weighted partition share at 1.672%, below both gates; keep this
+candidate deferred unless new evidence changes those figures. See the
+[partition sample](VISUAL_NOVEL_PERFORMANCE_PARTITION_SAMPLE.md).
+
 The current 2026-11-09 baseline shows that animated model windows have a high
 Flutter build phase: five 10-second Hiyori windows have build P95 of
 12.957–14.536 ms (median 13.629 ms), raster P95 of 0.507–0.570 ms, and native

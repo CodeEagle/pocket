@@ -1,10 +1,14 @@
 # Pocket VN 54 组功能追踪表
 
-**原生游戏安全区增量（2026-11-09）**：针对 iOS/Android 游戏反馈，确认 `NovelView` 的共同 stage/UI 根已消费一次全局安全区；修复顶部局部遮挡释放页面侧边距后，游戏菜单未避让局部区域和内移系统关闭按钮的问题。复用 `@pocket/ui` contour/occlusion 布局及共享 host-action reserve，旧字节码负对照 menu right=749 越入 x=744 遮挡，新字节码 right=644；原不安全位置不再触发菜单，迁移后可实际点击。390×844、412×915、844×390 再回竖屏的真实 Guest 输入与 SDK/framework 组合13项/84断言通过，VN SDK277项通过；不是物理设备或OS旋转验收。宿主首帧安全区时序另行修复验证中。见[原生安全区](VISUAL_NOVEL_MOBILE_SAFE_AREA.md)。
+**暂停收尾（2026-11-09）**：用户要求当前安全区问题收尾后暂停进一步优化。晚挂载NovelView丢失首次安全区消息已在SDK JS HostBridge入口修复；旧Guest存档延迟负对照失败，新Guest真实Core两项/72断言及UI SDK八项通过。Android模拟器实际OS安全区及点击最终复验1项通过，未手动重发；iOS/真机/OS旋转仍未完成。所有剩余项目和恢复动作见[未完成清单](VISUAL_NOVEL_UNFINISHED_20261109.md)。完整Goal不标记完成，状态以暂停记录为准。
+
+**Editor 草稿资源诊断增量（2026-11-09）**：移除浏览器四段重复资源引用遍历，直接复用 SDK 纯校验器；诊断去重纳入具体字段，不再用已保存服务端诊断覆盖修复中的草稿。同一 scene 的两个坏引用均显示，未保存修复、磁盘不变、撤销/重做、保存重开、同 buildGuest 编译与 Core 实际点击至结局的浏览器验收1项通过；相邻 registry/build/场景对象7项通过。E06.3 全类别覆盖仍未完成，暂不升级状态。见[资源诊断](VISUAL_NOVEL_REGISTRY_DIAGNOSTICS.md)。
+
+**原生游戏安全区增量（2026-11-09）**：针对 iOS/Android 游戏反馈，确认 `NovelView` 的共同 stage/UI 根已消费一次全局安全区；修复顶部局部遮挡释放页面侧边距后，游戏菜单未避让局部区域和内移系统关闭按钮的问题。复用 `@pocket/ui` contour/occlusion 布局及共享 host-action reserve，旧字节码负对照 menu right=749 越入 x=744 遮挡，新字节码 right=644；原不安全位置不再触发菜单，迁移后可实际点击。390×844、412×915、844×390 再回竖屏的真实 Guest 输入与 SDK/framework 组合13项/84断言通过，VN SDK277项通过；不是物理设备或OS旋转验收。宿主已复用现有加载门，在首次可见前应用安全区并取得零时间布局帧，Flutter3.47.9专项16项通过；整包及真实FFI补验结果单独记录。见[原生安全区](VISUAL_NOVEL_MOBILE_SAFE_AREA.md)。
 
 **独立试玩页面（2026-11-09）**：应用户反馈加入“在新页面打开试玩”真实链接，独立页自动运行已保存故事；去掉360px固定宽度并复用SDK viewport/character bounds。1440×1000、800×900、390×844完整布局、缩放不重启、选项到结局及story未变通过，原文富文本Editor回归同时通过。8791绑定实际Lantern工程，新页面实际加载无脚本错误；不计作Core/native模型、音视频或全量Editor验收。普通Demo历史PID87428目前已退出，未为本轮Editor体验重新启动游戏。见[独立页验收](VISUAL_NOVEL_PREVIEW_PAGE.md)。整体Goal保持active，Live2D清晰度延期。
 
-**当前状态（2026-11-09）**：完整 Goal 未完成，统计为 **9 组通过 / 36 组部分验收 / 9 组待实现**。最新普通试玩为 `sdk/.pocket-build/lantern-playable-rich-text-20261109/pocket_host.app`，PID87428，正常 `lib/main.dart` Profile 入口；签名、最终 pinned Core、四份精确资源、runnable main isolate 与 onscreen 窗口已核验，旧PID74668已退出，原存档SHA未变。新增回放“信纸上的第二层海”展示字样强调、注音、局部停顿与可点击注记；窄屏/大屏真实输入、历史注记及两结局隔离验收通过。窗口存在不代表用户前台可见，系统前台状态记录于 `ordinary-window-final.json`。Live2D清晰度继续延后；最终跨平台包、真机、Windows及整游戏性能门槛仍开放，完整Goal保持active。见[富文本验收](VISUAL_NOVEL_RICH_TEXT.md)。
+**当前状态（2026-11-09）**：完整 Goal 未完成，统计为 **9 组通过 / 36 组部分验收 / 9 组待实现**。最新普通试玩为 `sdk/.pocket-build/lantern-playable-rich-text-20261109/pocket_host.app`，历史PID87428现已退出，制品为正常 `lib/main.dart` Profile 入口；签名、最终 pinned Core、四份精确资源、runnable main isolate 与 onscreen 窗口已核验，旧PID74668已退出，原存档SHA未变。新增回放“信纸上的第二层海”展示字样强调、注音、局部停顿与可点击注记；窄屏/大屏真实输入、历史注记及两结局隔离验收通过。窗口存在不代表用户前台可见，系统前台状态记录于 `ordinary-window-final.json`。Live2D清晰度继续延后；最终跨平台包、真机、Windows及整游戏性能门槛仍开放，完整Goal保持active。见[富文本验收](VISUAL_NOVEL_RICH_TEXT.md)。
 
 **上下文预览增量（2026-11-09）**：E04.2/E04.3 部分验收：从故事起点沿同一SDK真实执行，选择/输入由作者决定后继续，显式wait推进实际时间；可见对白、结局及背景/层/角色配置可回到当前已提交来源。循环断点只放过当前一次已修复；普通预览对白完成后相机/时间轴仍继续、暂停/结束停帧已验。最终SDK255项、Editor单元36项、新浏览器与pinned Guest真实输入闭环及旧调试/输入回归通过。普通Demo PID40085、存档与资源未变，未重开试玩。当轮独立入口选择尚缺，后续进展见下；完整动画/native来源和整游戏性能仍缺，统计9/34/11不变；Live2D清晰度延后。见[验收边界](VISUAL_NOVEL_CONTEXT_PREVIEW.md)。
 

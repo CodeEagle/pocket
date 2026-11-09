@@ -5,6 +5,7 @@ import 'package:pocket_flutter/pocket_flutter.dart';
 
 import 'pocket_config.dart';
 import 'pocket_session.dart';
+import 'pocket_startup_indicator.dart';
 
 /// Standalone Flutter entry point. Its only page is the JS rendering surface.
 /// Use [PocketGuest] inside an existing MaterialApp instead.
@@ -176,7 +177,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       final background = widget.backgroundColor;
       return Center(
         child: SelectableText(
-          'Pocket startup failed: $error',
+          'Pocket 启动失败：$error',
           style: background == null
               ? null
               : TextStyle(
@@ -187,7 +188,20 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
         ),
       );
     }
-    if (!session.ready) return const Center(child: CircularProgressIndicator());
+    if (!session.ready) {
+      final progress = session.transferProgress;
+      final background = widget.backgroundColor;
+      return PocketStartupIndicator(
+        stage: session.stage,
+        downloadedBytes: progress?.downloadedBytes,
+        totalBytes: progress?.totalBytes,
+        foregroundColor: background == null
+            ? null
+            : background.computeLuminance() > 0.179
+            ? Colors.black
+            : Colors.white,
+      );
+    }
     return PocketView(
       key: ValueKey(epoch),
       controller: session.controller,

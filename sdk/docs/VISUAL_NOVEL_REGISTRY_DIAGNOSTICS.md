@@ -31,3 +31,24 @@ Dangling story-to-registry references remain visible diagnostics in the Editor w
 ## Ablation
 
 The earlier split had an Editor-only `storyAssetDiagnostics()` walk and a separate build-time check for scene-object images. The shared helper now owns the story-to-registry walk for Editor and declared VN builds. Disk validation remains at the existing IO boundaries, and non-VN builds do not acquire new VN reference rules.
+
+## Unsaved browser drafts (2026-11-09)
+
+The browser now calls the exported `validateNovelAssetReferences()` against the
+current in-memory story and registry on each diagnostics refresh. It removes four
+partial browser walks (timeline audio, background layers, scene-object images,
+and video cues) and does not merge saved-server asset-reference diagnostics over
+that current result. Remaining diagnostic deduplication includes `location.field`,
+so two bad fields in one instruction no longer hide each other. The diagnostic
+list displays the exact field alongside its instruction location.
+
+The negative control showed only three errors for four missing keys: an object's
+local `assets.reference` suppressed the same scene's saved background diagnostic.
+The old saved-reference merge also retained voice/CG errors after unsaved repair.
+`editor/test/novel_registry_diagnostics_browser.test.ts` now verifies all four,
+repairs the unsaved fields while disk stays unchanged, exercises undo/redo, saves
+and reloads, builds that exact saved story with the public buildGuest pipeline,
+and performs real native Core pointer input through its dialogue and ending.
+The final isolated run passes (1 test, 8 assertions) with Bun 1.4.4 and the final
+pinned native Probe; the negative log remains alongside the final log in
+`.pocket-build/rich-text-20261109/registry-draft-{negative,final}.log`.

@@ -116,6 +116,59 @@ test("modern HostBridge listeners share one direct event object across platform 
   }
 });
 
+test("HostBridge retains only the merged display viewport for a late geometry subscriber", () => {
+  const host = createHostBridge(() => true);
+  const first = event("display.viewport", {
+    width: 411,
+    height: 731,
+    safeArea: { top: 24, right: 0, bottom: 23.57, left: 0 },
+    keyboardInset: 0,
+    reservedRegions: [{
+      id: "status-cutout",
+      kind: "occlusion",
+      frame: { left: 370, top: 0, width: 41, height: 28 },
+      margins: { top: 0, right: 0, bottom: 0, left: 0 },
+      active: true,
+    }],
+  });
+  const partial = event("display.viewport", {
+    width: 411,
+    height: 700,
+    keyboardInset: 12,
+  });
+  try {
+    // No onEvent/display subscriber exists yet, but the canonical display fact
+    // is captured at the actual HostBridge ingress.
+    assert.equal(host.handle(first), false);
+    assert.equal(host.handle(partial), false);
+    const snapshot = host.getLatestDisplayViewport?.();
+    assert.ok(snapshot);
+    assert.deepEqual(snapshot.geometry, {
+      width: 411,
+      height: 700,
+      safeArea: { top: 24, right: 0, bottom: 23.57, left: 0 },
+      keyboardInset: 12,
+      reservedRegions: [{
+        id: "status-cutout",
+        kind: "occlusion",
+        frame: { left: 370, top: 0, width: 41, height: 28 },
+        margins: { top: 0, right: 0, bottom: 0, left: 0 },
+        active: true,
+      }],
+    });
+    assert.equal(snapshot.event.raw, partial);
+
+    let replayed = 0;
+    host.onEvent!(() => { replayed += 1; });
+    assert.equal(replayed, 0, "ordinary host listeners must not receive retained display events on subscribe");
+    host.handle(event("fixture.live", {}));
+    assert.equal(replayed, 1, "ordinary host listeners still receive live events");
+  } finally {
+    host.dispose();
+  }
+  assert.equal(host.getLatestDisplayViewport?.(), undefined, "disposal clears the cached viewport snapshot");
+});
+
 test("per-request cold-load deadline preserves ordinary deadlines and late responses", async () => {
   const sent: Array<{ payload: { requestId: string; capability: string } }> = [];
   const bridge = createHostBridge((packet) => { sent.push(packet as typeof sent[number]); return true; }, { timeoutFrames: 2 });

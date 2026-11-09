@@ -1,4 +1,4 @@
-import { batch, createEffect, createMemo, createSignal, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack, type JSX } from "solid-js";
 import { mount } from "@pocketjs/framework/solid";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import { after, simulationHz } from "@pocketjs/framework/clock";
@@ -10,6 +10,7 @@ import { createNovelEngine, createNovelReplayEngine, createNovelAnimationDriver,
 import { attachNovelClock } from "@pocket/vn/clock";
 import { createNovelAudioAdapter, DEFAULT_NOVEL_AUDIO_MIX, type NovelAudioGroup, type NovelAudioMix } from "@pocket/vn/audio";
 import { createNovelVideoAdapter } from "@pocket/vn/video";
+import { NovelSkinFrame } from "@pocket/vn/skin-view";
 import { createBundledNovelSpineFactory } from "@pocket/vn/spine";
 import { createBundledNovelLive2dFactory } from "@pocket/vn/live2d";
 import type { NovelModelFactory } from "@pocket/vn";
@@ -26,6 +27,9 @@ import { applyStoryAssetOverrides, localizeStory, rebaseNovelSaveDataForLocale, 
 
 const catalogs = localeDocument.catalogs as StoryLocaleCatalogCollection;
 const locales = [{ id: "zh", label: "中文" }, { id: "en", label: "English" }];
+type StartupReadId = "locale" | "audioMix" | "textSounds" | "autosave";
+type StartupReadStatus = "reading" | "read" | "validating" | "ready" | "empty" | "unavailable";
+type StartupRead = { readonly id: StartupReadId; readonly status: StartupReadStatus };
 // Intrinsic dimensions are read from the runtime PNG files (`file art/*.png`);
 // the optional map lets the SDK preserve proportions without assuming all
 // consumers' images share Lantern's square texture format.
@@ -55,6 +59,47 @@ function LanternApp(): JSX.Element {
   });
   const text = (chinese: string, english: string) => locale() === "en" ? english : chinese;
   const [ready, setReady] = createSignal(false);
+  let disposed = false;
+  const [startupReads, setStartupReads] = createSignal<StartupRead[]>([
+    { id: "locale", status: "reading" },
+    { id: "audioMix", status: "reading" },
+    { id: "textSounds", status: "reading" },
+    { id: "autosave", status: "reading" },
+  ]);
+  const startupReadCount = () => startupReads().filter(item => item.status !== "reading").length;
+  const setStartupReadStatus = (id: StartupReadId, status: StartupReadStatus): void => {
+    if (disposed) return;
+    setStartupReads(current => current.map(item => item.id === id ? { ...item, status } : item));
+  };
+  const startupReadLabel = (id: StartupReadId): string => ({
+    locale: text("语言偏好", "Language preference"),
+    audioMix: text("声音混音偏好", "Audio mix preference"),
+    textSounds: text("文字提示音偏好", "Text reveal sound preference"),
+    autosave: text("自动记录", "Autosave"),
+  })[id];
+  const startupReadStatusLabel = (id: StartupReadId, status: StartupReadStatus): string => {
+    if (status === "reading") return text("读取中…", "Reading…");
+    if (status === "read") return text("已读取", "Read");
+    if (status === "validating") return text("校验中…", "Validating…");
+    if (status === "ready") return text("已就绪", "Ready");
+    if (status === "empty") return id === "autosave"
+      ? text("没有可恢复的自动记录", "No resumable autosave")
+      : text("使用默认值", "Using defaults");
+    return id === "autosave"
+      ? text("读取失败，可开始新旅程", "Unavailable; a new journey is available")
+      : text("读取失败，使用默认值", "Unavailable; using defaults");
+  };
+  const startupStageMessage = (): string => {
+    const pending = startupReads().find(item => item.status === "reading");
+    if (pending?.id === "locale") return text("正在读取语言偏好…", "Reading language…");
+    if (pending?.id === "audioMix") return text("正在读取声音设置…", "Reading audio settings…");
+    if (pending?.id === "textSounds") return text("正在读取文字提示音…", "Reading text sounds…");
+    if (pending?.id === "autosave") return text("正在读取自动记录…", "Reading autosave…");
+    if (startupReads().some(item => item.id === "autosave" && item.status === "validating")) {
+      return text("正在校验自动记录…", "Validating the autosave…");
+    }
+    return text("正在准备手札…", "Preparing the journal…");
+  };
   const [storageStatus, setStorageStatus] = createSignal<"" | "locale" | "autosave" | "read" | "audioMix" | "textSounds" | "thumbnail">("");
   const images = createPocketImagesClient(host);
   const [slotImagesAvailable, setSlotImagesAvailable] = createSignal(false);
@@ -107,31 +152,36 @@ function LanternApp(): JSX.Element {
       capture: async () => {
         try {
           const image = await images.capture({ maxWidth: 192, maxHeight: 108, maxPixels: 20_736 });
+          if (disposed) return null;
           if (storageStatus() === "thumbnail") setStorageStatus("");
           return { version: 1 as const, ...image };
         } catch {
           // A video/platform texture or unavailable image provider must not
           // prevent the player from saving the canonical game progress.
-          setStorageStatus("thumbnail");
+          if (!disposed) setStorageStatus("thumbnail");
           return null;
         }
       },
       list: async () => {
         const items = await images.list();
-        setSlotImagesAvailable(true);
+        if (!disposed) setSlotImagesAvailable(true);
         return items.map(item => item.id);
       },
       remove: async id => { await images.remove(id); },
-      onCleanupError: () => setStorageStatus("thumbnail"),
+      onCleanupError: () => { if (!disposed) setStorageStatus("thumbnail"); },
     },
   });
+  const rebaseStoredSave = (data: unknown, targetStory: StoryDefinition = localized().story): NovelSaveData => {
+    const sourceVersion = typeof data === "object" && data !== null && "storyVersion" in data ? data.storyVersion : undefined;
+    const sourceMap = [revisionMap, revisionMapV2, revisionMapV3, revisionMapV4, revisionMapV5].find(map => map.fromVersion === sourceVersion);
+    const migrated = migrateNovelSaveRevision(data, sourceMap, lanternStory);
+    return rebaseNovelSaveDataForLocale(migrated, lanternStory, targetStory);
+  };
   const storage = {
     read: async (slot: string) => {
       const data = await slots.read(slot);
       if (data === null) return null;
-      const sourceVersion = typeof data === "object" && "storyVersion" in data ? data.storyVersion : undefined;
-      const sourceMap = [revisionMap, revisionMapV2, revisionMapV3, revisionMapV4, revisionMapV5].find(map => map.fromVersion === sourceVersion);
-      return rebaseNovelSaveDataForLocale(migrateNovelSaveRevision(data, sourceMap, lanternStory), lanternStory, localized().story);
+      return rebaseStoredSave(data);
     },
     write: async (slot: string, data: NovelSaveData): Promise<void> => {
       await persistSave(slot, rebaseNovelSaveDataForLocale(data, localized().story, lanternStory));
@@ -150,8 +200,8 @@ function LanternApp(): JSX.Element {
     initialMix: audioMix(),
     textSounds: projectAssets.textSounds,
     initialTextSoundsEnabled: textSoundsEnabled(),
-    onStatus: (status, detail) => setAudioStatus({ status, detail }),
-    onVoicePlayback: fact => activeEngine().reportVoice(fact),
+    onStatus: (status, detail) => { if (!disposed) setAudioStatus({ status, detail }); },
+    onVoicePlayback: fact => { if (!disposed) activeEngine().reportVoice(fact); },
   });
   let audioMixWriteQueue: Promise<void> = Promise.resolve();
   const changeAudioMix = (group: "master" | NovelAudioGroup, value: number): void => {
@@ -160,8 +210,8 @@ function LanternApp(): JSX.Element {
     audioMixWriteQueue = audioMixWriteQueue.catch(() => {}).then(() =>
       platform.storage.set("lantern.audio.mix", next as unknown as BridgeValue),
     ).then(() => {
-      if (storageStatus() === "audioMix") setStorageStatus("");
-    }).catch(() => setStorageStatus("audioMix"));
+      if (!disposed && storageStatus() === "audioMix") setStorageStatus("");
+    }).catch(() => { if (!disposed) setStorageStatus("audioMix"); });
   };
   let textSoundsWriteQueue: Promise<void> = Promise.resolve();
   const changeTextSoundsEnabled = (enabled: boolean): void => {
@@ -170,8 +220,8 @@ function LanternApp(): JSX.Element {
     textSoundsWriteQueue = textSoundsWriteQueue.catch(() => {}).then(() =>
       platform.storage.set("lantern.audio.textSoundsEnabled", enabled),
     ).then(() => {
-      if (storageStatus() === "textSounds") setStorageStatus("");
-    }).catch(() => setStorageStatus("textSounds"));
+      if (!disposed && storageStatus() === "textSounds") setStorageStatus("");
+    }).catch(() => { if (!disposed) setStorageStatus("textSounds"); });
   };
   const audioMessage = () => {
     const { status, detail } = audioStatus();
@@ -259,7 +309,6 @@ function LanternApp(): JSX.Element {
   };
   let pendingSave: { engine: NovelEngine; story: StoryDefinition; locale: string; videoToken: string | null } | undefined;
   let writing = false;
-  let disposed = false;
   const writeAutosave = async (): Promise<void> => {
     if (writing || disposed) return;
     writing = true;
@@ -290,8 +339,8 @@ function LanternApp(): JSX.Element {
         const canonical = rebaseNovelSaveDataForLocale(data, pending.story, lanternStory);
         await persistSave("auto", { ...canonical, state: { ...canonical.state, paused: false } });
       }
-      setStorageStatus("");
-    } catch { setStorageStatus("autosave"); }
+      if (!disposed) setStorageStatus("");
+    } catch { if (!disposed) setStorageStatus("autosave"); }
     finally { writing = false; }
   };
   createEffect(() => {
@@ -336,39 +385,114 @@ function LanternApp(): JSX.Element {
     });
   });
   onMount(async () => {
-    // One startup sweep recovers orphan PNGs from interrupted writes. Slot
-    // references remain the only catalog; autosaves do not rescan image files.
-    try { await slots.collectThumbnails?.(); } catch { /* Older hosts keep text-only saves. */ }
+    const readStartupValue = async (
+      id: StartupReadId,
+      read: () => Promise<unknown>,
+    ): Promise<{ readonly ok: true; readonly value: unknown } | { readonly ok: false }> => {
+      try {
+        const value = await read();
+        setStartupReadStatus(id, "read");
+        return { ok: true, value };
+      } catch {
+        if (!disposed) {
+          setStartupReadStatus(id, "unavailable");
+          setStorageStatus(id === "autosave" ? "read" : id);
+        }
+        return { ok: false };
+      }
+    };
+
     try {
-      const storedMix = await platform.storage.get("lantern.audio.mix");
-      if (storedMix && typeof storedMix === "object" && !Array.isArray(storedMix)) {
-        const restored = audio.setMix(storedMix as Partial<NovelAudioMix>);
-        setAudioMix(restored);
+      // These four storage requests are independent. Start them together so
+      // slow optional media cleanup cannot delay the title screen.
+      const [mixRead, textSoundsRead, localeRead, autosaveRead] = await Promise.all([
+        readStartupValue("audioMix", () => platform.storage.get("lantern.audio.mix")),
+        readStartupValue("textSounds", () => platform.storage.get("lantern.audio.textSoundsEnabled")),
+        readStartupValue("locale", () => platform.storage.get("lantern.locale")),
+        readStartupValue("autosave", () => slots.read("auto")),
+      ]);
+      if (disposed) return;
+
+      if (mixRead.ok) {
+        try {
+          const storedMix = mixRead.value;
+          if (storedMix && typeof storedMix === "object" && !Array.isArray(storedMix)) {
+            const restored = audio.setMix(storedMix as Partial<NovelAudioMix>);
+            setAudioMix(restored);
+          }
+          setStartupReadStatus("audioMix", "ready");
+        } catch {
+          setStartupReadStatus("audioMix", "unavailable");
+          setStorageStatus("audioMix");
+        }
       }
-    } catch { setStorageStatus("audioMix"); }
-    try {
-      const storedTextSoundsEnabled = await platform.storage.get("lantern.audio.textSoundsEnabled");
-      if (typeof storedTextSoundsEnabled === "boolean") {
-        audio.setTextSoundsEnabled(storedTextSoundsEnabled);
-        setTextSoundsEnabled(storedTextSoundsEnabled);
+
+      if (textSoundsRead.ok) {
+        const storedTextSoundsEnabled = textSoundsRead.value;
+        if (typeof storedTextSoundsEnabled === "boolean") {
+          audio.setTextSoundsEnabled(storedTextSoundsEnabled);
+          setTextSoundsEnabled(storedTextSoundsEnabled);
+        }
+        setStartupReadStatus("textSounds", "ready");
       }
-    } catch { setStorageStatus("textSounds"); }
-    try {
-      const savedLocale = await platform.storage.get("lantern.locale");
-      if (typeof savedLocale === "string" && locales.some(item => item.id === savedLocale)) {
-        setLocale(savedLocale); audio.setAssets(assets().audio); setEngine(newEngine());
+
+      if (localeRead.ok) {
+        try {
+          const savedLocale = localeRead.value;
+          if (typeof savedLocale === "string" && locales.some(item => item.id === savedLocale)) {
+            setLocale(savedLocale);
+            audio.setAssets(assets().audio);
+            setEngine(newEngine());
+          }
+          setStartupReadStatus("locale", "ready");
+        } catch {
+          setStartupReadStatus("locale", "unavailable");
+          setStorageStatus("locale");
+        }
       }
-      const saved = await storage.read("auto") as NovelSaveData | null;
-      if (saved?.storyId === lanternStory.id && saved?.storyVersion === lanternStory.version) {
-        // Validate with the actual engine before trusting persisted meta.
-        const validator = newEngine();
-        validator.load(saved);
-        const progress = validator.getSnapshot().meta;
-        validator.dispose();
-        if (!disposed) setEngine(newEngine(progress));
+
+      if (autosaveRead.ok) {
+        if (autosaveRead.value === null) {
+          setStartupReadStatus("autosave", "empty");
+        } else {
+          setStartupReadStatus("autosave", "validating");
+          try {
+            // Rebase only after the saved locale has been applied. The
+            // revision migration and the real engine load remain the same
+            // validation boundary used before startup was parallelized.
+            const saved = rebaseStoredSave(autosaveRead.value, localized().story);
+            if (saved.storyId === lanternStory.id && saved.storyVersion === lanternStory.version) {
+              const validator = newEngine();
+              let progress: NovelMetaState;
+              try {
+                validator.load(saved);
+                progress = validator.getSnapshot().meta;
+              } finally {
+                validator.dispose();
+              }
+              if (!disposed) setEngine(newEngine(progress));
+              setStartupReadStatus("autosave", "ready");
+            } else {
+              setStartupReadStatus("autosave", "empty");
+            }
+          } catch {
+            setStartupReadStatus("autosave", "unavailable");
+            setStorageStatus("read");
+          }
+        }
       }
-    } catch { setStorageStatus("read"); }
-    finally { if (!disposed) setReady(true); }
+    } catch {
+      if (!disposed) setStorageStatus("read");
+    } finally {
+      if (!disposed) {
+        setReady(true);
+        // This is optional orphan cleanup, kept on the existing serialized
+        // slot queue. Its completion is not part of title-screen readiness.
+        void slots.collectThumbnails?.().catch(() => {
+          if (!disposed) setStorageStatus("thumbnail");
+        });
+      }
+    }
   });
   let lifecycleResume = false;
   const removeLifecycle = platform.onLifecycle(event => {
@@ -383,7 +507,21 @@ function LanternApp(): JSX.Element {
     }
   });
   onCleanup(() => { disposed = true; pendingSave = undefined; removeLifecycle(); video.dispose(); audio.dispose(); platform.dispose(); host.dispose(); });
-  return <AccessibilityPreferencesProvider value={accessibility}><Show when={ready()} fallback={<View class="w-full h-full bg-[#08151D] items-center justify-center"><Text class="text-sm text-[#E4CF9E]">{text("正在翻开雾港手札……", "Opening the Mist Harbor journal…")}</Text></View>}>
+  return <AccessibilityPreferencesProvider value={accessibility}><Show when={ready()} fallback={<View class="w-full h-full bg-[#08151D] items-center justify-center overflow-hidden p-3">
+    <View class="relative flex-col items-center justify-center gap-2 px-5" style={{ width: 320, height: 280 }}>
+      <NovelSkinFrame frame={projectAssets.skin.frame} width={320} height={280} border={20} debugName="lantern-startup-skin" />
+      <Text class="text-xl font-bold text-[#FFE1A3] text-center">{text("雾港末班信", "The Last Letter of Mist Harbor")}</Text>
+      <Text class="text-sm text-[#E4CF9E] text-center">{text("正在翻开雾港手札……", "Opening the Mist Harbor journal…")}</Text>
+      <Text class="text-base font-bold text-[#F5ECD9] text-center mt-1">{startupStageMessage()}</Text>
+      <Text class="text-xs text-[#9EB2B5] text-center mt-1">{text(`已完成 ${startupReadCount()} / 4 项启动读取`, `${startupReadCount()} / 4 startup requests completed`)}</Text>
+      <View class="flex-col gap-1 mt-1" style={{ width: 280 }}>
+        <For each={startupReads()}>{item => <View class="flex-col gap-0.5">
+          <Text class="text-xs text-[#C7C4B6]">{startupReadLabel(item.id)}</Text>
+          <Text class="text-xs text-[#DBBD80]">{startupReadStatusLabel(item.id, item.status)}</Text>
+        </View>}</For>
+      </View>
+    </View>
+  </View>}>
     <NovelView featuredReplayId="model_showcase" featuredReplayIds={["rich_letter_showcase", "scene_objects_showcase", "feature_tour", "inventory_showcase", "parallax_showcase", "letter_showcase", "transition_showcase", "timeline_showcase"]} engine={activeEngine()} inventory={lanternStory.inventory} assets={assets() satisfies NovelAssets} modelFactory={modelFactory} animations={animations} title={text("雾港末班信", "The Last Letter of Mist Harbor")} shortTitle={text("雾港末班信", "MIST HARBOR")} subtitle={text("把未能抵达的昨天，寄向天亮。", "Send an undelivered yesterday toward dawn.")} storage={storage} slotImages={slotImagesAvailable() ? images : undefined} host={host} videoAdapter={video} audioMix={audioMix()} onAudioMixChange={changeAudioMix} textSoundsEnabled={textSoundsEnabled()} onTextSoundsEnabledChange={changeTextSoundsEnabled} audioStatus={storageMessage() || audioMessage()}
       replayEntries={replayEntries()} replayMode={replayEngine() !== null} onReplayStart={startReplay} onReplayExit={exitReplay}
       registeredMusicIds={registeredMusicIds()} musicTitles={musicTitles()} onMusicPreviewPlay={cue => audio.previewMusic(cue)} onMusicPreviewStop={() => audio.stopMusicPreview()}

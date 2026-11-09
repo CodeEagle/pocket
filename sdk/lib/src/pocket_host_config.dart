@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
+import 'package:pocket_services/pocket_services.dart';
 
 import 'pocket_config.dart';
 
@@ -15,6 +17,31 @@ const _bootstrapAssetMaxBytes = 16 * 1024 * 1024;
 const _bootstrapTotalMaxBytes = 64 * 1024 * 1024;
 const _httpRequestTimeout = Duration(seconds: 10);
 const _httpBodyTimeout = Duration(seconds: 10);
+
+/// Observed bytes while the host bootstrap document and its required assets
+/// are read. [totalBytes] is null when the response has no declared length;
+/// bootstrap assets use the declared size that is verified after reading.
+@immutable
+final class PocketHostLoadProgress {
+  const PocketHostLoadProgress({
+    required this.stage,
+    required this.downloadedBytes,
+    required this.totalBytes,
+  });
+
+  /// `index`, `descriptor`, or `bootstrapAsset`.
+  final String stage;
+
+  /// Bytes read from the current HTTP response body.
+  final int downloadedBytes;
+
+  /// Known response length, or null when the server did not provide one.
+  final int? totalBytes;
+}
+
+/// Receives progress facts from actual bootstrap HTTP response chunks.
+typedef PocketHostLoadProgressCallback =
+    void Function(PocketHostLoadProgress progress);
 
 /// A single host bootstrap document for one Pocket application.
 ///
@@ -258,7 +285,10 @@ final class PocketHostConfig {
     Set<String> allowInsecureHttpHosts = const <String>{},
     Directory? trustAnchorDirectory,
     String? requiredRootPayloadSha256,
+    PocketHostLoadProgressCallback? onProgress,
+    PocketCancellationToken? cancellation,
   }) async {
+    cancellation?.throwIfCancelled();
     final parsed = uri;
     final effectiveAllowedHosts = <String>{
       ...allowInsecureHttpHosts,
@@ -273,18 +303,26 @@ final class PocketHostConfig {
     final owned = client == null;
     final http = client ?? HttpClient();
     try {
+      cancellation?.throwIfCancelled();
       final index = await _fetchJsonObject(
         http,
         parsed,
         errorLabel: 'Pocket host config',
+        progressStage: 'index',
+        onProgress: onProgress,
+        cancellation: cancellation,
       );
+      cancellation?.throwIfCancelled();
       final resolved = await _resolveHostDocument(
         index,
         client: http,
         source: parsed,
         allowedHttpHosts: effectiveAllowedHosts,
         requiredRootPayloadSha256: requiredRootPayloadSha256,
+        onProgress: onProgress,
+        cancellation: cancellation,
       );
+      cancellation?.throwIfCancelled();
       final document = resolved.document;
       await _hydrateBootstrapAssets(
         document,
@@ -292,7 +330,10 @@ final class PocketHostConfig {
         source: parsed,
         baseUri: resolved.baseUri,
         allowedHttpHosts: effectiveAllowedHosts,
+        onProgress: onProgress,
+        cancellation: cancellation,
       );
+      cancellation?.throwIfCancelled();
       final loaded = PocketHostConfig.fromJson(
         document,
         source: parsed,
@@ -301,11 +342,20 @@ final class PocketHostConfig {
         selectedCatalogEntry: resolved.selectedCatalogEntry,
         packageIndexSource: resolved.isIndex ? parsed : null,
       );
+      cancellation?.throwIfCancelled();
+      final Directory trustDirectory =
+          trustAnchorDirectory ??
+          await _awaitCancellable(
+            getApplicationSupportDirectory(),
+            cancellation,
+          );
+      cancellation?.throwIfCancelled();
       await _checkTrustAnchor(
         loaded,
-        directory:
-            trustAnchorDirectory ?? await getApplicationSupportDirectory(),
+        directory: trustDirectory,
+        cancellation: cancellation,
       );
+      cancellation?.throwIfCancelled();
       return loaded;
     } finally {
       if (owned) http.close(force: true);
@@ -320,6 +370,8 @@ final class PocketHostConfig {
   /// returned document and are never read from separate environment fields.
   static Future<PocketHostConfig?> loadFromEnvironment({
     String? requiredRootPayloadSha256,
+    PocketHostLoadProgressCallback? onProgress,
+    PocketCancellationToken? cancellation,
   }) {
     const raw = String.fromEnvironment('POCKET_HOST_CONFIG_URL');
     if (raw.isEmpty) return Future<PocketHostConfig?>.value(null);
@@ -329,7 +381,12 @@ final class PocketHostConfig {
         const FormatException('POCKET_HOST_CONFIG_URL is not a valid URL'),
       );
     }
-    return load(uri, requiredRootPayloadSha256: requiredRootPayloadSha256);
+    return load(
+      uri,
+      requiredRootPayloadSha256: requiredRootPayloadSha256,
+      onProgress: onProgress,
+      cancellation: cancellation,
+    );
   }
 
   /// Creates a `PocketSystemHost` using all packages from this document.
@@ -474,10 +531,14 @@ Future<void> _hydrateBootstrapAssets(
   required Uri source,
   required Uri baseUri,
   required Set<String> allowedHttpHosts,
+  PocketHostLoadProgressCallback? onProgress,
+  PocketCancellationToken? cancellation,
 }) async {
+  cancellation?.throwIfCancelled();
   final applications = _object(document['applications'], 'applications');
   var totalBytes = 0;
   for (final entry in applications.entries) {
+    cancellation?.throwIfCancelled();
     final package = _packageMap(entry.value);
     if (package == null) {
       throw FormatException('Pocket host application ${entry.key} is invalid');
@@ -495,6 +556,7 @@ Future<void> _hydrateBootstrapAssets(
     var metadataVerified = false;
     var manifestVerified = false;
     for (final assetEntry in rawAssets.entries) {
+      cancellation?.throwIfCancelled();
       final descriptor = _object(
         assetEntry.value,
         'bootstrapAssets.${assetEntry.key}',
@@ -525,11 +587,24 @@ Future<void> _hydrateBootstrapAssets(
         allowedHttpHosts: allowedHttpHosts,
         label: 'Bootstrap asset',
       );
-      final bytes = await _fetchBytes(client, uri, maxBytes: expectedSize);
+      final bytes = await _fetchBytes(
+        client,
+        uri,
+        maxBytes: expectedSize,
+        progressStage: 'bootstrapAsset',
+        progressTotalBytes: expectedSize,
+        onProgress: onProgress,
+        cancellation: cancellation,
+      );
+      cancellation?.throwIfCancelled();
       totalBytes += bytes.length;
+      final actualHash = await _awaitCancellable(
+        Isolate.run<String>(() => _bootstrapBytesSha256(bytes)),
+        cancellation,
+      );
+      cancellation?.throwIfCancelled();
       if (bytes.length != expectedSize ||
-          sha256.convert(bytes).toString().toLowerCase() !=
-              expectedHash.toLowerCase()) {
+          actualHash.toLowerCase() != expectedHash.toLowerCase()) {
         throw FormatException(
           'Bootstrap asset verification failed: ${assetEntry.key}',
         );
@@ -550,6 +625,7 @@ Future<void> _hydrateBootstrapAssets(
     }
     applications[entry.key] = package;
   }
+  cancellation?.throwIfCancelled();
   document['applications'] = applications;
 }
 
@@ -564,7 +640,10 @@ Future<_ResolvedHostDocument> _resolveHostDocument(
   required Uri source,
   required Set<String> allowedHttpHosts,
   String? requiredRootPayloadSha256,
+  PocketHostLoadProgressCallback? onProgress,
+  PocketCancellationToken? cancellation,
 }) async {
+  cancellation?.throwIfCancelled();
   if (index['kind'] != 'pocket-editor-package-index') {
     return _ResolvedHostDocument(
       document: index,
@@ -624,12 +703,17 @@ Future<_ResolvedHostDocument> _resolveHostDocument(
       'Pocket package index has no descriptor for the mounted root payload',
     );
   }
+  cancellation?.throwIfCancelled();
   final descriptorUri = selected.hostConfigUrl;
   final descriptor = await _fetchJsonObject(
     client,
     descriptorUri,
     errorLabel: 'Pocket host descriptor',
+    progressStage: 'descriptor',
+    onProgress: onProgress,
+    cancellation: cancellation,
   );
+  cancellation?.throwIfCancelled();
   if (descriptor['kind'] != 'pocket-editor-app-host') {
     throw const FormatException(
       'Pocket package index descriptor is not a host config',
@@ -710,8 +794,18 @@ Future<Map<String, dynamic>> _fetchJsonObject(
   HttpClient client,
   Uri uri, {
   required String errorLabel,
+  required String progressStage,
+  PocketHostLoadProgressCallback? onProgress,
+  PocketCancellationToken? cancellation,
 }) async {
-  final response = await _openHttpResponse(client, uri);
+  cancellation?.throwIfCancelled();
+  final opened = await _openHttpResponse(
+    client,
+    uri,
+    cancellation: cancellation,
+  );
+  final response = opened.response;
+  _checkCancellation(cancellation, abortRequest: opened.abort);
   if (response.statusCode != HttpStatus.ok) {
     throw HttpException(
       '$errorLabel request failed: ${response.statusCode}',
@@ -719,8 +813,17 @@ Future<Map<String, dynamic>> _fetchJsonObject(
     );
   }
   final body = utf8.decode(
-    await _readHttpBytes(response, uri: uri, maxBytes: _hostConfigMaxBytes),
+    await _readHttpBytes(
+      response,
+      uri: uri,
+      maxBytes: _hostConfigMaxBytes,
+      progressStage: progressStage,
+      onProgress: onProgress,
+      cancellation: cancellation,
+      abortRequest: opened.abort,
+    ),
   );
+  cancellation?.throwIfCancelled();
   final value = jsonDecode(body);
   if (value is! Map) {
     throw FormatException('$errorLabel must be a JSON object');
@@ -770,23 +873,80 @@ Future<List<int>> _fetchBytes(
   HttpClient client,
   Uri uri, {
   required int maxBytes,
+  required String progressStage,
+  int? progressTotalBytes,
+  PocketHostLoadProgressCallback? onProgress,
+  PocketCancellationToken? cancellation,
 }) async {
-  final response = await _openHttpResponse(client, uri);
+  cancellation?.throwIfCancelled();
+  final opened = await _openHttpResponse(
+    client,
+    uri,
+    cancellation: cancellation,
+  );
+  final response = opened.response;
+  _checkCancellation(cancellation, abortRequest: opened.abort);
   if (response.statusCode != HttpStatus.ok) {
     throw HttpException(
       'Bootstrap asset request failed: ${response.statusCode}',
       uri: uri,
     );
   }
-  return _readHttpBytes(response, uri: uri, maxBytes: maxBytes);
+  return _readHttpBytes(
+    response,
+    uri: uri,
+    maxBytes: maxBytes,
+    progressStage: progressStage,
+    progressTotalBytes: progressTotalBytes,
+    onProgress: onProgress,
+    cancellation: cancellation,
+    abortRequest: opened.abort,
+  );
 }
 
-Future<HttpClientResponse> _openHttpResponse(HttpClient client, Uri uri) async {
+final class _OpenedHttpResponse {
+  const _OpenedHttpResponse(this.response, this.request);
+
+  final HttpClientResponse response;
+  final HttpClientRequest request;
+
+  void abort() => request.abort();
+}
+
+Future<_OpenedHttpResponse> _openHttpResponse(
+  HttpClient client,
+  Uri uri, {
+  PocketCancellationToken? cancellation,
+}) async {
+  cancellation?.throwIfCancelled();
+  final requestFuture = client.getUrl(uri);
   HttpClientRequest? request;
   try {
-    request = await client.getUrl(uri).timeout(_httpRequestTimeout);
-    request.followRedirects = false;
-    return await request.close().timeout(_httpRequestTimeout);
+    final openedRequest = await _awaitCancellable(
+      requestFuture.timeout(_httpRequestTimeout),
+      cancellation,
+    );
+    request = openedRequest;
+    cancellation?.throwIfCancelled();
+    openedRequest.followRedirects = false;
+    final response = await _awaitCancellable(
+      openedRequest.close().timeout(_httpRequestTimeout),
+      cancellation,
+    );
+    cancellation?.throwIfCancelled();
+    return _OpenedHttpResponse(response, openedRequest);
+  } on PocketUpdateCancellation {
+    request?.abort();
+    if (request == null && cancellation?.isCancelled == true) {
+      // `getUrl` may still be connecting when cancellation wins. Abort the
+      // request as soon as HttpClient hands it back, without closing the
+      // caller-owned client.
+      requestFuture.then<void>(
+        (lateRequest) => lateRequest.abort(),
+        onError: (Object _, StackTrace __) {},
+      );
+    }
+    rethrow;
   } on TimeoutException {
     request?.abort();
     throw HttpException('HTTP request timed out', uri: uri);
@@ -797,11 +957,19 @@ Future<List<int>> _readHttpBytes(
   HttpClientResponse response, {
   required Uri uri,
   required int maxBytes,
+  required String progressStage,
+  int? progressTotalBytes,
+  PocketHostLoadProgressCallback? onProgress,
+  PocketCancellationToken? cancellation,
+  void Function()? abortRequest,
 }) async {
+  cancellation?.throwIfCancelled();
   if (maxBytes < 0) {
     throw const FormatException('HTTP body size limit must not be negative');
   }
   final contentLength = response.contentLength;
+  final knownTotalBytes =
+      progressTotalBytes ?? (contentLength >= 0 ? contentLength : null);
   if (contentLength > maxBytes) {
     throw FormatException(
       'HTTP body exceeds the size limit for $uri: $contentLength > $maxBytes',
@@ -810,20 +978,50 @@ Future<List<int>> _readHttpBytes(
   final iterator = StreamIterator<List<int>>(response);
   final bytes = BytesBuilder(copy: false);
   var length = 0;
+  var cancellationWon = false;
+  void reportProgress() {
+    cancellation?.throwIfCancelled();
+    onProgress?.call(
+      PocketHostLoadProgress(
+        stage: progressStage,
+        downloadedBytes: length,
+        totalBytes: knownTotalBytes,
+      ),
+    );
+  }
+
   try {
-    while (await iterator.moveNext().timeout(_httpBodyTimeout)) {
+    reportProgress();
+    while (await _awaitCancellable(
+      iterator.moveNext().timeout(_httpBodyTimeout),
+      cancellation,
+    )) {
+      cancellation?.throwIfCancelled();
       final chunk = iterator.current;
       if (chunk.length > maxBytes - length) {
         throw FormatException('HTTP body exceeds the size limit for $uri');
       }
       bytes.add(chunk);
       length += chunk.length;
+      reportProgress();
     }
     return bytes.takeBytes();
+  } on PocketUpdateCancellation {
+    cancellationWon = true;
+    abortRequest?.call();
+    rethrow;
   } on TimeoutException {
     throw HttpException('HTTP body timed out', uri: uri);
   } finally {
-    await iterator.cancel().timeout(_httpRequestTimeout, onTimeout: () {});
+    final cleanup = iterator.cancel();
+    if (cancellationWon) {
+      // A response stream's cancellation may wait for its source to finish.
+      // The request has already been aborted, so let that cleanup settle
+      // without delaying cancellation of the host load itself.
+      unawaited(cleanup.catchError((Object _, StackTrace __) {}));
+    } else {
+      await cleanup.timeout(_httpRequestTimeout, onTimeout: () {});
+    }
   }
 }
 
@@ -836,7 +1034,9 @@ Future<List<int>> _readHttpBytes(
 Future<void> _checkTrustAnchor(
   PocketHostConfig config, {
   required Directory directory,
+  PocketCancellationToken? cancellation,
 }) async {
+  cancellation?.throwIfCancelled();
   final updates = config.systemUI.updates;
   if (updates == null || !updates.configured) {
     return;
@@ -856,8 +1056,11 @@ Future<void> _checkTrustAnchor(
     'schemaVersion': 1,
     'anchors': <String, dynamic>{},
   };
+  cancellation?.throwIfCancelled();
   if (await file.exists()) {
+    cancellation?.throwIfCancelled();
     final decoded = jsonDecode(await file.readAsString());
+    cancellation?.throwIfCancelled();
     if (decoded is! Map || decoded['schemaVersion'] != 1) {
       throw const FormatException('Pocket host trust anchor is invalid');
     }
@@ -899,20 +1102,53 @@ Future<void> _checkTrustAnchor(
     }
     return;
   }
+  cancellation?.throwIfCancelled();
   anchors[scope] = key;
   document['anchors'] = anchors;
   await directory.create(recursive: true);
+  cancellation?.throwIfCancelled();
   final temporary = File(
     '${file.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
   );
-  await temporary.writeAsString(jsonEncode(document), flush: true);
   try {
+    cancellation?.throwIfCancelled();
+    await temporary.writeAsString(jsonEncode(document), flush: true);
+    cancellation?.throwIfCancelled();
     await temporary.rename(file.path);
   } catch (_) {
     if (await temporary.exists()) await temporary.delete();
     rethrow;
   }
 }
+
+Future<T> _awaitCancellable<T>(
+  Future<T> future,
+  PocketCancellationToken? cancellation,
+) {
+  if (cancellation == null) return future;
+  cancellation.throwIfCancelled();
+  return Future.any<T>(<Future<T>>[
+    future,
+    cancellation.whenCancelled.then<T>(
+      (_) => throw const PocketUpdateCancellation(),
+    ),
+  ]);
+}
+
+void _checkCancellation(
+  PocketCancellationToken? cancellation, {
+  void Function()? abortRequest,
+}) {
+  try {
+    cancellation?.throwIfCancelled();
+  } on PocketUpdateCancellation {
+    abortRequest?.call();
+    rethrow;
+  }
+}
+
+String _bootstrapBytesSha256(List<int> bytes) =>
+    sha256.convert(bytes).toString();
 
 String? _string(Map<String, dynamic> value, String key) {
   final item = value[key];

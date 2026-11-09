@@ -952,12 +952,22 @@ void main() {
   ) async {
     final runtime = _ScheduledTestRuntime(
       nextWakeDelayMilliseconds: -1,
-      afterFrameDelayMilliseconds: 100,
+      afterFrameDelayMilliseconds: -1,
     );
-    await mountView(tester, runtime);
+    final controller = PocketViewController();
+    await mountView(tester, runtime, controller: controller);
 
+    // Startup's zero-time display.viewport frame is intentionally idle. Arm
+    // the fake timer through a later guest frame so the tested deadline has
+    // an explicit, stable time origin independent of startup work.
     await tester.pump(const Duration(milliseconds: 16));
     final state = tester.state(find.byType(PocketView)) as dynamic;
+    expect(state.isTickerActive, isFalse);
+    expect(state.hasScheduledWake, isFalse);
+
+    runtime.afterFrameDelayMilliseconds = 100;
+    controller.send(method: 'arm.timer');
+    await tester.pump(const Duration(milliseconds: 16));
     expect(state.isTickerActive, isFalse);
     expect(state.hasScheduledWake, isTrue);
     final callsBeforeDeadline = runtime.frameCalls;

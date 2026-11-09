@@ -37,3 +37,6 @@ sdk/prebuilt/
 # Native compiler intermediates and local QuickJS diagnostic executables.
 **/.cxx/
 /ng/
+
+# Local agent handoff records.
+/.primeflow/

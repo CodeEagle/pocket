@@ -12,6 +12,9 @@
  * and never knows about Dart objects or a JSON wire representation.
  */
 
+import { EMPTY_DISPLAY_GEOMETRY, parseDisplayGeometry } from "./responsive.ts";
+import type { DisplayGeometry } from "./responsive.ts";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
@@ -54,6 +57,12 @@ export interface HostEvent {
   readonly raw: Record<string, unknown>;
 }
 
+/** The latest merged display viewport observed at the host event ingress. */
+export interface HostDisplayViewportSnapshot {
+  readonly event: HostEvent;
+  readonly geometry: DisplayGeometry;
+}
+
 export type HostEventListener = (event: HostEvent) => void;
 
 /** Override one long-running operation without changing ordinary requests. */
@@ -71,6 +80,8 @@ export interface HostBridge {
   emit?(method: string, params?: BridgeObject): boolean;
   /** Subscribe to host-originated events. Optional for legacy request-only bridges. */
   onEvent?(listener: HostEventListener): () => void;
+  /** Read the canonical viewport fact without replaying it to other listeners. */
+  getLatestDisplayViewport?(): HostDisplayViewportSnapshot | undefined;
   /** Subscribe to the deterministic guest clock used for bounded operations. */
   onTick?(listener: () => void): () => void;
   /** Official guest-clock deadline scheduling, which wakes an idle runtime. */
@@ -228,6 +239,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   const previousHostBridge = globalObject.__pocketHostBridge;
   const eventListeners = new Set<HostEventListener>();
   const tickListeners = new Set<() => void>();
+  let latestDisplayViewport: HostDisplayViewportSnapshot | undefined;
   let diagnosticsReported = 0;
   const diagnose = (
     kind: HostBridgeDiagnosticKind,
@@ -257,6 +269,14 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
     }
   };
   const dispatchEvent = (event: HostEvent): boolean => {
+    if (event.method === "display.viewport") {
+      const previous = latestDisplayViewport?.geometry ?? EMPTY_DISPLAY_GEOMETRY;
+      const geometry = parseDisplayGeometry(event.params, previous);
+      // Keep this one canonical display fact at the event ingress, even when
+      // there is not yet a display listener. This is not a general event replay
+      // buffer; arbitrary HostBridge subscribers still receive only live events.
+      latestDisplayViewport = { event, geometry };
+    }
     if (eventListeners.size === 0) return false;
     for (const listener of [...eventListeners]) {
       try {
@@ -395,6 +415,10 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       return () => eventListeners.delete(listener);
     },
 
+    getLatestDisplayViewport(): HostDisplayViewportSnapshot | undefined {
+      return disposed ? undefined : latestDisplayViewport;
+    },
+
     onTick(listener: () => void): () => void {
       if (disposed) return () => {};
       tickListeners.add(listener);
@@ -419,6 +443,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       pending.clear();
       eventListeners.clear();
       tickListeners.clear();
+      latestDisplayViewport = undefined;
     },
   };
   globalObject.__pocketHostBridge = bridge;

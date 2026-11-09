@@ -112,10 +112,112 @@ test("Editor live preview applies guarded scene-object hits, keeps real sources 
     assert.equal(await page.locator(".nv-instruction").first().locator(".nv-type-select").inputValue(), "scene", "clicking the visible object's source navigates to its committed scene configuration");
 
     await page.getByRole("button", { name: "试玩与调试", exact: true }).click();
+    const sourceBeforeRootChange = await source.evaluate(element => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      const object = element.closest(".nv-stage-object") as HTMLElement | null;
+      const objectRect = object?.getBoundingClientRect();
+      return {
+        source: {
+          tag: element.tagName,
+          className: element.getAttribute("class"),
+          sourceKind: element.getAttribute("data-source-kind"),
+          sourceLocation: element.getAttribute("data-source-location"),
+          sourceExecutionLocation: element.getAttribute("data-source-execution-location"),
+          targetStoryRevision: element.getAttribute("data-target-story-revision"),
+          disabled: (element as HTMLButtonElement).disabled,
+          ariaLabel: element.getAttribute("aria-label"),
+          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          computed: { display: style.display, visibility: style.visibility, opacity: style.opacity, position: style.position, zIndex: style.zIndex },
+          hidden: (element as HTMLElement).hidden,
+        },
+        stageObject: object ? {
+          id: object.dataset.sceneObjectId,
+          image: object.dataset.image,
+          frame: object.dataset.frame,
+          crop: object.dataset.crop,
+          hit: object.dataset.hit,
+          layer: object.dataset.layer,
+          rect: objectRect ? { x: objectRect.x, y: objectRect.y, width: objectRect.width, height: objectRect.height } : null,
+        } : null,
+      };
+    });
+    assert.equal(sourceBeforeRootChange.source.sourceLocation, "start:0");
+    assert.equal(sourceBeforeRootChange.stageObject?.id, validObject.id);
+    assert.equal(sourceBeforeRootChange.stageObject?.image, validObject.image);
     await roots.selectOption("replay:lamp-memory");
     assert.equal(await status.getAttribute("data-root-kind"), "main", "choosing a future replay root does not relabel the current engine");
     assert.equal(await status.getAttribute("data-root-location"), "start:0");
     const retainedSource = page.locator('#novel-live-view .nv-preview-source-object[data-source-location="start:0"]');
+    const retainedSourceDiagnostics = await page.evaluate(() => {
+      const describe = (element: Element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          tag: element.tagName,
+          className: element.getAttribute("class"),
+          sourceKind: element.getAttribute("data-source-kind"),
+          sourceLocation: element.getAttribute("data-source-location"),
+          sourceExecutionLocation: element.getAttribute("data-source-execution-location"),
+          targetStoryRevision: element.getAttribute("data-target-story-revision"),
+          disabled: (element as HTMLButtonElement).disabled,
+          ariaLabel: element.getAttribute("aria-label"),
+          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          computed: { display: style.display, visibility: style.visibility, opacity: style.opacity, position: style.position, zIndex: style.zIndex },
+          hidden: (element as HTMLElement).hidden,
+        };
+      };
+      const objects = [...document.querySelectorAll<HTMLElement>("#novel-live-view .nv-stage-object")];
+      return {
+        root: (document.querySelector<HTMLSelectElement>("#novel-context-preview-root")?.value ?? ""),
+        status: {
+          kind: document.querySelector("#novel-context-preview-status")?.getAttribute("data-root-kind"),
+          location: document.querySelector("#novel-context-preview-status")?.getAttribute("data-root-location"),
+        },
+        sourceControls: [...document.querySelectorAll("#novel-live-view .nv-preview-source-object")].map(describe),
+        stageObjects: objects.map(object => ({
+          id: object.dataset.sceneObjectId,
+          image: object.dataset.image,
+          frame: object.dataset.frame,
+          crop: object.dataset.crop,
+          hit: object.dataset.hit,
+          layer: object.dataset.layer,
+          rect: (() => { const rect = object.getBoundingClientRect(); return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }; })(),
+        })),
+      };
+    });
+    assert.equal(
+      retainedSourceDiagnostics.sourceControls.filter(source => source.sourceLocation === "start:0").length,
+      1,
+      `future-root selection must preserve the committed source fact: ${JSON.stringify({
+        beforeRootChange: sourceBeforeRootChange,
+        rendered: retainedSourceDiagnostics,
+        committedScenePayload: { location: "start:0", op: "scene", objects: [{ ...validObject }] },
+      })}`,
+    );
+    const retainedSourceFact = retainedSourceDiagnostics.sourceControls.find(source => source.sourceLocation === "start:0");
+    assert.deepEqual(
+      retainedSourceFact && {
+        sourceKind: retainedSourceFact.sourceKind,
+        sourceLocation: retainedSourceFact.sourceLocation,
+        sourceExecutionLocation: retainedSourceFact.sourceExecutionLocation,
+        targetStoryRevision: retainedSourceFact.targetStoryRevision,
+        disabled: retainedSourceFact.disabled,
+      },
+      sourceBeforeRootChange.source && {
+        sourceKind: sourceBeforeRootChange.source.sourceKind,
+        sourceLocation: sourceBeforeRootChange.source.sourceLocation,
+        sourceExecutionLocation: sourceBeforeRootChange.source.sourceExecutionLocation,
+        targetStoryRevision: sourceBeforeRootChange.source.targetStoryRevision,
+        disabled: sourceBeforeRootChange.source.disabled,
+      },
+      "the exact source fact stays tied to the same committed scene",
+    );
+    const retainedStageObject = retainedSourceDiagnostics.stageObjects[0];
+    assert.deepEqual(
+      retainedStageObject && { id: retainedStageObject.id, image: retainedStageObject.image, frame: retainedStageObject.frame, crop: retainedStageObject.crop, hit: retainedStageObject.hit, layer: retainedStageObject.layer },
+      sourceBeforeRootChange.stageObject && { id: sourceBeforeRootChange.stageObject.id, image: sourceBeforeRootChange.stageObject.image, frame: sourceBeforeRootChange.stageObject.frame, crop: sourceBeforeRootChange.stageObject.crop, hit: sourceBeforeRootChange.stageObject.hit, layer: sourceBeforeRootChange.stageObject.layer },
+    );
     await retainedSource.waitFor();
     assert.equal(await retainedSource.isDisabled(), false, "changing the future root preserves the current executed object's source fact");
 
@@ -164,7 +266,7 @@ test("Editor live preview applies guarded scene-object hits, keeps real sources 
       assert.match(diagnostics, /个错误/ , `${invalid.name} must show an Editor field diagnostic`);
       assert.equal(await page.locator("#novel-build").isDisabled(), true, `${invalid.name} must block Guest build`);
       await objectsField.fill(JSON.stringify(valid, null, 2));
-      await page.waitForTimeout(300);
+      await page.waitForFunction(expected => !document.querySelector("#novel-diagnostics")?.textContent?.includes(expected), invalid.expected);
       const restoredDiagnostics = await page.locator("#novel-diagnostics").innerText();
       console.log(`restored ${invalid.name} draft diagnostics: ${restoredDiagnostics}`);
       assert.doesNotMatch(restoredDiagnostics, new RegExp(invalid.expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${invalid.name} diagnostic clears when valid JSON is restored`);

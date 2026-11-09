@@ -1808,7 +1808,9 @@ class _PocketViewState extends State<PocketView>
       // events above have been consumed, so their resource ledger and events
       // remain ordered and single-shot.
       _loading = false;
-      if (_reportSafeArea()) {
+      final safeAreaSentImmediately = _reportSafeArea();
+      if (_runtime == null || _error != null) return;
+      if (safeAreaSentImmediately) {
         final deltaFn = debugPocketFrameDeltaAtOverride ?? pocketFrameDeltaAt;
         final geometryFrame = deltaFn(runtime, 0);
         _idleWakeCreditMicroseconds = 0;

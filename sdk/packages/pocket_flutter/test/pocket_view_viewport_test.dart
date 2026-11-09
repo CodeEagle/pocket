@@ -44,6 +44,62 @@ final class _ViewportRuntime implements PocketRuntime {
   void dispose() {}
 }
 
+final class _SafeAreaStartupRuntime implements PocketRuntime {
+  _SafeAreaStartupRuntime(
+    this.initialFrame,
+    this.safeAreaFrame, {
+    this.throwOnDisplayViewport = false,
+  });
+
+  final PocketFrame initialFrame;
+  final PocketFrame safeAreaFrame;
+  final bool throwOnDisplayViewport;
+  final List<Map<String, dynamic>> messages = <Map<String, dynamic>>[];
+  final List<int> frameDeltas = <int>[];
+  PocketFrame? lastFrame;
+  bool receivedTopSafeArea = false;
+
+  @override
+  PocketFrame eval(String source) => initialFrame;
+
+  @override
+  PocketFrame load(String source, Uint8List pak) => initialFrame;
+
+  @override
+  PocketFrame frame(int deltaMilliseconds) {
+    frameDeltas.add(deltaMilliseconds);
+    final next = receivedTopSafeArea ? safeAreaFrame : initialFrame;
+    lastFrame = next;
+    return next;
+  }
+
+  @override
+  bool resizeViewport(double width, double height) => false;
+
+  @override
+  void enableAuxiliary(double width, double height) {}
+
+  @override
+  void send(Map<String, dynamic> message) {
+    final copy = Map<String, dynamic>.from(message);
+    messages.add(copy);
+    if (copy['name'] != 'display.viewport') return;
+    if (throwOnDisplayViewport) {
+      throw StateError('display viewport send failed');
+    }
+    final payload = copy['payload'];
+    if (payload is Map && (payload['safeArea'] as Map?)?['top'] == 10) {
+      receivedTopSafeArea = true;
+    }
+  }
+
+  @override
+  String? get lastError => null;
+
+  @override
+  void dispose() {}
+}
+
 Map<String, dynamic> _lastViewport(_ViewportRuntime runtime) {
   final message = runtime.messages.lastWhere(
     (message) => message['name'] == 'display.viewport',
@@ -131,6 +187,133 @@ void main() {
         'left': 5,
       });
       expect(payload['keyboardInset'], 80);
+    },
+  );
+
+  testWidgets(
+    'applies host safe area in a zero-time frame before first-frame readiness',
+    (tester) async {
+      _configureDuoLikeView(tester);
+      final initialFrame = PocketFrame(
+        width: 320,
+        height: 480,
+        ops: const <PocketOp>[
+          PocketRectOp(x: 0, y: 0, width: 320, height: 480, color: 0xff101827),
+        ],
+        events: const <PocketEvent>[
+          PocketEvent(
+            id: 'initial-ready-event',
+            method: 'startup.initial-event',
+            params: <String, dynamic>{},
+          ),
+        ],
+      );
+      final safeAreaFrame = PocketFrame(
+        width: 320,
+        height: 480,
+        ops: const <PocketOp>[
+          PocketRectOp(x: 0, y: 0, width: 320, height: 480, color: 0xff203040),
+        ],
+        events: const <PocketEvent>[],
+      );
+      final runtime = _SafeAreaStartupRuntime(initialFrame, safeAreaFrame);
+      var readyCount = 0;
+      var readySawSafeAreaFrame = false;
+      var readyFrameDeltas = <int>[];
+      final initialEvents = <String>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 320,
+              height: 480,
+              child: PocketView(
+                runtime: runtime,
+                jsSource: '',
+                pakBytes: Uint8List(0),
+                showDebugFps: false,
+                onReady: (_) {
+                  readyCount++;
+                  readySawSafeAreaFrame = identical(
+                    runtime.lastFrame,
+                    safeAreaFrame,
+                  );
+                  readyFrameDeltas = List<int>.of(runtime.frameDeltas);
+                },
+                onEvent: (event) => initialEvents.add(event.method),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(runtime.receivedTopSafeArea, isTrue);
+      expect(runtime.frameDeltas, isNotEmpty);
+      expect(runtime.frameDeltas.first, 0);
+      expect(readyCount, 1);
+      expect(readySawSafeAreaFrame, isTrue);
+      expect(readyFrameDeltas, isNotEmpty);
+      expect(readyFrameDeltas.first, 0);
+      expect(initialEvents, <String>['startup.initial-event']);
+    },
+  );
+
+  testWidgets(
+    'does not report first-frame readiness when host geometry delivery fails',
+    (tester) async {
+      _configureDuoLikeView(tester);
+      final frame = PocketFrame(
+        width: 320,
+        height: 480,
+        ops: const <PocketOp>[
+          PocketRectOp(x: 0, y: 0, width: 320, height: 480, color: 0xff101827),
+        ],
+        events: const <PocketEvent>[],
+      );
+      final runtime = _SafeAreaStartupRuntime(
+        frame,
+        frame,
+        throwOnDisplayViewport: true,
+      );
+      final errors = <Object>[];
+      var readyCount = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 320,
+              height: 480,
+              child: PocketView(
+                runtime: runtime,
+                jsSource: '',
+                pakBytes: Uint8List(0),
+                showDebugFps: false,
+                onReady: (_) => readyCount++,
+                onError: errors.add,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(readyCount, 0);
+      expect(errors, hasLength(1));
+      expect(
+        errors.single.toString(),
+        contains('display viewport send failed'),
+      );
+      expect(
+        find.textContaining('PocketJS runtime unavailable'),
+        findsOneWidget,
+      );
     },
   );
 

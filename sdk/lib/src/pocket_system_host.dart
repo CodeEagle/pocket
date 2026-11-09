@@ -9,6 +9,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:path_provider/path_provider.dart';
 import 'package:pocket_flutter/pocket_flutter.dart' show PocketViewController;
 import 'package:pocket_services/pocket_services.dart';
@@ -20,6 +21,7 @@ import 'pocket_bundled_application_catalog.dart';
 import 'pocket_config.dart';
 import 'pocket_host_config.dart';
 import 'pocket_image_store.dart';
+import 'pocket_startup_indicator.dart';
 import 'package:pocket_flutter/src/pocket_compositor.dart';
 import 'pocket_platform_data.dart';
 import 'pocket_recordings.dart';
@@ -202,6 +204,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     required this.buildSystemUI,
     required this.buildApplications,
     this.loadHostConfig,
+    this.hostConfigUrl,
     this.initialHostConfig,
     this.initialHostConfigError,
     this.initialBundledApplications,
@@ -211,6 +214,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     this.approveSystemUI,
     this.approveApplication,
     this.appBuilder,
+    this.onExit,
     this.showPerformanceOverlay = false,
     this.backgroundColor = const Color(0xFF000000),
   }) : _bundledCatalogAssetSource = null;
@@ -230,6 +234,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
         const <String, PocketAppConfig>{},
     Set<String> keyboardInputAppIdPrefixes = const <String>{},
     Future<PocketHostConfig?> Function()? loadHostConfig,
+    Uri? hostConfigUrl,
     PocketHostConfig? initialHostConfig,
     Object? initialHostConfigError,
     PocketBundledApplicationCatalog? initialBundledApplications,
@@ -239,6 +244,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     PocketSystemHostSystemUIApprover? approveSystemUI,
     PocketSystemHostApplicationApprover? approveApplication,
     PocketSystemHostAppBuilder? appBuilder,
+    VoidCallback? onExit,
     bool showPerformanceOverlay = false,
     Color backgroundColor = const Color(0xFF000000),
   }) {
@@ -280,6 +286,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
       buildSystemUI: buildSystemUI,
       buildApplications: buildApplications,
       loadHostConfig: loadHostConfig,
+      hostConfigUrl: hostConfigUrl,
       initialHostConfig: initialHostConfig,
       initialHostConfigError: initialHostConfigError,
       initialBundledApplications: initialBundledApplications,
@@ -289,6 +296,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
       approveSystemUI: approveSystemUI,
       approveApplication: approveApplication,
       appBuilder: appBuilder,
+      onExit: onExit,
       showPerformanceOverlay: showPerformanceOverlay,
       backgroundColor: backgroundColor,
     );
@@ -300,6 +308,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     required PocketSystemHostSystemUIBuilder buildSystemUI,
     required PocketSystemHostApplicationsBuilder buildApplications,
     Future<PocketHostConfig?> Function()? loadHostConfig,
+    Uri? hostConfigUrl,
     PocketHostConfig? initialHostConfig,
     Object? initialHostConfigError,
     PocketBundledApplicationCatalog? initialBundledApplications,
@@ -309,9 +318,11 @@ final class PocketSystemHostApplication extends StatefulWidget {
     PocketSystemHostSystemUIApprover? approveSystemUI,
     PocketSystemHostApplicationApprover? approveApplication,
     PocketSystemHostAppBuilder? appBuilder,
+    VoidCallback? onExit,
     bool showPerformanceOverlay = false,
     Color backgroundColor = const Color(0xFF000000),
   }) : loadHostConfig = loadHostConfig,
+       hostConfigUrl = hostConfigUrl,
        loadBundledApplications = source.load,
        buildSystemUI = buildSystemUI,
        buildApplications = buildApplications,
@@ -324,12 +335,18 @@ final class PocketSystemHostApplication extends StatefulWidget {
        approveSystemUI = approveSystemUI,
        approveApplication = approveApplication,
        appBuilder = appBuilder,
+       onExit = onExit,
        showPerformanceOverlay = showPerformanceOverlay,
        backgroundColor = backgroundColor,
        _bundledCatalogAssetSource = source,
        super(key: key);
 
   final Future<PocketHostConfig?> Function()? loadHostConfig;
+
+  /// Runtime URL for a Debug/container route. The SDK owns this request and
+  /// cancels it on exit. A custom [loadHostConfig] takes precedence and owns
+  /// its own IO cancellation.
+  final Uri? hostConfigUrl;
   final PocketSystemHostApplicationCatalogLoader loadBundledApplications;
   final PocketAppConfig Function(PocketBundledApplicationCatalog catalog)
   buildSystemUI;
@@ -343,6 +360,11 @@ final class PocketSystemHostApplication extends StatefulWidget {
   final PocketSystemHostSystemUIApprover? approveSystemUI;
   final PocketSystemHostApplicationApprover? approveApplication;
   final PocketSystemHostAppBuilder? appBuilder;
+
+  /// Leaves the remote container immediately. Cleanup continues in the
+  /// background. Without a callback, an enclosing route is popped, or the
+  /// bundled host is restored when this application is the root route.
+  final VoidCallback? onExit;
   final bool showPerformanceOverlay;
   final Color backgroundColor;
   final _BundledCatalogAssetSource? _bundledCatalogAssetSource;
@@ -355,6 +377,9 @@ final class PocketSystemHostApplication extends StatefulWidget {
 final class _PocketSystemHostApplicationState
     extends State<PocketSystemHostApplication> {
   late Future<_SystemHostBootstrap> _bootstrap;
+  PocketHostLoadProgress? _hostConfigProgress;
+  PocketCancellationToken _hostConfigProgressOwner = PocketCancellationToken();
+  bool _remoteDismissed = false;
 
   @override
   void initState() {
@@ -372,25 +397,54 @@ final class _PocketSystemHostApplicationState
               widget._bundledCatalogAssetSource
         : oldWidget.loadBundledApplications != widget.loadBundledApplications;
     if (oldWidget.loadHostConfig != widget.loadHostConfig ||
+        oldWidget.hostConfigUrl != widget.hostConfigUrl ||
         catalogSourceChanged ||
         oldWidget.initialHostConfig != widget.initialHostConfig ||
         oldWidget.initialHostConfigError != widget.initialHostConfigError ||
         oldWidget.initialBundledApplications !=
             widget.initialBundledApplications ||
         oldWidget.initialCatalogError != widget.initialCatalogError) {
+      _hostConfigProgress = null;
+      _remoteDismissed = false;
       _bootstrap = _loadBootstrap();
     }
   }
 
-  Future<_SystemHostBootstrap> _loadBootstrap() async {
-    final hostFuture = _loadHostConfig();
+  Future<_SystemHostBootstrap> _loadBootstrap({bool localOnly = false}) async {
+    _hostConfigProgressOwner.cancel();
+    final progressOwner = PocketCancellationToken();
+    _hostConfigProgressOwner = progressOwner;
+    final hostFuture = localOnly
+        ? Future.value(
+            const _SystemHostLoadResult<PocketHostConfig?>(null, null),
+          )
+        : _loadHostConfig(progressOwner);
     final catalogFuture = _loadCatalog();
     final host = await hostFuture;
+    if (mounted &&
+        identical(_hostConfigProgressOwner, progressOwner) &&
+        _hostConfigProgress != null) {
+      setState(() => _hostConfigProgress = null);
+    }
     final catalog = await catalogFuture;
     return _SystemHostBootstrap(host: host, catalog: catalog);
   }
 
-  Future<_SystemHostLoadResult<PocketHostConfig?>> _loadHostConfig() async {
+  void _onHostConfigProgress(
+    PocketCancellationToken progressOwner,
+    PocketHostLoadProgress progress,
+  ) {
+    if (!mounted ||
+        progressOwner.isCancelled ||
+        !identical(_hostConfigProgressOwner, progressOwner)) {
+      return;
+    }
+    setState(() => _hostConfigProgress = progress);
+  }
+
+  Future<_SystemHostLoadResult<PocketHostConfig?>> _loadHostConfig(
+    PocketCancellationToken progressOwner,
+  ) async {
     if (widget.initialHostConfigError != null) {
       return _SystemHostLoadResult<PocketHostConfig?>(
         null,
@@ -404,12 +458,52 @@ final class _PocketSystemHostApplicationState
       );
     }
     try {
-      final load =
-          widget.loadHostConfig ?? PocketHostConfig.loadFromEnvironment;
-      return _SystemHostLoadResult<PocketHostConfig?>(await load(), null);
+      final url = widget.hostConfigUrl;
+      final config = widget.loadHostConfig != null
+          ? await widget.loadHostConfig!()
+          : url != null
+          ? await PocketHostConfig.load(
+              url,
+              cancellation: progressOwner,
+              onProgress: (progress) =>
+                  _onHostConfigProgress(progressOwner, progress),
+            )
+          : await PocketHostConfig.loadFromEnvironment(
+              cancellation: progressOwner,
+              onProgress: (progress) =>
+                  _onHostConfigProgress(progressOwner, progress),
+            );
+      progressOwner.throwIfCancelled();
+      return _SystemHostLoadResult<PocketHostConfig?>(config, null);
     } catch (error) {
       return _SystemHostLoadResult<PocketHostConfig?>(null, error);
     }
+  }
+
+  void _exitRemote() {
+    if (_remoteDismissed) return;
+    _remoteDismissed = true;
+    _hostConfigProgressOwner.cancel();
+    final navigator = Navigator.maybeOf(context);
+    final hasOuterExit =
+        widget.onExit != null || (navigator?.canPop() ?? false);
+    setState(() {
+      _hostConfigProgress = null;
+      if (!hasOuterExit) _bootstrap = _loadBootstrap(localOnly: true);
+    });
+    // Navigation must never await network cancellation, verification or
+    // native plugin teardown. Removing the remote host disposes its session.
+    if (widget.onExit case final exit?) {
+      exit();
+    } else if (navigator?.canPop() ?? false) {
+      navigator!.pop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _hostConfigProgressOwner.cancel();
+    super.dispose();
   }
 
   Future<_SystemHostLoadResult<PocketBundledApplicationCatalog>>
@@ -440,68 +534,139 @@ final class _PocketSystemHostApplicationState
   }
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<_SystemHostBootstrap>(
-    future: _bootstrap,
-    builder: (context, snapshot) {
-      final bootstrap = snapshot.data;
-      final catalog =
-          bootstrap?.catalog.value ?? PocketBundledApplicationCatalog.empty;
-      final error = bootstrap?.host.error ?? bootstrap?.catalog.error;
-      Widget body;
-      if (bootstrap == null) {
-        body = const Center(child: CircularProgressIndicator());
-      } else if (error != null) {
-        body = Center(
-          child: SelectableText('Pocket host config failed: $error'),
+  Widget build(BuildContext context) {
+    // A popped route can remain mounted during its exit animation. Drop the
+    // remote surface now, rather than waiting for that animation to dispose it.
+    if (_remoteDismissed && _hostConfigProgressOwner.isCancelled) {
+      return const SizedBox.shrink();
+    }
+    return FutureBuilder<_SystemHostBootstrap>(
+      future: _bootstrap,
+      builder: (context, snapshot) {
+        final bootstrap = snapshot.connectionState == ConnectionState.done
+            ? snapshot.data
+            : null;
+        final catalog =
+            bootstrap?.catalog.value ?? PocketBundledApplicationCatalog.empty;
+        final error = bootstrap?.host.error ?? bootstrap?.catalog.error;
+        final remoteEntry =
+            widget.loadHostConfig != null ||
+            widget.hostConfigUrl != null ||
+            widget.initialHostConfig != null ||
+            widget.initialHostConfigError != null ||
+            const String.fromEnvironment('POCKET_HOST_CONFIG_URL').isNotEmpty;
+        final canExit =
+            !_remoteDismissed &&
+            (bootstrap?.host.value != null ||
+                (bootstrap == null && remoteEntry) ||
+                (error != null && remoteEntry));
+        Widget loadingError(Object cause) => Center(
+          child: SelectableText(
+            'Pocket 宿主配置加载失败：$cause',
+            style: TextStyle(
+              color: widget.backgroundColor.computeLuminance() > 0.179
+                  ? Colors.black
+                  : Colors.white,
+            ),
+          ),
         );
-      } else {
-        try {
-          final systemUI = widget.buildSystemUI(catalog);
-          final applications = widget.buildApplications(catalog);
-          final remote = bootstrap.host.value;
-          body = remote == null
-              ? PocketSystemHost(
-                  systemUI: systemUI,
-                  applications: applications,
-                  controller: widget.controller,
-                  recordings: widget.recordings,
-                )
-              : PocketSystemHost.fromHostConfig(
-                  config: remote,
-                  controller: widget.controller,
-                  recordings: widget.recordings,
-                  approveSystemUI:
-                      widget.approveSystemUI ??
-                      ((app) => app.withNativePolicy(systemUI)),
-                  approveApplication:
-                      widget.approveApplication ??
-                      ((id, app) => app.withNativePolicy(
-                        applications[id] ?? PocketAppConfig(appId: id),
-                      )),
-                );
-        } catch (cause) {
-          body = Center(
-            child: SelectableText('Pocket host config failed: $cause'),
+        Widget body;
+        if (bootstrap == null) {
+          final background = widget.backgroundColor;
+          body = PocketStartupIndicator(
+            stage: _hostConfigProgress?.stage ?? 'initializing',
+            downloadedBytes: _hostConfigProgress?.downloadedBytes,
+            totalBytes: _hostConfigProgress?.totalBytes,
+            foregroundColor: background.computeLuminance() > 0.179
+                ? Colors.black
+                : Colors.white,
           );
+        } else if (error != null) {
+          body = loadingError(error);
+        } else {
+          try {
+            final systemUI = widget.buildSystemUI(catalog);
+            final applications = widget.buildApplications(catalog);
+            final remote = bootstrap.host.value;
+            body = remote == null
+                ? PocketSystemHost(
+                    key: ObjectKey(_hostConfigProgressOwner),
+                    systemUI: systemUI,
+                    applications: applications,
+                    controller: widget.controller,
+                    recordings: widget.recordings,
+                  )
+                : PocketSystemHost.fromHostConfig(
+                    key: ObjectKey(_hostConfigProgressOwner),
+                    config: remote,
+                    controller: widget.controller,
+                    recordings: widget.recordings,
+                    approveSystemUI:
+                        widget.approveSystemUI ??
+                        ((app) => app.withNativePolicy(
+                          applications[app.appId] ?? systemUI,
+                        )),
+                    approveApplication:
+                        widget.approveApplication ??
+                        ((id, app) => app.withNativePolicy(
+                          applications[id] ?? PocketAppConfig(appId: id),
+                        )),
+                  );
+          } catch (cause) {
+            body = loadingError(cause);
+          }
         }
-      }
-      return MaterialApp(
-        debugShowCheckedModeBanner: false,
-        showPerformanceOverlay: widget.showPerformanceOverlay,
-        builder: (context, child) =>
-            widget.appBuilder?.call(
-              context,
-              child ?? const SizedBox.shrink(),
-            ) ??
-            child ??
-            const SizedBox.shrink(),
-        home: Scaffold(
-          backgroundColor: error == null ? null : widget.backgroundColor,
-          body: body,
-        ),
-      );
-    },
-  );
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          showPerformanceOverlay: widget.showPerformanceOverlay,
+          builder: (context, child) =>
+              widget.appBuilder?.call(
+                context,
+                child ?? const SizedBox.shrink(),
+              ) ??
+              child ??
+              const SizedBox.shrink(),
+          home: CallbackShortcuts(
+            bindings: {
+              if (canExit)
+                const SingleActivator(LogicalKeyboardKey.escape): _exitRemote,
+            },
+            child: Focus(
+              autofocus: true,
+              child: PopScope(
+                canPop: !canExit,
+                onPopInvokedWithResult: (didPop, _) {
+                  if (!didPop && canExit) _exitRemote();
+                },
+                child: Scaffold(
+                  appBar: canExit
+                      ? AppBar(
+                          backgroundColor: widget.backgroundColor,
+                          foregroundColor:
+                              widget.backgroundColor.computeLuminance() > 0.179
+                              ? Colors.black
+                              : Colors.white,
+                          leading: IconButton(
+                            key: const ValueKey('pocket-container-exit'),
+                            tooltip: '返回退出',
+                            icon: const Icon(Icons.arrow_back),
+                            onPressed: _exitRemote,
+                          ),
+                          title: const Text('远程容器'),
+                        )
+                      : null,
+                  backgroundColor: bootstrap == null || error != null
+                      ? widget.backgroundColor
+                      : null,
+                  body: body,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 final class _PendingSystemHostCatalog {
@@ -920,7 +1085,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     for (final instance in _applications.values.toList(growable: false)) {
       _closeInstance(instance, removeFromTree: false);
     }
-    unawaited(_systemUIInstance.session.close());
+    unawaited(_systemUIInstance.session.close().catchError((Object _) {}));
     final dataFuture = _platformDataFuture;
     if (dataFuture != null) {
       unawaited(

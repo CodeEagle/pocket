@@ -30,6 +30,16 @@ Slot IDs and the prefix follow Pocket storage's key restrictions: non-empty, not
 
 Native `platform.storage` is an app-private JSON key-value store persisted by the Flutter System host under its application-support directory. Existing `get/set/remove/keys` operations use the same store; the generic storage batch operation supplies the atomic multi-key boundary needed for move and swap. Slot management adds no Dart slot state machine.
 
+## Lantern startup readiness
+
+Source-first inspection of the retained parent project, excluding `pocket_host/`, found no VN initialization, locale restore, audio-preference restore, or save migration flow to port. Its `lib/main.dart:6-14` calls `runApp()` immediately and defers optional shader/context prewarming until after the first frame. Lantern keeps the same visible-first boundary in JS and now reports its four actual critical storage requests while the game is opening.
+
+Lantern starts reads for `lantern.locale`, `lantern.audio.mix`, `lantern.audio.textSoundsEnabled`, and the raw `lantern.slot.auto` value together. The loading page uses the existing `NovelSkinFrame` and Lantern frame image, the Mist Harbor title and “Opening the Mist Harbor journal…” heading, a localized current-request line, and four localized row states. Its count advances only when a request actually returns or fails; it does not estimate progress from time. Read failures are shown on their corresponding row while defaults or a new journey remain available. The rows stack each preference label and status so long English messages fit the 320-pixel card on a 360-pixel-wide display.
+
+After all four requests settle, Lantern applies the stored locale before touching the autosave. The existing `migrateNovelSaveRevision`→`rebaseNovelSaveDataForLocale` order is shared by normal slot reads and startup; only then does a temporary real engine `load()` validate the save, and only its validated meta progress seeds the new engine. The title screen can mount as soon as these required reads and validation finish.
+
+Orphan thumbnail collection starts in the background after readiness and still runs through the same serialized slot manager used by slot reads and writes. Lantern does not treat `storage.keys` or `images.list` as required startup work. Until collection reaches `images.list`, `slotImagesAvailable` stays false and a manual save remains a valid text-only save without thumbnail metadata; if image listing is unavailable, this fallback remains in place. Thumbnail capture/list/cleanup callbacks check app disposal before updating UI state, so a late result cannot mutate an unmounted loading page.
+
 The current title screen has an explicit Resume action that loads `auto` through `NovelEngine.load()`. On app boot, Lantern validates the autosave and seeds meta progress for New Game, while keeping the player on the title screen; the full save location, stage, and variables are restored when the player selects Resume. `demo/integration_test/novel_storage_restart_test.dart` exercises this with the shipped QJBC and the actual application-support JSON file: story input increments Ren trust to 1, the test observes the persisted autosave, disposes the entire System host, mounts a new host without injecting state, and selects Resume. It saves again through the restored game's UI and compares variables, location and station stage in the native file. macOS, iOS 27.2 simulator and Android API 35 emulator all passed on 2026-11-07. This is host disposal/recreation in one test process, not a claim of process-kill or power-loss recovery.
 
 `NovelView` keeps Resume tied to `auto`, which remains reserved for continuous autosaves. Its explicit Quick Save writes the separate `quick` ID, and Quick Load reads that same checkpoint. Manual save/load retains the legacy `1`, `2`, and `3` IDs and adds manager-listed IDs without adding an index or second catalog. Rows are paged four at a time and the player UI caps the displayed list at 512 IDs; additional raw IDs remain in storage and are not removed. Consumers that only implement the original `read` and `write` methods keep the legacy three manual slots and quick save/load, with management controls hidden.
@@ -108,3 +118,24 @@ node_modules/typescript/bin/tsc --noEmit --strict --target ES2022 --module ESNex
 The full `bun test packages/pocket_vn/test` suite also passed **93 tests, 0 failures, 630 assertions**.
 
 The pinned guest integration fixture is `demo/js/tests/novel_slots_native.test.ts` (run from the repository root with `sdk/.pocket-build/browser-test-bun-1.4.4/node_modules/@oven/bun-darwin-aarch64/bin/bun test demo/js/tests/novel_slots_native.test.ts`). It builds a temporary guest with `buildGuest`, executes its QJBC through `NativeSession`, and exercises real `@pocket/ui/platform` requests plus `createNovelSlotManager`: raw nested save JSON copy/read, listing and delete, successful atomic swap/move, host rejection when batch is unavailable, and rejection of a malformed batch without changing the store. `NativeSession` uses a process-local injected map for this fixture; it proves guest and host-protocol behavior, not OS-disk persistence. The macOS/iOS/Android host-recreation run above and `sdk/test/platform_data_test.dart` provide the separate real-file persistence evidence. The fixture passed **1 test, 0 failures, 19 assertions** with the pinned Bun 1.4.4 runtime.
+
+Startup acceptance (2026-11-09): the actual Lantern Guest was rebuilt with the
+pinned buildGuest/Core and Bun 1.4.4. Three native input-driven tests pass
+(31 assertions): all four critical requests are issued before any reply, the
+visible count remains zero while replies are held, out-of-order replies and a
+failed preference update the actual count, the title/game opens while thumbnail
+key enumeration is still held, one ten-second guest-clock timeout window
+settles all four requests, and saved English locale plus unlocked CG metadata
+survive restore and an actual gallery click. Both native safe-area regressions
+also pass with this Guest. Logs, hashes and the initial serial-loading negative
+control are indexed by
+`.pocket-build/lantern-startup-20261109/acceptance.json`.
+
+The three generated Lantern artifacts in `demo/assets/apps/lantern/` now match
+that tested Guest. Authored art/story/save data was not replaced. No installed
+phone package was rebuilt or installed in this increment; the new loading page
+appears after the consuming app is rebuilt/updated. Actual phone cold-start
+latency and per-stage wall-clock time remain unmeasured. Background thumbnail
+collection still shares the existing slot serialization queue, so a very early
+manual slot action can wait behind it; until image listing succeeds, manual
+saves retain the existing text-only fallback.

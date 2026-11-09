@@ -192,6 +192,7 @@ void main() {
         expect(updateServer.count(release.pakPath), 1);
         expect(value.active?.build, 2);
         expect(value.active?.version, '2.0.0');
+        expect(value.transferProgress, isNull);
         expect(
           assetRequests.where(
             (name) => name.endsWith('.qjbc') || name.endsWith('.pak'),
@@ -210,6 +211,78 @@ void main() {
         expect(healthy?.manifest.payload.pak.size, release.pak.length);
       } finally {
         await closeQuietly(unopened);
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'downloadOnOpen reports real streamed bytes and clears on cancellation',
+    () async {
+      const chunkSize = 64 * 1024;
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+        entryBytes: Uint8List.fromList(
+          List<int>.generate(4 * chunkSize, (index) => index % 251),
+        ),
+      );
+      updateServer.current = release;
+      updateServer.chunkedPath = release.entryPath;
+      updateServer.chunkSize = chunkSize;
+      // The first real chunk is flushed to the client, then the server holds
+      // the rest so listeners can inspect a stable mid-transfer snapshot.
+      updateServer.holdPath = release.entryPath;
+
+      final value = session();
+      var notifications = 0;
+      final observed = <PocketUpdateProgress>[];
+      void observeProgress() {
+        notifications++;
+        final progress = value.transferProgress;
+        if (progress != null) observed.add(progress);
+      }
+
+      value.addListener(observeProgress);
+      final initializing = value.initialize();
+      try {
+        await waitUntil(() {
+          final progress = value.transferProgress;
+          return progress?.stage == PocketUpdateStage.downloading &&
+              progress!.downloadedBytes >= chunkSize;
+        });
+        final progress = value.transferProgress!;
+        expect(progress.stage, PocketUpdateStage.downloading);
+        expect(progress.downloadedBytes, chunkSize);
+        expect(progress.totalBytes, release.entry.length + release.pak.length);
+        expect(notifications, greaterThan(1));
+        expect(
+          observed.any((fact) => fact.downloadedBytes == chunkSize),
+          isTrue,
+        );
+        expect(value.ready, isFalse);
+
+        // Stop before the fixture's fake bytecode can reach a runtime mount.
+        // Disposing cancels the active HTTP transfer and clears the snapshot.
+        final closing = value.close();
+        updateServer.releaseHeldResponse();
+        try {
+          await closing;
+        } catch (_) {
+          // Initialization reports the expected cancellation to its caller.
+        }
+        expect(value.transferProgress, isNull);
+      } finally {
+        value.removeListener(observeProgress);
+        updateServer.releaseHeldResponse();
+        try {
+          await initializing;
+        } catch (_) {
+          // This test intentionally cancels initialization mid-transfer.
+        }
         await closeQuietly(value);
       }
     },
@@ -369,6 +442,7 @@ void main() {
         try {
           await reopened.initialize();
           expect(reopened.active!.build, 2);
+          expect(reopened.transferProgress, isNull);
           expect(updateServer.totalRequests, requests);
         } finally {
           await closeQuietly(reopened);
@@ -755,6 +829,7 @@ void main() {
         final result = await value.prepareForOpen();
 
         expect(result, <String, Object?>{'configured': true, 'updated': true});
+        expect(value.transferProgress, isNull);
         expect(
           updateServer.count('/manifest.json'),
           previousManifestRequests + 1,
@@ -1088,6 +1163,7 @@ void main() {
           );
           expect(value.ready, isFalse);
           expect(value.active, isNull);
+          expect(value.transferProgress, isNull);
           expect(
             assetRequests.where(
               (name) => name.endsWith('.qjbc') || name.endsWith('.pak'),
@@ -1180,6 +1256,7 @@ void main() {
           await initializing;
           expect(value.ready, isFalse);
           expect(value.active, isNull);
+          expect(value.transferProgress, isNull);
           expect(
             await packageStore().scoped(appId).lastGood(verifier: verifier()),
             isNull,
@@ -1692,6 +1769,8 @@ final class _UpdateServer {
   _Release? current;
   bool online = true;
   String? holdPath;
+  String? chunkedPath;
+  int chunkSize = 64 * 1024;
   final Map<String, int> _counts = <String, int>{};
   Completer<void>? _releaseHeld;
 
@@ -1719,6 +1798,28 @@ final class _UpdateServer {
     if (bytes == null) {
       request.response.statusCode = HttpStatus.notFound;
       await request.response.close();
+      return;
+    }
+    if (path == chunkedPath) {
+      request.response.headers.chunkedTransferEncoding = true;
+      try {
+        for (var offset = 0; offset < bytes.length; offset += chunkSize) {
+          final end = (offset + chunkSize).clamp(0, bytes.length).toInt();
+          request.response.add(bytes.sublist(offset, end));
+          await request.response.flush();
+          if (path == holdPath && offset == 0) {
+            _releaseHeld ??= Completer<void>();
+            await _releaseHeld!.future;
+          }
+        }
+      } catch (_) {
+        // Closing the session cancels the real client stream while the server
+        // may still be waiting between chunks.
+      } finally {
+        try {
+          await request.response.close();
+        } catch (_) {}
+      }
       return;
     }
     if (path == holdPath) {

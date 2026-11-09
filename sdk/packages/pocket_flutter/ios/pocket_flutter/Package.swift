@@ -33,9 +33,18 @@ let package = Package(
                 .target(name: "PocketFlutterNative"),
             ],
             linkerSettings: [
-                // Dart FFI resolves the Rust C ABI from the process image. The
-                // archive has no direct Swift references, so retain every object.
-                .unsafeFlags(["-Xlinker", "-all_load", "-Xlinker", "-export_dynamic"]),
+                // Dart FFI resolves the Rust C ABI from the process image. Use
+                // targeted `-u` roots instead of `-all_load` so apps linking
+                // other Rust staticlibs (e.g. intiface) do not collide on
+                // unreferenced `compiler_builtins` object members.
+                .unsafeFlags([
+                    "-Xlinker", "-u", "-Xlinker", "_pocket_create",
+                    "-Xlinker", "-u", "-Xlinker", "_pocket_worker_create",
+                    "-Xlinker", "-u", "-Xlinker", "_pocket_worker_quickjs_create",
+                    "-Xlinker", "-u", "-Xlinker", "_pocket_worker_ui_attach",
+                    "-Xlinker", "-u", "-Xlinker", "_pocket_worker_runner_create",
+                    "-Xlinker", "-export_dynamic",
+                ]),
                 .linkedLibrary("c"),
                 .linkedLibrary("m"),
                 .linkedLibrary("iconv"),

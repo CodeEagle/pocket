@@ -44,6 +44,10 @@ export 'package:pocket_services/pocket_services.dart'
         PocketPluginLimits,
         PocketPermissionRequest,
         PocketPermissionRequestHandler,
+        PocketUpdateProgress,
+        PocketUpdateStage,
+        PocketCancellationToken,
+        PocketUpdateCancellation,
         PocketCapabilityKind,
         PocketCapabilityException,
         PocketHostStreamContext;

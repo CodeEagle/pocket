@@ -72,6 +72,11 @@ callback, and restores that callback on cleanup. The signal exposes the live
 viewport, safe area, keyboard inset, and ReservedRegion frames to an external
 app or the showcase. `deriveResponsiveLayout()` then maps the data to bottom
 navigation or a rail while treating a central division as a layout landmark.
+The modern HostBridge captures only the latest merged `display.viewport` fact
+at event ingress, so a geometry signal mounted after an asynchronous startup
+gate starts from the host's current safe area. This does not replay other host
+events to late subscribers. Older/custom bridges keep their existing adapter
+behavior.
 `SafeAreaScaffold` is the canonical safe-area shell. It subscribes to the
 same event lane and consumes each selected edge once. Independent guests such
 as `demo/js/apps/profile/app.tsx` and `demo/js/apps/lobby/app.tsx` use the

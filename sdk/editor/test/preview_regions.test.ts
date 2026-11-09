@@ -82,6 +82,13 @@ test("preview region overlay toggles and captures without changing FrameResult o
       });
     });
 
+    // The browser publishes its accessibility fact on startup through the
+    // same /input endpoint. Compare overlay operations against that settled
+    // transport baseline, rather than treating startup facts as user input.
+    await waitFor(async () => inputPackets.some(packet => packet.type === "accessibility"), Boolean, "startup accessibility fact");
+    const startupPackets = structuredClone(inputPackets);
+    console.log(`preview regions startup packets: ${JSON.stringify(startupPackets)}`);
+
     const originalFrame = await page.evaluate(() => {
       const frame = (window as any).PocketEditorPreviewInstance.getFrame();
       return { number: frame.frame, ops: JSON.parse(JSON.stringify(frame.ops)) };
@@ -144,7 +151,7 @@ test("preview region overlay toggles and captures without changing FrameResult o
     const enabledOps = await page.evaluate(() => JSON.parse(JSON.stringify((window as any).PocketEditorPreviewInstance.getFrame().ops)));
     assert.deepEqual(enabledOps, originalFrame.ops, "region overlay must not mutate FrameResult ops");
     assert.equal(await page.evaluate(() => Number((window as any).PocketEditorPreviewInstance.getFrame().frame)), originalFrame.number, "enabling regions must not request a guest frame");
-    assert.equal(inputPackets.length, 0, "region toggle must not send native input");
+    assert.deepEqual(inputPackets, startupPackets, "region toggle must not send native input after startup facts");
     const onCapture = await capture("regions-on");
     const onCapturePixels = await capturePixels(onCapture.dataUrl);
     assert.ok(onCapturePixels > offPixels, "capture must include the currently visible region labels/borders");
@@ -156,7 +163,7 @@ test("preview region overlay toggles and captures without changing FrameResult o
     const disabledOps = await page.evaluate(() => JSON.parse(JSON.stringify((window as any).PocketEditorPreviewInstance.getFrame().ops)));
     assert.deepEqual(disabledOps, originalFrame.ops, "disabling regions must restore the original FrameResult projection");
     assert.equal(await page.evaluate(() => Number((window as any).PocketEditorPreviewInstance.getFrame().frame)), originalFrame.number, "disabling regions must not request a guest frame");
-    assert.equal(inputPackets.length, 0, "region toggle must not send native input");
+    assert.deepEqual(inputPackets, startupPackets, "region toggle must not send native input after startup facts");
 
     await page.evaluate(() => {
       const canvas = document.querySelector("canvas")!;
@@ -177,7 +184,7 @@ test("preview region overlay toggles and captures without changing FrameResult o
       (value) => value === true,
       "native counter input after overlay toggle",
     );
-    assert.deepEqual(inputPackets.map((packet) => packet.phase), ["down", "up"], "region overlay must not intercept pointer input");
+    assert.deepEqual(inputPackets.slice(startupPackets.length).map((packet) => packet.phase), ["down", "up"], "region overlay must not intercept pointer input");
   } finally {
     await browser.close();
     server.stop(true);
