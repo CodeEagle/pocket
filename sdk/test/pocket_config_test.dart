@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 
@@ -115,24 +116,46 @@ void main() {
       const remote = PocketAppConfig(
         appId: 'pocket.remote.app',
         bytecodeAsset: 'remote/app.qjbc',
+        fontFamilyFallback: <String>['RemoteSerif'],
         compositorSurfaces: <String, int>{'pocket.remote.child': 7},
         bootstrapMetadataJson: '{"runtimeAbi":"test"}',
       );
-      const policy = PocketAppConfig(
+      final policy = PocketAppConfig(
         appId: 'ignored.policy.id',
         allowedPermissions: <String>{'hardware.bluetooth'},
         additionalCapabilities: <String>{'native.approved'},
+        keyboardInputEnabled: true,
+        keyboardAutofocus: true,
+        fontFamilyFallback: <String>['LanternSerif'],
+        keyboardButtonMap: <LogicalKeyboardKey, int>{
+          LogicalKeyboardKey.space: 0x2000,
+          LogicalKeyboardKey.enter: 0x2000,
+          LogicalKeyboardKey.numpadEnter: 0x2000,
+          LogicalKeyboardKey.escape: 0x4000,
+        },
         memoryLimits: PocketMemoryLimits(heapLimitBytes: 4096),
       );
 
       final merged = remote.withNativePolicy(policy);
       expect(merged.appId, remote.appId);
       expect(merged.bytecodeAsset, remote.bytecodeAsset);
+      expect(merged.fontFamilyFallback, <String>['LanternSerif']);
       expect(merged.compositorSurfaces, remote.compositorSurfaces);
       expect(merged.bootstrapMetadataJson, remote.bootstrapMetadataJson);
       expect(merged.allowedPermissions, policy.allowedPermissions);
       expect(merged.additionalCapabilities, policy.additionalCapabilities);
       expect(merged.memoryLimits, policy.memoryLimits);
+      expect(merged.keyboardInputEnabled, isTrue);
+      expect(merged.keyboardAutofocus, isTrue);
+      expect(merged.keyboardButtonMap, policy.keyboardButtonMap);
+      expect(merged.copyWith().keyboardInputEnabled, isTrue);
+      expect(merged.copyWith().keyboardButtonMap, policy.keyboardButtonMap);
+      expect(merged.copyWith().fontFamilyFallback, <String>['LanternSerif']);
+      expect(merged.copyWith(keyboardInputEnabled: false), isNot(merged));
+      expect(
+        merged.copyWith(keyboardButtonMap: const <LogicalKeyboardKey, int>{}),
+        isNot(merged),
+      );
     },
   );
 }

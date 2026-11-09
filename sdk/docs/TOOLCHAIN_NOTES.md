@@ -82,3 +82,29 @@ The native probe command was equivalent to:
 {"op":"frame","deltaMs":16}
 {"op":"quit"}
 ```
+
+
+## Demo Android compatibility with pinned Flutter 3.47.9
+
+The retained parent's `android/gradle/wrapper/gradle-wrapper.properties` and
+`android/settings.gradle.kts` use Gradle 8.12 / AGP 8.9.1 / Kotlin 2.1.0, as did
+the first-layer Demo. The final model-theater Android build exposed a hard
+Flutter dependency validation failure before compilation: Gradle 8.12 is below
+8.14. No runtime or native model failure had occurred at that stage.
+
+The pinned Flutter checkout's
+`packages/flutter_tools/gradle/src/main/kotlin/DependencyVersionChecker.kt`
+sets error thresholds at Gradle 8.14.0, AGP 8.11.1 and Kotlin Gradle Plugin
+2.2.20. Demo now uses those three compatible minimums. This retains its
+existing AGP 8.x DSL and source layout; no dependency-validation bypass,
+second Android host, or parent-project edit is introduced. Existing
+`builtInKotlin=false` / `newDsl=false` migration flags were already present and
+are not part of this repair. The pinned tool still emits future-support
+warnings recommending newer versions; this repair does not claim AGP 9.x
+migration or compatibility with a different Flutter release.
+
+The official generated defaults in the same checkout's
+`lib/src/android/gradle_utils.dart` are newer than these error thresholds;
+copying those defaults would require a separate AGP/DSL migration. Actual
+Android model-theater acceptance and the frozen guest hashes are recorded in
+[Live2D](VISUAL_NOVEL_LIVE2D.md), independently of the older model fixture.

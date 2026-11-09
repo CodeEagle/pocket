@@ -177,6 +177,18 @@ class FakeHost implements HostBridge {
         .filter((item) => item.startsWith(prefix))
         .map((item) => item.slice(prefix.length));
     }
+    if (capability === "system.storage.batch") {
+      const staged = new Map(this.storage);
+      for (const raw of params.operations as JsonValue[]) {
+        const operation = raw as JsonObject;
+        const operationKey = prefix + String(operation.key);
+        if (operation.type === "set") staged.set(operationKey, operation.value ?? null);
+        else staged.delete(operationKey);
+      }
+      this.storage.clear();
+      for (const [storageKey, value] of staged) this.storage.set(storageKey, value);
+      return null;
+    }
     throw new Error(`unexpected storage capability ${capability}`);
   }
 }
@@ -525,6 +537,58 @@ try {
   }));
   assert.equal(valueOf(getShared), "Alex");
 
+  const batchCallCount = host.calls.filter((call) => call.capability === "system.storage.batch").length;
+  const batchResult = await invoke(request(PROFILE, storageProfileInstance, "platform.storage.batch", {
+    namespace: "identity",
+    operations: [
+      { type: "set", key: "name", value: "Grace" },
+      { type: "set", key: "visits", value: 3 },
+    ],
+  }));
+  assert.equal(valueOf(batchResult), null);
+  const lastBatch = [...host.calls].reverse().find((call) => call.capability === "system.storage.batch");
+  assert.deepEqual(lastBatch?.params, {
+    appId: PROFILE,
+    namespace: "identity",
+    operations: [
+      { type: "set", key: "name", value: "Grace" },
+      { type: "set", key: "visits", value: 3 },
+    ],
+  });
+  assert.equal(host.calls.filter((call) => call.capability === "system.storage.batch").length, batchCallCount + 1,
+    "a batch crosses the native boundary as one operation");
+  assert.equal(valueOf(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.get", {
+    key: "name", namespace: "identity",
+  }))), "Grace");
+
+  const storageBeforeInvalidBatch = host.calls.filter((call) => call.capability.startsWith("system.storage.")).length;
+  assert.equal(errorCode(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.batch", {
+    namespace: "identity",
+    operations: [
+      { type: "set", key: "partial", value: true },
+      { type: "set", key: "partial", value: false },
+    ],
+  }))), "duplicate_storage_key");
+  assert.equal(host.calls.filter((call) => call.capability.startsWith("system.storage.")).length, storageBeforeInvalidBatch,
+    "invalid batches must not reach native storage");
+  assert.equal(errorCode(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.batch", {
+    namespace: "identity",
+    operations: [{ type: "move", key: "name" }],
+  }))), "invalid_storage_operation");
+  assert.equal(host.calls.filter((call) => call.capability.startsWith("system.storage.")).length, storageBeforeInvalidBatch,
+    "unknown batch operations must be rejected before native storage");
+  assert.equal(errorCode(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.batch", {
+    namespace: "secret",
+    operations: [{ type: "set", key: "denied", value: 1 }],
+  }))), "shared_namespace_denied");
+  assert.equal(host.calls.filter((call) => call.capability.startsWith("system.storage.")).length, storageBeforeInvalidBatch,
+    "an unauthorized namespace must not reach native storage");
+  assert.equal(errorCode(await invoke(request(PROFILE, storageProfileInstance, "platform.storage.batch", {
+    operations: [{ type: "set", key: "large", value: "x".repeat(66 * 1024) }],
+  }))), "payload_too_large");
+  assert.equal(host.calls.filter((call) => call.capability.startsWith("system.storage.")).length, storageBeforeInvalidBatch,
+    "oversized batch values must be rejected before native storage");
+
   // The direct System storage path still preserves its public error codes and
   // top-level undefined -> null behavior without a JSON intermediate string.
   const invalidStorageValue: Record<string, unknown> = {};
@@ -599,7 +663,7 @@ assert.equal(kernel.snapshot().residents.find((record) => record.appId === PROFI
 const prewarmedStorage = await invoke(request(PROFILE, profilePrewarm, "platform.storage.get", {
   key: "name", namespace: "identity",
 }));
-assert.equal(valueOf(prewarmedStorage), "Alex", "prewarmed hidden apps may perform explicit storage I/O");
+assert.equal(valueOf(prewarmedStorage), "Grace", "prewarmed hidden apps may perform explicit storage I/O after one atomic batch");
 await invoke(request(SYSTEM_UI, "system-ui", "platform.apps.prewarm", { appId: NOTES }));
 assert.equal(host.destroyed.includes(lobbyPrewarm), true, "least recently used unreferenced app is evicted");
 assert.equal(kernel.snapshot().residentCount, 3, "resident limit includes SystemUI");

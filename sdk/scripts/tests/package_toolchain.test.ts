@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { packageToolchain, readBytecodeAbi } from "../package_toolchain.ts";
 
-function fixture(withNoble = true): string {
+function fixture(withNoble = true, withRenderWorker = true): string {
   const root = mkdtempSync(join(tmpdir(), "pocket-toolchain-package-test-"));
   const upstream = join(root, ".cache", "pocketjs");
   mkdirSync(upstream, { recursive: true });
@@ -31,6 +31,7 @@ function fixture(withNoble = true): string {
   mkdirSync(join(root, ".pocket-build", "web-engine"), { recursive: true });
   writeFileSync(join(root, ".pocket-build", "web-engine", "pocketjs.wasm"), "wasm\n");
   writeFileSync(join(root, ".pocket-build", "web-engine", "pocket-web.js"), "export {};\n");
+  if (withRenderWorker) writeFileSync(join(root, ".pocket-build", "web-engine", "pocket-render-worker.js"), "export {};\n");
   if (withNoble) {
     mkdirSync(join(root, "node_modules", "@abandonware", "noble", "build", "Release"), { recursive: true });
     writeFileSync(join(root, "node_modules", "@abandonware", "noble", "build", "Release", "binding.node"), "napi4-binding\n");
@@ -47,10 +48,12 @@ test("packages compiler sources and records payload hashes", () => {
     expect(existsSync(join(output, "compiler/framework/entry.ts"))).toBe(true);
     expect(existsSync(join(output, "engine/pocketjs.wasm"))).toBe(true);
     expect(existsSync(join(output, "web/pocket-web.js"))).toBe(true);
+    expect(existsSync(join(output, "web/pocket-render-worker.js"))).toBe(true);
     expect(existsSync(join(output, "noble/prebuilds", `${process.platform}-${process.arch}`, "node.napi.node"))).toBe(true);
     const manifest = JSON.parse(readFileSync(join(output, "manifest.json"), "utf8"));
     expect(manifest.bytecodeAbi).toBe("quickjs-bytecode-v1:test-abi");
     expect(manifest.webEngine.included).toBe(true);
+    expect(manifest.webEngine.renderWorker).toBe("web/pocket-render-worker.js");
     expect(manifest.noble.included).toBe(true);
     expect(manifest.hci.included).toBe(false);
     const payload = readFileSync(join(output, "bin/pocketjs_bytecode"));
@@ -85,6 +88,20 @@ test("keeps the package usable when optional Noble binding is unavailable", () =
     expect(manifest.noble.included).toBe(false);
     expect(manifest.hci.included).toBe(false);
     expect(existsSync(join(output, "noble"))).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("does not advertise a render Worker when the compiled asset is absent", () => {
+  const root = fixture(true, false);
+  const output = join(root, ".pocket-build", "out");
+  try {
+    packageToolchain({ sdkRoot: root, out: output, force: false, version: "0.1.1" }, { readAbi: () => "quickjs-bytecode-v1:test-abi" });
+    const manifest = JSON.parse(readFileSync(join(output, "manifest.json"), "utf8"));
+    expect(manifest.webEngine.included).toBe(true);
+    expect(manifest.webEngine.renderWorker).toBeUndefined();
+    expect(existsSync(join(output, "web/pocket-render-worker.js"))).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

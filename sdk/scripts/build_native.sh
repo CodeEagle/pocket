@@ -100,6 +100,9 @@ case "${1:-}" in
   macos)
     # Keep target objects aligned with the Flutter/Xcode deployment target
     # without polluting host proc-macros (which breaks libserde_derive on Xcode 27.2).
+    # cc-rs dependencies (QuickJS/ring) also need the deployment fact: Rust
+    # link arguments alone do not lower the minimum recorded in C objects.
+    export MACOSX_DEPLOYMENT_TARGET=12.0
     export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="-C link-arg=-mmacosx-version-min=12.0"
     export CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS="-C link-arg=-mmacosx-version-min=12.0"
     build aarch64-apple-darwin

@@ -1,0 +1,86 @@
+{
+  "source": "Live2D/CubismWebFramework",
+  "tag": "5-r.5",
+  "commit": "198a3769c26ca3d7b600e932590433badd392edd",
+  "physics3": {
+    "Version": 3,
+    "Meta": {
+      "PhysicsSettingCount": 1,
+      "TotalInputCount": 1,
+      "TotalOutputCount": 1,
+      "VertexCount": 2,
+      "Fps": 30,
+      "EffectiveForces": {
+        "Gravity": { "X": 0, "Y": -1 },
+        "Wind": { "X": 0, "Y": 0 }
+      }
+    },
+    "PhysicsSettings": [
+      {
+        "Input": [
+          {
+            "Source": { "Target": "Parameter", "Id": "ParamAngleX" },
+            "Weight": 100,
+            "Type": "X",
+            "Reflect": false
+          }
+        ],
+        "Output": [
+          {
+            "Destination": { "Target": "Parameter", "Id": "ParamHairFront" },
+            "VertexIndex": 1,
+            "Scale": 1.5,
+            "Weight": 100,
+            "Type": "Angle",
+            "Reflect": false
+          }
+        ],
+        "Vertices": [
+          { "Position": { "X": 0, "Y": 0 }, "Mobility": 0, "Delay": 0, "Acceleration": 0, "Radius": 0 },
+          { "Position": { "X": 0, "Y": 10 }, "Mobility": 1, "Delay": 0.5, "Acceleration": 1, "Radius": 10 }
+        ],
+        "Normalization": {
+          "Position": { "Minimum": -30, "Maximum": 30, "Default": 0 },
+          "Angle": { "Minimum": -30, "Maximum": 30, "Default": 0 }
+        }
+      }
+    ]
+  },
+  "parameterMetadata": [
+    { "id": "ParamAngleX", "minimum": -30, "maximum": 30, "defaultValue": 0 },
+    { "id": "ParamHairFront", "minimum": -10, "maximum": 10, "defaultValue": 0 }
+  ],
+  "physicsReferenceFrames": [
+    { "frame": 0, "ParamHairFront": 0 },
+    { "frame": 5, "ParamHairFront": 2.797100782394409 },
+    { "frame": 10, "ParamHairFront": 2.2933847904205322 },
+    { "frame": 15, "ParamHairFront": 1.0011833906173706 },
+    { "frame": 20, "ParamHairFront": -0.42588815093040466 },
+    { "frame": 25, "ParamHairFront": -1.3245229721069336 },
+    { "frame": 30, "ParamHairFront": -1.464186429977417 },
+    { "frame": 35, "ParamHairFront": -0.881584644317627 },
+    { "frame": 40, "ParamHairFront": 0.05478617176413536 },
+    { "frame": 45, "ParamHairFront": 0.7999632954597473 },
+    { "frame": 50, "ParamHairFront": 1.0283504724502563 },
+    { "frame": 55, "ParamHairFront": 0.6983235478401184 }
+  ],
+  "pose3": {
+    "Type": "Live2D Pose",
+    "FadeInTime": 0.5,
+    "Groups": [
+      [
+        { "Id": "PartArmA", "Link": [] },
+        { "Id": "PartArmB", "Link": [] }
+      ]
+    ]
+  },
+  "parts": [
+    { "id": "PartArmA", "defaultOpacity": 1 },
+    { "id": "PartArmB", "defaultOpacity": 1 }
+  ],
+  "poseReferenceFrames": [
+    { "state": "reset", "PartArmA": 1, "PartArmB": 0 },
+    { "state": "half", "PartArmA": 0.7, "PartArmB": 0.5 },
+    { "state": "complete", "PartArmA": 0, "PartArmB": 1 }
+  ]
+}

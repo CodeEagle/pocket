@@ -286,39 +286,51 @@ export function wrapTextLines(
   maxWidthPx = 276,
   fontSlot = 1,
 ): string {
-  if (!text || text.includes("\n")) return text;
-  const nativeWrap = layoutGlobal.ui?.wrapText;
-  if (typeof nativeWrap === "function" && maxWidthPx > 0) {
-    try {
-      const breaks = nativeWrap(text, fontSlot, maxWidthPx);
-      if (Array.isArray(breaks) && breaks.length > 0) {
-        const lines: string[] = [];
-        let start = 0;
-        for (const brk of breaks) {
-          if (typeof brk === "number" && brk > start && brk <= text.length) {
-            lines.push(text.slice(start, brk).trim());
-            start = brk;
+  if (!text) return text;
+  const wrapParagraph = (paragraph: string): string => {
+    if (!paragraph) return paragraph;
+    const nativeWrap = layoutGlobal.ui?.wrapText;
+    if (typeof nativeWrap === "function" && maxWidthPx > 0) {
+      try {
+        const breaks = nativeWrap(paragraph, fontSlot, maxWidthPx);
+        if (Array.isArray(breaks) && breaks.length > 0) {
+          const lines: string[] = [];
+          let start = 0;
+          for (const brk of breaks) {
+            if (
+              typeof brk === "number" &&
+              brk > start &&
+              brk <= paragraph.length
+            ) {
+              lines.push(paragraph.slice(start, brk).trim());
+              start = brk;
+            }
           }
+          const tail = paragraph.slice(start).trim();
+          if (tail) lines.push(tail);
+          if (lines.length > 0) return lines.join("\n");
         }
-        const tail = text.slice(start).trim();
-        if (tail) lines.push(tail);
-        if (lines.length > 0) return lines.join("\n");
+      } catch {
+        // Fall back to character-based word wrapping below.
       }
-    } catch {
-      // Fall back to character-based word wrapping below.
     }
-  }
-  if (text.length <= maxChars) return text;
-  const lines: string[] = [];
-  let remaining = text;
-  while (remaining.length > maxChars) {
-    let cut = remaining.lastIndexOf(" ", maxChars);
-    if (cut < Math.floor(maxChars * 0.4)) cut = maxChars;
-    lines.push(remaining.slice(0, cut).trimEnd());
-    remaining = remaining.slice(cut).trimStart();
-  }
-  if (remaining) lines.push(remaining);
-  return lines.join("\n");
+    const width = Math.max(1, Math.floor(maxChars));
+    if (paragraph.length <= width) return paragraph;
+    const lines: string[] = [];
+    let remaining = paragraph;
+    while (remaining.length > width) {
+      let cut = remaining.lastIndexOf(" ", width);
+      if (cut < Math.floor(width * 0.4)) cut = width;
+      lines.push(remaining.slice(0, cut).trimEnd());
+      remaining = remaining.slice(cut).trimStart();
+    }
+    if (remaining) lines.push(remaining);
+    return lines.join("\n");
+  };
+  // Explicit newlines are authored paragraph/line boundaries, not a reason to
+  // skip measuring. Wrap each segment independently and keep empty segments so
+  // paragraph spacing survives on narrow surfaces.
+  return text.split("\n").map(wrapParagraph).join("\n");
 }
 
 function readNodeExtent(node: { id: number } | undefined, dimension: "width" | "height" = "width"): number | undefined {
@@ -728,8 +740,8 @@ export function MobileAppBar(props: {
       <View
         ref={nodeRef}
         class={dark()
-          ? "flex-row items-center gap-2 w-full h-[56] px-4 bg-[#09090B] border-[#27272A] transition-colors duration-200 ease-out"
-          : "flex-row items-center gap-2 w-full h-[56] px-4 bg-white border-[#E4E4E7] transition-colors duration-200 ease-out"}
+          ? "flex-row items-center gap-2 w-full h-[56] px-4 border-[#27272A] transition-colors duration-200 ease-out"
+          : "flex-row items-center gap-2 w-full h-[56] px-4 border-[#E4E4E7] transition-colors duration-200 ease-out"}
         style={appBarStyle()}
       >
         {centered() ? <View class="flex-row items-center w-[64] shrink-0">{props.leading}</View> : props.leading}
@@ -2273,7 +2285,7 @@ export function GlassSurface(props: {
   const surfaceRadius = createMemo(() => effect === "blur" ? 0 : resolveGlassSurfaceNumber(props.radius, recipe().radius, 0, 10000));
   // Keep the shell transparent when a native surface is registered; the
   // gradient layer below is only the unsupported-host fallback.
-  const payload = createMemo<BridgeObject>(() => {
+  const payload = createMemo<BridgeObject, undefined>(() => {
     const current = recipe();
     const blurOnly = effect === "blur";
     return {
@@ -2325,7 +2337,12 @@ export function GlassSurface(props: {
   onCleanup(() => surfaceGlobal.pocket?.releaseSurface?.(id));
   return (
     <ScrollContourItem
-      nodeRef={(node) => { shellNode = node; props.nodeRef?.(node); }}
+      nodeRef={(node) => {
+        shellNode = node;
+        const ref = props.nodeRef;
+        if (typeof ref === "function") ref(node);
+        else if (ref && "current" in ref) ref.current = node;
+      }}
       class={props.class ?? "flex-col gap-3 p-4 rounded-xl border-[#E5E9F2]"}
       style={props.style}
     >
@@ -2388,7 +2405,7 @@ export function PlatformTextureSurface(props: {
 }): JSX.Element {
   const [registered, setRegistered] = createSignal(false);
   const id = `guest.texture.${nextTextureSurface++}`;
-  const payload = createMemo<BridgeObject>(() => ({
+  const payload = createMemo<BridgeObject, undefined>(() => ({
     textureId: props.textureId,
     sourceWidth: props.sourceWidth,
     sourceHeight: props.sourceHeight,

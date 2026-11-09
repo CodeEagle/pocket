@@ -1,0 +1,21 @@
+name: pocket_audio
+description: Bounded just_audio capability provider for PocketJS.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.2
+  flutter: '>=3.35.0'
+
+dependencies:
+  just_audio: ^0.10.6
+  just_audio_windows: 0.2.3
+  pocket_flutter:
+    path: ../pocket_flutter
+  pocket_services:
+    path: ../pocket_services
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0

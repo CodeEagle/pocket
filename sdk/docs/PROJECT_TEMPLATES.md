@@ -46,6 +46,25 @@ Studio 将选择通过 `POST /api/projects` 的 `template` 字段提交，并将
 
 这条顺序适用于从模板生成的项目以及后续扩展；需要改动交互时，先修正并测试状态逻辑，再调整视觉层。
 
+## 网络与游戏的业务 Worker（AI 开发规则）
+
+- 首次加入官方 `net.http` 网络功能时，AI 自动补齐 `worker.ts`、`pocket.json` 的 `domains.worker`、HTTP node/channels，以及 `runtime.worker` / `net.http` 声明。请求、流式接收和解析走官方 Worker IO，UI 通过 channel 接收进度和结果。
+- 宿主读取构建后的 Worker descriptor 后自动装载业务 Worker；官方 Worker HTTP 还需可信宿主配置精确的 `workerHttpOrigins`。不要生成通配授权、启动即联网或 UI frame loop 内请求。
+- 游戏寻路、AI 决策、地图生成和批量重计算按需要放入业务 Worker；UI、输入、动画、计分及生命周期仍复用现有 JS 状态和 `onFrame`。简单小游戏不创建空转 Worker，不逐帧复制完整世界状态。
+- `renderWorker` 是独立的 Web 渲染开关，默认 `false`；网络和游戏功能不能顺带打开它。是否开启应依据目标游戏的实测。
+- 当前初始模板不自带 `worker.ts`。以上“自动”指 AI 开发功能时负责补齐并验证接入；构建器不会扫描并改写现有 `fetch` 或 `dio.request`。`--dio` 选择的原生 Dio 插件会自动使用独立 IO Worker isolate，保持 `dio.request` 接口；它不是 `domains.worker` 或渲染 Worker 开关。Dio 继续使用 `network` 权限及插件 `allowedOrigins`，纯 Dio 功能无需额外创建 JS Worker。
+- 采用同一 pinned QJBC/descriptor 管线，不新增另一个 JS runtime。验证真实请求/计算、channel 返回值、错误、取消和隐藏/恢复，不能以文件存在代替可用性验证。独立 Worker 执行域不等于所有宿主都使用独立 OS 线程，也不保证 FPS 提升。
+
+### 配置与自动启动的范围
+
+按固定上游 `apps/worker-http/{pocket.json,worker.ts,main.tsx}` 复用契约：`domains.worker.entry` 指向 Worker 源码；`nodes` 声明 `{ "name": "http", "kind": "http" }`；`channels` 显式声明方向、recordBytes 与 capacity。UI 使用 `@pocketjs/framework/worker/channels` 的 `worker.channel()`，Worker 使用 `@pocketjs/framework/io` 的 `io.channel()` / `io.http()`，通过 `@pocketjs/framework/worker` 的 `settle()` 等待完成。不要自造 `fetch` fallback 或消息协议。
+
+AI 需要同时更新 `pocket.json` 的 engine capability、Guest manifest 及 Worker 源码。`buildGuest` 会编译 Worker QJBC 并生成 admission descriptor；现有宿主随后自动装载/attach Worker，不需要用户另找“启用线程”按钮。这个自动启动只对已经正确声明并打包的业务 Worker 成立。
+
+Worker HTTP 不依赖 Dio。Flutter 的可信宿主通过 `PocketAppConfig.workerHttpOrigins` 授权；独立 Web 构建可用 `--worker-http-origin=https://api.example.com`，运行时读取相应配置。Studio 默认新项目及 CLI 生成的 Flutter 宿主不会自动授权业务服务地址；AI 接入网络时必须完成相应宿主配置，不能虚构创建表单已有 origin 开关。具体 API、生命周期和平台限制见 [Web Worker](WEB_WORKER_IMPLEMENTATION.md) 与 [Worker IO](WORKER_IO_IMPLEMENTATION.md)。
+
+App 和 Game 的模板介绍会随 Studio 复制为项目 `README.md`；CLI 也生成同一规则的新项目 README。已有项目不会被创建流程追溯改写，硬件能力仍按需声明和接入。
+
 ## App 模板
 
 来源文件是 [`templates/app/app.tsx`](../templates/app/app.tsx)。它保留原 starter 的可运行移动 App 行为：`MobileThemeProvider`、`MobileScaffold`、`MobileAppBar`、安全区/折叠屏 pane 计算和明暗主题切换。页面和状态都在 JS/TSX，Flutter 只生成薄宿主。

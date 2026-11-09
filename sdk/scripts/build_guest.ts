@@ -1,10 +1,15 @@
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { resolveManagedBun, resolvePrebuiltTools } from "./prebuilt_tools.mjs";
+import { validatePocketProjectFonts } from "./project_fonts.ts";
+import { createNovelEngine } from "../packages/pocket_vn/src/engine.ts";
+import { validateNovelAssetReferences } from "../packages/pocket_vn/src/asset-references.ts";
+import type { StoryDefinition } from "../packages/pocket_vn/src/types.ts";
+import { validateNovelCollections, type NovelCollectionsValidationContext } from "../packages/pocket_vn/src/collections.ts";
 
 const root = resolve(import.meta.dir, "..");
 // Loaded lazily by buildGuest after the pinned cache has been installed.
@@ -135,6 +140,16 @@ function projectEntry(projectRoot: string, requested?: string): string {
   return absolute;
 }
 
+/** Resolve only project-owned primary faces declared by pocket.json. This
+ * keeps editor, scaffold and direct SDK builds on the same pinned compiler
+ * path without adding a parallel BuildGuestOptions override. */
+function projectPrimaryFontArguments(projectRoot: string): string[] {
+  const pocket = readJsonObject(join(projectRoot, "pocket.json"));
+  const fonts = validatePocketProjectFonts(pocket, projectRoot);
+  if (!fonts.ok) throw new Error(`build_guest: ${fonts.issues[0]!.message}`);
+  return [...fonts.compilerArguments];
+}
+
 function runOrThrow(command: string[], cwd: string, log?: (line: string) => void): void {
   const result = spawnSync(command[0], command.slice(1), {
     cwd,
@@ -180,7 +195,9 @@ function copyTree(source: string, target: string): void {
   if (sourceStat.isSymbolicLink()) throw new Error(`build_guest: @pocket/ui contains unsupported symlink: ${source}`);
   if (sourceStat.isDirectory()) {
     mkdirSync(target, { recursive: true });
-    for (const entry of readdirSync(source)) copyTree(join(source, entry), join(target, entry));
+    for (const entry of readdirSync(source)) {
+      if (entry !== "node_modules") copyTree(join(source, entry), join(target, entry));
+    }
     return;
   }
   cpSync(source, target, { force: true });
@@ -196,25 +213,28 @@ function copyTree(source: string, target: string): void {
  * written beside the real entry so image/font manifests keep their normal
  * app-directory lookup semantics.
  */
-function publicUiPackageRoot(projectRoot: string): string | undefined {
-  const candidates = [join(projectRoot, "vendor/pocket-ui")];
+function publicUiPackageRoot(projectRoot: string, packageName = "@pocket/ui"): string | undefined {
+  const slug = packageName.slice("@pocket/".length);
+  if (!["ui", "vn", "spine", "live2d"].includes(slug)) throw new Error(`Unknown SDK guest package: ${packageName}`);
+  const packageDirectory = `pocket_${slug}`;
+  const candidates = [join(projectRoot, "vendor", `pocket-${slug}`)];
   // A file dependency names source, while node_modules can be an older Bun
   // copy. Honor that declared source so a rebuild really includes SDK fixes
   // without replacing a consumer's vendored/custom UI package.
   const projectManifest = join(projectRoot, "package.json");
   if (existsSync(projectManifest)) {
     const manifest = JSON.parse(readFileSync(projectManifest, "utf8"));
-    const dependency = manifest.dependencies?.["@pocket/ui"] ?? manifest.devDependencies?.["@pocket/ui"];
+    const dependency = manifest.dependencies?.[packageName] ?? manifest.devDependencies?.[packageName];
     if (typeof dependency === "string" && dependency.startsWith("file:")) {
       candidates.push(resolve(projectRoot, dependency.slice(5)));
     }
   }
-  const localPackage = join(projectRoot, "node_modules/@pocket/ui");
+  const localPackage = join(projectRoot, "node_modules", packageName);
   // The in-repo demo and external projects may install the UI locally. The
   // SDK package is also an allowed build-time fallback; compiled artifacts do
   // not retain a dependency on this checkout.
   if (projectRoot === root || projectRoot.startsWith(`${root}/`)) {
-    candidates.push(join(root, "node_modules/@pocket/ui"), join(root, "packages/pocket_ui"));
+    candidates.push(join(root, "node_modules", packageName), join(root, "packages", packageDirectory));
   }
   candidates.push(localPackage);
   // Pocket Studio creates projects from the checked-in guest template. Its
@@ -222,7 +242,7 @@ function publicUiPackageRoot(projectRoot: string): string | undefined {
   // the editor is allowed to use this local SDK source at build time. The
   // generated project still contains only the transformed build artifacts.
   if (projectRoot !== root && !projectRoot.startsWith(`${root}/`)) {
-    candidates.push(join(root, "node_modules/@pocket/ui"), join(root, "packages/pocket_ui"));
+    candidates.push(join(root, "node_modules", packageName), join(root, "packages", packageDirectory));
   }
   const candidate = candidates.find((path) => existsSync(join(path, "package.json")));
   // Bun's local file dependency can symlink each package file instead of the
@@ -237,8 +257,8 @@ type UiPreparation = {
   cleanup: () => void;
 };
 
-function acquireUiLock(projectRoot: string): { release: () => void } {
-  const path = join(projectRoot, ".pocket-ui.lock");
+function acquireUiLock(projectRoot: string, packageName = "@pocket/ui"): { release: () => void } {
+  const path = join(projectRoot, `.pocket-${packageName.slice("@pocket/".length)}.lock`);
   const lock = (): void => {
     try {
       writeFileSync(path, `${process.pid}\n`, { flag: "wx" });
@@ -258,7 +278,7 @@ function acquireUiLock(projectRoot: string): { release: () => void } {
           }
         }
       }
-      throw new Error(`build_guest: @pocket/ui preparation is already running for ${projectRoot} (lock owner ${owner})`);
+      throw new Error(`build_guest: ${packageName} preparation is already running for ${projectRoot} (lock owner ${owner})`);
     }
   };
   lock();
@@ -274,6 +294,37 @@ function acquireUiLock(projectRoot: string): { release: () => void } {
   };
 }
 
+/** Plain TS runtime packages retain their own dependency resolution root.
+ * The temporary link is restored after compilation, including custom installs. */
+function prepareRuntimePackage(projectRoot: string, packageName: string): UiPreparation {
+  const sourceRoot = publicUiPackageRoot(projectRoot, packageName);
+  if (!sourceRoot) throw new Error(`build_guest: ${packageName} source is unavailable`);
+  const target = join(projectRoot, "node_modules", packageName);
+  if (existsSync(target) && realpathSync(target) === sourceRoot) return { packageRoot: sourceRoot, cleanup() {} };
+  const lock = acquireUiLock(projectRoot, packageName);
+  const backup = `${target}.pocket-build-backup-${process.pid}`;
+  const hadTarget = (() => { try { lstatSync(target); return true; } catch { return false; } })();
+  let moved = false;
+  let linked = false;
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      if (linked) rmSync(target, { force: true, recursive: true });
+      if (moved) renameSync(backup, target);
+    } finally { lock.release(); }
+  };
+  try {
+    mkdirSync(dirname(target), { recursive: true });
+    if (existsSync(backup)) throw new Error(`build_guest: preserved package backup already exists: ${backup}`);
+    if (hadTarget) { renameSync(target, backup); moved = true; }
+    symlinkSync(sourceRoot, target, process.platform === "win32" ? "junction" : "dir");
+    linked = true;
+    return { packageRoot: sourceRoot, cleanup };
+  } catch (error) { cleanup(); throw error; }
+}
+
 /**
  * Materialize the public SDK UI package at the project-local package boundary.
  *
@@ -282,16 +333,17 @@ function acquireUiLock(projectRoot: string): { release: () => void } {
  * repository build all use exactly the same JSX transform and package copy;
  * none of them need a second compiler or a source-evaluation fallback.
  */
-async function prepareUiPackage(projectRoot: string, entry: string, log?: (line: string) => void): Promise<UiPreparation> {
-  const source = publicUiPackageRoot(projectRoot);
+async function prepareUiPackage(projectRoot: string, entry: string, log?: (line: string) => void, packageName = "@pocket/ui"): Promise<UiPreparation> {
+  const source = publicUiPackageRoot(projectRoot, packageName);
   if (!source) {
+    if (packageName !== "@pocket/ui") throw new Error(`build_guest: declared ${packageName} source was not found`);
     if (usesPublicUi(entry)) throw new Error("build_guest: app imports @pocket/ui but no vendored package source was found");
     return { cleanup: () => {} };
   }
-  const targetRoot = join(projectRoot, "node_modules/@pocket/ui");
+  const targetRoot = join(projectRoot, "node_modules", packageName);
   const sourceRoot = realpathSync(source);
   const targetParent = dirname(targetRoot);
-  const lock = acquireUiLock(projectRoot);
+  const lock = acquireUiLock(projectRoot, packageName);
   // Keep the backup beside the consumer project: /tmp is a separate APFS
   // volume in the development environment, so cross-device rename would
   // otherwise fail for an existing node_modules package.
@@ -336,8 +388,8 @@ async function prepareUiPackage(projectRoot: string, entry: string, log?: (line:
     await transform(copySource);
     const packageJson = join(targetRoot, "package.json");
     const manifest = JSON.parse(readFileSync(packageJson, "utf8")) as Record<string, unknown>;
-    writeFileSync(packageJson, `${JSON.stringify({ ...manifest, name: "@pocket/ui", type: "module", main: "./src/index.ts" }, null, 2)}\n`);
-    log?.(`build_guest: prepared @pocket/ui from ${sourceRoot}`);
+    writeFileSync(packageJson, `${JSON.stringify({ ...manifest, name: packageName, type: "module", main: "./src/index.ts" }, null, 2)}\n`);
+    log?.(`build_guest: prepared ${packageName} from ${sourceRoot}`);
   } catch (error) {
     // Restore a package manager symlink/directory before surfacing the build
     // error; an interrupted compiler must not corrupt the consumer project.
@@ -397,7 +449,7 @@ interface CompilerEntry {
   cleanup: () => void;
 }
 
-function prepareCompilerEntry(projectRoot: string, entry: string, preparedPackageRoot?: string, log?: (line: string) => void): CompilerEntry {
+function prepareCompilerEntry(projectRoot: string, entry: string, preparedPackageRoot?: string, log?: (line: string) => void, additionalRoots: string[] = [], imageLiterals: string[] = [], modelSources: Record<string, unknown> = {}): CompilerEntry {
   const packageRoot = preparedPackageRoot ?? publicUiPackageRoot(projectRoot);
   if (!packageRoot) {
     if (!usesPublicUi(entry)) return { path: entry, cleanup: () => {} };
@@ -417,16 +469,234 @@ function prepareCompilerEntry(projectRoot: string, entry: string, preparedPackag
   const marker = mkdtempSync(join(dirname(entry), "pocket-ui-entry-"));
   rmSync(marker, { recursive: true, force: true });
   const wrapper = `${marker}.tsx`;
+  const modelModule = Object.keys(modelSources).length ? `${marker}.models.ts` : undefined;
+  // Model-relative texture names are lookup keys, not consumer PAK paths.
+  // Keep the exact JSON as data so the pinned literal collector admits only
+  // the resolved images explicitly preloaded above, without placeholder pages.
+  if (modelModule) writeFileSync(modelModule, `globalThis.__pocketNovelModelSources = JSON.parse(${JSON.stringify(JSON.stringify(modelSources))});\n`);
   writeFileSync(
     wrapper,
-    `import ${JSON.stringify(moduleSpecifier(dirname(wrapper), packageEntry))};\n` +
+    `void ${JSON.stringify(imageLiterals)};\n` +
+    [packageEntry, ...additionalRoots, ...(modelModule ? [modelModule] : [])].map((path) => `import ${JSON.stringify(moduleSpecifier(dirname(wrapper), path))};\n`).join("") +
       `import ${JSON.stringify(moduleSpecifier(dirname(wrapper), entry))};\n`,
   );
   report(`build_guest: pass-1 preload=${packageEntry}`, log);
   return {
     path: wrapper,
-    cleanup: () => rmSync(wrapper, { force: true }),
+    cleanup: () => { rmSync(wrapper, { force: true }); if (modelModule) rmSync(modelModule, { force: true }); },
   };
+}
+
+/** Compile canonical model files into one temporary guest module. No model
+ * parser runs at build time; official runtimes still load the exported data. */
+function novelModelSources(projectRoot: string): Record<string, unknown> {
+  const registry = readJsonObject(join(projectRoot, "novel.assets.json"));
+  const models = registry?.models;
+  if (models === undefined) return {};
+  if (!models || typeof models !== "object" || Array.isArray(models)) throw new Error("build_guest: invalid model registry");
+  const read = (name: unknown, maxBytes: number): Buffer => {
+    if (typeof name !== "string" || !/^[\w./-]+$/.test(name) || name.split("/").some(part => !part || part === "." || part === "..") || isAbsolute(name)) throw new Error(`build_guest: unsafe model source ${String(name)}`);
+    const path = resolve(projectRoot, name);
+    if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error(`build_guest: missing model file ${name}`);
+    const confined = relative(realpathSync(projectRoot), realpathSync(path));
+    if (confined.startsWith("..") || isAbsolute(confined)) throw new Error(`build_guest: model source escapes project ${name}`);
+    if (lstatSync(path).size > maxBytes) throw new Error(`build_guest: model source exceeds byte budget ${name}`);
+    return readFileSync(path);
+  };
+  const sources: Record<string, unknown> = {};
+  let total = 0;
+  for (const raw of Object.values(models)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("build_guest: invalid model definition");
+    const model = raw as Record<string, unknown>;
+    if (model.kind === "live2d") {
+      const source = String(model.source);
+      if (!source.toLowerCase().endsWith(".model3.json")) throw new Error(`build_guest: Live2D source must be model3.json: ${source}`);
+      const document = JSON.parse(read(model.source, 2 * 1024 * 1024).toString("utf8"));
+      if (document?.Version !== 3 || !document.FileReferences || typeof document.FileReferences !== "object") throw new Error(`build_guest: invalid Live2D model3 ${source}`);
+      const references = document.FileReferences;
+      const resolveReference = (name: unknown): string => {
+        if (typeof name !== "string" || !/^[\w./-]+$/.test(name) || name.split("/").some(part => !part || part === "." || part === "..") || isAbsolute(name)) throw new Error(`build_guest: unsafe Live2D reference ${String(name)}`);
+        return join(dirname(source), name).replace(/\\/g, "/");
+      };
+      // MOC3 remains an exact allowlisted native asset; JSON motion/expression
+      // policy is executed in JS. Validate the binary before producing QJBC.
+      const moc = resolveReference(references.Moc);
+      if (!moc.toLowerCase().endsWith(".moc3")) throw new Error(`build_guest: Live2D Moc reference must be .moc3: ${moc}`);
+      read(moc, 32 * 1024 * 1024);
+      if (!Array.isArray(references.Textures) || !references.Textures.length || references.Textures.length > 16) throw new Error(`build_guest: Live2D requires 1–16 texture pages: ${source}`);
+      references.Textures.forEach(resolveReference);
+      const motions: Record<string, unknown> = {};
+      const expressions: Record<string, unknown> = {};
+      const json = (name: unknown): unknown => {
+        const bytes = read(resolveReference(name), 2 * 1024 * 1024);
+        total += bytes.length;
+        return JSON.parse(bytes.toString("utf8"));
+      };
+      if (references.Motions !== undefined && (!references.Motions || typeof references.Motions !== "object" || Array.isArray(references.Motions))) throw new Error(`build_guest: invalid Live2D motions ${source}`);
+      for (const [group, entries] of Object.entries(references.Motions ?? {})) {
+        if (!Array.isArray(entries)) throw new Error(`build_guest: invalid Live2D motion group ${group}`);
+        entries.forEach((entry, index) => { motions[`${group}:${index}`] = json(entry?.File); });
+      }
+      if (references.Expressions !== undefined && !Array.isArray(references.Expressions)) throw new Error(`build_guest: invalid Live2D expressions ${source}`);
+      for (const entry of references.Expressions ?? []) {
+        if (typeof entry?.Name !== "string" || !entry.Name || Object.hasOwn(expressions, entry.Name)) throw new Error(`build_guest: invalid/duplicate Live2D expression ${source}`);
+        expressions[entry.Name] = json(entry.File);
+      }
+      total += Buffer.byteLength(JSON.stringify(document));
+      if (total > 32 * 1024 * 1024) throw new Error("build_guest: bundled model data exceeds 32 MiB");
+      const physics = references.Physics === undefined ? undefined : json(references.Physics);
+      const pose = references.Pose === undefined ? undefined : json(references.Pose);
+      if (total > 32 * 1024 * 1024) throw new Error("build_guest: bundled model data exceeds 32 MiB");
+      sources[source] = { kind: "live2d", document, motions, expressions,
+        ...(physics === undefined ? {} : { physics }), ...(pose === undefined ? {} : { pose }) };
+      continue;
+    }
+    if (model.kind !== "spine") throw new Error(`build_guest: unsupported model kind ${String(model.kind)}`);
+    const bytes = read(model.source, 16 * 1024 * 1024);
+    const atlasText = read(model.atlas, 2 * 1024 * 1024).toString("utf8");
+    total += bytes.length + atlasText.length;
+    if (total > 32 * 1024 * 1024) throw new Error("build_guest: bundled model data exceeds 32 MiB");
+    const source = String(model.source);
+    const skeleton = source.toLowerCase().endsWith(".json")
+      ? { format: "json", data: JSON.parse(bytes.toString("utf8")) }
+      : source.toLowerCase().endsWith(".skel") ? { format: "binary", data: [...bytes] } : undefined;
+    if (!skeleton) throw new Error(`build_guest: unsupported Spine source format ${source}`);
+    const next = { kind: "spine", skeleton, atlasText };
+    if (sources[source] && JSON.stringify(sources[source]) !== JSON.stringify(next)) throw new Error(`build_guest: conflicting atlases for Spine source ${source}`);
+    sources[source] = next;
+  }
+  return sources;
+}
+
+/** Only validated native model binaries travel outside the image PAK. */
+function copyNovelNativeModels(projectRoot: string, destination: string, sources: Record<string, unknown>): void {
+  const assets: Record<string, string> = Object.create(null);
+  const originals = new Map<string, string>();
+  const previous = readJsonObject(join(destination, "novel.native-assets.json"));
+  // One known Flutter asset directory handles nested user model sources.
+  // Flutter's asset-directory declarations are not recursive.
+  mkdirSync(join(destination, "native-models"), { recursive: true });
+  for (const [source, raw] of Object.entries(sources)) {
+    const model = raw as { kind: string; document?: { FileReferences?: { Moc?: string } } };
+    if (model.kind !== "live2d") continue;
+    // Both source and reference were confined and byte-checked above. Keep
+    // the ordinary assets/ prefix stripping used by copyProjectAssets.
+    const relativePath = join(dirname(source), model.document!.FileReferences!.Moc!).replace(/\\/g, "/");
+    const key = relativePath.replace(/^assets\//, "");
+    const original = join(projectRoot, relativePath);
+    if (originals.has(key) && originals.get(key) !== original) throw new Error(`build_guest: conflicting native model asset ${key}`);
+    originals.set(key, original);
+    const bytes = readFileSync(original);
+    const bundlePath = `native-models/${createHash("sha256").update(bytes).digest("hex")}.moc3`;
+    const target = join(destination, bundlePath);
+    assets[key] = bundlePath;
+    if (resolve(original) === resolve(target)) continue;
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, bytes);
+  }
+  const retained = new Set(Object.values(assets));
+  if (previous?.version === 1 && previous.assets && typeof previous.assets === "object") {
+    for (const path of Object.values(previous.assets)) {
+      if (typeof path === "string" && /^native-models\/[a-f0-9]{64}\.moc3$/.test(path) && !retained.has(path)) rmSync(join(destination, path), { force: true });
+    }
+  }
+  writeFileSync(join(destination, "novel.native-assets.json"), `${JSON.stringify({ version: 1, assets }, null, 2)}\n`);
+}
+
+/** JSON is the editor's asset source; the unchanged baker still owns encoding. */
+function novelImageLiterals(projectRoot: string): string[] {
+  const registry = readJsonObject(join(projectRoot, "novel.assets.json"));
+  if (!registry) return [];
+  const literals = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (typeof value === "string" && /\.(png|svg)$/i.test(value)) {
+      if (!/^[\w./-]+$/.test(value) || value.split("/").includes("..") || isAbsolute(value)) throw new Error(`build_guest: unsafe VN image path ${value}`);
+      const path = resolve(projectRoot, value);
+      if (!existsSync(path) || !lstatSync(path).isFile()) throw new Error(`build_guest: missing VN image ${value}`);
+      const resolved = relative(realpathSync(projectRoot), realpathSync(path));
+      if (resolved.startsWith("..") || isAbsolute(resolved)) throw new Error(`build_guest: VN image escapes project ${value}`);
+      literals.add(value);
+    } else if (Array.isArray(value)) value.forEach(visit);
+    else if (value && typeof value === "object") Object.values(value).forEach(visit);
+  };
+  // Catalog text is prose, even when it ends in .png. Portraits are stable
+  // character/expression references; their images are already in characters.
+  for (const [key, value] of Object.entries(registry)) if (key !== "collections") visit(value);
+  return [...literals].sort();
+}
+
+function validateNovelProjectState(projectRoot: string): void {
+  const story = readJsonObject(join(projectRoot, "story.json"));
+  if (!story) return;
+  const script = story.script;
+  const hasTrade = script && typeof script === "object" && !Array.isArray(script) && Object.values(script).some(instructions =>
+    Array.isArray(instructions) && instructions.some(instruction => instruction && typeof instruction === "object" && instruction.type === "trade"));
+  const hasObjects = script && typeof script === "object" && !Array.isArray(script) && Object.values(script).some(instructions =>
+    Array.isArray(instructions) && instructions.some(instruction => instruction && typeof instruction === "object" && instruction.type === "scene" && Object.hasOwn(instruction, "objects")));
+  const hasRich = script && typeof script === "object" && !Array.isArray(script) && Object.values(script).some(instructions =>
+    Array.isArray(instructions) && instructions.some(instruction => instruction && typeof instruction === "object" && instruction.type === "say" && Object.hasOwn(instruction, "rich")));
+  const project = readJsonObject(join(projectRoot, "package.json"));
+  const dependencies = project?.dependencies && typeof project.dependencies === "object" && !Array.isArray(project.dependencies)
+    ? project.dependencies as Record<string, unknown>
+    : {};
+  const devDependencies = project?.devDependencies && typeof project.devDependencies === "object" && !Array.isArray(project.devDependencies)
+    ? project.devDependencies as Record<string, unknown>
+    : {};
+  const usesNovelPackage = dependencies["@pocket/vn"] !== undefined || devDependencies["@pocket/vn"] !== undefined;
+  if (!usesNovelPackage && story.inventory === undefined && !hasTrade && !hasObjects && !hasRich) return;
+  // Use the runtime's authoritative StoryDefinition validator. VN consumers
+  // validate all story/resource references through the same pure registry
+  // helper used by the Editor; non-VN projects retain their previous narrow
+  // checks for newer schema features.
+  try { createNovelEngine(story as unknown as StoryDefinition).dispose(); }
+  catch (error) { throw new Error(`build_guest: invalid inventory/story: ${error instanceof Error ? error.message : String(error)}`); }
+  if (usesNovelPackage) {
+    const registry = readJsonObject(join(projectRoot, "novel.assets.json"));
+    const errors = validateNovelAssetReferences(story as unknown as StoryDefinition, registry);
+    if (errors.length) {
+      const describe = (diagnostic: typeof errors[number]): string => {
+        const location = diagnostic.location;
+        const path = location?.label !== undefined && location.index !== undefined
+          ? `script.${location.label}[${location.index}]${location.field ? `.${location.field}` : ""}`
+          : location?.field ?? "novel.assets.json";
+        return `${path}: ${diagnostic.message}`;
+      };
+      throw new Error(`build_guest: invalid VN asset references\n${errors.slice(0, 50).map(describe).join("\n")}`);
+    }
+    return;
+  }
+  if (hasObjects) {
+    const assets = readJsonObject(join(projectRoot, "novel.assets.json"));
+    const backgrounds = assets?.backgrounds;
+    for (const [label, instructions] of Object.entries((story as unknown as StoryDefinition).script)) {
+      instructions.forEach((instruction, index) => {
+        if (instruction.type !== "scene") return;
+        instruction.objects?.forEach((object, objectIndex) => {
+          if (!backgrounds || typeof backgrounds !== "object" || Array.isArray(backgrounds)
+            || !Object.hasOwn(backgrounds, object.image) || typeof backgrounds[object.image] !== "string" || !backgrounds[object.image].trim()) {
+            throw new Error(`build_guest: script.${label}[${index}].objects[${objectIndex}].image references unknown background '${object.image}'`);
+          }
+        });
+      });
+    }
+  }
+}
+
+function validateNovelProjectCollections(projectRoot: string): void {
+  const assets = readJsonObject(join(projectRoot, "novel.assets.json"));
+  if (assets?.collections === undefined) return;
+  const story = readJsonObject(join(projectRoot, "story.json"));
+  if (!story) throw new Error("build_guest: collections require the canonical story.json for unlock validation");
+  const characters = assets.characters;
+  if (!characters || typeof characters !== "object" || Array.isArray(characters) ||
+      Object.values(characters).some(expressions => !expressions || typeof expressions !== "object" || Array.isArray(expressions) || Object.values(expressions).some(image => typeof image !== "string"))) {
+    throw new Error("build_guest: collections require a character-to-expression image registry");
+  }
+  const issues = validateNovelCollections(assets.collections, {
+    story: story as NovelCollectionsValidationContext["story"],
+    characters: characters as NovelCollectionsValidationContext["characters"],
+  });
+  if (issues.length) throw new Error(`build_guest: invalid collections\n${issues.slice(0, 20).map(issue => `${issue.path}: ${issue.message}`).join("\n")}`);
 }
 
 export function parseBuildGuestArgs(args: string[]): BuildGuestOptions {
@@ -449,7 +719,7 @@ export function parseBuildGuestArgs(args: string[]): BuildGuestOptions {
  * baker. Video and other binary assets must stay byte-for-byte files so
  * Flutter's rootBundle and an OTA PocketPackageSource can open them directly.
  */
-function copyProjectAssets(projectRoot: string, destinationRoot: string): void {
+function copyProjectAssets(projectRoot: string, destinationRoot: string, excludedFiles: ReadonlySet<string> = new Set()): void {
   const sourceRoot = resolve(projectRoot, "assets");
   if (!existsSync(sourceRoot)) return;
   const sourceStat = lstatSync(sourceRoot);
@@ -478,6 +748,7 @@ function copyProjectAssets(projectRoot: string, destinationRoot: string): void {
         mkdirSync(targetPath, { recursive: true });
         copyTree(sourcePath);
       } else if (entry.isFile()) {
+        if (excludedFiles.has(resolve(sourcePath))) continue;
         mkdirSync(dirname(targetPath), { recursive: true });
         copyFileSync(sourcePath, targetPath);
       } else {
@@ -497,6 +768,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     throw new Error("build_guest: projectRoot is required for the SDK; use pocket.ts build <project>");
   }
   const projectRoot = resolve(options.projectRoot ?? defaultProject!);
+  validateNovelProjectCollections(projectRoot);
+  validateNovelProjectState(projectRoot);
+  // Validate the manifest before loading or invoking any compiler/toolchain.
+  const primaryFontArguments = projectPrimaryFontArguments(projectRoot);
   const sourceBuild = process.env.POCKET_SOURCE_BUILD === "1";
   const upstream = sourceBuild ? join(root, ".cache/pocketjs") : resolvePrebuiltTools(root).compiler;
   const bun = sourceBuild ? "bun" : resolveManagedBun(root);
@@ -541,11 +816,34 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     const entry = projectEntry(projectRoot, options.entry);
     const preparedUi = await prepareUiPackage(projectRoot, entry, options.log);
     uiCleanup = preparedUi.cleanup;
-    const compilerEntry = prepareCompilerEntry(projectRoot, entry, preparedUi.packageRoot, options.log);
+    // SDK guest packages use the same pinned JSX lowering and pass-1 asset
+    // collector as @pocket/ui. Only prepare VN for consumers declaring it;
+    // ordinary guests retain their previous package graph and glyph budget.
+    const projectPackage = readJsonObject(join(projectRoot, "package.json"));
+    const dependencies = projectPackage?.dependencies as Record<string, unknown> | undefined;
+    const devDependencies = projectPackage?.devDependencies as Record<string, unknown> | undefined;
+    const usesVn = dependencies?.["@pocket/vn"] !== undefined || devDependencies?.["@pocket/vn"] !== undefined;
+    const bundledModels = usesVn ? novelModelSources(projectRoot) : {};
+    for (const name of ["@pocket/spine", "@pocket/live2d"]) {
+      const kind = name.slice("@pocket/".length);
+      if (dependencies?.[name] === undefined && devDependencies?.[name] === undefined && !Object.values(bundledModels).some(model => (model as { kind?: string }).kind === kind)) continue;
+      const runtimePackage = prepareRuntimePackage(projectRoot, name);
+      const previousCleanup = uiCleanup;
+      uiCleanup = () => { runtimePackage.cleanup(); previousCleanup(); };
+    }
+    const preparedVn = usesVn ? await prepareUiPackage(projectRoot, entry, options.log, "@pocket/vn") : undefined;
+    if (preparedVn) {
+      const cleanupUi = uiCleanup;
+      uiCleanup = () => { preparedVn.cleanup(); cleanupUi(); };
+    }
+    const vnEntries = preparedVn?.packageRoot
+      ? [join(preparedVn.packageRoot, "src/index.ts"), join(preparedVn.packageRoot, "src/view.tsx")].filter(existsSync)
+      : [];
+    const compilerEntry = prepareCompilerEntry(projectRoot, entry, preparedUi.packageRoot, options.log, vnEntries, usesVn ? novelImageLiterals(projectRoot) : [], bundledModels);
     compilerEntryCleanup = compilerEntry.cleanup;
     report(`build_guest: compiler=${compiler}`, options.log);
     report(`build_guest: source=${entry}`, options.log);
-    runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes"], root, options.log);
+    runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes", ...primaryFontArguments], root, options.log);
 
     const compilerBase = compilerEntry.path.replace(/^.*[\\/]/, "").replace(/\.(?:tsx?|vue)$/, "");
     const compilerSource = join(output, `${compilerBase}.js`);
@@ -679,6 +977,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       writeFileSync(generatedManifest, `${JSON.stringify(outputManifest, null, 2)}\n`);
     }
     const assets = options.copyAssetsTo ? resolve(options.copyAssetsTo) : undefined;
+    if (usesVn) copyNovelNativeModels(projectRoot, output, bundledModels);
     if (assets) {
       mkdirSync(assets, { recursive: true });
       copyFileSync(bytecode, join(assets, "app.qjbc"));
@@ -693,11 +992,16 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       // Keep ordinary project resources beside the runtime artifacts. This
       // destination is also the Flutter asset root for built-in consumers;
       // binary media stays a loose file and never enters the image PAK.
-      copyProjectAssets(projectRoot, assets);
+      const mocSources = new Set(Object.entries(bundledModels).flatMap(([source, raw]) => {
+        const model = raw as { kind: string; document?: { FileReferences?: { Moc?: string } } };
+        return model.kind === "live2d" ? [resolve(projectRoot, dirname(source), model.document!.FileReferences!.Moc!)] : [];
+      }));
+      copyProjectAssets(projectRoot, assets, mocSources);
+      if (usesVn) copyNovelNativeModels(projectRoot, assets, bundledModels);
     }
     if (options.keepSource) {
       mkdirSync(resolve(options.keepSource, ".."), { recursive: true });
-      copyFileSync(source, resolve(options.keepSource));
+      if (resolve(source) !== resolve(options.keepSource)) copyFileSync(source, resolve(options.keepSource));
     }
     return { projectRoot, outDir: output, entry, source, pak, bytecode, metadata, manifest: join(projectRoot, "manifest.json"), ...(worker ? { worker } : {}), tickHz };
   } finally {

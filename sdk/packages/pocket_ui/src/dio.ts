@@ -20,6 +20,8 @@ export type PocketDioResponse<T extends JsonValue = JsonValue> = {
 };
 
 /** Uses the caller's existing bridge and the opt-in pocket_dio provider.
+ * The native provider performs HTTP, bounded stream reading and decoding
+ * in its dedicated IO Worker isolate; this is independent of renderWorker.
  * HTTP error statuses are returned as responses; transport, policy and
  * lifecycle failures reject. Retries and application state belong to JS.
  */

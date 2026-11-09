@@ -43,6 +43,7 @@ final class PocketPlatformData {
   static const String _storeFileName = 'pocket_platform_data.json';
   static const String _temporarySuffix = '.tmp';
   static const int _maxIdentifierBytes = 256;
+  static const int maxBatchOperations = 256;
 
   final Directory _directory;
   final int maxValueBytes;
@@ -197,6 +198,129 @@ final class PocketPlatformData {
     });
   }
 
+  /// Applies a unique-key set/remove batch to one private app bucket or one
+  /// explicitly granted shared namespace. The entire final bucket is checked
+  /// and persisted once before its in-memory bucket is replaced.
+  Future<void> batch(
+    String appId,
+    List<Object?> operations, {
+    String? namespace,
+  }) {
+    if (_closed || _closingRequested) return Future<void>.error(_closedError);
+    return _enqueue<void>(() async {
+      _ensureReady();
+      _validateAppId(appId);
+      final registration = _requireRegistered(appId);
+      final Map<String, Object?>? existingBucket;
+      if (namespace == null) {
+        existingBucket = _privateValues[appId];
+      } else {
+        _validateNamespace(namespace);
+        if (!registration.sharedNamespaces.contains(namespace)) {
+          throw const PocketCapabilityException(
+            'shared_namespace_denied',
+            'App is not allowed to access this shared namespace',
+          );
+        }
+        existingBucket = _sharedValues[namespace];
+      }
+
+      if (operations.length > maxBatchOperations) {
+        throw PocketCapabilityException(
+          'too_many_storage_operations',
+          'Storage batches are limited to $maxBatchOperations operations',
+        );
+      }
+      if (operations.isEmpty) return;
+
+      final staged = Map<String, Object?>.from(existingBucket ?? const {});
+      final seenKeys = <String>{};
+      var changed = false;
+      for (var index = 0; index < operations.length; index++) {
+        final raw = operations[index];
+        if (raw is! Map) {
+          throw PocketCapabilityException(
+            'invalid_storage_operation',
+            'Storage batch operation $index must be an object',
+          );
+        }
+        for (final key in raw.keys) {
+          if (key is! String) {
+            throw PocketCapabilityException(
+              'invalid_storage_operation',
+              'Storage batch operation $index contains a non-string field',
+            );
+          }
+        }
+        final type = raw['type'];
+        final key = raw['key'];
+        if ((type != 'set' && type != 'remove') || key is! String) {
+          throw PocketCapabilityException(
+            'invalid_storage_operation',
+            'Storage batch operation $index requires a set/remove type and string key',
+          );
+        }
+        final expectedKeys = type == 'set'
+            ? const <String>{'type', 'key', 'value'}
+            : const <String>{'type', 'key'};
+        if (raw.length != expectedKeys.length ||
+            raw.keys.any((field) => !expectedKeys.contains(field)) ||
+            type == 'set' && !raw.containsKey('value')) {
+          throw PocketCapabilityException(
+            'invalid_storage_operation',
+            'Storage batch operation $index has an invalid shape',
+          );
+        }
+        _validateKey(key);
+        if (!seenKeys.add(key)) {
+          throw PocketCapabilityException(
+            'duplicate_storage_key',
+            'Storage batch contains duplicate key "$key"',
+          );
+        }
+
+        if (type == 'set') {
+          final snapshot = _snapshotJson(raw['value']);
+          final valueBytes = _jsonBytes(snapshot);
+          if (valueBytes > maxValueBytes) {
+            throw PocketCapabilityException(
+              'value_too_large',
+              'Value for "$key" is $valueBytes bytes; limit is $maxValueBytes',
+            );
+          }
+          staged[key] = snapshot;
+          changed = true;
+        } else if (staged.containsKey(key)) {
+          staged.remove(key);
+          changed = true;
+        }
+      }
+      if (!changed) return;
+
+      final newUsage = _bucketBytes(staged);
+      if (newUsage > maxAppBytes) {
+        throw PocketCapabilityException(
+          'quota_exceeded',
+          'Storage quota exceeded for ${_scopeDescription(appId, namespace)}',
+        );
+      }
+
+      final nextPrivate = Map<String, Map<String, Object?>>.of(_privateValues);
+      final nextShared = Map<String, Map<String, Object?>>.of(_sharedValues);
+      if (namespace == null) {
+        nextPrivate[appId] = staged;
+      } else {
+        nextShared[namespace] = staged;
+      }
+      await _persistSnapshot(nextPrivate, nextShared);
+      if (namespace == null) {
+        _privateValues[appId] = staged;
+      } else {
+        _sharedValues[namespace] = staged;
+      }
+    });
+  }
+
   /// Lists keys visible to [appId] in sorted order.
   Future<List<String>> keys(String appId, {String? namespace}) {
     if (_closed || _closingRequested) {
@@ -334,10 +458,17 @@ final class PocketPlatformData {
   }
 
   Future<void> _persist() async {
+    await _persistSnapshot(_privateValues, _sharedValues);
+  }
+
+  Future<void> _persistSnapshot(
+    Map<String, Map<String, Object?>> privateValues,
+    Map<String, Map<String, Object?>> sharedValues,
+  ) async {
     final encoded = jsonEncode(<String, Object?>{
       'version': _formatVersion,
-      'private': _privateValues,
-      'shared': _sharedValues,
+      'private': privateValues,
+      'shared': sharedValues,
     });
     final file = _storeFile;
     final temporary = File('${file.path}$_temporarySuffix');

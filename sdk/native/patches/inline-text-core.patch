@@ -1,0 +1,1501 @@
+diff --git a/contracts/spec/spec.ts b/contracts/spec/spec.ts
+--- a/contracts/spec/spec.ts
++++ b/contracts/spec/spec.ts
+@@ -312,6 +312,12 @@
+   setMesh: 62,
+   // Blend/tint/mask metadata for a retained image mesh, MFX1 payload.
+   setMeshEffect: 63,
++  // Full-source inline ranges on one Core text leaf; RIT1 run table.
++  setInlineText: 64,
++  // Paint-only reveal cursor in Unicode scalar units.
++  setInlineReveal: 65,
++  // Synchronous Core layout and revealed-link boxes for one inline leaf.
++  getInlineTextLayout: 66,
+ } as const;
+ 
+ // ---------------------------------------------------------------------------
+
+diff --git a/contracts/spec/ui-ops.ts b/contracts/spec/ui-ops.ts
+--- a/contracts/spec/ui-ops.ts
++++ b/contracts/spec/ui-ops.ts
+@@ -90,6 +90,9 @@
+     [arg("id", "i32"), arg("propId", "u32"), arg("value", "real")],
+     "none", "ui.set_prop(a0, a1 as u8, a2)"),
+   core("setText", [arg("id", "i32"), arg("str", "string")], "none", "ui.set_text(a0, a1)"),
++  core("setInlineText", [arg("id", "i32"), arg("source", "string"), arg("records", "bytes")], "none", "ui.set_inline_text(a0, a1, a2)"),
++  core("setInlineReveal", [arg("id", "i32"), arg("codepoints", "nonnegative")], "none", "ui.set_inline_reveal(a0, a1)"),
++  core("getInlineTextLayout", [arg("id", "i32")], "u32Array", "ui.get_inline_text_layout(a0)"),
+   core("replaceText", [arg("id", "i32"), arg("str", "string")], "none", "ui.replace_text(a0, a1)"),
+   core("uploadTexture",
+     [arg("buf", "bytes"), arg("w", "u32"), arg("h", "u32"), arg("psm", "u32")],
+
+diff --git a/engine/core/src/tree.rs b/engine/core/src/tree.rs
+--- a/engine/core/src/tree.rs
++++ b/engine/core/src/tree.rs
+@@ -46,6 +46,67 @@
+     pub y: f32,
+     pub w: f32,
+     pub h: f32,
++}
++
++/// One source range in an InlineText paragraph. Ranges use Unicode scalar
++/// offsets (not UTF-16 code units or UTF-8 bytes) and are half-open.
++#[derive(Clone, Debug, PartialEq)]
++pub struct InlineRun {
++    pub start: u32,
++    pub end: u32,
++    pub font_slot: Option<u8>,
++    pub color: Option<u32>,
++    /// 0 means no link; positive ids are opaque guest-local link indexes.
++    pub link_id: u32,
++    pub ruby: Option<InlineRuby>,
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct InlineRuby {
++    pub text: String,
++    pub font_slot: Option<u8>,
++    pub color: Option<u32>,
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct InlineTextSpec {
++    pub runs: Vec<InlineRun>,
++    pub reveal_codepoints: u32,
++}
++
++/// A Core-computed visual fragment. The same fragments drive Taffy size,
++/// DrawList output and `getInlineTextLayout` link rectangles.
++#[derive(Clone, Debug, PartialEq)]
++pub struct InlineFragment {
++    pub start: u32,
++    pub end: u32,
++    pub x: f32,
++    pub y: f32,
++    pub width: f32,
++    pub height: f32,
++    pub font_slot: u8,
++    pub color: Option<u32>,
++    pub link_id: u32,
++    pub ruby: Option<InlineRubyFragment>,
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct InlineRubyFragment {
++    pub text: String,
++    pub x: f32,
++    pub y: f32,
++    pub width: f32,
++    pub height: f32,
++    pub font_slot: u8,
++    pub color: Option<u32>,
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct InlineTextLayout {
++    pub width: f32,
++    pub height: f32,
++    pub line_count: u32,
++    pub fragments: Vec<InlineFragment>,
+ }
+ 
+ /// One retained UI node.
+@@ -76,6 +137,11 @@
+     pub physics_values: Vec<(u8, u32)>,
+     /// UTF-8 content (text nodes only).
+     pub text: String,
++    /// Optional Core inline-run metadata attached to the same Text leaf.
++    pub inline_text: Option<InlineTextSpec>,
++    /// Full-source layout, intentionally independent of reveal progress.
++    pub inline_layout: Option<InlineTextLayout>,
++    pub inline_layout_key: u64,
+     /// Uploaded texture handle (image nodes only; -1 = none). For an animated
+     /// sprite this is the ATLAS texture; the drawn frame is a UV sub-rect of it.
+     pub tex: i32,
+@@ -129,6 +195,9 @@
+             anim_values: Vec::new(),
+             physics_values: Vec::new(),
+             text: String::new(),
++            inline_text: None,
++            inline_layout: None,
++            inline_layout_key: 0,
+             tex: -1,
+             mesh: None,
+             compositor_surface: -1,
+
+diff --git a/engine/core/src/inline_text.rs b/engine/core/src/inline_text.rs
+new file mode 100644
+--- /dev/null
++++ b/engine/core/src/inline_text.rs
+@@ -0,0 +1,256 @@
++//! One-leaf rich inline layout. Source ranges are Unicode scalar offsets.
++//! This deliberately supports scalar advances and simple CJK/Latin wrapping;
++//! complex-script shaping remains the responsibility of a future shaper.
++
++use alloc::string::ToString;
++use alloc::vec::Vec;
++
++use crate::text::Fonts;
++use crate::tree::{InlineFragment, InlineRubyFragment, InlineTextLayout, InlineTextSpec};
++
++#[derive(Clone)]
++struct Token {
++    start: u32,
++    end: u32,
++    width: f32,
++    font_slot: u8,
++    color: Option<u32>,
++    link_id: u32,
++    ruby: Option<crate::tree::InlineRuby>,
++    ruby_height: f32,
++    newline: bool,
++    whitespace: bool,
++    cjk: bool,
++}
++
++pub fn source_slice(source: &str, start: u32, end: u32) -> &str {
++    let mut first = source.len();
++    let mut last = source.len();
++    for (index, (byte, _)) in source.char_indices().enumerate() {
++        if index as u32 == start { first = byte; }
++        if index as u32 == end { last = byte; break; }
++    }
++    if end as usize == source.chars().count() { last = source.len(); }
++    if start == end { first = last; }
++    &source[first.min(source.len())..last.min(source.len()).max(first.min(source.len()))]
++}
++
++fn cjk(cp: u32) -> bool {
++    matches!(cp,
++        0x2e80..=0x2fff | 0x3000..=0x30ff | 0x3100..=0x312f |
++        0x3130..=0x318f | 0x31a0..=0x31bf | 0x31f0..=0x31ff |
++        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff |
++        0xff01..=0xff60 | 0xffe0..=0xffe6 | 0x20000..=0x3134f)
++}
++
++fn advance(fonts: &Fonts, native: bool, text: &str, slot: u8, tracking: f32, line_height: f32) -> (f32, f32) {
++    let (width, height) = fonts.measure_run_provider(native, text, slot, tracking, line_height);
++    if width.is_finite() && width >= 0.0 { (width, height.max(0.0)) } else { (0.0, height.max(0.0)) }
++}
++
++/// Computes the full paragraph once. Reveal progress is intentionally absent
++/// from the cache key and does not participate in this function.
++pub fn layout(
++    source: &str,
++    spec: &InlineTextSpec,
++    base_slot: u8,
++    max_width: f32,
++    tracking: f32,
++    line_height: f32,
++    native: bool,
++    fonts: &Fonts,
++) -> InlineTextLayout {
++    let scalar_count = source.chars().count() as u32;
++    let mut tokens: Vec<Token> = Vec::with_capacity(scalar_count as usize);
++    let mut cursor = 0u32;
++    let mut run_index = 0usize;
++    let chars: Vec<char> = source.chars().collect();
++    while cursor < scalar_count {
++        while run_index < spec.runs.len() && spec.runs[run_index].end <= cursor { run_index += 1; }
++        let run = spec.runs.get(run_index).filter(|run| run.start <= cursor && cursor < run.end);
++        if let Some(ruby) = run.and_then(|run| run.ruby.as_ref()) {
++            let end = run.unwrap().end.min(scalar_count);
++            let slot = run.unwrap().font_slot.unwrap_or(base_slot);
++            let text = source_slice(source, cursor, end);
++            let (base_width, _) = advance(fonts, native, text, slot, tracking, line_height);
++            let ruby_slot = ruby.font_slot.unwrap_or(base_slot);
++            let (ruby_width, ruby_height) = advance(fonts, native, &ruby.text, ruby_slot, 0.0, f32::NAN);
++            tokens.push(Token {
++                start: cursor, end, width: base_width.max(ruby_width), font_slot: slot,
++                color: run.unwrap().color, link_id: run.unwrap().link_id, ruby: Some(ruby.clone()),
++                ruby_height, newline: false, whitespace: false, cjk: false,
++            });
++            cursor = end;
++            continue;
++        }
++        let ch = chars[cursor as usize];
++        let slot = run.and_then(|run| run.font_slot).unwrap_or(base_slot);
++        let one = ch.to_string();
++        let (width, _) = if ch == '\n' { (0.0, 0.0) } else {
++            advance(fonts, native, &one, slot, tracking, line_height)
++        };
++        tokens.push(Token {
++            start: cursor, end: cursor + 1, width, font_slot: slot,
++            color: run.and_then(|run| run.color), link_id: run.map_or(0, |run| run.link_id),
++            ruby: None, ruby_height: 0.0,
++            newline: ch == '\n', whitespace: ch.is_whitespace(), cjk: cjk(ch as u32),
++        });
++        cursor += 1;
++    }
++
++    let wrap_width = if max_width.is_finite() && max_width > 0.0 { max_width } else { f32::INFINITY };
++    let mut lines: Vec<Vec<Token>> = alloc::vec![Vec::new()];
++    let mut line_width = 0.0f32;
++    let mut i = 0usize;
++    while i < tokens.len() {
++        if tokens[i].newline {
++            lines.push(Vec::new());
++            line_width = 0.0;
++            i += 1;
++            continue;
++        }
++        let first = i;
++        let split_word = tokens[i].whitespace || tokens[i].cjk || tokens[i].ruby.is_some();
++        if split_word {
++            i += 1;
++            while i < tokens.len() && tokens[i].whitespace == tokens[first].whitespace
++                && tokens[i].cjk == tokens[first].cjk && tokens[i].ruby.is_none()
++                && !tokens[i].newline && tokens[i].whitespace
++            { i += 1; }
++        } else {
++            i += 1;
++            while i < tokens.len() && !tokens[i].newline && !tokens[i].whitespace
++                && !tokens[i].cjk && tokens[i].ruby.is_none()
++            { i += 1; }
++        }
++        let group_width = if tokens[first].ruby.is_some() {
++            tokens[first].width
++        } else {
++            // Preserve native shaping/kern advances within each same-font
++            // slice when deciding a Latin word break. Per-scalar widths are
++            // only the fallback used to hard-split an overwide word.
++            let mut width = 0.0f32;
++            let mut from = first;
++            while from < i {
++                let slot = tokens[from].font_slot;
++                let mut to = from + 1;
++                while to < i && tokens[to].font_slot == slot { to += 1; }
++                let text = source_slice(source, tokens[from].start, tokens[to - 1].end);
++                width += advance(fonts, native, text, slot, tracking, line_height).0;
++                from = to;
++            }
++            width
++        };
++        if line_width > 0.0 && !tokens[first].whitespace && line_width + group_width > wrap_width {
++            lines.push(Vec::new());
++            line_width = 0.0;
++        }
++        // Oversized words are split at scalar boundaries, preserving the
++        // pinned Core's documented fallback for words wider than a row.
++        if group_width > wrap_width && i - first > 1 {
++            for token in &tokens[first..i] {
++                if line_width > 0.0 && line_width + token.width > wrap_width {
++                    lines.push(Vec::new());
++                    line_width = 0.0;
++                }
++                line_width += token.width;
++                lines.last_mut().unwrap().push(token.clone());
++            }
++        } else {
++            for token in &tokens[first..i] {
++                line_width += token.width;
++                lines.last_mut().unwrap().push(token.clone());
++            }
++        }
++    }
++
++    let fallback_text = "M";
++    let (_, fallback_height) = advance(fonts, native, fallback_text, base_slot, 0.0, line_height);
++    let default_line_height = fallback_height.max(1.0);
++    let mut fragments = Vec::new();
++    let mut y = 0.0f32;
++    let mut max_line_width = 0.0f32;
++    for line in &lines {
++        // Merge adjacent source scalars with equal paint semantics so native
++        // TextPainter keeps shaping within each styled fragment.
++        let mut groups: Vec<(u32, u32, u8, Option<u32>, u32, Option<crate::tree::InlineRuby>)> = Vec::new();
++        for token in line {
++            if token.ruby.is_none() {
++                if let Some(last) = groups.last_mut() {
++                    if last.1 == token.start && last.2 == token.font_slot && last.3 == token.color
++                        && last.4 == token.link_id && last.5.is_none()
++                    { last.1 = token.end; continue; }
++                }
++            }
++            groups.push((token.start, token.end, token.font_slot, token.color, token.link_id, token.ruby.clone()));
++        }
++        let ruby_lane = line.iter().map(|token| token.ruby_height).fold(0.0f32, f32::max);
++        let mut prepared = Vec::with_capacity(groups.len());
++        let mut line_w = 0.0f32;
++        let mut line_h = default_line_height;
++        for (start, end, slot, color, link_id, ruby) in groups {
++            let text = source_slice(source, start, end);
++            let (base_w, main_h) = advance(fonts, native, text, slot, tracking, line_height);
++            let ruby_info = ruby.map(|ruby| {
++                let ruby_slot = ruby.font_slot.unwrap_or(base_slot);
++                let (ruby_w, ruby_h) = advance(fonts, native, &ruby.text, ruby_slot, 0.0, f32::NAN);
++                InlineRubyFragment { text: ruby.text, x: 0.0, y: 0.0, width: ruby_w,
++                    height: ruby_h, font_slot: ruby_slot, color: ruby.color }
++            });
++            let outer_w = ruby_info.as_ref().map_or(base_w, |ruby| base_w.max(ruby.width));
++            line_h = line_h.max(main_h);
++            line_w += outer_w;
++            prepared.push((start, end, slot, color, link_id, base_w, main_h, outer_w, ruby_info));
++        }
++        max_line_width = max_line_width.max(line_w);
++        let mut x = 0.0f32;
++        for (start, end, slot, color, link_id, base_w, main_h, outer_w, ruby) in prepared {
++            let base_x = x + (outer_w - base_w) * 0.5;
++            let ruby = ruby.map(|mut ruby| {
++                ruby.x = x + (outer_w - ruby.width) * 0.5;
++                ruby.y = y + ((ruby_lane - ruby.height).max(0.0) * 0.5);
++                ruby
++            });
++            fragments.push(InlineFragment {
++                start, end, x: base_x, y: y + ruby_lane, width: base_w, height: main_h.max(default_line_height),
++                font_slot: slot, color, link_id, ruby,
++            });
++            x += outer_w;
++        }
++        y += ruby_lane + line_h;
++    }
++    let width = if max_width.is_finite() && max_width >= 0.0 { max_width } else { max_line_width };
++    InlineTextLayout { width, height: y, line_count: lines.len() as u32, fragments }
++}
++
++/// Append one link's source rectangles to a compact u32 response. Geometry
++/// is leaf-local. Adjacent fragments on the same line are merged.
++pub fn encode_query(layout: &InlineTextLayout, spec: &InlineTextSpec, reveal: u32, node_width: f32, node_height: f32) -> Vec<u32> {
++    let mut links: Vec<(u32, Vec<[f32; 4]>, u32)> = Vec::new();
++    for fragment in &layout.fragments {
++        if fragment.link_id == 0 { continue; }
++        let link_end = spec.runs.iter().filter(|run| run.link_id == fragment.link_id).map(|run| run.end).max().unwrap_or(fragment.end);
++        if link_end > reveal { continue; }
++        let rect = [fragment.x, fragment.y, fragment.width, fragment.height];
++        if let Some((_, rects, _)) = links.iter_mut().find(|(id, _, _)| *id == fragment.link_id) {
++            if let Some(last) = rects.last_mut() {
++                if (last[1] - rect[1]).abs() < 0.01 && (last[0] + last[2] - rect[0]).abs() < 0.75 {
++                    last[2] += rect[2];
++                    continue;
++                }
++            }
++            rects.push(rect);
++        } else {
++            links.push((fragment.link_id, alloc::vec![rect], link_end));
++        }
++    }
++    // Header: width, height, lineCount, linkCount. Then each link id, rect
++    // count and x/y/w/h float bit-tuples.
++    let mut out = alloc::vec![node_width.to_bits(), node_height.to_bits(), layout.line_count, links.len() as u32];
++    for (id, rects, _) in links {
++        out.push(id);
++        out.push(rects.len() as u32);
++        for rect in rects { for value in rect { out.push(value.to_bits()); } }
++    }
++    out
++}
+
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -41,6 +41,7 @@
+ mod package_format;
+ pub mod resources;
+ 
++use alloc::string::String;
+ use alloc::vec::Vec;
+ 
+ pub mod anim;
+@@ -71,6 +72,7 @@
+ pub mod touch;
+ pub mod tree;
+ pub mod wire;
++mod inline_text;
+ 
+ pub use pocket_drivers::{DrawList, TexView};
+ 
+@@ -1013,7 +1015,8 @@
+             return;
+         };
+         if self.tree.slots[slot as usize].node_type != spec::NodeType::Text as u8
+-            || self.tree.slots[slot as usize].text == text
++            || (self.tree.slots[slot as usize].text == text
++                && self.tree.slots[slot as usize].inline_text.is_none())
+         {
+             return;
+         }
+@@ -1027,6 +1030,9 @@
+             let node = &mut self.tree.slots[slot as usize];
+             node.text.clear();
+             node.text.push_str(text);
++            node.inline_text = None;
++            node.inline_layout = None;
++            node.inline_layout_key = 0;
+             return;
+         }
+         let mut run = alloc::string::String::new();
+@@ -1036,6 +1042,9 @@
+             let node = &mut self.tree.slots[slot as usize];
+             node.text.clear();
+             node.text.push_str(text);
++            node.inline_text = None;
++            node.inline_layout = None;
++            node.inline_layout_key = 0;
+         }
+         run.clear();
+         self.tree.collect_run(root_slot, &mut run);
+@@ -1061,6 +1070,52 @@
+     /// `set_text`.
+     pub fn replace_text(&mut self, id: i32, text: &str) {
+         self.set_text(id, text);
++    }
++
++    /// Replace the full paragraph and its inline annotations on the existing
++    /// Text leaf. `RIT1` is a little-endian header followed by fixed 9-word
++    /// run records and UTF-8 ruby payloads. Ranges are codepoint offsets.
++    pub fn set_inline_text(&mut self, id: i32, source: &str, records: &[u8]) {
++        let Some(slot) = self.tree.resolve(id) else { return; };
++        if self.tree.slots[slot as usize].node_type != spec::NodeType::Text as u8 { return; }
++        let Some(runs) = decode_inline_runs(source, records) else { return; };
++        let node = &mut self.tree.slots[slot as usize];
++        let changed = node.text != source || node.inline_text.as_ref().map_or(true, |old| old.runs != runs);
++        if !changed { return; }
++        let was_empty = node.text.is_empty();
++        node.text.clear();
++        node.text.push_str(source);
++        node.inline_text = Some(tree::InlineTextSpec { runs, reveal_codepoints: 0 });
++        node.inline_layout = None;
++        node.inline_layout_key = 0;
++        let parent = node.parent;
++        if was_empty != source.is_empty() {
++            self.mark_layout_structure_under(parent);
++        } else if !source.is_empty() {
++            self.mark_layout_style(slot);
++        }
++    }
++
++    /// Reveal is a paint-only update. It does not invalidate Taffy or the
++    /// cached full-source Core layout.
++    pub fn set_inline_reveal(&mut self, id: i32, codepoints: u32) {
++        let Some(slot) = self.tree.resolve(id) else { return; };
++        let node = &mut self.tree.slots[slot as usize];
++        let Some(inline) = node.inline_text.as_mut() else { return; };
++        let reveal = codepoints.min(node.text.chars().count() as u32);
++        inline.reveal_codepoints = reveal;
++    }
++
++    /// Return Core's current measured paragraph and fully-revealed link boxes.
++    /// This is synchronous and solves pending layout before reading leaf facts.
++    pub fn get_inline_text_layout(&mut self, id: i32) -> Vec<u32> {
++        self.relayout_outputs();
++        let Some(slot) = self.tree.resolve(id) else { return alloc::vec![0; 4]; };
++        let node = &self.tree.slots[slot as usize];
++        let (Some(layout), Some(inline)) = (node.inline_layout.as_ref(), node.inline_text.as_ref()) else {
++            return alloc::vec![node.layout.w.to_bits(), node.layout.h.to_bits(), 0, 0];
++        };
++        inline_text::encode_query(layout, inline, inline.reveal_codepoints, node.layout.w, node.layout.h)
+     }
+ 
+     /// Measure `text` at `font_slot` (px width). Layout measures natively;
+@@ -2775,6 +2830,71 @@
+ 
+ /// Convert a `set_prop`/`animate` f64 payload to raw u32 prop bits per its
+ /// VALUE_KIND (f32 props carry the number; color/int carry integral bits).
++fn decode_inline_runs(source: &str, bytes: &[u8]) -> Option<Vec<tree::InlineRun>> {
++    fn word(bytes: &[u8], at: &mut usize) -> Option<u32> {
++        let end = at.checked_add(4)?;
++        let value = u32::from_le_bytes(bytes.get(*at..end)?.try_into().ok()?);
++        *at = end;
++        Some(value)
++    }
++    if bytes.len() < 8 { return None; }
++    let mut at = 0usize;
++    if word(bytes, &mut at)? != u32::from_le_bytes(*b"RIT1") { return None; }
++    let count = word(bytes, &mut at)? as usize;
++    if count > 4096 { return None; }
++    let scalar_count = source.chars().count() as u32;
++    let mut runs = Vec::with_capacity(count);
++    let mut previous_end = 0u32;
++    for _ in 0..count {
++        let start = word(bytes, &mut at)?;
++        let end = word(bytes, &mut at)?;
++        let flags = word(bytes, &mut at)?;
++        let font = word(bytes, &mut at)?;
++        let color = word(bytes, &mut at)?;
++        let link_id = word(bytes, &mut at)?;
++        let ruby_font = word(bytes, &mut at)?;
++        let ruby_color = word(bytes, &mut at)?;
++        let ruby_len = word(bytes, &mut at)? as usize;
++        if flags & !0x3f != 0 || start >= end || end > scalar_count || start < previous_end { return None; }
++        let font_slot = if flags & 1 != 0 {
++            if font >= spec::MAX_FONT_SLOTS as u32 { return None; }
++            Some(font as u8)
++        } else { None };
++        let color = (flags & 2 != 0).then_some(color);
++        let actual_link = if flags & 4 != 0 { link_id } else { 0 };
++        if flags & 4 != 0 && actual_link == 0 { return None; }
++        let ruby = if flags & 8 != 0 {
++            let ruby_font_slot = if flags & 16 != 0 {
++                if ruby_font >= spec::MAX_FONT_SLOTS as u32 { return None; }
++                Some(ruby_font as u8)
++            } else {
++                if ruby_font != u32::MAX { return None; }
++                None
++            };
++            let ruby_color_value = if flags & 32 != 0 {
++                Some(ruby_color)
++            } else {
++                if ruby_color != u32::MAX { return None; }
++                None
++            };
++            let end_byte = at.checked_add(ruby_len)?;
++            let text = core::str::from_utf8(bytes.get(at..end_byte)?).ok()?;
++            at = end_byte;
++            Some(tree::InlineRuby {
++                text: String::from(text),
++                font_slot: ruby_font_slot,
++                color: ruby_color_value,
++            })
++        } else {
++            if ruby_len != 0 || flags & 0x30 != 0 { return None; }
++            None
++        };
++        runs.push(tree::InlineRun { start, end, font_slot, color, link_id: actual_link, ruby });
++        previous_end = end;
++    }
++    (at == bytes.len()).then_some(runs)
++}
++
+ fn prop_bits(kind: u8, value: f64) -> u32 {
+     if kind == spec::value_kind::F32 {
+         (value as f32).to_bits()
+
+diff --git a/engine/core/src/layout.rs b/engine/core/src/layout.rs
+--- a/engine/core/src/layout.rs
++++ b/engine/core/src/layout.rs
+@@ -37,7 +37,7 @@
+ use crate::spec;
+ use crate::style::{self, Resolved, StyleTable};
+ use crate::text::Fonts;
+-use crate::tree::{LayoutRect, Tree, LAYOUT_LIVE};
++use crate::tree::{InlineTextLayout, InlineTextSpec, LayoutRect, Tree, LAYOUT_LIVE};
+ 
+ /// Measure context attached to text leaves (taffy NodeContext).
+ pub struct MeasureCtx {
+@@ -50,6 +50,8 @@
+     /// shaping is the expensive half of layout on the PSP; the taffy
+     /// measure closure must never re-shape per solve pass.
+     pub size: (f32, f32),
++    /// Inline paragraph identity; reveal progress is intentionally excluded.
++    inline_key: u64,
+     native: bool,
+     environment_epoch: u64,
+     /// Replaying an unchanged measurement must preserve the public missing
+@@ -65,10 +67,12 @@
+         tracking: f32,
+         line_height: f32,
+         native: bool,
++        inline_key: u64,
+     ) -> bool {
+         self.text == text
+             && self.slot == slot
+             && self.native == native
++            && self.inline_key == inline_key
+             && float_key(self.tracking) == float_key(tracking)
+             && float_key(self.line_height) == float_key(line_height)
+     }
+@@ -95,11 +99,28 @@
+             tracking,
+             line_height,
+             size,
++            inline_key: 0,
+             native,
+             environment_epoch: 0,
+             misses: fonts.misses.get().wrapping_sub(before),
+         }
+     }
++
++    fn shaped_inline(
++        fonts: &Fonts,
++        text: String,
++        slot: u8,
++        tracking: f32,
++        line_height: f32,
++        native: bool,
++        size: (f32, f32),
++        inline_key: u64,
++    ) -> MeasureCtx {
++        let mut context = Self::shaped(fonts, text, slot, tracking, line_height, native);
++        context.size = size;
++        context.inline_key = inline_key;
++        context
++    }
+ }
+ 
+ fn float_key(value: f32) -> u32 {
+@@ -108,6 +129,66 @@
+     } else {
+         value.to_bits()
+     }
++}
++
++fn inline_key(text: &str, spec: &InlineTextSpec, resolved: &Resolved, native: bool, epoch: u64) -> u64 {
++    let mut hash = 0xcbf29ce484222325u64;
++    let mut feed = |bytes: &[u8]| {
++        for byte in bytes { hash = (hash ^ *byte as u64).wrapping_mul(0x100000001b3); }
++    };
++    feed(text.as_bytes());
++    feed(&(resolved.font_slot as u32).to_le_bytes());
++    feed(&resolved.width.to_bits().to_le_bytes());
++    feed(&resolved.tracking.to_bits().to_le_bytes());
++    feed(&resolved.line_height.to_bits().to_le_bytes());
++    feed(&[u8::from(native)]);
++    feed(&epoch.to_le_bytes());
++    for run in &spec.runs {
++        feed(&run.start.to_le_bytes()); feed(&run.end.to_le_bytes());
++        feed(&[run.font_slot.unwrap_or(u8::MAX)]);
++        feed(&[u8::from(run.color.is_some())]);
++        if let Some(color) = run.color { feed(&color.to_le_bytes()); }
++        feed(&run.link_id.to_le_bytes());
++        if let Some(ruby) = &run.ruby {
++            feed(ruby.text.as_bytes()); feed(&[ruby.font_slot.unwrap_or(u8::MAX)]);
++            feed(&[u8::from(ruby.color.is_some())]);
++            if let Some(color) = ruby.color { feed(&color.to_le_bytes()); }
++        }
++    }
++    hash
++}
++
++fn cached_inline_layout(
++    tree: &mut Tree,
++    slot: u32,
++    text: &str,
++    resolved: &Resolved,
++    fonts: &Fonts,
++    native: bool,
++    epoch: u64,
++) -> (Option<InlineTextLayout>, u64) {
++    let Some(spec) = tree.slots[slot as usize].inline_text.clone() else {
++        let node = &mut tree.slots[slot as usize];
++        node.inline_layout = None;
++        node.inline_layout_key = 0;
++        return (None, 0);
++    };
++    let key = inline_key(text, &spec, resolved, native, epoch);
++    let node = &mut tree.slots[slot as usize];
++    if node.inline_layout_key != key || node.inline_layout.is_none() {
++        node.inline_layout = Some(crate::inline_text::layout(
++            text,
++            &spec,
++            resolved.font_slot as u8,
++            resolved.width,
++            resolved.tracking,
++            resolved.line_height,
++            native,
++            fonts,
++        ));
++        node.inline_layout_key = key;
++    }
++    (node.inline_layout.clone(), key)
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -583,14 +664,14 @@
+         }
+         let native = fonts.native_active() && resolved.tracking == 0.0 && !in_transform;
+         tree.slots[slot as usize].text_native = native;
+-        let ctx = MeasureCtx::shaped(
+-            fonts,
+-            run,
+-            resolved.font_slot as u8,
+-            resolved.tracking,
+-            resolved.line_height,
+-            native,
+-        );
++        let (inline, inline_key) = cached_inline_layout(tree, slot, &run, &resolved, fonts, native, 0);
++        let ctx = if let Some(inline) = inline {
++            MeasureCtx::shaped_inline(fonts, run, resolved.font_slot as u8, resolved.tracking,
++                resolved.line_height, native, (inline.width, inline.height), inline_key)
++        } else {
++            MeasureCtx::shaped(fonts, run, resolved.font_slot as u8, resolved.tracking,
++                resolved.line_height, native)
++        };
+         counters.shaping_calls = counters.shaping_calls.saturating_add(1);
+         let nid = taffy.new_leaf_with_context(to_taffy(&resolved), ctx).ok()?;
+         counters.taffy_nodes_created = counters.taffy_nodes_created.saturating_add(1);
+@@ -668,6 +749,8 @@
+     resolved: &Resolved,
+     native: bool,
+     replay_misses: bool,
++    inline_layout: Option<&InlineTextLayout>,
++    inline_key: u64,
+ ) {
+     if let Some(context) = eng.taffy.get_node_context(handle) {
+         if context.environment_epoch == eng.environment_epoch {
+@@ -677,6 +760,7 @@
+                 resolved.tracking,
+                 resolved.line_height,
+                 native,
++                inline_key,
+             ) {
+                 if replay_misses {
+                     context.replay_misses(fonts);
+@@ -685,14 +769,17 @@
+             }
+         }
+     }
+-    let mut context = MeasureCtx::shaped(
+-        fonts,
+-        run,
+-        resolved.font_slot as u8,
+-        resolved.tracking,
+-        resolved.line_height,
+-        native,
+-    );
++    let mut context = if let Some(inline) = inline_layout {
++        MeasureCtx::shaped_inline(
++            fonts, run, resolved.font_slot as u8, resolved.tracking,
++            resolved.line_height, native, (inline.width, inline.height), inline_key,
++        )
++    } else {
++        MeasureCtx::shaped(
++            fonts, run, resolved.font_slot as u8, resolved.tracking,
++            resolved.line_height, native,
++        )
++    };
+     context.environment_epoch = eng.environment_epoch;
+     #[cfg(feature = "counters")]
+     {
+@@ -770,6 +857,11 @@
+         }
+     }
+     let native = is_text && fonts.native_active() && resolved.tracking == 0.0 && !in_transform;
++    let (inline_layout, inline_key) = if is_text {
++        cached_inline_layout(tree, slot, &run, &resolved, fonts, native, eng.environment_epoch)
++    } else {
++        (None, 0)
++    };
+     let old = entry(eng, tree, slot);
+     let handle = if let Some(old) = old {
+         update_style(eng, old.handle, &resolved);
+@@ -782,19 +874,20 @@
+                 &resolved,
+                 native,
+                 replay_all_misses || style_dirty.binary_search(&slot).is_ok(),
++                inline_layout.as_ref(),
++                inline_key,
+             );
+         }
+         old.handle
+     } else {
+         let handle = if is_text {
+-            let mut context = MeasureCtx::shaped(
+-                fonts,
+-                run,
+-                resolved.font_slot as u8,
+-                resolved.tracking,
+-                resolved.line_height,
+-                native,
+-            );
++            let mut context = if let Some(inline) = inline_layout.as_ref() {
++                MeasureCtx::shaped_inline(fonts, run, resolved.font_slot as u8, resolved.tracking,
++                    resolved.line_height, native, (inline.width, inline.height), inline_key)
++            } else {
++                MeasureCtx::shaped(fonts, run, resolved.font_slot as u8, resolved.tracking,
++                    resolved.line_height, native)
++            };
+             context.environment_epoch = eng.environment_epoch;
+             #[cfg(feature = "counters")]
+             {
+@@ -1183,7 +1276,11 @@
+             let native = fonts.native_active()
+                 && resolved.tracking == 0.0
+                 && !in_transform(tree, styles, slot, root_id);
+-            update_measure(eng, fonts, old.handle, run, &resolved, native, true);
++            let (inline, inline_key) = cached_inline_layout(
++                tree, slot, &run, &resolved, fonts, native, eng.environment_epoch,
++            );
++            update_measure(eng, fonts, old.handle, run, &resolved, native, true,
++                inline.as_ref(), inline_key);
+         } else if tree.slots[slot as usize].region_root {
+             // The region's own root carries the structural half of this style.
+             let id = tree.slots[slot as usize].id(slot);
+diff --git a/engine/core/src/draw.rs b/engine/core/src/draw.rs
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -22,7 +22,7 @@
+ //!   - opacity multiplies vertex alpha down the subtree (wrong on overlap,
+ //!     per docs/DESIGN.md punt list).
+ 
+-use alloc::{collections::BTreeMap, vec::Vec};
++use alloc::{collections::BTreeMap, string::ToString, vec::Vec};
+ 
+ use crate::fmath::{clampf, cosf, sinf, sqrtf, tanf};
+ use crate::layout::{floorf, roundf};
+@@ -2929,6 +2929,10 @@
+         box_w: f32,
+         in_transform: bool,
+     ) {
++        if node.inline_layout.is_some() && node.inline_text.is_some() {
++            self.emit_inline_text(dl, node, r, world, op, clip, box_w, in_transform);
++            return;
++        }
+         let color = scale_alpha(r.text_color, op);
+         if alpha(color) == 0 {
+             return;
+@@ -3087,6 +3091,113 @@
+         self.paint_cache.layouts = layouts;
+     }
+ 
++    #[allow(clippy::too_many_arguments)]
++    fn emit_inline_text(
++        &mut self,
++        dl: &mut DrawList,
++        node: &crate::tree::Node,
++        r: &style::Resolved,
++        world: &Affine,
++        opacity: f32,
++        clip: &Clip,
++        box_w: f32,
++        in_transform: bool,
++    ) {
++        let (Some(layout), Some(inline)) = (node.inline_layout.as_ref(), node.inline_text.as_ref()) else { return; };
++        let mut source = alloc::string::String::new();
++        collect_run_of(self.tree, node, &mut source);
++        if source.is_empty() { return; }
++        if let (true, Some(texts)) = (self.capturing, self.texts.as_mut()) {
++            let mut bounds = world_aabb_of(self.screen, world, box_w, node.layout.h);
++            bounds.x0 = bounds.x0.max(clip.x0);
++            bounds.y0 = bounds.y0.max(clip.y0);
++            bounds.x1 = bounds.x1.min(clip.x1);
++            bounds.y1 = bounds.y1.min(clip.y1);
++            if bounds.x1 > bounds.x0 && bounds.y1 > bounds.y0 {
++                texts.push(TextBox { x: bounds.x0, y: bounds.y0, w: bounds.x1 - bounds.x0,
++                    h: bounds.y1 - bounds.y0, text: source.clone() });
++            }
++        }
++        let desired_native = !self.in_3d && self.fonts.native_active()
++            && r.tracking == 0.0 && !in_transform;
++        if desired_native != node.text_native { self.provider_stale = true; }
++        let reveal = inline.reveal_codepoints.min(source.chars().count() as u32);
++        for fragment in &layout.fragments {
++            let visible_end = fragment.end.min(reveal);
++            if visible_end > fragment.start {
++                let text = crate::inline_text::source_slice(&source, fragment.start, visible_end).to_string();
++                let mut fragment_style = *r;
++                fragment_style.font_slot = fragment.font_slot as u32;
++                fragment_style.text_color = fragment.color.unwrap_or(r.text_color);
++                fragment_style.text_align = spec::TextAlign::Left as u8;
++                let origin = world.then(&Affine::translate(fragment.x, fragment.y));
++                self.emit_inline_fragment(dl, text,
++                    &fragment_style, &origin, opacity, clip, fragment.width,
++                    fragment.width, fragment.height, node.text_native, in_transform);
++            }
++            if reveal >= fragment.end {
++                if let Some(ruby) = &fragment.ruby {
++                    let mut ruby_style = *r;
++                    ruby_style.font_slot = ruby.font_slot as u32;
++                    ruby_style.text_color = ruby.color.unwrap_or(r.text_color);
++                    ruby_style.line_height = f32::NAN;
++                    ruby_style.text_align = spec::TextAlign::Left as u8;
++                    let origin = world.then(&Affine::translate(ruby.x, ruby.y));
++                    self.emit_inline_fragment(dl,
++                        ruby.text.clone(), &ruby_style, &origin, opacity, clip,
++                        ruby.width, ruby.width, ruby.height, node.text_native, in_transform);
++                }
++            }
++        }
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn emit_inline_fragment(
++        &mut self,
++        dl: &mut DrawList,
++        run: alloc::string::String,
++        r: &style::Resolved,
++        world: &Affine,
++        opacity: f32,
++        clip: &Clip,
++        box_w: f32,
++        measured_w: f32,
++        measured_h: f32,
++        native: bool,
++        _in_transform: bool,
++    ) {
++        let color = scale_alpha(r.text_color, opacity);
++        if run.is_empty() || alpha(color) == 0 { return; }
++        if native {
++            self.emit_text_native_measured(dl, run, r, world, color, clip, box_w, measured_w, measured_h);
++            return;
++        }
++        let slot = r.font_slot as u8;
++        let Some(atlas) = self.fonts.atlas(slot) else { return; };
++        let mut glyphs = Vec::new();
++        self.fonts.layout_run(&run, slot, r.tracking, r.line_height,
++            spec::TextAlign::Left as u8, box_w, &mut glyphs);
++        let (cell_w, cell_h) = (atlas.cell_w as f32, atlas.cell_h as f32);
++        let start = dl.words.len();
++        dl.words.push(spec::draw_op::GLYPH_RUN);
++        dl.words.push(0);
++        dl.words.push(color);
++        let mut count = 0u32;
++        for glyph in glyphs {
++            let (sx, sy) = world.apply(glyph.x, glyph.y);
++            let (x, y) = (roundf(sx), roundf(sy));
++            if x < 0.0 || y < 0.0 || x > self.screen.0 || y > self.screen.1
++                || x + cell_w <= clip.x0 || x >= clip.x1 || y + cell_h <= clip.y0 || y >= clip.y1
++                || !atlas.stream_visible(glyph.codepoint, glyph.gid) { continue; }
++            if count == u16::MAX as u32 { break; }
++            dl.words.push(xy_word(x, y));
++            dl.words.push(glyph.gid as u32);
++            count += 1;
++        }
++        if count == 0 { dl.words.truncate(start); }
++        else { dl.words[start + 1] = (slot as u32) | (count << 16); }
++    }
++
+     /// Emit one TEXT_RUN (native text path; format in spec.ts): header words
+     /// plus the run string's UTF-8 bytes packed into the stream — the words
+     /// alone are the complete pixel truth. The origin is f32 and may sit
+@@ -3107,6 +3218,22 @@
+         // Routes to the native measurer (the recorded-provider gate holds
+         // tracking at 0 on this path).
+         let (mw, mh) = self.fonts.measure_run(&run, slot, r.tracking, r.line_height);
++        self.emit_text_native_measured(dl, run, r, world, color, clip, box_w, mw, mh);
++    }
++
++    fn emit_text_native_measured(
++        &mut self,
++        dl: &mut DrawList,
++        run: alloc::string::String,
++        r: &style::Resolved,
++        world: &Affine,
++        color: u32,
++        clip: &Clip,
++        box_w: f32,
++        mw: f32,
++        mh: f32,
++    ) {
++        let slot = r.font_slot as u8;
+         if mw <= 0.0 || mh <= 0.0 {
+             return;
+         }
+
+diff --git a/engine/core/src/tests.rs b/engine/core/src/tests.rs
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -3653,6 +3653,156 @@
+     })
+ }
+ 
++fn inline_records(ruby_color: Option<u32>) -> Vec<u8> {
++    fn word(out: &mut Vec<u8>, value: u32) { out.extend_from_slice(&value.to_le_bytes()); }
++    let mut out = Vec::new();
++    word(&mut out, u32::from_le_bytes(*b"RIT1"));
++    word(&mut out, 2);
++    // [0,2): styled, ruby, and linked. Ruby uses the small 6px test face.
++    let flags = 1 | 2 | 4 | 8 | 16 | if ruby_color.is_some() { 32 } else { 0 };
++    for value in [0, 2, flags, 1, 0xff11_2233, 1, 2, ruby_color.unwrap_or(u32::MAX), 2] { word(&mut out, value); }
++    out.extend_from_slice(b"ru");
++    // [2,4): same link, default body style.
++    for value in [2, 4, 4, u32::MAX, u32::MAX, 1, u32::MAX, u32::MAX, 0] { word(&mut out, value); }
++    out
++}
++
++#[test]
++fn inline_text_one_core_layout_paints_runs_ruby_and_revealed_multiline_links() {
++    use std::{cell::Cell, rc::Rc};
++    let calls = Rc::new(Cell::new(0u32));
++    let calls_in_measure = calls.clone();
++    let mut ui = Ui::new();
++    ui.set_text_measure(Some(alloc::boxed::Box::new(move |text: &str, slot, _tracking, line_h| {
++        calls_in_measure.set(calls_in_measure.get() + 1);
++        let default_h = if slot == 2 { 6.0 } else { 12.0 };
++        let height = if line_h.is_nan() { default_h } else { line_h };
++        (text.chars().count() as f32 * 7.0, height)
++    })));
++    let text = ui.create_node(spec::NodeType::Text as u8);
++    ui.set_prop(text, spec::prop::WIDTH, 14.0);
++    ui.set_prop(text, spec::prop::TEXT_COLOR, u32::MAX as f64);
++    ui.set_inline_text(text, "ABCD", &inline_records(Some(u32::MAX)));
++    ui.set_inline_reveal(text, 0);
++    ui.insert_before(spec::ROOT_ID, text, 0);
++
++    let initial = ui.get_inline_text_layout(text);
++    assert_eq!(f32::from_bits(initial[0]), 14.0);
++    assert_eq!(f32::from_bits(initial[1]), 30.0, "ruby lane is reserved in line one");
++    assert_eq!(initial[2], 2);
++    assert_eq!(initial[3], 0, "links stay hidden before full reveal");
++    let shaped_calls = calls.get();
++
++    ui.set_inline_reveal(text, 1);
++    let partial = ui.get_inline_text_layout(text);
++    assert_eq!(f32::from_bits(partial[1]), 30.0, "reveal does not change full paragraph geometry");
++    assert_eq!(partial[3], 0, "ruby base and link remain partially hidden");
++    let partial_words = ui.draw().words.clone();
++    let partial_at = partial_words.iter().position(|&word| word == spec::draw_op::TEXT_RUN).unwrap();
++    assert_eq!(decode_text_run_text(&partial_words, partial_at).0, "A");
++    assert_eq!(calls.get(), shaped_calls, "reveal only changes paint; it does not remeasure");
++
++    ui.set_inline_reveal(text, 2);
++    let ruby_ready = ui.get_inline_text_layout(text);
++    assert_eq!(f32::from_bits(ruby_ready[1]), 30.0);
++    assert_eq!(ruby_ready[3], 0, "link spans both lines and is not ready yet");
++    let ruby_words = ui.draw().words.clone();
++    let text_ops: Vec<usize> = ruby_words.iter().enumerate()
++        .filter_map(|(index, &word)| (word == spec::draw_op::TEXT_RUN).then_some(index)).collect();
++    assert_eq!(text_ops.len(), 2, "one run for the styled base, one for ruby");
++    let (base, _) = decode_text_run_text(&ruby_words, text_ops[0]);
++    let (ruby, _) = decode_text_run_text(&ruby_words, text_ops[1]);
++    assert_eq!((base.as_str(), ruby.as_str()), ("AB", "ru"));
++    assert_eq!(ruby_words[text_ops[0] + 1] & 0xff, 1, "base uses explicit bold slot");
++    assert_eq!(ruby_words[text_ops[0] + 6], 0xff11_2233, "base uses explicit ABGR color");
++    assert_eq!(ruby_words[text_ops[1] + 1] & 0xff, 2, "ruby uses its smaller font slot");
++    assert_eq!(ruby_words[text_ops[1] + 6], u32::MAX, "explicit white ruby color does not inherit the base color");
++    assert!(f32::from_bits(ruby_words[text_ops[1] + 3]) < f32::from_bits(ruby_words[text_ops[0] + 3]),
++        "ruby paints above its base");
++    assert_eq!(calls.get(), shaped_calls, "painted partial text reuses Core's full-source metrics");
++
++    ui.set_inline_reveal(text, 4);
++    let full = ui.get_inline_text_layout(text);
++    assert_eq!(full[3], 1);
++    assert_eq!(full[4], 1, "guest link index is preserved");
++    assert_eq!(full[5], 2, "the link resolves to separate rectangles on two visual lines");
++    assert_eq!(calls.get(), shaped_calls, "link visibility filtering does not measure");
++}
++
++#[test]
++fn inline_ruby_color_presence_distinguishes_white_from_inherit() {
++    let explicit_white = crate::decode_inline_runs("ABCD", &inline_records(Some(u32::MAX))).unwrap();
++    assert_eq!(explicit_white[0].ruby.as_ref().unwrap().color, Some(u32::MAX));
++    let inherited = crate::decode_inline_runs("ABCD", &inline_records(None)).unwrap();
++    assert_eq!(inherited[0].ruby.as_ref().unwrap().color, None);
++}
++
++#[test]
++fn inline_cached_fragments_track_same_node_inherit_and_explicit_white_colors() {
++    let mut ui = Ui::new();
++    ui.set_text_measure(Some(alloc::boxed::Box::new(|text: &str, _slot, _tracking, line_h| {
++        (text.chars().count() as f32 * 7.0, if line_h.is_nan() { 12.0 } else { line_h })
++    })));
++    let text = ui.create_node(spec::NodeType::Text as u8);
++    ui.set_prop(text, spec::prop::WIDTH, 80.0);
++    ui.set_prop(text, spec::prop::TEXT_COLOR, 0xff12_3456u32 as f64);
++    ui.set_inline_text(text, "ABCD", &inline_records(None));
++    let slot = ui.tree.resolve(text).unwrap();
++    // Establish an inherited run color and ruby color before measuring. The
++    // subsequent same-node mutations leave the warmed fragment cache intact,
++    // so only the optional-presence part of inline_key can detect them.
++    ui.tree.slots[slot as usize].inline_text.as_mut().unwrap().runs[0].color = None;
++    ui.set_inline_reveal(text, 2);
++    ui.insert_before(spec::ROOT_ID, text, 0);
++
++    let painted_color = |ui: &mut Ui, text: &str| {
++        let words = ui.draw().words.clone();
++        let mut at = 0;
++        while let Some(offset) = words[at..].iter().position(|&word| word == spec::draw_op::TEXT_RUN) {
++            at += offset;
++            let (run, next) = decode_text_run_text(&words, at);
++            if run == text { return words[at + 6]; }
++            at = next;
++        }
++        panic!("missing TEXT_RUN {text}");
++    };
++    ui.get_inline_text_layout(text);
++    assert_eq!(painted_color(&mut ui, "AB"), 0xff12_3456);
++    assert_eq!(painted_color(&mut ui, "ru"), 0xff12_3456);
++
++    // Keep this same node's inline-layout cache warm. This path isolates the
++    // cache key's optional-value identity from set_inline_text's full reset.
++    ui.tree.slots[slot as usize].inline_text.as_mut().unwrap().runs[0].color = Some(u32::MAX);
++    ui.mark_layout_style(slot);
++    ui.get_inline_text_layout(text);
++    assert_eq!(painted_color(&mut ui, "AB"), u32::MAX);
++    assert_eq!(painted_color(&mut ui, "ru"), 0xff12_3456);
++
++    ui.tree.slots[slot as usize].inline_text.as_mut().unwrap().runs[0].color = None;
++    ui.mark_layout_style(slot);
++    ui.get_inline_text_layout(text);
++    assert_eq!(painted_color(&mut ui, "AB"), 0xff12_3456);
++
++    ui.tree.slots[slot as usize].inline_text.as_mut().unwrap().runs[0].ruby.as_mut().unwrap().color = Some(u32::MAX);
++    ui.mark_layout_style(slot);
++    ui.get_inline_text_layout(text);
++    assert_eq!(painted_color(&mut ui, "ru"), u32::MAX);
++    assert_eq!(painted_color(&mut ui, "AB"), 0xff12_3456);
++
++    ui.tree.slots[slot as usize].inline_text.as_mut().unwrap().runs[0].ruby.as_mut().unwrap().color = None;
++    ui.mark_layout_style(slot);
++    ui.get_inline_text_layout(text);
++    assert_eq!(painted_color(&mut ui, "ru"), 0xff12_3456);
++}
++
++#[test]
++fn inline_text_codepoint_slice_preserves_cjk_and_non_bmp_scalars() {
++    let source = "A中🙂B";
++    assert_eq!(crate::inline_text::source_slice(source, 1, 2), "中");
++    assert_eq!(crate::inline_text::source_slice(source, 2, 3), "🙂");
++    assert_eq!(crate::inline_text::source_slice(source, 1, 3), "中🙂");
++}
++
+ #[test]
+ fn native_measure_routes_layout_and_emits_text_run() {
+     let mut ui = Ui::new();
+diff --git a/framework/compiler/subpaths.ts b/framework/compiler/subpaths.ts
+--- a/framework/compiler/subpaths.ts
++++ b/framework/compiler/subpaths.ts
+@@ -77,6 +77,7 @@
+   ime: { file: "framework/src/ime.ts", aliases: TWINS },
+   pak: { file: "framework/src/pak.ts", aliases: TWINS },
+   text: { file: "framework/src/text.ts", aliases: TWINS },
++  "inline-fonts": { file: "framework/src/inline-fonts.ts", aliases: TWINS },
+   "text-view": { file: "framework/src/text-view.ts", aliases: TWINS },
+   "text/provider": { file: "tools/text-glyph-provider.ts" },
+   fonts: { file: "framework/src/fonts.ts", aliases: TWINS },
+
+diff --git a/framework/compiler/tailwind.ts b/framework/compiler/tailwind.ts
+--- a/framework/compiler/tailwind.ts
++++ b/framework/compiler/tailwind.ts
+@@ -784,7 +784,7 @@
+ }
+ 
+ /** The generated `styles.generated.ts` module source. */
+-export function generateStylesModule(c: CompiledStyles): string {
++export function generateStylesModule(c: CompiledStyles, inlineTextUsed = false): string {
+   const L: string[] = [];
+   L.push("// AUTO-GENERATED by PocketJS framework/compiler/tailwind.ts — DO NOT EDIT.");
+   L.push("// Regenerated by every `bun tools/build.ts <app>` run; excluded from");
+@@ -812,5 +812,17 @@
+   L.push("/** Slot for text with no text-size/font-weight utility (16px regular). */");
+   L.push(`export const DEFAULT_FONT_SLOT = ${DEFAULT_FONT_SLOT};`);
+   L.push("");
++  L.push("/** InlineText roles, populated only when a consumer uses rich inline text. */");
++  if (inlineTextUsed) {
++    L.push("export const INLINE_TEXT_FONT_SLOTS: Partial<Record<\"body\" | \"bodyBold\" | \"headingBold\" | \"ruby\", number>> = {");
++    L.push(`  body: ${fontSlotFor(16, false)},`);
++    L.push(`  bodyBold: ${fontSlotFor(16, true)},`);
++    L.push(`  headingBold: ${fontSlotFor(18, true)},`);
++    L.push(`  ruby: ${fontSlotFor(12, false)},`);
++    L.push("};");
++  } else {
++    L.push("export const INLINE_TEXT_FONT_SLOTS: Partial<Record<\"body\" | \"bodyBold\" | \"headingBold\" | \"ruby\", number>> = {};");
++  }
++  L.push("");
+   return L.join("\n");
+ }
+
+diff --git a/framework/src/host.ts b/framework/src/host.ts
+--- a/framework/src/host.ts
++++ b/framework/src/host.ts
+@@ -62,6 +62,12 @@
+   setPropBatch?(records: ArrayBuffer): void;
+   /** UTF-8 text; text nodes only. */
+   setText(id: number, str: string): void;
++  /** Replace a Text leaf with a full-source RIT1 inline run table. */
++  setInlineText(id: number, source: string, records: Uint8Array): void;
++  /** Paint-only reveal cursor, measured in Unicode scalar values. */
++  setInlineReveal(id: number, codepoints: number): void;
++  /** Synchronous Core leaf geometry and fully revealed inline-link boxes. */
++  getInlineTextLayout(id: number): number[];
+   /** Solid universal calls this on reactive text updates. */
+   replaceText(id: number, str: string): void;
+   /** pow2 dims ≤ 512; psm: spec PSM. Returns a texture handle. */
+
+diff --git a/framework/src/native-tree.ts b/framework/src/native-tree.ts
+--- a/framework/src/native-tree.ts
++++ b/framework/src/native-tree.ts
+@@ -792,6 +792,15 @@
+   throw new Error(`PocketJS: unknown property '${name}' on <${tagName(node)}>`);
+ }
+ 
++/** Apply the latest explicit style synchronously through the regular native
++ * property path. The mirror's existing domAttrs cache supplies the previous
++ * style object, so callers that need a read-after-write layout query do not
++ * need a second style snapshot or wait for a renderer effect to flush. */
++export function syncStyle(node: NodeMirror, value: StyleObject | undefined): void {
++  const previous = node.domAttrs?.style;
++  setProp(node, "style", value, previous as StyleObject | undefined);
++}
++
+ export type HostProps = Record<string, unknown>;
+ 
+ export function applyProps(node: NodeMirror, next: HostProps, prev: HostProps = {}): void {
+
+diff --git a/framework/src/renderer-solid.ts b/framework/src/renderer-solid.ts
+--- a/framework/src/renderer-solid.ts
++++ b/framework/src/renderer-solid.ts
+@@ -28,6 +28,7 @@
+   runSweep,
+   setProp,
+   setStyleResolver,
++  syncStyle,
+   type HostProps,
+   type NodeMirror,
+ } from "./native-tree.ts";
+@@ -53,6 +54,7 @@
+   runSweep,
+   setProp,
+   setStyleResolver,
++  syncStyle,
+   type NodeMirror,
+ };
+ 
+
+diff --git a/framework/src/inline-fonts.ts b/framework/src/inline-fonts.ts
+new file mode 100644
+--- /dev/null
++++ b/framework/src/inline-fonts.ts
+@@ -0,0 +1,14 @@
++import { INLINE_TEXT_FONT_SLOTS } from "./styles.generated.ts";
++
++export type InlineFontRole = "body" | "bodyBold" | "headingBold" | "ruby";
++
++/** Return a font atlas role emitted only when this build contains a real
++ * InlineText/inlineFontSlot callsite. Calling it in a plain-text guest is an
++ * explicit build error rather than silently shipping extra font atlases. */
++export function inlineFontSlot(role: InlineFontRole): number {
++  const slot = INLINE_TEXT_FONT_SLOTS[role];
++  if (slot === undefined) {
++    throw new Error(`PocketJS: inline font role '${role}' was not baked; use InlineText in a compiled module`);
++  }
++  return slot;
++}
+
+diff --git a/framework/src/styles.generated.ts b/framework/src/styles.generated.ts
+--- a/framework/src/styles.generated.ts
++++ b/framework/src/styles.generated.ts
+@@ -16,3 +16,6 @@
+ 
+ /** Slot for text with no text-size/font-weight utility (16px regular). */
+ export const DEFAULT_FONT_SLOT = 2;
++
++/** InlineText roles are empty for source-only/ordinary plain-text guests. */
++export const INLINE_TEXT_FONT_SLOTS: Partial<Record<"body" | "bodyBold" | "headingBold" | "ruby", number>> = {};
+
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -81,6 +81,7 @@
+     "./ime": "./framework/src/ime.ts",
+     "./pak": "./framework/src/pak.ts",
+     "./text": "./framework/src/text.ts",
++    "./inline-fonts": "./framework/src/inline-fonts.ts",
+     "./text-view": "./framework/src/text-view.ts",
+     "./text/provider": "./tools/text-glyph-provider.ts",
+     "./fonts": "./framework/src/fonts.ts",
+@@ -176,6 +177,7 @@
+     "./vue-vapor/ime": "./framework/src/ime.ts",
+     "./vue-vapor/pak": "./framework/src/pak.ts",
+     "./vue-vapor/text": "./framework/src/text.ts",
++    "./vue-vapor/inline-fonts": "./framework/src/inline-fonts.ts",
+     "./vue-vapor/text-view": "./framework/src/text-view.ts",
+     "./vue-vapor/fonts": "./framework/src/fonts.ts",
+     "./vue-vapor/offload": "./framework/src/offload.ts",
+@@ -201,6 +203,7 @@
+     "./octane/ime": "./framework/src/ime.ts",
+     "./octane/pak": "./framework/src/pak.ts",
+     "./octane/text": "./framework/src/text.ts",
++    "./octane/inline-fonts": "./framework/src/inline-fonts.ts",
+     "./octane/text-view": "./framework/src/text-view.ts",
+     "./octane/fonts": "./framework/src/fonts.ts",
+     "./octane/offload": "./framework/src/offload.ts",
+
+diff --git a/tools/inline-text-slots.ts b/tools/inline-text-slots.ts
+new file mode 100644
+--- /dev/null
++++ b/tools/inline-text-slots.ts
+@@ -0,0 +1,33 @@
++import { fontSlotFor, type CompiledStyles } from "../framework/compiler/tailwind.ts";
++
++const REQUIRED_ROLES = {
++  body: fontSlotFor(16, false),
++  bodyBold: fontSlotFor(16, true),
++  headingBold: fontSlotFor(18, true),
++  ruby: fontSlotFor(12, false),
++} as const;
++
++/** Detect app-side JSX/callsites, not the InlineText definition or barrels. */
++export function hasInlineTextCallsite(files: Iterable<{ path: string; source: string }>): boolean {
++  for (const file of files) {
++    const path = file.path.replace(/\\/g, "/");
++    if (path.endsWith("/framework/src/inline-fonts.ts")
++      || path.endsWith("/packages/pocket_ui/src/inline-text.tsx")
++      || path.endsWith("/packages/pocket_ui/src/index.ts")) continue;
++    const code = file.source
++      .replace(/\/\*[\s\S]*?\*\//g, " ")
++      .replace(/(^|[^:])\/\/.*$/gm, "$1 ");
++    if (/<\s*InlineText\b/.test(code) || /\binlineFontSlot\s*\(/.test(code)) return true;
++  }
++  return false;
++}
++
++export function addInlineTextFontSlots(styles: CompiledStyles, files: Iterable<{ path: string; source: string }>): boolean {
++  if (!hasInlineTextCallsite(files)) return false;
++  const slots = new Set(styles.usedFontSlots);
++  for (const slot of Object.values(REQUIRED_ROLES)) slots.add(slot);
++  styles.usedFontSlots = [...slots].sort((a, b) => a - b);
++  return true;
++}
++
++export function inlineTextRoleSlots(): typeof REQUIRED_ROLES { return REQUIRED_ROLES; }
+
+diff --git a/tools/tests/inline-text-slots.test.ts b/tools/tests/inline-text-slots.test.ts
+new file mode 100644
+--- /dev/null
++++ b/tools/tests/inline-text-slots.test.ts
+@@ -0,0 +1,33 @@
++import { describe, expect, test } from "bun:test";
++import { compileClasses, DEFAULT_FONT_SLOT, fontSlotFor, generateStylesModule } from "../../framework/compiler/tailwind.ts";
++import { addInlineTextFontSlots } from "../inline-text-slots.ts";
++
++describe("InlineText font-slot ablation", () => {
++  test("plain modules and re-export barrels add no atlas slots or role metadata", () => {
++    const styles = compileClasses([]);
++    const used = addInlineTextFontSlots(styles, [
++      { path: "/app/page.tsx", source: `import { Text } from "@pocket/ui"; <Text>plain</Text>;` },
++      { path: "/app/ui/index.ts", source: `export { InlineText, inlineFontSlot } from "@pocket/ui";` },
++      { path: "/sdk/packages/pocket_ui/src/inline-text.tsx", source: `export function InlineText() {}` },
++    ]);
++    expect(used).toBe(false);
++    expect(styles.usedFontSlots).toEqual([DEFAULT_FONT_SLOT]);
++    expect(generateStylesModule(styles, used)).toContain("INLINE_TEXT_FONT_SLOTS: Partial<Record<\"body\" | \"bodyBold\" | \"headingBold\" | \"ruby\", number>> = {};");
++  });
++
++  test("a consumer callsite bakes the four compiler-derived font roles", () => {
++    const styles = compileClasses([]);
++    const used = addInlineTextFontSlots(styles, [
++      { path: "/app/rich.tsx", source: `import { InlineText, inlineFontSlot } from "@pocket/ui"; const slot = inlineFontSlot("body"); <InlineText source="x"/>;` },
++    ]);
++    expect(used).toBe(true);
++    expect(styles.usedFontSlots).toEqual([
++      fontSlotFor(12, false), fontSlotFor(16, false), fontSlotFor(16, true), fontSlotFor(18, true),
++    ].sort((a, b) => a - b));
++    const generated = generateStylesModule(styles, used);
++    expect(generated).toContain(`body: ${fontSlotFor(16, false)},`);
++    expect(generated).toContain(`bodyBold: ${fontSlotFor(16, true)},`);
++    expect(generated).toContain(`headingBold: ${fontSlotFor(18, true)},`);
++    expect(generated).toContain(`ruby: ${fontSlotFor(12, false)},`);
++  });
++});
+
+diff --git a/tools/build.ts b/tools/build.ts
+--- a/tools/build.ts
++++ b/tools/build.ts
+@@ -2,6 +2,7 @@
+ import { resolveSolidAotModel } from "../microts/compiler/aot-solid-browser.ts";
+ import { modelConfiguration } from "../microts/compiler/aot-model-build.ts";
+ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
++import { addInlineTextFontSlots } from "./inline-text-slots.ts";
+ import { buildWorker } from "./build-worker.ts";
+ // tools/build.ts <app> — the TWO-PASS app build (docs/DESIGN.md "Build pipeline").
+ //
+@@ -240,6 +241,7 @@
+ const seenClass = new Set<string>();
+ const codepoints = new Set<number>();
+ const visited = new Set<string>();
++const visitedSources = new Map<string, string>();
+ 
+ async function walk(file: string): Promise<void> {
+   if (visited.has(file)) return;
+@@ -251,6 +253,7 @@
+   // pass 1 must see like any hand-written module's.
+   if (file.replace(/\\/g, "/").endsWith("/styles.generated.ts")) return;
+   const src = await Bun.file(file).text();
++  visitedSources.set(file, src);
+   buildInputs.add(file);
+   // Throws with a code frame on lint errors.
+   const res = await transformFile(file, src, framework, { features: buildPlan?.features, entry });
+@@ -290,6 +293,7 @@
+ // rate the realm ticks (transition-* stays in ms and converts at runtime).
+ setAnimationTickRate(tickHz);
+ const styles = compileClasses(classStrings);
++const inlineTextUsed = addInlineTextFontSlots(styles, [...visitedSources].map(([path, source]) => ({ path, source })));
+ if (styles.records.length === 0) {
+   console.warn("  tailwind: no class literals compiled — is the app unstyled?");
+ }
+@@ -327,7 +331,7 @@
+   for (const line of findings) console.warn(`  warning: ${line}`);
+ }
+ 
+-const generatedStyles = generateStylesModule(styles);
++const generatedStyles = generateStylesModule(styles, inlineTextUsed);
+ // Pass 2 receives this build's style table through jsxPlugin. The copy beside
+ // the bundle is for inspection and for tools that bundle the framework with a
+ // given table (the site's playground runtimes); nothing is written into the
+diff --git a/contracts/generated/pocket_spec.h b/contracts/generated/pocket_spec.h
+--- a/contracts/generated/pocket_spec.h
++++ b/contracts/generated/pocket_spec.h
+@@ -112,5 +112,8 @@
+ #define POCKET_OP_capturedTexts 61U
+ #define POCKET_OP_setMesh 62U
+ #define POCKET_OP_setMeshEffect 63U
++#define POCKET_OP_setInlineText 64U
++#define POCKET_OP_setInlineReveal 65U
++#define POCKET_OP_getInlineTextLayout 66U
+ 
+ #endif
+
+diff --git a/engine/spec/src/lib.rs b/engine/spec/src/lib.rs
+--- a/engine/spec/src/lib.rs
++++ b/engine/spec/src/lib.rs
+@@ -123,6 +123,9 @@
+     pub const CAPTURED_TEXTS: u8 = 61;
+     pub const SET_MESH: u8 = 62;
+     pub const SET_MESH_EFFECT: u8 = 63;
++    pub const SET_INLINE_TEXT: u8 = 64;
++    pub const SET_INLINE_REVEAL: u8 = 65;
++    pub const GET_INLINE_TEXT_LAYOUT: u8 = 66;
+ }
+ 
+ /// Property ids (u8, stable, append-only). Groups:
+
+diff --git a/engine/runtime/src/generated_ops.rs b/engine/runtime/src/generated_ops.rs
+--- a/engine/runtime/src/generated_ops.rs
++++ b/engine/runtime/src/generated_ops.rs
+@@ -21,6 +21,9 @@
+     OpDescriptor { id: 5, name: "setStyle", args: &[ArgDescriptor { name: "id", kind: ArgKind::I32, optional: false }, ArgDescriptor { name: "styleId", kind: ArgKind::I32, optional: false }], result: ResultKind::None, provider: "core", capability: None },
+     OpDescriptor { id: 6, name: "setProp", args: &[ArgDescriptor { name: "id", kind: ArgKind::I32, optional: false }, ArgDescriptor { name: "propId", kind: ArgKind::U32, optional: false }, ArgDescriptor { name: "value", kind: ArgKind::Real, optional: false }], result: ResultKind::None, provider: "core", capability: None },
+     OpDescriptor { id: 7, name: "setText", args: &[ArgDescriptor { name: "id", kind: ArgKind::I32, optional: false }, ArgDescriptor { name: "str", kind: ArgKind::String, optional: false }], result: ResultKind::None, provider: "core", capability: None },
++    OpDescriptor { id: 64, name: "setInlineText", args: &[ArgDescriptor { name: "id", kind: ArgKind::I32, optional: false }, ArgDescriptor { name: "source", kind: ArgKind::String, optional: false }, ArgDescriptor { name: "records", kind: ArgKind::Bytes, optional: false }], result: ResultKind::None, provider: "core", capability: None },
++    OpDescriptor { id: 65, name: "setInlineReveal", args: &[ArgDescriptor { name: "id", kind: ArgKind::I32, optional: false }, ArgDescriptor { name: "codepoints", kind: ArgKind::Nonnegative, optional: false }], result: ResultKind::None, provider: "core", capability: None },
++    OpDescriptor { id: 66, name: "getInlineTextLayout", args: &[ArgDescriptor { name: "id", kind: ArgKind::I32, optional: false }], result: ResultKind::U32Array, provider: "core", capability: None },
+     OpDescriptor { id: 8, name: "replaceText", args: &[ArgDescriptor { name: "id", kind: ArgKind::I32, optional: false }, ArgDescriptor { name: "str", kind: ArgKind::String, optional: false }], result: ResultKind::None, provider: "core", capability: None },
+     OpDescriptor { id: 9, name: "uploadTexture", args: &[ArgDescriptor { name: "buf", kind: ArgKind::Bytes, optional: false }, ArgDescriptor { name: "w", kind: ArgKind::U32, optional: false }, ArgDescriptor { name: "h", kind: ArgKind::U32, optional: false }, ArgDescriptor { name: "psm", kind: ArgKind::U32, optional: false }], result: ResultKind::Integer, provider: "core", capability: None },
+     OpDescriptor { id: 10, name: "setImage", args: &[ArgDescriptor { name: "id", kind: ArgKind::I32, optional: false }, ArgDescriptor { name: "texHandle", kind: ArgKind::I32, optional: false }], result: ResultKind::None, provider: "core", capability: None },
+@@ -81,7 +84,7 @@
+ pub const LEGACY_C_OPS: &[u16] = &[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,24,25,26,27,28,29,42,57,58];
+ pub const IDF_OPS: &[u16] = &[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,24,25,26,27,28,29,39,40,41,42,43];
+ pub fn descriptor(op: u16) -> Option<&'static OpDescriptor> { OP_DESCRIPTORS.iter().find(|entry| entry.id == op) }
+-pub fn supports_core_op(op: u16) -> bool { matches!(op, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 62 | 63 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 24 | 25 | 26 | 27 | 28 | 29 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 50 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61) }
++pub fn supports_core_op(op: u16) -> bool { matches!(op, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 64 | 65 | 66 | 8 | 9 | 10 | 62 | 63 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 24 | 25 | 26 | 27 | 28 | 29 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 50 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61) }
+ pub fn validate_args(op: u16, args: &[OpArg<'_>]) -> Result<(), RuntimeError> {
+     let descriptor = descriptor(op).ok_or(RuntimeError::UnsupportedOperation)?;
+     if args.len() != descriptor.args.len() { return Err(RuntimeError::InvalidArgument); }
+@@ -140,6 +143,23 @@
+             let a1 = core::str::from_utf8(bytes(&args[1])?).map_err(|_| RuntimeError::InvalidArgument)?;
+             ui.set_text(a0, a1);
+             Ok(OpResult::None)
++        },
++        64 => { // setInlineText
++            let a0 = integer(&args[0])? as i32;
++            let a1 = core::str::from_utf8(bytes(&args[1])?).map_err(|_| RuntimeError::InvalidArgument)?;
++            let a2 = bytes(&args[2])?;
++            ui.set_inline_text(a0, a1, a2);
++            Ok(OpResult::None)
++        },
++        65 => { // setInlineReveal
++            let a0 = integer(&args[0])? as i32;
++            let a1 = integer(&args[1])? as u32;
++            ui.set_inline_reveal(a0, a1);
++            Ok(OpResult::None)
++        },
++        66 => { // getInlineTextLayout
++            let a0 = integer(&args[0])? as i32;
++            Ok(OpResult::Bytes(ui.get_inline_text_layout(a0).into_iter().flat_map(u32::to_le_bytes).collect()))
+         },
+         8 => { // replaceText
+             let a0 = integer(&args[0])? as i32;
+
+diff --git a/engine/guest-quickjs/src/generated_ops.h b/engine/guest-quickjs/src/generated_ops.h
+--- a/engine/guest-quickjs/src/generated_ops.h
++++ b/engine/guest-quickjs/src/generated_ops.h
+@@ -14,6 +14,9 @@
+   { 5, "setStyle", 2, PJS_RESULT_NONE, 1, 1, { { PJS_ARG_I32, 0 }, { PJS_ARG_I32, 0 } } },
+   { 6, "setProp", 3, PJS_RESULT_NONE, 1, 1, { { PJS_ARG_I32, 0 }, { PJS_ARG_U32, 0 }, { PJS_ARG_REAL, 0 } } },
+   { 7, "setText", 2, PJS_RESULT_NONE, 1, 1, { { PJS_ARG_I32, 0 }, { PJS_ARG_STRING, 0 } } },
++  { 64, "setInlineText", 3, PJS_RESULT_NONE, 0, 0, { { PJS_ARG_I32, 0 }, { PJS_ARG_STRING, 0 }, { PJS_ARG_BYTES, 0 } } },
++  { 65, "setInlineReveal", 2, PJS_RESULT_NONE, 0, 0, { { PJS_ARG_I32, 0 }, { PJS_ARG_NONNEGATIVE, 0 } } },
++  { 66, "getInlineTextLayout", 1, PJS_RESULT_U32ARRAY, 0, 0, { { PJS_ARG_I32, 0 } } },
+   { 8, "replaceText", 2, PJS_RESULT_NONE, 1, 1, { { PJS_ARG_I32, 0 }, { PJS_ARG_STRING, 0 } } },
+   { 9, "uploadTexture", 4, PJS_RESULT_INTEGER, 1, 1, { { PJS_ARG_BYTES, 0 }, { PJS_ARG_U32, 0 }, { PJS_ARG_U32, 0 }, { PJS_ARG_U32, 0 } } },
+   { 10, "setImage", 2, PJS_RESULT_NONE, 1, 1, { { PJS_ARG_I32, 0 }, { PJS_ARG_I32, 0 } } },

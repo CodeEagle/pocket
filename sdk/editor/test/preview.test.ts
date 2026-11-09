@@ -222,7 +222,7 @@ test("real native preview opens Profile, launches Lobby, and returns through Sys
       await new Promise((resolveWait) => setTimeout(resolveWait, 30));
       value = await snapshot();
     }
-    assert.ok(predicate(value), `mini-app preview did not reach the expected state before timeout: ${JSON.stringify(value.status)}`);
+    assert.ok(predicate(value), `mini-app preview did not reach the expected state before timeout: ${JSON.stringify({ status: value.status, frame: { width: value.frame?.width, height: value.frame?.height, inputBounds: value.frame?.inputBounds, text: value.frame?.ops?.filter((op: Record<string, unknown>) => op.type === "text").map((op: Record<string, unknown>) => ({ text: op.text, y: op.y, clip: op.clip })) } })}`);
     return value;
   };
   const childStability = new Map<string, { y: number; h: number; samples: number }>();
@@ -249,6 +249,60 @@ test("real native preview opens Profile, launches Lobby, and returns through Sys
       }), "pocket-host-showcase", "input");
       assert.equal(response.status, 200);
     }
+  };
+  let scrollPointerId = 10;
+  const swipe = async (direction: "down" | "up") => {
+    const id = scrollPointerId++;
+    const x = 380;
+    const ys = direction === "down" ? [760, 630, 500, 370, 240] : [240, 370, 500, 630, 760];
+    const send = async (phase: "down" | "move" | "up", y: number) => {
+      const response = await manager.handle(new Request("http://127.0.0.1/api/projects/pocket-host-showcase/preview/input", {
+        method: "POST",
+        body: JSON.stringify({ type: "pointer", phase, id, x, y }),
+      }), "pocket-host-showcase", "input");
+      assert.equal(response.status, 200, `${phase} scroll pointer failed with ${response.status}`);
+    };
+    await send("down", ys[0]!);
+    for (const y of ys.slice(1, -1)) await send("move", y);
+    await send("up", ys.at(-1)!);
+  };
+  const scrollUntilText = async (
+    matches: (value: Record<string, any>) => boolean,
+    label: string,
+    direction: "down" | "up",
+  ) => {
+    let value = await snapshot();
+    if (direction === "up") {
+      for (let attempt = 0; attempt < 8 && !matches(value); attempt += 1) {
+        const heading = value.frame?.ops?.find((op: Record<string, unknown>) => op.type === "text" && op.text === "POCKET SHOWCASE");
+        const headingY = Number(heading?.y);
+        if (Number.isFinite(headingY) && headingY > 90) break;
+        await swipe("up");
+        await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+        value = await snapshot();
+      }
+      let previousHeadingY: number | undefined;
+      let stableFrames = 0;
+      value = await waitFor((next) => {
+        const nextHeadingY = Number(next.frame?.ops?.find((op: Record<string, unknown>) => op.type === "text" && op.text === "POCKET SHOWCASE")?.y);
+        if (!Number.isFinite(nextHeadingY)) {
+          previousHeadingY = undefined;
+          stableFrames = 0;
+          return false;
+        }
+        stableFrames = previousHeadingY !== undefined && Math.abs(nextHeadingY - previousHeadingY) < 0.5 ? stableFrames + 1 : 0;
+        previousHeadingY = nextHeadingY;
+        return matches(next) && Math.abs(nextHeadingY - 88) < 0.5 && stableFrames >= 3;
+      }, 7000);
+    } else {
+      for (let attempt = 0; attempt < 8 && !matches(value); attempt += 1) {
+        await swipe(direction);
+        await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+        value = await snapshot();
+      }
+    }
+    assert.ok(matches(value), `${label} must be visible after scrolling: ${JSON.stringify(value.frame?.ops?.filter((op: Record<string, unknown>) => op.type === "text").map((op: Record<string, unknown>) => ({ text: op.text, y: op.y, clip: op.clip })))}`);
+    return value;
   };
   try {
     const stream = await manager.handle(new Request("http://127.0.0.1/api/projects/pocket-host-showcase/preview/stream"), "pocket-host-showcase", "stream");
@@ -289,8 +343,14 @@ test("real native preview opens Profile, launches Lobby, and returns through Sys
     assert.equal(typeof profileReturn?.y, "number");
     await pointer(3, 195, Number(profileReturn!.y) + 8);
 
-    value = await waitFor((next) => next.frame.ops.some((op: Record<string, unknown>) => op.type === "text" && op.text === "App result:"));
+    value = await waitFor((next) => !next.frame.inputBounds &&
+      !next.frame.ops.some((op: Record<string, unknown>) => op.type === "text" && op.text === "Pocket Profile") &&
+      next.frame.ops.some((op: Record<string, unknown>) => op.type === "text" && op.text === "Open profile app"), 15000);
+    value = await scrollUntilText((next) => next.frame.ops.some((op: Record<string, unknown>) =>
+      op.type === "text" && typeof op.text === "string" && op.text.startsWith("App result:")), "Profile return payload", "down");
     assert.equal(value.status.state, "ready");
+    value = await scrollUntilText((next) => next.frame.ops.some((op: Record<string, unknown>) =>
+      op.type === "text" && op.text === "Open profile app"), "Showcase Profile launch action", "up");
     assert.ok(value.frame.ops.some((op: Record<string, unknown>) => op.type === "text" && op.text === "Open profile app"));
     assert.equal(value.frame.ops.some((op: Record<string, unknown>) => op.type === "hostSurface"), false);
     assert.equal(value.status.error, undefined);

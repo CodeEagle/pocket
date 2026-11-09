@@ -1,0 +1,40 @@
+group 'dev.pocketjs.pocket_live2d'
+version '1.0-SNAPSHOT'
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.9.1'
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'dev.pocketjs.pocket_live2d'
+    compileSdk 35
+
+    defaultConfig {
+        minSdk 21
+        ndk {
+            // The public Cubism Core bundle currently ships an Android
+            // arm64-v8a archive only. Avoid asking CMake to configure
+            // unsupported ABIs for this plugin.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path '../src/CMakeLists.txt'
+        }
+    }
+}

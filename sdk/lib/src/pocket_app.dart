@@ -63,6 +63,7 @@ final class PocketGuestSession extends StatefulWidget {
     this.compositorBounds,
     this.compositorViewport,
     this.preserveCompositorDisplayGeometry = false,
+    this.enableSceneCapture = false,
   });
   final PocketAppConfig config;
   final PocketHostSurfaceBuilder? hostSurfaceBuilder;
@@ -81,6 +82,11 @@ final class PocketGuestSession extends StatefulWidget {
   final Rect? compositorBounds;
   final Size? compositorViewport;
   final bool preserveCompositorDisplayGeometry;
+
+  /// Adds PocketView's bounded capture boundary when an admitted capability
+  /// needs the current rendered guest surface. Keep this off for ordinary
+  /// surfaces so they do not allocate the extra render layer.
+  final bool enableSceneCapture;
 
   /// Optional host-owned Session.  When supplied, this widget only attaches
   /// its PocketView and never disposes the Session.
@@ -189,6 +195,10 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       memoryLimits: session.memoryLimits,
       active: session.foreground,
       inputEnabled: widget.inputEnabled,
+      enableSceneCapture: widget.enableSceneCapture,
+      keyboardInputEnabled: config.keyboardInputEnabled,
+      keyboardAutofocus: config.keyboardAutofocus,
+      keyboardButtonMap: config.keyboardButtonMap,
       backgroundColor: widget.backgroundColor,
       viewport: widget.viewport,
       geometryRevision: widget.geometryRevision,
@@ -202,6 +212,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       workerProgram: session.workerProgram,
       offloadProviderFactory: config.offloadProviderFactory,
       tickHz: session.tickHz,
+      fontFamilyFallback: config.fontFamilyFallback,
       bytecodeAsset: config.bytecodeAsset,
       bytecodeMetadataAsset: config.metadataAsset,
       pakAsset: config.pakAsset,

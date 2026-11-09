@@ -3,12 +3,20 @@
 // normal completion and quota cancellation.
 // ignore_for_file: invalid_use_of_internal_member
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:pocket_services/pocket_services.dart';
+
+part 'dio_worker.dart';
+
+const Duration _workerShutdownGrace = Duration(milliseconds: 250);
+const Duration _workerExitGrace = Duration(milliseconds: 100);
+const Duration _workerCancellationGrace = Duration(milliseconds: 250);
 
 const String pocketDioPluginId = 'dart.dio';
 const String pocketDioRequestCapability = 'dio.request';
@@ -57,28 +65,30 @@ const PocketPluginCapabilitySchema _dioCapabilitySchema =
 final class PocketDioPlugin extends PocketPlugin {
   PocketDioPlugin({
     Iterable<String> allowedOrigins = const <String>[],
-    Dio? dio,
+    Dio Function()? dioFactory,
     Duration requestTimeout = const Duration(seconds: 30),
     int maxResponseBytes = _hardMaxResponseBytes,
   }) : _allowedOrigins = _normalizeOrigins(allowedOrigins),
-       _dio = dio ?? Dio(),
-       _ownsDio = dio == null,
+       _dioFactory = dioFactory,
        requestTimeout = _boundedTimeout(requestTimeout),
        maxResponseBytes = _boundedResponseLimit(maxResponseBytes);
 
   final Set<String> _allowedOrigins;
-  final Dio _dio;
-  final bool _ownsDio;
-  final Set<CancelToken> _inFlight = <CancelToken>{};
+  final Dio Function()? _dioFactory;
+  final Map<int, _DioPendingRequest> _pending = <int, _DioPendingRequest>{};
   final Duration requestTimeout;
   final int maxResponseBytes;
+  _DioWorker? _worker;
+  Future<void>? _disposeFuture;
+  int _nextRequestId = 1;
   bool _disposed = false;
 
   /// Canonical origins granted to this provider.
   Set<String> get allowedOrigins => Set<String>.unmodifiable(_allowedOrigins);
 
-  /// Number of requests currently owned by this plugin.
-  int get inFlightCount => _inFlight.length;
+  /// Number of requests currently owned by this plugin, including worker
+  /// startup and requests dispatched to the worker.
+  int get inFlightCount => _pending.length;
 
   @override
   PocketPluginDescriptor get descriptor => const PocketPluginDescriptor(
@@ -106,138 +116,317 @@ final class PocketDioPlugin extends PocketPlugin {
 
   /// Executes one bounded request. The same method is registered on the
   /// Pocket host bridge and is useful for a direct provider-level test.
-  Future<Object?> request(Map<String, dynamic> params) async {
+  Future<Object?> request(Map<String, dynamic> params) {
     if (_disposed) {
-      throw const PocketCapabilityException(
-        'plugin_disposed',
-        'Dio plugin is disposed',
+      return Future<Object?>.error(
+        const PocketCapabilityException(
+          'plugin_disposed',
+          'Dio plugin is disposed',
+        ),
       );
     }
-    final url = _parseUrl(params['url']);
-    final origin = _originOf(url);
-    if (!_allowedOrigins.contains(origin)) {
-      throw PocketCapabilityException(
-        'origin_denied',
-        'HTTP origin is not allowed: $origin',
+    if (_pending.length + (_worker?.cancelling.length ?? 0) >= 8) {
+      return Future<Object?>.error(
+        const PocketCapabilityException(
+          'request_limit',
+          'Dio plugin already has eight pending requests',
+        ),
       );
     }
 
-    final method = _parseMethod(params['method']);
-    final headers = _parseHeaders(params['headers']);
-    final queryParameters = _parseQueryParameters(params['queryParameters']);
-    final data = params['data'];
-    _validateJsonOrBytes(data, 'data', _hardMaxRequestBytes);
-    final responseType = _parseResponseType(params['responseType']);
-    final timeout = _parseTimeout(params['timeoutMs']);
-    final cancelToken = CancelToken();
-    _inFlight.add(cancelToken);
-    final stopwatch = Stopwatch()..start();
-
-    try {
-      final response = await _dio
-          .request<dynamic>(
-            url.toString(),
-            data: data,
-            queryParameters: queryParameters,
-            cancelToken: cancelToken,
-            options: Options(
-              method: method,
-              headers: headers,
-              responseType: ResponseType.stream,
-              sendTimeout: timeout,
-              connectTimeout: timeout,
-              receiveTimeout: timeout,
-              followRedirects: false,
-              maxRedirects: 0,
-              validateStatus: (_) => true,
-              receiveDataWhenStatusError: true,
-            ),
-          )
-          .timeout(
-            timeout,
-            onTimeout: () {
-              cancelToken.cancel('request deadline exceeded');
-              throw const PocketCapabilityException(
-                'request_timeout',
-                'Dio request exceeded its deadline',
-              );
-            },
-          );
-      final body = response.data;
-      if (body is! ResponseBody) {
-        throw const PocketCapabilityException(
-          'response_invalid',
-          'Dio did not return a response stream',
-        );
-      }
-      final remaining = timeout - stopwatch.elapsed;
-      if (remaining <= Duration.zero) {
-        cancelToken.cancel('request deadline exceeded');
-        throw const PocketCapabilityException(
-          'request_timeout',
-          'Dio request exceeded its deadline',
-        );
-      }
-      final bytes = await _readBounded(body, cancelToken).timeout(
-        remaining,
-        onTimeout: () {
-          cancelToken.cancel('request deadline exceeded');
-          throw const PocketCapabilityException(
-            'request_timeout',
-            'Dio response exceeded its deadline',
-          );
-        },
-      );
-      final decoded = _decode(bytes, responseType, body.headers);
-      final result = <String, Object?>{
-        'statusCode': response.statusCode ?? 0,
-        'headers': _responseHeaders(body.headers),
-        'data': decoded,
-      };
-      _validateResponsePayload(result, maxResponseBytes);
-      return result;
-    } on PocketCapabilityException {
-      rethrow;
-    } on DioException catch (error) {
-      if (CancelToken.isCancel(error) || cancelToken.isCancelled) {
-        throw const PocketCapabilityException(
-          'request_cancelled',
-          'Dio request was cancelled',
-        );
-      }
-      throw PocketCapabilityException(
-        'request_failed',
-        error.message ?? 'Dio request failed',
-      );
-    } on FormatException catch (error) {
-      throw PocketCapabilityException('response_decode', error.message);
-    } catch (error) {
-      throw PocketCapabilityException('request_failed', '$error');
-    } finally {
-      _inFlight.remove(cancelToken);
+    final id = _nextRequestId++;
+    final budget = _requestBudget(params);
+    final deadline = DateTime.now().add(budget).microsecondsSinceEpoch;
+    final pending = _DioPendingRequest(id, params, deadline);
+    _pending[id] = pending;
+    pending.timer = Timer(budget, () => _onDeadline(id));
+    _ensureWorker();
+    final worker = _worker;
+    if (worker != null && worker.commandPort != null) {
+      _dispatchPending(worker);
     }
+    return pending.completer.future;
   }
 
   @override
   Future<void> deactivate(PocketPluginContext context) async {
-    _cancelInFlight('plugin deactivated');
+    _settleAllCancelled('Dio plugin was deactivated');
+    await _stopWorker();
   }
 
   @override
-  Future<void> dispose() async {
+  Future<void> dispose() => _disposeFuture ??= _dispose();
+
+  Future<void> _dispose() async {
     if (_disposed) return;
     _disposed = true;
-    _cancelInFlight('plugin disposed');
-    if (_ownsDio) _dio.close(force: true);
+    _settleAllCancelled('Dio plugin was disposed');
+    await _stopWorker();
   }
 
-  void _cancelInFlight(Object reason) {
-    for (final token in _inFlight.toList(growable: false)) {
-      token.cancel(reason);
+  void _ensureWorker() {
+    if (_worker != null || _disposed) return;
+    final worker = _DioWorker(
+      events: ReceivePort(),
+      errors: ReceivePort(),
+      exits: ReceivePort(),
+    );
+    _worker = worker;
+    worker.events.listen((message) => _onWorkerMessage(worker, message));
+    worker.errors.listen((message) => _onWorkerError(worker, message));
+    worker.exits.listen((_) => _onWorkerExit(worker));
+    unawaited(_startWorker(worker));
+  }
+
+  Future<void> _startWorker(_DioWorker worker) async {
+    try {
+      final isolate = await Isolate.spawn<_DioWorkerStart>(
+        _dioWorkerMain,
+        _DioWorkerStart(
+          events: worker.events.sendPort,
+          allowedOrigins: _allowedOrigins.toList(growable: false),
+          requestTimeoutMicros: requestTimeout.inMicroseconds,
+          maxResponseBytes: maxResponseBytes,
+          dioFactory: _dioFactory,
+        ),
+        onError: worker.errors.sendPort,
+        onExit: worker.exits.sendPort,
+        debugName: 'PocketDio IO worker',
+      );
+      worker.isolate = isolate;
+      if (!worker.startupSettled.isCompleted) worker.startupSettled.complete();
+      if (worker.stopping) isolate.kill(priority: Isolate.immediate);
+    } on Object catch (error) {
+      if (!worker.startupSettled.isCompleted) worker.startupSettled.complete();
+      _failWorker(
+        worker,
+        'request_failed',
+        'Dio worker failed to start: $error',
+      );
     }
   }
 
-  Duration _parseTimeout(Object? value) {
+  void _onWorkerMessage(_DioWorker worker, Object? message) {
+    if (!identical(_worker, worker) || worker.stopping || message is! Map) {
+      return;
+    }
+    final type = message['type'];
+    if (type == 'ready') {
+      final commandPort = message['commandPort'];
+      if (commandPort is! SendPort) {
+        _failWorker(
+          worker,
+          'request_failed',
+          'Dio worker sent an invalid ready message',
+        );
+        return;
+      }
+      worker.commandPort = commandPort;
+      _dispatchPending(worker);
+      return;
+    }
+    if (type == 'startup_error') {
+      _failWorker(
+        worker,
+        'request_failed',
+        message['message']?.toString() ?? 'Dio worker failed to initialize',
+      );
+      return;
+    }
+    if (type != 'result' && type != 'error') {
+      _failWorker(
+        worker,
+        'request_failed',
+        'Dio worker sent an invalid message',
+      );
+      return;
+    }
+    final id = message['id'];
+    if (id is! int) {
+      _failWorker(
+        worker,
+        'request_failed',
+        'Dio worker sent an invalid request id',
+      );
+      return;
+    }
+    _acknowledgeCancellation(worker, id);
+    final pending = _pending[id];
+    if (pending == null) return; // Late replies after timeout/cancel are inert.
+    if (type == 'result') {
+      _settleResult(pending, message['value']);
+    } else {
+      final code = message['code'];
+      final errorMessage = message['message'];
+      _settleError(
+        pending,
+        PocketCapabilityException(
+          code is String ? code : 'request_failed',
+          errorMessage is String ? errorMessage : 'Dio worker request failed',
+        ),
+      );
+    }
+  }
+
+  void _onWorkerError(_DioWorker worker, Object? message) {
+    if (!identical(_worker, worker) || worker.stopping) return;
+    _failWorker(
+      worker,
+      'request_failed',
+      'Dio worker failed: ${_workerErrorMessage(message)}',
+    );
+  }
+
+  void _onWorkerExit(_DioWorker worker) {
+    if (!worker.exited.isCompleted) worker.exited.complete();
+    if (!identical(_worker, worker) || worker.stopping) return;
+    _failWorker(worker, 'request_failed', 'Dio worker exited unexpectedly');
+  }
+
+  void _dispatchPending(_DioWorker worker) {
+    final commandPort = worker.commandPort;
+    if (commandPort == null || worker.stopping) return;
+    for (final pending in _pending.values.toList(growable: false)) {
+      if (pending.sent) continue;
+      if (pending.deadlineMicros <= DateTime.now().microsecondsSinceEpoch) {
+        _onDeadline(pending.id);
+        continue;
+      }
+      try {
+        commandPort.send(<String, Object?>{
+          'type': 'request',
+          'id': pending.id,
+          'deadlineMicros': pending.deadlineMicros,
+          'params': pending.params,
+        });
+        pending.sent = true;
+      } on Object {
+        _settleError(
+          pending,
+          const PocketCapabilityException(
+            'invalid_request',
+            'request parameters could not be transferred to the Dio worker',
+          ),
+        );
+      }
+    }
+  }
+
+  void _onDeadline(int id) {
+    final pending = _pending[id];
+    if (pending == null) return;
+    if (pending.sent) {
+      final worker = _worker;
+      if (worker?.commandPort != null) {
+        worker!.commandPort!.send(<String, Object?>{
+          'type': 'cancel',
+          'id': id,
+        });
+        _trackCancellation(worker, id);
+      }
+    }
+    _settleError(
+      pending,
+      const PocketCapabilityException(
+        'request_timeout',
+        'Dio request exceeded its deadline',
+      ),
+    );
+    if (_pending.isEmpty && _worker?.commandPort == null) {
+      unawaited(_stopWorker());
+    }
+  }
+
+  void _settleResult(_DioPendingRequest pending, Object? value) {
+    if (!_pending.containsKey(pending.id)) return;
+    _pending.remove(pending.id);
+    pending.timer?.cancel();
+    if (!pending.completer.isCompleted) pending.completer.complete(value);
+  }
+
+  void _settleError(
+    _DioPendingRequest pending,
+    PocketCapabilityException error,
+  ) {
+    if (!_pending.containsKey(pending.id)) return;
+    _pending.remove(pending.id);
+    pending.timer?.cancel();
+    if (!pending.completer.isCompleted) pending.completer.completeError(error);
+  }
+
+  void _settleAllCancelled(String message) {
+    for (final pending in _pending.values.toList(growable: false)) {
+      _settleError(
+        pending,
+        PocketCapabilityException('request_cancelled', message),
+      );
+    }
+  }
+
+  void _trackCancellation(_DioWorker worker, int id) {
+    worker.cancelling.add(id);
+    worker.cancellationWatchdog ??= Timer(_workerCancellationGrace, () {
+      if (identical(_worker, worker) && worker.cancelling.isNotEmpty) {
+        _failWorker(
+          worker,
+          'request_failed',
+          'Dio worker did not acknowledge request cancellation',
+        );
+      }
+    });
+  }
+
+  void _acknowledgeCancellation(_DioWorker worker, int id) {
+    worker.cancelling.remove(id);
+    if (worker.cancelling.isEmpty) {
+      worker.cancellationWatchdog?.cancel();
+      worker.cancellationWatchdog = null;
+    }
+  }
+
+  void _failWorker(_DioWorker worker, String code, String message) {
+    if (!identical(_worker, worker)) return;
+    _worker = null;
+    worker.stopping = true;
+    for (final pending in _pending.values.toList(growable: false)) {
+      _settleError(pending, PocketCapabilityException(code, message));
+    }
+    worker.isolate?.kill(priority: Isolate.immediate);
+    worker.closePorts();
+  }
+
+  Future<void> _stopWorker() async {
+    final worker = _worker;
+    if (worker == null) return;
+    _worker = null;
+    worker.stopping = true;
+    worker.commandPort?.send(const <String, Object?>{'type': 'shutdown'});
+    try {
+      await worker.startupSettled.future.timeout(_workerShutdownGrace);
+      if (worker.isolate != null) {
+        await worker.exited.future.timeout(_workerShutdownGrace);
+      }
+    } on Object {
+      worker.isolate?.kill(priority: Isolate.immediate);
+      try {
+        await worker.exited.future.timeout(_workerExitGrace);
+      } on Object {
+        // Ports are still closed if an isolate does not exit in the grace time.
+      }
+    } finally {
+      worker.closePorts();
+    }
+  }
+
+  Duration _requestBudget(Map<String, dynamic> params) {
+    final value = params['timeoutMs'];
+    if (value is int && value > 0 && value < requestTimeout.inMilliseconds) {
+      return Duration(milliseconds: value);
+    }
+    return requestTimeout;
+  }
+
+  static Duration _parseTimeout(Object? value, Duration requestTimeout) {
     if (value == null) return requestTimeout;
     if (value is! int || value <= 0) {
       throw const PocketCapabilityException(
@@ -366,9 +555,10 @@ final class PocketDioPlugin extends PocketPlugin {
     return result;
   }
 
-  Future<List<int>> _readBounded(
+  static Future<List<int>> _readBounded(
     ResponseBody body,
     CancelToken cancelToken,
+    int maxResponseBytes,
   ) async {
     final declaredLength = body.contentLength;
     if (declaredLength > maxResponseBytes) {

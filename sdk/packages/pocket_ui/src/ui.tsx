@@ -9,6 +9,7 @@
 
 import { For, Show, children as resolveChildren, createContext, createEffect, createSignal, onCleanup, useContext, type Accessor, type JSX } from "solid-js";
 import { createGesture } from "@pocketjs/framework/gesture";
+import { getOps } from "@pocketjs/framework/host";
 import { bindDpadScroll, createScroller } from "@pocketjs/framework/kinetics";
 import { onFrame } from "@pocketjs/framework/solid/lifecycle";
 import {
@@ -20,7 +21,7 @@ import {
   type NodeMirror,
   type ViewProps,
 } from "@pocketjs/framework/solid/components";
-import { createDisplayGeometry } from "./display.ts";
+import { createDisplayGeometry, subscribeHostEvents } from "./display.ts";
 import {
   availableDisplayPanes,
   avoidDisplayOcclusions,
@@ -41,7 +42,7 @@ import {
   type DisplaySideContourReserves,
 } from "./responsive.ts";
 import { useRouteActive } from "./route.tsx";
-import { HostBridgeAbiError } from "./host.ts";
+import { HostBridgeAbiError, type HostEvent } from "./host.ts";
 import { useAnimatedNumber } from "./mobile.tsx";
 
 /**
@@ -113,9 +114,11 @@ export interface ScrollablePageContextValue {
   geometry: () => DisplayGeometry;
   subscribeContour: (sync: () => boolean) => () => void;
   /** Existing painted control geometry, shared with native editor overlays. */
-  visualRect?: (node: NodeMirror) => TextInputRect | undefined;
+  visualRect?: (node: NodeMirror, fallback?: TextInputRect) => TextInputRect | undefined;
   /** Visible page bounds for overlays such as explicit accessibility nodes. */
   clipRect?: () => TextInputRect | undefined;
+  /** Keep an input inside this page's visible clip before opening the IME. */
+  ensureVisible?: (node: NodeMirror, fallback?: TextInputRect) => void;
   /** iOS-style nested scroll chaining: forward unconsumed vertical drag delta to parent page. */
   chainDrag?: (deltaY: number) => void;
   /** Complete a chained nested drag with release velocity (or 0 on cancel). */
@@ -338,7 +341,7 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
   );
 }
 
-function baseMarginLeft(className: string | undefined, explicit?: number): number {
+function baseMarginLeft(className: string | undefined, explicit?: number | string): number {
   if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
   if (!className) return 0;
   let result = 0;
@@ -350,7 +353,7 @@ function baseMarginLeft(className: string | undefined, explicit?: number): numbe
   return result;
 }
 
-function baseMarginRight(className: string | undefined, explicit?: number): number {
+function baseMarginRight(className: string | undefined, explicit?: number | string): number {
   if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
   if (!className) return 0;
   let result = 0;
@@ -362,7 +365,7 @@ function baseMarginRight(className: string | undefined, explicit?: number): numb
   return result;
 }
 
-function basePaddingLeft(className: string | undefined, explicit?: number): number {
+function basePaddingLeft(className: string | undefined, explicit?: number | string): number {
   if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
   if (!className) return 0;
   let result = 0;
@@ -374,7 +377,7 @@ function basePaddingLeft(className: string | undefined, explicit?: number): numb
   return result;
 }
 
-function basePaddingRight(className: string | undefined, explicit?: number): number {
+function basePaddingRight(className: string | undefined, explicit?: number | string): number {
   if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
   if (!className) return 0;
   let result = 0;
@@ -392,13 +395,13 @@ function assignViewRef(ref: ViewProps["ref"], current: NodeMirror): void {
   else if (typeof ref === "object" && "current" in ref) ref.current = current;
 }
 
-function baseOverflow(className: string | undefined, explicit?: number): number {
+function baseOverflow(className: string | undefined, explicit?: number | string): number {
   if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
   if (!className) return 0;
   return /(?:^|\s)overflow-hidden(?:\s|$)/.test(className) ? 1 : 0;
 }
 
-function hasFullWidth(className: string | undefined, explicit?: number): boolean {
+function hasFullWidth(className: string | undefined, explicit?: number | string): boolean {
   if (typeof explicit === "number" && explicit < 0) return true;
   if (!className) return false;
   return /(?:^|\s)w-full(?:\s|$)/.test(className);
@@ -996,7 +999,7 @@ export function NavigationBar(props: NavigationBarProps): JSX.Element {
           <View class="w-full h-[1]" style={{ bgColor: border() }} />
         </Show>
         <View
-          nodeRef={(node) => { trackNode = node; props.trackNodeRef?.(node); }}
+          nodeRef={(node) => { trackNode = node; assignViewRef(props.trackNodeRef, node); }}
           class={isFloating()
             ? "relative flex-row items-center w-full h-[58] px-2"
             : "relative flex-row items-center w-full h-[54] px-2"}
@@ -1140,6 +1143,7 @@ interface TextInputSession {
   refreshLayout: () => void;
   close: () => void;
   accepts: (params: TextInputParams) => boolean;
+  onOpened: (params: TextInputParams) => boolean;
   onEdit: (params: TextInputParams) => void;
   onSubmit: (params: TextInputParams) => void;
   onClosed: (params: TextInputParams) => void;
@@ -1156,7 +1160,7 @@ interface TextInputSession {
  * The shell also has three baked font slots for this control; keeping the
  * size union finite makes the JS and Flutter editors select the same slot.
  */
-export type InputFieldColor = `#${string}`;
+export type InputFieldColor = `#${string}` | "transparent";
 
 export interface InputFieldAppearance {
   textColor?: InputFieldColor;
@@ -1191,7 +1195,7 @@ function normalizeInputColor(
   fallback: InputFieldColor,
 ): InputFieldColor {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
-  return /^#[0-9a-f]{6}$/.test(normalized)
+  return normalized === "transparent" || /^#[0-9a-f]{6}$/.test(normalized)
     ? normalized as InputFieldColor
     : fallback;
 }
@@ -1207,11 +1211,141 @@ const textInputGlobal = globalThis as typeof globalThis & {
 };
 let nextTextInputId = 1;
 let activeTextInput: TextInputSession | undefined;
-let activePageScroll: {
-  ensureVisible: (node: NodeMirror, fallback?: TextInputRect) => void;
-  visualRect: (node: NodeMirror, fallback?: TextInputRect) => TextInputRect | undefined;
-  clipRect: () => TextInputRect | undefined;
-} | undefined;
+
+/** One event tap serves the active ScrollablePages in this guest realm. Pages
+ * register only while their route is visible; the existing node tree and
+ * viewport geometry select the target, so a wheel event never gets replayed
+ * as pointer input or broadcast into each scroller. */
+interface DesktopScrollPage {
+  node: () => NodeMirror | undefined;
+  active: () => boolean;
+  rect: () => TextInputRect | undefined;
+  applyDelta: (deltaY: number) => number;
+  interrupt: () => void;
+}
+
+const activeDesktopScrollPages = new Set<DesktopScrollPage>();
+let removeDesktopScrollEvents: (() => void) | undefined;
+let trackpadScrollPage: DesktopScrollPage | null | undefined;
+
+function nodeContainsId(root: NodeMirror, id: number): boolean {
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current.id === id) return true;
+    for (const child of current.children) pending.push(child);
+  }
+  return false;
+}
+
+function nodeIsWithin(root: NodeMirror | undefined, node: NodeMirror | undefined): boolean {
+  for (let current = node; current; current = current.parent ?? undefined) {
+    if (current === root) return true;
+  }
+  return false;
+}
+
+function nodeDepth(node: NodeMirror): number {
+  let depth = 0;
+  for (let current: NodeMirror | null = node; current; current = current.parent) depth += 1;
+  return depth;
+}
+
+function scrollPageAt(x: number, y: number): DesktopScrollPage | undefined {
+  let hitId = 0;
+  try {
+    hitId = getOps().hitTestBounds?.(x, y) ?? 0;
+  } catch {
+    // Some injected/replay hosts do not expose bounds hit testing. The
+    // retained viewport rectangles below are the existing fallback.
+  }
+  const candidates: Array<{ page: DesktopScrollPage; node: NodeMirror; area: number; depth: number }> = [];
+  for (const page of activeDesktopScrollPages) {
+    if (!page.active()) continue;
+    const node = page.node();
+    const rect = page.rect();
+    if (!node || !rect || x < rect.x || y < rect.y || x >= rect.x + rect.width || y >= rect.y + rect.height) continue;
+    // When the host reports a target, accept only a ScrollablePage whose
+    // native mirror owns that target. This lets an overlay or sibling page
+    // win hit testing without making every visible page consume the delta.
+    if (hitId > 0 && !nodeContainsId(node, hitId)) continue;
+    candidates.push({ page, node, area: rect.width * rect.height, depth: nodeDepth(node) });
+  }
+  candidates.sort((a, b) => b.depth - a.depth || a.area - b.area);
+  return candidates[0]?.page;
+}
+
+function parentDesktopScrollPage(page: DesktopScrollPage): DesktopScrollPage | undefined {
+  const node = page.node();
+  for (let ancestor = node?.parent; ancestor; ancestor = ancestor.parent) {
+    for (const candidate of activeDesktopScrollPages) {
+      if (candidate !== page && candidate.active() && candidate.node() === ancestor) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function consumeDesktopScroll(page: DesktopScrollPage | undefined, deltaY: number): void {
+  if (!page || !page.active() || deltaY === 0) return;
+  const consumed = page.applyDelta(deltaY);
+  const remainder = deltaY - consumed;
+  // Reuse the existing node ancestry for nested scroll chaining. A child
+  // consumes to its current bound first; only its unconsumed delta reaches
+  // the nearest active ScrollablePage ancestor.
+  if (Math.abs(remainder) > 0.01) consumeDesktopScroll(parentDesktopScrollPage(page), remainder);
+}
+
+function dispatchDesktopScroll(event: HostEvent): void {
+  if (event.method !== "input.scroll") return;
+  const params = event.params as Record<string, unknown>;
+  const x = finiteNumber(params.x);
+  const y = finiteNumber(params.y);
+  const deltaY = finiteNumber(params.deltaY) ?? 0;
+  const source = params.source;
+  const phase = params.phase;
+  if (x === undefined || y === undefined) return;
+
+  if (source === "wheel") {
+    if (phase !== "update") return;
+    consumeDesktopScroll(scrollPageAt(x, y), deltaY);
+    return;
+  }
+  if (source !== "trackpad") return;
+  if (phase === "start") {
+    trackpadScrollPage = scrollPageAt(x, y) ?? null;
+    trackpadScrollPage?.interrupt();
+    return;
+  }
+  if (phase === "end") {
+    trackpadScrollPage = undefined;
+    return;
+  }
+  if (phase !== "update") return;
+  // Updates without a start are ignored. A start on empty space stores null
+  // until end, so a moving trackpad cannot acquire a new page mid-gesture.
+  if (trackpadScrollPage === undefined) return;
+  if (trackpadScrollPage && !trackpadScrollPage.active()) trackpadScrollPage = null;
+  const page = trackpadScrollPage ?? undefined;
+  consumeDesktopScroll(page, deltaY);
+}
+
+function subscribeDesktopScrollEvents(): () => void {
+  return subscribeHostEvents(dispatchDesktopScroll);
+}
+
+function registerDesktopScrollPage(page: DesktopScrollPage): () => void {
+  activeDesktopScrollPages.add(page);
+  if (!removeDesktopScrollEvents) removeDesktopScrollEvents = subscribeDesktopScrollEvents();
+  return () => {
+    activeDesktopScrollPages.delete(page);
+    if (trackpadScrollPage === page) trackpadScrollPage = null;
+    if (activeDesktopScrollPages.size === 0) {
+      trackpadScrollPage = undefined;
+      removeDesktopScrollEvents?.();
+      removeDesktopScrollEvents = undefined;
+    }
+  };
+}
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -1279,6 +1413,7 @@ export function deliverTextInputEvent(method: string, params: TextInputParams): 
   if (
     method !== "textInput.edit" &&
     method !== "textInput.submit" &&
+    method !== "textInput.opened" &&
     method !== "textInput.closed" &&
     method !== "textInput.dismiss" &&
     method !== "textInput.close"
@@ -1288,8 +1423,13 @@ export function deliverTextInputEvent(method: string, params: TextInputParams): 
   const parsed = parseTextInputParams(params);
   const eventId = parsed.id;
   if (eventId === undefined || eventId !== session.id || !session.isOpen()) return false;
-  if (!session.accepts(params)) return false;
+  // A mount ACK reports that the overlay attached, not a newer text value.
+  // Let its handler validate the current session/route without rejecting it
+  // for an older jsRevision; all value-bearing events keep the freshness gate.
+  if (method !== "textInput.opened" && !session.accepts(params)) return false;
   switch (method) {
+    case "textInput.opened":
+      return session.onOpened(params);
     case "textInput.edit":
       session.onEdit(params);
       break;
@@ -1311,6 +1451,7 @@ export function InputField(props: {
   appearance?: InputFieldAppearance;
 }): JSX.Element {
   const routeActive = useRouteActive();
+  const scrollPage = useContext(ScrollablePageContext);
   const id = `guest-text-input-${nextTextInputId++}`;
   const [isFocused, setIsFocused] = createSignal(false);
   let node: NodeMirror | undefined;
@@ -1327,6 +1468,7 @@ export function InputField(props: {
   let lastRect: TextInputRect | undefined;
   let lastClipRect: TextInputRect | undefined;
   let textLayoutDirty = false;
+  const [overlayReady, setOverlayReady] = createSignal(false);
   const appearance = (): Required<InputFieldAppearance> => {
     const provided = props.appearance ?? {};
     const fontSize = provided.fontSize === 12 || provided.fontSize === 16
@@ -1350,16 +1492,34 @@ export function InputField(props: {
         : defaultInputFieldAppearance.paddingVertical,
     };
   };
-  const appearanceParams = (): TextInputParams => ({
-    ...appearance(),
-    placeholder: props.placeholder ?? "Tap to type",
-  });
-  const shellStyle = () => {
+  const appearanceColorParams = (nativeTextVisible: boolean) => {
     const current = appearance();
     return {
+      textColor: nativeTextVisible ? current.textColor : "transparent",
+      placeholderColor: nativeTextVisible ? current.placeholderColor : "transparent",
+      fillColor: nativeTextVisible ? current.fillColor : "transparent",
+      borderColor: nativeTextVisible ? current.borderColor : "transparent",
+      focusedBorderColor: nativeTextVisible ? current.focusedBorderColor : "transparent",
+    };
+  };
+  const appearanceParams = (nativeTextVisible = overlayReady()): TextInputParams => {
+    const current = appearance();
+    // Keep Flutter's entire editable surface out of the Guest fallback until
+    // the host confirms that its overlay is mounted. Transparent text alone
+    // would still let TextField's default fill and border cover the Guest.
+    return {
+      ...current,
+      ...appearanceColorParams(nativeTextVisible),
+      placeholder: props.placeholder ?? "Tap to type",
+    };
+  };
+  const shellStyle = () => {
+    const current = appearance();
+    const border = isFocused() ? current.focusedBorderColor : current.borderColor;
+    return {
       width: -1,
-      bgColor: current.fillColor,
-      borderColor: isFocused() ? current.focusedBorderColor : current.borderColor,
+      bgColor: current.fillColor === "transparent" ? 0 : current.fillColor,
+      borderColor: border === "transparent" ? 0 : border,
       borderWidth: 1,
       radius: current.borderRadius,
       paddingL: current.paddingHorizontal,
@@ -1372,11 +1532,15 @@ export function InputField(props: {
     textColor: props.value() ? appearance().textColor : appearance().placeholderColor,
   });
 
-  const visualRect = (): TextInputRect | undefined =>
-    activePageScroll?.visualRect(node, lastRect) ?? committedLayout(node) ?? lastRect;
+  const visualRect = (): TextInputRect | undefined => {
+    const currentNode = node;
+    return (currentNode ? scrollPage?.visualRect?.(currentNode, lastRect) : undefined)
+      ?? committedLayout(currentNode)
+      ?? lastRect;
+  };
 
   const visualClip = (): TextInputRect | undefined =>
-    activePageScroll?.clipRect();
+    scrollPage?.clipRect?.();
 
   const sameRect = (
     left: TextInputRect | undefined,
@@ -1432,6 +1596,21 @@ export function InputField(props: {
     }
   };
 
+  const sendAppearanceUpdate = (nativeTextVisible: boolean): boolean => {
+    try {
+      return emitTextInput("textInput.update", {
+        id,
+        editingSession,
+        revision: lastNativeRevision,
+        jsRevision,
+        ...appearanceColorParams(nativeTextVisible),
+      });
+    } catch {
+      // If the host cannot accept the handoff, keep the Guest fallback visible.
+      return false;
+    }
+  };
+
   const sendRectUpdate = (): void => {
     if (!opened || activeTextInput !== session) return;
     const rect = visualRect();
@@ -1476,7 +1655,7 @@ export function InputField(props: {
   };
 
   const open = (): void => {
-    if (node) activePageScroll?.ensureVisible(node, visualRect());
+    if (node) scrollPage?.ensureVisible?.(node, visualRect());
     // Translations are paint-only in the core layout ABI; use the page
     // scroller's visual rect so Flutter's overlay follows the moved shell.
     const rect = visualRect();
@@ -1485,6 +1664,9 @@ export function InputField(props: {
     const text = props.value();
     const wasOpened = opened;
     if (!wasOpened) {
+      // Reset before building the open payload so a new session can never
+      // inherit the previous session's visible native styling.
+      setOverlayReady(false);
       editingSession = `${id}:${++openGeneration}`;
       lastNativeRevision = 0;
       jsRevision += 1;
@@ -1517,6 +1699,12 @@ export function InputField(props: {
       maxLines: 1,
       ...appearanceParams(),
     });
+    if (wasOpened && !sent) {
+      // A failed refresh does not mean an already mounted native editor was
+      // detached. Keep its session and visibility handoff intact so native
+      // edits continue and the Guest fallback does not appear underneath it.
+      return;
+    }
     opened = sent;
     setIsFocused(sent);
     if (sent) {
@@ -1533,6 +1721,7 @@ export function InputField(props: {
     if (!opened) return;
     opened = false;
     setIsFocused(false);
+    setOverlayReady(false);
     lastRect = undefined;
     lastClipRect = undefined;
     emitTextInput("textInput.close", { id, editingSession, revision: lastNativeRevision, jsRevision });
@@ -1554,6 +1743,22 @@ export function InputField(props: {
       // overwrite that explicit replacement, even if its native revision grew.
       if (parsed.jsRevision !== undefined && parsed.jsRevision < jsRevision) return false;
       if (parsed.revision !== undefined && parsed.revision < lastNativeRevision) return false;
+      return true;
+    },
+    onOpened: (params) => {
+      const parsed = parseTextInputParams(params);
+      if (
+        !opened ||
+        !routeActive() ||
+        parsed.editingSession !== editingSession
+      ) return false;
+      // Mount acknowledgement is independent of value freshness. A JS value
+      // update may have advanced jsRevision while the native mount ACK was in
+      // flight; restore only appearance so that ACK cannot overwrite IME text,
+      // selection or composing state.
+      if (overlayReady()) return true;
+      if (!sendAppearanceUpdate(true)) return false;
+      setOverlayReady(true);
       return true;
     },
     onEdit: (params) => {
@@ -1579,6 +1784,7 @@ export function InputField(props: {
       }
       opened = false;
       setIsFocused(false);
+      setOverlayReady(false);
       props.onSubmit?.(text);
     },
     onClosed: (params) => {
@@ -1594,6 +1800,7 @@ export function InputField(props: {
       }
       opened = false;
       setIsFocused(false);
+      setOverlayReady(false);
     },
   };
 
@@ -1634,9 +1841,14 @@ export function InputField(props: {
       style={shellStyle()}
       class="w-full rounded-xl"
     >
-      <Text class={appearance().fontSize === 12 ? "text-xs" : appearance().fontSize === 16 ? "text-base" : "text-sm"} style={shellTextStyle()}>
-        {props.value() || props.placeholder || "Tap to type"}
-      </Text>
+      {/* Flutter's positioned TextField paints the same value once its
+          attached session is focused. Keep the guest glyph visible until the
+          host confirms that overlay, then restore it on submit/dismiss/close. */}
+      <Show when={!overlayReady()}>
+        <Text class={appearance().fontSize === 12 ? "text-xs" : appearance().fontSize === 16 ? "text-base" : "text-sm"} style={shellTextStyle()}>
+          {props.value() || props.placeholder || "Tap to type"}
+        </Text>
+      </Show>
     </Focusable>
   );
 }
@@ -1652,8 +1864,10 @@ export function InputField(props: {
 export function ScrollablePage(props: {
   children?: JSX.Element;
   class?: string;
+  style?: ViewProps["style"];
 }): JSX.Element {
   const routeActive = useRouteActive();
+  const parentScrollPage = useContext(ScrollablePageContext);
   const fallbackViewportHeight = 480;
   let viewportNode: NodeMirror | undefined;
   let contentNode: NodeMirror | undefined;
@@ -1667,39 +1881,66 @@ export function ScrollablePage(props: {
     max: () => Math.max(0, contentHeight() - viewportHeight()),
     extent: () => viewportHeight(),
   });
-  let lastViewportRect: TextInputRect | undefined;
+  // Keep raw committed geometry so a nested page can reapply its parent's
+  // current paint translation after a transient layout readback gap.
+  let lastViewportLayoutRect: TextInputRect | undefined;
 
   /**
-   * Read the page clip with a retained-layout fallback. During a live Duo
+   * Read this page's own viewport bounds with a retained-layout fallback.
+   * Keep this separate from the ancestor-visible clip below: a parent may
+   * hide part of a nested viewport, but that does not shrink its scroll range.
+   * During a live Duo
    * resize the core may invalidate the viewport node for one layout pass, but
    * the host's canonical ui.__viewport has already received the new height.
    * Keep the last origin/size in that gap and cap it with the live viewport.
    */
   const measureViewport = (): TextInputRect | undefined => {
     if (!routeActive()) return undefined;
-    const measured = viewportLayout(viewportNode);
-    if (measured) {
-      lastViewportRect = measured;
-      return measured;
-    }
-    const fallback = lastViewportRect;
-    if (!fallback) return undefined;
+    // A nested page is positioned inside its parent's translated content.
+    // Read its un-clipped committed size, then compose the parent's paint
+    // translation. The parent clip is applied only by measureVisibleViewport.
+    const measured = parentScrollPage
+      ? committedLayout(viewportNode)
+      : viewportLayout(viewportNode);
+    if (measured) lastViewportLayoutRect = measured;
+    const layout = measured ?? lastViewportLayoutRect;
+    if (!layout) return undefined;
+    const parentVisual = viewportNode && parentScrollPage?.visualRect?.(viewportNode, layout);
+    let rect = parentVisual ?? layout;
+    if (measured || parentScrollPage) return rect;
     const liveWidth = finiteNumber(textInputGlobal.ui?.__viewport?.w);
     const liveHeight = finiteNumber(textInputGlobal.ui?.__viewport?.h);
     // A live host width describes the whole Duo window, while this retained
     // rect may be the left content pane beside a rail/hinge. Never let the
     // fallback clip expand across that sibling pane during the gap.
     const width = liveWidth !== undefined && liveWidth > 0
-      ? Math.max(1, Math.min(fallback.width, liveWidth - fallback.x))
-      : fallback.width;
-    if (liveHeight === undefined || liveHeight <= fallback.y) {
-      return { ...fallback, width };
+      ? Math.max(1, Math.min(rect.width, liveWidth - rect.x))
+      : rect.width;
+    if (liveHeight === undefined || liveHeight <= rect.y) {
+      return { ...rect, width };
     }
-    return {
-      ...fallback,
+    rect = {
+      ...rect,
       width,
-      height: Math.max(1, Math.min(fallback.height, liveHeight - fallback.y)),
+      height: Math.max(1, Math.min(rect.height, liveHeight - rect.y)),
     };
+    return rect;
+  };
+
+  const clipToParentViewport = (rect: TextInputRect): TextInputRect | undefined => {
+    const parent = parentScrollPage?.clipRect?.();
+    if (!parent) return rect;
+    const x = Math.max(rect.x, parent.x);
+    const y = Math.max(rect.y, parent.y);
+    const right = Math.min(rect.x + rect.width, parent.x + parent.width);
+    const bottom = Math.min(rect.y + rect.height, parent.y + parent.height);
+    if (right <= x || bottom <= y) return undefined;
+    return { x, y, width: right - x, height: bottom - y };
+  };
+
+  const measureVisibleViewport = (): TextInputRect | undefined => {
+    const rect = measureViewport();
+    return rect ? clipToParentViewport(rect) : undefined;
   };
 
   const refreshMeasurements = (): {
@@ -1741,16 +1982,21 @@ export function ScrollablePage(props: {
       const committed = committedLayout(node);
       if (!committed) return fallback;
       // `getLayout` intentionally reports flex geometry without paint
-      // transforms. The canvas is the only translated ancestor of page input
-      // shells, so apply the current kinetic offset for overlay coordinates.
-      return { ...committed, y: committed.y - scroller.offset() };
+      // transforms. Apply every enclosing page translation before this
+      // page's content translation so nested viewports and input overlays
+      // share the same painted coordinate space as hit testing.
+      const parentVisual = parentScrollPage?.visualRect?.(node, committed) ?? committed;
+      return { ...parentVisual, y: parentVisual.y - scroller.offset() };
     },
-    clipRect: (): TextInputRect | undefined => measureViewport(),
+    clipRect: measureVisibleViewport,
     ensureVisible: (node: NodeMirror, fallback?: TextInputRect): void => {
       if (!routeActive()) return;
-      const viewport = measureViewport();
+      const viewport = measureVisibleViewport();
       if (!viewport) return;
-      const input = pageScroll.visualRect(node, fallback);
+      // InputField's context supplies its actual painted rect, including the
+      // child scroller and every parent translation. Recomputing from this
+      // page alone would drop an inner page offset when an ancestor adjusts it.
+      const input = fallback ?? pageScroll.visualRect(node);
       if (!input) return;
       const margin = 8;
       const top = viewport.y + margin;
@@ -1775,16 +2021,7 @@ export function ScrollablePage(props: {
     if (active) {
       needsActiveMeasurement = true;
       activeMeasurementFrames = 0;
-      activePageScroll = pageScroll;
-    } else if (activePageScroll === pageScroll) {
-      // A retained page must not keep serving overlay geometry after it is
-      // hidden. The identity check prevents an older page's effect from
-      // clearing a newer page that became active in the same route turn.
-      activePageScroll = undefined;
     }
-  });
-  onCleanup(() => {
-    if (activePageScroll === pageScroll) activePageScroll = undefined;
   });
 
   const parentScaffold = useContext(SafeAreaScaffoldContext);
@@ -1833,10 +2070,10 @@ export function ScrollablePage(props: {
     if (!routeActive()) return;
     syncContourSubscribers();
     const { rect } = refreshMeasurements();
-    if (!rect || activePageScroll !== pageScroll) return;
+    if (!rect) return;
     const input = activeTextInput;
     const inputNode = input?.isOpen() ? input.node() : undefined;
-    if (!input || !inputNode) return;
+    if (!input || !inputNode || !nodeIsWithin(viewportNode, inputNode)) return;
     // Reuse the normal page ensure-visible calculation, then synchronously
     // publish the moved overlay rect. This runs inside the existing
     // display.viewport bridge before PocketView asks for its delta=0 frame.
@@ -1848,8 +2085,9 @@ export function ScrollablePage(props: {
   const scrollContext: ScrollablePageContextValue = {
     scrollOffset: () => scroller.offset(),
     geometry: activePageGeometry,
-    visualRect: (node) => pageScroll.visualRect(node),
+    visualRect: (node, fallback) => pageScroll.visualRect(node, fallback),
     clipRect: pageScroll.clipRect,
+    ensureVisible: pageScroll.ensureVisible,
     subscribeContour: (sync) => {
       contourSubscribers.add(sync);
       scheduleContourMicrotask();
@@ -1890,7 +2128,7 @@ export function ScrollablePage(props: {
       node: () => routeActive() ? viewportNode : undefined,
       rect: () => {
         if (!routeActive()) return undefined;
-        const rect = measureViewport();
+        const rect = measureVisibleViewport();
         return rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : undefined;
       },
     },
@@ -1933,6 +2171,46 @@ export function ScrollablePage(props: {
       scroller.endDrag(0);
     },
   });
+
+  const desktopScrollPage: DesktopScrollPage = {
+    node: () => viewportNode,
+    active: routeActive,
+    rect: measureVisibleViewport,
+    interrupt: () => {
+      gesture.cancel();
+      scroller.stop();
+    },
+    applyDelta: (deltaY) => {
+      desktopScrollPage.interrupt();
+      // A touch drag may have left the Scroller in its rubber-band range.
+      // Normalize that existing state before measuring how much of this
+      // desktop delta the child consumed, or the correction itself could be
+      // mistaken for input and send an opposite remainder to the parent.
+      scroller.scrollTo(scroller.offset(), { immediate: true });
+      const before = scroller.offset();
+      scroller.scrollBy(deltaY, { immediate: true });
+      const after = scroller.offset();
+      if (after !== before) {
+        syncedOffsetInTurn = after;
+        syncContourSubscribers();
+      }
+      return after - before;
+    },
+  };
+  let unregisterDesktopScrollPage: (() => void) | undefined;
+  createEffect(() => {
+    if (routeActive()) {
+      if (!unregisterDesktopScrollPage) unregisterDesktopScrollPage = registerDesktopScrollPage(desktopScrollPage);
+    } else {
+      unregisterDesktopScrollPage?.();
+      unregisterDesktopScrollPage = undefined;
+    }
+  });
+  onCleanup(() => {
+    unregisterDesktopScrollPage?.();
+    unregisterDesktopScrollPage = undefined;
+  });
+
   bindDpadScroll(scroller, { active: routeActive });
   createEffect(() => {
     if (routeActive()) return;
@@ -1971,17 +2249,21 @@ export function ScrollablePage(props: {
     }
     const input = activeTextInput;
     const inputNode = input?.isOpen() ? input.node() : undefined;
-    if (viewportChanged && inputNode && activePageScroll === pageScroll) {
+    if (viewportChanged && inputNode && nodeIsWithin(viewportNode, inputNode)) {
       pageScroll.ensureVisible(inputNode, input?.visualRect());
     }
-    if (contourChanged && input && inputNode) {
+    if (contourChanged && input && inputNode && nodeIsWithin(viewportNode, inputNode)) {
       input.refreshLayout();
     }
-    if (scrolled && rect && input && inputNode) {
-      const inputRect = pageScroll.visualRect(inputNode, input.visualRect());
-      const viewportBottom = rect.y + rect.height;
+    if (scrolled && rect && input && inputNode && nodeIsWithin(viewportNode, inputNode)) {
+      const visibleRect = measureVisibleViewport();
+      // The active InputField owns the nearest ScrollablePage context, so its
+      // rect already includes child and ancestor paint translations. A sibling
+      // page must never judge the overlay with its own scroll transform.
+      const inputRect = input.visualRect();
+      const viewportBottom = visibleRect ? visibleRect.y + visibleRect.height : Number.NEGATIVE_INFINITY;
       const inputBottom = inputRect ? inputRect.y + inputRect.height : 0;
-      const outside = !inputRect || inputRect.y < rect.y || inputBottom > viewportBottom;
+      const outside = !visibleRect || !inputRect || inputRect.y < visibleRect.y || inputBottom > viewportBottom;
       if (outside) {
         input.close();
         if (activeTextInput === input) activeTextInput = undefined;
@@ -1999,6 +2281,7 @@ export function ScrollablePage(props: {
           viewportNode = current;
         }}
         class={props.class ?? "flex-1 w-full overflow-hidden"}
+        style={props.style}
       >
         <View
           class="flex-col"

@@ -73,7 +73,9 @@ class PocketWechatHost {
     this.context = options.context;
     this.onInput = options.onInput;
     this.onError = options.onError;
+    this.onWorkerChannel = options.onWorkerChannel;
     this.isActive = options.isActive;
+    this.sampleInput = options.sampleInput;
     this.instance = null;
     this.exports = null;
     this.host = 0;
@@ -163,6 +165,15 @@ class PocketWechatHost {
 
     const imports = {
       env: { __rquickjs_host_now_us: () => this.clockNowUs() },
+      // The Worker bridge is linked into the shared engine even for UI-only
+      // packages. A native/Web UI host does not own a Worker realm, so it
+      // supplies an explicit unsupported adapter instead of leaving the WASM
+      // import unresolved. The browser Worker replaces these functions with
+      // its bounded HTTP transport.
+      pocket_web_worker: {
+        now_micros: () => this.clockNowUs(),
+        operation: () => -6,
+      },
       pocket_wechat: {
         host_emit: (pointer, length) => this.enqueueFromWasm(pointer, length),
       },
@@ -184,6 +195,14 @@ class PocketWechatHost {
         this.exports.web_set_identity(this.host, identityPointer, identityLength, Number(external.hostAbi || 1)),
         "PocketJS Web Guest identity was rejected.",
       ));
+      const workerDeclaration = this.config.worker?.descriptor?.declaration || this.config.worker?.declaration;
+      if (workerDeclaration?.channels?.length && typeof this.exports.web_worker_channels_configure === "function") {
+        const channels = encodeUtf8(JSON.stringify(workerDeclaration.channels));
+        this.withBytes(channels, (pointer, length) => this.check(
+          this.exports.web_worker_channels_configure(this.host, pointer, length),
+          "PocketJS Worker channel declaration was rejected.",
+        ));
+      }
       this.withBytes(external.qjbc, (qjbcPointer, qjbcLength) => this.withBytes(external.pak, (pakPointer, pakLength) => this.check(
         this.exports.web_boot(this.host, qjbcPointer, qjbcLength, pakPointer, pakLength,
           Number(external.tickHz || this.config.tickHz || 60), this.scale),
@@ -297,15 +316,53 @@ class PocketWechatHost {
     else { this.advance(contacts); this.schedule(); }
   }
 
+  pushWorkerChannel(channel, data) {
+    if (!this.exports || this.disposed || typeof this.exports.web_worker_channels_push !== "function") return false;
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data || []);
+    const status = this.withBytes(bytes, (pointer, length) => this.exports.web_worker_channels_push(this.host, channel, pointer, length));
+    if (status !== 0) return false;
+    if (this.visible) this.wake();
+    return true;
+  }
+
+  drainWorkerChannels() {
+    if (!this.exports || this.disposed || typeof this.exports.web_worker_channels_take !== "function" || typeof this.onWorkerChannel !== "function") return;
+    for (let pass = 0; pass < 8; pass += 1) {
+      if (this.exports.web_worker_channels_take(this.host) !== 0) return;
+      const pointer = this.exports.web_result_ptr(this.host);
+      const length = this.exports.web_result_len(this.host);
+      if (!pointer || !length) return;
+      let packet;
+      try { packet = decodeMessage(new Uint8Array(this.exports.memory.buffer, pointer, length)); }
+      catch (_) { return; }
+      const records = Array.isArray(packet?.records) ? packet.records : [];
+      if (!records.length) return;
+      for (const record of records) {
+        const channel = Number(record?.channel || 0);
+        // Binary bridge versions before the typed-array fast path decode a
+        // JSON byte vector as number[]. Accept that canonical representation
+        // at the host boundary so a valid Worker record is not silently lost.
+        const data = record?.data instanceof Uint8Array ? record.data
+          : Array.isArray(record?.data) && record.data.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
+            ? Uint8Array.from(record.data) : null;
+        if (channel > 0 && data) this.onWorkerChannel(channel, data);
+      }
+      if (records.length < 8) return;
+    }
+  }
+
   advance(contacts = this.contacts) {
     this.contacts = contacts.filter(contact => !contact.cancelled);
-    const facts = encodeMessage({ buttons: 0, analog: 0x8080, rightAnalog: 0x8080, contacts, axisDeltas: [] });
+    const input = this.sampleInput?.() || {};
+    const facts = encodeMessage({ buttons: (input.buttons || 0) >>> 0,
+      analog: input.analog ?? 0x8080, rightAnalog: input.rightAnalog ?? 0x8080, contacts, axisDeltas: [] });
     this.withBytes(facts, (pointer, length) => this.check(
       this.exports.web_advance(this.host, pointer, length, 1), "PocketJS guest frame failed.",
     ));
     this.check(this.exports.web_present(this.host), "PocketJS renderer failed to present DrawOps.");
     this.draw();
     this.drainOutbound();
+    this.drainWorkerChannels();
   }
 
   draw() {
@@ -798,4 +855,19 @@ function setPermissionHandler(handler) {
   permissionHandler = handler;
 }
 
-module.exports = { PocketWechatHost, registerCapability, setPermissionHandler };
+// Internal browser boundaries share this registry with the direct host. A
+// rendering Worker transports calls; it must not copy app permission policy.
+function registeredCapabilityNames() { return Object.keys(capabilityHandlers); }
+function invokeRegisteredCapability(name, params, context) {
+  const handler = capabilityHandlers[name];
+  if (typeof handler !== "function") throw Object.assign(new Error(`No Web handler is configured for ${name}`), { code: "unconfigured" });
+  return handler(params, context);
+}
+function requestCapabilityPermission(name, params, context) {
+  if (typeof permissionHandler === "function") return permissionHandler(name, params, context);
+  if (name.startsWith("platform.storage.")) return true;
+  throw Object.assign(new Error(`No Web permission handler is configured for ${name}`), { code: "unconfigured" });
+}
+
+module.exports = { PocketWechatHost, registerCapability, setPermissionHandler,
+  registeredCapabilityNames, invokeRegisteredCapability, requestCapabilityPermission };

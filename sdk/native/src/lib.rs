@@ -60,8 +60,8 @@ struct NodeMeta {
 #[derive(Clone, Copy, Debug)]
 struct TouchContact {
     id: u8,
-    x: u16,
-    y: u16,
+    x: u32,
+    y: u32,
     hit: i32,
     surface: u8,
 }
@@ -82,6 +82,7 @@ struct PendingTouchFrame {
 
 const TOUCH_CANCEL_MARKER: u32 = 0x4000_0000;
 const TOUCH_WIDE_MARKER: u32 = 0x8000_0000;
+const TOUCH_COORDINATE_SIDECAR_MARKER: u32 = 0x1000_0000;
 const TOUCH_COORD_MASK: u32 = 0x3ff;
 const TOUCH_WIDE_ID_SHIFT: u32 = 20;
 const TOUCH_LEGACY_ID_SHIFT: u32 = 18;
@@ -182,6 +183,7 @@ struct FrameOp {
     /// non-video operations; video operations always carry `Some`, including
     /// `Some(false)`, so the JSON path cannot fall back to legacy autoplay.
     autoplay: Option<bool>,
+    repeat_texture: bool,
     color: Option<u32>,
     /// First/last endpoint of a real core GRAD_RECT. Colors use the public
     /// FrameResult ARGB convention (the core DrawList stores ABGR).
@@ -231,6 +233,8 @@ struct LegacyFrameOp<'a> {
     fit: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     autoplay: Option<bool>,
+    #[serde(rename = "repeatTexture", skip_serializing_if = "Option::is_none")]
+    repeat_texture: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     color: Option<u32>,
     #[serde(rename = "from", skip_serializing_if = "Option::is_none")]
@@ -300,6 +304,7 @@ impl Serialize for FrameOp {
             id: self.id.as_deref(),
             fit: self.fit.as_deref(),
             autoplay: self.autoplay,
+            repeat_texture: self.repeat_texture.then_some(true),
             color: self.color,
             from_color: self.from_color,
             to_color: self.to_color,
@@ -559,7 +564,7 @@ struct MemoryLimits {
 /// `pocket_frame_delta` for diagnostics and older hosts, while this format
 /// keeps DrawOps and image pixels out of the UTF-8/serde JSON path.
 const BINARY_FRAME_MAGIC: u32 = u32::from_le_bytes(*b"PFB1");
-const BINARY_FRAME_VERSION: u16 = 1;
+const BINARY_FRAME_VERSION: u16 = 2;
 
 struct BinaryFrameWriter {
     bytes: Vec<u8>,
@@ -625,11 +630,15 @@ impl BinaryFrameWriter {
             "rounded" => 1,
             "gradient" => 2,
             "triangle" => 3,
+            "textureTriangle" if op.repeat_texture => 14,
             "textureTriangle" => 4,
             "text" => 5,
             "image" => 6,
             "hostSurface" => 7,
             "video" => 8,
+            "meshLayerBegin" => 9,
+            "meshMaskBegin" => 10,
+            "meshLayerRestore" => 11,
             other => return Err(format!("unsupported binary frame operation {other}")),
         };
         self.u8(tag);
@@ -669,7 +678,7 @@ impl BinaryFrameWriter {
                     self.u32(*color);
                 }
             }
-            4 => {
+            4 | 14 => {
                 let points = op
                     .points
                     .as_ref()
@@ -751,6 +760,29 @@ impl BinaryFrameWriter {
                     self.u8(u8::from(op.autoplay.unwrap_or(true)));
                 }
             }
+            9 => {
+                let tints = op
+                    .uvs
+                    .as_ref()
+                    .ok_or_else(|| "mesh layer tint is missing".to_owned())?;
+                if tints.len() != 6 || !(0..=3).contains(&op.color.unwrap_or(u32::MAX)) {
+                    return Err("invalid mesh layer parameters".to_owned());
+                }
+                self.u32(op.color.unwrap_or(0));
+                for value in tints {
+                    if !value.is_finite() || !(0.0..=1.0).contains(value) {
+                        return Err("invalid mesh layer tint".to_owned());
+                    }
+                    self.f32(*value);
+                }
+            }
+            10 => {
+                match op.color {
+                    Some(0 | 1) => self.u8(op.color.unwrap_or(0) as u8),
+                    _ => return Err("invalid mesh mask inversion flag".to_owned()),
+                }
+            }
+            11 => {}
             _ => unreachable!(),
         }
         Ok(())
@@ -2085,25 +2117,36 @@ fn resize_guest_viewport(guest: &RquickjsGuest, width: f32, height: f32) -> Resu
 }
 
 fn pack_touch(contact: TouchContact) -> u32 {
-    // framework/src/touch.ts supports the wide form for logical coordinates
-    // above 511.  The POC's maximum packed coordinate is 1023 (the official
-    // ten-bit wire format); create() still accepts larger viewports, but
-    // input.pointer rejects coordinates outside this canonical range.
+    // Preserve the established 9-bit and 10-bit packed forms. Coordinates
+    // above the packed range use an explicit sidecar marker; the exact u32
+    // coordinates are appended to the QuickJS frame call.
+    if contact.x > TOUCH_COORD_MASK || contact.y > TOUCH_COORD_MASK {
+        return TOUCH_WIDE_MARKER
+            | TOUCH_COORDINATE_SIDECAR_MARKER
+            | ((contact.id as u32) << TOUCH_WIDE_ID_SHIFT);
+    }
     let wide = contact.x > 511 || contact.y > 511;
     if wide {
         TOUCH_WIDE_MARKER
             | ((contact.id as u32) << TOUCH_WIDE_ID_SHIFT)
-            | ((contact.y as u32 & TOUCH_COORD_MASK) << 10)
-            | (contact.x as u32 & TOUCH_COORD_MASK)
+            | ((contact.y & TOUCH_COORD_MASK) << 10)
+            | (contact.x & TOUCH_COORD_MASK)
     } else {
         ((contact.id as u32) << TOUCH_LEGACY_ID_SHIFT)
-            | ((contact.y as u32 & 0x1ff) << 9)
-            | (contact.x as u32 & 0x1ff)
+            | ((contact.y & 0x1ff) << 9)
+            | (contact.x & 0x1ff)
     }
 }
 
-fn pack_touch_cancel(id: u8) -> u32 {
-    TOUCH_CANCEL_MARKER | ((id as u32) << TOUCH_LEGACY_ID_SHIFT)
+fn pack_touch_cancel(contact: TouchContact) -> u32 {
+    if contact.x > TOUCH_COORD_MASK || contact.y > TOUCH_COORD_MASK {
+        TOUCH_CANCEL_MARKER
+            | TOUCH_WIDE_MARKER
+            | TOUCH_COORDINATE_SIDECAR_MARKER
+            | ((contact.id as u32) << TOUCH_WIDE_ID_SHIFT)
+    } else {
+        TOUCH_CANCEL_MARKER | ((contact.id as u32) << TOUCH_LEGACY_ID_SHIFT)
+    }
 }
 
 fn pointer_payload<'a>(message: &'a serde_json::Value) -> Option<&'a serde_json::Value> {
@@ -2187,17 +2230,17 @@ fn queue_pointer_fields(
     };
     if x < 0.0
         || y < 0.0
-        || x > TOUCH_COORD_MASK as f64
-        || y > TOUCH_COORD_MASK as f64
+        || x > u32::MAX as f64
+        || y > u32::MAX as f64
         || x > surface_width as f64
         || y > surface_height as f64
     {
         return Err(format!(
-            "input.pointer coordinates ({x_value},{y_value}) exceed the logical viewport or 10-bit touch wire format"
+            "input.pointer coordinates ({x_value},{y_value}) exceed the logical viewport or u32 coordinate sidecar range"
         ));
     }
-    let x = x as u16;
-    let y = y as u16;
+    let x = x as u32;
+    let y = y as u32;
 
     match phase {
         "down" => {
@@ -2680,7 +2723,7 @@ fn run_guest_touch_frame(
         touch_surfaces.push(contact.surface);
     }
     for contact in cancelled {
-        touches.push(pack_touch_cancel(contact.id));
+        touches.push(pack_touch_cancel(*contact));
         hits.push(0);
         touch_surfaces.push(contact.surface);
     }
@@ -2705,12 +2748,27 @@ fn run_guest_touch_frame(
         motion: host.motion.as_ref(),
         text: &text,
     };
-    host.guest.frame(&frame).map_err(|error| {
+    let requires_coordinate_sidecar = active
+        .iter()
+        .chain(cancelled)
+        .any(|contact| contact.x > TOUCH_COORD_MASK || contact.y > TOUCH_COORD_MASK);
+    let result = if requires_coordinate_sidecar {
+        let touch_coordinates = active
+            .iter()
+            .chain(cancelled)
+            .map(|contact| (contact.x, contact.y))
+            .collect::<Vec<_>>();
         host.guest
-            .last_error()
-            .map(|detail| format!("{error:?}: {detail}"))
-            .unwrap_or_else(|| format!("{error:?}"))
-    })?;
+            .frame_with_touch_coordinates(&frame, &touch_coordinates)
+    } else {
+        host.guest.frame(&frame)
+    };
+    result.map_err(|error| {
+            host.guest
+                .last_error()
+                .map(|detail| format!("{error:?}: {detail}"))
+                .unwrap_or_else(|| format!("{error:?}"))
+        })?;
     if let Some(bridge) = &mut host.worker_bridge {
         bridge.mark_frame_consumed();
     }
@@ -3288,6 +3346,7 @@ fn append_draw_operation(
                 id: None,
                 fit: None,
                 autoplay: None,
+                repeat_texture: false,
                 color: Some(argb_from_abgr(color)),
                 from_color: None,
                 to_color: None,
@@ -3341,6 +3400,7 @@ fn append_draw_operation(
                 id: None,
                 fit: None,
                 autoplay: None,
+                repeat_texture: false,
                 color: None,
                 from_color: Some(argb_from_abgr(from)),
                 to_color: Some(argb_from_abgr(to)),
@@ -3432,6 +3492,7 @@ fn append_draw_operation(
                     id: None,
                     fit: None,
                     autoplay: None,
+                    repeat_texture: false,
                     color: Some(argb_from_abgr(color)),
                     from_color: None,
                     to_color: None,
@@ -3502,6 +3563,7 @@ fn append_draw_operation(
                 id: None,
                 fit: None,
                 autoplay: None,
+                repeat_texture: false,
                 // TEX_QUAD word 8 is the core's per-quad ABGR modulation
                 // (alpha-covered discs and shadow masks rely on it).
                 color: Some(argb_from_abgr(*words.get(8).ok_or_else(|| {
@@ -3572,6 +3634,7 @@ fn append_draw_operation(
                 id: None,
                 fit: None,
                 autoplay: None,
+                repeat_texture: false,
                 color: None,
                 from_color: None,
                 to_color: None,
@@ -3591,7 +3654,7 @@ fn append_draw_operation(
                 clip: clip_of(operation.clip),
             });
         }
-        8 => {
+        8 | 14 | 15 | 16 => {
             let texture = *words
                 .get(1)
                 .ok_or_else(|| "TEX_TRI is missing its texture handle".to_owned())?
@@ -3605,58 +3668,37 @@ fn append_draw_operation(
                 generic_texture_handles.insert(texture);
                 synthetic_texture_asset(texture)
             });
-            let points = vec![
-                unpack_point(
-                    *words
-                        .get(2)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 0".to_owned())?,
-                ),
-                unpack_point(
-                    *words
-                        .get(5)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 1".to_owned())?,
-                ),
-                unpack_point(
-                    *words
-                        .get(8)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 2".to_owned())?,
-                ),
-            ];
+            // Legacy quads retain packed integer XY. Retained model meshes
+            // carry float XY so display scaling cannot magnify logical rounding.
+            let fractional = matches!(operation.opcode, 15 | 16);
+            let stride = if fractional { 4 } else { 3 };
+            let word = |index: usize| -> Result<u32, String> {
+                words.get(index).copied()
+                    .ok_or_else(|| "TEX_TRI is truncated".to_owned())
+            };
+            let mut points = Vec::with_capacity(3);
+            let mut uvs = Vec::with_capacity(6);
+            for vertex in 0..3 {
+                let offset = 2 + vertex * stride;
+                let uv_offset = if fractional {
+                    points.push(FramePoint {
+                        x: f32::from_bits(word(offset)?),
+                        y: f32::from_bits(word(offset + 1)?),
+                    });
+                    offset + 2
+                } else {
+                    points.push(unpack_point(word(offset)?));
+                    offset + 1
+                };
+                uvs.push(f32::from_bits(word(uv_offset)?));
+                uvs.push(f32::from_bits(word(uv_offset + 1)?));
+            }
             let (x, y, w, h) = triangle_bounds(&points)?;
-            let uvs = vec![
-                f32::from_bits(
-                    *words
-                        .get(3)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 0 u".to_owned())?,
-                ),
-                f32::from_bits(
-                    *words
-                        .get(4)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 0 v".to_owned())?,
-                ),
-                f32::from_bits(
-                    *words
-                        .get(6)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 1 u".to_owned())?,
-                ),
-                f32::from_bits(
-                    *words
-                        .get(7)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 1 v".to_owned())?,
-                ),
-                f32::from_bits(
-                    *words
-                        .get(9)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 2 u".to_owned())?,
-                ),
-                f32::from_bits(
-                    *words
-                        .get(10)
-                        .ok_or_else(|| "TEX_TRI is missing vertex 2 v".to_owned())?,
-                ),
-            ];
-            if uvs.iter().any(|value| !value.is_finite()) {
-                return Err("TEX_TRI contains a non-finite UV".to_owned());
+            if uvs
+                .iter()
+                .any(|value| !value.is_finite() || value.abs() > 1_000_000.0)
+            {
+                return Err("TEX_TRI contains an invalid UV".to_owned());
             }
             out.push(FrameOp {
                 kind: "textureTriangle".into(),
@@ -3669,7 +3711,8 @@ fn append_draw_operation(
                 id: None,
                 fit: None,
                 autoplay: None,
-                color: Some(argb_from_abgr(*words.get(11).ok_or_else(|| {
+                repeat_texture: matches!(operation.opcode, 14 | 16),
+                color: Some(argb_from_abgr(*words.get(2 + 3 * stride).ok_or_else(|| {
                     "TEX_TRI is missing its modulation color".to_owned()
                 })?)),
                 from_color: None,
@@ -3690,6 +3733,120 @@ fn append_draw_operation(
                 clip: clip_of(operation.clip),
             });
         }
+        11 => {
+            let (x, y, w, h) = unpack_rect(words[1], words[2]);
+            let blend = words[3];
+            if blend > 3 {
+                return Err(format!("MESH_LAYER_BEGIN has unsupported blend mode {blend}"));
+            }
+            let tints: Vec<f32> = words[4..10]
+                .iter()
+                .map(|word| f32::from_bits(*word))
+                .collect();
+            if tints
+                .iter()
+                .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+            {
+                return Err("MESH_LAYER_BEGIN contains an invalid RGB tint".to_owned());
+            }
+            out.push(FrameOp {
+                kind: "meshLayerBegin".into(),
+                x,
+                y,
+                w,
+                h,
+                text: None,
+                asset: None,
+                id: None,
+                fit: None,
+                autoplay: None,
+                repeat_texture: false,
+                color: Some(blend),
+                from_color: None,
+                to_color: None,
+                direction: None,
+                size: None,
+                font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
+                radius: None,
+                points: None,
+                colors: None,
+                uvs: Some(tints),
+                uv: None,
+                surface_kind: None,
+                surface_parameters: None,
+                clip: clip_of(operation.clip),
+            });
+        }
+        12 => {
+            let (x, y, w, h) = unpack_rect(words[2], words[3]);
+            let inverted = words[1];
+            if inverted > 1 {
+                return Err("MESH_MASK_BEGIN has an invalid inversion flag".to_owned());
+            }
+            out.push(FrameOp {
+                kind: "meshMaskBegin".into(),
+                x,
+                y,
+                w,
+                h,
+                text: None,
+                asset: None,
+                id: None,
+                fit: None,
+                autoplay: None,
+                repeat_texture: false,
+                color: Some(inverted),
+                from_color: None,
+                to_color: None,
+                direction: None,
+                size: None,
+                font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
+                radius: None,
+                points: None,
+                colors: None,
+                uvs: None,
+                uv: None,
+                surface_kind: None,
+                surface_parameters: None,
+                clip: clip_of(operation.clip),
+            });
+        }
+        13 => out.push(FrameOp {
+            kind: "meshLayerRestore".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+            text: None,
+            asset: None,
+            id: None,
+            fit: None,
+            autoplay: None,
+            repeat_texture: false,
+            color: None,
+            from_color: None,
+            to_color: None,
+            direction: None,
+            size: None,
+            font_slot: None,
+            text_align: None,
+            surface_handle: None,
+            focused: None,
+            radius: None,
+            points: None,
+            colors: None,
+            uvs: None,
+            uv: None,
+            surface_kind: None,
+            surface_parameters: None,
+            clip: clip_of(operation.clip),
+        }),
         5 | 6 => {}
         9 => {
             let x = f32::from_bits(words[2]);
@@ -3735,6 +3892,7 @@ fn append_draw_operation(
                 id: None,
                 fit: None,
                 autoplay: None,
+                repeat_texture: false,
                 color: Some(argb_from_abgr(words[6])),
                 from_color: None,
                 to_color: None,
@@ -3798,6 +3956,7 @@ fn append_draw_operation(
                 id: Some(video.video_id.clone()),
                 fit: Some(video.fit.clone()),
                 autoplay: (video.kind == "video").then_some(video.autoplay),
+                repeat_texture: false,
                 color: None,
                 from_color: None,
                 to_color: None,
@@ -3867,10 +4026,6 @@ struct TextMetrics {
 }
 
 impl TextMetrics {
-    fn clear(&mut self) {
-        self.fonts.clear();
-    }
-
     fn font(&self, slot: u8) -> Option<&FontMetric> {
         self.fonts.iter().find(|font| font.slot == slot)
     }
@@ -5186,7 +5341,9 @@ fn read_application_file(path: &CStr, limit: u64, label: &str) -> Result<Vec<u8>
 fn reset_host_for_load(host: &mut HostState) {
     stop_worker(host);
     guest_security::reset_runtime(&host.guest_security);
-    host.nodes.borrow_mut().clear();
+    // The new package is admitted before this reset. Retain its static texture
+    // metadata while dropping the prior guest's transient host registrations.
+    host.nodes.borrow_mut().retain(|node| node.from_pack);
     // A reload is a channel-generation boundary. Never clear cursors in an
     // Arc that may still be borrowed by a background Dart isolate.
     host.duplex.close();
@@ -5214,7 +5371,6 @@ fn reset_host_for_load(host: &mut HostState) {
     host.tick_remainder_ms = 0.0;
     host.clock_started = false;
     host.demand = demand::Demand::default();
-    host.text_metrics.borrow_mut().clear();
 }
 
 fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry, String> {
@@ -5222,21 +5378,49 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
     // bytes to JS. This installs styles/font atlases and uploads every
     // `ui:img.*` entry in the real core, then publishes the resulting name ->
     // texture handle table to framework/host.
+    let metrics = parse_pak_font_metrics(pak)?;
+    let mut previous_pack_handles = host
+        .nodes
+        .borrow()
+        .iter()
+        .filter(|node| node.from_pack)
+        .map(|node| node.texture)
+        .collect::<Vec<_>>();
+    previous_pack_handles.sort_unstable();
+    previous_pack_handles.dedup();
     let assets: AssetRegistry = host
         .ops
         .install_assets(pak)
         .map_err(|error| format!("pak asset install: {error:?}"))?;
-    let metrics = parse_pak_font_metrics(pak)?;
     *host.text_metrics.borrow_mut() = metrics;
     {
         let mut core = host
             .ops
             .core_mut()
             .map_err(|error| format!("font measure install: {error:?}"))?;
+        // A fresh guest realm cannot reuse the previous realm's retained
+        // Core tree. Clear only guest UI children after the new package has
+        // been admitted, then retire old PAK handles through the Core API;
+        // free_texture preserves any texture storage pinned by an in-flight
+        // Core submission until its frame fence retires.
+        let roots = [pocket_spec::ROOT_ID, core.ui.auxiliary_surface_root()];
+        for root in roots {
+            if root == 0 {
+                continue;
+            }
+            let children = core.ui.node_children(root).to_vec();
+            for child in children {
+                core.ui.destroy_node(child);
+            }
+        }
+        for texture in previous_pack_handles {
+            core.ui.free_texture(texture);
+        }
         install_text_measure(&mut core.ui, host.text_metrics.clone());
     }
     {
         let mut nodes = host.nodes.borrow_mut();
+        nodes.retain(|node| !node.from_pack);
         for (index, texture) in assets.textures.iter().enumerate() {
             nodes.push(NodeMeta {
                 id: i32::MIN.saturating_add(index as i32),
@@ -5352,8 +5536,10 @@ pub unsafe extern "C" fn pocket_load_files(
 /// embedding can keep package admission/verification outside this small FFI.
 /// The package must be non-empty and valid; source-only guests use
 /// `pocket_eval` instead of this loader.
-/// Callers should use a fresh handle for each mount; the framework's `mount`
-/// function creates a retained tree during evaluation.
+/// A successful source package reload may replace the guest on the same
+/// non-offload handle. Package admission completes before the current guest is
+/// reset, and the old guest tree and PAK textures are retired after admission;
+/// an offload guest reload still requires a fresh native runtime generation.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_load(
     handle: *mut HostState,
@@ -5394,8 +5580,8 @@ pub unsafe extern "C" fn pocket_load(
         // current guest or installing any native package assets. A rejected
         // reload therefore leaves the existing realm and frame state intact.
         let _ = guest_heap_limit(host, pak.len())?;
-        reset_host_for_load(host);
         let assets = install_host_assets(host, pak)?;
+        reset_host_for_load(host);
         initialize_guest_for_load(host, pak, &assets)?;
         evaluate_guest(&mut host.guest, &source, host.tick_hz)?;
         ensure_guest_security_healthy(host)
@@ -5483,8 +5669,8 @@ pub unsafe extern "C" fn pocket_load_bytecode(
         // well; reloads must preserve the configured policy and old realm on
         // an oversized package.
         let _ = guest_heap_limit(host, pak.len())?;
-        reset_host_for_load(host);
         let assets = install_host_assets(host, pak)?;
+        reset_host_for_load(host);
         initialize_guest_for_load(host, pak, &assets)?;
         host.guest
             .evaluate_bytecode(artifact.payload, host.tick_hz)
@@ -6533,6 +6719,408 @@ mod smoke_tests {
         pak_entries(&[(key, blob)])
     }
 
+    fn exercise_repeated_package_reload(bytecode_load: bool) {
+        let source = CString::new(
+            r#"
+            const image = ui.createNode(2);
+            ui.setProp(image, 1, 5);
+            ui.setProp(image, 2, 5);
+            ui.setImage(image, ui.__textures.reload);
+            ui.insertBefore(1, image, 0);
+            globalThis.frame = function() {};
+            globalThis.__pocketEvent = function(line) {
+                const event = JSON.parse(line);
+                if (event.name === 'input.pointer' && event.payload.phase === 'up') {
+                    ui.setProp(image, 1, 24);
+                }
+            };
+            "#,
+        )
+        .unwrap();
+        let bytecode = bytecode_load.then(|| compile_test_bytecode(source.as_bytes()));
+        let package = |rgba: [u8; 4]| {
+            let mut image = vec![1, 0, 1, 0, pocket_spec::psm::PSM_8888 as u8, 0, 0, 0];
+            image.extend_from_slice(&rgba);
+            one_entry_pak("ui:img.reload", &image)
+        };
+        let load = |handle: *mut HostState, pak: &[u8]| unsafe {
+            if let Some(bytecode) = bytecode.as_deref() {
+                pocket_load_bytecode(
+                    handle,
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                    pak.as_ptr(),
+                    pak.len(),
+                )
+            } else {
+                pocket_load(handle, source.as_ptr(), pak.as_ptr(), pak.len())
+            }
+        };
+        let pack_handle = |handle: *mut HostState| {
+            unsafe { &*handle }
+                .nodes
+                .borrow()
+                .iter()
+                .find(|node| node.from_pack && node.asset == "reload")
+                .map(|node| node.texture)
+                .expect("package image has a host texture node")
+        };
+        let pixels = |handle: *mut HostState, texture: i32| {
+            unsafe { &*handle }
+                .ops
+                .core()
+                .unwrap()
+                .ui
+                .texture(texture)
+                .map(|view| view.pixels.to_vec())
+        };
+        let texture_stats = |handle: *mut HostState| {
+            let core = unsafe { &*handle }.ops.core().unwrap();
+            let ui = &core.ui;
+            let slots = ui.texture_slot_count();
+            let mut live_textures = 0;
+            let mut live_bytes = 0;
+            for slot in 0..slots {
+                if let Some((_, view)) = ui.texture_at(slot as u32) {
+                    live_textures += 1;
+                    live_bytes += view.pixels.len();
+                }
+            }
+            (slots, live_textures, live_bytes)
+        };
+
+        let red = [11, 22, 33, 255];
+        let blue = [44, 55, 66, 255];
+        let first_pak = package(red);
+        let replacement_pak = package(blue);
+        let handle = pocket_create(64.0, 64.0);
+        assert!(!handle.is_null());
+
+        assert_eq!(load(handle, &first_pak), 0, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+        });
+        let first_frame = frame_json(handle);
+        assert_eq!(first_frame["resources"][0]["pixels"][0], red[0]);
+        let first_texture = pack_handle(handle);
+        let first_stats = texture_stats(handle);
+
+        // Reloading identical PAK bytes must retire the prior generation too.
+        assert_eq!(load(handle, &first_pak), 0, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+        });
+        let same_package_frame = frame_json(handle);
+        let second_texture = pack_handle(handle);
+        let same_package_stats = texture_stats(handle);
+        let first_texture_after_same_load = pixels(handle, first_texture);
+        let same_package_released = same_package_frame["releasedResources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|asset| asset == "reload");
+
+        // A new PAK with the same asset name must publish its new pixels and
+        // keep that replacement drawable after the old Core handle is freed.
+        assert_eq!(load(handle, &replacement_pak), 0, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+        });
+        let replacement_frame = frame_json(handle);
+        let replacement_texture = pack_handle(handle);
+        let replacement_stats = texture_stats(handle);
+        let first_texture_after_changed_load = pixels(handle, first_texture);
+        let second_texture_after_changed_load = pixels(handle, second_texture);
+        let replacement_resource = replacement_frame["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|resource| resource["asset"] == "reload")
+            .expect("replacement frame exports the newly mounted image");
+        let replacement_pixels = replacement_resource["pixels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap() as u8)
+            .collect::<Vec<_>>();
+        let replacement_image_ops = replacement_frame["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["type"] == "image")
+            .collect::<Vec<_>>();
+        let replacement_asset_ops = replacement_image_ops
+            .iter()
+            .filter(|op| op["asset"] == "reload")
+            .collect::<Vec<_>>();
+        let replacement_released = replacement_frame["releasedResources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|asset| asset == "reload");
+        eprintln!(
+            "reload_frame bytecode={bytecode_load} frame={replacement_frame} new_core_pixels={:?}",
+            pixels(handle, replacement_texture)
+        );
+        let replacement_handle_pixels = pixels(handle, replacement_texture);
+
+        let down = CString::new(
+            r#"{"type":"event","name":"input.pointer","payload":{"phase":"down","id":0,"x":8,"y":12}}"#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_send(handle, down.as_ptr()) }, 0);
+        let _ = frame_json(handle);
+        let up = CString::new(
+            r#"{"type":"event","name":"input.pointer","payload":{"phase":"up","id":0,"x":8,"y":12}}"#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_send(handle, up.as_ptr()) }, 0);
+        let input_frame = frame_json(handle);
+        let input_image_op = input_frame["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["asset"] == "reload")
+            .cloned();
+
+        let fresh = pocket_create(64.0, 64.0);
+        assert!(!fresh.is_null());
+        assert_eq!(load(fresh, &replacement_pak), 0, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(fresh)).to_string_lossy()
+        });
+        let fresh_frame = frame_json(fresh);
+        let fresh_stats = texture_stats(fresh);
+        let fresh_resource_pixels = fresh_frame["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|resource| resource["asset"] == "reload")
+            .unwrap()["pixels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap() as u8)
+            .collect::<Vec<_>>();
+
+        eprintln!(
+            "reload_probe bytecode={bytecode_load} first={first_stats:?} same={same_package_stats:?} replacement={replacement_stats:?} fresh={fresh_stats:?} first_old={first_texture_after_same_load:?}->{first_texture_after_changed_load:?} second_old={second_texture_after_changed_load:?} replacement_pixels={replacement_pixels:?} replacement_handle_pixels={replacement_handle_pixels:?} replacement_asset_ops={replacement_asset_ops:?} input_image_op={input_image_op:?} same_package_released={same_package_released} replacement_released={replacement_released} fresh_pixels={fresh_resource_pixels:?}"
+        );
+
+        unsafe {
+            pocket_destroy(handle);
+            pocket_destroy(fresh);
+        }
+
+        assert_eq!(first_texture_after_same_load, None, "identical reload left the old Core texture readable; live state {same_package_stats:?}");
+        assert_eq!(first_texture_after_changed_load, None);
+        assert_eq!(second_texture_after_changed_load, None);
+        assert_ne!(first_texture, second_texture);
+        assert_ne!(second_texture, replacement_texture);
+        assert_eq!(replacement_pixels, blue);
+        assert_eq!(replacement_handle_pixels, Some(blue.to_vec()));
+        assert_eq!(replacement_image_ops.len(), 1, "old guest DrawOps remain after reload: {replacement_image_ops:?}");
+        assert_eq!(replacement_asset_ops.len(), 1);
+        assert_eq!(replacement_asset_ops[0]["w"], 5.0);
+        assert_eq!(input_image_op.unwrap()["w"], 24.0);
+        assert!(same_package_released);
+        assert!(replacement_released);
+        assert_eq!(fresh_resource_pixels, blue);
+        assert_eq!(fresh_stats.1, 1);
+        assert_eq!(replacement_stats.1, fresh_stats.1);
+        assert_eq!(replacement_stats.2, fresh_stats.2);
+        assert!(
+            replacement_stats.0 <= fresh_stats.0 + 1,
+            "package reload grew Core texture slots beyond one retired staging slot"
+        );
+    }
+
+    #[test]
+    fn source_package_reload_retires_old_pak_textures_and_keeps_new_drawable() {
+        exercise_repeated_package_reload(false);
+    }
+
+    #[test]
+    fn bytecode_package_reload_retires_old_pak_textures_and_keeps_new_drawable() {
+        exercise_repeated_package_reload(true);
+    }
+
+    #[test]
+    fn invalid_pak_admission_preserves_previous_guest_tree_and_textures() {
+        let source = CString::new(
+            r#"
+            const image = ui.createNode(2);
+            ui.setProp(image, 1, 5);
+            ui.setProp(image, 2, 5);
+            ui.setImage(image, ui.__textures.reload);
+            ui.insertBefore(1, image, 0);
+            globalThis.frame = function() {};
+            globalThis.__pocketEvent = function(line) {
+                const event = JSON.parse(line);
+                if (event.name === 'input.pointer' && event.payload.phase === 'up') {
+                    ui.setProp(image, 1, 24);
+                }
+            };
+            "#,
+        )
+        .unwrap();
+        let mut image = vec![1, 0, 1, 0, pocket_spec::psm::PSM_8888 as u8, 0, 0, 0];
+        image.extend_from_slice(&[11, 22, 33, 255]);
+        let pak = one_entry_pak("ui:img.reload", &image);
+        let invalid_pak = one_entry_pak("ui:img.broken", &[]);
+        let handle = pocket_create(64.0, 64.0);
+        assert!(!handle.is_null());
+        assert_eq!(unsafe { pocket_load(handle, source.as_ptr(), pak.as_ptr(), pak.len()) }, 0);
+        let initial = frame_json(handle);
+        assert_eq!(initial["ops"].as_array().unwrap().len(), 1);
+        assert_eq!(initial["ops"][0]["asset"], "reload");
+        let texture = unsafe { &*handle }
+            .nodes
+            .borrow()
+            .iter()
+            .find(|node| node.from_pack && node.asset == "reload")
+            .unwrap()
+            .texture;
+        let initial_stats = {
+            let core = unsafe { &*handle }.ops.core().unwrap();
+            let ui = &core.ui;
+            let slots = ui.texture_slot_count();
+            let live = (0..slots)
+                .filter_map(|slot| ui.texture_at(slot as u32))
+                .map(|(_, view)| view.pixels.len())
+                .sum::<usize>();
+            (slots, live)
+        };
+
+        assert_eq!(
+            unsafe {
+                pocket_load(
+                    handle,
+                    source.as_ptr(),
+                    invalid_pak.as_ptr(),
+                    invalid_pak.len(),
+                )
+            },
+            -1
+        );
+        assert_eq!(
+            unsafe { &*handle }
+                .ops
+                .core()
+                .unwrap()
+                .ui
+                .texture(texture)
+                .map(|view| view.pixels.to_vec()),
+            Some(vec![11, 22, 33, 255])
+        );
+        let retained_frame = frame_json(handle);
+        assert_eq!(retained_frame["ops"].as_array().unwrap().len(), 1);
+        assert_eq!(retained_frame["ops"][0]["asset"], "reload");
+        assert_eq!(retained_frame["ops"][0]["w"], 5.0);
+        let retained_stats = {
+            let core = unsafe { &*handle }.ops.core().unwrap();
+            let ui = &core.ui;
+            let slots = ui.texture_slot_count();
+            let live = (0..slots)
+                .filter_map(|slot| ui.texture_at(slot as u32))
+                .map(|(_, view)| view.pixels.len())
+                .sum::<usize>();
+            (slots, live)
+        };
+        assert_eq!(retained_stats, initial_stats);
+
+        let down = CString::new(
+            r#"{"type":"event","name":"input.pointer","payload":{"phase":"down","id":0,"x":8,"y":12}}"#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_send(handle, down.as_ptr()) }, 0);
+        let _ = frame_json(handle);
+        let up = CString::new(
+            r#"{"type":"event","name":"input.pointer","payload":{"phase":"up","id":0,"x":8,"y":12}}"#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_send(handle, up.as_ptr()) }, 0);
+        let input_frame = frame_json(handle);
+        assert_eq!(input_frame["ops"][0]["asset"], "reload");
+        assert_eq!(input_frame["ops"][0]["w"], 24.0);
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
+    fn invalid_and_oversized_bytecode_preflight_preserve_previous_guest() {
+        let source = br#"
+            const image = ui.createNode(2);
+            ui.setProp(image, 1, 5);
+            ui.setProp(image, 2, 5);
+            ui.setImage(image, ui.__textures.reload);
+            ui.insertBefore(1, image, 0);
+            globalThis.frame = function() {};
+        "#;
+        let bytecode = compile_test_bytecode(source);
+        let mut invalid_bytecode = bytecode.clone();
+        invalid_bytecode[bytecode::HEADER_LEN] ^= 1;
+        let mut image = vec![1, 0, 1, 0, pocket_spec::psm::PSM_8888 as u8, 0, 0, 0];
+        image.extend_from_slice(&[11, 22, 33, 255]);
+        let pak = one_entry_pak("ui:img.reload", &image);
+        let handle = pocket_create(64.0, 64.0);
+        assert!(!handle.is_null());
+        assert_eq!(
+            unsafe {
+                pocket_load_bytecode(
+                    handle,
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                    pak.as_ptr(),
+                    pak.len(),
+                )
+            },
+            0
+        );
+        let _ = frame_json(handle);
+        let texture = unsafe { &*handle }
+            .nodes
+            .borrow()
+            .iter()
+            .find(|node| node.from_pack && node.asset == "reload")
+            .unwrap()
+            .texture;
+        assert_eq!(
+            unsafe {
+                pocket_load_bytecode(
+                    handle,
+                    invalid_bytecode.as_ptr(),
+                    invalid_bytecode.len(),
+                    pak.as_ptr(),
+                    pak.len(),
+                )
+            },
+            -1
+        );
+        unsafe { (*handle).memory_limits.max_pak_bytes = Some(1) };
+        assert_eq!(
+            unsafe {
+                pocket_load_bytecode(
+                    handle,
+                    bytecode.as_ptr(),
+                    bytecode.len(),
+                    pak.as_ptr(),
+                    pak.len(),
+                )
+            },
+            -1
+        );
+        assert_eq!(
+            unsafe { &*handle }
+                .ops
+                .core()
+                .unwrap()
+                .ui
+                .texture(texture)
+                .map(|view| view.pixels.to_vec()),
+            Some(vec![11, 22, 33, 255])
+        );
+        let retained = frame_json(handle);
+        assert_eq!(retained["ops"].as_array().unwrap().len(), 1);
+        assert_eq!(retained["ops"][0]["asset"], "reload");
+        unsafe { pocket_destroy(handle) };
+    }
+
     fn test_glyph_run(slot: u8, color: u32, cells: &[(i16, i16, u32)]) -> Vec<u32> {
         let mut words = vec![3, ((cells.len() as u32) << 16) | slot as u32, color];
         for &(x, y, gid) in cells {
@@ -7350,6 +7938,155 @@ mod smoke_tests {
     }
 
     #[test]
+    fn mesh_effect_drawlist_markers_reach_json_and_pfb_v2() {
+        let viewport = DamageRect::new(0, 0, 8, 8);
+        let mut words = vec![
+            11,
+            0,
+            (8 << 16) | 8,
+            3,
+            1.0f32.to_bits(),
+            0.9f32.to_bits(),
+            0.8f32.to_bits(),
+            0.1f32.to_bits(),
+            0.2f32.to_bits(),
+            0.3f32.to_bits(),
+        ];
+        let operation = Operation {
+            opcode: 11,
+            words: &words,
+            clip: viewport,
+        };
+        let mut projected = Vec::new();
+        append_draw_operation(
+            &mut projected,
+            &operation,
+            &[],
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(projected[0].kind, "meshLayerBegin");
+        let legacy = serde_json::to_value(&projected[0]).unwrap();
+        assert_eq!(legacy["type"], "meshLayerBegin");
+        assert_eq!(legacy["color"], 3);
+        assert_eq!(legacy["uvs"][0], 1.0);
+        assert!((legacy["uvs"][5].as_f64().unwrap() - 0.3).abs() < 1e-6);
+        let mut writer = BinaryFrameWriter::new();
+        writer.op(&projected[0]).unwrap();
+        assert_eq!(writer.bytes[0], 9);
+        assert_eq!(u32::from_le_bytes(writer.bytes[33..37].try_into().unwrap()), 3);
+        assert_eq!(BINARY_FRAME_VERSION, 2);
+
+        words[4] = f32::NAN.to_bits();
+        let invalid = Operation {
+            opcode: 11,
+            words: &words,
+            clip: viewport,
+        };
+        assert!(append_draw_operation(
+            &mut Vec::new(),
+            &invalid,
+            &[],
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn repeated_texture_triangle_keeps_uv_and_sampler_mode_in_json_and_pfb() {
+        let mut ui = Ui::new();
+        let texture = ui.upload_texture(&[0xff, 0x00, 0x00, 0xff], 1, 1, pocket_spec::psm::PSM_8888);
+        assert!(texture >= 0);
+        let xy = |x: i16, y: i16| x as u16 as u32 | ((y as u16 as u32) << 16);
+        let words = vec![
+            pocket_spec::draw_op::TEX_TRI_REPEAT,
+            texture as u32,
+            xy(0, 0),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            xy(7, 0),
+            1.25f32.to_bits(),
+            0.0f32.to_bits(),
+            xy(0, 7),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            u32::MAX,
+        ];
+        let operation = Operation {
+            opcode: pocket_spec::draw_op::TEX_TRI_REPEAT,
+            words: &words,
+            clip: DamageRect::new(0, 0, 8, 8),
+        };
+        let mut projected = Vec::new();
+        append_draw_operation(
+            &mut projected,
+            &operation,
+            &[],
+            &mut ui,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(projected.len(), 1);
+        assert!(projected[0].repeat_texture);
+        assert_eq!(projected[0].uvs.as_ref().unwrap()[2], 1.25);
+
+        let legacy = serde_json::to_value(&projected[0]).unwrap();
+        assert_eq!(legacy["type"], "textureTriangle");
+        assert_eq!(legacy["repeatTexture"], true);
+        assert_eq!(legacy["uvs"][2], 1.25);
+
+        let mut writer = BinaryFrameWriter::new();
+        writer.op(&projected[0]).unwrap();
+        assert_eq!(writer.bytes[0], 14, "repeat sampler uses the append-only PFB tag");
+    }
+
+    #[test]
+    fn subpixel_texture_triangles_preserve_xy_uv_sampler_and_pfb() {
+        let mut ui = Ui::new();
+        let texture = ui.upload_texture(&[255; 4], 1, 1, pocket_spec::psm::PSM_8888);
+        for opcode in [15u32, 16] {
+            let mut words = vec![opcode, texture as u32];
+            for value in [0.25f32, 0.375, -0.125, 0.0,
+                          7.75, 0.625, 1.25, 0.0,
+                          0.5, 7.875, 0.0, 1.0] {
+                words.push(value.to_bits());
+            }
+            words.push(u32::MAX);
+            let project = |words: &[u32], ui: &mut Ui| {
+                let mut projected = Vec::new();
+                append_draw_operation(&mut projected, &Operation {
+                    opcode, words, clip: DamageRect::new(0, 0, 8, 8),
+                }, &[], ui, &mut HashSet::new()).map(|_| projected)
+            };
+            let projected = project(&words, &mut ui).unwrap();
+            let triangle = &projected[0];
+            assert_eq!(triangle.points.as_ref().unwrap()[0].x, 0.25);
+            assert_eq!(triangle.points.as_ref().unwrap()[0].y, 0.375);
+            assert_eq!(triangle.points.as_ref().unwrap()[2].y, 7.875);
+            assert_eq!(triangle.uvs.as_ref().unwrap()[0], -0.125);
+            assert_eq!(triangle.repeat_texture, opcode == 16);
+            let json = serde_json::to_value(triangle).unwrap();
+            assert_eq!(json["points"][0]["x"], 0.25);
+            let mut writer = BinaryFrameWriter::new();
+            writer.op(triangle).unwrap();
+            assert_eq!(writer.bytes[0], if opcode == 16 { 14 } else { 4 });
+            // PFB already has float XY: no second tag or Dart projection is needed.
+            let asset_bytes = triangle.asset.as_ref().unwrap().len();
+            let xy_offset = 33 + 4 + asset_bytes + 4;
+            assert_eq!(f32::from_le_bytes(writer.bytes[xy_offset..xy_offset + 4].try_into().unwrap()), 0.25);
+            assert!(project(&words[..14], &mut ui).is_err());
+            let mut invalid = words.clone();
+            invalid[2] = f32::NAN.to_bits();
+            assert!(project(&invalid, &mut ui).is_err());
+            invalid = words.clone();
+            invalid[4] = f32::INFINITY.to_bits();
+            assert!(project(&invalid, &mut ui).is_err());
+        }
+    }
+
+    #[test]
     fn source_guest_executes_and_returns_a_frame() {
         let handle = pocket_create(320.0, 480.0);
         assert!(!handle.is_null());
@@ -7394,7 +8131,8 @@ mod smoke_tests {
         assert!(length > 32);
         let bytes = unsafe { std::slice::from_raw_parts(pointer, length as usize) };
         assert_eq!(&bytes[..4], b"PFB1");
-        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
+        // PFB1 v2 carries the extended operation/resource envelope.
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 2);
         assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 3);
         // Header (24 bytes) is followed by the operation count. The source
         // above emits at least one rect operation.
@@ -7719,6 +8457,97 @@ mod smoke_tests {
     }
 
     #[test]
+    fn full_coordinate_pointer_sidecar_preserves_large_viewports_and_surfaces() {
+        assert_eq!(
+            pack_touch(TouchContact { id: 3, x: 479, y: 271, hit: 0, surface: 0 }),
+            (3 << TOUCH_LEGACY_ID_SHIFT) | (271 << 9) | 479,
+        );
+        assert_eq!(
+            pack_touch(TouchContact { id: 9, x: 639, y: 359, hit: 0, surface: 0 }),
+            TOUCH_WIDE_MARKER | (9 << TOUCH_WIDE_ID_SHIFT) | (359 << 10) | 639,
+        );
+        assert_eq!(
+            pack_touch_cancel(TouchContact { id: 3, x: 479, y: 271, hit: 0, surface: 0 }),
+            TOUCH_CANCEL_MARKER | (3 << TOUCH_LEGACY_ID_SHIFT),
+        );
+        let handle = pocket_create(2560.0, 1440.0);
+        unsafe { (*handle).auxiliary_viewport = Some((1920.0, 1200.0)); }
+        let source = CString::new(
+            r#"
+            globalThis.frame = function(buttons, analog, touches, hits, surfaces,
+                rightAnalog, axisDeltas, motion, text, coordinates) {
+                const points = [];
+                for (let i = 0; i < (touches ? touches.length : 0); i++) {
+                    points.push({ packed: touches[i] >>> 0, hit: hits[i], surface: surfaces[i], coordinate: coordinates && coordinates[i] });
+                }
+                if (points.length) pocket._emitValue({ type: 'event', name: 'fullcoords.frame', payload: { points } });
+            };
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0, "{}", unsafe {
+            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+        });
+
+        for message in [
+            r#"{"method":"input.pointer","payload":{"phase":"down","id":7,"x":2048,"y":1200}}"#,
+            r#"{"method":"input.pointer","payload":{"phase":"down","id":8,"x":1500,"y":1100,"surface":"auxiliary"}}"#,
+        ] {
+            let message = CString::new(message).unwrap();
+            assert_eq!(unsafe { pocket_send(handle, message.as_ptr()) }, 0, "{}", unsafe {
+                CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
+            });
+        }
+
+        let frame = frame_json(handle);
+        let frames = frame["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["name"] == "fullcoords.frame")
+            .collect::<Vec<_>>();
+        assert!(frames.len() >= 2, "{frame}");
+        let first_points = frames[0]["payload"]["points"].as_array().unwrap();
+        assert_eq!(first_points.len(), 1);
+        assert_eq!(first_points[0]["coordinate"]["x"], 2048);
+        assert_eq!(first_points[0]["coordinate"]["y"], 1200);
+        assert_eq!(first_points[0]["surface"], 0);
+        assert_ne!(first_points[0]["packed"].as_u64().unwrap() as u32 & TOUCH_COORDINATE_SIDECAR_MARKER, 0);
+
+        let both_points = frames.iter()
+            .map(|event| event["payload"]["points"].as_array().unwrap())
+            .find(|points| points.len() == 2)
+            .expect("second down exposes both simultaneous contacts");
+        assert_eq!(both_points[0]["coordinate"]["x"], 2048);
+        assert_eq!(both_points[0]["coordinate"]["y"], 1200);
+        assert_eq!(both_points[0]["surface"], 0);
+        assert_eq!(both_points[1]["coordinate"]["x"], 1500);
+        assert_eq!(both_points[1]["coordinate"]["y"], 1100);
+        assert_eq!(both_points[1]["surface"], 1);
+
+        let cancel = CString::new(
+            r#"{"method":"input.pointer","payload":{"phase":"cancel","id":8,"x":1500,"y":1100,"surface":"auxiliary"}}"#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_send(handle, cancel.as_ptr()) }, 0);
+        let after_cancel = frame_json(handle);
+        let cancel_frame = after_cancel["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["name"] == "fullcoords.frame")
+            .map(|event| event["payload"]["points"].as_array().unwrap())
+            .find(|points| points.len() == 2 && points[1]["surface"] == 1)
+            .expect("cancel keeps the contact/surface slots aligned for this frame");
+        assert_eq!(cancel_frame[1]["coordinate"]["x"], 1500);
+        assert_eq!(cancel_frame[1]["coordinate"]["y"], 1100);
+        let cancel_word = cancel_frame[1]["packed"].as_u64().unwrap() as u32;
+        assert_ne!(cancel_word & TOUCH_CANCEL_MARKER, 0);
+        assert_ne!(cancel_word & TOUCH_COORDINATE_SIDECAR_MARKER, 0);
+        unsafe { pocket_destroy(handle) };
+    }
+
+    #[test]
     fn packaged_guest_loads_real_host_assets() {
         let fixture = package_fixture();
         let source_file = CString::new(fixture.source.to_str().unwrap()).unwrap();
@@ -7961,10 +8790,10 @@ mod smoke_tests {
                 globalThis.__pocketWorkState = () => ({version:1,continuous:false,
                   simulationHz:60,framesUntilTimer:null});
                 globalThis.__pocketSkipIdleFrames = (n) => n;
-                globalThis.frame = (_buttons, analog, _touches, _hits, _surfaces, rightAnalog) => {
+                globalThis.frame = (buttons, analog, _touches, _hits, _surfaces, rightAnalog) => {
                   guestFrames++;
                   const axes = String(analog) + ':' + String(rightAnalog);
-                  pocket._emit(JSON.stringify({name:'analog.frame',params:{axes,guestFrames}}));
+                  pocket._emit(JSON.stringify({name:'analog.frame',params:{buttons,axes,guestFrames}}));
                   if (axes !== previousAxes) {
                     previousAxes = axes;
                     pocket._emit(JSON.stringify({name:'analog.seen',params:{axes}}));
@@ -7980,8 +8809,33 @@ mod smoke_tests {
             // delivered by the zero-tick path.
             let initial = frame_json_with_delta(host, 1000.0 / 60.0);
             assert_eq!(initial["events"][0]["name"], "analog.frame");
+            assert_eq!(initial["events"][0]["params"]["buttons"], 0);
             assert_eq!(initial["events"][1]["name"], "analog.seen");
             assert_eq!(initial["events"][1]["params"]["axes"], "32896:32896");
+            assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
+
+            let pressed = CString::new(
+                r#"{"method":"input.buttons","payload":{"buttons":16384,"analog":32896,"rightAnalog":32896}}"#,
+            )
+            .unwrap();
+            assert_eq!(pocket_send(host, pressed.as_ptr()), 0);
+            assert!((*host).external_work_pending);
+            let pressed_frame = frame_json_with_delta(host, 0.0);
+            assert_eq!(pressed_frame["events"][0]["name"], "analog.frame");
+            assert_eq!(pressed_frame["events"][0]["params"]["buttons"], 16384);
+            assert_eq!(pressed_frame["events"][0]["params"]["guestFrames"], 2);
+            assert_eq!(pocket_next_wake_delay_ms(host), 0.0);
+
+            let released = CString::new(
+                r#"{"method":"input.buttons","payload":{"buttons":0,"analog":32896,"rightAnalog":32896}}"#,
+            )
+            .unwrap();
+            assert_eq!(pocket_send(host, released.as_ptr()), 0);
+            assert!((*host).external_work_pending);
+            let released_frame = frame_json_with_delta(host, 0.0);
+            assert_eq!(released_frame["events"][0]["name"], "analog.frame");
+            assert_eq!(released_frame["events"][0]["params"]["buttons"], 0);
+            assert_eq!(released_frame["events"][0]["params"]["guestFrames"], 3);
             assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
 
             let unchanged_buttons = CString::new(
@@ -8005,14 +8859,15 @@ mod smoke_tests {
             assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
 
             let moved = CString::new(
-                r#"{"method":"input.buttons","payload":{"buttons":0,"analog":4660,"rightAnalog":22136}}"#,
+                r#"{"method":"input.buttons","payload":{"buttons":16384,"analog":4660,"rightAnalog":22136}}"#,
             )
             .unwrap();
             assert_eq!(pocket_send(host, moved.as_ptr()), 0);
             assert!((*host).external_work_pending);
             let moved_frame = frame_json_with_delta(host, 0.0);
             assert_eq!(moved_frame["events"][0]["name"], "analog.frame");
-            assert_eq!(moved_frame["events"][0]["params"]["guestFrames"], 2);
+            assert_eq!(moved_frame["events"][0]["params"]["buttons"], 16384);
+            assert_eq!(moved_frame["events"][0]["params"]["guestFrames"], 4);
             assert_eq!(moved_frame["events"][1]["name"], "analog.seen");
             assert_eq!(moved_frame["events"][1]["params"]["axes"], "4660:22136");
             assert_eq!(pocket_next_wake_delay_ms(host), 0.0);
@@ -8028,7 +8883,8 @@ mod smoke_tests {
             let held_full_tick = frame_json_with_delta(host, 1000.0 / 60.0);
             assert_eq!(held_full_tick["events"][0]["name"], "analog.frame");
             assert_eq!(held_full_tick["events"][0]["params"]["axes"], "4660:22136");
-            assert_eq!(held_full_tick["events"][0]["params"]["guestFrames"], 3);
+            assert_eq!(held_full_tick["events"][0]["params"]["buttons"], 16384);
+            assert_eq!(held_full_tick["events"][0]["params"]["guestFrames"], 5);
 
             let centered = CString::new(
                 r#"{"method":"input.buttons","payload":{"buttons":0,"analog":32896,"rightAnalog":32896}}"#,
@@ -8038,7 +8894,8 @@ mod smoke_tests {
             assert!((*host).external_work_pending);
             let centered_frame = frame_json_with_delta(host, 0.0);
             assert_eq!(centered_frame["events"][0]["name"], "analog.frame");
-            assert_eq!(centered_frame["events"][0]["params"]["guestFrames"], 4);
+            assert_eq!(centered_frame["events"][0]["params"]["buttons"], 0);
+            assert_eq!(centered_frame["events"][0]["params"]["guestFrames"], 6);
             assert_eq!(centered_frame["events"][1]["name"], "analog.seen");
             assert_eq!(centered_frame["events"][1]["params"]["axes"], "32896:32896");
             assert_eq!(pocket_next_wake_delay_ms(host), -1.0);

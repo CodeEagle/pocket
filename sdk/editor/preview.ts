@@ -42,6 +42,23 @@ export type PreviewArtifactPaths = {
   metadataPath?: string;
   /** BuildOutput-compatible alias for metadataPath. */
   metadata?: string;
+  /** Optional independent Worker QJBC artifact. When omitted, preview derives
+   * app.worker.qjbc beside the UI artifact and reads the worker descriptor
+   * from app.bytecode.json/guest-manifest.json. */
+  workerBytecodePath?: string;
+  /** BuildOutput-compatible alias for workerBytecodePath. */
+  workerBytecode?: string;
+  /** Optional compiler metadata for the Worker QJBC. The signed descriptor
+   * itself still comes from the UI metadata/guest manifest. */
+  workerMetadataPath?: string;
+  /** BuildOutput-compatible alias for workerMetadataPath. */
+  workerMetadata?: string;
+  /** Explicit worker descriptor for embedders whose metadata is not colocated
+   * with the staged artifacts. Package admission remains the caller's trust
+   * boundary; native still validates the QJBC envelope and policy shape. */
+  workerDescriptor?: Record<string, unknown>;
+  /** Exact HTTP(S) origins granted by the preview host for this artifact. */
+  workerHttpOrigins?: string[];
   /** Trusted System catalog package-to-surface handles, or derive from pocket.system.json. */
   compositorSurfaces?: Record<string, number>;
   /** Trusted installed child guest artifacts, keyed by catalog package ID. */
@@ -64,6 +81,13 @@ export type PreviewProject = PreviewArtifactPaths & {
 type ResolvedPreviewProject = PreviewProject & {
   /** Validated size/mtime identity used when no completed-build token exists. */
   artifactFingerprint?: string;
+  worker?: ResolvedPreviewWorker;
+};
+
+type ResolvedPreviewWorker = {
+  bytecodePath: string;
+  descriptor: Record<string, unknown>;
+  config: Record<string, unknown>;
 };
 
 export type PreviewResolver<T> = T | ((projectId: string) => T | Promise<T>);
@@ -82,6 +106,9 @@ export type PreviewManagerOptions = {
   safeArea?: Partial<PreviewSafeArea>;
   rasterDensity?: number;
   tickHz?: number;
+  /** Exact HTTP(S) origins granted to Worker HTTP nodes in preview. Empty
+   * (the default) denies every network destination. */
+  workerHttpOrigins?: PreviewResolver<readonly string[]>;
   commandTimeoutMs?: number;
   /** Bound retained project sessions; idle sessions are evicted first. */
   maxSessions?: number;
@@ -445,6 +472,156 @@ function resolveValue<T>(value: PreviewResolver<T> | undefined, projectId: strin
   return Promise.resolve(typeof value === "function" ? (value as (id: string) => T | Promise<T>)(projectId) : value);
 }
 
+function existingPath(candidates: string[]): string | undefined {
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function workerInteger(value: unknown, label: string, minimum = 1, maximum = 0xffffffff): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < minimum || number > maximum) {
+    throw new Error(`preview worker ${label} must be an integer in [${minimum}, ${maximum}]`);
+  }
+  return number;
+}
+
+function workerString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 256) {
+    throw new Error(`preview worker ${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function workerStringList(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item)) {
+    throw new Error(`preview worker ${label} must be a string array`);
+  }
+  const result = value.map((item) => String(item));
+  if (new Set(result).size !== result.length) throw new Error(`preview worker ${label} must not contain duplicates`);
+  return result;
+}
+
+async function readJsonObjectFile(path: string, label: string): Promise<Record<string, unknown> | undefined> {
+  if (!existsSync(path)) return undefined;
+  try {
+    return asRecord(JSON.parse(await readFile(path, "utf8")), label);
+  } catch (error) {
+    throw new Error(`preview: invalid ${label}: ${errorText(error)}`);
+  }
+}
+
+/**
+ * Resolve the signed worker descriptor and sibling QJBC used by one preview
+ * runtime. The descriptor is read from the same app.bytecode.json/guest-
+ * manifest files consumed by Flutter; this adapter does not compile or
+ * interpret Worker source in the Editor process.
+ */
+async function resolvePreviewWorker(
+  project: PreviewProject,
+  origins: readonly string[],
+): Promise<ResolvedPreviewWorker | undefined> {
+  const uiBytecode = project.bytecodePath ?? project.bytecode;
+  const uiMetadata = project.metadataPath ?? project.metadata;
+  const artifactDirectory = uiBytecode ? dirname(resolve(uiBytecode)) : undefined;
+  const projectDirectory = project.projectDirectory;
+  const descriptorFromMetadata = uiMetadata
+    ? (await readJsonObjectFile(uiMetadata, "app.bytecode.json"))?.worker
+    : undefined;
+  const manifestCandidates = [
+    ...(projectDirectory ? [join(projectDirectory, "guest-manifest.json")] : []),
+    ...(artifactDirectory ? [join(artifactDirectory, "guest-manifest.json")] : []),
+  ];
+  let manifest: Record<string, unknown> | undefined;
+  let descriptor: unknown = project.workerDescriptor ?? descriptorFromMetadata;
+  for (const path of manifestCandidates) {
+    const candidate = await readJsonObjectFile(path, "guest-manifest.json");
+    if (!manifest && candidate) manifest = candidate;
+    if (descriptor === undefined && candidate?.worker !== undefined) {
+      descriptor = candidate.worker;
+      break;
+    }
+  }
+  const workerBytecode = project.workerBytecodePath ?? project.workerBytecode ?? existingPath([
+    ...(artifactDirectory ? [join(artifactDirectory, "app.worker.qjbc")] : []),
+    ...(projectDirectory ? [join(projectDirectory, "app.worker.qjbc")] : []),
+  ]);
+  if (descriptor === undefined) {
+    if (workerBytecode) throw new Error("preview worker bytecode exists without a signed worker descriptor");
+    return undefined;
+  }
+  if (!workerBytecode) throw new Error("preview worker descriptor exists but app.worker.qjbc is missing");
+  const raw = asRecord(descriptor, "worker descriptor");
+  if (raw.kind !== "quickjs-bytecode") throw new Error("preview worker kind must be quickjs-bytecode");
+  if (workerInteger(raw.protocolVersion, "protocolVersion", 1, 1) !== 1) throw new Error("unsupported preview worker protocol version");
+  const bytecodeDescriptor = asRecord(raw.bytecode, "worker bytecode descriptor");
+  const descriptorPath = workerString(bytecodeDescriptor.path, "bytecode path");
+  if (descriptorPath.startsWith("/") || descriptorPath.includes("\\") || descriptorPath.split("/").some((part) => !part || part === "." || part === "..")) {
+    throw new Error("preview worker bytecode path must be canonical and relative");
+  }
+  const workerBytes = new Uint8Array(await readFile(workerBytecode));
+  const expectedBytes = workerInteger(bytecodeDescriptor.bytes, "bytecode bytes", 1, 64 * 1024 * 1024);
+  const expectedHash = workerString(bytecodeDescriptor.sha256, "bytecode sha256").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(expectedHash) || workerBytes.byteLength !== expectedBytes || sha256Hex(workerBytes) !== expectedHash) {
+    throw new Error("preview worker bytecode integrity does not match its descriptor");
+  }
+  const declaration = asRecord(raw.declaration, "worker declaration");
+  const requiredCapabilities = workerStringList(raw.requiredCaps, "requiredCaps");
+  if (!requiredCapabilities.includes("runtime.worker")) throw new Error("preview worker must require runtime.worker");
+  const manifestRequires = manifest?.capabilities && typeof manifest.capabilities === "object" && !Array.isArray(manifest.capabilities)
+    ? (manifest.capabilities as Record<string, unknown>).requires
+    : undefined;
+  if (manifestRequires !== undefined) {
+    const admitted = new Set(workerStringList(manifestRequires, "manifest capabilities.requires"));
+    if (requiredCapabilities.some((capability) => !admitted.has(capability))) {
+      throw new Error("preview worker requires a capability missing from guest-manifest.json");
+    }
+  }
+  const runtimeAbi = workerString(raw.runtimeAbi, "runtimeAbi");
+  const bindingGeneration = workerInteger(raw.bindingGeneration, "bindingGeneration");
+  const tickHz = workerInteger(raw.tickHz, "tickHz", 1, 120);
+  // The main metadata's ABI/tick are the UI host contract. Native performs the
+  // final ABI/binding admission; rejecting an obvious mismatch here keeps the
+  // error attached to the preview artifact instead of a later eval boundary.
+  const uiMetadataRecord = uiMetadata ? await readJsonObjectFile(uiMetadata, "app.bytecode.json") : undefined;
+  if (uiMetadataRecord?.runtimeAbi !== undefined && uiMetadataRecord.runtimeAbi !== runtimeAbi) {
+    throw new Error("preview worker runtime ABI differs from the UI bytecode");
+  }
+  if (project.tickHz !== undefined && project.tickHz !== tickHz) {
+    throw new Error(`preview worker tickHz ${tickHz} differs from UI tickHz ${project.tickHz}`);
+  }
+  const declarationNodes = Array.isArray(declaration.nodes) ? declaration.nodes : [];
+  const expectedCapabilities = new Set(["runtime.worker"]);
+  for (const rawNode of declarationNodes) {
+    const node = asRecord(rawNode, "worker node");
+    if (node.kind === "http") expectedCapabilities.add("net.http");
+    else if (node.kind === "i2c") expectedCapabilities.add("io.i2c");
+    else if (node.kind === "uart") expectedCapabilities.add("io.uart");
+    else throw new Error("preview worker declaration contains an unsupported node kind");
+  }
+  if (requiredCapabilities.length !== expectedCapabilities.size || requiredCapabilities.some((capability) => !expectedCapabilities.has(capability))) {
+    throw new Error("preview worker requiredCaps do not match runtime.worker and its declared nodes");
+  }
+  const config: Record<string, unknown> = {
+    protocolVersion: 1,
+    nativeGeneration: 1,
+    bindingGeneration,
+    tickHz,
+    expectedRuntimeAbi: runtimeAbi,
+    declaration,
+    policy: {
+      requiredCapabilities: [...requiredCapabilities].sort(),
+      allowedHttpOrigins: [...new Set(origins.map((origin) => String(origin)))].sort(),
+    },
+    limits: {
+      heapBytes: 16 * 1024 * 1024,
+      stackBytes: 1024 * 1024,
+      turnBudgetMicros: 10_000,
+      windowMicros: 50_000,
+      quotaMicros: 10_000,
+    },
+  };
+  return { bytecodePath: resolve(workerBytecode), descriptor: raw, config };
+}
+
 type SystemCatalogEntry = {
   package: string;
   manifest: string;
@@ -487,6 +664,30 @@ async function systemCatalogFromProject(projectDirectory: string | undefined): P
     }
     catalog.push({ package: packageId, manifest, required: record.required === true });
   }
+  const generatedPath = join(projectDirectory, "generated", "compositor-surfaces.json");
+  if (existsSync(generatedPath)) {
+    let generated: unknown;
+    try {
+      generated = JSON.parse(await readFile(generatedPath, "utf8"));
+    } catch (error) {
+      throw new Error(`preview: invalid generated compositor registry: ${errorText(error)}`);
+    }
+    const document = asRecord(generated, "generated compositor registry");
+    if (document.schemaVersion !== 1) throw new Error("preview: unsupported generated compositor registry schema");
+    const surfaces = asRecord(document.surfaces, "generated compositor registry surfaces");
+    const generatedApplications = document.applications === undefined
+      ? {}
+      : asRecord(document.applications, "generated compositor registry applications");
+    for (const appId of Object.keys(generatedApplications)) {
+      if (appId === systemUI || typeof surfaces[appId] !== "number" || !Number.isInteger(surfaces[appId])) {
+        throw new Error("preview: generated application must have a compositor surface");
+      }
+      installed.add(appId);
+      if (!catalog.some((entry) => entry.package === appId)) {
+        catalog.push({ package: appId, manifest: `generated/${appId}`, required: false });
+      }
+    }
+  }
   return { systemUI, installed, catalog };
 }
 
@@ -500,6 +701,35 @@ async function systemCatalogFromProject(projectDirectory: string | undefined): P
 export async function compositorSurfacesFromProject(projectDirectory: string | undefined): Promise<Record<string, number> | undefined> {
   const system = await systemCatalogFromProject(projectDirectory);
   if (!system) return undefined;
+  const generatedPath = join(projectDirectory!, "generated", "compositor-surfaces.json");
+  if (existsSync(generatedPath)) {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(generatedPath, "utf8"));
+    } catch (error) {
+      throw new Error(`preview: invalid generated compositor registry: ${errorText(error)}`);
+    }
+    const document = asRecord(value, "generated compositor registry");
+    if (document.schemaVersion !== 1) throw new Error("preview: unsupported generated compositor registry schema");
+    const raw = asRecord(document.surfaces, "generated compositor registry surfaces");
+    const result: Record<string, number> = {};
+    const handles = new Set<number>();
+    for (const [appId, handle] of Object.entries(raw)) {
+      if (!appId || typeof handle !== "number" || !Number.isInteger(handle) || handle < 2 || handle > 63 || handles.has(handle)) {
+        throw new Error("preview: generated compositor handles must be unique integers from 2 through 63");
+      }
+      if (appId === system.systemUI) throw new Error("preview: generated compositor registry must not contain the SystemUI");
+      handles.add(handle);
+      result[appId] = handle;
+    }
+    const requiredChildren = system.catalog
+      .filter((entry) => entry.package !== system.systemUI && system.installed.has(entry.package))
+      .map((entry) => entry.package);
+    if (requiredChildren.some((appId) => result[appId] === undefined)) {
+      throw new Error("preview: generated compositor registry omits an installed manifest child");
+    }
+    return result;
+  }
   const result: Record<string, number> = {};
   let handle = 2;
   for (const entry of system.catalog) {
@@ -591,6 +821,7 @@ class NativeProbe {
   private closed = false;
   private observer?: NativeProbeObserver;
   private decorator?: NativeProbeCommandDecorator;
+  private wakeHandler?: () => void;
 
   constructor(path: string, timeoutMs: number) {
     this.path = path;
@@ -607,13 +838,24 @@ class NativeProbe {
   }
 
   private onLine(line: string): void {
-    const next = this.pending.shift();
-    if (!next) return;
-    clearTimeout(next.timer);
     try {
       const parsed = JSON.parse(line) as unknown;
-      next.resolve(asRecord(parsed, "probe response"));
+      const response = asRecord(parsed, "probe response");
+      // pocket_probe emits this record from the native Worker/provider wake
+      // callback. It is deliberately not a command response and must leave
+      // the serialized request queue untouched.
+      if (response.__pocket_probe_event === "worker") {
+        this.wakeHandler?.();
+        return;
+      }
+      const next = this.pending.shift();
+      if (!next) return;
+      clearTimeout(next.timer);
+      next.resolve(response);
     } catch (error) {
+      const next = this.pending.shift();
+      if (!next) return;
+      clearTimeout(next.timer);
       next.reject(new Error(`invalid pocket_probe response: ${errorText(error)}`));
     }
   }
@@ -666,6 +908,10 @@ class NativeProbe {
 
   setDecorator(decorator: NativeProbeCommandDecorator | undefined): void {
     this.decorator = decorator;
+  }
+
+  setWakeHandler(handler: (() => void) | undefined): void {
+    this.wakeHandler = handler;
   }
 
   async stop(): Promise<void> {
@@ -965,6 +1211,7 @@ type PreviewRuntime = {
   generation: number;
   probe: NativeProbe;
   artifacts: PreviewProject;
+  worker?: ResolvedPreviewWorker;
   /** Native guest viewport; child guests are resized to their selected host
    * surface rather than inheriting the browser/root viewport. */
   viewportWidth: number;
@@ -1384,6 +1631,10 @@ class PreviewSession {
       artifacts.bytecodePath ?? "",
       artifacts.sourcePath ?? "",
       artifacts.pakPath ?? "",
+      artifacts.workerBytecodePath ?? artifacts.workerBytecode ?? "",
+      artifacts.workerMetadataPath ?? artifacts.workerMetadata ?? "",
+      JSON.stringify(artifacts.workerDescriptor ?? {}),
+      JSON.stringify(artifacts.workerHttpOrigins ?? []),
       artifactIdentity,
       JSON.stringify(artifacts.compositorSurfaces ?? {}),
       JSON.stringify(artifacts.applications ?? {}),
@@ -1433,7 +1684,10 @@ class PreviewSession {
         fingerprints.push(`${path}:${item.size}:${item.mtimeMs}`);
       }
     }
-    return { ...result, artifactFingerprint: fingerprints.join(";") };
+    const origins = result.workerHttpOrigins ?? await this.manager.resolveWorkerHttpOrigins(this.id);
+    const worker = await resolvePreviewWorker(result, origins);
+    if (worker) fingerprints.push(`${worker.bytecodePath}:${(await stat(worker.bytecodePath)).size}:${(await stat(worker.bytecodePath)).mtimeMs}`);
+    return { ...result, ...(worker ? { worker } : {}), artifactFingerprint: fingerprints.join(";") };
   }
 
   /**
@@ -1487,6 +1741,7 @@ class PreviewSession {
       this.tickHz = artifacts.tickHz ?? this.manager.options.tickHz ?? 60;
       const probePath = await this.manager.findProbe();
       const probe = new NativeProbe(probePath, this.manager.options.commandTimeoutMs ?? 15_000);
+      probe.setWakeHandler(() => this.onWorkerWake());
       const recording = this.previewRecordingActive();
       const runtime: PreviewRuntime = {
         appId: this.systemCatalog?.systemUI ?? (artifacts.appId ?? this.id),
@@ -1494,6 +1749,7 @@ class PreviewSession {
         generation: ++this.rootGeneration,
         probe,
         artifacts,
+        ...(artifacts.worker ? { worker: artifacts.worker } : {}),
         viewportWidth: this.width,
         viewportHeight: this.height,
         safeArea: { ...this.safeArea },
@@ -1518,6 +1774,16 @@ class PreviewSession {
         // this method is entered, so the native clock is selected before the
         // first guest load and every transaction can be replayed canonically.
         if (recording) await probe.checked({ op: "traceMode", mode: 1 });
+        // The native host attaches the Worker channel bridge during guest
+        // initialization, before evaluating UI bytecode. Configure the real
+        // QJBC worker first; never eval Worker/UI source in this process.
+        if (runtime.worker) {
+          await probe.checked({
+            op: "configureWorker",
+            bytecodePath: runtime.worker.bytecodePath,
+            config: { ...runtime.worker.config, nativeGeneration: runtime.generation },
+          });
+        }
         if (artifacts.compositorSurfaces && Object.keys(artifacts.compositorSurfaces).length > 0) {
           await probe.checked({ op: "compositor", applications: artifacts.compositorSurfaces });
         }
@@ -2025,7 +2291,7 @@ class PreviewSession {
 
   private recordableProbeCommand(command: JsonRecord): boolean {
     const operation = command.op;
-    if (!["create", "compositor", "load", "loadBytecode", "eval", "frame", "send", "resize"].includes(String(operation))) return false;
+    if (!["create", "compositor", "configureWorker", "load", "loadBytecode", "eval", "frame", "send", "resize"].includes(String(operation))) return false;
     // Recording control responses are real guest-visible boundaries. The
     // initial start response is sent while the old runtime is pending restart
     // (and is therefore intentionally not captured); active status/repeated
@@ -2147,6 +2413,24 @@ class PreviewSession {
         index: 0,
         kind: "compositor",
         args: { applications: cloneJson(command.applications) },
+        result: { configured: true, traceClock },
+        error: null,
+      };
+    }
+    if (operation === "configureWorker") {
+      if (typeof command.bytecodePath !== "string" || !command.config || typeof command.config !== "object" || Array.isArray(command.config)) {
+        throw new Error("configureWorker paths/config are missing");
+      }
+      const config = cloneJson(command.config) as JsonRecord;
+      const configSha256 = sha256Hex(canonicalPreviewJson(config));
+      return {
+        index: 0,
+        kind: "workerConfigure",
+        args: {
+          workerBytecode: await this.recordingAsset(capture, "workerBytecode", command.bytecodePath),
+          config,
+          configSha256,
+        },
         result: { configured: true, traceClock },
         error: null,
       };
@@ -2445,6 +2729,15 @@ class PreviewSession {
         let response: JsonRecord;
         if (entry.kind === "compositor") {
           const command: JsonRecord = { op: "compositor", applications: cloneJson(entry.args.applications) };
+          if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
+          response = await probe.checked(command);
+        } else if (entry.kind === "workerConfigure") {
+          const config = asRecord(entry.args.config, "workerConfigure config");
+          const command: JsonRecord = {
+            op: "configureWorker",
+            bytecodePath: this.previewAssetPath(capture, entry.args.workerBytecode),
+            config,
+          };
           if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
           response = await probe.checked(command);
         } else if (entry.kind === "loadBytecode") {
@@ -3125,8 +3418,11 @@ class PreviewSession {
       pakPath: raw.pakPath ?? raw.pak,
       appId,
     };
+    const workerOrigins = artifacts.workerHttpOrigins ?? await this.manager.resolveWorkerHttpOrigins(this.id);
+    const worker = await resolvePreviewWorker(artifacts, workerOrigins);
     const probePath = await this.manager.findProbe();
     const probe = new NativeProbe(probePath, this.manager.options.commandTimeoutMs ?? 15_000);
+    probe.setWakeHandler(() => this.onWorkerWake());
     const initialSlot = this.preferredViewportSlots(this.rootRuntime?.frame).get(appId);
     const initialWidth = initialSlot ? Math.max(1, Math.round(initialSlot.w)) : this.width;
     const initialHeight = initialSlot ? Math.max(1, Math.round(initialSlot.h)) : this.height;
@@ -3144,6 +3440,7 @@ class PreviewSession {
       generation: 1,
       probe,
       artifacts,
+      ...(worker ? { worker } : {}),
       viewportWidth: initialWidth,
       viewportHeight: initialHeight,
       safeArea: initialSafeArea,
@@ -3167,6 +3464,13 @@ class PreviewSession {
         ...(memory ? { memory } : {}),
       });
       if (recording) await probe.checked({ op: "traceMode", mode: 1 });
+      if (worker) {
+        await probe.checked({
+          op: "configureWorker",
+          bytecodePath: worker.bytecodePath,
+          config: { ...worker.config, nativeGeneration: runtime.generation },
+        });
+      }
       let loadResponse: JsonRecord;
       if (artifacts.bytecodePath) loadResponse = await probe.checked({
         op: "loadBytecode",
@@ -3609,6 +3913,18 @@ class PreviewSession {
       this.tickDeadlineAt = undefined;
       void this.enqueue(() => this.tickNow()).catch((error) => this.reportError(error));
     }, delay);
+  }
+
+  /** Native Worker/provider completions arrive on a probe-owned thread. The
+   * probe forwards a coalesced wake record; serialize one zero-delta UI turn
+   * so the existing WorkerUiBridge latch and frame publication remain the
+   * only channel path. */
+  private onWorkerWake(): void {
+    if (this.disposed || this.subscribers.size === 0) return;
+    void this.enqueue(async () => {
+      if (this.disposed || this.subscribers.size === 0 || !this.rootRuntime) return;
+      await this.tickNow(0);
+    }).catch((error) => this.reportError(error));
   }
 
   private async tickNow(explicitDelta?: number): Promise<void> {
@@ -4081,6 +4397,15 @@ class PreviewManagerImpl implements PreviewManager {
     const value = this.options.artifacts ?? this.options.artifact;
     const artifacts = await resolveValue(value, projectId);
     return artifacts ? { ...artifacts } : undefined;
+  }
+
+  async resolveWorkerHttpOrigins(projectId: string): Promise<readonly string[]> {
+    const origins = await resolveValue(this.options.workerHttpOrigins, projectId);
+    if (origins === undefined) return [];
+    if (!Array.isArray(origins) || origins.some((origin) => typeof origin !== "string" || origin.length === 0 || origin.length > 512)) {
+      throw new Error("preview workerHttpOrigins must be a string array");
+    }
+    return [...new Set(origins)];
   }
 
   async findProbe(): Promise<string> {

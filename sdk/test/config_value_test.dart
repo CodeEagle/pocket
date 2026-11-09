@@ -2,6 +2,26 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 
 void main() {
+  test('font family fallbacks participate in config copies and identity', () {
+    final first = PocketAppConfig(
+      appId: 'font.fallback.test',
+      fontFamilyFallback: const <String>['LanternSerif'],
+    );
+    final equal = PocketAppConfig(
+      appId: 'font.fallback.test',
+      fontFamilyFallback: const <String>['LanternSerif'],
+    );
+    final changed = first.copyWith(
+      fontFamilyFallback: const <String>['DifferentSerif'],
+    );
+
+    expect(PocketAppConfig(appId: 'font.default').fontFamilyFallback, isEmpty);
+    expect(first.copyWith().fontFamilyFallback, <String>['LanternSerif']);
+    expect(first, equal);
+    expect(first.hashCode, equal.hashCode);
+    expect(first, isNot(changed));
+  });
+
   test('equal permission and capability sets have equal hashes', () {
     final first = PocketAppConfig(
       appId: 'hash.test',

@@ -44,7 +44,6 @@ function managerFor(clientPath: string) {
       pakPath: join(repositoryRoot, "demo/assets/app.pak"),
       revision: 1,
       tickHz: 60,
-      compositorSurfaces: { [profileAppId]: 2, [lobbyAppId]: 3 },
       applications: {
         [profileAppId]: {
           bytecodePath: join(repositoryRoot, "demo/assets/apps/profile/app.qjbc"),

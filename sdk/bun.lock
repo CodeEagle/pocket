@@ -12,11 +12,23 @@
       },
       "devDependencies": {
         "@open-wxa/wxa-runner-core": "0.12.3",
+        "@pocket/spine": "0.1.0",
         "node-gyp": "12.3.0",
         "playwright": "1.64.1",
       },
       "optionalDependencies": {
         "@abandonware/noble": "1.9.2-26",
+      },
+    },
+    "packages/pocket_live2d": {
+      "name": "@pocket/live2d",
+      "version": "0.1.0",
+    },
+    "packages/pocket_spine": {
+      "name": "@pocket/spine",
+      "version": "0.1.0",
+      "dependencies": {
+        "@esotericsoftware/spine-core": "4.3.13",
       },
     },
     "packages/pocket_tftc": {
@@ -32,6 +44,14 @@
     "packages/pocket_ui": {
       "name": "@pocket/ui",
       "version": "0.1.0",
+    },
+    "packages/pocket_vn": {
+      "name": "@pocket/vn",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pocket/live2d": "0.1.0",
+        "@pocket/spine": "0.1.0",
+      },
     },
   },
   "trustedDependencies": [
@@ -93,6 +113,8 @@
     "@esbuild/win32-ia32": ["@esbuild/win32-ia32@0.28.2", "", { "os": "win32", "cpu": "ia32" }, "sha512-YmJbfTlvU7Sdn9BB+4PRES4oB6pxgS37MAONj+hBr/cpXS1aBPKXxNnDbu+QCWPj0o9dgyxeq79g6c5P8KeuYA=="],
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.28.2", "", { "os": "win32", "cpu": "x64" }, "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="],
+
+    "@esotericsoftware/spine-core": ["@esotericsoftware/spine-core@4.3.13", "", {}, "sha512-iGs/40qOWSQYicABebDzFSwFOS1Nsm0dCCS8sGqbpVuThRKdLYeI1cVJpmATSpEmtcetEABTmh97NoBnt7XLDw=="],
 
     "@isaacs/cliui": ["@isaacs/cliui@8.0.2", "", { "dependencies": { "string-width": "^5.1.2", "string-width-cjs": "npm:string-width@^4.2.0", "strip-ansi": "^7.0.1", "strip-ansi-cjs": "npm:strip-ansi@^6.0.1", "wrap-ansi": "^8.1.0", "wrap-ansi-cjs": "npm:wrap-ansi@^7.0.0" } }, "sha512-O8jcjabXaleOG9DQ0+ARXWZBTfnP4WNAqzuiJK7ll44AmxGKv/J2M4TPjxjY3znBCfvBXFzucm1twdyFybFqEA=="],
 
@@ -162,9 +184,15 @@
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
 
+    "@pocket/live2d": ["@pocket/live2d@workspace:packages/pocket_live2d"],
+
+    "@pocket/spine": ["@pocket/spine@workspace:packages/pocket_spine"],
+
     "@pocket/tftc": ["@pocket/tftc@workspace:packages/pocket_tftc"],
 
     "@pocket/ui": ["@pocket/ui@workspace:packages/pocket_ui"],
+
+    "@pocket/vn": ["@pocket/vn@workspace:packages/pocket_vn"],
 
     "@types/w3c-web-usb": ["@types/w3c-web-usb@1.0.14", "", {}, "sha512-Qu3Nn6JFuF4+sHKYl+IcX9vYiI40ogleXzFFSxoE1W94rG98o/kXs8uJ0QSfFzuwBCZWlGfUGpPkgwuuX4PchA=="],
 

@@ -80,3 +80,21 @@ changed `00` to `01` via Flutter pointer input, and navigated between Home/UI/Ho
 Its full legacy scenario still expects the old `Gallery` label and a formerly
 visible package-info row; it is not a passing full-suite result. The focused Duo
 resize scenario uses the current `UI` label.
+
+## Current PAK acceptance, 2026-11-08
+
+The save-thumbnail integration initially reached a ready child session but no
+first frame: `pak asset install: InvalidAssets`. The bundled QJBC, PAK and
+metadata hashes matched the passing macOS/Android artifacts. With the final
+integration source and game assets held constant, rebuilding through the
+existing `bash sdk/scripts/build_native.sh ios-sim` and relinking Runner made
+all six simulator checkpoints pass. The old simulator archive SHA-256 was
+`55292ac68fab06135a7f406d7934f6d86f84fb94a97f5ae92f566fc5b9733bed`;
+the refreshed archive was
+`c22d29fe226d6504864ea48c7969ff2887d68ffcf274832b7d7a14e200c969ad`.
+This isolates a stale native artifact; it does not identify a particular PAK
+validation branch. No second native build layer or runtime fallback was added.
+Evidence: `sdk/.pocket-build/save-thumbnail-responsive-20261108/`, including
+`ios-thumbnail-attempt2.log`, `ios-native-rebuild.log`, and
+`ios-thumbnail-attempt3-response.json`. This is simulator Debug acceptance,
+not physical iPhone or release IPA acceptance.

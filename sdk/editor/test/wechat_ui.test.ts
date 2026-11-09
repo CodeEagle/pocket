@@ -11,9 +11,9 @@ test("editor exposes the non-popup WeChat validation controls alongside Canvas/d
   for (const id of ["wechat-project-label", "wechat-state", "wechat-start", "wechat-stop", "wechat-open", "wechat-validation-hint"]) {
     expect(html).toContain(`id="${id}"`);
   }
-  expect(html).toContain('class="control-label">WeChat</span>');
-  expect(html).toContain("Run WeChat");
-  expect(html).toContain("Browser hardware is available through optional web plugins; platform-specific validation uses a device.");
+  expect(html).toContain('class="control-label">微信</span>');
+  expect(html).toContain("运行");
+  expect(html).toContain("构建会准备 Flutter 包。各平台有独立的预览控制。蓝牙预览使用宿主的可选 Noble 适配器；平台验收请连接真实设备。");
   expect(html).not.toContain("wechat-target-picker");
   expect(html).toContain('id="wechat-open" class="button secondary small-button" href="#" target="_blank" rel="noopener" hidden');
   expect(html).toContain('id="preview-frame"');

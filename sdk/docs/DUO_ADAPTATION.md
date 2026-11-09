@@ -229,7 +229,8 @@ CLI，应先以 `xcrun simctl help` 为准，再把确切参数写入这里。�
   - 新增 `hasLocalLeftOcclusionInset(geometry)`、`hasLocalRightOcclusionInset(geometry)` 与 `hasLocalTopRightOcclusionInset(geometry)`：识别 `safeArea.left` 或 `safeArea.right` 仅由局部侧边/角部 occlusion（如 Duo 右上角状态簇、横屏左右侧刘海、灵动岛或单个摄像头挖孔）投影产生的情形，释放整页冗余侧边安全边距，使挖孔上方与下方区域保持全宽。
   - 新增 `DISPLAY_CONTOUR_CLEARANCE_PX = 5`、`DISPLAY_CONTOUR_BOTTOM_TRIM_PX = 14`、`DISPLAY_CONTOUR_RAMP_PX = 5`、`leftOcclusionFrames`、`rightOcclusionFrames`、`sideContourReservesForBand(geometry, visualTop, visualBottom, options)` 与 `topRightContourReserveForBand`：支持重叠多区域左右侧 contour，保持 UI 边界距离真实异形区 `5px`，并对高占比顶角状态胶囊底部内收 `14px`；当子项从下方滑入 `[cutoutBottom, cutoutBottom + 5px]` 过渡带时按 C1 连续 Hermite smoothstep（`3t² - 2t³`）渐进收缩；对于 `cutoutTop > 0` 的横屏居中刘海或单挖孔，当子项继续上滑至 `[cutoutTop - 5px, cutoutTop]` 上方过渡带时按同一 smoothstep 曲线渐进恢复全宽（贴顶 `cutoutTop = 0` 的角部遮挡滑出顶边后仍保持不回弹以防屏外重排跳动）。
 - **`sdk/packages/pocket_ui/src/ui.tsx` & `sdk/packages/pocket_ui/src/mobile.tsx`**：
-  - `MobileAppBar` 顶部标题栏去除底色背景与底边线（改为 `bg-transparent`），直接融入页面背景。
+  - `MobileAppBar` 顶部标题栏去除底色背景与底边线（保持透明），直接融入页面背景。
+  - 来源核对：保留 parent 的 `mini_apps/syslib/pocket_syslib_flutter_ui.js:272-300` 将可选 `backgroundColor` 传给 `View.Header`，原生实现见 `lib/render/pocket_ui_components.dart:1907-1926`；当前 Root 的 `demo/js/app.tsx:930-934` 与 `MobileScaffold` 的 `mobile.tsx:672-676` 继续分别提供浅色 `#FAFAFA` / 深色 `#09090B` canvas，因此适配后由父 shell 持有页面底色，AppBar 不再叠一层固定色块。
   - 新增 `ScrollablePageContext`、`ContourConsumedContext`、`useScrollContourReserve` 与 `ScrollContourItem`（同时支持 `leftReserve` 与 `reserve`），在 `ScrollablePage` 的手势拖拽、动量帧、内容重排与 `display.viewport` 变更时同步测量子项真实未缩进左右边界（不重复累加容器 `p-4` / `mx-5` 边距），使子项边界精确停在距离真实异形区/单挖孔 `5px` 处；在缩进状态下启用裁剪，并在恢复全宽时保留组件声明的 `overflow-hidden` 属性。
   - 全量覆盖公共 UI 组件：`Header`、`MobileAppBar`、`PageIntro`、`SectionHeading`、`Tabs`、`StatusBar`、`EmptyState`、`Card`、`MobileCard`、`GlassSurface`、`Row`、`List`、`TileGrid`、`MobileListTile`、`MobileSegmentedControl`。
 - **`demo/js/app.tsx`**：
@@ -240,4 +241,5 @@ CLI，应先以 `xcrun simctl help` 为准，再把确切参数写入这里。�
 - `flutter test test/pocket_view_viewport_test.dart`（于 `sdk/packages/pocket_flutter`）：验证 `DisplayFeatureType.cutout`（横屏刘海/单挖孔）自动转换为 `display.viewport.reservedRegions` 内的 guest 坐标 `occlusion`。
 - `bun test sdk/packages/pocket_ui/test/responsive_occlusion.test.ts`：验证 `hasLocalLeftOcclusionInset`、`hasLocalRightOcclusionInset`、`sideContourReservesForBand` 与 `topRightContourReserveForBand` 在顶角状态区、横屏左侧刘海（含上下双端 5px smoothstep 过渡带）、横屏右侧 28px 单挖孔、多区域叠加及全高遮挡下的几何契约。
 - `bun test sdk/packages/pocket_ui/test/safe_area_native.test.ts`：通过 `pocket_probe` 运行编译后字节码，验证 `MobileAppBar` 透明无底色、双列网格右列距异形区 5px 避让、顶角与横屏左侧单挖孔下列表卡片从下方全宽滑入异形区缩进（距异形区 5px）并继续上滑到横屏单孔上方后恢复全宽、以及静止态内容重排自动同步的完整闭环。
+- 2026-11-08 透明 AppBar 回归复验：使用 pinned Bun 1.4.4 与 SDK native-tools 包，隔离运行 `safe_area_native.test.ts`，390px 与 320px portrait、landscape 与 contour scroll 全部通过（1 test，退出码 0）。
 - `cd demo/js && bun run test && cd ../.. && python3 sdk/scripts/check_architecture.py`：全部通过。

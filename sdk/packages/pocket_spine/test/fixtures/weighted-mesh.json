@@ -1,0 +1,74 @@
+{
+  "skeleton": {
+    "hash": "pocket-weighted-mesh-fixture",
+    "spine": "4.3.13",
+    "x": -8,
+    "y": -8,
+    "width": 16,
+    "height": 16,
+    "images": ""
+  },
+  "bones": [
+    { "name": "root" },
+    { "name": "hinge", "parent": "root", "x": 4, "y": 0, "length": 4 }
+  ],
+  "slots": [
+    { "name": "clip-slot", "bone": "root", "attachment": "window" },
+    { "name": "body", "bone": "root", "attachment": "body" }
+  ],
+  "skins": [
+    {
+      "name": "default",
+      "attachments": {
+        "clip-slot": {
+          "window": {
+            "type": "clipping",
+            "end": "body",
+            "vertexCount": 4,
+            "vertices": [-4, -8, 4, -8, 4, 8, -4, 8],
+            "convex": true
+          }
+        },
+        "body": {
+          "body": {
+            "type": "mesh",
+            "path": "square",
+            "uvs": [0, 0, 1, 0, 1, 1, 0, 1],
+            "triangles": [0, 1, 2, 2, 3, 0],
+            "vertices": [
+              2, 0, -8, -8, 0.25, 1, -8, -8, 0.75,
+              2, 0, 8, -8, 0.25, 1, 8, -8, 0.75,
+              2, 0, 8, 8, 0.25, 1, 8, 8, 0.75,
+              2, 0, -8, 8, 0.25, 1, -8, 8, 0.75
+            ],
+            "hull": 4,
+            "width": 16,
+            "height": 16
+          }
+        }
+      }
+    }
+  ],
+  "animations": {
+    "idle": {
+      "bones": {
+        "hinge": {
+          "rotate": [
+            { "time": 0, "value": 0 },
+            { "time": 1, "value": 10 }
+          ]
+        }
+      }
+    },
+    "wave": {
+      "bones": {
+        "hinge": {
+          "rotate": [
+            { "time": 0, "value": 35 },
+            { "time": 1, "value": 65 }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -10,7 +10,7 @@ const repository = resolve(import.meta.dir, "../../..");
 const demo = join(repository, "demo/js");
 const profileId = "pocket.demo.profile";
 const lobbyId = "pocket.demo.lobby";
-const probe = join(repository, "sdk/native/target/debug/pocket_probe");
+const probe = process.env.POCKET_NATIVE_PROBE ?? join(repository, "sdk/native/target/debug/pocket_probe");
 type Snapshot = Record<string, any>;
 
 test("stacked mini apps retain their parent and reverse every dismissal path", { timeout: 180_000 }, async () => {
@@ -58,12 +58,56 @@ test("stacked mini apps retain their parent and reverse every dismissal path", {
         if (predicate(value)) return value;
         await Bun.sleep(16);
       }
-      throw new Error(`timeout: ${label}`);
+      const latest = await snapshot();
+      throw new Error(`timeout: ${label}; frame=${JSON.stringify({ width: latest.frame?.width, height: latest.frame?.height, inputBounds: latest.frame?.inputBounds, text: latest.frame?.ops?.filter((op: any) => op.type === "text").map((op: any) => ({ text: op.text, y: op.y, clip: op.clip })) })}`);
     };
     let pointer = 0;
     const click = async (x: number, y: number) => {
       const pointerId = pointer++;
       for (const phase of ["down", "up"]) await input({ type: "pointer", phase, id: pointerId, x, y });
+    };
+    const swipe = async (direction: "down" | "up") => {
+      const pointerId = pointer++;
+      const x = 380;
+      const ys = direction === "down" ? [760, 630, 500, 370, 240] : [240, 370, 500, 630, 760];
+      await input({ type: "pointer", phase: "down", id: pointerId, x, y: ys[0] });
+      for (const y of ys.slice(1, -1)) await input({ type: "pointer", phase: "move", id: pointerId, x, y });
+      await input({ type: "pointer", phase: "up", id: pointerId, x, y: ys.at(-1) });
+    };
+    const scrollUntilText = async (matches: (value: Snapshot) => boolean, label: string) => {
+      let value = await snapshot();
+      for (let attempt = 0; attempt < 8 && !matches(value); attempt += 1) {
+        await swipe("down");
+        await Bun.sleep(100);
+        value = await snapshot();
+      }
+      assert.ok(matches(value), `${label} must be visible after scrolling; text=${JSON.stringify(value.frame?.ops?.filter((op: any) => op.type === "text").map((op: any) => ({ text: op.text, y: op.y, clip: op.clip })) )}`);
+      return value;
+    };
+    const scrollToTopForText = async (label: string) => {
+      let value = await snapshot();
+      for (let attempt = 0; attempt < 8 && !text(value, label); attempt += 1) {
+        const headingY = Number(text(value, "POCKET SHOWCASE")?.y);
+        if (Number.isFinite(headingY) && headingY > 90) break;
+        await swipe("up");
+        await Bun.sleep(100);
+        value = await snapshot();
+      }
+      let previousHeadingY: number | undefined;
+      let stableFrames = 0;
+      value = await wait(v => {
+        const headingY = Number(text(v, "POCKET SHOWCASE")?.y);
+        if (!Number.isFinite(headingY)) {
+          previousHeadingY = undefined;
+          stableFrames = 0;
+          return false;
+        }
+        stableFrames = previousHeadingY !== undefined && Math.abs(headingY - previousHeadingY) < 0.5 ? stableFrames + 1 : 0;
+        previousHeadingY = headingY;
+        return !!text(v, label) && Math.abs(headingY - 88) < 0.5 && stableFrames >= 3;
+      }, `${label} visible after parent scroll settles`);
+      assert.ok(text(value, label), `${label} must be visible after returning the parent scroll to its top`);
+      return value;
     };
     const clickText = async (label: string) => {
       const value = await snapshot();
@@ -126,9 +170,10 @@ test("stacked mini apps retain their parent and reverse every dismissal path", {
     }
     const profileExit: Snapshot[] = [await snapshot()];
     await clickText("Return to Showcase");
-    await wait(v => titleY(v, profileId) === undefined && !session.childRuntimes.has(profileId) &&
-      v.frame.ops.some((op: any) => op.type === "text" && String(op.text).startsWith("App result:")), "explicit Profile return", profileExit);
+    await wait(v => titleY(v, profileId) === undefined && !session.childRuntimes.has(profileId), "explicit Profile return", profileExit);
     assertExit(profileExit, profileId, "parent return");
+    await scrollUntilText(v => v.frame.ops.some((op: any) => op.type === "text" && String(op.text).startsWith("App result:")), "Profile return payload");
+    await scrollToTopForText("Open lobby app");
     await clickText("Open lobby app");
     await settled(lobbyId);
     const directLobbyTexts = session.childRuntimes.get(lobbyId).frame.ops

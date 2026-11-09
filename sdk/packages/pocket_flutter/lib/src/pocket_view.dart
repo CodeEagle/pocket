@@ -7,6 +7,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:video_player/video_player.dart';
@@ -33,6 +34,29 @@ part 'pocket_surface.dart';
 
 typedef PocketEventCallback = void Function(PocketEvent event);
 typedef PocketDuplexEventCallback = void Function(PocketDuplexEvent event);
+typedef _PocketSceneCaptureCallback =
+    Future<PocketViewCapture?> Function({
+      required int maxWidth,
+      required int maxHeight,
+      required int maxPixels,
+    });
+
+/// A bounded PNG readback of the PocketView subtree, excluding its host app.
+///
+/// The returned bytes own the encoded PNG buffer. [width] and [height] report
+/// the PNG's actual pixel dimensions after Flutter's device-pixel ratio and
+/// the caller's requested bounds have been applied.
+final class PocketViewCapture {
+  const PocketViewCapture._({
+    required this.pngBytes,
+    required this.width,
+    required this.height,
+  });
+
+  final Uint8List pngBytes;
+  final int width;
+  final int height;
+}
 
 final class _PocketQueuedMessage {
   const _PocketQueuedMessage(this.generation, this.message, this.byteLength);
@@ -59,6 +83,9 @@ typedef PocketImageResourceDecoder =
 final class PocketViewController {
   static const int maxPendingMessages = 64;
   static const int maxPendingMessageBytes = 1024 * 1024;
+  static const int maxSceneCaptureDimension = 4096;
+  static const int maxSceneCapturePixels = 1024 * 1024;
+  static const int maxSceneCapturePngBytes = 8 * 1024 * 1024;
 
   PocketRuntime? _runtime;
   PocketDuplexChannel? _duplexChannel;
@@ -66,6 +93,8 @@ final class PocketViewController {
   VoidCallback? _surfacesChanged;
   final Set<PocketDuplexEventCallback> _duplexListeners =
       <PocketDuplexEventCallback>{};
+  _PocketSceneCaptureCallback? _captureScene;
+  bool _sceneCaptureInFlight = false;
 
   /// Only trusted, compiled host providers can authorize a platform texture.
   /// A downloaded guest cannot render an arbitrary Flutter texture handle.
@@ -79,6 +108,68 @@ final class PocketViewController {
   }
 
   bool get isReady => _runtime != null;
+
+  /// Captures only the currently rendered [PocketView] subtree as PNG.
+  ///
+  /// The owning [PocketView] must have `enableSceneCapture: true` from its
+  /// first build. [maxWidth], [maxHeight], and [maxPixels] bound the output;
+  /// the hard ceilings are [maxSceneCaptureDimension] per side and
+  /// [maxSceneCapturePixels] total pixels. Returns null when no capture-ready
+  /// view is attached, the view is still loading, or the view detaches before
+  /// readback completes. Unsupported external textures and host application
+  /// surfaces throw [UnsupportedError] so a caller never mistakes a partial
+  /// image for a complete scene. Calls are single-flight; a concurrent call
+  /// throws [StateError].
+  Future<PocketViewCapture?> captureScene({
+    required int maxWidth,
+    required int maxHeight,
+    int maxPixels = 256 * 1024,
+  }) async {
+    if (maxWidth <= 0 || maxWidth > maxSceneCaptureDimension) {
+      throw ArgumentError.value(
+        maxWidth,
+        'maxWidth',
+        'must be in 1..$maxSceneCaptureDimension',
+      );
+    }
+    if (maxHeight <= 0 || maxHeight > maxSceneCaptureDimension) {
+      throw ArgumentError.value(
+        maxHeight,
+        'maxHeight',
+        'must be in 1..$maxSceneCaptureDimension',
+      );
+    }
+    if (maxPixels <= 0 || maxPixels > maxSceneCapturePixels) {
+      throw ArgumentError.value(
+        maxPixels,
+        'maxPixels',
+        'must be in 1..$maxSceneCapturePixels',
+      );
+    }
+    if (_sceneCaptureInFlight) {
+      throw StateError('a PocketView scene capture is already in progress');
+    }
+    final capture = _captureScene;
+    if (capture == null) return null;
+
+    _sceneCaptureInFlight = true;
+    final generation = _generation;
+    try {
+      final result = await capture(
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+        maxPixels: maxPixels,
+      );
+      // A byte readback may finish after a guest reload or widget detach. Do
+      // not hand a stale generation's pixels to a caller.
+      if (generation != _generation || !identical(capture, _captureScene)) {
+        return null;
+      }
+      return result;
+    } finally {
+      _sceneCaptureInFlight = false;
+    }
+  }
 
   bool _appActive = true;
 
@@ -118,6 +209,14 @@ final class PocketViewController {
   final List<_PocketQueuedMessage> _pendingMessages = <_PocketQueuedMessage>[];
   int _pendingMessageBytes = 0;
   int _generation = 0;
+  // Button input has two host-owned sources. The keyboard source is updated
+  // only by PocketView's Focus bridge; callers of sendButtons own the
+  // external source. The guest receives their OR, so one source cannot clear
+  // a bit that is still held by the other.
+  int _keyboardButtons = 0;
+  int _externalButtons = 0;
+  int _publishedButtons = 0;
+  bool _hasPublishedButtons = false;
 
   bool send({
     required String method,
@@ -147,6 +246,102 @@ final class PocketViewController {
       if (selectionEnd != null) 'selectionEnd': selectionEnd,
     },
   );
+
+  /// Publishes the official `input.buttons` frame sample.
+  ///
+  /// [buttons] replaces the external-provider source of the PocketJS BTN
+  /// bitmask. When keyboard input is enabled on the owning [PocketView], the
+  /// published sample is the OR of this external source and the currently
+  /// held keyboard source; clearing this source with zero therefore does not
+  /// release a button still held by the keyboard.
+  ///
+  /// The optional analog values use
+  /// the upstream packed representation: each stick is `(x << 8) | y`, with
+  /// each component in 0..255 and 128 at rest. This is an input sample, not a
+  /// second host-side input state machine; the native runtime latches it for
+  /// the next guest frame and preserves held buttons until the next sample.
+  bool sendButtons({required int buttons, int? analog, int? rightAnalog}) {
+    if (buttons < 0 || buttons > 0xffffffff) return false;
+    if (analog != null && (analog < 0 || analog > 0xffff)) return false;
+    if (rightAnalog != null && (rightAnalog < 0 || rightAnalog > 0xffff)) {
+      return false;
+    }
+    _externalButtons = buttons;
+    return _publishButtonSources(
+      analog: analog,
+      rightAnalog: rightAnalog,
+      force: true,
+    );
+  }
+
+  /// Updates the keyboard-owned button source without replacing an external
+  /// provider's held bits. This is intentionally private: the keyboard Focus
+  /// bridge is the only owner of this source.
+  bool _setKeyboardButtons(int buttons) {
+    if (buttons < 0 || buttons > 0xffffffff) return false;
+    _keyboardButtons = buttons;
+    return _publishButtonSources();
+  }
+
+  bool _publishButtonSources({
+    int? analog,
+    int? rightAnalog,
+    bool force = false,
+  }) {
+    final buttons = _keyboardButtons | _externalButtons;
+    // A source may be updated before the runtime is attached. Do not emit an
+    // unsolicited neutral sample at attach time, but do preserve a non-zero
+    // source for the first real frame.
+    if (!force &&
+        !_hasPublishedButtons &&
+        buttons == 0 &&
+        analog == null &&
+        rightAnalog == null) {
+      return true;
+    }
+    if (!force &&
+        analog == null &&
+        rightAnalog == null &&
+        _hasPublishedButtons &&
+        buttons == _publishedButtons) {
+      return true;
+    }
+    final sent = send(
+      method: 'input.buttons',
+      params: <String, dynamic>{
+        'buttons': buttons,
+        if (analog != null) 'analog': analog,
+        if (rightAnalog != null) 'rightAnalog': rightAnalog,
+      },
+    );
+    if (sent) {
+      _publishedButtons = buttons;
+      _hasPublishedButtons = true;
+    }
+    return sent;
+  }
+
+  /// Publishes absolute stick samples using the upstream 0..255 wire range.
+  /// Axis ids are 0/1 for the left stick and 2/3 for the right stick. Hosts
+  /// that have a real gamepad should translate its platform values here;
+  /// PocketView does not pretend that a touch or keyboard is a gamepad.
+  bool sendAxes(Map<int, double> axes) {
+    final entries = <Map<String, dynamic>>[];
+    for (final entry in axes.entries) {
+      if (entry.key < 0 || entry.key > 3 || !entry.value.isFinite) {
+        return false;
+      }
+      entries.add(<String, dynamic>{
+        'id': entry.key,
+        'value': entry.value.clamp(0.0, 255.0),
+      });
+    }
+    if (entries.isEmpty) return false;
+    return send(
+      method: 'input.axes',
+      params: <String, dynamic>{'axes': entries},
+    );
+  }
 
   bool _sendEvent({
     required String method,
@@ -272,28 +467,44 @@ final class PocketViewController {
     PocketDuplexChannel? duplexChannel,
     bool Function()? canSendImmediately,
     VoidCallback? onAppActiveChanged,
+    _PocketSceneCaptureCallback? captureScene,
   }) {
     _clearPendingMessages();
     _generation++;
+    _hasPublishedButtons = false;
     _runtime = runtime;
     _duplexChannel = duplexChannel;
     _surfacesChanged = surfacesChanged;
     _onMessageSent = onMessageSent;
     _canSendImmediately = canSendImmediately;
     _onAppActiveChanged = onAppActiveChanged;
+    _captureScene = captureScene;
   }
 
   void _detach(PocketRuntime runtime) {
-    if (identical(_runtime, runtime)) {
-      _runtime = null;
-      _duplexChannel = null;
-      _platformTextures.clear();
-      _surfacesChanged = null;
-      _onMessageSent = null;
-      _canSendImmediately = null;
-      _onAppActiveChanged = null;
-      _clearPendingMessages();
+    // A load can be cancelled before _attach runs. Clear pre-attach source
+    // state in that case too, but never let a stale fallback detach a newer
+    // runtime generation.
+    if (_runtime != null && !identical(_runtime, runtime)) return;
+    _keyboardButtons = 0;
+    _externalButtons = 0;
+    _publishedButtons = 0;
+    _hasPublishedButtons = false;
+    if (_runtime == null) {
+      _generation++;
+      _captureScene = null;
+      return;
     }
+    _generation++;
+    _runtime = null;
+    _duplexChannel = null;
+    _platformTextures.clear();
+    _surfacesChanged = null;
+    _onMessageSent = null;
+    _canSendImmediately = null;
+    _onAppActiveChanged = null;
+    _captureScene = null;
+    _clearPendingMessages();
   }
 
   void _clearDuplexChannel(PocketDuplexChannel channel) {
@@ -335,6 +546,9 @@ class PocketView extends StatefulWidget {
     this.controller,
     this.active = true,
     this.inputEnabled = true,
+    this.keyboardInputEnabled = false,
+    this.keyboardAutofocus = false,
+    this.keyboardButtonMap = const <LogicalKeyboardKey, int>{},
     this.backgroundColor,
     this.compositorSurfaces = const {},
     this.hostSurfaceBuilder,
@@ -368,6 +582,7 @@ class PocketView extends StatefulWidget {
     this.onError,
     this.onPerformanceSample,
     this.showDebugFps = true,
+    this.enableSceneCapture = false,
   }) : jsAsset = jsAsset ?? 'assets/app.js',
        _jsAssetWasExplicit = jsAsset != null;
 
@@ -388,6 +603,20 @@ class PocketView extends StatefulWidget {
   /// Focus gate independent from visibility: unfocused visible children may
   /// animate but cannot own an IME or pointer sequence.
   final bool inputEnabled;
+
+  /// Enables the official button bitmask path for desktop/keyboard hosts.
+  /// This is opt-in so a normal PocketView does not claim a physical gamepad
+  /// provider or steal focus from its surrounding Flutter UI.
+  final bool keyboardInputEnabled;
+
+  /// Requests keyboard focus when [keyboardInputEnabled] is true. A caller
+  /// that owns focus traversal can set this false and focus the PocketView via
+  /// the normal Flutter traversal system.
+  final bool keyboardAutofocus;
+
+  /// Optional bindings layered over PocketView's standard desktop bindings.
+  /// Values are official PocketJS BTN bit values from the pinned contract.
+  final Map<LogicalKeyboardKey, int> keyboardButtonMap;
 
   /// Backing color for the entire viewport, including uncovered/letterboxed
   /// regions. Set an opaque color on a standalone root surface. Null preserves
@@ -410,6 +639,13 @@ class PocketView extends StatefulWidget {
   /// available in debug, profile and release builds; keep it false for a
   /// production surface that does not want the overlay.
   final bool showDebugFps;
+
+  /// Adds one scene-level repaint boundary for controller PNG capture.
+  ///
+  /// This is false by default so ordinary PocketView instances gain no extra
+  /// layer. Set it before the first build when [PocketViewController.captureScene]
+  /// will be used; changing it requires remounting the view.
+  final bool enableSceneCapture;
   final PocketViewController? controller;
 
   /// Optional logical primary viewport used when this widget creates its own
@@ -580,6 +816,8 @@ class _PocketViewState extends State<PocketView>
   static const int _maxVideoFailureEntries = 128;
   static const int _maxVideoRetiredIds = 128;
   static const int _maxVideoIdLength = 128;
+  static const int _maxVideoRequestIdLength = 128;
+  static const int _maxVideoTokenLength = 128;
   // Keep the retained-layer count bounded while limiting a text/label update
   // to a small contiguous draw block. Video ops still force a boundary so
   // painter blocks never cross a texture in the original op order.
@@ -589,6 +827,28 @@ class _PocketViewState extends State<PocketView>
   static const String _defaultBytecodeMetadataAsset =
       'assets/app.bytecode.json';
   static const String _defaultPakAsset = 'assets/app.pak';
+  static final Map<LogicalKeyboardKey, int> _defaultKeyboardButtonMap =
+      <LogicalKeyboardKey, int>{
+        LogicalKeyboardKey.arrowUp: 0x0010,
+        LogicalKeyboardKey.arrowRight: 0x0020,
+        LogicalKeyboardKey.arrowDown: 0x0040,
+        LogicalKeyboardKey.arrowLeft: 0x0080,
+        LogicalKeyboardKey.space: 0x4000,
+        LogicalKeyboardKey.enter: 0x0008,
+        LogicalKeyboardKey.numpadEnter: 0x0008,
+        LogicalKeyboardKey.escape: 0x2000,
+        LogicalKeyboardKey.tab: 0x0001,
+        LogicalKeyboardKey.keyW: 0x0010,
+        LogicalKeyboardKey.keyD: 0x0020,
+        LogicalKeyboardKey.keyS: 0x0040,
+        LogicalKeyboardKey.keyA: 0x0080,
+        LogicalKeyboardKey.keyQ: 0x0100,
+        LogicalKeyboardKey.keyE: 0x0200,
+        LogicalKeyboardKey.keyJ: 0x8000,
+        LogicalKeyboardKey.keyK: 0x1000,
+        LogicalKeyboardKey.keyZ: 0x4000,
+        LogicalKeyboardKey.keyX: 0x2000,
+      };
 
   late final PocketViewController _controller =
       widget.controller ?? PocketViewController();
@@ -603,6 +863,13 @@ class _PocketViewState extends State<PocketView>
   PocketFrame _frame = PocketFrame.empty();
   PocketSurfaceFrame? _auxiliaryFrame;
   final Map<String, ui.Image> _images = <String, ui.Image>{};
+  // Mesh-only downsampled variants share the source asset's image epoch and
+  // release lifecycle. Ordinary image quads continue to use [_images].
+  final Map<String, List<ui.Image>> _meshImageLevels =
+      <String, List<ui.Image>>{};
+  final Map<String, Future<void>> _loadingMeshImageLevels =
+      <String, Future<void>>{};
+  final Set<String> _activeMeshImageAssets = <String>{};
   final PocketTextLayoutCache _textLayoutCache = PocketTextLayoutCache();
   final Map<String, VideoPlayerController> _videos =
       <String, VideoPlayerController>{};
@@ -628,6 +895,11 @@ class _PocketViewState extends State<PocketView>
   final Map<String, String> _videoFailureAssets = <String, String>{};
   final Map<String, String> _videoAssets = <String, String>{};
   final Map<String, String> _loadingVideoAssets = <String, String>{};
+  // These two per-id values are the mutable configuration for the one retained
+  // native surface. They are bounded by _videoKnownIds and never create a
+  // second playback identity or controller.
+  final Map<String, String> _videoTokens = <String, String>{};
+  final Map<String, bool> _videoLooping = <String, bool>{};
   final Map<String, int> _videoEpochs = <String, int>{};
   // Zero is reserved for "no ticket" so a dropped epoch entry can never
   // accidentally match the first in-flight load through a ?? 0 fallback.
@@ -665,8 +937,15 @@ class _PocketViewState extends State<PocketView>
   // bounded, reusable slot in [0, _maxPointerSlots).
   final Map<int, int> _pointerSlots = <int, int>{};
   final Map<int, int> _pointerSurfaceIds = <int, int>{};
+  final FocusNode _keyboardFocusNode = FocusNode(
+    debugLabel: 'pocket-keyboard-input',
+  );
+  final Set<LogicalKeyboardKey> _pressedKeyboardKeys = <LogicalKeyboardKey>{};
   final Map<int, PocketCompositorSlot> _lastCompositorSlots =
       <int, PocketCompositorSlot>{};
+  final GlobalKey _sceneCaptureBoundaryKey = GlobalKey(
+    debugLabel: 'pocket-view-scene-capture',
+  );
   final List<Map<String, dynamic>> _pendingPointerMessages =
       <Map<String, dynamic>>[];
   final Map<int, Offset> _outsideTextInputPointerOrigins = <int, Offset>{};
@@ -678,6 +957,12 @@ class _PocketViewState extends State<PocketView>
   final List<_PocketGestureRegion> _guestGestureRegions =
       <_PocketGestureRegion>[];
   final Map<String, bool> _videoDesiredPlayback = <String, bool>{};
+  // Only explicit host seek operations can create this latch. It prevents a
+  // seek to duration from being mistaken for native playback completion, and
+  // keeps that endpoint from auto-resuming on later resource/lifecycle scans.
+  final Map<String, int> _videoSeeking = <String, int>{};
+  final Map<String, String?> _videoSeekEndTokens = <String, String?>{};
+  final Map<String, String?> _videoEndedTokens = <String, String?>{};
   String? _textInputId;
   String? _textInputEditingSession;
   int _textInputRevision = 0;
@@ -823,6 +1108,64 @@ class _PocketViewState extends State<PocketView>
   bool get _effectiveActive =>
       widget.active && _controller.appActive && !_lifecyclePaused;
 
+  int? _keyboardButtonFor(LogicalKeyboardKey key) {
+    return widget.keyboardButtonMap[key] ?? _defaultKeyboardButtonMap[key];
+  }
+
+  int _keyboardButtonsForPressedKeys() {
+    var buttons = 0;
+    for (final key in _pressedKeyboardKeys) {
+      buttons |= _keyboardButtonFor(key) ?? 0;
+    }
+    return buttons;
+  }
+
+  void _syncKeyboardButtons() {
+    final next = _keyboardButtonsForPressedKeys();
+    _controller._setKeyboardButtons(next);
+  }
+
+  KeyEventResult _handleKeyboardEvent(FocusNode node, KeyEvent event) {
+    if (!widget.keyboardInputEnabled ||
+        !widget.inputEnabled ||
+        !_effectiveActive ||
+        _textInputFocusNode?.hasFocus == true) {
+      return KeyEventResult.ignored;
+    }
+    final mask = _keyboardButtonFor(event.logicalKey);
+    if (mask == null) return KeyEventResult.ignored;
+    if (event is KeyUpEvent) {
+      _pressedKeyboardKeys.remove(event.logicalKey);
+    } else {
+      // KeyRepeatEvent is deliberately idempotent. Guest button actions derive
+      // pressed/released edges from adjacent frame samples, so repeating a key
+      // must not synthesize an extra edge or allocate a host-side queue.
+      _pressedKeyboardKeys.add(event.logicalKey);
+    }
+    _syncKeyboardButtons();
+    return KeyEventResult.handled;
+  }
+
+  void _clearKeyboardButtons() {
+    _pressedKeyboardKeys.clear();
+    _controller._setKeyboardButtons(0);
+  }
+
+  Widget _wrapKeyboardInput(Widget child) {
+    if (!widget.keyboardInputEnabled) return child;
+    return Focus(
+      key: const ValueKey<String>('pocket-keyboard-focus'),
+      focusNode: _keyboardFocusNode,
+      autofocus: widget.keyboardAutofocus,
+      canRequestFocus: true,
+      onFocusChange: (focused) {
+        if (!focused) _clearKeyboardButtons();
+      },
+      onKeyEvent: _handleKeyboardEvent,
+      child: child,
+    );
+  }
+
   @visibleForTesting
   int get debugSceneRevision => _sceneRevision.value;
 
@@ -931,6 +1274,11 @@ class _PocketViewState extends State<PocketView>
   @override
   void didUpdateWidget(covariant PocketView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.enableSceneCapture != widget.enableSceneCapture) {
+      throw StateError(
+        'Remount PocketView to change scene capture configuration',
+      );
+    }
     if (oldWidget.memoryLimits != widget.memoryLimits) {
       throw StateError('Remount PocketView to change memory limits');
     }
@@ -942,7 +1290,18 @@ class _PocketViewState extends State<PocketView>
     }
     if (oldWidget.inputEnabled && !widget.inputEnabled) {
       _cancelPointerSequences();
+      _clearKeyboardButtons();
       _dismissTextInput(reason: 'focus.lost', rebuild: false);
+    }
+    if (oldWidget.keyboardInputEnabled && !widget.keyboardInputEnabled) {
+      _clearKeyboardButtons();
+      _keyboardFocusNode.unfocus();
+    }
+    if (!mapEquals(oldWidget.keyboardButtonMap, widget.keyboardButtonMap)) {
+      // Recompute from the physical keys still held. This matters when an app
+      // changes skins/bindings while a key is down: a removed alias must not
+      // leave a stale BTN bit latched in the guest.
+      _syncKeyboardButtons();
     }
     if (oldWidget.inputEnabled != widget.inputEnabled ||
         oldWidget.viewport != widget.viewport ||
@@ -1399,18 +1758,19 @@ class _PocketViewState extends State<PocketView>
         duplexChannel: _duplexChannel,
         canSendImmediately: () => _effectiveActive && !_loading,
         onAppActiveChanged: _onControllerActivityChanged,
+        captureScene: _capturePocketViewScene,
       );
+      // Re-publish any source that was updated before the runtime finished
+      // loading (keyboard or external provider). A neutral source does not
+      // create an unsolicited startup message.
+      _controller._setKeyboardButtons(
+        widget.keyboardInputEnabled ? _keyboardButtonsForPressedKeys() : 0,
+      );
+      _controller._publishButtonSources();
       final visualFirst = _visualFrame(first);
       _frame = visualFirst;
       _auxiliaryFrame = visualFirst.auxiliary;
       final waitForInitialImages = _imageAssetsForFrame(first).isNotEmpty;
-      if (!waitForInitialImages) {
-        // Preserve the established no-image startup ordering, including the
-        // callback occurring before the invalidation batch is opened.
-        _loading = false;
-        widget.onReady?.call(_controller);
-        if (!mounted) return;
-      }
       if (!mounted) return;
       _beginInvalidationBatch();
       try {
@@ -1426,15 +1786,11 @@ class _PocketViewState extends State<PocketView>
           await _requestResources(first, waitForInitialImages: true);
           await _flushPendingStartupResizes();
           if (!mounted || _isDisposed) return;
-          _loading = false;
-          if (_effectiveActive && _controller.pendingMessageCount > 0) {
-            _controller._flushPendingMessages();
-            _wakePendingUntilTickerCreated = true;
-          }
-          widget.onReady?.call(_controller);
         } else {
           // Do not insert an async turn before controller events and the first
-          // ticker wake when there is no image/mask to gate.
+          // ticker wake when there is no image/mask to gate. The loading
+          // surface remains visible until display geometry has produced its
+          // zero-time layout frame below.
           unawaited(_requestResources(first));
         }
         // Keep non-video event dispatch (including text input and onEvent)
@@ -1444,6 +1800,31 @@ class _PocketViewState extends State<PocketView>
         _endInvalidationBatch();
       }
       if (!mounted || _isDisposed) return;
+
+      // The initial guest frame was evaluated before Flutter could publish its
+      // host display facts. Keep it behind the existing loading surface while
+      // the existing display.viewport event updates the guest at zero elapsed
+      // time. No runtime message is sent until resources and first-frame
+      // events above have been consumed, so their resource ledger and events
+      // remain ordered and single-shot.
+      _loading = false;
+      if (_reportSafeArea()) {
+        final deltaFn = debugPocketFrameDeltaAtOverride ?? pocketFrameDeltaAt;
+        final geometryFrame = deltaFn(runtime, 0);
+        _idleWakeCreditMicroseconds = 0;
+        if (geometryFrame != null) {
+          _applyFrame(geometryFrame, requestResources: false);
+          // _applyFrame may change the first visible DrawList. Reuse the same
+          // loading gate while its newly referenced images are admitted.
+          _loading = true;
+          await _requestResources(geometryFrame, waitForInitialImages: true);
+          if (!mounted || _isDisposed) return;
+          _loading = false;
+        }
+      }
+      if (!mounted || _isDisposed) return;
+      widget.onReady?.call(_controller);
+      if (!mounted) return;
       _reportAccessibilityPreferences();
       setState(() {});
       _scheduleSafeAreaReport();
@@ -3067,14 +3448,17 @@ class _PocketViewState extends State<PocketView>
     return parentOrigin & referenceSize;
   }
 
-  void _reportSafeArea() {
+  /// Sends the current host geometry through the existing guest event lane.
+  /// Returns true only when a new event was sent immediately; a hidden-view
+  /// queue acceptance is not proof that a zero-time frame consumed it.
+  bool _reportSafeArea() {
     final runtime = _runtime;
-    if (runtime == null || _loading || !mounted) return;
+    if (runtime == null || _loading || !mounted) return false;
     final hostContext = _hostKey.currentContext;
-    if (hostContext == null) return;
+    if (hostContext == null) return false;
     final renderObject = hostContext.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.hasSize) return;
-    if (!_displayGeometryMatchesView(hostContext, renderObject)) return;
+    if (renderObject is! RenderBox || !renderObject.hasSize) return false;
+    if (!_displayGeometryMatchesView(hostContext, renderObject)) return false;
     final geometry = _canvasGeometryForHost(renderObject);
     final referenceRect = _compositorDisplayReferenceRect(
       renderObject,
@@ -3091,7 +3475,7 @@ class _PocketViewState extends State<PocketView>
         !viewport.height.isFinite ||
         viewport.width <= 0 ||
         viewport.height <= 0) {
-      return;
+      return false;
     }
     final keyboardInset = _keyboardInsetForHost(
       renderObject,
@@ -3110,7 +3494,7 @@ class _PocketViewState extends State<PocketView>
         _reportedSafeArea == safeArea &&
         _reportedKeyboardInset == keyboardInset &&
         _reportedReservedRegionsKey == reservedRegionsKey) {
-      return;
+      return false;
     }
     // Native already owns the canonical resize ABI. This is an additive host
     // event sent through the existing FFI bridge so the guest receives the
@@ -3134,10 +3518,12 @@ class _PocketViewState extends State<PocketView>
         _reportedSafeArea = safeArea;
         _reportedKeyboardInset = keyboardInset;
         _reportedReservedRegionsKey = reservedRegionsKey;
+        return _effectiveActive;
       }
     } catch (error) {
       _failRuntime(error);
     }
+    return false;
   }
 
   static const Duration _firstFrameResourceTimeout = Duration(seconds: 5);
@@ -3163,6 +3549,9 @@ class _PocketViewState extends State<PocketView>
     return assets;
   }
 
+  bool _frameUsesMeshImage(String asset) =>
+      _activeMeshImageAssets.contains(asset);
+
   Future<void> _requestResources(
     PocketFrame frame, {
     bool waitForInitialImages = false,
@@ -3172,7 +3561,10 @@ class _PocketViewState extends State<PocketView>
     // Prefer native texture-table resources. This keeps package parsing and
     // texture admission in Rust while still allowing the old PAK fallback
     // below when an older host does not send resources.
-    final imageAssets = _imageAssetsForFrame(frame);
+    final imageAssets = waitForInitialImages
+        ? _imageAssetsForFrame(frame)
+        : const <String>{};
+    final meshImageAssets = <String>{};
     final resourceAssets = frame.resources
         .map((resource) => resource.asset)
         .where((asset) => asset.isNotEmpty)
@@ -3180,22 +3572,17 @@ class _PocketViewState extends State<PocketView>
     final initialLoads = <Future<bool>>[];
     final initialAssets = <String>{};
     final initialAssetNames = <String>[];
-    for (final resource in frame.resources) {
-      final load = _loadImageResource(
-        resource,
-        reportError: !waitForInitialImages,
-      );
-      if (waitForInitialImages &&
-          imageAssets.contains(resource.asset) &&
-          initialAssets.add(resource.asset)) {
-        initialLoads.add(load);
-        initialAssetNames.add(resource.asset);
-      }
-    }
     final videoRequests = <String, _PocketVideoRequest>{};
     final requestedPackageImages = <String>{};
     void collectResources(List<PocketOp> ops, double width, double height) {
       for (final op in ops) {
+        // LOD is opted into by repeated-texture geometry. Clamp-mapped meshes
+        // such as nine-slice UI keep their original source pixels.
+        if (op is PocketTextureTriangleOp &&
+            op.repeatTexture &&
+            op.asset.isNotEmpty) {
+          meshImageAssets.add(op.asset);
+        }
         final imageAsset = switch (op) {
           PocketImageOp image => image.asset,
           PocketTextureTriangleOp texture => texture.asset,
@@ -3203,18 +3590,8 @@ class _PocketViewState extends State<PocketView>
         };
         if (imageAsset != null &&
             imageAsset.isNotEmpty &&
-            !resourceAssets.contains(imageAsset) &&
-            requestedPackageImages.add(imageAsset)) {
-          final load = _loadImage(
-            imageAsset,
-            reportError: !waitForInitialImages,
-          );
-          if (waitForInitialImages && imageAssets.contains(imageAsset)) {
-            if (initialAssets.add(imageAsset)) {
-              initialLoads.add(load);
-              initialAssetNames.add(imageAsset);
-            }
-          }
+            !resourceAssets.contains(imageAsset)) {
+          requestedPackageImages.add(imageAsset);
         }
         if (op is PocketVideoOp) {
           final request = _PocketVideoRequest(
@@ -3233,6 +3610,36 @@ class _PocketViewState extends State<PocketView>
     final auxiliary = frame.auxiliary;
     if (auxiliary != null) {
       collectResources(auxiliary.ops, auxiliary.width, auxiliary.height);
+    }
+    _activeMeshImageAssets
+      ..clear()
+      ..addAll(meshImageAssets);
+    _pruneMeshImageLevels(meshImageAssets);
+    for (final asset in requestedPackageImages) {
+      final load = _loadImage(
+        asset,
+        reportError: !waitForInitialImages,
+        prepareMeshImageLevels: meshImageAssets.contains(asset),
+      );
+      if (waitForInitialImages &&
+          imageAssets.contains(asset) &&
+          initialAssets.add(asset)) {
+        initialLoads.add(load);
+        initialAssetNames.add(asset);
+      }
+    }
+    for (final resource in frame.resources) {
+      final load = _loadImageResource(
+        resource,
+        reportError: !waitForInitialImages,
+        prepareMeshImageLevels: meshImageAssets.contains(resource.asset),
+      );
+      if (waitForInitialImages &&
+          imageAssets.contains(resource.asset) &&
+          initialAssets.add(resource.asset)) {
+        initialLoads.add(load);
+        initialAssetNames.add(resource.asset);
+      }
     }
 
     // Admission is independent of visibility. Events were folded by the
@@ -3460,6 +3867,31 @@ class _PocketViewState extends State<PocketView>
     return raw;
   }
 
+  bool _isValidVideoToken(Object? value) =>
+      value is String &&
+      value.isNotEmpty &&
+      value.length <= _maxVideoTokenLength;
+
+  String? _videoTokenFromParams(Map<String, dynamic> params) {
+    final raw = params['token'];
+    return _isValidVideoToken(raw) ? raw as String : null;
+  }
+
+  bool _videoCommandTokenMatches(String id, Map<String, dynamic> params) {
+    final hasCurrentToken = _videoTokens.containsKey(id);
+    if (!params.containsKey('token') || params['token'] == null) {
+      return !hasCurrentToken;
+    }
+    final token = params['token'];
+    return _isValidVideoToken(token) && _videoTokens[id] == token;
+  }
+
+  bool _videoEndLatchMatches(String id, Map<String, String?> latches) =>
+      latches.containsKey(id) && latches[id] == _videoTokens[id];
+
+  bool _videoHasEndLatch(String id) =>
+      _videoEndedTokens.containsKey(id) || _videoSeekEndTokens.containsKey(id);
+
   void _dropVideoEpochIfIdle(String id) {
     if (_videoKnownIds.contains(id) ||
         _videoReleasedIds.contains(id) ||
@@ -3509,6 +3941,7 @@ class _PocketViewState extends State<PocketView>
     // is still pending, a newly admitted id must not be able to reuse the
     // stale epoch (ABA).
     _videoEpochs[id] = _nextVideoEpoch++;
+    _videoSeeking.remove(id);
     final playbackPump = _videoPlaybackPumps.remove(id);
     _videoPlaybackPumpVideos.remove(id);
     _loadingVideos.remove(id);
@@ -3543,6 +3976,11 @@ class _PocketViewState extends State<PocketView>
     _videoReleasedIds.remove(id);
     _videoReleasedIds.add(id);
     _videoKnownIds.remove(id);
+    _videoTokens.remove(id);
+    _videoLooping.remove(id);
+    _videoSeeking.remove(id);
+    _videoSeekEndTokens.remove(id);
+    _videoEndedTokens.remove(id);
     _clearFailedVideo(id);
     _releaseVideo(id, resetDesiredPlayback: true);
     _trimVideoCommandCaches();
@@ -3558,6 +3996,7 @@ class _PocketViewState extends State<PocketView>
       if (asset.isEmpty) continue;
       _imageEpochs[asset] = (_imageEpochs[asset] ?? 0) + 1;
       _images.remove(asset)?.dispose();
+      _clearMeshImageLevels(asset);
       _failedImages.remove(asset);
       _imageResourceRevisions.remove(asset);
       // A release explicitly retires an in-flight decode. The old Future's
@@ -3567,18 +4006,191 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
+  static const List<int> _meshImageLevelDivisors = <int>[2, 4, 8];
+  static const int _minMeshImageSourceDimension = 256;
+  static const int _minMeshImageLevelDimension = 64;
+  static const bool _meshImageLevelsEnabled = bool.fromEnvironment(
+    'POCKET_MESH_IMAGE_LEVELS',
+    defaultValue: true,
+  );
+
+  void _clearMeshImageLevels(String asset) {
+    for (final image in _meshImageLevels.remove(asset) ?? const <ui.Image>[]) {
+      image.dispose();
+    }
+    // A running resize cannot be cancelled, but removing its ticket allows a
+    // replacement source to start immediately. The old resize checks its
+    // image epoch before publishing and disposes its own late result.
+    _loadingMeshImageLevels.remove(asset);
+  }
+
+  void _pruneMeshImageLevels(Set<String> activeMeshAssets) {
+    final inactive = <String>{
+      ..._meshImageLevels.keys,
+      ..._loadingMeshImageLevels.keys,
+    }..removeAll(activeMeshAssets);
+    for (final asset in inactive) {
+      _clearMeshImageLevels(asset);
+    }
+  }
+
+  Future<void> _ensureMeshImageLevels(
+    String asset,
+    ui.Image source,
+    int epoch,
+  ) async {
+    if (!_meshImageLevelsEnabled ||
+        !mounted ||
+        _isDisposed ||
+        !identical(_images[asset], source) ||
+        (_imageEpochs[asset] ?? 0) != epoch ||
+        source.width < _minMeshImageSourceDimension ||
+        source.height < _minMeshImageSourceDimension ||
+        _meshImageLevels.containsKey(asset)) {
+      return;
+    }
+    if (!_frameUsesMeshImage(asset)) return;
+    final pending = _loadingMeshImageLevels[asset];
+    if (pending != null) {
+      await pending;
+      return;
+    }
+
+    late final Future<void> build;
+    build = _buildMeshImageLevels(
+      asset,
+      source,
+      epoch,
+      () => identical(_loadingMeshImageLevels[asset], build),
+    );
+    _loadingMeshImageLevels[asset] = build;
+    try {
+      await build;
+    } finally {
+      if (identical(_loadingMeshImageLevels[asset], build)) {
+        _loadingMeshImageLevels.remove(asset);
+      }
+    }
+  }
+
+  Future<void> _buildMeshImageLevels(
+    String asset,
+    ui.Image source,
+    int epoch,
+    bool Function() isPendingBuild,
+  ) async {
+    final levels = <ui.Image>[];
+    var extraPixels = 0;
+    var installed = false;
+    bool isCurrent() =>
+        mounted &&
+        !_isDisposed &&
+        isPendingBuild() &&
+        _frameUsesMeshImage(asset) &&
+        identical(_images[asset], source) &&
+        (_imageEpochs[asset] ?? 0) == epoch;
+
+    try {
+      final maxExtraPixels = source.width * source.height ~/ 3;
+      for (final divisor in _meshImageLevelDivisors) {
+        final width = source.width ~/ divisor;
+        final height = source.height ~/ divisor;
+        if (width < _minMeshImageLevelDimension ||
+            height < _minMeshImageLevelDimension) {
+          continue;
+        }
+        final pixels = width * height;
+        if (extraPixels + pixels > maxExtraPixels) break;
+        final level = await _downsampleMeshImage(source, width, height);
+        if (!isCurrent()) {
+          level.dispose();
+          break;
+        }
+        levels.add(level);
+        extraPixels += pixels;
+      }
+      if (levels.isNotEmpty && isCurrent()) {
+        for (final previous in _meshImageLevels[asset] ?? const <ui.Image>[]) {
+          previous.dispose();
+        }
+        _meshImageLevels[asset] = List<ui.Image>.unmodifiable(levels);
+        installed = true;
+        _markSceneNeedsBuild();
+      }
+    } catch (error) {
+      if (isCurrent()) {
+        // An empty entry records the single attempted build for this source;
+        // the original image remains valid and the failure is not retried
+        // every frame. Release/revision replacement clears this entry.
+        _meshImageLevels[asset] = const <ui.Image>[];
+        if (mounted) {
+          try {
+            widget.onError?.call(error);
+          } catch (_) {
+            // A reporting callback failure must not invalidate the original
+            // image or escape as a resource decode failure.
+          }
+        }
+      }
+    } finally {
+      if (!installed) {
+        for (final level in levels) {
+          level.dispose();
+        }
+      }
+    }
+  }
+
+  Future<ui.Image> _downsampleMeshImage(
+    ui.Image source,
+    int width,
+    int height,
+  ) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+    canvas.drawImageRect(
+      source,
+      Rect.fromLTWH(0, 0, source.width.toDouble(), source.height.toDouble()),
+      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+      Paint()..filterQuality = FilterQuality.medium,
+    );
+    final picture = recorder.endRecording();
+    try {
+      return await picture.toImage(width, height);
+    } finally {
+      picture.dispose();
+    }
+  }
+
   Future<bool> _loadImageResource(
     PocketImageResource resource, {
     bool reportError = true,
+    bool prepareMeshImageLevels = false,
   }) async {
     final asset = resource.asset;
     final revision = resource.revision;
     if (asset.isEmpty) return false;
     final loadedRevision = _imageResourceRevisions[asset];
-    if (_images.containsKey(asset) && loadedRevision == revision) return true;
+    if (_images.containsKey(asset) && loadedRevision == revision) {
+      if (prepareMeshImageLevels) {
+        await _ensureMeshImageLevels(
+          asset,
+          _images[asset]!,
+          _imageEpochs[asset] ?? 0,
+        );
+      }
+      return true;
+    }
     if (loadedRevision != null && revision < loadedRevision) {
       // Frames are ordered, but do not let a late older resource overwrite a
       // newer in-place texture update if a host queues work asynchronously.
+      if (prepareMeshImageLevels && _images.containsKey(asset)) {
+        await _ensureMeshImageLevels(
+          asset,
+          _images[asset]!,
+          _imageEpochs[asset] ?? 0,
+        );
+      }
       return _images.containsKey(asset);
     }
     if (_loadingImages.contains(asset)) {
@@ -3589,15 +4201,19 @@ class _PocketViewState extends State<PocketView>
       _imageEpochs[asset] = (_imageEpochs[asset] ?? 0) + 1;
       _loadingImages.remove(asset);
       _loadingImageRevisions.remove(asset);
+    } else if (_images.containsKey(asset)) {
+      // A new native revision replaces the source image. Advancing the same
+      // resource epoch retires any mip generation still reading old pixels.
+      _imageEpochs[asset] = (_imageEpochs[asset] ?? 0) + 1;
     }
     _loadingImages.add(asset);
     _loadingImageRevisions[asset] = revision;
     final epoch = _imageEpochs[asset] ?? 0;
     final decoder = widget.imageResourceDecoder;
-    final image = decoder == null
-        ? PocketPakImages.fromResource(resource)
+    final decoding = decoder == null
+        ? PocketPakImages.decodeResource(resource)
         : null;
-    if (decoder == null && image == null) {
+    if (decoder == null && decoding == null) {
       if (_imageEpochs[asset] == epoch) {
         _loadingImages.remove(asset);
         _loadingImageRevisions.remove(asset);
@@ -3605,18 +4221,20 @@ class _PocketViewState extends State<PocketView>
       return false;
     }
     try {
-      final decoded = await (decoder == null
-          ? image!.decode()
-          : decoder(resource));
+      final decoded = await (decoder == null ? decoding! : decoder(resource));
       if (!mounted || (_imageEpochs[asset] ?? 0) != epoch) {
         decoded.dispose();
         return false;
       }
+      _clearMeshImageLevels(asset);
       _images.remove(asset)?.dispose();
       _images[asset] = decoded;
       _imageResourceRevisions[asset] = revision;
       _failedImages.remove(asset);
       _markSceneNeedsBuild();
+      if (prepareMeshImageLevels || _frameUsesMeshImage(asset)) {
+        await _ensureMeshImageLevels(asset, decoded, epoch);
+      }
       return true;
     } catch (error) {
       if ((_imageEpochs[asset] ?? 0) == epoch) {
@@ -3632,13 +4250,20 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  Future<bool> _loadImage(String asset, {bool reportError = true}) async {
-    if (asset.isEmpty ||
-        _images.containsKey(asset) ||
-        _failedImages.contains(asset) ||
-        !_loadingImages.add(asset)) {
-      return _images.containsKey(asset);
+  Future<bool> _loadImage(
+    String asset, {
+    bool reportError = true,
+    bool prepareMeshImageLevels = false,
+  }) async {
+    if (asset.isEmpty || _failedImages.contains(asset)) return false;
+    final cached = _images[asset];
+    if (cached != null) {
+      if (prepareMeshImageLevels) {
+        await _ensureMeshImageLevels(asset, cached, _imageEpochs[asset] ?? 0);
+      }
+      return true;
     }
+    if (!_loadingImages.add(asset)) return _images.containsKey(asset);
     final epoch = _imageEpochs[asset] ?? 0;
     ui.Codec? codec;
     try {
@@ -3659,9 +4284,13 @@ class _PocketViewState extends State<PocketView>
         decoded.dispose();
         return false;
       }
+      _clearMeshImageLevels(asset);
       _images.remove(asset)?.dispose();
       _images[asset] = decoded;
       _markSceneNeedsBuild();
+      if (prepareMeshImageLevels || _frameUsesMeshImage(asset)) {
+        await _ensureMeshImageLevels(asset, decoded, epoch);
+      }
       return true;
     } catch (error) {
       if ((_imageEpochs[asset] ?? 0) == epoch) {
@@ -3673,6 +4302,41 @@ class _PocketViewState extends State<PocketView>
       codec?.dispose();
       if ((_imageEpochs[asset] ?? 0) == epoch) {
         _loadingImages.remove(asset);
+      }
+    }
+  }
+
+  void _bindVideoDiagnosticListener(
+    String id,
+    VideoPlayerController video,
+    int epoch,
+  ) {
+    final previous = _videoDiagnosticListeners.remove(id);
+    if (previous != null) video.removeListener(previous);
+    final token = _videoTokens[id];
+    final listener = () => _onVideoValueChanged(id, video, epoch, token);
+    _videoDiagnosticListeners[id] = listener;
+    video.addListener(listener);
+  }
+
+  Future<void> _setVideoLooping(
+    String id,
+    VideoPlayerController video,
+    int epoch,
+    bool loop,
+  ) async {
+    try {
+      await video.setLooping(loop);
+    } catch (error) {
+      if (_videoPlaybackStillCurrent(id, video, epoch) &&
+          _videoLooping[id] == loop) {
+        _emitVideoState(
+          id,
+          asset: _videoAssets[id] ?? '',
+          state: 'error',
+          video: video,
+          error: '$error',
+        );
       }
     }
   }
@@ -3708,7 +4372,7 @@ class _PocketViewState extends State<PocketView>
           ? VideoPlayerController.asset(op.asset)
           : VideoPlayerController.file(File(packagePath));
       await video.initialize();
-      await video.setLooping(true);
+      await video.setLooping(_videoLooping[op.id] ?? true);
       await video.setVolume(0);
       if (!mounted || (_videoEpochs[op.id] ?? 0) != epoch) {
         await video.dispose();
@@ -3721,9 +4385,8 @@ class _PocketViewState extends State<PocketView>
       if (_videoFailureAssets[op.id] == op.asset) {
         _videoFailureAssets.remove(op.id);
       }
-      final listener = () => _onVideoValueChanged(op.id, video!);
-      _videoDiagnosticListeners[op.id] = listener;
-      video.addListener(listener);
+      _bindVideoDiagnosticListener(op.id, video, epoch);
+      final listener = _videoDiagnosticListeners[op.id]!;
       _emitVideoState(op.id, asset: op.asset, state: 'ready', video: video);
       await _applyVideoPlayback(op.id, video);
       if (!mounted || (_videoEpochs[op.id] ?? 0) != epoch) {
@@ -3772,13 +4435,43 @@ class _PocketViewState extends State<PocketView>
   ({String id, String asset}) _videoResourceKey(PocketVideoOp op) =>
       (id: op.id, asset: op.asset);
 
-  void _onVideoValueChanged(String id, VideoPlayerController video) {
-    if (!identical(_videos[id], video)) return;
+  void _onVideoValueChanged(
+    String id,
+    VideoPlayerController video,
+    int epoch,
+    String? token,
+  ) {
+    if (!identical(_videos[id], video) ||
+        _videoEpochs[id] != epoch ||
+        _videoTokens[id] != token) {
+      return;
+    }
     final value = video.value;
+    final seekEndSuppressed =
+        value.isCompleted &&
+        !(_videoLooping[id] ?? true) &&
+        ((_videoSeeking[id] ?? 0) > 0 ||
+            (_videoHasEndLatch(id) &&
+                !_videoEndLatchMatches(id, _videoEndedTokens)));
+    final completedWithoutSeek =
+        value.isCompleted &&
+        value.position.inMilliseconds == value.duration.inMilliseconds &&
+        !(_videoLooping[id] ?? true) &&
+        (_videoSeeking[id] ?? 0) == 0 &&
+        !_videoHasEndLatch(id);
+    if (completedWithoutSeek) {
+      _videoDesiredPlayback[id] = false;
+      _videoEndedTokens[id] = token;
+      if (value.isPlaying) unawaited(_applyVideoPlayback(id, video));
+    }
     final state = value.hasError
         ? 'error'
+        : completedWithoutSeek || _videoEndLatchMatches(id, _videoEndedTokens)
+        ? 'ended'
         : value.isPlaying
         ? 'playing'
+        : seekEndSuppressed
+        ? 'paused'
         : value.isInitialized
         ? (_videoDiagnostics[id]?.state == 'ready' ? 'ready' : 'paused')
         : 'loading';
@@ -3788,6 +4481,7 @@ class _PocketViewState extends State<PocketView>
       state: state,
       video: video,
       error: value.errorDescription,
+      token: token,
     );
   }
 
@@ -3797,16 +4491,28 @@ class _PocketViewState extends State<PocketView>
     required String state,
     VideoPlayerController? video,
     String? error,
+    String? token,
   }) {
-    final playing = video?.value.isPlaying ?? state == 'playing';
+    final factToken = token ?? _videoTokens[id];
+    final value = video?.value;
+    final playing = state == 'ended'
+        ? false
+        : value?.isPlaying ?? state == 'playing';
     final diagnostic = _PocketVideoDiagnostic(
       id: id,
+      token: factToken,
       asset: asset,
       state: state,
       playing: playing,
       visible: _videoVisibility[id] ?? false,
       active: _effectiveActive,
       error: error,
+      positionMs: value?.isInitialized == true
+          ? value!.position.inMilliseconds
+          : null,
+      durationMs: value?.isInitialized == true
+          ? value!.duration.inMilliseconds
+          : null,
     );
     final previous = _videoDiagnostics[id];
     if (previous != null && previous.sameState(diagnostic)) return;
@@ -3840,46 +4546,96 @@ class _PocketViewState extends State<PocketView>
     final prior = _videoDiagnostics[id];
     if (video != null) {
       final value = video.value;
+      final completesNow =
+          value.isCompleted &&
+          value.position.inMilliseconds == value.duration.inMilliseconds &&
+          !(_videoLooping[id] ?? true) &&
+          (_videoSeeking[id] ?? 0) == 0 &&
+          !_videoHasEndLatch(id);
+      final seekEndSuppressed =
+          value.isCompleted &&
+          !(_videoLooping[id] ?? true) &&
+          ((_videoSeeking[id] ?? 0) > 0 ||
+              (_videoHasEndLatch(id) &&
+                  !_videoEndLatchMatches(id, _videoEndedTokens)));
+      if (completesNow) {
+        _videoEndedTokens[id] = _videoTokens[id];
+        _videoDesiredPlayback[id] = false;
+        if (value.isPlaying) unawaited(_applyVideoPlayback(id, video));
+      }
       final state = value.hasError
           ? 'error'
+          : completesNow || _videoEndLatchMatches(id, _videoEndedTokens)
+          ? 'ended'
           : value.isPlaying
           ? 'playing'
+          : seekEndSuppressed
+          ? 'paused'
           : prior?.state == 'ready'
           ? 'ready'
           : 'paused';
-      return _PocketVideoDiagnostic(
+      final item = _PocketVideoDiagnostic(
         id: id,
+        token: _videoTokens[id],
         asset: _videoAssets[id] ?? prior?.asset ?? '',
         state: state,
-        playing: value.isPlaying,
+        playing: state == 'ended' ? false : value.isPlaying,
         visible: _videoVisibility[id] ?? false,
         active: _effectiveActive,
         error: value.errorDescription,
+        positionMs: value.isInitialized ? value.position.inMilliseconds : null,
+        durationMs: value.isInitialized ? value.duration.inMilliseconds : null,
       ).toJson();
+      return item;
     }
-    return (prior ??
-            _PocketVideoDiagnostic(
-              id: id,
-              asset: _loadingVideoAssets[id] ?? '',
-              state: _loadingVideos.contains(id) ? 'loading' : 'disposed',
-              playing: false,
-              visible: _videoVisibility[id] ?? false,
-              active: _effectiveActive,
-            ))
-        .toJson();
+    final state = _loadingVideos.contains(id)
+        ? 'loading'
+        : prior?.state == 'error'
+        ? 'error'
+        : 'disposed';
+    return _PocketVideoDiagnostic(
+      id: id,
+      token: _videoTokens[id],
+      asset: _loadingVideoAssets[id] ?? prior?.asset ?? '',
+      state: state,
+      playing: false,
+      visible: _videoVisibility[id] ?? false,
+      active: _effectiveActive,
+      error: state == 'error' ? prior?.error : null,
+      positionMs: null,
+      durationMs: null,
+    ).toJson();
   }
 
-  void _sendVideoSnapshot() {
+  void _sendVideoSnapshot({
+    String? requestId,
+    String? requestedVideoId,
+    String? requestToken,
+    String? requestError,
+  }) {
     final ids = <String>{
       ..._videoDiagnostics.keys,
       ..._loadingVideos,
       ..._videos.keys,
     };
-    final items = ids.map(_videoSnapshotItem).toList(growable: false);
+    if (requestedVideoId != null) ids.add(requestedVideoId);
+    final items = ids
+        .map((id) {
+          final item = _videoSnapshotItem(id);
+          if (id == requestedVideoId && requestError != null) {
+            // Request-local errors must not become persistent decoder diagnostics.
+            item['error'] = requestError;
+          }
+          return item;
+        })
+        .toList(growable: false);
     items.sort((left, right) => '${left['id']}'.compareTo('${right['id']}'));
     _controller.send(
       method: 'video.snapshot',
       params: {
+        if (requestId != null) 'requestId': requestId,
+        if (requestedVideoId != null) 'id': requestedVideoId,
+        if (requestToken != null) 'token': requestToken,
         'controllers': _videos.length,
         'loading': _loadingVideos.length,
         'items': items,
@@ -3887,10 +4643,175 @@ class _PocketViewState extends State<PocketView>
     );
   }
 
+  String? _videoRequestId(Map<String, dynamic> params) {
+    final value = params['requestId'];
+    return value is String &&
+            value.isNotEmpty &&
+            value.length <= _maxVideoRequestIdLength
+        ? value
+        : null;
+  }
+
+  int? _videoSeekPosition(Object? value) {
+    if (value is! num ||
+        !value.isFinite ||
+        value < 0 ||
+        value > 9007199254740991 ||
+        value.toDouble() != value.toDouble().truncateToDouble()) {
+      return null;
+    }
+    return value.toInt();
+  }
+
+  Future<void> _seekVideoRequest({
+    required String id,
+    required String requestId,
+    required Map<String, dynamic> requestParams,
+    required Object? rawPositionMs,
+  }) async {
+    final video = _videos[id];
+    final epoch = _videoEpochs[id];
+    final positionMs = _videoSeekPosition(rawPositionMs);
+    final requestToken = _videoTokenFromParams(requestParams);
+    if (!_videoCommandTokenMatches(id, requestParams)) {
+      _sendVideoSnapshot(
+        requestId: requestId,
+        requestedVideoId: id,
+        requestToken: requestToken,
+        requestError: 'Video token is stale.',
+      );
+      return;
+    }
+    if (positionMs == null) {
+      _sendVideoSnapshot(
+        requestId: requestId,
+        requestedVideoId: id,
+        requestToken: requestToken,
+        requestError: 'Video seek position must be a non-negative integer.',
+      );
+      return;
+    }
+    if (video == null ||
+        epoch == null ||
+        !_videoPlaybackStillCurrent(id, video, epoch) ||
+        !video.value.isInitialized) {
+      _sendVideoSnapshot(
+        requestId: requestId,
+        requestedVideoId: id,
+        requestToken: requestToken,
+        requestError: 'Video is not initialized.',
+      );
+      return;
+    }
+    if (video.value.hasError) {
+      _sendVideoSnapshot(
+        requestId: requestId,
+        requestedVideoId: id,
+        requestToken: requestToken,
+        requestError:
+            video.value.errorDescription ??
+            'Video controller is in an error state.',
+      );
+      return;
+    }
+    if (positionMs > video.value.duration.inMilliseconds) {
+      _sendVideoSnapshot(
+        requestId: requestId,
+        requestedVideoId: id,
+        requestToken: requestToken,
+        requestError: 'Video seek position exceeds the current duration.',
+      );
+      return;
+    }
+
+    try {
+      _videoSeeking[id] = (_videoSeeking[id] ?? 0) + 1;
+      _videoEndedTokens.remove(id);
+      _videoSeekEndTokens.remove(id);
+      final pump = _videoPlaybackPumps[id];
+      if (pump != null && identical(_videoPlaybackPumpVideos[id], video)) {
+        await pump;
+      }
+      if (!_videoPlaybackStillCurrent(id, video, epoch) ||
+          _videoTokens[id] != requestToken) {
+        return;
+      }
+      if (!video.value.isInitialized || video.value.hasError) {
+        _sendVideoSnapshot(
+          requestId: requestId,
+          requestedVideoId: id,
+          requestToken: requestToken,
+          requestError:
+              video.value.errorDescription ?? 'Video is not initialized.',
+        );
+        return;
+      }
+      if (positionMs > video.value.duration.inMilliseconds) {
+        _sendVideoSnapshot(
+          requestId: requestId,
+          requestedVideoId: id,
+          requestToken: requestToken,
+          requestError: 'Video seek position exceeds the current duration.',
+        );
+        return;
+      }
+      await video.seekTo(Duration(milliseconds: positionMs));
+      if (!_videoPlaybackStillCurrent(id, video, epoch) ||
+          _videoTokens[id] != requestToken) {
+        return;
+      }
+      if (video.value.hasError) {
+        _sendVideoSnapshot(
+          requestId: requestId,
+          requestedVideoId: id,
+          requestToken: requestToken,
+          requestError:
+              video.value.errorDescription ?? 'Native video seek failed.',
+        );
+        return;
+      }
+      final atEnd = positionMs == video.value.duration.inMilliseconds;
+      if (atEnd && !(_videoLooping[id] ?? true)) {
+        _videoDesiredPlayback[id] = false;
+        _videoSeekEndTokens[id] = requestToken;
+        if (video.value.isPlaying) await video.pause();
+      } else {
+        _videoSeekEndTokens.remove(id);
+      }
+      if (!_videoPlaybackStillCurrent(id, video, epoch) ||
+          _videoTokens[id] != requestToken) {
+        return;
+      }
+      _sendVideoSnapshot(
+        requestId: requestId,
+        requestedVideoId: id,
+        requestToken: requestToken,
+      );
+    } catch (error) {
+      if (!_videoPlaybackStillCurrent(id, video, epoch)) return;
+      _sendVideoSnapshot(
+        requestId: requestId,
+        requestedVideoId: id,
+        requestToken: requestToken,
+        requestError: '$error',
+      );
+    } finally {
+      if (_videoEpochs[id] == epoch) {
+        final remaining = (_videoSeeking[id] ?? 1) - 1;
+        if (remaining <= 0) {
+          _videoSeeking.remove(id);
+        } else {
+          _videoSeeking[id] = remaining;
+        }
+      }
+    }
+  }
+
   bool _videoShouldPlay(String id) {
     return _effectiveActive &&
         (_videoVisibility[id] ?? false) &&
-        _videoDesiredPlayback[id] == true;
+        _videoDesiredPlayback[id] == true &&
+        !_videoHasEndLatch(id);
   }
 
   bool _videoNeedsPlaybackSync(String id, VideoPlayerController video) {
@@ -4040,6 +4961,7 @@ class _PocketViewState extends State<PocketView>
     }
     if (value is String) {
       var hex = value.trim();
+      if (hex.toLowerCase() == 'transparent') return Colors.transparent;
       if (hex.startsWith('#')) hex = hex.substring(1);
       final parsed = int.tryParse(hex, radix: 16);
       if (parsed != null) {
@@ -4469,6 +5391,15 @@ class _PocketViewState extends State<PocketView>
         return;
       }
       focusNode.requestFocus();
+      // The guest keeps its text as a visible fallback until this existing
+      // editor has actually been attached to the overlay tree. A successful
+      // outbound `textInput.open` alone only proves that the message was sent.
+      if (focusNode.context != null) {
+        _controller.send(
+          method: 'textInput.opened',
+          params: _textInputNativePayload(<String, dynamic>{'id': id}),
+        );
+      }
     });
   }
 
@@ -4744,11 +5675,51 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
+  void _configureVideo(String id, Map<String, dynamic> params) {
+    if (!params.containsKey('token') || params['loop'] is! bool) return;
+    final rawToken = params['token'];
+    if (rawToken != null && !_isValidVideoToken(rawToken)) return;
+    if (!_admitVideoId(id, explicitCommand: true)) return;
+
+    final previousToken = _videoTokens[id];
+    final hadPreviousToken = _videoTokens.containsKey(id);
+    final nextToken = rawToken as String?;
+    final tokenChanged =
+        hadPreviousToken != (nextToken != null) || previousToken != nextToken;
+    final nextLoop = params['loop'] as bool;
+    final loopChanged = (_videoLooping[id] ?? true) != nextLoop;
+    if (!tokenChanged && !loopChanged) return;
+
+    if (nextToken == null) {
+      _videoTokens.remove(id);
+    } else {
+      _videoTokens[id] = nextToken;
+    }
+    _videoLooping[id] = nextLoop;
+    final video = _videos[id];
+    final epoch = _videoEpochs[id];
+    if (tokenChanged && video != null && epoch != null) {
+      // Rebind the callback without replacing the controller. Any existing
+      // end latch remains attached to its original generation until an
+      // explicit new play or seek clears it.
+      _bindVideoDiagnosticListener(id, video, epoch);
+    }
+    if (loopChanged &&
+        video != null &&
+        epoch != null &&
+        video.value.isInitialized) {
+      unawaited(_setVideoLooping(id, video, epoch, nextLoop));
+    }
+  }
+
   void _handleVideoEvents(List<PocketEvent> events) {
     for (final event in events) {
-      if (event.method == 'video.release') {
+      if (event.method == 'video.configure') {
         final id = _videoEventId(event.params);
-        if (id != null) {
+        if (id != null) _configureVideo(id, event.params);
+      } else if (event.method == 'video.release') {
+        final id = _videoEventId(event.params);
+        if (id != null && _videoCommandTokenMatches(id, event.params)) {
           // A first registration may release its DrawOp in the same frame.
           // Treat the current DrawOp as the narrow admission proof for that
           // release, while still rejecting an arbitrary raw release id.
@@ -4763,7 +5734,18 @@ class _PocketViewState extends State<PocketView>
         // A command is a legal registration boundary even when its DrawOp is
         // currently culled. Tombstoned ids can only be revived explicitly;
         // a late DrawOp alone remains rejected.
-        if (id != null && _admitVideoId(id, explicitCommand: true)) {
+        if (id != null &&
+            _videoCommandTokenMatches(id, event.params) &&
+            _admitVideoId(id, explicitCommand: true)) {
+          if (event.method == 'video.play') {
+            final restart = event.params['restart'] == true;
+            final blockedByEnd =
+                _videoEndLatchMatches(id, _videoEndedTokens) ||
+                _videoEndLatchMatches(id, _videoSeekEndTokens);
+            if (blockedByEnd && !restart) continue;
+            _videoEndedTokens.remove(id);
+            _videoSeekEndTokens.remove(id);
+          }
           _videoDesiredPlayback[id] = event.method == 'video.play';
           _trimVideoCommandCaches();
         }
@@ -4785,7 +5767,40 @@ class _PocketViewState extends State<PocketView>
       _handleGestureRegions(event);
       if (event.method == 'input.gesture.regions') continue;
       _handleTextInputEvent(event);
-      if (event.method == 'video.inspect') _sendVideoSnapshot();
+      if (event.method == 'video.inspect') {
+        if (!event.params.containsKey('requestId')) {
+          // Keep the original uncorrelated aggregate path for diagnostics.
+          _sendVideoSnapshot();
+        } else {
+          final id = _videoEventId(event.params);
+          final requestId = _videoRequestId(event.params);
+          if (id != null && requestId != null) {
+            final requestToken = _videoTokenFromParams(event.params);
+            _sendVideoSnapshot(
+              requestId: requestId,
+              requestedVideoId: id,
+              requestToken: requestToken,
+              requestError: _videoCommandTokenMatches(id, event.params)
+                  ? null
+                  : 'Video token is stale.',
+            );
+          }
+        }
+      }
+      if (event.method == 'video.seek') {
+        final id = _videoEventId(event.params);
+        final requestId = _videoRequestId(event.params);
+        if (id != null && requestId != null) {
+          unawaited(
+            _seekVideoRequest(
+              id: id,
+              requestId: requestId,
+              requestParams: Map<String, dynamic>.from(event.params),
+              rawPositionMs: event.params['positionMs'],
+            ),
+          );
+        }
+      }
       if (event.method == 'app.echo') {
         final result = event.params['message'] ?? event.params;
         _controller.sendRaw(<String, dynamic>{
@@ -4952,6 +5967,17 @@ class _PocketViewState extends State<PocketView>
       // authority for interactions inside the surface.
     }
 
+    // A game surface opts into keyboard buttons without requiring the host to
+    // steal focus at startup. Tapping the canvas activates its Focus node;
+    // while a real PocketJS text editor owns the IME, leave focus untouched.
+    if (phase == 'down' &&
+        surface == 0 &&
+        widget.keyboardInputEnabled &&
+        _textInputId == null &&
+        _textInputFocusNode?.hasFocus != true) {
+      _keyboardFocusNode.requestFocus();
+    }
+
     // Mouse hover and some trackpad streams produce move events without a
     // preceding down. The native input contract only accepts move/up/cancel
     // events for an active contact, so ignore those host-only events while
@@ -5109,6 +6135,154 @@ class _PocketViewState extends State<PocketView>
     );
   }
 
+  Offset _localPointerScrollDelta(PointerScrollEvent event) {
+    final transform = event.transform;
+    if (transform == null) return event.scrollDelta;
+    return PointerEvent.transformDeltaViaPositions(
+      transform: transform,
+      untransformedDelta: event.scrollDelta,
+      untransformedEndPosition: event.position,
+      transformedEndPosition: event.localPosition,
+    );
+  }
+
+  bool _dispatchSurfaceScroll({
+    required int surface,
+    required Size size,
+    required Offset localPosition,
+    required Offset localDelta,
+    required String phase,
+    required String source,
+  }) {
+    if (!widget.inputEnabled ||
+        !_effectiveActive ||
+        (surface != 0 && _auxiliaryFrame == null)) {
+      return false;
+    }
+    final frameWidth = surface == 0 ? _frame.width : _auxiliaryFrame!.width;
+    final frameHeight = surface == 0 ? _frame.height : _auxiliaryFrame!.height;
+    if (!size.width.isFinite ||
+        !size.height.isFinite ||
+        size.width <= 0 ||
+        size.height <= 0 ||
+        !frameWidth.isFinite ||
+        !frameHeight.isFinite ||
+        frameWidth <= 0 ||
+        frameHeight <= 0) {
+      return false;
+    }
+
+    // Match _sendPointer's conversion so both the hit position and wheel
+    // distance use the guest's logical viewport units, even when the Flutter
+    // surface is letterboxed or rendered at a different size.
+    final scaleX = frameWidth / size.width;
+    final scaleY = frameHeight / size.height;
+    final rawX = localPosition.dx * scaleX;
+    final rawY = localPosition.dy * scaleY;
+    final deltaX = localDelta.dx * scaleX;
+    final deltaY = localDelta.dy * scaleY;
+    if (!rawX.isFinite ||
+        !rawY.isFinite ||
+        !deltaX.isFinite ||
+        !deltaY.isFinite) {
+      return false;
+    }
+
+    // Embedded focused apps receive their own surface-local event. The root
+    // listener also observes bubbled pointer signals, so do not deliver a
+    // second scroll to the root guest behind that app.
+    if (surface == 0 && _focusedApplicationOwnsPointerAt(Offset(rawX, rawY))) {
+      return false;
+    }
+
+    return _controller.send(
+      method: 'input.scroll',
+      params: <String, dynamic>{
+        'x': rawX.clamp(0.0, frameWidth).toDouble(),
+        'y': rawY.clamp(0.0, frameHeight).toDouble(),
+        'deltaX': deltaX,
+        'deltaY': deltaY,
+        'phase': phase,
+        'source': source,
+        if (surface != 0) 'surface': surface,
+      },
+    );
+  }
+
+  void _onSurfacePointerSignal({
+    required int surface,
+    required Size size,
+    required PointerSignalEvent event,
+  }) {
+    if (event is PointerScrollEvent) {
+      final delta = _localPointerScrollDelta(event);
+      if (delta != Offset.zero) {
+        final sent = _dispatchSurfaceScroll(
+          surface: surface,
+          size: size,
+          localPosition: event.localPosition,
+          localDelta: delta,
+          phase: 'update',
+          source: 'wheel',
+        );
+        if (!sent) _wakeTicker();
+      } else {
+        _wakeTicker();
+      }
+      return;
+    }
+    // Keep existing signal wake behavior for platform signal variants that
+    // are not scroll deltas (for example inertia cancellation).
+    _wakeTicker();
+  }
+
+  void _onSurfacePanZoomStart({
+    required int surface,
+    required Size size,
+    required PointerPanZoomStartEvent event,
+  }) {
+    _dispatchSurfaceScroll(
+      surface: surface,
+      size: size,
+      localPosition: event.localPosition,
+      localDelta: Offset.zero,
+      phase: 'start',
+      source: 'trackpad',
+    );
+  }
+
+  void _onSurfacePanZoomUpdate({
+    required int surface,
+    required Size size,
+    required PointerPanZoomUpdateEvent event,
+  }) {
+    final panDelta = event.localPanDelta;
+    if (panDelta == Offset.zero) return; // scale/rotation-only update
+    _dispatchSurfaceScroll(
+      surface: surface,
+      size: size,
+      localPosition: event.localPosition,
+      localDelta: -panDelta,
+      phase: 'update',
+      source: 'trackpad',
+    );
+  }
+
+  void _onSurfacePanZoomEnd({
+    required int surface,
+    required Size size,
+    required PointerPanZoomEndEvent event,
+  }) {
+    _dispatchSurfaceScroll(
+      surface: surface,
+      size: size,
+      localPosition: event.localPosition,
+      localDelta: Offset.zero,
+      phase: 'end',
+      source: 'trackpad',
+    );
+  }
+
   bool _guestGestureForPointer({
     required int surface,
     required Offset localPosition,
@@ -5158,6 +6332,9 @@ class _PocketViewState extends State<PocketView>
     _resumedFromIdle = false;
     _ticker?.dispose();
     _ticker = null;
+    _clearKeyboardButtons();
+    _pressedKeyboardKeys.clear();
+    _keyboardFocusNode.dispose();
     _pointerSlots.clear();
     _pendingPointerMessages.clear();
     _outsideTextInputPointerOrigins.clear();
@@ -5170,11 +6347,22 @@ class _PocketViewState extends State<PocketView>
     for (final image in _images.values) {
       image.dispose();
     }
-    for (final asset in _loadingImages) {
+    for (final levels in _meshImageLevels.values) {
+      for (final image in levels) {
+        image.dispose();
+      }
+    }
+    _meshImageLevels.clear();
+    _activeMeshImageAssets.clear();
+    for (final asset in <String>{
+      ..._loadingImages,
+      ..._loadingMeshImageLevels.keys,
+    }) {
       _imageEpochs[asset] = (_imageEpochs[asset] ?? 0) + 1;
     }
     _loadingImages.clear();
     _loadingImageRevisions.clear();
+    _loadingMeshImageLevels.clear();
     _textLayoutCache.dispose();
     final retiringVideoIds = <String>{..._loadingVideos, ..._videos.keys};
     final retiringVideoAssets = <String, String>{
@@ -5230,6 +6418,7 @@ class _PocketViewState extends State<PocketView>
   void _pauseForLifecycle() {
     if (_lifecyclePaused) return;
     _lifecyclePaused = true;
+    _clearKeyboardButtons();
     _pauseGuestForActivity();
   }
 
@@ -5341,7 +6530,7 @@ class _PocketViewState extends State<PocketView>
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
+    final layout = LayoutBuilder(
       key: _hostKey,
       builder: (context, constraints) {
         _observeConstraints(constraints);
@@ -5354,6 +6543,206 @@ class _PocketViewState extends State<PocketView>
             : ColoredBox(color: background, child: content);
       },
     );
+    final keyboardInput = _wrapKeyboardInput(layout);
+    return widget.enableSceneCapture
+        ? RepaintBoundary(key: _sceneCaptureBoundaryKey, child: keyboardInput)
+        : keyboardInput;
+  }
+
+  Future<PocketViewCapture?> _capturePocketViewScene({
+    required int maxWidth,
+    required int maxHeight,
+    required int maxPixels,
+  }) async {
+    if (!widget.enableSceneCapture ||
+        !mounted ||
+        _loading ||
+        _error != null ||
+        _runtime == null ||
+        !_frame.width.isFinite ||
+        !_frame.height.isFinite ||
+        _frame.width <= 0 ||
+        _frame.height <= 0) {
+      return null;
+    }
+
+    // Capture only after Flutter has painted the current composed tree. This
+    // also makes calls issued from onReady safe: startup has a real frame, not
+    // just a newly attached runtime.
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted ||
+        !widget.enableSceneCapture ||
+        _loading ||
+        _error != null ||
+        _runtime == null) {
+      return null;
+    }
+    if (_hasUnsupportedSceneCaptureContent()) {
+      throw UnsupportedError(
+        'PocketView PNG capture cannot include external textures or host application surfaces',
+      );
+    }
+
+    final boundaryContext = _sceneCaptureBoundaryKey.currentContext;
+    if (boundaryContext == null ||
+        boundaryContext.findAncestorWidgetOfExactType<Offstage>()?.offstage ==
+            true) {
+      return null;
+    }
+    final renderObject = boundaryContext.findRenderObject();
+    if (renderObject is! RenderRepaintBoundary ||
+        !renderObject.attached ||
+        !renderObject.hasSize ||
+        renderObject.size.width <= 0 ||
+        renderObject.size.height <= 0 ||
+        !renderObject.size.width.isFinite ||
+        !renderObject.size.height.isFinite) {
+      return null;
+    }
+
+    final logicalSize = renderObject.size;
+    final devicePixelRatio = View.maybeOf(context)?.devicePixelRatio ?? 1.0;
+    if (!devicePixelRatio.isFinite || devicePixelRatio <= 0) return null;
+    var pixelRatio = math.min(
+      devicePixelRatio,
+      math.min(
+        maxWidth / logicalSize.width,
+        math.min(
+          maxHeight / logicalSize.height,
+          math.sqrt(maxPixels / (logicalSize.width * logicalSize.height)),
+        ),
+      ),
+    );
+    if (!pixelRatio.isFinite || pixelRatio <= 0) return null;
+
+    // RenderRepaintBoundary.toImage rounds dimensions up. Adjust for that
+    // rounding so the actual allocation, not only the ideal scale, stays
+    // within all three caller-supplied bounds.
+    var outputWidth = (logicalSize.width * pixelRatio).ceil();
+    var outputHeight = (logicalSize.height * pixelRatio).ceil();
+    for (
+      var attempt = 0;
+      attempt < 8 &&
+          (outputWidth > maxWidth ||
+              outputHeight > maxHeight ||
+              outputWidth * outputHeight > maxPixels);
+      attempt++
+    ) {
+      final widthScale = maxWidth / outputWidth;
+      final heightScale = maxHeight / outputHeight;
+      final pixelScale = math.sqrt(maxPixels / (outputWidth * outputHeight));
+      pixelRatio *=
+          math.min(widthScale, math.min(heightScale, pixelScale)) * 0.999999;
+      outputWidth = (logicalSize.width * pixelRatio).ceil();
+      outputHeight = (logicalSize.height * pixelRatio).ceil();
+    }
+    if (outputWidth <= 0 ||
+        outputHeight <= 0 ||
+        outputWidth > maxWidth ||
+        outputHeight > maxHeight ||
+        outputWidth * outputHeight > maxPixels) {
+      return null;
+    }
+
+    ui.Image? image;
+    try {
+      image = await renderObject.toImage(pixelRatio: pixelRatio);
+      if (image.width <= 0 ||
+          image.height <= 0 ||
+          image.width > maxWidth ||
+          image.height > maxHeight ||
+          image.width * image.height > maxPixels) {
+        return null;
+      }
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (data == null ||
+          data.lengthInBytes == 0 ||
+          data.lengthInBytes > PocketViewController.maxSceneCapturePngBytes) {
+        return null;
+      }
+      // toByteData returns Dart-owned encoded bytes, independent from the
+      // temporary engine image disposed below. Keep a view over that buffer to
+      // avoid an unnecessary second PNG-sized allocation.
+      final png = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      if (!mounted || _runtime == null || _loading || _error != null) {
+        return null;
+      }
+      return PocketViewCapture._(
+        pngBytes: png,
+        width: image.width,
+        height: image.height,
+      );
+    } catch (error, stackTrace) {
+      // A detach while the engine is reading back can invalidate its layer.
+      // Treat that race as unavailable; surface active-view errors to callers.
+      if (!mounted || _runtime == null || _isDisposed) return null;
+      Error.throwWithStackTrace(error, stackTrace);
+    } finally {
+      image?.dispose();
+    }
+  }
+
+  bool _hasUnsupportedSceneCaptureContent() {
+    if (_hasUnsupportedCaptureContent(
+      _frame.ops,
+      _frame.width,
+      _frame.height,
+    )) {
+      return true;
+    }
+    final auxiliary = _auxiliaryFrame;
+    return auxiliary != null &&
+        _hasUnsupportedCaptureContent(
+          auxiliary.ops,
+          auxiliary.width,
+          auxiliary.height,
+        );
+  }
+
+  bool _hasUnsupportedCaptureContent(
+    List<PocketOp> ops,
+    double width,
+    double height,
+  ) {
+    final viewport = Rect.fromLTWH(0, 0, width, height);
+    for (final op in ops) {
+      final bounds = Rect.fromLTWH(op.x, op.y, op.width, op.height);
+      final clipped = op.clip == null
+          ? bounds
+          : bounds.intersect(
+              Rect.fromLTWH(
+                op.clip!.x,
+                op.clip!.y,
+                op.clip!.width,
+                op.clip!.height,
+              ),
+            );
+      if (clipped.intersect(viewport).isEmpty) continue;
+
+      if (op is PocketVideoOp &&
+          (_videos[op.id]?.value.isInitialized ?? false)) {
+        return true;
+      }
+      if (op is PocketHostSurfaceOp) {
+        if (op.kind == 'platformTexture') {
+          final textureId = op.parameters['textureId'];
+          if (textureId is int &&
+              _controller._platformTextures.contains(textureId)) {
+            return true;
+          }
+        }
+        // A host surface builder may insert a platform view or external
+        // texture. Without a declarative capture-safety contract, reject the
+        // whole host surface rather than return a partial scene.
+        if (op.kind == 'application' && widget.hostSurfaceBuilder != null) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   Widget _buildContent(BuildContext context) {
@@ -5612,11 +7001,16 @@ class _PocketViewState extends State<PocketView>
         onTapUpOutside: _onTextInputTapUpOutside,
         style: TextStyle(
           color: _textInputTextColor,
+          fontFamilyFallback: widget.fontFamilyFallback.isEmpty
+              ? null
+              : widget.fontFamilyFallback,
           fontSize: _textInputFontSize,
           fontWeight: _textInputFontWeight,
           height: textInputLineHeight,
         ),
-        cursorColor: _textInputFocusedBorderColor,
+        cursorColor: _textInputFocusedBorderColor.a == 0
+            ? _textInputTextColor
+            : _textInputFocusedBorderColor,
         decoration: InputDecoration(
           isDense: true,
           filled: true,
@@ -5624,6 +7018,9 @@ class _PocketViewState extends State<PocketView>
           hintText: _textInputHintText,
           hintStyle: TextStyle(
             color: _textInputHintColor,
+            fontFamilyFallback: widget.fontFamilyFallback.isEmpty
+                ? null
+                : widget.fontFamilyFallback,
             fontSize: _textInputFontSize,
             fontWeight: _textInputFontWeight,
             height: textInputLineHeight,
@@ -5700,28 +7097,75 @@ class _PocketViewState extends State<PocketView>
       if (canvasOps.isEmpty) return;
       // Each block remains a full-size transparent canvas. Stacking the
       // blocks preserves Canvas order while RepaintBoundary lets unchanged
-      // blocks retain their raster layer when another block changes.
-      for (var start = 0; start < canvasOps.length; start += _canvasBlockSize) {
-        final end = math.min(start + _canvasBlockSize, canvasOps.length);
+      // blocks retain their raster layer when another block changes. Keep a
+      // complete mesh layer group in one painter: saveLayer/mask state belongs
+      // to a single Canvas and cannot continue across CustomPaint delegates.
+      final supersampledPartitions = <PocketCanvasPainter>[];
+      void flushSupersampledPartitions() {
+        if (supersampledPartitions.isEmpty) return;
         sceneChildren.add(
           Positioned.fill(
             child: RepaintBoundary(
               child: CustomPaint(
-                painter: PocketCanvasPainter(
-                  width: width,
-                  height: height,
-                  ops: List<PocketOp>.of(canvasOps.sublist(start, end)),
-                  images: _images,
-                  renderedSize: size,
-                  devicePixelRatio: devicePixelRatio,
-                  fontFamilyFallback: widget.fontFamilyFallback,
-                  textLayoutCache: _textLayoutCache,
+                painter: PocketMeshSpanPainter(
+                  partitions: supersampledPartitions,
+                  sampleScale: _pocketMeshSupersampleScale,
                 ),
               ),
             ),
           ),
         );
+        supersampledPartitions.clear();
       }
+
+      void addDirectCanvasPainter(PocketCanvasPainter painter) {
+        sceneChildren.add(
+          Positioned.fill(
+            child: RepaintBoundary(child: CustomPaint(painter: painter)),
+          ),
+        );
+      }
+
+      void addCanvasBlock(int start, int end) {
+        final painter = PocketCanvasPainter(
+          width: width,
+          height: height,
+          ops: canvasOps.sublist(start, end),
+          images: _images,
+          meshImageLevels: _meshImageLevels,
+          renderedSize: size,
+          devicePixelRatio: devicePixelRatio,
+          fontFamilyFallback: widget.fontFamilyFallback,
+          textLayoutCache: _textLayoutCache,
+        );
+        if (_pocketMeshSupersampleScale > 1 &&
+            _isEligibleMeshSpan(<PocketCanvasPainter>[painter])) {
+          supersampledPartitions.add(painter);
+        } else {
+          flushSupersampledPartitions();
+          addDirectCanvasPainter(painter);
+        }
+      }
+
+      var start = 0;
+      var meshLayerDepth = 0;
+      for (var index = 0; index < canvasOps.length; index++) {
+        final op = canvasOps[index];
+        if (op is PocketMeshLayerBeginOp) meshLayerDepth++;
+        if (op is PocketMeshLayerRestoreOp && meshLayerDepth > 0) {
+          meshLayerDepth--;
+        }
+        final blockSize = index + 1 - start;
+        if (meshLayerDepth == 0 && blockSize >= _canvasBlockSize) {
+          final end = index + 1;
+          addCanvasBlock(start, end);
+          start = end;
+        }
+      }
+      if (start < canvasOps.length) {
+        addCanvasBlock(start, canvasOps.length);
+      }
+      flushSupersampledPartitions();
       canvasOps.clear();
     }
 
@@ -6077,7 +7521,14 @@ class _PocketViewState extends State<PocketView>
       child: Listener(
         key: ValueKey<String>('pocket-surface-$surface'),
         behavior: HitTestBehavior.opaque,
-        onPointerSignal: (event) => _wakeTicker(),
+        onPointerSignal: (event) =>
+            _onSurfacePointerSignal(surface: surface, size: size, event: event),
+        onPointerPanZoomStart: (event) =>
+            _onSurfacePanZoomStart(surface: surface, size: size, event: event),
+        onPointerPanZoomUpdate: (event) =>
+            _onSurfacePanZoomUpdate(surface: surface, size: size, event: event),
+        onPointerPanZoomEnd: (event) =>
+            _onSurfacePanZoomEnd(surface: surface, size: size, event: event),
         onPointerDown: allowHostArena
             ? null
             : (event) => _sendPointer(
@@ -6127,24 +7578,31 @@ class _PocketViewState extends State<PocketView>
 final class _PocketVideoDiagnostic {
   const _PocketVideoDiagnostic({
     required this.id,
+    required this.token,
     required this.asset,
     required this.state,
     required this.playing,
     required this.visible,
     required this.active,
+    required this.positionMs,
+    required this.durationMs,
     this.error,
   });
 
   final String id;
+  final String? token;
   final String asset;
   final String state;
   final bool playing;
   final bool visible;
   final bool active;
+  final int? positionMs;
+  final int? durationMs;
   final String? error;
 
   bool sameState(_PocketVideoDiagnostic other) =>
       id == other.id &&
+      token == other.token &&
       asset == other.asset &&
       state == other.state &&
       playing == other.playing &&
@@ -6154,11 +7612,14 @@ final class _PocketVideoDiagnostic {
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'id': id,
+    if (token != null) 'token': token,
     'asset': asset,
     'state': state,
     'playing': playing,
     'visible': visible,
     'active': active,
+    'positionMs': positionMs,
+    'durationMs': durationMs,
     if (error != null && error!.isNotEmpty) 'error': error,
   };
 }

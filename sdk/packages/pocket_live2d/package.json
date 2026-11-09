@@ -1,0 +1,19 @@
+{
+  "name": "@pocket/live2d",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./motion": "./src/motion.ts",
+    "./physics": "./src/physics.ts",
+    "./pose": "./src/pose.ts",
+    "./transport": "./src/transport.ts"
+  },
+  "scripts": {
+    "test": "bun test test",
+    "probe:macos": "sh scripts/run_macos_core_probe.sh"
+  },
+  "files": ["src", "native/include", "native/src", "native/CMakeLists.txt", "scripts"]
+}

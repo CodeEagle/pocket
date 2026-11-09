@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'pocket_guest_manifest.dart';
 import 'pocket_host.dart';
@@ -7,6 +8,7 @@ import 'pocket_stream.dart';
 
 abstract class PocketPlugin {
   PocketPluginDescriptor get descriptor;
+
   /// Trusted, resource-free coordination may finish while its caller is
   /// hidden. Hardware/stream providers retain the default foreground policy.
   bool get backgroundSafe => false;
@@ -800,7 +802,7 @@ final class PocketPluginContext {
           'plugin is revoked',
         );
       }
-      _checkJsonBytes(result, budget.maxResponseBytes, 'plugin response');
+      _checkPayloadBytes(result, budget.maxResponseBytes, 'plugin response');
       return result;
     } finally {
       _activeRequests--;
@@ -864,7 +866,7 @@ final class PocketPluginContext {
                   'plugin_stream_quota',
                   'stream event quota exceeded',
                 );
-              _checkJsonBytes(
+              _checkPayloadBytes(
                 value,
                 budget.maxStreamEventBytes,
                 'plugin stream event',
@@ -915,14 +917,58 @@ final class PocketPluginContext {
     }
   }
 
-  static void _checkJsonBytes(Object? value, int limit, String field) {
-    try {
-      if (utf8.encode(jsonEncode(value)).length > limit) {
+  // Ordinary values retain their UTF-8 JSON quota. Typed byte buffers use
+  // their binary payload size plus the bridge's tag/length header, rather
+  // than expanding each byte into a JSON number. Count before transport
+  // encoding, without copying buffers or allocating a whole JSON document.
+  static void _checkPayloadBytes(Object? value, int limit, String field) {
+    var used = 0;
+    final ancestors = Set<Object>.identity();
+    void add(int bytes) {
+      used += bytes;
+      if (used > limit) {
         throw PocketCapabilityException(
           'plugin_payload_quota',
           '$field exceeds byte limit',
         );
       }
+    }
+
+    void visit(Object? item) {
+      if (item is Uint8List) {
+        add(5 + item.lengthInBytes);
+      } else if (item is List) {
+        if (!ancestors.add(item)) throw const FormatException('Cyclic list');
+        try {
+          add(2 + (item.isEmpty ? 0 : item.length - 1));
+          for (final child in item) {
+            visit(child);
+          }
+        } finally {
+          ancestors.remove(item);
+        }
+      } else if (item is Map) {
+        if (!ancestors.add(item)) throw const FormatException('Cyclic map');
+        try {
+          add(2 + (item.isEmpty ? 0 : item.length - 1));
+          for (final entry in item.entries) {
+            if (entry.key is! String) {
+              throw const FormatException('Object keys must be strings');
+            }
+            add(utf8.encode(jsonEncode(entry.key)).length + 1);
+            visit(entry.value);
+          }
+        } finally {
+          ancestors.remove(item);
+        }
+      } else {
+        // Retain JsonEncoder's scalar/toJson validation and escaping.
+        add(utf8.encode(jsonEncode(item)).length);
+      }
+    }
+
+    try {
+      visit(value);
     } on PocketCapabilityException {
       rethrow;
     } on Object {
@@ -1009,19 +1055,17 @@ final class PocketPluginManager {
     _ensureOpen();
     if (requestedPermissions != null) {
       final requested = _validatePermissions(requestedPermissions);
-      final declared = _plugins.values
-          .expand((state) {
-            final desc = state.plugin.descriptor;
-            final methodPerms = desc.capabilities.values.expand(
-              (m) => (m.permissions ?? desc.permissions).followedBy(
-                m.optionalPermissions,
-              ),
-            );
-            return desc.permissions
-                .followedBy(desc.optionalPermissions)
-                .followedBy(methodPerms);
-          })
-          .toSet();
+      final declared = _plugins.values.expand((state) {
+        final desc = state.plugin.descriptor;
+        final methodPerms = desc.capabilities.values.expand(
+          (m) => (m.permissions ?? desc.permissions).followedBy(
+            m.optionalPermissions,
+          ),
+        );
+        return desc.permissions
+            .followedBy(desc.optionalPermissions)
+            .followedBy(methodPerms);
+      }).toSet();
       final undeclared = requested.difference(declared);
       if (undeclared.isNotEmpty)
         throw PocketCapabilityException(
@@ -1063,8 +1107,9 @@ final class PocketPluginManager {
           for (final method in descriptor.capabilities.values) {
             if (!granted.contains(method.name)) continue;
             final methodPerms = method.permissions ?? descriptor.permissions;
-            final notDeclared =
-                methodPerms.difference(_guestRequestedPermissions!);
+            final notDeclared = methodPerms.difference(
+              _guestRequestedPermissions!,
+            );
             if (notDeclared.isNotEmpty) {
               if (availability.required.contains(method.name)) {
                 host.revokeCapabilities(names);
@@ -1093,18 +1138,19 @@ final class PocketPluginManager {
 
         final requestedPermissionsForPlugin = grantedMethods.isNotEmpty
             ? grantedMethods
-                .expand((m) => m.permissions ?? descriptor.permissions)
-                .toSet()
+                  .expand((m) => m.permissions ?? descriptor.permissions)
+                  .toSet()
             : (descriptor.capabilities.isEmpty
-                ? descriptor.permissions.intersection(
-                    _guestRequestedPermissions ?? descriptor.permissions,
-                  )
-                : const <String>{});
+                  ? descriptor.permissions.intersection(
+                      _guestRequestedPermissions ?? descriptor.permissions,
+                    )
+                  : const <String>{});
 
         if (descriptor.capabilities.isEmpty &&
             _guestRequestedPermissions != null) {
-          final notDeclared =
-              descriptor.permissions.difference(_guestRequestedPermissions!);
+          final notDeclared = descriptor.permissions.difference(
+            _guestRequestedPermissions!,
+          );
           if (notDeclared.isNotEmpty) {
             if (requiredCapability) {
               host.revokeCapabilities(names);
@@ -1118,8 +1164,9 @@ final class PocketPluginManager {
         }
 
         var approvedPermissions = const <String>{};
-        final pending =
-            requestedPermissionsForPlugin.difference(allowedPermissions);
+        final pending = requestedPermissionsForPlugin.difference(
+          allowedPermissions,
+        );
         if (pending.isNotEmpty) {
           final approved = (await permissionRequest(
             PocketPermissionRequest(
@@ -1175,8 +1222,9 @@ final class PocketPluginManager {
         final effectiveGranted = _guestRequestedPermissions != null
             ? _guestRequestedPermissions!.intersection(effectiveAllowed)
             : effectiveAllowed;
-        _grantedPermissions[descriptor.id] =
-            Set<String>.unmodifiable(effectiveGranted);
+        _grantedPermissions[descriptor.id] = Set<String>.unmodifiable(
+          effectiveGranted,
+        );
 
         try {
           await state.plugin.activate(state.context);
@@ -1266,14 +1314,16 @@ final class PocketPluginManager {
           );
         }
         final plugin = state.plugin;
-        final effectiveGranted = _grantedPermissions[plugin.descriptor.id] ??
+        final effectiveGranted =
+            _grantedPermissions[plugin.descriptor.id] ??
             (_guestRequestedPermissions != null
                 ? _guestRequestedPermissions!.intersection(allowedPermissions)
                 : allowedPermissions);
         final requiredPermissions =
             method.permissions ?? plugin.descriptor.permissions;
-        final missingPermissions =
-            requiredPermissions.difference(effectiveGranted);
+        final missingPermissions = requiredPermissions.difference(
+          effectiveGranted,
+        );
         if (missingPermissions.isNotEmpty) {
           throw PocketCapabilityException(
             'plugin_permission_denied',

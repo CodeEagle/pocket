@@ -1,0 +1,8 @@
+{
+  "pocket": 2,
+  "id": "test.pocket-view-scene-capture",
+  "app": {
+    "entry": "app.tsx",
+    "framework": "solid"
+  }
+}

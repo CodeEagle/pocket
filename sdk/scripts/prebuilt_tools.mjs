@@ -76,6 +76,6 @@ export function prebuiltEnvironment(sdkRoot, env = process.env) {
   const bun = resolveManagedBun(sdkRoot, env);
   return { ...env, ...nativeBindingEnvironment(tools), POCKET_TOOLS_PACKAGE: tools.root, POCKET_UPSTREAM_ROOT: tools.compiler,
     POCKET_COMPILER_PATH: join(tools.compiler, 'tools/build.ts'), POCKET_BYTECODE_BIN: tools.bytecode,
-    POCKET_NATIVE_PROBE: tools.probe, POCKET_BUN: bun, POCKET_EDITOR_BUN: bun,
+    POCKET_NATIVE_PROBE: env.POCKET_NATIVE_PROBE || tools.probe, POCKET_BUN: bun, POCKET_EDITOR_BUN: bun,
     PATH: `${dirname(bun)}${delimiter}${env.PATH || ''}` };
 }

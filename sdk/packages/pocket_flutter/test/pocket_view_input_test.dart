@@ -1,6 +1,6 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 
@@ -154,7 +154,324 @@ Map<String, dynamic> _minimalTextInputOpenParams(String id) =>
       'text': '',
     };
 
+Future<void> _sendWheelAndPanZoom(
+  WidgetTester tester,
+  RenderBox surface,
+) async {
+  const localPosition = Offset(40, 60);
+  final globalPosition = surface.localToGlobal(localPosition);
+  await tester.sendEventToBinding(
+    PointerScrollEvent(
+      kind: PointerDeviceKind.mouse,
+      position: globalPosition,
+      scrollDelta: const Offset(0, 12),
+    ),
+  );
+  final trackpad = TestPointer(23, PointerDeviceKind.trackpad);
+  await tester.sendEventToBinding(trackpad.panZoomStart(globalPosition));
+  await tester.sendEventToBinding(
+    trackpad.panZoomUpdate(globalPosition, pan: const Offset(0, -12)),
+  );
+  await tester.sendEventToBinding(trackpad.panZoomEnd());
+}
+
 void main() {
+  testWidgets('opt-in keyboard input publishes official button edges', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            keyboardInputEnabled: true,
+            keyboardAutofocus: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey<String>('pocket-surface-0')));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+
+    final buttons = runtime.messages
+        .where((message) => message['name'] == 'input.buttons')
+        .map((message) => (message['payload'] as Map)['buttons'])
+        .toList();
+    expect(buttons, containsAllInOrder(<int>[0x0020, 0]));
+  });
+
+  testWidgets('keyboard aliases keep a shared button held until all release', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            keyboardInputEnabled: true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey<String>('pocket-surface-0')));
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyD);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyD);
+    await tester.pump();
+
+    final buttons = runtime.messages
+        .where((message) => message['name'] == 'input.buttons')
+        .map((message) => (message['payload'] as Map)['buttons'])
+        .toList();
+    expect(buttons, <int>[0x0020, 0]);
+  });
+
+  testWidgets('keyboard and external button sources are ORed independently', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    final controller = PocketViewController();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            controller: controller,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            keyboardInputEnabled: true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey<String>('pocket-surface-0')));
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    expect(controller.sendButtons(buttons: 0x0100), isTrue);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+    expect(controller.sendButtons(buttons: 0), isTrue);
+    await tester.pump();
+
+    final buttons = runtime.messages
+        .where((message) => message['name'] == 'input.buttons')
+        .map((message) => (message['payload'] as Map)['buttons'])
+        .toList();
+    expect(buttons, <int>[0x0020, 0x0120, 0x0100, 0]);
+  });
+
+  testWidgets('detaching a view drops both button sources', (tester) async {
+    final firstRuntime = _RecordingRuntime();
+    final controller = PocketViewController();
+    Future<void> pumpView(PocketRuntime runtime) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              controller: controller,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              keyboardInputEnabled: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    await pumpView(firstRuntime);
+    await tester.tap(find.byKey(const ValueKey<String>('pocket-surface-0')));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    expect(controller.sendButtons(buttons: 0x0100), isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+
+    final secondRuntime = _RecordingRuntime();
+    await pumpView(secondRuntime);
+    expect(
+      secondRuntime.messages.where(
+        (message) => message['name'] == 'input.buttons',
+      ),
+      isEmpty,
+    );
+  });
+
+  testWidgets('changing keyboard bindings recomputes held keys', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    Future<void> pumpView(Map<LogicalKeyboardKey, int> bindings) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              keyboardInputEnabled: true,
+              keyboardButtonMap: bindings,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    await pumpView(const <LogicalKeyboardKey, int>{});
+    await tester.tap(find.byKey(const ValueKey<String>('pocket-surface-0')));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    await pumpView(<LogicalKeyboardKey, int>{
+      LogicalKeyboardKey.arrowRight: 0x0040,
+    });
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+
+    final buttons = runtime.messages
+        .where((message) => message['name'] == 'input.buttons')
+        .map((message) => (message['payload'] as Map)['buttons'])
+        .toList();
+    expect(buttons, <int>[0x0020, 0x0040, 0]);
+  });
+
+  testWidgets('hidden keyboard input is cleared and does not accept new keys', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    Future<void> pumpView(bool active) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              keyboardInputEnabled: true,
+              active: active,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    await pumpView(true);
+    await tester.tap(find.byKey(const ValueKey<String>('pocket-surface-0')));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    final beforeHide = runtime.messages
+        .where((message) => message['name'] == 'input.buttons')
+        .length;
+
+    await pumpView(false);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    final hiddenButtons = runtime.messages
+        .where((message) => message['name'] == 'input.buttons')
+        .skip(beforeHide)
+        .map((message) => (message['payload'] as Map)['buttons'])
+        .toList();
+    expect(hiddenButtons, isEmpty);
+  });
+
+  testWidgets('keyboard buttons stay out of an active PocketJS IME field', (
+    tester,
+  ) async {
+    final runtime = _TextInputRuntime(
+      initialEvent: _textInputEvent(
+        'textInput.open',
+        _minimalTextInputOpenParams('keyboard-ime'),
+      ),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            keyboardInputEnabled: true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final field = tester.widget<TextField>(
+      find.byKey(const ValueKey<String>('pocket-text-input-keyboard-ime')),
+    );
+    expect(field.focusNode?.hasFocus, isTrue);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(
+      runtime.messages.where((message) => message['name'] == 'input.buttons'),
+      isEmpty,
+    );
+  });
+
+  testWidgets('controller publishes validated absolute axes', (tester) async {
+    final runtime = _RecordingRuntime();
+    final controller = PocketViewController();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            controller: controller,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(controller.sendAxes(<int, double>{0: 300, 1: 64}), isTrue);
+    expect(controller.sendAxes(<int, double>{4: 1}), isFalse);
+    final message = runtime.messages.lastWhere(
+      (entry) => entry['name'] == 'input.axes',
+    );
+    expect(message['payload']['axes'], <Map<String, dynamic>>[
+      <String, dynamic>{'id': 0, 'value': 255.0},
+      <String, dynamic>{'id': 1, 'value': 64.0},
+    ]);
+  });
+
   testWidgets('forwards Flutter pointer edges in guest logical coordinates', (
     tester,
   ) async {
@@ -201,6 +518,246 @@ void main() {
     expect(down['surface'], isNull);
   });
 
+  testWidgets('forwards mouse wheel position and delta in guest coordinates', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 160,
+          height: 240,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final surface = find.byKey(const ValueKey<String>('pocket-surface-0'));
+    final renderBox = tester.renderObject<RenderBox>(surface);
+    const localPosition = Offset(40, 60);
+    const wheelDelta = Offset(8, -12);
+    await tester.sendEventToBinding(
+      PointerScrollEvent(
+        kind: PointerDeviceKind.mouse,
+        position: renderBox.localToGlobal(localPosition),
+        scrollDelta: wheelDelta,
+      ),
+    );
+    await tester.pump();
+
+    final scrolls = runtime.messages
+        .where((message) => message['name'] == 'input.scroll')
+        .toList();
+    expect(scrolls, hasLength(1));
+    final payload = scrolls.single['payload'] as Map;
+    final scaleX = 320 / renderBox.size.width;
+    final scaleY = 480 / renderBox.size.height;
+    expect(payload['x'], closeTo(localPosition.dx * scaleX, 0.001));
+    expect(payload['y'], closeTo(localPosition.dy * scaleY, 0.001));
+    expect(payload['deltaX'], closeTo(wheelDelta.dx * scaleX, 0.001));
+    expect(payload['deltaY'], closeTo(wheelDelta.dy * scaleY, 0.001));
+    expect(payload['phase'], 'update');
+    expect(payload['source'], 'wheel');
+    expect(
+      runtime.messages.where((message) => message['name'] == 'input.pointer'),
+      isEmpty,
+      reason: 'a wheel signal must not synthesize a touch or click',
+    );
+  });
+
+  testWidgets('forwards trackpad pan phases without scale-only scrolls', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 160,
+          height: 240,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final surface = find.byKey(const ValueKey<String>('pocket-surface-0'));
+    final renderBox = tester.renderObject<RenderBox>(surface);
+    const localPosition = Offset(40, 60);
+    final globalPosition = renderBox.localToGlobal(localPosition);
+    final trackpad = TestPointer(17, PointerDeviceKind.trackpad);
+    await tester.sendEventToBinding(trackpad.panZoomStart(globalPosition));
+    await tester.sendEventToBinding(
+      trackpad.panZoomUpdate(globalPosition, pan: const Offset(0, -12)),
+    );
+    // A zoom-only update has no scroll component and must not be forwarded.
+    await tester.sendEventToBinding(
+      trackpad.panZoomUpdate(
+        globalPosition,
+        pan: const Offset(0, -12),
+        scale: 1.2,
+      ),
+    );
+    await tester.sendEventToBinding(trackpad.panZoomEnd());
+    await tester.pump();
+
+    final scrolls = runtime.messages
+        .where((message) => message['name'] == 'input.scroll')
+        .toList();
+    expect(scrolls, hasLength(3));
+    final payloads = scrolls
+        .map((message) => message['payload'] as Map)
+        .toList();
+    expect(payloads.map((payload) => payload['phase']), <String>[
+      'start',
+      'update',
+      'end',
+    ]);
+    expect(
+      payloads.map((payload) => payload['source']),
+      everyElement('trackpad'),
+    );
+    final scaleY = 480 / renderBox.size.height;
+    expect(payloads[1]['deltaX'], 0.0);
+    expect(payloads[1]['deltaY'], closeTo(12 * scaleY, 0.001));
+    expect(payloads.first['deltaY'], 0.0);
+    expect(payloads.last['deltaY'], 0.0);
+    expect(
+      runtime.messages.where((message) => message['name'] == 'input.pointer'),
+      isEmpty,
+      reason: 'trackpad scrolling must not synthesize a touch or click',
+    );
+  });
+
+  testWidgets('wheel deltas follow ancestor transforms into guest units', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Align(
+          alignment: Alignment.topLeft,
+          child: Transform.scale(
+            scale: 2,
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 160,
+              height: 240,
+              child: PocketView(
+                runtime: runtime,
+                jsSource: '',
+                pakBytes: Uint8List(0),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final surface = find.byKey(const ValueKey<String>('pocket-surface-0'));
+    final renderBox = tester.renderObject<RenderBox>(surface);
+    const localPosition = Offset(40, 60);
+    const wheelDelta = Offset(16, -24);
+    await tester.sendEventToBinding(
+      PointerScrollEvent(
+        kind: PointerDeviceKind.mouse,
+        position: renderBox.localToGlobal(localPosition),
+        scrollDelta: wheelDelta,
+      ),
+    );
+    await tester.pump();
+
+    final scroll = runtime.messages.singleWhere(
+      (message) => message['name'] == 'input.scroll',
+    );
+    final payload = scroll['payload'] as Map;
+    expect(payload['x'], closeTo(80, 0.001));
+    expect(payload['y'], closeTo(120, 0.001));
+    // The transform halves the wheel delta in surface-local units; the guest
+    // viewport conversion then doubles it back to screen/guest logical units.
+    expect(payload['deltaX'], closeTo(16, 0.001));
+    expect(payload['deltaY'], closeTo(-24, 0.001));
+  });
+
+  testWidgets('inactive surfaces do not queue wheel or trackpad scrolls', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    final controller = PocketViewController();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            controller: controller,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            active: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(controller.isReady, isTrue);
+    final pendingBefore = controller.pendingMessageCount;
+    final surface = tester.renderObject<RenderBox>(
+      find.byKey(const ValueKey<String>('pocket-surface-0')),
+    );
+    await _sendWheelAndPanZoom(tester, surface);
+    expect(controller.pendingMessageCount, pendingBefore);
+    expect(
+      runtime.messages.where((message) => message['name'] == 'input.scroll'),
+      isEmpty,
+    );
+  });
+
+  testWidgets('input-disabled surfaces discard wheel and trackpad scrolls', (
+    tester,
+  ) async {
+    final runtime = _RecordingRuntime();
+    final controller = PocketViewController();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            controller: controller,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            inputEnabled: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(controller.isReady, isTrue);
+    final pendingBefore = controller.pendingMessageCount;
+    final surface = tester.renderObject<RenderBox>(
+      find.byKey(const ValueKey<String>('pocket-surface-0')),
+    );
+    await _sendWheelAndPanZoom(tester, surface);
+    expect(controller.pendingMessageCount, pendingBefore);
+    expect(
+      runtime.messages.where((message) => message['name'] == 'input.scroll'),
+      isEmpty,
+    );
+  });
+
   testWidgets(
     'native TextField round-trips UTF-16 state and rejects stale events',
     (tester) async {
@@ -219,6 +776,7 @@ void main() {
               runtime: runtime,
               jsSource: '',
               pakBytes: Uint8List(0),
+              fontFamilyFallback: const <String>['InputTestSerif'],
               showDebugFps: false,
             ),
           ),
@@ -234,10 +792,14 @@ void main() {
       expect(field.keyboardType, TextInputType.emailAddress);
       expect(field.textInputAction, TextInputAction.next);
       expect(field.style?.color, const Color(0xff102030));
+      expect(field.style?.fontFamilyFallback, <String>['InputTestSerif']);
       expect(field.style?.fontSize, 16);
       expect(field.style?.fontWeight, FontWeight.normal);
       expect(field.style?.height, closeTo(20 / 16, 0.0001));
       expect(field.decoration?.hintText, '输入文本');
+      expect(field.decoration?.hintStyle?.fontFamilyFallback, <String>[
+        'InputTestSerif',
+      ]);
       expect(field.decoration?.fillColor, const Color(0xfff7f9fc));
       expect(field.decoration?.hintStyle?.color, const Color(0xff607080));
       expect(field.decoration?.hintStyle?.height, closeTo(20 / 16, 0.0001));
@@ -290,6 +852,42 @@ void main() {
           styledUpdate.decoration?.focusedBorder as OutlineInputBorder;
       expect(styledFocusBorder.borderSide.color, const Color(0xff0b63ce));
       expect(styledFocusBorder.borderRadius, BorderRadius.circular(12));
+
+      // Image-skinned JS fields retain this same IME session while the
+      // native editor contributes only editable text and a visible caret.
+      runtime.enqueue(
+        _textInputEvent('textInput.update', <String, dynamic>{
+          'id': 'session-a',
+          'fillColor': 'transparent',
+          'borderColor': 'transparent',
+          'focusedBorderColor': 'transparent',
+          'borderRadius': 0,
+        }),
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+      final transparentUpdate = tester.widget<TextField>(fieldFinder);
+      expect(transparentUpdate.controller, same(stableController));
+      expect(transparentUpdate.controller!.value.text, '你好😀');
+      expect(transparentUpdate.style?.fontFamilyFallback, <String>[
+        'InputTestSerif',
+      ]);
+      expect(
+        transparentUpdate.decoration?.hintStyle?.fontFamilyFallback,
+        <String>['InputTestSerif'],
+      );
+      expect(
+        transparentUpdate.controller!.value.composing,
+        const TextRange(start: 2, end: 4),
+      );
+      expect(transparentUpdate.decoration?.fillColor, Colors.transparent);
+      for (final border in [
+        transparentUpdate.decoration?.border,
+        transparentUpdate.decoration?.enabledBorder,
+        transparentUpdate.decoration?.focusedBorder,
+      ]) {
+        expect(border!.borderSide.color, Colors.transparent);
+      }
+      expect(transparentUpdate.cursorColor, transparentUpdate.style?.color);
 
       // An old session cannot overwrite the active IME value, even when its
       // text and selection look otherwise valid.
@@ -548,7 +1146,9 @@ void main() {
       ),
     );
     expect(field.style?.color, const Color(0xff283444));
+    expect(field.style?.fontFamilyFallback, isNull);
     expect(field.decoration?.fillColor, Colors.white);
+    expect(field.decoration?.hintStyle?.fontFamilyFallback, isNull);
     expect(field.decoration?.hintStyle?.color, const Color(0xff667485));
     expect(field.decoration?.hintText, isNull);
   });

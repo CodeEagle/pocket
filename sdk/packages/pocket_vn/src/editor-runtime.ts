@@ -1,0 +1,35 @@
+// Browser Editor uses the same story core, without native or view dependencies.
+export * from "./engine.ts";
+export * from "./scene.ts";
+export * from "./scene-objects.ts";
+export * from "./conditions.ts";
+export * from "./background-layers.ts";
+export * from "./timeline.ts";
+export { NOVEL_VOICE_CHANNEL } from "./voice.ts";
+export * from "./authoring.ts";
+export * from "./blueprint.ts";
+export * from "./interchange.ts";
+export * from "./manuscript.ts";
+export * from "./replay.ts";
+export * from "./preview-context.ts";
+export * from "./slots.ts";
+export * from "./save-codec.ts";
+export * from "./save-revision.ts";
+export * from "./input.ts";
+export * from "./variables.ts";
+export * from "./say-presentation.ts";
+export * from "./rich-text.ts";
+export { novelVideoInstructionIssue, novelVideoOverlayStateIssue, novelVideoPlaybackFactIssue, novelVideoSeekIssue } from "./video-schema.ts";
+export { novelCameraInstructionIssue, resolveNovelCameraPose } from "./camera.ts";
+export { novelAtmosphereIssue } from "./atmosphere.ts";
+export type { NovelAtmosphere } from "./atmosphere.ts";
+export { isNovelChoiceSurface, novelChoiceSurfaceIssue } from "./choice-surface.ts";
+export type { NovelChoiceSurface, NovelChoiceSurfaceRect } from "./choice-surface.ts";
+export * from "./collections.ts";
+export * from "./inventory.ts";
+export * from "./asset-references.ts";
+export type { NovelVideoInstruction, NovelVideoOverlayState, NovelVideoPlaybackFact } from "./types.ts";
+export { NOVEL_UI_DEFAULT_MESSAGES } from "./localization.ts";
+export * from "./skin.ts";
+
+export { createNovelViewportLayout, novelCharacterBounds } from "./viewport.ts";

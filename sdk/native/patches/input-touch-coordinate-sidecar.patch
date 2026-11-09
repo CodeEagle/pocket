@@ -1,0 +1,515 @@
+--- a/framework/src/touch.ts
++++ b/framework/src/touch.ts
+@@ -30,7 +30,17 @@
+ const WIDE_COORD_MASK = (1 << WIDE_COORD_BITS) - 1;
+ const WIDE_ID_SHIFT = WIDE_COORD_BITS * 2;
+ const CANCEL_MARKER = 0x40000000;
++// Bit 28 is unused by both packed coordinate forms and their 8-bit ids.
++// Native hosts set it only when the exact logical coordinate is supplied in
++// the append-only GuestFrame sidecar. Without that sidecar, ignore the contact
++// rather than reporting a fabricated (0, 0).
++const COORDINATE_SIDECAR_MARKER = 0x10000000;
+ const EMPTY: readonly TouchContact[] = Object.freeze([]);
++
++export interface TouchCoordinate {
++  readonly x: number;
++  readonly y: number;
++}
+ 
+ let primarySnapshot: readonly TouchContact[] = EMPTY;
+ let auxiliarySnapshot: readonly TouchContact[] = EMPTY;
+@@ -49,6 +59,7 @@
+   packed: readonly number[] | undefined,
+   hits?: readonly number[],
+   surfaces?: readonly number[],
++  coordinates?: readonly TouchCoordinate[],
+ ): void {
+   cancelledSnapshot = EMPTY;
+   if (!packed || packed.length === 0) {
+@@ -66,11 +77,14 @@
+     const coordBits = wide ? WIDE_COORD_BITS : LEGACY_COORD_BITS;
+     const coordMask = wide ? WIDE_COORD_MASK : LEGACY_COORD_MASK;
+     const idShift = wide ? WIDE_ID_SHIFT : LEGACY_ID_SHIFT;
++    const needsSidecar = (value & COORDINATE_SIDECAR_MARKER) !== 0;
++    const coordinate = needsSidecar ? coordinates?.[index] : undefined;
++    if (needsSidecar && !isCoordinate(coordinate)) continue;
+     output.push(Object.freeze({
+       surface: surfaces?.[index] === 1 ? "auxiliary" as const : "primary" as const,
+       id: (value >>> idShift) & 0xff,
+-      x: value & coordMask,
+-      y: (value >>> coordBits) & coordMask,
++      x: needsSidecar ? coordinate!.x : value & coordMask,
++      y: needsSidecar ? coordinate!.y : (value >>> coordBits) & coordMask,
+       hit: hits?.[index],
+     }));
+   }
+@@ -78,6 +92,16 @@
+   allSnapshot = Object.freeze(all);
+   primarySnapshot = Object.freeze(all.filter((contact) => contact.surface === "primary"));
+   auxiliarySnapshot = Object.freeze(all.filter((contact) => contact.surface === "auxiliary"));
++}
++
++function isCoordinate(value: TouchCoordinate | undefined): value is TouchCoordinate {
++  return value !== undefined
++    && Number.isSafeInteger(value.x)
++    && Number.isSafeInteger(value.y)
++    && value.x >= 0
++    && value.y >= 0
++    && value.x <= 0xffff_ffff
++    && value.y <= 0xffff_ffff;
+ }
+ 
+ /** Front-panel contacts for the current frame, in logical viewport pixels. */
+@@ -123,21 +147,31 @@
+  */
+ export function createTouchHitFacts(
+   query: (x: number, y: number) => number,
+-): (packed: readonly number[] | undefined) => number[] | undefined {
++): (packed: readonly number[] | undefined, coordinates?: readonly TouchCoordinate[]) => number[] | undefined {
+   const table = new Map<number, number>();
+-  return (packed) => {
++  return (packed, coordinates) => {
+     if (!packed || packed.length === 0) {
+       table.clear();
+       return undefined;
+     }
+     const seen = new Set<number>();
+-    const hits = packed.slice(0, 16).map((value) => {
++    const hits = packed.slice(0, 16).map((value, index) => {
+       if (value & CANCEL_MARKER) return 0;
+       const wide = (value & WIDE_MARKER) !== 0;
+       const coordBits = wide ? WIDE_COORD_BITS : LEGACY_COORD_BITS;
+       const coordMask = wide ? WIDE_COORD_MASK : LEGACY_COORD_MASK;
+       const id = (value >>> (coordBits * 2)) & 0xff;
+       seen.add(id);
++      if (value & COORDINATE_SIDECAR_MARKER) {
++        const coordinate = coordinates?.[index];
++        if (!isCoordinate(coordinate)) return 0;
++        let hit = table.get(id);
++        if (hit === undefined) {
++          hit = query(coordinate.x, coordinate.y);
++          table.set(id, hit);
++        }
++        return hit;
++      }
+       let hit = table.get(id);
+       if (hit === undefined) {
+         hit = query(value & coordMask, (value >>> coordBits) & coordMask);
+@@ -160,5 +194,10 @@
+   ) >>> 0;
+ }
+ 
++/** Test/native helper for an active contact whose exact coordinate is sidecar-backed. */
++export function __packTouchCoordinateSidecar(id: number): number {
++  return (WIDE_MARKER | COORDINATE_SIDECAR_MARKER | ((id & 0xff) << WIDE_ID_SHIFT)) >>> 0;
++}
++
+ /** Test/TS-host helper for a terminal cancellation on the touch wire. */
+ export function __packTouchCancel(id: number): number { return (CANCEL_MARKER | ((id & 255) << LEGACY_ID_SHIFT)) >>> 0; }
+--- a/framework/src/index.ts
++++ b/framework/src/index.ts
+@@ -48,7 +48,7 @@
+ import type { AxisDelta } from "./relative-axis.ts";
+ import type { MotionState } from "./motion.ts";
+ import { flushLifecycleHooks, flushUnmountedHooks, disposeRootModelRegions } from "./lifecycle-solid-aot.ts";
+-import { __resetTouches, __setTouches } from "./touch.ts";
++import { __resetTouches, __setTouches, type TouchCoordinate } from "./touch.ts";
+ import { __dispatchTextEvents, __resetTextInput, __setTextEvents, type TextEventRecord } from "./text-input.ts";
+ import { __advanceClock, resetClock } from "./clock.ts";
+ import { __drainEffects, resetEffects } from "./effects.ts";
+@@ -289,18 +289,20 @@
+       axisDeltas?: readonly AxisDelta[],
+       motion?: MotionState | null,
+       text?: readonly TextEventRecord[],
++      touchCoordinates?: readonly TouchCoordinate[],
+     ) => {
+       __advanceClock(); // virtual frame++, fire due after() timers
+       // A system layer may take the frame's input first (system-layers.ts).
+-      const filtered = filterFrameInput(buttons, touches, hits, touchSurfaces);
++      const filtered = filterFrameInput(buttons, touches, hits, touchSurfaces, touchCoordinates);
+       if (filtered !== null) {
+         buttons = filtered.buttons;
+         touches = filtered.touches;
+         hits = filtered.hits;
+         touchSurfaces = filtered.surfaces;
++        touchCoordinates = filtered.coordinates;
+       }
+       __setAnalog(analog, rightAnalog); // latch the nub before any app code reads it
+-      __setTouches(touches, hits, touchSurfaces); // latch contacts + surface-specific hit facts
++      __setTouches(touches, hits, touchSurfaces, touchCoordinates); // latch contacts + surface-specific hit facts
+       __setTextEvents(text); // the keyboard's events for this frame
+       runServicePumps(); // only modules with pending async work register here
+       __drainEffects(); // frame-boundary deliveries enter the world first
+--- a/framework/src/index-vue-vapor.ts
++++ b/framework/src/index-vue-vapor.ts
+@@ -35,7 +35,7 @@
+ import type { MotionState } from "./motion.ts";
+ import { __runGestures, resetGestures } from "./gesture.ts";
+ import { installTouchActivation } from "./touch-activation.ts";
+-import { __resetTouches, __setTouches } from "./touch.ts";
++import { __resetTouches, __setTouches, type TouchCoordinate } from "./touch.ts";
+ import { __advanceClock, resetClock } from "./clock.ts";
+ import { __drainEffects, resetEffects } from "./effects.ts";
+ import { runServicePumps } from "./services.ts";
+@@ -233,10 +233,12 @@
+       rightAnalog?: number,
+       axisDeltas?: readonly AxisDelta[],
+       motion?: MotionState | null,
++      _text?: readonly unknown[],
++      touchCoordinates?: readonly TouchCoordinate[],
+     ) => {
+       __advanceClock();
+       __setAnalog(analog, rightAnalog);
+-      __setTouches(touches, hits, touchSurfaces); // latch contacts + surface-specific hit facts
++      __setTouches(touches, hits, touchSurfaces, touchCoordinates); // latch contacts + surface-specific hit facts
+       runServicePumps();
+       __drainEffects();
+       runFrameHooks(
+--- a/framework/src/index-octane.ts
++++ b/framework/src/index-octane.ts
+@@ -31,7 +31,7 @@
+ import { registerStyles, resolveStyle } from "./styles.ts";
+ import { handleFrame, setAuxiliaryHitRoot, setHitRoot, setInputRoot } from "./input.ts";
+ import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame-octane.tsx";
+-import { __resetTouches, __setTouches } from "./touch.ts";
++import { __resetTouches, __setTouches, type TouchCoordinate } from "./touch.ts";
+ import { __advanceClock, resetClock } from "./clock.ts";
+ import { __drainEffects, resetEffects } from "./effects.ts";
+ import { runServicePumps } from "./services.ts";
+@@ -215,10 +215,16 @@
+       hits?: readonly number[],
+       touchSurfaces?: readonly number[],
+       rightAnalog?: number,
++      // Keep the canonical positional frame contract through arg 10. Octane
++      // currently ignores these unrelated input lanes.
++      _axisDeltas?: readonly unknown[],
++      _motion?: unknown,
++      _text?: readonly unknown[],
++      touchCoordinates?: readonly TouchCoordinate[],
+     ) => {
+       __advanceClock();
+       __setAnalog(analog, rightAnalog);
+-      __setTouches(touches, hits, touchSurfaces);
++      __setTouches(touches, hits, touchSurfaces, touchCoordinates);
+       runServicePumps();
+       __drainEffects();
+       // Octane schedules re-renders on the microtask queue; the sync boundary
+--- a/framework/src/system-layers.ts
++++ b/framework/src/system-layers.ts
+@@ -16,13 +16,20 @@
+   touches: readonly number[] | undefined;
+   hits: readonly number[] | undefined;
+   surfaces: readonly number[] | undefined;
++  coordinates: readonly { readonly x: number; readonly y: number }[] | undefined;
+ }
+ 
+ export type FrameInputFilter = (input: FrameInput) => void;
+ 
+ const layers: SystemLayer[] = [];
+ let filter: FrameInputFilter | null = null;
+-const input: FrameInput = { buttons: 0, touches: undefined, hits: undefined, surfaces: undefined };
++const input: FrameInput = {
++  buttons: 0,
++  touches: undefined,
++  hits: undefined,
++  surfaces: undefined,
++  coordinates: undefined,
++};
+ 
+ export function registerSystemLayer(layer: SystemLayer): void {
+   if (!layers.includes(layer)) layers.push(layer);
+@@ -50,12 +57,14 @@
+   touches: readonly number[] | undefined,
+   hits: readonly number[] | undefined,
+   surfaces: readonly number[] | undefined,
++  coordinates: readonly { readonly x: number; readonly y: number }[] | undefined,
+ ): FrameInput | null {
+   if (filter === null) return null;
+   input.buttons = buttons;
+   input.touches = touches;
+   input.hits = hits;
+   input.surfaces = surfaces;
++  input.coordinates = coordinates;
+   filter(input);
+   return input;
+ }
+--- a/framework/src/agent-layer.tsx
++++ b/framework/src/agent-layer.tsx
+@@ -451,6 +451,7 @@
+     input.touches = contact?.touches;
+     input.hits = undefined;
+     input.surfaces = contact?.surfaces;
++    input.coordinates = undefined;
+   });
+ 
+   // -- opening and closing ---------------------------------------------------
+--- a/framework/src/devtools.ts
++++ b/framework/src/devtools.ts
+@@ -14,6 +14,7 @@
+ import { __takeAxisDeltas, EMPTY_AXIS_DELTAS } from "./relative-axis.ts";
+ import { __copyMotionState, __takeMotionState, type MotionState } from "./motion.ts";
+ import type { TextEventRecord } from "./text-input.ts";
++import type { TouchCoordinate } from "./touch.ts";
+ import { ANALOG_CENTER } from "../../contracts/spec/spec.ts";
+ import type { HostOps } from "./host.ts";
+ import { rootMirror, setTreeMutationHook, type NodeMirror } from "./native-tree.ts";
+@@ -306,6 +307,7 @@
+     axisDeltas?: readonly AxisDelta[],
+     motion?: MotionState | null,
+     text?: readonly TextEventRecord[],
++    touchCoordinates?: readonly TouchCoordinate[],
+   ) => void,
+ ): (
+   buttons: number,
+@@ -317,6 +319,7 @@
+   axisDeltas?: readonly AxisDelta[],
+   motion?: MotionState | null,
+   text?: readonly TextEventRecord[],
++  touchCoordinates?: readonly TouchCoordinate[],
+ ) => void {
+   return (
+     buttons: number,
+@@ -328,6 +331,7 @@
+     axisDeltasArg?: readonly AxisDelta[],
+     motionArg?: MotionState | null,
+     textArg?: readonly TextEventRecord[],
++    touchCoordinatesArg?: readonly TouchCoordinate[],
+   ) => {
+     state.hostCalls++;
+     if (state.transport) {
+@@ -342,6 +346,7 @@
+     let touchSurfaces = touchSurfacesArg;
+     let axisDeltas = axisDeltasArg;
+     let motion = motionArg;
++    let touchCoordinates = touchCoordinatesArg;
+     if (state.replayMasks) {
+       if (state.replayAt < state.replayMasks.length) {
+         // Paused host polls must not consume queued replay input.
+@@ -364,6 +369,9 @@
+         // (op 42/27 against the same committed layout — the same answer the
+         // recording host computed).
+         hits = undefined;
++        // Tape v5 does not store the new large-coordinate sidecar. Never
++        // combine a replayed packed marker with a live host's coordinates.
++        touchCoordinates = undefined;
+         state.replayAt++;
+       } else {
+         state.replayMasks = null; // tape exhausted: back to live input
+@@ -386,7 +394,7 @@
+     recordMask(mask, analog, touch, touchSurfaces, rightAnalog, axisDeltas, motion);
+     state.frame++;
+     try {
+-      h(mask, analog, touch, hits, touchSurfaces, rightAnalog, axisDeltas, motion, textArg);
++      h(mask, analog, touch, hits, touchSurfaces, rightAnalog, axisDeltas, motion, textArg, touchCoordinates);
+     } catch (e) {
+       send({
+         t: "error",
+--- a/engine/guest-rquickjs/src/lib.rs
++++ b/engine/guest-rquickjs/src/lib.rs
+@@ -131,6 +131,24 @@
+         self.remember(result)?;
+         self.collect()
+     }
++
++    /// Run a frame while appending exact logical touch coordinates as the
++    /// tenth argument. The shared GuestFrame and `frame()` contract remain
++    /// unchanged for existing runtime callers.
++    pub fn frame_with_touch_coordinates(
++        &mut self,
++        frame: &GuestFrame<'_>,
++        coordinates: &[(u32, u32)],
++    ) -> Result<(), RuntimeError> {
++        self.begin_turn(Duration::from_millis(250));
++        let context = self.context.as_ref().ok_or(RuntimeError::Guest)?;
++        let result = context.with(|ctx| {
++            call_frame_with_touch_coordinates(&ctx, frame, coordinates)
++                .map_err(|error| engine_error(&ctx, error))
++        });
++        self.remember(result)?;
++        self.collect()
++    }
+ }
+ impl Guest for RquickjsGuest {
+     fn initialize(
+@@ -226,6 +244,24 @@
+ /// Encode the canonical frame facts into a host-owned QuickJS realm.
+ /// The owner drains its job queue before returning from the guest turn.
+ pub fn call_frame(ctx: &Ctx<'_>, frame: &GuestFrame<'_>) -> rquickjs::Result<()> {
++    call_frame_inner(ctx, frame, None)
++}
++
++/// Backwards-compatible extension used by hosts that can supply exact touch
++/// coordinates without changing the runtime's shared GuestFrame structure.
++pub fn call_frame_with_touch_coordinates(
++    ctx: &Ctx<'_>,
++    frame: &GuestFrame<'_>,
++    coordinates: &[(u32, u32)],
++) -> rquickjs::Result<()> {
++    call_frame_inner(ctx, frame, Some(coordinates))
++}
++
++fn call_frame_inner(
++    ctx: &Ctx<'_>,
++    frame: &GuestFrame<'_>,
++    coordinates: Option<&[(u32, u32)]>,
++) -> rquickjs::Result<()> {
+     let value: Value = ctx.globals().get("frame")?;
+     if value.is_undefined() {
+         return Ok(());
+@@ -296,7 +332,7 @@
+         text.set(count, entry)?;
+         count += 1;
+     }
+-    function.call::<_, ()>((Rest(vec![
++    let mut arguments = vec![
+         frame.buttons.into_js(ctx)?,
+         frame.analog.into_js(ctx)?,
+         touches.into_value(),
+@@ -306,7 +342,18 @@
+         deltas.into_value(),
+         motion,
+         text.into_value(),
+-    ]),))
++    ];
++    if let Some(coordinates) = coordinates {
++        let sidecar = Array::new(ctx.clone())?;
++        for (index, (x, y)) in coordinates.iter().enumerate() {
++            let point = Object::new(ctx.clone())?;
++            point.set("x", *x)?;
++            point.set("y", *y)?;
++            sidecar.set(index, point)?;
++        }
++        arguments.push(sidecar.into_value());
++    }
++    function.call::<_, ()>((Rest(arguments),))
+ }
+ 
+ fn engine_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
+--- a/tests/touch.test.ts
++++ b/tests/touch.test.ts
+@@ -1,10 +1,13 @@
+ import { afterEach, describe, expect, test } from "bun:test";
+ import {
+   __packTouch,
++  __packTouchCoordinateSidecar,
+   __packTouchWide,
++  __cancelledTouches,
+   __resetTouches,
+   __setTouches,
+   auxiliaryTouches,
++  createTouchHitFacts,
+   touches,
+ } from "../framework/src/touch.ts";
+ 
+@@ -31,6 +34,47 @@
+       { surface: "primary", id: 9, x: 639, y: 359 },
+       { surface: "primary", id: 3, x: 479, y: 271 },
+     ]);
++  });
++
++  test("uses the coordinate sidecar only for explicitly marked contacts", () => {
++    const extended = __packTouchCoordinateSidecar(23);
++    __setTouches([extended], [71], [1]);
++    expect(touches()).toEqual([]);
++    expect(auxiliaryTouches()).toEqual([]);
++
++    __setTouches(
++      [extended, __packTouch(4, 51, 70)],
++      [71, 12],
++      [1, 0],
++      [{ x: 2048, y: 1200 }, { x: 9999, y: 9999 }],
++    );
++    expect(touches()).toEqual([
++      { surface: "primary", id: 4, x: 51, y: 70, hit: 12 },
++    ]);
++    expect(auxiliaryTouches()).toEqual([
++      { surface: "auxiliary", id: 23, x: 2048, y: 1200, hit: 71 },
++    ]);
++  });
++
++  test("preserves sidecar coordinates for terminal cancellation records", () => {
++    const cancelled = (__packTouchCoordinateSidecar(23) | 0x40000000) >>> 0;
++    __setTouches([cancelled], [0], [1], [{ x: 2560, y: 1440 }]);
++    expect(touches()).toEqual([]);
++    expect(__cancelledTouches()).toEqual([
++      { surface: "auxiliary", id: 23, x: 2560, y: 1440, hit: 0 },
++    ]);
++  });
++
++  test("uses full sidecar coordinates when a TS host captures hit facts", () => {
++    const seen: [number, number][] = [];
++    const facts = createTouchHitFacts((x, y) => {
++      seen.push([x, y]);
++      return 301;
++    });
++    const packed = [__packTouchCoordinateSidecar(5)];
++    expect(facts(packed)).toEqual([0]);
++    expect(facts(packed, [{ x: 2560, y: 1440 }])).toEqual([301]);
++    expect(seen).toEqual([[2560, 1440]]);
+   });
+ 
+   test("publishes an immutable per-frame snapshot and clears on release", () => {
+--- a/tests/devtools.test.ts
++++ b/tests/devtools.test.ts
+@@ -15,8 +15,8 @@
+ 
+ import { installHost, type Host, type HostOps } from "../framework/src/host.ts";
+ import { render as publicRender } from "../framework/src/index.ts";
+-import { expandTape, expandTapeMotion, expandTapeTouch, expandTapeTouchSurfaces, fmt, type Tape } from "../framework/src/devtools.ts";
+-import { touches, __packTouch, __packTouchCancel } from "../framework/src/touch.ts";
++import { expandTape, expandTapeMotion, expandTapeTouch, expandTapeTouchSurfaces, fmt, type Tape, wrapFrameHandler } from "../framework/src/devtools.ts";
++import { touches, __packTouch, __packTouchCancel, __packTouchCoordinateSidecar } from "../framework/src/touch.ts";
+ import { onFrame, onMotion, rightAnalogRaw, rightAnalogX, rightAnalogY } from "../framework/src/lifecycle.ts";
+ import { feedMotionState, MotionQuality, type MotionState } from "../framework/src/input-api.ts";
+ import { createComponent, createTextNode, insertNode, resetRendererState, rootMirror, type NodeMirror } from "../framework/src/renderer.ts";
+@@ -135,6 +135,50 @@
+ 
+ // ---------------------------------------------------------------------------
+ 
++describe("full touch coordinate sidecar", () => {
++  test("frame wrapper forwards only the supplied optional tenth argument", () => {
++    let received: readonly { readonly x: number; readonly y: number }[] | undefined;
++    const wrapped = wrapFrameHandler((
++      _buttons,
++      _analog,
++      _touches,
++      _hits,
++      _surfaces,
++      _rightAnalog,
++      _axisDeltas,
++      _motion,
++      _text,
++      coordinates,
++    ) => { received = coordinates; });
++    const sidecar = [{ x: 2048, y: 1200 }];
++    wrapped(0, undefined, [0x90000000], [0], [0], undefined, undefined, undefined, undefined, sidecar);
++    expect(received).toEqual(sidecar);
++    wrapped(0, undefined, [0x90000000], [0], [0], undefined, undefined, undefined, undefined);
++    expect(received).toBeUndefined();
++  });
++
++  test("does not pair a replayed marker with live coordinates", () => {
++    mountApp(() => View({}));
++    let received: readonly { readonly x: number; readonly y: number }[] | undefined;
++    const wrapped = wrapFrameHandler((
++      _buttons,
++      _analog,
++      _touches,
++      _hits,
++      _surfaces,
++      _rightAnalog,
++      _axisDeltas,
++      _motion,
++      _text,
++      coordinates,
++    ) => { received = coordinates; });
++    const marker = __packTouchCoordinateSidecar(5);
++    push({ t: "replay", tape: { v: 2, frames: 1, masks: [[0, 1]], touch: [[0, [marker]]] } });
++    wrapped(0, undefined, [marker], [0], [0], undefined, undefined, null, undefined, [{ x: 2048, y: 1200 }]);
++    expect(received).toBeUndefined();
++  });
++});
++
+ describe("tree + semantic names", () => {
+   test("tree and node stats include independent primary and auxiliary roots", () => {
+     host.ops.__auxiliarySurface = { root: 90, w: 320, h: 240 };

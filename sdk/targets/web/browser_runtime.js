@@ -6,7 +6,12 @@
  * WebAssembly.instantiate, Canvas2D, pointer/IME/lifecycle events and the
  * browser's localStorage implementation. It never evaluates guest source.
  */
-const { PocketWechatHost, registerCapability, setPermissionHandler } = require("../wechat/template/wechat-host.js");
+const { PocketWechatHost, registerCapability, setPermissionHandler, registeredCapabilityNames,
+  invokeRegisteredCapability, requestCapabilityPermission } = require("../wechat/template/wechat-host.js");
+const { BrowserGameInput } = require("./game_input.js");
+const { createPocketWorkerTransport } = require("./worker_transport.js");
+const { PocketRenderWorkerHost } = require("./render_worker_transport.js");
+const { observeRenderHost } = require("./render_observations.js");
 
 function numberOr(value, fallback) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -86,16 +91,44 @@ class PocketWebRuntime {
     this.ownsInputElement = false;
     this.disposed = false;
     this.active = false;
+    this.mounted = false;
+    this.mountPromise = null;
     this.pointers = new Map();
-    this.context = this.canvas.getContext("2d", { alpha: true });
-    if (!this.context) throw new Error("PocketJS requires a Canvas2D context");
+    this.renderWorker = options.renderWorker ?? this.config.renderWorker ?? false;
+    if (typeof this.renderWorker !== "boolean") throw new TypeError("renderWorker must be a boolean host option");
+    this.context = this.renderWorker ? null : this.canvas.getContext("2d", { alpha: true });
+    if (!this.renderWorker && !this.context) throw new Error("PocketJS requires a Canvas2D context");
     this.onError = options.onError;
+    this.workerTransport = null;
+    this.workerTransportUnsubscribe = null;
+    this.gameInput = (options.gameInput === true || this.config.gameInput === true)
+      ? new BrowserGameInput({ canvas: this.canvas, onChange: () => {
+        if (this.active && !this.disposed) this.host?.inputFrame([...this.pointers.values()]);
+      } }) : null;
     this.wx = createBrowserWx(this);
-    this.host = new PocketWechatHost({
+    const hostOptions = {
       wx: this.wx, config: this.config, canvas: this.canvas, context: this.context,
       onInput: (value) => this.updateInput(value), onError: (error) => this.onError?.(error),
       isActive: () => this.active && !this.disposed,
-    });
+      sampleInput: () => this.gameInput?.state(),
+      onWorkerChannel: (channel, data) => this.workerTransport?.receive(channel, data),
+    };
+    if (this.renderWorker) {
+      const base = document.baseURI;
+      const absolute = (value) => value ? new URL(value, base).href : null;
+      try {
+        this.host = new PocketRenderWorkerHost({ ...hostOptions,
+          workerUrl: absolute(options.renderWorkerUrl) || new URL("./pocket-render-worker.js", import.meta.url).href,
+          engineUrl: absolute(this.engineUrl), qjbcUrl: absolute(this.qjbcUrl), pakUrl: absolute(this.pakUrl),
+          cache: this.cache,
+          capabilityNames: [...new Set([...registeredCapabilityNames(), ...(this.config.requires || []), ...(this.config.optional || [])])],
+          boundary: (operation, params, signal) => this.browserBoundary(operation, params, signal),
+        });
+      } catch (error) { this.gameInput?.dispose(); throw error; }
+    } else {
+      this.host = new PocketWechatHost(hostOptions);
+      this.observations = observeRenderHost(this.host, "main");
+    }
     this.handleResize = () => { if (!this.disposed) this.host.resize(this.width(), this.height()); };
     this.handleVisibility = () => { if (document.visibilityState === "hidden") this.hide(); else this.show(); };
     this.handlePointer = (event) => this.pointer(event);
@@ -107,6 +140,29 @@ class PocketWebRuntime {
 
   width() { return Math.max(1, Math.floor(this.canvas.clientWidth || this.canvas.width || 1)); }
   height() { return Math.max(1, Math.floor(this.canvas.clientHeight || this.canvas.height || 1)); }
+
+  async browserBoundary(operation, params, signal) {
+    if (this.disposed || signal.aborted) throw Object.assign(new Error("Browser host is disposed"), { code: "cancelled" });
+    if (operation === "permission") return requestCapabilityPermission(params.capability, params.params || {}, { signal, wx: this.wx });
+    if (operation === "capability.invoke") return invokeRegisteredCapability(params.capability, params.params || {}, { signal, wx: this.wx });
+    const store = browserStorage();
+    if (operation === "storage.get") {
+      const data = store.getItem(String(params.key));
+      if (data === null) throw Object.assign(new Error("data not found"), { code: "not_found" });
+      return { data };
+    }
+    if (operation === "storage.set") { store.setItem(String(params.key), String(params.data)); return {}; }
+    if (operation === "storage.remove") { store.removeItem(String(params.key)); return {}; }
+    if (operation === "storage.info") {
+      const keys = [];
+      for (let index = 0; index < store.length; index++) { const key = store.key(index); if (key !== null) keys.push(key); }
+      return { keys, currentSize: 0, limitSize: 0 };
+    }
+    throw Object.assign(new Error(`Unsupported browser boundary: ${operation}`), { code: "unsupported" });
+  }
+
+  async inspect() { return this.renderWorker ? this.host.inspect() : this.observations.inspect(); }
+  async stats() { return this.renderWorker ? this.host.stats() : this.observations.stats(); }
 
   ensureInputElement() {
     if (this.inputElement) return this.inputElement;
@@ -140,6 +196,7 @@ class PocketWebRuntime {
       x: (event.clientX - rect.left) * scaleX, y: (event.clientY - rect.top) * scaleY,
       cancelled: event.type === "pointercancel" };
     if (event.type === "pointerdown") {
+      if ((!this.inputElement || this.inputElement.style.display === "none") && this.canvas.focus) this.canvas.focus({ preventScroll: true });
       this.pointers.set(event.pointerId, contact);
       this.canvas.setPointerCapture?.(event.pointerId);
     } else if (event.type === "pointermove") {
@@ -157,8 +214,16 @@ class PocketWebRuntime {
 
   async mount() {
     if (this.disposed) throw new Error("PocketWebRuntime is disposed");
-    if (this.active) return this;
-    if (this.qjbcUrl || this.pakUrl) {
+    if (this.mounted) return this;
+    if (this.mountPromise) return this.mountPromise;
+    this.mountPromise = this.mountRuntime();
+    try { return await this.mountPromise; }
+    catch (error) { this.dispose(); throw error; }
+    finally { this.mountPromise = null; }
+  }
+
+  async mountRuntime() {
+    if (!this.renderWorker && (this.qjbcUrl || this.pakUrl)) {
       if (!this.qjbcUrl || !this.pakUrl) throw new Error("PocketWebRuntime requires both qjbcUrl and pakUrl");
       const [qjbcResponse, pakResponse] = await Promise.all([
         fetch(this.qjbcUrl, { cache: this.cache ?? "no-store" }),
@@ -181,18 +246,41 @@ class PocketWebRuntime {
     addEventListener("resize", this.handleResize); addEventListener("visibilitychange", this.handleVisibility);
     for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"]) this.canvas.addEventListener(type, this.handlePointer, { passive: false });
     await this.host.start(this.width(), this.height(), numberOr(globalThis.devicePixelRatio, 1));
-    this.host.show(); return this;
+    const workerConfig = this.config.worker && typeof this.config.worker === "object" ? this.config.worker : null;
+    const workerDescriptor = workerConfig?.descriptor && typeof workerConfig.descriptor === "object" ? workerConfig.descriptor : workerConfig;
+    if (!this.renderWorker && workerConfig && workerDescriptor) {
+      const base = globalThis.location?.href || globalThis.document?.baseURI || "http://localhost/";
+      const engineUrl = new URL(this.engineUrl, base).href;
+      const qjbcBase = this.qjbcUrl ? new URL(this.qjbcUrl, base) : new URL(base);
+      this.workerTransport = createPocketWorkerTransport({
+        descriptor: workerDescriptor,
+        engineUrl,
+        qjbcUrl: new URL(String(workerConfig.bytecode || "app.worker.qjbc"), qjbcBase).href,
+        workerHttpOrigins: this.config.workerHttpOrigins,
+        onError: (error) => this.onError?.(error),
+      });
+      this.workerTransportUnsubscribe = this.workerTransport.subscribe((channel, data) =>
+        this.host.pushWorkerChannel(channel, data));
+      try {
+        await this.workerTransport.ready;
+      } catch (error) {
+        this.dispose();
+        throw error;
+      }
+    }
+    this.mounted = true;
+    this.host.show(); this.workerTransport?.setActive(true); this.gameInput?.setActive(true); return this;
   }
 
-  show() { if (!this.disposed) { this.active = true; this.host.show(); } }
-  hide() { if (!this.disposed) { this.active = false; this.host.hide(); } }
+  show() { if (!this.disposed) { this.active = true; this.host.show(); this.workerTransport?.setActive(true); this.gameInput?.setActive(true); } }
+  hide() { if (!this.disposed) { this.gameInput?.setActive(false); this.active = false; this.workerTransport?.setActive(false); this.host.hide(); } }
 
   dispose() {
     if (this.disposed) return;
     this.disposed = true; this.active = false;
     removeEventListener("resize", this.handleResize); removeEventListener("visibilitychange", this.handleVisibility);
     for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"]) this.canvas.removeEventListener(type, this.handlePointer);
-    this.pointers.clear(); this.host.dispose(); if (this.ownsInputElement) this.inputElement?.remove();
+    this.pointers.clear(); this.gameInput?.dispose(); this.gameInput = null; this.workerTransportUnsubscribe?.(); this.workerTransportUnsubscribe = null; this.workerTransport?.dispose(); this.workerTransport = null; this.host.dispose(); if (this.ownsInputElement) this.inputElement?.remove();
   }
 }
 

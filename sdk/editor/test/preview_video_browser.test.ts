@@ -111,7 +111,6 @@ async function runVideoBrowserAcceptance(): Promise<void> {
         appId: "pocket.host.demo",
         revision: 1,
         tickHz: 60,
-        compositorSurfaces: { [profileAppId]: 2, [lobbyAppId]: 3 },
         applications,
       },
     });

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -33,6 +34,182 @@ void main() {
         expect(resynchronized.resources.single.asset, original.asset);
         expect(resynchronized.resources.single.pixels, original.pixels);
         expect(runtime.frameDeltaAt(0), isNull);
+      } finally {
+        runtime.dispose();
+      }
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
+
+  test(
+    'resource-bearing baseline survives unchanged marker then applies a patch',
+    () {
+      final runtime = FfiPocketRuntime.open(width: 320, height: 480);
+      try {
+        final initial = runtime.eval(r'''
+          const imageNode = ui.createNode(2);
+          ui.setProp(imageNode, 1, 16);
+          ui.setProp(imageNode, 2, 16);
+          const texture = ui.uploadTexture(
+            new Uint8Array([10, 20, 30, 255]), 1, 1, 3
+          );
+          ui.setImage(imageNode, texture);
+          ui.insertBefore(1, imageNode, 0);
+
+          const rectNode = ui.createNode(0);
+          ui.setProp(rectNode, 1, 16);
+          ui.setProp(rectNode, 2, 16);
+          ui.setProp(rectNode, 24, 1);
+          ui.setProp(rectNode, 28, 40);
+          ui.setProp(rectNode, 25, 40);
+          ui.setProp(rectNode, 64, 0xff336699);
+          ui.insertBefore(1, rectNode, 1);
+
+          globalThis.frame = function() {};
+          globalThis.__pocketEvent = function(packet) {
+            if (packet.name === 'notify') {
+              pocket._emitValue({
+                type: 'event',
+                name: 'event-applied',
+                payload: {},
+              });
+            }
+          };
+          globalThis.__pocketEvent.__binaryCapable = true;
+        ''');
+        expect(initial.resources, hasLength(1));
+        final originalPixels = Uint8List.fromList(
+          initial.resources.single.pixels,
+        );
+
+        // The second call is the native zero-byte unchanged marker. The
+        // runtime must retain its operation base without retaining this
+        // caller-visible resource payload as part of that private base.
+        expect(runtime.frameDeltaAt(0), isNull);
+
+        runtime.send(const <String, dynamic>{
+          'type': 'event',
+          'name': 'notify',
+          'payload': <String, dynamic>{},
+        });
+        final patched = runtime.frameDeltaAt(0)!;
+        expect(patched.events.single.method, 'event-applied');
+        expect(patched.resources, isEmpty);
+        expect(identical(patched.ops, initial.ops), isTrue);
+        expect(initial.resources.single.pixels, originalPixels);
+        expect(runtime.frameDeltaAt(0), isNull);
+      } finally {
+        runtime.dispose();
+      }
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
+
+  test(
+    '2048-wide PFB1 resources stay owned after native output is replaced',
+    () {
+      final runtime = FfiPocketRuntime.open(width: 320, height: 480);
+      try {
+        final initial = runtime.load(r'''
+          const largeNode = ui.createNode(2);
+          ui.setProp(largeNode, 1, 320);
+          ui.setProp(largeNode, 2, 240);
+          ui.setImage(largeNode, ui.__textures.large_a);
+          ui.insertBefore(1, largeNode, 0);
+          const indexedNode = ui.createNode(2);
+          ui.setProp(indexedNode, 1, 16);
+          ui.setProp(indexedNode, 2, 16);
+          ui.setImage(indexedNode, ui.__textures.palette_a);
+          ui.insertBefore(1, indexedNode, 0);
+          globalThis.frame = function() {};
+          globalThis.__pocketEvent = function(packet) {
+            if (packet.name === "replace-image-resources") {
+              ui.setImage(largeNode, ui.__textures.large_b);
+              ui.setImage(indexedNode, ui.__textures.palette_b);
+            }
+          };
+          globalThis.__pocketEvent.__binaryCapable = true;
+        ''', _largeResourcePak());
+
+        expect(
+          initial.resources.any((resource) => resource.width == 2048),
+          isTrue,
+          reason:
+              'resources=${initial.resources.map((resource) => '${resource.width}x${resource.height}/psm${resource.psm}').toList()} '
+              'ops=${initial.ops.map((op) => op.runtimeType).toList()} '
+              'error=${runtime.lastError}',
+        );
+        final originalLarge = initial.resources.singleWhere(
+          (resource) => resource.width == 2048,
+        );
+        final originalIndexed = initial.resources.singleWhere(
+          (resource) => resource.psm == 5,
+        );
+        expect(originalLarge.height, 1024);
+        expect(originalLarge.psm, 3);
+        expect(originalLarge.pixels.length, 2048 * 1024 * 4);
+        expect(originalLarge.pixels.first, 17);
+        expect(originalLarge.pixels.last, 17);
+        expect(originalIndexed.pixels, Uint8List.fromList(<int>[45]));
+        expect(originalIndexed.palette, hasLength(1024));
+        expect(originalIndexed.palette!.first, 41);
+        expect(originalIndexed.palette![3], 44);
+        final originalLargeHash = _hashBytes(originalLarge.pixels);
+        final originalPaletteHash = _hashBytes(originalIndexed.palette!);
+
+        runtime.send(const <String, dynamic>{
+          'type': 'event',
+          'name': 'replace-image-resources',
+          'payload': <String, dynamic>{},
+        });
+        final replacement = runtime.frameDeltaAt(0)!;
+        final replacementLarge = replacement.resources.singleWhere(
+          (resource) => resource.width == 2048,
+        );
+        final replacementIndexed = replacement.resources.singleWhere(
+          (resource) => resource.psm == 5,
+        );
+        expect(replacementLarge.asset, 'large_b');
+        expect(replacementLarge.pixels.first, 93);
+        expect(replacementLarge.pixels.last, 93);
+        expect(replacementIndexed.asset, 'palette_b');
+        expect(replacementIndexed.pixels, Uint8List.fromList(<int>[105]));
+        expect(replacementIndexed.palette!.first, 101);
+
+        // The native binary output has been replaced by a frame containing
+        // different 2048-wide pixels and palette bytes. Parsed resource lists
+        // must own their data instead of viewing the borrowed FFI buffer.
+        expect(_hashBytes(originalLarge.pixels), originalLargeHash);
+        expect(_hashBytes(originalIndexed.palette!), originalPaletteHash);
+
+        final elapsedMicros = <int>[];
+        for (var index = 0; index < 8; index++) {
+          final width = index.isEven ? 321.0 : 320.0;
+          expect(runtime.resizeViewport(width, 480), isTrue);
+          final stopwatch = Stopwatch()..start();
+          final resynchronized = runtime.frameDeltaAt(0)!;
+          stopwatch.stop();
+          final transported = resynchronized.resources.singleWhere(
+            (resource) => resource.width == 2048,
+          );
+          expect(transported.pixels.length, 2048 * 1024 * 4);
+          expect(transported.pixels.first, 93);
+          if (index >= 2) elapsedMicros.add(stopwatch.elapsedMicroseconds);
+        }
+        final orderedMicros = List<int>.of(elapsedMicros)..sort();
+        final medianMicros = (orderedMicros[2] + orderedMicros[3]) ~/ 2;
+        // This stable-size real FFI resync is also the before/after timing
+        // fixture. The number is diagnostic only; correctness is asserted
+        // above, without a wall-clock threshold.
+        // ignore: avoid_print
+        print(
+          'PFB1_COPY_ABLATION 2048x1024 rgbaBytes=${2048 * 1024 * 4} '
+          'samplesMicros=${elapsedMicros.join(',')} medianMicros=$medianMicros',
+        );
       } finally {
         runtime.dispose();
       }
@@ -106,6 +283,65 @@ void main() {
       );
       expect(frameDelta.result['mode'], 'binaryV2');
       expect(frameDelta.result['unchanged'], isFalse);
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
+
+  test(
+    'event-only PFP1 frame reuses its unchanged primary operation list',
+    () {
+      final runtime = FfiPocketRuntime.open(width: 320, height: 480);
+      try {
+        final initial = runtime.eval(r'''
+          const node = ui.createNode(0);
+          ui.setProp(node, 1, 80);
+          ui.setProp(node, 2, 40);
+          ui.setProp(node, 64, 0xff336699);
+          ui.insertBefore(1, node, 0);
+          globalThis.frame = function() {};
+          globalThis.__pocketEvent = function(packet) {
+            pocket._emitValue({
+              type: 'event',
+              name: 'guest.notice',
+              payload: { acknowledged: packet.name },
+            });
+          };
+          __pocketEvent.__binaryCapable = true;
+        ''');
+        expect(initial.ops, hasLength(1));
+        expect(initial.sequence, isNotNull);
+
+        runtime.send(const <String, dynamic>{
+          'type': 'event',
+          'name': 'host.notice',
+          'payload': <String, dynamic>{},
+        });
+        final eventFrame = runtime.frameDeltaAt(0)!;
+
+        expect(eventFrame.events.single.method, 'guest.notice');
+        expect(eventFrame.events.single.params['acknowledged'], 'host.notice');
+        expect(eventFrame.sequence, greaterThan(initial.sequence!));
+        expect(identical(eventFrame.ops, initial.ops), isTrue);
+        expect(
+          () => eventFrame.ops.add(
+            const PocketRectOp(
+              x: 0,
+              y: 0,
+              width: 1,
+              height: 1,
+              color: 0xffffffff,
+            ),
+          ),
+          throwsUnsupportedError,
+        );
+        // The event was consumed, so the next stable probe uses the existing
+        // native zero-length marker and does not fabricate another frame.
+        expect(runtime.frameDeltaAt(0), isNull);
+      } finally {
+        runtime.dispose();
+      }
     },
     skip: libraryPath == null
         ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
@@ -328,4 +564,77 @@ void main() {
         ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
         : false,
   );
+}
+
+Uint8List _largeResourcePak() {
+  final entries = <({String key, int width, int height, int psm, int fill})>[
+    (key: 'ui:img.large_a', width: 2048, height: 1024, psm: 3, fill: 17),
+    (key: 'ui:img.large_b', width: 2048, height: 1024, psm: 3, fill: 93),
+    (key: 'ui:img.palette_a', width: 1, height: 1, psm: 5, fill: 41),
+    (key: 'ui:img.palette_b', width: 1, height: 1, psm: 5, fill: 101),
+  ];
+  const directoryOffset = 32;
+  final namesOffset = directoryOffset + entries.length * 24;
+  final names = <Uint8List>[
+    for (final entry in entries) Uint8List.fromList(utf8.encode(entry.key)),
+  ];
+  final blobsOffset =
+      namesOffset + names.fold<int>(0, (size, name) => size + name.length);
+  final blobLengths = entries.map((entry) {
+    final payloadBytes = entry.width * entry.height * (entry.psm == 3 ? 4 : 1);
+    return 8 + (entry.psm == 5 ? 1024 : 0) + payloadBytes;
+  }).toList();
+  final pakLength =
+      blobsOffset + blobLengths.fold<int>(0, (size, length) => size + length);
+  final pak = Uint8List(pakLength);
+  final data = ByteData.sublistView(pak);
+  data
+    ..setUint32(0, 0x4b504344, Endian.little) // DCPK
+    ..setUint16(4, 1, Endian.little)
+    ..setUint32(8, entries.length, Endian.little)
+    ..setUint32(12, directoryOffset, Endian.little)
+    ..setUint32(16, namesOffset, Endian.little);
+
+  var nameOffset = 0;
+  var blobOffset = blobsOffset;
+  for (var index = 0; index < entries.length; index++) {
+    final entry = entries[index];
+    final name = names[index];
+    final blobLength = blobLengths[index];
+    final directoryEntry = directoryOffset + index * 24;
+    data
+      ..setUint32(directoryEntry + 4, blobOffset, Endian.little)
+      ..setUint32(directoryEntry + 8, blobLength, Endian.little)
+      ..setUint32(directoryEntry + 12, nameOffset, Endian.little)
+      ..setUint16(directoryEntry + 16, name.length, Endian.little);
+    pak.setRange(
+      namesOffset + nameOffset,
+      namesOffset + nameOffset + name.length,
+      name,
+    );
+    data
+      ..setUint16(blobOffset, entry.width, Endian.little)
+      ..setUint16(blobOffset + 2, entry.height, Endian.little)
+      ..setUint8(blobOffset + 4, entry.psm)
+      ..setUint8(blobOffset + 5, 0);
+    if (entry.psm == 5) {
+      for (var byte = 0; byte < 1024; byte++) {
+        pak[blobOffset + 8 + byte] = (entry.fill + byte) & 0xff;
+      }
+      pak[blobOffset + 8 + 1024] = entry.fill + 4;
+    } else {
+      pak.fillRange(blobOffset + 8, blobOffset + blobLength, entry.fill);
+    }
+    nameOffset += name.length;
+    blobOffset += blobLength;
+  }
+  return pak;
+}
+
+int _hashBytes(Uint8List bytes) {
+  var hash = 0x811c9dc5;
+  for (final byte in bytes) {
+    hash = ((hash ^ byte) * 0x01000193) & 0xffffffff;
+  }
+  return hash;
 }

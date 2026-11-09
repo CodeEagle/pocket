@@ -16,8 +16,20 @@ import { buildWechat } from "./build_wechat.ts";
 
 const SDK_ROOT = resolve(import.meta.dir, "..");
 const DEFAULT_OUT = join(SDK_ROOT, ".pocket-build", "web-engine");
-const REQUIRED_EXPORTS = ["web_boot", "web_set_identity", "web_wechat_boot"];
-const SOURCE_GUEST_IMPORTS = /guest_(?:eval|start)|pocket_web/i;
+/** Exports required by every released generic engine. The Worker entries are
+ * kept in the same engine so a package cannot silently switch to a second
+ * JavaScript runtime when it is moved from native to a browser Worker. */
+export const REQUIRED_EXPORTS = [
+  "web_boot", "web_set_identity", "web_wechat_boot",
+  "web_worker_create", "web_worker_step", "web_worker_deadline",
+  "web_worker_receive", "web_worker_take", "web_worker_emit",
+  "web_worker_finish", "web_worker_error", "web_worker_destroy",
+  "web_worker_channels_configure", "web_worker_channels_push", "web_worker_channels_take",
+];
+// The old source-eval browser target imported `pocket_web.*`; the pinned
+// Worker bridge intentionally imports the distinct `pocket_web_worker.*`
+// module and must remain valid here.
+const SOURCE_GUEST_IMPORTS = /(?:guest_eval|guest_start|pocket_web\.)/i;
 
 export type BuildWebEngineOptions = { outDir: string; tickHz?: number; rasterDensity?: number };
 
@@ -94,6 +106,12 @@ export async function buildWebEngine(options: BuildWebEngineOptions): Promise<{ 
     const bun = process.env.POCKET_BUN || "bun";
     run(bun, ["build", join(SDK_ROOT, "targets/web/browser_runtime.js"), "--target=browser", "--format=esm", `--outfile=${join(output, "pocket-web.js")}`]);
     const runtime = readFileSync(join(output, "pocket-web.js"));
+    const renderWorkerSource = join(SDK_ROOT, "targets/web/render_worker.js");
+    if (!existsSync(renderWorkerSource) || !statSync(renderWorkerSource).isFile()) {
+      throw new Error("build_web_engine: render worker entry is missing: targets/web/render_worker.js");
+    }
+    run(bun, ["build", renderWorkerSource, "--target=browser", "--format=esm", `--outfile=${join(output, "pocket-render-worker.js")}`]);
+    const renderWorker = readFileSync(join(output, "pocket-render-worker.js"));
     writeFileSync(join(output, "manifest.json"), `${JSON.stringify({
       schemaVersion: 1,
       kind: "pocket-web-engine",
@@ -102,8 +120,10 @@ export async function buildWebEngine(options: BuildWebEngineOptions): Promise<{ 
       externalGuestAbi: "web_boot + web_set_identity",
       wasm: "pocketjs.wasm",
       runtime: "pocket-web.js",
+      renderWorker: "pocket-render-worker.js",
       wasmBytes: wasm.byteLength,
       runtimeBytes: runtime.byteLength,
+      renderWorkerBytes: renderWorker.byteLength,
       exports: verification.exports,
       imports: verification.imports,
     }, null, 2)}\n`);

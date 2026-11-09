@@ -8,6 +8,7 @@
 use pocket_flutter::{
     pocket_bytecode_runtime_abi, pocket_create_with_density_and_tick_hz, pocket_destroy,
     pocket_frame, pocket_frame_delta, pocket_last_error, pocket_load_bytecode_files, pocket_send,
+    pocket_configure_worker,
 };
 use serde_json::{json, Value};
 use std::env;
@@ -21,6 +22,8 @@ type Handle = *mut std::ffi::c_void;
 struct Args {
     bytecode: PathBuf,
     pak: PathBuf,
+    worker_bytecode: Option<PathBuf>,
+    worker_config: Option<PathBuf>,
     frames: usize,
     warmup: usize,
     width: f64,
@@ -73,6 +76,8 @@ fn parse_f64(value: String, label: &str) -> f64 {
 fn parse_args() -> Args {
     let mut bytecode = None;
     let mut pak = None;
+    let mut worker_bytecode = None;
+    let mut worker_config = None;
     let mut frames = 300;
     let mut warmup = 10;
     let mut width = 390.0;
@@ -94,6 +99,8 @@ fn parse_args() -> Args {
         match name {
             "--bytecode" => bytecode = Some(PathBuf::from(value(&mut args))),
             "--pak" => pak = Some(PathBuf::from(value(&mut args))),
+            "--worker-bytecode" => worker_bytecode = Some(PathBuf::from(value(&mut args))),
+            "--worker-config" => worker_config = Some(PathBuf::from(value(&mut args))),
             "--frames" => frames = parse_usize(value(&mut args), "--frames"),
             "--warmup" => warmup = parse_usize(value(&mut args), "--warmup"),
             "--width" => width = parse_f64(value(&mut args), "--width"),
@@ -111,9 +118,15 @@ fn parse_args() -> Args {
         eprintln!("frames, tick-hz and raster-density must be positive; tick-hz <= 120");
         usage();
     }
+    if worker_bytecode.is_some() != worker_config.is_some() {
+        eprintln!("--worker-bytecode and --worker-config must be supplied together");
+        usage();
+    }
     Args {
         bytecode: bytecode.unwrap_or_else(|| usage()),
         pak: pak.unwrap_or_else(|| usage()),
+        worker_bytecode,
+        worker_config,
         frames,
         warmup,
         width,
@@ -148,6 +161,21 @@ unsafe fn create_runtime(args: &Args) -> Result<Handle, String> {
     .cast::<std::ffi::c_void>();
     if handle.is_null() {
         return Err("pocket_create_with_density_and_tick_hz returned null".to_owned());
+    }
+    if let (Some(bytecode), Some(config)) = (&args.worker_bytecode, &args.worker_config) {
+        let configured = (|| -> Result<(), String> {
+            let bytes = std::fs::read(bytecode).map_err(|error| error.to_string())?;
+            let config = CString::new(std::fs::read(config).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+            if pocket_configure_worker(handle.cast(), bytes.as_ptr(), bytes.len(), config.as_ptr(), None) != 0 {
+                return Err(last_error(handle));
+            }
+            Ok(())
+        })();
+        if let Err(error) = configured {
+            pocket_destroy(handle.cast());
+            return Err(error);
+        }
     }
     let bytecode_path = c_path(&args.bytecode, "bytecode path");
     let pak_path = c_path(&args.pak, "pak path");

@@ -1,0 +1,542 @@
+diff --git a/contracts/spec/spec.ts b/contracts/spec/spec.ts
+--- a/contracts/spec/spec.ts
++++ b/contracts/spec/spec.ts
+@@ -1479,6 +1479,11 @@
+ //   TEX_TRI_REPEAT (12 words): same payload and geometry as TEX_TRI, but sample
+ //                           the texture with repeat tiling on both axes.
+ //                           UVs must be finite and within +/-1,000,000.
++//   TEX_TRI_FLOAT (15 words): op, texture handle, 3 x { x, y, u, v }, color;
++//                           x/y/u/v are f32 bits. Retained meshes use this to
++//                           preserve fractional logical-pixel coordinates.
++//   TEX_TRI_REPEAT_FLOAT (15 words): same float payload, repeat sampler. Only
++//                           retained meshes emit these float-coordinate ops.
+ //   TEXT_RUN    (8 + ceil(n/4) words):
+ //                           op,
+ //                           word1: bits 0-7 fontSlot,
+@@ -1524,7 +1529,7 @@
+ //                           enclosing mesh layer. Layers cannot nest.
+ 
+ /** Closed DrawList operation generation; drivers and archives use matching headers. */
+-export const DRAW_LIST_VERSION = 2;
++export const DRAW_LIST_VERSION = 3;
+ 
+ export const DRAW_OP = {
+   rect: 1,
+@@ -1541,6 +1546,8 @@
+   meshMaskBegin: 12,
+   meshLayerRestore: 13,
+   texTriRepeat: 14,
++  texTriFloat: 15,
++  texTriRepeatFloat: 16,
+ } as const;
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/contracts/spec/gen-rust.ts b/contracts/spec/gen-rust.ts
+--- a/contracts/spec/gen-rust.ts
++++ b/contracts/spec/gen-rust.ts
+@@ -462,7 +462,8 @@
+   put("/// Word counts incl. header: RECT 4, GRAD_RECT 6, GLYPH_RUN 3+2n,");
+   put("/// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,");
+   put("/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,");
+-  put("/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12.");
++  put("/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,");
++  put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each.");
+   put(`pub const DRAW_LIST_VERSION: u32 = ${DRAW_LIST_VERSION};`);
+   put("pub mod draw_op {");
+   for (const [name, v] of Object.entries(DRAW_OP)) {
+diff --git a/contracts/generated/pocket_spec.h b/contracts/generated/pocket_spec.h
+--- a/contracts/generated/pocket_spec.h
++++ b/contracts/generated/pocket_spec.h
+@@ -29,7 +29,7 @@
+ #define POCKET_ANALOG_CENTER 0x8080U
+ 
+ /* Closed DrawList operation set; word layouts are specified in spec.ts. */
+-#define POCKET_DRAW_LIST_VERSION 2U
++#define POCKET_DRAW_LIST_VERSION 3U
+ #define POCKET_DRAW_OP_RECT 1U
+ #define POCKET_DRAW_OP_GRAD_RECT 2U
+ #define POCKET_DRAW_OP_GLYPH_RUN 3U
+@@ -44,6 +44,8 @@
+ #define POCKET_DRAW_OP_MESH_MASK_BEGIN 12U
+ #define POCKET_DRAW_OP_MESH_LAYER_RESTORE 13U
+ #define POCKET_DRAW_OP_TEX_TRI_REPEAT 14U
++#define POCKET_DRAW_OP_TEX_TRI_FLOAT 15U
++#define POCKET_DRAW_OP_TEX_TRI_REPEAT_FLOAT 16U
+ 
+ /* Portable operation numbers (contracts/spec/ui-ops.ts): what a program's
+  * operation provider serves and pocket_runtime_op dispatches. */
+diff --git a/engine/spec/src/lib.rs b/engine/spec/src/lib.rs
+--- a/engine/spec/src/lib.rs
++++ b/engine/spec/src/lib.rs
+@@ -466,8 +466,9 @@
+ /// Word counts incl. header: RECT 4, GRAD_RECT 6, GLYPH_RUN 3+2n,
+ /// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,
+ /// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,
+-/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12.
+-pub const DRAW_LIST_VERSION: u32 = 2;
++/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,
++/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each.
++pub const DRAW_LIST_VERSION: u32 = 3;
+ pub mod draw_op {
+     pub const RECT: u32 = 1;
+     pub const GRAD_RECT: u32 = 2;
+@@ -483,6 +484,8 @@
+     pub const MESH_MASK_BEGIN: u32 = 12;
+     pub const MESH_LAYER_RESTORE: u32 = 13;
+     pub const TEX_TRI_REPEAT: u32 = 14;
++    pub const TEX_TRI_FLOAT: u32 = 15;
++    pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;
+ }
+ 
+ /// .pak container constants (byte-compatible with dreamcart's format;
+diff --git a/engine/drivers/src/abi.rs b/engine/drivers/src/abi.rs
+--- a/engine/drivers/src/abi.rs
++++ b/engine/drivers/src/abi.rs
+@@ -91,7 +91,7 @@
+ pub const POCKET_MOTION_VALUE_SCREEN_ROTATION: u32 = 6;
+ pub const POCKET_MOTION_VALUE_TILT: u32 = 7;
+ pub const POCKET_MOTION_VALUE_ANGLES: u32 = 8;
+-pub const POCKET_DRAW_LIST_VERSION: u32 = 2;
++pub const POCKET_DRAW_LIST_VERSION: u32 = 3;
+ pub const POCKET_PIXEL_FORMAT_RGB565: u32 = 0;
+ pub const POCKET_PIXEL_FORMAT_RGBA8888: u32 = 1;
+ pub const POCKET_PIXEL_FORMAT_ARGB8888: u32 = 2;
+diff --git a/engine/core/src/draw.rs b/engine/core/src/draw.rs
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -1845,7 +1845,7 @@
+                 ClipVert { x, y, u: vertex[2], v: vertex[3], color: [255.0; 4] }
+             });
+             clip_fan(&poly, clip, |a, b, c| {
+-                emit_tex_tri(dl, texture as u32, color, a, b, c, clip, self.screen, repeat_texture)
++                emit_mesh_tex_tri(dl, texture as u32, color, a, b, c, clip, self.screen, repeat_texture)
+             });
+         }
+         dl.words.len() > start
+@@ -3239,6 +3239,47 @@
+     dl.words.push(modulate);
+ }
+ 
++/// Retained mesh triangles keep subpixel logical-pixel positions. Ordinary
++/// rotated image quads continue using the legacy packed-i16 TEX_TRI format.
++fn emit_mesh_tex_tri(
++    dl: &mut DrawList,
++    tex: u32,
++    modulate: u32,
++    v0: &ClipVert,
++    v1: &ClipVert,
++    v2: &ClipVert,
++    clip: &Clip,
++    screen: (f32, f32),
++    repeat_texture: bool,
++) {
++    let px = |v: &ClipVert| {
++        (
++            clampf(clampf(v.x, clip.x0, clip.x1), 0.0, screen.0),
++            clampf(clampf(v.y, clip.y0, clip.y1), 0.0, screen.1),
++        )
++    };
++    let (x0, y0) = px(v0);
++    let (x1, y1) = px(v1);
++    let (x2, y2) = px(v2);
++    let area2 = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
++    if area2 == 0.0 || !area2.is_finite() {
++        return;
++    }
++    dl.words.push(if repeat_texture {
++        spec::draw_op::TEX_TRI_REPEAT_FLOAT
++    } else {
++        spec::draw_op::TEX_TRI_FLOAT
++    });
++    dl.words.push(tex);
++    for ((x, y), vert) in [((x0, y0), v0), ((x1, y1), v1), ((x2, y2), v2)] {
++        dl.words.push(x.to_bits());
++        dl.words.push(y.to_bits());
++        dl.words.push(vert.u.to_bits());
++        dl.words.push(vert.v.to_bits());
++    }
++    dl.words.push(modulate);
++}
++
+ /// Stack capacity for a clipped polygon: a convex quad gains at most one
+ /// vertex per clip edge.
+ const CLIP_STACK: usize = 8;
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -1492,6 +1492,7 @@
+                 x if x == spec::draw_op::SCISSOR_POP => 1,
+                 x if x == spec::draw_op::TRI => 7,
+                 x if x == spec::draw_op::TEX_TRI || x == spec::draw_op::TEX_TRI_REPEAT => 12,
++                x if x == spec::draw_op::TEX_TRI_FLOAT || x == spec::draw_op::TEX_TRI_REPEAT_FLOAT => 15,
+                 x if x == spec::draw_op::MESH_LAYER_BEGIN => 10,
+                 x if x == spec::draw_op::MESH_MASK_BEGIN => 4,
+                 x if x == spec::draw_op::MESH_LAYER_RESTORE => 1,
+diff --git a/engine/render/draw-ops/src/lib.rs b/engine/render/draw-ops/src/lib.rs
+--- a/engine/render/draw-ops/src/lib.rs
++++ b/engine/render/draw-ops/src/lib.rs
+@@ -57,6 +57,7 @@
+         draw_op::SCISSOR_POP => 1,
+         draw_op::TRI => 7,
+         draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT => 12,
++        draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,
+         draw_op::MESH_LAYER_BEGIN => 10,
+         draw_op::MESH_MASK_BEGIN => 4,
+         draw_op::MESH_LAYER_RESTORE => 1,
+@@ -182,6 +183,7 @@
+                 self.mesh_target_seen = false;
+             }
+             draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT
++                | draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT
+                 if self.mesh_layer_active && !self.mesh_mask_active =>
+             {
+                 self.mesh_target_seen = true;
+diff --git a/engine/render/draw-ops/tests/decoding.rs b/engine/render/draw-ops/tests/decoding.rs
+--- a/engine/render/draw-ops/tests/decoding.rs
++++ b/engine/render/draw-ops/tests/decoding.rs
+@@ -13,7 +13,7 @@
+ }
+ 
+ #[test]
+-fn all_eleven_records_preserve_the_original_words_and_offsets() {
++fn all_thirteen_records_preserve_the_original_words_and_offsets() {
+     let records: &[&[u32]] = &[
+         &[RECT, 0, 0, 0xff00_0000],
+         &[GRAD_RECT, 0, 0, 1, 2, 0],
+@@ -24,6 +24,8 @@
+         &[TRI, 0, 0, 0, 1, 2, 3],
+         &[TEX_TRI, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+         &[TEX_TRI_REPEAT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
++        &[TEX_TRI_FLOAT, 0, 0.25f32.to_bits(), 0.5f32.to_bits(), 0, 0, 2.25f32.to_bits(), 0.5f32.to_bits(), 1.0f32.to_bits(), 0, 0.25f32.to_bits(), 2.5f32.to_bits(), 0, 1.0f32.to_bits(), u32::MAX],
++        &[TEX_TRI_REPEAT_FLOAT, 0, 0.25f32.to_bits(), 0.5f32.to_bits(), 0, 0, 2.25f32.to_bits(), 0.5f32.to_bits(), 1.0f32.to_bits(), 0, 0.25f32.to_bits(), 2.5f32.to_bits(), 0, 1.0f32.to_bits(), u32::MAX],
+         &[TEXT_RUN, 0, 0, 0, 0, 0, 0, 5, 0x6463_6261, 0x65],
+         &[SURFACE_QUAD, 0, 0, 0, 0, 0, 0, 0, 0],
+     ];
+@@ -34,7 +36,7 @@
+     let decoded: Vec<_> = DrawOps::new(&words, SCREEN)
+         .collect::<Result<_, _>>()
+         .unwrap();
+-    assert_eq!(decoded.len(), 11);
++    assert_eq!(decoded.len(), 13);
+     let mut offset = 0;
+     for (operation, record) in decoded.iter().zip(records) {
+         assert_eq!(operation.words, *record);
+diff --git a/engine/present/src/damage.rs b/engine/present/src/damage.rs
+--- a/engine/present/src/damage.rs
++++ b/engine/present/src/damage.rs
+@@ -543,6 +543,14 @@
+             spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_REPEAT => {
+                 triangle_bounds([words[2], words[5], words[8]], clip)
+             }
++            spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT => {
++                triangle_bounds_float(
++                    [words[2], words[3]],
++                    [words[6], words[7]],
++                    [words[10], words[11]],
++                    clip,
++                )
++            }
+             // Native text has no glyph geometry here. Its current clip is a
+             // conservative bound for damage tracking.
+             spec::draw_op::TEXT_RUN => clip,
+@@ -589,7 +597,11 @@
+ /// The texture an operation samples.
+ fn sampled_texture(code: u32, words: &[u32]) -> Option<i32> {
+     match code {
+-        spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_REPEAT => {
++        spec::draw_op::TEX_QUAD
++        | spec::draw_op::TEX_TRI
++        | spec::draw_op::TEX_TRI_REPEAT
++        | spec::draw_op::TEX_TRI_FLOAT
++        | spec::draw_op::TEX_TRI_REPEAT_FLOAT => {
+             words.get(1).map(|&handle| handle as i32)
+         }
+         _ => None,
+@@ -1061,6 +1073,38 @@
+ }
+ 
+ #[inline]
++fn floor_i32(value: f32) -> i32 {
++    let truncated = value as i32;
++    if value < truncated as f32 {
++        truncated.saturating_sub(1)
++    } else {
++        truncated
++    }
++}
++
++#[inline]
++fn ceil_i32(value: f32) -> i32 {
++    let truncated = value as i32;
++    if value > truncated as f32 {
++        truncated.saturating_add(1)
++    } else {
++        truncated
++    }
++}
++
++fn triangle_bounds_float(a: [u32; 2], b: [u32; 2], c: [u32; 2], clip: DamageRect) -> DamageRect {
++    let points = [a, b, c].map(|point| (f32::from_bits(point[0]), f32::from_bits(point[1])));
++    if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
++        return clip;
++    }
++    let min_x = floor_i32(points.iter().map(|point| point.0).fold(f32::INFINITY, f32::min));
++    let min_y = floor_i32(points.iter().map(|point| point.1).fold(f32::INFINITY, f32::min));
++    let max_x = ceil_i32(points.iter().map(|point| point.0).fold(f32::NEG_INFINITY, f32::max));
++    let max_y = ceil_i32(points.iter().map(|point| point.1).fold(f32::NEG_INFINITY, f32::max));
++    DamageRect::new(min_x, min_y, max_x, max_y).intersect(clip)
++}
++
++#[inline]
+ fn xy(word: u32) -> (i32, i32) {
+     (
+         (word & 0xffff) as u16 as i16 as i32,
+diff --git a/engine/raster/src/lib.rs b/engine/raster/src/lib.rs
+--- a/engine/raster/src/lib.rs
++++ b/engine/raster/src/lib.rs
+@@ -837,6 +837,13 @@
+                 tex_tri(ui, target, width, scale, clip, &words[i + 1..i + 12]);
+                 i += 12;
+             }
++            draw_op::TEX_TRI_FLOAT => {
++                if i + 15 > words.len() {
++                    return;
++                }
++                tex_tri_float(ui, target, width, scale, clip, &words[i + 1..i + 15]);
++                i += 15;
++            }
+             draw_op::TEXT_RUN => {
+                 // Native-text op (host text system shapes the run); the
+                 // software rasterizer has no shaper, so hosts that raster run
+@@ -1185,6 +1192,116 @@
+         mix(c00.2, c01.2, c10.2, c11.2),
+         mix(c00.3, c01.3, c10.3, c11.3),
+     ))
++}
++
++// ---- TEX_TRI_FLOAT: subpixel barycentric mesh triangle --------------------
++
++fn tex_tri_float<T: RenderTarget>(
++    ui: &(impl RenderResources + ?Sized),
++    target: &mut T,
++    stride: i32,
++    scale: i32,
++    clip: Clip,
++    p: &[u32],
++) {
++    let handle = p[0] as i32;
++    let scale = scale as f32;
++    let (mut x0, mut y0) = (f32::from_bits(p[1]) * scale, f32::from_bits(p[2]) * scale);
++    let (mut u0, mut v0) = (f32::from_bits(p[3]), f32::from_bits(p[4]));
++    let (mut x1, mut y1) = (f32::from_bits(p[5]) * scale, f32::from_bits(p[6]) * scale);
++    let (mut u1, mut v1) = (f32::from_bits(p[7]), f32::from_bits(p[8]));
++    let (mut x2, mut y2) = (f32::from_bits(p[9]) * scale, f32::from_bits(p[10]) * scale);
++    let (mut u2, mut v2) = (f32::from_bits(p[11]), f32::from_bits(p[12]));
++    let modulate = p[13];
++    if [x0, y0, x1, y1, x2, y2, u0, v0, u1, v1, u2, v2]
++        .iter()
++        .any(|value| !value.is_finite())
++    {
++        return;
++    }
++    let Some(view) = ui.texture(handle) else {
++        return;
++    };
++    // Compute edge equations in f64. Source vertices are f32, so this gives
++    // exact antisymmetric edge values for opposite directions of a shared
++    // edge and avoids double-blending that edge between adjacent triangles.
++    let orient = |ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32| {
++        (bx as f64 - ax as f64) * (py as f64 - ay as f64)
++            - (by as f64 - ay as f64) * (px as f64 - ax as f64)
++    };
++    let top_left = |ax: f32, ay: f32, bx: f32, by: f32| {
++        let dx = bx - ax;
++        let dy = by - ay;
++        dy < 0.0 || (dy == 0.0 && dx > 0.0)
++    };
++    let mut area = orient(x0, y0, x1, y1, x2, y2);
++    if area == 0.0 {
++        return;
++    }
++    if area < 0.0 {
++        core::mem::swap(&mut x1, &mut x2);
++        core::mem::swap(&mut y1, &mut y2);
++        core::mem::swap(&mut u1, &mut u2);
++        core::mem::swap(&mut v1, &mut v2);
++        area = -area;
++    }
++    // Bounds are finite above. Rust's float cast truncates toward zero;
++    // correct the fractional side without adding a no_std math dependency.
++    let floor_bound = |value: f32| {
++        let integer = value as i32;
++        if integer as f32 > value { integer.saturating_sub(1) } else { integer }
++    };
++    let ceil_bound = |value: f32| {
++        let integer = value as i32;
++        if (integer as f32) < value { integer.saturating_add(1) } else { integer }
++    };
++    let min_x = floor_bound(x0.min(x1).min(x2));
++    let max_x = ceil_bound(x0.max(x1).max(x2));
++    let min_y = floor_bound(y0.min(y1).min(y2));
++    let max_y = ceil_bound(y0.max(y1).max(y2));
++    let (min_x, max_x) = (min_x.max(clip.x0), max_x.min(clip.x1));
++    let (min_y, max_y) = (min_y.max(clip.y0), max_y.min(clip.y1));
++    let (mr, mg, mb, ma) = channels(modulate);
++    let identity = modulate == 0xffff_ffff;
++    let (twf, thf) = (view.w as f32, view.h as f32);
++    let (tw_max, th_max) = (view.w as i32 - 1, view.h as i32 - 1);
++    for py in min_y..max_y {
++        let sy = py as f32 + 0.5;
++        for px in min_x..max_x {
++            let sx = px as f32 + 0.5;
++            let w0 = orient(x1, y1, x2, y2, sx, sy);
++            let w1 = orient(x2, y2, x0, y0, sx, sy);
++            let w2 = orient(x0, y0, x1, y1, sx, sy);
++            if w0 < 0.0
++                || (w0 == 0.0 && !top_left(x1, y1, x2, y2))
++                || w1 < 0.0
++                || (w1 == 0.0 && !top_left(x2, y2, x0, y0))
++                || w2 < 0.0
++                || (w2 == 0.0 && !top_left(x0, y0, x1, y1))
++            {
++                continue;
++            }
++            let (f0, f1, f2) = ((w0 / area) as f32, (w1 / area) as f32, (w2 / area) as f32);
++            let (u, v) = (u0 * f0 + u1 * f1 + u2 * f2, v0 * f0 + v1 * f1 + v2 * f2);
++            let sample = if view.linear {
++                sample_linear(&view, u, v)
++            } else {
++                let tx = ((u * twf) as i32).clamp(0, tw_max);
++                let ty = ((v * thf) as i32).clamp(0, th_max);
++                texel(&view, (ty * view.w as i32 + tx) as usize)
++            };
++            let Some((mut r, mut g, mut b, mut a)) = sample else {
++                return;
++            };
++            if !identity {
++                r = (r * mr + 127) / 255;
++                g = (g * mg + 127) / 255;
++                b = (b * mb + 127) / 255;
++                a = (a * ma + 127) / 255;
++            }
++            target.blend((py * stride + px) as usize, r, g, b, a);
++        }
++    }
+ }
+ 
+ // ---- TEX_TRI: barycentric textured triangle (affine UV; nearest, or integer
+diff --git a/engine/raster/src/surface.rs b/engine/raster/src/surface.rs
+--- a/engine/raster/src/surface.rs
++++ b/engine/raster/src/surface.rs
+@@ -129,6 +129,7 @@
+                 | draw_op::MESH_MASK_BEGIN
+                 | draw_op::MESH_LAYER_RESTORE
+                 | draw_op::TEX_TRI_REPEAT
++                | draw_op::TEX_TRI_REPEAT_FLOAT
+         ) {
+             return Err(RenderError::Unsupported);
+         }
+@@ -240,6 +241,7 @@
+             | draw_op::MESH_MASK_BEGIN
+             | draw_op::MESH_LAYER_RESTORE
+             | draw_op::TEX_TRI_REPEAT
++            | draw_op::TEX_TRI_REPEAT_FLOAT
+     ) {
+         return Err(RenderError::Unsupported);
+     }
+@@ -299,16 +301,23 @@
+             texture: None,
+             font: None,
+         };
++        if operation.opcode == draw_op::TEX_TRI_FLOAT {
++            for &word in &[2usize, 3, 6, 7, 10, 11] {
++                if !f32::from_bits(operation.words[word]).is_finite() {
++                    return Err(RenderError::InvalidFrame);
++                }
++            }
++        }
+         match operation.opcode {
+-            draw_op::TEX_QUAD | draw_op::TEX_TRI => {
++            draw_op::TEX_QUAD | draw_op::TEX_TRI | draw_op::TEX_TRI_FLOAT => {
+                 if let Some(view) = source.texture(operation.words[1] as i32) {
+                     if !validate_texture(&view)? {
+                         return Ok(result);
+                     }
+-                    let coordinates: &[usize] = if operation.opcode == draw_op::TEX_QUAD {
+-                        &[4, 5, 6, 7]
+-                    } else {
+-                        &[3, 4, 6, 7, 9, 10]
++                    let coordinates: &[usize] = match operation.opcode {
++                        draw_op::TEX_QUAD => &[4, 5, 6, 7],
++                        draw_op::TEX_TRI => &[3, 4, 6, 7, 9, 10],
++                        _ => &[4, 5, 8, 9, 12, 13],
+                     };
+                     for (index, &word) in coordinates.iter().enumerate() {
+                         let uv = f32::from_bits(operation.words[word]);
+diff --git a/engine/raster/tests/driver.rs b/engine/raster/tests/driver.rs
+--- a/engine/raster/tests/driver.rs
++++ b/engine/raster/tests/driver.rs
+@@ -462,6 +462,63 @@
+ }
+ 
+ #[test]
++fn float_mesh_triangle_preserves_subpixel_coverage_in_software_raster() {
++    let resources = Resources::fixture();
++    let float_mesh = [
++        draw_op::TEX_TRI_FLOAT,
++        1,
++        0.2f32.to_bits(), 0.2f32.to_bits(), 0.0f32.to_bits(), 0.0f32.to_bits(),
++        2.6f32.to_bits(), 0.2f32.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(),
++        0.2f32.to_bits(), 2.6f32.to_bits(), 0.0f32.to_bits(), 1.0f32.to_bits(),
++        u32::MAX,
++    ];
++    let legacy = [
++        draw_op::TEX_TRI, 1, xy(0, 0), 0.0f32.to_bits(), 0.0f32.to_bits(),
++        xy(3, 0), 1.0f32.to_bits(), 0.0f32.to_bits(),
++        xy(0, 3), 0.0f32.to_bits(), 1.0f32.to_bits(), u32::MAX,
++    ];
++    let mut float_pixels = [0u8; 8 * 6 * 4];
++    let mut legacy_pixels = [0u8; 8 * 6 * 4];
++    let mut float_surface = Surface::new(
++        &mut float_pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888,
++    ).unwrap();
++    let mut legacy_surface = Surface::new(
++        &mut legacy_pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888,
++    ).unwrap();
++    render_surface(&resources, &float_mesh, &mut float_surface, 1).unwrap();
++    render_surface(&resources, &legacy, &mut legacy_surface, 1).unwrap();
++    let sample = (0 * 8 + 2) * 4;
++    assert_eq!(&float_pixels[sample..sample + 4], &[0, 0, 0, 255]);
++    assert_ne!(&legacy_pixels[sample..sample + 4], &[0, 0, 0, 255]);
++}
++
++#[test]
++fn float_mesh_shared_edge_uses_top_left_coverage_once() {
++    let resources = Resources::fixture();
++    let triangle = |points: [[f32; 2]; 3]| {
++        [
++            draw_op::TEX_TRI_FLOAT,
++            1,
++            points[0][0].to_bits(), points[0][1].to_bits(), 0.0f32.to_bits(), 0.0f32.to_bits(),
++            points[1][0].to_bits(), points[1][1].to_bits(), 0.0f32.to_bits(), 0.0f32.to_bits(),
++            points[2][0].to_bits(), points[2][1].to_bits(), 0.0f32.to_bits(), 0.0f32.to_bits(),
++            0x80ff_ffff,
++        ]
++    };
++    let words = [
++        triangle([[1.0, 1.0], [4.0, 1.0], [4.0, 4.0]]).as_slice(),
++        triangle([[1.0, 1.0], [4.0, 4.0], [1.0, 4.0]]).as_slice(),
++    ].concat();
++    let mut pixels = [0u8; 8 * 6 * 4];
++    let mut surface = Surface::new(
++        &mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888,
++    ).unwrap();
++    render_surface(&resources, &words, &mut surface, 1).unwrap();
++    let shared_edge = (2 * 8 + 2) * 4;
++    assert_eq!(pixels[shared_edge], 128, "shared edge must blend once");
++}
++
++#[test]
+ fn software_surface_rejects_mesh_effects_explicitly() {
+     let resources = Resources::fixture();
+     let list = mesh_effect_words();

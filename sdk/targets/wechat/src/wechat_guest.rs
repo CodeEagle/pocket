@@ -139,6 +139,7 @@ impl Guest for WechatGuest {
             // generated catalog. Child Guests deliberately do not receive it;
             // only the root is allowed to decide which package owns a surface.
             let host = unsafe { &*(self.host as *const WasmHost) };
+            crate::web_worker_channels::install(&ctx, host.worker_channels.clone())?;
             if host.app_index.get() == 0 && !crate::wechat_assets::SYSTEM_SURFACES.is_empty() {
                 let ui = match globals.get::<_, Object>("ui") {
                     Ok(value) => value,
@@ -185,6 +186,14 @@ impl Guest for WechatGuest {
     }
 
     fn frame(&mut self, frame: &GuestFrame<'_>) -> Result<(), RuntimeError> {
+        let host = unsafe { &*(self.host as *const WasmHost) };
+        if host.worker_channels.borrow().is_some() {
+            let state = self.state.borrow();
+            let guest = state.as_ref().ok_or(RuntimeError::InvalidState)?;
+            if !matches!(guest.with_turn(|ctx| crate::web_worker_channels::before_frame(&ctx, &host.worker_channels)), Some(Ok(()))) {
+                return Err(RuntimeError::Guest);
+            }
+        }
         self.state
             .borrow_mut()
             .as_mut()
@@ -264,8 +273,13 @@ pub unsafe extern "C" fn web_wechat_guest_event(
             packet.set("type", "event")?;
             packet.set("name", method)?;
             packet.set("payload", params)?;
-            let function: Function = ctx.globals().get("__pocketEvent")?;
-            function.call::<_, ()>((packet,))?;
+            // Direct upstream apps need not install the SDK event adapter.
+            // Their viewport still arrives in the canonical GuestFrame; an
+            // absent optional SDK listener is not a failed native input.
+            let handler: Value = ctx.globals().get("__pocketEvent")?;
+            if let Some(function) = handler.as_function() {
+                function.call::<_, ()>((packet,))?;
+            }
         }
         Ok(())
     });

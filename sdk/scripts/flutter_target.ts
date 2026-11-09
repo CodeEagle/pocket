@@ -23,6 +23,11 @@ const FLUTTER_TARGET_CAPABILITIES = [
   "platform.storage.set",
   "platform.storage.remove",
   "platform.storage.keys",
+  "platform.storage.batch",
+  "platform.images.capture",
+  "platform.images.read",
+  "platform.images.list",
+  "platform.images.remove",
   "platform.messages.send",
   "platform.messages.receive",
 ] as const;

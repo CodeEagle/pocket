@@ -176,11 +176,14 @@ export function packageToolchain(options: PackageToolchainOptions, injected: Pac
   const webEngineRoot = join(options.sdkRoot, ".pocket-build", "web-engine");
   const webEngineWasm = join(webEngineRoot, "pocketjs.wasm");
   const webEngineRuntime = join(webEngineRoot, "pocket-web.js");
+  const webRenderWorker = join(webEngineRoot, "pocket-render-worker.js");
   const webEngineIncluded = existsSync(webEngineWasm) && existsSync(webEngineRuntime)
     && statSync(webEngineWasm).isFile() && statSync(webEngineRuntime).isFile();
+  const webRenderWorkerIncluded = webEngineIncluded && existsSync(webRenderWorker) && statSync(webRenderWorker).isFile();
   if (webEngineIncluded) {
     copyFile(webEngineWasm, join(output, "engine", "pocketjs.wasm"));
     copyFile(webEngineRuntime, join(output, "web", "pocket-web.js"));
+    if (webRenderWorkerIncluded) copyFile(webRenderWorker, join(output, "web", "pocket-render-worker.js"));
   }
   const upstreamPackage = JSON.parse(readFileSync(join(upstream, "package.json"), "utf8")) as Record<string, unknown>;
   const compilerPackage = { ...upstreamPackage, private: false };
@@ -202,7 +205,7 @@ export function packageToolchain(options: PackageToolchainOptions, injected: Pac
     upstreamRevision: PINNED_REVISION,
     bytecodeAbi,
     compilerRoot: "compiler",
-    webEngine: { included: webEngineIncluded, ...(webEngineIncluded ? { wasm: "engine/pocketjs.wasm", runtime: "web/pocket-web.js" } : {}) },
+    webEngine: { included: webEngineIncluded, ...(webEngineIncluded ? { wasm: "engine/pocketjs.wasm", runtime: "web/pocket-web.js", ...(webRenderWorkerIncluded ? { renderWorker: "web/pocket-render-worker.js" } : {}) } : {}) },
     noble: { included: nobleIncluded, ...(nobleIncluded ? { prebuild: `noble/prebuilds/${platform}-${arch}/node.napi.node` } : {}) },
     // bluetooth-hci-socket is loaded by node-pre-gyp from its own package
     // build/Release path and has no supported external prebuild override.

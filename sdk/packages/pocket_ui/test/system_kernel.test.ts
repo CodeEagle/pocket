@@ -3,7 +3,10 @@ import { mock, test } from "bun:test";
 import { join } from "node:path";
 import type { HostBridge, HostRequestOptions, JsonObject, JsonValue } from "../src/host.ts";
 import type { PocketSystemV1 } from "../src/system.ts";
-mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60 }));
+mock.module("@pocketjs/framework/clock", () => ({
+  after: (_seconds: number, _callback: () => void) => () => {},
+  simulationHz: () => 60,
+}));
 const { installPocketSystem } = await import("../src/system.ts");
 
 const SYSTEM_UI = "pocket.host.demo";
@@ -80,7 +83,7 @@ class TestHost implements HostBridge {
     const call = { capability, params, options };
     this.calls.push(call);
     if (capability === "system.runtime.configure") {
-      return Promise.resolve({ systemInstanceId: "system-ui" } as T);
+      return Promise.resolve({ systemInstanceId: "system-ui", generation: "gen-system-ui" } as T);
     }
     if (capability === "system.runtime.create") {
       const appId = String(params.appId);
@@ -575,6 +578,98 @@ test("split-view non-active presented instance excluded from LRU eviction", asyn
   assert.equal(host.destroyed.includes(lobbyInstance), false, "split-view presented Lobby must not be evicted");
   assert.ok(kernel.snapshot().residents.some((r) => r.appId === LOBBY));
   assert.equal(kernel.snapshot().residents.some((r) => r.appId === NOTES), false);
+});
+
+test("memory pressure reclaims unreferenced backgrounds and preserves stack, presentation, and SystemUI", async () => {
+  const { host, kernel, invoke } = createEnv(5);
+  await kernel.ready;
+
+  const opened = await invoke(systemRequest("pressure-open-profile", "platform.apps.open", { appId: PROFILE }));
+  assert.equal(opened.ok, true);
+  const profile = kernel.snapshot().residents.find((record) => record.appId === PROFILE)!;
+
+  for (const [requestId, appId] of [["pressure-warm-lobby", LOBBY], ["pressure-warm-notes", NOTES], ["pressure-warm-extra", EXTRA]] as const) {
+    const warmed = await invoke(systemRequest(requestId, "platform.apps.prewarm", { appId }));
+    assert.equal(warmed.ok, true);
+  }
+  const lobby = kernel.snapshot().residents.find((record) => record.appId === LOBBY)!;
+  const notes = kernel.snapshot().residents.find((record) => record.appId === NOTES)!;
+  const extra = kernel.snapshot().residents.find((record) => record.appId === EXTRA)!;
+  assert.ok(
+    kernel.snapshot().pendingCalls.some((call) => call.targetInstanceId === profile.instanceId),
+    "the active Profile runtime still has a pending launch result reference",
+  );
+  await kernel.presentSurfaces([PROFILE, LOBBY], PROFILE);
+  const hostRequest = host.request.bind(host);
+  let failNotesDestroy = true;
+  host.request = async (capability, params = {}, options) => {
+    if (
+      capability === "system.runtime.destroy" &&
+      params.instanceId === notes.instanceId &&
+      failNotesDestroy
+    ) {
+      failNotesDestroy = false;
+      throw new Error("transient destroy failure");
+    }
+    return await hostRequest(capability, params, options) as never;
+  };
+
+  // A stale root generation must not apply a native pressure fact to this JS realm.
+  globalObject.__pocketEvent!({
+    type: "event",
+    name: "system.runtime.memoryPressure",
+    payload: { generation: "retired-root-generation" },
+  });
+  await kernel.presentSurfaces([PROFILE, LOBBY], PROFILE);
+  assert.deepEqual(host.destroyed, []);
+
+  globalObject.__pocketEvent!({
+    type: "event",
+    name: "system.runtime.memoryPressure",
+    payload: { generation: "gen-system-ui" },
+  });
+  // The public kernel operation shares the event queue, so it also waits for
+  // every pressure eviction to finish before asserting resident state.
+  await kernel.presentSurfaces([PROFILE, LOBBY], PROFILE);
+  assert.deepEqual(host.destroyed, [], "failed destroy is retained for the existing closing retry lane");
+  assert.equal(
+    kernel.snapshot().residents.find((record) => record.instanceId === notes.instanceId)?.state,
+    "closing",
+  );
+
+  globalObject.__pocketEvent!({
+    type: "event",
+    name: "system.runtime.memoryPressure",
+    payload: { generation: "gen-system-ui" },
+  });
+  await kernel.presentSurfaces([PROFILE, LOBBY], PROFILE);
+
+  assert.deepEqual(host.destroyed, [extra.instanceId, notes.instanceId]);
+  assert.deepEqual(
+    kernel.snapshot().residents.map((record) => record.appId).sort(),
+    [SYSTEM_UI, PROFILE, LOBBY].sort(),
+  );
+  assert.equal(host.destroyed.includes(profile.instanceId), false, "active stack runtime stays resident");
+  assert.equal(host.destroyed.includes(lobby.instanceId), false, "presented background runtime stays resident");
+  assert.ok(kernel.snapshot().residents.some((record) => record.instanceId === "system-ui"), "SystemUI stays pinned");
+  for (const record of [notes, extra]) {
+    assert.ok(
+      host.posted.some((post) => post.instanceId === record.instanceId && post.params.state === "onUnload"),
+      "each evicted background receives its existing unload lifecycle event",
+    );
+    assert.ok(
+      host.posted.some((post) => post.instanceId === record.instanceId && post.params.state === "onUnload" && post.params.reason === "memory_pressure"),
+      "pressure eviction reports its reason through the existing lifecycle event",
+    );
+  }
+
+  globalObject.__pocketEvent!({
+    type: "event",
+    name: "system.runtime.memoryPressure",
+    payload: { generation: "gen-system-ui" },
+  });
+  await kernel.presentSurfaces([PROFILE, LOBBY], PROFILE);
+  assert.deepEqual(host.destroyed, [extra.instanceId, notes.instanceId], "a repeated pressure signal does not destroy residents twice");
 });
 
 test("destroyRuntime cleaning up presentedInstanceIds", async () => {

@@ -35,7 +35,19 @@ function fixture(): { readonly root: string; readonly document: Record<string, a
   const required = systemUi.engine.capabilities.requires as string[];
   if (!required.includes("ui.compositor-surfaces")) required.push("ui.compositor-surfaces");
   writeFileSync(join(root, "pocket.json"), JSON.stringify(systemUi, null, 2));
-  return { root, document: clone(systemDocument) };
+  const document = clone(systemDocument);
+  // This target-contract fixture owns only these three manifests. Showcase
+  // additions must not turn it into a second copy of the full demo catalog.
+  const fixturePackages = new Set(["pocket.host.demo", "pocket.demo.profile", "pocket.demo.lobby"]);
+  document.applications.catalog = document.applications.catalog.filter(
+    (entry: { package: string }) => fixturePackages.has(entry.package),
+  );
+  if (document.installation?.installedPackages) {
+    document.installation.installedPackages = document.installation.installedPackages.filter(
+      (id: string) => fixturePackages.has(id),
+    );
+  }
+  return { root, document };
 }
 
 afterEach(() => {
@@ -57,6 +69,7 @@ test("Pocket Flutter target is a real Flutter registry entry with implemented ho
     "display.viewport.live",
     "platform.apps.open",
     "platform.storage.get",
+    "platform.storage.batch",
     "platform.messages.send",
   ]));
   expect(profile.capabilities).not.toContain("input.pointer");
@@ -67,6 +80,37 @@ test("Pocket Flutter target is a real Flutter registry entry with implemented ho
   expect(profile.roleCapabilities?.systemUI).toEqual(["ui.compositor-surfaces"]);
   expect(profile.display.animation).toBe("composited");
   expect(registry.capabilities).toContain("platform.apps.list");
+});
+
+test("Flutter child can negotiate the implemented atomic storage batch capability", async () => {
+  const { root, document } = fixture();
+  const path = join(root, "apps/profile/pocket.json");
+  const app = JSON.parse(readFileSync(path, "utf8"));
+  app.engine.capabilities.requires.push("platform.storage.batch");
+  writeFileSync(path, JSON.stringify(app));
+  const result = await resolveSystemDocument(document, {
+    appRoot: root, target: POCKET_FLUTTER_TARGET_ID,
+  });
+  expect(result.ok).toBe(true);
+  if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+  expect(result.plan.applications.some(app => app.package === "pocket.demo.profile")).toBe(true);
+});
+
+test("Flutter child negotiates the app-private image resource capabilities", async () => {
+  const { root, document } = fixture();
+  const path = join(root, "apps/profile/pocket.json");
+  const app = JSON.parse(readFileSync(path, "utf8"));
+  app.engine.capabilities.requires.push(
+    "platform.images.capture", "platform.images.read",
+    "platform.images.list", "platform.images.remove",
+  );
+  writeFileSync(path, JSON.stringify(app));
+  const result = await resolveSystemDocument(document, {
+    appRoot: root, target: POCKET_FLUTTER_TARGET_ID,
+  });
+  expect(result.ok).toBe(true);
+  if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+  expect(result.plan.applications.some(app => app.package === "pocket.demo.profile")).toBe(true);
 });
 
 test("resolved Flutter plan emits application handles in official catalog order", async () => {

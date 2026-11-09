@@ -232,7 +232,10 @@ test("mini-app surfaces rise from the bottom and close through SystemUI cancella
         pakPath: root.pak,
         revision: 1,
         tickHz: 60,
-        compositorSurfaces: { [profileAppId]: 2, [lobbyAppId]: 3 },
+        // Let the PreviewManager read Demo's canonical generated compositor
+        // registry. It includes every installed child, including Lantern and
+        // the pinned official demos; hard-coding only Profile and Lobby makes
+        // SystemUI reject its complete installed-child catalog.
         applications,
       },
     });
@@ -242,18 +245,32 @@ test("mini-app surfaces rise from the bottom and close through SystemUI cancella
       "pocket-host-showcase",
       "snapshot",
     )) as Promise<Snapshot>;
+    const pointerPhase = async (phase: "down" | "move" | "up", id: number, point: { x: number; y: number }): Promise<void> => {
+      const response = await manager!.handle(new Request(`${prefix}/input`, {
+        method: "POST",
+        body: JSON.stringify({ type: "pointer", phase, id, x: point.x, y: point.y }),
+      }), "pocket-host-showcase", "input");
+      assert.equal(response.status, 200, `${phase} pointer failed with ${response.status}`);
+    };
     const pointer = async (id: number, point: { x: number; y: number }): Promise<void> => {
-      for (const phase of ["down", "up"] as const) {
-        const response = await manager!.handle(new Request(`${prefix}/input`, {
-          method: "POST",
-          body: JSON.stringify({ type: "pointer", phase, id, x: point.x, y: point.y }),
-        }), "pocket-host-showcase", "input");
-        assert.equal(response.status, 200, `${phase} pointer failed with ${response.status}`);
-      }
+      await pointerPhase("down", id, point);
+      await pointerPhase("up", id, point);
+    };
+    const scrollDown = async (id: number): Promise<void> => {
+      const x = 380;
+      await pointerPhase("down", id, { x, y: 760 });
+      for (const y of [630, 500, 370, 240]) await pointerPhase("move", id, { x, y });
+      await pointerPhase("up", id, { x, y: 240 });
+    };
+    const scrollUp = async (id: number): Promise<void> => {
+      const x = 380;
+      await pointerPhase("down", id, { x, y: 240 });
+      for (const y of [370, 500, 630, 760]) await pointerPhase("move", id, { x, y });
+      await pointerPhase("up", id, { x, y: 760 });
     };
 
     const stream = await manager.handle(new Request(`${prefix}/stream`), "pocket-host-showcase", "stream");
-    assert.equal(stream.status, 200);
+    assert.equal(stream.status, 200, stream.status === 200 ? undefined : await stream.text());
     reader = stream.body!.getReader();
     await reader.read();
 
@@ -283,8 +300,10 @@ test("mini-app surfaces rise from the bottom and close through SystemUI cancella
       method: "POST", body: JSON.stringify({ type: "pointer", phase: "down", id: 1, ...profileClose }),
     }), "pocket-host-showcase", "input");
     assert.equal(down.status, 200);
-    const held = (await sampleUntil(snapshot, next => next.frame.ops.some(op =>
-      Number(op.color) === 0xffdce2eb && Number(op.x) > next.frame.width - 80 && Number(op.y) < 56), "close Button pressed feedback")).value;
+    // The close hit target is intentionally transparent; check the behavior
+    // that matters while held without assuming it paints pressed feedback.
+    await Bun.sleep(80);
+    const held = await snapshot();
     assert.ok(hasChild(held, profileAppId), "holding Button must not close before release");
     const up = await manager.handle(new Request(`${prefix}/input`, {
       method: "POST", body: JSON.stringify({ type: "pointer", phase: "up", id: 1, ...profileClose }),
@@ -292,8 +311,30 @@ test("mini-app surfaces rise from the bottom and close through SystemUI cancella
     assert.equal(up.status, 200);
     const profileClosed = await sampleChildClosing(snapshot, profileAppId);
     assertClosingAnimation(profileClosed.frames, profileAppId);
-    value = (await sampleUntil(snapshot, (next) => !next.frame.inputBounds && next.frame.ops.some((op) => op.type === "text" && typeof op.text === "string" && op.text.startsWith("Cancelled:")), "Profile cancellation result")).value;
+    // The result summary follows the official-demo list, below the initial
+    // viewport. Scroll the real parent surface until the cancellation payload
+    // is painted; each drag uses the same pointer input route as a user.
+    let cancellation: Snapshot | undefined;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      value = await snapshot();
+      cancellation = value.frame.ops.some((op) => op.type === "text" && typeof op.text === "string" && op.text.startsWith("Cancelled:"))
+        ? value
+        : undefined;
+      if (cancellation) break;
+      await scrollDown(10 + attempt);
+      await Bun.sleep(100);
+    }
+    assert.ok(cancellation, "closing Profile must publish its cancellation result after scrolling the parent status into view");
+    value = cancellation!;
     assertNoPreviewError(value, "Profile cancellation");
+    assert.equal(value.frame.inputBounds, undefined, "Profile cancellation must return input to the parent");
+    assert.equal(closeIconOps(value).length, 0, "Profile cancellation must remove the floating close control");
+    for (let attempt = 0; attempt < 8 && !value.frame.ops.some((op) => op.type === "text" && op.text === "Open profile app"); attempt += 1) {
+      await scrollUp(30 + attempt);
+      await Bun.sleep(100);
+      value = await snapshot();
+    }
+    assert.ok(value.frame.ops.some((op) => op.type === "text" && op.text === "Open profile app"), "parent scroll must return to the Profile launch action");
 
     await pointer(2, centerOf(value, "Open profile app"));
     opened = await sampleSettledChild(snapshot, profileAppId, "Profile reopening");

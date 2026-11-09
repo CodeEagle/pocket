@@ -14,6 +14,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync,
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prebuiltEnvironment } from "./prebuilt_tools.mjs";
+import { nativeProbeCandidates, nativeProbeSourceInputs, selectNativeProbe } from "./native_probe_path.ts";
 
 const require = createRequire(import.meta.url);
 const findProcess = require("find-process").default;
@@ -51,6 +52,26 @@ function checkFixedEnvironment() {
     throw new Error("Pocket Studio 的 update port 固定使用 8791，不能使用其他端口");
   }
   if (!existsSync(SERVER)) throw new Error(`找不到编辑器入口：${SERVER}`);
+}
+
+/**
+ * Prefer a fresh source-repository probe for the checked-out Editor. The npm
+ * toolchain still supplies Bun, the compiler and other platform helpers; this
+ * override is limited to the Editor child and never changes standalone SDK
+ * selection. An explicit POCKET_NATIVE_PROBE remains authoritative.
+ */
+function editorToolEnvironment() {
+  if (process.env.POCKET_SOURCE_BUILD === "1") return process.env;
+  const toolEnv = prebuiltEnvironment(SDK_ROOT);
+  if (process.env.POCKET_NATIVE_PROBE?.trim()) return toolEnv;
+
+  const candidates = nativeProbeCandidates(SDK_ROOT);
+  if (!candidates.some(candidate => existsSync(candidate))) return toolEnv;
+  const probe = selectNativeProbe({
+    candidates,
+    sourceInputs: nativeProbeSourceInputs(SDK_ROOT),
+  });
+  return { ...toolEnv, POCKET_NATIVE_PROBE: probe };
 }
 
 function processCommand(info) {
@@ -224,7 +245,7 @@ async function startChild(options, toolEnv, bun) {
 }
 
 async function restart(options) {
-  const toolEnv = process.env.POCKET_SOURCE_BUILD === "1" ? process.env : prebuiltEnvironment(SDK_ROOT);
+  const toolEnv = editorToolEnvironment();
   const bun = toolEnv.POCKET_BUN || toolEnv.POCKET_EDITOR_BUN || "bun";
   const runtime = spawnSync(bun, ["--version"], { encoding: "utf8", timeout: 5000, windowsHide: true });
   if (runtime.status !== 0) throw new Error("npm Bun 不可用，请执行 npm run setup");

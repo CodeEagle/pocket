@@ -5,15 +5,21 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pocket_flutter/pocket_flutter.dart' show PocketViewController;
 import 'package:pocket_services/pocket_services.dart';
 import 'package:pocket_flutter/src/pocket_memory_limits.dart';
+import 'package:pocket_flutter/src/pocket_view.dart' show PocketViewCapture;
 
 import 'pocket_app.dart' show PocketGuestSession, PocketGuestSessionState;
+import 'pocket_bundled_application_catalog.dart';
 import 'pocket_config.dart';
 import 'pocket_host_config.dart';
+import 'pocket_image_store.dart';
 import 'package:pocket_flutter/src/pocket_compositor.dart';
 import 'pocket_platform_data.dart';
 import 'pocket_recordings.dart';
@@ -35,6 +41,20 @@ String _runtimeFailureCode(Object error, {String fallback = 'runtime_failed'}) {
 const int _maxPendingPlatformRequests = 64;
 const String _systemInstanceId = 'system-ui';
 const String _compositorSurfacesCapability = 'ui.compositor-surfaces';
+const String _platformImagesCaptureCapability = 'platform.images.capture';
+const String _platformImagesReadCapability = 'platform.images.read';
+const String _platformImagesListCapability = 'platform.images.list';
+const String _platformImagesRemoveCapability = 'platform.images.remove';
+const int _maxPlatformImageWidth = PocketImageStore.maxWidth;
+const int _maxPlatformImageHeight = PocketImageStore.maxHeight;
+const int _maxPlatformImagePixels =
+    _maxPlatformImageWidth * _maxPlatformImageHeight;
+const List<String> _platformImageCapabilities = <String>[
+  _platformImagesCaptureCapability,
+  _platformImagesReadCapability,
+  _platformImagesListCapability,
+  _platformImagesRemoveCapability,
+];
 final RegExp _storageNamespacePattern = RegExp(
   r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$',
 );
@@ -49,6 +69,7 @@ const List<String> _platformRequestCapabilities = <String>[
   'platform.storage.set',
   'platform.storage.remove',
   'platform.storage.keys',
+  'platform.storage.batch',
   'platform.messages.send',
   'platform.messages.receive',
 ];
@@ -65,6 +86,7 @@ const List<String> _systemRequestCapabilities = <String>[
   'system.storage.set',
   'system.storage.remove',
   'system.storage.keys',
+  'system.storage.batch',
 ];
 
 typedef PocketSystemHostCatalogLoader =
@@ -75,6 +97,20 @@ typedef PocketSystemHostSystemUIApprover =
 
 typedef PocketSystemHostApplicationApprover =
     PocketAppConfig Function(String appId, PocketAppConfig config);
+
+typedef PocketSystemHostApplicationCatalogLoader =
+    Future<PocketBundledApplicationCatalog> Function();
+
+typedef PocketSystemHostSystemUIBuilder =
+    PocketAppConfig Function(PocketBundledApplicationCatalog catalog);
+
+typedef PocketSystemHostApplicationsBuilder =
+    Map<String, PocketAppConfig> Function(
+      PocketBundledApplicationCatalog catalog,
+    );
+
+typedef PocketSystemHostAppBuilder =
+    Widget Function(BuildContext context, Widget child);
 
 /// A verified, native-approved catalog selected for one signed root payload.
 /// The loader must return a catalog whose [rootPayloadSha256] matches the
@@ -89,6 +125,383 @@ final class PocketSystemHostCatalog {
   final PocketAppConfig systemUI;
   final Map<String, PocketAppConfig> applications;
   final String? rootPayloadSha256;
+}
+
+final class _SystemHostLoadResult<T> {
+  const _SystemHostLoadResult(this.value, this.error);
+
+  final T? value;
+  final Object? error;
+}
+
+final class _SystemHostBootstrap {
+  const _SystemHostBootstrap({required this.host, required this.catalog});
+
+  final _SystemHostLoadResult<PocketHostConfig?> host;
+  final _SystemHostLoadResult<PocketBundledApplicationCatalog> catalog;
+}
+
+final class _BundledCatalogAssetSource {
+  _BundledCatalogAssetSource({
+    required this.catalogAsset,
+    required this.assetPrefix,
+    required this.firstCompositorHandle,
+    required this.lastCompositorHandle,
+    required this.bundle,
+    required Set<String> reservedAppIds,
+  }) : reservedAppIds = Set<String>.unmodifiable(reservedAppIds);
+
+  final String catalogAsset;
+  final String assetPrefix;
+  final int firstCompositorHandle;
+  final int lastCompositorHandle;
+  final AssetBundle? bundle;
+  final Set<String> reservedAppIds;
+
+  Future<PocketBundledApplicationCatalog> load() =>
+      PocketBundledApplicationCatalog.loadFromBundle(
+        catalogAsset,
+        bundle: bundle,
+        assetPrefix: assetPrefix,
+        firstCompositorHandle: firstCompositorHandle,
+        lastCompositorHandle: lastCompositorHandle,
+        reservedAppIds: reservedAppIds,
+      );
+
+  @override
+  bool operator ==(Object other) =>
+      other is _BundledCatalogAssetSource &&
+      catalogAsset == other.catalogAsset &&
+      assetPrefix == other.assetPrefix &&
+      firstCompositorHandle == other.firstCompositorHandle &&
+      lastCompositorHandle == other.lastCompositorHandle &&
+      identical(bundle, other.bundle) &&
+      reservedAppIds.length == other.reservedAppIds.length &&
+      reservedAppIds.containsAll(other.reservedAppIds);
+
+  @override
+  int get hashCode => Object.hash(
+    catalogAsset,
+    assetPrefix,
+    firstCompositorHandle,
+    lastCompositorHandle,
+    identityHashCode(bundle),
+    Object.hashAll(reservedAppIds.toList()..sort()),
+  );
+}
+
+/// Generic Material app shell for a trusted Pocket System host.
+///
+/// Consumers supply their own catalog loader and native config builders. This
+/// widget owns only bootstrap/error presentation and the local-versus-signed
+/// host selection; it introduces no application IDs or capability policy.
+final class PocketSystemHostApplication extends StatefulWidget {
+  const PocketSystemHostApplication({
+    super.key,
+    required this.loadBundledApplications,
+    required this.buildSystemUI,
+    required this.buildApplications,
+    this.loadHostConfig,
+    this.initialHostConfig,
+    this.initialHostConfigError,
+    this.initialBundledApplications,
+    this.initialCatalogError,
+    this.controller,
+    this.recordings,
+    this.approveSystemUI,
+    this.approveApplication,
+    this.appBuilder,
+    this.showPerformanceOverlay = false,
+    this.backgroundColor = const Color(0xFF000000),
+  }) : _bundledCatalogAssetSource = null;
+
+  /// Builds the standard shell configuration from one embedded app catalog.
+  /// Native grants and host-selected input namespaces remain caller-owned.
+  factory PocketSystemHostApplication.fromBundledAssets({
+    Key? key,
+    required String catalogAsset,
+    required String assetPrefix,
+    required int firstCompositorHandle,
+    required int lastCompositorHandle,
+    Set<String> reservedAppIds = const <String>{},
+    AssetBundle? bundle,
+    required PocketAppConfig systemUI,
+    Map<String, PocketAppConfig> nativePolicies =
+        const <String, PocketAppConfig>{},
+    Set<String> keyboardInputAppIdPrefixes = const <String>{},
+    Future<PocketHostConfig?> Function()? loadHostConfig,
+    PocketHostConfig? initialHostConfig,
+    Object? initialHostConfigError,
+    PocketBundledApplicationCatalog? initialBundledApplications,
+    Object? initialCatalogError,
+    PocketSystemHostController? controller,
+    PocketRecordingLibrary? recordings,
+    PocketSystemHostSystemUIApprover? approveSystemUI,
+    PocketSystemHostApplicationApprover? approveApplication,
+    PocketSystemHostAppBuilder? appBuilder,
+    bool showPerformanceOverlay = false,
+    Color backgroundColor = const Color(0xFF000000),
+  }) {
+    final source = _BundledCatalogAssetSource(
+      catalogAsset: catalogAsset,
+      assetPrefix: assetPrefix,
+      firstCompositorHandle: firstCompositorHandle,
+      lastCompositorHandle: lastCompositorHandle,
+      bundle: bundle,
+      reservedAppIds: <String>{...reservedAppIds, systemUI.appId},
+    );
+    final inputPrefixes = Set<String>.unmodifiable(keyboardInputAppIdPrefixes);
+    final policies = Map<String, PocketAppConfig>.unmodifiable(nativePolicies);
+    PocketAppConfig buildSystemUI(PocketBundledApplicationCatalog catalog) =>
+        systemUI.copyWith(
+          compositorSurfaces: <String, int>{
+            ...systemUI.compositorSurfaces,
+            ...catalog.compositorSurfaces,
+          },
+        );
+    Map<String, PocketAppConfig> buildApplications(
+      PocketBundledApplicationCatalog catalog,
+    ) {
+      final configured = catalog.applicationsWithNativePolicies(
+        nativePolicies: policies,
+      );
+      if (inputPrefixes.isEmpty) return configured;
+      return Map<String, PocketAppConfig>.unmodifiable({
+        for (final entry in configured.entries)
+          entry.key: inputPrefixes.any(entry.key.startsWith)
+              ? entry.value.copyWith(keyboardInputEnabled: true)
+              : entry.value,
+      });
+    }
+
+    return PocketSystemHostApplication._fromBundledAssets(
+      key: key,
+      source: source,
+      buildSystemUI: buildSystemUI,
+      buildApplications: buildApplications,
+      loadHostConfig: loadHostConfig,
+      initialHostConfig: initialHostConfig,
+      initialHostConfigError: initialHostConfigError,
+      initialBundledApplications: initialBundledApplications,
+      initialCatalogError: initialCatalogError,
+      controller: controller,
+      recordings: recordings,
+      approveSystemUI: approveSystemUI,
+      approveApplication: approveApplication,
+      appBuilder: appBuilder,
+      showPerformanceOverlay: showPerformanceOverlay,
+      backgroundColor: backgroundColor,
+    );
+  }
+
+  PocketSystemHostApplication._fromBundledAssets({
+    Key? key,
+    required _BundledCatalogAssetSource source,
+    required PocketSystemHostSystemUIBuilder buildSystemUI,
+    required PocketSystemHostApplicationsBuilder buildApplications,
+    Future<PocketHostConfig?> Function()? loadHostConfig,
+    PocketHostConfig? initialHostConfig,
+    Object? initialHostConfigError,
+    PocketBundledApplicationCatalog? initialBundledApplications,
+    Object? initialCatalogError,
+    PocketSystemHostController? controller,
+    PocketRecordingLibrary? recordings,
+    PocketSystemHostSystemUIApprover? approveSystemUI,
+    PocketSystemHostApplicationApprover? approveApplication,
+    PocketSystemHostAppBuilder? appBuilder,
+    bool showPerformanceOverlay = false,
+    Color backgroundColor = const Color(0xFF000000),
+  }) : loadHostConfig = loadHostConfig,
+       loadBundledApplications = source.load,
+       buildSystemUI = buildSystemUI,
+       buildApplications = buildApplications,
+       initialHostConfig = initialHostConfig,
+       initialHostConfigError = initialHostConfigError,
+       initialBundledApplications = initialBundledApplications,
+       initialCatalogError = initialCatalogError,
+       controller = controller,
+       recordings = recordings,
+       approveSystemUI = approveSystemUI,
+       approveApplication = approveApplication,
+       appBuilder = appBuilder,
+       showPerformanceOverlay = showPerformanceOverlay,
+       backgroundColor = backgroundColor,
+       _bundledCatalogAssetSource = source,
+       super(key: key);
+
+  final Future<PocketHostConfig?> Function()? loadHostConfig;
+  final PocketSystemHostApplicationCatalogLoader loadBundledApplications;
+  final PocketAppConfig Function(PocketBundledApplicationCatalog catalog)
+  buildSystemUI;
+  final PocketSystemHostApplicationsBuilder buildApplications;
+  final PocketHostConfig? initialHostConfig;
+  final Object? initialHostConfigError;
+  final PocketBundledApplicationCatalog? initialBundledApplications;
+  final Object? initialCatalogError;
+  final PocketSystemHostController? controller;
+  final PocketRecordingLibrary? recordings;
+  final PocketSystemHostSystemUIApprover? approveSystemUI;
+  final PocketSystemHostApplicationApprover? approveApplication;
+  final PocketSystemHostAppBuilder? appBuilder;
+  final bool showPerformanceOverlay;
+  final Color backgroundColor;
+  final _BundledCatalogAssetSource? _bundledCatalogAssetSource;
+
+  @override
+  State<PocketSystemHostApplication> createState() =>
+      _PocketSystemHostApplicationState();
+}
+
+final class _PocketSystemHostApplicationState
+    extends State<PocketSystemHostApplication> {
+  late Future<_SystemHostBootstrap> _bootstrap;
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap = _loadBootstrap();
+  }
+
+  @override
+  void didUpdateWidget(covariant PocketSystemHostApplication oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final catalogSourceChanged =
+        oldWidget._bundledCatalogAssetSource != null ||
+            widget._bundledCatalogAssetSource != null
+        ? oldWidget._bundledCatalogAssetSource !=
+              widget._bundledCatalogAssetSource
+        : oldWidget.loadBundledApplications != widget.loadBundledApplications;
+    if (oldWidget.loadHostConfig != widget.loadHostConfig ||
+        catalogSourceChanged ||
+        oldWidget.initialHostConfig != widget.initialHostConfig ||
+        oldWidget.initialHostConfigError != widget.initialHostConfigError ||
+        oldWidget.initialBundledApplications !=
+            widget.initialBundledApplications ||
+        oldWidget.initialCatalogError != widget.initialCatalogError) {
+      _bootstrap = _loadBootstrap();
+    }
+  }
+
+  Future<_SystemHostBootstrap> _loadBootstrap() async {
+    final hostFuture = _loadHostConfig();
+    final catalogFuture = _loadCatalog();
+    final host = await hostFuture;
+    final catalog = await catalogFuture;
+    return _SystemHostBootstrap(host: host, catalog: catalog);
+  }
+
+  Future<_SystemHostLoadResult<PocketHostConfig?>> _loadHostConfig() async {
+    if (widget.initialHostConfigError != null) {
+      return _SystemHostLoadResult<PocketHostConfig?>(
+        null,
+        widget.initialHostConfigError,
+      );
+    }
+    if (widget.initialHostConfig != null) {
+      return _SystemHostLoadResult<PocketHostConfig?>(
+        widget.initialHostConfig,
+        null,
+      );
+    }
+    try {
+      final load =
+          widget.loadHostConfig ?? PocketHostConfig.loadFromEnvironment;
+      return _SystemHostLoadResult<PocketHostConfig?>(await load(), null);
+    } catch (error) {
+      return _SystemHostLoadResult<PocketHostConfig?>(null, error);
+    }
+  }
+
+  Future<_SystemHostLoadResult<PocketBundledApplicationCatalog>>
+  _loadCatalog() async {
+    if (widget.initialCatalogError != null) {
+      return _SystemHostLoadResult<PocketBundledApplicationCatalog>(
+        null,
+        widget.initialCatalogError,
+      );
+    }
+    if (widget.initialBundledApplications != null) {
+      return _SystemHostLoadResult<PocketBundledApplicationCatalog>(
+        widget.initialBundledApplications,
+        null,
+      );
+    }
+    try {
+      return _SystemHostLoadResult<PocketBundledApplicationCatalog>(
+        await widget.loadBundledApplications(),
+        null,
+      );
+    } catch (error) {
+      return _SystemHostLoadResult<PocketBundledApplicationCatalog>(
+        null,
+        error,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<_SystemHostBootstrap>(
+    future: _bootstrap,
+    builder: (context, snapshot) {
+      final bootstrap = snapshot.data;
+      final catalog =
+          bootstrap?.catalog.value ?? PocketBundledApplicationCatalog.empty;
+      final error = bootstrap?.host.error ?? bootstrap?.catalog.error;
+      Widget body;
+      if (bootstrap == null) {
+        body = const Center(child: CircularProgressIndicator());
+      } else if (error != null) {
+        body = Center(
+          child: SelectableText('Pocket host config failed: $error'),
+        );
+      } else {
+        try {
+          final systemUI = widget.buildSystemUI(catalog);
+          final applications = widget.buildApplications(catalog);
+          final remote = bootstrap.host.value;
+          body = remote == null
+              ? PocketSystemHost(
+                  systemUI: systemUI,
+                  applications: applications,
+                  controller: widget.controller,
+                  recordings: widget.recordings,
+                )
+              : PocketSystemHost.fromHostConfig(
+                  config: remote,
+                  controller: widget.controller,
+                  recordings: widget.recordings,
+                  approveSystemUI:
+                      widget.approveSystemUI ??
+                      ((app) => app.withNativePolicy(systemUI)),
+                  approveApplication:
+                      widget.approveApplication ??
+                      ((id, app) => app.withNativePolicy(
+                        applications[id] ?? PocketAppConfig(appId: id),
+                      )),
+                );
+        } catch (cause) {
+          body = Center(
+            child: SelectableText('Pocket host config failed: $cause'),
+          );
+        }
+      }
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        showPerformanceOverlay: widget.showPerformanceOverlay,
+        builder: (context, child) =>
+            widget.appBuilder?.call(
+              context,
+              child ?? const SizedBox.shrink(),
+            ) ??
+            child ??
+            const SizedBox.shrink(),
+        home: Scaffold(
+          backgroundColor: error == null ? null : widget.backgroundColor,
+          body: body,
+        ),
+      );
+    },
+  );
 }
 
 final class _PendingSystemHostCatalog {
@@ -251,7 +664,22 @@ final class PocketSystemHostController extends ChangeNotifier {
     _publish(const <PocketSystemInstanceSnapshot>[]);
   }
 
-  void _publish(List<PocketSystemInstanceSnapshot> next) {
+  void _publish(
+    List<PocketSystemInstanceSnapshot> next, {
+    bool sessionChanged = false,
+  }) {
+    // The session reference also exposes live failure/update facts. Preserve
+    // its notifications even when the immutable snapshot fields are equal.
+    if (!sessionChanged && _instances.length == next.length) {
+      var unchanged = true;
+      for (var index = 0; index < next.length; index++) {
+        if (!_instances[index]._sameFacts(next[index])) {
+          unchanged = false;
+          break;
+        }
+      }
+      if (unchanged) return;
+    }
     _instances = List<PocketSystemInstanceSnapshot>.unmodifiable(next);
     notifyListeners();
   }
@@ -290,6 +718,19 @@ final class PocketSystemInstanceSnapshot {
   /// a non-empty clip. This is not a topmost/foreground indicator.
   final bool isPresented;
   final bool compositorFocused;
+
+  bool _sameFacts(PocketSystemInstanceSnapshot other) =>
+      instanceId == other.instanceId &&
+      appId == other.appId &&
+      identical(session, other.session) &&
+      identical(firstFrame, other.firstFrame) &&
+      generation == other.generation &&
+      isSystemUI == other.isSystemUI &&
+      ready == other.ready &&
+      firstFrameReady == other.firstFrameReady &&
+      foreground == other.foreground &&
+      isPresented == other.isPresented &&
+      compositorFocused == other.compositorFocused;
 }
 
 final class _PocketSystemHostState extends State<PocketSystemHost>
@@ -316,6 +757,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   bool _catalogReady = true;
   Future<PocketPlatformData>? _platformDataFuture;
   PocketPlatformData? _platformData;
+  Future<PocketImageStore>? _imageStoreFuture;
+  PocketImageStore? _imageStore;
   AppLifecycleState? _lifecycleState;
   int _nextInstanceId = 0;
   int _nextRequestId = 0;
@@ -407,7 +850,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         if (firstFrame != null && !firstFrame.isCompleted) {
           firstFrame.completeError(error);
         }
-        _publishFacts();
+        _publishFacts(sessionChanged: true);
       }),
     );
     _publishFacts();
@@ -448,6 +891,21 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   }
 
   @override
+  void didHaveMemoryPressure() {
+    final root = _systemUIInstance;
+    if (!_isCurrent(root) ||
+        !root.firstFrameReady ||
+        root.session.failure != null ||
+        !_catalogMatchesMountedGeneration) {
+      return;
+    }
+    root.session.controller.send(
+      method: 'system.runtime.memoryPressure',
+      params: <String, dynamic>{'generation': root.session.generation},
+    );
+  }
+
+  @override
   void dispose() {
     _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
@@ -467,6 +925,14 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     if (dataFuture != null) {
       unawaited(
         dataFuture.then<void>((data) => data.close()).catchError((Object _) {}),
+      );
+    }
+    final imageFuture = _imageStoreFuture;
+    if (imageFuture != null) {
+      unawaited(
+        imageFuture
+            .then<void>((store) => store.close())
+            .catchError((Object _) {}),
       );
     }
     _controller._detach(this);
@@ -510,6 +976,9 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       config: instance.config,
       session: instance.session,
       inputEnabled: slot.visible && slot.focused,
+      enableSceneCapture: instance.session.hasConfiguredCapability(
+        _platformImagesCaptureCapability,
+      ),
       geometryRevision: instance.compositorGeometryRevision,
       compositorBounds: slot.bounds,
       compositorViewport: slot.logicalViewport,
@@ -668,6 +1137,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       'system.storage.set' => _storageSet(params),
       'system.storage.remove' => _storageRemove(params),
       'system.storage.keys' => _storageKeys(params),
+      'system.storage.batch' => _storageBatch(params),
       _ => throw const PocketCapabilityException(
         'capability_unavailable',
         'System capability is unavailable',
@@ -1076,6 +1546,13 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final childConfig = capturedConfig.withPlugins(<PocketPluginFactory>[
       ...capturedConfig.pluginFactories,
       (_) => _PlatformProxyPlugin(this, instance, ownerGeneration),
+      (captureController) => _PlatformImagesPlugin(
+        this,
+        instance,
+        ownerGeneration,
+        instance.session.generation,
+        captureController,
+      ),
     ]);
     instance.config = childConfig;
     instance.session = PocketSession(config: childConfig);
@@ -1568,6 +2045,309 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     return completer.future;
   }
 
+  void _ensureImageGeneration(
+    _RuntimeInstance source, {
+    required int ownerGeneration,
+    required int sessionGeneration,
+    required String appId,
+  }) {
+    if (!_isCurrent(source) ||
+        source.closing ||
+        source.isSystemUI ||
+        source.appId != appId ||
+        source.session.appId != appId ||
+        source.ownerGeneration != ownerGeneration ||
+        ownerGeneration != _systemUIGeneration ||
+        source.session.generation != sessionGeneration) {
+      throw const PocketCapabilityException(
+        'stale_instance',
+        'Image request belongs to an expired child runtime generation',
+      );
+    }
+  }
+
+  Future<Map<String, Object?>> _captureGuestImage(
+    _RuntimeInstance source, {
+    required int ownerGeneration,
+    required int sessionGeneration,
+    required PocketViewController captureController,
+    required String appId,
+    required Map<String, dynamic> params,
+  }) async {
+    _ensureOnlyImageFields(params, const <String>{
+      'maxWidth',
+      'maxHeight',
+      'maxPixels',
+    });
+    final maxWidth = _imageLimit(
+      params,
+      'maxWidth',
+      maximum: _maxPlatformImageWidth,
+    );
+    final maxHeight = _imageLimit(
+      params,
+      'maxHeight',
+      maximum: _maxPlatformImageHeight,
+    );
+    final maxPixels = _imageLimit(
+      params,
+      'maxPixels',
+      maximum: _maxPlatformImagePixels,
+    );
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+
+    late final PocketViewCapture? capture;
+    try {
+      capture = await captureController.captureScene(
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+        maxPixels: maxPixels,
+      );
+    } on UnsupportedError catch (error) {
+      throw PocketCapabilityException(
+        'unsupported_scene',
+        'Guest surface contains unsupported capture content: ${error.message}',
+      );
+    } on StateError catch (error) {
+      final busy = error.message.toString().contains('already in progress');
+      throw PocketCapabilityException(
+        busy ? 'capture_busy' : 'capture_unavailable',
+        busy
+            ? 'A guest scene capture is already in progress'
+            : 'Guest scene capture is not available: ${error.message}',
+      );
+    }
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    if (capture == null) {
+      throw const PocketCapabilityException(
+        'capture_unavailable',
+        'Guest surface is not currently available for capture',
+      );
+    }
+
+    final store = await _getImageStore();
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    final stored = await store.put(appId, capture.pngBytes);
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    if (stored.width != capture.width || stored.height != capture.height) {
+      throw const PocketCapabilityException(
+        'image_store_corrupt',
+        'Captured PNG dimensions did not match the PocketView readback',
+      );
+    }
+    return <String, Object?>{
+      'id': stored.id,
+      'width': stored.width,
+      'height': stored.height,
+    };
+  }
+
+  Future<Map<String, Object?>> _readGuestImage(
+    _RuntimeInstance source, {
+    required int ownerGeneration,
+    required int sessionGeneration,
+    required String appId,
+    required Map<String, dynamic> params,
+  }) async {
+    _ensureOnlyImageFields(params, const <String>{'id'});
+    final id = _requiredString(params, 'id');
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    final store = await _getImageStore();
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    final stored = await store.read(appId, id);
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    if (stored == null) {
+      throw const PocketCapabilityException(
+        'image_not_found',
+        'Image ID is not present in this app image store',
+      );
+    }
+    final imageEntry = await _decodePocketImageEntry(stored);
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    return <String, Object?>{
+      'id': stored.id,
+      'width': stored.width,
+      'height': stored.height,
+      'textureWidth': imageEntry.width,
+      'textureHeight': imageEntry.height,
+      'img': imageEntry.bytes,
+    };
+  }
+
+  Future<List<Map<String, Object?>>> _listGuestImages(
+    _RuntimeInstance source, {
+    required int ownerGeneration,
+    required int sessionGeneration,
+    required String appId,
+    required Map<String, dynamic> params,
+  }) async {
+    _ensureOnlyImageFields(params, const <String>{});
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    final store = await _getImageStore();
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    final images = await store.list(appId);
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    return images;
+  }
+
+  Future<Map<String, Object?>> _removeGuestImage(
+    _RuntimeInstance source, {
+    required int ownerGeneration,
+    required int sessionGeneration,
+    required String appId,
+    required Map<String, dynamic> params,
+  }) async {
+    _ensureOnlyImageFields(params, const <String>{'id'});
+    final id = _requiredString(params, 'id');
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    final store = await _getImageStore();
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    final removed = await store.remove(appId, id);
+    _ensureImageGeneration(
+      source,
+      ownerGeneration: ownerGeneration,
+      sessionGeneration: sessionGeneration,
+      appId: appId,
+    );
+    return <String, Object?>{'removed': removed};
+  }
+
+  Future<_PocketImageEntryData> _decodePocketImageEntry(
+    PocketStoredImage stored,
+  ) async {
+    ui.Codec? codec;
+    ui.Image? image;
+    try {
+      codec = await ui.instantiateImageCodec(stored.pngBytes);
+      image = (await codec.getNextFrame()).image;
+      if (image.width != stored.width || image.height != stored.height) {
+        throw const PocketCapabilityException(
+          'image_store_corrupt',
+          'Stored PNG dimensions changed during decode',
+        );
+      }
+      final data = await image.toByteData(
+        format: ui.ImageByteFormat.rawStraightRgba,
+      );
+      if (data == null ||
+          data.lengthInBytes != stored.width * stored.height * 4) {
+        throw const PocketCapabilityException(
+          'image_decode_failed',
+          'Flutter did not return a complete RGBA image',
+        );
+      }
+      final textureWidth = _nextPowerOfTwo(stored.width);
+      final textureHeight = _nextPowerOfTwo(stored.height);
+      if (textureWidth > _maxPlatformImageWidth ||
+          textureHeight > _maxPlatformImageHeight) {
+        throw const PocketCapabilityException(
+          'image_dimensions_unsupported',
+          'Captured image exceeds the dynamic texture dimensions',
+        );
+      }
+      final rgba = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      final entry = Uint8List(8 + textureWidth * textureHeight * 4);
+      final header = ByteData.sublistView(entry);
+      header.setUint16(0, textureWidth, Endian.little);
+      header.setUint16(2, textureHeight, Endian.little);
+      entry[4] = 3; // PSM_8888
+      entry[5] = 2; // IMG_FLAG_LINEAR
+      for (var row = 0; row < stored.height; row++) {
+        final sourceStart = row * stored.width * 4;
+        final targetStart = 8 + row * textureWidth * 4;
+        entry.setRange(
+          targetStart,
+          targetStart + stored.width * 4,
+          rgba,
+          sourceStart,
+        );
+      }
+      return _PocketImageEntryData(
+        bytes: entry,
+        width: textureWidth,
+        height: textureHeight,
+      );
+    } on PocketCapabilityException {
+      rethrow;
+    } on Object catch (error) {
+      throw PocketCapabilityException(
+        'image_decode_failed',
+        'Unable to decode stored PNG: $error',
+      );
+    } finally {
+      image?.dispose();
+      codec?.dispose();
+    }
+  }
+
   void _finishPendingError(_PendingPlatformRequest pending, Object error) {
     if (!identical(_pendingRequests[pending.requestId], pending)) return;
     _pendingRequests.remove(pending.requestId);
@@ -1626,6 +2406,24 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     return (await _configuredPlatformData()).keys(appId, namespace: namespace);
   }
 
+  Future<Object?> _storageBatch(Map<String, dynamic> params) async {
+    final appId = _trustedStorageAppId(params);
+    final operations = params['operations'];
+    if (operations is! List) {
+      throw const PocketCapabilityException(
+        'invalid_storage_batch',
+        'Storage batch operations must be an array',
+      );
+    }
+    final namespace = _optionalString(params, 'namespace');
+    await (await _configuredPlatformData()).batch(
+      appId,
+      List<Object?>.from(operations),
+      namespace: namespace,
+    );
+    return null;
+  }
+
   String _trustedStorageAppId(Map<String, dynamic> params) {
     final appId = _requiredString(params, 'appId');
     if (appId != widget.systemUI.appId &&
@@ -1658,6 +2456,52 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final future = _openPlatformData();
     _platformDataFuture = future;
     return future;
+  }
+
+  Future<PocketImageStore> _getImageStore() {
+    final ready = _imageStore;
+    if (ready != null) return Future<PocketImageStore>.value(ready);
+    final pending = _imageStoreFuture;
+    if (pending != null) return pending;
+    final future = _openImageStore();
+    _imageStoreFuture = future;
+    return future;
+  }
+
+  Future<PocketImageStore> _openImageStore() async {
+    late final Directory supportDirectory;
+    try {
+      supportDirectory = await getApplicationSupportDirectory();
+    } on Exception catch (error) {
+      if (_disposed) {
+        throw const PocketCapabilityException(
+          'host_closed',
+          'System host closed',
+        );
+      }
+      throw PocketCapabilityException(
+        'image_store_unavailable',
+        'Unable to locate app-private image storage: $error',
+      );
+    }
+    if (_disposed) {
+      throw const PocketCapabilityException(
+        'host_closed',
+        'System host closed',
+      );
+    }
+    final store = PocketImageStore(
+      directory: Directory('${supportDirectory.path}/pocket-images'),
+    );
+    if (_disposed) {
+      await store.close();
+      throw const PocketCapabilityException(
+        'host_closed',
+        'System host closed',
+      );
+    }
+    _imageStore = store;
+    return store;
   }
 
   Future<PocketPlatformData> _openPlatformData() async {
@@ -1813,7 +2657,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         );
       }
     }
-    _publishFacts();
+    _publishFacts(sessionChanged: true);
     if (mounted) setState(() {});
   }
 
@@ -1894,7 +2738,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       }
       _retireOwnedChildren();
     }
-    _publishFacts();
+    _publishFacts(sessionChanged: true);
     if (mounted) setState(() {});
   }
 
@@ -1935,7 +2779,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
           : identical(_applications[instance.instanceId], instance)) &&
       !instance.closing;
 
-  void _publishFacts() {
+  void _publishFacts({bool sessionChanged = false}) {
     if (_disposed) return;
     final all = <_RuntimeInstance>[_systemUIInstance, ..._applications.values];
     _controller._publish(<PocketSystemInstanceSnapshot>[
@@ -1957,7 +2801,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
           isPresented: instance.isSystemUI || instance.compositorVisible,
           compositorFocused: instance.compositorFocused,
         ),
-    ]);
+    ], sessionChanged: sessionChanged);
   }
 }
 
@@ -2123,6 +2967,145 @@ final class _PlatformProxyPlugin extends PocketPlugin {
       );
     }
   }
+}
+
+/// Filesystem and current-scene IO stays bound to one child runtime. These
+/// requests intentionally bypass SystemUI's `system.request` router: the
+/// caller's controller and generation are the authority for capture.
+final class _PlatformImagesPlugin extends PocketPlugin {
+  _PlatformImagesPlugin(
+    this.host,
+    this.source,
+    this.ownerGeneration,
+    this.sessionGeneration,
+    this.captureController,
+  );
+
+  final _PocketSystemHostState host;
+  final _RuntimeInstance source;
+  final int ownerGeneration;
+  final int sessionGeneration;
+  final PocketViewController captureController;
+  late String _appId;
+
+  @override
+  bool get backgroundSafe => true;
+
+  @override
+  PocketPluginDescriptor get descriptor => PocketPluginDescriptor(
+    id: 'pocket.platform.images',
+    version: '1.0.0',
+    description: 'App-private scene capture and image IO',
+    limits: const PocketPluginLimits(maxResponseBytes: 512 * 1024),
+    capabilities: <String, PocketPluginCapability>{
+      for (final capability in _platformImageCapabilities)
+        capability: PocketPluginCapability(
+          name: capability,
+          kind: PocketCapabilityKind.request,
+        ),
+    },
+  );
+
+  @override
+  void register(PocketPluginContext context) {
+    if (source.isSystemUI ||
+        context.appId != source.appId ||
+        source.session.appId != source.appId ||
+        source.session.generation != sessionGeneration) {
+      throw const PocketCapabilityException(
+        'platform_context_denied',
+        'Image provider must be attached to its current child runtime',
+      );
+    }
+    _appId = context.appId;
+    context.registerRequest(
+      _platformImagesCaptureCapability,
+      (params) => host._captureGuestImage(
+        source,
+        ownerGeneration: ownerGeneration,
+        sessionGeneration: sessionGeneration,
+        captureController: captureController,
+        appId: _appId,
+        params: Map<String, dynamic>.from(params),
+      ),
+    );
+    context.registerRequest(
+      _platformImagesReadCapability,
+      (params) => host._readGuestImage(
+        source,
+        ownerGeneration: ownerGeneration,
+        sessionGeneration: sessionGeneration,
+        appId: _appId,
+        params: Map<String, dynamic>.from(params),
+      ),
+    );
+    context.registerRequest(
+      _platformImagesListCapability,
+      (params) => host._listGuestImages(
+        source,
+        ownerGeneration: ownerGeneration,
+        sessionGeneration: sessionGeneration,
+        appId: _appId,
+        params: Map<String, dynamic>.from(params),
+      ),
+    );
+    context.registerRequest(
+      _platformImagesRemoveCapability,
+      (params) => host._removeGuestImage(
+        source,
+        ownerGeneration: ownerGeneration,
+        sessionGeneration: sessionGeneration,
+        appId: _appId,
+        params: Map<String, dynamic>.from(params),
+      ),
+    );
+  }
+}
+
+final class _PocketImageEntryData {
+  const _PocketImageEntryData({
+    required this.bytes,
+    required this.width,
+    required this.height,
+  });
+
+  final Uint8List bytes;
+  final int width;
+  final int height;
+}
+
+int _imageLimit(
+  Map<String, dynamic> params,
+  String name, {
+  required int maximum,
+}) {
+  if (!params.containsKey(name)) return maximum;
+  final value = params[name];
+  if (value is! int || value <= 0 || value > maximum) {
+    throw PocketCapabilityException(
+      'invalid_request',
+      '$name must be an integer in 1..$maximum',
+    );
+  }
+  return value;
+}
+
+void _ensureOnlyImageFields(Map<String, dynamic> params, Set<String> allowed) {
+  final unexpected = params.keys.where((key) => !allowed.contains(key));
+  if (unexpected.isNotEmpty) {
+    throw PocketCapabilityException(
+      'invalid_request',
+      'Unsupported image request fields: ${unexpected.join(', ')}',
+    );
+  }
+}
+
+int _nextPowerOfTwo(int value) {
+  var next = 1;
+  while (next < value) {
+    next <<= 1;
+  }
+  return next;
 }
 
 String _requiredString(Map<String, dynamic> params, String name) {

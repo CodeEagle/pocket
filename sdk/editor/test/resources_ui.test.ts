@@ -141,8 +141,8 @@ test("Editor edits package resource delivery and retains saved values per mini-a
     const profileAvatar = page.locator('select[data-resource-key="pak:profile.avatar"]');
     const requiredFont = page.locator('.resource-row[data-resource-key="pak:required.font"]');
     expect(await requiredFont.locator("select").count()).toBe(0);
-    expect(await requiredFont.locator(".resource-required-badge").textContent()).toContain("Base package");
-    expect(await page.locator('.resource-preview-image[alt="Preview of pak:profile.avatar"]').count()).toBe(1);
+    expect(await requiredFont.locator(".resource-required-badge").textContent()).toContain("基础包 · 必需");
+    expect(await page.locator('.resource-preview-image[alt="资源预览：pak:profile.avatar"]').count()).toBe(1);
     expect(await page.locator('.resource-row:has-text("asset:profile.video") .resource-preview-image').count()).toBe(0);
     const fontCards = page.locator('.resource-row[data-resource-key^="pak:ui:font."]');
     const fontKeys = await fontCards.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-resource-key")));
@@ -154,7 +154,7 @@ test("Editor edits package resource delivery and retains saved values per mini-a
     expect(await profileAvatar.evaluate(node => parseFloat(getComputedStyle(node).paddingRight))).toBeGreaterThanOrEqual(24);
     await profileAvatar.selectOption("network");
     expect(await page.locator("#save-resources").isDisabled()).toBe(false);
-    expect(await page.locator("#resources-state").textContent()).toBe("Unsaved policy");
+    expect(await page.locator("#resources-state").textContent()).toBe("策略未保存");
     await page.locator("#save-resources").click();
     await page.waitForFunction(() => document.getElementById("save-resources")?.hasAttribute("disabled") === true);
     expect(putRequests).toHaveLength(1);
@@ -169,15 +169,15 @@ test("Editor edits package resource delivery and retains saved values per mini-a
     legacyBackend = true;
     const errorPage = await browser.newPage();
     await errorPage.goto(`http://127.0.0.1:${server.port}/`, { waitUntil: "domcontentloaded" });
-    await errorPage.waitForFunction(() => document.getElementById("resources-state")?.textContent === "Unavailable");
-    expect(await errorPage.locator("#resources-panel").textContent()).toContain("Editor backend is outdated. Restart the Editor server and reload this page.");
+    await errorPage.waitForFunction(() => document.getElementById("resources-state")?.textContent === "不可用");
+    expect(await errorPage.locator("#resources-panel").textContent()).toContain("编辑器后端版本过旧，请重启编辑器服务并刷新页面。");
     await errorPage.close();
     legacyBackend = false;
     catalogOnly = true;
     const catalogPage = await browser.newPage();
     await catalogPage.goto(`http://127.0.0.1:${server.port}/`, { waitUntil: "domcontentloaded" });
     await catalogPage.waitForFunction(() => document.querySelectorAll("#resource-package-picker option").length === 2);
-    expect(await catalogPage.locator("#resources-panel .resource-empty").textContent()).toContain("Build the project to inventory");
+    expect(await catalogPage.locator("#resources-panel .resource-empty").textContent()).toContain("请先构建项目以生成此资源包的 PAK 和签名网络资源清单。");
     await catalogPage.close();
     expect(pageErrors).toEqual([]);
   } finally {

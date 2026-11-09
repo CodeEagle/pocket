@@ -451,11 +451,39 @@ function patchPinnedWorkspace(
 
   const wasmCargo = join(workspace, "programs/web/wasm/Cargo.toml");
   let wasmManifest = readFileSync(wasmCargo, "utf8");
-  wasmManifest += `\npocket-guest-rquickjs = { workspace = true, default-features = true }\nrquickjs = "0.12.2"\n`;
+  wasmManifest += `\npocket-guest-rquickjs = { workspace = true, default-features = true }\nrquickjs = "0.12.2"\nserde = { version = "1", features = ["derive"] }\n\n[build-dependencies]\ncc = "1"\n`;
   writeFileSync(wasmCargo, wasmManifest);
+
+  const workerBridge = join(workspace, "programs/web/wasm/worker-bridge");
+  mkdirSync(workerBridge, { recursive: true });
+  for (const file of ["worker_bridge.c", "worker_bridge.h"]) {
+    cpSync(join(SDK_ROOT, "targets/web/src", file), join(workerBridge, file));
+  }
+  writeFileSync(join(workspace, "programs/web/wasm/build.rs"), `
+fn main() {
+    for source in ["worker-bridge", "../../../engine/worker/src", "../../../engine/worker/include"] {
+        println!("cargo:rerun-if-changed={source}");
+    }
+    let mut build = cc::Build::new();
+    build.std("c11")
+        .include("../../../engine/worker/include")
+        .include(${JSON.stringify(join(sysOverlay, "quickjs"))})
+        .flag(${JSON.stringify("-isystem" + join(sysOverlay, "vendor/wasi-libc/include"))})
+        .include("worker-bridge")
+        .file("../../../engine/worker/src/worker.c")
+        .file("../../../engine/worker/src/quickjs.c")
+        .file("worker-bridge/worker_bridge.c")
+        .compile("pocket_web_worker");
+}
+`);
 
   const src = join(workspace, "programs/web/wasm/src");
   cpSync(join(TARGET_ROOT, "src/wechat_guest.rs"), join(src, "wechat_guest.rs"));
+  // Keep the browser Worker UI-channel mirror in the same generated Web
+  // workspace as the patched Guest adapter. It is a host transport module,
+  // not a second framework/runtime implementation.
+  cpSync(join(SDK_ROOT, "targets/web/src/worker_channels.rs"), join(src, "web_worker_channels.rs"));
+  cpSync(join(SDK_ROOT, "targets/web/src/worker_runtime.rs"), join(src, "web_worker_runtime.rs"));
   cpSync(bytecodeModule, join(src, "bytecode.rs"));
   cpSync(join(SDK_ROOT, "native/src/binary_bridge.rs"), join(src, "binary_bridge.rs"));
   if (!artifacts.length) throw new Error("build_wechat: no Guest artifacts were produced");
@@ -475,7 +503,7 @@ function patchPinnedWorkspace(
 
   const libPath = join(src, "lib.rs");
   let lib = readFileSync(libPath, "utf8");
-  lib = replaceOnce(lib, "mod browser;", "pub(crate) mod browser;\nmod bytecode;\nmod binary_bridge;\nmod wechat_guest;\nmod wechat_assets;", "WebAssembly target modules");
+  lib = replaceOnce(lib, "mod browser;", "pub(crate) mod browser;\nmod bytecode;\nmod binary_bridge;\nmod web_worker_channels;\nmod web_worker_runtime;\nmod wechat_guest;\nmod wechat_assets;", "WebAssembly target modules");
   lib = replaceOnce(lib,
 `        Err(e) => {
             *host.result.borrow_mut() = format!("{e:?}").into_bytes();
@@ -532,8 +560,11 @@ pub extern "C" fn web_compositor_frames(h: &WasmHost) -> i32 {
 }`,
     "typed WeChat compositor frame transport");
   lib = replaceOnce(lib, "    runtime: RefCell<Option<Runtime>>,", "    runtime: RefCell<Option<Runtime>>,\n    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,", "owned QuickJS handle");
+  lib = replaceOnce(lib, "    provider_ops: RefCell<Vec<u16>>,", "    provider_ops: RefCell<Vec<u16>>,\n    pub(crate) worker_channels: Rc<RefCell<Option<crate::web_worker_channels::UiChannels>>>,", "browser Worker UI channel bridge");
   lib = replaceOnce(lib, "    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,", "    pub(crate) quickjs: Rc<RefCell<Option<pocket_guest_rquickjs::RquickjsGuest>>>,\n    pub(crate) app_index: Cell<usize>,", "WeChat Guest app index");
   lib = replaceOnce(lib, "        runtime: RefCell::new(None),", "        runtime: RefCell::new(None),\n        quickjs: Rc::new(RefCell::new(None)),", "QuickJS state initialization");
+  lib = replaceOnce(lib, "        provider_ops: RefCell::new(Vec::new()),", "        provider_ops: RefCell::new(Vec::new()),\n        worker_channels: Rc::new(RefCell::new(None)),", "Worker UI channel initialization");
+  lib = replaceOnce(lib, "            h.provider_ops.borrow_mut().clear();", "            h.provider_ops.borrow_mut().clear();\n            *h.worker_channels.borrow_mut() = None;", "reset Worker UI channels");
   lib = replaceOnce(lib, "        quickjs: Rc::new(RefCell::new(None)),", "        quickjs: Rc::new(RefCell::new(None)),\n        app_index: Cell::new(0),", "WeChat Guest app index initialization");
   lib = replaceOnce(lib, "RefCell::new((\"web\".into(), BINDING_GENERATION))", "RefCell::new((\"wechat\".into(), BINDING_GENERATION))", "WeChat host identity");
   writeFileSync(libPath, lib);

@@ -247,6 +247,8 @@ bun sdk/pocket.ts init /path/to/app \
 
 可选模块包括 `pocket_permissions`、`pocket_camera`、`pocket_bluetooth`、`pocket_sensors`、`pocket_location`、`pocket_biometrics`、`pocket_weather`、`pocket_platform` 和 `pocket_dio`。
 
+Dio 插件的 `dio.request` 自动使用独立 Dart IO Worker isolate 执行请求、读流和解码，保留 `createPocketDioClient(host)` 接口；纯 Dio 接入不需要另建 `domains.worker`，继续使用 `network` 权限与插件 `allowedOrigins`。官方 JS `net.http` 则使用 `domains.worker` 和 `workerHttpOrigins`，两套授权不可混用。游戏重计算按需走官方业务 Worker；Web `renderWorker` 是独立渲染开关，默认关闭。
+
 权限请求必须由用户操作触发，JS 决定说明、拒绝后的 UI 和是否打开设置。插件只返回系统真实状态。
 
 ### 接入自己的原生能力

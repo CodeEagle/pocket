@@ -73,6 +73,16 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   let viewportNodeId = 0;
   let contentNodeId = 0;
   let pressInput: (() => void) | undefined;
+  let inputPressCount = 0;
+  const contextValues = new Map<object, unknown>();
+  const nodeMirrors = new Map<number, any>();
+  const attachNode = (parent: any, child: any): void => {
+    if (!parent || !child || typeof child !== "object" || typeof child.id !== "number") return;
+    const oldIndex = child.parent?.children?.indexOf(child) ?? -1;
+    if (oldIndex >= 0) child.parent.children.splice(oldIndex, 1);
+    child.parent = parent;
+    parent.children.push(child);
+  };
 
   const mockSolid = {
     createSignal: <T>(initial: T): [() => T, (next: T | ((prev: T) => T)) => void] => {
@@ -90,8 +100,15 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
       fn();
     },
     createMemo: (fn: () => any) => () => fn(),
-    createContext: () => ({}),
-    useContext: () => ({}),
+    createContext: <T>(defaultValue: T) => {
+      const context: any = { defaultValue };
+      context.Provider = (props: any) => {
+        contextValues.set(context, props.value);
+        return props.children;
+      };
+      return context;
+    },
+    useContext: (context: any) => contextValues.has(context) ? contextValues.get(context) : context?.defaultValue,
     children: (fn: any) => fn,
     onCleanup: (callback: () => void) => {
       cleanupCallbacks.push(callback);
@@ -110,22 +127,29 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
     },
   }));
   mock.module("solid-js", () => mockSolid);
-  mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60 }));
+  mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60, virtualNow: () => 0 }));
   mock.module(join(testDir, "../src/route.tsx"), () => ({
     useRouteActive: () => () => true,
   }));
-  mock.module("@pocketjs/framework/gesture", () => ({ createGesture: () => ({}) }));
+  mock.module("@pocketjs/framework/gesture", () => ({ createGesture: () => ({ cancel: () => {} }) }));
+  mock.module("@pocketjs/framework/host", () => ({
+    getOps: () => ({ hitTestBounds: () => viewportNodeId }),
+  }));
   mock.module("@pocketjs/framework/kinetics", () => ({
     bindDpadScroll: () => ({}),
     createScroller: (options: any) => {
       scrollerOptions = options;
       return {
         offset: () => scrollOffset,
+        state: () => "idle",
         stop: () => {},
         beginDrag: () => {},
         drag: () => {},
         endDrag: () => {},
         step: () => {},
+        scrollTo: (to: number) => {
+          scrollOffset = Math.max(0, Math.min(scrollMax, to));
+        },
         scrollBy: (delta: number) => {
           scrollOffset = Math.max(0, Math.min(scrollMax, scrollOffset + delta));
         },
@@ -140,9 +164,15 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   mock.module("@pocketjs/framework/solid/components", () => ({
     CompositorSurface: () => null,
     Focusable: (props: any) => {
-      props?.nodeRef?.({ id: 101 });
-      pressInput = props?.onPress;
-      return null;
+      const node = { id: 101, type: 0, parent: null, children: [] as any[] };
+      nodeMirrors.set(node.id, node);
+      attachNode(nodeMirrors.get(contentNodeId), node);
+      props?.nodeRef?.(node);
+      pressInput = () => {
+        inputPressCount += 1;
+        props?.onPress?.();
+      };
+      return node;
     },
     Grid: () => null,
     Modal: () => null,
@@ -152,12 +182,23 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
       const id = ++nextViewNodeId;
       if (props?.class === "flex-1 w-full overflow-hidden") viewportNodeId = id;
       if (props?.class === "flex-col w-full shrink-0") contentNodeId = id;
-      props?.ref?.({ id });
-      return null;
+      const node = { id, type: 0, parent: null, children: [] as any[] };
+      nodeMirrors.set(id, node);
+      const children = Array.isArray(props?.children) ? props.children : [props?.children];
+      for (const child of children) attachNode(node, child);
+      props?.ref?.(node);
+      return node;
     },
   }));
 
   const emitted: Array<{ type: string; name: string; payload: any }> = [];
+  let emissionMode: "success" | "false" | "throw" = "success";
+  const mockEmitValue = (packet: { type: string; name: string; payload: any }): boolean => {
+    if (emissionMode === "false") return false;
+    if (emissionMode === "throw") throw new Error("mock bridge emission failure");
+    emitted.push(packet);
+    return true;
+  };
   let inputLayout: any = { x: 0, y: 200, width: 300, height: 48 };
   (globalThis as any).pocket = {
     getLayout: (id: number) => {
@@ -189,10 +230,7 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
       }
       return { x: 0, y: 0, width: viewportWidth, height: 400 };
     },
-    _emitValue: (packet: { type: string; name: string; payload: any }) => {
-      emitted.push(packet);
-      return true;
-    },
+    _emitValue: mockEmitValue,
   };
 
   const { deliverTextInputEvent, InputField, ScrollablePage, getActiveTextInputSession } = await import("../src/ui.tsx");
@@ -223,6 +261,65 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   assert.equal(scrollerOptions.max(), 150, "resize event must refresh the page extent before frame(0)");
   console.log("flutter_widgets.test: display.viewport synchronous measurement passed");
 
+  // Desktop wheel/trackpad events use the same logical viewport coordinates
+  // and feed the existing page Scroller. They never synthesize pointer taps.
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 40, y: 100, deltaX: 0, deltaY: 36, phase: "update", source: "wheel" },
+  });
+  assert.equal(scrollOffset, 36, "wheel delta should update the page scroller immediately");
+  frameCallbacks.forEach((callback) => callback());
+  assert.equal(scrollOffset, 36, "the next guest frame must retain the input-driven scroll offset");
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 400, y: 100, deltaX: 0, deltaY: 18, phase: "update", source: "wheel" },
+  });
+  assert.equal(scrollOffset, 36, "wheel input outside the ScrollablePage viewport must be ignored");
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 400, y: 100, deltaX: 0, deltaY: 18, phase: "start", source: "trackpad" },
+  });
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 40, y: 100, deltaX: 0, deltaY: 18, phase: "update", source: "trackpad" },
+  });
+  assert.equal(scrollOffset, 36, "a trackpad sequence started outside a page must stay unclaimed");
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 40, y: 100, deltaX: 0, deltaY: 0, phase: "end", source: "trackpad" },
+  });
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 40, y: 100, deltaX: 0, deltaY: 12, phase: "update", source: "trackpad" },
+  });
+  assert.equal(scrollOffset, 36, "trackpad updates without a start must not acquire a page");
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 40, y: 100, deltaX: 0, deltaY: 12, phase: "start", source: "trackpad" },
+  });
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 40, y: 100, deltaX: 0, deltaY: 12, phase: "update", source: "trackpad" },
+  });
+  assert.equal(scrollOffset, 48, "trackpad update delta should use the same positive-down scroll direction");
+  frameCallbacks.forEach((callback) => callback());
+  receiveViewport!({
+    type: "event",
+    name: "input.scroll",
+    payload: { x: 40, y: 100, deltaX: 0, deltaY: 0, phase: "end", source: "trackpad" },
+  });
+  assert.equal(inputPressCount, 0, "desktop scroll must not dispatch a click handler");
+  assert.equal(emitted.length, 0, "desktop scroll before focus must not open an IME session");
+  console.log("flutter_widgets.test: wheel/trackpad routing and guest frame offset passed");
+
   // Open the input field
   assert.ok(pressInput, "InputField should provide an onPress handler to focus/open");
   pressInput();
@@ -232,6 +329,142 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   assert.equal(emitted[0].payload.revision, 0);
   assert.equal(emitted[0].payload.jsRevision, 1);
   const inputId = emitted[0].payload.id;
+  const inputEditingSession = emitted[0].payload.editingSession;
+  assert.equal(typeof inputEditingSession, "string");
+  const inputColorKeys = [
+    "textColor",
+    "placeholderColor",
+    "fillColor",
+    "borderColor",
+    "focusedBorderColor",
+  ];
+  for (const key of inputColorKeys) {
+    assert.equal(emitted[0].payload[key], "transparent", `textInput.open ${key} must stay transparent until attachment`);
+  }
+
+  // An explicit controlled-value change while the native overlay is mounted
+  // but before its attach ACK must not reveal native glyphs or its fill/border.
+  setDraft("before-ack");
+  assert.equal(emitted.length, 2);
+  const beforeAckUpdate = emitted[1];
+  assert.equal(beforeAckUpdate.name, "textInput.update");
+  assert.equal(beforeAckUpdate.payload.text, "before-ack");
+  assert.equal(beforeAckUpdate.payload.jsRevision, 2);
+  for (const key of inputColorKeys) {
+    assert.equal(beforeAckUpdate.payload[key], "transparent", `pre-ACK update ${key} must stay transparent`);
+  }
+  emissionMode = "false";
+  assert.equal(
+    deliverTextInputEvent("textInput.opened", {
+      id: inputId,
+      editingSession: inputEditingSession,
+      revision: 0,
+      // This mount ACK was created before the controlled value update above.
+      jsRevision: 1,
+    }),
+    false,
+    "a failed appearance handoff must remain retryable",
+  );
+  assert.equal(emitted.length, 2, "a rejected restore must not be recorded as emitted");
+  emissionMode = "throw";
+  assert.equal(
+    deliverTextInputEvent("textInput.opened", {
+      id: inputId,
+      editingSession: inputEditingSession,
+      revision: 0,
+      jsRevision: 1,
+    }),
+    false,
+    "a thrown appearance handoff must preserve the Guest fallback",
+  );
+  assert.equal(emitted.length, 2);
+  const pocketBridge = (globalThis as any).pocket;
+  delete pocketBridge._emitValue;
+  assert.equal(
+    deliverTextInputEvent("textInput.opened", {
+      id: inputId,
+      editingSession: inputEditingSession,
+      revision: 0,
+      jsRevision: 1,
+    }),
+    false,
+    "a missing bridge emitter must preserve the Guest fallback",
+  );
+  assert.equal(emitted.length, 2);
+  pocketBridge._emitValue = mockEmitValue;
+  emissionMode = "success";
+  assert.equal(
+    deliverTextInputEvent("textInput.opened", {
+      id: inputId,
+      editingSession: inputEditingSession,
+      revision: 0,
+      jsRevision: 1,
+    }),
+    true,
+    "the current native overlay attachment acknowledgement should be accepted",
+  );
+  assert.equal(emitted.length, 3, "a valid ACK should emit one appearance-only restore");
+  const appearanceRestore = emitted[2];
+  assert.equal(appearanceRestore.name, "textInput.update");
+  assert.equal(appearanceRestore.payload.id, inputId);
+  assert.equal(appearanceRestore.payload.editingSession, inputEditingSession);
+  assert.equal(appearanceRestore.payload.jsRevision, 2);
+  const restoredInputColors = ["#09090B", "#71717A", "#ffffff", "#E4E4E7", "#18181B"];
+  inputColorKeys.forEach((key, index) => {
+    assert.equal(appearanceRestore.payload[key], restoredInputColors[index]);
+  });
+  for (const key of [
+    "text",
+    "selectionBase",
+    "selectionExtent",
+    "composingBase",
+    "composingExtent",
+    "rect",
+    "clip",
+  ]) {
+    assert.equal(Object.hasOwn(appearanceRestore.payload, key), false, `appearance restore must omit ${key}`);
+  }
+  assert.equal(
+    deliverTextInputEvent("textInput.opened", {
+      id: inputId,
+      editingSession: inputEditingSession,
+      revision: 0,
+      jsRevision: 1,
+    }),
+    true,
+    "a duplicate current-session mount ACK remains accepted",
+  );
+  assert.equal(emitted.length, 3, "a duplicate ACK must not resend the appearance restore");
+  emissionMode = "false";
+  pressInput();
+  assert.equal(
+    getActiveTextInputSession()?.isOpen(),
+    true,
+    "a failed refresh must retain an already attached native editor session",
+  );
+  emissionMode = "success";
+  assert.equal(
+    deliverTextInputEvent("textInput.opened", {
+      id: inputId,
+      editingSession: inputEditingSession,
+      revision: 0,
+      jsRevision: 1,
+    }),
+    true,
+    "a failed refresh must retain the existing appearance handoff",
+  );
+  assert.equal(emitted.length, 3, "a ready session does not resend appearance on a duplicate ACK");
+  assert.equal(
+    deliverTextInputEvent("textInput.opened", {
+      id: inputId,
+      editingSession: `${inputEditingSession}:stale`,
+      revision: 0,
+      jsRevision: 1,
+    }),
+    false,
+    "an opened acknowledgement from another editing session must be rejected",
+  );
+  assert.equal(emitted.length, 3, "a stale-session ACK must not emit a restore");
 
   // A transient zero-width viewport must use the retained pane width. The
   // live host width is the full Duo window (300 here), so accepting it would
@@ -240,7 +473,7 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   zeroWidthViewport = true;
   layoutQueryCount = 0;
   frameCallbacks.forEach((callback) => callback());
-  assert.equal(emitted.length, 1, "zero-width viewport must retain the pane clip");
+  assert.equal(emitted.length, 3, "zero-width viewport must retain the pane clip");
   assert.equal(scrollerOptions.max(), 150, "zero-width viewport must retain its height");
   zeroWidthViewport = false;
 
@@ -251,7 +484,7 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   (globalThis as any).ui = {};
   zeroWidthViewport = true;
   frameCallbacks.forEach((callback) => callback());
-  assert.equal(emitted.length, 1, "missing live viewport must retain the pane clip");
+  assert.equal(emitted.length, 3, "missing live viewport must retain the pane clip");
   assert.equal(scrollerOptions.max(), 150, "missing live viewport must retain page extent");
   zeroWidthViewport = false;
   (globalThis as any).ui = savedUi;
@@ -275,7 +508,7 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   frameCallbacks.forEach((callback) => callback());
   assert.equal(
     emitted.length,
-    1,
+    3,
     "a transiently missing layout must retain the last visual overlay rect",
   );
 
@@ -283,13 +516,13 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   // receives exactly one page translation (200 - 50 = 150).
   inputLayout = { x: 0, y: 200, width: 300, height: 48 };
   frameCallbacks.forEach((callback) => callback());
-  assert.equal(emitted.length, 2);
-  assert.equal(emitted[1].name, "textInput.update");
-  assert.equal(emitted[1].payload.rect.y, 150);
+  assert.equal(emitted.length, 4);
+  assert.equal(emitted[3].name, "textInput.update");
+  assert.equal(emitted[3].payload.rect.y, 150);
   console.log("flutter_widgets.test: zero-width content and visual fallback regressions passed");
   // Keep the original IME ordering assertions focused on the open/edit lane;
   // the layout-only event was fully asserted above.
-  emitted.splice(1, 1);
+  emitted.splice(3, 1);
 
   // A resize-time ensureVisible correction is not a user scroll. Limit the
   // mock scroller so the correction remains partially clipped; the next
@@ -364,13 +597,13 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   // 4) Explicit JS signal update: setDraft("reset")
   setDraft("reset");
   assert.equal(draft(), "reset");
-  // sendUpdate should have emitted textInput.update with incremented jsRevision (2) and lastNativeRevision (2)
+  // sendUpdate should have emitted textInput.update with incremented jsRevision (3) and lastNativeRevision (2)
   assert.equal(emitted.length, 2);
   const updateEvent = emitted[1];
   assert.equal(updateEvent.name, "textInput.update");
   assert.equal(updateEvent.payload.text, "reset");
   assert.equal(updateEvent.payload.revision, 2);
-  assert.equal(updateEvent.payload.jsRevision, 2);
+  assert.equal(updateEvent.payload.jsRevision, 3);
   assert.equal(updateEvent.payload.force, true);
 
   console.log("flutter_widgets.test: IME out-of-order stale echo protection passed");
@@ -382,6 +615,16 @@ console.log("flutter_widgets.test: public Flutter vocabulary adapters and indepe
   assert.ok(staleViewportReceiver);
   const emittedBeforeCleanup = emitted.length;
   for (const cleanup of cleanupCallbacks.splice(0).reverse()) cleanup();
+  assert.equal(
+    deliverTextInputEvent("textInput.opened", {
+      id: inputId,
+      editingSession: inputEditingSession,
+      revision: 0,
+      jsRevision: 1,
+    }),
+    false,
+    "an acknowledgement after InputField unmount must not reopen its visual overlay state",
+  );
   staleViewportReceiver!({
     type: "event",
     name: "display.viewport",

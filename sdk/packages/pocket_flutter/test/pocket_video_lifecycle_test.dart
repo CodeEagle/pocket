@@ -16,10 +16,13 @@ final class _FakeVideoPlayerPlatform extends VideoPlayerPlatform {
   final List<int> pendingCreateIds = <int>[];
   final List<Completer<void>> pendingPlays = <Completer<void>>[];
   final List<Completer<void>> pendingPauses = <Completer<void>>[];
+  final List<Completer<void>> pendingSeeks = <Completer<void>>[];
   bool failCreate = false;
   bool holdCreate = false;
   bool holdPlay = false;
   bool holdPause = false;
+  bool failSeek = false;
+  bool holdSeek = false;
 
   int count(String call) => calls.where((value) => value == call).length;
 
@@ -38,6 +41,10 @@ final class _FakeVideoPlayerPlatform extends VideoPlayerPlatform {
 
   void completeNextPause() {
     pendingPauses.removeAt(0).complete();
+  }
+
+  void completeNextSeek() {
+    pendingSeeks.removeAt(0).complete();
   }
 
   @override
@@ -120,6 +127,16 @@ final class _FakeVideoPlayerPlatform extends VideoPlayerPlatform {
   }
 
   @override
+  Future<void> seekTo(int playerId, Duration position) {
+    calls.add('seek:$playerId:${position.inMilliseconds}');
+    if (failSeek) return Future<void>.error(StateError('fake seek failed'));
+    if (!holdSeek) return Future<void>.value();
+    final completer = Completer<void>();
+    pendingSeeks.add(completer);
+    return completer.future;
+  }
+
+  @override
   Future<Duration> getPosition(int playerId) async => Duration.zero;
 
   @override
@@ -172,9 +189,24 @@ PocketFrame _frameWithVideo({
   String id = 'hero',
   String asset = 'video-a.mp4',
   bool autoplay = true,
+  bool? loop,
+  String? token,
   PocketClip? clip,
   List<PocketEvent> events = const <PocketEvent>[],
 }) {
+  final frameEvents = <PocketEvent>[
+    if (loop != null || token != null)
+      PocketEvent(
+        id: 'configure-$id',
+        method: 'video.configure',
+        params: <String, dynamic>{
+          'id': id,
+          'token': token,
+          'loop': loop ?? true,
+        },
+      ),
+    ...events,
+  ];
   return PocketFrame(
     width: 320,
     height: 480,
@@ -197,7 +229,7 @@ PocketFrame _frameWithVideo({
         clip: clip,
       ),
     ],
-    events: events,
+    events: frameEvents,
   );
 }
 
@@ -259,6 +291,30 @@ Future<void> _yieldPlatformCleanup(WidgetTester tester) async {
     await Future<void>.delayed(Duration.zero);
   });
   await tester.pump();
+}
+
+Map<String, dynamic>? _videoRequestSnapshot(
+  _VideoRuntime runtime,
+  String requestId,
+) {
+  for (final message in runtime.messages.reversed) {
+    if (message['name'] != 'video.snapshot') continue;
+    final payload = message['payload'];
+    if (payload is Map && payload['requestId'] == requestId) {
+      return Map<String, dynamic>.from(payload);
+    }
+  }
+  return null;
+}
+
+Map<String, dynamic> _videoRequestItem(
+  Map<String, dynamic> snapshot,
+  String id,
+) {
+  final items = snapshot['items'] as List;
+  return Map<String, dynamic>.from(
+    items.cast<Map>().firstWhere((item) => item['id'] == id),
+  );
 }
 
 void main() {
@@ -705,6 +761,9 @@ void main() {
     expect(payload['controllers'], 1);
     expect(payload['loading'], 0);
     expect((payload['items'] as List).single['id'], 'hero');
+    expect((payload['items'] as List).single['positionMs'], 0);
+    expect((payload['items'] as List).single['durationMs'], 10_000);
+    expect(payload.containsKey('requestId'), isFalse);
     expect(
       runtime.messages
           .where((message) => message['name'] == 'video.state')
@@ -712,7 +771,318 @@ void main() {
       stateCount,
       reason: 'inspection must not create a polling state stream',
     );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'inspect-request-1',
+          method: 'video.inspect',
+          params: <String, dynamic>{'id': 'hero', 'requestId': 'inspect-1'},
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => _videoRequestSnapshot(runtime, 'inspect-1') != null,
+      reason: 'request-specific video.inspect did not echo its request id',
+    );
+    final requestSnapshot = _videoRequestSnapshot(runtime, 'inspect-1')!;
+    expect(requestSnapshot['id'], 'hero');
+    expect(_videoRequestItem(requestSnapshot, 'hero')['positionMs'], 0);
+    expect(_videoRequestItem(requestSnapshot, 'hero')['durationMs'], 10_000);
+    expect(
+      runtime.messages
+          .where((message) => message['name'] == 'video.state')
+          .length,
+      stateCount,
+      reason: 'correlated inspection must not create a polling state stream',
+    );
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('video seek validates native bounds and returns post-seek facts', (
+    tester,
+  ) async {
+    final platform = _FakeVideoPlayerPlatform();
+    VideoPlayerPlatform.instance = platform;
+    final runtime = _VideoRuntime(
+      _frameWithVideo(autoplay: false),
+      nextWakeDelayMilliseconds: -1,
+    );
+    final controller = await _mountVideoView(tester, runtime);
+    await _pumpUntil(
+      tester,
+      () => runtime.messages.any((message) {
+        final payload = message['payload'];
+        return message['name'] == 'video.state' &&
+            payload is Map &&
+            payload['state'] == 'ready';
+      }),
+      reason: 'video was not ready before seek requests',
+    );
+    final stateCount = runtime.messages
+        .where((message) => message['name'] == 'video.state')
+        .length;
+    void sendSeek(String requestId, Object? positionMs) {
+      runtime.frameValue = _frameWithVideo(
+        autoplay: false,
+        events: <PocketEvent>[
+          PocketEvent(
+            id: 'event-$requestId',
+            method: 'video.seek',
+            params: <String, dynamic>{
+              'id': 'hero',
+              'requestId': requestId,
+              'positionMs': positionMs,
+            },
+          ),
+        ],
+      );
+      controller.notifyWork();
+    }
+
+    sendSeek('out-of-range', 10_001);
+    await _pumpUntil(
+      tester,
+      () => _videoRequestSnapshot(runtime, 'out-of-range') != null,
+      reason: 'out-of-range seek did not return a request error',
+    );
+    final invalid = _videoRequestItem(
+      _videoRequestSnapshot(runtime, 'out-of-range')!,
+      'hero',
+    );
+    expect(invalid['error'], isA<String>());
+    expect(platform.calls.where((call) => call.startsWith('seek:')), isEmpty);
+    expect(
+      runtime.messages
+          .where((message) => message['name'] == 'video.state')
+          .length,
+      stateCount,
+      reason: 'invalid requests must not pollute persistent video diagnostics',
+    );
+
+    platform.holdSeek = true;
+    sendSeek('seek-1', 5_000);
+    await _pumpUntil(
+      tester,
+      () => platform.calls.contains('seek:1:5000'),
+      reason: 'native seek was not issued',
+    );
+    expect(_videoRequestSnapshot(runtime, 'seek-1'), isNull);
+    platform.completeNextSeek();
+    await _pumpUntil(
+      tester,
+      () => _videoRequestSnapshot(runtime, 'seek-1') != null,
+      reason: 'seek did not return post-seek controller facts',
+    );
+    final sought = _videoRequestItem(
+      _videoRequestSnapshot(runtime, 'seek-1')!,
+      'hero',
+    );
+    expect(sought['positionMs'], 5_000);
+    expect(sought['durationMs'], 10_000);
+    expect(sought['error'], isNull);
+    expect(
+      runtime.messages
+          .where((message) => message['name'] == 'video.state')
+          .length,
+      stateCount,
+      reason:
+          'position changes are returned on demand, not as a new state stream',
+    );
+
+    platform.holdSeek = false;
+    platform.failSeek = true;
+    sendSeek('seek-error', 7_000);
+    await _pumpUntil(
+      tester,
+      () => _videoRequestSnapshot(runtime, 'seek-error') != null,
+      reason: 'native seek failure did not return a request error',
+    );
+    final failed = _videoRequestItem(
+      _videoRequestSnapshot(runtime, 'seek-error')!,
+      'hero',
+    );
+    expect(failed['error'], contains('fake seek failed'));
+    expect(
+      runtime.messages
+          .where((message) => message['name'] == 'video.state')
+          .length,
+      stateCount,
+      reason:
+          'seek errors are request-local and do not replace playback diagnostics',
+    );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'inspect-after-failed-seek',
+          method: 'video.inspect',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'requestId': 'inspect-after-failed-seek',
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => _videoRequestSnapshot(runtime, 'inspect-after-failed-seek') != null,
+      reason: 'inspection after seek failure did not return current facts',
+    );
+    final afterFailure = _videoRequestItem(
+      _videoRequestSnapshot(runtime, 'inspect-after-failed-seek')!,
+      'hero',
+    );
+    expect(afterFailure['positionMs'], 5_000);
+    expect(afterFailure['error'], isNull);
+    expect(
+      runtime.messages
+          .where((message) => message['name'] == 'video.state')
+          .length,
+      stateCount,
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('release prevents a pending seek from reporting stale success', (
+    tester,
+  ) async {
+    final platform = _FakeVideoPlayerPlatform();
+    platform.holdSeek = true;
+    VideoPlayerPlatform.instance = platform;
+    final runtime = _VideoRuntime(
+      _frameWithVideo(autoplay: false),
+      nextWakeDelayMilliseconds: -1,
+    );
+    final controller = await _mountVideoView(tester, runtime);
+    await _pumpUntil(
+      tester,
+      () => runtime.messages.any((message) {
+        final payload = message['payload'];
+        return message['name'] == 'video.state' &&
+            payload is Map &&
+            payload['state'] == 'ready';
+      }),
+      reason: 'video was not ready before the stale seek test',
+    );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'pending-seek',
+          method: 'video.seek',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'requestId': 'stale-seek',
+            'positionMs': 4_000,
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => platform.calls.contains('seek:1:4000'),
+      reason: 'the stale seek was not held by the platform',
+    );
+
+    runtime.frameValue = PocketFrame(
+      width: 320,
+      height: 480,
+      ops: _frameWithoutVideo().ops,
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'release-after-seek',
+          method: 'video.release',
+          params: <String, dynamic>{'id': 'hero'},
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => runtime.messages.any((message) {
+        final payload = message['payload'];
+        return message['name'] == 'video.state' &&
+            payload is Map &&
+            payload['id'] == 'hero' &&
+            payload['state'] == 'disposed';
+      }),
+      reason: 'release event did not retire the video with the pending seek',
+    );
+    await _yieldPlatformCleanup(tester);
+    await _pumpUntil(
+      tester,
+      () => platform.count('dispose:1') == 1,
+      reason: 'release did not dispose the controller with the pending seek',
+    );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'reregister-after-seek',
+          method: 'video.pause',
+          params: <String, dynamic>{'id': 'hero'},
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => platform.calls.contains('create:2:video-a.mp4'),
+      reason: 'the same id did not receive a new controller after release',
+    );
+    await _pumpUntil(
+      tester,
+      () => platform.calls.contains('loop:2:true'),
+      reason: 'the replacement controller did not finish initialization',
+    );
+
+    platform.completeNextSeek();
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(
+      _videoRequestSnapshot(runtime, 'stale-seek'),
+      isNull,
+      reason: 'a retired controller must not resolve an old seek as success',
+    );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'inspect-recreated-video',
+          method: 'video.inspect',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'requestId': 'inspect-recreated-video',
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => _videoRequestSnapshot(runtime, 'inspect-recreated-video') != null,
+      reason: 'the replacement video did not answer inspection',
+    );
+    expect(
+      _videoRequestItem(
+        _videoRequestSnapshot(runtime, 'inspect-recreated-video')!,
+        'hero',
+      )['positionMs'],
+      0,
+      reason: 'the stale seek must not alter the replacement controller',
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _yieldPlatformCleanup(tester);
   });
 
   testWidgets('position or buffering updates do not emit duplicate state', (
@@ -1493,7 +1863,7 @@ void main() {
     platform.completeNextCreate();
     await _pumpUntil(
       tester,
-      () => platform.calls.contains('loop:2:false'),
+      () => platform.calls.contains('loop:2:true'),
       reason: 'the fresh initialize did not finish',
     );
 
@@ -1766,6 +2136,357 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
     expect(platform.count('create:2:video-a.mp4'), 0);
 
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('non-loop completion is correlated and never auto-restarts', (
+    tester,
+  ) async {
+    final platform = _FakeVideoPlayerPlatform();
+    VideoPlayerPlatform.instance = platform;
+    final runtime = _VideoRuntime(
+      _frameWithVideo(autoplay: true, loop: false, token: 'cutscene-1'),
+      nextWakeDelayMilliseconds: -1,
+    );
+    final controller = await _mountVideoView(tester, runtime);
+    await _pumpUntil(
+      tester,
+      () => platform.calls.contains('play:1'),
+      reason: 'the configured non-looping video did not start',
+    );
+    expect(platform.calls, contains('loop:1:false'));
+
+    platform.emit(
+      1,
+      VideoEvent(
+        eventType: VideoEventType.completed,
+        duration: const Duration(seconds: 10),
+      ),
+    );
+    await _pumpUntil(
+      tester,
+      () => runtime.messages.any((message) {
+        final payload = message['payload'];
+        return message['name'] == 'video.state' &&
+            payload is Map &&
+            payload['id'] == 'hero' &&
+            payload['token'] == 'cutscene-1' &&
+            payload['state'] == 'ended' &&
+            payload['positionMs'] == 10_000 &&
+            payload['durationMs'] == 10_000;
+      }),
+      reason:
+          'native completion did not publish exact ended position and duration',
+    );
+    final firstPlayCount = platform.count('play:1');
+    expect(firstPlayCount, 1);
+
+    controller.setAppActive(false);
+    await tester.pump(const Duration(milliseconds: 16));
+    controller.setAppActive(true);
+    await tester.pump(const Duration(milliseconds: 16));
+    runtime.frameValue = _frameWithVideo(
+      autoplay: true,
+      loop: false,
+      token: 'cutscene-1',
+    );
+    controller.notifyWork();
+    await tester.pump(const Duration(milliseconds: 64));
+    expect(platform.count('play:1'), firstPlayCount);
+
+    runtime.frameValue = _frameWithoutVideo();
+    controller.sendRaw(<String, dynamic>{'type': 'test.wake'});
+    await tester.pump(const Duration(milliseconds: 16));
+    await _yieldPlatformCleanup(tester);
+    await _pumpUntil(
+      tester,
+      () => platform.count('dispose:1') == 1,
+      reason: 'temporary DrawOp removal did not retire its controller',
+    );
+    runtime.frameValue = _frameWithVideo(
+      autoplay: true,
+      loop: false,
+      token: 'cutscene-1',
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => platform.calls.contains('create:2:video-a.mp4'),
+      reason: 'the retained registration did not reload after culling',
+    );
+    await _pumpUntil(
+      tester,
+      () => runtime.messages.any((message) {
+        final payload = message['payload'];
+        return message['name'] == 'video.state' &&
+            payload is Map &&
+            payload['id'] == 'hero' &&
+            payload['token'] == 'cutscene-1' &&
+            payload['state'] == 'ready';
+      }),
+      reason: 'the reloaded player did not publish ready facts',
+    );
+    expect(
+      platform.count('play:2'),
+      0,
+      reason:
+          'an ended same-token registration must stay stopped after culling',
+    );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      loop: false,
+      token: 'cutscene-2',
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'new-generation-play',
+          method: 'video.play',
+          params: <String, dynamic>{'id': 'hero', 'token': 'cutscene-2'},
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => platform.count('play:2') == 1,
+      reason: 'a new core generation should be allowed to play explicitly',
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('loop and token updates keep the registered decoder', (
+    tester,
+  ) async {
+    final platform = _FakeVideoPlayerPlatform();
+    VideoPlayerPlatform.instance = platform;
+    final runtime = _VideoRuntime(
+      _frameWithVideo(
+        autoplay: false,
+        loop: true,
+        token: 'native-generation-a',
+      ),
+      nextWakeDelayMilliseconds: -1,
+    );
+    final controller = await _mountVideoView(tester, runtime);
+    await _pumpUntil(
+      tester,
+      () => platform.calls.contains('pause:1'),
+      reason: 'the initial configured player did not initialize paused',
+    );
+    expect(platform.calls, contains('loop:1:true'));
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      loop: false,
+      token: 'native-generation-b',
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'new-generation-play',
+          method: 'video.play',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'token': 'native-generation-b',
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () =>
+          platform.calls.contains('loop:1:false') &&
+          platform.calls.contains('play:1'),
+      reason: 'loop/token update was not applied to the existing player',
+    );
+    expect(
+      platform.calls.where((call) => call.startsWith('create:')),
+      hasLength(1),
+    );
+    final pauseCount = platform.count('pause:1');
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      loop: false,
+      token: 'native-generation-b',
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'stale-old-generation-pause',
+          method: 'video.pause',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'token': 'native-generation-a',
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await tester.pump(const Duration(milliseconds: 64));
+    expect(
+      platform.count('pause:1'),
+      pauseCount,
+      reason: 'stale-token pause must not affect the current generation',
+    );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      loop: false,
+      token: 'native-generation-b',
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'current-generation-pause',
+          method: 'video.pause',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'token': 'native-generation-b',
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => platform.count('pause:1') == pauseCount + 1,
+      reason: 'the current generation pause command was not applied',
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('seek to duration stays paused until explicit replay', (
+    tester,
+  ) async {
+    final platform = _FakeVideoPlayerPlatform();
+    VideoPlayerPlatform.instance = platform;
+    final runtime = _VideoRuntime(
+      _frameWithVideo(autoplay: true, loop: false, token: 'seek-generation'),
+      nextWakeDelayMilliseconds: -1,
+    );
+    final controller = await _mountVideoView(tester, runtime);
+    await _pumpUntil(
+      tester,
+      () => platform.calls.contains('play:1'),
+      reason: 'the seek test video did not start',
+    );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: true,
+      loop: false,
+      token: 'seek-generation',
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'seek-inspect',
+          method: 'video.inspect',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'token': 'seek-generation',
+            'requestId': 'seek-inspect',
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => _videoRequestSnapshot(runtime, 'seek-inspect') != null,
+      reason: 'inspect did not return initialized facts',
+    );
+    final inspected = _videoRequestItem(
+      _videoRequestSnapshot(runtime, 'seek-inspect')!,
+      'hero',
+    );
+    expect(inspected['token'], 'seek-generation');
+    expect(inspected['durationMs'], 10_000);
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: true,
+      loop: false,
+      token: 'seek-generation',
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'seek-end',
+          method: 'video.seek',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'token': 'seek-generation',
+            'requestId': 'seek-end',
+            'positionMs': 10_000,
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => _videoRequestSnapshot(runtime, 'seek-end') != null,
+      reason: 'seek-to-duration did not return its real position',
+    );
+    final atEnd = _videoRequestItem(
+      _videoRequestSnapshot(runtime, 'seek-end')!,
+      'hero',
+    );
+    expect(atEnd['token'], 'seek-generation');
+    expect(atEnd['state'], 'paused');
+    expect(atEnd['playing'], isFalse);
+    expect(atEnd['positionMs'], 10_000);
+    expect(atEnd['durationMs'], 10_000);
+    expect(
+      runtime.messages.where((message) {
+        final payload = message['payload'];
+        return message['name'] == 'video.state' &&
+            payload is Map &&
+            payload['token'] == 'seek-generation' &&
+            payload['state'] == 'ended';
+      }),
+      isEmpty,
+      reason: 'an explicit endpoint seek is not a playback-completed fact',
+    );
+
+    final playCount = platform.count('play:1');
+    controller.setAppActive(false);
+    await tester.pump(const Duration(milliseconds: 16));
+    controller.setAppActive(true);
+    await tester.pump(const Duration(milliseconds: 16));
+    runtime.frameValue = _frameWithVideo(
+      autoplay: true,
+      loop: false,
+      token: 'seek-generation',
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'gated-play',
+          method: 'video.play',
+          params: <String, dynamic>{'id': 'hero', 'token': 'seek-generation'},
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await tester.pump(const Duration(milliseconds: 48));
+    expect(
+      platform.count('play:1'),
+      playCount,
+      reason: 'same-token policy replay must not restart an endpoint seek',
+    );
+
+    runtime.frameValue = _frameWithVideo(
+      autoplay: false,
+      loop: false,
+      token: 'seek-generation',
+      events: const <PocketEvent>[
+        PocketEvent(
+          id: 'explicit-replay',
+          method: 'video.play',
+          params: <String, dynamic>{
+            'id': 'hero',
+            'token': 'seek-generation',
+            'restart': true,
+          },
+        ),
+      ],
+    );
+    controller.notifyWork();
+    await _pumpUntil(
+      tester,
+      () => platform.count('play:1') == playCount + 1,
+      reason: 'explicit replay should clear the endpoint suppression',
+    );
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

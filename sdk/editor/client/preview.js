@@ -553,10 +553,17 @@
   function drawFrame(context, frame, resources, videos, resourceEpoch = 0) {
     const width = number(frame.width, 1);
     const height = number(frame.height, 1);
+    const ops = Array.isArray(frame.ops) ? frame.ops : [];
+    const unsupported = ops.find((op) => op && typeof op === "object" && (
+      op.type === "meshLayerBegin" || op.type === "meshMaskBegin" || op.type === "meshLayerRestore"
+      || op.type === "textureTriangleRepeat" || (op.type === "textureTriangle" && op.repeatTexture === true)
+    ));
+    if (unsupported) {
+      throw new Error(`Canvas2D preview does not support Live2D mesh effects or repeat sampling (${unsupported.type})`);
+    }
     context.clearRect(0, 0, width, height);
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
-    const ops = Array.isArray(frame.ops) ? frame.ops : [];
     let hasGlass = false;
     let backdropHasVideo = false;
     let activeClip = null;
@@ -2607,7 +2614,6 @@
       cancelPointerContacts();
       connectionGeneration += 1;
       stream?.close();
-      disposeWebBluetoothPlugin();
       global.removeEventListener("blur", cancelPointerContacts);
       removeAccessibilityMediaQueryListeners();
       densityQuery?.removeEventListener("change", onDensityChange);
@@ -2617,7 +2623,16 @@
     }, getFrame: () => frame };
   }
 
-  global.PocketEditorPreview = { version: VERSION, protocol: { version: VERSION, source: SOURCE }, mount: client };
+  global.PocketEditorPreview = {
+    version: VERSION,
+    protocol: { version: VERSION, source: SOURCE },
+    mount: client,
+    /** Project an already-canonical TEX_TRI-shaped operation (also used by the Novel mesh inspector). */
+    projectTriangle(context, operation, image) {
+      if (!operation || operation.type !== "textureTriangle") return;
+      drawTriangle(context, operation, image);
+    },
+  };
   if (typeof document !== "undefined") {
     const root = document.querySelector("[data-pocket-preview]");
     if (root && !global.PocketEditorPreviewInstance) {

@@ -36,9 +36,7 @@ void main() {
   late Directory directory;
 
   setUp(() {
-    directory = Directory.systemTemp.createTempSync(
-      'pocket-system-host-unit-',
-    );
+    directory = Directory.systemTemp.createTempSync('pocket-system-host-unit-');
     binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('plugins.flutter.io/path_provider'),
       (_) async => directory.path,
@@ -166,29 +164,29 @@ void main() {
             child: Center(
               child: SizedBox.shrink(
                 child: PocketSystemHost(
-                systemUI: PocketAppConfig(
-                  appId: rootId,
-                  bytecodeAsset: 'test/root.qjbc',
-                  pakAsset: 'test/root.pak',
-                  metadataAsset: 'test/root.metadata.json',
-                  manifestAsset: 'test/root.manifest.json',
-                  additionalCapabilities: const {'ui.compositor-surfaces'},
-                  compositorSurfaces: const <String, int>{childId: 2},
-                  pluginFactories: <PocketPluginFactory>[
-                    (_) => _RegistryCapturePlugin((registry) {
-                      rootRegistry = registry;
-                    }),
-                  ],
-                ),
-                applications: const <String, PocketAppConfig>{
-                  childId: PocketAppConfig(
-                    appId: childId,
-                    bytecodeAsset: 'test/child.qjbc',
-                    pakAsset: 'test/child.pak',
-                    metadataAsset: 'test/child.metadata.json',
-                    manifestAsset: 'test/child.manifest.json',
+                  systemUI: PocketAppConfig(
+                    appId: rootId,
+                    bytecodeAsset: 'test/root.qjbc',
+                    pakAsset: 'test/root.pak',
+                    metadataAsset: 'test/root.metadata.json',
+                    manifestAsset: 'test/root.manifest.json',
+                    additionalCapabilities: const {'ui.compositor-surfaces'},
+                    compositorSurfaces: const <String, int>{childId: 2},
+                    pluginFactories: <PocketPluginFactory>[
+                      (_) => _RegistryCapturePlugin((registry) {
+                        rootRegistry = registry;
+                      }),
+                    ],
                   ),
-                },
+                  applications: const <String, PocketAppConfig>{
+                    childId: PocketAppConfig(
+                      appId: childId,
+                      bytecodeAsset: 'test/child.qjbc',
+                      pakAsset: 'test/child.pak',
+                      metadataAsset: 'test/child.metadata.json',
+                      manifestAsset: 'test/child.manifest.json',
+                    ),
+                  },
                   controller: controller,
                 ),
               ),
@@ -209,6 +207,59 @@ void main() {
             ],
           },
         );
+        await invokeSystem(
+          tester,
+          rootRegistry,
+          'system.storage.batch',
+          <String, dynamic>{
+            'appId': rootId,
+            'operations': <Map<String, Object?>>[
+              {'type': 'set', 'key': 'slot.a', 'value': 'chapter-a'},
+              {'type': 'set', 'key': 'slot.b', 'value': 'chapter-b'},
+            ],
+          },
+        );
+        expect(
+          await invokeSystem(
+            tester,
+            rootRegistry,
+            'system.storage.get',
+            <String, dynamic>{'appId': rootId, 'key': 'slot.a'},
+          ),
+          'chapter-a',
+        );
+        await expectLater(
+          invokeSystem(
+            tester,
+            rootRegistry,
+            'system.storage.batch',
+            <String, dynamic>{
+              'appId': rootId,
+              'operations': <Map<String, Object?>>[
+                {'type': 'set', 'key': 'slot.a', 'value': 'must-not-commit'},
+                {'type': 'remove', 'key': 'slot.a'},
+              ],
+            },
+          ),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'duplicate_storage_key',
+            ),
+          ),
+        );
+        expect(
+          await invokeSystem(
+            tester,
+            rootRegistry,
+            'system.storage.get',
+            <String, dynamic>{'appId': rootId, 'key': 'slot.a'},
+          ),
+          'chapter-a',
+          reason:
+              'invalid native batches must leave the complete old bucket intact',
+        );
         final created = Map<String, dynamic>.from(
           await invokeSystem(
                 tester,
@@ -222,6 +273,17 @@ void main() {
         final rootGuest = tester.widget<PocketGuestSession>(
           find.byType(PocketGuestSession).first,
         );
+
+        var notifications = 0;
+        void observeFacts() => notifications++;
+        controller.addListener(observeFacts);
+        rootGuest.onFirstFrame!();
+        expect(notifications, 1, reason: 'new first-frame facts must publish');
+        final published = controller.instances;
+        rootGuest.onFirstFrame!();
+        expect(notifications, 1, reason: 'identical facts must not republish');
+        expect(controller.instances, same(published));
+        controller.removeListener(observeFacts);
 
         // Child produces an Offstage first frame while its compositor slot is hidden.
         const offstageSlot = PocketCompositorSlot(
@@ -251,9 +313,17 @@ void main() {
         expect(childAfterOffstageFrame.isPresented, isFalse);
 
         // Child fails while Offstage, then its compositor slot becomes visible.
+        final beforeFailure = notifications;
+        controller.addListener(observeFacts);
         await childAfterOffstageFrame.session.onError(
           StateError('failed after offstage frame'),
         );
+        expect(
+          notifications,
+          greaterThan(beforeFailure),
+          reason: 'live session failures must still notify host observers',
+        );
+        controller.removeListener(observeFacts);
         final visibleChild =
             rootGuest.hostSurfaceBuilder!(
                   const PocketCompositorSlot(
@@ -316,29 +386,29 @@ void main() {
             child: Center(
               child: SizedBox.shrink(
                 child: PocketSystemHost(
-                systemUI: PocketAppConfig(
-                  appId: rootId,
-                  bytecodeAsset: 'test/root.qjbc',
-                  pakAsset: 'test/root.pak',
-                  metadataAsset: 'test/root.metadata.json',
-                  manifestAsset: 'test/root.manifest.json',
-                  additionalCapabilities: const {'ui.compositor-surfaces'},
-                  compositorSurfaces: const <String, int>{childId: 2},
-                  pluginFactories: <PocketPluginFactory>[
-                    (_) => _RegistryCapturePlugin((registry) {
-                      rootRegistry = registry;
-                    }),
-                  ],
-                ),
-                applications: const <String, PocketAppConfig>{
-                  childId: PocketAppConfig(
-                    appId: childId,
-                    bytecodeAsset: 'test/child.qjbc',
-                    pakAsset: 'test/child.pak',
-                    metadataAsset: 'test/child.metadata.json',
-                    manifestAsset: 'test/child.manifest.json',
+                  systemUI: PocketAppConfig(
+                    appId: rootId,
+                    bytecodeAsset: 'test/root.qjbc',
+                    pakAsset: 'test/root.pak',
+                    metadataAsset: 'test/root.metadata.json',
+                    manifestAsset: 'test/root.manifest.json',
+                    additionalCapabilities: const {'ui.compositor-surfaces'},
+                    compositorSurfaces: const <String, int>{childId: 2},
+                    pluginFactories: <PocketPluginFactory>[
+                      (_) => _RegistryCapturePlugin((registry) {
+                        rootRegistry = registry;
+                      }),
+                    ],
                   ),
-                },
+                  applications: const <String, PocketAppConfig>{
+                    childId: PocketAppConfig(
+                      appId: childId,
+                      bytecodeAsset: 'test/child.qjbc',
+                      pakAsset: 'test/child.pak',
+                      metadataAsset: 'test/child.metadata.json',
+                      manifestAsset: 'test/child.manifest.json',
+                    ),
+                  },
                   controller: controller,
                 ),
               ),
@@ -618,4 +688,179 @@ void main() {
       controller.dispose();
     }
   });
+
+  testWidgets(
+    'child image provider stays app-scoped and capture opt-in survives hide/resume',
+    (tester) async {
+      final controller = PocketSystemHostController();
+      late PocketHostRegistry rootRegistry;
+      late PocketHostRegistry childRegistry;
+      const imageCapabilities = <String>[
+        'platform.images.capture',
+        'platform.images.read',
+        'platform.images.list',
+        'platform.images.remove',
+      ];
+      final childConfig = PocketAppConfig(
+        appId: childId,
+        bytecodeAsset: 'test/child.qjbc',
+        pakAsset: 'test/child.pak',
+        metadataAsset: 'test/child.metadata.json',
+        manifestAsset: 'test/child.manifest.json',
+        bootstrapManifestJson: jsonEncode(<String, Object?>{
+          'capabilities': <String, Object?>{'requires': imageCapabilities},
+        }),
+        pluginFactories: <PocketPluginFactory>[
+          (_) => _RegistryCapturePlugin((registry) {
+            childRegistry = registry;
+          }),
+        ],
+      );
+
+      try {
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Center(
+              child: SizedBox.shrink(
+                child: PocketSystemHost(
+                  systemUI: PocketAppConfig(
+                    appId: rootId,
+                    bytecodeAsset: 'test/root.qjbc',
+                    pakAsset: 'test/root.pak',
+                    metadataAsset: 'test/root.metadata.json',
+                    manifestAsset: 'test/root.manifest.json',
+                    additionalCapabilities: const {'ui.compositor-surfaces'},
+                    compositorSurfaces: const <String, int>{childId: 2},
+                    pluginFactories: <PocketPluginFactory>[
+                      (_) => _RegistryCapturePlugin((registry) {
+                        rootRegistry = registry;
+                      }),
+                    ],
+                  ),
+                  applications: <String, PocketAppConfig>{childId: childConfig},
+                  controller: controller,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await waitFor(
+          tester,
+          controller,
+          (entry) => entry.isSystemUI && entry.ready,
+        );
+        await invokeSystem(
+          tester,
+          rootRegistry,
+          'system.runtime.configure',
+          <String, dynamic>{
+            'systemUI': rootId,
+            'grants': <Map<String, Object?>>[
+              {'appId': rootId, 'sharedNamespaces': <String>[]},
+              {'appId': childId, 'sharedNamespaces': <String>[]},
+            ],
+          },
+        );
+        final created = Map<String, dynamic>.from(
+          await invokeSystem(
+                tester,
+                rootRegistry,
+                'system.runtime.create',
+                <String, dynamic>{'appId': childId},
+              )
+              as Map,
+        );
+        final childInstance = await waitFor(
+          tester,
+          controller,
+          (entry) => entry.instanceId == created['instanceId'] && entry.ready,
+        );
+        expect(
+          childInstance.session.hasConfiguredCapability(
+            'platform.images.capture',
+          ),
+          isTrue,
+        );
+        expect(rootRegistry.registrationFor('platform.images.read'), isNull);
+
+        final listRequest = childRegistry.registrationFor(
+          'platform.images.list',
+        )!;
+        final listed = await tester.runAsync(
+          () async => await listRequest.request!(<String, dynamic>{}),
+        );
+        expect(listed, isEmpty);
+        final captureRequest = childRegistry.registrationFor(
+          'platform.images.capture',
+        )!;
+        await expectLater(
+          captureRequest.request!(<String, dynamic>{}),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'capture_unavailable',
+            ),
+          ),
+          reason: 'a child with no mounted scene must not report a fake image',
+        );
+
+        final rootGuest = tester.widget<PocketGuestSession>(
+          find.byType(PocketGuestSession).first,
+        );
+        final visibleSlot = const PocketCompositorSlot(
+          surfaceHandle: 2,
+          bounds: Rect.fromLTWH(0, 0, 120, 120),
+          visibleClip: Rect.fromLTWH(0, 0, 120, 120),
+          logicalViewport: Size(120, 120),
+          visible: true,
+          focused: true,
+          drawIndex: 0,
+        );
+        final visibleChild =
+            rootGuest.hostSurfaceBuilder!(visibleSlot) as PocketGuestSession;
+        expect(visibleChild.enableSceneCapture, isTrue);
+        await tester.pump();
+        await childInstance.session.setForeground(true);
+        expect(
+          childInstance.session.hasConfiguredCapability(
+            'platform.images.capture',
+          ),
+          isTrue,
+          reason:
+              'foreground capability revocation must not remove capture opt-in',
+        );
+
+        final hiddenChild =
+            rootGuest.hostSurfaceBuilder!(
+                  const PocketCompositorSlot(
+                    surfaceHandle: 2,
+                    bounds: Rect.zero,
+                    visibleClip: Rect.zero,
+                    logicalViewport: Size(120, 120),
+                    visible: false,
+                    focused: false,
+                    drawIndex: 0,
+                  ),
+                )
+                as PocketGuestSession;
+        expect(hiddenChild.enableSceneCapture, isTrue);
+        await tester.pump();
+        await childInstance.session.setForeground(false);
+        final resumedChild =
+            rootGuest.hostSurfaceBuilder!(visibleSlot) as PocketGuestSession;
+        expect(resumedChild.enableSceneCapture, isTrue);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        controller.dispose();
+      }
+    },
+  );
 }

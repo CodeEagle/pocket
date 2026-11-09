@@ -51,11 +51,27 @@ final class PocketSession extends ChangeNotifier {
   PocketMemoryLimits? _memoryLimits;
   PocketMemoryLimits get memoryLimits => _memoryLimits ?? config.memoryLimits;
   String get appId => config.appId;
-  Set<String> get capabilities => {
+
+  /// Whether [capability] was requested by the mounted guest and is available
+  /// from its configured native providers. This admission snapshot is stable
+  /// for the session generation, including while foreground-only providers are
+  /// temporarily revoked during lifecycle suspension.
+  bool hasConfiguredCapability(String capability) =>
+      _negotiatedCapabilities?.granted.contains(capability) ?? false;
+  Set<String> get _builtInCapabilities => {
     'text.glyphs.baked',
     'runtime.worker',
+    'input.touch',
+    'display.viewport.live',
+    if (config.keyboardInputEnabled) 'input.buttons',
     if (config.offloadProviderFactory != null) 'io.offload',
     if (config.workerHttpOrigins.isNotEmpty) 'net.http',
+    if (config.additionalCapabilities.contains('ui.compositor-surfaces'))
+      'ui.compositor-surfaces',
+  };
+
+  Set<String> get capabilities => {
+    ..._builtInCapabilities,
     'runtime.info',
     'runtime.performance',
     'plugins.list',
@@ -197,16 +213,27 @@ final class PocketSession extends ChangeNotifier {
   }
 
   Future<void> _initialize({bool prepareForOpen = false}) async {
-    await performance.initialize();
-    final metadataSource =
-        config.bootstrapMetadataJson ??
-        await rootBundle.loadString(config.metadataAsset);
+    // History restoration and bootstrap assets are independent. Drain every
+    // operation, including on failure, before admission or close completes.
+    late final List<String> sources;
+    await Future.wait<void>([
+      performance.initialize(),
+      Future.wait<String>([
+        config.bootstrapMetadataJson != null
+            ? Future.value(config.bootstrapMetadataJson!)
+            : rootBundle.loadString(config.metadataAsset),
+        config.bootstrapManifestJson != null
+            ? Future.value(config.bootstrapManifestJson!)
+            : rootBundle.loadString(config.manifestAsset),
+      ]).then<void>((loaded) {
+        sources = loaded;
+      }),
+    ]);
+    final metadataSource = sources[0];
     _metadata = Map<String, dynamic>.from(jsonDecode(metadataSource) as Map);
-    final manifestSource =
-        config.bootstrapManifestJson ??
-        await rootBundle.loadString(config.manifestAsset);
-    _embeddedManifest = PocketGuestManifest.fromJsonString(manifestSource);
+    final manifestSource = sources[1];
     final manifestJson = jsonDecode(manifestSource);
+    _embeddedManifest = PocketGuestManifest.fromJson(manifestJson);
     final updateConfig = config.updates;
     final embeddedBuild = _resolveEmbeddedBuild(
       _metadata,
@@ -693,6 +720,10 @@ final class PocketSession extends ChangeNotifier {
       for (final factory in config.pluginFactories) factory(controller),
     ];
     final registry = PocketHostRegistry();
+    final includesAppPrivateImages = providers.any(
+      (provider) =>
+          provider.descriptor.capabilities.containsKey('platform.images.read'),
+    );
     final host = PocketHost(
       registry: registry,
       streams: PocketStreamBridge(send: _send),
@@ -702,20 +733,19 @@ final class PocketSession extends ChangeNotifier {
           ...provider.descriptor.capabilities.keys,
       },
       send: _send,
-      builtInCapabilities: {
-        'text.glyphs.baked',
-        'runtime.worker',
-        if (config.offloadProviderFactory != null) 'io.offload',
-        if (config.workerHttpOrigins.isNotEmpty) 'net.http',
-        if (config.additionalCapabilities.contains('ui.compositor-surfaces'))
-          'ui.compositor-surfaces',
-      },
+      builtInCapabilities: _builtInCapabilities,
       sendRaw: controller.sendRaw,
     );
     final plugins = PocketPluginManager(
       host: host,
       appId: appId,
       sessionId: 'guest-$generation',
+      // Only a host-compiled image provider needs room for one bounded
+      // 256×256 RGBA IMG entry plus its response metadata. Every other session
+      // keeps the standard 256 KiB plugin response ceiling.
+      budget: includesAppPrivateImages
+          ? const PocketPluginBudget(maxResponseBytes: 512 * 1024)
+          : const PocketPluginBudget(),
       // Host policy permits these compiled capabilities. Each platform still
       // asks for OS authorization at the user's explicit action; activation
       // asks none.

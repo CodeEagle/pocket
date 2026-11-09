@@ -24,37 +24,49 @@ final class PocketPakImage {
     // the texture (visible as white fringes around antialiased masks).
     // Keep [rgba] in the source format for the native contract and make one
     // premultiplied copy only at the Flutter image boundary.
-    final buffer = await ui.ImmutableBuffer.fromUint8List(
-      _premultiplyRgba(rgba),
-    );
-    final descriptor = ui.ImageDescriptor.raw(
-      buffer,
-      width: width,
-      height: height,
-      pixelFormat: ui.PixelFormat.rgba8888,
-    );
-    final codec = await descriptor.instantiateCodec();
-    try {
-      final frame = await codec.getNextFrame();
-      return frame.image;
-    } finally {
-      codec.dispose();
-      descriptor.dispose();
-      buffer.dispose();
-    }
+    return _decodePremultipliedRgba(width, height, _premultiplyRgba(rgba));
   }
 }
 
 Uint8List _premultiplyRgba(Uint8List source) {
   final result = Uint8List.fromList(source);
-  for (var offset = 0; offset + 3 < result.length; offset += 4) {
-    final alpha = result[offset + 3];
-    if (alpha == 255) continue;
-    result[offset] = (result[offset] * alpha + 127) ~/ 255;
-    result[offset + 1] = (result[offset + 1] * alpha + 127) ~/ 255;
-    result[offset + 2] = (result[offset + 2] * alpha + 127) ~/ 255;
-  }
+  _premultiplyRgbaInPlace(result);
   return result;
+}
+
+void _premultiplyRgbaInPlace(Uint8List rgba) {
+  for (var offset = 0; offset + 3 < rgba.length; offset += 4) {
+    final alpha = rgba[offset + 3];
+    if (alpha == 255) continue;
+    rgba[offset] = (rgba[offset] * alpha + 127) ~/ 255;
+    rgba[offset + 1] = (rgba[offset + 1] * alpha + 127) ~/ 255;
+    rgba[offset + 2] = (rgba[offset + 2] * alpha + 127) ~/ 255;
+  }
+}
+
+Future<ui.Image> _decodePremultipliedRgba(
+  int width,
+  int height,
+  Uint8List rgba,
+) async {
+  final buffer = await ui.ImmutableBuffer.fromUint8List(rgba);
+  ui.ImageDescriptor? descriptor;
+  ui.Codec? codec;
+  try {
+    descriptor = ui.ImageDescriptor.raw(
+      buffer,
+      width: width,
+      height: height,
+      pixelFormat: ui.PixelFormat.rgba8888,
+    );
+    codec = await descriptor.instantiateCodec();
+    final frame = await codec.getNextFrame();
+    return frame.image;
+  } finally {
+    codec?.dispose();
+    descriptor?.dispose();
+    buffer.dispose();
+  }
 }
 
 /// Reads only `ui:img.*` records from a PocketJS PAK. Invalid or unrelated
@@ -62,6 +74,17 @@ Uint8List _premultiplyRgba(Uint8List source) {
 /// admission and will report malformed packages through the FFI error path.
 final class PocketPakImages {
   const PocketPakImages._();
+
+  /// Decodes a frame resource without retaining an intermediate straight-RGBA
+  /// image. The new conversion buffer is exclusively owned here, so it can be
+  /// premultiplied in place. The resource's pixels and palette stay unchanged.
+  /// Unsupported or truncated resources return null, as [fromResource] does.
+  static Future<ui.Image>? decodeResource(PocketImageResource resource) {
+    final image = fromResource(resource);
+    if (image == null) return null;
+    _premultiplyRgbaInPlace(image.rgba);
+    return _decodePremultipliedRgba(image.width, image.height, image.rgba);
+  }
 
   /// Converts the native texture-table representation emitted in a frame
   /// resource into the RGBA form consumed by Flutter's image decoder. Native
@@ -74,13 +97,13 @@ final class PocketPakImages {
     switch (resource.psm) {
       case 0:
         if (source.length < expected * 2) return null;
-        _decode5650(source.sublist(0, expected * 2), rgba);
+        _decode5650(Uint8List.sublistView(source, 0, expected * 2), rgba);
       case 2:
         if (source.length < expected * 2) return null;
-        _decode4444(source.sublist(0, expected * 2), rgba);
+        _decode4444(Uint8List.sublistView(source, 0, expected * 2), rgba);
       case 3:
         if (source.length < expected * 4) return null;
-        rgba.setAll(0, source.sublist(0, expected * 4));
+        rgba.setRange(0, expected * 4, source);
       case 5:
         final palette = resource.palette;
         if (palette == null ||
@@ -88,7 +111,7 @@ final class PocketPakImages {
             source.length < expected) {
           return null;
         }
-        _decodeT8(palette, source.sublist(0, expected), rgba);
+        _decodeT8(palette, Uint8List.sublistView(source, 0, expected), rgba);
       default:
         return null;
     }
@@ -132,9 +155,13 @@ final class PocketPakImages {
           blobEnd > pak.length) {
         continue;
       }
-      final name = String.fromCharCodes(pak.sublist(nameStart, nameEnd));
+      final name = String.fromCharCodes(
+        Uint8List.sublistView(pak, nameStart, nameEnd),
+      );
       if (!name.startsWith('ui:img.')) continue;
-      final image = _decodeEntry(pak.sublist(blobOffset, blobEnd));
+      final image = _decodeEntry(
+        Uint8List.sublistView(pak, blobOffset, blobEnd),
+      );
       if (image == null) continue;
       final key = name.substring('ui:img.'.length);
       result[key] = image;
@@ -163,11 +190,11 @@ final class PocketPakImages {
     final paletteBytes = psm == 5 ? 1024 : 0;
     if (blob.length < 8 + paletteBytes) return null;
     final expected = width * height * bytesPerPixel;
-    final encoded = blob.sublist(8 + paletteBytes);
+    final encoded = Uint8List.sublistView(blob, 8 + paletteBytes);
     final pixels = flags & 1 == 0
         ? (encoded.length < expected
               ? null
-              : Uint8List.fromList(encoded.sublist(0, expected)))
+              : Uint8List.sublistView(encoded, 0, expected))
         : _decodePackBits(encoded, expected);
     if (pixels == null) return null;
 
@@ -180,7 +207,7 @@ final class PocketPakImages {
       case 2:
         _decode4444(pixels, rgba);
       case 5:
-        _decodeT8(blob.sublist(8, 8 + 1024), pixels, rgba);
+        _decodeT8(Uint8List.sublistView(blob, 8, 8 + 1024), pixels, rgba);
     }
     return PocketPakImage(width: width, height: height, rgba: rgba);
   }

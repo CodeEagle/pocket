@@ -150,6 +150,94 @@ void main() {
     },
   );
 
+  test('batch moves and swaps a bucket in one persisted transaction', () async {
+    store.registerApp('app.a', sharedNamespaces: {'account'});
+    await store.write('app.a', 'slot.1', {'story': 'chapter-1'});
+    await store.write('app.a', 'slot.2', {'story': 'chapter-2'});
+    final file = File('${directory.path}${Platform.pathSeparator}pocket_platform_data.json');
+    final writesBeforeBatch = await file.readAsString();
+
+    await store.batch('app.a', <Object?>[
+      <String, Object?>{'type': 'set', 'key': 'slot.1', 'value': {'story': 'chapter-2'}},
+      <String, Object?>{'type': 'set', 'key': 'slot.2', 'value': {'story': 'chapter-1'}},
+      <String, Object?>{'type': 'remove', 'key': 'obsolete'},
+    ]);
+    expect(await store.read('app.a', 'slot.1'), {'story': 'chapter-2'});
+    expect(await store.read('app.a', 'slot.2'), {'story': 'chapter-1'});
+    expect(await file.readAsString(), isNot(writesBeforeBatch));
+
+    await store.close();
+    final reopened = PocketPlatformData(directory: directory);
+    await reopened.initialize();
+    reopened.registerApp('app.a', sharedNamespaces: {'account'});
+    expect(await reopened.read('app.a', 'slot.1'), {'story': 'chapter-2'});
+    expect(await reopened.read('app.a', 'slot.2'), {'story': 'chapter-1'});
+    await reopened.close();
+    store = PocketPlatformData(directory: directory);
+    await store.initialize();
+  });
+
+  test('malformed, duplicate, over-value and over-count batches leave data unchanged', () async {
+    store.registerApp('app.a');
+    await store.write('app.a', 'slot', 'original');
+    final file = File('${directory.path}${Platform.pathSeparator}pocket_platform_data.json');
+    final before = await file.readAsString();
+
+    Future<void> expectUnchanged(List<Object?> operations, String code) async {
+      await expectLater(
+        store.batch('app.a', operations),
+        throwsA(isA<PocketCapabilityException>().having((error) => error.code, 'code', code)),
+      );
+      expect(await store.read('app.a', 'slot'), 'original');
+      expect(await file.readAsString(), before);
+    }
+
+    await expectUnchanged(<Object?>[
+      <String, Object?>{'type': 'set', 'key': 'slot', 'value': 'changed'},
+      <String, Object?>{'type': 'invalid', 'key': 'bad'},
+    ], 'invalid_storage_operation');
+    await expectUnchanged(<Object?>[
+      <String, Object?>{'type': 'set', 'key': 'slot', 'value': 'changed'},
+      <String, Object?>{'type': 'remove', 'key': 'slot'},
+    ], 'duplicate_storage_key');
+    await expectUnchanged(<Object?>[
+      <String, Object?>{'type': 'set', 'key': 'slot', 'value': 'x' * 65537},
+    ], 'value_too_large');
+    await expectUnchanged(List<Object?>.generate(257, (index) => <String, Object?>{
+      'type': 'remove', 'key': 'unused.$index',
+    }), 'too_many_storage_operations');
+  });
+
+  test('final quota and temp-file failures keep the old memory and disk snapshot', () async {
+    await store.close();
+    store = PocketPlatformData(directory: directory, maxValueBytes: 128, maxAppBytes: 50);
+    await store.initialize();
+    store.registerApp('app.a');
+    await store.write('app.a', 'one', 'x' * 20);
+    final file = File('${directory.path}${Platform.pathSeparator}pocket_platform_data.json');
+    final before = await file.readAsString();
+    await expectLater(
+      store.batch('app.a', <Object?>[
+        <String, Object?>{'type': 'set', 'key': 'two', 'value': 'y' * 20},
+      ]),
+      throwsA(isA<PocketCapabilityException>().having((error) => error.code, 'code', 'quota_exceeded')),
+    );
+    expect(await store.read('app.a', 'one'), 'x' * 20);
+    expect(await store.read('app.a', 'two'), isNull);
+    expect(await file.readAsString(), before);
+
+    final obstruction = Directory('${file.path}.tmp');
+    await obstruction.create();
+    await expectLater(
+      store.batch('app.a', <Object?>[
+        <String, Object?>{'type': 'set', 'key': 'one', 'value': 'replacement'},
+      ]),
+      throwsA(isA<PocketCapabilityException>().having((error) => error.code, 'code', 'storage_unavailable')),
+    );
+    expect(await store.read('app.a', 'one'), 'x' * 20);
+    expect(await file.readAsString(), before);
+  });
+
   test(
     'serializes concurrent writes and rejects late calls after close',
     () async {

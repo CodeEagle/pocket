@@ -44,11 +44,20 @@ const registrations = [];
 const surfaces = [];
 const releases = [];
 const policyCalls = [];
+const configurations = [];
 const media = {
   register(id, options) {
     registrations.push({ id, options });
     return {
       id,
+      configure(configuration) {
+        configurations.push({ id, configuration });
+        if (typeof configuration.playing === "boolean" && this.playing !== configuration.playing) {
+          this.playing = configuration.playing;
+          policyCalls.push(id + (this.playing ? ":play" : ":pause"));
+        }
+        return true;
+      },
       setActive(active) { this.active = active; policyCalls.push(id + ":active:" + active); },
       play() { this.playing = true; policyCalls.push(id + ":play"); return true; },
       pause() { this.playing = false; policyCalls.push(id + ":pause"); return true; },
@@ -87,21 +96,41 @@ assert.deepEqual(releases, ["hero"]);
 let disposeReactive;
 let setActive;
 let setPlaying;
+let setToken;
+let setLoop;
 createRoot((cleanup) => {
   disposeReactive = cleanup;
   const [active, updateActive] = createSignal(true);
   const [playing, updatePlaying] = createSignal(false);
+  const [token, updateToken] = createSignal("generation-1");
+  const [loop, updateLoop] = createSignal(false);
   setActive = updateActive;
   setPlaying = updatePlaying;
+  setToken = updateToken;
+  setLoop = updateLoop;
   Video({
     id: "reactive",
     asset: "one.mp4",
     get active() { return active(); },
     get playing() { return playing(); },
+    get token() { return token(); },
+    get loop() { return loop(); },
     media,
   });
 });
 await Promise.resolve();
+assert.deepEqual(registrations.at(-1).options, {
+  group: undefined,
+  page: undefined,
+  active: true,
+  playing: false,
+  token: "generation-1",
+  loop: false,
+});
+assert.deepEqual(configurations.at(-1), {
+  id: "reactive",
+  configuration: { token: "generation-1", loop: false, playing: false },
+});
 const reactiveStart = policyCalls.length;
 setActive(false);
 await Promise.resolve();
@@ -109,6 +138,13 @@ assert.deepEqual(policyCalls.slice(reactiveStart), ["reactive:active:false"]);
 setPlaying(true);
 await Promise.resolve();
 assert.deepEqual(policyCalls.slice(reactiveStart), ["reactive:active:false", "reactive:play"]);
+setToken("generation-2");
+setLoop(true);
+await Promise.resolve();
+assert.deepEqual(configurations.at(-1), {
+  id: "reactive",
+  configuration: { token: "generation-2", loop: true, playing: true },
+});
 disposeReactive();
 
 globalThis.pocket = undefined;

@@ -32,6 +32,9 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
     "templates/game/app.tsx",
     "docs/PROJECT_TEMPLATES.md",
     "docs/NPM_TOOLCHAIN.md",
+    "docs/GAME_INPUT_IMPLEMENTATION.md",
+    "docs/WEB_WORKER_IMPLEMENTATION.md",
+    "docs/LARGE_IMAGE_IMPLEMENTATION.md",
     "editor/native/noble-bluetooth.mjs",
     "packages/pocket_tftc/src/index.js",
     "packages/pocket_tftc/README.md",
@@ -72,6 +75,9 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(manifest.optionalDependencies?.["@abandonware/noble"]).toBe("1.9.2-26");
   const readme = readFileSync(join(output, "README.md"), "utf8");
   expect(readme).toContain("QJBC");
+  expect(readme).toContain("docs/GAME_INPUT_IMPLEMENTATION.md");
+  expect(readme).toContain("docs/WEB_WORKER_IMPLEMENTATION.md");
+  expect(readme).toContain("docs/LARGE_IMAGE_IMPLEMENTATION.md");
 }, 30_000);
 
 test("export_web_sdk can produce a single-platform SDK package", () => {

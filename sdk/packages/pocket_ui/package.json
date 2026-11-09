@@ -19,12 +19,14 @@
     "./streams": "./src/streams.ts",
     "./platform-experience": "./src/platform-experience.ts",
     "./media": "./src/media.ts",
+    "./images": "./src/images.tsx",
     "./video": "./src/video.tsx",
     "./platform": "./src/platform.ts",
     "./system": "./src/system.ts",
     "./updates": "./src/updates.ts",
     "./recording": "./src/recording.ts",
     "./system-surfaces": "./src/system-surfaces.tsx",
+    "./inline-text": "./src/inline-text.tsx",
     "./dev": "./src/dev.ts"
   }
 }

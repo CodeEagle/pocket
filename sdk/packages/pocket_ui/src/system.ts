@@ -605,6 +605,16 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
           await this.handleGenerationChange(payload);
           await this.flushForegroundWork();
         });
+      } else if (name === "system.runtime.memoryPressure") {
+        void this.enqueue(async () => {
+          const root = this.records.get(SYSTEM_UI_INSTANCE_ID);
+          const generation = isRecord(payload) ? this.readGeneration(payload.generation) : null;
+          if (!this.initialized || !root || generation === null || root.generation !== generation) return;
+          await this.reclaimUnreferencedRuntimes();
+          await this.flushForegroundWork();
+        }).catch(() => {
+          // Memory pressure handling is best effort; the host can signal again.
+        });
       }
     };
     if (typeof this.bridge.onEvent === "function") {
@@ -1415,6 +1425,12 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
 
   private async ensureCapacity(): Promise<void> {
     if (this.records.size < this.maxResidentApps) return;
+    if (!(await this.evictLeastRecentlyUsed())) {
+      throw new PocketSystemError("resident_capacity", "resident app limit reached; no unreferenced runtime can be evicted");
+    }
+  }
+
+  private evictionCandidate(): RuntimeRecord | undefined {
     const stackInstances = new Set(this.stack.map((frame) => frame.instanceId));
     const callInstances = new Set<string>();
     for (const call of this.calls.values()) {
@@ -1432,15 +1448,25 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         !record.closing &&
         !record.failed)
       .sort((a, b) => a.lastUsed - b.lastUsed || a.instanceId.localeCompare(b.instanceId));
-    const candidate = candidates[0];
-    if (!candidate) {
-      throw new PocketSystemError("resident_capacity", "resident app limit reached; no unreferenced runtime can be evicted");
-    }
-    await this.lifecycle(candidate, "onWillDisappear", { reason: "lru_eviction" });
-    await this.lifecycle(candidate, "onUnload", { reason: "lru_eviction" });
+    return candidates[0];
+  }
+
+  private async evictLeastRecentlyUsed(reason: "lru_eviction" | "memory_pressure" = "lru_eviction"): Promise<boolean> {
+    const candidate = this.evictionCandidate();
+    if (!candidate) return false;
+    await this.lifecycle(candidate, "onWillDisappear", { reason });
+    await this.lifecycle(candidate, "onUnload", { reason });
     await this.flushLifecycle(candidate);
     candidate.closing = true;
     await this.destroyRuntime(candidate);
+    return true;
+  }
+
+  private async reclaimUnreferencedRuntimes(): Promise<void> {
+    while (!this.disposed && await this.evictLeastRecentlyUsed("memory_pressure")) {
+      // Each pass rechecks stack, pending calls, presentation and generation
+      // state before choosing the next least-recently-used background runtime.
+    }
   }
 
   private async destroyRuntime(record: RuntimeRecord): Promise<void> {
@@ -1731,7 +1757,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     // this authorizes only the explicit in-flight I/O request.
     const source = this.authorizeRuntime(request);
     const operation = request.capability.slice("platform.storage.".length);
-    if (!["get", "set", "remove", "keys"].includes(operation)) {
+    if (!["get", "set", "remove", "keys", "batch"].includes(operation)) {
       throw new PocketSystemError("capability_unavailable", "unsupported storage operation");
     }
     const namespace = request.params.namespace;
@@ -1743,7 +1769,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       }
     }
     const params: JsonObject = { appId: source.appId };
-    if (operation !== "keys") {
+    if (operation !== "keys" && operation !== "batch") {
       if (!nonEmptyString(request.params.key)) {
         throw new PocketSystemError("invalid_storage_key", "storage key must be a non-empty string");
       }
@@ -1752,6 +1778,35 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     if (namespace !== undefined) params.namespace = namespace;
     if (operation === "set") {
       params.value = jsonSnapshot(request.params.value ?? null, "storage value");
+    } else if (operation === "batch") {
+      const operations = request.params.operations;
+      if (!Array.isArray(operations)) {
+        throw new PocketSystemError("invalid_storage_batch", "storage batch operations must be an array");
+      }
+      if (operations.length > 256) {
+        throw new PocketSystemError("too_many_storage_operations", "storage batches are limited to 256 operations");
+      }
+      const seenKeys = new Set<string>();
+      const copied: JsonValue[] = [];
+      for (const [index, value] of operations.entries()) {
+        if (!isRecord(value) || (value.type !== "set" && value.type !== "remove") || !nonEmptyString(value.key)) {
+          throw new PocketSystemError("invalid_storage_operation", `storage batch operation ${index} is invalid`);
+        }
+        const allowedKeys = value.type === "set" ? ["type", "key", "value"] : ["type", "key"];
+        if (Object.keys(value).length !== allowedKeys.length || Object.keys(value).some((key) => !allowedKeys.includes(key)) ||
+            value.type === "set" && !Object.hasOwn(value, "value")) {
+          throw new PocketSystemError("invalid_storage_operation", `storage batch operation ${index} has an invalid shape`);
+        }
+        if (seenKeys.has(value.key)) {
+          throw new PocketSystemError("duplicate_storage_key", `storage batch contains duplicate key '${value.key}'`);
+        }
+        seenKeys.add(value.key);
+        const copiedOperation: JsonObject = { type: value.type, key: value.key };
+        if (value.type === "set") copiedOperation.value = jsonSnapshot(value.value, "storage batch value");
+        copied.push(copiedOperation);
+      }
+      if (copied.length === 0) return null;
+      params.operations = copied;
     }
     return await this.hostRequest("system.storage." + operation, params);
   }

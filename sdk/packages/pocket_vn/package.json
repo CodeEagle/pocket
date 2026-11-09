@@ -1,0 +1,38 @@
+{
+  "name": "@pocket/vn",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./video": "./src/video.ts",
+    "./authoring": "./src/authoring.ts",
+    "./view": "./src/view.tsx",
+    "./clock": "./src/clock.ts",
+    "./audio": "./src/audio.ts",
+    "./localization": "./src/localization.ts",
+    "./collections": "./src/collections.ts",
+    "./inventory": "./src/inventory.ts",
+    "./mesh": "./src/mesh.ts",
+    "./mesh-view": "./src/mesh-view.tsx",
+    "./skin": "./src/skin.ts",
+    "./skin-view": "./src/skin-view.tsx",
+    "./spine": "./src/spine.ts",
+    "./live2d": "./src/live2d.ts",
+    "./atmosphere": "./src/atmosphere.ts",
+    "./atmosphere-view": "./src/atmosphere-view.tsx",
+    "./choice-surface": "./src/choice-surface.ts",
+    "./choice-surface-view": "./src/choice-surface-view.tsx"
+  },
+  "scripts": {
+    "test": "bun test test"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@pocket/spine": "0.1.0",
+    "@pocket/live2d": "0.1.0"
+  }
+}

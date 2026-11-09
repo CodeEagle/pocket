@@ -154,6 +154,22 @@ function resolvedDisplayBridge(bridge: DisplayGeometryBridge): DisplayGeometryBr
     : bridge;
 }
 
+/** Subscribe to the guest's existing host event lane. This shares the single
+ * bridge wrapper used by display geometry and keeps SDK consumers from
+ * creating parallel `__pocketEvent` chains for non-display events. */
+export function subscribeHostEvents(
+  listener: (event: HostEvent) => void,
+  bridge: DisplayGeometryBridge = globalDisplayBridge(),
+): () => void {
+  const resolved = resolvedDisplayBridge(bridge);
+  return subscribeDisplayBridge(
+    resolved,
+    listener,
+    undefined,
+    initialDisplayGeometry(resolved, EMPTY_DISPLAY_GEOMETRY, bridge),
+  );
+}
+
 function initialDisplayGeometry(
   bridge: DisplayGeometryBridge,
   fallback: DisplayGeometry,

@@ -1,0 +1,151 @@
+.nv-authoring-panel-host,
+.nv-authoring-panel-host .nv-text-authoring {
+  min-width: 0;
+}
+
+.nv-text-authoring {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  color: #e6e8de;
+  border: 1px solid #34413b;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #17201d, #101715 70%);
+}
+
+.nv-text-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.nv-text-button {
+  min-height: 34px;
+  padding: 7px 12px;
+  color: #d9e4d5;
+  border: 1px solid #43544c;
+  border-radius: 8px;
+  background: #202b26;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.nv-text-button:hover:not(:disabled) {
+  border-color: #83a58a;
+  background: #293831;
+}
+
+.nv-text-button:focus-visible,
+.nv-text-source:focus-visible {
+  outline: 2px solid #bdcf91;
+  outline-offset: 2px;
+}
+
+.nv-text-button:disabled {
+  opacity: .48;
+  cursor: default;
+}
+
+.nv-text-apply {
+  color: #f6f2e6;
+  border-color: #657d5b;
+  background: #465c3f;
+}
+
+.nv-text-help,
+.nv-text-status,
+.nv-text-asset-summary {
+  margin: 0;
+  color: #9da99e;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.nv-text-label {
+  color: #d6dfd2;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.nv-text-source {
+  display: block;
+  width: 100%;
+  min-height: min(62vh, 720px);
+  resize: vertical;
+  padding: 13px 14px;
+  color: #e7e8dc;
+  border: 1px solid #3b4a42;
+  border-radius: 9px;
+  background: #0c1210;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+
+.nv-text-source::selection {
+  color: #101715;
+  background: #bdd195;
+}
+
+.nv-text-status[data-kind="error"] {
+  color: #ffb2a6;
+}
+
+.nv-text-status[data-kind="draft"] {
+  color: #ebcf94;
+}
+
+.nv-text-status[data-kind="busy"] {
+  color: #a8c4d0;
+}
+
+.nv-text-diagnostics {
+  padding: 8px 10px;
+  color: #ffd2ca;
+  border: 1px solid #794d46;
+  border-radius: 7px;
+  background: #321d1b;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.nv-text-diagnostics[hidden] {
+  display: none;
+}
+
+.nv-text-conflict {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 10px;
+  color: #edcf96;
+  border: 1px solid #695738;
+  border-radius: 8px;
+  background: #28231a;
+  font-size: 12px;
+}
+
+.nv-text-conflict[hidden] {
+  display: none;
+}
+
+.nv-text-conflict-message {
+  flex: 1 1 300px;
+}
+
+@media (max-width: 700px) {
+  .nv-text-authoring {
+    padding: 10px;
+  }
+
+  .nv-text-source {
+    min-height: 54vh;
+    font-size: 11px;
+  }
+}

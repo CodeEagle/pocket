@@ -1,0 +1,881 @@
+diff --git a/devices/3ds/pocket-3ds-pica/src/driver.c b/devices/3ds/pocket-3ds-pica/src/driver.c
+index b53fafd..7348be2 100644
+--- a/devices/3ds/pocket-3ds-pica/src/driver.c
++++ b/devices/3ds/pocket-3ds-pica/src/driver.c
+@@ -558,6 +558,8 @@ static int32_t visit(void *context, const pocket_draw_op *raw) {
+   float uv[4] = {0, 0, 1, 1};
+   if (w[0] == POCKET_DRAW_OP_SCISSOR || w[0] == POCKET_DRAW_OP_SCISSOR_POP)
+     return 0;
++  if (w[0] == POCKET_DRAW_OP_TEX_TRI_REPEAT_FLOAT)
++    return POCKET_STATUS_UNSUPPORTED;
+   if (w[0] == POCKET_DRAW_OP_GLYPH_RUN) {
+     uint8_t slot = (uint8_t)w[1];
+     uint32_t count = w[1] >> 16;
+@@ -585,6 +587,21 @@ static int32_t visit(void *context, const pocket_draw_op *raw) {
+     }
+     return 0;
+   }
++  if (w[0] == POCKET_DRAW_OP_TEX_TRI_FLOAT) {
++    if (op.word_count < 15)
++      return POCKET_STATUS_INVALID;
++    int32_t status = image_texture(b, (int32_t)w[1], &texture, &us, &vs);
++    if (status || !texture)
++      return status;
++    if (!command(s, texture, clip, 3))
++      return POCKET_STATUS_FAILED;
++    for (unsigned i = 0; i < 3; i++) {
++      unsigned at = 2 + i * 4;
++      vertex(s, word_float(w[at]) * scale, word_float(w[at + 1]) * scale,
++             word_float(w[at + 2]) * us, word_float(w[at + 3]) * vs, w[14]);
++    }
++    return 0;
++  }
+   if (w[0] == POCKET_DRAW_OP_TEX_QUAD || w[0] == POCKET_DRAW_OP_TEX_TRI) {
+     float us, vs;
+     int32_t status = image_texture(b, (int32_t)w[1], &texture, &us, &vs);
+diff --git a/devices/gles/pocket-gles/src/geometry.rs b/devices/gles/pocket-gles/src/geometry.rs
+index 15ae477..bd85e5d 100644
+--- a/devices/gles/pocket-gles/src/geometry.rs
++++ b/devices/gles/pocket-gles/src/geometry.rs
+@@ -226,6 +226,33 @@ impl<P: Pipeline, C: ContextAccess> GlesRenderer<P, C> {
+                     self.vertices
+                         .extend_from_slice(&pocket_tri_batch::triangle(positions, uvs, [color; 3]));
+                 }
++                spec::draw_op::TEX_TRI_FLOAT if index + 15 <= words.len() => {
++                    let handle = words[index + 1] as i32;
++                    let Some(name) = self.image_name(handle) else {
++                        continue;
++                    };
++                    if texture != name {
++                        self.flush(texture, clip, &mut start);
++                        texture = name;
++                    }
++                    let color = words[index + 14];
++                    let positions = core::array::from_fn(|vertex| {
++                        let offset = index + 2 + vertex * 4;
++                        [
++                            f32::from_bits(words[offset]),
++                            f32::from_bits(words[offset + 1]),
++                        ]
++                    });
++                    let uvs = core::array::from_fn(|vertex| {
++                        let offset = index + 2 + vertex * 4;
++                        [
++                            f32::from_bits(words[offset + 2]),
++                            f32::from_bits(words[offset + 3]),
++                        ]
++                    });
++                    self.vertices
++                        .extend_from_slice(&pocket_tri_batch::triangle(positions, uvs, [color; 3]));
++                }
+                 spec::draw_op::TRI if index + 7 <= words.len() => {
+                     if texture != self.white {
+                         self.flush(texture, clip, &mut start);
+diff --git a/devices/gles/pocket-gles/src/lib.rs b/devices/gles/pocket-gles/src/lib.rs
+index 1ef6f92..999311f 100644
+--- a/devices/gles/pocket-gles/src/lib.rs
++++ b/devices/gles/pocket-gles/src/lib.rs
+@@ -591,10 +591,11 @@ impl<P: Pipeline, C: ContextAccess> GlesRenderer<P, C> {
+             let op = op.map_err(|_| RenderError::InvalidFrame)?;
+             match op.opcode {
+                 spec::draw_op::TEX_TRI_REPEAT
++                | spec::draw_op::TEX_TRI_REPEAT_FLOAT
+                 | spec::draw_op::MESH_LAYER_BEGIN
+                 | spec::draw_op::MESH_MASK_BEGIN
+                 | spec::draw_op::MESH_LAYER_RESTORE => return Err(RenderError::Unsupported),
+-                spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI => {
++                spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_FLOAT => {
+                     self.image(frame.resources, op.words[1] as i32, submission)?
+                 }
+                 spec::draw_op::GLYPH_RUN => {
+diff --git a/devices/gles/pocket-gles/src/tests.rs b/devices/gles/pocket-gles/src/tests.rs
+index 5658202..0ca32d6 100644
+--- a/devices/gles/pocket-gles/src/tests.rs
++++ b/devices/gles/pocket-gles/src/tests.rs
+@@ -196,6 +196,73 @@ fn tex_tri_decoder_preserves_vertices_batches_and_nested_scissors() {
+     );
+ }
+ 
++#[test]
++fn float_tex_tri_decoder_preserves_subpixel_positions_uvs_and_tint() {
++    let color = 0x8040_3020;
++    let words = [
++        spec::draw_op::TEX_TRI_FLOAT,
++        0,
++        1.25f32.to_bits(),
++        2.5f32.to_bits(),
++        0.125f32.to_bits(),
++        0.25f32.to_bits(),
++        31.5f32.to_bits(),
++        4.25f32.to_bits(),
++        0.75f32.to_bits(),
++        0.25f32.to_bits(),
++        5.75f32.to_bits(),
++        26.125f32.to_bits(),
++        0.5f32.to_bits(),
++        0.875f32.to_bits(),
++        color,
++    ];
++    let mut renderer = planner(0, 9);
++    renderer.build(&words, 100, 50).unwrap();
++    assert_eq!(
++        renderer
++            .vertices
++            .iter()
++            .map(|v| (v.position, v.uv, v.color))
++            .collect::<Vec<_>>(),
++        [
++            ([1.25, 2.5], [0.125, 0.25], color),
++            ([31.5, 4.25], [0.75, 0.25], color),
++            ([5.75, 26.125], [0.5, 0.875], color),
++        ]
++    );
++}
++
++#[test]
++fn float_repeat_tex_tri_remains_unsupported() {
++    let mut renderer = fresh();
++    let handle = renderer.register_target(config()).unwrap();
++    let resources = Resources::new();
++    let words = DrawList {
++        words: vec![
++            spec::draw_op::TEX_TRI_REPEAT_FLOAT,
++            7,
++            1.0f32.to_bits(),
++            2.0f32.to_bits(),
++            0.0f32.to_bits(),
++            0.0f32.to_bits(),
++            3.0f32.to_bits(),
++            2.0f32.to_bits(),
++            1.0f32.to_bits(),
++            0.0f32.to_bits(),
++            1.0f32.to_bits(),
++            4.0f32.to_bits(),
++            0.0f32.to_bits(),
++            1.0f32.to_bits(),
++            u32::MAX,
++        ],
++        ..DrawList::default()
++    };
++    assert_eq!(
++        submit(&mut renderer, handle, &words, &resources),
++        Err(RenderError::Unsupported)
++    );
++}
++
+ #[test]
+ fn indexed_coverage_optimization_rejects_colored_or_short_palettes() {
+     let mut palette = vec![255; 1024];
+diff --git a/devices/psp/pocket-psp-render/src/encode.rs b/devices/psp/pocket-psp-render/src/encode.rs
+index bdb5804..05c410d 100644
+--- a/devices/psp/pocket-psp-render/src/encode.rs
++++ b/devices/psp/pocket-psp-render/src/encode.rs
+@@ -41,6 +41,9 @@ impl Encoder {
+         }
+         for op in DrawOps::new(words, DamageRect::new(0, 0, 480, 272)) {
+             let op = op.map_err(|_| RenderError::InvalidFrame)?;
++            if matches!(op.opcode, spec::draw_op::TEX_TRI_REPEAT_FLOAT) {
++                return Err(RenderError::Unsupported);
++            }
+             if matches!(
+                 op.opcode,
+                 spec::draw_op::SURFACE_QUAD | spec::draw_op::TEXT_RUN
+@@ -208,14 +211,19 @@ impl Encoder {
+                 spec::draw_op::TRI => 7,
+                 spec::draw_op::TEX_QUAD => 9,
+                 spec::draw_op::TEX_TRI => 12,
++                spec::draw_op::TEX_TRI_FLOAT => 15,
+                 _ => 0,
+             };
+             let mut count = 1;
+             if width != 0 {
+                 let mut end = ops.position();
+                 while words.get(end) == Some(&opcode)
+-                    && (!matches!(opcode, spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI)
+-                        || words[end + 1] == op.words[1])
++                    && (!matches!(
++                        opcode,
++                        spec::draw_op::TEX_QUAD
++                            | spec::draw_op::TEX_TRI
++                            | spec::draw_op::TEX_TRI_FLOAT
++                    ) || words[end + 1] == op.words[1])
+                 {
+                     count += 1;
+                     end += width;
+@@ -265,7 +273,7 @@ impl Encoder {
+                     }
+                     device.draw(Primitive::Triangles, Vertices::Colored(v));
+                 }
+-                spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI => {
++                spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_FLOAT => {
+                     let Some(binding) = self.image(device, resources, data[1] as i32, zero_copy)?
+                     else {
+                         continue;
+@@ -292,7 +300,7 @@ impl Encoder {
+                             );
+                         }
+                         device.draw(Primitive::Sprites, Vertices::Textured(v));
+-                    } else {
++                    } else if opcode == spec::draw_op::TEX_TRI {
+                         let v = self.textured(count * 3);
+                         for (k, w) in data.as_chunks::<12>().0.iter().enumerate() {
+                             for c in 0..3 {
+@@ -307,6 +315,26 @@ impl Encoder {
+                             }
+                         }
+                         device.draw(Primitive::Triangles, Vertices::Textured(v));
++                    } else {
++                        // This driver feeds GE S16 position attributes. Keep
++                        // the DrawList float through validation and round only
++                        // at this existing vertex-format boundary.
++                        let v = self.textured(count * 3);
++                        for (k, w) in data.as_chunks::<15>().0.iter().enumerate() {
++                            for c in 0..3 {
++                                let at = 2 + c * 4;
++                                let x = ge_position(f32::from_bits(w[at]))?;
++                                let y = ge_position(f32::from_bits(w[at + 1]))?;
++                                v[k * 3 + c] = VertTC::new(
++                                    w[14],
++                                    x,
++                                    y,
++                                    uv(w[at + 2], binding.width)?,
++                                    uv(w[at + 3], binding.height)?,
++                                );
++                            }
++                        }
++                        device.draw(Primitive::Triangles, Vertices::Textured(v));
+                     }
+                     device.bind(None);
+                 }
+@@ -494,6 +522,18 @@ unsafe fn ge_texture_storage(
+ fn xy(word: u32) -> (i16, i16) {
+     (word as u16 as i16, (word >> 16) as u16 as i16)
+ }
++fn ge_position(value: f32) -> Result<i16, RenderError> {
++    if !value.is_finite() || value < i16::MIN as f32 - 0.5 || value > i16::MAX as f32 + 0.5 {
++        Err(RenderError::InvalidFrame)
++    } else {
++        let rounded = if value < 0.0 {
++            (value - 0.5) as i32
++        } else {
++            (value + 0.5) as i32
++        };
++        i16::try_from(rounded).map_err(|_| RenderError::InvalidFrame)
++    }
++}
+ fn add(start: i16, amount: u32) -> Result<i16, RenderError> {
+     i16::try_from(i64::from(start) + i64::from(amount)).map_err(|_| RenderError::InvalidFrame)
+ }
+diff --git a/devices/psp/pocket-psp-render/src/tests.rs b/devices/psp/pocket-psp-render/src/tests.rs
+index a28c05a..f599e08 100644
+--- a/devices/psp/pocket-psp-render/src/tests.rs
++++ b/devices/psp/pocket-psp-render/src/tests.rs
+@@ -184,6 +184,120 @@ fn normal_render_owns_texture_and_geometry_until_terminal_retirement() {
+     assert_eq!(r.resident_bytes(), used);
+     assert_eq!(state.borrow().waits, 2);
+ }
++
++#[test]
++fn float_mesh_triangle_keeps_subpixel_until_psp_ge_integer_vertices() {
++    let (mut renderer, state) = create();
++    let resources = Resources::default();
++    let words = list(vec![
++        pocket_spec::draw_op::TEX_TRI_FLOAT,
++        7,
++        1.25f32.to_bits(),
++        2.5f32.to_bits(),
++        0.125f32.to_bits(),
++        0.25f32.to_bits(),
++        31.5f32.to_bits(),
++        4.25f32.to_bits(),
++        0.75f32.to_bits(),
++        0.25f32.to_bits(),
++        5.75f32.to_bits(),
++        26.125f32.to_bits(),
++        0.5f32.to_bits(),
++        0.875f32.to_bits(),
++        0x8040_2010,
++    ]);
++    let mut frame = FrameInput::new(
++        &words,
++        &resources,
++        &[],
++        Target::DeviceOwned(renderer.target()),
++    );
++    let token = renderer.render(&mut frame).unwrap();
++    let state = state.borrow();
++    assert_eq!(state.draws.len(), 1);
++    assert_eq!(state.draws[0].0, Primitive::Triangles);
++    let bytes = &state.draws[0].1;
++    assert_eq!(bytes.len(), 3 * core::mem::size_of::<VertTC>());
++    let point = |vertex: usize| {
++        let offset = vertex * core::mem::size_of::<VertTC>() + 8;
++        (
++            i16::from_ne_bytes([bytes[offset], bytes[offset + 1]]),
++            i16::from_ne_bytes([bytes[offset + 2], bytes[offset + 3]]),
++        )
++    };
++    let uv = |vertex: usize| {
++        let offset = vertex * core::mem::size_of::<VertTC>();
++        (
++            i16::from_ne_bytes([bytes[offset], bytes[offset + 1]]),
++            i16::from_ne_bytes([bytes[offset + 2], bytes[offset + 3]]),
++        )
++    };
++    // PSP GE's S16 position attributes remain integer pixels; round only at
++    // the final hardware-format conversion, after the float DrawList decode.
++    assert_eq!([point(0), point(1), point(2)], [(1, 3), (32, 4), (6, 26)]);
++    assert_eq!([uv(0), uv(1), uv(2)], [(1, 2), (6, 2), (4, 7)]);
++    assert_eq!(
++        u32::from_ne_bytes(bytes[4..8].try_into().unwrap()),
++        0x8040_2010
++    );
++    drop(state);
++    renderer.retire(token);
++}
++
++#[test]
++fn float_repeat_mesh_is_rejected_before_native_pass_begins() {
++    let (_, state) = create();
++    let resources = Resources::default();
++    let words = list(vec![
++        pocket_spec::draw_op::TEX_TRI_REPEAT_FLOAT,
++        7,
++        1.0f32.to_bits(),
++        2.0f32.to_bits(),
++        0.0f32.to_bits(),
++        0.0f32.to_bits(),
++        3.0f32.to_bits(),
++        2.0f32.to_bits(),
++        1.0f32.to_bits(),
++        0.0f32.to_bits(),
++        1.0f32.to_bits(),
++        4.0f32.to_bits(),
++        0.0f32.to_bits(),
++        1.0f32.to_bits(),
++        u32::MAX,
++    ]);
++    assert_eq!(
++        Encoder::validate(&words.words, &resources),
++        Err(RenderError::Unsupported)
++    );
++    assert_eq!(state.borrow().begins, 0);
++}
++
++#[test]
++fn legacy_repeat_mesh_remains_unsupported() {
++    let (mut renderer, _) = create();
++    let resources = Resources::default();
++    let words = list(vec![
++        pocket_spec::draw_op::TEX_TRI_REPEAT,
++        7,
++        xy(1, 2),
++        0.0f32.to_bits(),
++        0.0f32.to_bits(),
++        xy(3, 2),
++        1.0f32.to_bits(),
++        0.0f32.to_bits(),
++        xy(1, 4),
++        0.0f32.to_bits(),
++        1.0f32.to_bits(),
++        u32::MAX,
++    ]);
++    let mut frame = FrameInput::new(
++        &words,
++        &resources,
++        &[],
++        Target::DeviceOwned(renderer.target()),
++    );
++    assert_eq!(renderer.render(&mut frame), Err(RenderError::Unsupported));
++}
+ #[test]
+ fn validates_foreign_targets_and_complete_stream_before_native_begin() {
+     let (mut r, state) = create();
+diff --git a/devices/vita/pocket-vita-render/src/geometry.rs b/devices/vita/pocket-vita-render/src/geometry.rs
+index 9a45409..79a9b35 100644
+--- a/devices/vita/pocket-vita-render/src/geometry.rs
++++ b/devices/vita/pocket-vita-render/src/geometry.rs
+@@ -244,6 +244,33 @@ impl<D: Device> GxmRenderer<D> {
+                     self.vertices
+                         .extend_from_slice(&pocket_tri_batch::triangle(positions, uvs, [color; 3]));
+                 }
++                spec::draw_op::TEX_TRI_FLOAT if index + 15 <= words.len() => {
++                    let handle = words[index + 1] as i32;
++                    let Some(name) = self.image_name(handle) else {
++                        continue;
++                    };
++                    if texture != name {
++                        self.flush(texture, clip, &mut start);
++                        texture = name;
++                    }
++                    let color = words[index + 14];
++                    let positions = core::array::from_fn(|vertex| {
++                        let offset = index + 2 + vertex * 4;
++                        [
++                            f32::from_bits(words[offset]),
++                            f32::from_bits(words[offset + 1]),
++                        ]
++                    });
++                    let uvs = core::array::from_fn(|vertex| {
++                        let offset = index + 2 + vertex * 4;
++                        [
++                            f32::from_bits(words[offset + 2]),
++                            f32::from_bits(words[offset + 3]),
++                        ]
++                    });
++                    self.vertices
++                        .extend_from_slice(&pocket_tri_batch::triangle(positions, uvs, [color; 3]));
++                }
+                 spec::draw_op::TRI if index + 7 <= words.len() => {
+                     if texture != self.white {
+                         self.flush(texture, clip, &mut start);
+diff --git a/devices/vita/pocket-vita-render/src/lib.rs b/devices/vita/pocket-vita-render/src/lib.rs
+index c080a73..fa6abbb 100644
+--- a/devices/vita/pocket-vita-render/src/lib.rs
++++ b/devices/vita/pocket-vita-render/src/lib.rs
+@@ -11,11 +11,11 @@ use pocket_drivers::{
+ use pocket_glyph_pages::{GlyphPageLayout, GlyphSampler};
+ use pocket_spec as spec;
+ use pocket_tex_cache::{TextureCache, TextureKey};
+-pub mod registered;
+ mod geometry;
+ #[cfg(target_os = "vita")]
+ pub mod native;
+ mod pixels;
++pub mod registered;
+ 
+ /// Copied geometry, with logical coordinates converted to physical pixels
+ /// before Device::submit. GXM uses a fixed z of 0.5 for this UI pass.
+@@ -519,10 +519,11 @@ impl<D: Device> GxmRenderer<D> {
+             let op = operation.map_err(|_| RenderError::InvalidFrame)?;
+             match op.opcode {
+                 spec::draw_op::TEX_TRI_REPEAT
++                | spec::draw_op::TEX_TRI_REPEAT_FLOAT
+                 | spec::draw_op::MESH_LAYER_BEGIN
+                 | spec::draw_op::MESH_MASK_BEGIN
+                 | spec::draw_op::MESH_LAYER_RESTORE => return Err(RenderError::Unsupported),
+-                spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI => {
++                spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_FLOAT => {
+                     self.image(frame.resources, op.words[1] as i32, id)?
+                 }
+                 spec::draw_op::GLYPH_RUN => {
+diff --git a/devices/vita/pocket-vita-render/src/tests.rs b/devices/vita/pocket-vita-render/src/tests.rs
+index fc19abe..4f39994 100644
+--- a/devices/vita/pocket-vita-render/src/tests.rs
++++ b/devices/vita/pocket-vita-render/src/tests.rs
+@@ -477,6 +477,75 @@ fn mirrored_quads_keep_legacy_skip_but_textured_triangles_keep_tint_and_uv() {
+     r.retire(token);
+ }
+ 
++#[test]
++fn float_textured_triangle_keeps_subpixel_positions_uvs_and_tint() {
++    let (mut renderer, device) = fresh();
++    let resources = Resources::new();
++    let color = 0x8040_2010;
++    let words = list(vec![
++        spec::draw_op::TEX_TRI_FLOAT,
++        7,
++        1.25f32.to_bits(),
++        2.5f32.to_bits(),
++        0.125f32.to_bits(),
++        0.25f32.to_bits(),
++        31.5f32.to_bits(),
++        4.25f32.to_bits(),
++        0.75f32.to_bits(),
++        0.25f32.to_bits(),
++        5.75f32.to_bits(),
++        26.125f32.to_bits(),
++        0.5f32.to_bits(),
++        0.875f32.to_bits(),
++        color,
++    ]);
++    let token = submit(&mut renderer, &words, &resources).unwrap();
++    assert_eq!(
++        device
++            .0
++            .borrow()
++            .vertices
++            .iter()
++            .map(|vertex| (vertex.position, vertex.uv, vertex.color))
++            .collect::<Vec<_>>(),
++        [
++            // Vita's renderer config scales logical coordinates by two here;
++            // fractional source positions must survive that transform.
++            ([2.5, 5.0], [0.125, 0.25], color),
++            ([63.0, 8.5], [0.75, 0.25], color),
++            ([11.5, 52.25], [0.5, 0.875], color),
++        ]
++    );
++    renderer.retire(token);
++}
++
++#[test]
++fn float_repeat_mesh_remains_unsupported() {
++    let (mut renderer, _) = fresh();
++    let resources = Resources::new();
++    let words = list(vec![
++        spec::draw_op::TEX_TRI_REPEAT_FLOAT,
++        7,
++        1.0f32.to_bits(),
++        2.0f32.to_bits(),
++        0.0f32.to_bits(),
++        0.0f32.to_bits(),
++        3.0f32.to_bits(),
++        2.0f32.to_bits(),
++        1.0f32.to_bits(),
++        0.0f32.to_bits(),
++        1.0f32.to_bits(),
++        4.0f32.to_bits(),
++        0.0f32.to_bits(),
++        1.0f32.to_bits(),
++        u32::MAX,
++    ]);
++    assert_eq!(
++        submit(&mut renderer, &words, &resources),
++        Err(RenderError::Unsupported)
++    );
++}
++
+ #[test]
+ fn coordinator_display_split_retires_only_after_display_wait() {
+     let (mut renderer, device) = fresh();
+diff --git a/devices/web/pocket-web-render/src/batch.rs b/devices/web/pocket-web-render/src/batch.rs
+index 5cf6293..4ded69c 100644
+--- a/devices/web/pocket-web-render/src/batch.rs
++++ b/devices/web/pocket-web-render/src/batch.rs
+@@ -10,6 +10,22 @@ fn cache_error(error: pocket_tex_cache::CacheError<RenderError>) -> RenderError
+     }
+ }
+ 
++fn float_textured_triangle(words: &[u32]) -> ([[f32; 2]; 3], [[f32; 2]; 3], u32) {
++    let positions = core::array::from_fn(|i| {
++        [
++            f32::from_bits(words[2 + i * 4]),
++            f32::from_bits(words[3 + i * 4]),
++        ]
++    });
++    let uvs = core::array::from_fn(|i| {
++        [
++            f32::from_bits(words[4 + i * 4]),
++            f32::from_bits(words[5 + i * 4]),
++        ]
++    });
++    (positions, uvs, words[14])
++}
++
+ struct GlyphDraw {
+     key: TextureKey,
+     uv: [f32; 4],
+@@ -294,6 +310,28 @@ impl WgpuRenderer {
+                     }
+                     vertices.extend(triangle);
+                 }
++                spec::draw_op::TEX_TRI_FLOAT => {
++                    let Some(key) = self.image(resources, w[1] as i32, submission)? else {
++                        continue;
++                    };
++                    texture = TexBind::Image(key);
++                    let (positions, uvs, color) = float_textured_triangle(w);
++                    let positions = positions.map(|position| ndc(position));
++                    if positions
++                        .iter()
++                        .flatten()
++                        .chain(uvs.iter().flatten())
++                        .any(|v| !v.is_finite())
++                    {
++                        return Err(RenderError::InvalidFrame);
++                    }
++                    let mut triangle: [UiVertex; 3] =
++                        pocket_tri_batch::triangle(positions, uvs, [color; 3]);
++                    for vertex in &mut triangle {
++                        vertex.mode = 1;
++                    }
++                    vertices.extend(triangle);
++                }
+                 spec::draw_op::GLYPH_RUN => {
+                     for pair in w[3..].as_chunks::<2>().0 {
+                         let Some(GlyphDraw {
+@@ -381,3 +419,34 @@ impl WgpuRenderer {
+         Ok((vertices, commands))
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::float_textured_triangle;
++
++    #[test]
++    fn float_mesh_triangle_keeps_fractional_positions_uvs_and_tint() {
++        let color = 0x8040_3020;
++        let words = [
++            15,
++            7,
++            1.25f32.to_bits(),
++            2.5f32.to_bits(),
++            0.125f32.to_bits(),
++            0.25f32.to_bits(),
++            31.5f32.to_bits(),
++            4.25f32.to_bits(),
++            0.75f32.to_bits(),
++            0.25f32.to_bits(),
++            5.75f32.to_bits(),
++            26.125f32.to_bits(),
++            0.5f32.to_bits(),
++            0.875f32.to_bits(),
++            color,
++        ];
++        let (positions, uvs, tint) = float_textured_triangle(&words);
++        assert_eq!(positions, [[1.25, 2.5], [31.5, 4.25], [5.75, 26.125]]);
++        assert_eq!(uvs, [[0.125, 0.25], [0.75, 0.25], [0.5, 0.875]]);
++        assert_eq!(tint, color);
++    }
++}
+diff --git a/devices/web/pocket-web-render/src/lib.rs b/devices/web/pocket-web-render/src/lib.rs
+index 53ec755..0775841 100644
+--- a/devices/web/pocket-web-render/src/lib.rs
++++ b/devices/web/pocket-web-render/src/lib.rs
+@@ -387,7 +387,10 @@ impl WgpuRenderer {
+             let operation = operation.map_err(|_| RenderError::InvalidFrame)?;
+             let count = match operation.opcode {
+                 spec::draw_op::TEXT_RUN => return Err(RenderError::Unsupported),
+-                spec::draw_op::TRI | spec::draw_op::TEX_TRI => 3,
++                spec::draw_op::TRI | spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_FLOAT => 3,
++                spec::draw_op::TEX_TRI_REPEAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT => {
++                    return Err(RenderError::Unsupported);
++                }
+                 spec::draw_op::GLYPH_RUN => (operation.words[1] >> 16) as u64 * 6,
+                 spec::draw_op::SCISSOR | spec::draw_op::SCISSOR_POP => 0,
+                 _ => 6,
+diff --git a/devices/web/pocket-web-render/tests/gpu.rs b/devices/web/pocket-web-render/tests/gpu.rs
+index 44f4d4b..8f77bc5 100644
+--- a/devices/web/pocket-web-render/tests/gpu.rs
++++ b/devices/web/pocket-web-render/tests/gpu.rs
+@@ -152,6 +152,27 @@ fn image(width: u32) -> DrawList {
+     ];
+     list
+ }
++fn float_triangle() -> DrawList {
++    let mut list = DrawList::new();
++    list.words = vec![
++        op::TEX_TRI_FLOAT,
++        7,
++        0.25f32.to_bits(),
++        0.25f32.to_bits(),
++        0.5f32.to_bits(),
++        0.5f32.to_bits(),
++        3.9f32.to_bits(),
++        0.25f32.to_bits(),
++        0.5f32.to_bits(),
++        0.5f32.to_bits(),
++        0.25f32.to_bits(),
++        3.9f32.to_bits(),
++        0.5f32.to_bits(),
++        0.5f32.to_bits(),
++        u32::MAX,
++    ];
++    list
++}
+ fn render(
+     renderer: &mut WgpuRenderer,
+     target: TargetId,
+@@ -216,6 +237,55 @@ fn separate_encoders_copy_vertices_and_resource_versions_before_submission() {
+     assert_eq!(gpu.read(&b), [0, 255, 0, 255].repeat(16));
+ }
+ 
++#[test]
++fn float_textured_triangle_keeps_subpixel_coverage_on_gpu() {
++    let gpu = Gpu::new();
++    let mut renderer = gpu.renderer();
++    let output = gpu.output();
++    let target = gpu.register(&mut renderer, &output);
++    let resources = Resources::red();
++    let token = render(&mut renderer, target, &float_triangle(), &resources).unwrap();
++    renderer.wait(&token).unwrap();
++    renderer.retire(token);
++    let pixels = gpu.read(&output);
++    let pixel = |x: usize, y: usize| &pixels[(y * 4 + x) * 4..(y * 4 + x + 1) * 4];
++    assert_eq!(pixel(3, 0), [255, 0, 0, 255]);
++    assert_eq!(pixel(3, 3), [0, 0, 0, 255]);
++}
++
++#[test]
++fn float_repeat_triangle_keeps_the_backend_unsupported_boundary() {
++    let gpu = Gpu::new();
++    let mut renderer = gpu.renderer();
++    let output = gpu.output();
++    let target = gpu.register(&mut renderer, &output);
++    let resources = Resources::red();
++    let list = DrawList {
++        words: vec![
++            op::TEX_TRI_REPEAT_FLOAT,
++            7,
++            0.25f32.to_bits(),
++            0.25f32.to_bits(),
++            0.5f32.to_bits(),
++            0.5f32.to_bits(),
++            3.9f32.to_bits(),
++            0.25f32.to_bits(),
++            1.5f32.to_bits(),
++            0.5f32.to_bits(),
++            0.25f32.to_bits(),
++            3.9f32.to_bits(),
++            0.5f32.to_bits(),
++            1.5f32.to_bits(),
++            u32::MAX,
++        ],
++        ..DrawList::default()
++    };
++    assert!(matches!(
++        render(&mut renderer, target, &list, &resources),
++        Err(RenderError::Unsupported)
++    ));
++}
++
+ #[test]
+ fn two_targets_retain_old_versions_until_reverse_retirement() {
+     let gpu = Gpu::new();
+diff --git a/engine/backends/gpui/src/render.rs b/engine/backends/gpui/src/render.rs
+index cc0b270..b1cc75b 100644
+--- a/engine/backends/gpui/src/render.rs
++++ b/engine/backends/gpui/src/render.rs
+@@ -38,6 +38,26 @@ fn decode_xy(word: u32) -> (f32, f32) {
+     )
+ }
+ 
++fn tex_tri_words(opcode: u32) -> usize {
++    match opcode {
++        spec::draw_op::TEX_TRI => 12,
++        spec::draw_op::TEX_TRI_FLOAT => 15,
++        _ => 0,
++    }
++}
++
++fn tex_tri_position(opcode: u32, words: &[u32], vertex: usize) -> (f32, f32) {
++    if opcode == spec::draw_op::TEX_TRI_FLOAT {
++        let offset = 2 + vertex * 4;
++        (
++            f32::from_bits(words[offset]),
++            f32::from_bits(words[offset + 1]),
++        )
++    } else {
++        decode_xy(words[2 + vertex * 3])
++    }
++}
++
+ fn decode_wh(word: u32) -> (f32, f32) {
+     ((word & 0xffff) as f32, ((word >> 16) & 0xffff) as f32)
+ }
+@@ -322,7 +342,7 @@ impl GpuiRenderer {
+                     *i += 1;
+                     return;
+                 }
+-                spec::draw_op::TRI | spec::draw_op::TEX_TRI => {
++                spec::draw_op::TRI | spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_FLOAT => {
+                     self.paint_tri_batch(ui, words, i, origin, window, cx);
+                 }
+                 spec::draw_op::TEXT_RUN => {
+@@ -583,6 +603,10 @@ impl GpuiRenderer {
+                     needs_raster = true;
+                     end += 12;
+                 }
++                spec::draw_op::TEX_TRI_FLOAT => {
++                    needs_raster = true;
++                    end += 15;
++                }
+                 _ => break,
+             }
+         }
+@@ -616,13 +640,14 @@ impl GpuiRenderer {
+         let mut key_words: Vec<u32> = batch.to_vec();
+         let mut j = 0usize;
+         while j < batch.len() {
+-            if batch[j] == spec::draw_op::TEX_TRI {
++            let tri_words = tex_tri_words(batch[j]);
++            if tri_words != 0 {
+                 let slot = batch[j + 1] & spec::TEX_SLOT_MASK;
+                 if let Some((_, revision, _)) = ui.texture_at_versioned(slot) {
+                     key_words.push(revision as u32);
+                     key_words.push((revision >> 32) as u32);
+                 }
+-                j += 12;
++                j += tri_words;
+             } else {
+                 j += 7;
+             }
+@@ -643,20 +668,25 @@ impl GpuiRenderer {
+         let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+         let mut j = 0usize;
+         while j < batch.len() {
+-            let idxs: &[usize] = if batch[j] == spec::draw_op::TEX_TRI {
+-                &[j + 2, j + 5, j + 8]
++            if batch[j] == spec::draw_op::TEX_TRI || batch[j] == spec::draw_op::TEX_TRI_FLOAT {
++                for vertex in 0..3 {
++                    let (x, y) = tex_tri_position(batch[j], &batch[j..], vertex);
++                    min_x = min_x.min(x.floor() as i32);
++                    min_y = min_y.min(y.floor() as i32);
++                    max_x = max_x.max(x.ceil() as i32);
++                    max_y = max_y.max(y.ceil() as i32);
++                }
+             } else {
+-                &[j + 1, j + 2, j + 3]
+-            };
+-            for &k in idxs {
+-                let (x, y) = decode_xy(batch[k]);
+-                min_x = min_x.min(x as i32);
+-                min_y = min_y.min(y as i32);
+-                max_x = max_x.max(x.ceil() as i32);
+-                max_y = max_y.max(y.ceil() as i32);
++                for &k in &[j + 1, j + 2, j + 3] {
++                    let (x, y) = decode_xy(batch[k]);
++                    min_x = min_x.min(x.floor() as i32);
++                    min_y = min_y.min(y.floor() as i32);
++                    max_x = max_x.max(x.ceil() as i32);
++                    max_y = max_y.max(y.ceil() as i32);
++                }
+             }
+-            j += if batch[j] == spec::draw_op::TEX_TRI {
+-                12
++            j += if tex_tri_words(batch[j]) != 0 {
++                tex_tri_words(batch[j])
+             } else {
+                 7
+             };
+@@ -764,3 +794,38 @@ fn to_rgba8(view: &pocketjs_core::TexView) -> Option<Vec<u8>> {
+         _ => None,
+     }
+ }
++
++#[cfg(test)]
++mod subpixel_tests {
++    use super::{tex_tri_position, tex_tri_words};
++    use pocketjs_core::spec;
++
++    #[test]
++    fn float_mesh_positions_remain_fractional_for_the_raster_fallback() {
++        let words = [
++            spec::draw_op::TEX_TRI_FLOAT,
++            7,
++            1.25f32.to_bits(),
++            2.5f32.to_bits(),
++            0.125f32.to_bits(),
++            0.25f32.to_bits(),
++            31.5f32.to_bits(),
++            4.25f32.to_bits(),
++            0.75f32.to_bits(),
++            0.25f32.to_bits(),
++            5.75f32.to_bits(),
++            26.125f32.to_bits(),
++            0.5f32.to_bits(),
++            0.875f32.to_bits(),
++            u32::MAX,
++        ];
++        assert_eq!(tex_tri_words(words[0]), 15);
++        assert_eq!(
++            (0..3)
++                .map(|i| tex_tri_position(words[0], &words, i))
++                .collect::<Vec<_>>(),
++            [(1.25, 2.5), (31.5, 4.25), (5.75, 26.125)]
++        );
++        assert_eq!(tex_tri_words(spec::draw_op::TEX_TRI), 12);
++    }
++}

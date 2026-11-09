@@ -1,0 +1,10 @@
+.nv-backup-panel { max-width: 900px; margin: 1rem auto 3rem; padding: 1.25rem; border: 1px solid #304036; border-radius: 12px; background: #111713; }
+.nv-backup-panel h1 { margin-top: 0; font-size: 1.3rem; }
+.nv-backup-policy { display: flex; align-items: center; gap: 1rem; margin-top: 1rem; }
+.nv-backup-policy select { max-width: 240px; }
+.nv-backup-list { display: grid; gap: .75rem; }
+.nv-backup-row { display: grid; grid-template-columns: 1fr auto; gap: .5rem 1rem; padding: 1rem; border: 1px solid #304036; border-radius: 8px; }
+.nv-backup-row > .nv-button { grid-column: 2; grid-row: 1 / 3; }
+.nv-backup-warning { color: #f0b78f; }
+.nv-backup-status { min-height: 1.4rem; color: #bde8c4; }
+@media (max-width: 600px) { .nv-backup-row { grid-template-columns: 1fr; } .nv-backup-row > .nv-button { grid-column: 1; grid-row: auto; } }

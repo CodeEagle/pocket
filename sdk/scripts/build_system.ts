@@ -20,6 +20,7 @@ import {
   type PocketMemoryBudget,
   type PocketMemoryPolicy,
 } from "../packages/pocket_ui/src/system-memory.ts";
+import { validatePocketProjectFonts } from "./project_fonts.ts";
 
 const sdkRoot = resolve(import.meta.dir, "..");
 const upstreamRoot = join(sdkRoot, ".cache/pocketjs");
@@ -456,9 +457,22 @@ export async function validateSystemDocument(
       ));
       return;
     }
-    const manifestResult = api.validatePocketManifest(parsed.value);
+    const fontValidation = validatePocketProjectFonts(parsed.value, dirname(manifestPath));
+    if (!fontValidation.ok) {
+      for (const issue of fontValidation.issues) {
+        diagnostics.push(diagnostic(
+          "system.invalidProjectFont",
+          `${entryPath}/resolved/${issue.path}`,
+          issue.message,
+        ));
+      }
+    }
+    const manifestResult = api.validatePocketManifest(fontValidation.schemaInput);
     if (!manifestResult.ok) {
       for (const item of manifestResult.diagnostics) {
+        // Invalid fonts already have the SDK's precise portable-path error;
+        // keep all other official schema failures, including unknown fields.
+        if (!fontValidation.ok && item.path === "/fonts" && item.code === "schema.additionalProperty") continue;
         diagnostics.push({
           ...item,
           path: `${entryPath}/resolved${item.path}`,

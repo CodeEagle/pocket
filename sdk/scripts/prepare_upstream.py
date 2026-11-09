@@ -40,6 +40,12 @@ PATCHES = (
     ("offload-direct-value.patch", "offload direct-value transport"),
     ("focus-display-filter.patch", "focus display filtering"),
     ("modal-transparent-backdrop.patch", "transparent modal backdrop"),
+    ("image-mesh.patch", "retained image mesh"),
+    ("image-mesh-subpixel.patch", "subpixel retained mesh DrawList"),
+    ("image-mesh-subpixel-backends.patch", "subpixel mesh backend readers"),
+    ("image-high-resolution-pak.patch", "bounded high-resolution IMG entries"),
+    ("input-touch-coordinate-sidecar.patch", "full touch coordinate sidecar"),
+    ("inline-text-core.patch", "one-leaf rich inline text"),
 )
 
 # Later patches can intentionally supersede one earlier diff hunk. The
@@ -86,9 +92,136 @@ SUPERSEDED_PATCH_MARKERS = {
             "registerServicePump(() => next.step(), () => next.needsPump());",
         ),
     },
+    "retained image mesh": {
+        # The later float-op and high-resolution patches supersede a few
+        # version/spec/mesh-emitter hunks while preserving the retained-mesh
+        # contract. These markers accept only that complete successor state.
+        "contracts/generated/pocket_spec.h": (
+            "#define POCKET_DRAW_LIST_VERSION 3U",
+            "#define POCKET_DRAW_OP_TEX_TRI_FLOAT 15U",
+            "#define POCKET_DRAW_OP_TEX_TRI_REPEAT_FLOAT 16U",
+        ),
+        "contracts/spec/spec.ts": (
+            "export const DRAW_LIST_VERSION = 3;",
+            "texTriFloat: 15,",
+            "texTriRepeatFloat: 16,",
+        ),
+        "contracts/spec/gen-rust.ts": (
+            'put("/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,");',
+            'put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each.");',
+        ),
+        "devices/gles/pocket-gles/src/lib.rs": (
+            "spec::draw_op::TEX_TRI_REPEAT_FLOAT",
+            "spec::draw_op::TEX_TRI_FLOAT",
+        ),
+        "devices/vita/pocket-vita-render/src/lib.rs": (
+            "spec::draw_op::TEX_TRI_REPEAT_FLOAT",
+            "spec::draw_op::TEX_TRI_FLOAT",
+        ),
+        "engine/core/src/draw.rs": (
+            "fn emit_mesh_tex_tri(",
+            "spec::draw_op::TEX_TRI_REPEAT_FLOAT",
+        ),
+        "engine/core/src/lib.rs": (
+            "self.upload_texture_flags_with_limit(data, w, h, psm, flags, spec::TEX_MAX_DIM)",
+            "self.upload_texture_flags_with_limit(&blob[8..], w, h, psm, flags, spec::IMG_MAX_DIM)",
+        ),
+        "engine/drivers/src/abi.rs": (
+            "pub const POCKET_DRAW_LIST_VERSION: u32 = 3;",
+        ),
+        "engine/present/src/damage.rs": (
+            "fn triangle_bounds_float(",
+            "spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT",
+        ),
+        "engine/raster/src/surface.rs": (
+            "operation.opcode == draw_op::TEX_TRI_FLOAT",
+            "draw_op::TEX_TRI_REPEAT_FLOAT",
+        ),
+        "engine/render/draw-ops/src/lib.rs": (
+            "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,",
+        ),
+        "engine/render/draw-ops/tests/decoding.rs": (
+            "all_thirteen_records_preserve_the_original_words_and_offsets",
+            "TEX_TRI_REPEAT_FLOAT",
+        ),
+        "engine/spec/src/lib.rs": (
+            "pub const DRAW_LIST_VERSION: u32 = 3;",
+            "pub const TEX_TRI_FLOAT: u32 = 15;",
+            "pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;",
+        ),
+        "engine/core/src/tree.rs": (
+            "pub(crate) mesh: Option<crate::mesh::ImageMesh>,",
+            "pub inline_text: Option<InlineTextSpec>,",
+            "pub inline_layout_key: u64,",
+            "mesh: None,",
+            "inline_layout_key: 0,",
+        ),
+        "engine/runtime/src/generated_ops.rs": (
+            'name: "setMesh",',
+            'name: "setMeshEffect",',
+            'name: "setInlineText",',
+            'name: "setInlineReveal",',
+            'name: "getInlineTextLayout",',
+            "7 | 64 | 65 | 66 | 8 | 9 | 10 | 62 | 63",
+            "ui.set_mesh(a0, a1, a2)",
+            "ui.set_mesh_effect(a0, a1)",
+            "ui.set_inline_text(a0, a1, a2)",
+            "ui.set_inline_reveal(a0, a1)",
+            "ui.get_inline_text_layout(a0)",
+        ),
+    },
 }
 
 FINAL_CONTRACTS = {
+    "contracts/generated/pocket_spec.h": (
+        "#define POCKET_OP_setInlineText 64U",
+        "#define POCKET_OP_setInlineReveal 65U",
+        "#define POCKET_OP_getInlineTextLayout 66U",
+    ),
+    "contracts/spec/ui-ops.ts": (
+        'core("setInlineText", [arg("id", "i32"), arg("source", "string"), arg("records", "bytes")]',
+        'core("getInlineTextLayout", [arg("id", "i32")]',
+    ),
+    "engine/core/src/lib.rs": (
+        "pub fn set_inline_text(&mut self, id: i32, source: &str, records: &[u8])",
+        "pub fn set_inline_reveal(&mut self, id: i32, codepoints: u32)",
+        "pub fn get_inline_text_layout(&mut self, id: i32) -> Vec<u32>",
+    ),
+    "engine/core/src/inline_text.rs": (
+        "pub fn layout(",
+        "pub fn encode_query(",
+        "complex-script shaping remains the responsibility of a future shaper",
+    ),
+    "engine/spec/src/lib.rs": (
+        "pub const SET_INLINE_TEXT: u8 = 64;",
+        "pub const SET_INLINE_REVEAL: u8 = 65;",
+        "pub const GET_INLINE_TEXT_LAYOUT: u8 = 66;",
+    ),
+    "engine/runtime/src/generated_ops.rs": (
+        'name: "setInlineText",',
+        'name: "setInlineReveal",',
+        'name: "getInlineTextLayout",',
+        "ui.set_inline_text(a0, a1, a2)",
+        "ui.set_inline_reveal(a0, a1)",
+        "ui.get_inline_text_layout(a0)",
+    ),
+    "engine/guest-quickjs/src/generated_ops.h": (
+        '{ 64, "setInlineText", 3, PJS_RESULT_NONE, 0, 0,',
+        '{ 65, "setInlineReveal", 2, PJS_RESULT_NONE, 0, 0,',
+        '{ 66, "getInlineTextLayout", 1, PJS_RESULT_U32ARRAY, 0, 0,',
+    ),
+    "framework/src/renderer-solid.ts": (
+        "syncStyle,",
+    ),
+    "framework/src/inline-fonts.ts": (
+        "export function inlineFontSlot(role: InlineFontRole): number",
+        "INLINE_TEXT_FONT_SLOTS",
+    ),
+    "tools/inline-text-slots.ts": (
+        "export function addInlineTextFontSlots(",
+        "fontSlotFor(16, false)",
+        "fontSlotFor(12, false)",
+    ),
     "framework/src/services.ts": (
         "export function registerServicePump(pump: ServicePump, pending: PendingWork = () => true): () => void {",
         "export function hasPendingServiceWork(): boolean",
@@ -99,6 +232,73 @@ FINAL_CONTRACTS = {
         "registerServicePump(() => next.step(), () => next.needsPump());",
         "ops as OffloadOps & { cancel?:",
         "if (item.sent) (ops as OffloadOps",
+    ),
+    "framework/src/touch.ts": (
+        "const COORDINATE_SIDECAR_MARKER = 0x10000000;",
+        "coordinates?: readonly TouchCoordinate[],",
+        "if (needsSidecar && !isCoordinate(coordinate)) continue;",
+    ),
+    "framework/src/index.ts": (
+        "touchCoordinates?: readonly TouchCoordinate[],",
+        "__setTouches(touches, hits, touchSurfaces, touchCoordinates)",
+    ),
+    "framework/src/index-vue-vapor.ts": (
+        "touchCoordinates?: readonly TouchCoordinate[],",
+        "__setTouches(touches, hits, touchSurfaces, touchCoordinates)",
+    ),
+    "framework/src/index-octane.ts": (
+        "_axisDeltas?: readonly unknown[],",
+        "_text?: readonly unknown[],",
+        "__setTouches(touches, hits, touchSurfaces, touchCoordinates)",
+    ),
+    "framework/src/devtools.ts": (
+        "touchCoordinatesArg?: readonly TouchCoordinate[],",
+        "touchCoordinates = undefined;",
+        "textArg, touchCoordinates);",
+    ),
+    "engine/guest-rquickjs/src/lib.rs": (
+        "pub fn frame_with_touch_coordinates(",
+        "pub fn call_frame_with_touch_coordinates(",
+    ),
+    "contracts/spec/spec.ts": (
+        "export const TEX_MAX_DIM = 512;",
+        "export const IMG_MAX_DIM = 2048;",
+        "export const DRAW_LIST_VERSION = 3;",
+        "texTriFloat: 15,",
+        "texTriRepeatFloat: 16,",
+    ),
+    "contracts/spec/gen-rust.ts": (
+        "  IMG_MAX_DIM,",
+        "pub const IMG_MAX_DIM: u32 = ${IMG_MAX_DIM};",
+    ),
+    "framework/compiler/pak.ts": (
+        "w > IMG_MAX_DIM || h > IMG_MAX_DIM",
+        "dims must be pow2 <= ${IMG_MAX_DIM}",
+    ),
+    "engine/spec/src/lib.rs": (
+        "pub const TEX_MAX_DIM: u32 = 512;",
+        "pub const IMG_MAX_DIM: u32 = 2048;",
+        "pub const DRAW_LIST_VERSION: u32 = 3;",
+        "pub const TEX_TRI_FLOAT: u32 = 15;",
+        "pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;",
+    ),
+    "engine/drivers/src/abi.rs": (
+        "pub const POCKET_DRAW_LIST_VERSION: u32 = 3;",
+    ),
+    "engine/render/draw-ops/src/lib.rs": (
+        "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,",
+    ),
+    "engine/core/src/draw.rs": (
+        "fn emit_mesh_tex_tri(",
+        "spec::draw_op::TEX_TRI_REPEAT_FLOAT",
+    ),
+    "engine/raster/src/lib.rs": (
+        "fn tex_tri_float<T: RenderTarget>(",
+        "draw_op::TEX_TRI_FLOAT =>",
+    ),
+    "engine/core/src/lib.rs": (
+        "self.upload_texture_flags_with_limit(data, w, h, psm, flags, spec::TEX_MAX_DIM)",
+        "self.upload_texture_flags_with_limit(&blob[8..], w, h, psm, flags, spec::IMG_MAX_DIM)",
     ),
 }
 

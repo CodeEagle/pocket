@@ -89,6 +89,9 @@ Map<String, dynamic> _opSnapshot(PocketOp op) {
       PocketGradientOp() => 'gradient',
       PocketTriangleOp() => 'triangle',
       PocketTextureTriangleOp() => 'textureTriangle',
+      PocketMeshLayerBeginOp() => 'meshLayerBegin',
+      PocketMeshMaskBeginOp() => 'meshMaskBegin',
+      PocketMeshLayerRestoreOp() => 'meshLayerRestore',
       PocketTextOp() => 'text',
       PocketImageOp() => 'image',
       PocketVideoOp() => 'video',
@@ -125,10 +128,18 @@ Map<String, dynamic> _opSnapshot(PocketOp op) {
     case PocketTextureTriangleOp value:
       result['asset'] = value.asset;
       result['color'] = value.color;
+      if (value.repeatTexture) result['repeatTexture'] = true;
       result['points'] = value.points
           .map((point) => <String, dynamic>{'x': point.x, 'y': point.y})
           .toList(growable: false);
       result['uvs'] = value.uvs;
+    case PocketMeshLayerBeginOp value:
+      result['color'] = value.blend;
+      result['uvs'] = <double>[...value.multiplyRgb, ...value.screenRgb];
+    case PocketMeshMaskBeginOp value:
+      result['color'] = value.inverted ? 1 : 0;
+    case PocketMeshLayerRestoreOp():
+      break;
     case PocketTextOp value:
       result['text'] = value.text;
       result['size'] = value.size;

@@ -108,7 +108,6 @@ async function runMiniAppBrowserAcceptance(): Promise<void> {
         pakPath: root.pak,
         revision: 1,
         tickHz: 60,
-        compositorSurfaces: { [profileAppId]: 2, [lobbyAppId]: 3 },
         applications,
       },
     });

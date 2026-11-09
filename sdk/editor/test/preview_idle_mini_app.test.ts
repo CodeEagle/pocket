@@ -7,7 +7,9 @@ import { createPreviewManager, type PreviewFrame } from "../preview.ts";
 const repositoryRoot = resolve(import.meta.dir, "..", "..", "..");
 const sdkRoot = join(repositoryRoot, "sdk");
 const demoRoot = join(repositoryRoot, "demo/js");
-const probe = join(sdkRoot, "native/target/debug/pocket_probe");
+const probe = process.env.POCKET_NATIVE_PROBE
+  ? resolve(process.env.POCKET_NATIVE_PROBE)
+  : join(sdkRoot, "native/target/debug/pocket_probe");
 const projectId = "preview-idle-mini-app";
 const prefix = `http://127.0.0.1/api/projects/${projectId}/preview`;
 
@@ -63,7 +65,6 @@ test("native mini-app launch rebases the clock after an idle preview", { timeout
       pakPath: join(repositoryRoot, "demo/assets/app.pak"),
       revision: 1,
       tickHz: 60,
-      compositorSurfaces: { "pocket.demo.profile": 2, "pocket.demo.lobby": 3 },
       applications: {
         "pocket.demo.profile": {
           bytecodePath: join(repositoryRoot, "demo/assets/apps/profile/app.qjbc"),
@@ -86,7 +87,7 @@ test("native mini-app launch rebases the clock after an idle preview", { timeout
   let pending = "";
   try {
     const stream = await manager.handle(new Request(`${prefix}/stream?presentation=browser`), projectId, "stream");
-    assert.equal(stream.status, 200);
+    assert.equal(stream.status, 200, stream.status === 200 ? undefined : await stream.text());
     reader = stream.body!.getReader();
     const consume = (async (): Promise<void> => {
       while (!stopReader) {

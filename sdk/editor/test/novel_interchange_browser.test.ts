@@ -1,0 +1,177 @@
+import { clickNovelHistory } from "./novel_browser_helpers.ts";
+import { strict as assert } from "node:assert";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { chromium } from "playwright";
+import { test } from "bun:test";
+import { startEditor } from "../server.ts";
+import { NativeSession, textOf } from "../../../demo/js/tests/native_session.ts";
+import { extractZipArchive } from "../../scripts/package_update.ts";
+
+test("Editor exports, imports and rejects interchange files before building the edited story into a real Guest", { timeout: 180_000 }, async () => {
+  const repository = resolve(import.meta.dir, "../../..");
+  const temporary = mkdtempSync(join(tmpdir(), "pocket-interchange-browser-"));
+  const project = join(temporary, "project");
+  const id = "interchange-browser";
+  const artifacts = process.env.POCKET_INTERCHANGE_ARTIFACT_DIR?.trim() || join(repository, "sdk/.pocket-build/novel-friendly-csv-20261108");
+  mkdirSync(project);
+  mkdirSync(artifacts, { recursive: true });
+  for (const name of ["pocket.json", "package.json", "manifest.json", "fonts.json", "fonts"]) cpSync(join(repository, "demo/js/apps/lantern", name), join(project, name), { recursive: true });
+  writeFileSync(join(project, "editor.json"), JSON.stringify({ id, appId: "pocket.demo.lantern", name: id, version: "0.1.0", entry: "app.tsx", framework: "solid", build: 1, tickHz: 60 }));
+  const story = { id, version: 1, start: "start", custom: { retained: ["Mira", "Ren"] }, variableDefinitions: { _name: { lifetime: "session", defaultValue: "Mira" } }, replayEntries: [{ id: "memory", title: "Memory", location: { label: "stale_missing", index: 0 } }], script: { start: [{ type: "say", id: "opening", text: "Original import", custom: { retain: true } }, { type: "say", id: "quoted", text: 'Quoted "Ren"\nMira' }, { type: "ending", id: "end", text: "714" }], empty: [] } };
+  writeFileSync(join(project, "story.json"), JSON.stringify(story));
+  writeFileSync(join(project, "novel.assets.json"), JSON.stringify({ backgrounds: {}, characters: {}, cgs: {}, audio: {} }));
+  writeFileSync(join(project, "novel.locales.json"), JSON.stringify({ format: "pocket-vn-locales", formatVersion: 1, catalogs: {} }));
+  writeFileSync(join(project, "images.json"), "{}");
+  writeFileSync(join(project, "app.tsx"), `import { mount } from "@pocketjs/framework/solid";
+import { onCleanup } from "solid-js";
+import { createNovelEngine, formatStoryTableCsv, formatStoryCsv, parseStoryCsv, formatStoryMarkdown, parseStoryMarkdown, type StoryDefinition } from "@pocket/vn";
+import { attachNovelClock } from "@pocket/vn/clock";
+import { NovelView } from "@pocket/vn/view";
+import story from "./story.json";
+import assets from "./novel.assets.json";
+const tableCsv = parseStoryCsv(formatStoryTableCsv(story as StoryDefinition));
+if (!tableCsv.story) throw new Error(tableCsv.diagnostics.map(issue => issue.message).join("; "));
+const csv = parseStoryCsv(formatStoryCsv(tableCsv.story));
+if (!csv.story) throw new Error(csv.diagnostics.map(issue => issue.message).join("; "));
+const markdown = parseStoryMarkdown(formatStoryMarkdown(csv.story));
+if (!markdown.story) throw new Error(markdown.diagnostics.map(issue => issue.message).join("; "));
+const engine = createNovelEngine(markdown.story);
+function App() { const removeClock = attachNovelClock(engine); onCleanup(() => { removeClock(); engine.dispose(); }); return <NovelView engine={engine} assets={assets} title="Exchange" onNewGame={() => engine.newGame()} />; }
+mount(App);
+`);
+  const server = await startEditor({ port: 0, updatePort: 0, workspace: join(temporary, "workspace"), projectRoot: project });
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 980 } });
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  let native: NativeSession | undefined;
+  try {
+    await page.goto(`http://127.0.0.1:${server.port}/novel?project=${id}`);
+    await page.waitForFunction(() => document.querySelector("#novel-diagnostics")?.textContent?.includes("replayEntries"));
+    const exported = async (format: "csv" | "md" | "table-csv") => {
+      await page.getByLabel("剧本导出格式", { exact: true }).selectOption(format);
+      const names = { csv: "导出 CSV", md: "导出 Markdown", "table-csv": "导出 表格 CSV" };
+      const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: names[format], exact: true }).click()]);
+      assert.equal(download.suggestedFilename(), format === "table-csv" ? `${id}-story-table.csv` : `${id}-story.${format}`);
+      return readFileSync((await download.path())!, "utf8");
+    };
+    const originalCsv = await exported("csv");
+    const csv = originalCsv.replace("Original import", "Edited by CSV714").replace("stale_missing", "start");
+    await page.locator("#novel-import-input").setInputFiles({ name: "edited.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
+    await page.waitForFunction(() => (document.querySelector('[aria-label="对白文本"]') as HTMLTextAreaElement)?.value === "Edited by CSV714");
+    assert.doesNotMatch(await page.locator("#novel-diagnostics").innerText(), /replayEntries/);
+    await page.locator("#novel-save").click();
+    await page.waitForFunction(() => document.querySelector("#novel-save-state")?.textContent === "已保存");
+    const afterCsv = JSON.parse(readFileSync(join(project, "story.json"), "utf8"));
+    const expected = structuredClone(story);
+    expected.replayEntries[0]!.location.label = "start";
+    expected.script.start[0]!.text = "Edited by CSV714";
+    assert.deepEqual(afterCsv, expected);
+    await page.locator("#novel-import-input").setInputFiles({ name: "invalid-target.csv", mimeType: "text/csv", buffer: Buffer.from(originalCsv) });
+    await page.waitForFunction(() => (document.querySelector('[aria-label="对白文本"]') as HTMLTextAreaElement)?.value === "Original import");
+    assert.match(await page.locator("#novel-diagnostics").innerText(), /replayEntries/);
+    assert.equal(await page.locator("#novel-build").isDisabled(), true);
+    assert.deepEqual(JSON.parse(readFileSync(join(project, "story.json"), "utf8")), expected);
+    await clickNovelHistory(page, "undo");
+    assert.equal(await page.getByLabel("对白文本", { exact: true }).first().inputValue(), "Edited by CSV714");
+    assert.doesNotMatch(await page.locator("#novel-diagnostics").innerText(), /replayEntries/);
+    const markdown = (await exported("md")).replace("Edited by CSV714", "Edited by Markdown714");
+    await page.locator("#novel-import-input").setInputFiles({ name: "edited.md", mimeType: "text/markdown", buffer: Buffer.from(markdown) });
+    await page.waitForFunction(() => (document.querySelector('[aria-label="对白文本"]') as HTMLTextAreaElement)?.value === "Edited by Markdown714");
+    await page.locator("#novel-save").click();
+    await page.waitForFunction(() => document.querySelector("#novel-save-state")?.textContent === "已保存");
+    expected.script.start[0]!.text = "Edited by Markdown714";
+    assert.deepEqual(JSON.parse(readFileSync(join(project, "story.json"), "utf8")), expected);
+    await page.locator("#novel-import-input").setInputFiles({ name: "broken.csv", mimeType: "text/csv", buffer: Buffer.from('record,label,index,type,payload\n"unterminated') });
+    await page.waitForFunction(() => document.querySelector(".nv-notice")?.textContent?.includes("导入失败"));
+    assert.equal(await page.getByLabel("对白文本", { exact: true }).first().inputValue(), "Edited by Markdown714");
+    assert.deepEqual(JSON.parse(readFileSync(join(project, "story.json"), "utf8")), expected);
+    await page.locator("#novel-import-input").setInputFiles({ name: "broken.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ id, version: 1, start: "start", script: { start: "invalid instruction array" } })) });
+    await page.waitForFunction(() => document.querySelector("#novel-notice")?.textContent?.includes("must be an instruction array"));
+    assert.equal(await page.getByLabel("对白文本", { exact: true }).first().inputValue(), "Edited by Markdown714");
+    assert.deepEqual(JSON.parse(readFileSync(join(project, "story.json"), "utf8")), expected);
+    const tableCsv = await exported("table-csv");
+    assert.match(tableCsv.split(/\r?\n/)[0]!, /speaker,text,target,asset/);
+    const tableText = '表格编辑, "你好"\n雾港714';
+    assert.match(tableCsv, /instruction,start,0,say,opening,,Edited by Markdown714/);
+    const editedTableCsv = tableCsv.replace("say,opening,,Edited by Markdown714", "say,opening,Mira,Edited by Markdown714")
+      .replace("Edited by Markdown714", '"表格编辑, ""你好""\n雾港714"');
+    writeFileSync(join(artifacts, "exported-table.csv"), tableCsv);
+    writeFileSync(join(artifacts, "edited-table.csv"), editedTableCsv);
+    await page.locator("#novel-import-input").setInputFiles({ name: "table.csv", mimeType: "text/csv", buffer: Buffer.from(editedTableCsv) });
+    await page.waitForFunction(text => (document.querySelector('[aria-label="对白文本"]') as HTMLTextAreaElement)?.value === text, tableText);
+    const invalidUtf8 = Buffer.from(editedTableCsv);
+    const invalidOffset = invalidUtf8.indexOf(Buffer.from("表格编辑"));
+    assert.ok(invalidOffset >= 0);
+    invalidUtf8[invalidOffset] = 0xff;
+    await page.locator("#novel-import-input").setInputFiles({ name: "invalid-utf8.csv", mimeType: "text/csv", buffer: invalidUtf8 });
+    await page.waitForFunction(text => document.querySelector("#novel-notice")?.textContent?.includes("导入失败")
+      || (document.querySelector('[aria-label="对白文本"]') as HTMLTextAreaElement)?.value !== text, tableText);
+    const utf8Result = {
+      notice: await page.locator("#novel-notice").innerText(),
+      draftText: await page.getByLabel("对白文本", { exact: true }).first().inputValue(),
+    };
+    writeFileSync(join(artifacts, "invalid-utf8-result.json"), JSON.stringify(utf8Result, null, 2));
+    assert.match(utf8Result.notice, /导入失败/);
+    assert.equal(utf8Result.draftText, tableText);
+    assert.deepEqual(JSON.parse(readFileSync(join(project, "story.json"), "utf8")), expected);
+    await page.getByLabel("剧本导出格式", { exact: true }).selectOption("docx");
+    const beforeWord = await (await fetch(`http://127.0.0.1:${server.port}/api/projects/${id}/status`)).json() as any;
+    const [wordDownload, wordResponse] = await Promise.all([
+      page.waitForEvent("download"),
+      page.waitForResponse(response => response.url().endsWith("/novel/export?format=docx") && response.request().method() === "POST"),
+      page.getByRole("button", { name: "导出 Word", exact: true }).click(),
+    ]);
+    assert.equal(wordResponse.status(), 200);
+    assert.equal(wordResponse.headers()["content-type"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    assert.equal(wordDownload.suggestedFilename(), `${id}-story.docx`);
+    const wordBytes = readFileSync((await wordDownload.path())!);
+    writeFileSync(join(artifacts, "unsaved-draft.docx"), wordBytes);
+    const wordParts = extractZipArchive(wordBytes);
+    const wordXml = new TextDecoder().decode(wordParts.get("word/document.xml")!);
+    assert.match(wordXml, /表格编辑/);
+    assert.match(wordXml, /雾港714/);
+    assert.match(wordXml, /Mira/);
+    assert.doesNotMatch(wordXml, /Edited by Markdown714/);
+    assert.equal(await page.locator("#novel-save-state").innerText(), "未保存");
+    assert.deepEqual(JSON.parse(readFileSync(join(project, "story.json"), "utf8")), expected);
+    const afterWord = await (await fetch(`http://127.0.0.1:${server.port}/api/projects/${id}/status`)).json() as any;
+    assert.equal(afterWord.revision, beforeWord.revision);
+    assert.equal(afterWord.builtRevision, beforeWord.builtRevision);
+    await clickNovelHistory(page, "undo");
+    assert.equal(await page.getByLabel("对白文本", { exact: true }).first().inputValue(), "Edited by Markdown714");
+    await clickNovelHistory(page, "redo");
+    assert.equal(await page.getByLabel("对白文本", { exact: true }).first().inputValue(), tableText);
+    await page.locator("#novel-save").click();
+    await page.waitForFunction(() => document.querySelector("#novel-save-state")?.textContent === "已保存");
+    Object.assign(expected.script.start[0]!, { text: tableText, speaker: "Mira" });
+    assert.deepEqual(JSON.parse(readFileSync(join(project, "story.json"), "utf8")), expected);
+    await page.reload();
+    assert.equal(await page.getByLabel("对白文本", { exact: true }).first().inputValue(), tableText);
+    await page.screenshot({ path: join(artifacts, "table-import-after-reopen.png"), fullPage: true });
+    await page.locator("#novel-build").click();
+    await page.waitForFunction(() => /Guest 已构建完成|构建失败/.test(document.querySelector("#novel-notice")?.textContent ?? ""), undefined, { timeout: 120_000 });
+    const status = await (await fetch(`http://127.0.0.1:${server.port}/api/projects/${id}/status`)).json() as any;
+    assert.match(await page.locator("#novel-notice").innerText(), /Guest 已构建完成/, JSON.stringify(status));
+    assert.equal(status.revision, status.builtRevision);
+    const artifact = join(temporary, "workspace", "builds", id, String(status.builtRevision));
+    const metadataPath = join(artifact, "app.bytecode.json");
+    const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+    assert.equal(metadata.entryFormat, "quickjs-bytecode");
+    for (const name of ["app.qjbc", "app.pak", "app.bytecode.json"]) cpSync(join(artifact, name), join(artifacts, name));
+    writeFileSync(join(artifacts, "saved-story.json"), JSON.stringify(expected, null, 2));
+    native = new NativeSession({ bytecodePath: join(artifact, "app.qjbc"), pakPath: join(artifact, "app.pak"), metadataPath, runtimeAbi: metadata.runtimeAbi }, { width: 360, height: 640, deadlineMs: 30_000 });
+    let frame = await native.boot();
+    frame = await native.tap("启程 · 开始新的故事", frame);
+    frame = await native.settle(frame, 60);
+    assert.match(textOf(frame), /表格编辑,\s*"你好"\s*雾港714/);
+    assert.match(textOf(frame), /Mira/);
+    writeFileSync(join(artifacts, "guest-frame.txt"), textOf(frame));
+    assert.deepEqual(errors, []);
+  } finally {
+    await native?.quit(); await browser.close(); await server.stop(true);
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});

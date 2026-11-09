@@ -40,6 +40,15 @@ test("preview storage shares named buckets and isolates private app buckets", as
     await request("lobby", "remove", { namespace: "identity", key: "userInfo" });
     assert.equal(await request("profile", "get", { namespace: "identity", key: "userInfo" }), null);
     assert.deepEqual(await request("profile", "get", { key: "userInfo" }), { name: "Private" });
+
+    await session.handleSystemRuntimeRequest(root, "batch-unavailable", "system.storage.batch", {
+      appId: "profile",
+      operations: [{ type: "set", key: "userInfo", value: { name: "Must not partially write" } }],
+    }, 0);
+    assert.equal(error.code, "system_runtime_error");
+    assert.match(error.message, /unsupported system storage operation: batch/);
+    error = undefined;
+    assert.deepEqual(await request("profile", "get", { key: "userInfo" }), { name: "Private" });
     await session.handleSystemRuntimeRequest({ appId: "lobby" }, "denied", "system.storage.get", { appId: "profile", key: "userInfo" }, 0);
     assert.equal(error.code, "system_context_denied");
   } finally {

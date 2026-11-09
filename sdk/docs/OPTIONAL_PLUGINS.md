@@ -10,13 +10,17 @@
 | `pocket_camera`、`pocket_bluetooth`、`pocket_sensors`、`pocket_location`、`pocket_biometrics`、`pocket_weather` | 分别注册 `PocketCameraPlugin` 等 | 仅相应领域的能力；独立原生包不依赖其余硬件包 |
 | `pocket_platform` / `flutter.platform` | 显式依赖并注册 `PocketPlatformPlugin`；CLI `--platform-experience` | `platform.systemUi.set`、`platform.haptics.perform` |
 | `pocket_platform` / `flutter.links` | 注册带 scheme 的 `PocketDeepLinkPlugin` 并配置原生 scheme；CLI `--deep-link-scheme=...` | `platform.links.initial/latest/events` |
-| `pocket_dio` / `dart.dio` | 显式依赖并注册 `PocketDioPlugin`；CLI `--dio` | `dio.request`，有界 HTTP 请求 |
+| `pocket_dio` / `dart.dio` | 显式依赖并注册 `PocketDioPlugin`；CLI `--dio` | `dio.request`，独立 IO Worker isolate 中的有界 HTTP 请求 |
 
 系统运行时、平台代理与调试录制还使用内部插件。OTA 下载使用 `pocket_services` 的 `http`；Worker 的 `net.http` 使用原有 Worker IO 通道。这两者不要求安装 Dio。Dio 不替换这两个已工作的实现。
 
 硬件拆分、权限边界与接入示例见 [HARDWARE_MODULES.md](HARDWARE_MODULES.md)。
 
 ## Dio 接入
+
+Dio 的请求、响应读流和 JSON/text/bytes 解码默认在插件自己的持久 IO Worker isolate 中执行；主 isolate 只保留能力准入、请求关联与生命周期边界。首次请求按需启动，后续复用，调用方无需打开 Worker 开关。JS 的 `createPocketDioClient(host).request()` 和响应格式不变。
+
+这个 IO Worker 与官方 `domains.worker` 的 JS 业务 Worker、Web 的 `renderWorker` 各自独立。仅使用 Dio 不必新增 `domains.worker` / `net.http` 声明；继续声明 `dio.request`、授予 `network` 并配置插件的 `allowedOrigins`。Web 渲染 Worker 仍默认关闭。详见 [Dio Worker 实现](DIO_WORKER.md)。
 
 消费者 `pubspec.yaml` 添加 `pocket_dio` 的 path 依赖，指向 `sdk/packages/pocket_dio`。`pocket_sdk` 自身不依赖这个包。新工程也可以使用 `bun pocket.ts init /path/to/app --dio`；生成的 origin 白名单为空，需自行填写。
 
@@ -62,7 +66,7 @@ const response = await dio.request({
 // response: { statusCode, headers, data }
 ```
 
-非 2xx 状态仍返回 HTTP 响应；网络错误、未授权、超限、生命周期取消通过现有 bridge 错误返回。白名单按 origin 精确匹配；不自动跟随重定向。切后台和销毁时取消正在执行的请求。重试、鉴权业务策略、状态和页面编排由 JS 管理。
+非 2xx 状态仍返回 HTTP 响应；网络错误、未授权、超限、生命周期取消通过现有 bridge 错误返回。白名单按 origin 精确匹配；不自动跟随重定向。切后台和销毁时取消正在执行的请求；销毁同时释放 IO Worker，恢复前台后可再次按需发起请求。重试、鉴权业务策略、状态和页面编排由 JS 管理。
 
 宿主默认总超时 30 秒，guest 的 `timeoutMs` 只能缩短它。已有 HostBridge 的帧超时也独立生效；长请求需由消费者配置相应的 bridge deadline。响应原始字节与编码后的返回值都受大小限制，默认上限 256 KiB（bytes 数组会因 JSON 编码更早触及限制）。
 

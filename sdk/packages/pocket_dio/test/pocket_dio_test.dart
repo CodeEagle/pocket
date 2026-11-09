@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
+import 'package:dio/dio.dart';
 import 'package:pocket_dio/pocket_dio.dart';
 import 'package:pocket_services/pocket_services.dart';
 import 'package:test/test.dart';
@@ -12,6 +14,7 @@ void main() {
 
   setUp(() async {
     _redirectHits = 0;
+    _slowHits = 0;
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     origin = 'http://127.0.0.1:${server.port}';
     unawaited(server.forEach(_handleRequest));
@@ -62,6 +65,196 @@ void main() {
       await plugin.dispose();
     }
   });
+
+  test('executes Dio in a worker isolate', () async {
+    final plugin = PocketDioPlugin(
+      allowedOrigins: [origin],
+      dioFactory: _workerIdentityDioFactory,
+    );
+    try {
+      final result =
+          await plugin.request(<String, dynamic>{
+                'url': '$origin/worker-isolate',
+              })
+              as Map;
+      final headers = result['headers'] as Map;
+      final identityHeader = headers.entries.singleWhere(
+        (entry) =>
+            entry.key.toString().toLowerCase() == 'x-pocket-worker-isolate',
+      );
+      final workerIdentity = (identityHeader.value as List).single as String;
+
+      expect(workerIdentity, isNotEmpty);
+      expect(
+        workerIdentity,
+        isNot(identityHashCode(Isolate.current).toString()),
+      );
+    } finally {
+      await plugin.dispose();
+    }
+  });
+
+  test('rejects promptly when the worker factory throws', () async {
+    final plugin = PocketDioPlugin(
+      allowedOrigins: [origin],
+      dioFactory: _throwingDioFactory,
+      requestTimeout: const Duration(seconds: 5),
+    );
+    final stopwatch = Stopwatch()..start();
+    try {
+      await expectLater(
+        plugin
+            .request(<String, dynamic>{'url': '$origin/text'})
+            .timeout(const Duration(seconds: 1)),
+        throwsA(
+          isA<PocketCapabilityException>().having(
+            (error) => error.code,
+            'code',
+            'request_failed',
+          ),
+        ),
+      );
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 1)));
+      expect(plugin.inFlightCount, 0);
+    } finally {
+      await plugin.dispose();
+    }
+  });
+
+  test(
+    'rejects promptly when the worker isolate exits during startup',
+    () async {
+      final plugin = PocketDioPlugin(
+        allowedOrigins: [origin],
+        dioFactory: _crashingDioFactory,
+        requestTimeout: const Duration(seconds: 5),
+      );
+      try {
+        await expectLater(
+          plugin
+              .request(<String, dynamic>{'url': '$origin/text'})
+              .timeout(const Duration(seconds: 1)),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'request_failed',
+            ),
+          ),
+        );
+        expect(plugin.inFlightCount, 0);
+      } finally {
+        await plugin.dispose();
+      }
+    },
+  );
+
+  test('request deadline covers worker startup', () async {
+    final plugin = PocketDioPlugin(
+      allowedOrigins: [origin],
+      dioFactory: _slowWorkerDioFactory,
+      requestTimeout: const Duration(milliseconds: 30),
+    );
+    final stopwatch = Stopwatch()..start();
+    try {
+      await expectLater(
+        plugin.request(<String, dynamic>{'url': '$origin/text'}),
+        throwsA(
+          isA<PocketCapabilityException>().having(
+            (error) => error.code,
+            'code',
+            'request_timeout',
+          ),
+        ),
+      );
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 1)));
+      expect(plugin.inFlightCount, 0);
+    } finally {
+      await plugin.dispose();
+    }
+  });
+
+  test('rejects requests above the eight-request concurrency limit', () async {
+    final plugin = PocketDioPlugin(
+      allowedOrigins: [origin],
+      requestTimeout: const Duration(seconds: 10),
+    );
+    try {
+      final outcomes = await Future.wait(
+        List<Future<Object?>>.generate(
+          9,
+          (_) => _capture(
+            plugin.request(<String, dynamic>{'url': '$origin/slow'}),
+          ),
+        ),
+      );
+      final failures = outcomes.whereType<PocketCapabilityException>();
+      expect(failures, hasLength(1));
+      expect(failures.single.code, 'request_limit');
+      expect(outcomes.whereType<Map>(), hasLength(8));
+      expect(plugin.inFlightCount, 0);
+    } finally {
+      await plugin.dispose();
+    }
+  });
+
+  test(
+    'timed-out requests retain backpressure until cancellation is acknowledged',
+    () async {
+      final plugin = PocketDioPlugin(
+        allowedOrigins: [origin],
+        dioFactory: _blockingRequestDioFactory,
+        requestTimeout: const Duration(seconds: 2),
+      );
+      try {
+        // Warm up first so the short deadlines below test a running Worker,
+        // rather than merely cancelling requests during isolate startup.
+        await plugin.request({'url': '$origin/text', 'responseType': 'text'});
+        final outcomes = await Future.wait(
+          List.generate(
+            8,
+            (_) => _capture(
+              plugin.request({'url': '$origin/text', 'timeoutMs': 20}),
+            ),
+          ),
+        );
+        for (final outcome in outcomes) {
+          expect(
+            outcome,
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'request_timeout',
+            ),
+          );
+        }
+        expect(plugin.inFlightCount, 0);
+        // The isolate is still blocked, so it has not consumed cancellation.
+        // Caller completion must not open an unbounded SendPort backlog.
+        await expectLater(
+          plugin.request({'url': '$origin/text'}),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'request_limit',
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        final recovered =
+            await plugin.request({
+                  'url': '$origin/text',
+                  'responseType': 'text',
+                  'timeoutMs': 1000,
+                })
+                as Map;
+        expect(recovered['data'], 'hello pocket');
+      } finally {
+        await plugin.dispose();
+      }
+    },
+  );
 
   test('returns non-2xx and does not follow redirects', () async {
     final plugin = PocketDioPlugin(allowedOrigins: [origin]);
@@ -169,10 +362,135 @@ void main() {
         'url': '$origin/slow',
         'responseType': 'text',
       });
+      final pendingExpectation = expectLater(
+        pending,
+        throwsA(isA<PocketCapabilityException>()),
+      );
       await _waitFor(() => plugin.inFlightCount == 1);
       await plugin.deactivate(context);
-      await expectLater(pending, throwsA(isA<PocketCapabilityException>()));
+      await pendingExpectation;
       expect(plugin.inFlightCount, 0);
+    } finally {
+      context.dispose();
+      await plugin.dispose();
+    }
+  });
+
+  test('deactivate cancels a request while the worker is starting', () async {
+    final plugin = PocketDioPlugin(
+      allowedOrigins: [origin],
+      dioFactory: _slowWorkerDioFactory,
+      requestTimeout: const Duration(seconds: 5),
+    );
+    final context = PocketPluginContext(
+      plugin: plugin.descriptor,
+      appId: 'test.app',
+      sessionId: 'startup-session',
+      registry: PocketHostRegistry(),
+    );
+    try {
+      final pending = plugin.request(<String, dynamic>{'url': '$origin/text'});
+      final pendingExpectation = expectLater(
+        pending,
+        throwsA(
+          isA<PocketCapabilityException>().having(
+            (error) => error.code,
+            'code',
+            'request_cancelled',
+          ),
+        ),
+      );
+      await _waitFor(() => plugin.inFlightCount == 1);
+      await plugin.deactivate(context);
+      await pendingExpectation;
+      expect(plugin.inFlightCount, 0);
+
+      final resumed =
+          await plugin.request(<String, dynamic>{'url': '$origin/text'}) as Map;
+      expect(resumed['data'], 'hello pocket');
+      expect(plugin.inFlightCount, 0);
+    } finally {
+      context.dispose();
+      await plugin.dispose();
+    }
+  });
+
+  test('dispose cancels a request while the worker is starting', () async {
+    final plugin = PocketDioPlugin(
+      allowedOrigins: [origin],
+      dioFactory: _slowWorkerDioFactory,
+      requestTimeout: const Duration(seconds: 5),
+    );
+    final pending = plugin.request(<String, dynamic>{'url': '$origin/text'});
+    final pendingExpectation = expectLater(
+      pending,
+      throwsA(
+        isA<PocketCapabilityException>().having(
+          (error) => error.code,
+          'code',
+          'request_cancelled',
+        ),
+      ),
+    );
+    try {
+      await _waitFor(() => plugin.inFlightCount == 1);
+      await plugin.dispose();
+      await pendingExpectation;
+      expect(plugin.inFlightCount, 0);
+      await expectLater(
+        plugin.request(<String, dynamic>{'url': '$origin/text'}),
+        throwsA(
+          isA<PocketCapabilityException>().having(
+            (error) => error.code,
+            'code',
+            'plugin_disposed',
+          ),
+        ),
+      );
+    } finally {
+      await plugin.dispose();
+    }
+  });
+
+  test('repeated deactivate and reuse does not leak requests', () async {
+    final plugin = PocketDioPlugin(
+      allowedOrigins: [origin],
+      requestTimeout: const Duration(seconds: 5),
+    );
+    final context = PocketPluginContext(
+      plugin: plugin.descriptor,
+      appId: 'test.app',
+      sessionId: 'reuse-session',
+      registry: PocketHostRegistry(),
+    );
+    try {
+      for (var i = 0; i < 4; i++) {
+        final pending = plugin.request(<String, dynamic>{
+          'url': '$origin/slow',
+          'responseType': 'text',
+        });
+        final pendingExpectation = expectLater(
+          pending,
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'request_cancelled',
+            ),
+          ),
+        );
+        await _waitFor(() => plugin.inFlightCount == 1);
+        await _waitFor(() => _slowHits > i);
+        await plugin.deactivate(context);
+        await pendingExpectation;
+        expect(plugin.inFlightCount, 0);
+
+        final result =
+            await plugin.request(<String, dynamic>{'url': '$origin/text'})
+                as Map;
+        expect(result['data'], 'hello pocket');
+        expect(plugin.inFlightCount, 0);
+      }
     } finally {
       context.dispose();
       await plugin.dispose();
@@ -244,9 +562,13 @@ void main() {
         'url': '$origin/slow',
         'responseType': 'text',
       });
+      final pendingExpectation = expectLater(
+        pending,
+        throwsA(isA<PocketCapabilityException>()),
+      );
       await _waitFor(() => plugin.inFlightCount == 1);
       await plugin.dispose();
-      await expectLater(pending, throwsA(isA<PocketCapabilityException>()));
+      await pendingExpectation;
       expect(plugin.inFlightCount, 0);
     } finally {
       await plugin.dispose();
@@ -321,6 +643,12 @@ void main() {
 
 Future<void> _handleRequest(HttpRequest request) async {
   switch (request.uri.path) {
+    case '/worker-isolate':
+      request.response.headers.set(
+        'x-pocket-worker-isolate',
+        request.headers.value('x-pocket-worker-isolate') ?? 'missing',
+      );
+      request.response.write('worker');
     case '/json':
       request.response.headers.add('x-pocket', 'dio');
       request.response.headers.contentType = ContentType.json;
@@ -356,6 +684,7 @@ Future<void> _handleRequest(HttpRequest request) async {
     case '/binary-large':
       request.response.add(List<int>.filled(128, 65));
     case '/slow':
+      _slowHits++;
       await Future<void>.delayed(const Duration(seconds: 2));
       request.response.write('slow');
     case '/slow-stream':
@@ -372,6 +701,47 @@ Future<void> _handleRequest(HttpRequest request) async {
 }
 
 var _redirectHits = 0;
+var _slowHits = 0;
+
+Dio _workerIdentityDioFactory() {
+  final identity = identityHashCode(Isolate.current).toString();
+  return Dio()
+    ..interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) {
+          options.headers['x-pocket-worker-isolate'] = identity;
+          handler.next(options);
+        },
+      ),
+    );
+}
+
+Dio _slowWorkerDioFactory() {
+  sleep(const Duration(milliseconds: 150));
+  return Dio();
+}
+
+Dio _blockingRequestDioFactory() => Dio()
+  ..interceptors.add(
+    InterceptorsWrapper(
+      onRequest: (options, handler) {
+        sleep(const Duration(milliseconds: 150));
+        handler.next(options);
+      },
+    ),
+  );
+
+Dio _throwingDioFactory() => throw StateError('factory failed for regression');
+
+Dio _crashingDioFactory() => Isolate.exit();
+
+Future<Object?> _capture(Future<Object?> future) async {
+  try {
+    return await future;
+  } on Object catch (error) {
+    return error;
+  }
+}
 
 Future<void> _waitFor(bool Function() condition) async {
   for (var i = 0; i < 100; i++) {

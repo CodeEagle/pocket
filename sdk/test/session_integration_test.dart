@@ -74,6 +74,8 @@ void main() {
               'capabilities': {
                 'requires': [
                   name.contains('missing') ? 'example.missing' : 'example.echo',
+                  'input.touch',
+                  'display.viewport.live',
                 ],
               },
             };
@@ -142,6 +144,35 @@ void main() {
   );
 
   test(
+    'official button requirements need an explicitly enabled keyboard source',
+    () async {
+      for (final enabled in [false, true]) {
+        final session = PocketSession(
+          config: PocketAppConfig(
+            appId: 'external.buttons.$enabled',
+            metadataAsset: 'buttons/metadata.json',
+            bootstrapManifestJson:
+                '{"capabilities":{"requires":["input.buttons"]}}',
+            keyboardInputEnabled: enabled,
+          ),
+        );
+        try {
+          if (enabled) {
+            await session.initialize();
+            expect(session.ready, isTrue);
+          } else {
+            await expectLater(session.initialize(), throwsStateError);
+            expect(session.ready, isFalse);
+          }
+        } finally {
+          session.dispose();
+          await session.performance.dispose();
+        }
+      }
+    },
+  );
+
+  test(
     'external required capability is rejected before guest startup',
     () async {
       final session = PocketSession(
@@ -157,6 +188,153 @@ void main() {
       } finally {
         session.dispose();
         await session.performance.dispose();
+      }
+    },
+  );
+
+  test(
+    'bootstrap assets and history load together and admission waits for all',
+    () async {
+      final metadataRequested = Completer<void>();
+      final manifestRequested = Completer<void>();
+      final releaseMetadata = Completer<void>();
+      final historyRequested = Completer<void>();
+      final releaseHistory = Completer<void>();
+      final plugin = _ApplicationPlugin();
+      binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/path_provider'),
+        (_) async {
+          if (!historyRequested.isCompleted) historyRequested.complete();
+          await releaseHistory.future;
+          return directory.path;
+        },
+      );
+      binding.defaultBinaryMessenger.setMockMessageHandler('flutter/assets', (
+        data,
+      ) async {
+        final name = utf8.decode(data!.buffer.asUint8List());
+        final isMetadata = name.endsWith('metadata.json');
+        if (isMetadata) {
+          metadataRequested.complete();
+          await releaseMetadata.future;
+        } else {
+          manifestRequested.complete();
+        }
+        return ByteData.sublistView(
+          Uint8List.fromList(
+            utf8.encode(
+              jsonEncode(
+                isMetadata
+                    ? {'runtimeAbi': 'test-session-admission', 'build': 42}
+                    : {
+                        'capabilities': {
+                          'requires': ['example.echo'],
+                        },
+                      },
+              ),
+            ),
+          ),
+        );
+      });
+      final session = PocketSession(
+        config: PocketAppConfig(
+          appId: 'external.concurrent',
+          metadataAsset: 'concurrent/metadata.json',
+          manifestAsset: 'concurrent/manifest.json',
+          pluginFactories: [(_) => plugin],
+        ),
+      );
+      final initializing = session.initialize();
+      try {
+        await historyRequested.future.timeout(const Duration(seconds: 5));
+        await metadataRequested.future.timeout(const Duration(seconds: 5));
+        await manifestRequested.future.timeout(const Duration(seconds: 5));
+        expect(session.ready, isFalse);
+        expect(plugin.activatedApp, isNull);
+        releaseMetadata.complete();
+        await Future<void>.delayed(Duration.zero);
+        expect(session.ready, isFalse);
+        expect(plugin.activatedApp, isNull);
+        releaseHistory.complete();
+        await initializing;
+        expect(session.ready, isTrue);
+        expect(plugin.activatedApp, 'external.concurrent');
+      } finally {
+        if (!releaseMetadata.isCompleted) releaseMetadata.complete();
+        if (!releaseHistory.isCompleted) releaseHistory.complete();
+        await initializing;
+        await session.close();
+      }
+    },
+  );
+
+  test(
+    'bootstrap failure and close drain pending history restoration',
+    () async {
+      final historyRequested = Completer<void>();
+      final releaseHistory = Completer<void>();
+      final metadataRequested = Completer<void>();
+      binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/path_provider'),
+        (_) async {
+          if (!historyRequested.isCompleted) historyRequested.complete();
+          await releaseHistory.future;
+          return directory.path;
+        },
+      );
+      binding.defaultBinaryMessenger.setMockMessageHandler('flutter/assets', (
+        data,
+      ) async {
+        final name = utf8.decode(data!.buffer.asUint8List());
+        if (name.endsWith('metadata.json')) {
+          metadataRequested.complete();
+          return null;
+        }
+        return ByteData.sublistView(Uint8List.fromList(utf8.encode('{}')));
+      });
+      final session = PocketSession(
+        config: const PocketAppConfig(
+          appId: 'external.failed-bootstrap',
+          metadataAsset: 'failed-bootstrap/metadata.json',
+          manifestAsset: 'failed-bootstrap/manifest.json',
+        ),
+      );
+      var initialized = false;
+      Object? failure;
+      final initializing = session.initialize().then<void>(
+        (_) => initialized = true,
+        onError: (Object error) {
+          failure = error;
+          initialized = true;
+        },
+      );
+      Future<Object?>? closing;
+      try {
+        await historyRequested.future.timeout(const Duration(seconds: 5));
+        await metadataRequested.future.timeout(const Duration(seconds: 5));
+        await Future<void>.delayed(Duration.zero);
+        expect(initialized, isFalse);
+        var closed = false;
+        closing = session.close().then<Object?>(
+          (_) {
+            closed = true;
+            return null;
+          },
+          onError: (Object error) {
+            closed = true;
+            return error;
+          },
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(closed, isFalse);
+        releaseHistory.complete();
+        await initializing;
+        expect(failure, isA<FlutterError>());
+        expect(await closing, isA<FlutterError>());
+      } finally {
+        if (!releaseHistory.isCompleted) releaseHistory.complete();
+        await initializing;
+        await (closing ?? session.close().catchError((Object _) {}));
       }
     },
   );

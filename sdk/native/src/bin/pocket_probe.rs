@@ -28,7 +28,8 @@
 
 use pocket_flutter::{
     pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_configure_guest_security,
-    pocket_create, pocket_create_with_density_and_tick_hz, pocket_create_with_memory_limits,
+    pocket_configure_worker, pocket_create, pocket_create_with_density_and_tick_hz,
+    pocket_create_with_memory_limits,
     pocket_destroy, pocket_eval, pocket_frame, pocket_last_error, pocket_load_bytecode_files,
     pocket_load_files, pocket_next_wake_delay_ms, pocket_resize_viewport, pocket_send,
     pocket_trace_clock_begin_json, pocket_trace_clock_end_json, pocket_trace_clock_mode,
@@ -36,8 +37,29 @@ use pocket_flutter::{
 use serde_json::{json, Value};
 use std::ffi::{c_void, CStr, CString};
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 type Handle = *mut c_void;
+
+// Worker/provider completion happens on a native thread. Keep the line
+// protocol responsive by emitting a tiny out-of-band wake record; the Node
+// bridge treats this as an event rather than consuming a pending command
+// response. A process has one probe stream, so one coalesced wake at a time is
+// sufficient (the native WorkerUiBridge re-arms its own gate at latch).
+static PROBE_OUTPUT_LOCK: Mutex<()> = Mutex::new(());
+static PROBE_WORKER_WAKE: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" fn worker_notify() {
+    if PROBE_WORKER_WAKE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _guard = PROBE_OUTPUT_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut stdout = io::stdout().lock();
+    let _ = serde_json::to_writer(&mut stdout, &json!({"__pocket_probe_event":"worker"}));
+    let _ = stdout.write_all(b"\n");
+    let _ = stdout.flush();
+}
 
 fn error_response(message: impl Into<String>) -> Value {
     json!({"ok": false, "error": message.into()})
@@ -101,6 +123,20 @@ fn c_string(value: &str, label: &str) -> Result<CString, Value> {
     CString::new(value).map_err(|_| error_response(format!("{label} contains a NUL byte")))
 }
 
+fn worker_bytecode_file(path: &str) -> Result<Vec<u8>, Value> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| error_response(format!("worker bytecode metadata: {error}")))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 64 * 1024 * 1024 {
+        return Err(error_response("worker bytecode must be a non-empty file of at most 64 MiB"));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| error_response(format!("worker bytecode read: {error}")))?;
+    if bytes.is_empty() || bytes.len() as u64 > 64 * 1024 * 1024 {
+        return Err(error_response("worker bytecode changed size while reading"));
+    }
+    Ok(bytes)
+}
+
 unsafe fn frame_response(handle: Handle, delta_ms: f64) -> Value {
     let pointer = pocket_frame(handle.cast(), delta_ms);
     if pointer.is_null() {
@@ -133,6 +169,7 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
         operation,
         "load"
             | "loadBytecode"
+            | "configureWorker"
             | "eval"
             | "send"
             | "resize"
@@ -233,6 +270,47 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 return (false, error_response("traceBoundary requires traceClock"));
             }
             (false, json!({"ok": true, "captured": true}))
+        }
+        "configureWorker" => {
+            if handle.is_null() {
+                return (
+                    false,
+                    error_response("create a native runtime before configuring a worker"),
+                );
+            }
+            let bytecode_path = match command.get("bytecodePath").and_then(Value::as_str) {
+                Some(value) => value,
+                None => return (false, error_response("configureWorker requires bytecodePath")),
+            };
+            let config = match command.get("config") {
+                Some(value) if value.is_object() => value,
+                Some(_) => return (false, error_response("configureWorker config must be an object")),
+                None => return (false, error_response("configureWorker requires config")),
+            };
+            let bytes = match worker_bytecode_file(bytecode_path) {
+                Ok(value) => value,
+                Err(error) => return (false, error),
+            };
+            let config_json = match CString::new(config.to_string()) {
+                Ok(value) => value,
+                Err(_) => return (false, error_response("configureWorker config contains a NUL byte")),
+            };
+            PROBE_WORKER_WAKE.store(false, Ordering::Release);
+            if pocket_configure_worker(
+                (*handle).cast(),
+                bytes.as_ptr(),
+                bytes.len(),
+                config_json.as_ptr(),
+                if command.get("notify") == Some(&Value::Bool(false)) {
+                    None
+                } else {
+                    Some(worker_notify)
+                },
+            ) != 0
+            {
+                return (false, native_error(*handle, "pocket_configure_worker"));
+            }
+            (false, json!({"ok": true, "configured": true}))
         }
         "schedule" => {
             if handle.is_null() {
@@ -464,6 +542,9 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 Ok(value) => value,
                 Err(error) => return (false, error_response(error)),
             };
+            // The preceding UI frame latches the coalesced Worker wake. Allow
+            // the next provider completion to publish a fresh event.
+            PROBE_WORKER_WAKE.store(false, Ordering::Release);
             (false, frame_response(*handle, delta_ms))
         }
         "lastError" => {
@@ -473,6 +554,7 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
             (false, json!({"ok": true, "error": last_error(*handle)}))
         }
         "destroy" => {
+            PROBE_WORKER_WAKE.store(false, Ordering::Release);
             destroy(handle);
             (false, json!({"ok": true}))
         }
@@ -486,7 +568,10 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
 
 fn main() -> io::Result<()> {
     let stdin = io::stdin();
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    // Do not retain StdoutLock for the process lifetime: the native Worker
+    // wake callback writes an out-of-band line while this loop is blocked in a
+    // load/frame call. The process-wide output mutex serializes both writers.
+    let mut stdout = io::BufWriter::new(io::stdout());
     let mut handle: Handle = std::ptr::null_mut();
 
     for line in stdin.lock().lines() {
@@ -499,6 +584,7 @@ fn main() -> io::Result<()> {
                 // `command` is the only unsafe boundary in this process; the
                 // native C ABI owns the handle and all returned C strings.
                 let (quit, response) = unsafe { command(&command_value, &mut handle) };
+                let _guard = PROBE_OUTPUT_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
                 if serde_json::to_writer(&mut stdout, &response).is_err() {
                     break;
                 }
@@ -511,6 +597,7 @@ fn main() -> io::Result<()> {
             }
             Err(error) => error_response(format!("invalid command JSON: {error}")),
         };
+        let _guard = PROBE_OUTPUT_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         serde_json::to_writer(&mut stdout, &response)?;
         stdout.write_all(b"\n")?;
         stdout.flush()?;

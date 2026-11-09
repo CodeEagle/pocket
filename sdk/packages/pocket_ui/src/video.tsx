@@ -27,12 +27,16 @@ export interface VideoProps {
   id: string;
   /** Asset key resolved by Flutter's configured package source. */
   asset: string;
-  /** Policy controller shared with the page/feed owner. */
+  /** Shared policy controller; the owner can inspect/seek this stable id. */
   media: MediaController;
   group?: string;
   page?: string;
   active?: boolean;
   playing?: boolean;
+  /** Correlates native facts with the owning JS playback generation. */
+  token?: string | null;
+  /** Native loop policy; omitted preserves Video's historical looping default. */
+  loop?: boolean;
   fit?: VideoFit;
   class?: string;
   style?: ViewProps["style"];
@@ -56,9 +60,11 @@ export function Video(props: VideoProps): JSX.Element {
     page: props.page,
     active: props.active !== false,
     playing: props.playing === true,
+    ...(typeof props.token === "string" ? { token: props.token } : {}),
+    ...(props.loop !== undefined ? { loop: props.loop } : {}),
   });
   const [registered, setRegistered] = createSignal(false);
-  const payload = createMemo<BridgeObject>(() => ({
+  const payload = createMemo<BridgeObject, undefined>(() => ({
     asset: props.asset,
     fit: props.fit ?? "cover",
     // The media controller is the sole source of playback intent.  Native
@@ -118,8 +124,11 @@ export function Video(props: VideoProps): JSX.Element {
     registration.setActive(props.active !== false);
   });
   createEffect(() => {
-    if (props.playing === true) registration.play();
-    else registration.pause();
+    registration.configure({
+      ...(props.token !== undefined ? { token: props.token } : {}),
+      ...(props.loop !== undefined ? { loop: props.loop } : {}),
+      playing: props.playing === true,
+    });
   });
 
   onCleanup(() => {

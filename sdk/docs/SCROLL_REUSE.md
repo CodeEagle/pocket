@@ -99,3 +99,61 @@ python3 scripts/check_architecture.py
 
 These are static/native-probe and source-boundary results. iOS/Flutter device
 verification is separate and is not claimed by this note.
+
+## Desktop wheel and trackpad input
+
+The retained parent was checked again before adding desktop input. In
+`/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/lib/render/pocket_ui_components.dart:878-950`,
+the original `<Screen>` body is a Flutter `ListView.separated` using
+`BouncingScrollPhysics` and `AlwaysScrollableScrollPhysics`. It demonstrates a
+scrollable body, but it owns that behavior in Flutter and has no reusable
+guest wheel/trackpad event contract. A search of the retained parent outside
+`pocket_host/` found no `PointerScroll`, `PointerPanZoom`, `WheelEvent`, or
+`input.scroll` implementation. The audit evidence is also recorded in
+`.pocket-build/lantern-playable-input-lod-20261108/desktop-scroll-protocol-audit.md`.
+
+The SDK keeps `ScrollablePage`'s existing `createScroller`, paint-only
+`translateY`, touch gesture, and IME visibility behavior. The necessary thin
+host adaptation is the `input.scroll` event consumer in
+`packages/pocket_ui/src/ui.tsx`: it subscribes through the shared event lane
+in `display.ts`, selects one active viewport by logical x/y, existing
+`hitTestBounds`, and the retained `NodeMirror` tree, then calls that page's
+existing `Scroller.scrollBy(deltaY, { immediate: true })`. Positive `deltaY`
+moves content downward; Flutter reverses trackpad pan delta before sending it.
+Only the vertical delta is consumed by `ScrollablePage`.
+
+For nested pages, a child consumes up to its existing scroll bound and passes
+only the unconsumed remainder to the nearest active page ancestor in the
+existing node tree. Parent scroll translation is included in nested viewport
+measurement and clipped against the parent's existing viewport. Wheel events
+route independently by pointer position. A trackpad sequence captures the
+page at `start`; an outside start remains unclaimed through `end`, and updates
+without a start are ignored. Hidden routes and unmounted pages unregister;
+the shared host-event subscription is removed when the last active scroll
+page leaves. No pointer or click packet is synthesized, and no native scroll
+layout operation or second scroll state machine is added.
+
+`InputField` reads `visualRect`, `clipRect`, and `ensureVisible` from the
+nearest `ScrollablePageContext` that contains it. The former module-wide
+"last active page" pointer was removed: with sibling and nested pages it could
+pair an upper input rect with a later page's clip. A page now handles input
+visibility only when the input node is its descendant (owner or ancestor),
+and evaluates the input's actual context-composed visual rect.
+
+The SDK routing/frame regression is
+`packages/pocket_ui/test/flutter_widgets.test.ts`; with the pinned Bun 1.4.4
+binary it verifies wheel offset changes, the following guest frame retains
+that offset, outside wheel input is ignored, trackpad target locking and
+positive-down direction, and no click/IME event is emitted before focus. The
+acceptance worker also reported a successful pinned buildGuest → native QJBC
+probe covering wheel on an auto-focused title button, outside no-op, a second
+trackpad target, touch pan, and IME open/edit/dismiss. Flutter device-level
+verification remains the root acceptance step and is not claimed here.
+
+The renewed run after the input ownership correction used the same pinned
+buildGuest/QJBC/native probe. It passed nested partial clipping (40px visible
+intersection), 20px remainder chaining, sibling isolation, and a focused IME
+case. The emitted `textInput.open` rect was `{x:16,y:66,width:328,height:37}`;
+its clip `{x:8,y:54,width:344,height:128}` matched the focused fallback's
+actual DrawOp clip. A subsequent 4px wheel moved the content exactly 4px and
+produced no `textInput.close` event.

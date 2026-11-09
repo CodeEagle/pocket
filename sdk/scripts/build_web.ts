@@ -1,8 +1,9 @@
 import { brotliDecompressSync } from "node:zlib";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, cpSync, copyFileSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { buildGuest } from "./build_guest.ts";
+import { verifyWebEngine } from "./build_web_engine.ts";
 
 const SDK_ROOT = resolve(import.meta.dir, "..");
 
@@ -14,6 +15,14 @@ export type BuildWebOptions = {
   rasterDensity?: number;
   enginePath?: string;
   runtimePath?: string;
+  workerHttpOrigins?: string[];
+  renderWorker?: boolean;
+};
+
+type WebWorkerArtifact = {
+  bytecode: string;
+  metadata: string;
+  descriptor?: Record<string, unknown>;
 };
 
 function ensureEmpty(path: string): void {
@@ -55,8 +64,19 @@ function copyPrebuiltEngine(source: string, output: string): number {
   return wasm.byteLength;
 }
 
-function copyRuntimeBundle(source: string, output: string): void {
+function copyRuntimeBundle(source: string, output: string, renderWorker: boolean): boolean {
   copyFileSync(requiredFile(source, "POCKET_WEB_RUNTIME"), join(output, "pocket-web.js"));
+  const worker = join(dirname(source), "pocket-render-worker.js");
+  if (renderWorker) {
+    copyFileSync(requiredFile(worker, "POCKET_RENDER_WORKER"), join(output, "pocket-render-worker.js"));
+    return true;
+  }
+  // Keep a matching compiled entry beside the host bundle when the release
+  // package already contains it, even when this build explicitly disables it,
+  // so the same artifact supports a host-controlled A/B comparison.
+  if (!existsSync(worker) || !statSync(worker).isFile()) return false;
+  copyFileSync(worker, join(output, "pocket-render-worker.js"));
+  return true;
 }
 
 function readme(config: Record<string, unknown>): string {
@@ -65,7 +85,7 @@ function readme(config: Record<string, unknown>): string {
     `This directory is a standalone browser package for **${appId}**. It contains the real pinned PocketJS WebAssembly runtime with the app's admitted QuickJS bytecode and PAK embedded during the build. It does not require Flutter, Dart, Xcode, Android SDK, or a WeChat runtime.\n\n` +
     `Serve this directory over HTTP(S), then import \`pocket-web.js\` and load \`pocket.config.json\`. \`PocketWebRuntime\` accepts an HTML Canvas2D surface:\n\n` +
     "```html\n<canvas id=\"pocket\" style=\"width:100%;height:100%\"></canvas>\n<script type=\"module\">\nimport { PocketWebRuntime } from './pocket-web.js';\nconst canvas = document.querySelector('#pocket');\nconst config = await fetch('./pocket.config.json').then(r => r.json());\nconst runtime = new PocketWebRuntime({ canvas, engineUrl: './engine/pocketjs.wasm', qjbcUrl: './app.qjbc', pakUrl: './app.pak', config });\nawait runtime.mount();\n</script>\n```\n\n" +
-    `The host provides pointer input, a browser IME overlay, resize/visibility lifecycle and app-scoped \`localStorage\` for manifest-declared \`platform.storage.*\`. Hardware APIs are not silently emulated: register a real capability handler with \`PocketWeb.registerCapability(name, handler)\`, or the guest receives an explicit unsupported/unconfigured error.\n`;
+    `The host provides pointer input, a browser IME overlay, resize/visibility lifecycle and app-scoped \`localStorage\` for manifest-declared \`platform.storage.*\`. Worker QJBC and its admission descriptor are preserved in the package when declared; a Worker package requires the matching pinned Worker ABI in the engine and an explicit host \`workerHttpOrigins\` allowlist (manifest capabilities do not grant network origins). Rendering runs on the main thread by default. Enable \`pocket-render-worker.js\` with \`renderWorker: true\` or build flag \`--render-worker\`; this requires \`OffscreenCanvas\` and fails clearly when the browser or CSP does not allow it. It never silently falls back to a second rendering implementation. Hardware APIs are not silently emulated: register a real capability handler with \`PocketWeb.registerCapability(name, handler)\`, or the guest receives an explicit unsupported/unconfigured error.\n`;
 }
 
 export async function buildWeb(options: BuildWebOptions): Promise<{ outDir: string; wasmBytes: number }> {
@@ -86,6 +106,9 @@ export async function buildWeb(options: BuildWebOptions): Promise<{ outDir: stri
     const manifest = readJson(join(projectRoot, "manifest.json"));
     const capabilities = manifest.capabilities && typeof manifest.capabilities === "object" && !Array.isArray(manifest.capabilities)
       ? manifest.capabilities as Record<string, unknown> : {};
+    // Network authority belongs to the embedding host. A guest manifest can
+    // require `net.http`, but it cannot self-authorize browser origins.
+    const configuredWorkerOrigins = options.workerHttpOrigins ?? [];
     const bindingGeneration = Number(metadata.bindingGeneration || 0);
     if (!Number.isInteger(bindingGeneration) || bindingGeneration < 1) {
       throw new Error("build_web: app.bytecode.json is missing a valid bindingGeneration");
@@ -95,6 +118,23 @@ export async function buildWeb(options: BuildWebOptions): Promise<{ outDir: stri
     copyFileSync(built.pak, join(output, "app.pak"));
     copyFileSync(built.metadata, join(output, "app.bytecode.json"));
     copyFileSync(join(guest, "guest-manifest.json"), join(output, "guest-manifest.json"));
+    let worker: WebWorkerArtifact | undefined;
+    if (built.worker) {
+      // Old npm engines intentionally lack this ABI. Refuse to emit a package
+      // that advertises Worker bytecode but can only start its UI realm.
+      await verifyWebEngine(new Uint8Array(readFileSync(join(output, "engine/pocketjs.wasm"))));
+      // Preserve the compiled Worker artifacts for a runtime that implements the
+      // pinned Worker ABI. Do not ship generated JS as a browser fallback: the
+      // Web target must execute the same QuickJS Worker QJBC as native hosts.
+      worker = {
+        bytecode: "app.worker.qjbc",
+        metadata: "app.worker.bytecode.json",
+        descriptor: metadata.worker,
+      };
+      copyFileSync(built.worker.bytecode, join(output, worker.bytecode));
+      copyFileSync(built.worker.metadata, join(output, worker.metadata));
+    }
+    const renderWorker = options.renderWorker ?? false;
     const config = {
       appId: typeof pocket.id === "string" && pocket.id ? pocket.id : "pocket.guest",
       tickHz: built.tickHz,
@@ -106,12 +146,16 @@ export async function buildWeb(options: BuildWebOptions): Promise<{ outDir: stri
       requires: Array.isArray(capabilities.requires) ? capabilities.requires : [],
       optional: Array.isArray(capabilities.optional) ? capabilities.optional : [],
       metadata,
+      renderWorker,
+      ...(worker ? { worker } : {}),
+      ...(worker && configuredWorkerOrigins.length ? { workerHttpOrigins: configuredWorkerOrigins } : {}),
     };
     writeFileSync(join(output, "pocket.config.json"), `${JSON.stringify(config, null, 2)}\n`);
-    const webInfo = { target: "web-host-qjbc", appId: config.appId, hostRuntime: "WebAssembly + Canvas2D", enginePath: "engine/pocketjs.wasm", qjbc: "app.qjbc", pak: "app.pak", bindingGeneration: config.bindingGeneration, tickHz: built.tickHz, wasmBytes };
+    const webInfo = { target: "web-host-qjbc", appId: config.appId, hostRuntime: "WebAssembly + Canvas2D", enginePath: "engine/pocketjs.wasm", qjbc: "app.qjbc", pak: "app.pak", ...(renderWorker ? { renderWorker: "pocket-render-worker.js" } : {}), ...(worker ? { worker } : {}), ...(worker && configuredWorkerOrigins.length ? { workerHttpOrigins: configuredWorkerOrigins } : {}), bindingGeneration: config.bindingGeneration, tickHz: built.tickHz, wasmBytes };
     writeFileSync(join(output, "build-info.json"), `${JSON.stringify(webInfo, null, 2)}\n`);
-    copyRuntimeBundle(runtime, output);
-    writeFileSync(join(output, "pocket-web.d.ts"), `export interface PocketWebRuntimeOptions { canvas: HTMLCanvasElement; engineUrl: string; qjbcUrl?: string; pakUrl?: string; config?: Record<string, unknown>; cache?: RequestCache; inputElement?: HTMLInputElement; onError?: (error: unknown) => void; }\nexport class PocketWebRuntime { constructor(options: PocketWebRuntimeOptions); mount(): Promise<this>; show(): void; hide(): void; dispose(): void; }\nexport function registerCapability(name: string, handler: (params: unknown, context: { signal: AbortSignal; wx: unknown }) => unknown): () => void;\nexport function setPermissionHandler(handler: ((name: string, params: unknown, context: { signal: AbortSignal }) => boolean | Promise<boolean>) | null): void;\n`);
+    const renderWorkerIncluded = copyRuntimeBundle(runtime, output, renderWorker);
+    if (renderWorker && !renderWorkerIncluded) throw new Error("build_web: render worker was requested but no pocket-render-worker.js was copied");
+    writeFileSync(join(output, "pocket-web.d.ts"), `export interface PocketWebRuntimeOptions { canvas: HTMLCanvasElement; engineUrl: string; qjbcUrl?: string; pakUrl?: string; gameInput?: boolean; renderWorker?: boolean; renderWorkerUrl?: string; config?: Record<string, unknown>; cache?: RequestCache; inputElement?: HTMLInputElement; onError?: (error: unknown) => void; }\nexport class PocketWebRuntime { constructor(options: PocketWebRuntimeOptions); mount(): Promise<this>; show(): void; hide(): void; dispose(): void; inspect(): Promise<unknown>; stats(): Promise<unknown>; }\nexport function registerCapability(name: string, handler: (params: unknown, context: { signal: AbortSignal; wx: unknown }) => unknown): () => void;\nexport function setPermissionHandler(handler: ((name: string, params: unknown, context: { signal: AbortSignal }) => boolean | Promise<boolean>) | null): void;\n`);
     writeFileSync(join(output, "README.md"), readme(config));
     cpSync(existsSync(join(SDK_ROOT, "LICENSE")) ? join(SDK_ROOT, "LICENSE") : resolve(SDK_ROOT, "../LICENSE"), join(output, "LICENSE"));
     return { outDir: output, wasmBytes };
@@ -130,9 +174,12 @@ export function parseBuildWebArgs(args: string[]): BuildWebOptions {
     else if (arg.startsWith("--density=")) options.rasterDensity = Number(arg.slice(10));
     else if (arg.startsWith("--engine=")) options.enginePath = arg.slice(9);
     else if (arg.startsWith("--runtime=")) options.runtimePath = arg.slice(10);
+    else if (arg.startsWith("--worker-http-origin=")) options.workerHttpOrigins = [...(options.workerHttpOrigins ?? []), arg.slice("--worker-http-origin=".length)];
+    else if (arg === "--render-worker") options.renderWorker = true;
+    else if (arg === "--no-render-worker") options.renderWorker = false;
     else throw new Error(`build_web: unknown option ${arg}`);
   }
-  if (!options.projectRoot || !options.outDir) throw new Error("usage: bun sdk/scripts/build_web.ts --project-root=<consumer> --outdir=<new-web-dir> [--engine=<prebuilt.wasm>] [--runtime=<pocket-web.js>]");
+  if (!options.projectRoot || !options.outDir) throw new Error("usage: bun sdk/scripts/build_web.ts --project-root=<consumer> --outdir=<new-web-dir> [--engine=<prebuilt.wasm>] [--runtime=<pocket-web.js>] [--render-worker|--no-render-worker]");
   return options as BuildWebOptions;
 }
 

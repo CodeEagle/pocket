@@ -295,6 +295,7 @@ function updateActionStates() {
   const workLocked = busy || startingDeploy || Boolean(activeDeploy && activeDeploy.status !== "running") || publishing || resourcesSaving;
   $("save").disabled = !hasProject || !dirty || saving || workLocked;
   $("build").disabled = !hasProject || workLocked || saving;
+  if ($("novel-open")) $("novel-open").disabled = !hasProject || workLocked;
   $("refresh-source").disabled = !hasProject || workLocked;
   $("refresh-preview").disabled = !hasProject || busy;
   previewFrame.style.pointerEvents = busy ? "none" : "";
@@ -2395,6 +2396,9 @@ $("wechat-stop")?.addEventListener("click", () => { void stopWechat(); });
 setupPreviewHeightControl();
 
 const sourceDialog = $("source-dialog");
+$("novel-open")?.addEventListener("click", () => {
+  if (currentId) window.open(`/novel?project=${encodeURIComponent(currentId)}`, "_blank", "noopener");
+});
 $("source-toggle")?.addEventListener("click", () => sourceDialog?.showModal());
 $("source-close")?.addEventListener("click", () => sourceDialog?.close());
 sourceDialog?.addEventListener("click", (event) => {

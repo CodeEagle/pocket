@@ -104,6 +104,10 @@ sealed class PocketOp {
           clip: clip,
         );
       case 'textureTriangle':
+        final repeatTexture = json['repeatTexture'];
+        if (repeatTexture != null && repeatTexture is! bool) {
+          throw const FormatException('Invalid texture triangle repeat flag');
+        }
         return PocketTextureTriangleOp(
           x: x,
           y: y,
@@ -113,6 +117,46 @@ sealed class PocketOp {
           color: _color(json['color']),
           points: _points(json['points']),
           uvs: _numbers(json['uvs']),
+          repeatTexture: repeatTexture as bool? ?? false,
+          clip: clip,
+        );
+      case 'meshLayerBegin':
+        final blend = _integer(json['color']);
+        final tints = _numbers(json['uvs']);
+        if (blend < 0 ||
+            blend > 3 ||
+            tints.any((value) => value < 0 || value > 1)) {
+          throw const FormatException('Invalid mesh layer parameters');
+        }
+        return PocketMeshLayerBeginOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          blend: blend,
+          multiplyRgb: tints.sublist(0, 3),
+          screenRgb: tints.sublist(3, 6),
+          clip: clip,
+        );
+      case 'meshMaskBegin':
+        final inverted = _integer(json['color']);
+        if (inverted < 0 || inverted > 1) {
+          throw const FormatException('Invalid mesh mask inversion flag');
+        }
+        return PocketMeshMaskBeginOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          inverted: inverted != 0,
+          clip: clip,
+        );
+      case 'meshLayerRestore':
+        return PocketMeshLayerRestoreOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
           clip: clip,
         );
       case 'text':
@@ -270,6 +314,7 @@ class PocketTextureTriangleOp extends PocketOp {
     required this.color,
     required this.points,
     required this.uvs,
+    this.repeatTexture = false,
     super.clip,
   });
 
@@ -277,6 +322,51 @@ class PocketTextureTriangleOp extends PocketOp {
   final int color;
   final List<PocketPoint> points;
   final List<double> uvs;
+  final bool repeatTexture;
+}
+
+/// Begins an isolated Live2D mesh group. RGB tints apply to its target meshes;
+/// blend is one of 0 normal, 1 add, 2 multiply or 3 screen.
+class PocketMeshLayerBeginOp extends PocketOp {
+  const PocketMeshLayerBeginOp({
+    required super.x,
+    required super.y,
+    required super.width,
+    required super.height,
+    required this.blend,
+    required this.multiplyRgb,
+    required this.screenRgb,
+    super.clip,
+  });
+
+  final int blend;
+  final List<double> multiplyRgb;
+  final List<double> screenRgb;
+}
+
+/// Starts a mask pass composited onto the active mesh layer.
+class PocketMeshMaskBeginOp extends PocketOp {
+  const PocketMeshMaskBeginOp({
+    required super.x,
+    required super.y,
+    required super.width,
+    required super.height,
+    required this.inverted,
+    super.clip,
+  });
+
+  final bool inverted;
+}
+
+/// Closes the optional mask pass and its enclosing mesh layer.
+class PocketMeshLayerRestoreOp extends PocketOp {
+  const PocketMeshLayerRestoreOp({
+    required super.x,
+    required super.y,
+    required super.width,
+    required super.height,
+    super.clip,
+  });
 }
 
 class PocketTextOp extends PocketOp {
@@ -530,7 +620,7 @@ class PocketFrame {
     if (flags & ~3 != 0) {
       throw FormatException('Unsupported Pocket binary frame flags: $flags');
     }
-    if (version != 1) {
+    if (version != 1 && version != 2) {
       throw FormatException(
         'Unsupported Pocket binary frame version: $version',
       );
@@ -538,7 +628,7 @@ class PocketFrame {
     final sequence = reader.u64();
     final width = reader.f32();
     final height = reader.f32();
-    final ops = _binaryOps(reader, reader.count('ops'), flags);
+    final ops = _binaryOps(reader, reader.count('ops'), flags, version);
     final events = <PocketEvent>[];
     final eventCount = reader.count('events');
     for (var index = 0; index < eventCount; index++) {
@@ -581,7 +671,7 @@ class PocketFrame {
       auxiliary = PocketSurfaceFrame(
         width: reader.f32(),
         height: reader.f32(),
-        ops: _binaryOps(reader, reader.count('auxiliary ops'), flags),
+        ops: _binaryOps(reader, reader.count('auxiliary ops'), flags, version),
       );
     }
     reader.finish();
@@ -613,7 +703,12 @@ class PocketFrame {
   final int? sequence;
 }
 
-List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
+List<PocketOp> _binaryOps(
+  _PocketBinaryReader reader,
+  int count,
+  int flags,
+  int version,
+) {
   final result = <PocketOp>[];
   for (var index = 0; index < count; index++) {
     final type = reader.u8();
@@ -680,7 +775,12 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
             clip: clip,
           ),
         );
-      case 4:
+      case 4 || 14:
+        if (type == 14 && version < 2) {
+          throw const FormatException(
+            'Repeated texture triangles require Pocket frame version 2',
+          );
+        }
         result.add(
           PocketTextureTriangleOp(
             x: x,
@@ -695,6 +795,7 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
               growable: false,
             ),
             uvs: List<double>.generate(6, (_) => reader.f32(), growable: false),
+            repeatTexture: type == 14,
             clip: clip,
           ),
         );
@@ -786,6 +887,62 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
             clip: clip,
           ),
         );
+      case 9:
+        if (version < 2) {
+          throw const FormatException('Mesh effects require PFB1 version 2');
+        }
+        final blend = reader.u32();
+        final tints = List<double>.generate(
+          6,
+          (_) => reader.f32(),
+          growable: false,
+        );
+        if (blend > 3 || tints.any((value) => value < 0 || value > 1)) {
+          throw const FormatException('Invalid mesh layer parameters');
+        }
+        result.add(
+          PocketMeshLayerBeginOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            blend: blend,
+            multiplyRgb: tints.sublist(0, 3),
+            screenRgb: tints.sublist(3, 6),
+            clip: clip,
+          ),
+        );
+      case 10:
+        if (version < 2) {
+          throw const FormatException('Mesh effects require PFB1 version 2');
+        }
+        final inverted = reader.u8();
+        if (inverted > 1) {
+          throw const FormatException('Invalid mesh mask inversion flag');
+        }
+        result.add(
+          PocketMeshMaskBeginOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            inverted: inverted != 0,
+            clip: clip,
+          ),
+        );
+      case 11:
+        if (version < 2) {
+          throw const FormatException('Mesh effects require PFB1 version 2');
+        }
+        result.add(
+          PocketMeshLayerRestoreOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            clip: clip,
+          ),
+        );
       default:
         throw FormatException('Unknown Pocket binary operation type: $type');
     }
@@ -794,9 +951,11 @@ List<PocketOp> _binaryOps(_PocketBinaryReader reader, int count, int flags) {
 }
 
 final class _PocketBinaryReader {
-  _PocketBinaryReader(this.data);
+  _PocketBinaryReader(this.data) : view = ByteData.sublistView(data);
 
   final Uint8List data;
+  // One bounded view per frame, rather than one view per scalar read.
+  final ByteData view;
   var offset = 0;
 
   int get remaining => data.length - offset;
@@ -816,44 +975,28 @@ final class _PocketBinaryReader {
 
   int u16() {
     _require(2, 'u16');
-    final value = ByteData.sublistView(
-      data,
-      offset,
-      offset + 2,
-    ).getUint16(0, Endian.little);
+    final value = view.getUint16(offset, Endian.little);
     offset += 2;
     return value;
   }
 
   int u32() {
     _require(4, 'u32');
-    final value = ByteData.sublistView(
-      data,
-      offset,
-      offset + 4,
-    ).getUint32(0, Endian.little);
+    final value = view.getUint32(offset, Endian.little);
     offset += 4;
     return value;
   }
 
   int u64() {
     _require(8, 'u64');
-    final value = ByteData.sublistView(
-      data,
-      offset,
-      offset + 8,
-    ).getUint64(0, Endian.little);
+    final value = view.getUint64(offset, Endian.little);
     offset += 8;
     return value;
   }
 
   double f32() {
     _require(4, 'f32');
-    final value = ByteData.sublistView(
-      data,
-      offset,
-      offset + 4,
-    ).getFloat32(0, Endian.little);
+    final value = view.getFloat32(offset, Endian.little);
     offset += 4;
     if (!value.isFinite)
       throw const FormatException('Pocket binary float is not finite');

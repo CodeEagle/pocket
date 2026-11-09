@@ -36,6 +36,8 @@ import {
 import { buildGuest } from "../scripts/build_guest.ts";
 import { createStudioCodex, type StudioExecutionContext, type StudioScope } from "./codex.ts";
 import { compositorSurfacesFromProject, createPreviewManager } from "./preview.ts";
+import { handleNovelRoute } from "./novel.ts";
+import { createNovelBackup } from "./novel-backups.ts";
 import { createLocalBluetoothProvider } from "./local_bluetooth.ts";
 import { previewDevice } from "./preview_device.ts";
 import { createEditorDeviceManager, type DeploymentSnapshot } from "./devices.ts";
@@ -191,6 +193,8 @@ type EditorState = {
   finishedAt?: string;
   artifacts?: ArtifactInfo;
   publish?: EditorStatus["publish"];
+  novelBackup?: { intervalMinutes: number; lastRunAt?: string; lastBackupId?: string; error?: string };
+  novelRestoreEpoch?: number;
 };
 
 type Workspace = {
@@ -993,6 +997,80 @@ async function realBuild(input: Parameters<BuildRunner>[0]): Promise<BuildOutput
   };
 }
 
+type GeneratedPreviewApplication = {
+  title: string;
+  assetDirectory: string;
+};
+
+function generatedPreviewApplications(value: unknown): Record<string, GeneratedPreviewApplication> {
+  if (!isObject(value) || value.schemaVersion !== 1 || value.applications === undefined) return {};
+  if (!isObject(value.surfaces) || !isObject(value.applications)) {
+    throw new Error("generated compositor registry applications must be an object");
+  }
+  const result: Record<string, GeneratedPreviewApplication> = {};
+  for (const [appId, raw] of Object.entries(value.applications)) {
+    if (!appIdPattern.test(appId) || !isObject(raw) || typeof raw.title !== "string" || !raw.title.trim() ||
+        typeof raw.assetDirectory !== "string" || !raw.assetDirectory ||
+        raw.assetDirectory.startsWith("/") || raw.assetDirectory.includes("\\") ||
+        raw.assetDirectory.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`generated preview application is invalid: ${appId}`);
+    }
+    const handle = value.surfaces[appId];
+    if (!Number.isInteger(handle) || Number(handle) < 2 || Number(handle) > 63) {
+      throw new Error(`generated preview application has no compositor surface: ${appId}`);
+    }
+    result[appId] = { title: raw.title.trim(), assetDirectory: raw.assetDirectory };
+  }
+  return result;
+}
+
+async function stageGeneratedPreviewApplications(
+  projectDir: string,
+  stagingDir: string,
+  registryPath: string,
+): Promise<number> {
+  const registry = await readJsonFile<Record<string, unknown>>(registryPath);
+  const applications = generatedPreviewApplications(registry);
+  const entries = Object.entries(applications);
+  if (entries.length === 0) return 0;
+  // A Showcase JS project is a direct child of its Flutter consumer. The
+  // generated catalog names paths below that consumer's assets root; it never
+  // grants arbitrary filesystem access to a preview build.
+  const assetRoot = resolve(projectDir, "..", "assets");
+  const rootInfo = lstatSync(assetRoot);
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+    throw new Error("generated preview applications require a regular Flutter assets directory");
+  }
+  const canonicalRoot = realpathSync(assetRoot);
+  const targetRoot = join(stagingDir, "preview-applications");
+  await mkdir(targetRoot, { recursive: true });
+  const requiredFiles = ["app.qjbc", "app.pak", "app.bytecode.json", "guest-manifest.json"] as const;
+  for (const [appId, application] of entries) {
+    const sourceDirectory = resolve(assetRoot, application.assetDirectory);
+    const sourceRelative = relative(canonicalRoot, realpathSync(sourceDirectory));
+    if (isAbsolute(sourceRelative) || sourceRelative === ".." || sourceRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
+      throw new Error(`generated preview application escapes Flutter assets: ${appId}`);
+    }
+    const targetDirectory = join(targetRoot, appId);
+    await mkdir(targetDirectory, { recursive: true });
+    const manifest = await readJsonFile<Record<string, unknown>>(join(sourceDirectory, "guest-manifest.json"));
+    const files: readonly string[] = manifest.worker
+      ? [...requiredFiles, "app.worker.qjbc", "app.worker.bytecode.json"]
+      : requiredFiles;
+    for (const name of files) {
+      const source = join(sourceDirectory, name);
+      const info = lstatSync(source);
+      if (info.isSymbolicLink() || !info.isFile()) throw new Error(`generated preview artifact is not a regular file: ${appId}/${name}`);
+      const artifactRelative = relative(canonicalRoot, realpathSync(source));
+      if (isAbsolute(artifactRelative) || artifactRelative === ".." || artifactRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
+        throw new Error(`generated preview artifact escapes Flutter assets: ${appId}/${name}`);
+      }
+      await cp(source, join(targetDirectory, name));
+    }
+  }
+  return entries.length;
+}
+
 async function buildProject(workspace: Workspace, id: string, state: EditorState, config: EditorConfig, runner: BuildRunner): Promise<void> {
   const revision = state.revision;
   const projectDir = projectDirectory(workspace, id);
@@ -1063,6 +1141,14 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
       strictPak: runner === realBuild,
       log: (line) => pushLog(state, line),
     });
+    const generatedCompositorRegistry = join(projectDir, "generated", "compositor-surfaces.json");
+    if (existsSync(generatedCompositorRegistry)) {
+      safeProjectFile(projectDir, "generated/compositor-surfaces.json", { mustExist: true });
+      const previewApplicationCount = await stageGeneratedPreviewApplications(projectDir, stagingDir, generatedCompositorRegistry);
+      if (previewApplicationCount > 0) pushLog(state, `staged ${previewApplicationCount} generated preview application(s)`);
+      await mkdir(join(stagingDir, "generated"), { recursive: true });
+      await cp(generatedCompositorRegistry, join(stagingDir, "generated", "compositor-surfaces.json"));
+    }
     const generation = randomUUID();
     const buildInfo = {
       generation,
@@ -1913,6 +1999,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const states = new Map<string, EditorState>();
   const stateLoads = new Map<string, Promise<EditorState>>();
   const projectWrites = new Set<string>();
+  const backupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let backupSchedulerStopped = false;
   const publishSlots = new Set<string>();
   const runner = options.buildRunner ?? realBuild;
   if (!appIdPattern.test(updateHostVersion)) throw new Error("Editor update host version is invalid");
@@ -1924,6 +2012,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     if (!loading) {
       loading = loadState(workspace, id).then((state) => {
         states.set(id, state);
+        armNovelBackup(id, state);
         return state;
       }).finally(() => stateLoads.delete(id));
       stateLoads.set(id, loading);
@@ -3069,6 +3158,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         metadataPath: string;
         appId: string;
         projectDirectory: string;
+        workerHttpOrigins?: string[];
       }> = {};
       for (const pkg of resourceSnapshot.packages) {
         if (pkg.id === rootAppId) continue;
@@ -3081,6 +3171,30 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           appId: pkg.id,
           projectDirectory: packageDir,
         };
+      }
+      // Standalone SDK guests have no generated child surface registry.
+      // Keep containment/symlink validation when one exists; only absence is optional.
+      let generatedRegistryPath: string | undefined;
+      try {
+        generatedRegistryPath = safeArtifactFile(workspace.builds, `${folder}/generated/compositor-surfaces.json`);
+      } catch (error) {
+        if ((error as { status?: number }).status !== 404) throw error;
+      }
+      if (generatedRegistryPath) {
+        const generatedRegistry = await readJsonFile<Record<string, unknown>>(generatedRegistryPath);
+        for (const appId of Object.keys(generatedPreviewApplications(generatedRegistry))) {
+          if (applications[appId]) continue;
+          const directory = `preview-applications/${appId}`;
+          applications[appId] = {
+            bytecodePath: safeArtifactFile(workspace.builds, `${folder}/${directory}/app.qjbc`),
+            sourcePath: "",
+            pakPath: safeArtifactFile(workspace.builds, `${folder}/${directory}/app.pak`),
+            metadataPath: safeArtifactFile(workspace.builds, `${folder}/${directory}/app.bytecode.json`),
+            appId,
+            projectDirectory: join(buildRoot, directory),
+            ...(appId === "dev.pocket-nexus.worker-http" ? { workerHttpOrigins: ["https://example.com"] } : {}),
+          };
+        }
       }
       return {
         bytecodePath: safeArtifactFile(workspace.builds, `${folder}/app.qjbc`),
@@ -3138,6 +3252,34 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     // share the SDK/project write boundary.
     devices.listDeployments().some((job) => ["queued", "building", "starting", "stopping"].includes(job.state));
 
+  function armNovelBackup(id: string, state: EditorState, retryMs?: number): void {
+    const previous = backupTimers.get(id);
+    if (previous) clearTimeout(previous);
+    backupTimers.delete(id);
+    const minutes = state.novelBackup?.intervalMinutes ?? 0;
+    if (backupSchedulerStopped || ![1, 5, 10, 30, 60].includes(minutes)) return;
+    const timer = setTimeout(async () => {
+      backupTimers.delete(id);
+      if (backupSchedulerStopped) return;
+      if (projectWrites.has(id) || state.busy || codex.isBusy(id) || wechat.isBuilding(id) || deploymentWriting(id)) {
+        armNovelBackup(id, state, 30_000);
+        return;
+      }
+      projectWrites.add(id);
+      try {
+        const backup = await createNovelBackup({ workspaceRoot: workspace.root, projectRoot: projectDir(id), projectId: id, skipUnchanged: true });
+        state.novelBackup = { intervalMinutes: minutes, lastRunAt: now(), lastBackupId: backup.id };
+      } catch (error) {
+        state.novelBackup = { ...state.novelBackup!, error: error instanceof Error ? error.message : String(error) };
+      }
+      try { await saveState(workspace, id, state); }
+      catch (error) { pushLog(state, `automatic backup state could not be saved: ${String(error)}`); }
+      finally { projectWrites.delete(id); armNovelBackup(id, state); }
+    }, retryMs ?? minutes * 60_000);
+    timer.unref?.();
+    backupTimers.set(id, timer);
+  }
+
   const server = Bun.serve({
     hostname: options.host ?? "127.0.0.1",
     port: options.port ?? Number(process.env.POCKET_EDITOR_PORT ?? 8791),
@@ -3154,6 +3296,12 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       try {
         if (path === "/api/preview/device" && method === "GET") return json(previewDevice);
         if (path === "/health" && method === "GET") return json({ ok: true, service: "pocket-editor", csrfToken, bluetooth: { local: !!localBluetooth }, workspace: workspace.root, ...(workspace.projectRoot ? { projectRoot: workspace.projectRoot, projectId: workspace.projectId } : {}) });
+        if ((path === "/novel" || path === "/novel/resource") && method === "GET") {
+          const id = asProjectId(url.searchParams.get("project"));
+          if (!existsSync(projectDir(id))) return failure("project not found", 404);
+          const state = await getState(id);
+          return handleNovelRoute(request, { projectRoot: projectDir(id), projectId: id, workspaceRoot: workspace.root, novelRestoreEpoch: state.novelRestoreEpoch ?? 0 });
+        }
         if (path === "/" && method === "GET") {
           const clientRoot = join(root, "editor/client");
           const indexFile = join(clientRoot, "index.html");
@@ -3241,6 +3389,33 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         if (wechat.isBuilding(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("WeChat build is using this project; stop it before editing/building", 409);
         if (deploymentWriting(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("Device build is using this project; wait or cancel it before editing/building", 409);
         if (parts[0] === "api" && parts[1] === "projects") {
+          if (parts[3] === "novel") {
+            if (state.busy && ["PUT", "POST"].includes(method)) return failure("Build in progress; retry editing when the build completes", 409);
+            if (parts[4] === "backups" && parts[5] === "schedule" && parts.length === 6) {
+              if (method === "GET") return json(state.novelBackup ?? { intervalMinutes: 0 });
+              if (method !== "POST") return failure("method not allowed", 405);
+              const raw = await request.text();
+              if (raw.length > 1024) return failure("backup schedule is too large", 413);
+              let body: unknown;
+              try { body = JSON.parse(raw); } catch { return failure("backup schedule must be JSON", 422); }
+              if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || ![0, 1, 5, 10, 30, 60].includes((body as { intervalMinutes: number }).intervalMinutes)) return failure("intervalMinutes must be 0, 1, 5, 10, 30 or 60", 422);
+              state.novelBackup = { ...state.novelBackup, intervalMinutes: (body as { intervalMinutes: number }).intervalMinutes };
+              await saveState(workspace, id, state);
+              armNovelBackup(id, state);
+              return json(state.novelBackup);
+            }
+            const response = await handleNovelRoute(request, { projectRoot: projectDir(id), projectId: id, workspaceRoot: workspace.root, novelRestoreEpoch: state.novelRestoreEpoch ?? 0 });
+            const restoredBackup = parts[4] === "backups" && parts[5] === "restore" && parts.length === 6 && method === "POST";
+            if (response.ok && (restoredBackup || ["PUT", "POST"].includes(method) && ["story", "assets", "locales"].includes(parts[4] ?? "") && parts.length === 5)) {
+              if (restoredBackup) state.novelRestoreEpoch = (state.novelRestoreEpoch ?? 0) + 1;
+              state.revision += 1;
+              state.error = undefined;
+              state.publish = undefined;
+              pushLog(state, restoredBackup ? `project backup restored: revision ${state.revision}; rebuild the Guest` : `novel ${parts[4]} saved: revision ${state.revision}`);
+              await saveState(workspace, id, state);
+            }
+            return response;
+          }
           if (parts[3] === "preview") {
             // Existing SSE clients retain their loaded runtime during a build.
             // New subscriptions/input must not load a partly copied snapshot.
@@ -3560,6 +3735,9 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   }
   const stop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
+    backupSchedulerStopped = true;
+    for (const timer of backupTimers.values()) clearTimeout(timer);
+    backupTimers.clear();
     codex.dispose();
     void preview.dispose();
     void devices.dispose();

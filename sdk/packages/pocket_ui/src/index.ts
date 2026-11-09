@@ -14,6 +14,7 @@ export * from "./media.ts";
 export * from "./video.tsx";
 export * from "./updates.ts";
 export * from "./flutter-widgets.tsx";
+export * from "./inline-text.tsx";
 export * from "./apple.tsx";
 
 // Preload compositor composition with the public UI entry so the pinned

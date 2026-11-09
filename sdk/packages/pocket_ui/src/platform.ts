@@ -8,6 +8,7 @@ import {
   type HostEvent,
   type HostPacketHandler,
   type HostSend,
+  type JsonValue,
 } from "./host.ts";
 import { createMediaController, type MediaController, type MediaControllerOptions } from "./media.ts";
 
@@ -33,6 +34,11 @@ export interface AppLaunch {
   result: Promise<AppResult>;
   cancel(): Promise<BridgeValue>;
 }
+
+/** One mutation in an atomic app-scoped platform storage batch. */
+export type PlatformStorageOperation =
+  | { readonly type: "set"; readonly key: string; readonly value: JsonValue }
+  | { readonly type: "remove"; readonly key: string };
 
 export interface PocketPlatformClientOptions {
   bridge?: HostBridge;
@@ -72,13 +78,21 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
       bridge: options.media && typeof options.media === "object" && "bridge" in options.media
         ? (options.media as MediaControllerOptions).bridge ?? host
         : host,
+      scheduleTimeoutMs: options.media && typeof options.media === "object" &&
+          typeof (options.media as MediaControllerOptions).scheduleTimeoutMs === "function"
+        ? (options.media as MediaControllerOptions).scheduleTimeoutMs
+        : (timeoutMs, callback) => {
+          const frames = Math.max(1, Math.ceil(timeoutMs * simulationHz() / 1000));
+          return host.scheduleTimeout?.(frames, callback) ?? after(timeoutMs / 1000, callback);
+        },
     });
   const target = globalThis as typeof globalThis & {
     __pocketEvent?: HostPacketHandler;
   };
   const previous = typeof host.onEvent === "function" ? undefined : target.__pocketEvent;
-  const handleEvent = (name: string, value: unknown): void => {
+  const handleEvent = (name: string, value: unknown, hostEvent?: HostEvent): void => {
     if (disposed || !value || typeof value !== "object" || Array.isArray(value)) return;
+    if (hostEvent) media?.handleHostEvent(hostEvent);
     if (name === "platform.result") {
       const result = value as AppResult;
       if (typeof result.requestId === "string") {
@@ -91,7 +105,6 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
         try { listener(value as AppMessage); } catch { /* isolate consumer callbacks */ }
       }
     } else if (name === "platform.lifecycle" || name === "platform.launch") {
-      if (name === "platform.lifecycle" && media) media.handleLifecycle(value as BridgeObject);
       for (const listener of [...lifecycleListeners]) {
         try { listener(value as BridgeObject); } catch { /* isolate consumer callbacks */ }
       }
@@ -101,15 +114,23 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
     // Request-only injected bridges still share the direct-object event lane.
     if (typeof host.onEvent !== "function") host.handle(packet);
     const event = packet;
-    if (event) handleEvent(
-      typeof event.name === "string" ? event.name : typeof event.method === "string" ? event.method : "",
-      event.payload ?? event.params,
-    );
+    if (event) {
+      const name = typeof event.name === "string" ? event.name : typeof event.method === "string" ? event.method : "";
+      const value = event.payload ?? event.params;
+      const params = value && typeof value === "object" && !Array.isArray(value) ? value as BridgeObject : {};
+      const hostEvent: HostEvent = {
+        id: typeof event.id === "string" ? event.id : "",
+        method: name,
+        params,
+        raw: event,
+      };
+      handleEvent(name, value, hostEvent);
+    }
     try { forwardHostPacket(previous, packet); } catch { /* isolate legacy previous sinks */ }
   };
   receive.__binaryCapable = true;
   const removeHostEvent = typeof host.onEvent === "function"
-    ? host.onEvent((event: HostEvent) => handleEvent(event.method, event.params))
+    ? host.onEvent((event: HostEvent) => handleEvent(event.method, event.params, event))
     : undefined;
   if (typeof host.onEvent !== "function") target.__pocketEvent = receive;
 
@@ -166,6 +187,33 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
       set: (key: string, value: BridgeValue, namespace?: string) => request("platform.storage.set", { key, value, ...(namespace ? { namespace } : {}) }),
       remove: (key: string, namespace?: string) => request("platform.storage.remove", { key, ...(namespace ? { namespace } : {}) }),
       keys: (namespace?: string) => request("platform.storage.keys", namespace ? { namespace } : {}),
+      batch: async (operations: readonly PlatformStorageOperation[], namespace?: string): Promise<void> => {
+        if (!Array.isArray(operations)) throw new TypeError("storage batch operations must be an array");
+        const copied: BridgeValue[] = operations.map((operation, index) => {
+          if (!operation || typeof operation !== "object" || Array.isArray(operation) ||
+              typeof operation.key !== "string" || operation.key.length === 0) {
+            throw new TypeError(`storage batch operation ${index} is invalid`);
+          }
+          const keys = Object.keys(operation);
+          if (operation.type === "set") {
+            if (keys.length !== 3 || keys.some(key => !["type", "key", "value"].includes(key)) || !Object.hasOwn(operation, "value")) {
+              throw new TypeError(`storage batch operation ${index} has an invalid set shape`);
+            }
+            return { type: "set", key: operation.key, value: operation.value };
+          }
+          if (operation.type === "remove") {
+            if (keys.length !== 2 || keys.some(key => key !== "type" && key !== "key")) {
+              throw new TypeError(`storage batch operation ${index} has an invalid remove shape`);
+            }
+            return { type: "remove", key: operation.key };
+          }
+          throw new TypeError(`storage batch operation ${index} has an unsupported type`);
+        });
+        await request("platform.storage.batch", {
+          operations: copied,
+          ...(namespace ? { namespace } : {}),
+        });
+      },
     },
     sendMessage: (appId: string, data: BridgeValue, topic = "default") => request("platform.messages.send", { appId, data, topic }),
     receiveMessages: () => request("platform.messages.receive"),

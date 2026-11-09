@@ -204,6 +204,39 @@ async function cancellation(): Promise<void> {
   }
 }
 
+async function storageBatch(): Promise<void> {
+  const { previous } = withPreviousEventSink();
+  const bridge = new FixtureBridge();
+  const client = createPocketPlatformClient(undefined, { bridge });
+  try {
+    const operations = [
+      { type: "set", key: "slot.1", value: { active: "chapter-2", unicode: "海" } },
+      { type: "remove", key: "slot.2" },
+    ] as const;
+    const pending = client.storage.batch(operations, "saves");
+    assert.equal(bridge.requests.length, 1);
+    assert.equal(bridge.requests[0]!.capability, "platform.storage.batch");
+    assert.deepEqual(bridge.requests[0]!.params, {
+      namespace: "saves",
+      operations: [
+        { type: "set", key: "slot.1", value: { active: "chapter-2", unicode: "海" } },
+        { type: "remove", key: "slot.2" },
+      ],
+    });
+    bridge.resolveAt(0, null);
+    await pending;
+
+    const callsBeforeInvalid = bridge.requests.length;
+    const malformed = [{ type: "move", key: "slot.1" }] as unknown as Parameters<typeof client.storage.batch>[0];
+    await assert.rejects(client.storage.batch(malformed, "saves"), /unsupported type/);
+    assert.equal(bridge.requests.length, callsBeforeInvalid,
+      "an unknown runtime operation must not be rewritten as a destructive remove request");
+  } finally {
+    client.dispose();
+    assert.equal((globalThis as { __pocketEvent?: unknown }).__pocketEvent, previous);
+  }
+}
+
 async function dispose(): Promise<void> {
   const { previous } = withPreviousEventSink();
   const bridge = new FixtureBridge();
@@ -234,5 +267,6 @@ async function dispose(): Promise<void> {
 await launchOrderAndEvents();
 await earlyResult();
 await cancellation();
+await storageBatch();
 await dispose();
 console.log("PLATFORM_CLIENT_FIXTURE_OK");

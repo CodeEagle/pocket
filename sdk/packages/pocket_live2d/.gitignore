@@ -1,0 +1,7 @@
+.cache/
+native/build/
+android/build/
+ios/Frameworks/Live2DCubismCore.xcframework
+macos/Frameworks/Live2DCubismCore.xcframework
+macos/Frameworks/Live2DCubismCore-macos.xcframework
+windows/build/

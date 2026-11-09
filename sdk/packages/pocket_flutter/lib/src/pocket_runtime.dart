@@ -249,6 +249,24 @@ final class _PocketFrameDeltaPacket {
   final PocketFrame frame;
 }
 
+/// The PFP1 splice needs only the current primary operation list and viewport.
+/// Keep this protocol baseline separate from the caller's full frame so one
+/// resource-bearing PFB1 packet does not keep its transient pixel buffers
+/// alive for the lifetime of an otherwise unchanged scene.
+final class _PocketFrameDeltaBase {
+  const _PocketFrameDeltaBase({
+    required this.width,
+    required this.height,
+    required this.ops,
+    required this.sequence,
+  });
+
+  final double width;
+  final double height;
+  final List<PocketOp> ops;
+  final int? sequence;
+}
+
 /// Decodes the fixed-size PFP1 envelope without duplicating the PFB1 decoder.
 /// The input is already copied from borrowed native memory before this function
 /// is called. The embedded PFB1 payload is therefore a view into owned bytes;
@@ -526,11 +544,10 @@ final class FfiPocketRuntime
   final _EvalDart _eval;
   final _FrameBinaryDart _frameBinary;
   final _FrameDeltaBinaryV2Dart _frameDeltaBinaryV2;
-  // The native delta ABI returns only an operation splice. Keep exactly one
-  // decoded full frame as the baseline for the next call; the widget/painter
-  // still owns the frame it receives, so this is protocol state, not a second
-  // rendering model.
-  PocketFrame? _deltaBaseFrame;
+  // The native delta ABI returns only an operation splice. Retain only the
+  // primary ops and viewport needed to apply it; transient resources and
+  // auxiliary output belong to the returned frame, not this protocol base.
+  _PocketFrameDeltaBase? _deltaBaseFrame;
   String _lastFrameDeltaMode = 'full';
   _NextWakeDelayDart? _nextWakeDelay;
   bool _nextWakeDelayLookedUp = false;
@@ -755,10 +772,11 @@ final class FfiPocketRuntime
       return DynamicLibrary.open(override);
     }
     if (Platform.isAndroid) return DynamicLibrary.open('libpocket_flutter.so');
+    if (Platform.isWindows) return DynamicLibrary.open('pocket_flutter.dll');
     if (Platform.isIOS) return DynamicLibrary.process();
     if (Platform.isMacOS) return DynamicLibrary.process();
     throw UnsupportedError(
-      'Pocket Flutter host supports macOS, iOS and Android.',
+      'Pocket Flutter host supports Windows, macOS, iOS and Android.',
     );
   }
 
@@ -1160,14 +1178,14 @@ final class FfiPocketRuntime
             'pocket_frame_delta_binary_v2 returned an oversized frame',
           );
         }
-        // Copy before querying lastError or making any other native call;
-        // the v2 pointer is borrowed until the next FFI boundary.
-        final bytes = Uint8List.fromList(pointer.asTypedList(byteLength));
-        final error = lastError;
-        if (error != null && error.isNotEmpty) {
-          throw PocketRuntimeException(error);
-        }
-        output = _decodeBinaryDeltaV2(bytes, base);
+        // Decode while the native pointer is still borrowed. The parser owns
+        // every byte field it retains; only after it returns may lastError
+        // cross the FFI boundary and invalidate this view.
+        output = _parseBorrowedBinaryFrame(
+          pointer.asTypedList(byteLength),
+          (bytes) => _decodeBinaryDeltaV2(bytes, base),
+        );
+        _retainDeltaBase(output);
         return output;
       } finally {
         calloc.free(length);
@@ -1278,12 +1296,10 @@ final class FfiPocketRuntime
           'pocket_frame_binary returned an oversized frame',
         );
       }
-      final bytes = Uint8List.fromList(pointer.asTypedList(byteLength));
-      final error = lastError;
-      if (error != null && error.isNotEmpty) {
-        throw PocketRuntimeException(error);
-      }
-      final frame = PocketFrame.fromBinary(bytes);
+      final frame = _parseBorrowedBinaryFrame(
+        pointer.asTypedList(byteLength),
+        PocketFrame.fromBinary,
+      );
       _retainDeltaBase(frame);
       return frame;
     } finally {
@@ -1291,7 +1307,36 @@ final class FfiPocketRuntime
     }
   }
 
-  PocketFrame _decodeBinaryDeltaV2(Uint8List bytes, PocketFrame? base) {
+  PocketFrame _parseBorrowedBinaryFrame(
+    Uint8List bytes,
+    PocketFrame Function(Uint8List) parse,
+  ) {
+    PocketFrame? frame;
+    Object? parseError;
+    StackTrace? parseStack;
+    try {
+      frame = parse(bytes);
+    } on Object catch (error, stack) {
+      parseError = error;
+      parseStack = stack;
+    }
+
+    // Keep native error precedence from the old copy-then-check sequence.
+    // This must be the first FFI call after parsing the borrowed frame.
+    final error = lastError;
+    if (error != null && error.isNotEmpty) {
+      throw PocketRuntimeException(error);
+    }
+    if (parseError != null) {
+      Error.throwWithStackTrace(parseError, parseStack!);
+    }
+    return frame!;
+  }
+
+  PocketFrame _decodeBinaryDeltaV2(
+    Uint8List bytes,
+    _PocketFrameDeltaBase? base,
+  ) {
     if (bytes.length < 4) {
       throw const FormatException(
         'pocket_frame_delta_binary_v2 returned a truncated frame',
@@ -1299,9 +1344,7 @@ final class FfiPocketRuntime
     }
     final magic = ByteData.sublistView(bytes).getUint32(0, Endian.little);
     if (magic == _pocketBinaryFrameMagic) {
-      final frame = PocketFrame.fromBinary(bytes);
-      _retainDeltaBase(frame);
-      return frame;
+      return PocketFrame.fromBinary(bytes);
     }
     if (magic != _pocketBinaryFrameDeltaMagic) {
       throw FormatException(
@@ -1365,15 +1408,24 @@ final class FfiPocketRuntime
         'header=${packet.resultingOpCount} actual=$resultingLength',
       );
     }
-    final ops = <PocketOp>[
-      ...base.ops.take(packet.prefixCount),
-      ...patchFrame.ops,
-      ...base.ops.skip(suffixStart),
-    ];
+    // An empty splice proves that the native primary DrawOps match this base.
+    // PFB1 decoding makes these lists immutable, so share the exact list and
+    // let PocketView's existing identity fast path avoid a second O(n) scan.
+    final primaryOpsUnchanged =
+        packet.prefixCount == base.ops.length &&
+        packet.deleteCount == 0 &&
+        patchFrame.ops.isEmpty;
+    final ops = primaryOpsUnchanged
+        ? base.ops
+        : <PocketOp>[
+            ...base.ops.take(packet.prefixCount),
+            ...patchFrame.ops,
+            ...base.ops.skip(suffixStart),
+          ];
     final frame = PocketFrame(
       width: patchFrame.width,
       height: patchFrame.height,
-      ops: List<PocketOp>.unmodifiable(ops),
+      ops: primaryOpsUnchanged ? ops : List<PocketOp>.unmodifiable(ops),
       // PFP1 metadata after the operation splice is the complete current
       // frame. Never carry transient data from the baseline into this turn.
       events: patchFrame.events,
@@ -1382,7 +1434,6 @@ final class FfiPocketRuntime
       auxiliary: patchFrame.auxiliary,
       sequence: patchSequence,
     );
-    _retainDeltaBase(frame);
     return frame;
   }
 
@@ -2145,7 +2196,12 @@ final class FfiPocketRuntime
   }
 
   void _retainDeltaBase(PocketFrame frame) {
-    _deltaBaseFrame = frame;
+    _deltaBaseFrame = _PocketFrameDeltaBase(
+      width: frame.width,
+      height: frame.height,
+      ops: frame.ops,
+      sequence: frame.sequence,
+    );
   }
 
   void _invalidateDeltaBase() {
@@ -2485,6 +2541,9 @@ final class FfiPocketRuntime
         PocketGradientOp() => 'gradient',
         PocketTriangleOp() => 'triangle',
         PocketTextureTriangleOp() => 'textureTriangle',
+        PocketMeshLayerBeginOp() => 'meshLayerBegin',
+        PocketMeshMaskBeginOp() => 'meshMaskBegin',
+        PocketMeshLayerRestoreOp() => 'meshLayerRestore',
         PocketTextOp() => 'text',
         PocketImageOp() => 'image',
         PocketHostSurfaceOp() => 'hostSurface',
@@ -2525,6 +2584,13 @@ final class FfiPocketRuntime
             .map((point) => <String, dynamic>{'x': point.x, 'y': point.y})
             .toList(growable: false);
         result['uvs'] = value.uvs;
+      case PocketMeshLayerBeginOp value:
+        result['color'] = value.blend;
+        result['uvs'] = <double>[...value.multiplyRgb, ...value.screenRgb];
+      case PocketMeshMaskBeginOp value:
+        result['color'] = value.inverted ? 1 : 0;
+      case PocketMeshLayerRestoreOp():
+        break;
       case PocketTextOp value:
         result['text'] = value.text;
         result['size'] = value.size;

@@ -12,6 +12,8 @@ dependencies:
     sdk: flutter
   pocket_services:
     path: ../pocket_services
+  pocket_flutter:
+    path: ../pocket_flutter
   pocket_permissions:
     path: ../pocket_permissions
   pocket_hardware_core:

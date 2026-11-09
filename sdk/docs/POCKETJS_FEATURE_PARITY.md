@@ -1,5 +1,7 @@
 # PocketJS 能力覆盖与性能优先级
 
+最新详细核对见 [2026-11-07 官方能力对照与补齐路线](UPSTREAM_CAPABILITY_AUDIT_2026-11-07.md)：覆盖固定上游32个 capability、UI/游戏能力、工具链与Editor，区分实际接入、运行验证和平台限制。下文保留此前实施记录。
+
 核对日期：2026-11-03。基准是固定上游 `99924de47c62fa36f526a8791055d91cbbdb3836` 的真实契约和本轮实现，不以组件标签数量或源码存在推定已经支持。
 
 证据见 [UI / 绘制 / 输入审查](POCKETJS_FEATURE_PARITY_UI.md)、[服务 / Worker / 工具链审查](POCKETJS_FEATURE_PARITY_SERVICES.md) 以及本轮的 [Compositor 实施记录](SYSTEM_COMPOSITOR_IMPLEMENTATION.md) 和 [Worker/IO 实施记录](WORKER_IO_IMPLEMENTATION.md)。前两份审查中的部分 Worker、focus 和 raw-text 行仍是接入前基线，不能覆盖后两份实施记录的当前状态。下文是补齐能力的顺序，不代表每项都是现有 App 的阻断缺陷。

@@ -1,10 +1,18 @@
 import 'package:pocket_hardware_core/pocket_hardware_core.dart';
 import 'package:pocket_permissions/pocket_permissions.dart';
+import 'package:pocket_flutter/pocket_flutter.dart' show PocketViewController;
 export 'package:pocket_hardware_core/pocket_hardware_core.dart';
 
 /// Compatibility aggregate. New consumers can select individual capability
 /// packages and register pocket_permissions only for OS permissions they need.
 final class HardwarePlugin extends HardwareCapabilityPlugin {
+  factory HardwarePlugin.forPocketViewController(
+    PocketViewController controller,
+  ) => HardwarePlugin(
+    onTextureRegistered: controller.authorizePlatformTexture,
+    onTextureReleased: controller.revokePlatformTexture,
+  );
+
   HardwarePlugin({
     HardwarePlatform? platform,
     PocketSystemPermissions? systemPermissions,

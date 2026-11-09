@@ -1,0 +1,264 @@
+diff --git a/contracts/spec/spec.ts b/contracts/spec/spec.ts
+--- a/contracts/spec/spec.ts
++++ b/contracts/spec/spec.ts
+@@ -621,8 +621,10 @@
+   //              index bytes. 4x smaller than 8888 — the tile-canvas format.
+ } as const;
+ 
+-/** Textures must be power-of-two and no larger than this per side. */
++/** General texture uploads (fonts, sprites, tiles and raw uploads) stay bounded. */
+ export const TEX_MAX_DIM = 512;
++/** Static PAK IMG entries have their own higher, still bounded per-side limit. */
++export const IMG_MAX_DIM = 2048;
+ 
+ // Texture handles are generation-tagged like node ids:
+ //   handle = (generation << TEX_SLOT_BITS) | slot, bit 31 stays 0.
+diff --git a/contracts/spec/gen-rust.ts b/contracts/spec/gen-rust.ts
+--- a/contracts/spec/gen-rust.ts
++++ b/contracts/spec/gen-rust.ts
+@@ -136,6 +136,7 @@
+   WIRE_SLOT_FLAG_RLE,
+   WIRE_SLOT_HEADER_SIZE,
+   WIRE_VERSION,
++  IMG_MAX_DIM,
+   TEX_MAX_DIM,
+   TEX_SLOT_BITS,
+   TEX_SLOT_MASK,
+@@ -233,8 +234,10 @@
+   if (SIZE_FULL !== -1) throw new Error("SIZE_FULL changed; update gen-rust.ts emission");
+   put("pub const SIZE_FULL: f32 = -1.0;");
+   put("");
+-  put("/// Textures must be power-of-two and no larger than this per side.");
++  put("/// General textures must be power-of-two and no larger than this per side.");
+   put(`pub const TEX_MAX_DIM: u32 = ${TEX_MAX_DIM};`);
++  put("/// Static PAK IMG entries have a separate bounded per-side limit.");
++  put(`pub const IMG_MAX_DIM: u32 = ${IMG_MAX_DIM};`);
+   put("/// Texture handles are generation-tagged like node ids:");
+   put("/// handle = (generation << TEX_SLOT_BITS) | slot; bit 31 stays 0.");
+   put(`pub const TEX_SLOT_BITS: u32 = ${TEX_SLOT_BITS};`);
+diff --git a/engine/spec/src/lib.rs b/engine/spec/src/lib.rs
+--- a/engine/spec/src/lib.rs
++++ b/engine/spec/src/lib.rs
+@@ -34,6 +34,8 @@ pub const SIZE_FULL: f32 = -1.0;
+ 
+-/// Textures must be power-of-two and no larger than this per side.
++/// General textures must be power-of-two and no larger than this per side.
+ pub const TEX_MAX_DIM: u32 = 512;
++/// Static PAK IMG entries have a separate bounded per-side limit.
++pub const IMG_MAX_DIM: u32 = 2048;
+ /// Texture handles are generation-tagged like node ids:
+ /// handle = (generation << TEX_SLOT_BITS) | slot; bit 31 stays 0.
+ pub const TEX_SLOT_BITS: u32 = 20;
+diff --git a/framework/compiler/pak.ts b/framework/compiler/pak.ts
+--- a/framework/compiler/pak.ts
++++ b/framework/compiler/pak.ts
+@@ -8,7 +8,7 @@
+ //   ui:img.<name>    demo image texture (IMG entry layout below)
+ //
+ // IMG entry layout (PocketJS addition — the container itself is unchanged):
+-//   off 0  u16  width   (texture dims; pow2, <= TEX_MAX_DIM)
++//   off 0  u16  width   (image dims; pow2, <= IMG_MAX_DIM)
+ //   off 2  u16  height
+ //   off 4  u8   psm     (spec.ts PSM: 0 = 5650, 2 = 4444, 3 = 8888)
+ //   off 5  u8   reserved (0)
+@@ -31,6 +31,7 @@
+   PAK_HEADER_SIZE,
+   PAK_MAGIC,
+   PAK_VERSION,
++  IMG_MAX_DIM,
+   PSM,
+   TEX_MAX_DIM,
+   TILESET_ABSENT,
+@@ -163,8 +164,8 @@
+ ): Uint8Array {
+   const { width: w, height: h, rgba } = img;
+   const pow2 = (n: number) => n > 0 && (n & (n - 1)) === 0;
+-  if (!pow2(w) || !pow2(h) || w > TEX_MAX_DIM || h > TEX_MAX_DIM) {
+-    throw new Error(`pak image: dims must be pow2 <= ${TEX_MAX_DIM}, got ${w}x${h}`);
++  if (!pow2(w) || !pow2(h) || w > IMG_MAX_DIM || h > IMG_MAX_DIM) {
++    throw new Error(`pak image: dims must be pow2 <= ${IMG_MAX_DIM}, got ${w}x${h}`);
+   }
+   if (rgba.length !== w * h * 4) throw new Error("pak image: rgba length mismatch");
+   const bpp = psm === PSM.PSM_8888 ? 4 : 2;
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -1101,13 +1101,25 @@
+         psm: u32,
+         flags: u8,
+     ) -> i32 {
++        self.upload_texture_flags_with_limit(data, w, h, psm, flags, spec::TEX_MAX_DIM)
++    }
++
++    fn upload_texture_flags_with_limit(
++        &mut self,
++        data: &[u8],
++        w: u32,
++        h: u32,
++        psm: u32,
++        flags: u8,
++        max_dimension: u32,
++    ) -> i32 {
+         let bpp = match psm {
+             spec::psm::PSM_5650 | spec::psm::PSM_4444 => 2usize,
+             spec::psm::PSM_8888 => 4usize,
+             spec::psm::PSM_T8 => 1usize,
+             _ => return -1,
+         };
+-        let pow2 = |v: u32| v > 0 && v <= spec::TEX_MAX_DIM && v & (v - 1) == 0;
++        let pow2 = |v: u32| v > 0 && v <= max_dimension && v & (v - 1) == 0;
+         if !pow2(w) || !pow2(h) {
+             return -1;
+         }
+@@ -1167,7 +1179,7 @@
+         let Some((w, h, psm, flags)) = parse_img_header(blob) else {
+             return -1;
+         };
+-        self.upload_texture_flags(&blob[8..], w, h, psm, flags)
++        self.upload_texture_flags_with_limit(&blob[8..], w, h, psm, flags, spec::IMG_MAX_DIM)
+     }
+ 
+     /// Decode ONE tile of a TILESET pak entry (spec op loadTileTexture; blob
+diff --git a/engine/core/src/tests.rs b/engine/core/src/tests.rs
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -2840,6 +2840,101 @@
+     assert_eq!(ui.upload_img_entry(&bad), -1);
+ }
+ 
++#[test]
++fn static_img_entries_use_the_larger_limit_without_widening_general_textures() {
++    let mut ui = Ui::new();
++    let dimension = spec::IMG_MAX_DIM;
++    let initial_slots = ui.texture_slot_count();
++
++    // Both the IMG dimension check and payload check happen before tex_alloc.
++    // Failed blobs must leave no live handle or allocated slot behind.
++    let mut too_large = Vec::from([0u8; 8]);
++    too_large[..2].copy_from_slice(&((spec::IMG_MAX_DIM * 2) as u16).to_le_bytes());
++    too_large[2..4].copy_from_slice(&1u16.to_le_bytes());
++    too_large[4] = spec::psm::PSM_8888 as u8;
++    assert_eq!(ui.upload_img_entry(&too_large), -1);
++    assert_eq!(ui.texture_slot_count(), initial_slots);
++    assert!(ui.texture_at(0).is_none());
++
++    let mut too_tall = Vec::from([0u8; 8]);
++    too_tall[..2].copy_from_slice(&1u16.to_le_bytes());
++    too_tall[2..4].copy_from_slice(&((spec::IMG_MAX_DIM * 2) as u16).to_le_bytes());
++    too_tall[4] = spec::psm::PSM_8888 as u8;
++    assert_eq!(ui.upload_img_entry(&too_tall), -1);
++    assert_eq!(ui.texture_slot_count(), initial_slots);
++
++    let mut truncated = Vec::from([0u8; 8]);
++    truncated[..2].copy_from_slice(&(dimension as u16).to_le_bytes());
++    truncated[2..4].copy_from_slice(&(dimension as u16).to_le_bytes());
++    truncated[4] = spec::psm::PSM_8888 as u8;
++    assert_eq!(ui.upload_img_entry(&truncated), -1);
++    assert_eq!(ui.texture_slot_count(), initial_slots);
++    assert!(ui.texture_at(0).is_none());
++    truncated[5] = spec::img::FLAG_RLE;
++    assert_eq!(ui.upload_img_entry(&truncated), -1, "malformed RLE drops its temporary decode buffer");
++    assert_eq!(ui.texture_slot_count(), initial_slots);
++
++    let payload_len = dimension as usize * dimension as usize * 4;
++    let mut image = Vec::with_capacity(8 + payload_len);
++    image.extend_from_slice(&(dimension as u16).to_le_bytes());
++    image.extend_from_slice(&(dimension as u16).to_le_bytes());
++    image.push(spec::psm::PSM_8888 as u8);
++    image.push(0);
++    image.extend_from_slice(&[0, 0]);
++    image.resize(8 + payload_len, 0x5a);
++
++    let handle = ui.upload_img_entry(&image);
++    assert_eq!(handle, 0, "rejected uploads must not consume a texture slot");
++    let texture = ui.texture(handle).unwrap();
++    assert_eq!((texture.w, texture.h), (dimension, dimension));
++    assert_eq!(texture.pixels.len(), payload_len);
++    assert_eq!(texture.pixels[0], 0x5a);
++    assert_eq!(ui.texture_at(0).unwrap().0, handle);
++
++    // Static IMG dimensions flow through the same texture handle used by PMS1
++    // meshes; UVs remain normalized and vertex color modulation is unchanged.
++    let image_node = ui.create_node(spec::NodeType::Image as u8);
++    ui.set_prop(image_node, spec::prop::WIDTH, 100.0);
++    ui.set_prop(image_node, spec::prop::HEIGHT, 100.0);
++    ui.set_prop(image_node, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
++    ui.set_prop(image_node, spec::prop::INSET_T, 0.0);
++    ui.set_prop(image_node, spec::prop::INSET_L, 0.0);
++    ui.insert_before(spec::ROOT_ID, image_node, 0);
++    let mut mesh = Vec::new();
++    mesh.extend_from_slice(&0x31534d50u32.to_le_bytes()); // PMS1
++    mesh.extend_from_slice(&3u32.to_le_bytes()); // vertices
++    mesh.extend_from_slice(&3u32.to_le_bytes()); // indices
++    mesh.extend_from_slice(&0x80402010u32.to_le_bytes()); // ABGR modulate
++    for vertex in [
++        [0.0f32, 0.0, 0.0, 0.0],
++        [100.0, 0.0, 1.0, 0.0],
++        [0.0, 100.0, 0.0, 1.0],
++    ] {
++        for value in vertex {
++            mesh.extend_from_slice(&value.to_le_bytes());
++        }
++    }
++    for index in [0u32, 1, 2] {
++        mesh.extend_from_slice(&index.to_le_bytes());
++    }
++    assert!(ui.set_mesh(image_node, handle, &mesh));
++    ui.tick();
++    let words = ui.draw().words.clone();
++    validate_drawlist(&words);
++    let triangle = words.iter().position(|&word| word == spec::draw_op::TEX_TRI).unwrap();
++    assert_eq!(words[triangle + 1], handle as u32);
++    assert_eq!(words[triangle + 11], 0x80402010, "mesh color modulation is preserved");
++    assert_eq!(f32::from_bits(words[triangle + 6]), 1.0, "normalized UV reaches texture edge");
++
++    assert_eq!(
++        ui.upload_texture(&[], spec::TEX_MAX_DIM * 2, 1, spec::psm::PSM_8888),
++        -1,
++        "general texture upload must retain the 512px limit",
++    );
++
++    assert_eq!(ui.texture_slot_count(), 1);
++}
++
+ /// Build a tiny 2x2-tile TILESET blob (4x4 CLUT8 tiles, RLE + linear):
+ /// tile 0 = stream of index 5, tile 1 = ABSENT, tile 2 = SOLID(index 9),
+ /// tile 3 = stream of index 6.
+diff --git a/tests/image-pak.test.ts b/tests/image-pak.test.ts
+--- /dev/null
++++ b/tests/image-pak.test.ts
+@@ -0,0 +1,34 @@
++import { expect, test } from "bun:test";
++import { IMG_MAX_DIM, PSM, TEX_MAX_DIM } from "../contracts/spec/spec.ts";
++import { encodeImageEntry } from "../framework/compiler/pak.ts";
++
++function image(width: number, height: number) {
++  return {
++    width,
++    height,
++    rgba: new Uint8Array(width * height * 4),
++  };
++}
++
++test("static PAK IMG entries admit the explicit 2048px bound", () => {
++  expect(TEX_MAX_DIM).toBe(512);
++  expect(IMG_MAX_DIM).toBe(2048);
++
++  for (const [width, height] of [[512, 512], [1024, 1], [1, 1024]]) {
++    const entry = encodeImageEntry(image(width, height), PSM.PSM_8888);
++    const view = new DataView(entry.buffer, entry.byteOffset, entry.byteLength);
++    expect([view.getUint16(0, true), view.getUint16(2, true)]).toEqual([width, height]);
++  }
++
++  const largest = encodeImageEntry(image(2048, 2048), PSM.PSM_8888);
++  const largestView = new DataView(largest.buffer, largest.byteOffset, largest.byteLength);
++  expect([largestView.getUint16(0, true), largestView.getUint16(2, true)]).toEqual([2048, 2048]);
++  expect(largest.byteLength).toBe(8 + 2048 * 2048 * 4);
++
++  expect(() => encodeImageEntry({ width: 4096, height: 1, rgba: new Uint8Array() }, PSM.PSM_8888))
++    .toThrow("dims must be pow2 <= 2048");
++  expect(() => encodeImageEntry({ width: 1, height: 4096, rgba: new Uint8Array() }, PSM.PSM_8888))
++    .toThrow("dims must be pow2 <= 2048");
++  expect(() => encodeImageEntry({ width: 1536, height: 512, rgba: new Uint8Array() }, PSM.PSM_8888))
++    .toThrow("dims must be pow2 <= 2048");
++});

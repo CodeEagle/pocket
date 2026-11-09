@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_services/pocket_services.dart';
 
@@ -229,6 +230,10 @@ final class PocketAppConfig {
     this.updates,
     this.downloadOnOpen = false,
     this.showFps = false,
+    this.fontFamilyFallback = const <String>[],
+    this.keyboardInputEnabled = false,
+    this.keyboardAutofocus = false,
+    this.keyboardButtonMap = const <LogicalKeyboardKey, int>{},
     this.allowedPermissions = const {},
     this.pluginFactories = const [],
     this.additionalCapabilities = const {},
@@ -270,6 +275,20 @@ final class PocketAppConfig {
   final bool downloadOnOpen;
 
   final bool showFps;
+
+  /// Additional Flutter font families tried after the fixed PocketJS slot
+  /// family. This only affects glyph painting; baked PAK metrics continue to
+  /// define JS line layout.
+  final List<String> fontFamilyFallback;
+
+  /// Registers the real Flutter keyboard as an official button input source.
+  /// Explicit host policy; does not grant analog/gamepad hardware capabilities.
+  final bool keyboardInputEnabled;
+  final bool keyboardAutofocus;
+
+  /// Per-app overrides for Flutter logical keys. Values are PocketJS `BTN`
+  /// bits; omitted keys keep PocketView's standard mapping.
+  final Map<LogicalKeyboardKey, int> keyboardButtonMap;
   final Set<String> allowedPermissions;
   final List<PocketPluginFactory> pluginFactories;
   final Set<String> additionalCapabilities;
@@ -300,6 +319,10 @@ final class PocketAppConfig {
     PocketUpdateConfig? updates,
     PocketRecordingController Function()? recordingFactory,
     bool? downloadOnOpen,
+    Iterable<String>? fontFamilyFallback,
+    bool? keyboardInputEnabled,
+    bool? keyboardAutofocus,
+    Map<LogicalKeyboardKey, int>? keyboardButtonMap,
     String? bootstrapMetadataJson,
     String? bootstrapManifestJson,
     Map<String, int>? compositorSurfaces,
@@ -312,6 +335,12 @@ final class PocketAppConfig {
     updates: updates ?? this.updates,
     downloadOnOpen: downloadOnOpen ?? this.downloadOnOpen,
     showFps: showFps,
+    fontFamilyFallback: fontFamilyFallback == null
+        ? this.fontFamilyFallback
+        : List<String>.unmodifiable(fontFamilyFallback),
+    keyboardInputEnabled: keyboardInputEnabled ?? this.keyboardInputEnabled,
+    keyboardAutofocus: keyboardAutofocus ?? this.keyboardAutofocus,
+    keyboardButtonMap: keyboardButtonMap ?? this.keyboardButtonMap,
     allowedPermissions: allowedPermissions,
     pluginFactories: pluginFactories == null
         ? this.pluginFactories
@@ -346,6 +375,10 @@ final class PocketAppConfig {
     updates: updates,
     downloadOnOpen: downloadOnOpen,
     showFps: policy.showFps,
+    fontFamilyFallback: policy.fontFamilyFallback,
+    keyboardInputEnabled: policy.keyboardInputEnabled,
+    keyboardAutofocus: policy.keyboardAutofocus,
+    keyboardButtonMap: policy.keyboardButtonMap,
     allowedPermissions: policy.allowedPermissions,
     pluginFactories: policy.pluginFactories,
     additionalCapabilities: policy.additionalCapabilities,
@@ -394,8 +427,12 @@ final class PocketAppConfig {
           bootstrapManifestJson == other.bootstrapManifestJson &&
           updates == other.updates &&
           downloadOnOpen == other.downloadOnOpen &&
+          listEquals(fontFamilyFallback, other.fontFamilyFallback) &&
           memoryLimits == other.memoryLimits &&
           showFps == other.showFps &&
+          keyboardInputEnabled == other.keyboardInputEnabled &&
+          keyboardAutofocus == other.keyboardAutofocus &&
+          mapEquals(keyboardButtonMap, other.keyboardButtonMap) &&
           recordingFactory == other.recordingFactory &&
           offloadProviderFactory == other.offloadProviderFactory &&
           mapEquals(compositorSurfaces, other.compositorSurfaces) &&
@@ -405,7 +442,7 @@ final class PocketAppConfig {
           setEquals(additionalCapabilities, other.additionalCapabilities);
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll(<Object?>[
     appId,
     bytecodeAsset,
     pakAsset,
@@ -415,8 +452,14 @@ final class PocketAppConfig {
     bootstrapManifestJson,
     updates,
     downloadOnOpen,
+    Object.hashAll(fontFamilyFallback),
     memoryLimits,
     showFps,
+    keyboardInputEnabled,
+    keyboardAutofocus,
+    Object.hashAllUnordered(
+      keyboardButtonMap.entries.map((e) => Object.hash(e.key, e.value)),
+    ),
     recordingFactory,
     offloadProviderFactory,
     Object.hashAllUnordered(workerHttpOrigins),
@@ -426,5 +469,5 @@ final class PocketAppConfig {
     Object.hashAllUnordered(allowedPermissions),
     Object.hashAll(pluginFactories),
     Object.hashAllUnordered(additionalCapabilities),
-  );
+  ]);
 }
