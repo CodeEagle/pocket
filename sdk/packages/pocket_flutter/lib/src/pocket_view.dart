@@ -21,6 +21,7 @@ import 'pocket_duplex.dart';
 import 'pocket_model.dart';
 import 'pocket_package.dart';
 import 'pocket_performance.dart';
+import 'pocket_startup_progress.dart';
 import 'pocket_recording.dart';
 import 'pocket_memory_limits.dart';
 import 'pocket_runtime.dart';
@@ -575,6 +576,7 @@ class PocketView extends StatefulWidget {
     this.auxiliaryViewport,
     this.displayGeometry,
     this.imageResourceDecoder,
+    this.loadingBuilder,
     this.onReady,
     this.onEvent,
     this.onDuplexEvent,
@@ -737,6 +739,11 @@ class PocketView extends StatefulWidget {
   /// Test-only override for decoding a native resource.
   @visibleForTesting
   final PocketImageResourceDecoder? imageResourceDecoder;
+
+  /// Builds a custom loading surface from observed startup facts. It is used
+  /// until the existing first-frame [onReady] gate opens. When null, PocketView
+  /// shows its default stage and image-resource count indicator.
+  final PocketLoadingBuilder? loadingBuilder;
   final ValueChanged<PocketViewController>? onReady;
   final PocketEventCallback? onEvent;
   final PocketDuplexEventCallback? onDuplexEvent;
@@ -1053,6 +1060,9 @@ class _PocketViewState extends State<PocketView>
   bool get hasScheduledWake => _idleWakeTimer != null;
   Object? _error;
   bool _loading = true;
+  PocketStartupProgress _startupProgress = const PocketStartupProgress(
+    stage: PocketStartupStage.startingRuntime,
+  );
   bool _ownsRuntime = false;
   bool _lifecyclePaused = false;
   bool _started = false;
@@ -1524,6 +1534,31 @@ class _PocketViewState extends State<PocketView>
     });
   }
 
+  void _setStartupProgress(PocketStartupProgress progress) {
+    if (!mounted || _isDisposed || _error != null) return;
+    if (_startupProgress == progress) return;
+    _startupProgress = progress;
+    // _loading can briefly be false while startup synchronously publishes
+    // display.geometry. Do not schedule a build in that gap: the first Guest
+    // frame must stay behind the existing gate until its geometry frame and
+    // any referenced resources have been applied.
+    if (_loading) setState(() {});
+  }
+
+  void _setStartupResourceProgress(
+    PocketStartupStage stage,
+    int decoded,
+    int total,
+  ) {
+    _setStartupProgress(
+      PocketStartupProgress(
+        stage: stage,
+        resourcesDecoded: decoded,
+        resourcesTotal: total,
+      ),
+    );
+  }
+
   Future<void> _flushPendingStartupResizes() async {
     while (mounted && !_isDisposed && _pendingResize != null) {
       final next = _pendingResize;
@@ -1594,7 +1629,11 @@ class _PocketViewState extends State<PocketView>
         _finishGuestOutputDelivery();
       }
       if (waitForInitialImages && applied != null) {
-        await _requestResources(applied, waitForInitialImages: true);
+        await _requestResources(
+          applied,
+          waitForInitialImages: true,
+          startupStage: PocketStartupStage.applyingDisplayGeometry,
+        );
       }
       _scheduleSafeAreaReport();
     } catch (error) {
@@ -1783,7 +1822,16 @@ class _PocketViewState extends State<PocketView>
         // the first DrawList have become paintable. Later frames continue to
         // use the existing demand-driven, non-blocking resource path.
         if (waitForInitialImages) {
-          await _requestResources(first, waitForInitialImages: true);
+          await _requestResources(
+            first,
+            waitForInitialImages: true,
+            startupStage: PocketStartupStage.decodingInitialResources,
+          );
+          _setStartupProgress(
+            const PocketStartupProgress(
+              stage: PocketStartupStage.applyingDisplayGeometry,
+            ),
+          );
           await _flushPendingStartupResizes();
           if (!mounted || _isDisposed) return;
         } else {
@@ -1800,6 +1848,12 @@ class _PocketViewState extends State<PocketView>
         _endInvalidationBatch();
       }
       if (!mounted || _isDisposed) return;
+
+      _setStartupProgress(
+        const PocketStartupProgress(
+          stage: PocketStartupStage.applyingDisplayGeometry,
+        ),
+      );
 
       // The initial guest frame was evaluated before Flutter could publish its
       // host display facts. Keep it behind the existing loading surface while
@@ -1819,7 +1873,11 @@ class _PocketViewState extends State<PocketView>
           // _applyFrame may change the first visible DrawList. Reuse the same
           // loading gate while its newly referenced images are admitted.
           _loading = true;
-          await _requestResources(geometryFrame, waitForInitialImages: true);
+          await _requestResources(
+            geometryFrame,
+            waitForInitialImages: true,
+            startupStage: PocketStartupStage.applyingDisplayGeometry,
+          );
           if (!mounted || _isDisposed) return;
           _loading = false;
         }
@@ -3557,6 +3615,7 @@ class _PocketViewState extends State<PocketView>
   Future<void> _requestResources(
     PocketFrame frame, {
     bool waitForInitialImages = false,
+    PocketStartupStage? startupStage,
   }) async {
     if (frame.releasedResources.isNotEmpty) _markSceneNeedsBuild();
     _releaseImages(frame.releasedResources);
@@ -3722,10 +3781,30 @@ class _PocketViewState extends State<PocketView>
     }
 
     if (waitForInitialImages && initialLoads.isNotEmpty) {
+      final total = initialLoads.length;
+      var decoded = 0;
+      if (startupStage != null) {
+        _setStartupResourceProgress(startupStage, decoded, total);
+      }
+      final countedLoads = initialLoads
+          .map(
+            (load) => load.then((succeeded) {
+              // Failed or superseded decodes remain uncounted. The existing
+              // Future.wait barrier still owns whether startup can continue.
+              if (succeeded) {
+                decoded++;
+                if (startupStage != null) {
+                  _setStartupResourceProgress(startupStage, decoded, total);
+                }
+              }
+              return succeeded;
+            }),
+          )
+          .toList(growable: false);
       try {
         final results =
             await Future.any(<Future<List<bool>>>[
-              Future.wait(initialLoads),
+              Future.wait(countedLoads),
               _disposeSignal.future.then((_) => const <bool>[]),
             ]).timeout(
               debugPocketFirstFrameResourceTimeoutOverride ??
@@ -6747,9 +6826,71 @@ class _PocketViewState extends State<PocketView>
     return false;
   }
 
+  String _startupStageLabel(PocketStartupStage stage) => switch (stage) {
+    PocketStartupStage.preparingPackage => 'Preparing application package',
+    PocketStartupStage.startingRuntime =>
+      'Reading PocketJS resources and starting runtime',
+    PocketStartupStage.decodingInitialResources =>
+      'Decoding first-frame image resources',
+    PocketStartupStage.applyingDisplayGeometry =>
+      'Applying display geometry and resources',
+  };
+
+  Widget _defaultStartupLoading(BuildContext context) {
+    final background = widget.backgroundColor ?? const Color(0xff101827);
+    final color = background.computeLuminance() > 0.179
+        ? Colors.black
+        : Colors.white;
+    final progress = _startupProgress;
+    final total = progress.resourcesTotal;
+    final decoded = progress.resourcesDecoded;
+    final resourceSummary = total == null || total <= 0
+        ? null
+        : '${decoded ?? 0} / $total first-frame resources decoded';
+    return Center(
+      child: Semantics(
+        liveRegion: true,
+        label: [
+          _startupStageLabel(progress.stage),
+          if (resourceSummary != null) resourceSummary,
+        ].join('. '),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox.square(
+                dimension: 36,
+                child: CircularProgressIndicator(color: color),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _startupStageLabel(progress.stage),
+                textAlign: TextAlign.center,
+                style: TextStyle(color: color, fontWeight: FontWeight.w600),
+              ),
+              if (resourceSummary != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  resourceSummary,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: color.withValues(alpha: 0.78),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildContent(BuildContext context) {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return widget.loadingBuilder?.call(context, _startupProgress) ??
+          _defaultStartupLoading(context);
     }
     if (_error != null) {
       return Center(

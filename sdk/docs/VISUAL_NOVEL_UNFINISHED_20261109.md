@@ -48,3 +48,7 @@ iOS/Android 共用的顶部局部遮挡避让、首个可见帧几何时序已�
 ## 暂停后的单独需求：游戏专属Loading
 
 按用户新请求，已加入图片边框Loading页、真实四项读取状态和完成计数，并将四项必要读取并行、缩略图清理移出主菜单就绪门。真实Core三项/31断言及原安全区两项通过，Demo生成资源已同步。仅处理本次单独需求，完整Goal继续暂停；手机实际冷启动耗时、每阶段墙钟耗时、早期存档等待后台清理的队列延迟仍待测。见[存档/启动记录](VISUAL_NOVEL_SLOTS.md)。
+
+## 暂停后的单独需求：纯Flutter接入的SDK Loading
+
+按用户后续反馈，补全 `PocketApp`、`PocketGuest`、`PocketView` 的 `loadingBuilder` 与统一启动事实模型，沿用原资源/安全区首帧准入门；默认展示运行时、首帧图片和屏幕适配阶段。实现与验收见 [Flutter启动Loading](FLUTTER_STARTUP_LOADING.md)。尚未重建用户手机App；物理设备阶段耗时、同步原生加载内部细分进度、后续动态资源Loading仍待后续专项处理。完整Goal继续暂停。

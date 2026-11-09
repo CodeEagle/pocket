@@ -4,6 +4,9 @@ library;
 export 'package:pocket_flutter/pocket_flutter.dart'
     show
         PocketViewController,
+        PocketLoadingBuilder,
+        PocketStartupProgress,
+        PocketStartupStage,
         PocketCompositorSlot,
         PocketHostSurfaceBuilder,
         PocketWorkerProgram,

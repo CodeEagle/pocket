@@ -8,6 +8,7 @@ export 'src/pocket_memory_limits.dart';
 export 'src/pocket_guest_security.dart';
 export 'src/pocket_package.dart';
 export 'src/pocket_performance.dart';
+export 'src/pocket_startup_progress.dart';
 export 'src/pocket_runtime.dart';
 export 'src/pocket_recording.dart';
 export 'src/pocket_text_cache.dart';

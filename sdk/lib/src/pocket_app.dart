@@ -14,9 +14,14 @@ final class PocketApp extends StatelessWidget {
     super.key,
     required this.config,
     this.backgroundColor = const Color(0xFF000000),
+    this.loadingBuilder,
   });
   final PocketAppConfig config;
   final Color backgroundColor;
+
+  /// Replaces Pocket's startup presentation with host-owned rendering of the
+  /// observed package/runtime progress. Defaults to Pocket's built-in loader.
+  final PocketLoadingBuilder? loadingBuilder;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -26,7 +31,11 @@ final class PocketApp extends StatelessWidget {
       // scaffold transparent so a standalone surface does not paint a second
       // retained layer beneath it while preserving Scaffold's IME/layout role.
       backgroundColor: Colors.transparent,
-      body: PocketGuest(config: config, backgroundColor: backgroundColor),
+      body: PocketGuest(
+        config: config,
+        backgroundColor: backgroundColor,
+        loadingBuilder: loadingBuilder,
+      ),
     ),
   );
 }
@@ -36,15 +45,25 @@ final class PocketApp extends StatelessWidget {
 /// Layout follows the parent constraints. Safe areas and reserved system
 /// regions are sent to JS, which owns component layout and navigation.
 final class PocketGuest extends StatelessWidget {
-  const PocketGuest({super.key, required this.config, this.backgroundColor});
+  const PocketGuest({
+    super.key,
+    required this.config,
+    this.backgroundColor,
+    this.loadingBuilder,
+  });
   final PocketAppConfig config;
   final Color? backgroundColor;
+
+  /// Replaces Pocket's startup presentation with host-owned rendering of the
+  /// observed package/runtime progress. Defaults to Pocket's built-in loader.
+  final PocketLoadingBuilder? loadingBuilder;
 
   @override
   Widget build(BuildContext context) => _PocketGuestSession(
     key: ValueKey<String>(config.appId),
     config: config,
     backgroundColor: backgroundColor,
+    loadingBuilder: loadingBuilder,
   );
 }
 
@@ -65,6 +84,7 @@ final class PocketGuestSession extends StatefulWidget {
     this.compositorViewport,
     this.preserveCompositorDisplayGeometry = false,
     this.enableSceneCapture = false,
+    this.loadingBuilder,
   });
   final PocketAppConfig config;
   final PocketHostSurfaceBuilder? hostSurfaceBuilder;
@@ -88,6 +108,10 @@ final class PocketGuestSession extends StatefulWidget {
   /// needs the current rendered guest surface. Keep this off for ordinary
   /// surfaces so they do not allocate the extra render layer.
   final bool enableSceneCapture;
+
+  /// Host-owned Flutter presentation for actual package/runtime startup work.
+  /// Business state and app navigation remain in the guest.
+  final PocketLoadingBuilder? loadingBuilder;
 
   /// Optional host-owned Session.  When supplied, this widget only attaches
   /// its PocketView and never disposes the Session.
@@ -191,6 +215,18 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
     if (!session.ready) {
       final progress = session.transferProgress;
       final background = widget.backgroundColor;
+      final loadingBuilder = widget.loadingBuilder;
+      if (loadingBuilder != null) {
+        return loadingBuilder(
+          context,
+          PocketStartupProgress(
+            stage: PocketStartupStage.preparingPackage,
+            packageStage: session.stage,
+            downloadedBytes: progress?.downloadedBytes,
+            totalBytes: progress?.totalBytes,
+          ),
+        );
+      }
       return PocketStartupIndicator(
         stage: session.stage,
         downloadedBytes: progress?.downloadedBytes,
@@ -222,6 +258,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
           widget.preserveCompositorDisplayGeometry,
       hostSurfaceBuilder: widget.hostSurfaceBuilder,
       hostSurfaceResidents: widget.hostSurfaceResidents,
+      loadingBuilder: widget.loadingBuilder,
       compositorSurfaces: config.compositorSurfaces,
       workerProgram: session.workerProgram,
       offloadProviderFactory: config.offloadProviderFactory,

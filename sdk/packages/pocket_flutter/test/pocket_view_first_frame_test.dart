@@ -119,11 +119,36 @@ PocketFrame _resizedImageFrame() {
   );
 }
 
+PocketFrame _twoImageFrame() {
+  PocketImageResource resource(String asset) => PocketImageResource(
+    asset: asset,
+    width: 1,
+    height: 1,
+    psm: 3,
+    linear: false,
+    pixels: Uint8List.fromList(<int>[255, 255, 255, 255]),
+  );
+
+  return PocketFrame(
+    width: 320,
+    height: 480,
+    ops: const <PocketOp>[
+      PocketRectOp(x: 0, y: 0, width: 320, height: 480, color: 0xff101827),
+      PocketImageOp(x: 20, y: 20, width: 10, height: 10, asset: 'first'),
+      PocketImageOp(x: 40, y: 20, width: 10, height: 10, asset: 'first'),
+      PocketImageOp(x: 60, y: 20, width: 10, height: 10, asset: 'second'),
+    ],
+    events: const <PocketEvent>[],
+    resources: <PocketImageResource>[resource('first'), resource('second')],
+  );
+}
+
 Widget _host(
   PocketRuntime runtime, {
   required PocketImageResourceDecoder decoder,
   PocketViewController? controller,
   ValueChanged<Object>? onError,
+  PocketLoadingBuilder? loadingBuilder,
   VoidCallback? onReady,
 }) {
   return MaterialApp(
@@ -137,6 +162,7 @@ Widget _host(
         pakBytes: Uint8List(0),
         showDebugFps: false,
         imageResourceDecoder: decoder,
+        loadingBuilder: loadingBuilder,
         onError: onError,
         onReady: (_) => onReady?.call(),
       ),
@@ -210,6 +236,8 @@ void main() {
       // old implementation hid the loading surface and called onReady before
       // the decoder completed, so this assertion must fail on that version.
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.text('Decoding first-frame image resources'), findsOneWidget);
+      expect(find.text('0 / 1 first-frame resources decoded'), findsOneWidget);
       expect(ready, isFalse);
 
       decode.complete(await _onePixelImage(tester));
@@ -218,10 +246,87 @@ void main() {
       await tester.pump();
 
       expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.text('Decoding first-frame image resources'), findsNothing);
       expect(ready, isTrue);
       expect(readyFrameCalls, greaterThan(0));
       expect(readySawDisplayViewport, isTrue);
       expect(runtime.frameDeltas.first, 0);
+    },
+  );
+
+  testWidgets(
+    'custom loading builder gets successful unique resource counts and excludes failures',
+    (tester) async {
+      final firstDecode = Completer<ui.Image>();
+      final secondDecode = Completer<ui.Image>();
+      final runtime = _FirstFrameRuntime(_twoImageFrame());
+      final seen = <PocketStartupProgress>[];
+      final errors = <Object>[];
+      var ready = false;
+
+      await tester.pumpWidget(
+        _host(
+          runtime,
+          decoder: (resource) => resource.asset == 'first'
+              ? firstDecode.future
+              : secondDecode.future,
+          loadingBuilder: (context, progress) {
+            seen.add(progress);
+            return Center(
+              child: Text(
+                '${progress.stage.name} '
+                '${progress.resourcesDecoded}/${progress.resourcesTotal}',
+                key: const ValueKey<String>('custom-startup-progress'),
+              ),
+            );
+          },
+          onError: errors.add,
+          onReady: () => ready = true,
+        ),
+      );
+      await tester.pump();
+
+      expect(ready, isFalse);
+      expect(find.text('decodingInitialResources 0/2'), findsOneWidget);
+
+      firstDecode.complete(await _onePixelImage(tester));
+      await tester.runAsync(() async => firstDecode.future);
+      await tester.pump();
+
+      expect(ready, isFalse);
+      expect(find.text('decodingInitialResources 1/2'), findsOneWidget);
+      expect(
+        seen.any(
+          (progress) =>
+              progress.stage == PocketStartupStage.decodingInitialResources &&
+              progress.resourcesDecoded == 1 &&
+              progress.resourcesTotal == 2,
+        ),
+        isTrue,
+      );
+
+      secondDecode.completeError(StateError('second image decode failed'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(ready, isFalse);
+      expect(errors, isNotEmpty);
+      expect(
+        find.textContaining('PocketJS runtime unavailable'),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('custom-startup-progress')),
+        findsNothing,
+      );
+      expect(
+        seen.any(
+          (progress) =>
+              progress.resourcesDecoded == 2 && progress.resourcesTotal == 2,
+        ),
+        isFalse,
+        reason: 'A failed decode must not be counted as ready.',
+      );
     },
   );
 

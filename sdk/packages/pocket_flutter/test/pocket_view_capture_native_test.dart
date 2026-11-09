@@ -190,6 +190,7 @@ void main() {
       );
       final controller = PocketViewController();
       final ready = Completer<void>();
+      final loadingStages = <PocketStartupStage>[];
       const viewKey = ValueKey<String>('scene-capture-view');
       try {
         await tester.pumpWidget(
@@ -211,6 +212,13 @@ void main() {
                       pakBytes: pak,
                       enableSceneCapture: true,
                       showDebugFps: false,
+                      loadingBuilder: (context, progress) {
+                        loadingStages.add(progress.stage);
+                        return Text(
+                          'Native startup: ${progress.stage.name}',
+                          key: const ValueKey<String>('native-startup-loader'),
+                        );
+                      },
                       backgroundColor: null,
                       onReady: (_) {
                         if (!ready.isCompleted) ready.complete();
@@ -228,6 +236,12 @@ void main() {
         }
         expect(ready.isCompleted, isTrue, reason: runtime.lastError);
         expect(controller.runtimeAbi, metadata['runtimeAbi']);
+        expect(loadingStages, contains(PocketStartupStage.startingRuntime));
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey<String>('native-startup-loader')),
+          findsNothing,
+        );
 
         final initial = await _capturePixels(tester, controller);
         _writeCaptureArtifact('before.png', initial.pngBytes);
