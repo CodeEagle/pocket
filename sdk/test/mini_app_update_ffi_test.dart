@@ -121,7 +121,7 @@ void main() {
   });
 
   testWidgets(
-    'prewarm gate holds root, promotes signed v2, and keeps child input live',
+    'cached child opens on v1, stages v2 in background, then reopens on v2',
     (tester) async {
       // Download signed v1 during prewarm. Entry must recheck and reuse its blobs.
       updateServer.releaseBuild = 1;
@@ -175,38 +175,41 @@ void main() {
         updateServer.releaseBuild = 2;
         updateServer.holdLatest = true;
 
+        // A cached v1 child must become visible while the background v2
+        // manifest request is still held by the real loopback server.
         await _sendPointer(tester, root.session, x: 72);
-        await _waitUntil(tester, () => updateServer.latestHeld);
-        await tester.pump(const Duration(milliseconds: 50));
-
-        // prepareOpen is before freeze/push/present: the root remains the
-        // foreground caller and the resident child keeps its old generation.
-        final heldRoot = _findInstance(controller, configs.rootId);
-        final heldChild = _findInstance(controller, configs.childId);
-        expect(heldRoot.foreground, isTrue);
-        expect(heldRoot.isPresented, isTrue);
-        expect(heldChild.instanceId, oldInstanceId);
-        expect(heldChild.generation, oldGeneration);
-        expect(heldChild.isPresented, isFalse);
-        expect(childRecordings.length, 1);
-
-        updateServer.releaseLatest();
         await _waitUntil(
           tester,
-          () {
-            final promoted = _findInstance(controller, configs.childId);
-            return promoted.session.active?.build == 2 &&
-                promoted.generation > oldGeneration &&
-                promoted.firstFrameReady &&
-                promoted.isPresented;
-          },
-          timeout: const Duration(seconds: 30),
+          () =>
+              updateServer.latestHeld &&
+              _findInstanceOrNull(controller, configs.childId)?.isPresented ==
+                  true,
           diagnostic: () =>
               _hostDiagnostics(controller, updateServer, childRecordings),
         );
-        final promoted = _findInstance(controller, configs.childId);
-        expect(promoted.instanceId, oldInstanceId);
-        expect(promoted.session.active?.version, '2.0.0');
+        final openedRoot = _findInstance(controller, configs.rootId);
+        final openedChild = _findInstance(controller, configs.childId);
+        expect(openedChild.instanceId, oldInstanceId);
+        expect(openedChild.generation, oldGeneration);
+        expect(openedChild.session.active?.build, 1);
+        expect(openedChild.isPresented, isTrue);
+        expect(openedRoot.isPresented, isTrue);
+        expect(_frameDigests(rootRecordings.first), isNotEmpty);
+        expect(childRecordings.length, 1);
+
+        updateServer.releaseLatest();
+        updateServer.holdLatest = false;
+        final stagedStatus = await _waitForAvailableVersion(
+          tester,
+          openedChild.session,
+          '2.0.0',
+        );
+        expect(stagedStatus['activeBuild'], 1);
+        expect(stagedStatus['availableVersion'], '2.0.0');
+        expect(openedChild.generation, oldGeneration);
+        expect(openedChild.session.active?.version, '1.0.0');
+        expect(openedChild.isPresented, isTrue);
+
         final reusedHashes = _sharedReleaseBlobs(fixtureRoot!);
         expect(reusedHashes, isNotEmpty);
         final updatePaths = updateServer.filePaths
@@ -218,19 +221,55 @@ void main() {
           updatePaths.where((path) => reusedHashes.contains(path)),
           isEmpty,
         );
-        expect(childRecordings.length, greaterThanOrEqualTo(2));
+        expect(childRecordings.length, 1);
 
-        final promotedRecording = childRecordings.last;
+        final v1Recording = childRecordings.single;
+        await _waitUntil(tester, () => _frameDigests(v1Recording).isNotEmpty);
+        final beforeInput = _frameDigests(v1Recording).last;
+        await _sendPointer(tester, openedChild.session, x: 24);
+        await _waitUntil(tester, () {
+          final frames = _frameDigests(v1Recording);
+          return frames.length >= 2 && frames.last != beforeInput;
+        });
+
+        // The fixture's right-side close target invokes the real JS platform
+        // return capability. The root result signal confirms launch cleanup
+        // has settled before reopening the staged package.
+        await _sendPointer(tester, openedChild.session, x: 220);
+        await _waitUntil(tester, () {
+          return signals.any((event) => event['event'] == 'open-settled') &&
+              _findInstanceOrNull(controller, configs.childId) == null;
+        });
+        await _sendPointer(
+          tester,
+          _findInstance(controller, configs.rootId).session,
+          x: 72,
+        );
         await _waitUntil(
           tester,
-          () => _frameDigests(promotedRecording).isNotEmpty,
+          () {
+            final child = _findInstanceOrNull(controller, configs.childId);
+            return child != null &&
+                child.isPresented &&
+                child.firstFrameReady &&
+                child.session.active?.build == 2;
+          },
+          timeout: const Duration(seconds: 30),
+          diagnostic: () =>
+              _hostDiagnostics(controller, updateServer, childRecordings),
         );
-        final beforeInput = _frameDigests(promotedRecording).last;
-        expect(beforeInput, isNot(oldFrame));
-        await _sendPointer(tester, promoted.session, x: 24);
+        final reopened = _findInstance(controller, configs.childId);
+        expect(reopened.instanceId, isNot(oldInstanceId));
+        expect(reopened.session.active?.version, '2.0.0');
+        expect(childRecordings.length, greaterThanOrEqualTo(2));
+        final v2Recording = childRecordings.last;
+        await _waitUntil(tester, () => _frameDigests(v2Recording).isNotEmpty);
+        final beforeV2Input = _frameDigests(v2Recording).first;
+        expect(beforeV2Input, isNot(oldFrame));
+        await _sendPointer(tester, reopened.session, x: 24);
         await _waitUntil(tester, () {
-          final frames = _frameDigests(promotedRecording);
-          return frames.length >= 2 && frames.last != beforeInput;
+          final frames = _frameDigests(v2Recording);
+          return frames.length >= 2 && frames.last != beforeV2Input;
         });
       } finally {
         await _closeHost(tester, controller);
@@ -239,7 +278,7 @@ void main() {
     skip: skip,
   );
 
-  testWidgets('same signed build during warm open does not remount the child', (
+  testWidgets('same signed build in background does not remount the child', (
     tester,
   ) async {
     updateServer.releaseBuild = 1;
@@ -276,6 +315,10 @@ void main() {
       expect(childBefore.isPresented, isFalse);
 
       await _sendPointer(tester, root.session, x: 72);
+      await _waitUntil(
+        tester,
+        () => updateServer.latestRequests > checksBeforeOpen,
+      );
       await _waitUntil(
         tester,
         () =>
@@ -400,73 +443,69 @@ void main() {
     skip: skip,
   );
 
-  testWidgets(
-    'failed warm admission leaves the caller visible and retries the same child',
-    (tester) async {
-      // Initial prewarm must establish the resident v1 before the failure is
-      // injected at the warm-open boundary.
-      updateServer.releaseBuild = 1;
-      updateServer.failLatest = false;
-      final controller = PocketSystemHostController();
-      final configs = _makeConfigs(
-        fixture: fixture,
-        server: server,
-        rootRecordings: rootRecordings,
-        childRecordings: childRecordings,
-        signals: signals,
+  testWidgets('cache-first background failure keeps the cached child active', (
+    tester,
+  ) async {
+    // Initial prewarm establishes v1. A failed background check must not
+    // undo the cache-first open or retire its active compositor generation.
+    updateServer.releaseBuild = 1;
+    updateServer.failLatest = false;
+    final controller = PocketSystemHostController();
+    final configs = _makeConfigs(
+      fixture: fixture,
+      server: server,
+      rootRecordings: rootRecordings,
+      childRecordings: childRecordings,
+      signals: signals,
+      downloadOnOpen: true,
+    );
+    try {
+      await _pumpHost(tester, controller, configs);
+      await _waitUntil(
+        tester,
+        () {
+          final child = _findInstanceOrNull(controller, configs.childId);
+          return child != null &&
+              child.firstFrameReady &&
+              signals.any((event) => event['event'] == 'prewarmed');
+        },
+        diagnostic: () =>
+            _hostDiagnostics(controller, updateServer, childRecordings),
       );
-      try {
-        await _pumpHost(tester, controller, configs);
-        await _waitUntil(
-          tester,
-          () {
-            final child = _findInstanceOrNull(controller, configs.childId);
-            return child != null &&
-                child.firstFrameReady &&
-                signals.any((event) => event['event'] == 'prewarmed');
-          },
-          diagnostic: () =>
-              _hostDiagnostics(controller, updateServer, childRecordings),
-        );
-        updateServer.releaseBuild = 2;
-        updateServer.failLatest = true;
-        final root = _findInstance(controller, configs.rootId);
-        final childBefore = _findInstance(controller, configs.childId);
-        final oldGeneration = childBefore.generation;
-        final oldInstanceId = childBefore.instanceId;
+      updateServer.releaseBuild = 2;
+      updateServer.failLatest = true;
+      final root = _findInstance(controller, configs.rootId);
+      final childBefore = _findInstance(controller, configs.childId);
+      final oldGeneration = childBefore.generation;
+      final oldInstanceId = childBefore.instanceId;
 
-        await _sendPointer(tester, root.session, x: 72);
-        await _waitUntil(
-          tester,
-          () => signals.any((event) => event['event'] == 'open-error'),
-        );
-        await tester.pump(const Duration(milliseconds: 100));
-        final failedRoot = _findInstance(controller, configs.rootId);
-        final failedChild = _findInstance(controller, configs.childId);
-        expect(failedRoot.foreground, isTrue);
-        expect(failedRoot.isPresented, isTrue);
-        expect(failedChild.isPresented, isFalse);
-        expect(failedChild.instanceId, oldInstanceId);
-        expect(failedChild.generation, oldGeneration);
-
-        updateServer.failLatest = false;
-        await _sendPointer(tester, failedRoot.session, x: 72);
-        await _waitUntil(tester, () {
-          final retried = _findInstance(controller, configs.childId);
-          return retried.session.active?.build == 2 &&
-              retried.generation > oldGeneration &&
-              retried.isPresented;
-        }, timeout: const Duration(seconds: 30));
-        expect(
-          _findInstance(controller, configs.childId).instanceId,
-          oldInstanceId,
-        );
-      } finally {
-        await _closeHost(tester, controller);
-      }
-    },
-    skip: skip,
-  );
+      await _sendPointer(tester, root.session, x: 72);
+      await _waitUntil(
+        tester,
+        () =>
+            _findInstance(controller, configs.childId).isPresented &&
+            _findInstance(controller, configs.childId).firstFrameReady,
+      );
+      final failedStatus = await _waitForStatus(
+        tester,
+        _findInstance(controller, configs.childId).session,
+        (status) => status['lastError'] != null,
+      );
+      expect(failedStatus['activeBuild'], 1);
+      expect(failedStatus['availableVersion'], isNull);
+      final failedRoot = _findInstance(controller, configs.rootId);
+      final failedChild = _findInstance(controller, configs.childId);
+      expect(failedRoot.isPresented, isTrue);
+      expect(_frameDigests(rootRecordings.first), isNotEmpty);
+      expect(failedChild.isPresented, isTrue);
+      expect(failedChild.instanceId, oldInstanceId);
+      expect(failedChild.generation, oldGeneration);
+      expect(failedChild.session.active?.build, 1);
+      expect(signals.any((event) => event['event'] == 'open-error'), isFalse);
+    } finally {
+      await _closeHost(tester, controller);
+    }
+  }, skip: skip);
 }
 
 final class _MiniUpdateConfigs {
@@ -643,6 +682,34 @@ Future<void> _waitUntil(
   }
   final detail = diagnostic == null ? '' : ': ${diagnostic()}';
   fail('Timed out waiting for mini-app update state$detail');
+}
+
+Future<Map<String, dynamic>> _waitForAvailableVersion(
+  WidgetTester tester,
+  PocketSession session,
+  String version,
+) => _waitForStatus(
+  tester,
+  session,
+  (status) => status['availableVersion'] == version,
+);
+
+Future<Map<String, dynamic>> _waitForStatus(
+  WidgetTester tester,
+  PocketSession session,
+  bool Function(Map<String, dynamic>) condition, {
+  Duration timeout = const Duration(seconds: 30),
+}) async {
+  final elapsed = Stopwatch()..start();
+  while (elapsed.elapsed < timeout) {
+    final status = await tester.runAsync(session.status);
+    if (status != null && condition(status)) return status;
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+  }
+  fail('Timed out waiting for mini-app session status');
 }
 
 String _hostDiagnostics(

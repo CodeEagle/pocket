@@ -147,6 +147,19 @@ void main() {
     expect(value.stage, 'ready');
   }
 
+  Future<void> waitForAvailableVersion(
+    PocketSession value,
+    String version,
+  ) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (DateTime.now().isBefore(deadline)) {
+      final current = await value.status();
+      if (current['availableVersion'] == version) return;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    fail('Session did not stage update $version');
+  }
+
   Future<void> closeQuietly(PocketSession value) async {
     try {
       await value.close();
@@ -540,6 +553,289 @@ void main() {
         expect(reopened.lastError, isNull);
       } finally {
         await closeQuietly(reopened);
+      }
+    },
+  );
+
+  test(
+    'cacheFirst presents healthy cache through blocked HTTP and uses staged update on next open',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release2;
+      final first = session();
+      try {
+        await first.initialize();
+        await waitForHealthy(first);
+      } finally {
+        await closeQuietly(first);
+      }
+
+      final release3 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 3,
+        version: '3.0.0',
+      );
+      updateServer.current = release3;
+      updateServer.holdPath = '/manifest.json';
+      final manifestRequests = updateServer.count('/manifest.json');
+      final cached = session();
+      try {
+        // initialize returns before the held response is released. The
+        // background check has not mounted or promoted the newer package.
+        await cached
+            .initialize(prepareForOpen: true, cacheFirst: true)
+            .timeout(const Duration(seconds: 2));
+        await waitUntil(
+          () => updateServer.count('/manifest.json') > manifestRequests,
+        );
+        expect(cached.active?.version, '2.0.0');
+        expect(cached.generation, 0);
+        final repeatedOpen = await cached
+            .prepareForOpen(cacheFirst: true)
+            .timeout(const Duration(seconds: 1));
+        expect(repeatedOpen, <String, Object?>{
+          'configured': true,
+          'updated': false,
+        });
+        expect(cached.active?.version, '2.0.0');
+        expect(cached.generation, 0);
+
+        updateServer.releaseHeldResponse();
+        await waitForAvailableVersion(cached, '3.0.0');
+        expect(cached.active?.version, '2.0.0');
+        expect(cached.generation, 0);
+        await waitForHealthy(cached);
+        final healthy = await packageStore()
+            .scoped(appId)
+            .lastGood(verifier: verifier());
+        expect(healthy?.manifest.payload.version, '2.0.0');
+
+        // A resident open consumes the staged v3 package, then starts its own
+        // non-blocking refresh so each subsequent open can stage the next
+        // published version.
+        updateServer.holdPath = '/manifest.json';
+        final residentOpenManifestRequests = updateServer.count(
+          '/manifest.json',
+        );
+        final residentOpen = await cached.prepareForOpen(cacheFirst: true);
+        expect(residentOpen, <String, Object?>{
+          'configured': true,
+          'updated': true,
+        });
+        expect(cached.active?.version, '3.0.0');
+        expect(cached.generation, 1);
+        await waitUntil(
+          () =>
+              updateServer.count('/manifest.json') >
+              residentOpenManifestRequests,
+        );
+        expect(cached.active?.version, '3.0.0');
+        expect(cached.generation, 1);
+        updateServer.releaseHeldResponse();
+      } finally {
+        updateServer.releaseHeldResponse();
+        await closeQuietly(cached);
+      }
+
+      // The staged v3 directory is consumed locally on the next cache-first
+      // startup. Its own refresh is held to prove startup does not need HTTP.
+      updateServer.holdPath = '/manifest.json';
+      final nextOpenManifestRequests = updateServer.count('/manifest.json');
+      final nextOpen = session();
+      try {
+        await nextOpen
+            .initialize(prepareForOpen: true, cacheFirst: true)
+            .timeout(const Duration(seconds: 2));
+        expect(nextOpen.active?.version, '3.0.0');
+        expect(nextOpen.generation, 0);
+        final repeatedOpen = await nextOpen.prepareForOpen(cacheFirst: true);
+        expect(repeatedOpen, <String, Object?>{
+          'configured': true,
+          'updated': false,
+        });
+        await waitUntil(
+          () => updateServer.count('/manifest.json') > nextOpenManifestRequests,
+        );
+        expect(nextOpen.active?.version, '3.0.0');
+        expect(nextOpen.generation, 0);
+        expect(updateServer.count(release3.entryPath), 1);
+        expect(updateServer.count(release3.pakPath), 1);
+      } finally {
+        updateServer.releaseHeldResponse();
+        await closeQuietly(nextOpen);
+      }
+    },
+  );
+
+  test(
+    'cacheFirst waits for a cold signed download and cancellation drains it',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+      updateServer.holdPath = '/manifest.json';
+      final value = session();
+      var completed = false;
+      final initializing = value
+          .initialize(prepareForOpen: true, cacheFirst: true)
+          .then<void>(
+            (_) => completed = true,
+            onError: (Object _) {
+              completed = true;
+            },
+          );
+      try {
+        await waitUntil(() => updateServer.count('/manifest.json') > 0);
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(completed, isFalse);
+        expect(value.ready, isFalse);
+        expect(value.active, isNull);
+
+        final closing = value.close();
+        updateServer.releaseHeldResponse();
+        await closing;
+        await initializing;
+        expect(value.active, isNull);
+        expect(value.ready, isFalse);
+        expect(
+          await packageStore().scoped(appId).lastGood(verifier: verifier()),
+          isNull,
+        );
+      } finally {
+        updateServer.releaseHeldResponse();
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'cacheFirst background check failure leaves the healthy runtime ready',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+      final first = session();
+      try {
+        await first.initialize();
+        await waitForHealthy(first);
+      } finally {
+        await closeQuietly(first);
+      }
+
+      updateServer.online = false;
+      final cached = session();
+      try {
+        await cached
+            .initialize(prepareForOpen: true, cacheFirst: true)
+            .timeout(const Duration(seconds: 2));
+        final generation = cached.generation;
+        expect(cached.active?.version, '2.0.0');
+        expect(cached.ready, isTrue);
+        await waitForHealthy(cached);
+        await waitUntil(
+          () =>
+              cached.lastError?.startsWith(
+                'Background update preparation failed:',
+              ) ==
+              true,
+        );
+        expect(cached.active?.version, '2.0.0');
+        expect(cached.generation, generation);
+        expect(cached.ready, isTrue);
+        expect(cached.stage, 'ready');
+        expect(cached.failure, isNull);
+      } finally {
+        await closeQuietly(cached);
+      }
+    },
+  );
+
+  test(
+    'cacheFirst cold download failure has no embedded or stale fallback',
+    () async {
+      updateServer.online = false;
+      final value = session();
+      try {
+        await expectLater(
+          value.initialize(prepareForOpen: true, cacheFirst: true),
+          throwsA(anything),
+        );
+        expect(updateServer.count('/manifest.json'), greaterThan(0));
+        expect(value.active, isNull);
+        expect(value.ready, isFalse);
+        expect(value.failure, isNotNull);
+        expect(value.stage, 'error');
+      } finally {
+        await closeQuietly(value);
+      }
+    },
+  );
+
+  test(
+    'cacheFirst keeps a bundled runtime presentable during a blocked update',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 1,
+        version: 'embedded-floor-1.0.0',
+      );
+      updateServer.current = release;
+      updateServer.holdPath = '/manifest.json';
+      final value = PocketSession(config: config(downloadOnOpen: false));
+      try {
+        await value
+            .initialize(prepareForOpen: true, cacheFirst: true)
+            .timeout(const Duration(seconds: 2));
+        await waitUntil(() => updateServer.count('/manifest.json') > 0);
+        expect(value.ready, isTrue);
+        expect(value.runtimeInfo()['source'], 'embedded');
+        expect(value.active, isNull);
+        expect(value.failure, isNull);
+        final result = await value.prepareForOpen(cacheFirst: true);
+        expect(result, <String, Object?>{'configured': true, 'updated': false});
+        expect(value.runtimeInfo()['source'], 'embedded');
+
+        updateServer.releaseHeldResponse();
+        await waitForAvailableVersion(value, 'embedded-floor-1.0.0');
+        expect(value.active, isNull);
+        expect(value.failure, isNull);
+      } finally {
+        updateServer.releaseHeldResponse();
+        await closeQuietly(value);
+      }
+
+      updateServer.holdPath = '/manifest.json';
+      final nextOpen = PocketSession(config: config(downloadOnOpen: false));
+      try {
+        await nextOpen
+            .initialize(prepareForOpen: true, cacheFirst: true)
+            .timeout(const Duration(seconds: 2));
+        expect(nextOpen.active?.version, 'embedded-floor-1.0.0');
+        expect(nextOpen.active?.build, 1);
+        expect(nextOpen.generation, 0);
+      } finally {
+        updateServer.releaseHeldResponse();
+        await closeQuietly(nextOpen);
       }
     },
   );

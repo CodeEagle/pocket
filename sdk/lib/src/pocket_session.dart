@@ -186,9 +186,10 @@ final class PocketSession extends ChangeNotifier {
   void _recordTransferProgress(
     PocketUpdateProgress progress, {
     bool sendToGuest = false,
+    bool updateStage = true,
   }) {
     if (_disposed) return;
-    stage = progress.stage.name;
+    if (updateStage) stage = progress.stage.name;
     _transferProgress = progress;
     if (sendToGuest) {
       _send('updates.progress', {
@@ -212,6 +213,7 @@ final class PocketSession extends ChangeNotifier {
   Timer? _startupTimer;
   Future<void>? _shutdown;
   Future<void>? _initializeFuture;
+  Future<void>? _backgroundPreparation;
   Map<String, dynamic> Function()? _pendingRecordingStartedStatus;
 
   void _restartForRecording(Map<String, dynamic> Function() statusProvider) {
@@ -229,20 +231,30 @@ final class PocketSession extends ChangeNotifier {
   /// loading. Keeping the future lets [close] wait for that work and prevents
   /// a second caller from constructing a second plugin/update generation.
   ///
-  /// When [prepareForOpen] is true and signed updates are configured, the
-  /// remote manifest is checked and any candidate is staged before the bridge
-  /// is configured. This is intentionally a one-shot startup gate; callers
-  /// must pass it on the first initialize call.
-  Future<void> initialize({bool prepareForOpen = false}) {
+  /// With [prepareForOpen], signed preparation normally precedes the bridge.
+  /// [cacheFirst] instead admits a usable local version and prepares updates
+  /// in the background; a remote-only cold start still awaits preparation.
+  /// These options must be supplied on the first initialize call.
+  Future<void> initialize({
+    bool prepareForOpen = false,
+    bool cacheFirst = false,
+  }) {
     if (_disposed) return Future<void>.error(StateError('Session is closed'));
     final existing = _initializeFuture;
     if (existing != null) return existing;
-    final future = _initialize(prepareForOpen: prepareForOpen);
+    final future = _initialize(
+      prepareForOpen: prepareForOpen,
+      cacheFirst: cacheFirst,
+    );
     _initializeFuture = future;
     return future;
   }
 
-  Future<void> _initialize({bool prepareForOpen = false}) async {
+  Future<void> _initialize({
+    bool prepareForOpen = false,
+    bool cacheFirst = false,
+  }) async {
+    var scheduleCacheFirstPreparation = false;
     // History restoration and bootstrap assets are independent. Drain every
     // operation, including on failure, before admission or close completes.
     late final List<String> sources;
@@ -331,16 +343,39 @@ final class PocketSession extends ChangeNotifier {
         return;
       }
       _updates = updates;
-      if (_downloadOnOpen || prepareForOpen) {
+      if (_downloadOnOpen || prepareForOpen || cacheFirst) {
         // Opening a remote mini-app first reuses only a verified healthy
         // package. With no healthy cache, the coordinator performs the full
         // signed-manifest/blob admission path and stages a candidate; no
-        // local qjbc/PAK fallback is available in this mode. An explicit
-        // prepareForOpen gate always performs that signed check, even when a
-        // healthy cache exists. This is what makes a mini-app entry check
-        // different from the normal offline cache bootstrap.
+        // local qjbc/PAK fallback is available in downloadOnOpen mode. The
+        // explicit cacheFirst path starts from a verified local package (or
+        // the validated bundle) and stages remote updates without switching
+        // this generation. The strict default checks and mounts before entry.
         try {
-          if (prepareForOpen) {
+          if (cacheFirst) {
+            active = await updates.lastGood(allowActiveFallback: false);
+            if (_disposed) return;
+            if (active != null && active!.build < _embeddedBuild) {
+              // Keep stale healthy pointers as anti-downgrade baselines, but
+              // never run them below the current bundled executable floor.
+              active = null;
+            }
+            final staged = await _verifiedStagedCandidate(
+              updates,
+              mountedPackage: active?.package,
+            );
+            if (_disposed) return;
+            if (staged != null) active = staged;
+            if (active == null && _downloadOnOpen) {
+              // Remote-only cold start: there is no local runtime to show, so
+              // retain the original bounded signed download/verification gate.
+              active = await _prepareOnOpen(updates);
+            } else {
+              // A trusted bundled package is local runtime data even before
+              // a signed package has reached lastGood.
+              scheduleCacheFirstPreparation = true;
+            }
+          } else if (prepareForOpen) {
             active = await _prepareOnOpen(
               updates,
               mountedPackage: active?.package,
@@ -395,10 +430,39 @@ final class PocketSession extends ChangeNotifier {
       await _configureBridge(active);
       await _prepareBeforeGenerationMount(active, generation);
       await _withAdmittedPackage(active, publishInitial);
+      if (scheduleCacheFirstPreparation) {
+        _scheduleCacheFirstPreparation();
+      }
     } catch (error) {
-      if (_downloadOnOpen || prepareForOpen) {
+      if (_downloadOnOpen || prepareForOpen || cacheFirst) {
         final failed = active;
-        if (_downloadOnOpen && !prepareForOpen) {
+        if (cacheFirst && failed?.needsActivation == true) {
+          final fallback = _downloadOnOpen
+              ? await _verifiedFallback(failed!)
+              : null;
+          if (!_downloadOnOpen) {
+            await _discardFailedStagedCandidate(failed!);
+            active = null;
+            _candidate = null;
+            _resetCacheOnHealth = true;
+            try {
+              await _configureBridge(null);
+              await _prepareBeforeGenerationMount(null, generation);
+              await _withAdmittedPackage(null, publishInitial);
+              return;
+            } catch (_) {}
+          }
+          if (fallback != null && !_disposed) {
+            active = fallback;
+            _candidate = null;
+            try {
+              await _configureBridge(fallback);
+              await _prepareBeforeGenerationMount(fallback, generation);
+              await _withAdmittedPackage(fallback, publishInitial);
+              return;
+            } catch (_) {}
+          }
+        } else if (_downloadOnOpen && !prepareForOpen) {
           final fallback = failed == null
               ? null
               : await _verifiedFallback(failed);
@@ -434,6 +498,7 @@ final class PocketSession extends ChangeNotifier {
   Future<PocketPreparedPackage> _prepareOnOpen(
     PocketUpdateCoordinator updates, {
     PocketPackage? mountedPackage,
+    bool updateStage = true,
   }) async {
     // A new open or refresh owns a fresh progress lifetime. Do not expose a
     // completed or interrupted transfer from an earlier attempt.
@@ -443,7 +508,7 @@ final class PocketSession extends ChangeNotifier {
       cancellation: token,
       mountedPackage: mountedPackage,
       onProgress: (progress) {
-        _recordTransferProgress(progress);
+        _recordTransferProgress(progress, updateStage: updateStage);
       },
     );
     try {
@@ -471,8 +536,156 @@ final class PocketSession extends ChangeNotifier {
     }
   }
 
-  /// Checks the signed update source immediately before an already resident
-  /// runtime is presented.
+  /// Returns the newest fully verified, non-pointer package that is newer
+  /// than every trusted running/healthy identity. Staged directories are
+  /// persistent package-store data; failed candidates are removed through the
+  /// coordinator's existing fallback path and are never selected again.
+  Future<PocketPreparedPackage?> _verifiedStagedCandidate(
+    PocketUpdateCoordinator updates, {
+    PocketPackage? mountedPackage,
+  }) async {
+    final versions = await updates.listVersions();
+    var floorBuild = updates.minimumBuild;
+    final establishedIdsAtFloor = <String>{};
+    for (final version in versions) {
+      if (!version.isActive && !version.isLastGood) continue;
+      if (version.build > floorBuild) {
+        floorBuild = version.build;
+        establishedIdsAtFloor
+          ..clear()
+          ..add(version.versionId);
+      } else if (version.build == floorBuild) {
+        establishedIdsAtFloor.add(version.versionId);
+      }
+    }
+    if (mountedPackage != null) {
+      final build = mountedPackage.manifest.payload.build;
+      if (build > floorBuild) {
+        floorBuild = build;
+        establishedIdsAtFloor
+          ..clear()
+          ..add(mountedPackage.versionId);
+      } else if (build == floorBuild) {
+        establishedIdsAtFloor.add(mountedPackage.versionId);
+      }
+    }
+
+    for (final version in versions) {
+      // Active/lastGood are the already-running baseline. Previous is a
+      // rollback-only target. Only unpointed staged releases are auto-opened.
+      if (version.isActive || version.isLastGood || version.isPrevious) {
+        continue;
+      }
+      if (version.build < _embeddedBuild || version.build < floorBuild) {
+        continue;
+      }
+      if (version.build == floorBuild &&
+          (establishedIdsAtFloor.isEmpty ||
+              establishedIdsAtFloor.any((id) => id != version.versionId))) {
+        continue;
+      }
+      final prepared = PocketPreparedPackage(
+        package: version.package,
+        needsActivation: true,
+      );
+      try {
+        // This validates the local staged bytes and the current persisted
+        // trust policy without fetching a remote trust policy or manifest.
+        await updates.withVerifiedPrepared(prepared, () {});
+        return prepared;
+      } on Object {
+        // A damaged/revoked stage does not hide a healthy cache or bundled
+        // runtime. A later signed prepare can repair the same version folder.
+      }
+    }
+    return null;
+  }
+
+  void _scheduleCacheFirstPreparation() {
+    final updates = _updates;
+    if (_disposed ||
+        updates == null ||
+        _backgroundPreparation != null ||
+        _download != null) {
+      return;
+    }
+    final sourceGeneration = generation;
+    final sourceVersionId = active?.package.versionId;
+    late final Future<void> tracked;
+    tracked =
+        _prepareCacheFirstInBackground(
+          updates,
+          sourceGeneration: sourceGeneration,
+          sourceVersionId: sourceVersionId,
+        ).whenComplete(() {
+          if (identical(_backgroundPreparation, tracked)) {
+            _backgroundPreparation = null;
+          }
+        });
+    _backgroundPreparation = tracked;
+    unawaited(tracked);
+  }
+
+  Future<void> _prepareCacheFirstInBackground(
+    PocketUpdateCoordinator updates, {
+    required int sourceGeneration,
+    required String? sourceVersionId,
+  }) async {
+    try {
+      final prepared = await _prepareOnOpen(
+        updates,
+        mountedPackage: active?.package,
+        updateStage: false,
+      );
+      if (_disposed ||
+          generation != sourceGeneration ||
+          active?.package.versionId != sourceVersionId) {
+        return;
+      }
+      if (!prepared.needsActivation ||
+          prepared.package.versionId == sourceVersionId) {
+        return;
+      }
+      await _withAdmittedPackage(prepared, () {});
+      if (_disposed ||
+          generation != sourceGeneration ||
+          active?.package.versionId != sourceVersionId) {
+        return;
+      }
+      _candidate = prepared;
+      lastError = null;
+      if (hasListeners) notifyListeners();
+    } on Object catch (error) {
+      if (_disposed ||
+          generation != sourceGeneration ||
+          active?.package.versionId != sourceVersionId) {
+        return;
+      }
+      // A failed refresh never invalidates the cached runtime or its healthy
+      // pointer. The progress callback leaves the runtime phase untouched.
+      lastError = 'Background update preparation failed: $error';
+      if (hasListeners) notifyListeners();
+    }
+  }
+
+  Future<void> _discardFailedStagedCandidate(
+    PocketPreparedPackage prepared,
+  ) async {
+    final updates = _updates;
+    if (updates == null || _disposed) return;
+    try {
+      // The store's existing fallback operation removes the failed version
+      // while restoring its healthy pointer. It creates no new pointer/state.
+      await updates.fallbackFor(prepared);
+    } on Object {
+      // Preserve the original mount error; the next stage scan still checks
+      // full package integrity before admitting any candidate.
+    }
+  }
+
+  /// Prepares an already resident runtime for presentation. By default this
+  /// checks the signed source first. With [cacheFirst], a locally verified
+  /// staged candidate is consumed and remote preparation runs in the background.
   ///
   /// This is deliberately separate from [updates.apply]. Applying through the
   /// guest API schedules a remount and keeps [_busy] set until the visible
@@ -486,6 +699,7 @@ final class PocketSession extends ChangeNotifier {
   /// for its first hidden health frame; only a real package operation or
   /// lifecycle transition is a conflict here.
   Future<Map<String, Object?>> prepareForOpen({
+    bool cacheFirst = false,
     bool Function()? canMount,
   }) async {
     if (_disposed) {
@@ -510,6 +724,15 @@ final class PocketSession extends ChangeNotifier {
         );
       }
       return const <String, Object?>{'configured': false, 'updated': false};
+    }
+    if (cacheFirst) {
+      if (_download != null && _backgroundPreparation == null) {
+        throw const PocketCapabilityException(
+          'busy',
+          'A package operation is in progress',
+        );
+      }
+      return _prepareCacheFirstOpen(updates, canMount: canMount);
     }
     if (_download != null ||
         (_mountTimer?.isActive ?? false) ||
@@ -600,6 +823,100 @@ final class PocketSession extends ChangeNotifier {
         // receives the failure and may retry the gate.
         _busy = active == null || failure != null ? false : previousBusy;
       }
+      if (error is PocketCapabilityException) rethrow;
+      if (error is PocketPackageException) {
+        throw PocketCapabilityException(error.code, error.message);
+      }
+      throw PocketCapabilityException('update_mount_failed', '$error');
+    } finally {
+      _packageAdmissionInFlight = false;
+    }
+  }
+
+  Future<Map<String, Object?>> _prepareCacheFirstOpen(
+    PocketUpdateCoordinator updates, {
+    bool Function()? canMount,
+  }) async {
+    if ((_mountTimer?.isActive ?? false) ||
+        _mountOperation != null ||
+        _packageAdmissionInFlight ||
+        _recovering ||
+        _promotion != null) {
+      throw const PocketCapabilityException(
+        'busy',
+        'A package operation is in progress',
+      );
+    }
+    if (canMount != null && !canMount()) {
+      throw const PocketCapabilityException(
+        'runtime_busy',
+        'Runtime became visible before its package was mounted',
+      );
+    }
+    // A background HTTP preparation may still be pending. The current local
+    // generation remains presentable; only a completed verified stage can be
+    // consumed by this open.
+    if (_backgroundPreparation != null && _download != null) {
+      return const <String, Object?>{'configured': true, 'updated': false};
+    }
+
+    final previousBusy = _busy;
+    _busy = true;
+    _packageAdmissionInFlight = true;
+    try {
+      final staged = await _verifiedStagedCandidate(
+        updates,
+        mountedPackage: active?.package,
+      );
+      if (_disposed) {
+        throw const PocketCapabilityException(
+          'host_closed',
+          'Session is closed',
+        );
+      }
+      if (canMount != null && !canMount()) {
+        throw const PocketCapabilityException(
+          'runtime_busy',
+          'Runtime became visible before its package was mounted',
+        );
+      }
+      if (staged == null ||
+          staged.package.versionId == active?.package.versionId) {
+        await _withAdmittedPackage(staged ?? active, () {});
+        _busy = previousBusy;
+        _scheduleCacheFirstPreparation();
+        return const <String, Object?>{'configured': true, 'updated': false};
+      }
+
+      final previous = active;
+      _candidate = staged;
+      await _mount(staged);
+      final actual = active;
+      if (actual?.package.versionId == staged.package.versionId) {
+        _scheduleCacheFirstPreparation();
+        return const <String, Object?>{'configured': true, 'updated': true};
+      }
+
+      await _discardFailedStagedCandidate(staged);
+      if (_candidate?.package.versionId == staged.package.versionId) {
+        _candidate = null;
+      }
+      if (failure != null || (_downloadOnOpen && actual == null)) {
+        _busy = false;
+        throw const PocketCapabilityException(
+          'update_mount_failed',
+          'Prepared package could not be mounted and no local runtime remains',
+        );
+      }
+      // _mount restored the prior healthy package or immutable embedded app.
+      // Keep that runtime presentable and report that this open used its cache.
+      if (previous == null && !_downloadOnOpen && actual == null) {
+        lastError ??= 'Staged update mount failed; using bundled package';
+      }
+      _busy = previousBusy;
+      return const <String, Object?>{'configured': true, 'updated': false};
+    } on Object catch (error) {
+      _busy = failure != null && active == null ? false : previousBusy;
       if (error is PocketCapabilityException) rethrow;
       if (error is PocketPackageException) {
         throw PocketCapabilityException(error.code, error.message);
@@ -947,7 +1264,7 @@ final class PocketSession extends ChangeNotifier {
     Map<String, dynamic> params = const <String, dynamic>{},
   ]) async {
     final updates = _requireUpdates();
-    if (_busy || _packageAdmissionInFlight) {
+    if (_busy || _packageAdmissionInFlight || _download != null) {
       throw const PocketCapabilityException(
         'busy',
         'A package operation is in progress',
@@ -1019,7 +1336,7 @@ final class PocketSession extends ChangeNotifier {
     Map<String, dynamic> params = const <String, dynamic>{},
   ]) async {
     _requireUpdates();
-    if (_busy || _packageAdmissionInFlight) {
+    if (_busy || _packageAdmissionInFlight || _download != null) {
       throw const PocketCapabilityException(
         'busy',
         'A package operation is in progress',
@@ -1099,7 +1416,7 @@ final class PocketSession extends ChangeNotifier {
 
   Future<Map<String, dynamic>> _rollback() async {
     final updates = _requireUpdates();
-    if (_busy || _packageAdmissionInFlight) {
+    if (_busy || _packageAdmissionInFlight || _download != null) {
       throw const PocketCapabilityException(
         'busy',
         'A package operation is in progress',
@@ -1397,6 +1714,7 @@ final class PocketSession extends ChangeNotifier {
     final pending = <Future<void>>[
       _shutdown ?? Future<void>.value(),
       if (_initializeFuture != null) _initializeFuture!,
+      if (_backgroundPreparation != null) _backgroundPreparation!,
       if (_promotion != null) _promotion!,
       if (_mountOperation != null) _mountOperation!,
       _bridgeOperation,

@@ -1343,7 +1343,7 @@ final class PocketPackageStore {
       );
       await _writeAtomic(_pointer('lastGood'), utf8.encode(verified.versionId));
     });
-    await _pruneInactiveVersionsUnlocked(keep: 2);
+    await _pruneInactiveVersionsUnlocked(keep: 2, verifier: verifier);
   }
 
   Future<int?> _readBuildForVersionId(String id) async {
@@ -1594,29 +1594,72 @@ final class PocketPackageStore {
     return List<PocketVersionInfo>.unmodifiable(result);
   }
 
+  /// Keeps activation-pointer targets and, when [verifier] is supplied, up to
+  /// [keep] newest complete signed versions that are not pointed to. Without
+  /// a verifier, unpointed directories are removed as in the legacy API.
   Future<void> pruneInactiveVersions([
     String? applicationId,
     int keep = 2,
+    PocketManifestVerifier? verifier,
   ]) =>
       _synchronized(() {
         final target = applicationId != null ? scoped(applicationId) : this;
-        return target._pruneInactiveVersionsUnlocked(keep: keep);
+        return target._pruneInactiveVersionsUnlocked(
+          keep: keep,
+          verifier: verifier,
+        );
       });
 
-  Future<void> _pruneInactiveVersionsUnlocked({int keep = 2}) async {
+  Future<void> _pruneInactiveVersionsUnlocked({
+    int keep = 2,
+    PocketManifestVerifier? verifier,
+  }) async {
     if (!await _versions.exists()) return;
     final keepSet = <String>{};
     for (final name in ['active', 'previous', 'lastGood']) {
       final id = await _readPointerId(name);
       if (id != null) keepSet.add(id);
     }
-    await for (final entity in _versions.list(followLinks: false)) {
-      if (entity is Directory && !keepSet.contains(path.basename(entity.path))) {
-        try {
-          await entity.delete(recursive: true);
-        } catch (_) {}
+    final candidates = <PocketPackage>[];
+    final directories = await _versions.list(followLinks: false).toList();
+    for (final entity in directories) {
+      if (entity is! Directory) continue;
+      final id = path.basename(entity.path);
+      if (keepSet.contains(id)) continue;
+      if (verifier == null) {
+        await _deleteVersionDirectory(entity);
+        continue;
+      }
+      try {
+        final package = await _loadVersion(id, verifier: verifier);
+        if (_versionId(package.manifest.payload) != id) {
+          throw const PocketPackageException(
+            'staged package version ID does not match its signed manifest',
+            code: 'cache-package',
+          );
+        }
+        candidates.add(package);
+      } on Object {
+        // Incomplete, corrupt, or no-longer-trusted stages are not reusable.
+        await _deleteVersionDirectory(entity);
       }
     }
+    candidates.sort((a, b) {
+      final buildOrder = b.manifest.payload.build.compareTo(
+        a.manifest.payload.build,
+      );
+      return buildOrder != 0 ? buildOrder : b.versionId.compareTo(a.versionId);
+    });
+    final retained = math.max(0, keep);
+    for (final package in candidates.skip(retained)) {
+      await _deleteVersionDirectory(package.directory);
+    }
+  }
+
+  Future<void> _deleteVersionDirectory(Directory directory) async {
+    try {
+      await directory.delete(recursive: true);
+    } catch (_) {}
   }
 
   Future<PocketPackage?> _readPointer(

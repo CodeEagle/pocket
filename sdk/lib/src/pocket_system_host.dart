@@ -1664,6 +1664,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     _ensureOwnerGeneration(ownerGeneration);
     final appId = _requiredString(params, 'appId');
     final prepareForOpen = params['prepareForOpen'] == true;
+    final cacheFirst = params['cacheFirst'] == true;
     final trustedConfig = _trustedApplications[appId];
     if (trustedConfig == null) {
       throw PocketCapabilityException(
@@ -1734,7 +1735,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
 
     try {
       await instance.session.setForeground(false);
-      await instance.session.initialize(prepareForOpen: prepareForOpen);
+      await instance.session.initialize(
+        prepareForOpen: prepareForOpen,
+        cacheFirst: cacheFirst,
+      );
       if (!_isCurrent(instance) ||
           ownerGeneration != _systemUIGeneration ||
           instance.ownerGeneration != _systemUIGeneration) {
@@ -1785,6 +1789,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     await _awaitConfigured();
     _ensureOwnerGeneration(ownerGeneration);
     final instanceId = _requiredString(params, 'instanceId');
+    final cacheFirst = params['cacheFirst'] == true;
     final rawGeneration = params['generation'];
     if (rawGeneration is! num ||
         !rawGeneration.isFinite ||
@@ -1826,6 +1831,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     late final Map<String, Object?> result;
     try {
       result = await instance.session.prepareForOpen(
+        cacheFirst: cacheFirst,
         canMount: () =>
             _isCurrent(instance) &&
             _systemUIGeneration == ownerGeneration &&

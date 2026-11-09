@@ -215,3 +215,15 @@ reproduces a shrinking top inset and an extra child layout update; enabling it
 keeps the inset stable and emits no movement-driven display update. Physical
 iPhone smoothness must be compared with a newly built app; the old screen recording
 is diagnostic evidence, not a recording of this patch.
+
+## Mini app 启动反馈与缓存优先
+
+`SystemAppSurfaces` 的 `mini-app` 模式直接订阅 kernel 的只读 `snapshot().opening`。启动请求通过鉴权后、native create/prepare 第一个等待点之前即可显示 Loading；因此不再依赖尚不存在的 child surface binding。等待首帧时显示“正在准备应用画面”，成功或异常退出后移除。界面沿用官方 View/Text，保留调用页面，没有第二个路由栈、定时模拟百分比或图片解码依赖。纯 compositor `surface` 模式保持消费者自主管理展示。
+
+System UI 在 native `create`（非预热）与 `prepareOpen` 请求中明确传 `cacheFirst: true`，启动策略仍由 JS 选择。有通过准入的本地版本时先显示，后台只准备更新候选，下次打开再采用；没有可用本地版本才等待既有签名下载流程并显示同一个 Loading。更新准入、失败回滚与后台候选的边界见 [mini app 打开与缓存更新](MINI_APP_UPDATE_BEFORE_OPEN.md)。
+
+首帧等待与实际下载进度是不同事实。此 JS Loading 使用真实启动阶段，不将未知总量伪装为百分比；mini app 自己的数据请求和业务内 Loading 仍归应用管理。现有 `platform.apps.cancel` 在 launch token 可用后处理关闭；不为尚未创建完成的实例伪造可用取消 token。整个容器卸载继续由宿主生命周期取消 IO。
+
+Source-first 复查了保留父工程 `lib/ui/mini_app_host_page.dart` 的 retained surface/overlay 组合，以及 `lib/core/pocketjs_bundle_runner.dart` 的 mini app/prewarm 路径（排除 pocket_host）。父工程没有可以直接迁移的 JS opening 快照；此次只补首次 native 等待前的呈现事实，不复制其 Flutter 业务 UI。
+
+验收：`bun test sdk/packages/pocket_ui/test/system_kernel.test.ts demo/js/tests/system_capabilities.test.ts` 18 项通过，覆盖 create/prepare/first-frame 等待、回滚与失败清理；`POCKET_COMPILER_PATH=<已准备的固定 compiler/tools/build.ts> bun test demo/js/tests/mini_app_loading_native.test.ts` 1 项通过。后者实际编译 QuickJS 字节码，native pointer 操作使 Loader 的准备/首帧/清除阶段改变真实 DrawOps，并在等待期间把主界面 Counter 从 0 点到 1。测试中的宿主呈现事实是可控输入，真实 kernel 事务另由前述 18 项验证；没有把模拟 runtime 当作执行成功。普通 surface 的 `demo/js/tests/system_surface_compiler.test.ts` 另有 1 项 native 回归通过，确认共享 wrapper 未改变该模式的绑定与实际绘制。整份 Showcase 亦经相同固定 buildGuest 编译到 `/tmp/pocket-system-mini-loading`。

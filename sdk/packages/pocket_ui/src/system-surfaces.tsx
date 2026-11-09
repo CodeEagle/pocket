@@ -5,13 +5,13 @@ import { virtualNow } from "@pocketjs/framework/clock";
 import { createDisplayGeometry } from "./display.ts";
 import { avoidDisplayOcclusions, reservedInsets } from "./responsive.ts";
 import { Button } from "./ui.tsx";
-import type { PocketSystemKernel, PocketSystemSurfaceBinding } from "./system.ts";
+import type { PocketSystemKernel, PocketSystemSurfaceBinding, PocketSystemOpeningApp } from "./system.ts";
 
 type CloseSurface = (binding: PocketSystemSurfaceBinding) => void | Promise<void>;
 type AnimateDismiss = () => Promise<void>;
 type SurfaceProps = {
   system: Pick<PocketSystemKernel, "surfaceBindings" | "subscribe"> &
-    Partial<Pick<PocketSystemKernel, "onBeforeDismiss">>;
+    Partial<Pick<PocketSystemKernel, "onBeforeDismiss" | "snapshot">>;
   /** A SystemUI modal can take input focus while the child stays visible. */
   systemUIFocused?: boolean;
   class?: string;
@@ -28,8 +28,10 @@ export function SystemAppSurfaces(props: SurfaceProps): JSX.Element {
   // Stack membership already belongs to the kernel. Retain those keyed
   // surfaces under the top sheet instead of unmounting a covered mini app.
   const readBindings = () => props.system.surfaceBindings({ includeStack: props.presentation === "mini-app" });
-  const [bindings, setBindings] = createSignal(readBindings());
-  const unsubscribe = props.system.subscribe(() => setBindings(readBindings()));
+  const readPresentation = () => ({ bindings: readBindings(), opening: props.system.snapshot?.().opening ?? null });
+  const [presentation, setPresentation] = createSignal(readPresentation());
+  const bindings = () => presentation().bindings;
+  const unsubscribe = props.system.subscribe(() => setPresentation(readPresentation()));
   onCleanup(unsubscribe);
   const dismissers = new Map<string, AnimateDismiss>();
   if (props.presentation === "mini-app") {
@@ -41,7 +43,7 @@ export function SystemAppSurfaces(props: SurfaceProps): JSX.Element {
     });
     onCleanup(removeDismiss);
   }
-  return <For each={bindings().map(binding => binding.instanceId)}>{instanceId => {
+  return <><For each={bindings().map(binding => binding.instanceId)}>{instanceId => {
     // Kernel notifications publish fresh objects. Retain the component by ID
     // so unrelated lifecycle events cannot restart its entry animation.
     const initial = bindings().find(binding => binding.instanceId === instanceId)!;
@@ -58,7 +60,22 @@ export function SystemAppSurfaces(props: SurfaceProps): JSX.Element {
           return () => { if (dismissers.get(instanceId) === animate) dismissers.delete(instanceId); };
         }} />
     </Show>;
-  }}</For>;
+  }}</For>
+    <Show when={props.presentation === "mini-app" ? presentation().opening : null}>
+      {opening => <MiniAppLoading opening={opening} />}
+    </Show>
+  </>;
+}
+
+/** Keep the caller visible and interactive while the existing open waits for IO. */
+function MiniAppLoading(props: { opening: () => PocketSystemOpeningApp }): JSX.Element {
+  const geometry = createDisplayGeometry();
+  const insets = () => reservedInsets(geometry());
+  return <View class="absolute left-[16] right-[16] top-[16] flex-col gap-1 p-3 rounded-lg bg-[#17233B]"
+    style={{ translateY: insets().top, borderWidth: 1, borderColor: "#52636A" }}>
+    <Text class="text-sm font-bold text-[#FFFFFF]">{`正在打开 ${props.opening().title ?? props.opening().appId}`}</Text>
+    <Text class="text-xs text-[#D6DCE7]">{props.opening().stage === "firstFrame" ? "正在准备应用画面…" : "正在加载应用…"}</Text>
+  </View>;
 }
 
 function MiniAppSurface(props: {

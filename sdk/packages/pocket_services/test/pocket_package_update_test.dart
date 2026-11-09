@@ -524,6 +524,79 @@ void main() {
     );
 
     test(
+      'healthy commit preserves newest complete signed stages and prunes invalid or excess stages',
+      () async {
+        final store = PocketPackageStore(tempDir).scoped('test.app');
+        final verifier = PocketManifestVerifier(
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          appId: 'test.app',
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+        );
+        final staged = <int, PocketPackage>{};
+        Future<PocketPackage> stage(int build) async {
+          final entryBytes = <int>[1, build, 3];
+          final pakBytes = <int>[4, build, 6];
+          final signed = await makeSignedManifest(
+            build: build,
+            version: '1.0.$build',
+            entryBytes: entryBytes,
+            pakBytes: pakBytes,
+          );
+          final entryBlob = File('${tempDir.path}/entry-$build.blob')
+            ..writeAsBytesSync(entryBytes);
+          final pakBlob = File('${tempDir.path}/pak-$build.blob')
+            ..writeAsBytesSync(pakBytes);
+          return store.stage(
+            signed: signed,
+            verifier: verifier,
+            entryBlob: entryBlob,
+            blobs: <String, File>{
+              _sha256(entryBytes): entryBlob,
+              _sha256(pakBytes): pakBlob,
+            },
+            cancellation: PocketCancellationToken(),
+          );
+        }
+
+        for (final build in <int>[1, 2, 3, 4, 5]) {
+          staged[build] = await stage(build);
+        }
+        final incomplete = Directory(
+          path.join(tempDir.path, 'apps', 'test.app', 'versions', 'incomplete'),
+        );
+        await incomplete.create(recursive: true);
+        await staged[3]!.entryFile.writeAsBytes(<int>[0]);
+
+        await store.commitHealthy(staged[1]!, verifier: verifier);
+
+        expect(
+          (await store.active(verifier: verifier))!.versionId,
+          staged[1]!.versionId,
+        );
+        expect(await Directory(staged[2]!.directory.path).exists(), isFalse);
+        expect(await Directory(staged[3]!.directory.path).exists(), isFalse);
+        expect(await incomplete.exists(), isFalse);
+        expect(await Directory(staged[4]!.directory.path).exists(), isTrue);
+        expect(await Directory(staged[5]!.directory.path).exists(), isTrue);
+        expect(
+          (await store.listVersions(verifier: verifier))
+              .map((version) => version.build),
+          <int>[5, 4, 1],
+        );
+
+        await PocketPackageStore(tempDir).pruneInactiveVersions(
+          'test.app',
+          1,
+          verifier,
+        );
+        expect(await Directory(staged[4]!.directory.path).exists(), isFalse);
+        expect(await Directory(staged[5]!.directory.path).exists(), isTrue);
+        expect(await Directory(staged[1]!.directory.path).exists(), isTrue);
+      },
+    );
+
+    test(
       '3. Auto-fallback from promoted v2 back to v1 followed by commitHealthy(v1): rollback does NOT return v2',
       () async {
         final store = PocketPackageStore(tempDir);

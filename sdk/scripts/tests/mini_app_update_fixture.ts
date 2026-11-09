@@ -17,9 +17,9 @@ import { packageArtifacts } from "../package_update.ts";
  *
  * The root and child are embedded at build 1 and have signed build 1/build 2
  * releases. The SystemUI is therefore exercised through the same signed
- * package path as a remote host bootstrap; the child prewarm/open flow then
- * proves the Dart host's prepareOpen boundary admits build 2 before the
- * kernel freezes or presents the caller.
+ * package path as a remote host bootstrap. A cache-first open presents the
+ * embedded/cached v1 while v2 is prepared in the background; returning and
+ * reopening consumes the staged signed v2 package.
  */
 const outputArgument = process.argv[2];
 if (!outputArgument) throw new Error("Pass the fixture output directory");
@@ -75,6 +75,7 @@ function writeProject(
         "platform.storage.set",
         "platform.storage.remove",
         "platform.storage.keys",
+        "platform.apps.return",
         "updates.status",
         "updates.check",
         "updates.apply",
@@ -141,7 +142,6 @@ async function openChild(): Promise<void> {
   try {
     const result = await platform.openApp(childAppId);
     setStatus(result.cancelled ? "cancelled" : "open");
-
   } catch (error) {
     setStatus("open-error");
     failure = String(error);
@@ -150,6 +150,8 @@ async function openChild(): Promise<void> {
   }
   if (failure !== undefined) {
     await host.request("fixture.signal", { event: "open-error", message: failure });
+  } else {
+    await host.request("fixture.signal", { event: "open-settled" });
   }
 }
 
@@ -190,8 +192,10 @@ import { mount } from "@pocketjs/framework/solid";
 import { createSignal } from "solid-js";
 import { Screen, Text, View } from "@pocketjs/framework/solid/components";
 import { createHostBridge } from "@pocket/ui/host";
+import { createPocketPlatformClient } from "@pocket/ui/platform";
 
 const host = createHostBridge();
+const platform = createPocketPlatformClient(undefined, { bridge: host });
 const [tapCount, setTapCount] = createSignal(0);
 const releaseVersion = ${JSON.stringify(version)};
 host.onEvent?.((event) => {
@@ -203,6 +207,10 @@ host.onEvent?.((event) => {
     });
   }
   if (event.method === "input.pointer" && event.params.phase === "up") {
+    if (Number(event.params.x) >= 180) {
+      void platform.returnResult({ closed: true });
+      return;
+    }
     const count = tapCount() + 1;
     setTapCount(count);
     void host.request("fixture.signal", { event: "tap", version: releaseVersion, count });

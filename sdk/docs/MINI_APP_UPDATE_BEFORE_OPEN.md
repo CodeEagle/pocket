@@ -1,28 +1,39 @@
-# Mini-app update before entry
+# Mini-app cache-first entry and signed updates
 
-The System kernel checks a mini-app's configured signed update source before
-changing the presented page. A newer package is downloaded, verified and mounted
-while hidden; only the admitted generation enters the normal presentation and
-first-visible-frame flow. The caller stays visible during this work. Network,
-signature, admission or boot-lifecycle failure rejects the open instead of
-silently entering an old package. The caller can retry.
+SystemUI sends `cacheFirst: true` when opening a mini-app. A verified healthy
+local package or the validated bundled runtime opens without waiting for the
+network. The configured signed source is checked and any newer package is fully
+verified into the existing package store in the background. It does not replace
+the running generation or become healthy during the current open; the next
+cache-first open consumes the staged package. A remote-only `downloadOnOpen`
+app with no eligible local version still awaits the full signed download and
+validation before it can run. Callers that omit `cacheFirst` keep the strict
+check-before-entry behavior.
 
 SystemUI must declare `system.runtime.prepareOpen` alongside its existing
-`system.runtime.create` capability and use a matching SDK host. The Showcase and
-the native fixture declarations include it. No new child-app capability is
-required.
+`system.runtime.create` capability and use a matching SDK host. Cold creation and
+resident preparation both include `cacheFirst: true`; the SDK host passes that
+kernel decision into `PocketSession`. The Showcase and native fixture declare
+the required capability. No new child-app capability is required.
 
 The behavior applies to both paths:
 
-- A cold open sends `system.runtime.create({ appId, prepareForOpen: true })`.
-  The native session prepares the package before its bridge is published ready.
-  The response must acknowledge `preparedForOpen: true`.
+- A cold open sends
+  `system.runtime.create({ appId, prepareForOpen: true, cacheFirst: true })`.
+  A healthy cache or bundled app is mounted locally and its bridge becomes ready
+  while signed update preparation runs in the background. If a remote-only app
+  has no eligible local package, the existing signed preparation is awaited
+  before its bridge becomes ready. The response acknowledges
+  `preparedForOpen: true`.
 - A resident/prewarmed open sends
-  `system.runtime.prepareOpen({ instanceId, generation })`. The host validates
-  ownership, the expected generation and hidden state. The response contains
-  instance/app identity, previous/current generations and factual `configured`
-  and `updated` flags. An unchanged verified active package is reverified without
-  a remount, including a hidden candidate that has not completed health promotion.
+  `system.runtime.prepareOpen({ instanceId, generation, cacheFirst: true })`.
+  The host validates ownership, expected generation and hidden state. A pending
+  background HTTP operation does not block presentation. A completed staged
+  candidate is locally reverified and mounted before presentation. The response
+  contains instance/app identity, previous/current generations and factual
+  `configured` and `updated` flags. An unchanged verified active package is
+  reverified without a remount, including a hidden candidate that has not
+  completed health promotion.
 
 Apps without an update source retain their local package and generation. Editor
 preview and the generated WeChat adapter currently have no trusted OTA resolver;
@@ -36,11 +47,11 @@ client for launch.
 
 ## Lifecycle and state
 
-Explicit prewarming retains the existing healthy-cache bootstrap. Actual entry
-always runs its gate afterward, so a release published after prewarm cannot be
-missed. A cold open performs one preparation rather than prewarm plus another
-immediate check. The preparation uses the existing 20-second overall I/O budget
-and cancellation cleanup.
+Explicit prewarming retains the existing healthy-cache bootstrap. Cache-first
+entry consumes an already staged signed version before starting another remote
+check. Without a staged candidate, a healthy cache remains presentable while its
+update check runs. A cold remote-only open performs one preparation and uses the
+existing 20-second overall I/O budget and cancellation cleanup.
 
 The returned generation is consumed through the kernel's existing generation
 handler before presentation. Child event admission requires the native observed
@@ -52,15 +63,16 @@ unchanged realm retains its in-memory state. Failed boot lifecycle removes the
 unusable child while leaving the caller visible.
 
 A package mount does not mark it healthy. The existing visible first-frame and
-live health window still control promotion and recovery. A hidden prewarm is
-allowed to prepare while waiting for that first visible health window; genuine
-concurrent downloads, mounts or promotions remain conflicts. The gate does not
-wait for visible health while hidden. The coordinator receives the already
-mounted package as a trusted native fact: it compares exact-update scopes and
-no-op activation against the actual realm, while both memory and disk identities
-contribute to downgrade/replay rejection. This neither marks the hidden package
-healthy nor creates another store pointer. A failed candidate and failed recovery
-clear executable readiness and leave a retryable terminal error.
+live health window still control promotion and recovery. Background preparation
+reuses `PocketUpdateCoordinator.prepare` and only writes a verified staged
+package: it does not mount, advance the healthy pointer, change active generation
+or fail a healthy open when the network fails. The next cache-first open checks
+the staged bytes against the current trust policy, hashes, embedded build floor,
+healthy/active identities and the currently mounted package before executing
+them. Active and healthy identities continue to prevent downgrade and same-build
+replay; previous versions remain rollback-only. Failed mount candidates use the
+existing fallback path and are removed so they cannot be selected repeatedly.
+No additional package pointer or update state machine is introduced.
 
 App-private persistent storage remains the app's normal data store. An updated
 realm starts its own JS state and loads its persisted data. The entry gate does
@@ -71,27 +83,29 @@ native handles or replay child instances.
 
 ## Source reuse and ablation
 
-The retained parent was inspected before implementation, excluding `pocket_host/`:
+The retained parent was inspected before implementation, excluding
+`pocket_host/`:
 
-- `lib/core/pocketjs_bundle_runner.dart` supplies the existing mini-app execution,
-  resource and prewarm context. Its example lazy-download status is not a signed
-  package admission implementation.
-- `mini_apps/syslib/pocket_syslib_ota.js` contains in-memory module metadata and a
-  SHA-length check, not a trustworthy download-before-entry gate.
-- `docs/04_BIDIRECTIONAL_FFI_WASM_AND_YOOASSET_HOTUPDATE.md` describes a proposed
-  hot-update transport rather than an executable signed launch gate.
+- `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/lib/ui/mini_app_host_page.dart`
+  and `lib/core/pocketjs_bundle_runner.dart` supply the mini-app host surface,
+  execution, bundled resource and prewarm context. They do not contain a signed
+  package cache-first policy.
+- `mini_apps/syslib/pocket_syslib_ota.js` and the system catalog modules such as
+  `mini_apps/syslib/pocket_syslib_pages.js` contain in-memory AOT metadata and
+  update showcase behavior, not a verified staged-package store.
+- The retained parent’s hot-update design note describes a proposed transport,
+  not an executable signed launch gate.
 
-The evidenced gap was a healthy-cache/prewarm bypass at actual entry. The SDK
-reuses `PocketUpdateCoordinator.prepare`, the content-addressed differential
-store, final admission, `PocketSession` mounting, the pinned `buildGuest` pipeline
-and the existing kernel generation/lifecycle handler. JS owns launch sequencing;
-Dart reports native package/instance facts. No second downloader, cache,
-compiler, layout engine, mirrored lifecycle state or per-frame update polling was
-introduced. Real FFI validation also exposed a transport redundancy: racing each
-HTTP operation against an uncancellable delayed timeout retained a 20-second
-timer after successful headers/body reads. The existing transport now applies a
-cancellable future timeout to its operation/cancellation race. Completed reads
-and cancellation release that timer immediately.
+The SDK adapts JS's existing open sequence by passing its explicit
+`cacheFirst` decision through the native SystemHost boundary. It reuses
+`PocketUpdateCoordinator.prepare`, the content-addressed differential store,
+final package admission, health-based promotion and the existing generation/
+lifecycle handler. The store's health cleanup now revalidates packages and keeps
+at most two complete signed non-pointer stages so a background candidate survives
+promotion of the currently running healthy version; invalid or excess unpointed
+versions are removed. It reuses the existing `active`/`previous`/`lastGood`
+pointers and `_loadVersion(verifier:)`, adding no stage pointer or second cache.
+No downloader, compiler, layout engine or parallel update workflow was added.
 
 ## Validation
 
@@ -105,11 +119,62 @@ events overtake queued init. Preview and WeChat tests cover the factual unconfig
 
 The signed Session tests cover cached and unpromoted prewarm packages, same-build
 admission, embedded build floors, final verification, mount rollback and busy
-operations. Added cases cover default-bundle reuse before promotion, mounted
-replay/downgrade rejection, a different disk-active package and double mount
-failure recovery. The real `mini_app_update_ffi_test.dart` runs compiled QJBC with
-`PocketSystemHost`, a loopback signed-package server and the existing native
-library. All three cases passed without skips:
+operations. Added cache-first cases use a held loopback response to show a healthy
+cache opens immediately, background preparation leaves the active generation
+and healthy pointer unchanged, the next open consumes the staged version, cold
+remote-only startup waits, background failure preserves the ready cache,
+cancellation drains cold I/O, and a bundled app remains presentable during a
+blocked check. One case promotes the old healthy version after staging and then
+reopens to catch store pruning that could delete the new candidate. A separate
+bundled-floor case confirms a first signed package at exactly the embedded build
+can be consumed on the following open.
+
+### Cache-first validation (2026-11-09)
+
+Flutter 3.35.7 / Dart 3.9.2 ran the complete signed Session suite: **44 passed,
+0 failed, 0 skipped**, including real QJBC execution and native pointer-driven
+frame changes with `POCKET_ON_DEMAND_FIXTURE_DIR` and `POCKET_NATIVE_LIBRARY`.
+The store suite passed **18 tests**. The staged-candidate/old-health-promotion
+case first failed with the legacy prune rule, then passed after preserving the
+verified unpointed stages. Host and upgrade regressions passed **17 tests**;
+System kernel and Showcase capability contracts passed **18 tests**. The native
+JS loading/pointer acceptance and plain-surface compiler regression passed
+**2 tests**. Targeted Session/host analysis and the SDK architecture boundary
+check also passed.
+
+Session/host tests used `/tmp/pocket-cache-first-verify` to avoid another
+in-progress Flutter loading-builder change in the shared workspace. That
+verification directory copied the current Session/tests, used the existing
+native packages, and retained the baseline unrelated `pocket_app.dart`; no
+cache, package admission, JS execution or assertions were replaced.
+
+All **4 current FFI scenarios passed with no skips**, verified in separate
+runs: the first three passed together against the regenerated fixture; the
+remote-cache background-failure case then passed individually after explicitly
+configuring `downloadOnOpen: true`. Its original bundled configuration correctly
+had no signed `active` package pointer and was not evidence of a cache failure.
+The other cases cover unchanged signed build without remount and the retained
+strict root update/remount path.
+
+The refreshed `mini_app_update_ffi_test.dart` compiles the actual SystemUI and
+child QJBC through pinned `buildGuest`, serves signed v1/v2 packages over loopback,
+and runs them in `PocketSystemHost` with the existing native library. The cache-first
+case holds the remote v2 manifest while v1 is already presented, verifies that
+background completion leaves active version/generation unchanged, invokes the
+real JS `platform.apps.return`, then reopens the staged v2. Native controller
+pointer input changes actual DrawOps in both versions. The root remains a live
+compositor, so its native `foreground` flag is not treated as child-page
+visibility. Actual child presentation, package identity and rendered frames are
+used instead. This is native QuickJS/controller execution, not OS gesture
+injection or a physical-device run.
+
+### Historical strict-gate native fixture (2026-11-06)
+
+The following native fixture result records the earlier strict check-before-entry
+behavior. It is historical evidence; the cache-first FFI regression above now
+verifies immediate local presentation and next-open staged activation. The fixture runs compiled QJBC with `PocketSystemHost`, a loopback
+signed-package server and the existing native library. The three historical
+strict-gate cases passed without skips:
 
 - Download signed v1 with the default bundle archive during prewarm, then hold
   the v2 update request: the caller

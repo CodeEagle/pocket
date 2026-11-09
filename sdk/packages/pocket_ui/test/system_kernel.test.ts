@@ -242,7 +242,7 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
   assert.equal(host.calls.find((call) => call.capability === "system.runtime.awaitFirstFrame")?.options?.timeoutFrames, 2700);
   assert.deepEqual(
     host.calls.find((call) => call.capability === "system.runtime.create")?.params,
-    { appId: PROFILE, prepareForOpen: true, memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 } },
+    { appId: PROFILE, prepareForOpen: true, cacheFirst: true, memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 } },
     "runtime.create forwards the catalog budget request",
   );
   const profileInstance = kernel.snapshot().residents.find((r) => r.appId === PROFILE)!.instanceId;
@@ -259,7 +259,7 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
   assert.equal(openLobby.ok, true);
   assert.deepEqual(
     host.calls.find((call) => call.capability === "system.runtime.create" && call.params.appId === LOBBY)?.params,
-    { appId: LOBBY, prepareForOpen: true, memory: { heapLimitBytes: 128 * 1024 * 1024 } },
+    { appId: LOBBY, prepareForOpen: true, cacheFirst: true, memory: { heapLimitBytes: 128 * 1024 * 1024 } },
     "compatibility memory policy maps to a heap-only request",
   );
   const lobbyLaunchId = ((openLobby.value as JsonObject).requestId) as string;
@@ -733,29 +733,43 @@ async function until(predicate: () => boolean): Promise<void> {
   throw new Error("System transaction did not reach the expected boundary");
 }
 
-test("a cold open keeps the caller visible until package preparation completes", async () => {
+test("a cold open reports preparing and first-frame stages until its first frame settles", async () => {
   const { host, kernel, invoke } = createEnv();
   await kernel.ready;
   const request = host.request.bind(host);
   let finish!: () => void;
   const pending = new Promise<void>((resolve) => { finish = resolve; });
+  let finishFrame!: () => void;
+  const pendingFrame = new Promise<void>((resolve) => { finishFrame = resolve; });
   host.request = async (capability, params = {}, options) => {
     const value = await request(capability, params, options);
     if (capability === "system.runtime.create") await pending;
+    if (capability === "system.runtime.awaitFirstFrame") await pendingFrame;
     return value as never;
   };
   const before = host.posted.length;
+  const observedStages: Array<string | null> = [];
+  const unsubscribe = kernel.subscribe(() => observedStages.push(kernel.snapshot().opening?.stage ?? null));
   try {
     const opening = invoke(systemRequest("cold-gate", "platform.apps.open", { appId: PROFILE }));
     await until(() => host.calls.some((call) => call.capability === "system.runtime.create"));
     assert.equal(host.calls.find((call) => call.capability === "system.runtime.create")!.params.prepareForOpen, true);
+    assert.deepEqual(kernel.snapshot().opening, { appId: PROFILE, stage: "preparing" });
     assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
     assert.equal(host.posted.slice(before).some((event) => event.params.state === "onWillDisappear"), false);
     assert.equal(host.calls.some((call) => call.capability === "system.runtime.awaitFirstFrame"), false);
     finish();
+    await until(() => host.calls.some((call) => call.capability === "system.runtime.awaitFirstFrame"));
+    assert.deepEqual(kernel.snapshot().opening, { appId: PROFILE, stage: "firstFrame" });
+    assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI, PROFILE]);
+    finishFrame();
     assert.equal((await opening).ok, true);
     assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI, PROFILE]);
-  } finally { finish(); kernel.dispose(); }
+    assert.equal(kernel.snapshot().opening, null);
+    assert.ok(observedStages.includes("preparing"), "subscribers see the pre-first-await loading fact");
+    assert.ok(observedStages.includes("firstFrame"), "subscribers see the presented first-frame wait");
+    assert.equal(observedStages.at(-1), null, "subscribers see opening clear after success");
+  } finally { finish(); finishFrame(); unsubscribe(); kernel.dispose(); }
 });
 
 test("a prewarmed update adopts its new generation before presentation and replays init only once", async () => {
@@ -780,6 +794,8 @@ test("a prewarmed update adopts its new generation before presentation and repla
   try {
     const opening = invoke(systemRequest("open-warm", "platform.apps.open", { appId: PROFILE }));
     await until(() => host.calls.some((call) => call.capability === "system.runtime.prepareOpen"));
+    assert.equal(host.calls.find((call) => call.capability === "system.runtime.prepareOpen")!.params.cacheFirst, true);
+    assert.deepEqual(kernel.snapshot().opening, { appId: PROFILE, stage: "preparing" });
     assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
     assert.equal(host.posted.slice(before).some((event) => event.params.state === "onWillDisappear"), false);
     globalObject.__pocketEvent!({ type: "event", name: "system.runtime.generation", payload: {
@@ -787,6 +803,7 @@ test("a prewarmed update adopts its new generation before presentation and repla
     } });
     finish();
     assert.equal((await opening).ok, true);
+    assert.equal(kernel.snapshot().opening, null);
     await new Promise((resolve) => setTimeout(resolve, 1));
     assert.equal(kernel.snapshot().residents.find((entry) => entry.appId === PROFILE)!.generation, generation);
     assert.equal(host.calls.filter((call) => call.capability === "system.runtime.create").length, 1);
@@ -816,12 +833,14 @@ test("a failed pre-entry update leaves the caller and prewarmed instance availab
     const failed = await invoke(systemRequest("bad-update", "platform.apps.open", { appId: PROFILE }));
     assert.equal(failed.ok, false);
     assert.equal((failed.error as JsonObject).code, "manifest-signature");
+    assert.equal(kernel.snapshot().opening, null);
     assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
     assert.equal(host.destroyed.includes(instanceId), false);
     assert.equal(kernel.snapshot().residents.find((entry) => entry.appId === PROFILE)!.prewarmed, true);
     assert.equal(host.posted.slice(before).some((event) => event.params.state === "onWillDisappear"), false);
     fail = false;
     assert.equal((await invoke(systemRequest("retry-update", "platform.apps.open", { appId: PROFILE }))).ok, true);
+    assert.equal(kernel.snapshot().opening, null);
     assert.equal(host.calls.filter((call) => call.capability === "system.runtime.create").length, 1);
     assert.equal(kernel.snapshot().residents.find((entry) => entry.appId === PROFILE)!.generation, host.generations.get(instanceId));
     assert.equal(host.posted.slice(before).filter((event) => event.instanceId === instanceId && event.params.state === "onInit").length, 0);

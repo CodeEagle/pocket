@@ -110,6 +110,13 @@ export interface PocketSystemPendingCallSnapshot {
   completionPending: boolean;
 }
 
+/** Transient fact about the serialized app-open operation currently in flight. */
+export interface PocketSystemOpeningApp {
+  readonly appId: string;
+  readonly title?: string;
+  readonly stage: "preparing" | "firstFrame";
+}
+
 /** One active app binding for an official framework CompositorSurface node. */
 export interface PocketSystemSurfaceBinding {
   appId: string;
@@ -147,6 +154,7 @@ export interface PocketSystemSnapshot {
   residents: readonly PocketSystemRuntimeSnapshot[];
   lru: readonly string[];
   pendingCalls: readonly PocketSystemPendingCallSnapshot[];
+  opening: PocketSystemOpeningApp | null;
   mailboxLimit: number;
   queuedMessages: number;
 }
@@ -549,6 +557,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
   private readonly records = new Map<string, RuntimeRecord>();
   private readonly instanceForApp = new Map<string, string>();
   private readonly stack: StackFrame[] = [];
+  private opening: PocketSystemOpeningApp | null = null;
   private presentedInstanceIds: string[] = [];
   private focusedInstanceId: string | null = null;
   private readonly presentationListeners = new Set<() => void>();
@@ -697,6 +706,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         targetInstanceId: call.targetInstanceId,
         completionPending: call.completion !== null,
       }))),
+      opening: this.opening ? Object.freeze({ ...this.opening }) : null,
       mailboxLimit: MAX_MAILBOX_MESSAGES,
       queuedMessages: this.mailbox.length,
     });
@@ -816,6 +826,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.stack.length = 0;
     this.presentedInstanceIds = [];
     this.focusedInstanceId = null;
+    this.opening = null;
     this.presentationListeners.clear();
     this.records.clear();
     this.instanceForApp.clear();
@@ -1255,82 +1266,94 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     let target = existingId ? this.records.get(existingId) : undefined;
     const created = target === undefined;
     const wasPrewarmed = target?.prewarmed ?? false;
-    if (created) {
-      await this.ensureCapacity();
-      target = await this.createRuntime(targetAppId, false);
-    }
-    if (!target) throw new PocketSystemError("runtime_create_failed", "target runtime could not be created");
-    if (target.closing || target.failed) {
-      throw new PocketSystemError("runtime_unavailable", "target runtime is closing or failed");
-    }
-    // Keep the caller presented while a resident/prewarmed package is checked.
-    // A newly created runtime performs the same admission before it is ready.
-    if (!created) await this.prepareForOpen(target);
-    try {
-      await this.lifecycle(resume, "onWillDisappear", { targetAppId, requestId: callId });
-      await this.lifecycle(resume, "frozenInStack", { targetAppId, requestId: callId });
-    } catch (error) {
-      await this.lifecycle(resume, "onResume", { targetAppId, requestId: callId, rollback: true }).catch(() => {});
-      await this.flushLifecycle(resume).catch(() => {});
-      if (created) await this.destroyRuntime(target).catch(() => {});
-      else target.prewarmed = wasPrewarmed;
-      throw error;
-    }
-    const call: PendingCall = {
-      requestId: callId,
-      callerAppId: caller.appId,
-      targetAppId,
-      callerInstanceId: caller.instanceId,
-      callerGeneration: caller.generation,
-      resumeAppId: resume.appId,
-      resumeInstanceId: resume.instanceId,
-      targetInstanceId: target.instanceId,
-      arguments: argumentsValue,
-      completion: null,
-      launchPending: true,
-    };
-    this.calls.set(callId, call);
-    const frame: StackFrame = {
-      appId: targetAppId,
-      instanceId: target.instanceId,
-      requestId: callId,
-    };
-    this.stack.push(frame);
-    target.prewarmed = false;
-    target.closing = false;
-    this.touch(target);
+    // This snapshot is presentation input only. The queue already serializes
+    // app opens, so one value points at the in-flight open without creating a
+    // second lifecycle or cancellation state machine.
+    this.opening = { appId: targetAppId, stage: "preparing" };
+    this.notifyPresentation();
     try {
       if (created) {
-        await this.lifecycle(target, "onInit", { requestId: callId, prewarmed: false });
-        await this.lifecycle(target, "onLoad", { requestId: callId, prewarmed: false });
+        await this.ensureCapacity();
+        target = await this.createRuntime(targetAppId, false);
       }
-      await this.lifecycle(target, "onWillAppear", { requestId: callId });
-      await this.presentTop();
-      await this.awaitFirstFrame(target);
-      await this.flushLifecycle(target);
-      const launchAccepted = await this.post(target, "platform.launch", this.launchParams(call));
-      if (!launchAccepted) {
-        throw new PocketSystemError("runtime_unavailable", "target runtime did not accept its launch event");
+      if (!target) throw new PocketSystemError("runtime_create_failed", "target runtime could not be created");
+      if (target.closing || target.failed) {
+        throw new PocketSystemError("runtime_unavailable", "target runtime is closing or failed");
       }
-      call.launchPending = false;
-      this.notifyPresentation();
-      await this.lifecycle(target, "onDidAppear", { requestId: callId });
-      await this.flushLifecycle(target);
-      await this.flushForegroundMailbox(targetAppId);
-      return {
+      // Keep the caller presented while a resident/prewarmed package is checked.
+      // A newly created runtime performs the same admission before it is ready.
+      if (!created) await this.prepareForOpen(target);
+      try {
+        await this.lifecycle(resume, "onWillDisappear", { targetAppId, requestId: callId });
+        await this.lifecycle(resume, "frozenInStack", { targetAppId, requestId: callId });
+      } catch (error) {
+        await this.lifecycle(resume, "onResume", { targetAppId, requestId: callId, rollback: true }).catch(() => {});
+        await this.flushLifecycle(resume).catch(() => {});
+        if (created) await this.destroyRuntime(target).catch(() => {});
+        else target.prewarmed = wasPrewarmed;
+        throw error;
+      }
+      const call: PendingCall = {
         requestId: callId,
+        callerAppId: caller.appId,
         targetAppId,
+        callerInstanceId: caller.instanceId,
+        callerGeneration: caller.generation,
+        resumeAppId: resume.appId,
+        resumeInstanceId: resume.instanceId,
         targetInstanceId: target.instanceId,
+        arguments: argumentsValue,
+        completion: null,
+        launchPending: true,
       };
-    } catch (error) {
-      this.calls.delete(callId);
-      if (this.stack[this.stack.length - 1]?.instanceId === target.instanceId) this.stack.pop();
-      await this.presentTop().catch(() => {});
-      await this.lifecycle(resume, "onResume", { targetAppId, requestId: callId, rollback: true }).catch(() => {});
-      await this.flushLifecycle(resume).catch(() => {});
-      if (created) await this.destroyRuntime(target).catch(() => {});
-      else target.prewarmed = wasPrewarmed;
-      throw error;
+      this.calls.set(callId, call);
+      const frame: StackFrame = {
+        appId: targetAppId,
+        instanceId: target.instanceId,
+        requestId: callId,
+      };
+      this.stack.push(frame);
+      target.prewarmed = false;
+      target.closing = false;
+      this.touch(target);
+      try {
+        if (created) {
+          await this.lifecycle(target, "onInit", { requestId: callId, prewarmed: false });
+          await this.lifecycle(target, "onLoad", { requestId: callId, prewarmed: false });
+        }
+        await this.lifecycle(target, "onWillAppear", { requestId: callId });
+        await this.presentTop();
+        this.opening = { appId: targetAppId, stage: "firstFrame" };
+        this.notifyPresentation();
+        await this.awaitFirstFrame(target);
+        await this.flushLifecycle(target);
+        const launchAccepted = await this.post(target, "platform.launch", this.launchParams(call));
+        if (!launchAccepted) {
+          throw new PocketSystemError("runtime_unavailable", "target runtime did not accept its launch event");
+        }
+        call.launchPending = false;
+        this.notifyPresentation();
+        await this.lifecycle(target, "onDidAppear", { requestId: callId });
+        await this.flushLifecycle(target);
+        await this.flushForegroundMailbox(targetAppId);
+        return {
+          requestId: callId,
+          targetAppId,
+          targetInstanceId: target.instanceId,
+        };
+      } catch (error) {
+        this.calls.delete(callId);
+        if (this.stack[this.stack.length - 1]?.instanceId === target.instanceId) this.stack.pop();
+        await this.presentTop().catch(() => {});
+        await this.lifecycle(resume, "onResume", { targetAppId, requestId: callId, rollback: true }).catch(() => {});
+        await this.flushLifecycle(resume).catch(() => {});
+        if (created) await this.destroyRuntime(target).catch(() => {});
+        else target.prewarmed = wasPrewarmed;
+        throw error;
+      }
+    } finally {
+      this.opening = null;
+      this.notifyPresentation();
     }
   }
 
@@ -1338,7 +1361,10 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.assertActive();
     const catalogEntry = this.catalog.get(appId);
     const createParams: JsonObject = { appId };
-    if (!prewarmed) createParams.prepareForOpen = true;
+    if (!prewarmed) {
+      createParams.prepareForOpen = true;
+      createParams.cacheFirst = true;
+    }
     if (catalogEntry?.memory) {
       const memory: JsonObject = {};
       if (catalogEntry.memory.heapLimitBytes !== undefined) {
@@ -1389,6 +1415,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     const prepared = await this.hostObject("system.runtime.prepareOpen", {
       instanceId: record.instanceId,
       generation: previousGeneration,
+      cacheFirst: true,
     }, { timeoutFrames: 60 * simulationHz() });
     this.assertActive();
     const generation = this.readGeneration(prepared.generation);
