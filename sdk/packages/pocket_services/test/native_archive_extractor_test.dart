@@ -375,6 +375,125 @@ void main() {
       }
     },
   );
+
+  test(
+    'ZIP uses Dart extraction without calling the configured native extractor',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'pocket-native-archive-zip-dart-only-',
+      );
+      try {
+        final contents = <int>[10, 20, 30, 40];
+        final hash = _sha256(contents);
+        final archive = encodePocketZip(<String, List<int>>{
+          'blobs/$hash': contents,
+        });
+        var extractorCalls = 0;
+        final store = PocketPackageStore(
+          root,
+          archiveExtractor:
+              ({
+                required String archivePath,
+                required String destinationPath,
+                required int maxOutputBytes,
+              }) async {
+                extractorCalls++;
+              },
+        );
+
+        final result = await store.writeBundleZip(
+          bundle: PocketManifestBundle(
+            format: 'zip',
+            sha256: _sha256(archive),
+            size: archive.length,
+            url: 'bundle.zip',
+          ),
+          expectedFiles: <PocketManifestFile>[
+            PocketManifestFile(
+              sha256: hash,
+              size: contents.length,
+              url: 'blobs/$hash',
+            ),
+          ],
+          bytes: Stream<List<int>>.value(archive),
+          cancellation: PocketCancellationToken(),
+          maxTotalBytes: 1024,
+        );
+
+        expect(extractorCalls, 0);
+        expect(result[hash], isNotNull);
+        expect(await result[hash]!.readAsBytes(), contents);
+      } finally {
+        await root.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
+    '7z does not fall back when native extractor reports native-archive-unavailable',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'pocket-native-archive-7z-no-fallback-',
+      );
+      try {
+        final contents = <int>[10, 20, 30, 40];
+        final hash = _sha256(contents);
+        final archive = <int>[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c];
+        var extractorCalls = 0;
+        final store = PocketPackageStore(
+          root,
+          archiveExtractor:
+              ({
+                required String archivePath,
+                required String destinationPath,
+                required int maxOutputBytes,
+              }) async {
+                extractorCalls++;
+                throw const PocketPackageException(
+                  'native plugin not registered on this host',
+                  code: 'native-archive-unavailable',
+                );
+              },
+        );
+
+        await expectLater(
+          store.writeBundleZip(
+            bundle: PocketManifestBundle(
+              format: '7z',
+              sha256: _sha256(archive),
+              size: archive.length,
+              url: 'bundle.7z',
+            ),
+            expectedFiles: <PocketManifestFile>[
+              PocketManifestFile(
+                sha256: hash,
+                size: contents.length,
+                url: 'blobs/$hash',
+              ),
+            ],
+            bytes: Stream<List<int>>.value(archive),
+            cancellation: PocketCancellationToken(),
+            maxTotalBytes: 1024,
+          ),
+          throwsA(
+            isA<PocketPackageException>().having(
+              (error) => error.code,
+              'code',
+              'native-archive-unavailable',
+            ),
+          ),
+        );
+
+        expect(extractorCalls, 1);
+        expect(
+          await File(path.join(root.path, 'blobs', hash)).exists(),
+          isFalse,
+        );
+      } finally {
+        await root.delete(recursive: true);
+      }
+    },
+  );
 }
 
 String _sha256(List<int> bytes) => crypto.sha256.convert(bytes).toString();

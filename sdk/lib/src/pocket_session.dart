@@ -317,7 +317,7 @@ final class PocketSession extends ChangeNotifier {
               },
         store: PocketPackageStore(
           packageRoot,
-          archiveExtractor: PocketNativeArchive.extract,
+          archiveExtractor: extractNativeArchive,
         ),
         expectedRuntimeAbi: _metadata['runtimeAbi'] as String,
         requireBytecode: true,
@@ -1784,6 +1784,31 @@ final class PocketSession extends ChangeNotifier {
       );
     }
     return updates;
+  }
+
+  @visibleForTesting
+  static Future<void> extractNativeArchive({
+    required String archivePath,
+    required String destinationPath,
+    required int maxOutputBytes,
+  }) async {
+    try {
+      await PocketNativeArchive.extract(
+        archivePath: archivePath,
+        destinationPath: destinationPath,
+        maxOutputBytes: maxOutputBytes,
+      );
+    } on MissingPluginException catch (error) {
+      throw PocketPackageException(
+        error.message ?? 'native archive extraction plugin is unavailable',
+        code: 'native-archive-unavailable',
+      );
+    } on PlatformException catch (error) {
+      throw PocketPackageException(
+        error.message ?? 'native archive extraction failed (${error.code})',
+        code: 'bundle-format',
+      );
+    }
   }
 
   /// Await plugin teardown and performance persistence when managing a

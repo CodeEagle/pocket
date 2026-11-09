@@ -2074,6 +2074,74 @@ void main() {
         );
         // Must not retry deterministic bundle-content failures
         expect(transport.requestedUris, hasLength(2));
+
+        // 4. Deterministic 7z native extraction failure downloads archive only once without retrying
+        var nativeExtractorCalls = 0;
+        final nativeStore = PocketPackageStore(
+          tempDir,
+          archiveExtractor:
+              ({
+                required String archivePath,
+                required String destinationPath,
+                required int maxOutputBytes,
+              }) async {
+                nativeExtractorCalls++;
+                throw const PocketPackageException(
+                  'native archive extraction failed (archive_extract)',
+                  code: 'bundle-format',
+                );
+              },
+        );
+        final sevenZipArchive = <int>[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c];
+        final sevenZipHash = _sha256(sevenZipArchive);
+        final sevenZipPayload = Map<String, dynamic>.from(payload)
+          ..['bundle'] = <String, dynamic>{
+            'format': '7z',
+            'sha256': sevenZipHash,
+            'size': sevenZipArchive.length,
+            'url': 'bundles/bundle-$sevenZipHash.7z',
+          };
+        final sevenZipPayloadBytes = Uint8List.fromList(
+          utf8.encode(jsonEncode(sevenZipPayload)),
+        );
+        final sevenZipSig = await Ed25519().sign(
+          sevenZipPayloadBytes,
+          keyPair: keyPair,
+        );
+        final sevenZipSigned = PocketSignedManifest.fromBytes(
+          _envelopeBytes(
+            keyId: 'test-key',
+            payloadBytes: sevenZipPayloadBytes,
+            signatureBytes: sevenZipSig.bytes,
+          ),
+        );
+        final sevenZipTransport = _MemoryTransport(<String, List<int>>{
+          manifestUri.toString(): sevenZipSigned.envelopeBytes,
+          manifestUri.resolve('bundles/bundle-$sevenZipHash.7z').toString():
+              sevenZipArchive,
+        });
+        final sevenZipCoordinator = PocketUpdateCoordinator(
+          manifestUri: manifestUri,
+          appId: 'test.app',
+          trustedKeys: <String, List<int>>{'test-key': publicKey.bytes},
+          store: nativeStore,
+          transport: sevenZipTransport,
+          expectedRuntimeAbi: 'abi-v1',
+          requireBytecode: true,
+        );
+
+        await expectLater(
+          sevenZipCoordinator.prepare(mode: PocketUpdateMode.zip),
+          throwsA(
+            isA<PocketPackageException>().having(
+              (e) => e.code,
+              'code',
+              'bundle-format',
+            ),
+          ),
+        );
+        expect(nativeExtractorCalls, 1);
+        expect(sevenZipTransport.requestedUris, hasLength(2));
       },
     );
   });

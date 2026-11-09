@@ -43,3 +43,9 @@ Final removal validation: the combined Session and startup UI suite passed 61/61
 The 7z adapter also bounds metadata allocations to 64 MiB per main/temp allocator while opening headers, rejects folder unpack sizes above the output quota before extraction, and limits extraction allocations to output quota plus 128 MiB decoder slack. This addresses declared encoded-header/folder allocation sizes that the upstream C API can consume before file totals are available. The bounded allocators are owned per call, with no shared mutable quota.
 
 After the allocation limits were added, the actual Flutter/macOS channel extracted the same full package in 1,719 ms (2,350 ms including all file hash checks); the iOS device target also rebuilt successfully. Final native regression count: 10/10.
+
+## Consolidated review follow-up
+
+The local `agy` Argon Medium review identified that native MethodChannel failures could enter the network retry loop. The Session adapter now maps a missing plugin to `native-archive-unavailable` and native extraction errors to deterministic `bundle-format` failures. The updater therefore reports a failed, already-downloaded archive without downloading it again. ZIP keeps its existing Dart route; only 7z uses the injected native extractor.
+
+Follow-up validation passed 28 service tests (including one-download failure, ZIP bypassing the native extractor and cancellation cleanup) and two actual MethodChannel exception mapping tests under Flutter 3.35.7. FunApp's fast updater also handles commented Git dependency blocks, with a production-matcher fixture covering active/commented refs and preserving unrelated dependencies. Its profile synchronization regression passed. These checks do not replace the pending physical iPhone verification.
