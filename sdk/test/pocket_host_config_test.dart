@@ -5,8 +5,6 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 import 'package:crypto/crypto.dart';
-import 'package:pocket_services/pocket_services.dart'
-    show PocketCancellationToken, PocketUpdateCancellation;
 
 Map<String, dynamic> _document({
   String baseUrl = 'https://updates.example.test/test',
@@ -267,9 +265,9 @@ void main() {
         if (request.uri.path == '/host.json') {
           bootstrapRequests++;
           request.response.headers.contentType = ContentType.json;
-        request.response
-          ..bufferOutput = false
-          ..contentLength = 1024;
+          request.response
+            ..bufferOutput = false
+            ..contentLength = 1024;
           request.response.add(utf8.encode('{"kind":"'));
           await request.response.flush();
           if (!bodyStarted.isCompleted) bodyStarted.complete();

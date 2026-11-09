@@ -10,6 +10,159 @@ import 'package:pocket_services/pocket_services.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('large ZIP and 7z bundles leave the caller isolate responsive', () async {
+    final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-worker-heartbeat-');
+    try {
+      for (final format in <String>['zip', '7z']) {
+        final blobBytes = _largeDeterministicBytes(12 * 1024 * 1024);
+        final blobSha256 = _sha256(blobBytes);
+        final archiveBytes = format == 'zip'
+            ? encodePocketZip(<String, List<int>>{'blobs/$blobSha256': blobBytes})
+            : encodePocket7z(<String, List<int>>{'blobs/$blobSha256': blobBytes});
+        final archiveFile = File(path.join(tempDir.path, '$format.archive'));
+        await archiveFile.writeAsBytes(archiveBytes, flush: true);
+        final store = PocketPackageStore(Directory(path.join(tempDir.path, format)));
+        var receivedArchive = false;
+        var heartbeatsDuringProcessing = 0;
+        var lastHeartbeatMilliseconds = 0;
+        var largestHeartbeatGapMilliseconds = 0;
+        var processingStartedMilliseconds = 0;
+        Timer? heartbeat;
+        final stopwatch = Stopwatch()..start();
+
+        final result = await store.writeBundleZip(
+          bundle: PocketManifestBundle(
+            format: format,
+            sha256: _sha256(archiveBytes),
+            size: archiveBytes.length,
+            url: 'bundle.$format',
+          ),
+          expectedFiles: <PocketManifestFile>[
+            PocketManifestFile(
+              sha256: blobSha256,
+              size: blobBytes.length,
+              url: 'blobs/$blobSha256',
+            ),
+          ],
+          bytes: archiveFile.openRead(),
+          cancellation: PocketCancellationToken(),
+          onBytes: (received) {
+            if (received == archiveBytes.length && !receivedArchive) {
+              receivedArchive = true;
+              // Start measuring after the last network/file chunk was read.
+              // The real decoder and per-entry hash now run in the worker.
+              processingStartedMilliseconds = stopwatch.elapsedMilliseconds;
+              lastHeartbeatMilliseconds = processingStartedMilliseconds;
+              heartbeat = Timer.periodic(const Duration(milliseconds: 1), (_) {
+                final now = stopwatch.elapsedMilliseconds;
+                final gap = now - lastHeartbeatMilliseconds;
+                if (gap > largestHeartbeatGapMilliseconds) {
+                  largestHeartbeatGapMilliseconds = gap;
+                }
+                lastHeartbeatMilliseconds = now;
+                heartbeatsDuringProcessing++;
+              });
+            }
+          },
+        );
+        final processingMilliseconds = stopwatch.elapsedMilliseconds - processingStartedMilliseconds;
+        final finalGap = stopwatch.elapsedMilliseconds - lastHeartbeatMilliseconds;
+        if (finalGap > largestHeartbeatGapMilliseconds) largestHeartbeatGapMilliseconds = finalGap;
+        stopwatch.stop();
+        heartbeat?.cancel();
+
+        expect(receivedArchive, isTrue, reason: format);
+        expect(
+          heartbeatsDuringProcessing,
+          greaterThanOrEqualTo(10),
+          reason: '$format decode must keep yielding to the caller isolate',
+        );
+        expect(processingMilliseconds, greaterThanOrEqualTo(20), reason: format);
+        expect(
+          largestHeartbeatGapMilliseconds,
+          lessThan(processingMilliseconds ~/ 2),
+          reason: '$format decode must not block the caller isolate',
+        );
+        expect(stopwatch.elapsed, greaterThan(const Duration(milliseconds: 5)));
+        expect(result[blobSha256]?.lengthSync(), blobBytes.length);
+        expect(await _fileSha256(result[blobSha256]!), blobSha256);
+      }
+    } finally {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
+  test('cancelling a bundle worker leaves no cached blob or package pointer', () async {
+    final tempDir = await Directory.systemTemp.createTemp('pocket-bundle-worker-cancel-');
+    try {
+      final blobBytes = _largeDeterministicBytes(32 * 1024 * 1024);
+      final blobSha256 = _sha256(blobBytes);
+      final archiveBytes = encodePocket7z(<String, List<int>>{'blobs/$blobSha256': blobBytes});
+      final archiveFile = File(path.join(tempDir.path, 'cancel.7z'));
+      await archiveFile.writeAsBytes(archiveBytes, flush: true);
+      final store = PocketPackageStore(tempDir);
+      final cancellation = PocketCancellationToken();
+      Timer? cancelWorker;
+      Timer? cancellationHeartbeat;
+      var receivedArchive = false;
+      var heartbeatsBeforeCancellation = 0;
+
+      await expectLater(
+        store.writeBundleZip(
+          bundle: PocketManifestBundle(
+            format: '7z',
+            sha256: _sha256(archiveBytes),
+            size: archiveBytes.length,
+            url: 'bundle.7z',
+          ),
+          expectedFiles: <PocketManifestFile>[
+            PocketManifestFile(
+              sha256: blobSha256,
+              size: blobBytes.length,
+              url: 'blobs/$blobSha256',
+            ),
+          ],
+          bytes: archiveFile.openRead(),
+          cancellation: cancellation,
+          onBytes: (received) {
+            if (received == archiveBytes.length && !receivedArchive) {
+              receivedArchive = true;
+              cancellationHeartbeat = Timer.periodic(
+                const Duration(milliseconds: 1),
+                (_) => heartbeatsBeforeCancellation++,
+              );
+            }
+            if (receivedArchive && cancelWorker == null) {
+              // Give the spawned decoder time to start on this real 32 MiB
+              // archive, then cancel while its pure-Dart work is in flight.
+              cancelWorker = Timer(const Duration(milliseconds: 100), cancellation.cancel);
+            }
+          },
+        ),
+        throwsA(isA<PocketUpdateCancellation>()),
+      );
+      cancelWorker?.cancel();
+      cancellationHeartbeat?.cancel();
+
+      expect(receivedArchive, isTrue);
+      expect(heartbeatsBeforeCancellation, greaterThanOrEqualTo(10));
+      expect(await File(path.join(tempDir.path, 'blobs', blobSha256)).exists(), isFalse);
+      expect(await File(path.join(tempDir.path, 'active')).exists(), isFalse);
+      expect(await File(path.join(tempDir.path, 'previous')).exists(), isFalse);
+      expect(await File(path.join(tempDir.path, 'lastGood')).exists(), isFalse);
+      final blobs = Directory(path.join(tempDir.path, 'blobs'));
+      expect(
+        (await blobs.list().toList()).where(
+          (entry) => path.basename(entry.path).startsWith('.bundle'),
+        ),
+        isEmpty,
+      );
+      expect((await Directory(path.join(tempDir.path, 'versions')).list().toList()), isEmpty);
+    } finally {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
   group('PocketPackageUpdate', () {
     late Directory tempDir;
     late SimpleKeyPair keyPair;
@@ -1669,6 +1822,28 @@ Uint8List _envelopeBytes({
     );
 
 String _sha256(List<int> bytes) => crypto.sha256.convert(bytes).toString();
+
+Future<String> _fileSha256(File file) async {
+  final digests = <crypto.Digest>[];
+  final converter = crypto.sha256.startChunkedConversion(
+    ChunkedConversionSink<crypto.Digest>.withCallback(digests.addAll),
+  );
+  await for (final chunk in file.openRead()) {
+    converter.add(chunk);
+  }
+  converter.close();
+  return digests.single.toString();
+}
+
+Uint8List _largeDeterministicBytes(int length) {
+  final bytes = Uint8List(length);
+  var state = 0x12345678;
+  for (var index = 0; index < bytes.length; index++) {
+    state = (1664525 * state + 1013904223) & 0xffffffff;
+    bytes[index] = state >>> 24;
+  }
+  return bytes;
+}
 
 final class _MemoryTransport implements PocketUpdateTransport {
   _MemoryTransport(this.responses);

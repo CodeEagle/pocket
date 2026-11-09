@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { createNovelEngine } from "../../../sdk/packages/pocket_vn/src/engine.ts";
 import type { StoryDefinition } from "../../../sdk/packages/pocket_vn/src/types.ts";
 import storyDocument from "../apps/lantern/story.json";
-import { NativeSession, readNativeArtifacts, textOf } from "./native_session.ts";
+import { NativeSession, readNativeArtifacts, textOf, type DrawOp } from "./native_session.ts";
 
 const directory = resolve(import.meta.dir, "../../assets/apps/lantern");
 process.env.POCKET_STARTUP_VN_GUEST_BYTECODE ??= `${directory}/app.qjbc`;
@@ -11,6 +11,8 @@ process.env.POCKET_STARTUP_VN_GUEST_PAK ??= `${directory}/app.pak`;
 process.env.POCKET_STARTUP_VN_GUEST_METADATA ??= `${directory}/app.bytecode.json`;
 const artifacts = readNativeArtifacts("POCKET_STARTUP_VN");
 const criticalKeys = ["lantern.audio.mix", "lantern.audio.textSoundsEnabled", "lantern.locale", "lantern.slot.auto"];
+const startupImageOps = (frame: { readonly ops?: readonly DrawOp[] }): DrawOp[] =>
+  (frame.ops ?? []).filter(op => op.type === "image" || op.type === "textureTriangle");
 
 test("Lantern shows real startup completion, overlaps independent reads and enters while thumbnail cleanup waits", async () => {
   const session = new NativeSession(artifacts, {
@@ -23,6 +25,7 @@ test("Lantern shows real startup completion, overlaps independent reads and ente
     expect([...requested].sort()).toEqual([...criticalKeys].sort());
     expect(textOf(frame)).toContain("0 / 4");
     expect(textOf(frame)).toContain("正在读取语言偏好");
+    expect(startupImageOps(frame)).toHaveLength(0);
     for (const op of frame.ops ?? []) {
       if (op.type !== "text") continue;
       expect(op.x! >= 0 && op.x! + op.w! <= 390 && op.y! >= 0 && op.y! + op.h! <= 844).toBe(true);
@@ -36,6 +39,7 @@ test("Lantern shows real startup completion, overlaps independent reads and ente
     session.respondPending("platform.storage.get", null, true, request => request.params.key === "lantern.slot.auto");
     frame = await session.settle(await session.frame(), 2);
     expect(textOf(frame)).toContain("1 / 4");
+    expect(startupImageOps(frame)).toHaveLength(0);
     session.respondPending("platform.storage.get", null, false, request => request.params.key === "lantern.audio.mix");
     frame = await session.settle(await session.frame(), 2);
     expect(textOf(frame)).toContain("2 / 4");

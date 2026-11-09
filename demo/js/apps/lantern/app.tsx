@@ -10,7 +10,6 @@ import { createNovelEngine, createNovelReplayEngine, createNovelAnimationDriver,
 import { attachNovelClock } from "@pocket/vn/clock";
 import { createNovelAudioAdapter, DEFAULT_NOVEL_AUDIO_MIX, type NovelAudioGroup, type NovelAudioMix } from "@pocket/vn/audio";
 import { createNovelVideoAdapter } from "@pocket/vn/video";
-import { NovelSkinFrame } from "@pocket/vn/skin-view";
 import { createBundledNovelSpineFactory } from "@pocket/vn/spine";
 import { createBundledNovelLive2dFactory } from "@pocket/vn/live2d";
 import type { NovelModelFactory } from "@pocket/vn";
@@ -508,8 +507,7 @@ function LanternApp(): JSX.Element {
   });
   onCleanup(() => { disposed = true; pendingSave = undefined; removeLifecycle(); video.dispose(); audio.dispose(); platform.dispose(); host.dispose(); });
   return <AccessibilityPreferencesProvider value={accessibility}><Show when={ready()} fallback={<View class="w-full h-full bg-[#08151D] items-center justify-center overflow-hidden p-3">
-    <View class="relative flex-col items-center justify-center gap-2 px-5" style={{ width: 320, height: 280 }}>
-      <NovelSkinFrame frame={projectAssets.skin.frame} width={320} height={280} border={20} debugName="lantern-startup-skin" />
+    <View class="flex-col items-center justify-center gap-2 px-5 bg-[#10212A] border-[#52636A]" style={{ width: 320, height: 280, borderWidth: 1 }}>
       <Text class="text-xl font-bold text-[#FFE1A3] text-center">{text("雾港末班信", "The Last Letter of Mist Harbor")}</Text>
       <Text class="text-sm text-[#E4CF9E] text-center">{text("正在翻开雾港手札……", "Opening the Mist Harbor journal…")}</Text>
       <Text class="text-base font-bold text-[#F5ECD9] text-center mt-1">{startupStageMessage()}</Text>

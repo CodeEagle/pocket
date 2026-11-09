@@ -949,6 +949,9 @@ Future<_OpenedHttpResponse> _openHttpResponse(
     rethrow;
   } on TimeoutException {
     request?.abort();
+    if (cancellation?.isCancelled == true) {
+      throw const PocketUpdateCancellation();
+    }
     throw HttpException('HTTP request timed out', uri: uri);
   }
 }
@@ -990,12 +993,9 @@ Future<List<int>> _readHttpBytes(
     );
   }
 
-  try {
+  Future<List<int>> readBody() async {
     reportProgress();
-    while (await _awaitCancellable(
-      iterator.moveNext().timeout(_httpBodyTimeout),
-      cancellation,
-    )) {
+    while (await iterator.moveNext().timeout(_httpBodyTimeout)) {
       cancellation?.throwIfCancelled();
       final chunk = iterator.current;
       if (chunk.length > maxBytes - length) {
@@ -1005,12 +1005,22 @@ Future<List<int>> _readHttpBytes(
       length += chunk.length;
       reportProgress();
     }
+    cancellation?.throwIfCancelled();
     return bytes.takeBytes();
+  }
+
+  try {
+    return await _awaitCancellable(readBody(), cancellation);
   } on PocketUpdateCancellation {
     cancellationWon = true;
     abortRequest?.call();
     rethrow;
   } on TimeoutException {
+    if (cancellation?.isCancelled == true) {
+      cancellationWon = true;
+      abortRequest?.call();
+      throw const PocketUpdateCancellation();
+    }
     throw HttpException('HTTP body timed out', uri: uri);
   } finally {
     final cleanup = iterator.cancel();

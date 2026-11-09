@@ -27,7 +27,7 @@ Lantern 远程链接把 `pocket.demo.lantern` 作为根界面运行。默认根�
 - 移除两个启动位置各自的无文案 spinner，复用一个无状态内部组件。
 - 不在 SystemUI 运行期间叠加原生业务弹层，不改变 compositor 的准备与首帧准入。
 - SDK 默认入口自动接入；自行在 `runApp` 前等待 `PocketHostConfig.load` 的消费者，需要使用其 `onProgress` 回调绘制自己的启动反馈，否则 SDK 尚未挂载，无法绘制。
-- 应用内部请求远程数据或图片的业务加载态不在本次范围内。
+- 应用内部请求远程数据或图片的加载态由 JS 管理。Lantern 复用自身启动页，显示四项实际读取状态；宿主不复制游戏状态。
 
 ## 消费者接入
 
@@ -79,6 +79,28 @@ POCKET_ON_DEMAND_FIXTURE_DIR=/tmp/pocket-on-demand-fixture-verify \
 
 ### 远程 Lantern 实跑中的独立限制
 
-用户提供的索引把普通 Lantern 应用标成 SystemUI 根包（`sdk/editor/server.ts` 的 `aggregateHostConfig` 与发布索引生成逻辑）。当前该应用没有安装 `installPocketSystem`，而 `PocketSystemHost` 的 `platform.*` 代理会把请求路由到根 JS kernel。因此应用启动时的存储请求会依次等待 30 秒应答超时，再由应用自己的 catch 继续进入首页。这段等待已在真实桌面运行中观察到，与包下载的进度无关。
+用户提供的索引把普通 Lantern 应用标成 SystemUI 根包（`sdk/editor/server.ts` 的 `aggregateHostConfig` 与发布索引生成逻辑）。当前该应用没有安装 `installPocketSystem`，而 `PocketSystemHost` 的 `platform.*` 代理会把请求路由到根 JS kernel。旧测试包的存储请求曾依次等待 30 秒应答超时，再由应用自己的 catch 进入首页。当前 Lantern 已并发读取，并由真实桥接超时回退；这仍与包下载进度不同。
 
 正确的后续修复应区分单应用容器和多应用 SystemUI 发布：使用真正安装 JS kernel 的 SystemUI shell 承载普通应用，或明确提供与单应用宿主相符的 JS/存储能力接入。不能用 Dart 业务路由绕过它，也不能用伪成功应答掩盖。此次加载进度不宣称已经修复该存储路由问题。
+
+### 可取消与游戏内加载的补充验收（2026-11-09）
+
+保留父工程的 `pocket_services/lib/src/pocket_package.dart`、`pocket_update.dart` 的取消令牌与分块读取语义。配置加载复用 SDK 的同一个取消令牌，取消时 abort 当前 HTTP 请求；不关闭消费者共享的 HttpClient。bootstrap 哈希移入后台 isolate，等待结果时可取消，不再继续请求后续资源。
+
+`flutter test test/pocket_host_loading_test.dart test/pocket_host_config_test.dart` 共 13 项通过：请求头等待、分块 body、共享 client 后续请求、取消后无进度/后续资源，以及按钮、Esc、系统返回和迟到结果隔离。真实 macOS Demo 在远程 Lantern 自身启动页点击返回后回到 bundled 主界面，点击计数按钮使 JS 文本从 00 变为 01。带外层路由时保留页面状态由 widget 路由测试验证。
+
+用户提供的固定测试索引最初仍指向 `0.1.0-test.2`，其游戏加载页只有“正在翻开雾港手机”一行。现有 Lantern JS 已有标题、装饰与四项真实启动读取反馈；通过本地编辑器既有发布接口先更新同一测试索引为 `0.1.0-test.3`，移除启动装饰图片后再发布 `0.1.0-test.4`，不另造游戏 Loading。`bun test tests/novel_startup_native.test.ts` 3 项、31 个断言通过，验证实际字节码的 0/4→1/4→2/4→3/4 帧变化、并行读取超时与点击进入剧情。它不是整包下载百分比；下载前仍使用宿主 IO 提示。
+
+ZIP / 7z 解压与逐文件哈希沿用原验证函数，移到可终止的独立 isolate；只传文件路径，避免向 UI isolate 复制整包数据。取消会终止 worker，临时目录在 finally 清理；完成校验后才把 blob 纳入缓存，不推进 active/healthy 指针。12 MiB ZIP/7z 的主 isolate 心跳与 32 MiB 7z 取消用例包含在 `pocket_package_update_test.dart`。原生运行时加载 QJBC/PAK 的同步 FFI 边界仍未改动，本次不宣称任何尺寸的运行时初始化均零卡顿。
+
+桌面复查发现已验证健康缓存会按原更新策略继续启动旧版本。此次为测试新包，将 `host_0618ad6020ecb93001bf39ee` 包缓存目录重命名为 `.before-loading-test3-120758` 备份后冷启动；未删除旧数据。下载成功后已进入新包首页。固定索引发布不等同于消费者已经执行 Check/Apply，验收时需区分这两件事。
+
+Lantern startup fallback 的装饰 `NovelSkinFrame` 图片被消融，改为已有底色和简单边框。四项读取的状态、文案及 ready 条件保持不变，使启动反馈自身不再依赖图片解码。编辑器重新通过固定 buildGuest 构建后，直接下载新 QJBC/PAK/metadata 到 `/tmp/pocket-lantern-loading-final` 跑 native 测试：3 项、33 断言通过；初始与 1/4 帧均没有 image/textureTriangle 绘制，后续 2/4、3/4、首页和点击剧情行为继续验证。首帧 gate 的实际时序还取决于设备，未用固定延时强制展示。
+
+最后复跑 `session_download_on_open_test.dart`：39 项全部通过，含真实 native pointer 输入；配置/返回 13 项与 Lantern 3 项共 55 项通过，包解压 worker 测试另列。当前工作区宿主相关五文件静态分析无问题。
+
+新测试包最终为 `0.1.0-test.4`，固定 URL 保持不变；test3 冷启动包缓存另保留在 `.before-loading-test4`。备份只用于本机验收，不属于源码或 SDK 交付。
+
+消融对照：同一新增断言运行旧 bundled QJBC，启动首帧检测到 18 条图片绘制而失败；运行重新编译的新 QJBC 则为 0 并通过全部三项。随后 macOS Demo 使用固定测试链接实际显示 Lantern 标题、当前“正在读取语言偏好”、`已完成 0 / 4 项启动读取` 及四项各自状态，宿主返回入口持续显示。没有把 native Guest 测试当作 Flutter 可见性的替代。
+
+收尾结果：包更新单文件 17 项全部通过。心跳测试记录最后下载块到处理完成的完整时长与最大 timer 间隔，要求至少 10 次响应且最大间隔小于处理窗口一半；取消用例覆盖真实 32 MiB 7z。连同上述 55 项，本轮最终 72 项通过，无跳过。收窄后的 package 实现及测试静态分析无问题，`git diff --check` 通过。

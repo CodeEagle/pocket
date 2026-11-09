@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -914,84 +915,82 @@ final class PocketPackageStore {
   }) async {
     await initialize();
     if (bundle.size <= 0 || bundle.size > maxArchiveBytes) {
-      throw const PocketPackageException(
-        'bundle exceeds size limit',
-        code: 'download-size',
-      );
+      throw const PocketPackageException('bundle exceeds size limit', code: 'download-size');
     }
-    final builder = BytesBuilder(copy: false);
+    final temporaryId = '${DateTime.now().microsecondsSinceEpoch}-${_tempCounter++}';
+    final archiveFile = File(path.join(_blobs.path, '.bundle-$temporaryId'));
+    final extractionDirectory = Directory(path.join(_blobs.path, '.bundle-extract-$temporaryId'));
+    final sink = archiveFile.openWrite();
     final digests = <crypto.Digest>[];
     final converter = crypto.sha256.startChunkedConversion(
       ChunkedConversionSink<crypto.Digest>.withCallback(digests.addAll),
     );
     var received = 0;
-    await for (final chunk in bytes) {
-      cancellation.throwIfCancelled();
-      received += chunk.length;
-      if (received > bundle.size || received > maxArchiveBytes) {
+    var sinkClosed = false;
+    try {
+      await for (final chunk in bytes) {
+        cancellation.throwIfCancelled();
+        received += chunk.length;
+        if (received > bundle.size || received > maxArchiveBytes) {
+          throw const PocketPackageException(
+            'bundle download exceeded declared size',
+            code: 'download-size',
+          );
+        }
+        sink.add(chunk);
+        converter.add(chunk);
+        onBytes?.call(received);
+      }
+      converter.close();
+      await sink.flush();
+      await sink.close();
+      sinkClosed = true;
+      if (received != bundle.size || digests.single.toString() != bundle.sha256) {
         throw const PocketPackageException(
-          'bundle download exceeded declared size',
-          code: 'download-size',
+          'bundle download hash or size mismatch',
+          code: 'download-hash',
         );
       }
-      builder.add(chunk);
-      converter.add(chunk);
-      onBytes?.call(received);
-    }
-    converter.close();
-    if (received != bundle.size || digests.single.toString() != bundle.sha256) {
-      throw const PocketPackageException(
-        'bundle download hash or size mismatch',
-        code: 'download-hash',
+      cancellation.throwIfCancelled();
+      await extractionDirectory.create();
+      final extractedFiles = await _decodeBundleInWorker(
+        archivePath: archiveFile.path,
+        outputDirectory: extractionDirectory.path,
+        format: bundle.format,
+        maxTotalBytes: maxTotalBytes,
+        expectedFiles: expectedFiles,
+        requireExactEntries: bundle.blobs != null,
+        cancellation: cancellation,
       );
-    }
-    final archiveBytes = builder.takeBytes();
-    final extracted = decodePocketBundle(
-      archiveBytes,
-      format: bundle.format,
-      maxTotalBytes: maxTotalBytes,
-    );
-    if (bundle.blobs != null) {
-      final expectedPaths = expectedFiles.map((file) => file.url).toSet();
-      if (extracted.length != expectedPaths.length ||
-          extracted.keys.any((name) => !expectedPaths.contains(name))) {
-        throw const PocketPackageException(
-          'partial bundle entries differ from its signed subset',
-          code: 'bundle-content',
-        );
+      final blobs = <String, File>{};
+      for (final file in expectedFiles) {
+        cancellation.throwIfCancelled();
+        final existing = await validBlob(file, cancellation: cancellation);
+        if (existing != null) {
+          // Partial archives promise the exact signed subset. Their extracted
+          // bytes were already checked by the worker even when cache wins.
+          blobs[file.sha256] = existing;
+          continue;
+        }
+        final extracted = extractedFiles[file.sha256];
+        if (extracted == null) {
+          throw PocketPackageException(
+            'bundle is missing blob ${file.sha256}',
+            code: 'bundle-content',
+          );
+        }
+        final target = File(path.join(_blobs.path, file.sha256));
+        await _copyAtomic(extracted, target);
+        blobs[file.sha256] = target;
+      }
+      return blobs;
+    } finally {
+      if (!sinkClosed) await sink.close();
+      if (await archiveFile.exists()) await archiveFile.delete();
+      if (await extractionDirectory.exists()) {
+        await extractionDirectory.delete(recursive: true);
       }
     }
-    final blobs = <String, File>{};
-    for (final file in expectedFiles) {
-      cancellation.throwIfCancelled();
-      final existing = await validBlob(file, cancellation: cancellation);
-      if (existing != null && bundle.blobs == null) {
-        blobs[file.sha256] = existing;
-        continue;
-      }
-      final entryBytes =
-          extracted[file.url] ??
-          extracted['blobs/${file.sha256}'] ??
-          extracted[file.sha256];
-      if (entryBytes == null ||
-          entryBytes.length != file.size ||
-          crypto.sha256.convert(entryBytes).toString() != file.sha256) {
-        throw PocketPackageException(
-          'bundle zip is missing or has corrupted blob ${file.sha256}',
-          code: 'bundle-content',
-        );
-      }
-      // A partial archive promises this exact signed subset. Validate its
-      // declared entries even when earlier downloads populated the cache.
-      if (existing != null) {
-        blobs[file.sha256] = existing;
-        continue;
-      }
-      final target = File(path.join(_blobs.path, file.sha256));
-      await _writeAtomic(target, entryBytes);
-      blobs[file.sha256] = target;
-    }
-    return blobs;
   }
 
   /// Seeds content-addressed blobs into `_blobs/<sha256>` from an already-staged
@@ -2205,6 +2204,209 @@ Future<void> _verifyPakAnnotations(
         );
       }
     }
+  }
+}
+
+Future<Map<String, File>> _decodeBundleInWorker({
+  required String archivePath,
+  required String outputDirectory,
+  required String format,
+  required int maxTotalBytes,
+  required List<PocketManifestFile> expectedFiles,
+  required bool requireExactEntries,
+  required PocketCancellationToken cancellation,
+}) async {
+  cancellation.throwIfCancelled();
+  final responsePort = ReceivePort();
+  final outcome = Completer<Map<String, String>>();
+  final exited = Completer<void>();
+  final responseSubscription = responsePort.listen((Object? message) {
+    // The isolate's reply and onExit notifications share this port, so FIFO
+    // delivery makes a missing result distinguishable without racing a
+    // separate exit/error port.
+    if (message == null) {
+      if (!exited.isCompleted) exited.complete();
+      if (!outcome.isCompleted) {
+        outcome.completeError(
+          const PocketPackageException(
+            'bundle decoder exited before returning a result',
+            code: 'bundle-worker',
+          ),
+        );
+      }
+      return;
+    }
+    if (outcome.isCompleted) return;
+    if (message is List && message.length == 2) {
+      outcome.completeError(
+        PocketPackageException(
+          'bundle decoder isolate failed: ${message.first}',
+          code: 'bundle-worker',
+        ),
+      );
+      return;
+    }
+    if (message is! Map || message['ok'] is! bool) {
+      outcome.completeError(
+        const PocketPackageException(
+          'bundle decoder returned an invalid response',
+          code: 'bundle-worker',
+        ),
+      );
+      return;
+    }
+    if (message['ok'] != true) {
+      outcome.completeError(
+        PocketPackageException(
+          message['message'] is String ? message['message'] as String : 'bundle decoder failed',
+          code: message['code'] is String ? message['code'] as String : 'bundle-worker',
+        ),
+      );
+      return;
+    }
+    final rawFiles = message['files'];
+    if (rawFiles is! Map ||
+        rawFiles.entries.any((entry) => entry.key is! String || entry.value is! String)) {
+      outcome.completeError(
+        const PocketPackageException(
+          'bundle decoder returned invalid file paths',
+          code: 'bundle-worker',
+        ),
+      );
+      return;
+    }
+    outcome.complete(<String, String>{
+      for (final entry in rawFiles.entries) entry.key as String: entry.value as String,
+    });
+  });
+
+  Isolate? worker;
+  var isCancelled = false;
+  unawaited(
+    cancellation.whenCancelled.then((_) {
+      isCancelled = true;
+      worker?.kill(priority: Isolate.immediate);
+    }),
+  );
+  final result = Future.any<Map<String, String>>(<Future<Map<String, String>>>[
+    outcome.future,
+    cancellation.whenCancelled.then<Map<String, String>>(
+      (_) => throw const PocketUpdateCancellation(),
+    ),
+  ]);
+  // Subscribe before spawning: cancellation can arrive during Isolate.spawn,
+  // and a worker exit error must never become an unhandled future error.
+  unawaited(result.then<void>((_) {}, onError: (Object _, StackTrace __) {}));
+  Future<Isolate>? spawn;
+  try {
+    spawn =
+        Isolate.spawn<List<Object?>>(
+          _decodeBundleWorkerMain,
+          <Object?>[
+            responsePort.sendPort,
+            archivePath,
+            outputDirectory,
+            format,
+            maxTotalBytes,
+            <List<Object?>>[
+              for (final file in expectedFiles) <Object?>[file.sha256, file.size, file.url],
+            ],
+            requireExactEntries,
+          ],
+          onError: responsePort.sendPort,
+          onExit: responsePort.sendPort,
+          errorsAreFatal: true,
+          debugName: 'Pocket bundle decoder',
+        ).then((isolate) {
+          worker = isolate;
+          if (isCancelled) isolate.kill(priority: Isolate.immediate);
+          return isolate;
+        });
+    worker = await Future.any<Isolate>(<Future<Isolate>>[
+      spawn,
+      cancellation.whenCancelled.then<Isolate>((_) => throw const PocketUpdateCancellation()),
+    ]);
+    // Unlike Isolate.run, this worker has an explicit lifetime. Closing the
+    // package/session kills the decoder immediately instead of waiting for a
+    // large pure-Dart inflate to finish on the caller isolate.
+    cancellation.throwIfCancelled();
+    final paths = await result;
+    cancellation.throwIfCancelled();
+    return <String, File>{for (final entry in paths.entries) entry.key: File(entry.value)};
+  } finally {
+    if (worker == null) {
+      // Cancellation may win while Isolate.spawn is still resolving. Wait for
+      // spawn failure or success; the success callback kills it immediately.
+      final pendingSpawn = spawn;
+      if (pendingSpawn != null) {
+        try {
+          worker = await pendingSpawn.timeout(const Duration(seconds: 5));
+        } on Object {
+          // A failed/timed-out spawn has no worker to reap.
+        }
+      }
+    }
+    final activeWorker = worker;
+    if (activeWorker != null && !exited.isCompleted) {
+      activeWorker.kill(priority: Isolate.immediate);
+      await exited.future.timeout(const Duration(seconds: 5), onTimeout: () {});
+    }
+    await responseSubscription.cancel();
+    responsePort.close();
+  }
+}
+
+@pragma('vm:entry-point')
+Future<void> _decodeBundleWorkerMain(List<Object?> request) async {
+  final reply = request[0] as SendPort;
+  try {
+    final archivePath = request[1] as String;
+    final outputDirectory = request[2] as String;
+    final format = request[3] as String;
+    final maxTotalBytes = request[4] as int;
+    final expectedFiles = (request[5] as List<Object?>).cast<List<Object?>>();
+    final requireExactEntries = request[6] as bool;
+
+    // Path-based transfer avoids duplicating an archive or extracted payload
+    // of hundreds of MiB across isolate message queues.
+    final archive = await File(archivePath).readAsBytes();
+    final extracted = decodePocketBundle(archive, format: format, maxTotalBytes: maxTotalBytes);
+    if (requireExactEntries) {
+      final expectedPaths = expectedFiles.map((file) => file[2] as String).toSet();
+      if (extracted.length != expectedPaths.length ||
+          extracted.keys.any((name) => !expectedPaths.contains(name))) {
+        throw const PocketPackageException(
+          'partial bundle entries differ from its signed subset',
+          code: 'bundle-content',
+        );
+      }
+    }
+
+    final files = <String, String>{};
+    for (final file in expectedFiles) {
+      final sha256 = file[0] as String;
+      final size = file[1] as int;
+      final url = file[2] as String;
+      final entryBytes = extracted[url] ?? extracted['blobs/$sha256'] ?? extracted[sha256];
+      if (entryBytes == null ||
+          entryBytes.length != size ||
+          crypto.sha256.convert(entryBytes).toString() != sha256) {
+        throw PocketPackageException(
+          'bundle is missing or has corrupted blob $sha256',
+          code: 'bundle-content',
+        );
+      }
+      final outputPath = path.join(outputDirectory, sha256);
+      if (!files.containsKey(sha256)) {
+        await File(outputPath).writeAsBytes(entryBytes, flush: true);
+        files[sha256] = outputPath;
+      }
+    }
+    reply.send(<String, Object?>{'ok': true, 'files': files});
+  } on PocketPackageException catch (error) {
+    reply.send(<String, Object?>{'ok': false, 'code': error.code, 'message': error.message});
+  } on Object catch (error) {
+    reply.send(<String, Object?>{'ok': false, 'code': 'bundle-worker', 'message': '$error'});
   }
 }
 
