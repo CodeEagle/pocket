@@ -1107,7 +1107,32 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   @override
   Widget build(BuildContext context) {
     if (!_catalogMatchesMountedGeneration) {
-      return ColoredBox(color: widget.backgroundColor);
+      final session = _systemUIInstance.session;
+      final error = _systemUIInstance.startupError ?? session.failure;
+      final foreground = widget.backgroundColor.computeLuminance() > 0.179
+          ? Colors.black
+          : Colors.white;
+      if (error != null) {
+        return ColoredBox(
+          color: widget.backgroundColor,
+          child: Center(
+            child: SelectableText(
+              'Pocket 启动失败：$error',
+              style: TextStyle(color: foreground),
+            ),
+          ),
+        );
+      }
+      final progress = session.transferProgress;
+      return ColoredBox(
+        color: widget.backgroundColor,
+        child: PocketStartupIndicator(
+          stage: session.stage,
+          downloadedBytes: progress?.downloadedBytes,
+          totalBytes: progress?.totalBytes,
+          foregroundColor: foreground,
+        ),
+      );
     }
     return PocketGuestSession(
       config: _systemUIInstance.config,
