@@ -151,20 +151,17 @@ void main() {
           final background = frame.ops.whereType<PocketImageOp>().firstWhere(
             (op) => op.asset.endsWith('art/station.png'),
           );
-          final safe = MediaQuery.viewPaddingOf(
-            tester.element(guest.activePocketViewFinder()),
-          );
-          // The stage occupies the safe content rectangle. Desktop has zero
-          // edge insets; the iPad retains its status/home-indicator edges.
-          expect(background.x, lessThanOrEqualTo(safe.left + 1));
-          expect(background.y, lessThanOrEqualTo(safe.top + 1));
+          // Scene art covers the complete canvas; only controls consume the
+          // status-bar and home-indicator safe insets.
+          expect(background.x, lessThanOrEqualTo(1));
+          expect(background.y, lessThanOrEqualTo(1));
           expect(
             background.x + background.width,
-            greaterThanOrEqualTo(frame.width - safe.right - 1),
+            greaterThanOrEqualTo(frame.width - 1),
           );
           expect(
             background.y + background.height,
-            greaterThanOrEqualTo(frame.height - safe.bottom - 1),
+            greaterThanOrEqualTo(frame.height - 1),
           );
           expect(frame.images[background.asset], isNotNull);
           final dialogue = guest

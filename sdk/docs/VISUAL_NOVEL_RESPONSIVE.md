@@ -10,6 +10,8 @@ The VN also reuses Pocket UI's existing `createDisplayGeometry()` and `pageInset
 
 `createNovelViewportLayout()` derives a safe content rectangle from the live display width, height, safe insets, and keyboard inset. It fills that rectangle, scales authored scene coordinates from the original 360×640 design while keeping touch controls and type natural-sized, and centers readable UI within caps (dialogue 960 px, paragraph 720 px, panel 860 px). At short heights, dialogue, choice, title/menu, log, settings, gallery, and ending content use `ScrollablePage` with a bounded viewport so their controls remain available.
 
+Backgrounds, video, atmosphere and scene transitions use the full display dimensions independently of this safe content rectangle. Title/menu scrims cover the same full viewport. Actors and scene hit targets retain the safe-coordinate mapping, including camera transforms; controls do not receive a second safe-area inset.
+
 When an asset consumer supplies its actual intrinsic dimensions, backgrounds and CG thumbnails use proportional cover bounds and character art uses contain bounds. No framework `Image.fit` API is available in this pinned renderer. String-only legacy assets keep their former box bounds. Lantern supplies a map for its runtime PNG paths; each packaged `art/*.png` was checked with `file` and is 512×512. Its higher-resolution `art/masters/*.png` are authoring sources and are not the files referenced by the runtime registry.
 
 ## Validation
@@ -62,10 +64,11 @@ to open the menu, continue reading, and advance the dialogue. These were
 in-app layout constraints, not OS rotation/window resizing or a physical iPad
 run. The test source is
 [`novel_large_screen_test.dart`](../../demo/integration_test/novel_large_screen_test.dart).
-Its original desktop-only assertion expected the background to fill the
-complete frame. On iPad, the intended stage excludes the 32/20-pixel safe
-edges. The assertion now checks the actual safe content rectangle; this
-correction changed the test only, not the production layout.
+That run checked only the safe content rectangle on iPad (32/20-pixel insets).
+This was insufficient for immersive game art: it accepted uncovered system
+edges. The current contract requires background coverage across the complete
+frame while controls remain inside safe bounds; the integration assertion has
+been corrected accordingly. See [mobile safe-area acceptance](VISUAL_NOVEL_MOBILE_SAFE_AREA.md).
 
 The final build identities are Lantern QJBC
 `ca609bad1a6c1a98a534dfb572a2a725e8ded3b5ec8118ca2c56be7970054a26`, Lantern

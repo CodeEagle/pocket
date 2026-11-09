@@ -200,6 +200,14 @@ export function NotesPage() {
 横竖屏/尺寸变化、无障碍和真机触控。AI 应明确说明“复用了哪个现有行为、只改了哪层皮肤”；
 不能把静态截图相似当作交互验收。
 
+### 游戏视口与安全区
+
+游戏场景的视觉层与交互层使用不同边界：背景、视频、氛围层、转场和遮罩绘制到完整 viewport，不能继承控件的 safe-area clip；按钮、对白、菜单及场景命中目标使用 `pageInsets` 形成的一份安全框。自定义游戏复用已有 `display.viewport` / `pageInsets` 几何原语，不另加 Dart `SafeArea`、逐控件重复 inset 或第二份布局/相机状态。如有分层和 camera，应复用同一 pose，并明确视觉与命中坐标的映射；具体相机原点由游戏设计决定。
+
+直接使用 `NovelView` 时由其内置视口布局保证场景视觉全屏、交互内容安全；自定义游戏必须自己遵守上述边界。详细证据与当前实现记录见 [`VISUAL_NOVEL_MOBILE_SAFE_AREA.md`](VISUAL_NOVEL_MOBILE_SAFE_AREA.md)。
+
+分层后，位于可点击场景上方的纯布局容器应使用现有 `hitPass: 1` 让自身空白区域透传命中，子控件仍正常响应。视觉透明不等于命中透明；菜单遮罩等有意阻断输入的区域须保留阻断行为。
+
 ## 6. HostBridge 与能力声明
 
 JS 通过同一个 `HostBridge` 请求原生能力：
@@ -544,6 +552,8 @@ AI 在交付前至少确认：
 - [ ] manifest、宿主 allowlist 和系统权限三层一致。
 - [ ] UI 使用已有控件并处理 loading/error/empty/disabled。
 - [ ] Editor 中真实构建并通过点击/输入后的画面变化验证。
+- [ ] 游戏使用真实 QJBC/DrawOps 检查背景绘制（图片、视频或图形）与所有生效 clip 的交集覆盖完整 viewport，且顶部状态栏区、底部 home-indicator 区有可见像素；控件与命中目标留在单次 safe frame，并验证 Start、菜单/等价游戏入口的真实输入。
+- [ ] 游戏安全区验收覆盖 iPhone、Android、竖屏、横屏与旋转往返；报告分别标明 Core、Editor、物理设备证据，不能用其中一类替代另一类。
 - [ ] 模拟器/真机验证了 IME、权限、Texture 或硬件边界。
 - [ ] QJBC/PAK/metadata/manifest 来自同一次固定流水线。
 - [ ] 发布地址符合 `/pocket/<hostVersion>/<packageId>/<packageVersion>/`。
@@ -560,6 +570,7 @@ AI 在交付前至少确认：
 - `HARDWARE_MODULES.md`：按需硬件与权限。
 - `OPTIONAL_PLUGINS.md`：Dio、平台能力和可选插件。
 - `EDITOR_STUDIO.md`：Editor、预览与设备部署。
+- `VISUAL_NOVEL_MOBILE_SAFE_AREA.md`：游戏/VN 全视口场景视觉、安全控件边界及分层验收证据。
 - `EDITOR_RESOURCE_DELIVERY.md`：资源基础包/网络放置。
 - `PACKAGE_UPDATE_MODES.md`：首次 bundle 与 granular 更新实现。
 - `SYSTEM_UI_SELF_REFRESH.md`：JS 自动刷新和状态交接。

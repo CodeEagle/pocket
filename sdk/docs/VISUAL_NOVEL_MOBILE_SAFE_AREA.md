@@ -15,9 +15,10 @@ compositor surface computes its own facts against the untransformed parent
 viewport. `createDisplayGeometry` consumes the existing `display.viewport`
 event lane, with no polling or second transport.
 
-`NovelView` consumes `pageInsets` once on the shared stage/UI root. All game
-controls inherit that origin. Adding the same top padding to each child would
-double-count the system safe area.
+`NovelView` consumes `pageInsets` once for interactive content. All game
+controls inherit that origin. Scene art covers the complete viewport behind
+the status bar and home indicator; safe insets must not crop that background.
+Adding the same top padding to each control would double-count the safe area.
 
 ## Local occlusion correction
 
@@ -143,3 +144,65 @@ A final device PNG was captured (1,815,067 bytes), but teardown removed it and
 only 50/3,458 log chunks survived, so no complete screenshot is retained.
 Full hit-area measurement, durable pixel capture, iOS/physical devices and
 rotation are explicitly outstanding evidence, not included in the 1-test pass.
+
+## Full-viewport scene correction, 2026-11-09
+
+The previous shared safe-area clip incorrectly applied the controls' contract
+to scene art. In the real Editor phone preview (375×812, top44/bottom34), the
+station image and its clip were both `(0,44,375,734)`. This left the status-bar
+and home-indicator regions uncovered. A native regression assertion against the
+previous compiled Lantern Guest also fails at background top59 in a 390×844
+viewport; safe controls alone were insufficient acceptance.
+
+Retained parent sources confirm the separation: the scaffold background in
+`pocketjs_flutter_demo/lib/ui/mini_app_host_page.dart` remains behind its
+top-inset toolbar, while NavigationBar in
+`pocketjs_flutter_demo/lib/render/pocket_ui_components.dart` fills the bottom
+system area and keeps icon content above it. The retained parent has no VN
+implementation to transplant. The necessary adaptation belongs in the JS VN
+view, using the existing host geometry and pinned renderer.
+
+Scene backgrounds, video, atmosphere, reveal/dissolve/fade and title/menu
+scrims now use the complete viewport. Actors and scene/choice hit targets retain
+the original fixed safe clip and camera-relative coordinates; HUD and panels
+retain the existing safe layout. Both scene layers derive their transform from
+the same camera pose and safe center. There is no second camera state,
+duplicated edge artwork, extra Flutter wrapper or duplicate safe-area scrim.
+
+New layout containers use the existing `hitPass: 1` style so their empty areas
+do not intercept the bounds-based native hit walk; descendants remain hittable.
+Removing this property reproduces failed scene-choice input, and an empty
+panel-layout sibling also blocks dialogue advancement. Keeping the HUD mounted
+beneath the full panel scrim preserves the original menu/transition behavior.
+Both regressions were caught by the existing actual Guest tests, without
+relaxing their assertions.
+
+The final pinned `buildGuest` Lantern artifacts pass six native tests across
+`novel_safe_area_native`, `novel_viewport_native`, `novel_camera_native`,
+`novel_choice_surface_view_native` and `novel_reveal_native`. These exercise
+full background/image-clip intersections for title and gameplay, late-mounted
+safe geometry, portrait/landscape changes, local occlusion, real menu/continue
+input, camera/reduce-motion, scene/dial choice input and four-direction reveal
+with pause/save/load/rollback. The existing viewport unit suite also passes
+three tests. Evidence is retained in
+`sdk/.pocket-build/lantern-full-safearea-20261109/evidence/`.
+
+Editor acceptance at port8791 uses the real Showcase child Guest in a
+375×812 phone preview. Both title and settled gameplay paint station art at
+`(0,0,375,812)` with a full viewport clip; captured pixels show it behind both
+system areas. Start input changes to the actual dialogue; after the ordinary
+entry fade, characters and full scene art appear. The Flutter large-screen
+integration assertion now requires full-frame art rather than accepting safe
+content-only coverage. This correction's new acceptance is Core and Editor;
+the changed Flutter integration test has not been rerun on OS devices.
+
+The final Editor run also opens the actual top-right journal and clicks
+Continue Reading back to gameplay. Its menu scrim covers the complete viewport;
+the background, characters and HUD remain painted beneath it. The journal
+panel stays within its `(39,90,298,642)` content clip and returning restores
+full scene art. Final title/body/menu/return PNGs and the browser acceptance
+log are retained with the evidence above (CSS viewport1440×1000, DPR2).
+
+The reusable development rule and delivery checklist live in
+[`AI_APP_DEVELOPMENT.md`](AI_APP_DEVELOPMENT.md#游戏视口与安全区), with entry
+references in the project-template guide and generated Game README.

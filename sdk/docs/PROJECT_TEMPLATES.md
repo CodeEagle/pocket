@@ -91,6 +91,10 @@ Game 的状态（`phase`、`score`、`remaining`、`target`、动画进度和命
 
 这个模板的能力边界是当前 SDK 已验收的 Solid/UI 帧模型：使用 `View` 组合星点、行星、轨道、星核和粒子爆发，使用 `Focusable` 处理 80 像素星核命中区和场景内操作，并以 `onFrame` 驱动漂移、倒计时和反馈动画。它不声明或伪造 3D Scene、Rapier 物理、BLE 手柄、Canvas DrawList、共享 Float32Array、VRAM 或资源流能力。需要这些能力时，应先实现并验收对应的公共 transport/API，再扩展模板。
 
+### 游戏画面与安全区
+
+游戏扩展遵循“场景视觉全屏、交互单次 safe”规则：`NovelView` 内置此保证，自定义游戏需自行遵守；完整规则与验收要求见 [AI 应用开发指南的游戏视口与安全区](AI_APP_DEVELOPMENT.md#游戏视口与安全区) 及 [详细证据](VISUAL_NOVEL_MOBILE_SAFE_AREA.md)。星尘捕手目前只展示 `View` 图形场景与 `Focusable` 输入，不包含视频、氛围媒体或场景转场等完整多媒体实现。
+
 ## 构建和 Preview
 
 两个模板走完全相同的真实构建流程：

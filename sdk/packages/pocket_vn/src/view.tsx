@@ -275,7 +275,27 @@ function revealClipBounds(direction: RevealTransitionDirection, progress: number
   return { insetL, insetT, width: clipWidth, height: clipHeight, contentInsetL: -insetL, contentInsetT: -insetT };
 }
 
-function StageBackground(props: { stage: StageComposition; assets: NovelAssets; layout: ReturnType<typeof createNovelViewportLayout>; reduceMotion: boolean }): JSX.Element {
+type CameraPose = ReturnType<typeof resolveNovelCameraPose>;
+type NovelLayout = ReturnType<typeof createNovelViewportLayout>;
+type ViewportSize = { width: number; height: number };
+
+function localCameraStyle(pose: CameraPose) {
+  return { translateX: pose.x, translateY: pose.y, scale: pose.scale, originX: 0, originY: 0 };
+}
+
+function fullViewportCameraStyle(pose: CameraPose, safe: NovelLayout, viewport: ViewportSize) {
+  return {
+    ...localCameraStyle(pose),
+    originX: (safe.insetL + safe.width / 2) / viewport.width - 0.5,
+    originY: (safe.insetT + safe.height / 2) / viewport.height - 0.5,
+  };
+}
+
+function safeStageClipBounds(layout: NovelLayout) {
+  return { insetL: layout.insetL, insetT: layout.insetT, width: layout.width, height: layout.height };
+}
+
+function StageBackground(props: { stage: StageComposition; assets: NovelAssets; layout: ViewportSize; safeLayout: NovelLayout; reduceMotion: boolean }): JSX.Element {
   const cameraPose = () => resolveNovelCameraPose(props.stage.camera, { reduceMotion: props.reduceMotion });
   const layerTransform = (parallax: number) => {
     if (parallax === 1) return {};
@@ -287,8 +307,8 @@ function StageBackground(props: { stage: StageComposition; assets: NovelAssets; 
       translateX: (layer.x - camera.x) / camera.scale,
       translateY: (layer.y - camera.y) / camera.scale,
       scale: layer.scale / camera.scale,
-      originX: 0,
-      originY: 0,
+      originX: (props.safeLayout.insetL + props.safeLayout.width / 2) / props.layout.width - 0.5,
+      originY: (props.safeLayout.insetT + props.safeLayout.height / 2) / props.layout.height - 0.5,
     };
   };
   const coverStyle = (source: string) => imageBoundsStyle(novelImageCoverBounds(
@@ -367,14 +387,17 @@ function StageItems(props: StageItemsProps): JSX.Element {
   }</For>;
 }
 
-function StageArt(props: { stage: StageComposition; assets: NovelAssets; layout: ReturnType<typeof createNovelViewportLayout>; reduceMotion: boolean; opacity?: number; modelFactory?: NovelModelFactory; animations?: NovelAnimationDriver; message: MessageFormatter }): JSX.Element {
-  const cameraStyle = () => {
-    const pose = resolveNovelCameraPose(props.stage.camera, { reduceMotion: props.reduceMotion });
-    return { translateX: pose.x, translateY: pose.y, scale: pose.scale, originX: 0, originY: 0 };
-  };
-  return <View class="absolute inset-0 w-full h-full bg-[#08151D]" style={{ opacity: props.opacity ?? 1, ...cameraStyle() }}>
-    <StageBackground stage={props.stage} assets={props.assets} layout={props.layout} reduceMotion={props.reduceMotion} />
-    <StageItems stage={props.stage} assets={props.assets} layout={props.layout} modelFactory={props.modelFactory} animations={props.animations} message={props.message} />
+function StageArt(props: { stage: StageComposition; assets: NovelAssets; layout: ReturnType<typeof createNovelViewportLayout>; visualViewport: { width: number; height: number }; reduceMotion: boolean; opacity?: number; modelFactory?: NovelModelFactory; animations?: NovelAnimationDriver; message: MessageFormatter }): JSX.Element {
+  const cameraPose = () => resolveNovelCameraPose(props.stage.camera, { reduceMotion: props.reduceMotion });
+  return <View class="absolute inset-0 w-full h-full bg-[#08151D]" style={{ opacity: props.opacity ?? 1, hitPass: 1 }}>
+    <View class="absolute inset-0 w-full h-full" style={{ ...fullViewportCameraStyle(cameraPose(), props.layout, props.visualViewport), hitPass: 1 }}>
+      <StageBackground stage={props.stage} assets={props.assets} layout={props.visualViewport} safeLayout={props.layout} reduceMotion={props.reduceMotion} />
+    </View>
+    <View class="absolute overflow-hidden" style={{ ...safeStageClipBounds(props.layout), hitPass: 1 }}>
+      <View class="absolute inset-0 w-full h-full" style={{ ...localCameraStyle(cameraPose()), hitPass: 1 }}>
+        <StageItems stage={props.stage} assets={props.assets} layout={props.layout} modelFactory={props.modelFactory} animations={props.animations} message={props.message} />
+      </View>
+    </View>
   </View>;
 }
 
@@ -383,6 +406,7 @@ export function NovelView(props: NovelViewProps): JSX.Element {
   const accessibility = useAccessibilityPreferences();
   const reduceMotion = () => accessibility().reduceMotion;
   const display = createDisplayGeometry({ fallback: { ...EMPTY_DISPLAY_GEOMETRY, width: 360, height: 640 } });
+  const visualViewport = createMemo(() => ({ width: display().width, height: display().height }));
   const layout = createMemo(() => {
     const geometry = display();
     const insets = pageInsets(geometry);
@@ -1042,10 +1066,10 @@ export function NovelView(props: NovelViewProps): JSX.Element {
     const active = transition();
     return active?.kind === "reveal" ? active : undefined;
   };
-  const revealClip = () => revealClipBounds(revealing()?.direction ?? "left", progress(), layout().width, layout().height);
+  const revealClip = () => revealClipBounds(revealing()?.direction ?? "left", progress(), visualViewport().width, visualViewport().height);
   const fadingOut = () => transition()?.kind === "fade" && !!transition()?.from && progress() < 0.5;
   const fadeOpacity = () => transition()?.kind === "fade" ? (transition()?.from ? (fadingOut() ? progress() * 2 : (1 - progress()) * 2) : 1 - progress()) : 0;
-  const backgroundImageStyle = (source: string) => imageBoundsStyle(novelImageCoverBounds(layout().width, layout().height, props.assets.imageDimensions?.[source]));
+  const backgroundImageStyle = (source: string) => imageBoundsStyle(novelImageCoverBounds(visualViewport().width, visualViewport().height, props.assets.imageDimensions?.[source]));
   const choiceHeight = () => {
     const current = choice();
     if (!current) return 1;
@@ -1094,10 +1118,9 @@ export function NovelView(props: NovelViewProps): JSX.Element {
   const compactPairWidth = (horizontalInset = 0) => Math.max(1, (panelContentWidth() - horizontalInset - 8) / 2);
   const pageActionWidth = () => Math.max(1, (panelContentWidth() - 100 - 16) / 2);
   const visualStage = () => fadingOut() ? transition()!.from! : presentationStage();
-  const artCameraStyle = () => {
-    const pose = resolveNovelCameraPose(visualStage().camera, { reduceMotion: reduceMotion() });
-    return { translateX: pose.x, translateY: pose.y, scale: pose.scale, originX: 0, originY: 0 };
-  };
+  const artCameraPose = () => resolveNovelCameraPose(visualStage().camera, { reduceMotion: reduceMotion() });
+  const artCameraStyle = () => localCameraStyle(artCameraPose());
+  const fullArtCameraStyle = () => fullViewportCameraStyle(artCameraPose(), layout(), visualViewport());
   const choiceOptionText = (text: string) => wrapTextLines(text, Math.max(1, Math.floor((layout().choiceWidth - 58) / 8)), layout().choiceWidth - 58, 1);
   const choiceOptionHeight = (text: string) => Math.max(40, choiceOptionText(text).split("\n").length * 20 + 16);
   const choiceSurface = createMemo(() => {
@@ -1122,8 +1145,9 @@ export function NovelView(props: NovelViewProps): JSX.Element {
       Math.max(1, Math.floor((target.width - 16) / 8)), target.width - 16, 1).split("\n").length * 20 + 16 > target.height)) return null;
     return resolved;
   }, null, { equals: sameChoiceSurfaceLayout });
-  const activeStage = () => <View class="absolute inset-0 w-full h-full bg-[#08151D]" style={{ opacity: transition()?.kind === "dissolve" ? progress() : 1, ...artCameraStyle() }}>
-    <StageBackground stage={visualStage()} assets={props.assets} layout={layout()} reduceMotion={reduceMotion()} />
+  const activeStage = () => <View class="absolute inset-0 w-full h-full bg-[#08151D]" style={{ opacity: transition()?.kind === "dissolve" ? progress() : 1, hitPass: 1 }}>
+    <View class="absolute inset-0 w-full h-full" style={{ ...fullArtCameraStyle(), hitPass: 1 }}>
+    <StageBackground stage={visualStage()} assets={props.assets} layout={visualViewport()} safeLayout={layout()} reduceMotion={reduceMotion()} />
     <Show when={snapshot().phase !== "disposed" ? stageVideo() : undefined}>{video => {
       const asset = () => props.assets.videos?.[video().cue];
       return <Show when={asset()} fallback={<View class="absolute inset-0 items-center justify-center bg-[#08151D]"><Text class="text-xs text-[#F0B78F]">{message("video.error", { detail: `Unknown video cue: ${video().cue}` })}</Text></View>}>
@@ -1138,37 +1162,43 @@ export function NovelView(props: NovelViewProps): JSX.Element {
             playing={video().status === "playing"}
             fit="cover"
             class="w-full h-full"
-            style={{ width: layout().width, height: layout().height }}
+            style={{ width: visualViewport().width, height: visualViewport().height }}
           />}
         </Show>
       </Show>;
     }}</Show>
-    <Show when={props.assets.atmospheres?.[visualStage().background ?? ""]}>{config => <NovelAtmosphereView config={config()} width={layout().width} height={layout().height} active={!snapshot().paused && panel() === "none"} animations={props.animations} />}</Show>
-    <StageItems stage={visualStage()} assets={props.assets} layout={layout()} modelFactory={props.modelFactory} animations={props.animations} message={message} variables={snapshot().variables} interactive={!titleScreen() && panel() === "none" && !snapshot().paused && snapshot().phase === "say" && !transition()} onObjectPress={id => { try { props.engine.interactSceneObject(id); } catch (error) { fail(error); } }} />
-    <Show when={choiceSurface()}>{surface => <NovelChoiceSurfaceView layout={surface()} renderOption={(option, geometry, caption) =>
-      <FocusTarget autoFocus={option.id === choice()?.options[0]?.id} onNode={option.id === choice()?.options[0]?.id ? rememberInteractionFocus : undefined}
-        debugName={`vn-choice-${option.id}`} class="absolute flex-col items-center justify-center px-2"
-        skinWidth={surface().image ? undefined : geometry.width} skinHeight={surface().image ? undefined : geometry.height}
-        style={{ insetL: geometry.x, insetT: geometry.y, width: geometry.width, height: geometry.height }}
-        onPress={() => { try { props.engine.selectChoice(option.id); } catch (error) { fail(error); } }}>
-        <Text class="text-sm text-[#FFE1A3]">{wrapTextLines(caption, Math.max(1, Math.floor((geometry.width - 16) / 8)), geometry.width - 16, 1)}</Text>
-      </FocusTarget>
-    } />}</Show>
+    <Show when={props.assets.atmospheres?.[visualStage().background ?? ""]}>{config => <NovelAtmosphereView config={config()} width={visualViewport().width} height={visualViewport().height} active={!snapshot().paused && panel() === "none"} animations={props.animations} />}</Show>
+    </View>
+    <View class="absolute overflow-hidden" style={{ ...safeStageClipBounds(layout()), hitPass: 1 }}>
+    <View class="absolute inset-0 w-full h-full" style={{ ...artCameraStyle(), hitPass: 1 }}>
+      <StageItems stage={visualStage()} assets={props.assets} layout={layout()} modelFactory={props.modelFactory} animations={props.animations} message={message} variables={snapshot().variables} interactive={!titleScreen() && panel() === "none" && !snapshot().paused && snapshot().phase === "say" && !transition()} onObjectPress={id => { try { props.engine.interactSceneObject(id); } catch (error) { fail(error); } }} />
+      <Show when={choiceSurface()}>{surface => <NovelChoiceSurfaceView layout={surface()} renderOption={(option, geometry, caption) =>
+        <FocusTarget autoFocus={option.id === choice()?.options[0]?.id} onNode={option.id === choice()?.options[0]?.id ? rememberInteractionFocus : undefined}
+          debugName={`vn-choice-${option.id}`} class="absolute flex-col items-center justify-center px-2"
+          skinWidth={surface().image ? undefined : geometry.width} skinHeight={surface().image ? undefined : geometry.height}
+          style={{ insetL: geometry.x, insetT: geometry.y, width: geometry.width, height: geometry.height }}
+          onPress={() => { try { props.engine.selectChoice(option.id); } catch (error) { fail(error); } }}>
+          <Text class="text-sm text-[#FFE1A3]">{wrapTextLines(caption, Math.max(1, Math.floor((geometry.width - 16) / 8)), geometry.width - 16, 1)}</Text>
+        </FocusTarget>
+      } />}</Show>
+    </View>
+    </View>
   </View>;
   return <NovelSkinContext.Provider value={skinContext}><View class="relative w-full h-full overflow-hidden bg-[#08151D]">
-    <View class="absolute overflow-hidden bg-[#08151D]" style={stageBounds()}>
-    <Show when={titleScreen()}><Show when={background()}>{source => <Image src={source()} class="absolute" style={backgroundImageStyle(source())} />}</Show></Show>
-    <Show when={!titleScreen()}>
+    <View class="absolute inset-0 overflow-hidden bg-[#08151D]" style={{ hitPass: 1 }}>
+      <Show when={titleScreen()}><Show when={background()}>{source => <Image src={source()} class="absolute" style={backgroundImageStyle(source())} />}</Show></Show>
+      <Show when={titleScreen() && panel() === "none"}><View class="absolute inset-0 bg-[#08151D]" style={{ opacity: 0.28 }} /></Show>
+      <Show when={!titleScreen()}>
       <Show when={revealing()} fallback={<>
-        <Show when={transition()?.kind === "dissolve" ? transition()?.from : undefined}>{previous => <StageArt stage={previous()} assets={props.assets} layout={layout()} reduceMotion={reduceMotion()} modelFactory={props.modelFactory} animations={props.animations} message={message} />}</Show>
+        <Show when={transition()?.kind === "dissolve" ? transition()?.from : undefined}>{previous => <StageArt stage={previous()} assets={props.assets} layout={layout()} visualViewport={visualViewport()} reduceMotion={reduceMotion()} modelFactory={props.modelFactory} animations={props.animations} message={message} />}</Show>
         {activeStage()}
       </>}>
         {current => {
           const clip = () => revealClip();
           return <>
-            <Show when={current().from}>{previous => <StageArt stage={previous()} assets={props.assets} layout={layout()} reduceMotion={reduceMotion()} modelFactory={props.modelFactory} animations={props.animations} message={message} />}</Show>
+            <Show when={current().from}>{previous => <StageArt stage={previous()} assets={props.assets} layout={layout()} visualViewport={visualViewport()} reduceMotion={reduceMotion()} modelFactory={props.modelFactory} animations={props.animations} message={message} />}</Show>
             <View class="absolute overflow-hidden" style={{ insetL: clip().insetL, insetT: clip().insetT, width: clip().width, height: clip().height }}>
-              <View class="absolute" style={{ insetL: clip().contentInsetL, insetT: clip().contentInsetT, width: layout().width, height: layout().height }}>
+              <View class="absolute" style={{ insetL: clip().contentInsetL, insetT: clip().contentInsetT, width: visualViewport().width, height: visualViewport().height }}>
                 {activeStage()}
               </View>
             </View>
@@ -1177,6 +1207,10 @@ export function NovelView(props: NovelViewProps): JSX.Element {
       </Show>
 
       <Show when={transition()?.kind === "fade"}><View class="absolute inset-0 bg-[#08151D]" style={{ opacity: fadeOpacity() }} /></Show>
+      </Show>
+    </View>
+    <View class="absolute overflow-hidden" style={{ ...stageBounds(), hitPass: 1 }}>
+    <Show when={!titleScreen()}>
       <View class="absolute flex-row items-center justify-between" style={headerBounds()}>
         <IconLabel label={props.shortTitle ?? props.title} icon="compass" width={22} height={22} tone="accent" />
         <FocusTarget skinWidth={120} skinHeight={44} class="relative shrink-0 h-[44] px-2 items-center justify-center" onPress={() => props.replayMode ? props.onReplayExit?.() : openPanel("menu")}>
@@ -1318,9 +1352,11 @@ export function NovelView(props: NovelViewProps): JSX.Element {
         <FocusTarget skinWidth={layout().toolbarButtonWidth} skinHeight={44} class="relative shrink-0 h-[44] items-center justify-center px-1" style={{ width: layout().toolbarButtonWidth }} onPress={() => toggleMode("skip")}><IconLabel icon={toolbarHasIcons() ? "skip" : undefined} labelWidth={toolbarLabelWidth()} label={message(snapshot().preferences.mode === "skip" ? "player.skipActive" : "player.skip")} width={16} height={16} /></FocusTarget>
       </View>
     </Show>
+    </View>
+    <Show when={panel() !== "none" && !capturingSlotImage()}><View class="absolute inset-0 bg-[#08151D]" style={{ opacity: 0.96 }} /></Show>
+    <View class="absolute overflow-hidden" style={{ ...stageBounds(), hitPass: 1 }}>
     <Show when={titleScreen() && panel() === "none"}>
       <FocusScope class="absolute inset-0 w-full h-full" autoFocus restoreFocus={false}>
-      <View class="absolute inset-0 bg-[#08151D]" style={{ opacity: 0.28 }} />
       <View class="absolute flex-col min-h-[0] overflow-hidden" style={{ insetL: layout().titleMenuLeft, insetT: layout().titleMenuTop, width: layout().titleMenuWidth, height: layout().titleMenuMaxHeight }}>
         <ScrollablePage class="flex-1 w-full min-h-[0] overflow-hidden">
           <View class="flex-col gap-2 pb-2">
@@ -1355,7 +1391,6 @@ export function NovelView(props: NovelViewProps): JSX.Element {
     </Show>
     <Show when={panel() !== "none" && !capturingSlotImage()}>
       <FocusScope class="absolute inset-0 w-full h-full" autoFocus restoreFocus={false}>
-      <View class="absolute inset-0 bg-[#08151D]" style={{ opacity: 0.96 }} />
       <View class="absolute min-h-[0] overflow-hidden" style={{ insetL: layout().panelLeft, insetT: layout().panelTop, width: layout().panelWidth, height: layout().panelHeight }}>
         <SkinBackground width={layout().panelWidth} height={layout().panelHeight} border={24} debugName="vn-panel-skin" />
         <View class="absolute flex-col gap-3 min-h-[0] overflow-hidden" style={{ insetL: panelContentLeft(), insetT: panelContentTop(), width: panelContentWidth(), height: panelContentHeight() }}>

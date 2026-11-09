@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { NativeSession, readNativeArtifacts, textOps, textOf } from "./native_session.ts";
+import { NativeSession, readNativeArtifacts, textOps, textOf, type Frame } from "./native_session.ts";
 
 const directory = resolve(import.meta.dir, "../../assets/apps/lantern");
 process.env.POCKET_SAFE_VN_GUEST_BYTECODE ??= `${directory}/app.qjbc`;
@@ -8,10 +8,26 @@ process.env.POCKET_SAFE_VN_GUEST_PAK ??= `${directory}/app.pak`;
 process.env.POCKET_SAFE_VN_GUEST_METADATA ??= `${directory}/app.bytecode.json`;
 const artifacts = readNativeArtifacts("POCKET_SAFE_VN");
 
+function expectFullViewportBackground(frame: Frame, width: number, height: number): void {
+  const background = frame.ops?.find(op => op.type === "image" && String((op as any).asset).endsWith("art/station.png"));
+  expect(background, "the real station art must be painted").toBeDefined();
+  const left = Math.max(background!.x!, background!.clip?.x ?? 0);
+  const top = Math.max(background!.y!, background!.clip?.y ?? 0);
+  const right = Math.min(background!.x! + background!.w!, background!.clip ? background!.clip.x! + background!.clip.w! : width);
+  const bottom = Math.min(background!.y! + background!.h!, background!.clip ? background!.clip.y! + background!.clip.h! : height);
+  expect(left, "background reaches the left viewport edge").toBeLessThanOrEqual(0.5);
+  expect(top, "background reaches behind the status bar").toBeLessThanOrEqual(0.5);
+  expect(right, "background reaches the right viewport edge").toBeGreaterThanOrEqual(width - 0.5);
+  expect(bottom, "background reaches behind the home indicator").toBeGreaterThanOrEqual(height - 0.5);
+}
+
 test("mobile game header and toolbar follow safe-area updates and retain real pointer input", async () => {
   const session = new NativeSession(artifacts, { width: 390, height: 844, deadlineMs: 90_000 });
   try {
     let frame = await session.boot();
+    session.sendEvent("display.viewport", { width: 390, height: 844, safeArea: { top: 59, right: 0, bottom: 34, left: 0 }, keyboardInset: 0, reservedRegions: [] });
+    frame = await session.settle(await session.frame(), 4);
+    expectFullViewportBackground(frame, 390, 844);
     frame = await session.tap("启程 · 开始新的故事", frame);
     frame = await session.settle(frame, 24);
     for (const device of [
@@ -23,6 +39,7 @@ test("mobile game header and toolbar follow safe-area updates and retain real po
       if (session.width !== device.width || session.height !== device.height) frame = await session.resize(device.width, device.height);
       session.sendEvent("display.viewport", { ...device, keyboardInset: 0, reservedRegions: [] });
       frame = await session.settle(await session.frame(), 4);
+      expectFullViewportBackground(frame, device.width, device.height);
       for (const label of ["手札", "回声"]) {
         const op = textOps(frame, label)[0];
         expect(op, `${label} must be painted`).toBeDefined();
@@ -84,6 +101,7 @@ test("mobile safe-area facts survive storage-delayed game view mounting", async 
         frame = await session.frame();
       }
       expect(textOf(frame)).toContain("启程 · 开始新的故事");
+      expectFullViewportBackground(frame, device.width, device.height);
       frame = await session.tap("启程 · 开始新的故事", frame);
       frame = await session.settle(frame, 4);
       for (const label of ["手札", "回声"]) {
