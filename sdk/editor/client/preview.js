@@ -29,6 +29,9 @@
  * parent-owned for embedded device frames (standalone pages may use a
  * ResizeObserver); wheel gestures are translated to the engine's canonical
  * pointer drag path because the pinned runtime has no native wheel method.
+ * The frame notification retains DrawOps/events and resource descriptors, but
+ * omits raw resource pixels/palettes: the Editor parent uses it as a readiness
+ * signal. The iframe renderer and getFrame() keep the complete native frame.
  * There is no fixed-interval browser polling.
  */
 (function installPocketEditorPreview(global) {
@@ -68,12 +71,79 @@
     return `rgba(${(color >>> 16) & 0xff},${(color >>> 8) & 0xff},${color & 0xff},${alpha})`;
   }
 
+  function resourceBytes(value, encoding) {
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    if (encoding !== "base64") return Array.isArray(value) ? new Uint8Array(value) : null;
+    if (typeof value !== "string") return null;
+    if (typeof Uint8Array.fromBase64 === "function") return Uint8Array.fromBase64(value);
+    const binary = global.atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  function previewStream(url, offMainThread) {
+    if (!offMainThread || typeof global.Worker !== "function") return new EventSource(url);
+    // Keep the browser's own SSE/reconnect implementation. Only its IO,
+    // JSON parsing and byte unpacking move off the editor's rendering thread.
+    function receive() {
+      self.onmessage = ({ data: url }) => {
+        const source = new EventSource(url);
+        source.onopen = () => self.postMessage({ kind: "open", state: source.readyState });
+        source.onerror = () => self.postMessage({ kind: "error", state: source.readyState });
+        source.onmessage = ({ data }) => {
+          try {
+            const packet = JSON.parse(data);
+            const buffers = [];
+            for (const resource of packet.frame?.resources ?? []) {
+              if (resource.bytesEncoding !== "base64") continue;
+              for (const key of ["pixels", "palette"]) {
+                if (typeof resource[key] !== "string") continue;
+                const bytes = resourceBytes(resource[key], "base64");
+                resource[key] = bytes;
+                buffers.push(bytes.buffer);
+              }
+              delete resource.bytesEncoding;
+            }
+            self.postMessage({ kind: "message", packet }, buffers);
+          } catch (error) {
+            self.postMessage({ kind: "message", packet: { type: "error", error: String(error?.message || error) } });
+          }
+        };
+      };
+    }
+    const blobUrl = URL.createObjectURL(new Blob([
+      `const global=self;const resourceBytes=${resourceBytes.toString()};(${receive.toString()})();`,
+    ], { type: "text/javascript" }));
+    let worker;
+    try { worker = new Worker(blobUrl); }
+    catch { URL.revokeObjectURL(blobUrl); return new EventSource(url); }
+    const stream = {
+      readyState: 0, onopen: null, onmessage: null, onerror: null,
+      close() { stream.readyState = 2; worker.terminate(); URL.revokeObjectURL(blobUrl); },
+    };
+    worker.onmessage = ({ data }) => {
+      URL.revokeObjectURL(blobUrl);
+      if (stream.readyState === 2) return;
+      if (data.kind === "message") stream.onmessage?.({ data: data.packet });
+      else {
+        stream.readyState = data.state;
+        if (data.kind === "open") stream.onopen?.();
+        else stream.onerror?.();
+      }
+    };
+    worker.onerror = () => { stream.close(); stream.onerror?.(); };
+    worker.postMessage(new URL(url, global.location.href).href);
+    return stream;
+  }
+
   function decodeResource(resource) {
-    if (!resource || !resource.width || !resource.height || !Array.isArray(resource.pixels)) return null;
+    if (!resource || !resource.width || !resource.height) return null;
     const width = Number(resource.width);
     const height = Number(resource.height);
     if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 || width * height > 16 * 1024 * 1024) return null;
-    const source = new Uint8Array(resource.pixels);
+    const source = resourceBytes(resource.pixels, resource.bytesEncoding);
+    if (!source) return null;
     const expected = width * height;
     const rgba = new Uint8ClampedArray(expected * 4);
     const psm = Number(resource.psm);
@@ -104,7 +174,7 @@
         rgba[at + 3] = ((value >>> 12) & 0x0f) * 17;
       }
     } else if (psm === 5) {
-      const palette = Array.isArray(resource.palette) ? new Uint8Array(resource.palette) : null;
+      const palette = resourceBytes(resource.palette, resource.bytesEncoding);
       if (!palette || palette.length < 1024 || source.length < expected) return null;
       // Glyph pages are indexed textures. Copy an RGBA palette entry as one
       // word instead of expanding four byte channels on the cold UI frame.
@@ -124,6 +194,41 @@
     if (!context) return null;
     context.putImageData(new ImageData(rgba, width, height), 0, 0);
     return { canvas, rgba, width, height, revision: Number(resource.revision) || 0 };
+  }
+
+  function resourceNotification(resource) {
+    if (!resource || typeof resource !== "object" || Array.isArray(resource)) return null;
+    const byteLength = (value) => {
+      if (Array.isArray(value)) return value.length;
+      if (value instanceof ArrayBuffer) return value.byteLength;
+      if (ArrayBuffer.isView(value)) return value.byteLength;
+      if (resource.bytesEncoding === "base64" && typeof value === "string") {
+        return value.length / 4 * 3 - (value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0);
+      }
+      return null;
+    };
+    return {
+      asset: resource.asset ?? null,
+      revision: resource.revision ?? null,
+      width: resource.width ?? null,
+      height: resource.height ?? null,
+      psm: resource.psm ?? null,
+      linear: resource.linear ?? null,
+      pixelsBytes: byteLength(resource.pixels),
+      paletteBytes: resource.palette == null ? null : byteLength(resource.palette),
+    };
+  }
+
+  function frameNotification(frame) {
+    // `frame` remains the unmodified native value for Canvas drawing, the
+    // presentation ACK barrier and getFrame(). Only the separate parent
+    // notification gets a small descriptor in place of raw pixel arrays.
+    return {
+      ...frame,
+      resources: Array.isArray(frame.resources)
+        ? frame.resources.map(resourceNotification)
+        : [],
+    };
   }
 
   function tintedImage(image, tintValue) {
@@ -2125,7 +2230,7 @@
         }));
       }
       status.textContent = `PocketJS native preview · frame ${next.frame} · ${next.width}×${next.height} · full FrameResult transport`;
-      announce("preview.frame", { frame: next });
+      announce("preview.frame", { frame: frameNotification(next) });
       const requests = Array.isArray(next.events) ? next.events.filter((event) => event && event.name === "host.request") : [];
       const unsupportedOps = Array.isArray(next.ops)
         ? next.ops.filter((op) => op && op.type === "hostSurface" && !surfaceDescriptor(op))
@@ -2193,9 +2298,9 @@
     function connect() {
       const generation = ++connectionGeneration;
       const endpoint = `${options.basePath || `/api/projects/${encodeURIComponent(projectId)}/preview`}/stream`;
-      const params = new URLSearchParams({ presentation: "browser", clientId: webBluetoothClientId });
+      const params = new URLSearchParams({ presentation: "browser", resources: "base64", clientId: webBluetoothClientId });
       if (webBluetoothEnabled) { params.set("webBluetooth", "1"); params.set("bluetoothProvider", bluetoothProvider); }
-      const current = new EventSource(`${endpoint}?${params.toString()}`);
+      const current = previewStream(`${endpoint}?${params.toString()}`, root.dataset.streamWorker === "true");
       stream = current;
       current.onopen = () => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
@@ -2207,7 +2312,7 @@
       current.onmessage = (event) => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
         try {
-          const packet = JSON.parse(event.data);
+          const packet = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
           if (packet.type === "frame") installFrame(packet.frame);
           else if (packet.type === "status") {
             const state = packet.status?.state;

@@ -1247,6 +1247,15 @@ type PendingSystemRequest = {
   reject: (error: Error) => void;
 };
 
+type PendingChildRuntimeLoad = {
+  rootRuntime: PreviewRuntime;
+  rootGeneration: number;
+  cancelled: boolean;
+  promise?: Promise<PreviewRuntime>;
+  probe?: NativeProbe;
+  stopPromise?: Promise<void>;
+};
+
 type SurfaceSlot = {
   handle: number;
   appId: string;
@@ -1493,8 +1502,34 @@ type Subscriber = {
   controller: ReadableStreamDefaultController<Uint8Array>;
   closed: boolean;
   browserPresentation: boolean;
+  compactResources: boolean;
   webBluetooth?: { clientId: string; lease: string };
 };
+
+/** Browser wire encoding only; native frames, recordings and resource caches stay canonical. */
+export function encodePreviewStreamPacket(value: unknown, compactResources = false): Uint8Array {
+  let packet = value;
+  const candidate = value as { type?: string; frame?: PreviewFrame } | null;
+  if (compactResources && candidate?.type === "frame" && Array.isArray(candidate.frame?.resources)) {
+    packet = {
+      ...candidate,
+      frame: {
+        ...candidate.frame,
+        resources: candidate.frame.resources.map(resource => {
+          if (!Array.isArray(resource.pixels)) return resource;
+          const { pixels, palette, ...metadata } = resource;
+          return {
+            ...metadata,
+            bytesEncoding: "base64",
+            pixels: Buffer.from(pixels).toString("base64"),
+            ...(Array.isArray(palette) ? { palette: Buffer.from(palette).toString("base64") } : {}),
+          };
+        }),
+      },
+    };
+  }
+  return new TextEncoder().encode(`data: ${JSON.stringify(packet)}\n\n`);
+}
 
 type BrowserPluginRequest = {
   token: string;
@@ -1518,6 +1553,9 @@ class PreviewSession {
    * real native runtime; the browser still receives one compositor frame. */
   private rootRuntime?: PreviewRuntime;
   private readonly childRuntimes = new Map<string, PreviewRuntime>();
+  /** Coalesce child starts and let stopProbe cancel native loads that have
+   * not yet reached the point where the child is in childRuntimes. */
+  private readonly childRuntimeLoads = new Map<string, PendingChildRuntimeLoad>();
   private readonly pendingSystemRequests = new Map<string, PendingSystemRequest>();
   private readonly pendingPresentations = new Map<string, {
     child: PreviewRuntime; published: boolean;
@@ -1886,7 +1924,7 @@ class PreviewSession {
     if (!this.probe || !this.rootRuntime || this.state !== "ready") return false;
     this.hotReload = { mode: "reload", reason: "Guest or build is not compatible with root replacement" };
     if (!next || !this.hotBuild || !this.hotVersion || next.compatibility !== this.hotBuild.compatibility ||
-        this.childRuntimes.size || this.pointerTargets.size || this.pendingSystemRequests.size ||
+        this.childRuntimes.size || this.childRuntimeLoads.size || this.pointerTargets.size || this.pendingSystemRequests.size ||
         this.browserPluginRequests.size || this.browserPluginStreams.size) return false;
     const transition = { protocol: 1, session: this.hotSession, base: this.hotVersion,
       version: String(artifacts.generation ?? randomUUID()) };
@@ -1936,6 +1974,10 @@ class PreviewSession {
     if (this.tickTimer) clearTimeout(this.tickTimer);
     this.tickTimer = undefined;
     this.tickDeadlineAt = undefined;
+    const childLoads = [...this.childRuntimeLoads.values()];
+    this.childRuntimeLoads.clear();
+    for (const load of childLoads) load.cancelled = true;
+    await Promise.all(childLoads.map((load) => this.stopChildRuntimeLoad(load)));
     const stopError = new Error("preview runtime stopped before the SystemUI request completed");
     for (const [requestId, pending] of this.pendingSystemRequests) {
       this.pendingSystemRequests.delete(requestId);
@@ -2031,12 +2073,15 @@ class PreviewSession {
   }
 
   private emit(value: unknown): void {
-    const packet = `data: ${JSON.stringify(value)}\n\n`;
-    const bytes = new TextEncoder().encode(packet);
+    let canonical: Uint8Array | undefined;
+    let compact: Uint8Array | undefined;
     let subscriberDropped = false;
     for (const subscriber of this.subscribers) {
       if (subscriber.closed) continue;
       try {
+        const bytes = subscriber.compactResources
+          ? (compact ??= encodePreviewStreamPacket(value, true))
+          : (canonical ??= encodePreviewStreamPacket(value));
         subscriber.controller.enqueue(bytes);
       } catch {
         subscriber.closed = true;
@@ -3253,16 +3298,20 @@ class PreviewSession {
         const memory = params.memory && typeof params.memory === "object" && !Array.isArray(params.memory)
           ? params.memory as JsonRecord
           : undefined;
-        const child = await this.createChildRuntime(appId, memory);
-        await respond({
-          instanceId: child.instanceId,
-          appId: child.appId,
-          generation: child.generation,
-          // Artifact loading is complete when createChildRuntime resolves.
-          // Local preview has no trusted OTA source, so this is only the
-          // admission fact required by the JS runtime gate.
-          ...(params.prepareForOpen === true ? { preparedForOpen: true } : {}),
-        });
+        const child = this.childRuntimes.get(appId);
+        if (child) {
+          await respond({
+            instanceId: child.instanceId,
+            appId: child.appId,
+            generation: child.generation,
+            ...(params.prepareForOpen === true ? { preparedForOpen: true } : {}),
+          });
+          return;
+        }
+        // Child artifact resolution and QJBC evaluation can take seconds.
+        // Do not await them from ingestRuntimeFrame: that call runs inside
+        // operationTail and otherwise blocks root frames and browser input.
+        this.beginChildRuntimeRequest(requester, requestId, capability, appId, memory, params.prepareForOpen === true);
         return;
       }
       if (capability === "system.runtime.prepareOpen") {
@@ -3405,7 +3454,72 @@ class PreviewSession {
     return [...this.childRuntimes.values()].find((runtime) => runtime.instanceId === instanceId);
   }
 
-  private async createChildRuntime(appId: string, memory?: JsonRecord): Promise<PreviewRuntime> {
+  private beginChildRuntimeRequest(
+    requester: PreviewRuntime,
+    requestId: string,
+    capability: string,
+    appId: string,
+    memory: JsonRecord | undefined,
+    prepareForOpen: boolean,
+  ): void {
+    const requesterGeneration = requester.generation;
+    const isCurrent = () => !this.disposed && this.rootRuntime === requester &&
+      this.probe === requester.probe && requester.generation === requesterGeneration &&
+      this.rootGeneration === requesterGeneration;
+    const deliver = (result: unknown, error?: JsonRecord) => {
+      void this.enqueue(async () => {
+        if (!isCurrent()) return;
+        await this.sendHostResponse(requester, requestId, capability, result, error);
+        // Resume the JS system queue now that the asynchronous native load has
+        // completed; the next display tick must not depend on unrelated input.
+        await this.tickNow(0);
+      }).catch((error) => {
+        if (isCurrent()) this.reportError(error);
+      });
+    };
+    void this.createChildRuntime(appId, memory, requester).then(
+      (child) => deliver({
+        instanceId: child.instanceId,
+        appId: child.appId,
+        generation: child.generation,
+        // The admitted child is a real native runtime loaded from its artifact.
+        ...(prepareForOpen ? { preparedForOpen: true } : {}),
+      }),
+      (error) => deliver(null, hostError("system_runtime_error", errorText(error))),
+    );
+  }
+
+  private isCurrentChildRuntimeLoad(appId: string, load: PendingChildRuntimeLoad): boolean {
+    return !load.cancelled && !this.disposed && this.childRuntimeLoads.get(appId) === load &&
+      this.rootRuntime === load.rootRuntime && this.probe === load.rootRuntime.probe &&
+      load.rootRuntime.generation === load.rootGeneration;
+  }
+
+  private stopChildRuntimeLoad(load: PendingChildRuntimeLoad): Promise<void> {
+    if (!load.probe) return Promise.resolve();
+    load.stopPromise ??= load.probe.stop();
+    return load.stopPromise;
+  }
+
+  private createChildRuntime(appId: string, memory: JsonRecord | undefined, rootRuntime: PreviewRuntime): Promise<PreviewRuntime> {
+    const existing = this.childRuntimes.get(appId);
+    if (existing) return Promise.resolve(existing);
+    const pending = this.childRuntimeLoads.get(appId);
+    if (pending && this.isCurrentChildRuntimeLoad(appId, pending) && pending.promise) return pending.promise;
+    const load: PendingChildRuntimeLoad = {
+      rootRuntime,
+      rootGeneration: rootRuntime.generation,
+      cancelled: false,
+    };
+    this.childRuntimeLoads.set(appId, load);
+    const promise = this.loadChildRuntime(appId, memory, load).finally(() => {
+      if (this.childRuntimeLoads.get(appId) === load) this.childRuntimeLoads.delete(appId);
+    });
+    load.promise = promise;
+    return promise;
+  }
+
+  private async loadChildRuntime(appId: string, memory: JsonRecord | undefined, load: PendingChildRuntimeLoad): Promise<PreviewRuntime> {
     if (!this.systemCatalog?.installed.has(appId)) throw new Error(`app is not installed: ${appId}`);
     const existing = this.childRuntimes.get(appId);
     if (existing) return existing;
@@ -3419,9 +3533,13 @@ class PreviewSession {
       appId,
     };
     const workerOrigins = artifacts.workerHttpOrigins ?? await this.manager.resolveWorkerHttpOrigins(this.id);
+    if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
     const worker = await resolvePreviewWorker(artifacts, workerOrigins);
+    if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
     const probePath = await this.manager.findProbe();
+    if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
     const probe = new NativeProbe(probePath, this.manager.options.commandTimeoutMs ?? 15_000);
+    load.probe = probe;
     probe.setWakeHandler(() => this.onWorkerWake());
     const initialSlot = this.preferredViewportSlots(this.rootRuntime?.frame).get(appId);
     const initialWidth = initialSlot ? Math.max(1, Math.round(initialSlot.w)) : this.width;
@@ -3463,6 +3581,7 @@ class PreviewSession {
         tickHz: this.tickHz,
         ...(memory ? { memory } : {}),
       });
+      if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
       if (recording) await probe.checked({ op: "traceMode", mode: 1 });
       if (worker) {
         await probe.checked({
@@ -3471,6 +3590,7 @@ class PreviewSession {
           config: { ...worker.config, nativeGeneration: runtime.generation },
         });
       }
+      if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
       let loadResponse: JsonRecord;
       if (artifacts.bytecodePath) loadResponse = await probe.checked({
         op: "loadBytecode",
@@ -3484,21 +3604,27 @@ class PreviewSession {
         pakPath: artifacts.pakPath,
         ...(recording ? { render: true, traceClock: {} } : {}),
       });
-      if (loadResponse.frame !== undefined) await this.ingestRuntimeFrame(runtime, loadResponse.frame, 0, false);
+      if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
       await sendDisplayViewport(probe, initialWidth, initialHeight, initialSafeArea);
       await this.replayAccessibilityPreferences(runtime);
-      this.childRuntimes.set(appId, runtime);
-      if (runtime.frame) {
-        for (const event of runtime.frame.events) {
-          if (event && typeof event === "object" && !Array.isArray(event)) {
-            await this.handleRuntimeEvent(runtime, event as JsonRecord, 0);
+      await this.enqueue(async () => {
+        if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
+        if (loadResponse.frame !== undefined) await this.ingestRuntimeFrame(runtime, loadResponse.frame, 0, false);
+        if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
+        this.childRuntimes.set(appId, runtime);
+        if (runtime.frame) {
+          for (const event of runtime.frame.events) {
+            if (event && typeof event === "object" && !Array.isArray(event)) {
+              await this.handleRuntimeEvent(runtime, event as JsonRecord, 0);
+            }
           }
         }
-      }
+      });
       return runtime;
     } catch (error) {
+      if (this.childRuntimes.get(appId) === runtime) this.childRuntimes.delete(appId);
       await this.finishPreviewRecordingCapture(runtime);
-      await probe.stop();
+      await this.stopChildRuntimeLoad(load);
       throw error;
     }
   }
@@ -4294,17 +4420,17 @@ class PreviewSession {
     this.releaseWebBluetoothOwner(owner.lease);
   }
 
-  stream(browserPresentation = false, webBluetooth?: { clientId: string; lease: string }): Response {
+  stream(browserPresentation = false, webBluetooth?: { clientId: string; lease: string }, compactResources = false): Response {
     this.touch();
     const encoder = new TextEncoder();
     let subscriber!: Subscriber;
     const body = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        subscriber = { controller, closed: false, browserPresentation, ...(webBluetooth ? { webBluetooth } : {}) };
+        subscriber = { controller, closed: false, browserPresentation, compactResources, ...(webBluetooth ? { webBluetooth } : {}) };
         this.subscribers.add(subscriber);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "status", status: this.status() })}\n\n`));
         const replay = this.replayFrame();
-        if (replay) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "frame", revision: this.artifactRevision ?? null, frame: replay })}\n\n`));
+        if (replay) controller.enqueue(encodePreviewStreamPacket({ type: "frame", revision: this.artifactRevision ?? null, frame: replay }, compactResources));
         this.flushWebBluetoothQueue(subscriber);
         void this.schedule().catch((error) => this.reportError(error));
       },
@@ -4463,7 +4589,7 @@ class PreviewManagerImpl implements PreviewManager {
     const source = (await this.clientSource()).replace(/<\/script/gi, "<\\/script");
     const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PocketJS Preview</title></head>
-<body data-pocket-preview data-project-id=${JSON.stringify(projectId)}><script>${source}</script></body></html>`;
+<body data-pocket-preview data-stream-worker="true" data-project-id=${JSON.stringify(projectId)}><script>${source}</script></body></html>`;
     return new Response(html, {
       headers: {
         "content-type": "text/html; charset=utf-8",
@@ -4500,7 +4626,7 @@ class PreviewManagerImpl implements PreviewManager {
         const pluginOwner = webBluetooth ? session.claimWebBluetooth(clientId, "local") : undefined;
         if (webBluetooth && !pluginOwner) return failure("Noble Bluetooth client could not claim the preview", 409);
         await session.ensureStarted();
-        return session.stream(query.get("presentation") === "browser", pluginOwner);
+        return session.stream(query.get("presentation") === "browser", pluginOwner, query.get("resources") === "base64");
       }
       if (route === "status" && request.method === "GET") return json(session.status());
       if (route === "snapshot" && request.method === "GET") return json(session.snapshot());
