@@ -137,6 +137,201 @@ void main() {
       source.dispose();
     }
   });
+
+  testWidgets('rounded rings honor clips and fill when their hole collapses', (
+    tester,
+  ) async {
+    final ring = await _rasterize(
+      tester,
+      width: 12,
+      height: 12,
+      ops: const <PocketOp>[
+        PocketRectOp(x: 0, y: 0, width: 12, height: 12, color: 0xff102030),
+        PocketRoundedOp(
+          x: 2,
+          y: 2,
+          width: 8,
+          height: 8,
+          color: 0xffe04050,
+          radius: 3,
+          borderWidth: 2,
+          clip: PocketClip(x: 3, y: 3, width: 6, height: 6),
+        ),
+      ],
+    );
+    expect(ring.pixel(5, 5), <int>[16, 32, 48, 255]);
+    expect(ring.pixel(3, 5), <int>[224, 64, 80, 255]);
+    expect(ring.pixel(2, 5), <int>[16, 32, 48, 255]);
+
+    final fractionalRing = await _rasterize(
+      tester,
+      width: 12,
+      height: 12,
+      ops: const <PocketOp>[
+        PocketRectOp(x: 0, y: 0, width: 12, height: 12, color: 0xff102030),
+        PocketRoundedOp(
+          x: 1.25,
+          y: 1.25,
+          width: 8.5,
+          height: 8.5,
+          color: 0xffe04050,
+          radius: 4.5,
+          borderWidth: 2.5,
+        ),
+      ],
+    );
+    final curvedEdge = fractionalRing.pixel(4, 1);
+    expect(curvedEdge[0], greaterThan(16));
+    expect(curvedEdge[0], lessThan(224));
+    expect(curvedEdge[1], greaterThan(32));
+    expect(curvedEdge[1], lessThan(64));
+
+    final collapsed = await _rasterize(
+      tester,
+      width: 10,
+      height: 10,
+      ops: const <PocketOp>[
+        PocketRectOp(x: 0, y: 0, width: 10, height: 10, color: 0xff102030),
+        PocketRoundedOp(
+          x: 1,
+          y: 3,
+          width: 8,
+          height: 4,
+          color: 0xffe04050,
+          radius: 2,
+          borderWidth: 10,
+        ),
+      ],
+    );
+    expect(collapsed.pixel(4, 4), <int>[224, 64, 80, 255]);
+  });
+
+  testWidgets(
+    'native arcs retain clockwise sweep, round caps, AA and hard clips',
+    (tester) async {
+      const background = 0xff102030;
+      const foreground = 0xffe04050;
+      const arc = PocketArcOp(
+        x: 3.25,
+        y: 3.5,
+        width: 14,
+        height: 14,
+        color: foreground,
+        radius: 6,
+        strokeWidth: 2,
+        startAngle: 0,
+        sweepAngle: 90,
+      );
+      final raster = await _rasterize(
+        tester,
+        width: 20,
+        height: 20,
+        ops: const <PocketOp>[
+          PocketRectOp(x: 0, y: 0, width: 20, height: 20, color: background),
+          arc,
+        ],
+      );
+
+      // 0° starts at the top and a positive sweep proceeds clockwise to the
+      // right. The endpoint pixels include the round caps.
+      expect(raster.pixel(10, 4), <int>[224, 64, 80, 255]);
+      expect(raster.pixel(15, 10)[0], greaterThan(16));
+      expect(raster.pixel(9, 4)[0], greaterThan(16));
+      expect(raster.pixel(9, 4)[0], lessThan(224));
+      expect(raster.pixel(10, 15), <int>[16, 32, 48, 255]);
+      expect(raster.pixel(5, 10), <int>[16, 32, 48, 255]);
+      final antialiased = raster.pixel(10, 3);
+      expect(antialiased[0], greaterThan(16));
+      expect(antialiased[0], lessThan(224));
+
+      final clipped = await _rasterize(
+        tester,
+        width: 20,
+        height: 20,
+        ops: const <PocketOp>[
+          PocketRectOp(x: 0, y: 0, width: 20, height: 20, color: background),
+          PocketArcOp(
+            x: 3.25,
+            y: 3.5,
+            width: 14,
+            height: 14,
+            color: foreground,
+            radius: 6,
+            strokeWidth: 2,
+            startAngle: 0,
+            sweepAngle: 90,
+            clip: PocketClip(x: 13.25, y: 0, width: 6.75, height: 20),
+          ),
+        ],
+      );
+      expect(clipped.pixel(12, 5), <int>[16, 32, 48, 255]);
+      expect(clipped.pixel(13, 5)[0], greaterThan(16));
+    },
+  );
+
+  testWidgets('full native arc is a closed ring with a transparent center', (
+    tester,
+  ) async {
+    final raster = await _rasterize(
+      tester,
+      width: 20,
+      height: 20,
+      ops: const <PocketOp>[
+        PocketRectOp(x: 0, y: 0, width: 20, height: 20, color: 0xff102030),
+        PocketArcOp(
+          x: 3.25,
+          y: 3.5,
+          width: 14,
+          height: 14,
+          color: 0xffe04050,
+          radius: 6,
+          strokeWidth: 2,
+          startAngle: 15,
+          sweepAngle: -360,
+        ),
+      ],
+    );
+    expect(raster.pixel(10, 10), <int>[16, 32, 48, 255]);
+    expect(raster.pixel(16, 10), <int>[224, 64, 80, 255]);
+  });
+
+  testWidgets(
+    'rounded gradient keeps full bounds and alpha interpolation under clip',
+    (tester) async {
+      const gradient = PocketRoundedGradientOp(
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 40,
+        radius: 8,
+        fromColor: 0x00000000,
+        viaColor: 0x80808080,
+        viaPosition: 0.25,
+        toColor: 0xffffffff,
+        direction: 3,
+        clip: PocketClip(x: 0.25, y: 0.25, width: 39.5, height: 39.5),
+      );
+      final raster = await _rasterize(
+        tester,
+        width: 80,
+        height: 40,
+        ops: const <PocketOp>[
+          PocketRectOp(x: 0, y: 0, width: 80, height: 40, color: 0xff204060),
+          gradient,
+        ],
+      );
+      // At x=10 the full 80px gradient is just over halfway to its first
+      // middle stop. Straight RGBA interpolation over this colored backdrop
+      // yields about [41, 65, 88]; rebasing to the 39.5px clip yields roughly
+      // [82, 98, 114] instead.
+      final towardMiddle = raster.pixel(10, 20);
+      expect(towardMiddle[0], inInclusiveRange(38, 44));
+      expect(towardMiddle[1], inInclusiveRange(62, 68));
+      expect(towardMiddle[2], inInclusiveRange(85, 91));
+      expect(raster.pixel(40, 20), <int>[32, 64, 96, 255]);
+      expect(raster.pixel(1, 1), <int>[32, 64, 96, 255]);
+    },
+  );
 }
 
 Future<_Raster> _rasterize(

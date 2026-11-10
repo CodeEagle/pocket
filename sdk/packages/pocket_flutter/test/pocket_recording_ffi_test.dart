@@ -86,7 +86,9 @@ Map<String, dynamic> _opSnapshot(PocketOp op) {
     'type': switch (op) {
       PocketRectOp() => 'rect',
       PocketRoundedOp() => 'rounded',
+      PocketArcOp() => 'arc',
       PocketGradientOp() => 'gradient',
+      PocketRoundedGradientOp() => 'roundedGradient',
       PocketTriangleOp() => 'triangle',
       PocketTextureTriangleOp() => 'textureTriangle',
       PocketMeshLayerBeginOp() => 'meshLayerBegin',
@@ -116,10 +118,23 @@ Map<String, dynamic> _opSnapshot(PocketOp op) {
     case PocketRoundedOp value:
       result['color'] = value.color;
       result['radius'] = value.radius;
+    case PocketArcOp value:
+      result['color'] = value.color;
+      result['radius'] = value.radius;
+      result['strokeWidth'] = value.strokeWidth;
+      result['startAngle'] = value.startAngle;
+      result['sweepAngle'] = value.sweepAngle;
     case PocketGradientOp value:
       result['fromColor'] = value.fromColor;
       result['toColor'] = value.toColor;
       result['direction'] = value.direction;
+    case PocketRoundedGradientOp value:
+      result['fromColor'] = value.fromColor;
+      result['toColor'] = value.toColor;
+      result['direction'] = value.direction;
+      result['radius'] = value.radius;
+      if (value.viaColor != null) result['viaColor'] = value.viaColor;
+      if (value.viaPosition != null) result['viaPosition'] = value.viaPosition;
     case PocketTriangleOp value:
       result['points'] = value.points
           .map((point) => <String, dynamic>{'x': point.x, 'y': point.y})

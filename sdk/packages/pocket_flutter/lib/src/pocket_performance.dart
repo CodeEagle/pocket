@@ -102,6 +102,18 @@ final class PocketPerformanceSample {
     required this.maxGapMs,
     required this.slowFrames,
     required this.nativeMsP95,
+    this.decodeMsP95 = 0,
+    this.diffMsP95 = 0,
+    this.buildMsP95 = 0,
+    this.paintMsP95 = 0,
+    this.nativeJsTickMsP95 = 0,
+    this.nativeLive2dUpdateMsP95 = 0,
+    this.nativeLive2dEmitMsP95 = 0,
+    this.nativeRelayoutMsP95 = 0,
+    this.nativeDrawDecodeMsP95 = 0,
+    this.nativeSpliceMsP95 = 0,
+    this.nativeEncodeMsP95 = 0,
+    this.nativeOtherMsP95 = 0,
     required this.refreshHz,
     this.longFrameEvents = const <PocketLongFrameEvent>[],
   });
@@ -136,6 +148,54 @@ final class PocketPerformanceSample {
   /// sample.
   final double nativeMsP95;
 
+  /// 95th percentile duration of binary/JSON frame decode (`pocket.decode`),
+  /// in milliseconds.
+  final double decodeMsP95;
+
+  /// 95th percentile duration of visual frame diffing (`pocket.diff`), in
+  /// milliseconds.
+  final double diffMsP95;
+
+  /// 95th percentile duration of surface widget building (`pocket.build`), in
+  /// milliseconds.
+  final double buildMsP95;
+
+  /// 95th percentile duration of retained canvas block painting
+  /// (`pocket.paint`, aggregated per frame), in milliseconds.
+  final double paintMsP95;
+
+  /// 95th percentile duration of QuickJS `run_virtual_frames` (`native.js_tick`),
+  /// in milliseconds.
+  final double nativeJsTickMsP95;
+
+  /// 95th percentile duration of Cubism `csmUpdateModel` + parameter/part
+  /// application (`native.live2d_update`), in milliseconds.
+  final double nativeLive2dUpdateMsP95;
+
+  /// 95th percentile duration of retained core DrawList emission including
+  /// mesh vertex/UV extraction (`native.live2d_emit`), in milliseconds.
+  final double nativeLive2dEmitMsP95;
+
+  /// 95th percentile duration of `relayout_outputs` (`native.relayout`), in
+  /// milliseconds.
+  final double nativeRelayoutMsP95;
+
+  /// 95th percentile duration of `decode_draw_ops` (`native.draw_decode`), in
+  /// milliseconds.
+  final double nativeDrawDecodeMsP95;
+
+  /// 95th percentile duration of `common_splice` delta diff (`native.splice`),
+  /// in milliseconds.
+  final double nativeSpliceMsP95;
+
+  /// 95th percentile duration of PFP1/PFB1 binary serialisation
+  /// (`native.encode`), in milliseconds.
+  final double nativeEncodeMsP95;
+
+  /// 95th percentile duration of remaining synchronous work inside the native
+  /// frame FFI call (`native.other`), in milliseconds.
+  final double nativeOtherMsP95;
+
   /// Display refresh rate used for the frame-budget and slow-frame decision.
   final double refreshHz;
 
@@ -153,6 +213,26 @@ final class PocketPerformanceSample {
     'maxGapMs': maxGapMs,
     'slowFrames': slowFrames,
     'nativeMsP95': nativeMsP95,
+    'decodeMsP95': decodeMsP95,
+    'diffMsP95': diffMsP95,
+    'buildMsP95': buildMsP95,
+    'paintMsP95': paintMsP95,
+    'nativeJsTickMsP95': nativeJsTickMsP95,
+    'nativeLive2dUpdateMsP95': nativeLive2dUpdateMsP95,
+    'nativeLive2dEmitMsP95': nativeLive2dEmitMsP95,
+    'nativeRelayoutMsP95': nativeRelayoutMsP95,
+    'nativeDrawDecodeMsP95': nativeDrawDecodeMsP95,
+    'nativeSpliceMsP95': nativeSpliceMsP95,
+    'nativeEncodeMsP95': nativeEncodeMsP95,
+    'nativeOtherMsP95': nativeOtherMsP95,
+    'native.js_tickMsP95': nativeJsTickMsP95,
+    'native.live2d_updateMsP95': nativeLive2dUpdateMsP95,
+    'native.live2d_emitMsP95': nativeLive2dEmitMsP95,
+    'native.relayoutMsP95': nativeRelayoutMsP95,
+    'native.draw_decodeMsP95': nativeDrawDecodeMsP95,
+    'native.spliceMsP95': nativeSpliceMsP95,
+    'native.encodeMsP95': nativeEncodeMsP95,
+    'native.otherMsP95': nativeOtherMsP95,
     'refreshHz': refreshHz,
     if (longFrameEvents.isNotEmpty)
       'longFrameEvents': longFrameEvents

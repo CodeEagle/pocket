@@ -26,7 +26,10 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
   private var pendingConnections: [String: PocketBluetoothResult] = [:]
   private var pendingConnectionSessions: [String: String] = [:]
   private var pendingConnectionPeripherals: [String: CBPeripheral] = [:]
+  private var pendingConnectionGenerations: [String: UInt64] = [:]
+  private var connectionGeneration: UInt64 = 0
   private var connectionTimeouts: [String: DispatchWorkItem] = [:]
+  private var pendingDisconnections: [String: PocketBluetoothDisconnectRequest] = [:]
   private var connectedSessionByDevice: [String: String] = [:]
   private var pendingGattOperations: [String: PocketBluetoothGattOperation] = [:]
   private var queuedGattOperations: [String: [PocketBluetoothGattOperation]] = [:]
@@ -64,6 +67,8 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
       startBleScan(timeoutMs: max(250, min(timeout, 30000)), sessionId: args["sessionId"] as? String, result: result)
     case "connectBleDevice":
       connectBleDevice(id: args["deviceId"] as? String ?? "", sessionId: args["sessionId"] as? String, result: result)
+    case "disconnectBleDevice":
+      disconnectBleDevice(id: args["deviceId"] as? String ?? "", sessionId: args["sessionId"] as? String, result: result)
     case "readBleCharacteristic":
       readBleCharacteristic(deviceId: args["deviceId"] as? String ?? "", serviceUuid: args["serviceUuid"] as? String ?? "", characteristicUuid: args["characteristicUuid"] as? String ?? "", sessionId: args["sessionId"] as? String, result: result)
     case "writeBleCharacteristic":
@@ -677,6 +682,14 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
         self.main { result(self.error(code: "hardware_not_found", message: "device was not discovered by this host")) }
         return
       }
+      if self.pendingDisconnections[id] != nil {
+        self.main { result(self.error(code: "hardware_busy", message: "Bluetooth disconnect is still pending")) }
+        return
+      }
+      if self.connectedSessionByDevice[id] == nil && self.pendingConnections[id] == nil && peripheral.state == .connected {
+        self.main { result(self.error(code: "hardware_busy", message: "Bluetooth device is still connected by the native host")) }
+        return
+      }
       if let owner = self.connectedSessionByDevice[id], owner != sessionId {
         self.main { result(self.error(code: "hardware_owner_mismatch", message: "device is owned by another hardware session")) }
         return
@@ -685,36 +698,138 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
         self.main { result(self.error(code: "hardware_busy", message: "connection is already pending")) }
         return
       }
+      self.connectionGeneration &+= 1
+      let generation = self.connectionGeneration
       self.pendingConnections[id] = result
       self.pendingConnectionSessions[id] = sessionId ?? "legacy"
       self.pendingConnectionPeripherals[id] = peripheral
+      self.pendingConnectionGenerations[id] = generation
       peripheral.delegate = self
       self.central?.connect(peripheral, options: nil)
       let timeout = DispatchWorkItem {
         // DispatchWorkItem cancellation is cooperative; verify that this
         // timeout still owns the same connection attempt before touching the
         // peripheral or completing a result slot reused by a later attempt.
-        guard self.pendingConnectionPeripherals[id] === peripheral,
+        guard self.pendingConnectionGenerations[id] == generation,
+              self.pendingConnectionPeripherals[id] === peripheral,
               self.pendingConnections[id] != nil else { return }
         peripheral.delegate = nil
         self.central?.cancelPeripheralConnection(peripheral)
-        self.finishConnection(id: id, value: self.error(code: "hardware_timeout", message: "Bluetooth connection timed out"))
+        self.finishConnection(
+          id: id,
+          value: self.error(code: "hardware_timeout", message: "Bluetooth connection timed out"),
+          generation: generation
+        )
       }
       self.connectionTimeouts[id] = timeout
       self.bleQueue.asyncAfter(deadline: .now() + 15, execute: timeout)
     }
   }
 
-  private func finishConnection(id: String, value: [String: Any]) {
+  private func finishConnection(id: String, value: [String: Any], generation: UInt64? = nil) {
+    if let generation = generation, pendingConnectionGenerations[id] != generation { return }
     connectionTimeouts[id]?.cancel()
     connectionTimeouts.removeValue(forKey: id)
     guard let callback = pendingConnections.removeValue(forKey: id) else { return }
     let sessionId = pendingConnectionSessions.removeValue(forKey: id)
     pendingConnectionPeripherals.removeValue(forKey: id)
+    pendingConnectionGenerations.removeValue(forKey: id)
     if value["ok"] as? Bool == true, let sessionId = sessionId {
       connectedSessionByDevice[id] = sessionId
     }
     main { callback(value) }
+  }
+
+  private func disconnectBleDevice(
+    id: String,
+    sessionId: String?,
+    result: @escaping PocketBluetoothResult
+  ) {
+    guard !id.isEmpty, let sessionId = sessionId, !sessionId.isEmpty else {
+      result(error(code: "invalid_argument", message: "deviceId and sessionId are required"))
+      return
+    }
+    bleQueue.async {
+      let pendingOwner = self.pendingConnectionSessions[id]
+      let activeOwner = self.connectedSessionByDevice[id]
+      if let owner = activeOwner, owner != sessionId {
+        self.main { result(self.error(code: "hardware_owner_mismatch", message: "Bluetooth device is owned by another session")) }
+        return
+      }
+      if let owner = pendingOwner, owner != sessionId {
+        self.main { result(self.error(code: "hardware_owner_mismatch", message: "Bluetooth connection attempt is owned by another session")) }
+        return
+      }
+      if let pending = self.pendingDisconnections[id] {
+        let value = pending.sessionId == sessionId
+          ? self.error(code: "hardware_busy", message: "Bluetooth disconnect is already pending")
+          : self.error(code: "hardware_owner_mismatch", message: "Bluetooth device is owned by another hardware session")
+        self.main { result(value) }
+        return
+      }
+
+      guard activeOwner != nil else {
+        if pendingOwner != nil {
+          let peripheral = self.pendingConnectionPeripherals[id]
+          let generation = self.pendingConnectionGenerations[id]
+          peripheral?.delegate = nil
+          if let peripheral = peripheral {
+            self.central?.cancelPeripheralConnection(peripheral)
+          }
+          self.finishConnection(
+            id: id,
+            value: self.error(code: "hardware_cancelled", message: "Bluetooth connection was cancelled by disconnect"),
+            generation: generation
+          )
+          self.main { result(self.disconnectReceipt(id, pendingConnectCancelled: true)) }
+        } else {
+          self.main { result(self.disconnectReceipt(id, alreadyClosed: true)) }
+        }
+        return
+      }
+
+      guard let peripheral = self.discovered[id] else {
+        self.main { result(self.error(code: "hardware_not_found", message: "device was not discovered by this host")) }
+        return
+      }
+      guard peripheral.state == .connected || peripheral.state == .connecting else {
+        self.abortGattDevice(
+          deviceId: id,
+          code: "hardware_bluetooth_disconnected",
+          message: "Bluetooth connection was already closed",
+          cancelPeripheral: false
+        )
+        self.main { result(self.disconnectReceipt(id, alreadyClosed: true)) }
+        return
+      }
+
+      let requestId = UUID()
+      let timeout = DispatchWorkItem {
+        guard let pending = self.pendingDisconnections[id], pending.requestId == requestId else { return }
+        self.pendingDisconnections.removeValue(forKey: id)
+        self.abortGattDevice(
+          deviceId: id,
+          code: "hardware_timeout",
+          message: "Bluetooth disconnect was not confirmed"
+        )
+        self.main { result(self.error(code: "hardware_timeout", message: "Bluetooth disconnect was not confirmed")) }
+      }
+      self.pendingDisconnections[id] = PocketBluetoothDisconnectRequest(
+        requestId: requestId,
+        sessionId: sessionId,
+        peripheral: peripheral,
+        result: result,
+        timeout: timeout
+      )
+      self.abortGattDevice(
+        deviceId: id,
+        code: "hardware_cancelled",
+        message: "Bluetooth GATT work was cancelled by disconnect",
+        cancelPeripheral: false
+      )
+      self.central?.cancelPeripheralConnection(peripheral)
+      self.bleQueue.asyncAfter(deadline: .now() + 12, execute: timeout)
+    }
   }
 
   public func centralManagerDidUpdateState(_ central: CBCentralManager) {
@@ -763,6 +878,12 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
         id: id,
         value: self.error(code: code, message: "Bluetooth became unavailable")
       )
+    }
+    let pendingDisconnectIds = Array(pendingDisconnections.keys)
+    for id in pendingDisconnectIds {
+      guard let request = pendingDisconnections.removeValue(forKey: id) else { continue }
+      request.timeout.cancel()
+      main { request.result(self.error(code: code, message: "Bluetooth became unavailable")) }
     }
     var deviceIds = Set(connectedSessionByDevice.keys)
     deviceIds.formUnion(activeGattOperationByDevice.keys)
@@ -823,6 +944,7 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
     let message = error?.localizedDescription ?? "Bluetooth peripheral disconnected"
     guard pendingConnectionPeripherals[deviceId] === peripheral ||
           connectedSessionByDevice[deviceId] != nil ||
+          pendingDisconnections[deviceId]?.peripheral === peripheral ||
           activeGattOperationByDevice[deviceId] != nil else {
       peripheral.delegate = nil
       return
@@ -840,6 +962,13 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
       message: message,
       cancelPeripheral: false
     )
+    if let disconnect = pendingDisconnections[deviceId], disconnect.peripheral === peripheral {
+      pendingDisconnections.removeValue(forKey: deviceId)
+      disconnect.timeout.cancel()
+      main {
+        disconnect.result(self.disconnectReceipt(deviceId, disconnected: true, closeConfirmed: true))
+      }
+    }
   }
 
   public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
@@ -1581,6 +1710,14 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
         self.connectionTimeouts.removeValue(forKey: id)
         self.pendingConnections.removeValue(forKey: id)
       }
+      let disconnectIds = self.pendingDisconnections.compactMap { id, request in
+        sessionId == nil || request.sessionId == sessionId ? id : nil
+      }
+      for id in disconnectIds {
+        guard let request = self.pendingDisconnections.removeValue(forKey: id) else { continue }
+        request.timeout.cancel()
+        self.main { request.result(self.error(code: "plugin_revoked", message: "Bluetooth session disposed")) }
+      }
       var ownedDeviceIds = Set(self.connectedSessionByDevice.compactMap { id, owner in (sessionId == nil || owner == sessionId) ? id : nil })
       for (deviceId, operationId) in self.activeGattOperationByDevice {
         if let operation = self.pendingGattOperations[operationId], sessionId == nil || operation.sessionId == sessionId { ownedDeviceIds.insert(deviceId) }
@@ -1619,6 +1756,7 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
           self.pendingConnections.removeAll()
           self.pendingConnectionSessions.removeAll()
           self.pendingConnectionPeripherals.removeAll()
+          self.pendingConnectionGenerations.removeAll()
           self.connectionTimeouts.values.forEach { $0.cancel() }
           self.connectionTimeouts.removeAll()
           self.pendingGattOperations.values.forEach { $0.timeout?.cancel() }
@@ -1643,6 +1781,24 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
     ["ok": false, "errorCode": code, "error": message]
   }
 
+  private func disconnectReceipt(
+    _ deviceId: String,
+    disconnected: Bool = false,
+    closeConfirmed: Bool = false,
+    alreadyClosed: Bool = false,
+    pendingConnectCancelled: Bool = false
+  ) -> [String: Any] {
+    [
+      "ok": true,
+      "realBle": true,
+      "deviceId": deviceId,
+      "disconnected": disconnected,
+      "closeConfirmed": closeConfirmed,
+      "alreadyClosed": alreadyClosed,
+      "pendingConnectCancelled": pendingConnectCancelled,
+    ]
+  }
+
   private func characteristicPropertyNames(_ properties: CBCharacteristicProperties) -> [String] {
     var values: [String] = []
     if properties.contains(.broadcast) { values.append("broadcast") }
@@ -1657,6 +1813,28 @@ public final class PocketBluetoothCore: NSObject, CBCentralManagerDelegate, CBPe
     if properties.contains(.indicateEncryptionRequired) { values.append("indicateEncryptionRequired") }
     return values
   }
+
+private final class PocketBluetoothDisconnectRequest {
+  let requestId: UUID
+  let sessionId: String
+  let peripheral: CBPeripheral
+  let result: PocketBluetoothResult
+  let timeout: DispatchWorkItem
+
+  init(
+    requestId: UUID,
+    sessionId: String,
+    peripheral: CBPeripheral,
+    result: @escaping PocketBluetoothResult,
+    timeout: DispatchWorkItem
+  ) {
+    self.requestId = requestId
+    self.sessionId = sessionId
+    self.peripheral = peripheral
+    self.result = result
+    self.timeout = timeout
+  }
+}
 
 private final class PocketBluetoothStreamState {
   let streamId: String

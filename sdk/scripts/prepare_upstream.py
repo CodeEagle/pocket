@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 import urllib.request
@@ -46,6 +47,10 @@ PATCHES = (
     ("image-high-resolution-pak.patch", "bounded high-resolution IMG entries"),
     ("input-touch-coordinate-sidecar.patch", "full touch coordinate sidecar"),
     ("inline-text-core.patch", "one-leaf rich inline text"),
+    ("native-rounded-rects.patch", "native rounded rectangle DrawList op"),
+    ("native-rounded-shadows.patch", "native rounded shadow DrawList reuse"),
+    ("native-arcs.patch", "native arc DrawList op"),
+    ("native-rounded-gradients.patch", "native rounded gradient DrawList op"),
 )
 
 # Later patches can intentionally supersede one earlier diff hunk. The
@@ -97,18 +102,21 @@ SUPERSEDED_PATCH_MARKERS = {
         # version/spec/mesh-emitter hunks while preserving the retained-mesh
         # contract. These markers accept only that complete successor state.
         "contracts/generated/pocket_spec.h": (
-            "#define POCKET_DRAW_LIST_VERSION 3U",
+            "#define POCKET_DRAW_LIST_VERSION 5U",
             "#define POCKET_DRAW_OP_TEX_TRI_FLOAT 15U",
             "#define POCKET_DRAW_OP_TEX_TRI_REPEAT_FLOAT 16U",
+            "#define POCKET_DRAW_OP_ARC 18U",
+            "#define POCKET_DRAW_OP_ROUNDED_GRADIENT 19U",
         ),
         "contracts/spec/spec.ts": (
-            "export const DRAW_LIST_VERSION = 3;",
+            "export const DRAW_LIST_VERSION = 5;",
             "texTriFloat: 15,",
             "texTriRepeatFloat: 16,",
+            "arc: 18,",
+            "roundedGradient: 19,",
         ),
         "contracts/spec/gen-rust.ts": (
-            'put("/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,");',
-            'put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each.");',
+            "TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT",
         ),
         "devices/gles/pocket-gles/src/lib.rs": (
             "spec::draw_op::TEX_TRI_REPEAT_FLOAT",
@@ -127,7 +135,7 @@ SUPERSEDED_PATCH_MARKERS = {
             "self.upload_texture_flags_with_limit(&blob[8..], w, h, psm, flags, spec::IMG_MAX_DIM)",
         ),
         "engine/drivers/src/abi.rs": (
-            "pub const POCKET_DRAW_LIST_VERSION: u32 = 3;",
+            "pub const POCKET_DRAW_LIST_VERSION: u32 = 5;",
         ),
         "engine/present/src/damage.rs": (
             "fn triangle_bounds_float(",
@@ -137,17 +145,27 @@ SUPERSEDED_PATCH_MARKERS = {
             "operation.opcode == draw_op::TEX_TRI_FLOAT",
             "draw_op::TEX_TRI_REPEAT_FLOAT",
         ),
+        "engine/raster/tests/driver.rs": (
+            "fn software_surface_rejects_mesh_effects_explicitly()",
+            "fn float_mesh_triangle_preserves_subpixel_coverage_in_software_raster()",
+            "fn float_mesh_shared_edge_uses_top_left_coverage_once()",
+            "fn software_surface_rejects_native_shape_ops_before_writing()",
+        ),
         "engine/render/draw-ops/src/lib.rs": (
             "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,",
+            "draw_op::ARC => 8,",
+            "draw_op::ROUNDED_GRADIENT => 11,",
         ),
         "engine/render/draw-ops/tests/decoding.rs": (
-            "all_thirteen_records_preserve_the_original_words_and_offsets",
             "TEX_TRI_REPEAT_FLOAT",
+            "fn arc_preserves_float_geometry_under_the_active_clip()",
         ),
         "engine/spec/src/lib.rs": (
-            "pub const DRAW_LIST_VERSION: u32 = 3;",
+            "pub const DRAW_LIST_VERSION: u32 = 5;",
             "pub const TEX_TRI_FLOAT: u32 = 15;",
             "pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;",
+            "pub const ARC: u32 = 18;",
+            "pub const ROUNDED_GRADIENT: u32 = 19;",
         ),
         "engine/core/src/tree.rs": (
             "pub(crate) mesh: Option<crate::mesh::ImageMesh>,",
@@ -170,10 +188,199 @@ SUPERSEDED_PATCH_MARKERS = {
             "ui.get_inline_text_layout(a0)",
         ),
     },
+    "native rounded rectangle DrawList op": {
+        "contracts/generated/pocket_spec.h": (
+            "#define POCKET_DRAW_LIST_VERSION 5U",
+            "#define POCKET_DRAW_OP_ROUNDED_RECT 17U",
+            "#define POCKET_DRAW_OP_ARC 18U",
+            "#define POCKET_DRAW_OP_ROUNDED_GRADIENT 19U",
+        ),
+        "contracts/spec/spec.ts": (
+            "export const DRAW_LIST_VERSION = 5;",
+            "roundedRect: 17,",
+            "arc: 18,",
+            "roundedGradient: 19,",
+        ),
+        "contracts/spec/gen-rust.ts": (
+            "ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.",
+            "pub const DRAW_LIST_VERSION: u32 = ${DRAW_LIST_VERSION};",
+        ),
+        "engine/core/src/draw.rs": (
+            "if sx1 + 1.0 <= clip.x0 || sx0 - 1.0 >= clip.x1",
+            "spec::draw_op::ROUNDED_RECT",
+            "fn emit_native_rounded_gradient(",
+            "spec::draw_op::ROUNDED_GRADIENT,",
+        ),
+        "engine/core/src/lib.rs": (
+            "pub fn set_native_rounded_rects(&mut self, enabled: bool)",
+            "x if x == spec::draw_op::ROUNDED_GRADIENT => 11,",
+        ),
+        "engine/spec/src/lib.rs": (
+            "/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.",
+            "pub const DRAW_LIST_VERSION: u32 = 5;",
+            "pub const ROUNDED_RECT: u32 = 17;",
+            "pub const ARC: u32 = 18;",
+            "pub const ROUNDED_GRADIENT: u32 = 19;",
+        ),
+        "engine/render/draw-ops/src/lib.rs": (
+            "draw_op::ROUNDED_RECT => 8,",
+            "draw_op::ARC => 8,",
+            "draw_op::ROUNDED_GRADIENT => 11,",
+        ),
+        "engine/present/src/damage.rs": (
+            "floor_i32(bounds[0])",
+            "ceil_i32(bounds[2])",
+        ),
+        "engine/core/src/tests.rs": (
+            "fn native_rounded_rects_are_opt_in_and_preserve_ring_compositing()",
+            "fn native_rounded_gradients_preserve_stops_directions_and_composition()",
+            "for word in i + 2..i + 14 { assert!(f32::from_bits(words[word]).is_finite()); }",
+            "spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT => { previous_was_tex_tri = false; i += 15; }",
+            "words[triangle + 14]",
+        ),
+        "engine/render/draw-ops/tests/decoding.rs": (
+            "fn rounded_rect_uses_the_active_viewport_and_overflow_clip()",
+            "all_sixteen_records_preserve_the_original_words_and_offsets",
+        ),
+    },
+    "native rounded shadow DrawList reuse": {
+        "engine/core/src/draw.rs": (
+            "let native_round = self.native_rounded_rects;",
+            "let native_shadow = self.native_rounded_rects && !has_grad;",
+            "r.shadow, op, &clip, native_shadow);",
+            "clip: &Clip, allow_native: bool",
+            "allow_native,",
+            "spec::draw_op::ROUNDED_GRADIENT,",
+        ),
+        "engine/core/src/tests.rs": (
+            "fn native_rounded_shadows_preserve_layers_and_fallbacks()",
+            "assert_rect(records[2], 15.0, 14.0, 230.0, 230.0, 43.0, 0.0, 0x07000000);",
+            "assert_rect(records[3], 20.0, 10.0, 220.0, 220.0, 38.0, 0.0, 0xff223344);",
+            "spec::draw_op::ROUNDED_GRADIENT => i += 11,",
+            "fn native_rounded_gradients_preserve_stops_directions_and_composition()",
+        ),
+    },
+    "native arc DrawList op": {
+        "contracts/spec/spec.ts": (
+            "export const DRAW_LIST_VERSION = 5;",
+            "arc: 18,",
+            "roundedGradient: 19,",
+        ),
+        "contracts/spec/gen-rust.ts": (
+            "ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.",
+            "pub const DRAW_LIST_VERSION: u32 = ${DRAW_LIST_VERSION};",
+        ),
+        "contracts/generated/pocket_spec.h": (
+            "#define POCKET_DRAW_LIST_VERSION 5U",
+            "#define POCKET_DRAW_OP_ARC 18U",
+            "#define POCKET_DRAW_OP_ROUNDED_GRADIENT 19U",
+        ),
+        "engine/spec/src/lib.rs": (
+            "pub const DRAW_LIST_VERSION: u32 = 5;",
+            "pub const ARC: u32 = 18;",
+            "pub const ROUNDED_GRADIENT: u32 = 19;",
+        ),
+        "engine/drivers/src/abi.rs": (
+            "pub const POCKET_DRAW_LIST_VERSION: u32 = 5;",
+        ),
+        "engine/core/src/lib.rs": (
+            "x if x == spec::draw_op::ARC => 8,",
+            "x if x == spec::draw_op::ROUNDED_GRADIENT => 11,",
+        ),
+        "engine/render/draw-ops/src/lib.rs": (
+            "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,",
+            "draw_op::ARC => 8,",
+            "draw_op::ROUNDED_GRADIENT => 11,",
+            "DecodeError::InvalidArc",
+        ),
+        "engine/render/draw-ops/tests/decoding.rs": (
+            "fn arc_preserves_float_geometry_under_the_active_clip()",
+            "Some(Err(DecodeError::InvalidArc))",
+        ),
+        "engine/core/src/draw.rs": (
+            "fn emit_native_arc(",
+            "spec::draw_op::ARC,",
+            "fn emit_native_rounded_gradient(",
+            "spec::draw_op::ROUNDED_GRADIENT,",
+        ),
+        "engine/core/src/tests.rs": (
+            "fn native_arcs_preserve_signed_geometry_and_legacy_fallback()",
+        ),
+        "engine/present/src/damage.rs": (
+            "spec::draw_op::ARC => arc_bounds(words, clip),",
+            "fn arc_damage_contains_antialias_and_stroke_caps()",
+        ),
+    },
+    "native rounded gradient DrawList op": {
+        # The retained gradient test scanner was extended to skip the new
+        # 11-word record while checking the flat-shadow fallback.
+        "engine/core/src/tests.rs": (
+            "fn native_rounded_shadows_preserve_layers_and_fallbacks()",
+            "spec::draw_op::ROUNDED_GRADIENT => i += 11,",
+            "fn native_rounded_gradients_preserve_stops_directions_and_composition()",
+        ),
+    },
+    "bounded high-resolution IMG entries": {
+        # The retained-mesh patch upgrades this test's mesh assertion from
+        # TEX_TRI to the already-supported float triangle opcodes. Accept the
+        # complete successor assertion when checking bootstrap idempotency.
+        "engine/core/src/tests.rs": (
+            "spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT",
+            "words[triangle + 14], 0x80402010",
+            "f32::from_bits(words[triangle + 8]), 1.0",
+        ),
+    },
+    "subpixel retained mesh DrawList": {
+        "contracts/spec/spec.ts": (
+            "texTriRepeatFloat: 16,",
+        ),
+        "contracts/spec/gen-rust.ts": (
+            "TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT",
+        ),
+        "contracts/generated/pocket_spec.h": (
+            "#define POCKET_DRAW_OP_TEX_TRI_REPEAT_FLOAT 16U",
+        ),
+        "engine/spec/src/lib.rs": (
+            "pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;",
+        ),
+        "engine/core/src/draw.rs": (
+            "spec::draw_op::TEX_TRI_REPEAT_FLOAT",
+        ),
+        "engine/core/src/lib.rs": (
+            "self.upload_texture_flags_with_limit(&blob[8..], w, h, psm, flags, spec::IMG_MAX_DIM)",
+        ),
+        "engine/render/draw-ops/src/lib.rs": (
+            "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,",
+        ),
+        "engine/raster/src/surface.rs": (
+            "operation.opcode == draw_op::TEX_TRI_FLOAT",
+            "draw_op::TEX_TRI_REPEAT_FLOAT",
+            "| draw_op::ROUNDED_RECT\n                | draw_op::ARC\n                | draw_op::ROUNDED_GRADIENT",
+            "| draw_op::ROUNDED_RECT\n            | draw_op::ARC\n            | draw_op::ROUNDED_GRADIENT",
+        ),
+        "engine/raster/tests/driver.rs": (
+            "fn float_mesh_triangle_preserves_subpixel_coverage_in_software_raster()",
+            "fn float_mesh_shared_edge_uses_top_left_coverage_once()",
+            "fn software_surface_rejects_native_shape_ops_before_writing()",
+        ),
+        "engine/render/draw-ops/tests/decoding.rs": (
+            "TEX_TRI_FLOAT",
+            "TEX_TRI_REPEAT_FLOAT",
+        ),
+        "engine/present/src/damage.rs": (
+            "spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT",
+        ),
+        "engine/drivers/src/abi.rs": (
+            "pub const POCKET_DRAW_LIST_VERSION: u32 = 5;",
+        ),
+    },
 }
 
 FINAL_CONTRACTS = {
     "contracts/generated/pocket_spec.h": (
+        "#define POCKET_DRAW_LIST_VERSION 5U",
+        "#define POCKET_DRAW_OP_ARC 18U",
+        "#define POCKET_DRAW_OP_ROUNDED_GRADIENT 19U",
         "#define POCKET_OP_setInlineText 64U",
         "#define POCKET_OP_setInlineReveal 65U",
         "#define POCKET_OP_getInlineTextLayout 66U",
@@ -186,6 +393,33 @@ FINAL_CONTRACTS = {
         "pub fn set_inline_text(&mut self, id: i32, source: &str, records: &[u8])",
         "pub fn set_inline_reveal(&mut self, id: i32, codepoints: u32)",
         "pub fn get_inline_text_layout(&mut self, id: i32) -> Vec<u32>",
+        "pub fn set_native_rounded_rects(&mut self, enabled: bool)",
+    ),
+    "engine/render/draw-ops/src/lib.rs": (
+        "draw_op::ROUNDED_RECT => 8,",
+        "draw_op::ARC => 8,",
+        "draw_op::ROUNDED_GRADIENT => 11,",
+    ),
+    "engine/raster/src/surface.rs": (
+        "| draw_op::ROUNDED_RECT\n                | draw_op::ARC\n                | draw_op::ROUNDED_GRADIENT",
+        "| draw_op::ROUNDED_RECT\n            | draw_op::ARC\n            | draw_op::ROUNDED_GRADIENT",
+    ),
+    "engine/raster/tests/driver.rs": (
+        "fn software_surface_rejects_native_shape_ops_before_writing()",
+    ),
+    "engine/core/src/draw.rs": (
+        "let native_round = self.native_rounded_rects;",
+        "clip: &Clip, allow_native: bool",
+        "spec::draw_op::ARC,",
+        "spec::draw_op::ROUNDED_GRADIENT,",
+    ),
+    "engine/core/src/tests.rs": (
+        "fn native_rounded_shadows_preserve_layers_and_fallbacks()",
+        "assert_rect(records[2], 15.0, 14.0, 230.0, 230.0, 43.0, 0.0, 0x07000000);",
+        "assert_rect(records[3], 20.0, 10.0, 220.0, 220.0, 38.0, 0.0, 0xff223344);",
+        "fn native_arcs_preserve_signed_geometry_and_legacy_fallback()",
+        "fn native_rounded_gradients_preserve_stops_directions_and_composition()",
+        "spec::draw_op::ROUNDED_GRADIENT => i += 11,",
     ),
     "engine/core/src/inline_text.rs": (
         "pub fn layout(",
@@ -263,9 +497,11 @@ FINAL_CONTRACTS = {
     "contracts/spec/spec.ts": (
         "export const TEX_MAX_DIM = 512;",
         "export const IMG_MAX_DIM = 2048;",
-        "export const DRAW_LIST_VERSION = 3;",
+        "export const DRAW_LIST_VERSION = 5;",
         "texTriFloat: 15,",
         "texTriRepeatFloat: 16,",
+        "arc: 18,",
+        "roundedGradient: 19,",
     ),
     "contracts/spec/gen-rust.ts": (
         "  IMG_MAX_DIM,",
@@ -278,15 +514,19 @@ FINAL_CONTRACTS = {
     "engine/spec/src/lib.rs": (
         "pub const TEX_MAX_DIM: u32 = 512;",
         "pub const IMG_MAX_DIM: u32 = 2048;",
-        "pub const DRAW_LIST_VERSION: u32 = 3;",
+        "pub const DRAW_LIST_VERSION: u32 = 5;",
         "pub const TEX_TRI_FLOAT: u32 = 15;",
         "pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;",
+        "pub const ARC: u32 = 18;",
+        "pub const ROUNDED_GRADIENT: u32 = 19;",
     ),
     "engine/drivers/src/abi.rs": (
-        "pub const POCKET_DRAW_LIST_VERSION: u32 = 3;",
+        "pub const POCKET_DRAW_LIST_VERSION: u32 = 5;",
     ),
     "engine/render/draw-ops/src/lib.rs": (
         "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,",
+        "draw_op::ARC => 8,",
+        "draw_op::ROUNDED_GRADIENT => 11,",
     ),
     "engine/core/src/draw.rs": (
         "fn emit_mesh_tex_tri(",
@@ -299,6 +539,14 @@ FINAL_CONTRACTS = {
     "engine/core/src/lib.rs": (
         "self.upload_texture_flags_with_limit(data, w, h, psm, flags, spec::TEX_MAX_DIM)",
         "self.upload_texture_flags_with_limit(&blob[8..], w, h, psm, flags, spec::IMG_MAX_DIM)",
+        "x if x == spec::draw_op::ARC => 8,",
+        "x if x == spec::draw_op::ROUNDED_GRADIENT => 11,",
+    ),
+    "engine/present/src/damage.rs": (
+        "spec::draw_op::ARC => arc_bounds(words, clip),",
+        "fn arc_damage_contains_antialias_and_stroke_caps()",
+        "spec::draw_op::ROUNDED_RECT | spec::draw_op::ROUNDED_GRADIENT",
+        "fn rounded_gradient_damage_keeps_the_full_bounds_and_intersects_clip()",
     ),
 }
 
@@ -428,6 +676,17 @@ def apply_patch(filename: str, label: str) -> None:
             already += 1
             continue
 
+        markers = superseded.get(target)
+        if (
+            label == "native rounded shadow DrawList reuse"
+            and target == "engine/core/src/tests.rs"
+            and markers
+            and file_has_markers(target, markers)
+        ):
+            already += 1
+            print(f"PocketJS {label}: accepted final gradient successor in {target} before forward apply")
+            continue
+
         forward = run_patch(target, section)
         if forward.returncode == 0:
             result = run_patch(target, section, dry_run=False)
@@ -441,7 +700,6 @@ def apply_patch(filename: str, label: str) -> None:
             applied += 1
             continue
 
-        markers = superseded.get(target)
         if markers and file_has_markers(target, markers):
             already += 1
             print(f"PocketJS {label}: accepted superseded hunk in {target} by explicit contract markers")
@@ -467,6 +725,19 @@ def verify_final_contracts() -> None:
             raise SystemExit(
                 f"Pinned PocketJS integration contract is incomplete in {target}; "
                 "recheck prepare_upstream patches against the pinned revision"
+            )
+    core_tests = CACHE / "engine/core/src/tests.rs"
+    content = core_tests.read_text(encoding="utf-8")
+    for name in (
+        "native_rounded_shadows_preserve_layers_and_fallbacks",
+        "native_arcs_preserve_signed_geometry_and_legacy_fallback",
+        "native_rounded_gradients_preserve_stops_directions_and_composition",
+    ):
+        declarations = re.findall(rf"^fn {re.escape(name)}\(", content, re.MULTILINE)
+        if len(declarations) != 1:
+            raise SystemExit(
+                f"Expected exactly one Core regression function {name} in {core_tests}, "
+                f"found {len(declarations)}"
             )
 
 

@@ -349,6 +349,68 @@ void main() {
   );
 
   test(
+    'PFP1 v5 insertion decodes a rounded gradient into the retained frame',
+    () {
+      final runtime = FfiPocketRuntime.open(width: 320, height: 480);
+      try {
+        final initial = runtime.eval(r'''
+          const rects = [];
+          for (let index = 0; index < 10; index++) {
+            const node = ui.createNode(0);
+            ui.setProp(node, 1, 24);
+            ui.setProp(node, 2, 16);
+            ui.setProp(node, 24, 1);
+            ui.setProp(node, 25, index * 20);
+            ui.setProp(node, 28, 0);
+            ui.setProp(node, 64, 0xff334455 + index);
+            ui.insertBefore(1, node, index);
+            rects.push(node);
+          }
+          globalThis.frame = function() {};
+          globalThis.__pocketEvent = function(packet) {
+            if (packet.name !== 'add-rounded-gradient') return;
+            const node = ui.createNode(0);
+            ui.setProp(node, 1, 80);
+            ui.setProp(node, 2, 60);
+            ui.setProp(node, 24, 1);
+            ui.setProp(node, 25, 100);
+            ui.setProp(node, 28, 100);
+            ui.setProp(node, 68, 12);
+            ui.setProp(node, 65, 0x80604020);
+            ui.setProp(node, 82, 0x96dce6f0);
+            ui.setProp(node, 83, 0.35);
+            ui.setProp(node, 66, 0xdc786450);
+            ui.setProp(node, 67, 3);
+            ui.insertBefore(1, node, 0);
+          };
+          __pocketEvent.__binaryCapable = true;
+        ''');
+        expect(initial.ops, hasLength(10));
+        expect(initial.sequence, isNotNull);
+
+        runtime.send(const <String, dynamic>{
+          'type': 'event',
+          'name': 'add-rounded-gradient',
+          'payload': <String, dynamic>{},
+        });
+        final patched = runtime.frameDeltaAt(0)!;
+        expect(patched.sequence, greaterThan(initial.sequence!));
+        expect(patched.ops, hasLength(11));
+        final gradient = patched.ops.first as PocketRoundedGradientOp;
+        expect(gradient.radius, 12);
+        expect(gradient.direction, 3);
+        expect(gradient.viaColor, 0x96f0e6dc);
+        expect(gradient.viaPosition, closeTo(0.35, 1e-6));
+      } finally {
+        runtime.dispose();
+      }
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
+
+  test(
     'production FfiPocketRuntime decodes the compact binary frame ABI and binary bridge events',
     () {
       final runtime = FfiPocketRuntime.open(width: 320, height: 480);

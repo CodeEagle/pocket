@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart'
+    show debugDefaultTargetPlatformOverride;
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart'
     show
@@ -229,6 +231,282 @@ void main() {
     }
     fail('Timed out waiting for host instance');
   }
+
+  testWidgets('system Back asks the guest before closing the embedded host', (
+    tester,
+  ) async {
+    final controller = PocketSystemHostController();
+    final runtime = _ProbeChildRuntime();
+    final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+    debugPocketSelfOwnedRuntimeFactory = (_) => runtime;
+    var closes = 0;
+    binding.defaultBinaryMessenger.setMockMessageHandler('flutter/assets', (
+      data,
+    ) async {
+      if (data == null) return null;
+      final requested = utf8.decode(data.buffer.asUint8List());
+      if (requested.endsWith('.qjbc')) return ByteData(1);
+      if (requested.endsWith('.pak')) return ByteData(0);
+      final content = requested.endsWith('metadata.json')
+          ? <String, Object?>{
+              'entryFormat': 'quickjs-bytecode',
+              'formatVersion': 1,
+              'kind': 'script',
+              'bindingGeneration': 1,
+              'tickHz': 60,
+              'runtimeAbi': 'system-host-unit-abi',
+              'bytecodeBytes': 1,
+              'version': '1.0.0',
+              'build': 1,
+            }
+          : <String, Object?>{
+              'capabilities': {
+                'requires': ['ui.compositor-surfaces'],
+              },
+            };
+      return ByteData.sublistView(
+        Uint8List.fromList(utf8.encode(jsonEncode(content))),
+      );
+    });
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PocketSystemHost(
+              systemUI: const PocketAppConfig(
+                appId: rootId,
+                bytecodeAsset: 'test/root.qjbc',
+                pakAsset: 'test/root.pak',
+                metadataAsset: 'test/root.metadata.json',
+                manifestAsset: 'test/root.manifest.json',
+                additionalCapabilities: {'ui.compositor-surfaces'},
+              ),
+              applications: const {},
+              controller: controller,
+              onClose: () => closes++,
+            ),
+          ),
+        ),
+      );
+      final root = await waitFor(
+        tester,
+        controller,
+        (entry) => entry.isSystemUI && entry.firstFrameReady,
+      );
+      List<Map<String, dynamic>> requests() => runtime.sentMessages
+          .where((message) => message['name'] == 'platform.back.request')
+          .toList();
+
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      expect(requests(), hasLength(1));
+      expect(closes, 0);
+      final pending = controller.requestBack();
+      expect(
+        identical(pending, controller.requestBack()),
+        isTrue,
+        reason: 'concurrent back requests must share one guest request',
+      );
+      final requestId = (requests().single['payload'] as Map)['requestId'];
+      root.session.onEvent(
+        PocketEvent(
+          id: 'back-response',
+          method: 'platform.back.response',
+          params: {'requestId': 'stale-request', 'handled': false},
+        ),
+      );
+      await tester.pump();
+      expect(closes, 0);
+      root.session.onEvent(
+        PocketEvent(
+          id: 'back-response',
+          method: 'platform.back.response',
+          params: {'requestId': requestId, 'handled': true},
+        ),
+      );
+      await tester.pump();
+      expect(await pending, isTrue);
+      expect(
+        closes,
+        0,
+        reason: 'a JS page pop must retain the embedded container',
+      );
+
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      expect(requests(), hasLength(2));
+      root.session.onEvent(
+        PocketEvent(
+          id: 'back-response',
+          method: 'platform.back.response',
+          params: {
+            'requestId': (requests().last['payload'] as Map)['requestId'],
+            'handled': false,
+          },
+        ),
+      );
+      await tester.pump();
+      expect(
+        closes,
+        1,
+        reason: 'an unhandled root back must close exactly once',
+      );
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      debugPocketSelfOwnedRuntimeFactory = previousFactory;
+      controller.dispose();
+    }
+  });
+
+  testWidgets(
+    'loaded host on iOS runtime with Android theme dispatches left-edge velocity and distance swipes to guest',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final controller = PocketSystemHostController();
+      final runtime = _ProbeChildRuntime();
+      final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+      debugPocketSelfOwnedRuntimeFactory = (_) => runtime;
+      var closes = 0;
+      binding.defaultBinaryMessenger.setMockMessageHandler('flutter/assets', (
+        data,
+      ) async {
+        if (data == null) return null;
+        final requested = utf8.decode(data.buffer.asUint8List());
+        if (requested.endsWith('.qjbc')) return ByteData(1);
+        if (requested.endsWith('.pak')) return ByteData(0);
+        final content = requested.endsWith('metadata.json')
+            ? <String, Object?>{
+                'entryFormat': 'quickjs-bytecode',
+                'formatVersion': 1,
+                'kind': 'script',
+                'bindingGeneration': 1,
+                'tickHz': 60,
+                'runtimeAbi': 'system-host-unit-abi',
+                'bytecodeBytes': 1,
+                'version': '1.0.0',
+                'build': 1,
+              }
+            : <String, Object?>{
+                'capabilities': {
+                  'requires': ['ui.compositor-surfaces'],
+                },
+              };
+        return ByteData.sublistView(
+          Uint8List.fromList(utf8.encode(jsonEncode(content))),
+        );
+      });
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(platform: TargetPlatform.android),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: Center(
+                  child: TextButton(
+                    onPressed: () {
+                      Navigator.of(context).push<void>(
+                        MaterialPageRoute<void>(
+                          builder: (_) => Scaffold(
+                            body: PocketSystemHost(
+                              systemUI: const PocketAppConfig(
+                                appId: rootId,
+                                bytecodeAsset: 'test/root.qjbc',
+                                pakAsset: 'test/root.pak',
+                                metadataAsset: 'test/root.metadata.json',
+                                manifestAsset: 'test/root.manifest.json',
+                                additionalCapabilities: {
+                                  'ui.compositor-surfaces',
+                                },
+                              ),
+                              applications: const {},
+                              controller: controller,
+                              onClose: () => closes++,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                    child: const Text('open-host'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('open-host'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+
+        final root = await waitFor(
+          tester,
+          controller,
+          (entry) => entry.isSystemUI && entry.firstFrameReady,
+        );
+        List<Map<String, dynamic>> requests() => runtime.sentMessages
+            .where((message) => message['name'] == 'platform.back.request')
+            .toList();
+
+        // 1. Retained parent velocity-based left-edge fling (startX=30 < 36, dx=56 < 88, velocity > 260).
+        await tester.flingFrom(
+          const Offset(30, 200),
+          const Offset(56, 0),
+          600,
+        );
+        await tester.pump();
+        expect(
+          requests(),
+          hasLength(1),
+          reason:
+              'iOS device with forced Android Theme must still dispatch velocity edge swipe over loaded PocketView',
+        );
+        root.session.onEvent(
+          PocketEvent(
+            id: 'back-response-1',
+            method: 'platform.back.response',
+            params: {
+              'requestId': (requests().last['payload'] as Map)['requestId'],
+              'handled': true,
+            },
+          ),
+        );
+        await tester.pump();
+        expect(closes, 0);
+
+        // 2. Slow distance-based left-edge drag (startX=12 < 36, dx=100 >= 88, dy=10 <= 72, low velocity).
+        final slowSwipe = await tester.startGesture(const Offset(12, 200));
+        await slowSwipe.moveTo(const Offset(112, 210));
+        await tester.pump(const Duration(milliseconds: 500));
+        await slowSwipe.up();
+        await tester.pump();
+        expect(
+          requests(),
+          hasLength(2),
+          reason: 'slow distance-based edge drag must also dispatch once',
+        );
+        root.session.onEvent(
+          PocketEvent(
+            id: 'back-response-2',
+            method: 'platform.back.response',
+            params: {
+              'requestId': (requests().last['payload'] as Map)['requestId'],
+              'handled': false,
+            },
+          ),
+        );
+        await tester.pump();
+        expect(closes, 1);
+        expect(tester.takeException(), isNull);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        debugPocketSelfOwnedRuntimeFactory = previousFactory;
+        controller.dispose();
+      }
+    },
+  );
 
   testWidgets(
     'awaitFirstFrame throws when a runtime fails after producing an Offstage frame and then becoming visible',
@@ -1301,7 +1579,9 @@ void main() {
         expect(childRuntime.frameDeltas.first, 0);
 
         final childPocketView = tester
-            .widgetList<PocketView>(find.byType(PocketView, skipOffstage: false))
+            .widgetList<PocketView>(
+              find.byType(PocketView, skipOffstage: false),
+            )
             .singleWhere((view) => view.bytecodeAsset == 'test/child.qjbc');
         expect(
           childPocketView.initialEvents,

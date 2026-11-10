@@ -7,10 +7,10 @@
 pub mod binary_bridge;
 mod binary_offload;
 pub mod bytecode;
-mod frame_delta;
-mod guest_security;
 mod demand;
 pub mod duplex;
+mod frame_delta;
+mod guest_security;
 pub mod offload;
 mod replay;
 pub mod worker;
@@ -30,7 +30,25 @@ use std::ffi::{c_char, CStr, CString};
 use std::io::Read;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
+
+static PERF_SAMPLING_ENABLED: AtomicBool = AtomicBool::new(false);
+static LIVE2D_UPDATE_NANOS: AtomicU64 = AtomicU64::new(0);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeFrameStageTimingsUs {
+    pub js_tick_us: u64,
+    pub live2d_update_us: u64,
+    pub live2d_emit_us: u64,
+    pub relayout_us: u64,
+    pub draw_decode_us: u64,
+    pub splice_us: u64,
+    pub encode_us: u64,
+    pub other_us: u64,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct NodeMeta {
@@ -122,7 +140,9 @@ fn valid_bridge_batch(value: &serde_json::Value) -> bool {
         return false;
     };
     events.len() <= MAX_BRIDGE_BATCH_EVENTS
-        && events.iter().all(|event| event.is_object() && !is_batch(event))
+        && events
+            .iter()
+            .all(|event| event.is_object() && !is_batch(event))
 }
 
 // The POC has one host-owned Flutter video Texture.  Framework
@@ -191,12 +211,18 @@ struct FrameOp {
     to_color: Option<u32>,
     /// pocket_spec::GradDir: 0=top, 1=bottom, 2=left, 3=right.
     direction: Option<u32>,
+    /// Middle rounded-gradient stop; the fields are paired in JSON/PFB1.
+    via_color: Option<u32>,
+    via_position: Option<f32>,
     size: Option<f32>,
     font_slot: Option<u8>,
     text_align: Option<u8>,
     surface_handle: Option<i32>,
     focused: Option<bool>,
     radius: Option<f32>,
+    border_width: Option<f32>,
+    start_angle: Option<f32>,
+    sweep_angle: Option<f32>,
     /// Triangle geometry is present only for TRI/TEX_TRI records. Keeping
     /// the vertices instead of reducing them to an AABB lets a Canvas host
     /// preserve real rotated/gouraud DrawList output.
@@ -243,6 +269,10 @@ struct LegacyFrameOp<'a> {
     to_color: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     direction: Option<u32>,
+    #[serde(rename = "viaColor", skip_serializing_if = "Option::is_none")]
+    via_color: Option<u32>,
+    #[serde(rename = "viaPosition", skip_serializing_if = "Option::is_none")]
+    via_position: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<f32>,
     #[serde(rename = "fontSlot", skip_serializing_if = "Option::is_none")]
@@ -255,6 +285,12 @@ struct LegacyFrameOp<'a> {
     focused: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     radius: Option<f32>,
+    #[serde(rename = "borderWidth", skip_serializing_if = "Option::is_none")]
+    border_width: Option<f32>,
+    #[serde(rename = "startAngle", skip_serializing_if = "Option::is_none")]
+    start_angle: Option<f32>,
+    #[serde(rename = "sweepAngle", skip_serializing_if = "Option::is_none")]
+    sweep_angle: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     points: Option<&'a Vec<FramePoint>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -279,9 +315,10 @@ impl Serialize for FrameOp {
                 .surface_kind
                 .as_deref()
                 .ok_or_else(|| serde::ser::Error::custom("hostSurface kind is missing"))?;
-            let parameters = self.surface_parameters.as_deref().ok_or_else(|| {
-                serde::ser::Error::custom("hostSurface parameters are missing")
-            })?;
+            let parameters = self
+                .surface_parameters
+                .as_deref()
+                .ok_or_else(|| serde::ser::Error::custom("hostSurface parameters are missing"))?;
             let value =
                 binary_bridge::decode_to_json(parameters).map_err(serde::ser::Error::custom)?;
             descriptor = serde_json::to_string(&serde_json::json!({
@@ -309,12 +346,17 @@ impl Serialize for FrameOp {
             from_color: self.from_color,
             to_color: self.to_color,
             direction: self.direction,
+            via_color: self.via_color,
+            via_position: self.via_position,
             size: self.size,
             font_slot: self.font_slot,
             text_align: self.text_align,
             surface_handle: self.surface_handle,
             focused: self.focused,
             radius: self.radius,
+            border_width: self.border_width,
+            start_angle: self.start_angle,
+            sweep_angle: self.sweep_angle,
             points: self.points.as_ref(),
             colors: self.colors.as_ref(),
             uvs: self.uvs.as_ref(),
@@ -546,6 +588,7 @@ pub struct HostState {
     frame_json_serialized_bytes: u64,
     frame_json_cache_hits: u64,
     draw_decode_count: u64,
+    last_stage_timings: NativeFrameStageTimingsUs,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -565,6 +608,9 @@ struct MemoryLimits {
 /// keeps DrawOps and image pixels out of the UTF-8/serde JSON path.
 const BINARY_FRAME_MAGIC: u32 = u32::from_le_bytes(*b"PFB1");
 const BINARY_FRAME_VERSION: u16 = 2;
+const BINARY_FRAME_ROUNDED_RING_VERSION: u16 = 3;
+const BINARY_FRAME_ARC_VERSION: u16 = 4;
+const BINARY_FRAME_ROUNDED_GRADIENT_VERSION: u16 = 5;
 
 struct BinaryFrameWriter {
     bytes: Vec<u8>,
@@ -625,9 +671,49 @@ impl BinaryFrameWriter {
     }
 
     fn op(&mut self, op: &FrameOp) -> Result<(), String> {
+        let border_width = op.border_width.unwrap_or(0.0);
+        if op.kind == "rounded" && (!border_width.is_finite() || border_width < 0.0) {
+            return Err("rounded rectangle border width must be finite and nonnegative".to_owned());
+        }
+        if op.kind == "arc"
+            && (!op.radius.is_some_and(f32::is_finite)
+                || op.radius.unwrap_or(-1.0) < 0.0
+                || !border_width.is_finite()
+                || border_width <= 0.0
+                || !op.start_angle.is_some_and(f32::is_finite)
+                || !op.sweep_angle.is_some_and(f32::is_finite)
+                || op.sweep_angle.unwrap_or(0.0) == 0.0
+                || op.sweep_angle.unwrap_or(0.0).abs() > 360.0)
+        {
+            return Err(
+                "arc geometry must be finite with a nonzero sweep in ±360 degrees".to_owned(),
+            );
+        }
+        if op.kind == "roundedGradient" {
+            let via_is_complete = op.via_color.is_some() == op.via_position.is_some();
+            if ![op.x, op.y, op.w, op.h]
+                .into_iter()
+                .all(f32::is_finite)
+                || op.w <= 0.0
+                || op.h <= 0.0
+                || op.from_color.is_none()
+                || op.to_color.is_none()
+                || !op.radius.is_some_and(|radius| radius.is_finite() && radius > 0.0)
+                || !op.direction.is_some_and(|direction| direction <= 3)
+                || !via_is_complete
+                || op.via_position.is_some_and(|position| {
+                    !position.is_finite() || position <= 0.0 || position >= 1.0
+                })
+            {
+                return Err("rounded gradient has invalid geometry, direction, or middle stop".to_owned());
+            }
+        }
         let tag = match op.kind.as_str() {
             "rect" => 0,
+            "rounded" if border_width > 0.0 => 15,
             "rounded" => 1,
+            "arc" => 16,
+            "roundedGradient" => 17,
             "gradient" => 2,
             "triangle" => 3,
             "textureTriangle" if op.repeat_texture => 14,
@@ -652,6 +738,39 @@ impl BinaryFrameWriter {
             1 => {
                 self.u32(op.color.unwrap_or(0));
                 self.f32(op.radius.unwrap_or(0.0));
+            }
+            15 => {
+                let radius = op.radius.unwrap_or(0.0);
+                if !radius.is_finite() || radius < 0.0 {
+                    return Err(
+                        "rounded rectangle radius must be finite and nonnegative".to_owned()
+                    );
+                }
+                self.u32(op.color.unwrap_or(0));
+                self.f32(radius);
+                self.f32(border_width);
+            }
+            16 => {
+                self.u32(op.color.unwrap_or(0));
+                self.f32(op.radius.unwrap_or(0.0));
+                self.f32(border_width);
+                self.f32(op.start_angle.unwrap_or(0.0));
+                self.f32(op.sweep_angle.unwrap_or(0.0));
+            }
+            17 => {
+                self.u32(op.from_color.expect("validated rounded gradient start color"));
+                self.u32(op.to_color.expect("validated rounded gradient end color"));
+                self.u32(op.direction.expect("validated rounded gradient direction"));
+                self.f32(op.radius.expect("validated rounded gradient radius"));
+                match (op.via_color, op.via_position) {
+                    (Some(color), Some(position)) => {
+                        self.u8(1);
+                        self.u32(color);
+                        self.f32(position);
+                    }
+                    (None, None) => self.u8(0),
+                    _ => unreachable!("rounded gradient optional fields were validated"),
+                }
             }
             2 => {
                 self.u32(op.from_color.unwrap_or(0));
@@ -730,15 +849,16 @@ impl BinaryFrameWriter {
             7 | 8 => {
                 self.string(op.id.as_deref().unwrap_or(""))?;
                 if tag == 7 {
-                    self.string(op.surface_kind.as_deref().ok_or_else(|| {
-                        "hostSurface kind is missing".to_owned()
-                    })?)?;
-                    let parameters = op.surface_parameters.as_deref().ok_or_else(|| {
-                        "hostSurface parameters are missing".to_owned()
-                    })?;
-                    if parameters.first().copied()
-                        != Some(binary_bridge::BINARY_MESSAGE_MAGIC)
-                    {
+                    self.string(
+                        op.surface_kind
+                            .as_deref()
+                            .ok_or_else(|| "hostSurface kind is missing".to_owned())?,
+                    )?;
+                    let parameters = op
+                        .surface_parameters
+                        .as_deref()
+                        .ok_or_else(|| "hostSurface parameters are missing".to_owned())?;
+                    if parameters.first().copied() != Some(binary_bridge::BINARY_MESSAGE_MAGIC) {
                         return Err("hostSurface parameters are not a 0xB1 object".to_owned());
                     }
                     self.bytes(parameters)?;
@@ -776,12 +896,10 @@ impl BinaryFrameWriter {
                     self.f32(*value);
                 }
             }
-            10 => {
-                match op.color {
-                    Some(0 | 1) => self.u8(op.color.unwrap_or(0) as u8),
-                    _ => return Err("invalid mesh mask inversion flag".to_owned()),
-                }
-            }
+            10 => match op.color {
+                Some(0 | 1) => self.u8(op.color.unwrap_or(0) as u8),
+                _ => return Err("invalid mesh mask inversion flag".to_owned()),
+            },
             11 => {}
             _ => unreachable!(),
         }
@@ -811,13 +929,45 @@ fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
 /// segment. PFP1 uses this to carry the insertion segment of a splice; events,
 /// resources, releases, and the complete auxiliary surface remain the current
 /// frame's metadata. The ordinary PFB1 ABI always calls this with `frame.ops`.
-fn encode_binary_frame_with_ops(
-    frame: &FrameResult,
-    ops: &[FrameOp],
-) -> Result<Vec<u8>, String> {
+fn encode_binary_frame_with_ops(frame: &FrameResult, ops: &[FrameOp]) -> Result<Vec<u8>, String> {
     let mut writer = BinaryFrameWriter::new();
     writer.u32(BINARY_FRAME_MAGIC);
-    writer.u16(BINARY_FRAME_VERSION);
+    let has_rounded_ring = |operations: &[FrameOp]| {
+        operations
+            .iter()
+            .any(|op| op.kind == "rounded" && op.border_width.is_some_and(|width| width > 0.0))
+    };
+    let has_rounded_gradient = |operations: &[FrameOp]| {
+        operations
+            .iter()
+            .any(|op| op.kind == "roundedGradient")
+    };
+    let has_rounded_gradient = has_rounded_gradient(ops)
+        || frame
+            .auxiliary
+            .as_ref()
+            .is_some_and(|auxiliary| has_rounded_gradient(&auxiliary.ops));
+    let has_arc = |operations: &[FrameOp]| operations.iter().any(|op| op.kind == "arc");
+    let has_arc = has_arc(ops)
+        || frame
+            .auxiliary
+            .as_ref()
+            .is_some_and(|auxiliary| has_arc(&auxiliary.ops));
+    let version = if has_rounded_gradient {
+        BINARY_FRAME_ROUNDED_GRADIENT_VERSION
+    } else if has_arc {
+        BINARY_FRAME_ARC_VERSION
+    } else if has_rounded_ring(ops)
+        || frame
+            .auxiliary
+            .as_ref()
+            .is_some_and(|auxiliary| has_rounded_ring(&auxiliary.ops))
+    {
+        BINARY_FRAME_ROUNDED_RING_VERSION
+    } else {
+        BINARY_FRAME_VERSION
+    };
+    writer.u16(version);
     // PFB1 metadata: existing text/handle fields plus typed surface
     // descriptors (tag 7).
     writer.u16(3);
@@ -1309,8 +1459,7 @@ fn install_bridge(
                         if !valid_bridge_batch(&parsed) {
                             return Ok(false);
                         }
-                        let Ok(binary) =
-                            binary_bridge::encode_json_to_binary(&parsed, usize::MAX)
+                        let Ok(binary) = binary_bridge::encode_json_to_binary(&parsed, usize::MAX)
                         else {
                             return Ok(false);
                         };
@@ -1427,11 +1576,9 @@ fn install_bridge(
                     };
                     if let Some(extra) = payload.as_object() {
                         meta.asset = js_string_property(&extra, "asset").unwrap_or_default();
-                        meta.video_id =
-                            js_string_property(&extra, "videoId").unwrap_or_default();
-                        meta.fit = normalize_video_fit(
-                            js_string_property(&extra, "fit").as_deref(),
-                        );
+                        meta.video_id = js_string_property(&extra, "videoId").unwrap_or_default();
+                        meta.fit =
+                            normalize_video_fit(js_string_property(&extra, "fit").as_deref());
                         meta.autoplay = js_bool_property(&extra, "autoplay").unwrap_or(true);
                         meta.texture = js_i32_property(&extra, "texture").unwrap_or(-1);
                         meta.surface = js_i32_property(&extra, "surface").unwrap_or(-1);
@@ -1448,23 +1595,18 @@ fn install_bridge(
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_owned();
-                                meta.fit = normalize_video_fit(
-                                    extra.get("fit").and_then(|v| v.as_str()),
-                                );
+                                meta.fit =
+                                    normalize_video_fit(extra.get("fit").and_then(|v| v.as_str()));
                                 meta.autoplay = extra
                                     .get("autoplay")
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(true);
-                                meta.texture = extra
-                                    .get("texture")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(-1)
-                                    as i32;
-                                meta.surface = extra
-                                    .get("surface")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(-1)
-                                    as i32;
+                                meta.texture =
+                                    extra.get("texture").and_then(|v| v.as_i64()).unwrap_or(-1)
+                                        as i32;
+                                meta.surface =
+                                    extra.get("surface").and_then(|v| v.as_i64()).unwrap_or(-1)
+                                        as i32;
                             }
                         }
                     }
@@ -1490,63 +1632,58 @@ fn install_bridge(
                         return Err(Exception::throw_type(&ctx, "invalid compositor provider"));
                     }
                     let is_video = kind == "video";
-                    let (parameters, video_asset, fit, autoplay) =
-                        if let Some(object) = payload.as_object() {
-                            let parameters = binary_bridge::encode_js_message(
-                                payload.clone(),
-                                8192,
-                                MAX_BRIDGE_BATCH_EVENTS,
-                            )
-                            .map_err(|_| {
+                    let (parameters, video_asset, fit, autoplay) = if let Some(object) =
+                        payload.as_object()
+                    {
+                        let parameters = binary_bridge::encode_js_message(
+                            payload.clone(),
+                            8192,
+                            MAX_BRIDGE_BATCH_EVENTS,
+                        )
+                        .map_err(|_| Exception::throw_type(&ctx, "invalid surface parameters"))?;
+                        let video_asset = js_string_property(&object, "asset");
+                        let fit =
+                            normalize_video_fit(js_string_property(&object, "fit").as_deref());
+                        let autoplay = js_bool_property(&object, "autoplay").unwrap_or(true);
+                        (parameters, video_asset, fit, autoplay)
+                    } else if let Some(js_string) = payload.as_string() {
+                        let text = js_string.to_string().map_err(|_| {
+                            Exception::throw_type(&ctx, "invalid surface parameters")
+                        })?;
+                        if text.len() > 8192 {
+                            return Err(Exception::throw_type(&ctx, "invalid surface parameters"));
+                        }
+                        let data: serde_json::Value =
+                            serde_json::from_str(&text).map_err(|_| {
                                 Exception::throw_type(&ctx, "invalid surface parameters")
                             })?;
-                            let video_asset = js_string_property(&object, "asset");
-                            let fit = normalize_video_fit(
-                                js_string_property(&object, "fit").as_deref(),
-                            );
-                            let autoplay = js_bool_property(&object, "autoplay").unwrap_or(true);
-                            (parameters, video_asset, fit, autoplay)
-                        } else if let Some(js_string) = payload.as_string() {
-                            let text = js_string.to_string().map_err(|_| {
-                                Exception::throw_type(&ctx, "invalid surface parameters")
-                            })?;
-                            if text.len() > 8192 {
-                                return Err(Exception::throw_type(
-                                    &ctx,
-                                    "invalid surface parameters",
-                                ));
-                            }
-                            let data: serde_json::Value = serde_json::from_str(&text).map_err(
-                                |_| Exception::throw_type(&ctx, "invalid surface parameters"),
-                            )?;
-                            if !data.is_object() {
-                                return Err(Exception::throw_type(
-                                    &ctx,
-                                    "surface parameters must be an object",
-                                ));
-                            }
-                            let parameters = binary_bridge::encode_json_to_binary(&data, 8192)
-                                .map_err(|_| {
-                                    Exception::throw_type(&ctx, "invalid surface parameters")
-                                })?;
-                            let video_asset = data
-                                .get("asset")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_owned);
-                            let fit = normalize_video_fit(
-                                data.get("fit").and_then(|value| value.as_str()),
-                            );
-                            let autoplay = data
-                                .get("autoplay")
-                                .and_then(|value| value.as_bool())
-                                .unwrap_or(true);
-                            (parameters, video_asset, fit, autoplay)
-                        } else {
+                        if !data.is_object() {
                             return Err(Exception::throw_type(
                                 &ctx,
                                 "surface parameters must be an object",
                             ));
-                        };
+                        }
+                        let parameters = binary_bridge::encode_json_to_binary(&data, 8192)
+                            .map_err(|_| {
+                                Exception::throw_type(&ctx, "invalid surface parameters")
+                            })?;
+                        let video_asset = data
+                            .get("asset")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_owned);
+                        let fit =
+                            normalize_video_fit(data.get("fit").and_then(|value| value.as_str()));
+                        let autoplay = data
+                            .get("autoplay")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(true);
+                        (parameters, video_asset, fit, autoplay)
+                    } else {
+                        return Err(Exception::throw_type(
+                            &ctx,
+                            "surface parameters must be an object",
+                        ));
+                    };
                     if is_video && video_asset.as_deref().map_or(true, str::is_empty) {
                         return Err(Exception::throw_type(
                             &ctx,
@@ -1563,12 +1700,9 @@ fn install_bridge(
                             "application surface is host-owned",
                         ));
                     }
-                    let existing = list
-                        .iter()
-                        .position(|n| {
-                            (n.kind == "hostSurface" || n.kind == "video")
-                                && n.video_id == package
-                        });
+                    let existing = list.iter().position(|n| {
+                        (n.kind == "hostSurface" || n.kind == "video") && n.video_id == package
+                    });
                     let handle = if let Some(index) = existing {
                         list[index].surface
                     } else {
@@ -1600,12 +1734,12 @@ fn install_bridge(
                         id: -handle,
                         kind: node_kind,
                         asset,
-                        surface_kind: if is_video { String::new() } else { kind.clone() },
-                        surface_parameters: if is_video {
-                            Vec::new()
+                        surface_kind: if is_video {
+                            String::new()
                         } else {
-                            parameters
+                            kind.clone()
                         },
+                        surface_parameters: if is_video { Vec::new() } else { parameters },
                         video_id: package.clone(),
                         fit,
                         autoplay,
@@ -1638,12 +1772,9 @@ fn install_bridge(
                             "application surface is host-owned",
                         ));
                     }
-                    release_nodes
-                        .borrow_mut()
-                        .retain(|n| {
-                            !((n.kind == "hostSurface" || n.kind == "video")
-                                && n.video_id == package)
-                        });
+                    release_nodes.borrow_mut().retain(|n| {
+                        !((n.kind == "hostSurface" || n.kind == "video") && n.video_id == package)
+                    });
                     let ui: Object = ctx.globals().get("ui")?;
                     let surfaces: Object = ui.get("__surfaces")?;
                     surfaces.remove(package)?;
@@ -1693,12 +1824,7 @@ fn install_bridge(
             }
             let security_snapshot = security.borrow().clone();
             if let Some(max_nodes) = security_snapshot.max_nodes {
-                guest_security::install_node_quota(
-                    &ctx,
-                    ops.clone(),
-                    security.clone(),
-                    max_nodes,
-                )?;
+                guest_security::install_node_quota(&ctx, ops.clone(), security.clone(), max_nodes)?;
             }
             if security_snapshot.harden_builtins {
                 guest_security::install_hardening(&ctx)?;
@@ -2764,11 +2890,11 @@ fn run_guest_touch_frame(
         host.guest.frame(&frame)
     };
     result.map_err(|error| {
-            host.guest
-                .last_error()
-                .map(|detail| format!("{error:?}: {detail}"))
-                .unwrap_or_else(|| format!("{error:?}"))
-        })?;
+        host.guest
+            .last_error()
+            .map(|detail| format!("{error:?}: {detail}"))
+            .unwrap_or_else(|| format!("{error:?}"))
+    })?;
     if let Some(bridge) = &mut host.worker_bridge {
         bridge.mark_frame_consumed();
     }
@@ -2876,7 +3002,10 @@ fn run_virtual_frames(
             || host.external_work_pending
             || !host.axis_deltas.is_empty()
             || host.motion.is_some()
-            || host.offload.as_ref().is_some_and(|offload| offload.has_replies()))
+            || host
+                .offload
+                .as_ref()
+                .is_some_and(|offload| offload.has_replies()))
     {
         let active = host.touches.clone();
         run_guest_touch_frame(host, &active, &[])?;
@@ -2908,6 +3037,13 @@ fn build_frame(
     allow_unchanged: bool,
     force_full_resources: bool,
 ) -> Result<BuiltFrame, String> {
+    let sampling = PERF_SAMPLING_ENABLED.load(Ordering::Relaxed);
+    if sampling {
+        host.last_stage_timings = NativeFrameStageTimingsUs {
+            live2d_update_us: LIVE2D_UPDATE_NANOS.swap(0, Ordering::Relaxed) / 1000,
+            ..NativeFrameStageTimingsUs::default()
+        };
+    }
     ensure_guest_security_healthy(host)?;
     // Advance known quiescent time before delivering this boundary's input.
     // A virtual timer's due frame still runs the ordinary guest transaction.
@@ -2921,42 +3057,73 @@ fn build_frame(
     // gesture pump can observe DOWN followed by UP (or CANCEL).  When there
     // are no edges, preserve the ordinary held-contact frame semantics.
     let pending = std::mem::take(&mut host.pending_touch_frames);
+    let t_js = sampling.then(Instant::now);
     let guest_result = run_virtual_frames(host, pending, tick_count);
+    if let Some(t) = t_js {
+        host.last_stage_timings.js_tick_us = t.elapsed().as_micros() as u64;
+    }
     guest_result?;
     // Node-quota failures are intentionally sticky even when guest code
     // catches the JS exception. Do not decode or publish a partial frame.
     ensure_guest_security_healthy(host)?;
     let (cache_hit, (width, height), auxiliary_size, raster_revision, words, auxiliary_words) = {
         let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
+        let t_relayout = sampling.then(Instant::now);
         core.ui.relayout_outputs();
+        if let Some(t) = t_relayout {
+            host.last_stage_timings.relayout_us = t.elapsed().as_micros() as u64;
+        }
         let auxiliary_size = core.ui.auxiliary_viewport();
         let (width, height) = core.ui.viewport();
         let raster_revision = core.ui.raster_revision();
         let nodes = host.nodes.borrow();
+        let t_emit = sampling.then(Instant::now);
         let primary_hit = {
             let draw = core.ui.draw();
-            host.draw_cache.as_ref().is_some_and(|cache| cache.matches_primary(
-                &draw.words,
-                width,
-                height,
-                auxiliary_size,
-                raster_revision,
-                &nodes,
-            ))
+            host.draw_cache.as_ref().is_some_and(|cache| {
+                cache.matches_primary(
+                    &draw.words,
+                    width,
+                    height,
+                    auxiliary_size,
+                    raster_revision,
+                    &nodes,
+                )
+            })
         };
-        let auxiliary = if auxiliary_size.is_some() { core.ui.draw_auxiliary() } else { None };
-        let hit = primary_hit && host.draw_cache.as_ref().is_some_and(|cache|
-            cache.matches_auxiliary(auxiliary.map(|draw| draw.words.as_slice())));
+        let auxiliary = if auxiliary_size.is_some() {
+            core.ui.draw_auxiliary()
+        } else {
+            None
+        };
+        let hit = primary_hit
+            && host.draw_cache.as_ref().is_some_and(|cache| {
+                cache.matches_auxiliary(auxiliary.map(|draw| draw.words.as_slice()))
+            });
         // The official draw API returns a retained list. Build each output
         // once, and only own its words when decoding a changed snapshot.
         // current_* accessors do not traverse the tree or allocate on a hit.
         let (words, auxiliary_words) = if hit {
             (Vec::new(), None)
         } else {
-            (core.ui.current_draw_list().words.clone(),
-             core.ui.current_auxiliary_draw_list().map(|draw| draw.words.clone()))
+            (
+                core.ui.current_draw_list().words.clone(),
+                core.ui
+                    .current_auxiliary_draw_list()
+                    .map(|draw| draw.words.clone()),
+            )
         };
-        (hit, (width, height), auxiliary_size, raster_revision, words, auxiliary_words)
+        if let Some(t) = t_emit {
+            host.last_stage_timings.live2d_emit_us = t.elapsed().as_micros() as u64;
+        }
+        (
+            hit,
+            (width, height),
+            auxiliary_size,
+            raster_revision,
+            words,
+            auxiliary_words,
+        )
     };
 
     // Consume the actual PocketJS DrawList. Unsupported operations are
@@ -2979,6 +3146,7 @@ fn build_frame(
             // Ui borrow and one deduplicated generic-resource set.
             let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
             let mut generic_texture_handles = HashSet::new();
+            let t_decode = sampling.then(Instant::now);
             let ops = decode_draw_ops(
                 &words,
                 width,
@@ -3006,6 +3174,9 @@ fn build_frame(
                 (None, Some(_)) => return Err("auxiliary draw list has no viewport".to_owned()),
                 (None, None) => None,
             };
+            if let Some(t) = t_decode {
+                host.last_stage_timings.draw_decode_us = t.elapsed().as_micros() as u64;
+            }
             let generic_texture_handles = generic_texture_handles.into_iter().collect::<Vec<_>>();
             (ops, auxiliary, generic_texture_handles)
         };
@@ -3029,9 +3200,15 @@ fn build_frame(
     let (ops, auxiliary, generic_texture_handles) = match decoded.as_ref() {
         Some((ops, auxiliary, textures)) => (ops, auxiliary, textures),
         None => {
-            let cache = host.draw_cache.as_ref()
+            let cache = host
+                .draw_cache
+                .as_ref()
                 .expect("draw cache hit must have a cache");
-            (cache.ops.as_ref(), &cache.auxiliary, &cache.generic_texture_handles)
+            (
+                cache.ops.as_ref(),
+                &cache.auxiliary,
+                &cache.generic_texture_handles,
+            )
         }
     };
 
@@ -3216,8 +3393,11 @@ fn build_frame(
     // iteration order leak into the frame ABI or replay digest.
     resources.sort_by(|left, right| left.asset.cmp(&right.asset));
     let events: Vec<_> = host.outbound.borrow_mut().drain(..).collect();
-    let unchanged = allow_unchanged && cache_hit && events.is_empty()
-        && resources.is_empty() && released_resources.is_empty();
+    let unchanged = allow_unchanged
+        && cache_hit
+        && events.is_empty()
+        && resources.is_empty()
+        && released_resources.is_empty();
     let (ops, auxiliary) = if unchanged {
         (Vec::new(), None)
     } else if let Some((ops, auxiliary, _)) = decoded {
@@ -3351,12 +3531,17 @@ fn append_draw_operation(
                 from_color: None,
                 to_color: None,
                 direction: None,
+                via_color: None,
+                via_position: None,
                 size: None,
                 font_slot: None,
                 text_align: None,
                 surface_handle: None,
                 focused: None,
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: None,
                 colors: None,
                 uvs: None,
@@ -3405,12 +3590,17 @@ fn append_draw_operation(
                 from_color: Some(argb_from_abgr(from)),
                 to_color: Some(argb_from_abgr(to)),
                 direction: Some(direction),
+                via_color: None,
+                via_position: None,
                 size: None,
                 font_slot: None,
                 text_align: None,
                 surface_handle: None,
                 focused: None,
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: None,
                 colors: None,
                 uvs: None,
@@ -3497,12 +3687,17 @@ fn append_draw_operation(
                     from_color: None,
                     to_color: None,
                     direction: None,
+                    via_color: None,
+                    via_position: None,
                     size: None,
                     font_slot: None,
                     text_align: None,
                     surface_handle: None,
                     focused: None,
                     radius: None,
+                    border_width: None,
+                    start_angle: None,
+                    sweep_angle: None,
                     points: None,
                     colors: None,
                     uvs: None,
@@ -3572,12 +3767,17 @@ fn append_draw_operation(
                 from_color: None,
                 to_color: None,
                 direction: None,
+                via_color: None,
+                via_position: None,
                 size: None,
                 font_slot: None,
                 text_align: None,
                 surface_handle: None,
                 focused: None,
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: None,
                 colors: None,
                 uvs: None,
@@ -3639,12 +3839,17 @@ fn append_draw_operation(
                 from_color: None,
                 to_color: None,
                 direction: None,
+                via_color: None,
+                via_position: None,
                 size: None,
                 font_slot: None,
                 text_align: None,
                 surface_handle: None,
                 focused: None,
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: Some(points),
                 colors: Some(colors),
                 uvs: None,
@@ -3673,7 +3878,9 @@ fn append_draw_operation(
             let fractional = matches!(operation.opcode, 15 | 16);
             let stride = if fractional { 4 } else { 3 };
             let word = |index: usize| -> Result<u32, String> {
-                words.get(index).copied()
+                words
+                    .get(index)
+                    .copied()
                     .ok_or_else(|| "TEX_TRI is truncated".to_owned())
             };
             let mut points = Vec::with_capacity(3);
@@ -3712,18 +3919,23 @@ fn append_draw_operation(
                 fit: None,
                 autoplay: None,
                 repeat_texture: matches!(operation.opcode, 14 | 16),
-                color: Some(argb_from_abgr(*words.get(2 + 3 * stride).ok_or_else(|| {
-                    "TEX_TRI is missing its modulation color".to_owned()
-                })?)),
+                color: Some(argb_from_abgr(*words.get(2 + 3 * stride).ok_or_else(
+                    || "TEX_TRI is missing its modulation color".to_owned(),
+                )?)),
                 from_color: None,
                 to_color: None,
                 direction: None,
+                via_color: None,
+                via_position: None,
                 size: None,
                 font_slot: None,
                 text_align: None,
                 surface_handle: None,
                 focused: None,
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: Some(points),
                 colors: None,
                 uvs: Some(uvs),
@@ -3737,7 +3949,9 @@ fn append_draw_operation(
             let (x, y, w, h) = unpack_rect(words[1], words[2]);
             let blend = words[3];
             if blend > 3 {
-                return Err(format!("MESH_LAYER_BEGIN has unsupported blend mode {blend}"));
+                return Err(format!(
+                    "MESH_LAYER_BEGIN has unsupported blend mode {blend}"
+                ));
             }
             let tints: Vec<f32> = words[4..10]
                 .iter()
@@ -3765,12 +3979,17 @@ fn append_draw_operation(
                 from_color: None,
                 to_color: None,
                 direction: None,
+                via_color: None,
+                via_position: None,
                 size: None,
                 font_slot: None,
                 text_align: None,
                 surface_handle: None,
                 focused: None,
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: None,
                 colors: None,
                 uvs: Some(tints),
@@ -3802,12 +4021,17 @@ fn append_draw_operation(
                 from_color: None,
                 to_color: None,
                 direction: None,
+                via_color: None,
+                via_position: None,
                 size: None,
                 font_slot: None,
                 text_align: None,
                 surface_handle: None,
                 focused: None,
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: None,
                 colors: None,
                 uvs: None,
@@ -3833,12 +4057,17 @@ fn append_draw_operation(
             from_color: None,
             to_color: None,
             direction: None,
+            via_color: None,
+            via_position: None,
             size: None,
             font_slot: None,
             text_align: None,
             surface_handle: None,
             focused: None,
             radius: None,
+            border_width: None,
+            start_angle: None,
+            sweep_angle: None,
             points: None,
             colors: None,
             uvs: None,
@@ -3847,6 +4076,203 @@ fn append_draw_operation(
             surface_parameters: None,
             clip: clip_of(operation.clip),
         }),
+        17 => {
+            if words.len() != 8 {
+                return Err(format!(
+                    "ROUNDED_RECT has {} words; expected 8",
+                    words.len()
+                ));
+            }
+            let x = f32::from_bits(words[1]);
+            let y = f32::from_bits(words[2]);
+            let w = f32::from_bits(words[3]);
+            let h = f32::from_bits(words[4]);
+            let radius = f32::from_bits(words[5]);
+            let border_width = f32::from_bits(words[6]);
+            if ![x, y, w, h, radius, border_width]
+                .into_iter()
+                .all(f32::is_finite)
+                || w < 0.0
+                || h < 0.0
+                || radius < 0.0
+                || border_width < 0.0
+            {
+                return Err("ROUNDED_RECT contains invalid geometry".to_owned());
+            }
+            out.push(FrameOp {
+                kind: "rounded".into(),
+                x,
+                y,
+                w,
+                h,
+                text: None,
+                asset: None,
+                id: None,
+                fit: None,
+                autoplay: None,
+                repeat_texture: false,
+                color: Some(argb_from_abgr(words[7])),
+                from_color: None,
+                to_color: None,
+                direction: None,
+                via_color: None,
+                via_position: None,
+                size: None,
+                font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
+                radius: Some(radius),
+                border_width: Some(border_width),
+                start_angle: None,
+                sweep_angle: None,
+                points: None,
+                colors: None,
+                uvs: None,
+                uv: None,
+                surface_kind: None,
+                surface_parameters: None,
+                clip: clip_of(operation.clip),
+            });
+        }
+        18 => {
+            if words.len() != 8 {
+                return Err(format!("ARC has {} words; expected 8", words.len()));
+            }
+            let center_x = f32::from_bits(words[1]);
+            let center_y = f32::from_bits(words[2]);
+            let radius = f32::from_bits(words[3]);
+            let stroke_width = f32::from_bits(words[4]);
+            let start_angle = f32::from_bits(words[5]);
+            let sweep_angle = f32::from_bits(words[6]);
+            if ![
+                center_x,
+                center_y,
+                radius,
+                stroke_width,
+                start_angle,
+                sweep_angle,
+            ]
+            .into_iter()
+            .all(f32::is_finite)
+                || radius < 0.0
+                || stroke_width <= 0.0
+                || sweep_angle == 0.0
+                || sweep_angle.abs() > 360.0
+            {
+                return Err("ARC contains invalid geometry".to_owned());
+            }
+            let outer_radius = radius + stroke_width * 0.5;
+            let (x, y, w, h) = (
+                center_x - outer_radius,
+                center_y - outer_radius,
+                outer_radius * 2.0,
+                outer_radius * 2.0,
+            );
+            if ![outer_radius, x, y, w, h].into_iter().all(f32::is_finite) || w <= 0.0 {
+                return Err("ARC contains invalid bounds".to_owned());
+            }
+            out.push(FrameOp {
+                kind: "arc".into(),
+                x,
+                y,
+                w,
+                h,
+                text: None,
+                asset: None,
+                id: None,
+                fit: None,
+                autoplay: None,
+                repeat_texture: false,
+                color: Some(argb_from_abgr(words[7])),
+                from_color: None,
+                to_color: None,
+                direction: None,
+                via_color: None,
+                via_position: None,
+                size: None,
+                font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
+                radius: Some(radius),
+                border_width: Some(stroke_width),
+                start_angle: Some(start_angle),
+                sweep_angle: Some(sweep_angle),
+                points: None,
+                colors: None,
+                uvs: None,
+                uv: None,
+                surface_kind: None,
+                surface_parameters: None,
+                clip: clip_of(operation.clip),
+            });
+        }
+        19 => {
+            if words.len() != 11 {
+                return Err(format!(
+                    "ROUNDED_GRADIENT has {} words; expected 11",
+                    words.len()
+                ));
+            }
+            let x = f32::from_bits(words[1]);
+            let y = f32::from_bits(words[2]);
+            let w = f32::from_bits(words[3]);
+            let h = f32::from_bits(words[4]);
+            let radius = f32::from_bits(words[5]);
+            let direction = words[8];
+            let via_position = f32::from_bits(words[10]);
+            if ![x, y, w, h, radius].into_iter().all(f32::is_finite)
+                || w <= 0.0
+                || h <= 0.0
+                || radius <= 0.0
+                || direction > 3
+                || (!via_position.is_nan()
+                    && (!via_position.is_finite()
+                        || via_position <= 0.0
+                        || via_position >= 1.0))
+            {
+                return Err("ROUNDED_GRADIENT contains invalid geometry, direction, or stop".to_owned());
+            }
+            let via = (!via_position.is_nan()).then(|| {
+                (argb_from_abgr(words[9]), via_position)
+            });
+            out.push(FrameOp {
+                kind: "roundedGradient".into(),
+                x,
+                y,
+                w,
+                h,
+                text: None,
+                asset: None,
+                id: None,
+                fit: None,
+                autoplay: None,
+                repeat_texture: false,
+                color: None,
+                from_color: Some(argb_from_abgr(words[6])),
+                to_color: Some(argb_from_abgr(words[7])),
+                direction: Some(direction),
+                via_color: via.map(|(color, _)| color),
+                via_position: via.map(|(_, position)| position),
+                size: None,
+                font_slot: None,
+                text_align: None,
+                surface_handle: None,
+                focused: None,
+                radius: Some(radius),
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
+                points: None,
+                colors: None,
+                uvs: None,
+                uv: None,
+                surface_kind: None,
+                surface_parameters: None,
+                clip: clip_of(operation.clip),
+            });
+        }
         5 | 6 => {}
         9 => {
             let x = f32::from_bits(words[2]);
@@ -3897,12 +4323,17 @@ fn append_draw_operation(
                 from_color: None,
                 to_color: None,
                 direction: None,
+                via_color: None,
+                via_position: None,
                 size: Some(font_slot_px(font_slot)),
                 font_slot: Some(font_slot),
                 text_align: Some(((words[1] >> 8) & 0xff).min(2) as u8),
                 surface_handle: None,
                 focused: None,
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: None,
                 colors: None,
                 uvs: None,
@@ -3961,12 +4392,17 @@ fn append_draw_operation(
                 from_color: None,
                 to_color: None,
                 direction: None,
+                via_color: None,
+                via_position: None,
                 size: None,
                 font_slot: None,
                 text_align: None,
                 surface_handle: Some(surface),
                 focused: Some(words[8] & 1 != 0),
                 radius: None,
+                border_width: None,
+                start_angle: None,
+                sweep_angle: None,
                 points: None,
                 colors: None,
                 uvs: None,
@@ -4118,9 +4554,7 @@ fn validate_memory_limits(
         {
             return Err(format!(
                 "memory_limits.heapLimitBytes must be 0 or between {} and {} bytes (got {})",
-                MIN_CONFIGURED_HEAP_LIMIT_BYTES,
-                MAX_CONFIGURED_HEAP_LIMIT_BYTES,
-                heap_limit_bytes
+                MIN_CONFIGURED_HEAP_LIMIT_BYTES, MAX_CONFIGURED_HEAP_LIMIT_BYTES, heap_limit_bytes
             ));
         }
         Some(usize::try_from(heap_limit_bytes).map_err(|_| {
@@ -4299,14 +4733,7 @@ fn install_text_measure(ui: &mut Ui, metrics: Rc<RefCell<TextMetrics>>) {
 /// sequentially from one Dart isolate.
 #[no_mangle]
 pub extern "C" fn pocket_create(width: f64, height: f64) -> *mut HostState {
-    pocket_create_with_memory_limits(
-        width,
-        height,
-        1,
-        DEFAULT_TICK_HZ,
-        0,
-        0,
-    )
+    pocket_create_with_memory_limits(width, height, 1, DEFAULT_TICK_HZ, 0, 0)
 }
 
 /// Create an engine instance with an explicit core raster density.
@@ -4322,14 +4749,7 @@ pub extern "C" fn pocket_create_with_density(
     height: f64,
     raster_density: u32,
 ) -> *mut HostState {
-    pocket_create_with_memory_limits(
-        width,
-        height,
-        raster_density,
-        DEFAULT_TICK_HZ,
-        0,
-        0,
-    )
+    pocket_create_with_memory_limits(width, height, raster_density, DEFAULT_TICK_HZ, 0, 0)
 }
 
 /// Create a host with explicit core/guest tick rate.
@@ -4345,14 +4765,7 @@ pub extern "C" fn pocket_create_with_density_and_tick_hz(
     raster_density: u32,
     tick_hz: u32,
 ) -> *mut HostState {
-    pocket_create_with_memory_limits(
-        width,
-        height,
-        raster_density,
-        tick_hz,
-        0,
-        0,
-    )
+    pocket_create_with_memory_limits(width, height, raster_density, tick_hz, 0, 0)
 }
 
 /// Create an engine instance with an immutable per-runtime memory policy.
@@ -4384,9 +4797,7 @@ pub extern "C" fn pocket_create_with_memory_limits(
         return create_error_host(
             width,
             height,
-            format!(
-                "raster density must be an integer from 1 through 4 (got {raster_density})"
-            ),
+            format!("raster density must be an integer from 1 through 4 (got {raster_density})"),
         );
     }
     if !(1..=MAX_HOST_TICK_HZ).contains(&tick_hz) {
@@ -4402,13 +4813,7 @@ pub extern "C" fn pocket_create_with_memory_limits(
 }
 
 fn create_error_host(width: f64, height: f64, error: impl Into<String>) -> *mut HostState {
-    let handle = create_host(
-        width,
-        height,
-        1,
-        DEFAULT_TICK_HZ,
-        MemoryLimits::default(),
-    );
+    let handle = create_host(width, height, 1, DEFAULT_TICK_HZ, MemoryLimits::default());
     if !handle.is_null() {
         unsafe { set_error(&mut *handle, error) };
     }
@@ -4428,6 +4833,7 @@ fn create_host(
     let guest_security = Rc::new(RefCell::new(guest_security::GuestSecurityState::default()));
     let (duplex, duplex_ingress_consumer) = new_duplex_channel();
     let mut ui = Ui::new_with_raster_density(raster_density);
+    ui.set_native_rounded_rects(true);
     ui.set_viewport(width as f32, height as f32);
     // Native text mode makes the core emit TEXT_RUN records. Flutter decodes
     // those records with its own font system, so no platform view or native
@@ -4500,6 +4906,7 @@ fn create_host(
             frame_json_serialized_bytes: 0,
             frame_json_cache_hits: 0,
             draw_decode_count: 0,
+            last_stage_timings: NativeFrameStageTimingsUs::default(),
         }));
     }
     let mut guest = RquickjsGuest::new(BindingProfile::Canonical);
@@ -4572,6 +4979,7 @@ fn create_host(
             frame_json_serialized_bytes: 0,
             frame_json_cache_hits: 0,
             draw_decode_count: 0,
+            last_stage_timings: NativeFrameStageTimingsUs::default(),
         }));
     }
     let nodes = Rc::new(RefCell::new(Vec::new()));
@@ -4629,6 +5037,7 @@ fn create_host(
         frame_json_serialized_bytes: 0,
         frame_json_cache_hits: 0,
         draw_decode_count: 0,
+        last_stage_timings: NativeFrameStageTimingsUs::default(),
     };
     if let Err(error) = install_bridge(
         &host.guest,
@@ -5117,8 +5526,7 @@ pub unsafe extern "C" fn pocket_offload_complete_binary(
         return -1;
     }
     let bytes = std::slice::from_raw_parts(record, record_len);
-    let Some((generation, session, id, result)) =
-        binary_bridge::decode_offload_completion(bytes)
+    let Some((generation, session, id, result)) = binary_bridge::decode_offload_completion(bytes)
     else {
         return -1;
     };
@@ -5312,7 +5720,11 @@ fn package_file_limit(host: &HostState) -> u64 {
     let policy = host.memory_limits;
     MAX_PACKAGE_FILE_BYTES
         .min(policy.max_pak_bytes.map_or(u64::MAX, |value| value as u64))
-        .min(policy.heap_limit_bytes.map_or(u64::MAX, |value| value as u64))
+        .min(
+            policy
+                .heap_limit_bytes
+                .map_or(u64::MAX, |value| value as u64),
+        )
 }
 
 fn read_application_file(path: &CStr, limit: u64, label: &str) -> Result<Vec<u8>, String> {
@@ -6211,24 +6623,43 @@ pub unsafe extern "C" fn pocket_frame_binary(
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
+    let sampling = PERF_SAMPLING_ENABLED.load(Ordering::Relaxed);
+    let t_total = sampling.then(Instant::now);
     match build_frame(host, delta_ms, false, false) {
-        Ok(built) => match encode_binary_frame(&built.result) {
-            Ok(bytes) => {
-                host.binary_output = bytes;
-                if let Some(length) = out_byte_length.as_mut() {
-                    *length = host.binary_output.len() as u64;
+        Ok(built) => {
+            let t_encode = sampling.then(Instant::now);
+            let encoded = encode_binary_frame(&built.result);
+            if let Some(t) = t_encode {
+                host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
+            }
+            match encoded {
+                Ok(bytes) => {
+                    host.binary_output = bytes;
+                    if let Some(length) = out_byte_length.as_mut() {
+                        *length = host.binary_output.len() as u64;
+                    }
+                    publish_frame_sequence(host, built.result.frame);
+                    clear_error(host);
+                    if let Some(t) = t_total {
+                        let total_us = t.elapsed().as_micros() as u64;
+                        let accounted = host.last_stage_timings.js_tick_us
+                            + host.last_stage_timings.relayout_us
+                            + host.last_stage_timings.live2d_emit_us
+                            + host.last_stage_timings.draw_decode_us
+                            + host.last_stage_timings.splice_us
+                            + host.last_stage_timings.encode_us;
+                        host.last_stage_timings.other_us = total_us.saturating_sub(accounted);
+                    }
+                    host.binary_output.as_ptr()
                 }
-                publish_frame_sequence(host, built.result.frame);
-                clear_error(host);
-                host.binary_output.as_ptr()
+                Err(error) => {
+                    host.binary_output.clear();
+                    host.frame_delta_v2_published = None;
+                    set_error(host, format!("frame binary encode: {error}"));
+                    ptr::null()
+                }
             }
-            Err(error) => {
-                host.binary_output.clear();
-                host.frame_delta_v2_published = None;
-                set_error(host, format!("frame binary encode: {error}"));
-                ptr::null()
-            }
-        },
+        }
         Err(error) => {
             host.binary_output.clear();
             failed_frame_output(host, error);
@@ -6313,6 +6744,8 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
     let Some(host) = handle.as_mut() else {
         return ptr::null();
     };
+    let sampling = PERF_SAMPLING_ENABLED.load(Ordering::Relaxed);
+    let t_total = sampling.then(Instant::now);
 
     // This is deliberately checked before build_frame.  The retained cache is
     // the previous published visual baseline; an idle v2 transaction advances
@@ -6320,9 +6753,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
     // appear stale on the next call.
     let base_matches = host.frame_delta_v2_published == Some(base_frame);
     let previous_ops = if base_matches {
-        host.draw_cache
-            .as_ref()
-            .map(|cache| Rc::clone(&cache.ops))
+        host.draw_cache.as_ref().map(|cache| Rc::clone(&cache.ops))
     } else {
         None
     };
@@ -6343,12 +6774,17 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
             // A stable retained frame with no lifecycle/event metadata is the
             // only zero-byte result. Keep `frame_delta_v2_published` unchanged
             // so the caller's base remains the last sequence it received.
-            if can_delta
-                && built.draw_cache_hit
-                && frame_has_no_transient_data(&built)
-            {
+            if can_delta && built.draw_cache_hit && frame_has_no_transient_data(&built) {
                 host.binary_output.clear();
                 clear_error(host);
+                if let Some(t) = t_total {
+                    let total_us = t.elapsed().as_micros() as u64;
+                    let accounted = host.last_stage_timings.js_tick_us
+                        + host.last_stage_timings.relayout_us
+                        + host.last_stage_timings.live2d_emit_us
+                        + host.last_stage_timings.draw_decode_us;
+                    host.last_stage_timings.other_us = total_us.saturating_sub(accounted);
+                }
                 return ptr::null();
             }
 
@@ -6356,7 +6792,11 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                 let previous_ops = previous_ops
                     .as_deref()
                     .expect("delta baseline must retain decoded operations");
+                let t_splice = sampling.then(Instant::now);
                 let splice = frame_delta::common_splice(previous_ops, &built.result.ops);
+                if let Some(t) = t_splice {
+                    host.last_stage_timings.splice_us = t.elapsed().as_micros() as u64;
+                }
                 let insert_end = built
                     .result
                     .ops
@@ -6364,10 +6804,11 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                     .checked_sub(splice.suffix_count)
                     .expect("common splice suffix cannot exceed result length");
                 let retained_ops = splice.prefix_count + splice.suffix_count;
+                let t_encode = sampling.then(Instant::now);
                 // PFP1 adds 28 bytes. Every current PFB1 op is at least the
                 // 33-byte tag/geometry/clip prefix, so one retained op is a
                 // strict size win without a second full encoder/count pass.
-                if retained_ops.saturating_mul(MIN_BINARY_OP_BYTES)
+                let encoded = if retained_ops.saturating_mul(MIN_BINARY_OP_BYTES)
                     > frame_delta::HEADER_BYTES
                 {
                     let patch = encode_binary_frame_with_ops(
@@ -6375,40 +6816,36 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                         &built.result.ops[splice.prefix_count..insert_end],
                     )
                     .and_then(|embedded| {
-                        frame_delta::encode(
-                            base_frame,
-                            splice,
-                            built.result.ops.len(),
-                            &embedded,
-                        )
+                        frame_delta::encode(base_frame, splice, built.result.ops.len(), &embedded)
                     });
                     match patch {
-                        Ok(patch) => patch,
-                        Err(_) => match encode_binary_frame(&built.result) {
-                            Ok(full) => full,
-                            Err(error) => {
-                                host.binary_output.clear();
-                                host.frame_delta_v2_published = None;
-                                set_error(host, format!("frame binary encode: {error}"));
-                                return ptr::null();
-                            }
-                        },
+                        Ok(patch) => Ok(patch),
+                        Err(_) => encode_binary_frame(&built.result),
                     }
                 } else {
-                    match encode_binary_frame(&built.result) {
-                        Ok(full) => full,
-                        Err(error) => {
-                            host.binary_output.clear();
-                            host.frame_delta_v2_published = None;
-                            set_error(host, format!("frame binary encode: {error}"));
-                            return ptr::null();
-                        }
+                    encode_binary_frame(&built.result)
+                };
+                if let Some(t) = t_encode {
+                    host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
+                }
+                match encoded {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        host.binary_output.clear();
+                        host.frame_delta_v2_published = None;
+                        set_error(host, format!("frame binary encode: {error}"));
+                        return ptr::null();
                     }
                 }
             } else {
                 // First frame, invalid base, resize, reload, and any call
                 // after a cache invalidation retain the original PFB1 ABI.
-                match encode_binary_frame(&built.result) {
+                let t_encode = sampling.then(Instant::now);
+                let encoded = encode_binary_frame(&built.result);
+                if let Some(t) = t_encode {
+                    host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
+                }
+                match encoded {
                     Ok(full) => full,
                     Err(error) => {
                         host.binary_output.clear();
@@ -6425,6 +6862,16 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
             }
             publish_frame_sequence(host, built.result.frame);
             clear_error(host);
+            if let Some(t) = t_total {
+                let total_us = t.elapsed().as_micros() as u64;
+                let accounted = host.last_stage_timings.js_tick_us
+                    + host.last_stage_timings.relayout_us
+                    + host.last_stage_timings.live2d_emit_us
+                    + host.last_stage_timings.draw_decode_us
+                    + host.last_stage_timings.splice_us
+                    + host.last_stage_timings.encode_us;
+                host.last_stage_timings.other_us = total_us.saturating_sub(accounted);
+            }
             host.binary_output.as_ptr()
         }
         Err(error) => {
@@ -6433,6 +6880,51 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
             ptr::null()
         }
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_set_perf_sampling_enabled(enabled: u32) {
+    let active = enabled != 0;
+    PERF_SAMPLING_ENABLED.store(active, Ordering::Relaxed);
+    if !active {
+        LIVE2D_UPDATE_NANOS.store(0, Ordering::Relaxed);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_is_perf_sampling_enabled() -> u32 {
+    u32::from(PERF_SAMPLING_ENABLED.load(Ordering::Relaxed))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_record_live2d_update_ns(nanos: u64) {
+    if PERF_SAMPLING_ENABLED.load(Ordering::Relaxed) {
+        LIVE2D_UPDATE_NANOS.fetch_add(nanos, Ordering::Relaxed);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pocket_last_frame_stage_timings_us(
+    handle: *const HostState,
+    out_timings: *mut u64,
+) -> u32 {
+    if out_timings.is_null() {
+        return 0;
+    }
+    let Some(host) = handle.as_ref() else {
+        return 0;
+    };
+    let t = &host.last_stage_timings;
+    let slice = std::slice::from_raw_parts_mut(out_timings, 8);
+    slice[0] = t.js_tick_us;
+    slice[1] = t.live2d_update_us;
+    slice[2] = t.live2d_emit_us;
+    slice[3] = t.relayout_us;
+    slice[4] = t.draw_decode_us;
+    slice[5] = t.splice_us;
+    slice[6] = t.encode_us;
+    slice[7] = t.other_us;
+    8
 }
 
 const MAX_INBOUND_BINARY_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -6915,7 +7407,11 @@ mod smoke_tests {
         assert_ne!(second_texture, replacement_texture);
         assert_eq!(replacement_pixels, blue);
         assert_eq!(replacement_handle_pixels, Some(blue.to_vec()));
-        assert_eq!(replacement_image_ops.len(), 1, "old guest DrawOps remain after reload: {replacement_image_ops:?}");
+        assert_eq!(
+            replacement_image_ops.len(),
+            1,
+            "old guest DrawOps remain after reload: {replacement_image_ops:?}"
+        );
         assert_eq!(replacement_asset_ops.len(), 1);
         assert_eq!(replacement_asset_ops[0]["w"], 5.0);
         assert_eq!(input_image_op.unwrap()["w"], 24.0);
@@ -6966,7 +7462,10 @@ mod smoke_tests {
         let invalid_pak = one_entry_pak("ui:img.broken", &[]);
         let handle = pocket_create(64.0, 64.0);
         assert!(!handle.is_null());
-        assert_eq!(unsafe { pocket_load(handle, source.as_ptr(), pak.as_ptr(), pak.len()) }, 0);
+        assert_eq!(
+            unsafe { pocket_load(handle, source.as_ptr(), pak.as_ptr(), pak.len()) },
+            0
+        );
         let initial = frame_json(handle);
         assert_eq!(initial["ops"].as_array().unwrap().len(), 1);
         assert_eq!(initial["ops"][0]["asset"], "reload");
@@ -7627,12 +8126,19 @@ mod smoke_tests {
             "#,
         )
         .unwrap();
-        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0, "{}", unsafe {
-            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
-        });
+        assert_eq!(
+            unsafe { pocket_eval(handle, source.as_ptr()) },
+            0,
+            "{}",
+            unsafe { CStr::from_ptr(pocket_last_error(handle)).to_string_lossy() }
+        );
 
         let producer = unsafe { (&*handle).duplex.claim_ingress_producer().unwrap() };
-        for (flags, x, y) in [(1_u16, 10.0_f32, 20.0_f32), (2, 12.0, 22.0), (3, 14.0, 24.0)] {
+        for (flags, x, y) in [
+            (1_u16, 10.0_f32, 20.0_f32),
+            (2, 12.0, 22.0),
+            (3, 14.0, 24.0),
+        ] {
             let reservation = producer.reserve(1).unwrap();
             unsafe {
                 ptr::write(
@@ -7661,12 +8167,8 @@ mod smoke_tests {
             .iter()
             .filter_map(|event| {
                 let value = binary_bridge::decode_to_json(&event.binary).unwrap();
-                (value["name"] == "pointer.seen").then(|| {
-                    value["payload"]["phase"]
-                        .as_str()
-                        .unwrap()
-                        .to_owned()
-                })
+                (value["name"] == "pointer.seen")
+                    .then(|| value["payload"]["phase"].as_str().unwrap().to_owned())
             })
             .collect::<Vec<_>>();
         assert_eq!(phases, ["down", "move", "up"]);
@@ -7705,13 +8207,25 @@ mod smoke_tests {
             *offset += len;
             result
         };
-        assert_eq!(String::from_utf8(read_bytes(bytes, &mut offset)).unwrap(), "typed.glass");
-        assert_eq!(String::from_utf8(read_bytes(bytes, &mut offset)).unwrap(), "glass");
+        assert_eq!(
+            String::from_utf8(read_bytes(bytes, &mut offset)).unwrap(),
+            "typed.glass"
+        );
+        assert_eq!(
+            String::from_utf8(read_bytes(bytes, &mut offset)).unwrap(),
+            "glass"
+        );
         let parameters = read_bytes(bytes, &mut offset);
-        assert_eq!(parameters.first().copied(), Some(binary_bridge::BINARY_MESSAGE_MAGIC));
+        assert_eq!(
+            parameters.first().copied(),
+            Some(binary_bridge::BINARY_MESSAGE_MAGIC)
+        );
         let decoded = binary_bridge::decode_to_json(&parameters).unwrap();
         assert_eq!(decoded["nested"]["enabled"], true);
-        assert_eq!(u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()), 100);
+        assert_eq!(
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+            100
+        );
 
         unsafe { pocket_destroy(handle) };
     }
@@ -7975,7 +8489,10 @@ mod smoke_tests {
         let mut writer = BinaryFrameWriter::new();
         writer.op(&projected[0]).unwrap();
         assert_eq!(writer.bytes[0], 9);
-        assert_eq!(u32::from_le_bytes(writer.bytes[33..37].try_into().unwrap()), 3);
+        assert_eq!(
+            u32::from_le_bytes(writer.bytes[33..37].try_into().unwrap()),
+            3
+        );
         assert_eq!(BINARY_FRAME_VERSION, 2);
 
         words[4] = f32::NAN.to_bits();
@@ -7995,9 +8512,364 @@ mod smoke_tests {
     }
 
     #[test]
+    fn rounded_rect_drawlist_preserves_fill_and_versions_ring_frames() {
+        let make_rounded = |border_width: f32| {
+            let words = vec![
+                17,
+                1.25f32.to_bits(),
+                2.0f32.to_bits(),
+                20.0f32.to_bits(),
+                10.0f32.to_bits(),
+                3.0f32.to_bits(),
+                border_width.to_bits(),
+                0xff11_2233,
+            ];
+            let operation = Operation {
+                opcode: 17,
+                words: &words,
+                clip: DamageRect::new(4, 5, 24, 15),
+            };
+            let mut projected = Vec::new();
+            append_draw_operation(
+                &mut projected,
+                &operation,
+                &[],
+                &mut Ui::new(),
+                &mut HashSet::new(),
+            )
+            .unwrap();
+            assert_eq!(projected.len(), 1);
+            projected.pop().unwrap()
+        };
+        let make_frame = |op| FrameResult {
+            frame: 1,
+            width: 32.0,
+            height: 32.0,
+            ops: vec![op],
+            auxiliary: None,
+            events: Vec::new(),
+            resources: Vec::new(),
+            released_resources: Vec::new(),
+        };
+
+        let fill = make_rounded(0.0);
+        assert_eq!((fill.x, fill.y, fill.w, fill.h), (1.25, 2.0, 20.0, 10.0));
+        assert_eq!(fill.clip.x, 4.0);
+        assert_eq!(fill.clip.y, 5.0);
+        assert_eq!(fill.color, Some(0xff33_2211));
+        let legacy = serde_json::to_value(&fill).unwrap();
+        assert_eq!(legacy["type"], "rounded");
+        assert_eq!(legacy["borderWidth"], 0.0);
+        let mut writer = BinaryFrameWriter::new();
+        writer.op(&fill).unwrap();
+        assert_eq!(writer.bytes[0], 1, "fill keeps the existing rounded tag");
+        let fill_frame = encode_binary_frame(&make_frame(fill)).unwrap();
+        assert_eq!(u16::from_le_bytes([fill_frame[4], fill_frame[5]]), 2);
+
+        let ring = make_rounded(2.0);
+        assert_eq!(ring.border_width, Some(2.0));
+        let mut writer = BinaryFrameWriter::new();
+        writer.op(&ring).unwrap();
+        assert_eq!(writer.bytes[0], 15, "ring uses the appended PFB tag");
+        assert_eq!(writer.bytes.len(), 45);
+        assert_eq!(
+            f32::from_le_bytes(writer.bytes[41..45].try_into().unwrap()),
+            2.0
+        );
+        let ring_frame = encode_binary_frame(&make_frame(ring)).unwrap();
+        assert_eq!(u16::from_le_bytes([ring_frame[4], ring_frame[5]]), 3);
+
+        let mut auxiliary_frame = make_frame(make_rounded(0.0));
+        auxiliary_frame.auxiliary = Some(SurfaceFrame {
+            width: 12.0,
+            height: 8.0,
+            ops: vec![make_rounded(1.0)],
+        });
+        let encoded_auxiliary = encode_binary_frame(&auxiliary_frame).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([encoded_auxiliary[4], encoded_auxiliary[5]]),
+            3
+        );
+    }
+
+    #[test]
+    fn native_arc_drawlist_roundtrips_json_and_versions_full_and_patch_frames() {
+        let words = vec![
+            18,
+            115.25f32.to_bits(),
+            105.5f32.to_bits(),
+            47.0f32.to_bits(),
+            8.0f32.to_bits(),
+            15.0f32.to_bits(),
+            (-90.0f32).to_bits(),
+            0xff12_3456,
+        ];
+        let operation = Operation {
+            opcode: 18,
+            words: &words,
+            clip: DamageRect::new(4, 5, 224, 214),
+        };
+        let mut projected = Vec::new();
+        append_draw_operation(
+            &mut projected,
+            &operation,
+            &[],
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(projected.len(), 1);
+        let arc = projected.pop().unwrap();
+        assert_eq!(arc.kind, "arc");
+        assert_eq!((arc.x, arc.y, arc.w, arc.h), (64.25, 54.5, 102.0, 102.0));
+        assert_eq!(arc.color, Some(0xff56_3412));
+        assert_eq!(arc.radius, Some(47.0));
+        assert_eq!(arc.border_width, Some(8.0));
+        assert_eq!(arc.start_angle, Some(15.0));
+        assert_eq!(arc.sweep_angle, Some(-90.0));
+        assert_eq!(arc.clip.x, 4.0);
+        assert_eq!(arc.clip.y, 5.0);
+        let legacy = serde_json::to_value(&arc).unwrap();
+        assert_eq!(legacy["type"], "arc");
+        assert_eq!(legacy["startAngle"], 15.0);
+        assert_eq!(legacy["sweepAngle"], -90.0);
+
+        let mut writer = BinaryFrameWriter::new();
+        writer.op(&arc).unwrap();
+        assert_eq!(writer.bytes[0], 16);
+        assert_eq!(writer.bytes.len(), 53);
+        assert_eq!(
+            f32::from_le_bytes(writer.bytes[45..49].try_into().unwrap()),
+            15.0
+        );
+        assert_eq!(
+            f32::from_le_bytes(writer.bytes[49..53].try_into().unwrap()),
+            -90.0
+        );
+
+        let make_frame = |ops| FrameResult {
+            frame: 12,
+            width: 240.0,
+            height: 240.0,
+            ops,
+            auxiliary: None,
+            events: Vec::new(),
+            resources: Vec::new(),
+            released_resources: Vec::new(),
+        };
+        let full = encode_binary_frame(&make_frame(vec![arc.clone()])).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([full[4], full[5]]),
+            BINARY_FRAME_ARC_VERSION
+        );
+
+        // PFP1 embeds only the inserted op segment in its PFB1 payload. The
+        // same encoder must select v4 there so the Flutter patch decoder accepts
+        // tag 16 before the outer splice is applied.
+        let patch_payload = encode_binary_frame_with_ops(&make_frame(Vec::new()), &[arc]).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([patch_payload[4], patch_payload[5]]),
+            BINARY_FRAME_ARC_VERSION
+        );
+        assert_eq!(patch_payload[28], 16);
+
+        // Frames without arcs keep their established wire versions.
+        let empty_frame = encode_binary_frame(&make_frame(Vec::new())).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([empty_frame[4], empty_frame[5]]),
+            BINARY_FRAME_VERSION
+        );
+        let short = Operation {
+            opcode: 18,
+            words: &words[..7],
+            clip: DamageRect::new(0, 0, 240, 240),
+        };
+        assert!(append_draw_operation(
+            &mut Vec::new(),
+            &short,
+            &[],
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap_err()
+        .contains("expected 8"));
+    }
+
+    #[test]
+    fn rounded_gradient_roundtrips_json_and_versions_full_patch_and_auxiliary_frames() {
+        let words = vec![
+            19,
+            15.25f32.to_bits(),
+            12.5f32.to_bits(),
+            44.0f32.to_bits(),
+            28.0f32.to_bits(),
+            8.0f32.to_bits(),
+            0x8060_4020,
+            0xdc78_6450,
+            3,
+            0x96dc_e6f0,
+            0.35f32.to_bits(),
+        ];
+        let operation = Operation {
+            opcode: 19,
+            words: &words,
+            clip: DamageRect::new(10, 11, 30, 41),
+        };
+        let mut projected = Vec::new();
+        append_draw_operation(
+            &mut projected,
+            &operation,
+            &[],
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(projected.len(), 1);
+        let gradient = projected.pop().unwrap();
+        assert_eq!(gradient.kind, "roundedGradient");
+        assert_eq!((gradient.x, gradient.y, gradient.w, gradient.h), (15.25, 12.5, 44.0, 28.0));
+        assert_eq!(gradient.from_color, Some(0x8020_4060));
+        assert_eq!(gradient.to_color, Some(0xdc50_6478));
+        assert_eq!(gradient.direction, Some(3));
+        assert_eq!(gradient.radius, Some(8.0));
+        assert_eq!(gradient.via_color, Some(0x96f0_e6dc));
+        assert_eq!(gradient.via_position, Some(0.35));
+        assert_eq!(gradient.clip.x, 10.0);
+
+        let legacy = serde_json::to_value(&gradient).unwrap();
+        assert_eq!(legacy["type"], "roundedGradient");
+        assert_eq!(legacy["from"], 0x8020_4060u32);
+        assert_eq!(legacy["to"], 0xdc50_6478u32);
+        assert_eq!(legacy["direction"], 3);
+        assert_eq!(legacy["radius"], 8.0);
+        assert_eq!(legacy["viaColor"], 0x96f0_e6dcu32);
+        assert!((legacy["viaPosition"].as_f64().unwrap() - 0.35).abs() < 1e-6);
+
+        let mut writer = BinaryFrameWriter::new();
+        writer.op(&gradient).unwrap();
+        assert_eq!(writer.bytes[0], 17);
+        assert_eq!(writer.bytes.len(), 58);
+        assert_eq!(writer.bytes[49], 1, "a complete middle stop has a strict true flag");
+        assert_eq!(
+            u32::from_le_bytes(writer.bytes[50..54].try_into().unwrap()),
+            0x96f0_e6dc
+        );
+        assert_eq!(
+            f32::from_le_bytes(writer.bytes[54..58].try_into().unwrap()),
+            0.35
+        );
+
+        let make_frame = |ops| FrameResult {
+            frame: 13,
+            width: 240.0,
+            height: 160.0,
+            ops,
+            auxiliary: None,
+            events: Vec::new(),
+            resources: Vec::new(),
+            released_resources: Vec::new(),
+        };
+        let full = encode_binary_frame(&make_frame(vec![gradient.clone()])).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([full[4], full[5]]),
+            BINARY_FRAME_ROUNDED_GRADIENT_VERSION
+        );
+        assert_eq!(full[28], 17);
+
+        let patch_payload =
+            encode_binary_frame_with_ops(&make_frame(Vec::new()), &[gradient.clone()]).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([patch_payload[4], patch_payload[5]]),
+            BINARY_FRAME_ROUNDED_GRADIENT_VERSION
+        );
+        assert_eq!(patch_payload[28], 17);
+
+        let mut auxiliary_frame = make_frame(Vec::new());
+        auxiliary_frame.auxiliary = Some(SurfaceFrame {
+            width: 80.0,
+            height: 60.0,
+            ops: vec![gradient.clone()],
+        });
+        let encoded_auxiliary = encode_binary_frame(&auxiliary_frame).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([encoded_auxiliary[4], encoded_auxiliary[5]]),
+            BINARY_FRAME_ROUNDED_GRADIENT_VERSION
+        );
+
+        let mut two_stop_words = words.clone();
+        two_stop_words[10] = f32::NAN.to_bits();
+        let two_stop_operation = Operation {
+            opcode: 19,
+            words: &two_stop_words,
+            clip: DamageRect::new(0, 0, 240, 160),
+        };
+        let mut two_stop = Vec::new();
+        append_draw_operation(
+            &mut two_stop,
+            &two_stop_operation,
+            &[],
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        let two_stop = two_stop.pop().unwrap();
+        let two_stop_json = serde_json::to_value(&two_stop).unwrap();
+        assert!(two_stop_json.get("viaColor").is_none());
+        assert!(two_stop_json.get("viaPosition").is_none());
+        let mut writer = BinaryFrameWriter::new();
+        writer.op(&two_stop).unwrap();
+        assert_eq!(writer.bytes[49], 0);
+        assert_eq!(writer.bytes.len(), 50);
+
+        let mut malformed = two_stop.clone();
+        malformed.via_color = Some(0xff00_0000);
+        assert!(BinaryFrameWriter::new().op(&malformed).is_err());
+        let mut zero_position = two_stop.clone();
+        zero_position.via_color = Some(0xff00_0000);
+        zero_position.via_position = Some(0.0);
+        assert!(BinaryFrameWriter::new().op(&zero_position).is_err());
+        let mut infinite_position = two_stop.clone();
+        infinite_position.via_color = Some(0xff00_0000);
+        infinite_position.via_position = Some(f32::INFINITY);
+        assert!(BinaryFrameWriter::new().op(&infinite_position).is_err());
+        for (index, value) in [(8, 4), (10, f32::INFINITY.to_bits()), (10, 0)] {
+            let mut invalid_words = words.clone();
+            invalid_words[index] = value;
+            let invalid = Operation {
+                opcode: 19,
+                words: &invalid_words,
+                clip: DamageRect::new(0, 0, 240, 160),
+            };
+            assert!(append_draw_operation(
+                &mut Vec::new(),
+                &invalid,
+                &[],
+                &mut Ui::new(),
+                &mut HashSet::new(),
+            )
+            .is_err());
+        }
+        let mut invalid_geometry = words.clone();
+        invalid_geometry[3] = 0.0f32.to_bits();
+        assert!(append_draw_operation(
+            &mut Vec::new(),
+            &Operation {
+                opcode: 19,
+                words: &invalid_geometry,
+                clip: DamageRect::new(0, 0, 240, 160),
+            },
+            &[],
+            &mut Ui::new(),
+            &mut HashSet::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn repeated_texture_triangle_keeps_uv_and_sampler_mode_in_json_and_pfb() {
         let mut ui = Ui::new();
-        let texture = ui.upload_texture(&[0xff, 0x00, 0x00, 0xff], 1, 1, pocket_spec::psm::PSM_8888);
+        let texture =
+            ui.upload_texture(&[0xff, 0x00, 0x00, 0xff], 1, 1, pocket_spec::psm::PSM_8888);
         assert!(texture >= 0);
         let xy = |x: i16, y: i16| x as u16 as u32 | ((y as u16 as u32) << 16);
         let words = vec![
@@ -8039,7 +8911,10 @@ mod smoke_tests {
 
         let mut writer = BinaryFrameWriter::new();
         writer.op(&projected[0]).unwrap();
-        assert_eq!(writer.bytes[0], 14, "repeat sampler uses the append-only PFB tag");
+        assert_eq!(
+            writer.bytes[0], 14,
+            "repeat sampler uses the append-only PFB tag"
+        );
     }
 
     #[test]
@@ -8048,17 +8923,26 @@ mod smoke_tests {
         let texture = ui.upload_texture(&[255; 4], 1, 1, pocket_spec::psm::PSM_8888);
         for opcode in [15u32, 16] {
             let mut words = vec![opcode, texture as u32];
-            for value in [0.25f32, 0.375, -0.125, 0.0,
-                          7.75, 0.625, 1.25, 0.0,
-                          0.5, 7.875, 0.0, 1.0] {
+            for value in [
+                0.25f32, 0.375, -0.125, 0.0, 7.75, 0.625, 1.25, 0.0, 0.5, 7.875, 0.0, 1.0,
+            ] {
                 words.push(value.to_bits());
             }
             words.push(u32::MAX);
             let project = |words: &[u32], ui: &mut Ui| {
                 let mut projected = Vec::new();
-                append_draw_operation(&mut projected, &Operation {
-                    opcode, words, clip: DamageRect::new(0, 0, 8, 8),
-                }, &[], ui, &mut HashSet::new()).map(|_| projected)
+                append_draw_operation(
+                    &mut projected,
+                    &Operation {
+                        opcode,
+                        words,
+                        clip: DamageRect::new(0, 0, 8, 8),
+                    },
+                    &[],
+                    ui,
+                    &mut HashSet::new(),
+                )
+                .map(|_| projected)
             };
             let projected = project(&words, &mut ui).unwrap();
             let triangle = &projected[0];
@@ -8075,7 +8959,10 @@ mod smoke_tests {
             // PFB already has float XY: no second tag or Dart projection is needed.
             let asset_bytes = triangle.asset.as_ref().unwrap().len();
             let xy_offset = 33 + 4 + asset_bytes + 4;
-            assert_eq!(f32::from_le_bytes(writer.bytes[xy_offset..xy_offset + 4].try_into().unwrap()), 0.25);
+            assert_eq!(
+                f32::from_le_bytes(writer.bytes[xy_offset..xy_offset + 4].try_into().unwrap()),
+                0.25
+            );
             assert!(project(&words[..14], &mut ui).is_err());
             let mut invalid = words.clone();
             invalid[2] = f32::NAN.to_bits();
@@ -8459,19 +9346,39 @@ mod smoke_tests {
     #[test]
     fn full_coordinate_pointer_sidecar_preserves_large_viewports_and_surfaces() {
         assert_eq!(
-            pack_touch(TouchContact { id: 3, x: 479, y: 271, hit: 0, surface: 0 }),
+            pack_touch(TouchContact {
+                id: 3,
+                x: 479,
+                y: 271,
+                hit: 0,
+                surface: 0
+            }),
             (3 << TOUCH_LEGACY_ID_SHIFT) | (271 << 9) | 479,
         );
         assert_eq!(
-            pack_touch(TouchContact { id: 9, x: 639, y: 359, hit: 0, surface: 0 }),
+            pack_touch(TouchContact {
+                id: 9,
+                x: 639,
+                y: 359,
+                hit: 0,
+                surface: 0
+            }),
             TOUCH_WIDE_MARKER | (9 << TOUCH_WIDE_ID_SHIFT) | (359 << 10) | 639,
         );
         assert_eq!(
-            pack_touch_cancel(TouchContact { id: 3, x: 479, y: 271, hit: 0, surface: 0 }),
+            pack_touch_cancel(TouchContact {
+                id: 3,
+                x: 479,
+                y: 271,
+                hit: 0,
+                surface: 0
+            }),
             TOUCH_CANCEL_MARKER | (3 << TOUCH_LEGACY_ID_SHIFT),
         );
         let handle = pocket_create(2560.0, 1440.0);
-        unsafe { (*handle).auxiliary_viewport = Some((1920.0, 1200.0)); }
+        unsafe {
+            (*handle).auxiliary_viewport = Some((1920.0, 1200.0));
+        }
         let source = CString::new(
             r#"
             globalThis.frame = function(buttons, analog, touches, hits, surfaces,
@@ -8485,18 +9392,24 @@ mod smoke_tests {
             "#,
         )
         .unwrap();
-        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0, "{}", unsafe {
-            CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
-        });
+        assert_eq!(
+            unsafe { pocket_eval(handle, source.as_ptr()) },
+            0,
+            "{}",
+            unsafe { CStr::from_ptr(pocket_last_error(handle)).to_string_lossy() }
+        );
 
         for message in [
             r#"{"method":"input.pointer","payload":{"phase":"down","id":7,"x":2048,"y":1200}}"#,
             r#"{"method":"input.pointer","payload":{"phase":"down","id":8,"x":1500,"y":1100,"surface":"auxiliary"}}"#,
         ] {
             let message = CString::new(message).unwrap();
-            assert_eq!(unsafe { pocket_send(handle, message.as_ptr()) }, 0, "{}", unsafe {
-                CStr::from_ptr(pocket_last_error(handle)).to_string_lossy()
-            });
+            assert_eq!(
+                unsafe { pocket_send(handle, message.as_ptr()) },
+                0,
+                "{}",
+                unsafe { CStr::from_ptr(pocket_last_error(handle)).to_string_lossy() }
+            );
         }
 
         let frame = frame_json(handle);
@@ -8512,9 +9425,13 @@ mod smoke_tests {
         assert_eq!(first_points[0]["coordinate"]["x"], 2048);
         assert_eq!(first_points[0]["coordinate"]["y"], 1200);
         assert_eq!(first_points[0]["surface"], 0);
-        assert_ne!(first_points[0]["packed"].as_u64().unwrap() as u32 & TOUCH_COORDINATE_SIDECAR_MARKER, 0);
+        assert_ne!(
+            first_points[0]["packed"].as_u64().unwrap() as u32 & TOUCH_COORDINATE_SIDECAR_MARKER,
+            0
+        );
 
-        let both_points = frames.iter()
+        let both_points = frames
+            .iter()
             .map(|event| event["payload"]["points"].as_array().unwrap())
             .find(|points| points.len() == 2)
             .expect("second down exposes both simultaneous contacts");
@@ -8845,7 +9762,10 @@ mod smoke_tests {
             assert_eq!(pocket_send(host, unchanged_buttons.as_ptr()), 0);
             assert!(!(*host).external_work_pending);
             let unchanged_buttons_frame = frame_json_with_delta(host, 0.0);
-            assert!(unchanged_buttons_frame["events"].as_array().unwrap().is_empty());
+            assert!(unchanged_buttons_frame["events"]
+                .as_array()
+                .unwrap()
+                .is_empty());
             assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
 
             let unchanged_axes = CString::new(
@@ -8855,7 +9775,10 @@ mod smoke_tests {
             assert_eq!(pocket_send(host, unchanged_axes.as_ptr()), 0);
             assert!(!(*host).external_work_pending);
             let unchanged_axes_frame = frame_json_with_delta(host, 0.0);
-            assert!(unchanged_axes_frame["events"].as_array().unwrap().is_empty());
+            assert!(unchanged_axes_frame["events"]
+                .as_array()
+                .unwrap()
+                .is_empty());
             assert_eq!(pocket_next_wake_delay_ms(host), -1.0);
 
             let moved = CString::new(
@@ -8986,10 +9909,7 @@ mod smoke_tests {
                     .submit_record(r#"{"v":1,"id":3,"method":"compute.sum","payload":"[5,6]"}"#),
                 "emptying the second reply must rearm wake_pending for subsequent submits"
             );
-            assert_eq!(
-                NOTIFY_COUNT.load(Ordering::Relaxed),
-                before_next_submit + 1
-            );
+            assert_eq!(NOTIFY_COUNT.load(Ordering::Relaxed), before_next_submit + 1);
             pocket_destroy(handle);
         }
     }
@@ -9608,9 +10528,7 @@ mod smoke_tests {
             unsafe { pocket_send_binary(handle, bytes.as_ptr(), bytes.len()) },
             -1
         );
-        assert!(unsafe { &*handle }
-            .last_error
-            .contains("__binaryCapable"));
+        assert!(unsafe { &*handle }.last_error.contains("__binaryCapable"));
         assert!(
             dispatch_duplex_pointer_guest(&unsafe { &*handle }.guest, "down", 0, 1.0, 1.0, 0)
                 .is_err()
@@ -9683,6 +10601,59 @@ mod smoke_tests {
         );
         assert_eq!(unsafe { (*handle).outbound.borrow().len() }, 2);
         unsafe {
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn perf_sampling_gate_controls_frame_stage_timings() {
+        let handle = pocket_create(120.0, 80.0);
+        let source = CString::new(
+            r#"
+            const box = ui.createNode(0);
+            ui.setProp(box, 1, 40);
+            ui.setProp(box, 2, 30);
+            ui.setProp(box, 64, 0xff224488);
+            ui.insertBefore(1, box, 0);
+            let step = 0;
+            globalThis.frame = function() {
+                step += 1;
+                ui.setProp(box, 64, 0xff224400 + (step & 0xff));
+            };
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+
+        unsafe { pocket_set_perf_sampling_enabled(0) };
+        assert_eq!(unsafe { pocket_is_perf_sampling_enabled() }, 0);
+        let mut out_len = 0u64;
+        let ptr1 = unsafe { pocket_frame_delta_binary_v2(handle, 17.0, 0, &mut out_len) };
+        assert!(!ptr1.is_null() && out_len > 0);
+        let mut timings = [99u64; 8];
+        assert_eq!(
+            unsafe { pocket_last_frame_stage_timings_us(handle, timings.as_mut_ptr()) },
+            8
+        );
+        assert_eq!(timings, [0u64; 8]);
+
+        unsafe {
+            pocket_set_perf_sampling_enabled(1);
+            pocket_record_live2d_update_ns(42_000);
+        }
+        assert_eq!(unsafe { pocket_is_perf_sampling_enabled() }, 1);
+        let base_seq = unsafe { (*handle).frame_delta_v2_published.unwrap() };
+        let ptr2 = unsafe { pocket_frame_delta_binary_v2(handle, 17.0, base_seq, &mut out_len) };
+        assert!(!ptr2.is_null() && out_len > 0);
+        assert_eq!(
+            unsafe { pocket_last_frame_stage_timings_us(handle, timings.as_mut_ptr()) },
+            8
+        );
+        assert_eq!(timings[1], 42);
+        assert!(timings.iter().sum::<u64>() >= 42);
+
+        unsafe {
+            pocket_set_perf_sampling_enabled(0);
             pocket_destroy(handle);
         }
     }

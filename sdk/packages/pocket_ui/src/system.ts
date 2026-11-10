@@ -229,6 +229,10 @@ export interface PocketSystemKernel {
    *  order only controls scheduling; actual DrawOps order is owned by the
    *  SystemUI layout tree. A multi-app presentation names its focused app. */
   presentSurfaces(appIds: readonly string[], focusedAppId?: string): Promise<void>;
+  /** Request host container closure for the active SystemUI container. */
+  closeContainer(): Promise<{ closed: boolean }>;
+  /** Cancel the top child app call in response to an unhandled guest back. */
+  handleBack(): Promise<boolean>;
   dispose(): void;
 }
 
@@ -969,6 +973,31 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       }
       this.applyPresentation(instanceIds, focusedInstanceId);
     });
+  }
+
+  async closeContainer(): Promise<{ closed: boolean }> {
+    this.assertActive();
+    // Closing the host must remain available if child/catalog configuration
+    // is still pending or fails. Native authorization uses SystemUI identity.
+    const response = await this.hostObject("system.container.close", {});
+    return { closed: response.closed === true };
+  }
+
+  async handleBack(): Promise<boolean> {
+    this.assertActive();
+    // A back request arriving during system startup must not queue a delayed
+    // stack mutation after the native host has already taken its fallback.
+    if (!this.initialized) return false;
+    let handled = false;
+    await this.enqueue(async () => {
+      if (this.stack.length <= 1) return;
+      const index = this.stack.length - 1;
+      const top = this.stack[index];
+      if (!top?.requestId || !this.calls.has(top.requestId)) return;
+      await this.cancelStackFrom(index, "back");
+      handled = true;
+    });
+    return handled;
   }
 
   dispose(): void {

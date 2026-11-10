@@ -11,6 +11,13 @@ export interface PocketLive2dHost {
   request(capability: string, params: Record<string, unknown>): Promise<unknown>;
 }
 
+export interface PocketLive2dPlacement {
+  readonly dx: number;
+  readonly dy: number;
+  readonly scale: number;
+  readonly opacity?: number;
+}
+
 export interface PocketLive2dDrawableFrame {
   readonly id: string;
   readonly textureIndex: number;
@@ -20,9 +27,7 @@ export interface PocketLive2dDrawableFrame {
   readonly constantFlags: number;
   readonly dynamicFlags: number;
   readonly opacity: number;
-  readonly positionsXYPixels: readonly number[];
-  readonly uvs: readonly number[];
-  readonly indices: readonly number[];
+  readonly meshBytes: Uint8Array;
   readonly maskIndices: readonly number[];
   readonly multiplyColorRgba: readonly number[];
   readonly screenColorRgba: readonly number[];
@@ -78,7 +83,12 @@ export interface Live2dLoadRequest {
 
 export interface PocketLive2dClient {
   load(request: Live2dLoadRequest): Promise<PocketLive2dModelInfo>;
-  update(modelId: string, parameters?: readonly Live2dParameterValue[], partOpacities?: readonly Live2dParameterValue[]): Promise<PocketLive2dFrame>;
+  update(
+    modelId: string,
+    parameters?: readonly Live2dParameterValue[],
+    partOpacities?: readonly Live2dParameterValue[],
+    placement?: PocketLive2dPlacement,
+  ): Promise<PocketLive2dFrame>;
   release(modelId: string): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -179,17 +189,21 @@ export function createPocketLive2dClient(
       );
       return pending;
     },
-    update(modelId, parameters = [], partOpacities = []): Promise<PocketLive2dFrame> {
+    update(modelId, parameters = [], partOpacities = [], placement): Promise<PocketLive2dFrame> {
       if (disposed) return Promise.reject(new Error("Live2D client is disposed"));
       if (!models.has(modelId)) return Promise.reject(new Error(`Unknown Live2D model handle '${modelId}'`));
       validateParameterValues(parameters, "parameters");
       validateParameterValues(partOpacities, "partOpacities");
+      if (placement !== undefined) validatePlacement(placement);
       return serialize(modelId, async () => {
         const request: Record<string, unknown> = {
           modelId,
           parameters,
           partOpacities,
         };
+        if (placement !== undefined) {
+          request.placement = placement;
+        }
         if (options.cacheStaticTopology === true) {
           request.cacheStaticTopology = true;
         }
@@ -230,6 +244,20 @@ function validateParameterValues(values: readonly Live2dParameterValue[], label:
     if (typeof entry.id !== "string" || entry.id.trim().length === 0 || !Number.isFinite(entry.value)) {
       throw new TypeError(`${label}[${index}] must have a non-empty id and finite value`);
     }
+  }
+}
+
+function validatePlacement(placement: PocketLive2dPlacement): void {
+  if (
+    typeof placement !== "object" ||
+    placement === null ||
+    !Number.isFinite(placement.dx) ||
+    !Number.isFinite(placement.dy) ||
+    !Number.isFinite(placement.scale) ||
+    placement.scale <= 0 ||
+    (placement.opacity !== undefined && !Number.isFinite(placement.opacity))
+  ) {
+    throw new TypeError("placement must have finite dx, dy, positive scale and optional finite opacity");
   }
 }
 
@@ -304,9 +332,7 @@ function parseParts(value: unknown): Live2dPartDefault[] {
 
 interface CachedDrawableTopology {
   readonly id: string;
-  readonly vertexCount: number;
-  readonly uvs: number[];
-  readonly indices: number[];
+  readonly meshByteLength: number;
   readonly maskIndices: number[];
 }
 
@@ -334,38 +360,27 @@ function parseFrame(
     : undefined;
   const drawables = root.drawables.map((entry, index): PocketLive2dDrawableFrame => {
     const drawable = object(entry, `frame result.drawables[${index}]`);
-    const positions = float32Array(drawable.positionsXYPixels, `drawables[${index}].positionsXYPixels`, true);
+    const meshBytes = pms1Bytes(drawable.meshBytes, `drawables[${index}].meshBytes`);
     const multiply = float32Array(drawable.multiplyColorRgba, `drawables[${index}].multiplyColorRgba`);
     const screen = float32Array(drawable.screenColorRgba, `drawables[${index}].screenColorRgba`);
     const id = string(drawable.id, `drawables[${index}].id`);
-    let uvs: number[];
-    let indices: number[];
     let masks: number[];
     if (cachedFrame) {
-      if (Object.hasOwn(drawable, "uvs") || Object.hasOwn(drawable, "indices") || Object.hasOwn(drawable, "maskIndices")) {
+      if (Object.hasOwn(drawable, "maskIndices")) {
         throw new TypeError(`frame result.drawables[${index}] repeats cached topology`);
       }
       const topology = cached![index]!;
-      if (id !== topology.id || positions.length !== topology.vertexCount * 2) {
+      if (id !== topology.id || meshBytes.byteLength !== topology.meshByteLength) {
         throw new TypeError(`frame result.drawables[${index}] changed cached drawable identity or vertex count`);
       }
-      uvs = topology.uvs;
-      indices = topology.indices;
       masks = topology.maskIndices;
     } else {
-      uvs = float32Array(drawable.uvs, `drawables[${index}].uvs`, true);
-      indices = uint16Array(drawable.indices, `drawables[${index}].indices`, true);
       masks = uint32Array(drawable.maskIndices, `drawables[${index}].maskIndices`, true);
-      if (positions.length % 2 !== 0 || uvs.length !== positions.length || indices.length % 3 !== 0) {
-        throw new TypeError(`frame result.drawables[${index}] has inconsistent mesh buffers`);
-      }
-      const vertexCount = positions.length / 2;
-      if (indices.some((value) => value >= vertexCount)) throw new TypeError(`frame result.drawables[${index}] contains an out-of-range index`);
       if (nextTopology) {
-        nextTopology[index] = { id, vertexCount, uvs, indices, maskIndices: masks };
+        nextTopology[index] = { id, meshByteLength: meshBytes.byteLength, maskIndices: masks };
       }
     }
-    if (positions.length % 2 !== 0 || uvs.length !== positions.length || indices.length % 3 !== 0 || multiply.length !== 4 || screen.length !== 4) {
+    if (multiply.length !== 4 || screen.length !== 4) {
       throw new TypeError(`frame result.drawables[${index}] has inconsistent mesh buffers`);
     }
     return {
@@ -377,9 +392,7 @@ function parseFrame(
       constantFlags: integer(drawable.constantFlags, `drawables[${index}].constantFlags`),
       dynamicFlags: integer(drawable.dynamicFlags, `drawables[${index}].dynamicFlags`),
       opacity: finiteNumber(drawable.opacity, `drawables[${index}].opacity`),
-      positionsXYPixels: positions,
-      uvs,
-      indices,
+      meshBytes,
       maskIndices: masks,
       multiplyColorRgba: multiply,
       screenColorRgba: screen,
@@ -410,12 +423,19 @@ function integer(value: unknown, path: string): number {
   return number;
 }
 
-function float32Array(value: unknown, path: string, allowEmpty = false): number[] {
-  return decodeNumericArray(value, path, 4, (view, offset) => view.getFloat32(offset, true), allowEmpty);
+function pms1Bytes(value: unknown, path: string): Uint8Array {
+  if (!(value instanceof Uint8Array)) {
+    throw new TypeError(`${path} must be a packed PMS1 Uint8Array`);
+  }
+  if (value.byteLength === 0) return value;
+  if (value.byteLength < 16 || value.byteLength % 4 !== 0) {
+    throw new TypeError(`${path} must be an empty buffer or a 32-bit aligned PMS1 mesh`);
+  }
+  return value;
 }
 
-function uint16Array(value: unknown, path: string, allowEmpty = false): number[] {
-  return decodeNumericArray(value, path, 2, (view, offset) => view.getUint16(offset, true), allowEmpty);
+function float32Array(value: unknown, path: string, allowEmpty = false): number[] {
+  return decodeNumericArray(value, path, 4, (view, offset) => view.getFloat32(offset, true), allowEmpty);
 }
 
 function uint32Array(value: unknown, path: string, allowEmpty = false): number[] {

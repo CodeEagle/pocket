@@ -1,9 +1,28 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 /// Injectable boundary for tests and native integration harnesses.
 /// Returned drawable arrays are Dart copies, never pointers into Cubism Core.
 typedef PocketLive2dCoreFactory =
     PocketLive2dCoreModel Function(Uint8List moc3Bytes);
+
+const int pocketLive2dPms1Magic = 0x31534d50;
+
+final class PocketLive2dPlacement {
+  const PocketLive2dPlacement({
+    this.dx = 0.0,
+    this.dy = 0.0,
+    this.scale = 1.0,
+    this.opacity = 1.0,
+  });
+
+  static const PocketLive2dPlacement identity = PocketLive2dPlacement();
+
+  final double dx;
+  final double dy;
+  final double scale;
+  final double opacity;
+}
 
 abstract interface class PocketLive2dCoreModel {
   PocketLive2dCanvas get canvas;
@@ -21,6 +40,12 @@ abstract interface class PocketLive2dCoreModel {
   /// Reads one drawable's current pose using the original complete-frame API.
   PocketLive2dDrawable drawableAt(int index);
   void dispose();
+}
+
+/// Optional extension for providers that pack transformed PMS1 mesh bytes
+/// directly during the native update pass.
+abstract interface class PocketLive2dCorePlacementUpdater {
+  void updateWithPlacement(PocketLive2dPlacement placement);
 }
 
 /// Optional extension for providers that can avoid copying static Cubism
@@ -124,6 +149,7 @@ final class PocketLive2dDrawable {
     required this.maskIndices,
     required this.multiplyColorRgba,
     required this.screenColorRgba,
+    this.pms1Bytes,
   }) : vertexCount = vertexCount ?? positionsXYPixels.length ~/ 2,
        indexCount = indexCount ?? indices.length,
        maskCount = maskCount ?? maskIndices.length;
@@ -147,8 +173,32 @@ final class PocketLive2dDrawable {
   final List<int> maskIndices;
   final List<double> multiplyColorRgba;
   final List<double> screenColorRgba;
+  final Uint8List? pms1Bytes;
 
-  Map<String, Object?> toJson({bool includeTopology = true}) =>
+  Uint8List packPms1({
+    PocketLive2dPlacement placement = PocketLive2dPlacement.identity,
+    List<double>? uvsOverride,
+    List<int>? indicesOverride,
+  }) {
+    final prepacked = pms1Bytes;
+    if (prepacked != null) {
+      return Uint8List.fromList(prepacked);
+    }
+    return packPocketLive2dDrawablePms1(
+      positionsXYPixels: positionsXYPixels,
+      uvs: uvsOverride ?? uvs,
+      indices: indicesOverride ?? indices,
+      drawableOpacity: opacity,
+      placement: placement,
+    );
+  }
+
+  Map<String, Object?> toJson({
+    bool includeTopology = true,
+    PocketLive2dPlacement placement = PocketLive2dPlacement.identity,
+    List<double>? uvsOverride,
+    List<int>? indicesOverride,
+  }) =>
       <String, Object?>{
         'id': id,
         'textureIndex': textureIndex,
@@ -158,13 +208,76 @@ final class PocketLive2dDrawable {
         'constantFlags': constantFlags,
         'dynamicFlags': dynamicFlags,
         'opacity': opacity,
-        'positionsXYPixels': _float32Bytes(positionsXYPixels),
-        if (includeTopology) 'uvs': _float32Bytes(uvs),
-        if (includeTopology) 'indices': _uint16Bytes(indices),
+        'meshBytes': packPms1(
+          placement: placement,
+          uvsOverride: uvsOverride,
+          indicesOverride: indicesOverride,
+        ),
         if (includeTopology) 'maskIndices': _uint32Bytes(maskIndices),
         'multiplyColorRgba': _float32Bytes(multiplyColorRgba),
         'screenColorRgba': _float32Bytes(screenColorRgba),
       };
+}
+
+/// Packs one Live2D drawable into the exact PMS1 binary layout produced by
+/// `@pocket/vn` `encodeNovelMesh` (16-byte header, interleaved `[x, y, u, 1 - v]`
+/// float32 vertices, uint32 triangle indices).
+Uint8List packPocketLive2dDrawablePms1({
+  required List<double> positionsXYPixels,
+  required List<double> uvs,
+  required List<int> indices,
+  required double drawableOpacity,
+  PocketLive2dPlacement placement = PocketLive2dPlacement.identity,
+}) {
+  final vertexCount = positionsXYPixels.length ~/ 2;
+  final indexCount = indices.length;
+  if (vertexCount == 0 || indexCount == 0) {
+    return Uint8List(0);
+  }
+  if (positionsXYPixels.length != vertexCount * 2 ||
+      uvs.length != vertexCount * 2 ||
+      vertexCount < 1 ||
+      vertexCount > 16384 ||
+      indexCount < 3 ||
+      indexCount > 98304 ||
+      indexCount % 3 != 0) {
+    throw StateError('Invalid Live2D drawable mesh vertex/index counts');
+  }
+  final bytes = Uint8List(16 + vertexCount * 16 + indexCount * 4);
+  final data = ByteData.sublistView(bytes);
+  final clampedOpacity = (drawableOpacity * placement.opacity).clamp(0.0, 1.0);
+  final opacityByte = (clampedOpacity * 255.0 + 0.5).floor();
+  final color = ((opacityByte << 24) | 0x00ffffff) & 0xffffffff;
+  data.setUint32(0, pocketLive2dPms1Magic, Endian.little);
+  data.setUint32(4, vertexCount, Endian.little);
+  data.setUint32(8, indexCount, Endian.little);
+  data.setUint32(12, color, Endian.little);
+
+  final dx = placement.dx;
+  final dy = placement.dy;
+  final scale = placement.scale;
+  var byteOffset = 16;
+  for (var vertex = 0; vertex < vertexCount; vertex++) {
+    final pairOffset = vertex * 2;
+    final px = positionsXYPixels[pairOffset];
+    final py = positionsXYPixels[pairOffset + 1];
+    final u = uvs[pairOffset];
+    final v = 1.0 - uvs[pairOffset + 1];
+    data.setFloat32(byteOffset, dx + px * scale, Endian.little);
+    data.setFloat32(byteOffset + 4, dy + py * scale, Endian.little);
+    data.setFloat32(byteOffset + 8, u, Endian.little);
+    data.setFloat32(byteOffset + 12, v, Endian.little);
+    byteOffset += 16;
+  }
+  for (var index = 0; index < indexCount; index++) {
+    final vertexIndex = indices[index];
+    if (vertexIndex < 0 || vertexIndex >= vertexCount) {
+      throw StateError('Live2D drawable index outside vertex range');
+    }
+    data.setUint32(byteOffset, vertexIndex, Endian.little);
+    byteOffset += 4;
+  }
+  return math.max(0, bytes.length) == 0 ? Uint8List(0) : bytes;
 }
 
 Uint8List _float32Bytes(List<double> values) {
@@ -180,21 +293,6 @@ Uint8List _float32Bytes(List<double> values) {
   final data = ByteData.sublistView(bytes);
   for (var index = 0; index < values.length; index++) {
     data.setFloat32(index * 4, values[index], Endian.little);
-  }
-  return bytes;
-}
-
-Uint8List _uint16Bytes(List<int> values) {
-  final bytes = Uint8List(values.length * 2);
-  final data = ByteData.sublistView(bytes);
-  for (var index = 0; index < values.length; index++) {
-    final value = values[index];
-    if (value < 0 || value > 0xffff) {
-      throw StateError(
-        'Cubism Core returned an index outside the uint16 range',
-      );
-    }
-    data.setUint16(index * 2, value, Endian.little);
   }
   return bytes;
 }

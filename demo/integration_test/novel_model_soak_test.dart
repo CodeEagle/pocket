@@ -309,15 +309,12 @@ Future<void> _waitForText(
   required String reason,
   Duration timeout = const Duration(seconds: 12),
 }) async {
+  tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   final clock = Stopwatch()..start();
   while (clock.elapsed < timeout) {
     if (_findText(tester, parts) != null) return;
     await tester.pump(const Duration(milliseconds: 30));
-    if (clock.elapsedMilliseconds % 300 < 30) {
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 1)),
-      );
-    }
+    await Future<void>.delayed(const Duration(milliseconds: 30));
   }
   fail('$reason; painted=${_texts(tester)}');
 }
@@ -327,6 +324,7 @@ Future<void> _tapAction(
   List<String> parts, {
   bool scroll = true,
 }) async {
+  tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   final clock = Stopwatch()..start();
   while (clock.elapsed < const Duration(seconds: 15)) {
     final action = _findText(tester, parts);
@@ -344,9 +342,7 @@ Future<void> _tapAction(
       await guest.tapGuest(tester, continueHint, scroll: false);
     } else {
       await tester.pump(const Duration(milliseconds: 30));
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 1)),
-      );
+      await Future<void>.delayed(const Duration(milliseconds: 30));
     }
   }
   fail('Could not reach action $parts; painted=${_texts(tester)}');
@@ -356,15 +352,14 @@ Future<void> _waitForLive2d(
   WidgetTester tester,
   PocketLive2dPlugin plugin,
 ) async {
+  tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   final clock = Stopwatch()..start();
   while (clock.elapsed < const Duration(seconds: 20)) {
     if (plugin.activeModelCount == 1 && _hiyoriOps(tester).length > 10) {
       return;
     }
     await tester.pump(const Duration(milliseconds: 30));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 2)),
-    );
+    await Future<void>.delayed(const Duration(milliseconds: 30));
   }
   fail(
     'Real Hiyori model did not become active: handles=${plugin.activeModelCount}, '
@@ -376,13 +371,12 @@ Future<void> _waitForLive2dRelease(
   WidgetTester tester,
   PocketLive2dPlugin plugin,
 ) async {
+  tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   final clock = Stopwatch()..start();
   while (clock.elapsed < const Duration(seconds: 12)) {
     if (plugin.activeModelCount == 0 && _hiyoriOps(tester).isEmpty) return;
     await tester.pump(const Duration(milliseconds: 30));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 2)),
-    );
+    await Future<void>.delayed(const Duration(milliseconds: 30));
   }
   fail(
     'The actual model handle did not release: handles=${plugin.activeModelCount}, '
@@ -465,9 +459,23 @@ Future<Map<String, Object?>> _sampleWindow(
 
   final frameTimings = <FrameTiming>[];
   final nativeCallMs = <double>[];
+  final decodeMsList = <double>[];
+  final diffMsList = <double>[];
+  final stageBuildMsList = <double>[];
+  final stagePaintMsList = <double>[];
+  final jsTickMsList = <double>[];
+  final live2dUpdateMsList = <double>[];
+  final live2dEmitMsList = <double>[];
+  final relayoutMsList = <double>[];
+  final drawDecodeMsList = <double>[];
+  final spliceMsList = <double>[];
+  final encodeMsList = <double>[];
+  final otherMsList = <double>[];
   final maxOps = <double>[];
   final rssSamples = <int>[];
   final originalFrameDelta = debugPocketFrameDeltaAtOverride;
+  final originalTickAttribution = debugOnPocketTickAttribution;
+  final originalFrameStageAttribution = debugOnPocketFrameStageAttribution;
   void collectFrames(List<FrameTiming> timings) => frameTimings.addAll(timings);
   debugPocketFrameDeltaAtOverride = (runtime, delta) {
     final clock = Stopwatch()..start();
@@ -478,6 +486,27 @@ Future<Map<String, Object?>> _sampleWindow(
     nativeCallMs.add(clock.elapsedMicroseconds / 1000);
     if (result != null) maxOps.add(result.ops.length.toDouble());
     return result;
+  };
+  debugOnPocketTickAttribution = ({
+    required nativeMs,
+    required decodeMs,
+    required diffMs,
+    PocketNativeStageTimings nativeStages = PocketNativeStageTimings.zero,
+  }) {
+    decodeMsList.add(decodeMs);
+    diffMsList.add(diffMs);
+    jsTickMsList.add(nativeStages.jsTickMs);
+    live2dUpdateMsList.add(nativeStages.live2dUpdateMs);
+    live2dEmitMsList.add(nativeStages.live2dEmitMs);
+    relayoutMsList.add(nativeStages.relayoutMs);
+    drawDecodeMsList.add(nativeStages.drawDecodeMs);
+    spliceMsList.add(nativeStages.spliceMs);
+    encodeMsList.add(nativeStages.encodeMs);
+    otherMsList.add(nativeStages.otherMs);
+  };
+  debugOnPocketFrameStageAttribution = ({buildMs, paintMs}) {
+    if (buildMs != null) stageBuildMsList.add(buildMs);
+    if (paintMs != null) stagePaintMsList.add(paintMs);
   };
   SchedulerBinding.instance.addTimingsCallback(collectFrames);
   PocketCanvasPainter.resetPaintInvocationCount();
@@ -498,10 +527,13 @@ Future<Map<String, Object?>> _sampleWindow(
       );
     }
     rssSamples.add(ProcessInfo.currentRss);
+    await tester.pump();
   } finally {
     elapsed.stop();
     SchedulerBinding.instance.removeTimingsCallback(collectFrames);
     debugPocketFrameDeltaAtOverride = originalFrameDelta;
+    debugOnPocketTickAttribution = originalTickAttribution;
+    debugOnPocketFrameStageAttribution = originalFrameStageAttribution;
   }
   final spanCountersForWindow = snapshotNovelMeshSpanDiagnostics();
   final spanInventoryAtExit = _painterInventory(tester);
@@ -572,8 +604,34 @@ Future<Map<String, Object?>> _sampleWindow(
     'nativeP50Ms': _percentile(nativeCallMs, .50),
     'nativeP95Ms': _percentile(nativeCallMs, .95),
     'nativeMaxMs': _percentile(nativeCallMs, 1),
+    'decodeP50Ms': _percentile(decodeMsList, .50),
+    'decodeP95Ms': _percentile(decodeMsList, .95),
+    'diffP50Ms': _percentile(diffMsList, .50),
+    'diffP95Ms': _percentile(diffMsList, .95),
+    'nativeJsTickP50Ms': _percentile(jsTickMsList, .50),
+    'nativeJsTickP95Ms': _percentile(jsTickMsList, .95),
+    'nativeLive2dUpdateP50Ms': _percentile(live2dUpdateMsList, .50),
+    'nativeLive2dUpdateP95Ms': _percentile(live2dUpdateMsList, .95),
+    'nativeLive2dEmitP50Ms': _percentile(live2dEmitMsList, .50),
+    'nativeLive2dEmitP95Ms': _percentile(live2dEmitMsList, .95),
+    'nativeRelayoutP50Ms': _percentile(relayoutMsList, .50),
+    'nativeRelayoutP95Ms': _percentile(relayoutMsList, .95),
+    'nativeDrawDecodeP50Ms': _percentile(drawDecodeMsList, .50),
+    'nativeDrawDecodeP95Ms': _percentile(drawDecodeMsList, .95),
+    'nativeSpliceP50Ms': _percentile(spliceMsList, .50),
+    'nativeSpliceP95Ms': _percentile(spliceMsList, .95),
+    'nativeEncodeP50Ms': _percentile(encodeMsList, .50),
+    'nativeEncodeP95Ms': _percentile(encodeMsList, .95),
+    'nativeOtherP50Ms': _percentile(otherMsList, .50),
+    'nativeOtherP95Ms': _percentile(otherMsList, .95),
+    'pocketBuildP50Ms': _percentile(stageBuildMsList, .50),
+    'pocketBuildP95Ms': _percentile(stageBuildMsList, .95),
+    'pocketPaintP50Ms': _percentile(stagePaintMsList, .50),
+    'pocketPaintP95Ms': _percentile(stagePaintMsList, .95),
+    'buildP50Ms': _percentile(buildMs, .50),
     'buildP95Ms': _percentile(buildMs, .95),
     'buildMaxMs': _percentile(buildMs, 1),
+    'rasterP50Ms': _percentile(rasterMs, .50),
     'rasterP95Ms': _percentile(rasterMs, .95),
     'rasterMaxMs': _percentile(rasterMs, 1),
     'totalSpanP95Ms': _percentile(totalSpanMs, .95),
@@ -783,64 +841,66 @@ void main() {
         expect(audio, isNotNull);
         expect(live2d!.activeModelCount, 0);
 
-        await sampleWholeWindow('game_title');
-        await _tapAction(tester, const [
-          '启程 · 开始新的故事',
-          'Begin · Start a new story',
-        ]);
-        await _waitForText(tester, const [
-          '23点08分',
-          '11:08 p.m.',
-          '23:08',
-        ], reason: 'The main story should start from its original opening');
-        await sampleWholeWindow('manual_reading');
+        if (!_profileAblationMode) {
+          await sampleWholeWindow('game_title');
+          await _tapAction(tester, const [
+            '启程 · 开始新的故事',
+            'Begin · Start a new story',
+          ]);
+          await _waitForText(tester, const [
+            '23点08分',
+            '11:08 p.m.',
+            '23:08',
+          ], reason: 'The main story should start from its original opening');
+          await sampleWholeWindow('manual_reading');
 
-        await openJournal();
-        await sampleWholeWindow('journal_menu');
+          await openJournal();
+          await sampleWholeWindow('journal_menu');
 
-        await _tapAction(tester, const ['沿途回声', 'Journey echoes']);
-        await _waitForText(tester, const [
-          '沿途回声',
-          'Journey echoes',
-        ], reason: 'Open the actual backlog panel');
-        await sampleWholeWindow('backlog');
-        await _tapAction(tester, const ['返回', 'Back'], scroll: false);
-        await openJournal();
-        await _tapAction(tester, const ['阅读偏好', 'Reading preferences']);
-        await _waitForText(tester, const [
-          '阅读偏好',
-          'Reading preferences',
-        ], reason: 'Open the actual reading settings panel');
-        await sampleWholeWindow('settings');
-        await _tapAction(tester, const ['返回', 'Back'], scroll: false);
-        await openJournal();
-        await _tapAction(tester, const ['雾港纪念', 'Harbor memories']);
-        await _waitForText(tester, const [
-          '雾港纪念',
-          'Harbor memories',
-        ], reason: 'Open the actual gallery panel');
-        await sampleWholeWindow('gallery');
-        await _tapAction(tester, const ['返回', 'Back'], scroll: false);
-        await openJournal();
-        await _tapAction(tester, const ['重读信笺', 'Reread letters']);
-        await waitForNovelSlotPage(tester);
-        await sampleWholeWindow('save_slots');
-        await _tapAction(tester, const ['返回', 'Back'], scroll: false);
-        await openJournal();
-        // This menu action is below the fold at 800x600. Search through
-        // actual page drags rather than waiting for an unpainted label.
-        await guest.tapGuest(
-          tester,
-          _findText(tester, const ['旅途手札']) != null
-              ? '返回扉页'
-              : 'Return to title',
-        );
-        await _waitForText(
-          tester,
-          const ['启程 · 开始新的故事', 'Begin · Start a new story'],
-          reason:
-              'Return to the actual title page before revealing its model action',
-        );
+          await _tapAction(tester, const ['沿途回声', 'Journey echoes']);
+          await _waitForText(tester, const [
+            '沿途回声',
+            'Journey echoes',
+          ], reason: 'Open the actual backlog panel');
+          await sampleWholeWindow('backlog');
+          await _tapAction(tester, const ['返回', 'Back'], scroll: false);
+          await openJournal();
+          await _tapAction(tester, const ['阅读偏好', 'Reading preferences']);
+          await _waitForText(tester, const [
+            '阅读偏好',
+            'Reading preferences',
+          ], reason: 'Open the actual reading settings panel');
+          await sampleWholeWindow('settings');
+          await _tapAction(tester, const ['返回', 'Back'], scroll: false);
+          await openJournal();
+          await _tapAction(tester, const ['雾港纪念', 'Harbor memories']);
+          await _waitForText(tester, const [
+            '雾港纪念',
+            'Harbor memories',
+          ], reason: 'Open the actual gallery panel');
+          await sampleWholeWindow('gallery');
+          await _tapAction(tester, const ['返回', 'Back'], scroll: false);
+          await openJournal();
+          await _tapAction(tester, const ['重读信笺', 'Reread letters']);
+          await waitForNovelSlotPage(tester);
+          await sampleWholeWindow('save_slots');
+          await _tapAction(tester, const ['返回', 'Back'], scroll: false);
+          await openJournal();
+          // This menu action is below the fold at 800x600. Search through
+          // actual page drags rather than waiting for an unpainted label.
+          await guest.tapGuest(
+            tester,
+            _findText(tester, const ['旅途手札']) != null
+                ? '返回扉页'
+                : 'Return to title',
+          );
+          await _waitForText(
+            tester,
+            const ['启程 · 开始新的故事', 'Begin · Start a new story'],
+            reason:
+                'Return to the actual title page before revealing its model action',
+          );
+        }
         await _enterReplay(tester);
 
         await _enterHiyoriIdle0(tester, live2d!);

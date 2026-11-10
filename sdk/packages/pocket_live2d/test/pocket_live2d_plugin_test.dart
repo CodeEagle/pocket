@@ -117,13 +117,12 @@ void main() {
         _decodeUint32(drawables.single['maskIndices']! as Uint8List),
         <int>[0],
       );
-      expect(
-        _decodeFloat32(
-          drawables.single['positionsXYPixels']! as Uint8List,
-        ).first,
-        10.0,
-      );
-      expect(drawables.single['indices'], isA<Uint8List>());
+      final meshBytes = drawables.single['meshBytes']! as Uint8List;
+      final meshData = ByteData.sublistView(meshBytes);
+      expect(meshData.getUint32(0, Endian.little), pocketLive2dPms1Magic);
+      expect(meshData.getUint32(4, Endian.little), 3);
+      expect(meshData.getUint32(8, Endian.little), 3);
+      expect(meshData.getFloat32(16, Endian.little), 10.0);
       expect(drawables.single['maskIndices'], isA<Uint8List>());
       expect(jsonEncode(result), isNot(contains('ParamAngleX')));
     },
@@ -145,18 +144,15 @@ void main() {
       final firstDrawable =
           (first['drawables']! as List<Map<String, Object?>>).single;
       expect(first['topologyMode'], 'full');
-      expect(firstDrawable['uvs'], isA<Uint8List>());
-      expect(firstDrawable['indices'], isA<Uint8List>());
+      expect(firstDrawable['meshBytes'], isA<Uint8List>());
       expect(firstDrawable['maskIndices'], isA<Uint8List>());
 
       final next = await plugin.update(request()) as Map<String, Object?>;
       final nextDrawable =
           (next['drawables']! as List<Map<String, Object?>>).single;
       expect(next['topologyMode'], 'cached-v1');
-      expect(nextDrawable.containsKey('uvs'), isFalse);
-      expect(nextDrawable.containsKey('indices'), isFalse);
       expect(nextDrawable.containsKey('maskIndices'), isFalse);
-      expect(nextDrawable['positionsXYPixels'], isA<Uint8List>());
+      expect(nextDrawable['meshBytes'], isA<Uint8List>());
       expect(nextDrawable['renderOrder'], 2);
       expect(nextDrawable['opacity'], 0.5);
       expect(models.single.topologyReads, <bool>[true, false]);
@@ -223,7 +219,7 @@ void main() {
       final frame =
           await legacyPlugin.update(baseRequest) as Map<String, Object?>;
       expect(
-        ((frame['drawables']! as List<Map<String, Object?>>).single)['indices'],
+        ((frame['drawables']! as List<Map<String, Object?>>).single)['meshBytes'],
         isA<Uint8List>(),
       );
 
@@ -513,8 +509,7 @@ void main() {
       final drawable =
           (result['drawables']! as List<Map<String, Object?>>).single;
       expect(drawable['textureIndex'], -1);
-      expect(drawable['positionsXYPixels'], Uint8List(0));
-      expect(drawable['indices'], Uint8List(0));
+      expect(drawable['meshBytes'], Uint8List(0));
     },
   );
 }
@@ -531,14 +526,6 @@ PocketPluginContext _context(PocketLive2dPlugin plugin) => PocketPluginContext(
   sessionId: 'live2d-session',
   registry: PocketHostRegistry(),
 );
-
-List<double> _decodeFloat32(Uint8List bytes) {
-  final view = ByteData.sublistView(bytes);
-  return <double>[
-    for (var offset = 0; offset < bytes.length; offset += 4)
-      view.getFloat32(offset, Endian.little),
-  ];
-}
 
 List<int> _decodeUint32(Uint8List bytes) {
   final view = ByteData.sublistView(bytes);

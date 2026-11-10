@@ -1,0 +1,160 @@
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -1235,10 +1235,10 @@
+         let border_color = scale_alpha(r.border_color, op);
+         let rounded_border = r.radius > 0.0 && r.border_width > 0.0 && alpha(border_color) > 0;
+         let rounded_ring = rounded_border && (has_grad || alpha(bg_color) > 0);
+-        let native_round = self.native_rounded_rects && r.shadow == 0 && !has_grad;
++        let native_round = self.native_rounded_rects && !has_grad;
+ 
+         if r.shadow > 0 && (alpha(bg_color) > 0 || has_grad) {
+-            self.emit_shadow(dl, &world, l.w, l.h, r.radius, r.shadow, op, &clip);
++            self.emit_shadow(dl, &world, l.w, l.h, r.radius, r.shadow, op, &clip, native_round);
+         }
+ 
+         let is_arc = r.arc_width > 0.0 && r.arc_sweep != 0.0;
+@@ -2858,7 +2858,7 @@
+         }
+     }
+ 
+-    fn emit_shadow(&mut self, dl: &mut DrawList, world: &Affine, w: f32, h: f32, radius: f32, level: u32, opacity: f32, clip: &Clip) {
++    fn emit_shadow(&mut self, dl: &mut DrawList, world: &Affine, w: f32, h: f32, radius: f32, level: u32, opacity: f32, clip: &Clip, allow_native: bool) {
+         if !world.is_axis_aligned() {
+             return;
+         }
+@@ -2879,7 +2879,7 @@
+                 radius + spread,
+                 Fill::Flat(color),
+                 clip,
+-                false,
++                allow_native,
+             );
+         }
+     }
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -912,6 +912,124 @@
+         .map(|(at, _)| (f32::from_bits(composite[at + 6]), composite[at + 7]))
+         .collect();
+     assert_eq!(paints, [(0.0, 0xffaabbcc), (0.0, 0xff223344)]);
++}
++
++#[test]
++fn native_rounded_shadows_preserve_layers_and_fallbacks() {
++    fn add_shadow(ui: &mut Ui, level: u32, border: bool, gradient: bool, scale_x: f64) {
++        let node = ui.create_node(0);
++        for (prop, value) in [
++            (spec::prop::WIDTH, 220.0),
++            (spec::prop::HEIGHT, 220.0),
++            (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
++            (spec::prop::INSET_L, 20.0),
++            (spec::prop::INSET_T, 10.0),
++            (spec::prop::RADIUS, 38.0),
++            (spec::prop::SHADOW, level as f64),
++        ] {
++            ui.set_prop(node, prop, value);
++        }
++        if gradient {
++            ui.set_prop(node, spec::prop::GRAD_FROM, 0xff223344u32 as f64);
++            ui.set_prop(node, spec::prop::GRAD_TO, 0xff556677u32 as f64);
++            ui.set_prop(node, spec::prop::GRAD_DIR, spec::GradDir::ToRight as u32 as f64);
++        } else {
++            ui.set_prop(node, spec::prop::BG_COLOR, 0xff223344u32 as f64);
++        }
++        if border {
++            ui.set_prop(node, spec::prop::BORDER_WIDTH, 6.0);
++            ui.set_prop(node, spec::prop::BORDER_COLOR, 0xffaabbccu32 as f64);
++        }
++        if scale_x != 1.0 {
++            ui.set_prop(node, spec::prop::SCALE_X, scale_x);
++        }
++        ui.insert_before(spec::ROOT_ID, node, 0);
++        ui.tick();
++    }
++
++    fn rounded_rects(words: &[u32]) -> Vec<[u32; 7]> {
++        let mut result = Vec::new();
++        let mut i = 0;
++        while i < words.len() {
++            match words[i] {
++                spec::draw_op::ROUNDED_RECT => {
++                    result.push(core::array::from_fn(|offset| words[i + 1 + offset]));
++                    i += 8;
++                }
++                spec::draw_op::RECT => i += 4,
++                spec::draw_op::GRAD_RECT => i += 6,
++                spec::draw_op::SCISSOR => i += 3,
++                spec::draw_op::SCISSOR_POP => i += 1,
++                other => panic!("unexpected DrawList op {other}"),
++            }
++        }
++        result
++    }
++
++    fn assert_rect(
++        words: [u32; 7],
++        x: f32,
++        y: f32,
++        width: f32,
++        height: f32,
++        radius: f32,
++        border_width: f32,
++        color: u32,
++    ) {
++        assert_eq!(
++            (
++                f32::from_bits(words[0]),
++                f32::from_bits(words[1]),
++                f32::from_bits(words[2]),
++                f32::from_bits(words[3]),
++                f32::from_bits(words[4]),
++                f32::from_bits(words[5]),
++                words[6],
++            ),
++            (x, y, width, height, radius, border_width, color),
++        );
++    }
++
++    let mut level_one = Ui::new();
++    add_shadow(&mut level_one, 1, true, false, 1.0);
++    let legacy = level_one.draw().words.clone();
++    assert_eq!(validate_drawlist(&legacy)[spec::draw_op::ROUNDED_RECT as usize], 0);
++    assert!(validate_drawlist(&legacy).iter().sum::<u32>() > 100);
++    level_one.set_native_rounded_rects(true);
++    let words = level_one.draw().words.clone();
++    assert_eq!(validate_drawlist(&words).iter().sum::<u32>(), 4);
++    let records = rounded_rects(&words);
++    assert_eq!(records.len(), 4);
++    assert_rect(records[0], 20.0, 11.0, 220.0, 220.0, 38.0, 0.0, 0x16000000);
++    assert_rect(records[1], 19.0, 11.0, 222.0, 222.0, 39.0, 0.0, 0x0a000000);
++    assert_rect(records[2], 20.0, 10.0, 220.0, 220.0, 38.0, 0.0, 0xffaabbcc);
++    assert_rect(records[3], 26.0, 16.0, 208.0, 208.0, 32.0, 0.0, 0xff223344);
++
++    let mut level_three = Ui::new();
++    add_shadow(&mut level_three, 3, false, false, 1.0);
++    let legacy = level_three.draw().words.clone();
++    assert_eq!(validate_drawlist(&legacy)[spec::draw_op::ROUNDED_RECT as usize], 0);
++    level_three.set_native_rounded_rects(true);
++    let words = level_three.draw().words.clone();
++    assert_eq!(validate_drawlist(&words).iter().sum::<u32>(), 4);
++    let records = rounded_rects(&words);
++    assert_eq!(records.len(), 4);
++    assert_rect(records[0], 19.0, 11.0, 222.0, 222.0, 39.0, 0.0, 0x1c000000);
++    assert_rect(records[1], 17.0, 12.0, 226.0, 226.0, 41.0, 0.0, 0x0e000000);
++    assert_rect(records[2], 15.0, 14.0, 230.0, 230.0, 43.0, 0.0, 0x07000000);
++    assert_rect(records[3], 20.0, 10.0, 220.0, 220.0, 38.0, 0.0, 0xff223344);
++
++    let mut nonuniform = Ui::new();
++    add_shadow(&mut nonuniform, 1, false, false, 1.5);
++    nonuniform.set_native_rounded_rects(true);
++    let words = nonuniform.draw().words.clone();
++    assert!(rounded_rects(&words).is_empty());
++
++    let mut gradient = Ui::new();
++    add_shadow(&mut gradient, 1, false, true, 1.0);
++    gradient.set_native_rounded_rects(true);
++    let words = gradient.draw().words.clone();
++    assert!(rounded_rects(&words).is_empty());
+ }
+ 
+ #[test]

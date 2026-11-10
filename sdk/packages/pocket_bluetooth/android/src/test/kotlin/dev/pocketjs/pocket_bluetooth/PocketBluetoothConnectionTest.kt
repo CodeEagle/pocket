@@ -1,6 +1,9 @@
 package dev.pocketjs.pocket_bluetooth
 
+import android.bluetooth.BluetoothProfile
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PocketBluetoothConnectionTest {
@@ -19,5 +22,12 @@ class PocketBluetoothConnectionTest {
             "hardware_bluetooth_disconnected" to "Bluetooth connection was released",
             PocketGattConnection.OperationResult.Success().disconnectCause(),
         )
+    }
+
+    @Test
+    fun onlyNativeDisconnectedStateConfirmsGattClose() {
+        assertFalse(isNativeBleDisconnectConfirmation(BluetoothProfile.STATE_CONNECTED))
+        assertFalse(isNativeBleDisconnectConfirmation(BluetoothProfile.STATE_DISCONNECTING))
+        assertTrue(isNativeBleDisconnectConfirmation(BluetoothProfile.STATE_DISCONNECTED))
     }
 }

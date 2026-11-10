@@ -311,10 +311,9 @@ Future<void> _probeRawHiyoriFrame(DynamicLibrary core) async {
     final outliers = <Map<String, Object?>>[];
     for (final raw in frame['drawables']! as List<Object?>) {
       final drawable = raw! as Map<String, Object?>;
-      final positionRange = _floatRange(
-        drawable['positionsXYPixels']! as Uint8List,
-      );
-      final uvRange = _floatRange(drawable['uvs']! as Uint8List);
+      final meshBytes = drawable['meshBytes']! as Uint8List;
+      final positionRange = _pms1PositionRange(meshBytes);
+      final uvRange = _pms1UvRange(meshBytes);
       if (positionRange.$1 < -1000000 ||
           positionRange.$2 > 1000000 ||
           uvRange.$1 < 0 ||
@@ -333,15 +332,40 @@ Future<void> _probeRawHiyoriFrame(DynamicLibrary core) async {
   }
 }
 
-(double, double) _floatRange(Uint8List bytes) {
+(double, double) _pms1PositionRange(Uint8List bytes) {
   if (bytes.isEmpty) return (double.nan, double.nan);
   final data = ByteData.sublistView(bytes);
+  final vertexCount = data.getUint32(4, Endian.little);
   var minimum = double.infinity;
   var maximum = double.negativeInfinity;
-  for (var offset = 0; offset < bytes.length; offset += 4) {
-    final value = data.getFloat32(offset, Endian.little);
-    if (value < minimum) minimum = value;
-    if (value > maximum) maximum = value;
+  for (var vertex = 0; vertex < vertexCount; vertex++) {
+    final offset = 16 + vertex * 16;
+    for (final value in <double>[
+      data.getFloat32(offset, Endian.little),
+      data.getFloat32(offset + 4, Endian.little),
+    ]) {
+      if (value < minimum) minimum = value;
+      if (value > maximum) maximum = value;
+    }
+  }
+  return (minimum, maximum);
+}
+
+(double, double) _pms1UvRange(Uint8List bytes) {
+  if (bytes.isEmpty) return (double.nan, double.nan);
+  final data = ByteData.sublistView(bytes);
+  final vertexCount = data.getUint32(4, Endian.little);
+  var minimum = double.infinity;
+  var maximum = double.negativeInfinity;
+  for (var vertex = 0; vertex < vertexCount; vertex++) {
+    final offset = 16 + vertex * 16;
+    for (final value in <double>[
+      data.getFloat32(offset + 8, Endian.little),
+      data.getFloat32(offset + 12, Endian.little),
+    ]) {
+      if (value < minimum) minimum = value;
+      if (value > maximum) maximum = value;
+    }
   }
   return (minimum, maximum);
 }

@@ -2897,7 +2897,9 @@ fn trace_worker_exit(state: &WorkerState, status: &'static str) {
             if next.session == *session && next.kind == "io.fact" {
                 continue;
             }
-            if !(TraceActor::for_event(Mode::Replay, &next) == TraceActor::Worker && next.session == *session) {
+            if !(TraceActor::for_event(Mode::Replay, &next) == TraceActor::Worker
+                && next.session == *session)
+            {
                 trace.wait_for_advance(next.seq)?;
                 continue;
             }
@@ -4501,10 +4503,8 @@ mod tests {
         // Each delay is below the 300 ms per-read budget, but the headers plus
         // body take 360 ms in total. The old agent (without timeout()) reads
         // the byte successfully; the fixed agent aborts at the total budget.
-        let (headers_url, headers_thread) = delayed_server(
-            Duration::from_millis(120),
-            vec![Duration::from_millis(240)],
-        );
+        let (headers_url, headers_thread) =
+            delayed_server(Duration::from_millis(120), vec![Duration::from_millis(240)]);
         let headers_started = Instant::now();
         let response = http_agent(Duration::from_millis(300))
             .get(&headers_url)
@@ -4513,7 +4513,10 @@ mod tests {
         assert!(headers_started.elapsed() < Duration::from_millis(280));
         let mut reader = response.into_reader();
         let mut byte = [0u8; 1];
-        assert!(reader.read(&mut byte).is_err(), "body exceeded the total budget");
+        assert!(
+            reader.read(&mut byte).is_err(),
+            "body exceeded the total budget"
+        );
         assert!(
             headers_started.elapsed() < Duration::from_millis(500),
             "body timeout did not interrupt promptly"
@@ -4537,9 +4540,8 @@ mod tests {
 
             let (mut slow, _) = listener.accept().unwrap();
             let _ = slow.read(&mut request);
-            let _ = slow.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n",
-            );
+            let _ = slow
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n");
             let _ = slow.flush();
             for _ in 0..3 {
                 thread::sleep(Duration::from_millis(80));
@@ -4584,7 +4586,10 @@ mod tests {
                 Ok(_) => unreachable!(),
             }
         }
-        assert!(timed_out, "redirect body exceeded the remaining total budget");
+        assert!(
+            timed_out,
+            "redirect body exceeded the remaining total budget"
+        );
         assert!(started.elapsed() < Duration::from_millis(500));
         thread.join().unwrap();
     }
@@ -4691,14 +4696,8 @@ mod tests {
             ctx.eval::<(), _>("__pocketWorkerChannels.configure(2,0);")
                 .unwrap();
         });
-        let outputs = collect_worker_outputs(
-            &ui_context,
-            &mut bridge,
-            &[9, 2],
-            "timeout",
-            &trace,
-            &[],
-        );
+        let outputs =
+            collect_worker_outputs(&ui_context, &mut bridge, &[9, 2], "timeout", &trace, &[]);
         let error_pos = outputs
             .iter()
             .position(|record| record.first() == Some(&9))

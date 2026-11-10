@@ -15,9 +15,8 @@ use crate::offload::OffloadProviderRequest;
 pub fn encode_offload_request(request: &OffloadProviderRequest) -> Vec<u8> {
     let method_bytes = request.method.as_bytes();
     let payload_bytes = request.payload.as_bytes();
-    let mut out = Vec::with_capacity(
-        1 + 4 + 4 + 8 + 8 + 4 + method_bytes.len() + 4 + payload_bytes.len(),
-    );
+    let mut out =
+        Vec::with_capacity(1 + 4 + 4 + 8 + 8 + 4 + method_bytes.len() + 4 + payload_bytes.len());
     out.push(OFFLOAD_BINARY_MAGIC);
     out.extend_from_slice(&request.generation.to_le_bytes());
     out.extend_from_slice(&request.session.to_le_bytes());
@@ -39,9 +38,7 @@ pub fn encode_offload_request(request: &OffloadProviderRequest) -> Vec<u8> {
 /// - `u64` id LE
 /// - `u8` status (`1 = Ok(payload)`, `0 = Err(error)`)
 /// - `u32` text_len LE + UTF-8 text bytes
-pub fn decode_offload_completion(
-    bytes: &[u8],
-) -> Option<(u32, u32, u64, Result<String, String>)> {
+pub fn decode_offload_completion(bytes: &[u8]) -> Option<(u32, u32, u64, Result<String, String>)> {
     if bytes.len() < 22 || bytes.len() > 16384 || bytes[0] != OFFLOAD_BINARY_MAGIC {
         return None;
     }
@@ -53,7 +50,9 @@ pub fn decode_offload_completion(
     if 22usize.checked_add(text_len)? != bytes.len() {
         return None;
     }
-    let text = std::str::from_utf8(&bytes[22..22 + text_len]).ok()?.to_owned();
+    let text = std::str::from_utf8(&bytes[22..22 + text_len])
+        .ok()?
+        .to_owned();
     let result = match status {
         1 => Ok(text),
         0 => Err(text),

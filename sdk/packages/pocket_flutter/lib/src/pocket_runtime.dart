@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:ffi';
 import 'dart:io' show File, Platform;
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart' show immutable;
 
 import 'pocket_binary_codec.dart';
 import 'pocket_duplex.dart';
@@ -496,6 +498,48 @@ typedef _DuplexPeekDart =
     );
 typedef _DuplexU32Native = Uint32 Function();
 typedef _DuplexU32Dart = int Function();
+typedef _SetPerfSamplingNative = Void Function(Uint32 enabled);
+typedef _SetPerfSamplingDart = void Function(int enabled);
+typedef _LastFrameStageTimingsNative =
+    Uint32 Function(Pointer<Void> handle, Pointer<Uint64> outTimings);
+typedef _LastFrameStageTimingsDart =
+    int Function(Pointer<Void> handle, Pointer<Uint64> outTimings);
+
+/// Per-frame native stage durations in microseconds (`pocket.native`).
+@immutable
+final class PocketNativeStageTimings {
+  const PocketNativeStageTimings({
+    this.jsTickUs = 0,
+    this.live2dUpdateUs = 0,
+    this.live2dEmitUs = 0,
+    this.relayoutUs = 0,
+    this.drawDecodeUs = 0,
+    this.spliceUs = 0,
+    this.encodeUs = 0,
+    this.otherUs = 0,
+  });
+
+  static const PocketNativeStageTimings zero = PocketNativeStageTimings();
+
+  final int jsTickUs;
+  final int live2dUpdateUs;
+  final int live2dEmitUs;
+  final int relayoutUs;
+  final int drawDecodeUs;
+  final int spliceUs;
+  final int encodeUs;
+  final int otherUs;
+
+  double get jsTickMs => jsTickUs / Duration.microsecondsPerMillisecond;
+  double get live2dUpdateMs =>
+      live2dUpdateUs / Duration.microsecondsPerMillisecond;
+  double get live2dEmitMs => live2dEmitUs / Duration.microsecondsPerMillisecond;
+  double get relayoutMs => relayoutUs / Duration.microsecondsPerMillisecond;
+  double get drawDecodeMs => drawDecodeUs / Duration.microsecondsPerMillisecond;
+  double get spliceMs => spliceUs / Duration.microsecondsPerMillisecond;
+  double get encodeMs => encodeUs / Duration.microsecondsPerMillisecond;
+  double get otherMs => otherUs / Duration.microsecondsPerMillisecond;
+}
 
 /// FFI binding to the PocketJS host. Apple targets link the static archive into
 /// the runner process; Android packages the shared library in the APK.
@@ -602,6 +646,71 @@ final class FfiPocketRuntime
   bool _asyncStopped = false;
   _PocketOffloadBinding? _offloadBinding;
   bool _offloadReplayConfigured = false;
+  bool _collectDecodeTiming = false;
+  int lastDecodeMicroseconds = 0;
+  PocketNativeStageTimings lastNativeStageTimings =
+      PocketNativeStageTimings.zero;
+  _SetPerfSamplingDart? _setPerfSampling;
+  _LastFrameStageTimingsDart? _lastFrameStageTimings;
+  bool _perfSamplingLookedUp = false;
+  Pointer<Uint64>? _stageTimingsBuffer;
+
+  bool get collectDecodeTiming => _collectDecodeTiming;
+
+  set collectDecodeTiming(bool value) {
+    if (_collectDecodeTiming == value) return;
+    _collectDecodeTiming = value;
+    _lookupPerfSampling();
+    _setPerfSampling?.call(value ? 1 : 0);
+  }
+
+  void _lookupPerfSampling() {
+    if (_perfSamplingLookedUp) return;
+    _perfSamplingLookedUp = true;
+    try {
+      _setPerfSampling = _library
+          .lookupFunction<_SetPerfSamplingNative, _SetPerfSamplingDart>(
+            'pocket_set_perf_sampling_enabled',
+            isLeaf: true,
+          );
+      _lastFrameStageTimings = _library
+          .lookupFunction<
+            _LastFrameStageTimingsNative,
+            _LastFrameStageTimingsDart
+          >('pocket_last_frame_stage_timings_us', isLeaf: true);
+    } on Object {
+      _setPerfSampling = null;
+      _lastFrameStageTimings = null;
+    }
+  }
+
+  void _captureLastNativeStageTimings() {
+    if (!_collectDecodeTiming || _disposed) {
+      lastNativeStageTimings = PocketNativeStageTimings.zero;
+      return;
+    }
+    _lookupPerfSampling();
+    final getter = _lastFrameStageTimings;
+    if (getter == null) {
+      lastNativeStageTimings = PocketNativeStageTimings.zero;
+      return;
+    }
+    final buffer = _stageTimingsBuffer ??= calloc<Uint64>(8);
+    if (getter(_handle, buffer) == 8) {
+      lastNativeStageTimings = PocketNativeStageTimings(
+        jsTickUs: buffer[0],
+        live2dUpdateUs: buffer[1],
+        live2dEmitUs: buffer[2],
+        relayoutUs: buffer[3],
+        drawDecodeUs: buffer[4],
+        spliceUs: buffer[5],
+        encodeUs: buffer[6],
+        otherUs: buffer[7],
+      );
+    } else {
+      lastNativeStageTimings = PocketNativeStageTimings.zero;
+    }
+  }
 
   static void _requirePinnedBinaryAbi(DynamicLibrary library) {
     final missing = <String>[];
@@ -1159,6 +1268,7 @@ final class FfiPocketRuntime
           base?.sequence ?? 0,
           length,
         );
+        if (_collectDecodeTiming) _captureLastNativeStageTimings();
         if (pointer.address == 0 || length.value == 0) {
           final error = lastError;
           if (error != null && error.isNotEmpty) {
@@ -1287,6 +1397,7 @@ final class FfiPocketRuntime
     try {
       length.value = 0;
       final pointer = binary(_handle, delta, length);
+      if (_collectDecodeTiming) _captureLastNativeStageTimings();
       if (pointer.address == 0 || length.value == 0) {
         _throwLastError('pocket_frame_binary returned no frame');
       }
@@ -1314,11 +1425,17 @@ final class FfiPocketRuntime
     PocketFrame? frame;
     Object? parseError;
     StackTrace? parseStack;
+    final decodeStopwatch = collectDecodeTiming ? (Stopwatch()..start()) : null;
     try {
-      frame = parse(bytes);
+      frame = developer.Timeline.timeSync('pocket.decode', () => parse(bytes));
     } on Object catch (error, stack) {
       parseError = error;
       parseStack = stack;
+    } finally {
+      if (decodeStopwatch != null) {
+        decodeStopwatch.stop();
+        lastDecodeMicroseconds = decodeStopwatch.elapsedMicroseconds;
+      }
     }
 
     // Keep native error precedence from the old copy-then-check sequence.
@@ -2020,6 +2137,15 @@ final class FfiPocketRuntime
     }
     _duplexEndpoints.clear();
     _offloadBinding?.disposeBeforeNative();
+    if (_collectDecodeTiming) {
+      _setPerfSampling?.call(0);
+      _collectDecodeTiming = false;
+    }
+    final stageBuffer = _stageTimingsBuffer;
+    _stageTimingsBuffer = null;
+    if (stageBuffer != null) {
+      calloc.free(stageBuffer);
+    }
     _destroy(_handle);
     _offloadBinding?.disposeAfterNative();
     _offloadBinding = null;
@@ -2538,7 +2664,9 @@ final class FfiPocketRuntime
       'type': switch (op) {
         PocketRectOp() => 'rect',
         PocketRoundedOp() => 'rounded',
+        PocketArcOp() => 'arc',
         PocketGradientOp() => 'gradient',
+        PocketRoundedGradientOp() => 'roundedGradient',
         PocketTriangleOp() => 'triangle',
         PocketTextureTriangleOp() => 'textureTriangle',
         PocketMeshLayerBeginOp() => 'meshLayerBegin',
@@ -2568,10 +2696,25 @@ final class FfiPocketRuntime
       case PocketRoundedOp value:
         result['color'] = value.color;
         result['radius'] = value.radius;
+        if (value.borderWidth > 0) result['borderWidth'] = value.borderWidth;
+      case PocketArcOp value:
+        result['color'] = value.color;
+        result['radius'] = value.radius;
+        result['strokeWidth'] = value.strokeWidth;
+        result['startAngle'] = value.startAngle;
+        result['sweepAngle'] = value.sweepAngle;
       case PocketGradientOp value:
         result['fromColor'] = value.fromColor;
         result['toColor'] = value.toColor;
         result['direction'] = value.direction;
+      case PocketRoundedGradientOp value:
+        result['fromColor'] = value.fromColor;
+        result['toColor'] = value.toColor;
+        result['direction'] = value.direction;
+        result['radius'] = value.radius;
+        if (value.viaColor != null) result['viaColor'] = value.viaColor;
+        if (value.viaPosition != null)
+          result['viaPosition'] = value.viaPosition;
       case PocketTriangleOp value:
         result['points'] = value.points
             .map((point) => <String, dynamic>{'x': point.x, 'y': point.y})

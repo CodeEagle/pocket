@@ -1,0 +1,491 @@
+diff --git a/contracts/spec/spec.ts b/contracts/spec/spec.ts
+--- a/contracts/spec/spec.ts
++++ b/contracts/spec/spec.ts
+@@ -1533,9 +1533,17 @@
+ //                           dstOut; masks union by source-over in this group.
+ //   MESH_LAYER_RESTORE (1 word): op — closes the optional mask group and the
+ //                           enclosing mesh layer. Layers cannot nest.
++//   ROUNDED_RECT (8 words): op, x, y, width, height, radius, borderWidth, ABGR
++//                           color. `radius` and `borderWidth` are screen-space
++//                           floats; zero borderWidth fills, positive widths
++//                           draw the inward rounded ring.
++//   ARC (8 words): op, centerX, centerY, midlineRadius, strokeWidth,
++//                  startDegrees, signedSweepDegrees, ABGR color. Zero degrees
++//                  starts at 12 o'clock; positive sweep is clockwise. Partial
++//                  arcs have round caps; a full ±360 sweep closes the ring.
+ 
+ /** Closed DrawList operation generation; drivers and archives use matching headers. */
+-export const DRAW_LIST_VERSION = 3;
++export const DRAW_LIST_VERSION = 4;
+ 
+ export const DRAW_OP = {
+   rect: 1,
+@@ -1555,6 +1563,7 @@
+   texTriFloat: 15,
+   texTriRepeatFloat: 16,
+   roundedRect: 17,
++  arc: 18,
+ } as const;
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/contracts/spec/gen-rust.ts b/contracts/spec/gen-rust.ts
+--- a/contracts/spec/gen-rust.ts
++++ b/contracts/spec/gen-rust.ts
+@@ -463,7 +463,7 @@
+   put("/// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,");
+   put("/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,");
+   put("/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,");
+-  put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT 8.");
++  put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each.");
+   put(`pub const DRAW_LIST_VERSION: u32 = ${DRAW_LIST_VERSION};`);
+   put("pub mod draw_op {");
+   for (const [name, v] of Object.entries(DRAW_OP)) {
+diff --git a/contracts/generated/pocket_spec.h b/contracts/generated/pocket_spec.h
+--- a/contracts/generated/pocket_spec.h
++++ b/contracts/generated/pocket_spec.h
+@@ -29,7 +29,7 @@
+ #define POCKET_ANALOG_CENTER 0x8080U
+ 
+ /* Closed DrawList operation set; word layouts are specified in spec.ts. */
+-#define POCKET_DRAW_LIST_VERSION 3U
++#define POCKET_DRAW_LIST_VERSION 4U
+ #define POCKET_DRAW_OP_RECT 1U
+ #define POCKET_DRAW_OP_GRAD_RECT 2U
+ #define POCKET_DRAW_OP_GLYPH_RUN 3U
+@@ -47,6 +47,7 @@
+ #define POCKET_DRAW_OP_TEX_TRI_FLOAT 15U
+ #define POCKET_DRAW_OP_TEX_TRI_REPEAT_FLOAT 16U
+ #define POCKET_DRAW_OP_ROUNDED_RECT 17U
++#define POCKET_DRAW_OP_ARC 18U
+ 
+ /* Portable operation numbers (contracts/spec/ui-ops.ts): what a program's
+  * operation provider serves and pocket_runtime_op dispatches. */
+diff --git a/engine/spec/src/lib.rs b/engine/spec/src/lib.rs
+--- a/engine/spec/src/lib.rs
++++ b/engine/spec/src/lib.rs
+@@ -470,8 +470,8 @@
+ /// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,
+ /// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,
+ /// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,
+-/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT 8.
+-pub const DRAW_LIST_VERSION: u32 = 3;
++/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each.
++pub const DRAW_LIST_VERSION: u32 = 4;
+ pub mod draw_op {
+     pub const RECT: u32 = 1;
+     pub const GRAD_RECT: u32 = 2;
+@@ -490,6 +490,7 @@
+     pub const TEX_TRI_FLOAT: u32 = 15;
+     pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;
+     pub const ROUNDED_RECT: u32 = 17;
++    pub const ARC: u32 = 18;
+ }
+ 
+ /// .pak container constants (byte-compatible with dreamcart's format;
+diff --git a/engine/core/src/draw.rs b/engine/core/src/draw.rs
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -1716,12 +1716,17 @@
+         }
+         let rmid = outer - width * 0.5;
+         let half = width * 0.5;
++        let sweep = clampf(r.arc_sweep, -360.0, 360.0);
++        if self.native_rounded_rects
++            && self.emit_native_arc(dl, cx, cy, outer, width, r.arc_start, sweep, color, clip)
++        {
++            return;
++        }
+         // Ring test in squared space (|d - rmid| <= half without the sqrt).
+         let ring_in = (rmid - half).max(0.0);
+         let ring_in2 = ring_in * ring_in;
+         let ring_out = rmid + half;
+         let ring_out2 = ring_out * ring_out;
+-        let sweep = clampf(r.arc_sweep, -360.0, 360.0);
+         let (a0, asweep) = if sweep < 0.0 { (r.arc_start + sweep, -sweep) } else { (r.arc_start, sweep) };
+         let full = asweep >= 360.0;
+         let major = asweep > 180.0;
+@@ -1832,6 +1837,51 @@
+             }
+             flush(dl, run_start, row_x1, run_cov);
+         }
++    }
++
++    /// Emit an opt-in vector arc with the same world-space centerline and
++    /// signed degree sweep as the legacy supersampled RECT run path.
++    fn emit_native_arc(
++        &self,
++        dl: &mut DrawList,
++        cx: f32,
++        cy: f32,
++        outer_radius: f32,
++        width: f32,
++        start_degrees: f32,
++        sweep_degrees: f32,
++        color: u32,
++        clip: &Clip,
++    ) -> bool {
++        let midline_radius = outer_radius - width * 0.5;
++        if ![cx, cy, outer_radius, width, midline_radius, start_degrees, sweep_degrees]
++            .iter()
++            .all(|value| value.is_finite())
++            || outer_radius <= 0.0
++            || width <= 0.0
++            || midline_radius < 0.0
++            || sweep_degrees == 0.0
++        {
++            return false;
++        }
++        if cx + outer_radius + 1.0 <= clip.x0
++            || cx - outer_radius - 1.0 >= clip.x1
++            || cy + outer_radius + 1.0 <= clip.y0
++            || cy - outer_radius - 1.0 >= clip.y1
++        {
++            return true;
++        }
++        dl.words.extend_from_slice(&[
++            spec::draw_op::ARC,
++            cx.to_bits(),
++            cy.to_bits(),
++            midline_radius.to_bits(),
++            width.to_bits(),
++            start_degrees.to_bits(),
++            sweep_degrees.to_bits(),
++            color,
++        ]);
++        true
+     }
+ 
+     /// AABB (intersected with the screen) of a local rect under `world`.
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -1553,6 +1553,7 @@
+                 }
+                 x if x == spec::draw_op::TEX_QUAD => 9,
+                 x if x == spec::draw_op::ROUNDED_RECT => 8,
++                x if x == spec::draw_op::ARC => 8,
+                 x if x == spec::draw_op::SCISSOR => 3,
+                 x if x == spec::draw_op::SCISSOR_POP => 1,
+                 x if x == spec::draw_op::TRI => 7,
+diff --git a/engine/core/src/tests.rs b/engine/core/src/tests.rs
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -201,7 +201,7 @@
+ /// Walk a DrawList asserting the pinned CPU-clip invariant: every coordinate
+ /// in [0, SCREEN_W] x [0, SCREEN_H], rect extents in range, scissors
+ /// balanced, only known ops. Returns per-op counts (indexed by op code).
+-fn validate_drawlist(words: &[u32]) -> [u32; 18] {
++fn validate_drawlist(words: &[u32]) -> [u32; 19] {
+     let (sw, sh) = (spec::SCREEN_W as i32, spec::SCREEN_H as i32);
+     let xy_ok = |w: u32| {
+         let (x, y) = decode_xy(w);
+@@ -213,7 +213,7 @@
+         let (w, h) = decode_wh(whw);
+         assert!(x + w <= sw && y + h <= sh, "rect exceeds screen: {x},{y} {w}x{h}");
+     };
+-    let mut counts = [0u32; 18];
++    let mut counts = [0u32; 19];
+     let mut depth = 0i32;
+     let mut i = 0usize;
+     while i < words.len() {
+@@ -250,6 +250,13 @@
+                 for word in i + 1..i + 7 { assert!(f32::from_bits(words[word]).is_finite()); }
+                 assert!(f32::from_bits(words[i + 3]) > 0.0 && f32::from_bits(words[i + 4]) > 0.0);
+                 assert!(f32::from_bits(words[i + 5]) > 0.0 && f32::from_bits(words[i + 6]) >= 0.0);
++                i += 8;
++            }
++            spec::draw_op::ARC => {
++                for word in i + 1..i + 7 { assert!(f32::from_bits(words[word]).is_finite()); }
++                assert!(f32::from_bits(words[i + 3]) >= 0.0);
++                assert!(f32::from_bits(words[i + 4]) > 0.0);
++                assert_ne!(f32::from_bits(words[i + 6]), 0.0);
+                 i += 8;
+             }
+             spec::draw_op::SURFACE_QUAD => {
+@@ -1030,6 +1037,94 @@
+     gradient.set_native_rounded_rects(true);
+     let words = gradient.draw().words.clone();
+     assert!(rounded_rects(&words).is_empty());
++}
++
++#[test]
++fn native_arcs_preserve_signed_geometry_and_legacy_fallback() {
++    fn add_arc(ui: &mut Ui, sweep: f64, width: f64, rotate: f64) {
++        let node = ui.create_node(0);
++        for (prop, value) in [
++            (spec::prop::WIDTH, 190.0),
++            (spec::prop::HEIGHT, 190.0),
++            (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
++            (spec::prop::INSET_L, 20.25),
++            (spec::prop::INSET_T, 10.5),
++            (spec::prop::ARC_START, 15.0),
++            (spec::prop::ARC_SWEEP, sweep),
++            (spec::prop::ARC_WIDTH, width),
++            (spec::prop::BG_COLOR, 0xff123456u32 as f64),
++            (spec::prop::ROTATE, rotate),
++        ] {
++            ui.set_prop(node, prop, value);
++        }
++        ui.insert_before(spec::ROOT_ID, node, 0);
++        ui.tick();
++    }
++
++    fn arcs(words: &[u32]) -> Vec<[u32; 7]> {
++        let mut result = Vec::new();
++        let mut i = 0;
++        while i < words.len() {
++            match words[i] {
++                spec::draw_op::ARC => {
++                    result.push(core::array::from_fn(|offset| words[i + 1 + offset]));
++                    i += 8;
++                }
++                spec::draw_op::RECT => i += 4,
++                spec::draw_op::GRAD_RECT => i += 6,
++                spec::draw_op::SCISSOR => i += 3,
++                spec::draw_op::SCISSOR_POP => i += 1,
++                other => panic!("unexpected DrawList op {other}"),
++            }
++        }
++        result
++    }
++
++    let cases = [
++        (90.0, 8.0, 8.0, 91.0),
++        (270.0, 8.0, 8.0, 91.0),
++        (-90.0, 8.0, 8.0, 91.0),
++        (360.0, 200.0, 95.0, 47.5),
++    ];
++    for (sweep, requested_width, expected_width, expected_radius) in cases {
++        let mut ui = Ui::new();
++        add_arc(&mut ui, sweep, requested_width, 0.0);
++        let legacy = ui.draw().words.clone();
++        assert_eq!(validate_drawlist(&legacy)[spec::draw_op::ARC as usize], 0);
++        assert!(validate_drawlist(&legacy).iter().sum::<u32>() > 100);
++
++        ui.set_native_rounded_rects(true);
++        let words = ui.draw().words.clone();
++        assert_eq!(validate_drawlist(&words)[spec::draw_op::ARC as usize], 1);
++        let record = arcs(&words).pop().unwrap();
++        assert_eq!(
++            (
++                f32::from_bits(record[0]),
++                f32::from_bits(record[1]),
++                f32::from_bits(record[2]),
++                f32::from_bits(record[3]),
++                f32::from_bits(record[4]),
++                f32::from_bits(record[5]),
++                record[6],
++            ),
++            (
++                115.0f32,
++                106.0f32,
++                expected_radius as f32,
++                expected_width as f32,
++                15.0f32,
++                sweep as f32,
++                0xff123456u32,
++            ),
++        );
++    }
++
++    let mut rotated = Ui::new();
++    add_arc(&mut rotated, 90.0, 8.0, 0.25);
++    rotated.set_native_rounded_rects(true);
++    let words = rotated.draw().words.clone();
++    assert_eq!(validate_drawlist(&words)[spec::draw_op::ARC as usize], 0);
++    assert!(arcs(&words).is_empty());
+ }
+ 
+ #[test]
+diff --git a/engine/render/draw-ops/src/lib.rs b/engine/render/draw-ops/src/lib.rs
+--- a/engine/render/draw-ops/src/lib.rs
++++ b/engine/render/draw-ops/src/lib.rs
+@@ -5,6 +5,9 @@
+ //! clip intersected with the caller's viewport. The decoder and producer use
+ //! the same DrawList version; unknown operations cannot be skipped because
+ //! operation headers do not carry a length.
++//!
++//! ARC is 8 words: opcode, center, centerline radius, stroke width, start and
++//! signed sweep in degrees, then ABGR color.
+ 
+ #![no_std]
+ 
+@@ -30,6 +33,7 @@
+     InvalidMeshBlend,
+     InvalidMeshTint,
+     InvalidMeshMaskMode,
++    InvalidArc,
+ }
+ 
+ /// A borrowed record from the original DrawList, including its opcode word.
+@@ -59,6 +63,7 @@
+         draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT => 12,
+         draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,
+         draw_op::ROUNDED_RECT => 8,
++        draw_op::ARC => 8,
+         draw_op::MESH_LAYER_BEGIN => 10,
+         draw_op::MESH_MASK_BEGIN => 4,
+         draw_op::MESH_LAYER_RESTORE => 1,
+@@ -125,6 +130,21 @@
+         let words = &self.words[self.at..self.at + len];
+         let opcode = words[0];
+         match opcode {
++            draw_op::ARC => {
++                let values = [1usize, 2, 3, 4, 5, 6]
++                    .map(|index| f32::from_bits(words[index]));
++                let [cx, cy, radius, width, start, sweep] = values;
++                if ![cx, cy, radius, width, start, sweep]
++                    .iter()
++                    .all(|value| value.is_finite())
++                    || radius < 0.0
++                    || width <= 0.0
++                    || sweep == 0.0
++                    || sweep.abs() > 360.0
++                {
++                    return Err(DecodeError::InvalidArc);
++                }
++            }
+             draw_op::SCISSOR => {
+                 if self.depth == MAX_CLIP_DEPTH {
+                     return Err(DecodeError::ClipOverflow);
+diff --git a/engine/render/draw-ops/tests/decoding.rs b/engine/render/draw-ops/tests/decoding.rs
+--- a/engine/render/draw-ops/tests/decoding.rs
++++ b/engine/render/draw-ops/tests/decoding.rs
+@@ -13,7 +13,7 @@
+ }
+ 
+ #[test]
+-fn all_fourteen_records_preserve_the_original_words_and_offsets() {
++fn all_fifteen_records_preserve_the_original_words_and_offsets() {
+     let records: &[&[u32]] = &[
+         &[RECT, 0, 0, 0xff00_0000],
+         &[GRAD_RECT, 0, 0, 1, 2, 0],
+@@ -27,6 +27,7 @@
+         &[TEX_TRI_FLOAT, 0, 0.25f32.to_bits(), 0.5f32.to_bits(), 0, 0, 2.25f32.to_bits(), 0.5f32.to_bits(), 1.0f32.to_bits(), 0, 0.25f32.to_bits(), 2.5f32.to_bits(), 0, 1.0f32.to_bits(), u32::MAX],
+         &[TEX_TRI_REPEAT_FLOAT, 0, 0.25f32.to_bits(), 0.5f32.to_bits(), 0, 0, 2.25f32.to_bits(), 0.5f32.to_bits(), 1.0f32.to_bits(), 0, 0.25f32.to_bits(), 2.5f32.to_bits(), 0, 1.0f32.to_bits(), u32::MAX],
+         &[ROUNDED_RECT, 1.25f32.to_bits(), 2.5f32.to_bits(), 30.0f32.to_bits(), 40.0f32.to_bits(), 18.0f32.to_bits(), 2.0f32.to_bits(), 0xff123456],
++        &[ARC, 45.25f32.to_bits(), 30.5f32.to_bits(), 8.0f32.to_bits(), 4.0f32.to_bits(), 270.0f32.to_bits(), (-90.0f32).to_bits(), 0xff123456],
+         &[TEXT_RUN, 0, 0, 0, 0, 0, 0, 5, 0x6463_6261, 0x65],
+         &[SURFACE_QUAD, 0, 0, 0, 0, 0, 0, 0, 0],
+     ];
+@@ -37,7 +38,7 @@
+     let decoded: Vec<_> = DrawOps::new(&words, SCREEN)
+         .collect::<Result<_, _>>()
+         .unwrap();
+-    assert_eq!(decoded.len(), 14);
++    assert_eq!(decoded.len(), 15);
+     let mut offset = 0;
+     for (operation, record) in decoded.iter().zip(records) {
+         assert_eq!(operation.words, *record);
+@@ -106,6 +107,31 @@
+     let operations: Vec<_> = DrawOps::new(&words, SCREEN).collect::<Result<_, _>>().unwrap();
+     assert_eq!(operations[1].opcode, ROUNDED_RECT);
+     assert_eq!(operations[1].clip, DamageRect::new(10, 11, 30, 41));
++}
++
++#[test]
++fn arc_preserves_float_geometry_under_the_active_clip() {
++    let words = [
++        SCISSOR, xy(10, 11), wh(20, 30),
++        ARC,
++        25.25f32.to_bits(), 26.5f32.to_bits(), 8.0f32.to_bits(), 4.0f32.to_bits(),
++        270.0f32.to_bits(), (-90.0f32).to_bits(), 0xff123456,
++        SCISSOR_POP,
++    ];
++    let operations: Vec<_> = DrawOps::new(&words, SCREEN).collect::<Result<_, _>>().unwrap();
++    assert_eq!(operations[1].opcode, ARC);
++    assert_eq!(operations[1].words, &words[3..11]);
++    assert_eq!(operations[1].clip, DamageRect::new(10, 11, 30, 41));
++    assert!(validate(&words, SCREEN).is_ok());
++
++    let invalid_sweep = [
++        ARC, 0.0f32.to_bits(), 0.0f32.to_bits(), 8.0f32.to_bits(), 4.0f32.to_bits(),
++        0.0f32.to_bits(), 0.0f32.to_bits(), 0xff123456,
++    ];
++    assert_eq!(
++        DrawOps::new(&invalid_sweep, SCREEN).next(),
++        Some(Err(DecodeError::InvalidArc)),
++    );
+ }
+ 
+ #[test]
+diff --git a/engine/present/src/damage.rs b/engine/present/src/damage.rs
+--- a/engine/present/src/damage.rs
++++ b/engine/present/src/damage.rs
+@@ -538,6 +538,7 @@
+             spec::draw_op::GLYPH_RUN => glyph_run_bounds(ui, words, clip),
+             spec::draw_op::TEX_QUAD => logical_rect(words[2], words[3]).intersect(clip),
+             spec::draw_op::ROUNDED_RECT => rounded_rect_bounds(words, clip),
++            spec::draw_op::ARC => arc_bounds(words, clip),
+             spec::draw_op::SCISSOR => clip,
+             spec::draw_op::SCISSOR_POP => DamageRect::empty(),
+             spec::draw_op::TRI => triangle_bounds([words[1], words[2], words[3]], clip),
+@@ -1102,6 +1103,26 @@
+     DamageRect::new(floor_i32(bounds[0]), floor_i32(bounds[1]), ceil_i32(bounds[2]), ceil_i32(bounds[3])).intersect(clip)
+ }
+ 
++fn arc_bounds(words: &[u32], clip: DamageRect) -> DamageRect {
++    let values = [1usize, 2, 3, 4].map(|index| f32::from_bits(words[index]));
++    let [cx, cy, radius, stroke_width] = values;
++    if !values.iter().all(|value| value.is_finite()) || radius < 0.0 || stroke_width <= 0.0 {
++        return clip;
++    }
++    let outer = radius + stroke_width * 0.5;
++    let bounds = [cx - outer - 1.0, cy - outer - 1.0, cx + outer + 1.0, cy + outer + 1.0];
++    if !bounds.iter().all(|value| value.is_finite()) {
++        return clip;
++    }
++    DamageRect::new(
++        floor_i32(bounds[0]),
++        floor_i32(bounds[1]),
++        ceil_i32(bounds[2]),
++        ceil_i32(bounds[3]),
++    )
++    .intersect(clip)
++}
++
+ fn triangle_bounds_float(a: [u32; 2], b: [u32; 2], c: [u32; 2], clip: DamageRect) -> DamageRect {
+     let points = [a, b, c].map(|point| (f32::from_bits(point[0]), f32::from_bits(point[1])));
+     if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+@@ -1122,4 +1143,29 @@
+     )
+ }
+ 
++#[cfg(test)]
++mod arc_bounds_tests {
++    use super::*;
++
++    #[test]
++    fn arc_damage_contains_antialias_and_stroke_caps() {
++        let clip = DamageRect::new(0, 0, 100, 80);
++        let words = [
++            spec::draw_op::ARC,
++            25.25f32.to_bits(),
++            30.5f32.to_bits(),
++            8.0f32.to_bits(),
++            4.0f32.to_bits(),
++            270.0f32.to_bits(),
++            (-90.0f32).to_bits(),
++            0xff123456,
++        ];
++        assert_eq!(arc_bounds(&words, clip), DamageRect::new(14, 19, 37, 42));
++        assert_eq!(
++            arc_bounds(&words, DamageRect::new(20, 25, 30, 35)),
++            DamageRect::new(20, 25, 30, 35),
++        );
++    }
++}
++
+ use pocket_draw_ops::logical_rect;
+diff --git a/engine/drivers/src/abi.rs b/engine/drivers/src/abi.rs
+--- a/engine/drivers/src/abi.rs
++++ b/engine/drivers/src/abi.rs
+@@ -91,7 +91,7 @@
+ pub const POCKET_MOTION_VALUE_SCREEN_ROTATION: u32 = 6;
+ pub const POCKET_MOTION_VALUE_TILT: u32 = 7;
+ pub const POCKET_MOTION_VALUE_ANGLES: u32 = 8;
+-pub const POCKET_DRAW_LIST_VERSION: u32 = 3;
++pub const POCKET_DRAW_LIST_VERSION: u32 = 4;
+ pub const POCKET_PIXEL_FORMAT_RGB565: u32 = 0;
+ pub const POCKET_PIXEL_FORMAT_RGBA8888: u32 = 1;
+ pub const POCKET_PIXEL_FORMAT_ARGB8888: u32 = 2;

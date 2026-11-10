@@ -8,8 +8,11 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
+import 'package:flutter/gestures.dart' show VelocityTracker, kTouchSlop;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:flutter/services.dart'
+    show HapticFeedback, LogicalKeyboardKey, SystemNavigator;
 import 'package:path_provider/path_provider.dart';
 import 'package:pocket_flutter/pocket_flutter.dart' show PocketViewController;
 import 'package:pocket_services/pocket_services.dart';
@@ -28,6 +31,9 @@ import 'pocket_recordings.dart';
 import 'pocket_session.dart';
 
 const Duration _platformRequestTimeout = Duration(seconds: 30);
+const Duration _nativeBackRequestTimeout = Duration(milliseconds: 600);
+const String _nativeBackRequestEvent = 'platform.back.request';
+const String _nativeBackResponseEvent = 'platform.back.response';
 
 String _runtimeFailureCode(Object error, {String fallback = 'runtime_failed'}) {
   if (error is PocketCapabilityException) return error.code;
@@ -377,6 +383,14 @@ final class PocketSystemHostApplication extends StatefulWidget {
 
 final class _PocketSystemHostApplicationState
     extends State<PocketSystemHostApplication> {
+  final PocketSystemHostController _backController =
+      PocketSystemHostController();
+
+  Future<void> _handleBack() async {
+    final handled = await (widget.controller ?? _backController).requestBack();
+    if (mounted && !handled) _exitRemote();
+  }
+
   late Future<_SystemHostBootstrap> _bootstrap;
   PocketHostLoadProgress? _hostConfigProgress;
   PocketCancellationToken _hostConfigProgressOwner = PocketCancellationToken();
@@ -523,6 +537,7 @@ final class _PocketSystemHostApplicationState
   @override
   void dispose() {
     _hostConfigProgressOwner.cancel();
+    _backController.dispose();
     super.dispose();
   }
 
@@ -578,6 +593,7 @@ final class _PocketSystemHostApplicationState
             (bootstrap?.host.value != null ||
                 (bootstrap == null && remoteEntry) ||
                 (error != null && remoteEntry));
+        var systemHostMounted = false;
         Widget loadingError(Object cause) => Center(
           child: SelectableText(
             'Pocket 宿主配置加载失败：$cause',
@@ -615,14 +631,14 @@ final class _PocketSystemHostApplicationState
                     key: ObjectKey(_hostConfigProgressOwner),
                     systemUI: systemUI,
                     applications: applications,
-                    controller: widget.controller,
+                    controller: widget.controller ?? _backController,
                     recordings: widget.recordings,
                     onClose: widget.onExit,
                   )
                 : PocketSystemHost.fromHostConfig(
                     key: ObjectKey(_hostConfigProgressOwner),
                     config: remote,
-                    controller: widget.controller,
+                    controller: widget.controller ?? _backController,
                     recordings: widget.recordings,
                     onClose: _exitRemote,
                     approveSystemUI:
@@ -636,53 +652,76 @@ final class _PocketSystemHostApplicationState
                           applications[id] ?? PocketAppConfig(appId: id),
                         )),
                   );
+            systemHostMounted = true;
           } catch (cause) {
             body = loadingError(cause);
           }
         }
-        return MaterialApp(
-          debugShowCheckedModeBanner: false,
-          showPerformanceOverlay: widget.showPerformanceOverlay,
-          builder: (context, child) =>
-              widget.appBuilder?.call(
-                context,
-                child ?? const SizedBox.shrink(),
-              ) ??
-              child ??
-              const SizedBox.shrink(),
-          home: CallbackShortcuts(
-            bindings: {
-              if (canExit)
-                const SingleActivator(LogicalKeyboardKey.escape): _exitRemote,
-            },
-            child: Focus(
-              autofocus: true,
-              child: PopScope(
-                canPop: !canExit,
-                onPopInvokedWithResult: (didPop, _) {
-                  if (!didPop && canExit) _exitRemote();
-                },
-                child: Scaffold(
-                  appBar: canExit
-                      ? AppBar(
-                          backgroundColor: widget.backgroundColor,
-                          foregroundColor:
-                              widget.backgroundColor.computeLuminance() > 0.179
-                              ? Colors.black
-                              : Colors.white,
-                          leading: IconButton(
-                            key: const ValueKey('pocket-container-exit'),
-                            tooltip: '返回退出',
-                            icon: const Icon(Icons.arrow_back),
-                            onPressed: _exitRemote,
-                          ),
-                          title: const Text('远程容器'),
-                        )
-                      : null,
-                  backgroundColor: bootstrap == null || error != null
-                      ? widget.backgroundColor
-                      : null,
-                  body: body,
+        // This application owns a nested Navigator. Guard its enclosing route
+        // too, so Cupertino's outer edge recognizer cannot remove the entire
+        // container before the guest's back-input listener receives the drag.
+        return PopScope(
+          canPop: !canExit,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop && canExit) {
+              if (systemHostMounted) {
+                unawaited(_handleBack());
+              } else {
+                _exitRemote();
+              }
+            }
+          },
+          child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            showPerformanceOverlay: widget.showPerformanceOverlay,
+            builder: (context, child) =>
+                widget.appBuilder?.call(
+                  context,
+                  child ?? const SizedBox.shrink(),
+                ) ??
+                child ??
+                const SizedBox.shrink(),
+            home: CallbackShortcuts(
+              bindings: {
+                if (canExit)
+                  const SingleActivator(LogicalKeyboardKey.escape): _exitRemote,
+              },
+              child: Focus(
+                autofocus: true,
+                child: PopScope(
+                  canPop: systemHostMounted || !canExit,
+                  onPopInvokedWithResult: (didPop, _) {
+                    // The mounted PocketSystemHost boundary owns guest Back.
+                    if (!didPop && canExit && !systemHostMounted) _exitRemote();
+                  },
+                  child: _PocketEdgeBackListener(
+                    onBack: (!systemHostMounted && canExit)
+                        ? _exitRemote
+                        : null,
+                    child: Scaffold(
+                      appBar: canExit
+                          ? AppBar(
+                              backgroundColor: widget.backgroundColor,
+                              foregroundColor:
+                                  widget.backgroundColor.computeLuminance() >
+                                      0.179
+                                  ? Colors.black
+                                  : Colors.white,
+                              leading: IconButton(
+                                key: const ValueKey('pocket-container-exit'),
+                                tooltip: '返回退出',
+                                icon: const Icon(Icons.arrow_back),
+                                onPressed: _exitRemote,
+                              ),
+                              title: const Text('远程容器'),
+                            )
+                          : null,
+                      backgroundColor: bootstrap == null || error != null
+                          ? widget.backgroundColor
+                          : null,
+                      body: body,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -859,6 +898,11 @@ final class PocketSystemHostController extends ChangeNotifier {
 
   List<PocketSystemInstanceSnapshot> get instances => _instances;
 
+  /// Ask the active guest to handle one native back action. Returns false when
+  /// no guest accepts the request so the embedding route can apply its fallback.
+  Future<bool> requestBack() =>
+      _owner?._requestBack() ?? Future<bool>.value(false);
+
   void _attach(_PocketSystemHostState owner) {
     if (_owner != null && !identical(_owner, owner)) {
       throw StateError('PocketSystemHostController is already attached');
@@ -954,6 +998,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   final Map<String, int> _surfaceHandles = <String, int>{};
   final Map<String, _PendingPlatformRequest> _pendingRequests =
       <String, _PendingPlatformRequest>{};
+  Future<bool>? _activeBackRequest;
 
   Future<void>? _configurationFuture;
   int? _configurationFutureGeneration;
@@ -970,6 +1015,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   AppLifecycleState? _lifecycleState;
   int _nextInstanceId = 0;
   int _nextRequestId = 0;
+  int _nextBackRequestId = 0;
   int _systemUIGeneration = 0;
   bool _disposed = false;
 
@@ -985,6 +1031,123 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       (_catalogReady &&
           _catalogGeneration != null &&
           _catalogGeneration == _systemUIInstance.session.generation);
+
+  Future<bool> _requestBack() {
+    final active = _activeBackRequest;
+    if (active != null) return active;
+    late final Future<bool> tracked;
+    tracked = _dispatchBackRequest().whenComplete(() {
+      if (identical(_activeBackRequest, tracked)) _activeBackRequest = null;
+    });
+    _activeBackRequest = tracked;
+    return tracked;
+  }
+
+  Future<bool> _dispatchBackRequest() async {
+    if (_disposed || !_catalogMatchesMountedGeneration) {
+      debugPrint(
+        '[PocketBack] dispatch skipped: disposed=$_disposed '
+        'catalogReady=$_catalogMatchesMountedGeneration',
+      );
+      return false;
+    }
+    final systemGeneration = _systemUIInstance.session.generation;
+    _RuntimeInstance? focusedChild;
+    for (final instance in _applications.values) {
+      if (instance.compositorVisible && instance.compositorFocused) {
+        focusedChild = instance;
+      }
+    }
+    if (focusedChild != null) {
+      final childGeneration = focusedChild.session.generation;
+      if (await _sendBackRequest(focusedChild)) return true;
+      if (!_isCurrent(focusedChild) ||
+          focusedChild.session.generation != childGeneration) {
+        return true;
+      }
+      if (_disposed ||
+          !mounted ||
+          !_isCurrent(_systemUIInstance) ||
+          _systemUIInstance.session.generation != systemGeneration) {
+        return true;
+      }
+    }
+    // SystemUI owns the app invocation stack and is the fallback when the
+    // focused child has no in-page route to pop.
+    final systemHandled = await _sendBackRequest(_systemUIInstance);
+    if (_disposed ||
+        !mounted ||
+        !_isCurrent(_systemUIInstance) ||
+        _systemUIInstance.session.generation != systemGeneration) {
+      return true;
+    }
+    return systemHandled;
+  }
+
+  Future<bool> _sendBackRequest(_RuntimeInstance target) async {
+    if (!_isCurrent(target) ||
+        target.closing ||
+        !target.firstFrameReady ||
+        target.session.failure != null ||
+        !target.session.controller.isReady) {
+      debugPrint(
+        '[PocketBack] target skipped: id=${target.instanceId} '
+        'appId=${target.appId} firstFrameReady=${target.firstFrameReady} '
+        'ready=${target.session.controller.isReady}',
+      );
+      return false;
+    }
+    final session = target.session;
+    final generation = session.generation;
+    final requestId = 'native-back-${++_nextBackRequestId}';
+    final response = Completer<bool>();
+    late final PocketSessionEventListener listener;
+    listener = (event) {
+      if (event.method != _nativeBackResponseEvent ||
+          event.params['requestId'] != requestId ||
+          event.params['handled'] is! bool ||
+          session.generation != generation ||
+          !_isCurrent(target)) {
+        return;
+      }
+      if (!response.isCompleted) {
+        response.complete(event.params['handled'] as bool);
+      }
+    };
+    session.addEventListener(listener);
+    try {
+      final accepted = session.controller.send(
+        method: _nativeBackRequestEvent,
+        params: <String, dynamic>{'requestId': requestId},
+      );
+      if (!accepted) {
+        debugPrint(
+          '[PocketBack] send rejected: id=${target.instanceId} '
+          'requestId=$requestId',
+        );
+        return false;
+      }
+      var timedOut = false;
+      final handled = await response.future.timeout(
+        _nativeBackRequestTimeout,
+        onTimeout: () {
+          timedOut = true;
+          return false;
+        },
+      );
+      debugPrint(
+        '[PocketBack] reply: id=${target.instanceId} appId=${target.appId} '
+        'requestId=$requestId handled=$handled timeout=$timedOut',
+      );
+      return handled &&
+          !_disposed &&
+          mounted &&
+          session.generation == generation &&
+          _isCurrent(target);
+    } finally {
+      session.removeEventListener(listener);
+    }
+  }
 
   @override
   void initState() {
@@ -1151,6 +1314,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
 
   @override
   Widget build(BuildContext context) {
+    final Widget body;
     if (!_catalogMatchesMountedGeneration) {
       final session = _systemUIInstance.session;
       final error = _systemUIInstance.startupError ?? session.failure;
@@ -1158,7 +1322,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
           ? Colors.black
           : Colors.white;
       if (error != null) {
-        return ColoredBox(
+        body = ColoredBox(
           color: widget.backgroundColor,
           child: Center(
             child: SelectableText(
@@ -1167,37 +1331,54 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
             ),
           ),
         );
-      }
-      if (!session.remotePackagePreparationInProgress &&
+      } else if (!session.remotePackagePreparationInProgress &&
           session.transferProgress == null) {
-        return ColoredBox(
+        body = ColoredBox(
           color: widget.backgroundColor,
           child: const SizedBox.expand(),
         );
+      } else {
+        final progress = session.transferProgress;
+        body = ColoredBox(
+          color: widget.backgroundColor,
+          child: PocketStartupIndicator(
+            stage: session.stage,
+            preparationProgress: progress?.preparationProgress,
+            downloadedBytes: progress?.downloadedBytes,
+            totalBytes: progress?.totalBytes,
+            foregroundColor: foreground,
+          ),
+        );
       }
-      final progress = session.transferProgress;
-      return ColoredBox(
-        color: widget.backgroundColor,
-        child: PocketStartupIndicator(
-          stage: session.stage,
-          preparationProgress: progress?.preparationProgress,
-          downloadedBytes: progress?.downloadedBytes,
-          totalBytes: progress?.totalBytes,
-          foregroundColor: foreground,
-        ),
+    } else {
+      body = PocketGuestSession(
+        config: _systemUIInstance.config,
+        session: _systemUIInstance.session,
+        backgroundColor: widget.backgroundColor,
+        onFirstFrame: () => _onFirstFrame(_systemUIInstance),
+        hostSurfaceBuilder: _buildCompositorSurface,
+        hostSurfaceResidents: <int>{
+          for (final instance in _applications.values)
+            if (_surfaceHandles.containsKey(instance.appId))
+              _surfaceHandles[instance.appId]!,
+        },
       );
     }
-    return PocketGuestSession(
-      config: _systemUIInstance.config,
-      session: _systemUIInstance.session,
-      backgroundColor: widget.backgroundColor,
-      onFirstFrame: () => _onFirstFrame(_systemUIInstance),
-      hostSurfaceBuilder: _buildCompositorSurface,
-      hostSurfaceResidents: <int>{
-        for (final instance in _applications.values)
-          if (_surfaceHandles.containsKey(instance.appId))
-            _surfaceHandles[instance.appId]!,
+    return _PocketBackInputBoundary(
+      controller: _controller,
+      onUnhandled: () {
+        if (widget.onClose case final close?) {
+          close();
+          return;
+        }
+        final navigator = Navigator.maybeOf(context);
+        if (navigator?.canPop() ?? false) {
+          navigator!.pop();
+        } else {
+          unawaited(SystemNavigator.pop());
+        }
       },
+      child: body,
     );
   }
 
@@ -3155,6 +3336,145 @@ final class _RuntimeInstance {
   late VoidCallback changeListener;
   final GlobalKey<PocketGuestSessionState> guestKey =
       GlobalKey<PocketGuestSessionState>();
+}
+
+final class _PocketBackInputBoundary extends StatefulWidget {
+  const _PocketBackInputBoundary({
+    required this.controller,
+    required this.onUnhandled,
+    required this.child,
+  });
+
+  final PocketSystemHostController controller;
+  final VoidCallback onUnhandled;
+  final Widget child;
+
+  @override
+  State<_PocketBackInputBoundary> createState() =>
+      _PocketBackInputBoundaryState();
+}
+
+final class _PocketBackInputBoundaryState
+    extends State<_PocketBackInputBoundary> {
+  bool _backPending = false;
+
+  Future<void> _requestBack({required String source}) async {
+    if (_backPending) return;
+    _backPending = true;
+    try {
+      var handled = false;
+      try {
+        handled = await widget.controller.requestBack();
+      } catch (_) {
+        handled = false;
+      }
+      debugPrint('[PocketBack] boundary($source): handled=$handled');
+      if (mounted && !handled) widget.onUnhandled();
+    } finally {
+      _backPending = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope<Object?>(
+    canPop: false,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop) unawaited(_requestBack(source: 'popScope'));
+    },
+    child: _PocketEdgeBackListener(
+      onBack: () => unawaited(_requestBack(source: 'edgeGesture')),
+      child: widget.child,
+    ),
+  );
+}
+
+final class _PocketEdgeBackListener extends StatefulWidget {
+  const _PocketEdgeBackListener({required this.onBack, required this.child});
+
+  final VoidCallback? onBack;
+  final Widget child;
+
+  @override
+  State<_PocketEdgeBackListener> createState() =>
+      _PocketEdgeBackListenerState();
+}
+
+final class _PocketEdgeBackListenerState
+    extends State<_PocketEdgeBackListener> {
+  int? _pointer;
+  Offset? _origin;
+  VelocityTracker? _velocity;
+
+  void _commitBack({required String trigger}) {
+    final onBack = widget.onBack;
+    if (onBack == null) return;
+    debugPrint('[PocketBack] edge commit ($trigger)');
+    unawaited(HapticFeedback.mediumImpact());
+    onBack();
+  }
+
+  void _onDown(PointerDownEvent event) {
+    if (_pointer != null ||
+        event.localPosition.dx < 0 ||
+        event.localPosition.dx > 36)
+      return;
+    _pointer = event.pointer;
+    _origin = event.position;
+    _velocity = VelocityTracker.withKind(event.kind)
+      ..addPosition(event.timeStamp, event.position);
+    debugPrint(
+      '[PocketBack] edge start x=${event.localPosition.dx.toStringAsFixed(1)}',
+    );
+  }
+
+  void _onMove(PointerMoveEvent event) {
+    if (_pointer == event.pointer) {
+      _velocity?.addPosition(event.timeStamp, event.position);
+    }
+  }
+
+  void _onUp(PointerUpEvent event) {
+    if (_pointer != event.pointer) return;
+    final origin = _origin;
+    _velocity?.addPosition(event.timeStamp, event.position);
+    final velocity = _velocity?.getVelocity().pixelsPerSecond.dx ?? 0;
+    _clear(event);
+    if (origin == null || widget.onBack == null) return;
+    final dx = event.position.dx - origin.dx;
+    final dy = event.position.dy - origin.dy;
+    final horizontal = dx > dy.abs() && dy.abs() <= 72;
+    final completed =
+        horizontal && (dx >= 88 || (dx >= kTouchSlop && velocity > 260));
+    debugPrint(
+      '[PocketBack] edge release dx=${dx.toStringAsFixed(1)} dy=${dy.toStringAsFixed(1)} vx=${velocity.toStringAsFixed(1)} accepted=$completed',
+    );
+    if (completed) {
+      _commitBack(trigger: dx >= 88 ? 'distance' : 'velocity');
+    }
+  }
+
+  void _clear(PointerEvent event) {
+    if (_pointer != event.pointer) return;
+    _pointer = null;
+    _origin = null;
+    _velocity = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final onBack = widget.onBack;
+    if (defaultTargetPlatform != TargetPlatform.iOS || onBack == null) {
+      return widget.child;
+    }
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _onDown,
+      onPointerMove: _onMove,
+      onPointerUp: _onUp,
+      onPointerCancel: _clear,
+      child: widget.child,
+    );
+  }
 }
 
 final class _PendingPlatformRequest {

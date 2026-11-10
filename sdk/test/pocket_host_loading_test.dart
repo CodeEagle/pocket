@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart'
+    show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -64,10 +66,14 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  for (final exit in ['button', 'escape', 'system back']) {
+  for (final exit in ['button', 'escape', 'system back', 'edge swipe']) {
     testWidgets('pending container returns through $exit without waiting', (
       tester,
     ) async {
+      if (exit == 'edge swipe') {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      }
       final pending = Completer<PocketHostConfig?>();
       var count = 0;
       late BuildContext mainContext;
@@ -101,6 +107,9 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 350));
+      if (exit == 'edge swipe') {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
       expect(find.text('初始化'), findsNothing);
       expect(
         find.byKey(const ValueKey<String>('pocket-startup-progress')),
@@ -114,9 +123,22 @@ void main() {
           await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         case 'system back':
           await tester.binding.handlePopRoute();
+        case 'edge swipe':
+          final cancelled = await tester.startGesture(const Offset(8, 200));
+          await cancelled.moveTo(const Offset(120, 200));
+          await cancelled.cancel();
+          await tester.pump();
+          expect(
+            find.byType(PocketSystemHostApplication),
+            findsOneWidget,
+            reason: 'a cancelled edge gesture must retain the container',
+          );
+          final swipe = await tester.startGesture(const Offset(8, 200));
+          await swipe.moveTo(const Offset(120, 200));
+          await swipe.up();
       }
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump(const Duration(milliseconds: 550));
       expect(find.text('主界面 0'), findsOneWidget);
       expect(find.byType(PocketSystemHostApplication), findsNothing);
       // The opaque custom callback is deliberately still pending. The
@@ -130,6 +152,7 @@ void main() {
       expect(find.textContaining('late remote response'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
+      if (exit == 'edge swipe') debugDefaultTargetPlatformOverride = null;
     });
   }
 

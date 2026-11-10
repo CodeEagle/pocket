@@ -1081,6 +1081,36 @@ test("closeContainer sends system.container.close over the existing host bridge 
   } finally { kernel.dispose(); }
 });
 
+test("handleBack cancels one foreground app call and resolves its pending result", async () => {
+  const { host, kernel, invoke } = createEnv();
+  await kernel.ready;
+  try {
+    assert.equal(await kernel.handleBack(), false, "SystemUI root has no app call to pop");
+    const opened = await invoke(systemRequest(
+      "native-back-open-profile",
+      "platform.apps.open",
+      { appId: PROFILE },
+    ));
+    assert.equal(opened.ok, true);
+    const requestId = (opened.value as JsonObject).requestId as string;
+    const profileInstance = kernel.snapshot().residents.find((r) => r.appId === PROFILE)!.instanceId;
+    assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI, PROFILE]);
+
+    assert.equal(await kernel.handleBack(), true);
+    assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
+    assert.ok(host.destroyed.includes(profileInstance));
+    const resultEvents = host.posted.filter(
+      (post) => post.event === "platform.result" && post.params.requestId === requestId,
+    );
+    assert.equal(resultEvents.length, 1, "the caller receives one result for the cancelled app call");
+    assert.equal(resultEvents[0]!.params.cancelled, true);
+    assert.equal(resultEvents[0]!.params.reason, "back");
+    assert.equal(await kernel.handleBack(), false, "one back request must pop at most one app call");
+  } finally {
+    kernel.dispose();
+  }
+});
+
 
 test("container close remains available while SystemUI configuration is blocked", async () => {
   const host = new TestHost();

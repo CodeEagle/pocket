@@ -69,6 +69,15 @@ const uint8_t *pocket_offload_take_binary(HostState *handle, uint32_t cancelled,
 int32_t pocket_offload_complete_binary(HostState *handle, const uint8_t *record,
                                        size_t record_len);
 
+/* Opt-in performance sampling gate and per-stage microsecond attribution.
+ * Order of out_timings[8]: js_tick, live2d_update, live2d_emit, relayout,
+ * draw_decode, splice, encode, other. */
+void pocket_set_perf_sampling_enabled(uint32_t enabled);
+uint32_t pocket_is_perf_sampling_enabled(void);
+void pocket_record_live2d_update_ns(uint64_t nanos);
+uint32_t pocket_last_frame_stage_timings_us(const HostState *handle,
+                                            uint64_t *out_timings);
+
 /* The returned string is borrowed and remains valid until the next host call. */
 const char *pocket_last_error(HostState *handle);
 void pocket_destroy(HostState *handle);

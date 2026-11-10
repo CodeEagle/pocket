@@ -79,14 +79,10 @@ const PocketPluginSchema _drawable = PocketPluginSchema.object(
     'constantFlags': _integer,
     'dynamicFlags': _integer,
     'opacity': _number,
-    // Mesh values cross the host bridge as packed little-endian buffers.
-    // Expanding each scalar to a BridgeValue would multiply frame size.
-    'positionsXYPixels': const PocketPluginSchema.unknown(),
-    // Optional only for the explicit cached-topology response. The JS client
-    // expands that delta into the same complete drawable frame it has always
-    // exposed; the standard response still includes all three packed buffers.
-    'uvs': const PocketPluginSchema.unknown(),
-    'indices': const PocketPluginSchema.unknown(),
+    // Ready PMS1 bytes (16-byte header, interleaved x/y/u/1-v float32, uint32
+    // indices) packed in C++/Dart at the native IO boundary.
+    'meshBytes': const PocketPluginSchema.unknown(),
+    // Optional only for the explicit cached-topology response.
     'maskIndices': const PocketPluginSchema.unknown(),
     'multiplyColorRgba': const PocketPluginSchema.unknown(),
     'screenColorRgba': const PocketPluginSchema.unknown(),
@@ -100,7 +96,7 @@ const PocketPluginSchema _drawable = PocketPluginSchema.object(
     'constantFlags',
     'dynamicFlags',
     'opacity',
-    'positionsXYPixels',
+    'meshBytes',
     'multiplyColorRgba',
     'screenColorRgba',
   },
@@ -140,11 +136,22 @@ const PocketPluginSchema _loadResult = PocketPluginSchema.object(
   },
 );
 
+const PocketPluginSchema _placement = PocketPluginSchema.object(
+  properties: <String, PocketPluginSchema>{
+    'dx': _number,
+    'dy': _number,
+    'scale': _number,
+    'opacity': _number,
+  },
+  required: <String>{'dx', 'dy', 'scale'},
+);
+
 const PocketPluginSchema _updateParameters = PocketPluginSchema.object(
   properties: <String, PocketPluginSchema>{
     'modelId': _identifier,
     'parameters': PocketPluginSchema.array(_parameterValue),
     'partOpacities': PocketPluginSchema.array(_parameterValue),
+    'placement': _placement,
     'cacheStaticTopology': PocketPluginSchema.boolean(),
   },
   required: <String>{'modelId', 'parameters', 'partOpacities'},
@@ -494,6 +501,7 @@ final class PocketLive2dPlugin extends PocketPlugin {
       'partOpacities',
       opacity: true,
     );
+    final placement = _parsePlacement(params['placement']);
     return _serializeModel(modelId, () {
       _ensureActive();
       final slot = _models[modelId];
@@ -518,7 +526,13 @@ final class PocketLive2dPlugin extends PocketPlugin {
         for (final entry in partOpacities) {
           slot.model.setPartOpacity(entry.id, entry.value);
         }
-        slot.model.update();
+        if (slot.model is PocketLive2dCorePlacementUpdater) {
+          (slot.model as PocketLive2dCorePlacementUpdater).updateWithPlacement(
+            placement,
+          );
+        } else {
+          slot.model.update();
+        }
         final previousTopology = slot.topology;
         final includeTopology =
             !cacheStaticTopology || previousTopology == null;
@@ -599,10 +613,19 @@ final class PocketLive2dPlugin extends PocketPlugin {
                 vertexCount: drawable.positionsXYPixels.length ~/ 2,
                 indexCount: indexCount,
                 maskCount: maskCount,
+                uvs: List<double>.unmodifiable(drawable.uvs),
+                indices: List<int>.unmodifiable(drawable.indices),
               ),
             );
           }
-          drawables.add(drawable.toJson(includeTopology: includeTopology));
+          drawables.add(
+            drawable.toJson(
+              includeTopology: includeTopology,
+              placement: placement,
+              uvsOverride: expected?.uvs,
+              indicesOverride: expected?.indices,
+            ),
+          );
         }
         if (topology != null) slot.topology = List.unmodifiable(topology);
         return <String, Object?>{
@@ -788,6 +811,54 @@ final class PocketLive2dPlugin extends PocketPlugin {
     );
   }
 
+  static PocketLive2dPlacement _parsePlacement(Object? value) {
+    if (value == null) return PocketLive2dPlacement.identity;
+    if (value is! Map) {
+      throw const PocketCapabilityException(
+        'invalid_request',
+        'placement must be an object when present',
+      );
+    }
+    final rawDx = value['dx'];
+    final rawDy = value['dy'];
+    final rawScale = value['scale'];
+    final rawOpacity = value['opacity'];
+    if (rawDx is! num || !rawDx.isFinite) {
+      throw const PocketCapabilityException(
+        'invalid_request',
+        'placement.dx must be a finite number',
+      );
+    }
+    if (rawDy is! num || !rawDy.isFinite) {
+      throw const PocketCapabilityException(
+        'invalid_request',
+        'placement.dy must be a finite number',
+      );
+    }
+    if (rawScale is! num || !rawScale.isFinite || rawScale <= 0) {
+      throw const PocketCapabilityException(
+        'invalid_request',
+        'placement.scale must be a positive finite number',
+      );
+    }
+    var opacity = 1.0;
+    if (rawOpacity != null) {
+      if (rawOpacity is! num || !rawOpacity.isFinite) {
+        throw const PocketCapabilityException(
+          'invalid_request',
+          'placement.opacity must be a finite number',
+        );
+      }
+      opacity = rawOpacity.toDouble().clamp(0.0, 1.0);
+    }
+    return PocketLive2dPlacement(
+      dx: rawDx.toDouble(),
+      dy: rawDy.toDouble(),
+      scale: rawScale.toDouble(),
+      opacity: opacity,
+    );
+  }
+
   static List<_Live2dValue> _parseValues(
     Object? value,
     String field, {
@@ -914,12 +985,16 @@ final class _Live2dDrawableTopology {
     required this.vertexCount,
     required this.indexCount,
     required this.maskCount,
+    required this.uvs,
+    required this.indices,
   });
 
   final String id;
   final int vertexCount;
   final int indexCount;
   final int maskCount;
+  final List<double> uvs;
+  final List<int> indices;
 }
 
 final class _Live2dValue {

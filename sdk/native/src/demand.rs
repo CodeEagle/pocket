@@ -116,7 +116,10 @@ pub(super) fn capture(host: &mut HostState) {
         || host.motion.is_some()
         || host.analog != 0x8080
         || host.right_analog != 0x8080
-        || host.offload.as_ref().is_some_and(|offload| offload.has_replies())
+        || host
+            .offload
+            .as_ref()
+            .is_some_and(|offload| offload.has_replies())
     {
         Work::Continuous
     } else {

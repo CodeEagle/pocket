@@ -18,6 +18,7 @@ import 'performance_history.dart';
 
 typedef PocketSessionGenerationMountHook =
     Future<void> Function(String? mountedPayloadSha256, int targetGeneration);
+typedef PocketSessionEventListener = void Function(PocketEvent event);
 
 /// Platform orchestration only: package trust, runtime lifetime and capability
 /// providers. Pages, routing, UI components and application state live in JS.
@@ -95,6 +96,8 @@ final class PocketSession extends ChangeNotifier {
   PocketUpdateCoordinator? _updates;
   PocketHost? _host;
   PocketPluginManager? _plugins;
+  final Set<PocketSessionEventListener> _eventListeners =
+      <PocketSessionEventListener>{};
   PocketCapabilityAvailability? _negotiatedCapabilities;
   Future<void> _bridgeOperation = Future<void>.value();
   bool _foreground = true;
@@ -1320,9 +1323,26 @@ final class PocketSession extends ChangeNotifier {
       !_disposed && controller.send(method: method, params: params, wake: wake);
 
   void onEvent(PocketEvent event) {
+    for (final listener in List<PocketSessionEventListener>.of(
+      _eventListeners,
+    )) {
+      try {
+        listener(event);
+      } catch (_) {
+        // Host observers must not prevent configured capability handling.
+      }
+    }
     final host = _host;
     if (host != null) unawaited(host.handle(event));
   }
+
+  /// Observe opaque guest events at the native ingress without adding a
+  /// second event channel or intercepting configured plugin requests.
+  void addEventListener(PocketSessionEventListener listener) =>
+      _eventListeners.add(listener);
+
+  void removeEventListener(PocketSessionEventListener listener) =>
+      _eventListeners.remove(listener);
 
   void onPerformanceSample(PocketPerformanceSample sample) {
     if (_disposed) return;
@@ -1900,6 +1920,7 @@ final class PocketSession extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _eventListeners.clear();
     _foregroundRequested = false;
     _foreground = false;
     _transferProgress = null;

@@ -63,6 +63,14 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var connectionGeneration = 0L
     private val pendingConnections = ConcurrentHashMap<String, MethodChannel.Result>()
     private val connectionTimeouts = ConcurrentHashMap<String, Runnable>()
+    private val pendingDisconnects = ConcurrentHashMap<String, PendingBleDisconnect>()
+
+    private data class PendingBleDisconnect(
+        val ownerSessionId: String,
+        val connection: PocketGattConnection,
+        val result: MethodChannel.Result,
+        val timeout: Runnable,
+    )
 
     private data class NotificationKey(
         val deviceId: String,
@@ -138,6 +146,11 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 result,
             )
             "connectBleDevice" -> connectBleDevice(
+                args["deviceId"] as? String,
+                normalizeSessionId(args["sessionId"]),
+                result,
+            )
+            "disconnectBleDevice" -> disconnectBleDevice(
                 args["deviceId"] as? String,
                 normalizeSessionId(args["sessionId"]),
                 result,
@@ -403,6 +416,10 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             result.success(error("hardware_not_found", "device was not discovered by this host"))
             return
         }
+        if (pendingDisconnects.containsKey(deviceId)) {
+            result.success(error("hardware_busy", "Bluetooth disconnect is still pending"))
+            return
+        }
         activeGattConnections[deviceId]?.let { connection ->
             if (connection.isClosed()) {
                 activeGattConnections.remove(deviceId, connection)
@@ -444,17 +461,29 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
         val callback = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                val connection = activeGattConnections[deviceId]
-                if (connection != null && connection.ownsGatt(gatt)) {
+                val activeConnection = activeGattConnections[deviceId]
+                val connection = activeConnection?.takeIf { it.ownsGatt(gatt) }
+                    ?: pendingDisconnects[deviceId]?.connection?.takeIf { it.ownsGatt(gatt) }
+                if (connection != null) {
                     if (status != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
+                        val message = "Bluetooth connection was lost ($status)"
                         connection.disconnect(
                             "hardware_bluetooth_disconnected",
-                            "Bluetooth connection was lost ($status)",
+                            message,
                         )
+                        handleGattDisconnected(
+                            deviceId,
+                            "hardware_bluetooth_disconnected",
+                            message,
+                            expectedGatt = gatt,
+                        )
+                        if (isNativeBleDisconnectConfirmation(newState)) {
+                            confirmGattDisconnect(deviceId, connection, gatt)
+                        }
                     }
                     return
                 }
-                if (connection != null && !connection.ownsGatt(gatt)) {
+                if (activeConnection != null) {
                     try { gatt.close() } catch (_: Exception) { }
                     return
                 }
@@ -643,6 +672,120 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
     }
 
+    private fun disconnectBleDevice(
+        deviceId: String?,
+        ownerSessionId: String?,
+        result: MethodChannel.Result,
+    ) {
+        if (deviceId.isNullOrBlank() || ownerSessionId.isNullOrBlank()) {
+            result.success(error("invalid_argument", "deviceId and sessionId are required"))
+            return
+        }
+
+        val snapshot = synchronized(bluetoothLock) {
+            val connection = activeGattConnections[deviceId]
+            val pendingCallback = pendingConnections[deviceId]
+            val pendingOwner = pendingConnectionOwners[deviceId]?.takeIf { it.isNotEmpty() }
+            val generation = pendingConnectionGenerations[deviceId]
+            val ownerMismatch = (connection != null && connection.ownerSessionId != ownerSessionId) ||
+                (pendingCallback != null && pendingOwner != ownerSessionId)
+            val cancellation = if (!ownerMismatch && pendingCallback != null && generation != null &&
+                pendingConnectionGenerations[deviceId] == generation &&
+                pendingConnections.remove(deviceId, pendingCallback)) {
+                PendingConnectCancellation(
+                    callback = pendingCallback,
+                    gatt = pendingGatts.remove(deviceId),
+                    timeout = connectionTimeouts.remove(deviceId),
+                ).also {
+                    pendingConnectionOwners.remove(deviceId)
+                    pendingConnectionGenerations.remove(deviceId)
+                }
+            } else {
+                null
+            }
+            DisconnectSnapshot(connection, ownerMismatch, cancellation)
+        }
+        if (snapshot.ownerMismatch) {
+            result.success(error("hardware_owner_mismatch", "Bluetooth connection attempt is owned by another session"))
+            return
+        }
+        pendingDisconnects[deviceId]?.let { pending ->
+            val response = if (pending.ownerSessionId == ownerSessionId) {
+                error("hardware_busy", "Bluetooth disconnect is already pending")
+            } else {
+                error("hardware_owner_mismatch", "Bluetooth device is owned by another session")
+            }
+            result.success(response)
+            return
+        }
+
+        snapshot.pendingConnectCancellation?.let { cancellation ->
+            cancellation.timeout?.let(mainHandler::removeCallbacks)
+            mainHandler.post {
+                cancellation.callback.success(
+                    error("hardware_cancelled", "Bluetooth connection was cancelled by disconnect"),
+                )
+            }
+            if (cancellation.gatt?.let { snapshot.connection?.ownsGatt(it) == true } != true) {
+                try { cancellation.gatt?.close() } catch (_: Exception) { }
+            }
+        }
+
+        val connection = snapshot.connection
+        if (connection == null) {
+            if (snapshot.pendingConnectCancellation != null) {
+                result.success(
+                    disconnectReceipt(deviceId, pendingConnectCancelled = true),
+                )
+            } else {
+                result.success(disconnectReceipt(deviceId, alreadyClosed = true))
+            }
+            return
+        }
+
+        if (connection.isClosed()) {
+            handleGattDisconnected(
+                deviceId,
+                "hardware_bluetooth_disconnected",
+                "Bluetooth connection was released",
+                expectedConnection = connection,
+            )
+            result.success(disconnectReceipt(deviceId, alreadyClosed = true))
+            return
+        }
+
+        val context = applicationContext
+        if (context == null || bluetoothAdapter(context) == null) {
+            result.success(error("hardware_unsupported", "Bluetooth LE is unavailable on this device"))
+            return
+        }
+        if (!hasBluetoothPermissions(context)) {
+            result.success(error("hardware_permission_denied", "Bluetooth permission is not granted"))
+            return
+        }
+
+        lateinit var pendingDisconnect: PendingBleDisconnect
+        val timeout = Runnable {
+            if (pendingDisconnects.remove(deviceId, pendingDisconnect)) {
+                connection.close()
+                mainHandler.post {
+                    result.success(error("hardware_timeout", "Bluetooth disconnect was not confirmed"))
+                }
+            }
+        }
+        pendingDisconnect = PendingBleDisconnect(ownerSessionId, connection, result, timeout)
+        if (pendingDisconnects.putIfAbsent(deviceId, pendingDisconnect) != null) {
+            result.success(error("hardware_busy", "Bluetooth disconnect is already pending"))
+            return
+        }
+        mainHandler.postDelayed(timeout, 12_000L)
+        if (!connection.requestDisconnect() && pendingDisconnects.remove(deviceId, pendingDisconnect)) {
+            mainHandler.removeCallbacks(timeout)
+            connection.close()
+            result.success(error("hardware_bluetooth_disconnect", "Bluetooth disconnect could not be started"))
+        }
+    }
+
     private fun isPendingConnection(deviceId: String, generation: Long): Boolean = synchronized(bluetoothLock) {
         pendingConnections.containsKey(deviceId) && pendingConnectionGenerations[deviceId] == generation
     }
@@ -751,6 +894,18 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     )
 
     private data class PendingConnectionSnapshot(val ownerSessionId: String?)
+
+    private data class PendingConnectCancellation(
+        val callback: MethodChannel.Result,
+        val gatt: BluetoothGatt?,
+        val timeout: Runnable?,
+    )
+
+    private data class DisconnectSnapshot(
+        val connection: PocketGattConnection?,
+        val ownerMismatch: Boolean,
+        val pendingConnectCancellation: PendingConnectCancellation?,
+    )
 
     private fun parseBleIdentity(
         args: Map<String, Any?>,
@@ -1113,9 +1268,15 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         code: String = "hardware_bluetooth_disconnected",
         message: String,
         expectedGatt: BluetoothGatt? = null,
+        expectedConnection: PocketGattConnection? = null,
     ) {
         val active = activeGattConnections[deviceId]
-        if (expectedGatt == null || active?.ownsGatt(expectedGatt) == true) {
+        val matchesActive = when {
+            expectedConnection != null -> active === expectedConnection
+            expectedGatt != null -> active?.ownsGatt(expectedGatt) == true
+            else -> true
+        }
+        if (matchesActive) {
             if (active != null) {
                 activeGattConnections.remove(deviceId, active)
             } else {
@@ -1124,7 +1285,11 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
         val states = notificationStates.values.filter { state ->
             state.key.deviceId == deviceId &&
-                (expectedGatt == null || state.connection.ownsGatt(expectedGatt))
+                when {
+                    expectedConnection != null -> state.connection === expectedConnection
+                    expectedGatt != null -> state.connection.ownsGatt(expectedGatt)
+                    else -> true
+                }
         }.toList()
         states.forEach { state ->
             failNotificationState(state, code, message)
@@ -1132,7 +1297,11 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         notificationStreams.values
             .filter { stream ->
                 stream.key.deviceId == deviceId &&
-                    (expectedGatt == null || stream.connection.ownsGatt(expectedGatt))
+                    when {
+                        expectedConnection != null -> stream.connection === expectedConnection
+                        expectedGatt != null -> stream.connection.ownsGatt(expectedGatt)
+                        else -> true
+                    }
             }
             .toList()
             .forEach { stream ->
@@ -1140,6 +1309,27 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     emitStreamErrorAndDone(stream.streamId, code, message)
                 }
             }
+    }
+
+    /** Only the Android GATT state callback can confirm the native link closed. */
+    private fun confirmGattDisconnect(
+        deviceId: String,
+        connection: PocketGattConnection,
+        gatt: BluetoothGatt,
+    ) {
+        val disconnect = pendingDisconnects[deviceId] ?: return
+        if (disconnect.connection !== connection ||
+            disconnect.ownerSessionId != connection.ownerSessionId ||
+            !connection.ownsGatt(gatt) ||
+            !pendingDisconnects.remove(deviceId, disconnect)) {
+            return
+        }
+        mainHandler.removeCallbacks(disconnect.timeout)
+        mainHandler.post {
+            disconnect.result.success(
+                disconnectReceipt(deviceId, disconnected = true, closeConfirmed = true),
+            )
+        }
     }
 
     // endregion
@@ -1167,6 +1357,16 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         ownerSessionId: String?,
         includeAll: Boolean,
     ) {
+        pendingDisconnects.entries.toList().forEach { (deviceId, disconnect) ->
+            if (includeAll || disconnect.ownerSessionId == ownerSessionId) {
+                if (pendingDisconnects.remove(deviceId, disconnect)) {
+                    mainHandler.removeCallbacks(disconnect.timeout)
+                    mainHandler.post {
+                        disconnect.result.success(error("plugin_revoked", reason))
+                    }
+                }
+            }
+        }
         if (includeAll) {
             completeBleScan(error("plugin_revoked", reason))
         } else {
@@ -1287,6 +1487,21 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         return result
     }
 
+    private fun disconnectReceipt(
+        deviceId: String,
+        disconnected: Boolean = false,
+        closeConfirmed: Boolean = false,
+        alreadyClosed: Boolean = false,
+        pendingConnectCancelled: Boolean = false,
+    ): Map<String, Any?> = ok(
+        "realBle" to true,
+        "deviceId" to deviceId,
+        "disconnected" to disconnected,
+        "closeConfirmed" to closeConfirmed,
+        "alreadyClosed" to alreadyClosed,
+        "pendingConnectCancelled" to pendingConnectCancelled,
+    )
+
     private fun error(code: String, message: String): Map<String, Any?> = linkedMapOf(
         "ok" to false,
         "errorCode" to code,
@@ -1301,3 +1516,6 @@ class PocketBluetoothPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     // endregion
 }
+
+internal fun isNativeBleDisconnectConfirmation(newState: Int): Boolean =
+    newState == BluetoothProfile.STATE_DISCONNECTED

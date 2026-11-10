@@ -27,6 +27,18 @@ void main() {
         maxGapMs: 42.0,
         slowFrames: 2,
         nativeMsP95: 1.75,
+        decodeMsP95: 0.5,
+        diffMsP95: 0.25,
+        buildMsP95: 0.75,
+        paintMsP95: 3.5,
+        nativeJsTickMsP95: 0.4,
+        nativeLive2dUpdateMsP95: 0.1,
+        nativeLive2dEmitMsP95: 0.3,
+        nativeRelayoutMsP95: 0.05,
+        nativeDrawDecodeMsP95: 0.35,
+        nativeSpliceMsP95: 0.15,
+        nativeEncodeMsP95: 0.2,
+        nativeOtherMsP95: 0.2,
         refreshHz: 144,
         longFrameEvents: <PocketLongFrameEvent>[longFrame],
       );
@@ -39,6 +51,26 @@ void main() {
         'maxGapMs': 42.0,
         'slowFrames': 2,
         'nativeMsP95': 1.75,
+        'decodeMsP95': 0.5,
+        'diffMsP95': 0.25,
+        'buildMsP95': 0.75,
+        'paintMsP95': 3.5,
+        'nativeJsTickMsP95': 0.4,
+        'nativeLive2dUpdateMsP95': 0.1,
+        'nativeLive2dEmitMsP95': 0.3,
+        'nativeRelayoutMsP95': 0.05,
+        'nativeDrawDecodeMsP95': 0.35,
+        'nativeSpliceMsP95': 0.15,
+        'nativeEncodeMsP95': 0.2,
+        'nativeOtherMsP95': 0.2,
+        'native.js_tickMsP95': 0.4,
+        'native.live2d_updateMsP95': 0.1,
+        'native.live2d_emitMsP95': 0.3,
+        'native.relayoutMsP95': 0.05,
+        'native.draw_decodeMsP95': 0.35,
+        'native.spliceMsP95': 0.15,
+        'native.encodeMsP95': 0.2,
+        'native.otherMsP95': 0.2,
         'refreshHz': 144,
         'longFrameEvents': <Map<String, dynamic>>[
           <String, dynamic>{
@@ -455,6 +487,59 @@ void main() {
       expect(event.scope, 'flutterView');
     },
   );
+
+  testWidgets(
+    'accumulates diff, build and paint P95 fields when performance sampling is enabled',
+    (tester) async {
+      final samples = <PocketPerformanceSample>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: _AnimatedPerformanceRuntime(),
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              showDebugFps: false,
+              onPerformanceSample: samples.add,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      for (var index = 0; index < 80 && samples.isEmpty; index++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(samples, hasLength(1));
+      final sample = samples.single;
+      expect(sample.diffMsP95, greaterThan(0));
+      expect(sample.buildMsP95, greaterThan(0));
+      expect(sample.paintMsP95, greaterThan(0));
+      expect(sample.decodeMsP95, greaterThanOrEqualTo(0));
+    },
+  );
+}
+
+final class _AnimatedPerformanceRuntime extends _PerformanceRuntime {
+  @override
+  PocketFrame frame(int deltaMilliseconds) {
+    frameCalls++;
+    return PocketFrame(
+      width: 320,
+      height: 480,
+      ops: <PocketOp>[
+        PocketRectOp(
+          x: (frameCalls % 32).toDouble(),
+          y: 0,
+          width: 280,
+          height: 480,
+          color: 0xff101827 + (frameCalls & 0xff),
+        ),
+      ],
+      events: const <PocketEvent>[],
+    );
+  }
 }
 
 class _PerformanceRuntime implements PocketRuntime {

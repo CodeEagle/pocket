@@ -5,7 +5,6 @@ import {
 } from "@pocket/live2d";
 import { createCubismPhysics3Simulation } from "@pocket/live2d/physics";
 import { CubismPose3Simulation } from "@pocket/live2d/pose";
-import { encodeNovelMesh } from "./mesh.ts";
 import type { CharacterModelIntent } from "./types.ts";
 import type { NovelModelFactory, NovelModelMesh, NovelModelInstance } from "./models.ts";
 
@@ -70,7 +69,6 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
       let loop = true;
       let expression: string | undefined;
       let seconds = 0;
-      const buffers = new Map<string, { vertices: Float32Array; geometry?: Uint8Array }>();
       const setIntent = (intent: CharacterModelIntent) => {
         if (disposed) throw new Error("Live2D model is disposed");
         if (intent.key !== initialIntent.key) throw new Error("A model instance cannot change its resource key");
@@ -113,29 +111,22 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
             parameters = poseFrame.parameters;
             partOpacities = poseFrame.partOpacities;
           }
-          const frame = await client.update(info.modelId,
+          const modelOpacity = sample.modelValues.Opacity ?? 1;
+          const frame = await client.update(
+            info.modelId,
             Object.entries(parameters).map(([id, value]) => ({ id, value })),
-            Object.entries(partOpacities).map(([id, value]) => ({ id, value })));
+            Object.entries(partOpacities).map(([id, value]) => ({ id, value })),
+            { dx, dy, scale, opacity: modelOpacity },
+          );
           if (disposed) return [];
-          const meshes = frame.drawables.filter(drawable => drawable.indices.length > 0).map((drawable): NovelModelMesh => {
+          const meshes = frame.drawables.filter(drawable => drawable.meshBytes.byteLength > 0).map((drawable): NovelModelMesh => {
             const alphaBlend = (drawable.blendMode >>> 8) & 0xff;
             const colorBlend = drawable.blendMode & 0xff;
             // Cubism 5.2 compatibility modes preserve destination alpha. They
             // must not be approximated by Skia add/multiply on a transparent layer.
             const blend = ({ 0: "normal", 3: "add", 6: "multiply", 10: "screen" } as const)[colorBlend as 0 | 3 | 6 | 10];
             if (!blend || alphaBlend !== 0 || (drawable.blendMode >>> 16) !== 0) throw new Error(`Live2D ${drawable.id}: unsupported color/alpha blend ${colorBlend}/${alphaBlend}`);
-            let buffer = buffers.get(drawable.id);
-            const length = drawable.positionsXYPixels.length * 2;
-            if (!buffer || buffer.vertices.length !== length) { buffer = { vertices: new Float32Array(length) }; buffers.set(drawable.id, buffer); }
-            for (let index = 0; index < drawable.positionsXYPixels.length / 2; index++) {
-              buffer.vertices[index * 4] = dx + drawable.positionsXYPixels[index * 2]! * scale;
-              buffer.vertices[index * 4 + 1] = dy + drawable.positionsXYPixels[index * 2 + 1]! * scale;
-              buffer.vertices[index * 4 + 2] = drawable.uvs[index * 2]!;
-              // Official Cubism Metal shader converts Core UV Y this way.
-              buffer.vertices[index * 4 + 3] = 1 - drawable.uvs[index * 2 + 1]!;
-            }
-            const opacity = Math.round(Math.max(0, Math.min(1, drawable.opacity * (sample.modelValues.Opacity ?? 1))) * 255);
-            buffer.geometry = encodeNovelMesh({ vertices: buffer.vertices, indices: drawable.indices, color: ((opacity << 24) | 0xffffff) >>> 0 }, buffer.geometry);
+            const opacity = Math.round(Math.max(0, Math.min(1, drawable.opacity * modelOpacity)) * 255);
             const rgb = (values: readonly number[]): [number, number, number] => [values[0]!, values[1]!, values[2]!];
             const texture = definition.textures[manifest.textures[drawable.textureIndex]!];
             if (!texture) throw new Error(`Live2D ${drawable.id}: texture index outside the mapped model pages`);
@@ -143,7 +134,7 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
               const mask = frame.drawables[index];
               if (!mask) throw new Error(`Live2D ${drawable.id}: mask index outside the model`);
               return mask;
-            }).filter(mask => mask.indices.length > 0);
+            }).filter(mask => mask.meshBytes.byteLength > 0);
             const inverted = (drawable.constantFlags & 8) !== 0;
             // A union of empty ArtMeshes has zero coverage. Avoid inventing
             // geometry while preserving normal/inverted mask semantics.
@@ -153,7 +144,7 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
             return {
               id: drawable.id,
               texture,
-              geometry: buffer.geometry,
+              geometry: drawable.meshBytes,
               visible: (drawable.dynamicFlags & 1) !== 0 && opacity > 0 && (!emptyMask || inverted),
               effect: {
                 blend,
@@ -171,7 +162,7 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
           meshes.sort((left, right) => order.get(left.id)! - order.get(right.id)!);
           return meshes;
         },
-        dispose() { if (disposed) return; disposed = true; buffers.clear(); physics?.dispose(); pose?.dispose(); release(); },
+        dispose() { if (disposed) return; disposed = true; physics?.dispose(); pose?.dispose(); release(); },
       };
       return instance;
     } catch (error) { release(); throw error; }

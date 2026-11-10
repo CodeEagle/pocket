@@ -132,22 +132,14 @@ pub(crate) fn install_node_quota<'js>(
                 // admitting another allocation instead of decrementing one
                 // guessed counter. This scan is only needed at the quota
                 // boundary; ordinary allocations remain O(1).
-                security
-                    .node_ids
-                    .retain(|id| core.ui.node_exists(*id));
+                security.node_ids.retain(|id| core.ui.node_exists(*id));
                 if security.node_ids.len() >= max_nodes as usize {
                     security.fatal = Some(format!("guest node quota exceeded ({max_nodes})"));
-                    return Err(Exception::throw_range(
-                        &ctx,
-                        "guest node quota exceeded",
-                    ));
+                    return Err(Exception::throw_range(&ctx, "guest node quota exceeded"));
                 }
             }
             let result = ops
-                .dispatch(
-                    1,
-                    &[OpArg::Integer((value.0 as u32) as i64)],
-                )
+                .dispatch(1, &[OpArg::Integer((value.0 as u32) as i64)])
                 .map_err(|_| Exception::throw_internal(&ctx, "UI operation failed"))?;
             let OpResult::Integer(id) = result else {
                 return Err(Exception::throw_internal(&ctx, "invalid UI result"));

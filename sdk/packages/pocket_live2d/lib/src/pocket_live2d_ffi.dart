@@ -91,6 +91,10 @@ final class _Live2dBindings {
       _update = library.lookupFunction<_UpdateNative, _UpdateDart>(
         'pocket_live2d_model_update',
       ),
+      _updateWithPlacement = library
+          .lookupFunction<_UpdateWithPlacementNative, _UpdateWithPlacementDart>(
+            'pocket_live2d_model_update_with_placement',
+          ),
       _getDrawableCount = library
           .lookupFunction<_GetDrawableCountNative, _GetDrawableCountDart>(
             'pocket_live2d_model_get_drawable_count',
@@ -117,6 +121,7 @@ final class _Live2dBindings {
   final _SetParameterDart _setParameter;
   final _SetPartOpacityDart _setPartOpacity;
   final _UpdateDart _update;
+  final _UpdateWithPlacementDart _updateWithPlacement;
   final _GetDrawableCountDart _getDrawableCount;
   final _GetDrawableDart _getDrawable;
   final _StatusMessageDart _statusMessage;
@@ -235,6 +240,20 @@ final class _Live2dBindings {
 
   void update(Pointer<Void> model) => check(_update(model), 'update model');
 
+  void updateWithPlacement(
+    Pointer<Void> model,
+    PocketLive2dPlacement placement,
+  ) => check(
+    _updateWithPlacement(
+      model,
+      placement.dx,
+      placement.dy,
+      placement.scale,
+      placement.opacity,
+    ),
+    'update model with placement',
+  );
+
   int drawableCount(Pointer<Void> model) {
     final count = _getDrawableCount(model);
     if (count < 0)
@@ -254,7 +273,11 @@ final class _Live2dBindings {
       final vertexCount = info.vertexCount;
       final indexCount = info.indexCount;
       final maskCount = info.maskCount;
-      if (vertexCount < 0 || indexCount < 0 || maskCount < 0) {
+      final pms1ByteCount = info.pms1ByteCount;
+      if (vertexCount < 0 ||
+          indexCount < 0 ||
+          maskCount < 0 ||
+          pms1ByteCount < 0) {
         throw StateError(
           'Cubism Core returned a negative drawable buffer size',
         );
@@ -283,6 +306,7 @@ final class _Live2dBindings {
             : const <int>[],
         multiplyColorRgba: _copyFloats(info.multiplyColorRgba, 4),
         screenColorRgba: _copyFloats(info.screenColorRgba, 4),
+        pms1Bytes: _copyBytes(info.pms1Bytes, pms1ByteCount),
       );
     } finally {
       calloc.free(output);
@@ -304,7 +328,8 @@ final class _FfiLive2dModel
     implements
         PocketLive2dCoreModel,
         PocketLive2dCoreMetadata,
-        PocketLive2dCoreTopologyReader {
+        PocketLive2dCoreTopologyReader,
+        PocketLive2dCorePlacementUpdater {
   _FfiLive2dModel(this._bindings, Uint8List moc3Bytes)
     : _handle = _bindings.create(moc3Bytes),
       _disposed = false {
@@ -412,6 +437,13 @@ final class _FfiLive2dModel
   }
 
   @override
+  void updateWithPlacement(PocketLive2dPlacement placement) {
+    _ensureOpen();
+    _bindings.updateWithPlacement(_handle, placement);
+    _drawableCount = _bindings.drawableCount(_handle);
+  }
+
+  @override
   PocketLive2dDrawable drawableAt(int index) => drawableAtWithTopology(index);
 
   @override
@@ -457,6 +489,14 @@ List<int> _copyI32(Pointer<Int32> source, int count) {
   if (source.address == 0)
     throw StateError('Cubism Core returned a null mask buffer');
   return List<int>.unmodifiable(source.asTypedList(count));
+}
+
+Uint8List _copyBytes(Pointer<Uint8> source, int count) {
+  if (count == 0) return Uint8List(0);
+  if (source.address == 0) {
+    throw StateError('Cubism Core returned a null PMS1 mesh buffer');
+  }
+  return Uint8List.fromList(source.asTypedList(count));
 }
 
 final class _NativeCanvasInfo extends Struct {
@@ -518,6 +558,9 @@ final class _NativeDrawableInfo extends Struct {
   external Pointer<Int32> maskIndices;
   external Pointer<Float> multiplyColorRgba;
   external Pointer<Float> screenColorRgba;
+  external Pointer<Uint8> pms1Bytes;
+  @Int32()
+  external int pms1ByteCount;
 }
 
 typedef _CreateNative =
@@ -555,6 +598,10 @@ typedef _SetPartOpacityDart =
     int Function(Pointer<Void>, Pointer<Char>, double);
 typedef _UpdateNative = Int32 Function(Pointer<Void>);
 typedef _UpdateDart = int Function(Pointer<Void>);
+typedef _UpdateWithPlacementNative =
+    Int32 Function(Pointer<Void>, Double, Double, Double, Double);
+typedef _UpdateWithPlacementDart =
+    int Function(Pointer<Void>, double, double, double, double);
 typedef _GetDrawableCountNative = Int32 Function(Pointer<Void>);
 typedef _GetDrawableCountDart = int Function(Pointer<Void>);
 typedef _GetDrawableNative =

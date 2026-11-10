@@ -73,6 +73,32 @@ sealed class PocketOp {
           height: height,
           color: _color(json['color']),
           radius: _number(json['radius']),
+          borderWidth: _number(json['borderWidth'] ?? json['border_width']),
+          clip: clip,
+        );
+      case 'arc':
+        final radius = _number(json['radius']);
+        final strokeWidth = _number(
+          json['strokeWidth'] ?? json['borderWidth'] ?? json['border_width'],
+        );
+        final startAngle = _number(json['startAngle'] ?? json['start_angle']);
+        final sweepAngle = _number(json['sweepAngle'] ?? json['sweep_angle']);
+        if (radius < 0 ||
+            strokeWidth <= 0 ||
+            sweepAngle == 0 ||
+            sweepAngle.abs() > 360) {
+          throw const FormatException('Invalid arc geometry');
+        }
+        return PocketArcOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          color: _color(json['color']),
+          radius: radius,
+          strokeWidth: strokeWidth,
+          startAngle: startAngle,
+          sweepAngle: sweepAngle,
           clip: clip,
         );
       case 'gradient':
@@ -91,6 +117,66 @@ sealed class PocketOp {
             json['toColor'] ?? json['to_color'] ?? json['to'] ?? json['color'],
           ),
           direction: _integer(json['direction'] ?? json['dir']),
+          clip: clip,
+        );
+      case 'roundedGradient':
+        final rawX = _requiredFiniteNumber(json['x'], 'x');
+        final rawY = _requiredFiniteNumber(json['y'], 'y');
+        final rawWidth = _requiredFiniteNumber(
+          json['w'] ?? json['width'],
+          'width',
+        );
+        final rawHeight = _requiredFiniteNumber(
+          json['h'] ?? json['height'],
+          'height',
+        );
+        final radius = _requiredFiniteNumber(json['radius'], 'radius');
+        final rawDirection = json['direction'] ?? json['dir'];
+        final rawViaColor = json['viaColor'] ?? json['via_color'];
+        final rawViaPosition = json['viaPosition'] ?? json['via_position'];
+        if (rawWidth <= 0 || rawHeight <= 0 || radius <= 0) {
+          throw const FormatException('Invalid rounded gradient geometry');
+        }
+        if (rawDirection is! num ||
+            !rawDirection.isFinite ||
+            rawDirection.toInt().toDouble() != rawDirection.toDouble() ||
+            rawDirection < 0 ||
+            rawDirection > 3) {
+          throw const FormatException('Invalid rounded gradient direction');
+        }
+        if ((rawViaColor == null) != (rawViaPosition == null)) {
+          throw const FormatException(
+            'Rounded gradient middle stop is incomplete',
+          );
+        }
+        int? viaColor;
+        double? viaPosition;
+        if (rawViaColor != null) {
+          if (rawViaColor is! num ||
+              !rawViaColor.isFinite ||
+              rawViaColor.toDouble() != rawViaColor.toInt().toDouble() ||
+              rawViaPosition is! num ||
+              !rawViaPosition.isFinite ||
+              rawViaPosition <= 0 ||
+              rawViaPosition >= 1) {
+            throw const FormatException('Invalid rounded gradient middle stop');
+          }
+          viaColor = _color(rawViaColor);
+          viaPosition = rawViaPosition.toDouble();
+        }
+        return PocketRoundedGradientOp(
+          x: rawX,
+          y: rawY,
+          width: rawWidth,
+          height: rawHeight,
+          radius: radius,
+          fromColor: _color(
+            json['fromColor'] ?? json['from_color'] ?? json['from'],
+          ),
+          toColor: _color(json['toColor'] ?? json['to_color'] ?? json['to']),
+          direction: rawDirection.toInt(),
+          viaColor: viaColor,
+          viaPosition: viaPosition,
           clip: clip,
         );
       case 'triangle':
@@ -250,11 +336,42 @@ class PocketRoundedOp extends PocketOp {
     required super.height,
     required this.color,
     required this.radius,
+    this.borderWidth = 0,
     super.clip,
   });
 
   final int color;
   final double radius;
+
+  /// Zero paints a fill; a positive width paints an inward hollow ring.
+  /// The painter clamps it to half the shortest side.
+  final double borderWidth;
+}
+
+/// A screen-space stroked arc. Angles are degrees from 12 o'clock, with
+/// positive sweeps moving clockwise; full sweeps are closed rings.
+class PocketArcOp extends PocketOp {
+  const PocketArcOp({
+    required super.x,
+    required super.y,
+    required super.width,
+    required super.height,
+    required this.color,
+    required this.radius,
+    required this.strokeWidth,
+    required this.startAngle,
+    required this.sweepAngle,
+    super.clip,
+  });
+
+  final int color;
+
+  /// Radius to the stroke centerline, in logical screen pixels.
+  final double radius;
+
+  final double strokeWidth;
+  final double startAngle;
+  final double sweepAngle;
 }
 
 class PocketGradientOp extends PocketOp {
@@ -272,6 +389,29 @@ class PocketGradientOp extends PocketOp {
   final int fromColor;
   final int toColor;
   final int direction;
+}
+
+class PocketRoundedGradientOp extends PocketOp {
+  const PocketRoundedGradientOp({
+    required super.x,
+    required super.y,
+    required super.width,
+    required super.height,
+    required this.radius,
+    required this.fromColor,
+    required this.toColor,
+    required this.direction,
+    this.viaColor,
+    this.viaPosition,
+    super.clip,
+  });
+
+  final double radius;
+  final int fromColor;
+  final int toColor;
+  final int direction;
+  final int? viaColor;
+  final double? viaPosition;
 }
 
 class PocketPoint {
@@ -620,7 +760,11 @@ class PocketFrame {
     if (flags & ~3 != 0) {
       throw FormatException('Unsupported Pocket binary frame flags: $flags');
     }
-    if (version != 1 && version != 2) {
+    if (version != 1 &&
+        version != 2 &&
+        version != 3 &&
+        version != 4 &&
+        version != 5) {
       throw FormatException(
         'Unsupported Pocket binary frame version: $version',
       );
@@ -743,6 +887,114 @@ List<PocketOp> _binaryOps(
             height: height,
             color: reader.u32(),
             radius: reader.f32(),
+            borderWidth: 0,
+            clip: clip,
+          ),
+        );
+      case 15:
+        if (version < 3) {
+          throw const FormatException(
+            'Rounded rectangle rings require Pocket frame version 3',
+          );
+        }
+        final color = reader.u32();
+        final radius = reader.f32();
+        final borderWidth = reader.f32();
+        if (!radius.isFinite ||
+            radius < 0 ||
+            !borderWidth.isFinite ||
+            borderWidth <= 0) {
+          throw const FormatException(
+            'Invalid rounded rectangle ring geometry',
+          );
+        }
+        result.add(
+          PocketRoundedOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            color: color,
+            radius: radius,
+            borderWidth: borderWidth,
+            clip: clip,
+          ),
+        );
+      case 16:
+        if (version < 4) {
+          throw const FormatException(
+            'Native arcs require Pocket frame version 4',
+          );
+        }
+        final color = reader.u32();
+        final radius = reader.f32();
+        final strokeWidth = reader.f32();
+        final startAngle = reader.f32();
+        final sweepAngle = reader.f32();
+        if (!radius.isFinite ||
+            radius < 0 ||
+            !strokeWidth.isFinite ||
+            strokeWidth <= 0 ||
+            !startAngle.isFinite ||
+            !sweepAngle.isFinite ||
+            sweepAngle == 0 ||
+            sweepAngle.abs() > 360) {
+          throw const FormatException('Invalid native arc geometry');
+        }
+        result.add(
+          PocketArcOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            color: color,
+            radius: radius,
+            strokeWidth: strokeWidth,
+            startAngle: startAngle,
+            sweepAngle: sweepAngle,
+            clip: clip,
+          ),
+        );
+      case 17:
+        if (version < 5) {
+          throw const FormatException(
+            'Rounded gradients require Pocket frame version 5',
+          );
+        }
+        final fromColor = reader.u32();
+        final toColor = reader.u32();
+        final direction = reader.u32();
+        final radius = reader.f32();
+        final hasVia = reader.u8();
+        if (hasVia > 1) {
+          throw const FormatException(
+            'Invalid rounded gradient middle stop flag',
+          );
+        }
+        final viaColor = hasVia == 1 ? reader.u32() : null;
+        final viaPosition = hasVia == 1 ? reader.f32() : null;
+        if (width <= 0 ||
+            height <= 0 ||
+            !radius.isFinite ||
+            radius <= 0 ||
+            direction > 3 ||
+            (viaPosition != null && (viaPosition <= 0 || viaPosition >= 1))) {
+          throw const FormatException(
+            'Invalid rounded gradient geometry or stops',
+          );
+        }
+        result.add(
+          PocketRoundedGradientOp(
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            radius: radius,
+            fromColor: fromColor,
+            toColor: toColor,
+            direction: direction,
+            viaColor: viaColor,
+            viaPosition: viaPosition,
             clip: clip,
           ),
         );
@@ -1055,6 +1307,13 @@ Uint8List? _byteList(Object? value, {required String field}) {
 double _number(Object? value, {double fallback = 0}) {
   if (value is num && value.isFinite) return value.toDouble();
   return fallback;
+}
+
+double _requiredFiniteNumber(Object? value, String field) {
+  if (value is! num || !value.isFinite) {
+    throw FormatException('Pocket rounded gradient $field must be finite');
+  }
+  return value.toDouble();
 }
 
 int _color(Object? value) {

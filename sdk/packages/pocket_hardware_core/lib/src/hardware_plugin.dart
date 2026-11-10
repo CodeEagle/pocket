@@ -45,6 +45,7 @@ abstract final class HardwareFeatures {
     HardwareFeature.bluetooth => <String>{
       HardwareCapabilities.bluetoothScan,
       HardwareCapabilities.bluetoothConnect,
+      HardwareCapabilities.bluetoothDisconnect,
       HardwareCapabilities.bluetoothRead,
       HardwareCapabilities.bluetoothWrite,
       HardwareCapabilities.bluetoothNotifications,
@@ -209,6 +210,7 @@ abstract final class HardwareCapabilities {
   static const String photosDelete = 'hardware.photos.delete';
   static const String bluetoothScan = 'hardware.bluetooth.scan';
   static const String bluetoothConnect = 'hardware.bluetooth.connect';
+  static const String bluetoothDisconnect = 'hardware.bluetooth.disconnect';
   static const String bluetoothRead = 'hardware.bluetooth.read';
   static const String bluetoothWrite = 'hardware.bluetooth.write';
   static const String bluetoothNotifications =
@@ -232,6 +234,7 @@ abstract final class HardwareCapabilities {
     photosDelete,
     bluetoothScan,
     bluetoothConnect,
+    bluetoothDisconnect,
     bluetoothRead,
     bluetoothWrite,
     bluetoothNotifications,
@@ -401,6 +404,13 @@ const PocketPluginSchema _bleSelectorSchema = PocketPluginSchema.object(
   required: <String>{'deviceId', 'serviceUuid', 'characteristicUuid'},
 );
 
+const PocketPluginSchema _bleDeviceSchema = PocketPluginSchema.object(
+  properties: <String, PocketPluginSchema>{
+    'deviceId': PocketPluginSchema.string(),
+  },
+  required: <String>{'deviceId'},
+);
+
 const PocketPluginSchema _bleWriteSchema = PocketPluginSchema.object(
   properties: <String, PocketPluginSchema>{
     'deviceId': PocketPluginSchema.string(),
@@ -548,6 +558,34 @@ class HardwareCapabilityPlugin extends PocketPlugin {
         name: HardwareCapabilities.bluetoothConnect,
         kind: PocketCapabilityKind.request,
         permissions: const <String>{HardwarePermissions.bluetooth},
+      ),
+      HardwareCapabilities.bluetoothDisconnect: PocketPluginCapability(
+        name: HardwareCapabilities.bluetoothDisconnect,
+        kind: PocketCapabilityKind.request,
+        permissions: const <String>{HardwarePermissions.bluetooth},
+        schema: PocketPluginCapabilitySchema(
+          parameters: _bleDeviceSchema,
+          result: PocketPluginSchema.object(
+            properties: <String, PocketPluginSchema>{
+              'ok': PocketPluginSchema.boolean(),
+              'realBle': PocketPluginSchema.boolean(),
+              'deviceId': PocketPluginSchema.string(),
+              'disconnected': PocketPluginSchema.boolean(),
+              'closeConfirmed': PocketPluginSchema.boolean(),
+              'alreadyClosed': PocketPluginSchema.boolean(),
+              'pendingConnectCancelled': PocketPluginSchema.boolean(),
+            },
+            required: <String>{
+              'ok',
+              'realBle',
+              'deviceId',
+              'disconnected',
+              'closeConfirmed',
+              'alreadyClosed',
+              'pendingConnectCancelled',
+            },
+          ),
+        ),
       ),
       HardwareCapabilities.bluetoothRead: PocketPluginCapability(
         name: HardwareCapabilities.bluetoothRead,
@@ -845,6 +883,24 @@ class HardwareCapabilityPlugin extends PocketPlugin {
           ..._trustedSessionArguments(),
         },
         timeout: const Duration(seconds: 15),
+      );
+    });
+    registerRequest(HardwareCapabilities.bluetoothDisconnect, (params) {
+      _checkPermission(HardwarePermissions.bluetooth);
+      final deviceId = _string(params, 'deviceId');
+      if (deviceId.trim().isEmpty) {
+        throw const PocketCapabilityException(
+          'invalid_argument',
+          'deviceId must not be empty',
+        );
+      }
+      return _native(
+        'disconnectBleDevice',
+        params: <String, dynamic>{
+          'deviceId': deviceId,
+          ..._trustedSessionArguments(),
+        },
+        timeout: const Duration(seconds: 14),
       );
     });
     registerRequest(HardwareCapabilities.bluetoothRead, (params) {

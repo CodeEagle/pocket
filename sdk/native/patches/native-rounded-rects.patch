@@ -1,0 +1,628 @@
+diff --git a/contracts/generated/pocket_spec.h b/contracts/generated/pocket_spec.h
+--- a/contracts/generated/pocket_spec.h
++++ b/contracts/generated/pocket_spec.h
+@@ -46,6 +46,7 @@
+ #define POCKET_DRAW_OP_TEX_TRI_REPEAT 14U
+ #define POCKET_DRAW_OP_TEX_TRI_FLOAT 15U
+ #define POCKET_DRAW_OP_TEX_TRI_REPEAT_FLOAT 16U
++#define POCKET_DRAW_OP_ROUNDED_RECT 17U
+ 
+ /* Portable operation numbers (contracts/spec/ui-ops.ts): what a program's
+  * operation provider serves and pocket_runtime_op dispatches. */
+
+diff --git a/contracts/spec/gen-rust.ts b/contracts/spec/gen-rust.ts
+--- a/contracts/spec/gen-rust.ts
++++ b/contracts/spec/gen-rust.ts
+@@ -463,7 +463,7 @@
+   put("/// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,");
+   put("/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,");
+   put("/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,");
+-  put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each.");
++  put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT 8.");
+   put(`pub const DRAW_LIST_VERSION: u32 = ${DRAW_LIST_VERSION};`);
+   put("pub mod draw_op {");
+   for (const [name, v] of Object.entries(DRAW_OP)) {
+
+diff --git a/contracts/spec/spec.ts b/contracts/spec/spec.ts
+--- a/contracts/spec/spec.ts
++++ b/contracts/spec/spec.ts
+@@ -1554,6 +1554,7 @@
+   texTriRepeat: 14,
+   texTriFloat: 15,
+   texTriRepeatFloat: 16,
++  roundedRect: 17,
+ } as const;
+ 
+ // ---------------------------------------------------------------------------
+
+diff --git a/engine/core/src/draw.rs b/engine/core/src/draw.rs
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -965,6 +965,7 @@
+     tex_free: &'a mut Vec<u32>,
+     paint_cache: &'a mut PaintCache,
+     raster_density: u32,
++    native_rounded_rects: bool,
+     /// DevTools: slot to capture the world AABB of (u32::MAX = none).
+     inspect_slot: u32,
+     /// World AABB of `inspect_slot`, set when the walk reaches it.
+@@ -998,22 +999,34 @@
+     inspect_prev: Option<(f32, f32, f32, f32)>,
+     cursor: Option<(u32, f32, f32, f32, f32)>,
+ ) -> (Option<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>, bool) {
+-    build_root(
+-        tree,
+-        styles,
+-        fonts,
+-        font_revisions,
+-        frame,
+-        spec::ROOT_ID,
+-        screen,
+-        textures,
+-        tex_free,
+-        paint_cache,
+-        raster_density,
+-        dl,
+-        inspect_id,
+-        inspect_prev,
+-        cursor,
++    build_with_native_rounded_rects(
++        tree, styles, fonts, font_revisions, frame, screen, textures, tex_free,
++        paint_cache, raster_density, dl, inspect_id, inspect_prev, cursor, false,
++    )
++}
++
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn build_with_native_rounded_rects(
++    tree: &Tree,
++    styles: &StyleTable,
++    fonts: &Fonts,
++    font_revisions: &[u64; spec::MAX_FONT_SLOTS],
++    frame: u64,
++    screen: (f32, f32),
++    textures: &mut Vec<crate::TexSlot>,
++    tex_free: &mut Vec<u32>,
++    paint_cache: &mut PaintCache,
++    raster_density: u32,
++    dl: &mut DrawList,
++    inspect_id: i32,
++    inspect_prev: Option<(f32, f32, f32, f32)>,
++    cursor: Option<(u32, f32, f32, f32, f32)>,
++    native_rounded_rects: bool,
++) -> (Option<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>, bool) {
++    build_root_with_native_rounded_rects(
++        tree, styles, fonts, font_revisions, frame, spec::ROOT_ID, screen,
++        textures, tex_free, paint_cache, raster_density, dl, inspect_id,
++        inspect_prev, cursor, native_rounded_rects,
+     )
+ }
+ 
+@@ -1036,6 +1049,32 @@
+     inspect_id: i32,
+     inspect_prev: Option<(f32, f32, f32, f32)>,
+     cursor: Option<(u32, f32, f32, f32, f32)>,
++) -> (Option<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>, bool) {
++    build_root_with_native_rounded_rects(
++        tree, styles, fonts, font_revisions, frame, root_id, screen, textures,
++        tex_free, paint_cache, raster_density, dl, inspect_id, inspect_prev,
++        cursor, false,
++    )
++}
++
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn build_root_with_native_rounded_rects(
++    tree: &Tree,
++    styles: &StyleTable,
++    fonts: &Fonts,
++    font_revisions: &[u64; spec::MAX_FONT_SLOTS],
++    frame: u64,
++    root_id: i32,
++    screen: (f32, f32),
++    textures: &mut Vec<crate::TexSlot>,
++    tex_free: &mut Vec<u32>,
++    paint_cache: &mut PaintCache,
++    raster_density: u32,
++    dl: &mut DrawList,
++    inspect_id: i32,
++    inspect_prev: Option<(f32, f32, f32, f32)>,
++    cursor: Option<(u32, f32, f32, f32, f32)>,
++    native_rounded_rects: bool,
+ ) -> (Option<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>, bool) {
+     dl.words.clear();
+     // DevTools (docs/DEVTOOLS.md): slot of the inspected node, u32::MAX = none.
+@@ -1058,6 +1097,7 @@
+         tex_free,
+         paint_cache,
+         raster_density,
++        native_rounded_rects,
+         inspect_slot,
+         inspect_hit: None,
+         texts: if dl.capture_texts != 0 { Some(Vec::new()) } else { None },
+@@ -1195,6 +1235,7 @@
+         let border_color = scale_alpha(r.border_color, op);
+         let rounded_border = r.radius > 0.0 && r.border_width > 0.0 && alpha(border_color) > 0;
+         let rounded_ring = rounded_border && (has_grad || alpha(bg_color) > 0);
++        let native_round = self.native_rounded_rects && r.shadow == 0 && !has_grad;
+ 
+         if r.shadow > 0 && (alpha(bg_color) > 0 || has_grad) {
+             self.emit_shadow(dl, &world, l.w, l.h, r.radius, r.shadow, op, &clip);
+@@ -1208,7 +1249,7 @@
+                 self.emit_arc(dl, &world, l.w, l.h, &r, bg_color, &clip);
+             }
+         } else if rounded_ring {
+-            self.emit_rounded_box(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, Fill::Flat(border_color), &clip);
++            self.emit_rounded_box(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, Fill::Flat(border_color), &clip, native_round);
+             let bw = r.border_width.min(l.w * 0.5).min(l.h * 0.5);
+             if has_grad {
+                 let fill = Fill::Grad {
+@@ -1217,7 +1258,7 @@
+                     to: scale_alpha(r.grad_to, op),
+                     dir: r.grad_dir,
+                 };
+-                self.emit_rounded_box(dl, &world, bw, bw, l.w - bw, l.h - bw, (r.radius - bw).max(0.0), fill, &clip);
++                self.emit_rounded_box(dl, &world, bw, bw, l.w - bw, l.h - bw, (r.radius - bw).max(0.0), fill, &clip, false);
+             } else {
+                 self.emit_rounded_box(
+                     dl,
+@@ -1229,6 +1270,7 @@
+                     (r.radius - bw).max(0.0),
+                     Fill::Flat(bg_color),
+                     &clip,
++                    native_round,
+                 );
+             }
+         } else if has_grad {
+@@ -1238,16 +1280,16 @@
+                 to: scale_alpha(r.grad_to, op),
+                 dir: r.grad_dir,
+             };
+-            self.emit_rounded_box(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, fill, &clip);
++            self.emit_rounded_box(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, fill, &clip, native_round);
+         } else if alpha(bg_color) > 0 {
+-            self.emit_rounded_box(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, Fill::Flat(bg_color), &clip);
++            self.emit_rounded_box(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, Fill::Flat(bg_color), &clip, native_round);
+         }
+ 
+         // -- border: 4 inset strips ------------------------------------------
+         let bw = r.border_width;
+         if !rounded_ring && bw > 0.0 && alpha(border_color) > 0 {
+             if rounded_border {
+-                self.emit_rounded_border(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, bw, Fill::Flat(border_color), &clip);
++                self.emit_rounded_border(dl, &world, 0.0, 0.0, l.w, l.h, r.radius, bw, Fill::Flat(border_color), &clip, native_round);
+             } else {
+                 let bc = Fill::Flat(border_color);
+                 let bwx = bw.min(l.w * 0.5);
+@@ -2353,7 +2395,13 @@
+         border_width: f32,
+         fill: Fill,
+         clip: &Clip,
++        allow_native: bool,
+     ) {
++        if allow_native {
++            if let Fill::Flat(color) = fill {
++                if self.emit_native_rounded_rect(dl, world, x0, y0, x1, y1, radius, border_width, color, clip) { return; }
++            }
++        }
+         if radius <= 0.0 || border_width <= 0.0 || !world.is_axis_aligned() {
+             let bwx = border_width.min((x1 - x0) * 0.5);
+             let bwy = border_width.min((y1 - y0) * 0.5);
+@@ -2490,6 +2538,30 @@
+         }
+     }
+ 
++    /// Emit an opt-in world-space rounded rectangle; the DrawOps clip remains
++    /// authoritative for viewport and nested overflow clipping.
++    fn emit_native_rounded_rect(
++        &self, dl: &mut DrawList, world: &Affine,
++        x0: f32, y0: f32, x1: f32, y1: f32,
++        radius: f32, border_width: f32, color: u32, clip: &Clip,
++    ) -> bool {
++        if !world.is_axis_aligned() || world.a != world.d { return false; }
++        let (sx0, sy0) = world.apply(x0, y0);
++        let (sx1, sy1) = world.apply(x1, y1);
++        let (w, h, scale) = (sx1 - sx0, sy1 - sy0, world.a);
++        if ![sx0, sy0, w, h, scale, radius, border_width].iter().all(|v| v.is_finite())
++            || w <= 0.0 || h <= 0.0 || scale <= 0.0 || radius <= 0.0 { return false; }
++        let radius = (radius * scale).min(w * 0.5).min(h * 0.5);
++        let border_width = (border_width * scale).max(0.0).min(w * 0.5).min(h * 0.5);
++        if !radius.is_finite() || !border_width.is_finite() { return false; }
++        if sx1 + 1.0 <= clip.x0 || sx0 - 1.0 >= clip.x1 || sy1 + 1.0 <= clip.y0 || sy0 - 1.0 >= clip.y1 { return true; }
++        dl.words.extend_from_slice(&[
++            spec::draw_op::ROUNDED_RECT, sx0.to_bits(), sy0.to_bits(),
++            w.to_bits(), h.to_bits(), radius.to_bits(), border_width.to_bits(), color,
++        ]);
++        true
++    }
++
+     #[allow(clippy::too_many_arguments)]
+     fn emit_rounded_box(
+         &mut self,
+@@ -2502,7 +2574,13 @@
+         radius: f32,
+         fill: Fill,
+         clip: &Clip,
++        allow_native: bool,
+     ) {
++        if allow_native {
++            if let Fill::Flat(color) = fill {
++                if self.emit_native_rounded_rect(dl, world, x0, y0, x1, y1, radius, 0.0, color, clip) { return; }
++            }
++        }
+         if radius <= 0.0 || !world.is_axis_aligned() {
+             self.emit_box(dl, world, x0, y0, x1, y1, fill, clip);
+             return;
+@@ -2801,6 +2879,7 @@
+                 radius + spread,
+                 Fill::Flat(color),
+                 clip,
++                false,
+             );
+         }
+     }
+
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -333,6 +333,8 @@
+     raster_density: u32,
+     /// See [`Ui::set_stable_motion_paint`].
+     stable_motion_paint: bool,
++    /// Native Flutter host opt-in for DrawList opcode 17.
++    native_rounded_rects: bool,
+     /// Changes whenever raster-visible resource bytes or tables change.
+     raster_revision: u64,
+     /// Changes with `raster_revision` except when a live texture's pixels
+@@ -424,6 +426,7 @@
+             paint_cache: draw::PaintCache::new(),
+             raster_density,
+             stable_motion_paint: false,
++            native_rounded_rects: false,
+             raster_revision: 1,
+             resource_revision: 1,
+             focused: 0,
+@@ -459,6 +462,12 @@
+     /// cannot draw.
+     pub fn set_stable_motion_paint(&mut self, enabled: bool) {
+         self.stable_motion_paint = enabled;
++    }
++
++    /// Enable vector rounded DrawList opcode 17 for a host that handles it.
++    /// The default is off so all existing renderers retain their old ops.
++    pub fn set_native_rounded_rects(&mut self, enabled: bool) {
++        self.native_rounded_rects = enabled;
+     }
+ 
+     /// Declare how many `tick()` calls make one second of virtual time
+@@ -1543,6 +1552,7 @@
+                     3 + 2 * ((*meta >> 16) as usize)
+                 }
+                 x if x == spec::draw_op::TEX_QUAD => 9,
++                x if x == spec::draw_op::ROUNDED_RECT => 8,
+                 x if x == spec::draw_op::SCISSOR => 3,
+                 x if x == spec::draw_op::SCISSOR_POP => 1,
+                 x if x == spec::draw_op::TRI => 7,
+@@ -2255,7 +2265,7 @@
+         } else {
+             None
+         };
+-        let (target, drawn, provider_stale) = draw::build(
++        let (target, drawn, provider_stale) = draw::build_with_native_rounded_rects(
+             &self.tree,
+             &self.styles,
+             &self.fonts,
+@@ -2270,6 +2280,7 @@
+             self.inspect_id,
+             self.inspect_drawn,
+             cursor,
++            self.native_rounded_rects,
+         );
+         let (mut target, mut drawn) = (target, drawn);
+         if provider_stale {
+@@ -2282,7 +2293,7 @@
+             // matches the repaint's expectation by construction.
+             self.mark_layout_dirty();
+             layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
+-            let retry = draw::build(
++            let retry = draw::build_with_native_rounded_rects(
+                 &self.tree,
+                 &self.styles,
+                 &self.fonts,
+@@ -2297,6 +2308,7 @@
+                 self.inspect_id,
+                 self.inspect_drawn,
+                 cursor,
++                self.native_rounded_rects,
+             );
+             target = retry.0;
+             drawn = retry.1;
+@@ -2330,7 +2342,7 @@
+             );
+         }
+         auxiliary.draw_list.stable_motion_paint = self.stable_motion_paint;
+-        let (target, drawn, provider_stale) = draw::build_root(
++        let (target, drawn, provider_stale) = draw::build_root_with_native_rounded_rects(
+             &self.tree,
+             &self.styles,
+             &self.fonts,
+@@ -2346,6 +2358,7 @@
+             self.inspect_id,
+             auxiliary.inspect_drawn,
+             None,
++            self.native_rounded_rects,
+         );
+         let (mut target, mut drawn) = (target, drawn);
+         if provider_stale {
+@@ -2357,7 +2370,7 @@
+                 &mut auxiliary.layout,
+                 auxiliary.root,
+             );
+-            let retry = draw::build_root(
++            let retry = draw::build_root_with_native_rounded_rects(
+                 &self.tree,
+                 &self.styles,
+                 &self.fonts,
+@@ -2373,6 +2386,7 @@
+                 self.inspect_id,
+                 auxiliary.inspect_drawn,
+                 None,
++                self.native_rounded_rects,
+             );
+             target = retry.0;
+             drawn = retry.1;
+
+diff --git a/engine/core/src/tests.rs b/engine/core/src/tests.rs
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -201,7 +201,7 @@
+ /// Walk a DrawList asserting the pinned CPU-clip invariant: every coordinate
+ /// in [0, SCREEN_W] x [0, SCREEN_H], rect extents in range, scissors
+ /// balanced, only known ops. Returns per-op counts (indexed by op code).
+-fn validate_drawlist(words: &[u32]) -> [u32; 11] {
++fn validate_drawlist(words: &[u32]) -> [u32; 18] {
+     let (sw, sh) = (spec::SCREEN_W as i32, spec::SCREEN_H as i32);
+     let xy_ok = |w: u32| {
+         let (x, y) = decode_xy(w);
+@@ -213,7 +213,7 @@
+         let (w, h) = decode_wh(whw);
+         assert!(x + w <= sw && y + h <= sh, "rect exceeds screen: {x},{y} {w}x{h}");
+     };
+-    let mut counts = [0u32; 11];
++    let mut counts = [0u32; 18];
+     let mut depth = 0i32;
+     let mut i = 0usize;
+     while i < words.len() {
+@@ -245,6 +245,12 @@
+                     assert!((0.0..=1.0).contains(&f), "UV out of range: {f}");
+                 }
+                 i += 9;
++            }
++            spec::draw_op::ROUNDED_RECT => {
++                for word in i + 1..i + 7 { assert!(f32::from_bits(words[word]).is_finite()); }
++                assert!(f32::from_bits(words[i + 3]) > 0.0 && f32::from_bits(words[i + 4]) > 0.0);
++                assert!(f32::from_bits(words[i + 5]) > 0.0 && f32::from_bits(words[i + 6]) >= 0.0);
++                i += 8;
+             }
+             spec::draw_op::SURFACE_QUAD => {
+                 for word in i + 2..i + 6 {
+@@ -280,6 +286,10 @@
+                 }
+                 i += 12;
+             }
++            spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT => {
++                for word in i + 2..i + 14 { assert!(f32::from_bits(words[word]).is_finite()); }
++                i += 15;
++            }
+             spec::draw_op::TEXT_RUN => {
+                 // Native-text op: origin is f32 (exempt from the i16 clip
+                 // guarantee), box width is finite and non-negative, and the
+@@ -325,6 +335,7 @@
+                 i += 3 + 2 * ((words[i + 1] >> 16) as usize);
+             }
+             spec::draw_op::TEX_QUAD => { previous_was_tex_tri = false; i += 9; }
++            spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT => { previous_was_tex_tri = false; i += 15; }
+             spec::draw_op::SURFACE_QUAD => { previous_was_tex_tri = false; i += 9; }
+             spec::draw_op::SCISSOR => { previous_was_tex_tri = false; i += 3; }
+             spec::draw_op::SCISSOR_POP => { previous_was_tex_tri = false; i += 1; }
+@@ -851,6 +862,56 @@
+         }
+     }
+     assert!(partial, "the baked disc must carry antialiased coverage alpha");
++}
++
++#[test]
++fn native_rounded_rects_are_opt_in_and_preserve_ring_compositing() {
++    fn add_shape(ui: &mut Ui, fill: bool, border: bool) {
++        let n = ui.create_node(0);
++        for (prop, value) in [
++            (spec::prop::WIDTH, 220.0), (spec::prop::HEIGHT, 220.0),
++            (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
++            (spec::prop::INSET_L, 12.0), (spec::prop::INSET_T, 14.0), (spec::prop::RADIUS, 95.0),
++        ] { ui.set_prop(n, prop, value); }
++        if fill { ui.set_prop(n, spec::prop::BG_COLOR, 0xff223344u32 as f64); }
++        if border {
++            ui.set_prop(n, spec::prop::BORDER_WIDTH, 6.0);
++            ui.set_prop(n, spec::prop::BORDER_COLOR, 0xffaabbccu32 as f64);
++        }
++        ui.insert_before(spec::ROOT_ID, n, 0);
++        ui.tick();
++    }
++    let mut ui = Ui::new();
++    add_shape(&mut ui, true, false);
++    assert_eq!(validate_drawlist(&ui.draw().words.clone())[spec::draw_op::ROUNDED_RECT as usize], 0);
++    ui.set_native_rounded_rects(true);
++    let fill = ui.draw().words.clone();
++    assert_eq!(validate_drawlist(&fill)[spec::draw_op::ROUNDED_RECT as usize], 1);
++    let at = fill.iter().position(|&word| word == spec::draw_op::ROUNDED_RECT).unwrap();
++    assert_eq!(f32::from_bits(fill[at + 5]), 95.0);
++    assert_eq!(f32::from_bits(fill[at + 6]), 0.0);
++    assert_eq!(fill[at + 7], 0xff223344);
++
++    let mut ring_ui = Ui::new();
++    add_shape(&mut ring_ui, false, true);
++    ring_ui.set_native_rounded_rects(true);
++    let ring = ring_ui.draw().words.clone();
++    assert_eq!(validate_drawlist(&ring)[spec::draw_op::ROUNDED_RECT as usize], 1);
++    let at = ring.iter().position(|&word| word == spec::draw_op::ROUNDED_RECT).unwrap();
++    assert_eq!(f32::from_bits(ring[at + 5]), 95.0);
++    assert_eq!(f32::from_bits(ring[at + 6]), 6.0);
++    assert_eq!(ring[at + 7], 0xffaabbcc);
++
++    let mut composite_ui = Ui::new();
++    add_shape(&mut composite_ui, true, true);
++    composite_ui.set_native_rounded_rects(true);
++    let composite = composite_ui.draw().words.clone();
++    assert_eq!(validate_drawlist(&composite)[spec::draw_op::ROUNDED_RECT as usize], 2);
++    let paints: Vec<_> = composite.iter().enumerate()
++        .filter(|(_, word)| **word == spec::draw_op::ROUNDED_RECT)
++        .map(|(at, _)| (f32::from_bits(composite[at + 6]), composite[at + 7]))
++        .collect();
++    assert_eq!(paints, [(0.0, 0xffaabbcc), (0.0, 0xff223344)]);
+ }
+ 
+ #[test]
+@@ -2921,10 +2982,21 @@
+     ui.tick();
+     let words = ui.draw().words.clone();
+     validate_drawlist(&words);
+-    let triangle = words.iter().position(|&word| word == spec::draw_op::TEX_TRI).unwrap();
++    let triangle = words.iter().position(|&word| matches!(word,
++        spec::draw_op::TEX_TRI | spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT
++    )).unwrap();
+     assert_eq!(words[triangle + 1], handle as u32);
+-    assert_eq!(words[triangle + 11], 0x80402010, "mesh color modulation is preserved");
+-    assert_eq!(f32::from_bits(words[triangle + 6]), 1.0, "normalized UV reaches texture edge");
++    match words[triangle] {
++        spec::draw_op::TEX_TRI => {
++            assert_eq!(words[triangle + 11], 0x80402010, "mesh color modulation is preserved");
++            assert_eq!(f32::from_bits(words[triangle + 6]), 1.0, "normalized UV reaches texture edge");
++        }
++        spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT => {
++            assert_eq!(words[triangle + 14], 0x80402010, "mesh color modulation is preserved");
++            assert_eq!(f32::from_bits(words[triangle + 8]), 1.0, "normalized UV reaches texture edge");
++        }
++        other => panic!("unexpected mesh triangle opcode {other}"),
++    }
+ 
+     assert_eq!(
+         ui.upload_texture(&[], spec::TEX_MAX_DIM * 2, 1, spec::psm::PSM_8888),
+
+diff --git a/engine/present/src/damage.rs b/engine/present/src/damage.rs
+--- a/engine/present/src/damage.rs
++++ b/engine/present/src/damage.rs
+@@ -537,6 +537,7 @@
+             }
+             spec::draw_op::GLYPH_RUN => glyph_run_bounds(ui, words, clip),
+             spec::draw_op::TEX_QUAD => logical_rect(words[2], words[3]).intersect(clip),
++            spec::draw_op::ROUNDED_RECT => rounded_rect_bounds(words, clip),
+             spec::draw_op::SCISSOR => clip,
+             spec::draw_op::SCISSOR_POP => DamageRect::empty(),
+             spec::draw_op::TRI => triangle_bounds([words[1], words[2], words[3]], clip),
+@@ -1092,6 +1093,15 @@
+     }
+ }
+ 
++fn rounded_rect_bounds(words: &[u32], clip: DamageRect) -> DamageRect {
++    let values = [1usize, 2, 3, 4].map(|index| f32::from_bits(words[index]));
++    let [x, y, w, h] = values;
++    if !values.iter().all(|value| value.is_finite()) || w <= 0.0 || h <= 0.0 { return clip; }
++    let bounds = [x - 1.0, y - 1.0, x + w + 1.0, y + h + 1.0];
++    if !bounds.iter().all(|value| value.is_finite()) { return clip; }
++    DamageRect::new(floor_i32(bounds[0]), floor_i32(bounds[1]), ceil_i32(bounds[2]), ceil_i32(bounds[3])).intersect(clip)
++}
++
+ fn triangle_bounds_float(a: [u32; 2], b: [u32; 2], c: [u32; 2], clip: DamageRect) -> DamageRect {
+     let points = [a, b, c].map(|point| (f32::from_bits(point[0]), f32::from_bits(point[1])));
+     if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+
+diff --git a/engine/render/draw-ops/src/lib.rs b/engine/render/draw-ops/src/lib.rs
+--- a/engine/render/draw-ops/src/lib.rs
++++ b/engine/render/draw-ops/src/lib.rs
+@@ -58,6 +58,7 @@
+         draw_op::TRI => 7,
+         draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT => 12,
+         draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,
++        draw_op::ROUNDED_RECT => 8,
+         draw_op::MESH_LAYER_BEGIN => 10,
+         draw_op::MESH_MASK_BEGIN => 4,
+         draw_op::MESH_LAYER_RESTORE => 1,
+
+diff --git a/engine/render/draw-ops/tests/decoding.rs b/engine/render/draw-ops/tests/decoding.rs
+--- a/engine/render/draw-ops/tests/decoding.rs
++++ b/engine/render/draw-ops/tests/decoding.rs
+@@ -13,7 +13,7 @@
+ }
+ 
+ #[test]
+-fn all_thirteen_records_preserve_the_original_words_and_offsets() {
++fn all_fourteen_records_preserve_the_original_words_and_offsets() {
+     let records: &[&[u32]] = &[
+         &[RECT, 0, 0, 0xff00_0000],
+         &[GRAD_RECT, 0, 0, 1, 2, 0],
+@@ -26,6 +26,7 @@
+         &[TEX_TRI_REPEAT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+         &[TEX_TRI_FLOAT, 0, 0.25f32.to_bits(), 0.5f32.to_bits(), 0, 0, 2.25f32.to_bits(), 0.5f32.to_bits(), 1.0f32.to_bits(), 0, 0.25f32.to_bits(), 2.5f32.to_bits(), 0, 1.0f32.to_bits(), u32::MAX],
+         &[TEX_TRI_REPEAT_FLOAT, 0, 0.25f32.to_bits(), 0.5f32.to_bits(), 0, 0, 2.25f32.to_bits(), 0.5f32.to_bits(), 1.0f32.to_bits(), 0, 0.25f32.to_bits(), 2.5f32.to_bits(), 0, 1.0f32.to_bits(), u32::MAX],
++        &[ROUNDED_RECT, 1.25f32.to_bits(), 2.5f32.to_bits(), 30.0f32.to_bits(), 40.0f32.to_bits(), 18.0f32.to_bits(), 2.0f32.to_bits(), 0xff123456],
+         &[TEXT_RUN, 0, 0, 0, 0, 0, 0, 5, 0x6463_6261, 0x65],
+         &[SURFACE_QUAD, 0, 0, 0, 0, 0, 0, 0, 0],
+     ];
+@@ -36,7 +37,7 @@
+     let decoded: Vec<_> = DrawOps::new(&words, SCREEN)
+         .collect::<Result<_, _>>()
+         .unwrap();
+-    assert_eq!(decoded.len(), 13);
++    assert_eq!(decoded.len(), 14);
+     let mut offset = 0;
+     for (operation, record) in decoded.iter().zip(records) {
+         assert_eq!(operation.words, *record);
+@@ -91,6 +92,20 @@
+             SCREEN
+         ]
+     );
++}
++
++#[test]
++fn rounded_rect_uses_the_active_viewport_and_overflow_clip() {
++    let words = [
++        SCISSOR, xy(10, 11), wh(20, 30),
++        ROUNDED_RECT,
++        9.5f32.to_bits(), 10.5f32.to_bits(), 30.0f32.to_bits(), 40.0f32.to_bits(),
++        18.0f32.to_bits(), 2.0f32.to_bits(), 0xff123456,
++        SCISSOR_POP,
++    ];
++    let operations: Vec<_> = DrawOps::new(&words, SCREEN).collect::<Result<_, _>>().unwrap();
++    assert_eq!(operations[1].opcode, ROUNDED_RECT);
++    assert_eq!(operations[1].clip, DamageRect::new(10, 11, 30, 41));
+ }
+ 
+ #[test]
+@@ -127,6 +142,7 @@
+         &[TRI, 0, 0, 0, 0, 0, 0],
+         &[TEX_TRI, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+         &[TEX_TRI_REPEAT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
++        &[ROUNDED_RECT, 1.25f32.to_bits(), 2.5f32.to_bits(), 30.0f32.to_bits(), 40.0f32.to_bits(), 18.0f32.to_bits(), 2.0f32.to_bits(), 0xff123456],
+         &[TEXT_RUN, 0, 0, 0, 0, 0, 0, 4, 0],
+         &[SURFACE_QUAD, 0, 0, 0, 0, 0, 0, 0, 0],
+     ];
+
+diff --git a/engine/spec/src/lib.rs b/engine/spec/src/lib.rs
+--- a/engine/spec/src/lib.rs
++++ b/engine/spec/src/lib.rs
+@@ -470,7 +470,7 @@
+ /// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,
+ /// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,
+ /// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,
+-/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each.
++/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT 8.
+ pub const DRAW_LIST_VERSION: u32 = 3;
+ pub mod draw_op {
+     pub const RECT: u32 = 1;
+@@ -489,6 +489,7 @@
+     pub const TEX_TRI_REPEAT: u32 = 14;
+     pub const TEX_TRI_FLOAT: u32 = 15;
+     pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;
++    pub const ROUNDED_RECT: u32 = 17;
+ }
+ 
+ /// .pak container constants (byte-compatible with dreamcart's format;
+

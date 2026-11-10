@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -808,6 +809,19 @@ Duration Function()? debugPocketNativeFrameDurationOverride;
 @visibleForTesting
 PocketRuntime Function(Size viewport)? debugPocketSelfOwnedRuntimeFactory;
 
+@visibleForTesting
+void Function({
+  required double nativeMs,
+  required double decodeMs,
+  required double diffMs,
+  PocketNativeStageTimings nativeStages,
+})?
+debugOnPocketTickAttribution;
+
+@visibleForTesting
+void Function({double? buildMs, double? paintMs})?
+debugOnPocketFrameStageAttribution;
+
 /// Test-only override for the bounded initial image-resource barrier.
 ///
 /// Production startup uses [_PocketViewState._firstFrameResourceTimeout]. A
@@ -1084,6 +1098,26 @@ class _PocketViewState extends State<PocketView>
   double _performanceMaxGapMs = 0;
   int _performanceSlowFrames = 0;
   final List<double> _performanceNativeDurationsMs = <double>[];
+  final List<double> _performanceDecodeDurationsMs = <double>[];
+  final List<double> _performanceDiffDurationsMs = <double>[];
+  final List<double> _performanceBuildDurationsMs = <double>[];
+  final List<double> _performancePaintDurationsMs = <double>[];
+  final List<double> _performanceNativeJsTickDurationsMs = <double>[];
+  final List<double> _performanceNativeLive2dUpdateDurationsMs = <double>[];
+  final List<double> _performanceNativeLive2dEmitDurationsMs = <double>[];
+  final List<double> _performanceNativeRelayoutDurationsMs = <double>[];
+  final List<double> _performanceNativeDrawDecodeDurationsMs = <double>[];
+  final List<double> _performanceNativeSpliceDurationsMs = <double>[];
+  final List<double> _performanceNativeEncodeDurationsMs = <double>[];
+  final List<double> _performanceNativeOtherDurationsMs = <double>[];
+  int _currentTickDiffMicroseconds = 0;
+  int _currentFrameBuildMicroseconds = 0;
+  bool _hasCurrentFrameBuild = false;
+  int _currentFramePaintMicroseconds = 0;
+  bool _hasCurrentFramePaint = false;
+  bool _frameStageFlushScheduled = false;
+  late final ValueSetter<int> _paintMicrosecondsCallback =
+      _onCanvasPaintMicroseconds;
   final List<_PocketPerformanceFrameContext> _performanceFrameContexts =
       <_PocketPerformanceFrameContext>[];
   final List<FrameTiming> _pendingFrameTimings = <FrameTiming>[];
@@ -1358,6 +1392,7 @@ class _PocketViewState extends State<PocketView>
       // consumed by the first sample in the new window.
       _resumedFromIdle = false;
       _idleStartedAt = null;
+      _markSceneNeedsBuild();
     }
     _syncFrameTimingListener();
   }
@@ -2555,13 +2590,34 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
+  void _clearPerformanceStageLists() {
+    _performanceNativeDurationsMs.clear();
+    _performanceDecodeDurationsMs.clear();
+    _performanceDiffDurationsMs.clear();
+    _performanceBuildDurationsMs.clear();
+    _performancePaintDurationsMs.clear();
+    _performanceNativeJsTickDurationsMs.clear();
+    _performanceNativeLive2dUpdateDurationsMs.clear();
+    _performanceNativeLive2dEmitDurationsMs.clear();
+    _performanceNativeRelayoutDurationsMs.clear();
+    _performanceNativeDrawDecodeDurationsMs.clear();
+    _performanceNativeSpliceDurationsMs.clear();
+    _performanceNativeEncodeDurationsMs.clear();
+    _performanceNativeOtherDurationsMs.clear();
+  }
+
   void _resetPerformanceWindow() {
     _performanceWindowStart = null;
     _performanceLastTick = null;
     _performanceFrames = 0;
     _performanceMaxGapMs = 0;
     _performanceSlowFrames = 0;
-    _performanceNativeDurationsMs.clear();
+    _clearPerformanceStageLists();
+    _currentTickDiffMicroseconds = 0;
+    _currentFrameBuildMicroseconds = 0;
+    _hasCurrentFrameBuild = false;
+    _currentFramePaintMicroseconds = 0;
+    _hasCurrentFramePaint = false;
     _performanceFrameContexts.clear();
     _pendingFrameTimings.clear();
     _pendingFrameTimingKeys.clear();
@@ -2572,11 +2628,89 @@ class _PocketViewState extends State<PocketView>
     _lastUnmatchedLongFrameTimestamp = null;
   }
 
-  double _nativeDurationP95() {
-    if (_performanceNativeDurationsMs.isEmpty) return 0;
-    final sorted = List<double>.of(_performanceNativeDurationsMs)..sort();
+  static double _durationListP95(List<double> values) {
+    if (values.isEmpty) return 0;
+    final sorted = List<double>.of(values)..sort();
     final index = ((sorted.length - 1) * 0.95).ceil();
     return sorted[index];
+  }
+
+  double _nativeDurationP95() =>
+      _durationListP95(_performanceNativeDurationsMs);
+
+  double _decodeDurationP95() =>
+      _durationListP95(_performanceDecodeDurationsMs);
+
+  double _diffDurationP95() => _durationListP95(_performanceDiffDurationsMs);
+
+  double _buildDurationP95() => _durationListP95(_performanceBuildDurationsMs);
+
+  double _paintDurationP95() => _durationListP95(_performancePaintDurationsMs);
+
+  double _nativeJsTickDurationP95() =>
+      _durationListP95(_performanceNativeJsTickDurationsMs);
+
+  double _nativeLive2dUpdateDurationP95() =>
+      _durationListP95(_performanceNativeLive2dUpdateDurationsMs);
+
+  double _nativeLive2dEmitDurationP95() =>
+      _durationListP95(_performanceNativeLive2dEmitDurationsMs);
+
+  double _nativeRelayoutDurationP95() =>
+      _durationListP95(_performanceNativeRelayoutDurationsMs);
+
+  double _nativeDrawDecodeDurationP95() =>
+      _durationListP95(_performanceNativeDrawDecodeDurationsMs);
+
+  double _nativeSpliceDurationP95() =>
+      _durationListP95(_performanceNativeSpliceDurationsMs);
+
+  double _nativeEncodeDurationP95() =>
+      _durationListP95(_performanceNativeEncodeDurationsMs);
+
+  double _nativeOtherDurationP95() =>
+      _durationListP95(_performanceNativeOtherDurationsMs);
+
+  void _flushPendingFrameStageDurations() {
+    double? buildMs;
+    double? paintMs;
+    if (_hasCurrentFrameBuild) {
+      buildMs =
+          _currentFrameBuildMicroseconds / Duration.microsecondsPerMillisecond;
+      _performanceBuildDurationsMs.add(buildMs);
+      _currentFrameBuildMicroseconds = 0;
+      _hasCurrentFrameBuild = false;
+    }
+    if (_hasCurrentFramePaint) {
+      paintMs =
+          _currentFramePaintMicroseconds / Duration.microsecondsPerMillisecond;
+      _performancePaintDurationsMs.add(paintMs);
+      _currentFramePaintMicroseconds = 0;
+      _hasCurrentFramePaint = false;
+    }
+    if (buildMs != null || paintMs != null) {
+      debugOnPocketFrameStageAttribution?.call(
+        buildMs: buildMs,
+        paintMs: paintMs,
+      );
+    }
+  }
+
+  void _scheduleFrameStageFlush() {
+    if (_frameStageFlushScheduled || !mounted) return;
+    _frameStageFlushScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _frameStageFlushScheduled = false;
+      if (!_performanceCollectionEnabled) return;
+      _flushPendingFrameStageDurations();
+    });
+  }
+
+  void _onCanvasPaintMicroseconds(int microseconds) {
+    if (!_performanceCollectionEnabled) return;
+    _currentFramePaintMicroseconds += microseconds;
+    _hasCurrentFramePaint = true;
+    _scheduleFrameStageFlush();
   }
 
   void _recordActiveFrameContext({
@@ -2617,7 +2751,9 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  void _deliverPerformanceSample(PocketPerformanceSample sample) {
+  void _deliverPerformanceSample(
+    PocketPerformanceSample sample,
+  ) {
     final callback = widget.onPerformanceSample;
     if (callback != null) {
       try {
@@ -2642,6 +2778,7 @@ class _PocketViewState extends State<PocketView>
 
   void _emitPendingLongFrameSample() {
     if (_performanceLongFrameEvents.isEmpty) return;
+    _flushPendingFrameStageDurations();
     final events = List<PocketLongFrameEvent>.of(
       _performanceLongFrameEvents,
       growable: false,
@@ -2654,6 +2791,18 @@ class _PocketViewState extends State<PocketView>
       maxGapMs: _performanceMaxGapMs,
       slowFrames: _performanceSlowFrames,
       nativeMsP95: _nativeDurationP95(),
+      decodeMsP95: _decodeDurationP95(),
+      diffMsP95: _diffDurationP95(),
+      buildMsP95: _buildDurationP95(),
+      paintMsP95: _paintDurationP95(),
+      nativeJsTickMsP95: _nativeJsTickDurationP95(),
+      nativeLive2dUpdateMsP95: _nativeLive2dUpdateDurationP95(),
+      nativeLive2dEmitMsP95: _nativeLive2dEmitDurationP95(),
+      nativeRelayoutMsP95: _nativeRelayoutDurationP95(),
+      nativeDrawDecodeMsP95: _nativeDrawDecodeDurationP95(),
+      nativeSpliceMsP95: _nativeSpliceDurationP95(),
+      nativeEncodeMsP95: _nativeEncodeDurationP95(),
+      nativeOtherMsP95: _nativeOtherDurationP95(),
       refreshHz: _refreshHz,
       longFrameEvents: events,
     );
@@ -2666,7 +2815,7 @@ class _PocketViewState extends State<PocketView>
     _performanceFrames = 0;
     _performanceMaxGapMs = 0;
     _performanceSlowFrames = 0;
-    _performanceNativeDurationsMs.clear();
+    _clearPerformanceStageLists();
     _deliverPerformanceSample(burstSample);
   }
 
@@ -2685,7 +2834,13 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  void _recordPerformanceTick(Duration elapsed, Duration nativeDuration) {
+  void _recordPerformanceTick(
+    Duration elapsed,
+    Duration nativeDuration, {
+    int decodeMicroseconds = 0,
+    int diffMicroseconds = 0,
+    PocketNativeStageTimings nativeStages = PocketNativeStageTimings.zero,
+  }) {
     final clockElapsed = elapsed;
     // `_idleStartedAt` is the authoritative marker that the scheduler parked
     // after the previous active turn. `_wakeTicker` may run while the ticker
@@ -2705,6 +2860,15 @@ class _PocketViewState extends State<PocketView>
         _idleStartedAt = null;
         _queueDeliveredLongFrameUpdates();
       }
+      debugOnPocketTickAttribution?.call(
+        nativeMs:
+            nativeDuration.inMicroseconds /
+            Duration.microsecondsPerSecond *
+            1000.0,
+        decodeMs: decodeMicroseconds / Duration.microsecondsPerMillisecond,
+        diffMs: diffMicroseconds / Duration.microsecondsPerMillisecond,
+        nativeStages: nativeStages,
+      );
       _recordActiveFrameContext(
         timestamp: clockElapsed,
         nativeDuration: nativeDuration,
@@ -2744,8 +2908,26 @@ class _PocketViewState extends State<PocketView>
     );
     _performanceLastTick = clockElapsed;
     _performanceFrames++;
-    _performanceNativeDurationsMs.add(
-      nativeDuration.inMicroseconds / Duration.microsecondsPerSecond * 1000.0,
+    final nativeMs =
+        nativeDuration.inMicroseconds / Duration.microsecondsPerSecond * 1000.0;
+    final decodeMs = decodeMicroseconds / Duration.microsecondsPerMillisecond;
+    final diffMs = diffMicroseconds / Duration.microsecondsPerMillisecond;
+    _performanceNativeDurationsMs.add(nativeMs);
+    _performanceDecodeDurationsMs.add(decodeMs);
+    _performanceDiffDurationsMs.add(diffMs);
+    _performanceNativeJsTickDurationsMs.add(nativeStages.jsTickMs);
+    _performanceNativeLive2dUpdateDurationsMs.add(nativeStages.live2dUpdateMs);
+    _performanceNativeLive2dEmitDurationsMs.add(nativeStages.live2dEmitMs);
+    _performanceNativeRelayoutDurationsMs.add(nativeStages.relayoutMs);
+    _performanceNativeDrawDecodeDurationsMs.add(nativeStages.drawDecodeMs);
+    _performanceNativeSpliceDurationsMs.add(nativeStages.spliceMs);
+    _performanceNativeEncodeDurationsMs.add(nativeStages.encodeMs);
+    _performanceNativeOtherDurationsMs.add(nativeStages.otherMs);
+    debugOnPocketTickAttribution?.call(
+      nativeMs: nativeMs,
+      decodeMs: decodeMs,
+      diffMs: diffMs,
+      nativeStages: nativeStages,
     );
 
     final start = _performanceWindowStart!;
@@ -2755,6 +2937,7 @@ class _PocketViewState extends State<PocketView>
         1000.0;
     if (durationMs < 1000 || _performanceFrames == 0) return;
 
+    _flushPendingFrameStageDurations();
     final fps = _performanceFrames * 1000.0 / durationMs;
     final events = List<PocketLongFrameEvent>.of(
       _performanceLongFrameEvents,
@@ -2768,6 +2951,18 @@ class _PocketViewState extends State<PocketView>
       maxGapMs: _performanceMaxGapMs,
       slowFrames: _performanceSlowFrames,
       nativeMsP95: _nativeDurationP95(),
+      decodeMsP95: _decodeDurationP95(),
+      diffMsP95: _diffDurationP95(),
+      buildMsP95: _buildDurationP95(),
+      paintMsP95: _paintDurationP95(),
+      nativeJsTickMsP95: _nativeJsTickDurationP95(),
+      nativeLive2dUpdateMsP95: _nativeLive2dUpdateDurationP95(),
+      nativeLive2dEmitMsP95: _nativeLive2dEmitDurationP95(),
+      nativeRelayoutMsP95: _nativeRelayoutDurationP95(),
+      nativeDrawDecodeMsP95: _nativeDrawDecodeDurationP95(),
+      nativeSpliceMsP95: _nativeSpliceDurationP95(),
+      nativeEncodeMsP95: _nativeEncodeDurationP95(),
+      nativeOtherMsP95: _nativeOtherDurationP95(),
       refreshHz: _refreshHz,
       longFrameEvents: events,
     );
@@ -2780,7 +2975,7 @@ class _PocketViewState extends State<PocketView>
     _performanceFrames = 0;
     _performanceMaxGapMs = 0;
     _performanceSlowFrames = 0;
-    _performanceNativeDurationsMs.clear();
+    _clearPerformanceStageLists();
     _performanceLongFrameEvents.clear();
     _deliverPerformanceSample(sample);
   }
@@ -2815,9 +3010,18 @@ class _PocketViewState extends State<PocketView>
       // first, and the guest may process the dismiss/re-layout before the
       // pending pointer-up snapshot is consumed by its next frame.
       _flushPendingPointerMessages();
-      final stopwatch = _performanceCollectionEnabled
-          ? (Stopwatch()..start())
-          : null;
+      final collectingPerformance = _performanceCollectionEnabled;
+      if (collectingPerformance) {
+        _flushPendingFrameStageDurations();
+        _currentTickDiffMicroseconds = 0;
+      }
+      final ffiRuntime = runtime is FfiPocketRuntime ? runtime : null;
+      if (ffiRuntime != null) {
+        ffiRuntime.collectDecodeTiming = collectingPerformance;
+        ffiRuntime.lastDecodeMicroseconds = 0;
+        ffiRuntime.lastNativeStageTimings = PocketNativeStageTimings.zero;
+      }
+      final stopwatch = collectingPerformance ? (Stopwatch()..start()) : null;
       PocketFrame? next;
       try {
         // This public seam measures the whole renderer bridge path: FFI,
@@ -2825,24 +3029,33 @@ class _PocketViewState extends State<PocketView>
         // Keep the compatibility sample key `nativeMsP95`, but do not read it
         // as a pure native-CPU measurement.
         final deltaFn = debugPocketFrameDeltaAtOverride ?? pocketFrameDeltaAt;
-        next = deltaFn(runtime, frameDelta);
+        next = developer.Timeline.timeSync(
+          'pocket.native',
+          () => deltaFn(runtime, frameDelta),
+        );
       } finally {
         stopwatch?.stop();
       }
+      final decodeMicroseconds = ffiRuntime?.lastDecodeMicroseconds ?? 0;
+      final nativeStages =
+          ffiRuntime?.lastNativeStageTimings ?? PocketNativeStageTimings.zero;
       // Scheduling is independent of DrawList equality: a guest can retain the
       // same pixels while a timeout needs a future turn, and a host callback
       // can publish new work after this native frame captured its status.
       _beginGuestOutputDelivery();
       try {
         if (next != null) {
+          _applyFrame(next);
           if (stopwatch != null) {
             _recordPerformanceTick(
               clockElapsed,
               debugPocketNativeFrameDurationOverride?.call() ??
                   stopwatch.elapsed,
+              decodeMicroseconds: decodeMicroseconds,
+              diffMicroseconds: _currentTickDiffMicroseconds,
+              nativeStages: nativeStages,
             );
           }
-          _applyFrame(next);
         }
         _drainDuplexEvents();
       } finally {
@@ -2871,6 +3084,37 @@ class _PocketViewState extends State<PocketView>
   }
 
   bool _surfaceVisualEquals(
+    double firstWidth,
+    double firstHeight,
+    List<PocketOp> firstOps,
+    double secondWidth,
+    double secondHeight,
+    List<PocketOp> secondOps,
+  ) {
+    final stopwatch = _performanceCollectionEnabled
+        ? (Stopwatch()..start())
+        : null;
+    try {
+      return developer.Timeline.timeSync(
+        'pocket.diff',
+        () => _surfaceVisualEqualsBody(
+          firstWidth,
+          firstHeight,
+          firstOps,
+          secondWidth,
+          secondHeight,
+          secondOps,
+        ),
+      );
+    } finally {
+      if (stopwatch != null) {
+        stopwatch.stop();
+        _currentTickDiffMicroseconds += stopwatch.elapsedMicroseconds;
+      }
+    }
+  }
+
+  bool _surfaceVisualEqualsBody(
     double firstWidth,
     double firstHeight,
     List<PocketOp> firstOps,
@@ -7105,6 +7349,41 @@ class _PocketViewState extends State<PocketView>
     required int surface,
     required bool allowHostArena,
   }) {
+    final stopwatch = _performanceCollectionEnabled
+        ? (Stopwatch()..start())
+        : null;
+    try {
+      return developer.Timeline.timeSync(
+        'pocket.build',
+        () => _buildSurfaceBody(
+          width: width,
+          height: height,
+          ops: ops,
+          size: size,
+          devicePixelRatio: devicePixelRatio,
+          surface: surface,
+          allowHostArena: allowHostArena,
+        ),
+      );
+    } finally {
+      if (stopwatch != null) {
+        stopwatch.stop();
+        _currentFrameBuildMicroseconds += stopwatch.elapsedMicroseconds;
+        _hasCurrentFrameBuild = true;
+        _scheduleFrameStageFlush();
+      }
+    }
+  }
+
+  Widget _buildSurfaceBody({
+    required double width,
+    required double height,
+    required List<PocketOp> ops,
+    required Size size,
+    required double devicePixelRatio,
+    required int surface,
+    required bool allowHostArena,
+  }) {
     if (size.width <= 0 || size.height <= 0) return const SizedBox.shrink();
     final scaleX = width == 0 ? 1.0 : size.width / width;
     final scaleY = height == 0 ? 1.0 : size.height / height;
@@ -7143,6 +7422,9 @@ class _PocketViewState extends State<PocketView>
         );
       }
 
+      final paintCallback = _performanceCollectionEnabled
+          ? _paintMicrosecondsCallback
+          : null;
       void addCanvasBlock(int start, int end) {
         final painter = PocketCanvasPainter(
           width: width,
@@ -7154,6 +7436,7 @@ class _PocketViewState extends State<PocketView>
           devicePixelRatio: devicePixelRatio,
           fontFamilyFallback: widget.fontFamilyFallback,
           textLayoutCache: _textLayoutCache,
+          onPaintMicroseconds: paintCallback,
         );
         if (_pocketMeshSupersampleScale > 1 &&
             _isEligibleMeshSpan(<PocketCanvasPainter>[painter])) {

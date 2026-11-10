@@ -155,6 +155,60 @@ void main() {
   );
 
   test(
+    'Bluetooth disconnect forwards the selected device and trusted owner session',
+    () async {
+      final platform = _SessionRecordingPlatform();
+      final plugin = HardwareCapabilityPlugin(
+        platform: platform,
+        features: {HardwareFeature.bluetooth},
+        pluginId: 'flutter.bluetooth',
+        includeLegacyPermissions: false,
+      );
+      final host = PocketHost(
+        registry: PocketHostRegistry(),
+        streams: PocketStreamBridge(send: (_, __) => true),
+        allowedCapabilities: HardwareCapabilities.all,
+        send: (_, __) => true,
+      );
+      final manager = PocketPluginManager(
+        host: host,
+        appId: 'test.bluetooth_disconnect',
+        sessionId: 'session.bluetooth_disconnect',
+        allowedPermissions: {HardwarePermissions.bluetooth},
+        onPermissionRequest: (request) => request.requested,
+      )..register(plugin);
+      try {
+        final availability = manager.negotiate(
+          required: [HardwareCapabilities.bluetoothDisconnect],
+          requestedPermissions: {HardwarePermissions.bluetooth},
+        );
+        await manager.activate(availability);
+
+        final result =
+            await manager.invoke(HardwareCapabilities.bluetoothDisconnect, {
+                  'deviceId': 'ble-1',
+                })
+                as Map;
+
+        expect(result['ok'], isTrue);
+        final call = platform.calls.singleWhere(
+          (call) => call.method == 'disconnectBleDevice',
+        );
+        expect(call.arguments['deviceId'], 'ble-1');
+        expect(
+          call.arguments['sessionId'],
+          'test.bluetooth_disconnect:session.bluetooth_disconnect:flutter.bluetooth',
+        );
+        expect(result['closeConfirmed'], isTrue);
+        expect(result['disconnected'], isTrue);
+      } finally {
+        await manager.dispose();
+        host.dispose();
+      }
+    },
+  );
+
+  test(
     'independent location and biometrics providers retain trusted session ownership',
     () async {
       final platform = _SessionRecordingPlatform();
@@ -363,6 +417,17 @@ final class _SessionRecordingPlatform implements HardwarePlatform {
         'latitude': 1.29,
         'longitude': 103.85,
         'realGps': true,
+      };
+    }
+    if (method == 'disconnectBleDevice') {
+      return <String, dynamic>{
+        'ok': true,
+        'realBle': true,
+        'deviceId': arguments['deviceId'],
+        'disconnected': true,
+        'closeConfirmed': true,
+        'alreadyClosed': false,
+        'pendingConnectCancelled': false,
       };
     }
     return <String, dynamic>{'ok': true};

@@ -78,13 +78,40 @@ internal class PocketGattConnection(
     private val queue = ArrayDeque<Operation>()
     private var active: Operation? = null
     private var closed = false
+    private var disconnecting = false
     private var closeReason: Pair<String, String>? = null
 
     fun ownerMatches(sessionId: String): Boolean = ownerSessionId == sessionId
 
     fun ownsGatt(candidate: BluetoothGatt): Boolean = gatt === candidate
 
-    fun isClosed(): Boolean = synchronized(lock) { closed }
+    /** Fences GATT work before requesting a native disconnect. */
+    fun requestDisconnect(): Boolean {
+        val disconnectReason = "hardware_cancelled" to "Bluetooth connection is disconnecting"
+        val pending = synchronized(lock) {
+            if (closed || disconnecting) return false
+            disconnecting = true
+            closeReason = disconnectReason
+            buildList {
+                active?.let(::add)
+                addAll(queue)
+            }.also {
+                active = null
+                queue.clear()
+            }
+        }
+        failPendingOperations(pending, disconnectReason)
+        return try {
+            gatt.disconnect()
+            true
+        } catch (_: SecurityException) {
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun isClosed(): Boolean = synchronized(lock) { closed || disconnecting }
 
     fun canRead(serviceUuid: String, characteristicUuid: String): Boolean {
         val characteristic = findCharacteristic(serviceUuid, characteristicUuid) ?: return false
@@ -187,7 +214,7 @@ internal class PocketGattConnection(
         }
         postMain {
             synchronized(lock) {
-                if (closed) return@synchronized
+                if (closed || disconnecting) return@synchronized
             }
             onNotification(address.first, address.second, value.copyOf())
         }
@@ -277,6 +304,7 @@ internal class PocketGattConnection(
         synchronized(lock) {
             if (closed) return
             closed = true
+            disconnecting = true
             closeReason = code to message
             pending = buildList {
                 active?.let(::add)
@@ -285,10 +313,7 @@ internal class PocketGattConnection(
             active = null
             queue.clear()
         }
-        pending.forEach { operation ->
-            cancelTimeout(operation)
-            completeOnce(operation, OperationResult.Failure(code, message), startNext = false)
-        }
+        failPendingOperations(pending, code to message)
         try {
             gatt.close()
         } catch (_: Exception) {
@@ -304,7 +329,7 @@ internal class PocketGattConnection(
 
     private fun enqueue(operation: Operation) {
         synchronized(lock) {
-            if (closed) {
+            if (closed || disconnecting) {
                 val reason = closeReason ?: ("hardware_bluetooth_disconnected" to "Bluetooth connection is unavailable")
                 postMain {
                     operation.completion(OperationResult.Failure(reason.first, reason.second))
@@ -318,7 +343,7 @@ internal class PocketGattConnection(
 
     private fun startNext() {
         val operation = synchronized(lock) {
-            if (closed || active != null || queue.isEmpty()) return
+            if (closed || disconnecting || active != null || queue.isEmpty()) return
             queue.removeFirst().also { active = it }
         }
         val characteristic = findCharacteristic(operation.serviceUuid, operation.characteristicUuid)
@@ -530,6 +555,20 @@ internal class PocketGattConnection(
     private fun cancelTimeout(operation: Operation) {
         operation.timeout?.let(mainHandler::removeCallbacks)
         operation.timeout = null
+    }
+
+    private fun failPendingOperations(
+        operations: List<Operation>,
+        reason: Pair<String, String>,
+    ) {
+        operations.forEach { operation ->
+            cancelTimeout(operation)
+            completeOnce(
+                operation,
+                OperationResult.Failure(reason.first, reason.second),
+                startNext = false,
+            )
+        }
     }
 
     private fun postMain(block: () -> Unit) {

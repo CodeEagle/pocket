@@ -81,6 +81,7 @@ import {
 } from "@pocket/ui";
 import { HardwarePage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx";
 import { createHostBridge, hostError, type HostBridge, type HostEvent, type JsonValue } from "@pocket/ui/host";
+import { createPocketBackNavigation } from "@pocket/ui/back-navigation";
 import { VideoPage } from "./video-page.tsx";
 import { RecordingPanel } from "./recording-panel.tsx";
 import { createPocketPlatformClient, type AppLaunchOptions } from "@pocket/ui/platform";
@@ -596,6 +597,20 @@ function App() {
       presentationStyle: state().miniAppPresentationStyle,
     },
   );
+  const backNavigation = createPocketBackNavigation(host);
+  backNavigation.setHandler(async () => {
+    if (await system.handleBack()) return true;
+    if (state().routeStack.length > 1) {
+      dispatch({ type: "popRoute" });
+      return true;
+    }
+    try {
+      await system.closeContainer();
+      return true;
+    } catch {
+      return false;
+    }
+  });
   const syncSystemPresets = (): void => {
     void system.setPresets({
       darkMode: mobileDark(),
@@ -916,6 +931,7 @@ function App() {
       removeHostEvent?.();
       if (bridge.__pocketEvent === receive) bridge.__pocketEvent = previous;
       system.dispose();
+      backNavigation.dispose();
       removeExperienceLifecycle();
       experience.dispose();
       platform.dispose();
@@ -924,7 +940,7 @@ function App() {
   });
 
   const requestCloseContainer = (): void => {
-    void host.request("system.container.close", {}).catch((error) => {
+    void system.closeContainer().catch((error) => {
       const failure = hostError(error);
       setState((current) => ({
         ...current,

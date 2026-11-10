@@ -1,0 +1,759 @@
+diff --git a/contracts/spec/spec.ts b/contracts/spec/spec.ts
+--- a/contracts/spec/spec.ts
++++ b/contracts/spec/spec.ts
+@@ -1541,9 +1541,14 @@
+ //                  startDegrees, signedSweepDegrees, ABGR color. Zero degrees
+ //                  starts at 12 o'clock; positive sweep is clockwise. Partial
+ //                  arcs have round caps; a full ±360 sweep closes the ring.
++//   ROUNDED_GRADIENT (11 words): op, x, y, width, height, radius, fromColor,
++//                  toColor, direction, viaColor, viaPosition. A NaN viaPosition
++//                  means the ordinary two-stop gradient; otherwise it is a
++//                  third stop strictly between 0 and 1. Coordinates and stops
++//                  cover the unclipped rounded box; the active clip is separate.
+ 
+ /** Closed DrawList operation generation; drivers and archives use matching headers. */
+-export const DRAW_LIST_VERSION = 4;
++export const DRAW_LIST_VERSION = 5;
+ 
+ export const DRAW_OP = {
+   rect: 1,
+@@ -1564,6 +1569,7 @@
+   texTriRepeatFloat: 16,
+   roundedRect: 17,
+   arc: 18,
++  roundedGradient: 19,
+ } as const;
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/contracts/spec/gen-rust.ts b/contracts/spec/gen-rust.ts
+--- a/contracts/spec/gen-rust.ts
++++ b/contracts/spec/gen-rust.ts
+@@ -463,7 +463,7 @@
+   put("/// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,");
+   put("/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,");
+   put("/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,");
+-  put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each.");
++  put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.");
+   put(`pub const DRAW_LIST_VERSION: u32 = ${DRAW_LIST_VERSION};`);
+   put("pub mod draw_op {");
+   for (const [name, v] of Object.entries(DRAW_OP)) {
+diff --git a/contracts/generated/pocket_spec.h b/contracts/generated/pocket_spec.h
+--- a/contracts/generated/pocket_spec.h
++++ b/contracts/generated/pocket_spec.h
+@@ -29,7 +29,7 @@
+ #define POCKET_ANALOG_CENTER 0x8080U
+ 
+ /* Closed DrawList operation set; word layouts are specified in spec.ts. */
+-#define POCKET_DRAW_LIST_VERSION 4U
++#define POCKET_DRAW_LIST_VERSION 5U
+ #define POCKET_DRAW_OP_RECT 1U
+ #define POCKET_DRAW_OP_GRAD_RECT 2U
+ #define POCKET_DRAW_OP_GLYPH_RUN 3U
+@@ -48,6 +48,7 @@
+ #define POCKET_DRAW_OP_TEX_TRI_REPEAT_FLOAT 16U
+ #define POCKET_DRAW_OP_ROUNDED_RECT 17U
+ #define POCKET_DRAW_OP_ARC 18U
++#define POCKET_DRAW_OP_ROUNDED_GRADIENT 19U
+ 
+ /* Portable operation numbers (contracts/spec/ui-ops.ts): what a program's
+  * operation provider serves and pocket_runtime_op dispatches. */
+diff --git a/engine/spec/src/lib.rs b/engine/spec/src/lib.rs
+--- a/engine/spec/src/lib.rs
++++ b/engine/spec/src/lib.rs
+@@ -470,8 +470,8 @@
+ /// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,
+ /// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,
+ /// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,
+-/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each.
+-pub const DRAW_LIST_VERSION: u32 = 4;
++/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.
++pub const DRAW_LIST_VERSION: u32 = 5;
+ pub mod draw_op {
+     pub const RECT: u32 = 1;
+     pub const GRAD_RECT: u32 = 2;
+@@ -491,6 +491,7 @@
+     pub const TEX_TRI_REPEAT_FLOAT: u32 = 16;
+     pub const ROUNDED_RECT: u32 = 17;
+     pub const ARC: u32 = 18;
++    pub const ROUNDED_GRADIENT: u32 = 19;
+ }
+ 
+ /// .pak container constants (byte-compatible with dreamcart's format;
+diff --git a/engine/core/src/draw.rs b/engine/core/src/draw.rs
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -1235,10 +1235,12 @@
+         let border_color = scale_alpha(r.border_color, op);
+         let rounded_border = r.radius > 0.0 && r.border_width > 0.0 && alpha(border_color) > 0;
+         let rounded_ring = rounded_border && (has_grad || alpha(bg_color) > 0);
+-        let native_round = self.native_rounded_rects && !has_grad;
++        let native_round = self.native_rounded_rects;
++        let native_shadow = self.native_rounded_rects && !has_grad;
+ 
+         if r.shadow > 0 && (alpha(bg_color) > 0 || has_grad) {
+-            self.emit_shadow(dl, &world, l.w, l.h, r.radius, r.shadow, op, &clip, native_round);
++            // Gradient fills keep the existing shadow layers in this phase.
++            self.emit_shadow(dl, &world, l.w, l.h, r.radius, r.shadow, op, &clip, native_shadow);
+         }
+ 
+         let is_arc = r.arc_width > 0.0 && r.arc_sweep != 0.0;
+@@ -1258,7 +1260,7 @@
+                     to: scale_alpha(r.grad_to, op),
+                     dir: r.grad_dir,
+                 };
+-                self.emit_rounded_box(dl, &world, bw, bw, l.w - bw, l.h - bw, (r.radius - bw).max(0.0), fill, &clip, false);
++                self.emit_rounded_box(dl, &world, bw, bw, l.w - bw, l.h - bw, (r.radius - bw).max(0.0), fill, &clip, native_round);
+             } else {
+                 self.emit_rounded_box(
+                     dl,
+@@ -2608,6 +2610,81 @@
+         dl.words.extend_from_slice(&[
+             spec::draw_op::ROUNDED_RECT, sx0.to_bits(), sy0.to_bits(),
+             w.to_bits(), h.to_bits(), radius.to_bits(), border_width.to_bits(), color,
++        ]);
++        true
++    }
++
++    /// Emit one opt-in full-bounds gradient RRect. The host keeps the original
++    /// local gradient endpoints and applies the active DrawOps clip itself.
++    fn emit_native_rounded_gradient(
++        &self,
++        dl: &mut DrawList,
++        world: &Affine,
++        x0: f32,
++        y0: f32,
++        x1: f32,
++        y1: f32,
++        radius: f32,
++        fill: Fill,
++        clip: &Clip,
++    ) -> bool {
++        if !world.is_axis_aligned() || world.a != world.d {
++            return false;
++        }
++        let Fill::Grad { from, via, to, dir } = fill else {
++            return false;
++        };
++        if dir > spec::GradDir::ToRight as u32 {
++            return false;
++        }
++        let (sx0, sy0) = world.apply(x0, y0);
++        let (sx1, sy1) = world.apply(x1, y1);
++        let (width, height, scale) = (sx1 - sx0, sy1 - sy0, world.a);
++        if ![sx0, sy0, width, height, scale, radius]
++            .iter()
++            .all(|value| value.is_finite())
++            || width <= 0.0
++            || height <= 0.0
++            || scale <= 0.0
++            || radius <= 0.0
++        {
++            return false;
++        }
++        let radius = (radius * scale).min(width * 0.5).min(height * 0.5);
++        // Keep the existing rasterizer's square fallback for subpixel radii.
++        if !radius.is_finite() || radius <= 0.5 {
++            return false;
++        }
++        if sx1 + 1.0 <= clip.x0
++            || sx0 - 1.0 >= clip.x1
++            || sy1 + 1.0 <= clip.y0
++            || sy0 - 1.0 >= clip.y1
++        {
++            return true;
++        }
++
++        // Match emit_box's two-stop behavior for an absent or endpoint stop.
++        let (via_color, via_position) = match via {
++            Some((color, position)) if position.is_finite() && position > 0.0 && position < 1.0 => {
++                (color, position)
++            }
++            _ => (0, f32::NAN),
++        };
++        if alpha(from) == 0 && alpha(to) == 0 && alpha(via_color) == 0 {
++            return true;
++        }
++        dl.words.extend_from_slice(&[
++            spec::draw_op::ROUNDED_GRADIENT,
++            sx0.to_bits(),
++            sy0.to_bits(),
++            width.to_bits(),
++            height.to_bits(),
++            radius.to_bits(),
++            from,
++            to,
++            dir,
++            via_color,
++            via_position.to_bits(),
+         ]);
+         true
+     }
+@@ -2627,8 +2704,17 @@
+         allow_native: bool,
+     ) {
+         if allow_native {
+-            if let Fill::Flat(color) = fill {
+-                if self.emit_native_rounded_rect(dl, world, x0, y0, x1, y1, radius, 0.0, color, clip) { return; }
++            match fill {
++                Fill::Flat(color) => {
++                    if self.emit_native_rounded_rect(dl, world, x0, y0, x1, y1, radius, 0.0, color, clip) {
++                        return;
++                    }
++                }
++                Fill::Grad { .. } => {
++                    if self.emit_native_rounded_gradient(dl, world, x0, y0, x1, y1, radius, fill, clip) {
++                        return;
++                    }
++                }
+             }
+         }
+         if radius <= 0.0 || !world.is_axis_aligned() {
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -1554,6 +1554,7 @@
+                 x if x == spec::draw_op::TEX_QUAD => 9,
+                 x if x == spec::draw_op::ROUNDED_RECT => 8,
+                 x if x == spec::draw_op::ARC => 8,
++                x if x == spec::draw_op::ROUNDED_GRADIENT => 11,
+                 x if x == spec::draw_op::SCISSOR => 3,
+                 x if x == spec::draw_op::SCISSOR_POP => 1,
+                 x if x == spec::draw_op::TRI => 7,
+diff --git a/engine/core/src/tests.rs b/engine/core/src/tests.rs
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -201,7 +201,7 @@
+ /// Walk a DrawList asserting the pinned CPU-clip invariant: every coordinate
+ /// in [0, SCREEN_W] x [0, SCREEN_H], rect extents in range, scissors
+ /// balanced, only known ops. Returns per-op counts (indexed by op code).
+-fn validate_drawlist(words: &[u32]) -> [u32; 19] {
++fn validate_drawlist(words: &[u32]) -> [u32; 20] {
+     let (sw, sh) = (spec::SCREEN_W as i32, spec::SCREEN_H as i32);
+     let xy_ok = |w: u32| {
+         let (x, y) = decode_xy(w);
+@@ -213,7 +213,7 @@
+         let (w, h) = decode_wh(whw);
+         assert!(x + w <= sw && y + h <= sh, "rect exceeds screen: {x},{y} {w}x{h}");
+     };
+-    let mut counts = [0u32; 19];
++    let mut counts = [0u32; 20];
+     let mut depth = 0i32;
+     let mut i = 0usize;
+     while i < words.len() {
+@@ -258,6 +258,18 @@
+                 assert!(f32::from_bits(words[i + 4]) > 0.0);
+                 assert_ne!(f32::from_bits(words[i + 6]), 0.0);
+                 i += 8;
++            }
++            spec::draw_op::ROUNDED_GRADIENT => {
++                for word in i + 1..i + 6 {
++                    assert!(f32::from_bits(words[word]).is_finite());
++                }
++                assert!(f32::from_bits(words[i + 3]) > 0.0);
++                assert!(f32::from_bits(words[i + 4]) > 0.0);
++                assert!(f32::from_bits(words[i + 5]) > 0.0);
++                assert!(words[i + 8] <= 3, "bad GradDir");
++                let via_position = f32::from_bits(words[i + 10]);
++                assert!(via_position.is_nan() || (via_position.is_finite() && via_position > 0.0 && via_position < 1.0));
++                i += 11;
+             }
+             spec::draw_op::SURFACE_QUAD => {
+                 for word in i + 2..i + 6 {
+@@ -1128,6 +1140,157 @@
+ }
+ 
+ #[test]
++fn native_rounded_gradients_preserve_stops_directions_and_composition() {
++    fn draw_gradient(
++        direction: u32,
++        native: bool,
++        radius: f64,
++        scale_x: f64,
++        rotate: f64,
++        border: bool,
++        shadow: u32,
++        via_position: Option<f64>,
++        gradient: bool,
++    ) -> Vec<u32> {
++        let mut ui = Ui::new();
++        ui.set_viewport(240.0, 160.0);
++        let node = ui.create_node(0);
++        let from = abgr(20, 40, 60, 100);
++        let via = abgr(240, 230, 220, 150);
++        let to = abgr(80, 100, 120, 220);
++        for (prop, value) in [
++            (spec::prop::WIDTH, 80.0),
++            (spec::prop::HEIGHT, 60.0),
++            (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
++            (spec::prop::INSET_L, 20.0),
++            (spec::prop::INSET_T, 20.0),
++            (spec::prop::RADIUS, radius),
++            (spec::prop::OPACITY, 0.5),
++            (spec::prop::SCALE_X, scale_x),
++            (spec::prop::ROTATE, rotate),
++            (spec::prop::SHADOW, shadow as f64),
++        ] {
++            ui.set_prop(node, prop, value);
++        }
++        if gradient {
++            for (prop, value) in [
++                (spec::prop::GRAD_FROM, from as f64),
++                (spec::prop::GRAD_VIA, via as f64),
++                (spec::prop::GRAD_TO, to as f64),
++                (spec::prop::GRAD_DIR, direction as f64),
++            ] {
++                ui.set_prop(node, prop, value);
++            }
++            if let Some(position) = via_position {
++                ui.set_prop(node, spec::prop::GRAD_VIA_POS, position);
++            }
++        } else {
++            ui.set_prop(node, spec::prop::BG_COLOR, from as f64);
++        }
++        if border {
++            ui.set_prop(node, spec::prop::BORDER_COLOR, abgr(10, 20, 30, 255) as f64);
++            ui.set_prop(node, spec::prop::BORDER_WIDTH, 4.0);
++        }
++        ui.insert_before(spec::ROOT_ID, node, 0);
++        ui.tick();
++        ui.set_native_rounded_rects(native);
++        ui.draw().words.clone()
++    }
++
++    let from = abgr(20, 40, 60, 50);
++    let via = abgr(240, 230, 220, 75);
++    let to = abgr(80, 100, 120, 110);
++    for direction in 0..=3 {
++        let words = draw_gradient(direction, true, 12.0, 1.0, 0.0, false, 0, Some(0.35), true);
++        let counts = validate_drawlist(&words);
++        assert_eq!(counts[spec::draw_op::ROUNDED_GRADIENT as usize], 1);
++        assert_eq!(counts[spec::draw_op::GRAD_RECT as usize], 0);
++        assert_eq!(counts[spec::draw_op::TEX_QUAD as usize], 0);
++        assert_eq!(words[0], spec::draw_op::ROUNDED_GRADIENT);
++        assert_eq!(
++            [
++                f32::from_bits(words[1]),
++                f32::from_bits(words[2]),
++                f32::from_bits(words[3]),
++                f32::from_bits(words[4]),
++                f32::from_bits(words[5]),
++            ],
++            [20.0, 20.0, 80.0, 60.0, 12.0],
++        );
++        assert_eq!(&words[6..10], &[from, to, direction, via]);
++        assert_eq!(f32::from_bits(words[10]), 0.35);
++    }
++
++    let mut clipped_ui = Ui::new();
++    clipped_ui.set_viewport(60.0, 60.0);
++    let clipped_node = clipped_ui.create_node(0);
++    for (prop, value) in [
++        (spec::prop::WIDTH, 80.0),
++        (spec::prop::HEIGHT, 40.0),
++        (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
++        (spec::prop::INSET_L, -20.0),
++        (spec::prop::INSET_T, 10.0),
++        (spec::prop::RADIUS, 12.0),
++        (spec::prop::GRAD_FROM, abgr(0, 0, 0, 255) as f64),
++        (spec::prop::GRAD_TO, abgr(255, 255, 255, 255) as f64),
++        (spec::prop::GRAD_DIR, spec::GradDir::ToRight as u32 as f64),
++    ] {
++        clipped_ui.set_prop(clipped_node, prop, value);
++    }
++    clipped_ui.insert_before(spec::ROOT_ID, clipped_node, 0);
++    clipped_ui.tick();
++    clipped_ui.set_native_rounded_rects(true);
++    let clipped_words = clipped_ui.draw().words.clone();
++    let clipped_at = clipped_words
++        .iter()
++        .position(|&word| word == spec::draw_op::ROUNDED_GRADIENT)
++        .unwrap();
++    assert_eq!(f32::from_bits(clipped_words[clipped_at + 1]), -20.0);
++    assert_eq!(f32::from_bits(clipped_words[clipped_at + 2]), 10.0);
++    assert_eq!(f32::from_bits(clipped_words[clipped_at + 3]), 80.0);
++    assert_eq!(f32::from_bits(clipped_words[clipped_at + 4]), 40.0);
++
++    let two_stop = draw_gradient(3, true, 12.0, 1.0, 0.0, false, 0, None, true);
++    assert_eq!(validate_drawlist(&two_stop)[spec::draw_op::ROUNDED_GRADIENT as usize], 1);
++    assert!(f32::from_bits(two_stop[10]).is_nan(), "NaN is the only no-middle-stop sentinel");
++    let endpoint_stop = draw_gradient(3, true, 12.0, 1.0, 0.0, false, 0, Some(0.0), true);
++    assert!(f32::from_bits(endpoint_stop[10]).is_nan(), "endpoint stops retain two-stop behavior");
++
++    let legacy = draw_gradient(3, false, 12.0, 1.0, 0.0, false, 0, Some(0.35), true);
++    assert_eq!(validate_drawlist(&legacy)[spec::draw_op::ROUNDED_GRADIENT as usize], 0);
++    let nonuniform = draw_gradient(3, true, 12.0, 1.5, 0.0, false, 0, Some(0.35), true);
++    assert_eq!(validate_drawlist(&nonuniform)[spec::draw_op::ROUNDED_GRADIENT as usize], 0);
++    let rotated = draw_gradient(3, true, 12.0, 1.0, 0.25, false, 0, Some(0.35), true);
++    assert_eq!(validate_drawlist(&rotated)[spec::draw_op::ROUNDED_GRADIENT as usize], 0);
++    let square = draw_gradient(3, true, 0.0, 1.0, 0.0, false, 0, Some(0.35), true);
++    assert_eq!(validate_drawlist(&square)[spec::draw_op::ROUNDED_GRADIENT as usize], 0);
++    let subpixel = draw_gradient(3, true, 0.4, 1.0, 0.0, false, 0, Some(0.35), true);
++    assert_eq!(validate_drawlist(&subpixel)[spec::draw_op::ROUNDED_GRADIENT as usize], 0);
++    let flat = draw_gradient(3, true, 12.0, 1.0, 0.0, false, 0, None, false);
++    assert_eq!(validate_drawlist(&flat)[spec::draw_op::ROUNDED_GRADIENT as usize], 0);
++    assert_eq!(validate_drawlist(&flat)[spec::draw_op::ROUNDED_RECT as usize], 1);
++
++    let bordered = draw_gradient(2, true, 12.0, 1.0, 0.0, true, 0, Some(0.35), true);
++    assert_eq!(validate_drawlist(&bordered)[spec::draw_op::ROUNDED_RECT as usize], 1);
++    assert_eq!(validate_drawlist(&bordered)[spec::draw_op::ROUNDED_GRADIENT as usize], 1);
++    assert_eq!(bordered[0], spec::draw_op::ROUNDED_RECT);
++    assert_eq!(bordered[8], spec::draw_op::ROUNDED_GRADIENT);
++    assert_eq!(f32::from_bits(bordered[8 + 1]), 24.0);
++    assert_eq!(f32::from_bits(bordered[8 + 2]), 24.0);
++    assert_eq!(f32::from_bits(bordered[8 + 3]), 72.0);
++    assert_eq!(f32::from_bits(bordered[8 + 4]), 52.0);
++    assert_eq!(f32::from_bits(bordered[8 + 5]), 8.0);
++
++    let shadowed = draw_gradient(1, true, 12.0, 1.0, 0.0, false, 1, Some(0.35), true);
++    let shadow_counts = validate_drawlist(&shadowed);
++    assert!(shadow_counts[spec::draw_op::RECT as usize] > 0);
++    assert_eq!(shadow_counts[spec::draw_op::ROUNDED_RECT as usize], 0);
++    assert_eq!(shadow_counts[spec::draw_op::ROUNDED_GRADIENT as usize], 1);
++    let gradient_at = shadowed.iter().rposition(|&word| word == spec::draw_op::ROUNDED_GRADIENT).unwrap();
++    assert_eq!(gradient_at + 11, shadowed.len(), "legacy shadow layers remain before the gradient fill");
++}
++
++#[test]
+ fn scaled_flat_rounded_box_has_no_gaps_between_fast_path_pieces() {
+     let mut ui = Ui::new_with_raster_density(2);
+     let n = ui.create_node(0);
+diff --git a/engine/core/src/tests.rs b/engine/core/src/tests.rs
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -975,6 +975,7 @@
+                     result.push(core::array::from_fn(|offset| words[i + 1 + offset]));
+                     i += 8;
+                 }
++                spec::draw_op::ROUNDED_GRADIENT => i += 11,
+                 spec::draw_op::RECT => i += 4,
+                 spec::draw_op::GRAD_RECT => i += 6,
+                 spec::draw_op::SCISSOR => i += 3,
+diff --git a/engine/drivers/src/abi.rs b/engine/drivers/src/abi.rs
+--- a/engine/drivers/src/abi.rs
++++ b/engine/drivers/src/abi.rs
+@@ -91,7 +91,7 @@
+ pub const POCKET_MOTION_VALUE_SCREEN_ROTATION: u32 = 6;
+ pub const POCKET_MOTION_VALUE_TILT: u32 = 7;
+ pub const POCKET_MOTION_VALUE_ANGLES: u32 = 8;
+-pub const POCKET_DRAW_LIST_VERSION: u32 = 4;
++pub const POCKET_DRAW_LIST_VERSION: u32 = 5;
+ pub const POCKET_PIXEL_FORMAT_RGB565: u32 = 0;
+ pub const POCKET_PIXEL_FORMAT_RGBA8888: u32 = 1;
+ pub const POCKET_PIXEL_FORMAT_ARGB8888: u32 = 2;
+diff --git a/engine/render/draw-ops/src/lib.rs b/engine/render/draw-ops/src/lib.rs
+--- a/engine/render/draw-ops/src/lib.rs
++++ b/engine/render/draw-ops/src/lib.rs
+@@ -8,6 +8,8 @@
+ //!
+ //! ARC is 8 words: opcode, center, centerline radius, stroke width, start and
+ //! signed sweep in degrees, then ABGR color.
++//! ROUNDED_GRADIENT is 11 words: opcode, full bounds, radius, endpoint colors,
++//! direction, middle color, and a middle-stop position (NaN means no middle stop).
+ 
+ #![no_std]
+ 
+@@ -34,6 +36,7 @@
+     InvalidMeshTint,
+     InvalidMeshMaskMode,
+     InvalidArc,
++    InvalidRoundedGradient,
+ }
+ 
+ /// A borrowed record from the original DrawList, including its opcode word.
+@@ -64,6 +67,7 @@
+         draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,
+         draw_op::ROUNDED_RECT => 8,
+         draw_op::ARC => 8,
++        draw_op::ROUNDED_GRADIENT => 11,
+         draw_op::MESH_LAYER_BEGIN => 10,
+         draw_op::MESH_MASK_BEGIN => 4,
+         draw_op::MESH_LAYER_RESTORE => 1,
+@@ -143,6 +147,22 @@
+                     || sweep.abs() > 360.0
+                 {
+                     return Err(DecodeError::InvalidArc);
++                }
++            }
++            draw_op::ROUNDED_GRADIENT => {
++                let values = [1usize, 2, 3, 4, 5, 10]
++                    .map(|index| f32::from_bits(words[index]));
++                let [x, y, width, height, radius, via_position] = values;
++                let valid_stop = via_position.is_nan()
++                    || (via_position.is_finite() && via_position > 0.0 && via_position < 1.0);
++                if ![x, y, width, height, radius].iter().all(|value| value.is_finite())
++                    || width <= 0.0
++                    || height <= 0.0
++                    || radius <= 0.0
++                    || words[8] > 3
++                    || !valid_stop
++                {
++                    return Err(DecodeError::InvalidRoundedGradient);
+                 }
+             }
+             draw_op::SCISSOR => {
+diff --git a/engine/render/draw-ops/tests/decoding.rs b/engine/render/draw-ops/tests/decoding.rs
+--- a/engine/render/draw-ops/tests/decoding.rs
++++ b/engine/render/draw-ops/tests/decoding.rs
+@@ -13,7 +13,7 @@
+ }
+ 
+ #[test]
+-fn all_fifteen_records_preserve_the_original_words_and_offsets() {
++fn all_sixteen_records_preserve_the_original_words_and_offsets() {
+     let records: &[&[u32]] = &[
+         &[RECT, 0, 0, 0xff00_0000],
+         &[GRAD_RECT, 0, 0, 1, 2, 0],
+@@ -28,6 +28,7 @@
+         &[TEX_TRI_REPEAT_FLOAT, 0, 0.25f32.to_bits(), 0.5f32.to_bits(), 0, 0, 2.25f32.to_bits(), 0.5f32.to_bits(), 1.0f32.to_bits(), 0, 0.25f32.to_bits(), 2.5f32.to_bits(), 0, 1.0f32.to_bits(), u32::MAX],
+         &[ROUNDED_RECT, 1.25f32.to_bits(), 2.5f32.to_bits(), 30.0f32.to_bits(), 40.0f32.to_bits(), 18.0f32.to_bits(), 2.0f32.to_bits(), 0xff123456],
+         &[ARC, 45.25f32.to_bits(), 30.5f32.to_bits(), 8.0f32.to_bits(), 4.0f32.to_bits(), 270.0f32.to_bits(), (-90.0f32).to_bits(), 0xff123456],
++        &[ROUNDED_GRADIENT, 15.25f32.to_bits(), 12.5f32.to_bits(), 44.0f32.to_bits(), 28.0f32.to_bits(), 8.0f32.to_bits(), 0xff123456, 0xffabcdef, pocket_spec::GradDir::ToRight as u32, 0x80808080, 0.35f32.to_bits()],
+         &[TEXT_RUN, 0, 0, 0, 0, 0, 0, 5, 0x6463_6261, 0x65],
+         &[SURFACE_QUAD, 0, 0, 0, 0, 0, 0, 0, 0],
+     ];
+@@ -38,7 +39,7 @@
+     let decoded: Vec<_> = DrawOps::new(&words, SCREEN)
+         .collect::<Result<_, _>>()
+         .unwrap();
+-    assert_eq!(decoded.len(), 15);
++    assert_eq!(decoded.len(), 16);
+     let mut offset = 0;
+     for (operation, record) in decoded.iter().zip(records) {
+         assert_eq!(operation.words, *record);
+@@ -132,6 +133,64 @@
+         DrawOps::new(&invalid_sweep, SCREEN).next(),
+         Some(Err(DecodeError::InvalidArc)),
+     );
++}
++
++#[test]
++fn rounded_gradient_preserves_full_bounds_and_validates_the_nan_stop_sentinel() {
++    let words = [
++        SCISSOR,
++        xy(10, 11),
++        wh(20, 30),
++        ROUNDED_GRADIENT,
++        25.25f32.to_bits(),
++        26.5f32.to_bits(),
++        40.0f32.to_bits(),
++        24.0f32.to_bits(),
++        8.0f32.to_bits(),
++        0xff123456,
++        0xffabcdef,
++        pocket_spec::GradDir::ToBottom as u32,
++        0x80808080,
++        0.35f32.to_bits(),
++        SCISSOR_POP,
++    ];
++    let operations: Vec<_> = DrawOps::new(&words, SCREEN)
++        .collect::<Result<_, _>>()
++        .unwrap();
++    assert_eq!(operations[1].opcode, ROUNDED_GRADIENT);
++    assert_eq!(operations[1].words, &words[3..14]);
++    assert_eq!(operations[1].clip, DamageRect::new(10, 11, 30, 41));
++    assert!(validate(&words, SCREEN).is_ok());
++
++    let no_middle_stop = [
++        ROUNDED_GRADIENT,
++        0.0f32.to_bits(),
++        0.0f32.to_bits(),
++        20.0f32.to_bits(),
++        12.0f32.to_bits(),
++        4.0f32.to_bits(),
++        0xff000000,
++        0xffffffff,
++        pocket_spec::GradDir::ToLeft as u32,
++        0,
++        f32::NAN.to_bits(),
++    ];
++    assert!(validate(&no_middle_stop, SCREEN).is_ok());
++
++    for (dir, via_position) in [
++        (4, 0.5f32),
++        (pocket_spec::GradDir::ToRight as u32, f32::INFINITY),
++        (pocket_spec::GradDir::ToRight as u32, 0.0),
++        (pocket_spec::GradDir::ToRight as u32, 1.0),
++    ] {
++        let mut invalid = no_middle_stop;
++        invalid[8] = dir;
++        invalid[10] = via_position.to_bits();
++        assert_eq!(
++            DrawOps::new(&invalid, SCREEN).next(),
++            Some(Err(DecodeError::InvalidRoundedGradient)),
++        );
++    }
+ }
+ 
+ #[test]
+@@ -169,6 +228,7 @@
+         &[TEX_TRI, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+         &[TEX_TRI_REPEAT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+         &[ROUNDED_RECT, 1.25f32.to_bits(), 2.5f32.to_bits(), 30.0f32.to_bits(), 40.0f32.to_bits(), 18.0f32.to_bits(), 2.0f32.to_bits(), 0xff123456],
++        &[ROUNDED_GRADIENT, 1.25f32.to_bits(), 2.5f32.to_bits(), 30.0f32.to_bits(), 40.0f32.to_bits(), 18.0f32.to_bits(), 0xff123456, 0xffabcdef, 2, 0xffaabbcc, 0.5f32.to_bits()],
+         &[TEXT_RUN, 0, 0, 0, 0, 0, 0, 4, 0],
+         &[SURFACE_QUAD, 0, 0, 0, 0, 0, 0, 0, 0],
+     ];
+diff --git a/engine/present/src/damage.rs b/engine/present/src/damage.rs
+--- a/engine/present/src/damage.rs
++++ b/engine/present/src/damage.rs
+@@ -537,7 +537,9 @@
+             }
+             spec::draw_op::GLYPH_RUN => glyph_run_bounds(ui, words, clip),
+             spec::draw_op::TEX_QUAD => logical_rect(words[2], words[3]).intersect(clip),
+-            spec::draw_op::ROUNDED_RECT => rounded_rect_bounds(words, clip),
++            spec::draw_op::ROUNDED_RECT | spec::draw_op::ROUNDED_GRADIENT => {
++                rounded_rect_bounds(words, clip)
++            }
+             spec::draw_op::ARC => arc_bounds(words, clip),
+             spec::draw_op::SCISSOR => clip,
+             spec::draw_op::SCISSOR_POP => DamageRect::empty(),
+@@ -1168,4 +1170,35 @@
+     }
+ }
+ 
++#[cfg(test)]
++mod rounded_gradient_bounds_tests {
++    use super::*;
++
++    #[test]
++    fn rounded_gradient_damage_keeps_the_full_bounds_and_intersects_clip() {
++        let words = [
++            spec::draw_op::ROUNDED_GRADIENT,
++            15.25f32.to_bits(),
++            12.5f32.to_bits(),
++            44.0f32.to_bits(),
++            28.0f32.to_bits(),
++            8.0f32.to_bits(),
++            0xff123456,
++            0xffabcdef,
++            spec::GradDir::ToRight as u32,
++            0x80808080,
++            0.35f32.to_bits(),
++        ];
++        let clip = DamageRect::new(0, 0, 100, 80);
++        assert_eq!(
++            rounded_rect_bounds(&words, clip),
++            DamageRect::new(14, 11, 61, 42),
++        );
++        assert_eq!(
++            rounded_rect_bounds(&words, DamageRect::new(20, 20, 40, 30)),
++            DamageRect::new(20, 20, 40, 30),
++        );
++    }
++}
++
+ use pocket_draw_ops::logical_rect;
+diff --git a/engine/raster/src/surface.rs b/engine/raster/src/surface.rs
+--- a/engine/raster/src/surface.rs
++++ b/engine/raster/src/surface.rs
+@@ -130,6 +130,9 @@
+                 | draw_op::MESH_LAYER_RESTORE
+                 | draw_op::TEX_TRI_REPEAT
+                 | draw_op::TEX_TRI_REPEAT_FLOAT
++                | draw_op::ROUNDED_RECT
++                | draw_op::ARC
++                | draw_op::ROUNDED_GRADIENT
+         ) {
+             return Err(RenderError::Unsupported);
+         }
+@@ -242,6 +245,9 @@
+             | draw_op::MESH_LAYER_RESTORE
+             | draw_op::TEX_TRI_REPEAT
+             | draw_op::TEX_TRI_REPEAT_FLOAT
++            | draw_op::ROUNDED_RECT
++            | draw_op::ARC
++            | draw_op::ROUNDED_GRADIENT
+     ) {
+         return Err(RenderError::Unsupported);
+     }
+diff --git a/engine/raster/tests/driver.rs b/engine/raster/tests/driver.rs
+--- a/engine/raster/tests/driver.rs
++++ b/engine/raster/tests/driver.rs
+@@ -562,6 +562,87 @@
+ }
+ 
+ #[test]
++fn software_surface_rejects_native_shape_ops_before_writing() {
++    let resources = Resources::fixture();
++    let records = [
++        vec![
++            draw_op::ROUNDED_RECT,
++            1.0f32.to_bits(),
++            1.0f32.to_bits(),
++            5.0f32.to_bits(),
++            4.0f32.to_bits(),
++            2.0f32.to_bits(),
++            0.0f32.to_bits(),
++            0xff12_3456,
++        ],
++        vec![
++            draw_op::ARC,
++            4.0f32.to_bits(),
++            3.0f32.to_bits(),
++            2.0f32.to_bits(),
++            1.0f32.to_bits(),
++            0.0f32.to_bits(),
++            90.0f32.to_bits(),
++            0xff12_3456,
++        ],
++        vec![
++            draw_op::ROUNDED_GRADIENT,
++            1.0f32.to_bits(),
++            1.0f32.to_bits(),
++            5.0f32.to_bits(),
++            4.0f32.to_bits(),
++            2.0f32.to_bits(),
++            0xff12_3456,
++            0xffab_cdef,
++            0,
++            0,
++            f32::NAN.to_bits(),
++        ],
++    ];
++
++    for words in records {
++        assert_eq!(
++            validate_supported_draw_list(&resources, &words),
++            Err(RenderError::Unsupported)
++        );
++
++        let decoded = DrawOps::new(&words, DamageRect::new(0, 0, 8, 6))
++            .next()
++            .unwrap()
++            .unwrap();
++
++        let mut operation_pixels = [0x37; 8 * 6 * 4];
++        let mut operation_surface = Surface::new(
++            &mut operation_pixels,
++            Rect::new(0, 0, 8, 6),
++            8 * 4,
++            PixelFormat::Rgba8888,
++        )
++        .unwrap();
++        assert_eq!(
++            render_operation(&resources, &decoded, &mut operation_surface, 1),
++            Err(RenderError::Unsupported)
++        );
++        drop(operation_surface);
++        assert!(operation_pixels.iter().all(|byte| *byte == 0x37));
++
++        let mut pixels = [0x37; 8 * 6 * 4];
++        let mut surface = Surface::new(
++            &mut pixels,
++            Rect::new(0, 0, 8, 6),
++            8 * 4,
++            PixelFormat::Rgba8888,
++        )
++        .unwrap();
++        assert_eq!(
++            render_surface(&resources, &words, &mut surface, 1),
++            Err(RenderError::Unsupported)
++        );
++        assert!(pixels.iter().all(|byte| *byte == 0x37));
++    }
++}
++
++#[test]
+ fn malformed_and_forged_operation_records_return_errors() {
+     let resources = Resources::fixture();
+     let clip = DamageRect::new(0, 0, 8, 6);

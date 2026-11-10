@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createNovelLive2dFactory } from "../src/live2d.ts";
+import { encodeNovelMesh } from "../src/mesh.ts";
 import { encodeNovelMeshEffect } from "../src/mesh-effect.ts";
 import type { NovelModelDefinition } from "../src/models.ts";
 
@@ -17,21 +18,53 @@ const motion = { Version: 3, Meta: { Duration: 2, Fps: 30, Loop: true, AreBezier
 ] };
 const expression = { Type: "Live2D Expression", Parameters: [{ Id: "Eye", Value: 0.5, Blend: "Multiply" }] };
 
-test("Live2D factory preserves native facts, evaluates JS motion, flips Core UV and resolves masks before paint order", async () => {
+function packMockNativePms1(
+  positions: readonly number[],
+  uvs: readonly number[],
+  indices: readonly number[],
+  drawableOpacity: number,
+  placement: { dx: number; dy: number; scale: number; opacity?: number },
+): Uint8Array {
+  if (positions.length === 0 || indices.length === 0) return new Uint8Array(0);
+  const vertices = new Float32Array(positions.length * 2);
+  for (let i = 0; i < positions.length / 2; i++) {
+    vertices[i * 4] = placement.dx + positions[i * 2]! * placement.scale;
+    vertices[i * 4 + 1] = placement.dy + positions[i * 2 + 1]! * placement.scale;
+    vertices[i * 4 + 2] = uvs[i * 2]!;
+    vertices[i * 4 + 3] = 1 - uvs[i * 2 + 1]!;
+  }
+  const opacity = Math.round(Math.max(0, Math.min(1, drawableOpacity * (placement.opacity ?? 1))) * 255);
+  return encodeNovelMesh({ vertices, indices, color: ((opacity << 24) | 0xffffff) >>> 0 });
+}
+
+test("Live2D factory preserves native facts, evaluates JS motion, forwards placement and passes native PMS1 bytes straight through", async () => {
   const calls: { capability: string; params: Record<string, unknown> }[] = [];
   const host = { async request(capability: string, params: Record<string, unknown>) {
     calls.push({ capability, params });
     if (capability.endsWith("load")) return { modelId: "core-1", drawableCount: 5, mocVersion: 5, nativeBytes: 1024, parameterCount: 4, parameterDefaults: [{ id: "Eye", value: 1 }, { id: "OtherEye", value: 0.6 }, { id: "Mouth", value: 0.1 }], canvas: { widthPixels: 100, heightPixels: 100, originXPixels: 50, originYPixels: 50, pixelsPerUnit: 100 } };
     if (capability.endsWith("release")) return { released: true };
     const angle = (params.parameters as { id: string; value: number }[]).find(value => value.id === "Angle")!.value;
-    const drawable = (id: string, renderOrder: number) => ({ id, textureIndex: 0, drawOrder: renderOrder, renderOrder, blendMode: 0, constantFlags: 0, dynamicFlags: 1, opacity: 1, positionsXYPixels: [angle, 0, 100, 0, 0, 100], uvs: [0, 1, 1, 1, 0, 0], indices: [0, 1, 2], maskIndices: [] as number[], multiplyColorRgba: [1, 1, 1, 1], screenColorRgba: [0, 0, 0, 0] });
-    const mask = drawable("mask", 5);
-    mask.uvs[0] = -0.0003222227; // Real official Hiyori atlas edge behavior.
+    const placement = params.placement as { dx: number; dy: number; scale: number; opacity?: number };
+    const drawable = (id: string, renderOrder: number, u0 = 0) => ({
+      id,
+      textureIndex: 0,
+      drawOrder: renderOrder,
+      renderOrder,
+      blendMode: 0,
+      constantFlags: 0,
+      dynamicFlags: 1,
+      opacity: 1,
+      meshBytes: packMockNativePms1([angle, 0, 100, 0, 0, 100], [u0, 1, 1, 1, 0, 0], [0, 1, 2], 1, placement),
+      maskIndices: [] as number[],
+      multiplyColorRgba: [1, 1, 1, 1],
+      screenColorRgba: [0, 0, 0, 0],
+    });
+    const mask = drawable("mask", 5, -0.0003222227); // Real official Hiyori atlas edge behavior.
     mask.dynamicFlags = 0;
     const art = drawable("art", 1);
     art.maskIndices = [0, 2];
     art.constantFlags = 8;
-    const empty = { ...drawable("empty", 0), positionsXYPixels: [], uvs: [], indices: [] };
+    const empty = { ...drawable("empty", 0), meshBytes: new Uint8Array(0) };
     const emptyNormal = { ...drawable("emptyNormal", 2), maskIndices: [2] };
     const emptyInverted = { ...drawable("emptyInverted", 3), maskIndices: [2], constantFlags: 8 };
     return { modelId: "core-1", drawables: [mask, art, empty, emptyNormal, emptyInverted] };
@@ -53,10 +86,17 @@ test("Live2D factory preserves native facts, evaluates JS motion, flips Core UV 
   expect(data.getUint32(12, true) >>> 24).toBe(102); // Model opacity multiplies Core drawable opacity.
   const initialX = data.getFloat32(16, true);
   const second = await instance.advance(500);
-  expect(second[0]!.geometry).toBe(first[0]!.geometry);
-  expect(data.getFloat32(16, true)).toBeGreaterThan(initialX);
+  const secondData = new DataView(second[0]!.geometry.buffer);
+  expect(secondData.getFloat32(16, true)).toBeGreaterThan(initialX);
   expect(calls.find(call => call.capability.endsWith("load"))?.params.mocAsset).toBe("models/actor.moc3");
-  const parameters = calls.find(call => call.capability.endsWith("update"))?.params.parameters as { id: string; value: number }[];
+  const updateCall = calls.find(call => call.capability.endsWith("update"))?.params;
+  expect(updateCall?.placement).toEqual({
+    dx: (240 - 100 * 2.2) / 2,
+    dy: 340 - 100 * 2.2,
+    scale: 2.2,
+    opacity: 0.4,
+  });
+  const parameters = updateCall?.parameters as { id: string; value: number }[];
   expect(parameters.find(value => value.id === "Eye")?.value).toBe(0.4);
   expect(parameters.find(value => value.id === "OtherEye")?.value).toBe(0.8);
   expect(parameters.find(value => value.id === "Mouth")?.value).toBeCloseTo(0.3);

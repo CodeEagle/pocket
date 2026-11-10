@@ -53,6 +53,7 @@
       "hardware.weather.current",
       "platform.systemUi.set",
       "platform.haptics.perform",
+      "system.container.close",
       "system.runtime.configure",
       "system.runtime.create",
       "system.runtime.prepareOpen",

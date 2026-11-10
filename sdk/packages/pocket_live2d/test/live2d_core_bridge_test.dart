@@ -122,11 +122,11 @@ void main() {
         }
         var movedComponents = 0;
         for (var index = 0; index < baselineDrawables.length; index++) {
-          final before = _decodeFloat32(
-            baselineDrawables[index]['positionsXYPixels']! as Uint8List,
+          final before = _decodePms1Positions(
+            baselineDrawables[index]['meshBytes']! as Uint8List,
           );
-          final after = _decodeFloat32(
-            changedDrawables[index]['positionsXYPixels']! as Uint8List,
+          final after = _decodePms1Positions(
+            changedDrawables[index]['meshBytes']! as Uint8List,
           );
           for (var component = 0; component < before.length; component++) {
             if ((before[component] - after[component]).abs() > 0.001)
@@ -149,22 +149,38 @@ void main() {
         final decodedDrawables = decodedResult['drawables']! as List<dynamic>;
         expect(decodedDrawables, hasLength(262));
         expect(
-          (decodedDrawables.first as Map)['positionsXYPixels'],
+          (decodedDrawables.first as Map)['meshBytes'],
           isA<Uint8List>(),
         );
 
         final scalarDrawables = changedDrawables
-            .map(
-              (drawable) => <String, Object?>{
+            .map((drawable) {
+              final meshBytes = drawable['meshBytes']! as Uint8List;
+              final meshData = ByteData.sublistView(meshBytes);
+              final vertexCount = meshBytes.isEmpty
+                  ? 0
+                  : meshData.getUint32(4, Endian.little);
+              final indexCount = meshBytes.isEmpty
+                  ? 0
+                  : meshData.getUint32(8, Endian.little);
+              final verticesEnd = 16 + vertexCount * 16;
+              return <String, Object?>{
                 ...drawable,
-                'positionsXYPixels': _decodeFloat32(
-                  drawable['positionsXYPixels']! as Uint8List,
-                ),
-                'uvs': _decodeFloat32(drawable['uvs']! as Uint8List),
-                'indices': _decodeUnsigned(
-                  drawable['indices']! as Uint8List,
-                  2,
-                ),
+                'vertices': meshBytes.isEmpty
+                    ? const <double>[]
+                    : _decodeFloat32(
+                        Uint8List.sublistView(meshBytes, 16, verticesEnd),
+                      ),
+                'indices': meshBytes.isEmpty
+                    ? const <int>[]
+                    : _decodeUnsigned(
+                        Uint8List.sublistView(
+                          meshBytes,
+                          verticesEnd,
+                          verticesEnd + indexCount * 4,
+                        ),
+                        4,
+                      ),
                 'maskIndices': _decodeUnsigned(
                   drawable['maskIndices']! as Uint8List,
                   4,
@@ -175,8 +191,8 @@ void main() {
                 'screenColorRgba': _decodeFloat32(
                   drawable['screenColorRgba']! as Uint8List,
                 ),
-              },
-            )
+              }..remove('meshBytes');
+            })
             .toList(growable: false);
         final scalarResult = <String, Object?>{
           ...changed,
@@ -192,11 +208,11 @@ void main() {
         final resetDrawables =
             reset['drawables']! as List<Map<String, Object?>>;
         expect(
-          _decodeFloat32(
-            resetDrawables.first['positionsXYPixels']! as Uint8List,
+          _decodePms1Positions(
+            resetDrawables.first['meshBytes']! as Uint8List,
           ),
-          _decodeFloat32(
-            baselineDrawables.first['positionsXYPixels']! as Uint8List,
+          _decodePms1Positions(
+            baselineDrawables.first['meshBytes']! as Uint8List,
           ),
         );
         await plugin.release(<String, dynamic>{'modelId': modelId});
@@ -396,6 +412,20 @@ List<double> _decodeFloat32(Uint8List bytes) {
   ];
 }
 
+List<double> _decodePms1Positions(Uint8List bytes) {
+  if (bytes.isEmpty) return const <double>[];
+  final data = ByteData.sublistView(bytes);
+  expect(data.getUint32(0, Endian.little), pocketLive2dPms1Magic);
+  final vertexCount = data.getUint32(4, Endian.little);
+  final result = <double>[];
+  for (var vertex = 0; vertex < vertexCount; vertex++) {
+    final offset = 16 + vertex * 16;
+    result.add(data.getFloat32(offset, Endian.little));
+    result.add(data.getFloat32(offset + 4, Endian.little));
+  }
+  return result;
+}
+
 List<int> _decodeUnsigned(Uint8List bytes, int bytesPerValue) {
   final data = ByteData.sublistView(bytes);
   return <int>[
@@ -434,11 +464,11 @@ _VertexFrameStats _measureVertexFrame(
   for (final drawable in after) {
     final id = drawable['id']! as String;
     final previous = beforeById[id]!;
-    final oldPositions = _decodeFloat32(
-      previous['positionsXYPixels']! as Uint8List,
+    final oldPositions = _decodePms1Positions(
+      previous['meshBytes']! as Uint8List,
     );
-    final nextPositions = _decodeFloat32(
-      drawable['positionsXYPixels']! as Uint8List,
+    final nextPositions = _decodePms1Positions(
+      drawable['meshBytes']! as Uint8List,
     );
     expect(
       nextPositions,

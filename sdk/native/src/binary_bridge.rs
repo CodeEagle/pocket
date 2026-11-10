@@ -12,7 +12,6 @@ use rquickjs::object::Property;
 use rquickjs::{Array, ArrayBuffer, Ctx, FromJs, Object, TypedArray, Value};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
-
 /// Leading magic byte identifying a binary TLV message packet (`0xB1` is never
 /// a valid leading UTF-8 byte or JSON character, making wire packets
 /// self-describing alongside legacy UTF-8 JSON strings).
@@ -138,9 +137,13 @@ fn js_raw_ptr(value: &Value<'_>) -> usize {
     // QuickJS uses a tagged u64 on 32-bit targets (including Wasm), and a
     // tagged union on 64-bit targets. Match JS_VALUE_GET_PTR in quickjs.h.
     #[cfg(target_pointer_width = "32")]
-    { value.as_raw() as u32 as usize }
+    {
+        value.as_raw() as u32 as usize
+    }
     #[cfg(target_pointer_width = "64")]
-    { unsafe { value.as_raw().u.ptr as usize } }
+    {
+        unsafe { value.as_raw().u.ptr as usize }
+    }
 }
 
 fn extract_js_bytes<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<Vec<u8>> {
@@ -701,7 +704,10 @@ fn decode_js_value<'js>(
                 let key = reader.str()?;
                 let child = decode_js_value(ctx, reader, depth + 1)?;
                 object
-                    .prop(key, Property::from(child).configurable().enumerable().writable())
+                    .prop(
+                        key,
+                        Property::from(child).configurable().enumerable().writable(),
+                    )
                     .map_err(|error| error.to_string())?;
             }
             Ok(object.into_value())
@@ -846,6 +852,4 @@ mod tests {
             assert!(encode_js_message(bad_batch, 256 * 1024, 256).is_err());
         });
     }
-
-
 }

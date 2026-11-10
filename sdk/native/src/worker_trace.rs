@@ -1394,11 +1394,15 @@ mod tests {
     #[test]
     fn verify_replay_complete_fails_on_active_unclosed_turn() {
         let replay = WorkerTrace::new(Mode::Replay);
-        let events = [
-            event(0, "turn.begin", json!({"sequence": 1, "nowMicros": 10})),
-        ];
+        let events = [event(
+            0,
+            "turn.begin",
+            json!({"sequence": 1, "nowMicros": 10}),
+        )];
         replay.begin_batch(&events).unwrap();
-        replay.take(TraceActor::Worker, "worker-1", "turn.begin").unwrap();
+        replay
+            .take(TraceActor::Worker, "worker-1", "turn.begin")
+            .unwrap();
         replay.finish_batch().unwrap();
 
         let err = replay.verify_replay_complete().unwrap_err();
@@ -1413,7 +1417,9 @@ mod tests {
             event(1, "turn.end", json!({"sequence": 1})),
         ];
         replay.begin_batch(&events).unwrap();
-        replay.take(TraceActor::Worker, "worker-1", "turn.begin").unwrap();
+        replay
+            .take(TraceActor::Worker, "worker-1", "turn.begin")
+            .unwrap();
         let err = replay.verify_replay_complete().unwrap_err();
         assert_eq!(err, "worker replay ended with unconsumed events");
     }
@@ -1423,18 +1429,24 @@ mod tests {
         let record = WorkerTrace::new(Mode::Record);
         record.begin_batch(&[]).unwrap();
         let lane = Arc::clone(&record);
-        lane.observe(TraceActor::Worker, "worker-1", "turn.begin", || {
-            json!({"sequence": 1})
-        })
+        lane.observe(
+            TraceActor::Worker,
+            "worker-1",
+            "turn.begin",
+            || json!({"sequence": 1}),
+        )
         .unwrap();
 
         let lane_worker = Arc::clone(&record);
         let worker = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
             lane_worker
-                .observe(TraceActor::Worker, "worker-1", "turn.end", || {
-                    json!({"sequence": 1})
-                })
+                .observe(
+                    TraceActor::Worker,
+                    "worker-1",
+                    "turn.end",
+                    || json!({"sequence": 1}),
+                )
                 .unwrap();
         });
 
@@ -1450,9 +1462,12 @@ mod tests {
         let record = WorkerTrace::new(Mode::Record);
         record.begin_batch(&[]).unwrap();
         record
-            .observe(TraceActor::Worker, "worker-1", "turn.begin", || {
-                json!({"sequence": 1})
-            })
+            .observe(
+                TraceActor::Worker,
+                "worker-1",
+                "turn.begin",
+                || json!({"sequence": 1}),
+            )
             .unwrap();
 
         let err = record.finish_batch().unwrap_err();

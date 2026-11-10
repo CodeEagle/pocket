@@ -277,6 +277,7 @@ final class PocketCanvasPainter extends CustomPainter {
     this.devicePixelRatio = 1,
     this.fontFamilyFallback = const <String>[],
     this.textLayoutCache,
+    this.onPaintMicroseconds,
   }) : _imageIdentities = _pocketImageIdentities(ops, images),
        _meshLevelIdentities = <String, List<ui.Image>>{
          for (final entry in meshImageLevels.entries)
@@ -306,6 +307,10 @@ final class PocketCanvasPainter extends CustomPainter {
   /// may omit it to exercise the original one-shot TextPainter path without
   /// creating a process-global cache.
   final PocketTextLayoutCache? textLayoutCache;
+
+  /// Optional per-paint attribution sink supplied by [PocketView] only when
+  /// performance sampling is enabled.
+  final ValueSetter<int>? onPaintMicroseconds;
   // The render map is intentionally shared so an image upload can become
   // visible without rebuilding every op object. Keep only identities used by
   // this block as an immutable snapshot for visual equality checks.
@@ -330,6 +335,27 @@ final class PocketCanvasPainter extends CustomPainter {
   }
 
   void _paintWithDevicePixelRatio(
+    Canvas canvas,
+    Size size,
+    double paintDevicePixelRatio,
+  ) {
+    final paintCallback = onPaintMicroseconds;
+    final stopwatch = paintCallback == null ? null : (Stopwatch()..start());
+    try {
+      developer.Timeline.timeSync(
+        'pocket.paint',
+        () =>
+            _paintWithDevicePixelRatioBody(canvas, size, paintDevicePixelRatio),
+      );
+    } finally {
+      if (stopwatch != null) {
+        stopwatch.stop();
+        paintCallback!(stopwatch.elapsedMicroseconds);
+      }
+    }
+  }
+
+  void _paintWithDevicePixelRatioBody(
     Canvas canvas,
     Size size,
     double paintDevicePixelRatio,
@@ -420,10 +446,53 @@ final class PocketCanvasPainter extends CustomPainter {
           );
         case PocketRoundedOp():
           final radius = op.radius.clamp(0.0, rect.shortestSide / 2).toDouble();
-          canvas.drawRRect(
-            RRect.fromRectAndRadius(rect, Radius.circular(radius)),
-            Paint()..color = Color(op.color),
-          );
+          final outer = RRect.fromRectAndRadius(rect, Radius.circular(radius));
+          final borderWidth = op.borderWidth
+              .clamp(0.0, rect.shortestSide / 2)
+              .toDouble();
+          if (borderWidth == 0.0) {
+            canvas.drawRRect(outer, Paint()..color = Color(op.color));
+          } else {
+            final innerRect = rect.deflate(borderWidth);
+            if (innerRect.width <= 0 || innerRect.height <= 0) {
+              // A border at least half as thick as the shortest dimension has
+              // no interior hole; paint the collapsed ring as one filled RRect.
+              canvas.drawRRect(outer, Paint()..color = Color(op.color));
+            } else {
+              final innerRadius = (radius - borderWidth)
+                  .clamp(0.0, innerRect.shortestSide / 2)
+                  .toDouble();
+              final inner = RRect.fromRectAndRadius(
+                innerRect,
+                Radius.circular(innerRadius),
+              );
+              canvas.drawDRRect(
+                outer,
+                inner,
+                Paint()
+                  ..color = Color(op.color)
+                  ..isAntiAlias = true,
+              );
+            }
+          }
+        case PocketArcOp():
+          final paint = Paint()
+            ..color = Color(op.color)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = op.strokeWidth
+            ..strokeCap = StrokeCap.round
+            ..isAntiAlias = true;
+          if (op.sweepAngle.abs() >= 360.0) {
+            canvas.drawCircle(rect.center, op.radius, paint);
+          } else {
+            final oval = Rect.fromCircle(
+              center: rect.center,
+              radius: op.radius,
+            );
+            final start = (op.startAngle - 90.0) * math.pi / 180.0;
+            final sweep = op.sweepAngle * math.pi / 180.0;
+            canvas.drawArc(oval, start, sweep, false, paint);
+          }
         case PocketGradientOp():
           final (begin, end) = _gradientAlignment(op.direction);
           final shader = LinearGradient(
@@ -432,6 +501,30 @@ final class PocketCanvasPainter extends CustomPainter {
             colors: <Color>[Color(op.fromColor), Color(op.toColor)],
           ).createShader(rect);
           canvas.drawRect(rect, Paint()..shader = shader);
+        case PocketRoundedGradientOp():
+          final (begin, end) = _gradientAlignment(op.direction);
+          final colors = op.viaColor == null
+              ? <Color>[Color(op.fromColor), Color(op.toColor)]
+              : <Color>[
+                  Color(op.fromColor),
+                  Color(op.viaColor!),
+                  Color(op.toColor),
+                ];
+          final stops = op.viaPosition == null
+              ? null
+              : <double>[0, op.viaPosition!, 1];
+          final shader = LinearGradient(
+            begin: begin,
+            end: end,
+            colors: colors,
+            stops: stops,
+          ).createShader(rect);
+          final radius = op.radius.clamp(0.0, rect.shortestSide / 2).toDouble();
+          final roundedRect = RRect.fromRectAndRadius(
+            rect,
+            Radius.circular(radius),
+          );
+          canvas.drawRRect(roundedRect, Paint()..shader = shader);
         case PocketTriangleOp():
           final vertices = ui.Vertices(
             ui.VertexMode.triangles,
@@ -1072,6 +1165,64 @@ bool _samePocketClip(PocketClip? first, PocketClip? second) {
 
 bool _pocketArgbPaints(int color) => (color >>> 24) != 0;
 
+bool _pocketRoundedPaintsAt(PocketRoundedOp op, Offset point) {
+  if (!_pocketArgbPaints(op.color)) return false;
+  final rect = Rect.fromLTWH(op.x, op.y, op.width, op.height);
+  final borderWidth = op.borderWidth
+      .clamp(0.0, rect.shortestSide / 2)
+      .toDouble();
+  if (borderWidth == 0.0) return true;
+  final innerRect = rect.deflate(borderWidth);
+  if (innerRect.width <= 0 || innerRect.height <= 0) return true;
+  final radius = op.radius.clamp(0.0, rect.shortestSide / 2).toDouble();
+  final innerRadius = (radius - borderWidth)
+      .clamp(0.0, innerRect.shortestSide / 2)
+      .toDouble();
+  return !RRect.fromRectAndRadius(
+    innerRect,
+    Radius.circular(innerRadius),
+  ).contains(point);
+}
+
+bool _pocketArcPaintsAt(PocketArcOp op, Offset point) {
+  if (!_pocketArgbPaints(op.color)) return false;
+  final center = Offset(op.x + op.width * 0.5, op.y + op.height * 0.5);
+  final dx = point.dx - center.dx;
+  final dy = point.dy - center.dy;
+  final half = op.strokeWidth * 0.5;
+  final distance = math.sqrt(dx * dx + dy * dy);
+  final onStroke = (distance - op.radius).abs() <= half;
+  if (op.sweepAngle.abs() >= 360.0) return onStroke;
+  final angle = (math.atan2(dx, -dy) * 180.0 / math.pi + 360.0) % 360.0;
+  final start = (op.startAngle % 360.0 + 360.0) % 360.0;
+  final delta = op.sweepAngle > 0
+      ? (angle - start + 360.0) % 360.0
+      : (start - angle + 360.0) % 360.0;
+  if (onStroke && delta <= op.sweepAngle.abs()) return true;
+  Offset endpoint(double degrees) {
+    final radians = degrees * math.pi / 180.0;
+    return Offset(
+      center.dx + math.sin(radians) * op.radius,
+      center.dy - math.cos(radians) * op.radius,
+    );
+  }
+
+  final first = endpoint(op.startAngle);
+  final last = endpoint(op.startAngle + op.sweepAngle);
+  return (point - first).distance <= half || (point - last).distance <= half;
+}
+
+bool _pocketRoundedGradientPaintsAt(PocketRoundedGradientOp op, Offset point) {
+  if (!_pocketArgbPaints(op.fromColor) &&
+      !_pocketArgbPaints(op.toColor) &&
+      (op.viaColor == null || !_pocketArgbPaints(op.viaColor!))) {
+    return false;
+  }
+  final rect = Rect.fromLTWH(op.x, op.y, op.width, op.height);
+  final radius = op.radius.clamp(0.0, rect.shortestSide / 2).toDouble();
+  return RRect.fromRectAndRadius(rect, Radius.circular(radius)).contains(point);
+}
+
 /// Conservative visual hit approximation for a DrawOp. The native Guest
 /// remains the authority for JS activation; this is only the Flutter sibling
 /// hit-test needed to choose between a host surface and later root paint.
@@ -1089,7 +1240,9 @@ bool _pocketOpPaintsAt(PocketOp op, Offset point) {
   }
   return switch (op) {
     PocketRectOp(:final color) => _pocketArgbPaints(color),
-    PocketRoundedOp(:final color) => _pocketArgbPaints(color),
+    PocketRoundedOp() => _pocketRoundedPaintsAt(op, point),
+    PocketRoundedGradientOp() => _pocketRoundedGradientPaintsAt(op, point),
+    PocketArcOp() => _pocketArcPaintsAt(op, point),
     PocketGradientOp(:final fromColor, :final toColor) =>
       _pocketArgbPaints(fromColor) || _pocketArgbPaints(toColor),
     PocketTriangleOp(:final colors) => colors.any(_pocketArgbPaints),
@@ -1258,12 +1411,29 @@ bool _pocketOpEquals(
       return (second as PocketRectOp).color == first.color;
     case PocketRoundedOp():
       final other = second as PocketRoundedOp;
-      return other.color == first.color && other.radius == first.radius;
+      return other.color == first.color &&
+          other.radius == first.radius &&
+          other.borderWidth == first.borderWidth;
+    case PocketArcOp():
+      final other = second as PocketArcOp;
+      return other.color == first.color &&
+          other.radius == first.radius &&
+          other.strokeWidth == first.strokeWidth &&
+          other.startAngle == first.startAngle &&
+          other.sweepAngle == first.sweepAngle;
     case PocketGradientOp():
       final other = second as PocketGradientOp;
       return other.fromColor == first.fromColor &&
           other.toColor == first.toColor &&
           other.direction == first.direction;
+    case PocketRoundedGradientOp():
+      final other = second as PocketRoundedGradientOp;
+      return other.radius == first.radius &&
+          other.fromColor == first.fromColor &&
+          other.toColor == first.toColor &&
+          other.direction == first.direction &&
+          other.viaColor == first.viaColor &&
+          other.viaPosition == first.viaPosition;
     case PocketTriangleOp():
       final other = second as PocketTriangleOp;
       return _pocketPointListEquals(first.points, other.points) &&

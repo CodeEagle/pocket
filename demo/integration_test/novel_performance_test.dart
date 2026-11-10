@@ -34,6 +34,8 @@ void main() {
   ) async {
     final windows = <Map<String, Object?>>[];
     final original = debugPocketFrameDeltaAtOverride;
+    final originalTickAttribution = debugOnPocketTickAttribution;
+    final originalFrameStageAttribution = debugOnPocketFrameStageAttribution;
     final captureKey = GlobalKey();
     PocketLive2dPlugin? live2d;
     final lantern = showcaseNativePolicies['pocket.demo.lantern']!;
@@ -58,6 +60,10 @@ void main() {
       await tester.pump();
       final frames = <FrameTiming>[];
       final native = <double>[];
+      final decode = <double>[];
+      final diff = <double>[];
+      final stageBuild = <double>[];
+      final stagePaint = <double>[];
       final ops = <double>[];
       void collect(List<FrameTiming> timings) => frames.addAll(timings);
       debugPocketFrameDeltaAtOverride = (runtime, delta) {
@@ -70,6 +76,18 @@ void main() {
         if (result != null) ops.add(result.ops.length.toDouble());
         return result;
       };
+      debugOnPocketTickAttribution = ({
+        required nativeMs,
+        required decodeMs,
+        required diffMs,
+      }) {
+        decode.add(decodeMs);
+        diff.add(diffMs);
+      };
+      debugOnPocketFrameStageAttribution = ({buildMs, paintMs}) {
+        if (buildMs != null) stageBuild.add(buildMs);
+        if (paintMs != null) stagePaint.add(paintMs);
+      };
       PocketCanvasPainter.resetPaintInvocationCount();
       SchedulerBinding.instance.addTimingsCallback(collect);
       final elapsed = Stopwatch()..start();
@@ -77,10 +95,13 @@ void main() {
         await action();
         // Observe real vsync; do not synthesize a 60 Hz test frame loop.
         await Future<void>.delayed(const Duration(milliseconds: 1600));
+        await tester.pump();
       } finally {
         elapsed.stop();
         SchedulerBinding.instance.removeTimingsCallback(collect);
         debugPocketFrameDeltaAtOverride = original;
+        debugOnPocketTickAttribution = originalTickAttribution;
+        debugOnPocketFrameStageAttribution = originalFrameStageAttribution;
       }
       final build = frames
           .map((f) => f.buildDuration.inMicroseconds / 1000)
@@ -109,7 +130,17 @@ void main() {
         'nativeP50Ms': _percentile(native, .50),
         'nativeP95Ms': _percentile(native, .95),
         'nativeMaxMs': _percentile(native, 1),
+        'decodeP50Ms': _percentile(decode, .50),
+        'decodeP95Ms': _percentile(decode, .95),
+        'diffP50Ms': _percentile(diff, .50),
+        'diffP95Ms': _percentile(diff, .95),
+        'pocketBuildP50Ms': _percentile(stageBuild, .50),
+        'pocketBuildP95Ms': _percentile(stageBuild, .95),
+        'pocketPaintP50Ms': _percentile(stagePaint, .50),
+        'pocketPaintP95Ms': _percentile(stagePaint, .95),
+        'buildP50Ms': _percentile(build, .50),
         'buildP95Ms': _percentile(build, .95),
+        'rasterP50Ms': _percentile(raster, .50),
         'rasterP95Ms': _percentile(raster, .95),
         'overBudget': frames
             .where(
@@ -297,6 +328,8 @@ void main() {
       };
     } finally {
       debugPocketFrameDeltaAtOverride = original;
+      debugOnPocketTickAttribution = originalTickAttribution;
+      debugOnPocketFrameStageAttribution = originalFrameStageAttribution;
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     }

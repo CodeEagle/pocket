@@ -49,9 +49,7 @@ const nativeFrame = {
     constantFlags: 0,
     dynamicFlags: 33,
     opacity: 1,
-    positionsXYPixels: floatBytes([0, 0, 20, 0, 10, 20]),
-    uvs: floatBytes([0, 0, 1, 0, 0.5, 1]),
-    indices: uint16Bytes([0, 1, 2]),
+    meshBytes: pms1Bytes([0, 0, 20, 0, 10, 20], [0, 0, 1, 0, 0.5, 1], [0, 1, 2]),
     maskIndices: uint32Bytes([3]),
     multiplyColorRgba: floatBytes([1, 1, 1, 1]),
     screenColorRgba: floatBytes([0, 0, 0, 1]),
@@ -136,17 +134,27 @@ test("host transport keeps model asset references, forwards Core mesh facts and 
     capability: pocketLive2dLoadCapability,
     params: { id: "mao", mocAsset: "models/mao/Mao.moc3", textures: ["models/mao/Mao.2048/texture_00.png"] },
   });
-  const frame = await client.update(info.modelId, [{ id: "ParamAngleX", value: 30 }]);
+  const frame = await client.update(
+    info.modelId,
+    [{ id: "ParamAngleX", value: 30 }],
+    [],
+    { dx: 10, dy: 20, scale: 0.5, opacity: 0.8 },
+  );
   expect(frame.drawables[0]).toMatchObject({
     id: "ArtMesh01",
     textureIndex: 0,
     maskIndices: [3],
     blendMode: 0,
-    positionsXYPixels: [0, 0, 20, 0, 10, 20],
   });
+  expect(frame.drawables[0]?.meshBytes).toBe(nativeFrame.drawables[0]!.meshBytes);
   expect(calls[1]).toEqual({
     capability: pocketLive2dUpdateCapability,
-    params: { modelId: "native-1", parameters: [{ id: "ParamAngleX", value: 30 }], partOpacities: [] },
+    params: {
+      modelId: "native-1",
+      parameters: [{ id: "ParamAngleX", value: 30 }],
+      partOpacities: [],
+      placement: { dx: 10, dy: 20, scale: 0.5, opacity: 0.8 },
+    },
   });
   await client.release(info.modelId);
   await client.dispose();
@@ -157,6 +165,7 @@ test("opt-in topology transport merges sparse native facts into a complete frame
   const calls: Array<{ capability: string; params: Record<string, unknown> }> = [];
   let updates = 0;
   const complete = { ...nativeFrame, topologyMode: "full" };
+  const sparseMesh = pms1Bytes([1, 2, 21, 2, 11, 22], [0, 0, 1, 0, 0.5, 1], [0, 1, 2], 0.4);
   const sparse = {
     modelId: nativeModelInfo.modelId,
     topologyMode: "cached-v1",
@@ -169,7 +178,7 @@ test("opt-in topology transport merges sparse native facts into a complete frame
       constantFlags: 1,
       dynamicFlags: 17,
       opacity: 0.4,
-      positionsXYPixels: floatBytes([1, 2, 21, 2, 11, 22]),
+      meshBytes: sparseMesh,
       multiplyColorRgba: floatBytes([1, 0.5, 0.25, 1]),
       screenColorRgba: floatBytes([0, 0.5, 0.25, 1]),
     }],
@@ -197,9 +206,7 @@ test("opt-in topology transport merges sparse native facts into a complete frame
     constantFlags: 1,
     dynamicFlags: 17,
     opacity: 0.4,
-    positionsXYPixels: [1, 2, 21, 2, 11, 22],
-    uvs: first.drawables[0]!.uvs,
-    indices: first.drawables[0]!.indices,
+    meshBytes: sparseMesh,
     maskIndices: first.drawables[0]!.maskIndices,
     multiplyColorRgba: [1, 0.5, 0.25, 1],
     screenColorRgba: [0, 0.5, 0.25, 1],
@@ -228,7 +235,7 @@ test("topology cache is cleared on release and a sparse first frame is rejected"
             constantFlags: 0,
             dynamicFlags: 33,
             opacity: 1,
-            positionsXYPixels: floatBytes([0, 0, 20, 0, 10, 20]),
+            meshBytes: nativeFrame.drawables[0]!.meshBytes,
             multiplyColorRgba: floatBytes([1, 1, 1, 1]),
             screenColorRgba: floatBytes([0, 0, 0, 1]),
           }],
@@ -343,9 +350,7 @@ test("host parser preserves Core drawables that have no topology", async () => {
             constantFlags: 0,
             dynamicFlags: 0,
             opacity: 0,
-            positionsXYPixels: new Uint8Array(0),
-            uvs: new Uint8Array(0),
-            indices: new Uint8Array(0),
+            meshBytes: new Uint8Array(0),
             maskIndices: new Uint8Array(0),
             multiplyColorRgba: floatBytes([1, 1, 1, 1]),
             screenColorRgba: floatBytes([0, 0, 0, 1]),
@@ -361,11 +366,37 @@ test("host parser preserves Core drawables that have no topology", async () => {
   expect(frame.drawables[0]).toMatchObject({
     id: "ArtMeshEmpty",
     textureIndex: -1,
-    positionsXYPixels: [],
-    indices: [],
+    meshBytes: new Uint8Array(0),
   });
   await client.dispose();
 });
+
+function pms1Bytes(
+  positions: readonly number[],
+  uvs: readonly number[],
+  indices: readonly number[],
+  opacity = 1,
+): Uint8Array {
+  const n = positions.length / 2;
+  const m = indices.length;
+  const bytes = new Uint8Array(16 + n * 16 + m * 4);
+  const view = new DataView(bytes.buffer);
+  const opacityByte = Math.round(Math.max(0, Math.min(1, opacity)) * 255);
+  view.setUint32(0, 0x31534d50, true);
+  view.setUint32(4, n, true);
+  view.setUint32(8, m, true);
+  view.setUint32(12, ((opacityByte << 24) | 0xffffff) >>> 0, true);
+  for (let i = 0; i < n; i++) {
+    view.setFloat32(16 + i * 16, positions[i * 2]!, true);
+    view.setFloat32(20 + i * 16, positions[i * 2 + 1]!, true);
+    view.setFloat32(24 + i * 16, uvs[i * 2]!, true);
+    view.setFloat32(28 + i * 16, 1 - uvs[i * 2 + 1]!, true);
+  }
+  for (let i = 0; i < m; i++) {
+    view.setUint32(16 + n * 16 + i * 4, indices[i]!, true);
+  }
+  return bytes;
+}
 
 function floatBytes(values: readonly number[]): Uint8Array {
   const bytes = new Uint8Array(values.length * 4);

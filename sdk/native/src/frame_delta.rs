@@ -137,7 +137,10 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 0);
         assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 2);
         assert_eq!(u32::from_le_bytes(bytes[20..24].try_into().unwrap()), 0);
-        assert_eq!(u32::from_le_bytes(bytes[24..HEADER_BYTES].try_into().unwrap()), 4);
+        assert_eq!(
+            u32::from_le_bytes(bytes[24..HEADER_BYTES].try_into().unwrap()),
+            4
+        );
         assert_eq!(&bytes[HEADER_BYTES..], b"PFB1");
     }
 }

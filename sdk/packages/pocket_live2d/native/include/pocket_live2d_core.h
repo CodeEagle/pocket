@@ -68,6 +68,8 @@ typedef struct PocketLive2dDrawableInfo {
   const int32_t* mask_indices;
   const float* multiply_color_rgba;
   const float* screen_color_rgba;
+  const uint8_t* pms1_bytes;
+  int pms1_byte_count;
 } PocketLive2dDrawableInfo;
 
 /*
@@ -114,6 +116,13 @@ POCKET_LIVE2D_EXPORT int32_t pocket_live2d_model_set_part_opacity(
 
 /* Runs the official Core deformation pass and refreshes copied drawable data. */
 POCKET_LIVE2D_EXPORT int32_t pocket_live2d_model_update(PocketLive2dModel* model);
+/* Runs the official Core deformation pass and packs PMS1 mesh bytes per drawable. */
+POCKET_LIVE2D_EXPORT int32_t pocket_live2d_model_update_with_placement(
+    PocketLive2dModel* model,
+    double dx,
+    double dy,
+    double scale,
+    double model_opacity);
 POCKET_LIVE2D_EXPORT int32_t pocket_live2d_model_get_drawable_count(const PocketLive2dModel* model);
 POCKET_LIVE2D_EXPORT int32_t pocket_live2d_model_get_drawable(
     const PocketLive2dModel* model,

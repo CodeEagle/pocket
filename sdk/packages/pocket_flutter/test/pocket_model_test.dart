@@ -148,6 +148,7 @@ void main() {
     expect(frame.ops, hasLength(10));
     expect(frame.ops[0], isA<PocketRectOp>());
     expect(frame.ops[1], isA<PocketRoundedOp>());
+    expect((frame.ops[1] as PocketRoundedOp).borderWidth, 0);
     expect(frame.ops[2], isA<PocketGradientOp>());
     expect(frame.ops[3], isA<PocketTriangleOp>());
     expect(frame.ops[4], isA<PocketTextureTriangleOp>());
@@ -172,6 +173,327 @@ void main() {
     expect(frame.releasedResources, <String>['old']);
     expect(frame.auxiliary!.ops.single, isA<PocketRectOp>());
     expect(frame.sequence, 7);
+  });
+
+  test(
+    'decodes rounded rings in PFB1 v3 and preserves older rounded fills',
+    () {
+      final binary = _BinaryFrameBuilder()
+        ..u32(0x31424650)
+        ..u16(3)
+        ..u16(0)
+        ..u64(9)
+        ..f32(20)
+        ..f32(20)
+        ..u32(1)
+        ..u8(15)
+        ..f32(2)
+        ..f32(3)
+        ..f32(12)
+        ..f32(8)
+        ..f32(2)
+        ..f32(3)
+        ..f32(12)
+        ..f32(8)
+        ..u32(0xff123456)
+        ..f32(3)
+        ..f32(2)
+        ..u32(0) // events
+        ..u32(0) // resources
+        ..u32(0) // released resources
+        ..u8(0); // auxiliary
+
+      final frame = PocketFrame.fromBinary(binary.build());
+      final ring = frame.ops.single as PocketRoundedOp;
+      expect(ring.borderWidth, 2);
+      expect(ring.radius, 3);
+      expect(ring.color, 0xff123456);
+      expect(ring.clip!.x, 2);
+      expect(ring.clip!.y, 3);
+      expect(ring.clip!.width, 12);
+      expect(ring.clip!.height, 8);
+
+      final versionTwo = Uint8List.fromList(binary.build())..[4] = 2;
+      expect(
+        () => PocketFrame.fromBinary(versionTwo),
+        throwsA(isA<FormatException>()),
+      );
+    },
+  );
+
+  test('decodes rounded ring border width from the legacy JSON frame', () {
+    final frame = PocketFrame.fromJson('''{
+      "width": 20, "height": 20,
+      "ops": [{"type":"rounded","x":2,"y":3,"w":12,"h":8,
+        "color":4279383126,"radius":3,"borderWidth":2}],
+      "events": [], "resources": []
+    }''');
+
+    expect((frame.ops.single as PocketRoundedOp).borderWidth, 2);
+  });
+
+  test('decodes native arcs only in PFB1 v4, including auxiliary surfaces', () {
+    Uint8List arcFrame({required int version, bool auxiliary = false}) {
+      final binary = _BinaryFrameBuilder()
+        ..u32(0x31424650)
+        ..u16(version)
+        ..u16(0)
+        ..u64(10)
+        ..f32(24)
+        ..f32(24)
+        ..u32(auxiliary ? 0 : 1);
+      void common(int type) {
+        binary
+          ..u8(type)
+          ..f32(3.25)
+          ..f32(3.5)
+          ..f32(14)
+          ..f32(14)
+          ..f32(1)
+          ..f32(2)
+          ..f32(21)
+          ..f32(20);
+      }
+
+      void arc() {
+        common(16);
+        binary
+          ..u32(0xff123456)
+          ..f32(6)
+          ..f32(2)
+          ..f32(0)
+          ..f32(90);
+      }
+
+      if (!auxiliary) arc();
+      binary
+        ..u32(0) // events
+        ..u32(0) // resources
+        ..u32(0) // released resources
+        ..u8(auxiliary ? 1 : 0);
+      if (auxiliary) {
+        binary
+          ..f32(24)
+          ..f32(24)
+          ..u32(1);
+        arc();
+      }
+      return binary.build();
+    }
+
+    final frame = PocketFrame.fromBinary(arcFrame(version: 4));
+    final arc = frame.ops.single as PocketArcOp;
+    expect(arc.radius, 6);
+    expect(arc.strokeWidth, 2);
+    expect(arc.startAngle, 0);
+    expect(arc.sweepAngle, 90);
+    expect(arc.color, 0xff123456);
+    expect(arc.clip!.x, 1);
+    expect(
+      PocketFrame.fromBinary(
+        arcFrame(version: 4, auxiliary: true),
+      ).auxiliary!.ops.single,
+      isA<PocketArcOp>(),
+    );
+    expect(
+      () => PocketFrame.fromBinary(arcFrame(version: 3)),
+      throwsA(isA<FormatException>()),
+    );
+    expect(
+      () => PocketFrame.fromBinary(arcFrame(version: 3, auxiliary: true)),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('decodes native arc geometry from the legacy JSON frame', () {
+    final frame = PocketFrame.fromJson('''{
+      "width": 20, "height": 20,
+      "ops": [{"type":"arc","x":2,"y":2,"w":16,"h":16,
+        "color":4279383126,"radius":7,"strokeWidth":2,
+        "startAngle":15,"sweepAngle":-90}],
+      "events": [], "resources": []
+    }''');
+
+    final arc = frame.ops.single as PocketArcOp;
+    expect(arc.startAngle, 15);
+    expect(arc.sweepAngle, -90);
+    expect(arc.strokeWidth, 2);
+  });
+
+  test(
+    'decodes rounded gradients in PFB1 v5 with strict optional stop fields',
+    () {
+      Uint8List frameBytes({
+        int version = 5,
+        bool auxiliary = false,
+        int viaFlag = 1,
+        int direction = 3,
+        double radius = 8,
+        double viaPosition = 0.35,
+      }) {
+        final binary = _BinaryFrameBuilder()
+          ..u32(0x31424650)
+          ..u16(version)
+          ..u16(0)
+          ..u64(11)
+          ..f32(100)
+          ..f32(80)
+          ..u32(auxiliary ? 0 : 1);
+        void common(int type) {
+          binary
+            ..u8(type)
+            ..f32(11.25)
+            ..f32(12.5)
+            ..f32(44)
+            ..f32(28)
+            ..f32(10)
+            ..f32(11)
+            ..f32(30)
+            ..f32(41);
+        }
+
+        void gradient() {
+          common(17);
+          binary
+            ..u32(0x80204060)
+            ..u32(0xdc506478)
+            ..u32(direction)
+            ..f32(radius)
+            ..u8(viaFlag);
+          if (viaFlag == 1) {
+            binary
+              ..u32(0x96f0e6dc)
+              ..f32(viaPosition);
+          }
+        }
+
+        if (!auxiliary) gradient();
+        binary
+          ..u32(0) // events
+          ..u32(0) // resources
+          ..u32(0) // released resources
+          ..u8(auxiliary ? 1 : 0);
+        if (auxiliary) {
+          binary
+            ..f32(60)
+            ..f32(40)
+            ..u32(1);
+          gradient();
+        }
+        return binary.build();
+      }
+
+      final frame = PocketFrame.fromBinary(frameBytes());
+      final gradient = frame.ops.single as PocketRoundedGradientOp;
+      expect(gradient.radius, 8);
+      expect(gradient.fromColor, 0x80204060);
+      expect(gradient.toColor, 0xdc506478);
+      expect(gradient.direction, 3);
+      expect(gradient.viaColor, 0x96f0e6dc);
+      expect(gradient.viaPosition, closeTo(0.35, 1e-6));
+      expect(gradient.clip!.x, 10);
+      expect(
+        PocketFrame.fromBinary(
+          frameBytes(auxiliary: true),
+        ).auxiliary!.ops.single,
+        isA<PocketRoundedGradientOp>(),
+      );
+
+      final twoStop =
+          PocketFrame.fromBinary(frameBytes(viaFlag: 0)).ops.single
+              as PocketRoundedGradientOp;
+      expect(twoStop.viaColor, isNull);
+      expect(twoStop.viaPosition, isNull);
+      expect(
+        () => PocketFrame.fromBinary(frameBytes(version: 4)),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => PocketFrame.fromBinary(frameBytes(version: 4, auxiliary: true)),
+        throwsA(isA<FormatException>()),
+      );
+      for (final invalid in <Uint8List>[
+        frameBytes(viaFlag: 2),
+        frameBytes(direction: 4),
+        frameBytes(radius: 0),
+        frameBytes(viaPosition: 0),
+        frameBytes(viaPosition: 1),
+        frameBytes(viaPosition: double.nan),
+      ]) {
+        expect(
+          () => PocketFrame.fromBinary(invalid),
+          throwsA(isA<FormatException>()),
+        );
+      }
+    },
+  );
+
+  test('decodes and validates rounded gradient JSON optional stop pairs', () {
+    final frame = PocketFrame.fromJson(
+      jsonEncode(<String, Object?>{
+        'width': 100,
+        'height': 80,
+        'ops': <Object?>[
+          <String, Object?>{
+            'type': 'roundedGradient',
+            'x': 11.25,
+            'y': 12.5,
+            'w': 44,
+            'h': 28,
+            'radius': 8,
+            'from': 0x80204060,
+            'to': 0xdc506478,
+            'direction': 3,
+            'viaColor': 0x96f0e6dc,
+            'viaPosition': 0.35,
+          },
+        ],
+      }),
+    );
+    final gradient = frame.ops.single as PocketRoundedGradientOp;
+    expect(gradient.viaColor, 0x96f0e6dc);
+    expect(gradient.viaPosition, closeTo(0.35, 1e-6));
+
+    final twoStop =
+        PocketOp.fromJson(<String, dynamic>{
+              'type': 'roundedGradient',
+              'x': 0,
+              'y': 0,
+              'w': 20,
+              'h': 12,
+              'radius': 4,
+              'from': 0xff000000,
+              'to': 0xffffffff,
+              'direction': 1,
+            })
+            as PocketRoundedGradientOp;
+    expect(twoStop.viaColor, isNull);
+    expect(twoStop.viaPosition, isNull);
+    for (final invalid in <Map<String, dynamic>>[
+      <String, dynamic>{'viaColor': 0xff808080},
+      <String, dynamic>{'viaPosition': 0.5},
+      <String, dynamic>{'viaColor': 0xff808080, 'viaPosition': 0},
+      <String, dynamic>{'viaColor': 0xff808080, 'viaPosition': 1},
+      <String, dynamic>{'direction': 4},
+      <String, dynamic>{'direction': 1.5},
+      <String, dynamic>{'radius': 0},
+    ]) {
+      expect(
+        () => PocketOp.fromJson(<String, dynamic>{
+          'type': 'roundedGradient',
+          'x': 0,
+          'y': 0,
+          'w': 20,
+          'h': 12,
+          'radius': 4,
+          'from': 0xff000000,
+          'to': 0xffffffff,
+          'direction': 1,
+          ...invalid,
+        }),
+        throwsA(isA<FormatException>()),
+      );
+    }
   });
 
   test(
