@@ -51,6 +51,7 @@ PATCHES = (
     ("native-rounded-shadows.patch", "native rounded shadow DrawList reuse"),
     ("native-arcs.patch", "native arc DrawList op"),
     ("native-rounded-gradients.patch", "native rounded gradient DrawList op"),
+    ("native-rounded-radius-threshold.patch", "native rounded radius threshold fallback"),
 )
 
 # Later patches can intentionally supersede one earlier diff hunk. The
@@ -408,13 +409,18 @@ FINAL_CONTRACTS = {
         "fn software_surface_rejects_native_shape_ops_before_writing()",
     ),
     "engine/core/src/draw.rs": (
+        "fn emit_mesh_tex_tri(",
+        "spec::draw_op::TEX_TRI_REPEAT_FLOAT",
         "let native_round = self.native_rounded_rects;",
         "clip: &Clip, allow_native: bool",
+        "fn emit_native_arc(",
         "spec::draw_op::ARC,",
         "spec::draw_op::ROUNDED_GRADIENT,",
+        "if !radius.is_finite() || !border_width.is_finite() || radius <= 0.5 { return false; }",
     ),
     "engine/core/src/tests.rs": (
         "fn native_rounded_shadows_preserve_layers_and_fallbacks()",
+        "fn native_rounded_radius_threshold_preserves_legacy_square_fallback()",
         "assert_rect(records[2], 15.0, 14.0, 230.0, 230.0, 43.0, 0.0, 0x07000000);",
         "assert_rect(records[3], 20.0, 10.0, 220.0, 220.0, 38.0, 0.0, 0xff223344);",
         "fn native_arcs_preserve_signed_geometry_and_legacy_fallback()",
@@ -527,10 +533,6 @@ FINAL_CONTRACTS = {
         "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,",
         "draw_op::ARC => 8,",
         "draw_op::ROUNDED_GRADIENT => 11,",
-    ),
-    "engine/core/src/draw.rs": (
-        "fn emit_mesh_tex_tri(",
-        "spec::draw_op::TEX_TRI_REPEAT_FLOAT",
     ),
     "engine/raster/src/lib.rs": (
         "fn tex_tri_float<T: RenderTarget>(",
@@ -730,6 +732,7 @@ def verify_final_contracts() -> None:
     content = core_tests.read_text(encoding="utf-8")
     for name in (
         "native_rounded_shadows_preserve_layers_and_fallbacks",
+        "native_rounded_radius_threshold_preserves_legacy_square_fallback",
         "native_arcs_preserve_signed_geometry_and_legacy_fallback",
         "native_rounded_gradients_preserve_stops_directions_and_composition",
     ):

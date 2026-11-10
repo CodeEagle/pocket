@@ -113,29 +113,46 @@ void main() {
   );
 
   test(
-    'rounded ring preserves a transparent hit-test center and invalidates',
+    'rounded fill and ring hit testing exclude cut corners, collapse holes, and honor clips',
     () {
-      PocketCanvasPainter painter(double borderWidth) => PocketCanvasPainter(
-        width: 20,
-        height: 20,
-        ops: <PocketOp>[
-          PocketRoundedOp(
-            x: 2,
-            y: 2,
-            width: 16,
-            height: 16,
-            color: 0xff405060,
-            radius: 4,
-            borderWidth: borderWidth,
-          ),
-        ],
-        images: const <String, ui.Image>{},
-      );
+      PocketCanvasPainter painter({double borderWidth = 0, PocketClip? clip}) =>
+          PocketCanvasPainter(
+            width: 20,
+            height: 20,
+            ops: <PocketOp>[
+              PocketRoundedOp(
+                x: 2,
+                y: 2,
+                width: 16,
+                height: 16,
+                color: 0xff405060,
+                radius: 6,
+                borderWidth: borderWidth,
+                clip: clip,
+              ),
+            ],
+            images: const <String, ui.Image>{},
+          );
 
-      final thick = painter(4);
+      final fill = painter();
+      expect(fill.hitTest(const ui.Offset(3, 3)), isFalse);
+      expect(fill.hitTest(const ui.Offset(10, 10)), isTrue);
+
+      final thick = painter(borderWidth: 4);
+      expect(thick.hitTest(const ui.Offset(3, 3)), isFalse);
       expect(thick.hitTest(const ui.Offset(10, 10)), isFalse);
       expect(thick.hitTest(const ui.Offset(3, 10)), isTrue);
-      expect(thick.shouldRepaint(painter(3)), isTrue);
+      expect(thick.shouldRepaint(painter(borderWidth: 3)), isTrue);
+
+      final collapsed = painter(borderWidth: 10);
+      expect(collapsed.hitTest(const ui.Offset(3, 3)), isFalse);
+      expect(collapsed.hitTest(const ui.Offset(10, 10)), isTrue);
+
+      final clipped = painter(
+        clip: const PocketClip(x: 8, y: 8, width: 10, height: 10),
+      );
+      expect(clipped.hitTest(const ui.Offset(6, 10)), isFalse);
+      expect(clipped.hitTest(const ui.Offset(10, 10)), isTrue);
     },
   );
 

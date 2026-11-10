@@ -1168,13 +1168,16 @@ bool _pocketArgbPaints(int color) => (color >>> 24) != 0;
 bool _pocketRoundedPaintsAt(PocketRoundedOp op, Offset point) {
   if (!_pocketArgbPaints(op.color)) return false;
   final rect = Rect.fromLTWH(op.x, op.y, op.width, op.height);
+  final radius = op.radius.clamp(0.0, rect.shortestSide / 2).toDouble();
+  if (!RRect.fromRectAndRadius(rect, Radius.circular(radius)).contains(point)) {
+    return false;
+  }
   final borderWidth = op.borderWidth
       .clamp(0.0, rect.shortestSide / 2)
       .toDouble();
   if (borderWidth == 0.0) return true;
   final innerRect = rect.deflate(borderWidth);
   if (innerRect.width <= 0 || innerRect.height <= 0) return true;
-  final radius = op.radius.clamp(0.0, rect.shortestSide / 2).toDouble();
   final innerRadius = (radius - borderWidth)
       .clamp(0.0, innerRect.shortestSide / 2)
       .toDouble();

@@ -1,0 +1,105 @@
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -2605,7 +2605,7 @@
+             || w <= 0.0 || h <= 0.0 || scale <= 0.0 || radius <= 0.0 { return false; }
+         let radius = (radius * scale).min(w * 0.5).min(h * 0.5);
+         let border_width = (border_width * scale).max(0.0).min(w * 0.5).min(h * 0.5);
+-        if !radius.is_finite() || !border_width.is_finite() { return false; }
++        if !radius.is_finite() || !border_width.is_finite() || radius <= 0.5 { return false; }
+         if sx1 + 1.0 <= clip.x0 || sx0 - 1.0 >= clip.x1 || sy1 + 1.0 <= clip.y0 || sy0 - 1.0 >= clip.y1 { return true; }
+         dl.words.extend_from_slice(&[
+             spec::draw_op::ROUNDED_RECT, sx0.to_bits(), sy0.to_bits(),
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -4997,3 +4997,91 @@
+     ui.set_stable_motion_paint(false);
+     assert_ne!(ui.hit_test_bounds(5.0, 2.8), spec::ROOT_ID);
+ }
++
++#[test]
++fn native_rounded_radius_threshold_preserves_legacy_square_fallback() {
++    fn add_shape(
++        ui: &mut Ui,
++        width: f64,
++        height: f64,
++        radius: f64,
++        scale: f64,
++        border: bool,
++        shadow: u32,
++    ) {
++        let node = ui.create_node(0);
++        for (prop, value) in [
++            (spec::prop::WIDTH, width),
++            (spec::prop::HEIGHT, height),
++            (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
++            (spec::prop::INSET_L, 12.0),
++            (spec::prop::INSET_T, 14.0),
++            (spec::prop::RADIUS, radius),
++            (spec::prop::SCALE_X, scale),
++            (spec::prop::SCALE_Y, scale),
++        ] {
++            ui.set_prop(node, prop, value);
++        }
++        if border {
++            ui.set_prop(node, spec::prop::BORDER_WIDTH, 2.0);
++            ui.set_prop(node, spec::prop::BORDER_COLOR, 0xffaabbccu32 as f64);
++        } else {
++            ui.set_prop(node, spec::prop::BG_COLOR, 0xff223344u32 as f64);
++        }
++        if shadow > 0 {
++            ui.set_prop(node, spec::prop::SHADOW, shadow as f64);
++        }
++        ui.insert_before(spec::ROOT_ID, node, 0);
++        ui.tick();
++    }
++
++    // These all land at a world-space radius of 0.5 or less: directly
++    // requested, scaled into the threshold, or clamped by the world-space bounds.
++    for (width, height, radius, scale, border) in [
++        (20.0, 20.0, 0.5, 1.0, false),
++        (20.0, 20.0, 1.0, 0.5, false),
++        (20.0, 1.0, 8.0, 1.0, false),
++        (20.0, 20.0, 0.5, 1.0, true),
++        (20.0, 2.0, 8.0, 0.5, true),
++    ] {
++        let mut ui = Ui::new();
++        add_shape(&mut ui, width, height, radius, scale, border, 0);
++        let legacy = ui.draw().words.clone();
++        assert_eq!(
++            validate_drawlist(&legacy)[spec::draw_op::ROUNDED_RECT as usize],
++            0,
++        );
++        ui.set_native_rounded_rects(true);
++        let actual = ui.draw().words.clone();
++        assert_eq!(
++            actual, legacy,
++            "legacy fallback for {width}x{height}, r={radius}, scale={scale}, border={border}"
++        );
++        let counts = validate_drawlist(&actual);
++        assert_eq!(counts[spec::draw_op::ROUNDED_RECT as usize], 0);
++        assert!(counts[spec::draw_op::RECT as usize] > 0);
++    }
++
++    let mut above_threshold = Ui::new();
++    add_shape(&mut above_threshold, 20.0, 20.0, 0.75, 1.0, false, 0);
++    above_threshold.set_native_rounded_rects(true);
++    assert_eq!(
++        validate_drawlist(&above_threshold.draw().words)[spec::draw_op::ROUNDED_RECT as usize],
++        1,
++    );
++
++    // The small-radius body remains a square fallback while the expanded
++    // second shadow lobe keeps its native RRect and is emitted behind it.
++    let mut layered_shadow = Ui::new();
++    add_shape(&mut layered_shadow, 20.0, 20.0, 0.5, 1.0, false, 1);
++    layered_shadow.set_native_rounded_rects(true);
++    let words = layered_shadow.draw().words.clone();
++    let counts = validate_drawlist(&words);
++    assert_eq!(counts[spec::draw_op::RECT as usize], 2);
++    assert_eq!(counts[spec::draw_op::ROUNDED_RECT as usize], 1);
++    assert_eq!(words[0], spec::draw_op::RECT);
++    assert_eq!(words[4], spec::draw_op::ROUNDED_RECT);
++    assert_eq!(words[11], 0x0a000000);
++    assert_eq!(words[12], spec::draw_op::RECT);
++    assert_eq!(words[15], 0xff223344);
++}
