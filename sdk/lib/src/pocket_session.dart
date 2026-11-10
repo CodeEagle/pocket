@@ -334,14 +334,14 @@ final class PocketSession extends ChangeNotifier {
         trustPolicyUri: updateConfig.trustPolicyConfigured
             ? Uri.parse(updateConfig.trustPolicyUrl!)
             : null,
-        debugHttpHosts: kDebugMode
-            ? <String>{
-                '127.0.0.1',
-                'localhost',
-                '10.0.2.2',
-                ...updateConfig.debugHttpHosts,
-              }
-            : const <String>[],
+        debugHttpHosts: <String>{
+          if (kDebugMode) ...const <String>[
+            '127.0.0.1',
+            'localhost',
+            '10.0.2.2',
+          ],
+          ...updateConfig.debugHttpHosts,
+        },
       );
       // The coordinator owns an HTTP client. If the widget was disposed while
       // assets/path resolution was in flight, no session field existed yet for

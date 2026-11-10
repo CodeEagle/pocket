@@ -137,6 +137,7 @@ final class PocketHostConfig {
     PocketHostCatalogEntry? selectedCatalogEntry,
     Uri? packageIndexSource,
   }) {
+    final normalizedAllowedHosts = _normalizeHosts(allowInsecureHttpHosts);
     final schema = _integer(json, 'schemaVersion', required: false) ?? 1;
     if (schema != 1 || json['kind'] != 'pocket-editor-app-host') {
       throw const FormatException('Unsupported Pocket host config schema');
@@ -170,7 +171,7 @@ final class PocketHostConfig {
         base.userInfo.isNotEmpty ||
         base.hasQuery ||
         base.hasFragment ||
-        (base.scheme != 'https' && !_allowHttp(base, allowInsecureHttpHosts))) {
+        (base.scheme != 'https' && !_allowHttp(base, normalizedAllowedHosts))) {
       throw const FormatException('Pocket host config has an unsafe baseUrl');
     }
     if (sourceUri != null &&
@@ -186,9 +187,9 @@ final class PocketHostConfig {
     final namespace = _string(updates, 'namespace') ?? 'default';
     final debugHosts = _approvedDebugHosts(
       _stringSet(updates['debugHttpHosts']),
-      allowInsecureHttpHosts,
+      normalizedAllowedHosts,
     );
-    if (base.scheme == 'http' && allowInsecureHttpHosts.contains(base.host)) {
+    if (base.scheme == 'http' && normalizedAllowedHosts.contains(base.host)) {
       debugHosts.add(base.host);
     }
     final rootIdHint = _string(json, 'systemUI');
@@ -290,14 +291,14 @@ final class PocketHostConfig {
   }) async {
     cancellation?.throwIfCancelled();
     final parsed = uri;
-    final effectiveAllowedHosts = <String>{
+    final effectiveAllowedHosts = _normalizeHosts(<String>{
       ...allowInsecureHttpHosts,
       if (kDebugMode && parsed.scheme == 'http') parsed.host,
-    };
+    });
     final allowHttp = _allowHttp(parsed, effectiveAllowedHosts);
     if (parsed.scheme != 'https' && !allowHttp) {
       throw const FormatException(
-        'Pocket host bootstrap requires HTTPS or an explicitly allowed debug LAN host',
+        'Pocket host bootstrap requires HTTPS or an explicitly allowed HTTP host',
       );
     }
     final owned = client == null;
@@ -522,8 +523,13 @@ Map<String, dynamic> _object(dynamic value, String field) {
   return Map<String, dynamic>.from(value);
 }
 
+Set<String> _normalizeHosts(Iterable<String> hosts) => <String>{
+  for (final host in hosts)
+    if (host.isNotEmpty) host.toLowerCase(),
+};
+
 Set<String> _approvedDebugHosts(Set<String> declared, Set<String> allowed) =>
-    declared.intersection(allowed);
+    _normalizeHosts(declared).intersection(allowed);
 
 Future<void> _hydrateBootstrapAssets(
   Map<String, dynamic> document, {
@@ -1251,7 +1257,7 @@ String _origin(Uri uri) =>
 bool _allowHttp(Uri uri, Set<String> allowed) {
   if (uri.scheme != 'http') return false;
   if (uri.host == '127.0.0.1' || uri.host == 'localhost' || uri.host == '::1') {
-    return kDebugMode;
+    return kDebugMode || allowed.contains(uri.host);
   }
-  return kDebugMode && allowed.contains(uri.host);
+  return allowed.contains(uri.host);
 }

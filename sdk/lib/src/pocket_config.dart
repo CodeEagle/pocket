@@ -85,8 +85,9 @@ final class PocketUpdateConfig {
       trustRootPublicKey?.isNotEmpty == true &&
       trustPolicyUrl?.isNotEmpty == true;
 
-  /// Additional HTTP hosts allowed for signed updates in debug builds only.
-  /// Loopback and Android's emulator host remain built-in debug hosts.
+  /// HTTP hosts explicitly permitted by the host for signed updates.
+  /// This allowlist applies in all build modes. The session adds its default
+  /// development hosts only in debug builds.
   final List<String> _debugHttpHosts;
   List<String> get debugHttpHosts =>
       _debugHttpHosts.length == 1 && _debugHttpHosts.first.isEmpty

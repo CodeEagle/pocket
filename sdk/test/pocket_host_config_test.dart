@@ -120,6 +120,38 @@ void main() {
         debug.systemUI.updates!.debugHttpHosts,
         contains('192.168.50.230'),
       );
+      final mixedCaseDoc = _document(
+        baseUrl: 'http://Dev.Local.Test:8791/test',
+      );
+      (mixedCaseDoc['updates']
+          as Map<String, dynamic>)['debugHttpHosts'] = <String>[
+        'Dev.Local.Test',
+        'CDN.Approved.Test',
+        'Evil.Unapproved.Test',
+      ];
+      final mixedCase = PocketHostConfig.fromJson(
+        mixedCaseDoc,
+        source: Uri.parse('http://DEV.LOCAL.TEST:8791/test/host.json'),
+        allowInsecureHttpHosts: const <String>{
+          'DEV.LOCAL.TEST',
+          'cdn.approved.test',
+        },
+      );
+      expect(
+        mixedCase.systemUI.updates!.debugHttpHosts,
+        unorderedEquals(<String>['dev.local.test', 'cdn.approved.test']),
+      );
+      expect(
+        mixedCase.applications['pocket.demo.profile']!.updates!.debugHttpHosts,
+        unorderedEquals(<String>['dev.local.test', 'cdn.approved.test']),
+      );
+      expect(
+        () => PocketHostConfig.fromJson(
+          _document(baseUrl: 'http://Evil.Unapproved.Test:8791/test'),
+          allowInsecureHttpHosts: const <String>{'DEV.LOCAL.TEST'},
+        ),
+        throwsFormatException,
+      );
     },
   );
 

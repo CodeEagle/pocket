@@ -732,6 +732,9 @@ final class PocketSystemHost extends StatefulWidget {
     }
 
     final initial = approvedCatalog(config);
+    final allowedHttpHosts = Set<String>.unmodifiable(
+      config.systemUI.updates?.debugHttpHosts ?? const <String>[],
+    );
     final reload =
         reloadHostConfig ??
         (config.catalog.isEmpty
@@ -748,6 +751,7 @@ final class PocketSystemHost extends StatefulWidget {
                 }
                 return PocketHostConfig.load(
                   config.source,
+                  allowInsecureHttpHosts: allowedHttpHosts,
                   requiredRootPayloadSha256: rootPayloadSha256,
                 );
               });
