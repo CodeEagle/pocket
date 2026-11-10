@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection' show UnmodifiableListView;
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:ffi';
@@ -578,6 +579,7 @@ final class FfiPocketRuntime
        ),
        _lastError = library.lookupFunction<_StringNative, _StringDart>(
          'pocket_last_error',
+         isLeaf: true,
        );
 
   final DynamicLibrary _library;
@@ -654,6 +656,10 @@ final class FfiPocketRuntime
   _LastFrameStageTimingsDart? _lastFrameStageTimings;
   bool _perfSamplingLookedUp = false;
   Pointer<Uint64>? _stageTimingsBuffer;
+  Pointer<Uint64>? _frameLengthBuffer;
+  Pointer<Uint8>? _sendBuffer;
+  int _sendBufferCapacity = 0;
+  static const int _maxRetainedSendBufferBytes = 64 * 1024;
 
   bool get collectDecodeTiming => _collectDecodeTiming;
 
@@ -1131,6 +1137,7 @@ final class FfiPocketRuntime
       try {
         _actualAbi = _library.lookupFunction<_AbiNative, _AbiDart>(
           'pocket_bytecode_runtime_abi',
+          isLeaf: true,
         );
       } on Object {
         _actualAbi = null;
@@ -1259,47 +1266,43 @@ final class FfiPocketRuntime
         _invalidateDeltaBase();
       }
       mode = 'binaryV2';
-      final length = calloc<Uint64>();
-      try {
-        length.value = 0;
-        final pointer = _frameDeltaBinaryV2(
-          _handle,
-          delta,
-          base?.sequence ?? 0,
-          length,
-        );
-        if (_collectDecodeTiming) _captureLastNativeStageTimings();
-        if (pointer.address == 0 || length.value == 0) {
-          final error = lastError;
-          if (error != null && error.isNotEmpty) {
-            throw PocketRuntimeException(error);
-          }
-          if (pointer.address != 0 || length.value != 0) {
-            throw const FormatException(
-              'pocket_frame_delta_binary_v2 returned an invalid empty frame',
-            );
-          }
-          // A null pointer and zero length are the native unchanged marker.
-          return null;
+      final length = _frameLengthBuffer ??= calloc<Uint64>();
+      length.value = 0;
+      final pointer = _frameDeltaBinaryV2(
+        _handle,
+        delta,
+        base?.sequence ?? 0,
+        length,
+      );
+      if (_collectDecodeTiming) _captureLastNativeStageTimings();
+      if (pointer.address == 0 || length.value == 0) {
+        final error = lastError;
+        if (error != null && error.isNotEmpty) {
+          throw PocketRuntimeException(error);
         }
-        final byteLength = length.value;
-        if (byteLength > _pocketMaxBinaryFrameBytes) {
-          throw const PocketRuntimeException(
-            'pocket_frame_delta_binary_v2 returned an oversized frame',
+        if (pointer.address != 0 || length.value != 0) {
+          throw const FormatException(
+            'pocket_frame_delta_binary_v2 returned an invalid empty frame',
           );
         }
-        // Decode while the native pointer is still borrowed. The parser owns
-        // every byte field it retains; only after it returns may lastError
-        // cross the FFI boundary and invalidate this view.
-        output = _parseBorrowedBinaryFrame(
-          pointer.asTypedList(byteLength),
-          (bytes) => _decodeBinaryDeltaV2(bytes, base),
-        );
-        _retainDeltaBase(output);
-        return output;
-      } finally {
-        calloc.free(length);
+        // A null pointer and zero length are the native unchanged marker.
+        return null;
       }
+      final byteLength = length.value;
+      if (byteLength > _pocketMaxBinaryFrameBytes) {
+        throw const PocketRuntimeException(
+          'pocket_frame_delta_binary_v2 returned an oversized frame',
+        );
+      }
+      // Decode while the native pointer is still borrowed. The parser owns
+      // every byte field it retains; only after it returns may lastError
+      // cross the FFI boundary and invalidate this view.
+      output = _parseBorrowedBinaryFrame(
+        pointer.asTypedList(byteLength),
+        (bytes) => _decodeBinaryDeltaV2(bytes, base),
+      );
+      _retainDeltaBase(output);
+      return output;
     } catch (error) {
       failure = error;
       // A native failure may have advanced the guest before serialization or
@@ -1364,6 +1367,7 @@ final class FfiPocketRuntime
       _nextWakeDelay = _library
           .lookupFunction<_NextWakeDelayNative, _NextWakeDelayDart>(
             'pocket_next_wake_delay_ms',
+            isLeaf: true,
           );
     } on Object {
       // Older libraries cannot prove that a guest is idle or when a timer is
@@ -1380,6 +1384,7 @@ final class FfiPocketRuntime
       _setSchedulerPaused = _library
           .lookupFunction<_SetSchedulerPausedNative, _SetSchedulerPausedDart>(
             'pocket_set_scheduler_paused',
+            isLeaf: true,
           );
     } on Object {
       // Older native libraries do not expose scheduler lifecycle control.
@@ -1393,29 +1398,25 @@ final class FfiPocketRuntime
   }
 
   PocketFrame _readBinaryFullFrame(_FrameBinaryDart binary, double delta) {
-    final length = calloc<Uint64>();
-    try {
-      length.value = 0;
-      final pointer = binary(_handle, delta, length);
-      if (_collectDecodeTiming) _captureLastNativeStageTimings();
-      if (pointer.address == 0 || length.value == 0) {
-        _throwLastError('pocket_frame_binary returned no frame');
-      }
-      final byteLength = length.value;
-      if (byteLength > _pocketMaxBinaryFrameBytes) {
-        throw const PocketRuntimeException(
-          'pocket_frame_binary returned an oversized frame',
-        );
-      }
-      final frame = _parseBorrowedBinaryFrame(
-        pointer.asTypedList(byteLength),
-        PocketFrame.fromBinary,
-      );
-      _retainDeltaBase(frame);
-      return frame;
-    } finally {
-      calloc.free(length);
+    final length = _frameLengthBuffer ??= calloc<Uint64>();
+    length.value = 0;
+    final pointer = binary(_handle, delta, length);
+    if (_collectDecodeTiming) _captureLastNativeStageTimings();
+    if (pointer.address == 0 || length.value == 0) {
+      _throwLastError('pocket_frame_binary returned no frame');
     }
+    final byteLength = length.value;
+    if (byteLength > _pocketMaxBinaryFrameBytes) {
+      throw const PocketRuntimeException(
+        'pocket_frame_binary returned an oversized frame',
+      );
+    }
+    final frame = _parseBorrowedBinaryFrame(
+      pointer.asTypedList(byteLength),
+      PocketFrame.fromBinary,
+    );
+    _retainDeltaBase(frame);
+    return frame;
   }
 
   PocketFrame _parseBorrowedBinaryFrame(
@@ -1532,17 +1533,34 @@ final class FfiPocketRuntime
         packet.prefixCount == base.ops.length &&
         packet.deleteCount == 0 &&
         patchFrame.ops.isEmpty;
-    final ops = primaryOpsUnchanged
-        ? base.ops
-        : <PocketOp>[
-            ...base.ops.take(packet.prefixCount),
-            ...patchFrame.ops,
-            ...base.ops.skip(suffixStart),
-          ];
+    final List<PocketOp> ops;
+    if (primaryOpsUnchanged) {
+      ops = base.ops;
+    } else if (resultingLength == 0) {
+      ops = const <PocketOp>[];
+    } else {
+      final seed = patchFrame.ops.isNotEmpty ? patchFrame.ops[0] : base.ops[0];
+      final merged = List<PocketOp>.filled(
+        resultingLength,
+        seed,
+        growable: false,
+      );
+      if (packet.prefixCount > 0) {
+        merged.setRange(0, packet.prefixCount, base.ops, 0);
+      }
+      final insertEnd = packet.prefixCount + patchFrame.ops.length;
+      if (patchFrame.ops.isNotEmpty) {
+        merged.setRange(packet.prefixCount, insertEnd, patchFrame.ops);
+      }
+      if (suffixStart < base.ops.length) {
+        merged.setRange(insertEnd, resultingLength, base.ops, suffixStart);
+      }
+      ops = UnmodifiableListView<PocketOp>(merged);
+    }
     final frame = PocketFrame(
       width: patchFrame.width,
       height: patchFrame.height,
-      ops: primaryOpsUnchanged ? ops : List<PocketOp>.unmodifiable(ops),
+      ops: ops,
       // PFP1 metadata after the operation splice is the complete current
       // frame. Never carry transient data from the baseline into this turn.
       events: patchFrame.events,
@@ -2083,13 +2101,36 @@ final class FfiPocketRuntime
     Object? failure;
     try {
       final encodedBytes = PocketBinaryCodec.encodeMessage(message);
-      final pointer = calloc<Uint8>(encodedBytes.length);
-      try {
-        pointer.asTypedList(encodedBytes.length).setAll(0, encodedBytes);
-        final result = _sendBinary(_handle, pointer, encodedBytes.length);
+      final byteLen = encodedBytes.length;
+      if (byteLen > 0 && byteLen <= _maxRetainedSendBufferBytes) {
+        var scratch = _sendBuffer;
+        if (scratch == null || _sendBufferCapacity < byteLen) {
+          if (scratch != null) calloc.free(scratch);
+          var nextCap = _sendBufferCapacity == 0 ? 1024 : _sendBufferCapacity * 2;
+          while (nextCap < byteLen) {
+            nextCap *= 2;
+          }
+          if (nextCap > _maxRetainedSendBufferBytes) {
+            nextCap = _maxRetainedSendBufferBytes;
+          }
+          scratch = calloc<Uint8>(nextCap);
+          _sendBuffer = scratch;
+          _sendBufferCapacity = nextCap;
+        }
+        scratch.asTypedList(byteLen).setRange(0, byteLen, encodedBytes);
+        final result = _sendBinary(_handle, scratch, byteLen);
         if (result != 0) _throwLastError('pocket_send_binary failed');
-      } finally {
-        calloc.free(pointer);
+      } else {
+        final pointer = calloc<Uint8>(byteLen == 0 ? 1 : byteLen);
+        try {
+          if (byteLen > 0) {
+            pointer.asTypedList(byteLen).setRange(0, byteLen, encodedBytes);
+          }
+          final result = _sendBinary(_handle, pointer, byteLen);
+          if (result != 0) _throwLastError('pocket_send_binary failed');
+        } finally {
+          calloc.free(pointer);
+        }
       }
     } catch (error) {
       failure = error;
@@ -2145,6 +2186,17 @@ final class FfiPocketRuntime
     _stageTimingsBuffer = null;
     if (stageBuffer != null) {
       calloc.free(stageBuffer);
+    }
+    final frameLenBuffer = _frameLengthBuffer;
+    _frameLengthBuffer = null;
+    if (frameLenBuffer != null) {
+      calloc.free(frameLenBuffer);
+    }
+    final sendScratch = _sendBuffer;
+    _sendBuffer = null;
+    _sendBufferCapacity = 0;
+    if (sendScratch != null) {
+      calloc.free(sendScratch);
     }
     _destroy(_handle);
     _offloadBinding?.disposeAfterNative();

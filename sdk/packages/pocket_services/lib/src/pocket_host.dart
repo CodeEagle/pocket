@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:pocket_flutter/src/pocket_model.dart' show PocketEvent;
 
@@ -487,14 +486,55 @@ final class PocketHost {
   }
 
   static void _assertJsonSafe(Object? value) {
-    try {
-      jsonEncode(value);
-    } on Object {
+    if (!_isBridgeValueSafe(value, 0, null)) {
       throw const PocketCapabilityException(
         'invalid_result',
         'provider result is not JSON-safe',
       );
     }
+  }
+
+  static bool _isBridgeValueSafe(
+    Object? value,
+    int depth,
+    Set<Object>? ancestors,
+  ) {
+    if (depth > 32) return false;
+    if (value == null || value is bool || value is String || value is int) {
+      return true;
+    }
+    if (value is num) return value.isFinite;
+    if (value is List<int>) {
+      // Covers Uint8List and typed integer byte buffers in O(1) without
+      // serializing every byte into a decimal JSON array string.
+      return true;
+    }
+    if (value is List) {
+      final visited = ancestors ?? Set<Object>.identity();
+      if (!visited.add(value)) return false;
+      for (var i = 0; i < value.length; i++) {
+        if (!_isBridgeValueSafe(value[i], depth + 1, visited)) {
+          visited.remove(value);
+          return false;
+        }
+      }
+      visited.remove(value);
+      return true;
+    }
+    if (value is Map) {
+      final visited = ancestors ?? Set<Object>.identity();
+      if (!visited.add(value)) return false;
+      for (final entry in value.entries) {
+        if (entry.key is! String ||
+            !_isBridgeValueSafe(entry.value, depth + 1, visited)) {
+          visited.remove(value);
+          return false;
+        }
+      }
+      visited.remove(value);
+      return true;
+    }
+    return false;
   }
 
   static String _safeError(Object error) =>

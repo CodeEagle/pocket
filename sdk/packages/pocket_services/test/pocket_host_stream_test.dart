@@ -172,4 +172,92 @@ void main() {
       expect((fixture.sent.single['error'] as Map)['code'], 'invalid_result');
     },
   );
+
+  test(
+    'structural bridge validator accepts Uint8List and rejects cycles and non-finite floats',
+    () async {
+      final cyclic = <String, Object?>{};
+      cyclic['self'] = cyclic;
+      final registry = PocketHostRegistry()
+        ..registerRequest('test.bytes', (_) => <String, Object?>{
+          'payload': <int>[1, 2, 3, 4],
+          'nested': <Object?>['ok', true, 12.5],
+        })
+        ..registerRequest('test.nan', (_) => <String, Object?>{
+          'bad': double.nan,
+        })
+        ..registerRequest('test.cycle', (_) => cyclic);
+      final sent = <Map<String, dynamic>>[];
+      final streams = PocketStreamBridge(
+        send: (method, params) {
+          sent.add(<String, dynamic>{'method': method, ...params});
+          return true;
+        },
+      );
+      final host = PocketHost(
+        registry: registry,
+        streams: streams,
+        allowedCapabilities: {'test.bytes', 'test.nan', 'test.cycle'},
+        send: (method, params) {
+          sent.add(<String, dynamic>{'method': method, ...params});
+          return true;
+        },
+      );
+      addTearDown(host.dispose);
+
+      await host.handle(
+        const PocketEvent(
+          id: 'r1',
+          method: 'host.request',
+          params: <String, dynamic>{
+            'requestId': 'r1',
+            'capability': 'test.bytes',
+          },
+        ),
+      );
+      expect(sent.last['ok'], isTrue);
+
+      await host.handle(
+        const PocketEvent(
+          id: 'r2',
+          method: 'host.request',
+          params: <String, dynamic>{
+            'requestId': 'r2',
+            'capability': 'test.nan',
+          },
+        ),
+      );
+      expect(sent.last['ok'], isFalse);
+      expect((sent.last['error'] as Map)['code'], 'invalid_result');
+
+      await host.handle(
+        const PocketEvent(
+          id: 'r3',
+          method: 'host.request',
+          params: <String, dynamic>{
+            'requestId': 'r3',
+            'capability': 'test.cycle',
+          },
+        ),
+      );
+      expect(sent.last['ok'], isFalse);
+      expect((sent.last['error'] as Map)['code'], 'invalid_result');
+
+      final port = streams.open(topic: 'test.bytes');
+      // Oversized wireByteLength is rejected in O(1) without JSON re-encoding.
+      streams.handle(
+        PocketEvent(
+          id: 's-over',
+          method: 'stream.data',
+          params: <String, dynamic>{
+            'streamId': port.streamId,
+            'data': 'x',
+          },
+          wireByteLength: PocketStreamBridge.maxMessageBytes + 1,
+        ),
+      );
+      expect(sent.last['method'], 'stream.error');
+      expect((sent.last['error'] as Map)['code'], 'stream_message_too_large');
+    },
+  );
 }

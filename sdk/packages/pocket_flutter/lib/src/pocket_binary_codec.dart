@@ -179,62 +179,104 @@ final class PocketBinaryCodec {
 }
 
 final class _BinaryTlvWriter {
-  _BinaryTlvWriter({required this.maxBytes});
+  _BinaryTlvWriter({required this.maxBytes, int initialCapacity = 256})
+    : _buffer = Uint8List(
+        maxBytes > 0 && initialCapacity > maxBytes ? maxBytes : initialCapacity,
+      ) {
+    _view = ByteData.sublistView(_buffer);
+  }
 
   final int maxBytes;
-  final BytesBuilder _builder = BytesBuilder(copy: false);
-  final Uint8List _scratch = Uint8List(8);
-  late final ByteData _scratchData = ByteData.sublistView(_scratch);
+  Uint8List _buffer;
+  late ByteData _view;
+  int _length = 0;
 
-  void _checkLimit(int additional) {
-    if (_builder.length + additional > maxBytes) {
+  void _ensureCapacity(int additional) {
+    final required = _length + additional;
+    if (required > maxBytes) {
       throw const FormatException('Binary bridge message exceeds size limit');
     }
+    if (required <= _buffer.length) return;
+    var nextCapacity = _buffer.isEmpty ? 64 : _buffer.length * 2;
+    while (nextCapacity < required) {
+      nextCapacity *= 2;
+    }
+    if (nextCapacity > maxBytes) nextCapacity = maxBytes;
+    final grown = Uint8List(nextCapacity);
+    grown.setRange(0, _length, _buffer);
+    _buffer = grown;
+    _view = ByteData.sublistView(_buffer);
   }
 
   void writeU8(int value) {
-    _checkLimit(1);
-    _builder.addByte(value & 0xff);
+    _ensureCapacity(1);
+    _buffer[_length++] = value & 0xff;
   }
 
   void writeU32(int value) {
-    _checkLimit(4);
-    _scratchData.setUint32(0, value, Endian.little);
-    _builder.add(Uint8List.fromList(_scratch.sublist(0, 4)));
+    _ensureCapacity(4);
+    _view.setUint32(_length, value, Endian.little);
+    _length += 4;
   }
 
   void writeU64(int value) {
-    _checkLimit(8);
-    _scratchData.setUint64(0, value, Endian.little);
-    _builder.add(Uint8List.fromList(_scratch));
+    _ensureCapacity(8);
+    _view.setUint64(_length, value, Endian.little);
+    _length += 8;
   }
 
   void writeI64(int value) {
-    _checkLimit(8);
-    _scratchData.setInt64(0, value, Endian.little);
-    _builder.add(Uint8List.fromList(_scratch));
+    _ensureCapacity(8);
+    _view.setInt64(_length, value, Endian.little);
+    _length += 8;
   }
 
   void writeF64(double value) {
     if (!value.isFinite) {
       throw const FormatException('Binary bridge float must be finite');
     }
-    _checkLimit(8);
-    _scratchData.setFloat64(0, value, Endian.little);
-    _builder.add(Uint8List.fromList(_scratch));
+    _ensureCapacity(8);
+    _view.setFloat64(_length, value, Endian.little);
+    _length += 8;
   }
 
   void writeBytes(Uint8List bytes) {
-    writeU32(bytes.length);
-    _checkLimit(bytes.length);
-    _builder.add(bytes);
+    final byteCount = bytes.length;
+    _ensureCapacity(4 + byteCount);
+    _view.setUint32(_length, byteCount, Endian.little);
+    _length += 4;
+    _buffer.setRange(_length, _length + byteCount, bytes);
+    _length += byteCount;
   }
 
   void writeString(String value) {
+    final codeUnits = value.length;
+    if (codeUnits == 0) {
+      writeU32(0);
+      return;
+    }
+    // Optimistically reserve 4 + codeUnits bytes for the overwhelmingly common
+    // ASCII fast path (envelope keys, capability names, IDs, enum values).
+    if (_length + 4 + codeUnits <= maxBytes) {
+      _ensureCapacity(4 + codeUnits);
+      final payloadStart = _length + 4;
+      var ascii = true;
+      for (var i = 0; i < codeUnits; i++) {
+        final unit = value.codeUnitAt(i);
+        if (unit >= 0x80) {
+          ascii = false;
+          break;
+        }
+        _buffer[payloadStart + i] = unit;
+      }
+      if (ascii) {
+        _view.setUint32(_length, codeUnits, Endian.little);
+        _length = payloadStart + codeUnits;
+        return;
+      }
+    }
     final encoded = utf8.encode(value);
-    writeU32(encoded.length);
-    _checkLimit(encoded.length);
-    _builder.add(encoded);
+    writeBytes(encoded);
   }
 
   void writeValue(Object? value, int depth) {
@@ -278,15 +320,27 @@ final class _BinaryTlvWriter {
       writeMap(value, depth);
       return;
     }
+    if (value is List) {
+      final len = value.length;
+      if (len > _maxCollectionEntries) {
+        throw const FormatException('Binary bridge array is too large');
+      }
+      writeU8(_tagArray);
+      writeU32(len);
+      for (var i = 0; i < len; i++) {
+        writeValue(value[i], depth + 1);
+      }
+      return;
+    }
     if (value is Iterable) {
-      final list = value is List ? value : value.toList(growable: false);
+      final list = value.toList(growable: false);
       if (list.length > _maxCollectionEntries) {
         throw const FormatException('Binary bridge array is too large');
       }
       writeU8(_tagArray);
       writeU32(list.length);
-      for (final item in list) {
-        writeValue(item, depth + 1);
+      for (var i = 0; i < list.length; i++) {
+        writeValue(list[i], depth + 1);
       }
       return;
     }
@@ -299,24 +353,24 @@ final class _BinaryTlvWriter {
     if (depth > _maxNestingDepth) {
       throw const FormatException('Binary bridge message nesting is too deep');
     }
-    if (map.length > _maxCollectionEntries) {
+    final len = map.length;
+    if (len > _maxCollectionEntries) {
       throw const FormatException('Binary bridge object has too many entries');
     }
     writeU8(_tagObject);
-    writeU32(map.length);
-    for (final entry in map.entries) {
-      final key = entry.key;
+    writeU32(len);
+    map.forEach((key, value) {
       if (key is! String) {
         throw const FormatException(
           'Binary bridge object key must be a String',
         );
       }
       writeString(key);
-      writeValue(entry.value, depth + 1);
-    }
+      writeValue(value, depth + 1);
+    });
   }
 
-  Uint8List takeBytes() => _builder.takeBytes();
+  Uint8List takeBytes() => Uint8List.sublistView(_buffer, 0, _length);
 }
 
 final class _BinaryTlvReader {
@@ -380,7 +434,20 @@ final class _BinaryTlvReader {
 
   Uint8List readBytesOwned() => Uint8List.fromList(readBytesView());
 
-  String readString() => utf8.decode(readBytesView());
+  String readString() {
+    final length = readU32();
+    _require(length);
+    if (length == 0) return '';
+    final start = offset;
+    final end = start + length;
+    offset = end;
+    for (var i = start; i < end; i++) {
+      if (data[i] >= 0x80) {
+        return utf8.decode(Uint8List.sublistView(data, start, end));
+      }
+    }
+    return String.fromCharCodes(data, start, end);
+  }
 
   Object? readValue(int depth) {
     if (depth > _maxDecodeNestingDepth) {

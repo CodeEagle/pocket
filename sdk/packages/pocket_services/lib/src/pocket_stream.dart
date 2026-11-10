@@ -171,6 +171,12 @@ final class PocketStreamBridge {
   }
 
   bool _fitsWireLimit(PocketEvent event) {
+    final wireBytes = event.wireByteLength;
+    if (wireBytes != null) {
+      // Packets decoded from native 0xB1 TLV already validated structure/UTF-8
+      // and carry their exact encoded wire byte length.
+      return wireBytes >= 0 && wireBytes <= maxMessageBytes;
+    }
     final sink = _BoundedJsonSink(maxMessageBytes);
     try {
       final converter = JsonUtf8Encoder(

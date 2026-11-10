@@ -887,6 +887,102 @@ void main() {
       expect(completionOk[17], 1);
     },
   );
+
+  test(
+    'PFB1 packed triangles, deduplicated clips/assets, and mixed ASCII/UTF-8 codec growth preserve parity',
+    () {
+      final binary = _BinaryFrameBuilder()
+        ..u32(0x31424650)
+        ..u16(2)
+        ..u16(0)
+        ..u64(42)
+        ..f32(390)
+        ..f32(844)
+        ..u32(3);
+      void commonWithSharedClip(int type) {
+        binary
+          ..u8(type)
+          ..f32(10)
+          ..f32(20)
+          ..f32(30)
+          ..f32(40)
+          ..f32(4)
+          ..f32(8)
+          ..f32(380)
+          ..f32(800);
+      }
+
+      commonWithSharedClip(3);
+      for (final v in <double>[10, 20, 40, 20, 10, 60]) {
+        binary.f32(v);
+      }
+      for (final c in <int>[0xffff0000, 0xff00ff00, 0xff0000ff]) {
+        binary.u32(c);
+      }
+
+      for (var i = 0; i < 2; i++) {
+        commonWithSharedClip(4);
+        binary.string('shared_atlas');
+        binary.u32(0xffffffff);
+        for (final v in <double>[0, 0, 10, 0, 0, 10]) {
+          binary.f32(v);
+        }
+        for (final uv in <double>[0, 0, 0.5, 0, 0, 0.5]) {
+          binary.f32(uv);
+        }
+      }
+
+      binary
+        ..u32(0)
+        ..u32(0)
+        ..u32(0)
+        ..u8(0);
+
+      final frame = PocketFrame.fromBinary(binary.build());
+      final tri = frame.ops[0] as PocketTriangleOp;
+      final texA = frame.ops[1] as PocketTextureTriangleOp;
+      final texB = frame.ops[2] as PocketTextureTriangleOp;
+      expect(identical(tri.clip, texA.clip), isTrue);
+      expect(identical(texA.clip, texB.clip), isTrue);
+      expect(identical(texA.asset, texB.asset), isTrue);
+      expect(tri.packedPoints, isNotNull);
+      expect(tri.packedColors, isNotNull);
+      expect(tri.points[1].x, 40);
+      expect(tri.colors[2], 0xff0000ff);
+      expect(texA.packedGeometry, isNotNull);
+      expect(texA.vertexCount, 3);
+      expect(texA.uvs[2], 0.5);
+
+      final largeMixedMessage = <String, dynamic>{
+        'type': 'event',
+        'id': 'batch-utf8',
+        'name': 'stream.batch',
+        'payload': <String, dynamic>{
+          'city': '深圳·南山🌤️',
+          'asciiPad': 'a' * 1024,
+          'items': List<Map<String, dynamic>>.generate(
+            24,
+            (index) => <String, dynamic>{
+              'k': 'item-$index',
+              'zh': '条目-$index',
+              'v': index * 1.5,
+            },
+          ),
+        },
+      };
+      final encoded = PocketBinaryCodec.encodeMessage(largeMixedMessage);
+      final roundtripped = PocketBinaryCodec.decodeMessage(encoded);
+      expect(
+        (roundtripped['payload'] as Map<String, dynamic>)['city'],
+        '深圳·南山🌤️',
+      );
+      expect(
+        ((roundtripped['payload'] as Map<String, dynamic>)['items'] as List)
+            .length,
+        24,
+      );
+    },
+  );
 }
 
 final class _BinaryFrameBuilder {

@@ -185,15 +185,50 @@ fn js_i32_property<'js>(object: &Object<'js>, key: &str) -> Option<i32> {
         .and_then(|number| i32::try_from(number as i64).ok())
 }
 
+#[derive(Clone, Debug)]
+struct SharedStr(Rc<str>);
+
+impl PartialEq for SharedStr {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0
+    }
+}
+
+impl Eq for SharedStr {}
+
+impl std::ops::Deref for SharedStr {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SharedStr {
+    #[inline]
+    fn from(value: String) -> Self {
+        Self(Rc::from(value.into_boxed_str()))
+    }
+}
+
+impl From<&str> for SharedStr {
+    #[inline]
+    fn from(value: &str) -> Self {
+        Self(Rc::from(value))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct FrameOp {
-    kind: String,
+    kind: &'static str,
     x: f32,
     y: f32,
     w: f32,
     h: f32,
     text: Option<String>,
-    asset: Option<String>,
+    asset: Option<SharedStr>,
     id: Option<String>,
     /// Flutter texture fitting policy carried by a video SURFACE_QUAD.
     /// The native bridge accepts only the canonical cover/contain/fill values;
@@ -223,16 +258,12 @@ struct FrameOp {
     border_width: Option<f32>,
     start_angle: Option<f32>,
     sweep_angle: Option<f32>,
-    /// Triangle geometry is present only for TRI/TEX_TRI records. Keeping
-    /// the vertices instead of reducing them to an AABB lets a Canvas host
-    /// preserve real rotated/gouraud DrawList output.
-    points: Option<Vec<FramePoint>>,
-    colors: Option<Vec<u32>>,
-    uvs: Option<Vec<f32>>,
-    /// Normalized source rectangle for an axis-aligned TEX_QUAD. This is
-    /// essential for PAK sprite atlases; [0,0,1,1] is the ordinary image
-    /// case. TEX_TRI uses `uvs` above because it has one pair per vertex.
-    uv: Option<Vec<f32>>,
+    /// Inline triangle geometry for TRI/TEX_TRI records (eliminates per-op heap Vecs).
+    points: Option<[FramePoint; 3]>,
+    colors: Option<[u32; 3]>,
+    uvs: Option<[f32; 6]>,
+    /// Normalized source rectangle for an axis-aligned TEX_QUAD.
+    uv: Option<[f32; 4]>,
     /// Typed compositor descriptor used only by the PFB1 encoder. Keeping it
     /// out of the serde representation preserves the legacy JSON asset
     /// descriptor contract without building JSON on the binary hot path.
@@ -292,13 +323,13 @@ struct LegacyFrameOp<'a> {
     #[serde(rename = "sweepAngle", skip_serializing_if = "Option::is_none")]
     sweep_angle: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    points: Option<&'a Vec<FramePoint>>,
+    points: Option<&'a [FramePoint]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    colors: Option<&'a Vec<u32>>,
+    colors: Option<&'a [u32]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    uvs: Option<&'a Vec<f32>>,
+    uvs: Option<&'a [f32]>,
     #[serde(rename = "uv", skip_serializing_if = "Option::is_none")]
-    uv: Option<&'a Vec<f32>>,
+    uv: Option<&'a [f32]>,
     clip: &'a Clip,
 }
 
@@ -331,7 +362,7 @@ impl Serialize for FrameOp {
             self.asset.as_deref()
         };
         LegacyFrameOp {
-            kind: &self.kind,
+            kind: self.kind,
             x: self.x,
             y: self.y,
             w: self.w,
@@ -357,23 +388,23 @@ impl Serialize for FrameOp {
             border_width: self.border_width,
             start_angle: self.start_angle,
             sweep_angle: self.sweep_angle,
-            points: self.points.as_ref(),
-            colors: self.colors.as_ref(),
-            uvs: self.uvs.as_ref(),
-            uv: self.uv.as_ref(),
+            points: self.points.as_ref().map(|v| v.as_slice()),
+            colors: self.colors.as_ref().map(|v| v.as_slice()),
+            uvs: self.uvs.as_ref().map(|v| v.as_slice()),
+            uv: self.uv.as_ref().map(|v| v.as_slice()),
             clip: &self.clip,
         }
         .serialize(serializer)
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 struct FramePoint {
     x: f32,
     y: f32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 struct Clip {
     x: f32,
     y: f32,
@@ -617,6 +648,7 @@ struct BinaryFrameWriter {
 }
 
 impl BinaryFrameWriter {
+    #[cfg(test)]
     fn new() -> Self {
         Self { bytes: Vec::new() }
     }
@@ -708,7 +740,7 @@ impl BinaryFrameWriter {
                 return Err("rounded gradient has invalid geometry, direction, or middle stop".to_owned());
             }
         }
-        let tag = match op.kind.as_str() {
+        let tag = match op.kind {
             "rect" => 0,
             "rounded" if border_width > 0.0 => 15,
             "rounded" => 1,
@@ -835,13 +867,12 @@ impl BinaryFrameWriter {
             6 => {
                 self.string(op.asset.as_deref().unwrap_or(""))?;
                 match op.uv.as_ref() {
-                    Some(uv) if uv.len() == 4 => {
+                    Some(uv) => {
                         self.u8(1);
                         for value in uv {
                             self.f32(*value);
                         }
                     }
-                    Some(_) => return Err("image UVs must contain four values".to_owned()),
                     None => self.u8(0),
                 }
                 self.optional_u32(op.color);
@@ -921,6 +952,8 @@ impl BinaryFrameWriter {
 // at least one common operation always makes the splice smaller than a full
 // PFB1. Keep this invariant explicit when adding a new binary operation tag.
 const MIN_BINARY_OP_BYTES: usize = 33;
+
+#[cfg(test)]
 fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
     encode_binary_frame_with_ops(frame, &frame.ops)
 }
@@ -929,93 +962,100 @@ fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
 /// segment. PFP1 uses this to carry the insertion segment of a splice; events,
 /// resources, releases, and the complete auxiliary surface remain the current
 /// frame's metadata. The ordinary PFB1 ABI always calls this with `frame.ops`.
+#[cfg(test)]
 fn encode_binary_frame_with_ops(frame: &FrameResult, ops: &[FrameOp]) -> Result<Vec<u8>, String> {
-    let mut writer = BinaryFrameWriter::new();
-    writer.u32(BINARY_FRAME_MAGIC);
-    let has_rounded_ring = |operations: &[FrameOp]| {
-        operations
-            .iter()
-            .any(|op| op.kind == "rounded" && op.border_width.is_some_and(|width| width > 0.0))
-    };
-    let has_rounded_gradient = |operations: &[FrameOp]| {
-        operations
-            .iter()
-            .any(|op| op.kind == "roundedGradient")
-    };
-    let has_rounded_gradient = has_rounded_gradient(ops)
-        || frame
-            .auxiliary
-            .as_ref()
-            .is_some_and(|auxiliary| has_rounded_gradient(&auxiliary.ops));
-    let has_arc = |operations: &[FrameOp]| operations.iter().any(|op| op.kind == "arc");
-    let has_arc = has_arc(ops)
-        || frame
-            .auxiliary
-            .as_ref()
-            .is_some_and(|auxiliary| has_arc(&auxiliary.ops));
-    let version = if has_rounded_gradient {
-        BINARY_FRAME_ROUNDED_GRADIENT_VERSION
-    } else if has_arc {
-        BINARY_FRAME_ARC_VERSION
-    } else if has_rounded_ring(ops)
-        || frame
-            .auxiliary
-            .as_ref()
-            .is_some_and(|auxiliary| has_rounded_ring(&auxiliary.ops))
-    {
-        BINARY_FRAME_ROUNDED_RING_VERSION
-    } else {
-        BINARY_FRAME_VERSION
-    };
-    writer.u16(version);
-    // PFB1 metadata: existing text/handle fields plus typed surface
-    // descriptors (tag 7).
-    writer.u16(3);
-    writer.u64(frame.frame);
-    writer.f32(frame.width);
-    writer.f32(frame.height);
-    writer.ops(ops)?;
-    let event_count =
-        u32::try_from(frame.events.len()).map_err(|_| "too many frame events".to_owned())?;
-    writer.u32(event_count);
-    for event in &frame.events {
-        writer.bytes(&event.binary)?;
+    let mut out = Vec::new();
+    encode_binary_frame_append(&mut out, frame, ops)?;
+    Ok(out)
+}
+
+fn scan_binary_frame_version(operations: &[FrameOp]) -> u16 {
+    let mut version = BINARY_FRAME_VERSION;
+    for op in operations {
+        match op.kind {
+            "roundedGradient" => return BINARY_FRAME_ROUNDED_GRADIENT_VERSION,
+            "arc" => version = version.max(BINARY_FRAME_ARC_VERSION),
+            "rounded" if op.border_width.is_some_and(|width| width > 0.0) => {
+                version = version.max(BINARY_FRAME_ROUNDED_RING_VERSION);
+            }
+            _ => {}
+        }
     }
-    let resource_count =
-        u32::try_from(frame.resources.len()).map_err(|_| "too many frame resources".to_owned())?;
-    writer.u32(resource_count);
-    for resource in &frame.resources {
-        writer.string(&resource.asset)?;
-        writer.u64(resource.revision);
-        writer.u32(resource.width);
-        writer.u32(resource.height);
-        writer.u32(resource.psm);
-        writer.u8(if resource.linear { 1 } else { 0 });
-        writer.bytes(&resource.pixels)?;
-        match resource.palette.as_deref() {
-            Some(palette) => {
+    version
+}
+
+/// Append a complete PFB1 frame into `out`, reusing `out`'s existing heap
+/// allocation across frames to eliminate steady-state buffer reallocations.
+fn encode_binary_frame_append(
+    out: &mut Vec<u8>,
+    frame: &FrameResult,
+    ops: &[FrameOp],
+) -> Result<(), String> {
+    let aux_len = frame.auxiliary.as_ref().map_or(0, |aux| aux.ops.len());
+    out.reserve(ops.len().saturating_add(aux_len).saturating_mul(48).saturating_add(64));
+    let mut writer = BinaryFrameWriter {
+        bytes: std::mem::take(out),
+    };
+    let result = (|| -> Result<(), String> {
+        writer.u32(BINARY_FRAME_MAGIC);
+        let mut version = scan_binary_frame_version(ops);
+        if version < BINARY_FRAME_ROUNDED_GRADIENT_VERSION {
+            if let Some(auxiliary) = frame.auxiliary.as_ref() {
+                version = version.max(scan_binary_frame_version(&auxiliary.ops));
+            }
+        }
+        writer.u16(version);
+        // PFB1 metadata: existing text/handle fields plus typed surface
+        // descriptors (tag 7).
+        writer.u16(3);
+        writer.u64(frame.frame);
+        writer.f32(frame.width);
+        writer.f32(frame.height);
+        writer.ops(ops)?;
+        let event_count =
+            u32::try_from(frame.events.len()).map_err(|_| "too many frame events".to_owned())?;
+        writer.u32(event_count);
+        for event in &frame.events {
+            writer.bytes(&event.binary)?;
+        }
+        let resource_count = u32::try_from(frame.resources.len())
+            .map_err(|_| "too many frame resources".to_owned())?;
+        writer.u32(resource_count);
+        for resource in &frame.resources {
+            writer.string(&resource.asset)?;
+            writer.u64(resource.revision);
+            writer.u32(resource.width);
+            writer.u32(resource.height);
+            writer.u32(resource.psm);
+            writer.u8(if resource.linear { 1 } else { 0 });
+            writer.bytes(&resource.pixels)?;
+            match resource.palette.as_deref() {
+                Some(palette) => {
+                    writer.u8(1);
+                    writer.bytes(palette)?;
+                }
+                None => writer.u8(0),
+            }
+        }
+        let released_count = u32::try_from(frame.released_resources.len())
+            .map_err(|_| "too many released resources".to_owned())?;
+        writer.u32(released_count);
+        for resource in &frame.released_resources {
+            writer.string(resource)?;
+        }
+        match frame.auxiliary.as_ref() {
+            Some(auxiliary) => {
                 writer.u8(1);
-                writer.bytes(palette)?;
+                writer.f32(auxiliary.width);
+                writer.f32(auxiliary.height);
+                writer.ops(&auxiliary.ops)?;
             }
             None => writer.u8(0),
         }
-    }
-    let released_count = u32::try_from(frame.released_resources.len())
-        .map_err(|_| "too many released resources".to_owned())?;
-    writer.u32(released_count);
-    for resource in &frame.released_resources {
-        writer.string(resource)?;
-    }
-    match frame.auxiliary.as_ref() {
-        Some(auxiliary) => {
-            writer.u8(1);
-            writer.f32(auxiliary.width);
-            writer.f32(auxiliary.height);
-            writer.ops(&auxiliary.ops)?;
-        }
-        None => writer.u8(0),
-    }
-    Ok(writer.bytes)
+        Ok(())
+    })();
+    *out = writer.bytes;
+    result
 }
 
 fn new_duplex_channel() -> (Arc<duplex::DuplexRing>, duplex::IngressConsumer) {
@@ -2910,12 +2950,18 @@ fn decode_draw_ops(
     generic_texture_handles: &mut HashSet<i32>,
 ) -> Result<Vec<FrameOp>, String> {
     let viewport = DamageRect::new(0, 0, width as i32, height as i32);
-    let decoded: Vec<Operation<'_>> = DrawOps::new(words, viewport)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("draw list decode: {error:?}"))?;
-    let mut ops = Vec::new();
-    for operation in &decoded {
-        append_draw_operation(&mut ops, operation, nodes, ui, generic_texture_handles)?;
+    let mut ops = Vec::with_capacity(words.len() / 8);
+    let mut texture_cache = TextureDecodeCache::default();
+    for item in DrawOps::new(words, viewport) {
+        let operation = item.map_err(|error| format!("draw list decode: {error:?}"))?;
+        append_draw_operation_cached(
+            &mut ops,
+            &operation,
+            nodes,
+            ui,
+            generic_texture_handles,
+            Some(&mut texture_cache),
+        )?;
     }
     Ok(ops)
 }
@@ -3480,18 +3526,96 @@ fn synthetic_texture_asset(texture: i32) -> String {
 /// FFI JSON boundary. The core still owns and keeps every admitted texture,
 /// while Flutter receives a resource when a live DrawList first references it.
 fn referenced_image_assets(ops: &[FrameOp]) -> HashSet<String> {
-    ops.iter()
-        .filter(|op| op.kind == "image" || op.kind == "textureTriangle")
-        .filter_map(|op| op.asset.clone())
-        .collect()
+    let mut out = HashSet::new();
+    let mut last_ptr: usize = 0;
+    for op in ops {
+        if op.kind == "image" || op.kind == "textureTriangle" {
+            if let Some(asset) = &op.asset {
+                let ptr = Rc::as_ptr(&asset.0) as *const u8 as usize;
+                if ptr == last_ptr {
+                    continue;
+                }
+                last_ptr = ptr;
+                if !out.contains(&**asset) {
+                    out.insert((**asset).to_owned());
+                }
+            }
+        }
+    }
+    out
 }
 
-fn registered_texture_asset(texture: i32, nodes: &[NodeMeta]) -> Option<String> {
+fn registered_texture_asset(texture: i32, nodes: &[NodeMeta]) -> Option<&str> {
     nodes
         .iter()
         .find(|node| node.kind == "image" && node.texture == texture)
-        .map(|node| node.asset.clone())
+        .map(|node| node.asset.as_str())
         .filter(|asset| !asset.is_empty())
+}
+
+#[derive(Default)]
+struct TextureDecodeCache {
+    last: Option<(i32, SharedStr)>,
+    by_handle: HashMap<i32, SharedStr>,
+}
+
+impl TextureDecodeCache {
+    fn resolve(
+        &mut self,
+        texture: i32,
+        nodes: &[NodeMeta],
+        ui: &Ui,
+        generic_texture_handles: &mut HashSet<i32>,
+        opcode_label: &str,
+    ) -> Result<SharedStr, String> {
+        if let Some((last_handle, ref asset)) = self.last {
+            if last_handle == texture {
+                return Ok(asset.clone());
+            }
+        }
+        if let Some(asset) = self.by_handle.get(&texture) {
+            let cloned = asset.clone();
+            self.last = Some((texture, cloned.clone()));
+            return Ok(cloned);
+        }
+        if ui.texture(texture).is_none() {
+            return Err(format!(
+                "{opcode_label} texture handle {texture} has no live core texture"
+            ));
+        }
+        let shared: SharedStr = match registered_texture_asset(texture, nodes) {
+            Some(name) => SharedStr::from(name),
+            None => {
+                generic_texture_handles.insert(texture);
+                SharedStr::from(synthetic_texture_asset(texture))
+            }
+        };
+        self.by_handle.insert(texture, shared.clone());
+        self.last = Some((texture, shared.clone()));
+        Ok(shared)
+    }
+
+    fn resolve_glyph_page(
+        &mut self,
+        handle: i32,
+        generic_texture_handles: &mut HashSet<i32>,
+    ) -> SharedStr {
+        if let Some((last_handle, ref asset)) = self.last {
+            if last_handle == handle {
+                return asset.clone();
+            }
+        }
+        if let Some(asset) = self.by_handle.get(&handle) {
+            let cloned = asset.clone();
+            self.last = Some((handle, cloned.clone()));
+            return cloned;
+        }
+        generic_texture_handles.insert(handle);
+        let shared = SharedStr::from(synthetic_texture_asset(handle));
+        self.by_handle.insert(handle, shared.clone());
+        self.last = Some((handle, shared.clone()));
+        shared
+    }
 }
 
 fn clip_of(rect: DamageRect) -> Clip {
@@ -3503,6 +3627,7 @@ fn clip_of(rect: DamageRect) -> Clip {
     }
 }
 
+#[cfg(test)]
 fn append_draw_operation(
     out: &mut Vec<FrameOp>,
     operation: &Operation<'_>,
@@ -3510,13 +3635,31 @@ fn append_draw_operation(
     ui: &mut Ui,
     generic_texture_handles: &mut HashSet<i32>,
 ) -> Result<(), String> {
+    append_draw_operation_cached(
+        out,
+        operation,
+        nodes,
+        ui,
+        generic_texture_handles,
+        None,
+    )
+}
+
+fn append_draw_operation_cached(
+    out: &mut Vec<FrameOp>,
+    operation: &Operation<'_>,
+    nodes: &[NodeMeta],
+    ui: &mut Ui,
+    generic_texture_handles: &mut HashSet<i32>,
+    mut texture_cache: Option<&mut TextureDecodeCache>,
+) -> Result<(), String> {
     let words = operation.words;
     match operation.opcode {
         1 => {
             let (x, y, w, h) = unpack_rect(words[1], words[2]);
             let color = words[3];
             out.push(FrameOp {
-                kind: "rect".into(),
+                kind: "rect",
                 x,
                 y,
                 w,
@@ -3575,7 +3718,7 @@ fn append_draw_operation(
                 ));
             }
             out.push(FrameOp {
-                kind: "gradient".into(),
+                kind: "gradient",
                 x,
                 y,
                 w,
@@ -3668,11 +3811,16 @@ fn append_draw_operation(
                     ));
                 }
                 let handle = page.handle as i32;
-                let asset = synthetic_texture_asset(handle);
-                generic_texture_handles.insert(handle);
+                let asset = match texture_cache.as_deref_mut() {
+                    Some(cache) => cache.resolve_glyph_page(handle, generic_texture_handles),
+                    None => {
+                        generic_texture_handles.insert(handle);
+                        SharedStr::from(synthetic_texture_asset(handle))
+                    }
+                };
                 let point = unpack_point(xy);
                 out.push(FrameOp {
-                    kind: "image".into(),
+                    kind: "image",
                     x: point.x,
                     y: point.y,
                     w: cell_w,
@@ -3701,7 +3849,7 @@ fn append_draw_operation(
                     points: None,
                     colors: None,
                     uvs: None,
-                    uv: Some(page.uv(gid).to_vec()),
+                    uv: Some(page.uv(gid)),
                     surface_kind: None,
                     surface_parameters: None,
                     clip: clip_of(operation.clip),
@@ -3711,15 +3859,29 @@ fn append_draw_operation(
         4 => {
             let (x, y, w, h) = unpack_rect(words[2], words[3]);
             let texture = words[1] as i32;
-            if ui.texture(texture).is_none() {
-                return Err(format!(
-                    "TEX_QUAD texture handle {texture} has no live core texture"
-                ));
-            }
-            let asset = registered_texture_asset(texture, nodes).unwrap_or_else(|| {
-                generic_texture_handles.insert(texture);
-                synthetic_texture_asset(texture)
-            });
+            let asset = match texture_cache.as_deref_mut() {
+                Some(cache) => cache.resolve(
+                    texture,
+                    nodes,
+                    ui,
+                    generic_texture_handles,
+                    "TEX_QUAD",
+                )?,
+                None => {
+                    if ui.texture(texture).is_none() {
+                        return Err(format!(
+                            "TEX_QUAD texture handle {texture} has no live core texture"
+                        ));
+                    }
+                    match registered_texture_asset(texture, nodes) {
+                        Some(name) => SharedStr::from(name),
+                        None => {
+                            generic_texture_handles.insert(texture);
+                            SharedStr::from(synthetic_texture_asset(texture))
+                        }
+                    }
+                }
+            };
             let uv = [
                 f32::from_bits(
                     *words
@@ -3748,7 +3910,7 @@ fn append_draw_operation(
                 ));
             }
             out.push(FrameOp {
-                kind: "image".into(),
+                kind: "image",
                 x,
                 y,
                 w,
@@ -3759,8 +3921,6 @@ fn append_draw_operation(
                 fit: None,
                 autoplay: None,
                 repeat_texture: false,
-                // TEX_QUAD word 8 is the core's per-quad ABGR modulation
-                // (alpha-covered discs and shadow masks rely on it).
                 color: Some(argb_from_abgr(*words.get(8).ok_or_else(|| {
                     "TEX_QUAD is missing its modulation color".to_owned()
                 })?)),
@@ -3781,14 +3941,14 @@ fn append_draw_operation(
                 points: None,
                 colors: None,
                 uvs: None,
-                uv: Some(uv.to_vec()),
+                uv: Some(uv),
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
             });
         }
         7 => {
-            let points = vec![
+            let points = [
                 unpack_point(
                     *words
                         .get(1)
@@ -3806,7 +3966,7 @@ fn append_draw_operation(
                 ),
             ];
             let (x, y, w, h) = triangle_bounds(&points)?;
-            let colors = vec![
+            let colors = [
                 argb_from_abgr(
                     *words
                         .get(4)
@@ -3824,7 +3984,7 @@ fn append_draw_operation(
                 ),
             ];
             out.push(FrameOp {
-                kind: "triangle".into(),
+                kind: "triangle",
                 x,
                 y,
                 w,
@@ -3864,17 +4024,29 @@ fn append_draw_operation(
                 .get(1)
                 .ok_or_else(|| "TEX_TRI is missing its texture handle".to_owned())?
                 as i32;
-            if ui.texture(texture).is_none() {
-                return Err(format!(
-                    "TEX_TRI texture handle {texture} has no live core texture"
-                ));
-            }
-            let asset = registered_texture_asset(texture, nodes).unwrap_or_else(|| {
-                generic_texture_handles.insert(texture);
-                synthetic_texture_asset(texture)
-            });
-            // Legacy quads retain packed integer XY. Retained model meshes
-            // carry float XY so display scaling cannot magnify logical rounding.
+            let asset = match texture_cache.as_deref_mut() {
+                Some(cache) => cache.resolve(
+                    texture,
+                    nodes,
+                    ui,
+                    generic_texture_handles,
+                    "TEX_TRI",
+                )?,
+                None => {
+                    if ui.texture(texture).is_none() {
+                        return Err(format!(
+                            "TEX_TRI texture handle {texture} has no live core texture"
+                        ));
+                    }
+                    match registered_texture_asset(texture, nodes) {
+                        Some(name) => SharedStr::from(name),
+                        None => {
+                            generic_texture_handles.insert(texture);
+                            SharedStr::from(synthetic_texture_asset(texture))
+                        }
+                    }
+                }
+            };
             let fractional = matches!(operation.opcode, 15 | 16);
             let stride = if fractional { 4 } else { 3 };
             let word = |index: usize| -> Result<u32, String> {
@@ -3883,22 +4055,22 @@ fn append_draw_operation(
                     .copied()
                     .ok_or_else(|| "TEX_TRI is truncated".to_owned())
             };
-            let mut points = Vec::with_capacity(3);
-            let mut uvs = Vec::with_capacity(6);
+            let mut points = [FramePoint { x: 0.0, y: 0.0 }; 3];
+            let mut uvs = [0.0f32; 6];
             for vertex in 0..3 {
                 let offset = 2 + vertex * stride;
                 let uv_offset = if fractional {
-                    points.push(FramePoint {
+                    points[vertex] = FramePoint {
                         x: f32::from_bits(word(offset)?),
                         y: f32::from_bits(word(offset + 1)?),
-                    });
+                    };
                     offset + 2
                 } else {
-                    points.push(unpack_point(word(offset)?));
+                    points[vertex] = unpack_point(word(offset)?);
                     offset + 1
                 };
-                uvs.push(f32::from_bits(word(uv_offset)?));
-                uvs.push(f32::from_bits(word(uv_offset + 1)?));
+                uvs[vertex * 2] = f32::from_bits(word(uv_offset)?);
+                uvs[vertex * 2 + 1] = f32::from_bits(word(uv_offset + 1)?);
             }
             let (x, y, w, h) = triangle_bounds(&points)?;
             if uvs
@@ -3908,7 +4080,7 @@ fn append_draw_operation(
                 return Err("TEX_TRI contains an invalid UV".to_owned());
             }
             out.push(FrameOp {
-                kind: "textureTriangle".into(),
+                kind: "textureTriangle",
                 x,
                 y,
                 w,
@@ -3953,10 +4125,14 @@ fn append_draw_operation(
                     "MESH_LAYER_BEGIN has unsupported blend mode {blend}"
                 ));
             }
-            let tints: Vec<f32> = words[4..10]
-                .iter()
-                .map(|word| f32::from_bits(*word))
-                .collect();
+            let tints = [
+                f32::from_bits(words[4]),
+                f32::from_bits(words[5]),
+                f32::from_bits(words[6]),
+                f32::from_bits(words[7]),
+                f32::from_bits(words[8]),
+                f32::from_bits(words[9]),
+            ];
             if tints
                 .iter()
                 .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
@@ -3964,7 +4140,7 @@ fn append_draw_operation(
                 return Err("MESH_LAYER_BEGIN contains an invalid RGB tint".to_owned());
             }
             out.push(FrameOp {
-                kind: "meshLayerBegin".into(),
+                kind: "meshLayerBegin",
                 x,
                 y,
                 w,
@@ -4006,7 +4182,7 @@ fn append_draw_operation(
                 return Err("MESH_MASK_BEGIN has an invalid inversion flag".to_owned());
             }
             out.push(FrameOp {
-                kind: "meshMaskBegin".into(),
+                kind: "meshMaskBegin",
                 x,
                 y,
                 w,
@@ -4042,7 +4218,7 @@ fn append_draw_operation(
             });
         }
         13 => out.push(FrameOp {
-            kind: "meshLayerRestore".into(),
+            kind: "meshLayerRestore",
             x: 0.0,
             y: 0.0,
             w: 0.0,
@@ -4100,7 +4276,7 @@ fn append_draw_operation(
                 return Err("ROUNDED_RECT contains invalid geometry".to_owned());
             }
             out.push(FrameOp {
-                kind: "rounded".into(),
+                kind: "rounded",
                 x,
                 y,
                 w,
@@ -4173,7 +4349,7 @@ fn append_draw_operation(
                 return Err("ARC contains invalid bounds".to_owned());
             }
             out.push(FrameOp {
-                kind: "arc".into(),
+                kind: "arc",
                 x,
                 y,
                 w,
@@ -4238,7 +4414,7 @@ fn append_draw_operation(
                 (argb_from_abgr(words[9]), via_position)
             });
             out.push(FrameOp {
-                kind: "roundedGradient".into(),
+                kind: "roundedGradient",
                 x,
                 y,
                 w,
@@ -4308,7 +4484,7 @@ fn append_draw_operation(
             let line_count = text.split('\n').count().max(1) as f32;
             let measured_h = (line_count * line_height).max(font_slot_line_height(font_slot));
             out.push(FrameOp {
-                kind: "text".into(),
+                kind: "text",
                 x,
                 y,
                 w,
@@ -4376,14 +4552,13 @@ fn append_draw_operation(
                     "hostSurface"
                 } else {
                     "video"
-                }
-                .into(),
+                },
                 x,
                 y,
                 w,
                 h,
                 text: None,
-                asset: (video.kind == "video").then(|| video.asset.clone()),
+                asset: (video.kind == "video").then(|| SharedStr::from(video.asset.as_str())),
                 id: Some(video.video_id.clone()),
                 fit: Some(video.fit.clone()),
                 autoplay: (video.kind == "video").then_some(video.autoplay),
@@ -6628,13 +6803,14 @@ pub unsafe extern "C" fn pocket_frame_binary(
     match build_frame(host, delta_ms, false, false) {
         Ok(built) => {
             let t_encode = sampling.then(Instant::now);
-            let encoded = encode_binary_frame(&built.result);
+            host.binary_output.clear();
+            let encoded =
+                encode_binary_frame_append(&mut host.binary_output, &built.result, &built.result.ops);
             if let Some(t) = t_encode {
                 host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
             }
             match encoded {
-                Ok(bytes) => {
-                    host.binary_output = bytes;
+                Ok(()) => {
                     if let Some(length) = out_byte_length.as_mut() {
                         *length = host.binary_output.len() as u64;
                     }
@@ -6689,23 +6865,25 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
             clear_error(host);
             ptr::null()
         }
-        Ok(built) => match encode_binary_frame(&built.result) {
-            Ok(bytes) => {
-                host.binary_output = bytes;
-                if let Some(length) = out_byte_length.as_mut() {
-                    *length = host.binary_output.len() as u64;
+        Ok(built) => {
+            host.binary_output.clear();
+            match encode_binary_frame_append(&mut host.binary_output, &built.result, &built.result.ops) {
+                Ok(()) => {
+                    if let Some(length) = out_byte_length.as_mut() {
+                        *length = host.binary_output.len() as u64;
+                    }
+                    publish_frame_sequence(host, built.result.frame);
+                    clear_error(host);
+                    host.binary_output.as_ptr()
                 }
-                publish_frame_sequence(host, built.result.frame);
-                clear_error(host);
-                host.binary_output.as_ptr()
+                Err(error) => {
+                    host.binary_output.clear();
+                    host.frame_delta_v2_published = None;
+                    set_error(host, format!("frame binary encode: {error}"));
+                    ptr::null()
+                }
             }
-            Err(error) => {
-                host.binary_output.clear();
-                host.frame_delta_v2_published = None;
-                set_error(host, format!("frame binary encode: {error}"));
-                ptr::null()
-            }
-        },
+        }
         Err(error) => {
             host.binary_output.clear();
             failed_frame_output(host, error);
@@ -6788,7 +6966,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                 return ptr::null();
             }
 
-            let output = if can_delta {
+            if can_delta {
                 let previous_ops = previous_ops
                     .as_deref()
                     .expect("delta baseline must retain decoded operations");
@@ -6811,52 +6989,67 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                 let encoded = if retained_ops.saturating_mul(MIN_BINARY_OP_BYTES)
                     > frame_delta::HEADER_BYTES
                 {
-                    let patch = encode_binary_frame_with_ops(
-                        &built.result,
-                        &built.result.ops[splice.prefix_count..insert_end],
-                    )
-                    .and_then(|embedded| {
-                        frame_delta::encode(base_frame, splice, built.result.ops.len(), &embedded)
-                    });
-                    match patch {
-                        Ok(patch) => Ok(patch),
-                        Err(_) => encode_binary_frame(&built.result),
+                    let patch_res = frame_delta::encode_with_writer(
+                        &mut host.binary_output,
+                        base_frame,
+                        splice,
+                        built.result.ops.len(),
+                        |out| {
+                            encode_binary_frame_append(
+                                out,
+                                &built.result,
+                                &built.result.ops[splice.prefix_count..insert_end],
+                            )
+                        },
+                    );
+                    match patch_res {
+                        Ok(()) => Ok(()),
+                        Err(_) => {
+                            host.binary_output.clear();
+                            encode_binary_frame_append(
+                                &mut host.binary_output,
+                                &built.result,
+                                &built.result.ops,
+                            )
+                        }
                     }
                 } else {
-                    encode_binary_frame(&built.result)
+                    host.binary_output.clear();
+                    encode_binary_frame_append(
+                        &mut host.binary_output,
+                        &built.result,
+                        &built.result.ops,
+                    )
                 };
                 if let Some(t) = t_encode {
                     host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
                 }
-                match encoded {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        host.binary_output.clear();
-                        host.frame_delta_v2_published = None;
-                        set_error(host, format!("frame binary encode: {error}"));
-                        return ptr::null();
-                    }
+                if let Err(error) = encoded {
+                    host.binary_output.clear();
+                    host.frame_delta_v2_published = None;
+                    set_error(host, format!("frame binary encode: {error}"));
+                    return ptr::null();
                 }
             } else {
                 // First frame, invalid base, resize, reload, and any call
                 // after a cache invalidation retain the original PFB1 ABI.
                 let t_encode = sampling.then(Instant::now);
-                let encoded = encode_binary_frame(&built.result);
+                host.binary_output.clear();
+                let encoded = encode_binary_frame_append(
+                    &mut host.binary_output,
+                    &built.result,
+                    &built.result.ops,
+                );
                 if let Some(t) = t_encode {
                     host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
                 }
-                match encoded {
-                    Ok(full) => full,
-                    Err(error) => {
-                        host.binary_output.clear();
-                        host.frame_delta_v2_published = None;
-                        set_error(host, format!("frame binary encode: {error}"));
-                        return ptr::null();
-                    }
+                if let Err(error) = encoded {
+                    host.binary_output.clear();
+                    host.frame_delta_v2_published = None;
+                    set_error(host, format!("frame binary encode: {error}"));
+                    return ptr::null();
                 }
             };
-
-            host.binary_output = output;
             if let Some(length) = out_byte_length.as_mut() {
                 *length = host.binary_output.len() as u64;
             }
@@ -7655,7 +7848,7 @@ mod smoke_tests {
         );
         assert!(ops[0].uv.as_ref().unwrap()[0] < ops[1].uv.as_ref().unwrap()[0]);
         assert_eq!(handles.len(), 1);
-        assert!(referenced_image_assets(&ops).contains(ops[0].asset.as_ref().unwrap()));
+        assert!(referenced_image_assets(&ops).contains(ops[0].asset.as_deref().unwrap()));
 
         let handle = *handles.iter().next().unwrap();
         let texture = ui.texture(handle).unwrap();
@@ -7739,7 +7932,7 @@ mod smoke_tests {
         .unwrap();
         assert_eq!(replacement.len(), 1);
         assert_ne!(replacement[0].asset, ops[0].asset);
-        assert!(!referenced_image_assets(&replacement).contains(ops[0].asset.as_ref().unwrap()));
+        assert!(!referenced_image_assets(&replacement).contains(ops[0].asset.as_deref().unwrap()));
         assert!(
             ui.texture(old_handle).is_none(),
             "replaced pages invalidate old handles"

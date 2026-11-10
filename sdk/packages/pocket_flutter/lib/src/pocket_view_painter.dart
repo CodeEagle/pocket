@@ -279,10 +279,7 @@ final class PocketCanvasPainter extends CustomPainter {
     this.textLayoutCache,
     this.onPaintMicroseconds,
   }) : _imageIdentities = _pocketImageIdentities(ops, images),
-       _meshLevelIdentities = <String, List<ui.Image>>{
-         for (final entry in meshImageLevels.entries)
-           entry.key: List<ui.Image>.of(entry.value),
-       };
+       _meshLevelIdentities = _pocketMeshLevelIdentities(ops, meshImageLevels);
 
   final double width;
   final double height;
@@ -364,8 +361,48 @@ final class PocketCanvasPainter extends CustomPainter {
     if (width <= 0 || height <= 0) return;
     final sx = size.width / width;
     final sy = size.height / height;
+    final pixelScale =
+        (sx * sy).abs() * paintDevicePixelRatio * paintDevicePixelRatio;
     canvas.save();
     canvas.scale(sx, sy);
+
+    final rectPaint = Paint()..isAntiAlias = false;
+    final shapePaint = Paint()..isAntiAlias = true;
+    final strokePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+    final shaderPaint = Paint();
+    final verticesPaint = Paint();
+    final imagePaint = Paint()..filterQuality = FilterQuality.low;
+
+    PocketClip? activeClip;
+    var clipSaveOpen = false;
+    void closeActiveClip() {
+      if (clipSaveOpen) {
+        canvas.restore();
+        clipSaveOpen = false;
+        activeClip = null;
+      }
+    }
+
+    void syncClip(PocketClip? nextClip) {
+      if (_samePocketClip(activeClip, nextClip)) return;
+      if (clipSaveOpen) {
+        canvas.restore();
+        clipSaveOpen = false;
+      }
+      activeClip = nextClip;
+      if (nextClip != null) {
+        canvas.save();
+        canvas.clipRect(
+          Rect.fromLTWH(nextClip.x, nextClip.y, nextClip.width, nextClip.height),
+          doAntiAlias: false,
+        );
+        clipSaveOpen = true;
+      }
+    }
+
     PocketMeshLayerBeginOp? meshLayer;
     var meshMaskActive = false;
     var index = 0;
@@ -374,6 +411,7 @@ final class PocketCanvasPainter extends CustomPainter {
       drawOpInvocationCount++;
       if (op is PocketMeshLayerBeginOp) {
         if (meshLayer == null) {
+          closeActiveClip();
           meshLayer = op;
           canvas.save();
           _clipPocketOp(canvas, op);
@@ -387,6 +425,7 @@ final class PocketCanvasPainter extends CustomPainter {
       }
       if (op is PocketMeshMaskBeginOp) {
         if (meshLayer != null && !meshMaskActive) {
+          closeActiveClip();
           meshMaskActive = true;
           canvas.save();
           _clipPocketOp(canvas, op);
@@ -401,6 +440,7 @@ final class PocketCanvasPainter extends CustomPainter {
       }
       if (op is PocketMeshLayerRestoreOp) {
         if (meshLayer != null) {
+          closeActiveClip();
           if (meshMaskActive) {
             canvas.restore();
             canvas.restore();
@@ -413,26 +453,33 @@ final class PocketCanvasPainter extends CustomPainter {
         index++;
         continue;
       }
+      if (op is PocketHostSurfaceOp || op is PocketVideoOp) {
+        index++;
+        continue;
+      }
+      syncClip(op.clip);
       if (op is PocketTextureTriangleOp) {
         final next = _drawTextureTriangleBatch(
           canvas,
           index,
           image: images[op.asset],
-          pixelScale:
-              (sx * sy).abs() * paintDevicePixelRatio * paintDevicePixelRatio,
+          pixelScale: pixelScale,
           layer: meshMaskActive ? null : meshLayer,
         );
         index = next;
         continue;
       }
       final rect = Rect.fromLTWH(op.x, op.y, op.width, op.height);
-      canvas.save();
-      _clipPocketOp(canvas, op);
       switch (op) {
         case PocketHostSurfaceOp():
-          // Rendered between retained canvas blocks by PocketView.
+        case PocketVideoOp():
+        case PocketTextureTriangleOp():
+        case PocketMeshLayerBeginOp():
+        case PocketMeshMaskBeginOp():
+        case PocketMeshLayerRestoreOp():
           break;
         case PocketRectOp():
+          rectPaint.color = Color(op.color);
           canvas.drawRect(
             _pocketPixelAlignedRect(
               rect,
@@ -440,9 +487,7 @@ final class PocketCanvasPainter extends CustomPainter {
               sy: sy,
               devicePixelRatio: devicePixelRatio,
             ),
-            Paint()
-              ..color = Color(op.color)
-              ..isAntiAlias = false,
+            rectPaint,
           );
         case PocketRoundedOp():
           final radius = op.radius.clamp(0.0, rect.shortestSide / 2).toDouble();
@@ -450,14 +495,13 @@ final class PocketCanvasPainter extends CustomPainter {
           final borderWidth = op.borderWidth
               .clamp(0.0, rect.shortestSide / 2)
               .toDouble();
+          shapePaint.color = Color(op.color);
           if (borderWidth == 0.0) {
-            canvas.drawRRect(outer, Paint()..color = Color(op.color));
+            canvas.drawRRect(outer, shapePaint);
           } else {
             final innerRect = rect.deflate(borderWidth);
             if (innerRect.width <= 0 || innerRect.height <= 0) {
-              // A border at least half as thick as the shortest dimension has
-              // no interior hole; paint the collapsed ring as one filled RRect.
-              canvas.drawRRect(outer, Paint()..color = Color(op.color));
+              canvas.drawRRect(outer, shapePaint);
             } else {
               final innerRadius = (radius - borderWidth)
                   .clamp(0.0, innerRect.shortestSide / 2)
@@ -466,24 +510,15 @@ final class PocketCanvasPainter extends CustomPainter {
                 innerRect,
                 Radius.circular(innerRadius),
               );
-              canvas.drawDRRect(
-                outer,
-                inner,
-                Paint()
-                  ..color = Color(op.color)
-                  ..isAntiAlias = true,
-              );
+              canvas.drawDRRect(outer, inner, shapePaint);
             }
           }
         case PocketArcOp():
-          final paint = Paint()
+          strokePaint
             ..color = Color(op.color)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = op.strokeWidth
-            ..strokeCap = StrokeCap.round
-            ..isAntiAlias = true;
+            ..strokeWidth = op.strokeWidth;
           if (op.sweepAngle.abs() >= 360.0) {
-            canvas.drawCircle(rect.center, op.radius, paint);
+            canvas.drawCircle(rect.center, op.radius, strokePaint);
           } else {
             final oval = Rect.fromCircle(
               center: rect.center,
@@ -491,7 +526,7 @@ final class PocketCanvasPainter extends CustomPainter {
             );
             final start = (op.startAngle - 90.0) * math.pi / 180.0;
             final sweep = op.sweepAngle * math.pi / 180.0;
-            canvas.drawArc(oval, start, sweep, false, paint);
+            canvas.drawArc(oval, start, sweep, false, strokePaint);
           }
         case PocketGradientOp():
           final (begin, end) = _gradientAlignment(op.direction);
@@ -500,7 +535,8 @@ final class PocketCanvasPainter extends CustomPainter {
             end: end,
             colors: <Color>[Color(op.fromColor), Color(op.toColor)],
           ).createShader(rect);
-          canvas.drawRect(rect, Paint()..shader = shader);
+          shaderPaint.shader = shader;
+          canvas.drawRect(rect, shaderPaint);
         case PocketRoundedGradientOp():
           final (begin, end) = _gradientAlignment(op.direction);
           final colors = op.viaColor == null
@@ -524,28 +560,43 @@ final class PocketCanvasPainter extends CustomPainter {
             rect,
             Radius.circular(radius),
           );
-          canvas.drawRRect(roundedRect, Paint()..shader = shader);
+          shaderPaint.shader = shader;
+          canvas.drawRRect(roundedRect, shaderPaint);
         case PocketTriangleOp():
-          final vertices = ui.Vertices(
-            ui.VertexMode.triangles,
-            op.points
-                .map((point) => Offset(point.x, point.y))
-                .toList(growable: false),
-            colors: op.colors.map(Color.new).toList(growable: false),
-          );
+          final packedPts = op.packedPoints;
+          final packedCols = op.packedColors;
+          final ui.Vertices vertices;
+          if (packedPts != null && packedCols != null) {
+            vertices = ui.Vertices.raw(
+              ui.VertexMode.triangles,
+              packedPts,
+              colors: packedCols,
+            );
+          } else {
+            final pts = op.points;
+            final cols = op.colors;
+            final rawPts = Float32List(pts.length * 2);
+            final rawCols = Int32List(cols.length);
+            for (var i = 0; i < pts.length; i++) {
+              rawPts[i * 2] = pts[i].x;
+              rawPts[i * 2 + 1] = pts[i].y;
+              rawCols[i] = cols[i];
+            }
+            vertices = ui.Vertices.raw(
+              ui.VertexMode.triangles,
+              rawPts,
+              colors: rawCols,
+            );
+          }
           try {
-            canvas.drawVertices(vertices, BlendMode.srcOver, Paint());
+            canvas.drawVertices(vertices, BlendMode.srcOver, verticesPaint);
           } finally {
             vertices.dispose();
           }
-        case PocketTextureTriangleOp():
-        case PocketMeshLayerBeginOp():
-        case PocketMeshMaskBeginOp():
-        case PocketMeshLayerRestoreOp():
-          // These operations are consumed before the ordinary per-op path.
-          break;
         case PocketTextOp():
-          final textLines = op.text.split('\n').length;
+          final hasNewline = op.text.contains('\n');
+          final lines = hasNewline ? op.text.split('\n') : null;
+          final textLines = lines == null ? 1 : lines.length;
           final lineHeight = op.size > 0 && op.height > 0
               ? op.height / textLines / op.size
               : null;
@@ -569,16 +620,24 @@ final class PocketCanvasPainter extends CustomPainter {
                 text: TextSpan(text: value, style: textStyle),
                 textDirection: TextDirection.ltr,
               )..layout());
-          // PocketJS supplies line breaks. Align each line inside the native
-          // box without a second wrapping pass or truncating overflowing text.
           if (op.align == 1 || op.align == 2) {
-            final lines = op.text.split('\n');
-            final advance = op.height / lines.length;
-            for (var index = 0; index < lines.length; index++) {
-              final text = layoutLine(lines[index]);
-              final offset = (op.width - text.width) * (op.align == 1 ? .5 : 1);
-              text.paint(canvas, Offset(op.x + offset, op.y + index * advance));
+            final alignFactor = op.align == 1 ? 0.5 : 1.0;
+            if (lines == null) {
+              final text = layoutLine(op.text);
+              final offset = (op.width - text.width) * alignFactor;
+              text.paint(canvas, Offset(op.x + offset, op.y));
               if (textLayoutCache == null) text.dispose();
+            } else {
+              final advance = op.height / lines.length;
+              for (var lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+                final text = layoutLine(lines[lineIdx]);
+                final offset = (op.width - text.width) * alignFactor;
+                text.paint(
+                  canvas,
+                  Offset(op.x + offset, op.y + lineIdx * advance),
+                );
+                if (textLayoutCache == null) text.dispose();
+              }
             }
           } else {
             final text = layoutLine(op.text);
@@ -589,26 +648,10 @@ final class PocketCanvasPainter extends CustomPainter {
           final image = images[op.asset];
           if (image != null) {
             final uv = op.uv;
-            // Bilinear sampling preserves smooth scaling without per-tile
-            // mipmaps. Medium filtering exposed texture/atlas boundaries
-            // on the Android GPU; both image and fill geometry share the
-            // same physical pixel grid below.
-            final paint = Paint()..filterQuality = FilterQuality.low;
             final tint = op.tint;
-            if (tint != null) {
-              paint.colorFilter = ColorFilter.mode(
-                Color(tint),
-                BlendMode.modulate,
-              );
-            }
-            // DeepZoom emits adjacent TEX_QUADs whose transformed edges can
-            // land between device pixels.  Flutter's filtered image draw
-            // then coverage-blends each tile independently, exposing a
-            // one-pixel dark/colour seam even when the source tiles are
-            // opaque. Snap both edges to one shared physical pixel grid;
-            // independently rounding the near/far edges (rather than
-            // extending the far edge with ceil) preserves exact adjacency
-            // without transparent overlap or alpha darkening.
+            imagePaint.colorFilter = tint == null
+                ? null
+                : ColorFilter.mode(Color(tint), BlendMode.modulate);
             final destination = _pocketPixelAlignedRect(
               rect,
               sx: sx,
@@ -631,20 +674,14 @@ final class PocketCanvasPainter extends CustomPainter {
                       uv[3] * image.height,
                     ),
               destination,
-              paint,
+              imagePaint,
             );
           }
-        case PocketVideoOp():
-          // The video texture is a sibling below this painter. Keeping this op
-          // in the frame preserves ordering without painting a second frame.
-          break;
       }
-      canvas.restore();
       index++;
     }
+    closeActiveClip();
     if (meshLayer != null) {
-      // Malformed injected/legacy JSON must not leak a saveLayer into Flutter's
-      // canvas stack. Native DrawOps rejects unbalanced mesh groups earlier.
       if (meshMaskActive) {
         canvas.restore();
         canvas.restore();
@@ -664,7 +701,7 @@ final class PocketCanvasPainter extends CustomPainter {
   }) {
     final first = ops[start] as PocketTextureTriangleOp;
     var end = start + 1;
-    final batch = <PocketTextureTriangleOp>[first];
+    var vertexCount = first.vertexCount;
     while (end < ops.length) {
       final candidate = ops[end];
       if (candidate is! PocketTextureTriangleOp) break;
@@ -676,11 +713,11 @@ final class PocketCanvasPainter extends CustomPainter {
         drawOpInvocationCount--;
         break;
       }
-      batch.add(candidate);
+      vertexCount += candidate.vertexCount;
       end++;
     }
     final sourceImage = image;
-    if (sourceImage == null) return end;
+    if (sourceImage == null || vertexCount == 0) return end;
     var sampledImage = sourceImage;
     final levels = meshImageLevels[first.asset];
     // Clamped meshes also carry pixel-preserving nine-slice UI skins. Keep
@@ -691,30 +728,43 @@ final class PocketCanvasPainter extends CustomPainter {
         pixelScale > 0) {
       var textureArea = 0.0;
       var screenArea = 0.0;
-      for (final op in batch) {
-        for (var i = 0; i + 2 < op.points.length; i += 3) {
-          final a = op.points[i], b = op.points[i + 1], c = op.points[i + 2];
-          final area = ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x))
-              .abs();
+      final texPixels = sourceImage.width * sourceImage.height;
+      for (var opIdx = start; opIdx < end; opIdx++) {
+        final op = ops[opIdx] as PocketTextureTriangleOp;
+        final g = op.packedGeometry;
+        if (g != null) {
+          final area =
+              ((g[2] - g[0]) * (g[5] - g[1]) - (g[3] - g[1]) * (g[4] - g[0]))
+                  .abs();
           if (area <= 1e-9) continue;
-          final u = i * 2;
-          final du1 = op.uvs[u + 2] - op.uvs[u];
-          final dv1 = op.uvs[u + 3] - op.uvs[u + 1];
-          final du2 = op.uvs[u + 4] - op.uvs[u];
-          final dv2 = op.uvs[u + 5] - op.uvs[u + 1];
-          textureArea +=
-              (du1 * dv2 - dv1 * du2).abs() *
-              sourceImage.width *
-              sourceImage.height;
+          final du1 = g[8] - g[6];
+          final dv1 = g[9] - g[7];
+          final du2 = g[10] - g[6];
+          final dv2 = g[11] - g[7];
+          textureArea += (du1 * dv2 - dv1 * du2).abs() * texPixels;
           screenArea += area * pixelScale;
+        } else {
+          final pts = op.points;
+          final uvs = op.uvs;
+          for (var i = 0; i + 2 < pts.length; i += 3) {
+            final a = pts[i], b = pts[i + 1], c = pts[i + 2];
+            final area = ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x))
+                .abs();
+            if (area <= 1e-9) continue;
+            final u = i * 2;
+            final du1 = uvs[u + 2] - uvs[u];
+            final dv1 = uvs[u + 3] - uvs[u + 1];
+            final du2 = uvs[u + 4] - uvs[u];
+            final dv2 = uvs[u + 5] - uvs[u + 1];
+            textureArea += (du1 * dv2 - dv1 * du2).abs() * texPixels;
+            screenArea += area * pixelScale;
+          }
         }
       }
       if (screenArea > 0 && textureArea.isFinite) {
         final density = math.sqrt(textureArea / screenArea);
         final original = sourceImage;
         for (final level in levels) {
-          // Keep at least one source texel per output pixel. Magnified meshes
-          // keep the original; normalized UVs remain unchanged at every LOD.
           if (level.width < original.width &&
               level.height < original.height &&
               level.width * original.height == level.height * original.width &&
@@ -726,23 +776,43 @@ final class PocketCanvasPainter extends CustomPainter {
         }
       }
     }
-    final positions = <Offset>[];
-    final textureCoordinates = <Offset>[];
-    final colors = <Color>[];
-    for (final op in batch) {
-      for (var vertex = 0; vertex < op.points.length; vertex++) {
-        final point = op.points[vertex];
-        positions.add(Offset(point.x, point.y));
-        textureCoordinates.add(
-          Offset(
-            op.uvs[vertex * 2] * sampledImage.width,
-            op.uvs[vertex * 2 + 1] * sampledImage.height,
-          ),
-        );
-        colors.add(Color(op.color));
+    final positions = Float32List(vertexCount * 2);
+    final textureCoordinates = Float32List(vertexCount * 2);
+    final colors = Int32List(vertexCount)..fillRange(0, vertexCount, first.color);
+    final imgW = sampledImage.width.toDouble();
+    final imgH = sampledImage.height.toDouble();
+    var out = 0;
+    for (var opIdx = start; opIdx < end; opIdx++) {
+      final op = ops[opIdx] as PocketTextureTriangleOp;
+      final g = op.packedGeometry;
+      if (g != null) {
+        positions[out] = g[0];
+        positions[out + 1] = g[1];
+        positions[out + 2] = g[2];
+        positions[out + 3] = g[3];
+        positions[out + 4] = g[4];
+        positions[out + 5] = g[5];
+        textureCoordinates[out] = g[6] * imgW;
+        textureCoordinates[out + 1] = g[7] * imgH;
+        textureCoordinates[out + 2] = g[8] * imgW;
+        textureCoordinates[out + 3] = g[9] * imgH;
+        textureCoordinates[out + 4] = g[10] * imgW;
+        textureCoordinates[out + 5] = g[11] * imgH;
+        out += 6;
+      } else {
+        final pts = op.points;
+        final uvs = op.uvs;
+        for (var vertex = 0; vertex < pts.length; vertex++) {
+          final point = pts[vertex];
+          positions[out] = point.x;
+          positions[out + 1] = point.y;
+          textureCoordinates[out] = uvs[vertex * 2] * imgW;
+          textureCoordinates[out + 1] = uvs[vertex * 2 + 1] * imgH;
+          out += 2;
+        }
       }
     }
-    final vertices = ui.Vertices(
+    final vertices = ui.Vertices.raw(
       ui.VertexMode.triangles,
       positions,
       colors: colors,
@@ -760,13 +830,8 @@ final class PocketCanvasPainter extends CustomPainter {
           ..shader = shader
           ..filterQuality = FilterQuality.low;
         if (layer != null) paint.colorFilter = _meshTintFilter(layer);
-        canvas.save();
-        try {
-          _clipPocketOp(canvas, first);
-          canvas.drawVertices(vertices, BlendMode.modulate, paint);
-        } finally {
-          canvas.restore();
-        }
+        // Active scissor clip for `first.clip` is already synchronized by caller.
+        canvas.drawVertices(vertices, BlendMode.modulate, paint);
         textureTriangleBatchDrawCount++;
       } finally {
         shader.dispose();
@@ -1004,7 +1069,7 @@ bool _isEligibleMeshSpan(List<PocketCanvasPainter> partitions) {
     var maskTriangleSeen = false;
     for (final op in partition.ops) {
       if (op is PocketTextureTriangleOp) {
-        if (partition.images[op.asset] == null || op.points.isEmpty) {
+        if (partition.images[op.asset] == null || op.vertexCount == 0) {
           return false;
         }
         foundTriangle = true;
@@ -1075,15 +1140,29 @@ Rect? _meshSpanCropBounds(
   var right = double.negativeInfinity;
   var bottom = double.negativeInfinity;
   for (final partition in partitions) {
-    for (final op in partition.ops.whereType<PocketTextureTriangleOp>()) {
-      for (final point in op.points) {
-        final x = point.x * sx * devicePixelRatio;
-        final y = point.y * sy * devicePixelRatio;
-        if (!x.isFinite || !y.isFinite) return null;
-        left = math.min(left, x);
-        top = math.min(top, y);
-        right = math.max(right, x);
-        bottom = math.max(bottom, y);
+    for (final op in partition.ops) {
+      if (op is! PocketTextureTriangleOp) continue;
+      final g = op.packedGeometry;
+      if (g != null) {
+        for (var i = 0; i < 6; i += 2) {
+          final x = g[i] * sx * devicePixelRatio;
+          final y = g[i + 1] * sy * devicePixelRatio;
+          if (!x.isFinite || !y.isFinite) return null;
+          left = math.min(left, x);
+          top = math.min(top, y);
+          right = math.max(right, x);
+          bottom = math.max(bottom, y);
+        }
+      } else {
+        for (final point in op.points) {
+          final x = point.x * sx * devicePixelRatio;
+          final y = point.y * sy * devicePixelRatio;
+          if (!x.isFinite || !y.isFinite) return null;
+          left = math.min(left, x);
+          top = math.min(top, y);
+          right = math.max(right, x);
+          bottom = math.max(bottom, y);
+        }
       }
     }
   }
@@ -1248,7 +1327,12 @@ bool _pocketOpPaintsAt(PocketOp op, Offset point) {
     PocketArcOp() => _pocketArcPaintsAt(op, point),
     PocketGradientOp(:final fromColor, :final toColor) =>
       _pocketArgbPaints(fromColor) || _pocketArgbPaints(toColor),
-    PocketTriangleOp(:final colors) => colors.any(_pocketArgbPaints),
+    PocketTriangleOp(:final packedColors) =>
+      packedColors != null
+          ? (_pocketArgbPaints(packedColors[0]) ||
+                _pocketArgbPaints(packedColors[1]) ||
+                _pocketArgbPaints(packedColors[2]))
+          : op.colors.any(_pocketArgbPaints),
     PocketTextureTriangleOp(:final color) => _pocketArgbPaints(color),
     PocketTextOp(:final color) => _pocketArgbPaints(color),
     // A loaded image/video may contain transparent pixels, but its DrawOp is
@@ -1327,6 +1411,13 @@ bool _pocketCanvasEquals(
     if (!listEquals(entry.value, newPainter._meshLevelIdentities[entry.key]))
       return false;
   }
+  if (identical(oldPainter.ops, newPainter.ops) &&
+      _pocketImageIdentityMapsEqual(
+        oldPainter._imageIdentities,
+        newPainter._imageIdentities,
+      )) {
+    return true;
+  }
   for (var index = 0; index < oldPainter.ops.length; index++) {
     if (!_pocketOpEquals(
       oldPainter.ops[index],
@@ -1354,7 +1445,8 @@ bool _pocketStringListEquals(List<String> first, List<String> second) {
 }
 
 bool _pocketClipEquals(PocketClip? first, PocketClip? second) {
-  if (first == null || second == null) return first == second;
+  if (identical(first, second)) return true;
+  if (first == null || second == null) return false;
   return first.x == second.x &&
       first.y == second.y &&
       first.width == second.width &&
@@ -1388,12 +1480,54 @@ bool _pocketDoubleListEquals(List<double> first, List<double> second) {
   return true;
 }
 
+bool _pocketImageIdentityMapsEqual(
+  Map<String, ui.Image?> first,
+  Map<String, ui.Image?> second,
+) {
+  if (identical(first, second)) return true;
+  if (first.length != second.length) return false;
+  for (final entry in first.entries) {
+    if (!second.containsKey(entry.key) ||
+        !identical(entry.value, second[entry.key])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool _pocketFloat32ListEquals(Float32List a, Float32List b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+bool _pocketInt32ListEquals(Int32List a, Int32List b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
 bool _pocketOpEquals(
   PocketOp first,
   PocketOp second,
   Map<String, ui.Image?> firstImages,
   Map<String, ui.Image?> secondImages,
 ) {
+  if (identical(first, second)) {
+    if (identical(firstImages, secondImages)) return true;
+    return switch (first) {
+      PocketImageOp(:final asset) ||
+      PocketTextureTriangleOp(:final asset) =>
+        identical(firstImages[asset], secondImages[asset]),
+      _ => true,
+    };
+  }
   if (first.runtimeType != second.runtimeType ||
       first.x != second.x ||
       first.y != second.y ||
@@ -1439,16 +1573,31 @@ bool _pocketOpEquals(
           other.viaPosition == first.viaPosition;
     case PocketTriangleOp():
       final other = second as PocketTriangleOp;
+      final ptsA = first.packedPoints;
+      final ptsB = other.packedPoints;
+      final colsA = first.packedColors;
+      final colsB = other.packedColors;
+      if (ptsA != null && ptsB != null && colsA != null && colsB != null) {
+        return _pocketFloat32ListEquals(ptsA, ptsB) &&
+            _pocketInt32ListEquals(colsA, colsB);
+      }
       return _pocketPointListEquals(first.points, other.points) &&
           _pocketIntListEquals(first.colors, other.colors);
     case PocketTextureTriangleOp():
       final other = second as PocketTextureTriangleOp;
-      return first.asset == other.asset &&
-          first.color == other.color &&
-          first.repeatTexture == other.repeatTexture &&
-          _pocketPointListEquals(first.points, other.points) &&
-          _pocketDoubleListEquals(first.uvs, other.uvs) &&
-          identical(firstImages[first.asset], secondImages[other.asset]);
+      if (first.asset != other.asset ||
+          first.color != other.color ||
+          first.repeatTexture != other.repeatTexture ||
+          !identical(firstImages[first.asset], secondImages[other.asset])) {
+        return false;
+      }
+      final gA = first.packedGeometry;
+      final gB = other.packedGeometry;
+      if (gA != null && gB != null) {
+        return _pocketFloat32ListEquals(gA, gB);
+      }
+      return _pocketPointListEquals(first.points, other.points) &&
+          _pocketDoubleListEquals(first.uvs, other.uvs);
     case PocketMeshLayerBeginOp():
       final other = second as PocketMeshLayerBeginOp;
       return first.blend == other.blend &&
@@ -1491,16 +1640,45 @@ Map<String, ui.Image?> _pocketImageIdentities(
   List<PocketOp> ops,
   Map<String, ui.Image> images,
 ) {
-  final identities = <String, ui.Image?>{};
-  for (final op in ops) {
-    final asset = switch (op) {
-      PocketImageOp() => op.asset,
-      PocketTextureTriangleOp() => op.asset,
-      _ => null,
-    };
-    if (asset != null) identities[asset] = images[asset];
+  Map<String, ui.Image?>? identities;
+  String? lastAsset;
+  for (var i = 0; i < ops.length; i++) {
+    final op = ops[i];
+    final String? asset;
+    if (op is PocketImageOp) {
+      asset = op.asset;
+    } else if (op is PocketTextureTriangleOp) {
+      asset = op.asset;
+    } else {
+      continue;
+    }
+    if (asset == lastAsset) continue;
+    lastAsset = asset;
+    (identities ??= <String, ui.Image?>{})[asset] = images[asset];
   }
-  return Map<String, ui.Image?>.unmodifiable(identities);
+  if (identities == null) return const <String, ui.Image?>{};
+  return identities;
+}
+
+Map<String, List<ui.Image>> _pocketMeshLevelIdentities(
+  List<PocketOp> ops,
+  Map<String, List<ui.Image>> meshImageLevels,
+) {
+  if (meshImageLevels.isEmpty) return const <String, List<ui.Image>>{};
+  Map<String, List<ui.Image>>? copied;
+  String? lastAsset;
+  for (var i = 0; i < ops.length; i++) {
+    final op = ops[i];
+    if (op is! PocketTextureTriangleOp || !op.repeatTexture) continue;
+    final asset = op.asset;
+    if (asset == lastAsset) continue;
+    lastAsset = asset;
+    final levels = meshImageLevels[asset];
+    if (levels != null && levels.isNotEmpty) {
+      (copied ??= <String, List<ui.Image>>{})[asset] = List<ui.Image>.of(levels);
+    }
+  }
+  return copied ?? const <String, List<ui.Image>>{};
 }
 
 final Float64List _identityMatrix = Float64List.fromList(<double>[

@@ -55,33 +55,55 @@ pub(crate) fn common_splice<T: PartialEq>(base: &[T], result: &[T]) -> Splice {
     }
 }
 
-/// Build a PFP1 envelope around a complete PFB1 payload. The caller only uses
-/// this when the common splice has retained operations: the fixed 28-byte
-/// envelope is smaller than the bytes removed by that splice. This helper
-/// validates fixed-width fields and performs no compression.
-pub(crate) fn encode(
+/// Write a PFP1 header followed by an embedded PFB1 payload created via `write_payload`
+/// directly into `out`, avoiding a second intermediate `Vec<u8>` allocation and copy.
+pub(crate) fn encode_with_writer(
+    out: &mut Vec<u8>,
     base_sequence: u64,
     splice: Splice,
     resulting_op_count: usize,
-    payload: &[u8],
-) -> Result<Vec<u8>, String> {
+    write_payload: impl FnOnce(&mut Vec<u8>) -> Result<(), String>,
+) -> Result<(), String> {
     let prefix_count = u32::try_from(splice.prefix_count)
         .map_err(|_| "frame delta prefix count exceeds u32".to_owned())?;
     let delete_count = u32::try_from(splice.delete_count)
         .map_err(|_| "frame delta delete count exceeds u32".to_owned())?;
     let resulting_op_count = u32::try_from(resulting_op_count)
         .map_err(|_| "frame delta resulting operation count exceeds u32".to_owned())?;
-    let embedded_payload_length = u32::try_from(payload.len())
-        .map_err(|_| "frame delta embedded payload exceeds u32".to_owned())?;
 
+    out.clear();
+    out.extend_from_slice(&MAGIC.to_le_bytes());
+    out.extend_from_slice(&base_sequence.to_le_bytes());
+    out.extend_from_slice(&prefix_count.to_le_bytes());
+    out.extend_from_slice(&delete_count.to_le_bytes());
+    out.extend_from_slice(&resulting_op_count.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // placeholder for embedded_payload_length
+
+    write_payload(out)?;
+
+    let payload_len = out.len().saturating_sub(HEADER_BYTES);
+    let embedded_payload_length = u32::try_from(payload_len)
+        .map_err(|_| "frame delta embedded payload exceeds u32".to_owned())?;
+    out[24..HEADER_BYTES].copy_from_slice(&embedded_payload_length.to_le_bytes());
+    Ok(())
+}
+
+/// Build a PFP1 envelope around a complete PFB1 payload. The caller only uses
+/// this when the common splice has retained operations: the fixed 28-byte
+/// envelope is smaller than the bytes removed by that splice. This helper
+/// validates fixed-width fields and performs no compression.
+#[cfg(test)]
+pub(crate) fn encode(
+    base_sequence: u64,
+    splice: Splice,
+    resulting_op_count: usize,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::with_capacity(HEADER_BYTES + payload.len());
-    bytes.extend_from_slice(&MAGIC.to_le_bytes());
-    bytes.extend_from_slice(&base_sequence.to_le_bytes());
-    bytes.extend_from_slice(&prefix_count.to_le_bytes());
-    bytes.extend_from_slice(&delete_count.to_le_bytes());
-    bytes.extend_from_slice(&resulting_op_count.to_le_bytes());
-    bytes.extend_from_slice(&embedded_payload_length.to_le_bytes());
-    bytes.extend_from_slice(payload);
+    encode_with_writer(&mut bytes, base_sequence, splice, resulting_op_count, |out| {
+        out.extend_from_slice(payload);
+        Ok(())
+    })?;
     Ok(bytes)
 }
 

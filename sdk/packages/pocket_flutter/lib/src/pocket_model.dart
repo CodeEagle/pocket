@@ -1,3 +1,4 @@
+import 'dart:collection' show UnmodifiableListView;
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -435,13 +436,55 @@ class PocketTriangleOp extends PocketOp {
     required super.y,
     required super.width,
     required super.height,
-    required this.points,
-    required this.colors,
+    required List<PocketPoint> points,
+    required List<int> colors,
     super.clip,
-  });
+  }) : _points = points,
+       _colors = colors,
+       packedPoints = null,
+       packedColors = null;
 
-  final List<PocketPoint> points;
-  final List<int> colors;
+  const PocketTriangleOp._packed({
+    required super.x,
+    required super.y,
+    required super.width,
+    required super.height,
+    required Float32List this.packedPoints,
+    required Int32List this.packedColors,
+    super.clip,
+  }) : _points = null,
+       _colors = null;
+
+  final List<PocketPoint>? _points;
+  final List<int>? _colors;
+
+  /// Optional flat `[x0, y0, x1, y1, x2, y2]` coordinates populated by PFB1.
+  final Float32List? packedPoints;
+
+  /// Optional flat `[c0, c1, c2]` ARGB colors populated by PFB1.
+  final Int32List? packedColors;
+
+  List<PocketPoint> get points {
+    final existing = _points;
+    if (existing != null) return existing;
+    final raw = packedPoints!;
+    return List<PocketPoint>.unmodifiable(<PocketPoint>[
+      PocketPoint(x: raw[0], y: raw[1]),
+      PocketPoint(x: raw[2], y: raw[3]),
+      PocketPoint(x: raw[4], y: raw[5]),
+    ]);
+  }
+
+  List<int> get colors {
+    final existing = _colors;
+    if (existing != null) return existing;
+    final raw = packedColors!;
+    return List<int>.unmodifiable(<int>[
+      raw[0] & 0xffffffff,
+      raw[1] & 0xffffffff,
+      raw[2] & 0xffffffff,
+    ]);
+  }
 }
 
 class PocketTextureTriangleOp extends PocketOp {
@@ -452,17 +495,66 @@ class PocketTextureTriangleOp extends PocketOp {
     required super.height,
     required this.asset,
     required this.color,
-    required this.points,
-    required this.uvs,
+    required List<PocketPoint> points,
+    required List<double> uvs,
     this.repeatTexture = false,
     super.clip,
-  });
+  }) : _points = points,
+       _uvs = uvs,
+       packedGeometry = null;
+
+  const PocketTextureTriangleOp._packed({
+    required super.x,
+    required super.y,
+    required super.width,
+    required super.height,
+    required this.asset,
+    required this.color,
+    required Float32List this.packedGeometry,
+    this.repeatTexture = false,
+    super.clip,
+  }) : _points = null,
+       _uvs = null;
 
   final String asset;
   final int color;
-  final List<PocketPoint> points;
-  final List<double> uvs;
+  final List<PocketPoint>? _points;
+  final List<double>? _uvs;
+
+  /// Flat 12-float slice `[x0, y0, x1, y1, x2, y2, u0, v0, u1, v1, u2, v2]`
+  /// decoded directly from PFB1 without boxing intermediate objects.
+  final Float32List? packedGeometry;
   final bool repeatTexture;
+
+  int get vertexCount {
+    if (packedGeometry != null) return 3;
+    return _points!.length;
+  }
+
+  List<PocketPoint> get points {
+    final existing = _points;
+    if (existing != null) return existing;
+    final g = packedGeometry!;
+    return List<PocketPoint>.unmodifiable(<PocketPoint>[
+      PocketPoint(x: g[0], y: g[1]),
+      PocketPoint(x: g[2], y: g[3]),
+      PocketPoint(x: g[4], y: g[5]),
+    ]);
+  }
+
+  List<double> get uvs {
+    final existing = _uvs;
+    if (existing != null) return existing;
+    final g = packedGeometry!;
+    return List<double>.unmodifiable(<double>[
+      g[6],
+      g[7],
+      g[8],
+      g[9],
+      g[10],
+      g[11],
+    ]);
+  }
 }
 
 /// Begins an isolated Live2D mesh group. RGB tints apply to its target meshes;
@@ -773,42 +865,60 @@ class PocketFrame {
     final width = reader.f32();
     final height = reader.f32();
     final ops = _binaryOps(reader, reader.count('ops'), flags, version);
-    final events = <PocketEvent>[];
     final eventCount = reader.count('events');
-    for (var index = 0; index < eventCount; index++) {
-      final payload = reader.bytes('event', copy: false);
-      events.add(PocketBinaryCodec.decodeEvent(payload));
+    final List<PocketEvent> events;
+    if (eventCount == 0) {
+      events = const <PocketEvent>[];
+    } else {
+      final list = <PocketEvent>[];
+      for (var index = 0; index < eventCount; index++) {
+        final payload = reader.bytes('event', copy: false);
+        list.add(PocketBinaryCodec.decodeEvent(payload));
+      }
+      events = UnmodifiableListView<PocketEvent>(list);
     }
-    final resources = <PocketImageResource>[];
     final resourceCount = reader.count('resources');
-    for (var index = 0; index < resourceCount; index++) {
-      final asset = reader.string('resource asset');
-      final revision = reader.u64();
-      final resourceWidth = reader.u32();
-      final resourceHeight = reader.u32();
-      final psm = reader.u32();
-      final linear = reader.u8() != 0;
-      final pixels = reader.bytes('resource pixels');
-      final palette = reader.u8() == 0
-          ? null
-          : reader.bytes('resource palette');
-      resources.add(
-        PocketImageResource(
-          asset: asset,
-          revision: revision,
-          width: resourceWidth,
-          height: resourceHeight,
-          psm: psm,
-          linear: linear,
-          pixels: pixels,
-          palette: palette,
-        ),
-      );
+    final List<PocketImageResource> resources;
+    if (resourceCount == 0) {
+      resources = const <PocketImageResource>[];
+    } else {
+      final list = <PocketImageResource>[];
+      for (var index = 0; index < resourceCount; index++) {
+        final asset = reader.string('resource asset');
+        final revision = reader.u64();
+        final resourceWidth = reader.u32();
+        final resourceHeight = reader.u32();
+        final psm = reader.u32();
+        final linear = reader.u8() != 0;
+        final pixels = reader.bytes('resource pixels');
+        final palette = reader.u8() == 0
+            ? null
+            : reader.bytes('resource palette');
+        list.add(
+          PocketImageResource(
+            asset: asset,
+            revision: revision,
+            width: resourceWidth,
+            height: resourceHeight,
+            psm: psm,
+            linear: linear,
+            pixels: pixels,
+            palette: palette,
+          ),
+        );
+      }
+      resources = UnmodifiableListView<PocketImageResource>(list);
     }
-    final releasedResources = <String>[];
     final releasedCount = reader.count('released resources');
-    for (var index = 0; index < releasedCount; index++) {
-      releasedResources.add(reader.string('released resource'));
+    final List<String> releasedResources;
+    if (releasedCount == 0) {
+      releasedResources = const <String>[];
+    } else {
+      final list = <String>[];
+      for (var index = 0; index < releasedCount; index++) {
+        list.add(reader.string('released resource'));
+      }
+      releasedResources = UnmodifiableListView<String>(list);
     }
     PocketSurfaceFrame? auxiliary;
     if (reader.u8() != 0) {
@@ -823,9 +933,9 @@ class PocketFrame {
       width: width,
       height: height,
       ops: ops,
-      events: List<PocketEvent>.unmodifiable(events),
-      resources: List<PocketImageResource>.unmodifiable(resources),
-      releasedResources: List<String>.unmodifiable(releasedResources),
+      events: events,
+      resources: resources,
+      releasedResources: releasedResources,
       auxiliary: auxiliary,
       sequence: sequence,
     );
@@ -847,49 +957,69 @@ class PocketFrame {
   final int? sequence;
 }
 
+const PocketOp _dummyOp = PocketMeshLayerRestoreOp(
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+);
+
 List<PocketOp> _binaryOps(
   _PocketBinaryReader reader,
   int count,
   int flags,
   int version,
 ) {
-  final result = <PocketOp>[];
+  if (count == 0) return const <PocketOp>[];
+  // Every PFB1 op has at least a 33-byte header before kind-specific fields.
+  if (count * 33 > reader.remaining) {
+    throw const FormatException(
+      'Pocket binary frame truncated while reading ops',
+    );
+  }
+  final result = List<PocketOp>.filled(count, _dummyOp, growable: false);
+  PocketClip? lastClip;
   for (var index = 0; index < count; index++) {
     final type = reader.u8();
     final x = reader.f32();
     final y = reader.f32();
     final width = reader.f32();
     final height = reader.f32();
-    final clip = PocketClip(
-      x: reader.f32(),
-      y: reader.f32(),
-      width: reader.f32(),
-      height: reader.f32(),
-    );
+    final cx = reader.f32();
+    final cy = reader.f32();
+    final cw = reader.f32();
+    final ch = reader.f32();
+    final PocketClip clip;
+    if (lastClip != null &&
+        lastClip.x == cx &&
+        lastClip.y == cy &&
+        lastClip.width == cw &&
+        lastClip.height == ch) {
+      clip = lastClip;
+    } else {
+      clip = PocketClip(x: cx, y: cy, width: cw, height: ch);
+      lastClip = clip;
+    }
     switch (type) {
       case 0:
-        result.add(
-          PocketRectOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            color: reader.u32(),
-            clip: clip,
-          ),
+        result[index] = PocketRectOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          color: reader.u32(),
+          clip: clip,
         );
       case 1:
-        result.add(
-          PocketRoundedOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            color: reader.u32(),
-            radius: reader.f32(),
-            borderWidth: 0,
-            clip: clip,
-          ),
+        result[index] = PocketRoundedOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          color: reader.u32(),
+          radius: reader.f32(),
+          borderWidth: 0,
+          clip: clip,
         );
       case 15:
         if (version < 3) {
@@ -908,17 +1038,15 @@ List<PocketOp> _binaryOps(
             'Invalid rounded rectangle ring geometry',
           );
         }
-        result.add(
-          PocketRoundedOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            color: color,
-            radius: radius,
-            borderWidth: borderWidth,
-            clip: clip,
-          ),
+        result[index] = PocketRoundedOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          color: color,
+          radius: radius,
+          borderWidth: borderWidth,
+          clip: clip,
         );
       case 16:
         if (version < 4) {
@@ -941,19 +1069,17 @@ List<PocketOp> _binaryOps(
             sweepAngle.abs() > 360) {
           throw const FormatException('Invalid native arc geometry');
         }
-        result.add(
-          PocketArcOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            color: color,
-            radius: radius,
-            strokeWidth: strokeWidth,
-            startAngle: startAngle,
-            sweepAngle: sweepAngle,
-            clip: clip,
-          ),
+        result[index] = PocketArcOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          color: color,
+          radius: radius,
+          strokeWidth: strokeWidth,
+          startAngle: startAngle,
+          sweepAngle: sweepAngle,
+          clip: clip,
         );
       case 17:
         if (version < 5) {
@@ -983,49 +1109,47 @@ List<PocketOp> _binaryOps(
             'Invalid rounded gradient geometry or stops',
           );
         }
-        result.add(
-          PocketRoundedGradientOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            radius: radius,
-            fromColor: fromColor,
-            toColor: toColor,
-            direction: direction,
-            viaColor: viaColor,
-            viaPosition: viaPosition,
-            clip: clip,
-          ),
+        result[index] = PocketRoundedGradientOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          radius: radius,
+          fromColor: fromColor,
+          toColor: toColor,
+          direction: direction,
+          viaColor: viaColor,
+          viaPosition: viaPosition,
+          clip: clip,
         );
       case 2:
-        result.add(
-          PocketGradientOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            fromColor: reader.u32(),
-            toColor: reader.u32(),
-            direction: reader.u32(),
-            clip: clip,
-          ),
+        result[index] = PocketGradientOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          fromColor: reader.u32(),
+          toColor: reader.u32(),
+          direction: reader.u32(),
+          clip: clip,
         );
       case 3:
-        result.add(
-          PocketTriangleOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            points: List<PocketPoint>.generate(
-              3,
-              (_) => PocketPoint(x: reader.f32(), y: reader.f32()),
-              growable: false,
-            ),
-            colors: List<int>.generate(3, (_) => reader.u32(), growable: false),
-            clip: clip,
-          ),
+        final packedPts = Float32List(6);
+        for (var i = 0; i < 6; i++) {
+          packedPts[i] = reader.f32();
+        }
+        final packedCols = Int32List(3);
+        packedCols[0] = reader.u32();
+        packedCols[1] = reader.u32();
+        packedCols[2] = reader.u32();
+        result[index] = PocketTriangleOp._packed(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          packedPoints: packedPts,
+          packedColors: packedCols,
+          clip: clip,
         );
       case 4 || 14:
         if (type == 14 && version < 2) {
@@ -1033,23 +1157,22 @@ List<PocketOp> _binaryOps(
             'Repeated texture triangles require Pocket frame version 2',
           );
         }
-        result.add(
-          PocketTextureTriangleOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            asset: reader.string('texture triangle asset'),
-            color: reader.u32(),
-            points: List<PocketPoint>.generate(
-              3,
-              (_) => PocketPoint(x: reader.f32(), y: reader.f32()),
-              growable: false,
-            ),
-            uvs: List<double>.generate(6, (_) => reader.f32(), growable: false),
-            repeatTexture: type == 14,
-            clip: clip,
-          ),
+        final asset = reader.assetString('texture triangle asset');
+        final color = reader.u32();
+        final geom = Float32List(12);
+        for (var i = 0; i < 12; i++) {
+          geom[i] = reader.f32();
+        }
+        result[index] = PocketTextureTriangleOp._packed(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          asset: asset,
+          color: color,
+          packedGeometry: geom,
+          repeatTexture: type == 14,
+          clip: clip,
         );
       case 5:
         final text = reader.string('text');
@@ -1058,37 +1181,33 @@ List<PocketOp> _binaryOps(
         final fontSlot = reader.u8() == 0 ? null : reader.u8();
         final align = flags & 1 == 0 ? 0 : reader.u8();
         if (align > 2) throw const FormatException('Invalid text alignment');
-        result.add(
-          PocketTextOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            text: text,
-            size: size,
-            color: color,
-            fontSlot: fontSlot,
-            align: align,
-            clip: clip,
-          ),
+        result[index] = PocketTextOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          text: text,
+          size: size,
+          color: color,
+          fontSlot: fontSlot,
+          align: align,
+          clip: clip,
         );
       case 6:
-        final asset = reader.string('image asset');
+        final asset = reader.assetString('image asset');
         final uv = reader.u8() == 0
             ? null
-            : List<double>.generate(4, (_) => reader.f32(), growable: false);
+            : <double>[reader.f32(), reader.f32(), reader.f32(), reader.f32()];
         final tint = reader.u8() == 0 ? null : reader.u32();
-        result.add(
-          PocketImageOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            asset: asset,
-            uv: uv,
-            tint: tint,
-            clip: clip,
-          ),
+        result[index] = PocketImageOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          asset: asset,
+          uv: uv,
+          tint: tint,
+          clip: clip,
         );
       case 7:
         final id = reader.string('surface id');
@@ -1103,66 +1222,63 @@ List<PocketOp> _binaryOps(
         );
         final surfaceHandle = flags & 1 == 0 ? 0 : (reader.u32().toSigned(32));
         final focused = flags & 1 != 0 && reader.u8() != 0;
-        result.add(
-          PocketHostSurfaceOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            clip: clip,
-            id: id,
-            surfaceHandle: surfaceHandle,
-            focused: focused,
-            kind: kind,
-            parameters: parameters,
-          ),
+        result[index] = PocketHostSurfaceOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          clip: clip,
+          id: id,
+          surfaceHandle: surfaceHandle,
+          focused: focused,
+          kind: kind,
+          parameters: parameters,
         );
       case 8:
         final id = reader.string('video id');
-        final asset = reader.string('video asset');
+        final asset = reader.assetString('video asset');
         final fit = switch (reader.u8()) {
           1 => 'contain',
           2 => 'fill',
           _ => 'cover',
         };
         final autoplay = reader.u8() != 0;
-        result.add(
-          PocketVideoOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            id: id,
-            asset: asset,
-            autoplay: autoplay,
-            fit: fit,
-            clip: clip,
-          ),
+        result[index] = PocketVideoOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          id: id,
+          asset: asset,
+          autoplay: autoplay,
+          fit: fit,
+          clip: clip,
         );
       case 9:
         if (version < 2) {
           throw const FormatException('Mesh effects require PFB1 version 2');
         }
         final blend = reader.u32();
-        final tints = List<double>.generate(
-          6,
-          (_) => reader.f32(),
-          growable: false,
-        );
+        final tints = <double>[
+          reader.f32(),
+          reader.f32(),
+          reader.f32(),
+          reader.f32(),
+          reader.f32(),
+          reader.f32(),
+        ];
         if (blend > 3 || tints.any((value) => value < 0 || value > 1)) {
           throw const FormatException('Invalid mesh layer parameters');
         }
-        result.add(
-          PocketMeshLayerBeginOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            blend: blend,
-            multiplyRgb: tints.sublist(0, 3),
-            screenRgb: tints.sublist(3, 6),
-            clip: clip,
-          ),
+        result[index] = PocketMeshLayerBeginOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          blend: blend,
+          multiplyRgb: tints.sublist(0, 3),
+          screenRgb: tints.sublist(3, 6),
+          clip: clip,
         );
       case 10:
         if (version < 2) {
@@ -1172,34 +1288,30 @@ List<PocketOp> _binaryOps(
         if (inverted > 1) {
           throw const FormatException('Invalid mesh mask inversion flag');
         }
-        result.add(
-          PocketMeshMaskBeginOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            inverted: inverted != 0,
-            clip: clip,
-          ),
+        result[index] = PocketMeshMaskBeginOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          inverted: inverted != 0,
+          clip: clip,
         );
       case 11:
         if (version < 2) {
           throw const FormatException('Mesh effects require PFB1 version 2');
         }
-        result.add(
-          PocketMeshLayerRestoreOp(
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            clip: clip,
-          ),
+        result[index] = PocketMeshLayerRestoreOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          clip: clip,
         );
       default:
         throw FormatException('Unknown Pocket binary operation type: $type');
     }
   }
-  return List<PocketOp>.unmodifiable(result);
+  return UnmodifiableListView<PocketOp>(result);
 }
 
 final class _PocketBinaryReader {
@@ -1209,6 +1321,10 @@ final class _PocketBinaryReader {
   // One bounded view per frame, rather than one view per scalar read.
   final ByteData view;
   var offset = 0;
+
+  int _lastAssetStart = -1;
+  int _lastAssetLength = -1;
+  String _lastAssetString = '';
 
   int get remaining => data.length - offset;
 
@@ -1270,7 +1386,51 @@ final class _PocketBinaryReader {
     return copy ? Uint8List.fromList(slice) : slice;
   }
 
-  String string(String field) => utf8.decode(bytes(field, copy: false));
+  String string(String field) {
+    final length = u32();
+    _require(length, field);
+    if (length == 0) return '';
+    final start = offset;
+    final end = start + length;
+    offset = end;
+    return _decodeStringSlice(start, end);
+  }
+
+  /// Fast-path decoder for repeated asset keys (e.g. hundreds of mesh triangles
+  /// or glyph quads referencing the exact same texture name).
+  String assetString(String field) {
+    final length = u32();
+    _require(length, field);
+    if (length == 0) return '';
+    final start = offset;
+    final end = start + length;
+    offset = end;
+    if (length == _lastAssetLength && _lastAssetStart >= 0) {
+      var same = true;
+      final prev = _lastAssetStart;
+      for (var i = 0; i < length; i++) {
+        if (data[start + i] != data[prev + i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return _lastAssetString;
+    }
+    final decoded = _decodeStringSlice(start, end);
+    _lastAssetStart = start;
+    _lastAssetLength = length;
+    _lastAssetString = decoded;
+    return decoded;
+  }
+
+  String _decodeStringSlice(int start, int end) {
+    for (var i = start; i < end; i++) {
+      if (data[i] >= 0x80) {
+        return utf8.decode(Uint8List.sublistView(data, start, end));
+      }
+    }
+    return String.fromCharCodes(data, start, end);
+  }
 
   void finish() {
     if (offset != data.length) {

@@ -703,12 +703,18 @@ fn decode_js_value<'js>(
             for _ in 0..count {
                 let key = reader.str()?;
                 let child = decode_js_value(ctx, reader, depth + 1)?;
-                object
-                    .prop(
-                        key,
-                        Property::from(child).configurable().enumerable().writable(),
-                    )
-                    .map_err(|error| error.to_string())?;
+                if key == "__proto__" {
+                    object
+                        .prop(
+                            key,
+                            Property::from(child).configurable().enumerable().writable(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    object
+                        .set(key, child)
+                        .map_err(|error| error.to_string())?;
+                }
             }
             Ok(object.into_value())
         }
