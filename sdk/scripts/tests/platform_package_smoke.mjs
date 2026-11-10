@@ -214,30 +214,68 @@ for (const template of ["app", "game"]) {
   let reader;
   const snapshot = async () => { const response = await call("snapshot"); assert.equal(response.status, 200); const value = await response.json(); assert.equal(value.status.state, "ready", JSON.stringify(value.status)); return value.frame; };
   const has = (frame, text) => frame.ops.some(op => op.type === "text" && op.text === text);
-  const waitFor = async predicate => { const deadline = Date.now() + 5000; do { const frame = await snapshot(); if (predicate(frame)) return frame; await wait(30); } while (Date.now() < deadline); throw new Error("Preview frame did not reach expected state for " + template); };
-  const click = async text => { const frame = await waitFor(value => has(value, text)); const op = frame.ops.find(value => value.type === "text" && value.text === text); for (const phase of ["down", "up"]) { const response = await call("input", { method: "POST", body: JSON.stringify({ type: "pointer", phase, id: 0, x: op.x + op.w / 2, y: op.y + op.h / 2 }) }); assert.equal(response.status, 200); } };
+  const waitFor = async (predicate, expected) => {
+    const deadline = Date.now() + 5000;
+    let frame;
+    do {
+      frame = await snapshot();
+      if (predicate(frame)) return frame;
+      await wait(30);
+    } while (Date.now() < deadline);
+    const text = frame.ops.filter(op => op.type === "text").map(op => op.text);
+    throw new Error("Preview " + template + " did not reach " + expected + " within 5s; frame=" + frame.frame + "; text=" + JSON.stringify(text));
+  };
+  const click = async text => { const frame = await waitFor(value => has(value, text), "text " + JSON.stringify(text)); const op = frame.ops.find(value => value.type === "text" && value.text === text); for (const phase of ["down", "up"]) { const response = await call("input", { method: "POST", body: JSON.stringify({ type: "pointer", phase, id: 0, x: op.x + op.w / 2, y: op.y + op.h / 2 }) }); assert.equal(response.status, 200); } };
+  const textStartingWith = (frame, prefix) => frame.ops.find(op => op.type === "text" && op.text?.startsWith(prefix))?.text;
+  const tap = async (x, y, holdMs = 120) => {
+    for (const phase of ["down", "up"]) {
+      const response = await call("input", { method: "POST", body: JSON.stringify({ type: "pointer", phase, id: 0, x, y }) });
+      assert.equal(response.status, 200);
+      if (phase === "down") await wait(holdMs);
+    }
+  };
   try {
     const stream = await call("stream");
     assert.equal(stream.status, 200);
     reader = stream.body?.getReader();
     await reader?.read();
-    if (template === "app") { await click("深色"); await waitFor(frame => has(frame, "浅色")); await click("浅色"); await waitFor(frame => has(frame, "深色")); }
-    else {
+    if (template === "app") {
+      const initial = await waitFor(frame => has(frame, "深色"), 'App initial theme control');
+      await click("深色");
+      const light = await waitFor(frame => has(frame, "浅色"), 'App light theme after input');
+      await click("浅色");
+      const dark = await waitFor(frame => has(frame, "深色"), 'App dark theme after input');
+      result.push({ template, inputChangesFrame: true, frames: { initial: initial.frame, light: light.frame, dark: dark.frame } });
+    } else {
+      const ready = await waitFor(frame => has(frame, "星尘捕手") && has(frame, "得分：0") && has(frame, "剩余：30 秒"), 'Game ready HUD');
       await click("开始游戏");
-      await click("命中");
-      await waitFor(frame => frame.ops.some(op => op.text?.startsWith("得分：1 | 剩余：")));
+      const playing = await waitFor(frame => has(frame, "点击发光星核") && has(frame, "得分：0") && Boolean(textStartingWith(frame, "剩余：")), 'Game playing HUD');
+      const starCore = frame => frame.ops.find(op => op.color === 0xfffff8df);
+      const firstCore = starCore(playing);
+      assert.ok(firstCore, "playing Game frame must expose the rendered star-core op");
+      await tap(8, 100);
+      const emptySpace = await snapshot();
+      assert.ok(has(emptySpace, "得分：0"), "empty space must not score");
+      const targetFrame = await waitFor(frame => Boolean(starCore(frame)), 'rendered star-core target');
+      const target = starCore(targetFrame);
+      assert.ok(target, "target frame must contain the rendered star-core op");
+      await tap(target.x + target.w / 2, target.y + target.h / 2);
+      const scored = await waitFor(frame => has(frame, "得分：1"), 'Game score to become 1 after star-core input');
       await click("暂停");
-      const paused = await waitFor(frame => has(frame, "已暂停"));
-      const pausedScore = paused.ops.find(op => op.type === "text" && op.text?.startsWith("得分："))?.text;
-      assert.ok(pausedScore, "paused game frame must expose its score/timer text");
+      const paused = await waitFor(frame => has(frame, "已暂停") && Boolean(textStartingWith(frame, "剩余：")), 'Game paused HUD');
+      const pausedTime = textStartingWith(paused, "剩余：");
+      assert.ok(pausedTime, "paused game frame must expose its countdown text");
       await wait(1200);
       const frozen = await snapshot();
-      assert.ok(has(frozen, pausedScore), "game timer changed while paused");
+      assert.ok(has(frozen, "已暂停"), "game left the paused state during the 1.2s freeze check");
+      assert.ok(has(frozen, "得分：1"), "game score changed while paused");
+      assert.equal(textStartingWith(frozen, "剩余："), pausedTime, "game countdown changed while paused");
       await click("继续");
-      const continued = await waitFor(frame => has(frame, "进行中") && frame.ops.some(op => op.type === "text" && op.text?.startsWith("得分：") && op.text !== pausedScore));
-      assert.ok(continued.ops.some(op => op.type === "text" && op.text?.startsWith("得分：") && op.text !== pausedScore), "game timer did not resume");
+      const continued = await waitFor(frame => has(frame, "点击发光星核") && has(frame, "得分：1") && Boolean(textStartingWith(frame, "剩余：")) && textStartingWith(frame, "剩余：") !== pausedTime, 'Game countdown to advance after resume');
+      result.push({ template, inputChangesFrame: true, score: { before: "得分：0", after: "得分：1", frame: scored.frame }, countdown: { paused: pausedTime, frozenForMs: 1200, resumed: textStartingWith(continued, "剩余：") }, frames: { ready: ready.frame, playing: playing.frame, target: targetFrame.frame, scored: scored.frame, paused: paused.frame, frozen: frozen.frame, resumed: continued.frame }, targetSource: "rendered FrameResult op color 0xfffff8df" });
     }
-    result.push({ template, qjbcBytes: builds[template].qjbcBytes, pakBytes: builds[template].pakBytes, inputChangesFrame: true });
+    result.at(-1).qjbcBytes = builds[template].qjbcBytes;
+    result.at(-1).pakBytes = builds[template].pakBytes;
   } finally { await reader?.cancel(); await manager.dispose(); }
 }
 console.log("POCKET_PREVIEW_ACCEPTANCE " + JSON.stringify({ ok: true, results: result }));
