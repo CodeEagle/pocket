@@ -26,6 +26,7 @@ import { SDK_VERSION } from "./prebuilt_tools.mjs";
 const SDK_ROOT = resolve(import.meta.dir, "..");
 const DEFAULT_OUT = join(SDK_ROOT, ".pocket-build", "toolchain-package");
 const PINNED_REVISION = "99924de47c62fa36f526a8791055d91cbbdb3836";
+const GENERATED_BACKUP_SUFFIXES = [".orig", ".rej", ".bak"];
 
 export type PackageToolchainOptions = { sdkRoot: string; out: string; force: boolean; version: string };
 export type PackageToolchainDependencies = {
@@ -36,6 +37,10 @@ export type PackageToolchainDependencies = {
 
 function fail(message: string): never {
   throw new Error(`package_toolchain: ${message}`);
+}
+
+function isGeneratedBackup(pathPart: string): boolean {
+  return GENERATED_BACKUP_SUFFIXES.some((suffix) => pathPart.endsWith(suffix));
 }
 
 function option(args: string[], name: string, fallback: string): string {
@@ -54,8 +59,16 @@ function copyTree(source: string, target: string): void {
   cpSync(source, target, {
     recursive: true,
     force: true,
-    filter: (path) => !relative(source, path).split(/[\\/]/).some((part) =>
-      part === "node_modules" || part === "target" || part === ".cache" || part === ".pocket-build" || part === ".git" || part === ".gitignore" || part === ".npmignore"),
+    filter: (path) => !relative(source, path).split(/[\\/]/).some((part) => {
+      return part === "node_modules"
+        || part === "target"
+        || part === ".cache"
+        || part === ".pocket-build"
+        || part === ".git"
+        || part === ".gitignore"
+        || part === ".npmignore"
+        || isGeneratedBackup(part);
+    }),
   });
 }
 

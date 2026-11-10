@@ -73,6 +73,30 @@ test("packages compiler sources and records payload hashes", () => {
   }
 });
 
+test("excludes generated patch backups from the package and manifest without hiding source files", () => {
+  const root = fixture();
+  const output = join(root, ".pocket-build", "out");
+  const spec = join(root, ".cache", "pocketjs", "contracts", "spec");
+  mkdirSync(spec, { recursive: true });
+  writeFileSync(join(spec, "gen-rust.ts"), "export const generated = true;\n");
+  writeFileSync(join(spec, "gen-rust.ts.orig"), "stale upstream backup\n");
+  writeFileSync(join(spec, "gen-rust.ts.rej"), "rejected patch hunk\n");
+  writeFileSync(join(spec, "gen-rust.ts.bak"), "editor backup\n");
+  try {
+    packageToolchain({ sdkRoot: root, out: output, force: false, version: SDK_VERSION }, { readAbi: () => "quickjs-bytecode-v1:test-abi" });
+    const manifest = JSON.parse(readFileSync(join(output, "manifest.json"), "utf8"));
+    expect(existsSync(join(output, "compiler/contracts/spec/gen-rust.ts"))).toBe(true);
+    expect(manifest.files["compiler/contracts/spec/gen-rust.ts"]).toBeDefined();
+    for (const suffix of ["orig", "rej", "bak"]) {
+      const backup = `compiler/contracts/spec/gen-rust.ts.${suffix}`;
+      expect(existsSync(join(output, backup))).toBe(false);
+      expect(manifest.files[backup]).toBeUndefined();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("fails before creating an output package when a native binary is absent", () => {
   const root = fixture(false);
   const output = join(root, ".pocket-build", "out");
@@ -130,6 +154,7 @@ test("reads ABI by executing the supplied bytecode binary", () => {
 test("rejects packaging when inline-fonts compiler sources are missing", () => {
   const root = fixture();
   const output = join(root, ".pocket-build", "out");
+  writeFileSync(join(root, ".cache", "pocketjs", "framework", "src", "inline-fonts.ts.orig"), "backup only\n");
   rmSync(join(root, ".cache", "pocketjs", "framework", "src", "inline-fonts.ts"));
   try {
     expect(() => packageToolchain({ sdkRoot: root, out: output, force: false, version: SDK_VERSION }, { readAbi: () => "quickjs-bytecode-v1:test-abi" })).toThrow(/missing patched compiler source.*inline-fonts\.ts/);

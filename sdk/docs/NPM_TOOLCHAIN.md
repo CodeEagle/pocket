@@ -28,7 +28,7 @@ registry；开发者应下载与当前系统匹配的独立 SDK 包：
 
 ## GitHub Actions 发布
 
-`.github/workflows/toolchain.yml` 是 0.1.4 的唯一发布入口。它在 macOS arm64 和
+`.github/workflows/toolchain.yml` 是 0.1.5 的唯一发布入口。它在 macOS arm64 和
 Windows x64 runner 上从固定上游源码构建平台工具包，再分别生成两个带
 `npm-shrinkwrap.json` 的独立 SDK tarball。每个 SDK tarball 只保留自己的平台工具包，
 并在对应目标平台的干净目录中执行 `npm run setup`、`npm run doctor`，再运行：
@@ -43,7 +43,7 @@ node scripts/tests/platform_package_smoke.mjs --sdk-root=/path/to/sdk
 `pocket-web-sdk-tools-win32-x64-0.1.4.tgz`、对应裸平台包、`SHA256SUMS` 以及两平台
 验收 JSON。工作流不会执行 `npm publish`。
 
-推送 `sdk-v0.1.4` 这类版本 tag，或手动运行带发布开关的工作流：
+推送 `sdk-v0.1.5` 这类版本 tag，或手动运行带发布开关的工作流：
 
 ```sh
 gh workflow run toolchain.yml -f publish_release=true -f update_existing_release=false

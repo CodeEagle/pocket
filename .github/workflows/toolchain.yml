@@ -54,6 +54,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
+      - name: Verify packaging contracts before building
+        working-directory: sdk
+        run: bun test --timeout 60000 scripts/tests/prebuilt_tools.test.ts scripts/tests/package_toolchain.test.ts scripts/tests/export_web_sdk.test.ts
       - uses: dtolnay/rust-toolchain@stable
         if: steps.web-engine-cache.outputs.cache-hit != 'true'
         with:
