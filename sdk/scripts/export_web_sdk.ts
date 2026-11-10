@@ -104,6 +104,7 @@ function copySources(out: string): void {
 
   for (const file of [
     "build_guest.ts",
+    "project_fonts.ts",
     "prebuilt_tools.mjs",
     "toolchain.mjs",
     "package_toolchain.ts",
@@ -130,6 +131,8 @@ function copySources(out: string): void {
   rmSync(join(out, "packages/pocket_ui/test"), { recursive: true, force: true });
   copyTree(join(SDK_ROOT, "packages/pocket_tftc"), join(out, "packages/pocket_tftc"));
   rmSync(join(out, "packages/pocket_tftc/test"), { recursive: true, force: true });
+  copyTree(join(SDK_ROOT, "packages/pocket_vn"), join(out, "packages/pocket_vn"));
+  rmSync(join(out, "packages/pocket_vn/test"), { recursive: true, force: true });
   copyFile(
     join(SDK_ROOT, "packages/pocket_flutter/shaders/liquid_glass.frag"),
     join(out, "packages/pocket_flutter/shaders/liquid_glass.frag"),

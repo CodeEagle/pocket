@@ -41,12 +41,16 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
     "editor/client/index.html",
     "native/src/bin/pocket_probe.rs",
     "scripts/build_guest.ts",
+    "scripts/project_fonts.ts",
     "scripts/build_web.ts",
     "scripts/build_wechat.ts",
     "scripts/prepare_upstream.py",
     "targets/web/browser_runtime.js",
     "targets/wechat/template/wechat-host.js",
     "packages/pocket_ui/src/index.ts",
+    "packages/pocket_vn/src/engine.ts",
+    "packages/pocket_vn/src/asset-references.ts",
+    "packages/pocket_vn/src/collections.ts",
     "packages/pocket_flutter/shaders/liquid_glass.frag",
   ]) expect(existsSync(join(output, path)), path).toBe(true);
 
@@ -54,6 +58,7 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(existsSync(join(output, ".cache"))).toBe(false);
   expect(existsSync(join(output, "editor/test"))).toBe(false);
   expect(existsSync(join(output, "packages/pocket_tftc/test"))).toBe(false);
+  expect(existsSync(join(output, "packages/pocket_vn/test"))).toBe(false);
 
   const manifest = JSON.parse(readFileSync(join(output, "package.json"), "utf8"));
   expect(manifest.version).toBe("0.1.1");
