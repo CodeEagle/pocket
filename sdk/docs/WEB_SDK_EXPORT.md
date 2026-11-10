@@ -2,7 +2,7 @@
 
 ## Source-first audit
 
-The retained parent `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` was inspected with `pocket_host/` excluded. Its `web_wasm_preview/index.html` is a ring-buffer/update simulator and does not boot the PocketJS Runtime or execute QJBC, so it was not reused as a runtime. The retained `wechat_host/` is bound to `WXWebAssembly`, `wx.*`, WXML and WeChat storage/BLE; it was treated as platform evidence, not a standard-browser implementation.
+The retained parent `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` was inspected with `pocket_host/` excluded. Its `web_wasm_preview/index.html` constructs `WebAssembly.Memory` and a ring buffer in page JavaScript to simulate updates; it does not instantiate the PocketJS runtime or execute QJBC, so it was not reused as a runtime. The parent `README.md` and `docs/02_ARCHITECTURE_AND_MEMORY_DESIGN.md` describe the actual hosts as Flutter and WeChat: the retained Flutter implementation is under `lib/`, while `wechat_host/` is bound to `WXWebAssembly`, `wx.*`, WXML and WeChat storage/BLE. These files establish the host boundary, not a standard-browser implementation.
 
 The implementation instead retains these working repository paths:
 
@@ -22,7 +22,9 @@ No source-evaluation or mock-runtime fallback is provided. Missing browser hardw
 
 ## Release operation
 
-The current SDK distribution version is **0.1.3**. `.github/workflows/toolchain.yml` is the existing build, verification and GitHub Release workflow; it validates `sdk/package.json` against the shared `SDK_VERSION`, then builds both `darwin-arm64` and `win32-x64` packages. Push the matching `sdk-v0.1.3` tag to trigger it automatically, or dispatch the workflow with `publish_release=true` and `update_existing_release=false`. The Release is created only after both platform packages pass consumer acceptance; it includes the standalone SDK tarballs, platform tool archives, checksums and acceptance reports. The workflow does not publish to npm.
+The current SDK distribution version is **0.1.4**. `.github/workflows/toolchain.yml` is the existing build, verification and GitHub Release workflow; it validates `sdk/package.json` against the shared `SDK_VERSION`, then builds both `darwin-arm64` and `win32-x64` packages. Push the matching `sdk-v0.1.4` tag to trigger it automatically, or dispatch the workflow with `publish_release=true` and `update_existing_release=false`. The Release is created only after both platform packages pass consumer acceptance; it includes the standalone SDK tarballs, platform tool archives, checksums and acceptance reports. The workflow does not publish to npm.
+
+The release workflow validates the standalone npm/Web SDK toolchain and its platform packages. It checks the real `pocket_probe`, `pocketjs_bytecode` and Noble Windows binaries, then exercises the clean SDK archives; it does not install Flutter, build the Showcase host or include `pocket_flutter.dll`. The retained parent Flutter implementation has a separate native-host boundary. Flutter/Live2D consumers must validate their app in an authorized Flutter environment that supplies the required Cubism Core files; this Web SDK Release does not claim Flutter or Live2D native-host acceptance.
 
 The exporter’s optional `--publish` operation publishes the standalone source repository and is separate from the versioned GitHub Release attachments.
 

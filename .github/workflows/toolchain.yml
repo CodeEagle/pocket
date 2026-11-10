@@ -1,4 +1,4 @@
-name: Pocket SDK release
+name: Pocket Web SDK release
 
 on:
   workflow_dispatch:
@@ -165,49 +165,6 @@ jobs:
           Copy-Item native/target/x86_64-pc-windows-msvc/release/pocket_probe.exe native/target/release/
           Copy-Item native/target/x86_64-pc-windows-msvc/release/pocketjs_bytecode.exe native/target/release/
 
-      - uses: subosito/flutter-action@v2
-        if: runner.os == 'Windows'
-        with:
-          flutter-version: '3.47.9'
-          channel: stable
-
-      - name: Check pinned Flutter and build Windows FFI runtime
-        if: runner.os == 'Windows'
-        working-directory: sdk
-        shell: pwsh
-        run: |
-          $pin = (Get-Content ../.fvmrc -Raw | ConvertFrom-Json).flutter
-          if ($pin -ne '3.47.9') { throw "Workflow Flutter version 3.47.9 does not match .fvmrc ($pin)" }
-          flutter --version
-          ./scripts/build_native_windows.ps1 -SkipPrepare
-
-      - name: Build the Flutter Windows host
-        if: runner.os == 'Windows'
-        working-directory: demo
-        shell: pwsh
-        run: |
-          flutter pub get --enforce-lockfile
-          if ($LASTEXITCODE -ne 0) { throw "Flutter dependency resolution failed" }
-          flutter build windows --release --no-pub
-          if ($LASTEXITCODE -ne 0) { throw "Flutter Windows host build failed" }
-          $nativeDll = Resolve-Path ../sdk/packages/pocket_flutter/windows/bin/pocket_flutter.dll
-          $runner = Get-ChildItem build/windows -Filter pocket_host.exe -Recurse | Select-Object -First 1
-          if (-not $runner) { throw "Flutter Windows runner executable was not produced" }
-          $appDll = Join-Path $runner.DirectoryName 'pocket_flutter.dll'
-          if (-not (Test-Path -LiteralPath $appDll -PathType Leaf)) { throw "Pocket runtime DLL was not bundled beside the Windows runner" }
-          $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $nativeDll.Path).Hash
-          $bundleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $appDll).Hash
-          if ($sourceHash -ne $bundleHash) { throw "Bundled Pocket runtime DLL does not match the built SDK DLL" }
-          $report = [ordered]@{
-            flutterVersion = (flutter --version --machine | ConvertFrom-Json).frameworkVersion
-            runner = $runner.FullName
-            runtimeDll = $appDll
-            runtimeDllSha256 = $bundleHash
-            bundledMatchesSdk = $true
-          }
-          New-Item -ItemType Directory -Force ../sdk/.pocket-build | Out-Null
-          $report | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 ../sdk/.pocket-build/windows-flutter-acceptance.json
-
       - name: Verify Windows runtime dependencies
         if: runner.os == 'Windows'
         shell: pwsh
@@ -217,22 +174,13 @@ jobs:
           $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
           if (-not $dumpbin) { throw "dumpbin not found" }
           New-Item -ItemType Directory -Force sdk/.pocket-build | Out-Null
-          $files = @("sdk/native/target/release/pocket_probe.exe", "sdk/native/target/release/pocketjs_bytecode.exe", "sdk/node_modules/@abandonware/noble/build/Release/binding.node", "sdk/packages/pocket_flutter/windows/bin/pocket_flutter.dll")
+          $files = @("sdk/native/target/release/pocket_probe.exe", "sdk/native/target/release/pocketjs_bytecode.exe", "sdk/node_modules/@abandonware/noble/build/Release/binding.node")
           foreach ($file in $files) {
             $deps = & $dumpbin /dependents $file
             if ($LASTEXITCODE -ne 0) { throw "Cannot inspect $file" }
             $deps | Tee-Object -FilePath sdk/.pocket-build/windows-acceptance-dependencies.txt -Append
             if ($deps -match '(?i)\b(?:VCRUNTIME|MSVCP)\d+[^\s]*\.dll') { throw "Unexpected external VC runtime dependency in $file" }
           }
-
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Windows'
-        with:
-          name: pocket-windows-flutter-runtime
-          path: |
-            sdk/packages/pocket_flutter/windows/bin/pocket_flutter.dll
-            sdk/.pocket-build/windows-flutter-acceptance.json
-          if-no-files-found: error
 
       - name: Assemble npm package
         working-directory: sdk
@@ -424,10 +372,10 @@ jobs:
                 if printf '%s\n' "$assets" | grep -Fqx -- "$obsolete"; then gh release delete-asset "$RELEASE_TAG" "$obsolete" --yes; fi
               done
             fi
-            gh release edit "$RELEASE_TAG" --title "Pocket SDK ${SDK_VERSION}" --notes-file release-notes.md
+            gh release edit "$RELEASE_TAG" --title "Pocket Web SDK ${SDK_VERSION}" --notes-file release-notes.md
           else
             if [ "$ALLOW_RELEASE_UPDATE" = "1" ]; then echo "Release to update does not exist" >&2; exit 1; fi
-            gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" --title "Pocket SDK ${SDK_VERSION}" --notes-file release-notes.md --draft
+            gh release create "$RELEASE_TAG" release/* --target "$GITHUB_SHA" --title "Pocket Web SDK ${SDK_VERSION}" --notes-file release-notes.md --draft
           fi
           gh release edit "$RELEASE_TAG" --draft=false --latest
           gh release view "$RELEASE_TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

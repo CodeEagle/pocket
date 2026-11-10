@@ -28,7 +28,7 @@ registry；开发者应下载与当前系统匹配的独立 SDK 包：
 
 ## GitHub Actions 发布
 
-`.github/workflows/toolchain.yml` 是 0.1.3 的唯一发布入口。它在 macOS arm64 和
+`.github/workflows/toolchain.yml` 是 0.1.4 的唯一发布入口。它在 macOS arm64 和
 Windows x64 runner 上从固定上游源码构建平台工具包，再分别生成两个带
 `npm-shrinkwrap.json` 的独立 SDK tarball。每个 SDK tarball 只保留自己的平台工具包，
 并在对应目标平台的干净目录中执行 `npm run setup`、`npm run doctor`，再运行：
@@ -39,11 +39,11 @@ node scripts/tests/platform_package_smoke.mjs --sdk-root=/path/to/sdk
 
 该验收会实际加载平台 Noble addon，构建 App/Game 模板的 QJBC/PAK，驱动 Preview 输入
 并检查 Studio 固定 8791 端口的启动、健康检查、状态和停止。两个平台全部通过后，工作流
-才会生成 GitHub Release 附件：`pocket-web-sdk-tools-darwin-arm64-0.1.3.tgz`、
-`pocket-web-sdk-tools-win32-x64-0.1.3.tgz`、对应裸平台包、`SHA256SUMS` 以及两平台
+才会生成 GitHub Release 附件：`pocket-web-sdk-tools-darwin-arm64-0.1.4.tgz`、
+`pocket-web-sdk-tools-win32-x64-0.1.4.tgz`、对应裸平台包、`SHA256SUMS` 以及两平台
 验收 JSON。工作流不会执行 `npm publish`。
 
-推送 `sdk-v0.1.3` 这类版本 tag，或手动运行带发布开关的工作流：
+推送 `sdk-v0.1.4` 这类版本 tag，或手动运行带发布开关的工作流：
 
 ```sh
 gh workflow run toolchain.yml -f publish_release=true -f update_existing_release=false
@@ -55,6 +55,8 @@ gh workflow run toolchain.yml -f publish_release=true -f update_existing_release
 工作流才会更新同一 tag 的现有 Release 附件，且不会移动 tag。下文保留此前独立 Windows
 consumer 验收的来源；完整版本的发布状态以对应 GitHub Release 及随附的两平台验收 JSON 为准，
 不能把本地 tarball 或单个平台 CI 结果当成完整发布验收。
+
+此 Web SDK 发布只验收 npm/Web 工具链、平台 `pocket_probe` / `pocketjs_bytecode` / Noble 二进制，以及干净 SDK 包中的 Guest 构建与 Preview/Studio 流程。当前 workflow 不安装 Flutter、不编译 `demo/` Flutter Showcase 或 `pocket_flutter.dll`；Flutter 和 Live2D 消费者需要在具备相应授权及 Cubism Core 文件的环境中单独验证，不能把 Web SDK Release 当作 Flutter 原生宿主验收。
 
 完整 Guest 构建默认使用预先准备的 pinned compiler、预编译 `pocketjs_bytecode` 和 `pocket_probe`：
 
@@ -105,7 +107,7 @@ Editor 默认监听 `http://127.0.0.1:8791`。`build:web` 和 Editor 内部使�
 
 ## 来源与保留边界
 
-本入口复用当前 SDK 中的 `scripts/build_guest.ts`、固定编译器、平台工具包和 `packages/pocket_ui`。本次先检查了保留父工程 `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` 的 `pubspec.yaml`、`tools/compile_pocket_syslib_aot.py` 和 `native/pocket_runtime_multi.c`（排除旧的 `pocket_host/`）。父工程保留宿主/资源分工，但没有完整的 `buildGuest` 或 `@pocket/ui` npm 包；因此继续复用当前 SDK 已有的固定上游构建管线，不退回历史 AOT 工具。npm 用户路径只消费发布侧生成的平台包；`prepare_upstream.py`、Rust 和补丁脚本留在发布/CI 侧。固定上游版本、归档校验和补丁清单由 `prepare_upstream.py` 作为单一来源维护。
+本入口复用当前 SDK 中的 `scripts/build_guest.ts`、固定编译器、平台工具包和 `packages/pocket_ui`。本次检查了保留父工程 `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` 的 `pubspec.yaml`、`lib/`、`wechat_host/`、`web_wasm_preview/index.html`、`README.md`、`docs/02_ARCHITECTURE_AND_MEMORY_DESIGN.md`、`tools/compile_pocket_syslib_aot.py` 和 `native/pocket_runtime_multi.c`（排除旧的 `pocket_host/`）。父工程的实际宿主边界是 Flutter 与 WeChat；其 WebAssembly 页面在 JavaScript 中手写内存与 ring-buffer 更新模拟，没有启动 PocketJS Runtime 或执行 QJBC。父工程没有完整的 `buildGuest` 或 `@pocket/ui` npm 包；因此复用当前 SDK 固定上游构建管线及其真实浏览器运行时，不复用模拟器，也不退回历史 AOT 工具。npm 用户路径只消费发布侧生成的平台包；`prepare_upstream.py`、Rust 和补丁脚本留在发布/CI 侧。固定上游版本、归档校验和补丁清单由 `prepare_upstream.py` 作为单一来源维护。
 
 这样做消除了重复的编译包装层：npm 调度器只安装平台包、校验 ABI/哈希、选择 npm Bun 并转发参数；不会复制 `buildGuest`、QuickJS 编译器、布局引擎或运行时。`@pocket/ui` 也只有一个公开 workspace 来源。
 
@@ -114,9 +116,11 @@ Editor 默认监听 `http://127.0.0.1:8791`。`build:web` 和 Editor 内部使�
 macOS 已使用真实预编译平台包生成 app/game 模板的 QJBC、PAK，并在 Pocket Preview 路径执行。导出测试会检查 `build_guest.ts`、`@pocket/ui`、templates、平台包解析器和 toolchain manager 都进入独立包，且不会带入源码缓存、`target` 或 Flutter 项目。
 
 Windows 的 npm 入口和 `win32-x64` 平台包已由此前独立 CI 完成 native 编译与打包；干净
-consumer 安装、Preview smoke 和 WinRT addon 加载也已通过历史验收。完整双平台发布
-验收由 `.github/workflows/toolchain.yml` 执行，报告附在对应 GitHub Release。Linux 仍需独立 CI 生成和验证；
-CI 通过不能替代 Windows DK-META2 等 BLE 硬件验收。
+consumer 安装、Preview smoke 和 WinRT addon 加载也已通过历史验收。当前完整双平台 Web SDK
+发布验收由 `.github/workflows/toolchain.yml` 执行，报告附在对应 GitHub Release。该 workflow
+检查 Windows `pocket_probe`、`pocketjs_bytecode` 和 Noble 的 DLL 依赖，不构建 Flutter 原生宿主，
+也不要求 CI 持有 Cubism Core 授权文件。Flutter/Live2D 消费者应在单独的授权环境验证；Linux
+仍需独立 CI 生成和验证，CI 通过不能替代 Windows DK-META2 等 BLE 硬件验收。
 
 ## 本次实际验收（macOS）
 

@@ -26,7 +26,7 @@ The updated FunApp Release was installed with application data preserved. Its fi
 
 ## Release build follow-up
 
-The `sdk-v0.1.2` CI run stopped before publication because the Demo Flutter lockfile did not match the repository-pinned Flutter 3.47.9. The lockfile is regenerated with that exact toolchain and checked again with `--enforce-lockfile`; the release workflow keeps the strict lock check. The corrected distribution advances to 0.1.3 and uses a new immutable release tag.
+The `sdk-v0.1.2` CI run stopped before publication because the Demo Flutter lockfile did not match the repository-pinned Flutter 3.47.9. The lockfile is regenerated with that exact toolchain and checked again with `--enforce-lockfile`; the release workflow keeps the strict lock check. The corrected lockfile passed the 0.1.3 CI check. The subsequent Flutter Showcase build required separately licensed Cubism Core headers, which are not Web SDK build inputs. The 0.1.4 Web release removes that unrelated Flutter consumer gate while retaining both platform toolchain builds, archive installation, actual Guest input/preview execution and Studio lifecycle checks. Flutter/Live2D native consumers require their own licensed build environment and validation. Each attempt keeps its original immutable tag.
 
 ## Detailed records
 
