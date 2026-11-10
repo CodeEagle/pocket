@@ -72,6 +72,9 @@ pub(crate) fn encode_with_writer(
         .map_err(|_| "frame delta resulting operation count exceeds u32".to_owned())?;
 
     out.clear();
+    if out.capacity() > 256 * 1024 {
+        out.shrink_to(256 * 1024);
+    }
     out.extend_from_slice(&MAGIC.to_le_bytes());
     out.extend_from_slice(&base_sequence.to_le_bytes());
     out.extend_from_slice(&prefix_count.to_le_bytes());

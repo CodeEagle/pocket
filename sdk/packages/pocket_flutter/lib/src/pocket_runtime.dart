@@ -1384,7 +1384,6 @@ final class FfiPocketRuntime
       _setSchedulerPaused = _library
           .lookupFunction<_SetSchedulerPausedNative, _SetSchedulerPausedDart>(
             'pocket_set_scheduler_paused',
-            isLeaf: true,
           );
     } on Object {
       // Older native libraries do not expose scheduler lifecycle control.

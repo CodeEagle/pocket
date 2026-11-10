@@ -485,7 +485,7 @@ final class PocketCanvasPainter extends CustomPainter {
               rect,
               sx: sx,
               sy: sy,
-              devicePixelRatio: devicePixelRatio,
+              devicePixelRatio: paintDevicePixelRatio,
             ),
             rectPaint,
           );

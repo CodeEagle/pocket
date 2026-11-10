@@ -258,6 +258,36 @@ void main() {
       );
       expect(sent.last['method'], 'stream.error');
       expect((sent.last['error'] as Map)['code'], 'stream_message_too_large');
+
+      // Nesting deeper than 14 levels inside `result` (16 total with envelope)
+      // must report `invalid_result` rather than failing inside codec encoding.
+      Object nested = 'leaf';
+      for (var i = 0; i < 15; i++) {
+        nested = <String, Object?>{'n': nested};
+      }
+      registry.registerRequest('test.too_deep', (_) => nested);
+      final hostDeep = PocketHost(
+        registry: registry,
+        streams: streams,
+        allowedCapabilities: {'test.too_deep'},
+        send: (method, params) {
+          sent.add(<String, dynamic>{'method': method, ...params});
+          return true;
+        },
+      );
+      addTearDown(hostDeep.dispose);
+      await hostDeep.handle(
+        const PocketEvent(
+          id: 'r-deep',
+          method: 'host.request',
+          params: <String, dynamic>{
+            'requestId': 'r-deep',
+            'capability': 'test.too_deep',
+          },
+        ),
+      );
+      expect(sent.last['ok'], isFalse);
+      expect((sent.last['error'] as Map)['code'], 'invalid_result');
     },
   );
 }

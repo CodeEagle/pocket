@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data' show Uint8List;
 
 import 'package:pocket_flutter/src/pocket_model.dart' show PocketEvent;
 
@@ -485,8 +486,15 @@ final class PocketHost {
     return result;
   }
 
+  static const int _maxBridgeNestingDepth = 16;
+  static const int _maxBridgeCollectionEntries = 1000000;
+  static const int _maxBridgeBytes = 4 * 1024 * 1024;
+
   static void _assertJsonSafe(Object? value) {
-    if (!_isBridgeValueSafe(value, 0, null)) {
+    // Outbound `host.response` and `stream.data` envelopes wrap `value` two
+    // levels deep (`message -> payload/params -> result/data`). Starting at
+    // depth 2 keeps validation 1:1 with PocketBinaryCodec._maxNestingDepth.
+    if (!_isBridgeValueSafe(value, 2, null)) {
       throw const PocketCapabilityException(
         'invalid_result',
         'provider result is not JSON-safe',
@@ -499,17 +507,20 @@ final class PocketHost {
     int depth,
     Set<Object>? ancestors,
   ) {
-    if (depth > 32) return false;
+    if (depth > _maxBridgeNestingDepth) return false;
     if (value == null || value is bool || value is String || value is int) {
       return true;
     }
     if (value is num) return value.isFinite;
+    if (value is Uint8List) {
+      return value.length <= _maxBridgeBytes;
+    }
     if (value is List<int>) {
-      // Covers Uint8List and typed integer byte buffers in O(1) without
-      // serializing every byte into a decimal JSON array string.
-      return true;
+      // Non-Uint8List integer lists encode as TAG_ARRAY in 0xB1 TLV.
+      return value.length <= _maxBridgeCollectionEntries;
     }
     if (value is List) {
+      if (value.length > _maxBridgeCollectionEntries) return false;
       final visited = ancestors ?? Set<Object>.identity();
       if (!visited.add(value)) return false;
       for (var i = 0; i < value.length; i++) {
@@ -522,6 +533,7 @@ final class PocketHost {
       return true;
     }
     if (value is Map) {
+      if (value.length > _maxBridgeCollectionEntries) return false;
       final visited = ancestors ?? Set<Object>.identity();
       if (!visited.add(value)) return false;
       for (final entry in value.entries) {

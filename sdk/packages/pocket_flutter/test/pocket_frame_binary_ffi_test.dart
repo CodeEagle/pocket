@@ -396,7 +396,7 @@ void main() {
         final patched = runtime.frameDeltaAt(0)!;
         expect(patched.sequence, greaterThan(initial.sequence!));
         expect(patched.ops, hasLength(11));
-        final gradient = patched.ops.first as PocketRoundedGradientOp;
+        final gradient = patched.ops.last as PocketRoundedGradientOp;
         expect(gradient.radius, 12);
         expect(gradient.direction, 3);
         expect(gradient.viaColor, 0x96f0e6dc);

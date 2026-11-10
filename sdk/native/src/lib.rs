@@ -952,6 +952,15 @@ impl BinaryFrameWriter {
 // at least one common operation always makes the splice smaller than a full
 // PFB1. Keep this invariant explicit when adding a new binary operation tag.
 const MIN_BINARY_OP_BYTES: usize = 33;
+const MAX_RETAINED_BINARY_OUTPUT_CAPACITY: usize = 256 * 1024;
+
+#[inline]
+fn reset_binary_output_buffer(buf: &mut Vec<u8>) {
+    buf.clear();
+    if buf.capacity() > MAX_RETAINED_BINARY_OUTPUT_CAPACITY {
+        buf.shrink_to(MAX_RETAINED_BINARY_OUTPUT_CAPACITY);
+    }
+}
 
 #[cfg(test)]
 fn encode_binary_frame(frame: &FrameResult) -> Result<Vec<u8>, String> {
@@ -6803,7 +6812,7 @@ pub unsafe extern "C" fn pocket_frame_binary(
     match build_frame(host, delta_ms, false, false) {
         Ok(built) => {
             let t_encode = sampling.then(Instant::now);
-            host.binary_output.clear();
+            reset_binary_output_buffer(&mut host.binary_output);
             let encoded =
                 encode_binary_frame_append(&mut host.binary_output, &built.result, &built.result.ops);
             if let Some(t) = t_encode {
@@ -6829,7 +6838,7 @@ pub unsafe extern "C" fn pocket_frame_binary(
                     host.binary_output.as_ptr()
                 }
                 Err(error) => {
-                    host.binary_output.clear();
+                    reset_binary_output_buffer(&mut host.binary_output);
                     host.frame_delta_v2_published = None;
                     set_error(host, format!("frame binary encode: {error}"));
                     ptr::null()
@@ -6837,7 +6846,7 @@ pub unsafe extern "C" fn pocket_frame_binary(
             }
         }
         Err(error) => {
-            host.binary_output.clear();
+            reset_binary_output_buffer(&mut host.binary_output);
             failed_frame_output(host, error);
             ptr::null()
         }
@@ -6862,11 +6871,12 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
     };
     match build_frame(host, delta_ms, true, false) {
         Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
+            reset_binary_output_buffer(&mut host.binary_output);
             clear_error(host);
             ptr::null()
         }
         Ok(built) => {
-            host.binary_output.clear();
+            reset_binary_output_buffer(&mut host.binary_output);
             match encode_binary_frame_append(&mut host.binary_output, &built.result, &built.result.ops) {
                 Ok(()) => {
                     if let Some(length) = out_byte_length.as_mut() {
@@ -6877,7 +6887,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
                     host.binary_output.as_ptr()
                 }
                 Err(error) => {
-                    host.binary_output.clear();
+                    reset_binary_output_buffer(&mut host.binary_output);
                     host.frame_delta_v2_published = None;
                     set_error(host, format!("frame binary encode: {error}"));
                     ptr::null()
@@ -6885,7 +6895,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
             }
         }
         Err(error) => {
-            host.binary_output.clear();
+            reset_binary_output_buffer(&mut host.binary_output);
             failed_frame_output(host, error);
             ptr::null()
         }
@@ -6953,7 +6963,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
             // only zero-byte result. Keep `frame_delta_v2_published` unchanged
             // so the caller's base remains the last sequence it received.
             if can_delta && built.draw_cache_hit && frame_has_no_transient_data(&built) {
-                host.binary_output.clear();
+                reset_binary_output_buffer(&mut host.binary_output);
                 clear_error(host);
                 if let Some(t) = t_total {
                     let total_us = t.elapsed().as_micros() as u64;
@@ -7005,7 +7015,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                     match patch_res {
                         Ok(()) => Ok(()),
                         Err(_) => {
-                            host.binary_output.clear();
+                            reset_binary_output_buffer(&mut host.binary_output);
                             encode_binary_frame_append(
                                 &mut host.binary_output,
                                 &built.result,
@@ -7014,7 +7024,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                         }
                     }
                 } else {
-                    host.binary_output.clear();
+                    reset_binary_output_buffer(&mut host.binary_output);
                     encode_binary_frame_append(
                         &mut host.binary_output,
                         &built.result,
@@ -7025,7 +7035,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                     host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
                 }
                 if let Err(error) = encoded {
-                    host.binary_output.clear();
+                    reset_binary_output_buffer(&mut host.binary_output);
                     host.frame_delta_v2_published = None;
                     set_error(host, format!("frame binary encode: {error}"));
                     return ptr::null();
@@ -7034,7 +7044,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                 // First frame, invalid base, resize, reload, and any call
                 // after a cache invalidation retain the original PFB1 ABI.
                 let t_encode = sampling.then(Instant::now);
-                host.binary_output.clear();
+                reset_binary_output_buffer(&mut host.binary_output);
                 let encoded = encode_binary_frame_append(
                     &mut host.binary_output,
                     &built.result,
@@ -7044,7 +7054,7 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
                     host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
                 }
                 if let Err(error) = encoded {
-                    host.binary_output.clear();
+                    reset_binary_output_buffer(&mut host.binary_output);
                     host.frame_delta_v2_published = None;
                     set_error(host, format!("frame binary encode: {error}"));
                     return ptr::null();

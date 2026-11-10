@@ -370,7 +370,12 @@ final class _BinaryTlvWriter {
     });
   }
 
-  Uint8List takeBytes() => Uint8List.sublistView(_buffer, 0, _length);
+  Uint8List takeBytes() {
+    if (_buffer.length > 4096 && _length * 2 < _buffer.length) {
+      return Uint8List.fromList(Uint8List.sublistView(_buffer, 0, _length));
+    }
+    return Uint8List.sublistView(_buffer, 0, _length);
+  }
 }
 
 final class _BinaryTlvReader {

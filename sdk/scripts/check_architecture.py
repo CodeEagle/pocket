@@ -119,7 +119,14 @@ if demo_lib.exists():
             errors.append(f"forbidden extra Dart file in demo host: {rel}")
             continue
         source = dart_file.read_text(errors="replace")
-        if re.search(r"^\s*(?:import|export)\s+['\"]package:pocket_[^'\"]+['\"]", source, re.M):
+        # Allow only the shared frame-monitor compatibility re-export from pocket_flutter.
+        sanitized = re.sub(
+            r"^\s*export\s+['\"]package:pocket_flutter/pocket_flutter\.dart['\"]\s+show\s+FlutterFrameMonitor\b[^;]*;",
+            "",
+            source,
+            flags=re.M | re.S,
+        )
+        if re.search(r"^\s*(?:import|export)\s+['\"]package:pocket_[^'\"]+['\"]", sanitized, re.M):
             errors.append(f"Flutter diagnostic must not import Pocket SDK or host packages: {rel}")
         if re.search(r"^\s*(?:import|export)\s+['\"](?:\.\.?/)*main\.dart['\"]", source, re.M):
             errors.append(f"Flutter diagnostic must not import the business host entry: {rel}")
