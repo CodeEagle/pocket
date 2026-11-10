@@ -40,12 +40,14 @@ import {
   avoidDisplayOcclusions,
   deriveDesignDensity,
   deriveWindowSizeClass,
+  leftOcclusionFrames,
   topRightOcclusionFrame,
   type DesignDensity,
   type DisplayGeometry,
   type WindowSizeClass,
 } from "./responsive.ts";
 import { useRouteActive } from "./route.tsx";
+import { createSystemPresets, DEFAULT_SYSTEM_PRESETS } from "./display.ts";
 import type { BridgeObject } from "./host.ts";
 import { MOBILE_MOTION, motionEaseInOut, motionEaseOut, stepMotionSpring } from "./motion.ts";
 import { useAccessibilityPreferences } from "./accessibility.ts";
@@ -151,11 +153,49 @@ const MOBILE_ACCENT_PALETTES: Record<MobileAccent, { light: MobileAccentPalette;
   },
 };
 
+const HEX_ACCENT_ALIASES: Readonly<Record<string, MobileAccent>> = {
+  "#2563eb": "blue",
+  "#3b82f6": "blue",
+  "#315deb": "blue",
+  "#1d4ed8": "blue",
+  "#7c3aed": "violet",
+  "#8b5cf6": "violet",
+  "#6d28d9": "violet",
+  "#0d9488": "teal",
+  "#14b8a6": "teal",
+  "#0f766e": "teal",
+  "#e11d48": "rose",
+  "#f43f5e": "rose",
+  "#be123c": "rose",
+};
+
+function parseHexAccentColor(value: string): number | undefined {
+  const match = /^#([0-9a-f]{6})$/i.exec(value.trim());
+  if (!match) return undefined;
+  const rgb = Number.parseInt(match[1]!, 16);
+  if (!Number.isFinite(rgb)) return undefined;
+  return (0xff000000 | rgb) >>> 0;
+}
+
 /** Build a theme with one shared accent palette for the whole guest tree. */
-export function createMobileTheme(dark: boolean, accent: MobileAccent = "blue"): MobileTheme {
+export function createMobileTheme(dark: boolean, accent: MobileAccent | string = "blue"): MobileTheme {
   const base = dark ? MOBILE_THEME_DARK : MOBILE_THEME_LIGHT;
-  const palette = MOBILE_ACCENT_PALETTES[accent] ?? MOBILE_ACCENT_PALETTES.blue;
+  const normalized = typeof accent === "string" ? accent.trim().toLowerCase() : "blue";
+  const namedAccent = (normalized in MOBILE_ACCENT_PALETTES
+    ? normalized
+    : HEX_ACCENT_ALIASES[normalized]) as MobileAccent | undefined;
+  const palette = MOBILE_ACCENT_PALETTES[namedAccent ?? "blue"] ?? MOBILE_ACCENT_PALETTES.blue;
   const colors = dark ? palette.dark : palette.light;
+  const customHexColor = namedAccent ? undefined : parseHexAccentColor(normalized);
+  if (customHexColor !== undefined) {
+    return {
+      ...base,
+      accentColor: customHexColor,
+      accentSoftColor: colors.softColor,
+      accentInkColor: customHexColor,
+      accentPressedColor: customHexColor,
+    };
+  }
   return {
     ...base,
     accentColor: colors.color,
@@ -222,9 +262,24 @@ export function MobileThemeProvider(props: {
   density?: DensitySource;
   children?: JSX.Element;
 }): JSX.Element {
+  const systemPresets = props.theme === undefined || props.density === undefined
+    ? createSystemPresets()
+    : undefined;
+  const memoizedPresetTheme = systemPresets
+    ? createMemo(() => {
+        const current = systemPresets();
+        return createMobileTheme(current.darkMode, current.accentColor);
+      })
+    : undefined;
+  const resolvedTheme: ThemeSource = props.theme !== undefined
+    ? props.theme
+    : memoizedPresetTheme ?? MOBILE_THEME_LIGHT;
+  const resolvedDensity: DensitySource = props.density !== undefined
+    ? props.density
+    : () => (systemPresets ? systemPresets().density : "auto");
   return (
-    <ThemeContext.Provider value={props.theme ?? MOBILE_THEME_LIGHT}>
-      <DensityContext.Provider value={props.density ?? "auto"}>
+    <ThemeContext.Provider value={resolvedTheme}>
+      <DensityContext.Provider value={resolvedDensity}>
         {props.children}
       </DensityContext.Provider>
     </ThemeContext.Provider>
@@ -709,29 +764,55 @@ export function MobileAppBar(props: {
   const appBarStyle = () => {
     const l = leftReserve();
     const r = reserve();
-    if (l > 0) appliedLeftNonZero = true;
-    if (r > 0) appliedRightNonZero = true;
-    const hasLeft = l > 0 || appliedLeftNonZero;
-    const hasRight = scaffold.reservedActions > 0 || r > 0 || appliedRightNonZero;
+    const leadingActionReserve = scaffold.reservedLeadingActions ?? 0;
+    const trailingActionReserve = scaffold.reservedActions;
+    if (l > 0 || leadingActionReserve > 0) appliedLeftNonZero = true;
+    if (r > 0 || trailingActionReserve > 0) appliedRightNonZero = true;
+    const hasLeft = leadingActionReserve > 0 || l > 0 || appliedLeftNonZero;
+    const hasRight = trailingActionReserve > 0 || r > 0 || appliedRightNonZero;
     if (!hasLeft && !hasRight) return undefined;
-    let actionRightPadding = scaffold.reservedActions;
-    if (scaffold.reservedActions > 0 && !alreadyConsumed()) {
+    let actionLeftPadding = leadingActionReserve;
+    if (leadingActionReserve > 0 && !alreadyConsumed()) {
       const current = scaffold.geometry();
       if (current.width > 0) {
         const target = {
-          left: Math.max(0, current.width - scaffold.reservedActions),
+          left: 0,
           top: 0,
-          width: scaffold.reservedActions,
+          width: leadingActionReserve,
+          height: 56,
+        };
+        const local = avoidDisplayOcclusions(current, target, { prefer: "horizontal" });
+        const actionShift = Math.max(0, local.offsetX) + (leftOcclusionFrames(current).length > 0 ? DISPLAY_UI_SAFETY_GAP : 0);
+        actionLeftPadding = leadingActionReserve + actionShift;
+      }
+    }
+    let actionRightPadding = trailingActionReserve;
+    if (trailingActionReserve > 0 && !alreadyConsumed()) {
+      const current = scaffold.geometry();
+      if (current.width > 0) {
+        const target = {
+          left: Math.max(0, current.width - trailingActionReserve),
+          top: 0,
+          width: trailingActionReserve,
           height: 56,
         };
         const local = avoidDisplayOcclusions(current, target, { prefer: "horizontal" });
         const actionShift = Math.max(0, -local.offsetX) + (topRightOcclusionFrame(current) ? DISPLAY_UI_SAFETY_GAP : 0);
-        actionRightPadding = scaffold.reservedActions + actionShift;
+        actionRightPadding = trailingActionReserve + actionShift;
       }
     }
+    const leftPad = hasLeft ? Math.max(16 + l, actionLeftPadding) : 16;
+    const rightPad = hasRight ? Math.max(16 + r, actionRightPadding) : 16;
+    if (props.centered === true) {
+      const balanced = Math.max(leftPad, rightPad);
+      return {
+        paddingL: balanced,
+        paddingR: balanced,
+      };
+    }
     return {
-      ...(hasLeft ? { paddingL: 16 + l } : {}),
-      ...(hasRight ? { paddingR: Math.max(16 + r, actionRightPadding) } : {}),
+      ...(hasLeft ? { paddingL: leftPad } : {}),
+      ...(hasRight ? { paddingR: rightPad } : {}),
     };
   };
   const centered = () => props.centered === true;

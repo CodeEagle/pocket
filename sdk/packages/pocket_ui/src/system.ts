@@ -1,6 +1,35 @@
 import { simulationHz } from "@pocketjs/framework/clock";
-import { forwardHostPacket, type HostBridge, type HostEvent, type HostRequestOptions, type HostPacketHandler, type JsonObject, type JsonValue } from "./host.ts";
+import {
+  DEFAULT_SYSTEM_PRESETS,
+  forwardHostPacket,
+  normalizePresentationStyle,
+  parseSystemPresets,
+  SYSTEM_PRESETS_EVENT,
+  systemPresetsBridgeObject,
+  type HostBridge,
+  type HostEvent,
+  type HostPacketHandler,
+  type HostRequestOptions,
+  type JsonObject,
+  type JsonValue,
+  type MiniAppPresentationStyle,
+  type MiniAppPresentationStyleInput,
+  type PocketSystemDensity,
+  type PocketSystemPresets,
+} from "./host.ts";
 import { clonePocketValue, PocketValueSnapshotError } from "./value_snapshot.ts";
+
+export {
+  DEFAULT_SYSTEM_PRESETS,
+  normalizePresentationStyle,
+  parseSystemPresets,
+  SYSTEM_PRESETS_EVENT,
+  systemPresetsBridgeObject,
+  type MiniAppPresentationStyle,
+  type MiniAppPresentationStyleInput,
+  type PocketSystemDensity,
+  type PocketSystemPresets,
+};
 
 const MAX_PENDING_CALLS = 32;
 const MAX_MAILBOX_MESSAGES = 32;
@@ -46,6 +75,7 @@ export interface PocketSystemV1 {
       mutable?: boolean;
     };
     backgroundExecution?: "suspend" | "continue";
+    presentation?: JsonObject;
     catalog: readonly PocketSystemCatalogEntry[];
   };
   installation: {
@@ -67,11 +97,24 @@ export type PocketSystemPolicies = Readonly<Record<string, PocketAppPolicy>>;
  */
 export type PocketSystemBeforeDismissHandler = (instanceIds: readonly string[]) => Promise<void>;
 
+export interface PocketSystemPresetUpdate {
+  darkMode?: boolean;
+  colorScheme?: "light" | "dark";
+  accentColor?: string | number;
+  accent?: string | number;
+  density?: PocketSystemDensity;
+  presentationStyle?: MiniAppPresentationStyleInput;
+  defaultPresentationStyle?: MiniAppPresentationStyleInput;
+  presentation?: { style?: MiniAppPresentationStyleInput };
+}
+
 export interface InstallPocketSystemOptions {
   bridge: HostBridge;
   policies?: PocketSystemPolicies;
   /** Resident app slots, including the non-evictable System UI. */
   maxResidentApps?: number;
+  /** Initial system UI presets propagated to child runtimes. */
+  presets?: PocketSystemPresetUpdate;
 }
 
 export type PocketSystemRuntimeState =
@@ -90,6 +133,7 @@ export interface PocketSystemRuntimeSnapshot {
   lastUsed: number;
   generation: string | number | null;
   pendingLifecycleEvents: number;
+  presentationStyle: MiniAppPresentationStyle;
 }
 
 export interface PocketSystemStackSnapshot {
@@ -124,6 +168,8 @@ export interface PocketSystemSurfaceBinding {
   /** Stable handle supplied by the trusted compositor registry in `ui`. */
   surfaceHandle: number;
   focused: boolean;
+  /** Resolved presentation style for this child app surface. */
+  presentationStyle?: MiniAppPresentationStyle;
   /** False only while the existing launch awaits the host's first-frame fact. */
   ready?: boolean;
 }
@@ -155,6 +201,7 @@ export interface PocketSystemSnapshot {
   lru: readonly string[];
   pendingCalls: readonly PocketSystemPendingCallSnapshot[];
   opening: PocketSystemOpeningApp | null;
+  presets: PocketSystemPresets;
   mailboxLimit: number;
   queuedMessages: number;
 }
@@ -162,6 +209,10 @@ export interface PocketSystemSnapshot {
 export interface PocketSystemKernel {
   readonly ready: Promise<void>;
   snapshot(): PocketSystemSnapshot;
+  /** Read the current global System UI presets. */
+  presets(): PocketSystemPresets;
+  /** Update global System UI presets and broadcast them to resident child runtimes. */
+  setPresets(partial: PocketSystemPresetUpdate): Promise<void>;
   /** Current child bindings; geometry and z-order stay in SystemUI's ordinary
    *  PocketJS layout tree. `includeStack` keeps lower app frames resident for
    *  retained mini-app presentations while preserving the default visible-only
@@ -195,6 +246,8 @@ interface RuntimeRecord {
   lastUsed: number;
   generation: string | number | null;
   lifecycleQueue: JsonObject[];
+  presetsPending: boolean;
+  launchPresentationStyle?: MiniAppPresentationStyle;
 }
 
 interface StackFrame {
@@ -377,9 +430,24 @@ function parseMemoryBudget(
   return { memory, memoryPolicy };
 }
 
+function extractExplicitPresentationStyle(value: unknown): MiniAppPresentationStyle | undefined {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "page" || normalized === "push") return "page";
+    if (normalized === "sheet" || normalized === "modal" || normalized === "bottom-sheet") return "sheet";
+    return undefined;
+  }
+  if (isRecord(value)) {
+    if ("style" in value) return extractExplicitPresentationStyle(value.style);
+    if ("presentationStyle" in value) return extractExplicitPresentationStyle(value.presentationStyle);
+  }
+  return undefined;
+}
+
 function parseManifest(input: PocketSystemV1): {
   systemId: string;
   systemUI: string;
+  defaultPresentationStyle: MiniAppPresentationStyle;
   catalog: Map<string, CatalogRecord>;
 } {
   const manifest = objectSnapshot(input, "manifest") as Record<string, unknown>;
@@ -473,9 +541,11 @@ function parseManifest(input: PocketSystemV1): {
       "roles.systemUI must identify a required installed catalog package",
     );
   }
+  const defaultPresentationStyle = normalizePresentationStyle(applications.presentation, "sheet");
   return {
     systemId: manifest.id,
     systemUI,
+    defaultPresentationStyle,
     catalog,
   };
 }
@@ -578,6 +648,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
   private lruSequence = 0;
   private nextCallId = 1;
   private nextMessageId = 1;
+  private currentPresets: PocketSystemPresets;
 
   constructor(
     manifest: PocketSystemV1,
@@ -590,6 +661,13 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.catalog = parsed.catalog;
     this.policies = parsePolicies(options.policies, this.catalog);
     this.maxResidentApps = options.maxResidentApps ?? 3;
+    this.currentPresets = Object.freeze(parseSystemPresets(
+      options.presets ?? {},
+      {
+        ...DEFAULT_SYSTEM_PRESETS,
+        presentationStyle: parsed.defaultPresentationStyle,
+      },
+    ));
     if (!Number.isInteger(this.maxResidentApps) || this.maxResidentApps < 1 || this.maxResidentApps > 256) {
       throw new PocketSystemError("invalid_resident_limit", "maxResidentApps must be an integer from 1 to 256");
     }
@@ -654,6 +732,83 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     });
   }
 
+  presets(): PocketSystemPresets {
+    return this.currentPresets;
+  }
+
+  setPresets(partial: PocketSystemPresetUpdate): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    if (!isRecord(partial)) return Promise.resolve();
+    const next = Object.freeze(parseSystemPresets(partial, this.currentPresets));
+    const changed =
+      next.darkMode !== this.currentPresets.darkMode ||
+      next.colorScheme !== this.currentPresets.colorScheme ||
+      next.accentColor !== this.currentPresets.accentColor ||
+      next.density !== this.currentPresets.density ||
+      next.presentationStyle !== this.currentPresets.presentationStyle;
+    this.currentPresets = next;
+    if (changed) {
+      this.notifyPresentation();
+    }
+    return this.enqueue(async () => {
+      if (!this.initialized || this.disposed) return;
+      for (const record of [...this.records.values()]) {
+        if (this.disposed) break;
+        if (record.instanceId === SYSTEM_UI_INSTANCE_ID || record.closing || record.failed) continue;
+        if (!changed && !record.presetsPending) continue;
+        try {
+          await this.emitPresets(record);
+        } catch {
+          // Best-effort live preset sync; stale/closing runtimes are handled on their own lane.
+        }
+      }
+    });
+  }
+
+  private resolveAppPresentationStyle(appId: string, instanceId?: string): MiniAppPresentationStyle {
+    const record = instanceId ? this.records.get(instanceId) : undefined;
+    if (record?.launchPresentationStyle) return record.launchPresentationStyle;
+    const entry = this.catalog.get(appId);
+    const catalogStyle = extractExplicitPresentationStyle(entry?.presentation);
+    if (catalogStyle) return catalogStyle;
+    return this.currentPresets.presentationStyle;
+  }
+
+  private presetsForApp(
+    appId: string,
+    instanceId?: string,
+    launchPresentationStyle?: MiniAppPresentationStyle,
+  ): PocketSystemPresets {
+    const presentationStyle = launchPresentationStyle ?? this.resolveAppPresentationStyle(appId, instanceId);
+    return {
+      ...this.currentPresets,
+      presentationStyle,
+    };
+  }
+
+  private initialEventsForApp(
+    appId: string,
+    instanceId?: string,
+    launchPresentationStyle?: MiniAppPresentationStyle,
+  ): JsonObject[] {
+    const resolved = this.presetsForApp(appId, instanceId, launchPresentationStyle);
+    return [{
+      method: SYSTEM_PRESETS_EVENT,
+      params: systemPresetsBridgeObject(resolved) as JsonObject,
+    }];
+  }
+
+  private async emitPresets(record: RuntimeRecord): Promise<boolean> {
+    const resolved = this.presetsForApp(record.appId, record.instanceId);
+    const accepted = await this.post(
+      record,
+      SYSTEM_PRESETS_EVENT,
+      systemPresetsBridgeObject(resolved) as JsonObject,
+    );
+    record.presetsPending = !accepted;
+    return accepted;
+  }
+
   snapshot(): PocketSystemSnapshot {
     const foreground = this.stack[this.stack.length - 1];
     const residentRows = [...this.records.values()]
@@ -666,6 +821,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         lastUsed: record.lastUsed,
         generation: record.generation,
         pendingLifecycleEvents: record.lifecycleQueue.length,
+        presentationStyle: this.resolveAppPresentationStyle(record.appId, record.instanceId),
       }));
     const catalog = [...this.catalog.values()].map((entry) => Object.freeze({
       appId: entry.package,
@@ -707,6 +863,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         completionPending: call.completion !== null,
       }))),
       opening: this.opening ? Object.freeze({ ...this.opening }) : null,
+      presets: this.currentPresets,
       mailboxLimit: MAX_MAILBOX_MESSAGES,
       queuedMessages: this.mailbox.length,
     });
@@ -737,6 +894,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         instanceId: record.instanceId,
         surfaceHandle,
         focused: record.instanceId === focusedInstanceId,
+        presentationStyle: this.resolveAppPresentationStyle(record.appId, record.instanceId),
         ...([...this.calls.values()].some(call => call.targetInstanceId === instanceId && call.launchPending)
           ? { ready: false } : {}),
       })];
@@ -911,6 +1069,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       lastUsed: this.nextLru(),
       generation: this.readGeneration(configured.generation),
       lifecycleQueue: [],
+      presetsPending: false,
     };
     this.records.set(root.instanceId, root);
     this.instanceForApp.set(root.appId, root.instanceId);
@@ -1215,6 +1374,9 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     if (request.capability === "platform.messages.receive") {
       return { value: await this.receiveMessages(request) };
     }
+    if (request.capability === "system.container.close") {
+      throw new PocketSystemError("system_context_denied", "system.container.close is restricted to the trusted SystemUI instance");
+    }
     throw new PocketSystemError("capability_unavailable", "unsupported system capability: " + request.capability);
   }
 
@@ -1266,6 +1428,17 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     let target = existingId ? this.records.get(existingId) : undefined;
     const created = target === undefined;
     const wasPrewarmed = target?.prewarmed ?? false;
+    const previousLaunchPresentationStyle = target?.launchPresentationStyle;
+    const launchStyleOverride = extractExplicitPresentationStyle(
+      request.params.presentationStyle ?? request.params.presentation,
+    );
+    const restoreLaunchPresentationStyle = (record: RuntimeRecord): void => {
+      if (previousLaunchPresentationStyle !== undefined) {
+        record.launchPresentationStyle = previousLaunchPresentationStyle;
+      } else {
+        delete record.launchPresentationStyle;
+      }
+    };
     // This snapshot is presentation input only. The queue already serializes
     // app opens, so one value points at the in-flight open without creating a
     // second lifecycle or cancellation state machine.
@@ -1274,15 +1447,27 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     try {
       if (created) {
         await this.ensureCapacity();
-        target = await this.createRuntime(targetAppId, false);
+        target = await this.createRuntime(targetAppId, false, launchStyleOverride);
       }
       if (!target) throw new PocketSystemError("runtime_create_failed", "target runtime could not be created");
       if (target.closing || target.failed) {
         throw new PocketSystemError("runtime_unavailable", "target runtime is closing or failed");
       }
+      if (launchStyleOverride) {
+        target.launchPresentationStyle = launchStyleOverride;
+      } else {
+        delete target.launchPresentationStyle;
+      }
       // Keep the caller presented while a resident/prewarmed package is checked.
       // A newly created runtime performs the same admission before it is ready.
-      if (!created) await this.prepareForOpen(target);
+      if (!created) {
+        try {
+          await this.prepareForOpen(target);
+        } catch (error) {
+          restoreLaunchPresentationStyle(target);
+          throw error;
+        }
+      }
       try {
         await this.lifecycle(resume, "onWillDisappear", { targetAppId, requestId: callId });
         await this.lifecycle(resume, "frozenInStack", { targetAppId, requestId: callId });
@@ -1290,7 +1475,10 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         await this.lifecycle(resume, "onResume", { targetAppId, requestId: callId, rollback: true }).catch(() => {});
         await this.flushLifecycle(resume).catch(() => {});
         if (created) await this.destroyRuntime(target).catch(() => {});
-        else target.prewarmed = wasPrewarmed;
+        else {
+          target.prewarmed = wasPrewarmed;
+          restoreLaunchPresentationStyle(target);
+        }
         throw error;
       }
       const call: PendingCall = {
@@ -1317,6 +1505,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       target.closing = false;
       this.touch(target);
       try {
+        await this.emitPresets(target);
         if (created) {
           await this.lifecycle(target, "onInit", { requestId: callId, prewarmed: false });
           await this.lifecycle(target, "onLoad", { requestId: callId, prewarmed: false });
@@ -1348,7 +1537,10 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         await this.lifecycle(resume, "onResume", { targetAppId, requestId: callId, rollback: true }).catch(() => {});
         await this.flushLifecycle(resume).catch(() => {});
         if (created) await this.destroyRuntime(target).catch(() => {});
-        else target.prewarmed = wasPrewarmed;
+        else {
+          target.prewarmed = wasPrewarmed;
+          restoreLaunchPresentationStyle(target);
+        }
         throw error;
       }
     } finally {
@@ -1357,10 +1549,17 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
   }
 
-  private async createRuntime(appId: string, prewarmed: boolean): Promise<RuntimeRecord> {
+  private async createRuntime(
+    appId: string,
+    prewarmed: boolean,
+    launchPresentationStyle?: MiniAppPresentationStyle,
+  ): Promise<RuntimeRecord> {
     this.assertActive();
     const catalogEntry = this.catalog.get(appId);
-    const createParams: JsonObject = { appId };
+    const createParams: JsonObject = {
+      appId,
+      initialEvents: this.initialEventsForApp(appId, undefined, launchPresentationStyle),
+    };
     if (!prewarmed) {
       createParams.prepareForOpen = true;
       createParams.cacheFirst = true;
@@ -1401,6 +1600,8 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       lastUsed: this.nextLru(),
       generation: this.readGeneration(created.generation),
       lifecycleQueue: [],
+      presetsPending: false,
+      ...(launchPresentationStyle ? { launchPresentationStyle } : {}),
     };
     this.records.set(instanceId, record);
     this.instanceForApp.set(appId, instanceId);
@@ -1416,6 +1617,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       instanceId: record.instanceId,
       generation: previousGeneration,
       cacheFirst: true,
+      initialEvents: this.initialEventsForApp(record.appId, record.instanceId),
     }, { timeoutFrames: 60 * simulationHz() });
     this.assertActive();
     const generation = this.readGeneration(prepared.generation);
@@ -1543,6 +1745,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
     await this.ensureCapacity();
     const record = await this.createRuntime(appId, true);
+    await this.emitPresets(record);
     await this.lifecycle(record, "onInit", { prewarmed: true });
     await this.lifecycle(record, "onLoad", { prewarmed: true });
     await this.lifecycle(record, "frozenInStack", { prewarmed: true });
@@ -1856,7 +2059,8 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     const targetInstanceId = this.instanceForApp.get(targetAppId);
     const targetRecord = targetInstanceId ? this.records.get(targetInstanceId) : undefined;
     const foreground = this.foregroundFrame();
-    if (targetRecord && foreground.instanceId === targetRecord.instanceId) {
+    // Trusted resident SystemUI remains immediately reachable while a child is foreground.
+    if (targetRecord && (foreground.instanceId === targetRecord.instanceId || targetRecord.instanceId === SYSTEM_UI_INSTANCE_ID)) {
       const accepted = await this.post(targetRecord, "platform.message", message as unknown as JsonObject);
       if (accepted) return { sent: true, queued: false, messageId: message.id };
     }
@@ -1885,6 +2089,17 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       await this.flushLifecycle(runtime);
       await this.flushForegroundMailbox(runtime.appId);
     }
+    for (const record of [...this.records.values()]) {
+      if (this.disposed) break;
+      if (record.instanceId === SYSTEM_UI_INSTANCE_ID || record.closing || record.failed) continue;
+      if (!record.presetsPending && record.lifecycleQueue.length === 0) continue;
+      if (record.instanceId === frame.instanceId) continue;
+      try {
+        await this.flushLifecycle(record);
+      } catch {
+        // Retry on the next host event.
+      }
+    }
     await this.flushClosingRuntimes();
   }
 
@@ -1901,12 +2116,15 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
   }
 
   private launchParams(call: PendingCall): JsonObject {
+    const presets = this.presetsForApp(call.targetAppId, call.targetInstanceId);
     return {
       requestId: call.requestId,
       appId: call.targetAppId,
       callerAppId: call.callerAppId,
       callerInstanceId: call.callerInstanceId,
       arguments: call.arguments,
+      presentationStyle: presets.presentationStyle,
+      presets: systemPresetsBridgeObject(presets) as JsonObject,
     };
   }
 
@@ -1914,9 +2132,11 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     for (const call of [...this.calls.values()]) {
       if (this.disposed || !call.launchPending) continue;
       const target = this.records.get(call.targetInstanceId);
-      if (!target || target.failed || target.closing || target.lifecycleQueue.length > 0) continue;
+      if (!target || target.failed || target.closing) continue;
       const frameIndex = this.stack.findIndex((frame) => frame.requestId === call.requestId);
       if (frameIndex !== this.stack.length - 1) continue;
+      await this.flushLifecycle(target);
+      if (target.presetsPending || target.lifecycleQueue.length > 0) continue;
       if (await this.post(target, "platform.launch", this.launchParams(call))) {
         call.launchPending = false;
       }
@@ -1962,8 +2182,9 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       ...extra,
     };
     // Preserve lifecycle order when a new native binding becomes ready between
-    // posts. Later events must not overtake an init already queued for retry.
-    if (record.lifecycleQueue.length > 0) {
+    // posts. Later events must not overtake an init or initial presets snapshot
+    // already queued for retry.
+    if (record.presetsPending || record.lifecycleQueue.length > 0) {
       if (record.lifecycleQueue.length < 32) record.lifecycleQueue.push(params);
       return;
     }
@@ -1974,6 +2195,10 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
   }
 
   private async flushLifecycle(record: RuntimeRecord): Promise<void> {
+    if (this.disposed) return;
+    if (record.presetsPending && record.instanceId !== SYSTEM_UI_INSTANCE_ID) {
+      if (!(await this.emitPresets(record))) return;
+    }
     while (!this.disposed && record.lifecycleQueue.length > 0) {
       const params = record.lifecycleQueue[0]!;
       const accepted = await this.post(record, "platform.lifecycle", params);
@@ -2064,10 +2289,14 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
 
     record.generation = payload.generation;
     record.lifecycleQueue.length = 0;
+    record.presetsPending = false;
     const frameIndex = this.stack.findIndex((frame) => frame.instanceId === instanceId);
     const isForeground = frameIndex === this.stack.length - 1;
     try {
       if (isForeground) await this.presentTop();
+      if (record.instanceId !== SYSTEM_UI_INSTANCE_ID) {
+        await this.emitPresets(record);
+      }
       await this.lifecycle(record, "onInit", { generationChanged: true });
       await this.lifecycle(record, "onLoad", { generationChanged: true });
       if (isForeground) {

@@ -15,6 +15,7 @@ mock.module("solid-js", () => ({
   createMemo: (value: () => unknown) => value,
   createSignal: (value: unknown) => [() => value, () => undefined],
   onCleanup: () => undefined,
+  onMount: () => undefined,
   untrack: (value: () => unknown) => value(),
   useContext: () => undefined,
 }));
@@ -31,6 +32,7 @@ mock.module("@pocketjs/framework/solid/lifecycle", () => ({
   onFrame: () => undefined,
 }));
 mock.module("@pocketjs/framework/clock", () => ({
+  after: () => () => {},
   simulationHz: () => 60,
   virtualNow: () => 0,
 }));
@@ -44,13 +46,6 @@ mock.module("../src/ui.tsx", () => ({
   ScrollContourItem: () => undefined,
   ScrollablePageContext: {},
   useScrollContourReserve: () => undefined,
-}));
-mock.module("../src/responsive.ts", () => ({
-  DISPLAY_UI_SAFETY_GAP: 0,
-  avoidDisplayOcclusions: (value: unknown) => value,
-  deriveDesignDensity: () => "touch",
-  deriveWindowSizeClass: () => "compact",
-  topRightOcclusionFrame: () => undefined,
 }));
 mock.module("../src/route.tsx", () => ({ useRouteActive: () => true }));
 mock.module("../src/motion.ts", () => ({

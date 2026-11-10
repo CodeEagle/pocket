@@ -7,7 +7,34 @@ import { mock, test } from "bun:test";
 import type { HostBridge, JsonObject, JsonValue } from "../../../sdk/packages/pocket_ui/src/host.ts";
 import type { PocketSystemV1 } from "../../../sdk/packages/pocket_ui/src/system.ts";
 
-mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60 }));
+mock.module("@pocketjs/framework/clock", () => ({ after: () => () => {}, simulationHz: () => 60 }));
+mock.module("solid-js", () => ({
+  Show: () => null,
+  createSignal: (v: unknown) => [() => v, () => {}],
+  onCleanup: () => {},
+}));
+mock.module("react/jsx-dev-runtime", () => ({
+  Fragment: Symbol.for("fragment"),
+  jsx: () => null,
+  jsxs: () => null,
+  jsxDEV: () => null,
+}));
+mock.module("@pocketjs/framework/solid/components", () => ({
+  Text: () => null,
+  View: () => null,
+}));
+mock.module("@pocket/ui", () => ({
+  MobileAlert: () => null,
+  MobileBadge: () => null,
+  MobileButton: () => null,
+  MobileCard: () => null,
+  MobileDialog: () => null,
+  MobileListTile: () => null,
+  MobileSegmentedControl: () => null,
+  ScrollablePage: () => null,
+  useMobileTheme: () => () => ({ name: "light", accentColor: 0xff2563eb }),
+  toMobileColor: () => "#2563eb",
+}));
 const { installPocketSystem } = await import("../../../sdk/packages/pocket_ui/src/system.ts");
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -221,6 +248,7 @@ test("SystemUI manifest covers the live runtime host capability contract", async
       instanceId: "profile-instance-1",
       surfaceHandle: 2,
       focused: true,
+      presentationStyle: "sheet",
       ready: false,
     }]);
   } finally {
@@ -228,4 +256,44 @@ test("SystemUI manifest covers the live runtime host capability contract", async
     globalObject.__pocketEvent = previousEvent;
     globalObject.ui = previousUi;
   }
+});
+
+test("Showcase buildShowcaseSystemConfiguration and DemoState merge per-app pocket.json presentation style and persist global preference", async () => {
+  const { buildShowcaseSystemConfiguration } = await import("../system.ts");
+  const { initialDemoState, reduceDemoState } = await import("../state.ts");
+  const { readAppearance, storedAppearance } = await import("../settings.tsx");
+
+  const config = buildShowcaseSystemConfiguration(undefined, []);
+  const profileCatalog = config.manifest.applications.catalog.find((entry) => entry.package === "pocket.demo.profile");
+  const lobbyCatalog = config.manifest.applications.catalog.find((entry) => entry.package === "pocket.demo.lobby");
+  assert.deepEqual(profileCatalog?.presentation, { style: "page" }, "profile catalog must inherit presentation.style=page from apps/profile/pocket.json");
+  assert.equal(lobbyCatalog?.presentation, undefined, "lobby catalog has no per-app override and inherits global presets");
+
+  // Verify DemoState and persisted appearance round-trip
+  let state = initialDemoState();
+  assert.equal(state.miniAppPresentationStyle, "sheet");
+  assert.deepEqual(storedAppearance(state), {
+    version: 1,
+    dark: false,
+    accent: "blue",
+    density: "auto",
+  }, "default sheet omits presentationStyle to keep existing v1 storage compact");
+
+  state = reduceDemoState(state, { type: "setMiniAppPresentationStyle", value: "page" });
+  assert.equal(state.miniAppPresentationStyle, "page");
+  const savedPage = storedAppearance(state);
+  assert.deepEqual(savedPage, {
+    version: 1,
+    dark: false,
+    accent: "blue",
+    density: "auto",
+    presentationStyle: "page",
+  });
+  const restored = readAppearance(savedPage);
+  assert.ok(restored);
+  const hydrated = reduceDemoState(initialDemoState(), { type: "restoreAppearance", ...restored });
+  assert.equal(hydrated.miniAppPresentationStyle, "page");
+
+  const reset = reduceDemoState(hydrated, { type: "resetAppearance" });
+  assert.equal(reset.miniAppPresentationStyle, "sheet");
 });

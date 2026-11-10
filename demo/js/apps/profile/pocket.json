@@ -21,6 +21,9 @@
     "entry": "app.tsx",
     "output": "profile-app",
     "framework": "solid",
+    "presentation": {
+      "style": "page"
+    },
     "viewport": {
       "fixed": {
         "logical": [360, 640],

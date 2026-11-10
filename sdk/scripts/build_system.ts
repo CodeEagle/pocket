@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
+import { UPSTREAM_REVISION } from "./prebuilt_tools.mjs";
 import type {
   ContractDiagnostic,
   PocketManifestV2,
@@ -35,7 +37,16 @@ type UpstreamManifestApi = Pick<
 
 let upstreamApiPromise: Promise<UpstreamManifestApi> | undefined;
 
-function ensurePinnedUpstream(): void {
+function resolvePinnedUpstreamRoot(): string {
+  const sourceBuild = process.env.POCKET_SOURCE_BUILD === "1";
+  if (
+    !sourceBuild &&
+    existsSync(upstreamMarker) &&
+    readFileSync(upstreamMarker, "utf8").trim() === UPSTREAM_REVISION &&
+    existsSync(join(upstreamRoot, "framework/src/manifest/index.ts"))
+  ) {
+    return upstreamRoot;
+  }
   const bootstrap = join(sdkRoot, "scripts/prepare_upstream.py");
   if (!existsSync(bootstrap)) {
     throw new Error(`build_system: pinned upstream bootstrap is missing: ${bootstrap}`);
@@ -52,15 +63,16 @@ function ensurePinnedUpstream(): void {
   if (!existsSync(upstreamMarker)) {
     throw new Error(`build_system: pinned PocketJS cache has no revision marker: ${upstreamMarker}`);
   }
+  return upstreamRoot;
 }
 
 async function upstreamManifestApi(): Promise<UpstreamManifestApi> {
   if (!upstreamApiPromise) {
     upstreamApiPromise = (async () => {
-      ensurePinnedUpstream();
+      const root = resolvePinnedUpstreamRoot();
       // Keep this lazy: a clean checkout materializes the ignored upstream
-      // cache in ensurePinnedUpstream before Bun evaluates its TypeScript.
-      return await import("../.cache/pocketjs/framework/src/manifest/index.ts") as UpstreamManifestApi;
+      // cache in resolvePinnedUpstreamRoot before Bun evaluates its TypeScript.
+      return await import(pathToFileURL(join(root, "framework/src/manifest/index.ts")).href) as UpstreamManifestApi;
     })().catch((error) => {
       upstreamApiPromise = undefined;
       throw error;
@@ -79,13 +91,19 @@ export interface ValidatedSystemPackage {
   readonly manifest: PocketManifestV2;
 }
 
-type PocketSystemCatalogEntryWithMemory = PocketSystemPackageV1 & {
+type PocketSystemCatalogEntryWithMemory = Omit<PocketSystemPackageV1, "presentation"> & {
   readonly memory?: PocketMemoryBudget;
   readonly memoryPolicy?: PocketMemoryPolicy;
+  readonly presentation?: {
+    readonly title?: string;
+    readonly viewport?: readonly [number, number];
+    readonly style?: string;
+  };
 };
 
 type PocketSystemWithMemory = Omit<PocketSystemV1, "applications"> & {
   readonly applications: Omit<PocketSystemV1["applications"], "catalog"> & {
+    readonly presentation?: Readonly<Record<string, unknown>>;
     readonly catalog: readonly PocketSystemCatalogEntryWithMemory[];
   };
 };
@@ -127,9 +145,15 @@ export type ResolvedSystemDocument =
 type ResolvedSystemPackageWithMemory = ResolvedSystemPackage & {
   readonly memory?: PocketMemoryBudget;
   readonly memoryPolicy?: PocketMemoryPolicy;
+  readonly presentation?: {
+    readonly title?: string;
+    readonly viewport?: readonly [number, number];
+    readonly style?: string;
+  };
 };
 
 type ResolvedSystemPlanWithMemory = Omit<ResolvedSystemPlan, "systemUI" | "applications"> & {
+  readonly presentation?: Readonly<Record<string, unknown>>;
   readonly systemUI: ResolvedSystemPackageWithMemory;
   readonly applications: readonly ResolvedSystemPackageWithMemory[];
 };
@@ -248,18 +272,116 @@ function parseMemoryExtension(
   return { memory, memoryPolicy: policy };
 }
 
+const VALID_PRESENTATION_STYLES = ["sheet", "page", "modal", "bottom-sheet", "push"] as const;
+
+function parsePresentationStyleField(
+  rawStyle: unknown,
+  path: string,
+  diagnostics: ContractDiagnostic[],
+): string | undefined {
+  if (typeof rawStyle === "string") {
+    const normalized = rawStyle.trim().toLowerCase();
+    if ((VALID_PRESENTATION_STYLES as readonly string[]).includes(normalized)) {
+      return normalized;
+    }
+  }
+  diagnostics.push(diagnostic(
+    "system.invalidPresentationStyle",
+    path,
+    `must be one of ${VALID_PRESENTATION_STYLES.join(", ")}`,
+  ));
+  return undefined;
+}
+
+function sanitizeManifestPresentation(
+  input: unknown,
+  entryPath: string,
+  diagnostics: ContractDiagnostic[],
+): { value: unknown; style?: string } {
+  if (!isRecord(input)) return { value: input };
+  let style: string | undefined;
+  const checkPresentation = (raw: unknown, path: string): void => {
+    if (raw === undefined) return;
+    if (!isRecord(raw)) {
+      diagnostics.push(diagnostic("system.invalidPresentation", path, "presentation must be an object"));
+      return;
+    }
+    for (const key of Object.keys(raw)) {
+      if (key !== "style") {
+        diagnostics.push(diagnostic(
+          "system.invalidPresentation",
+          `${path}/${key}`,
+          `unknown presentation field ${key}`,
+        ));
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, "style")) {
+      const parsed = parsePresentationStyleField(raw.style, `${path}/style`, diagnostics);
+      if (parsed) style = parsed;
+    }
+  };
+  checkPresentation(input.presentation, `${entryPath}/resolved/presentation`);
+  if (isRecord(input.app)) {
+    checkPresentation(input.app.presentation, `${entryPath}/resolved/app/presentation`);
+  }
+  const next: Record<string, unknown> = { ...input };
+  delete next.presentation;
+  if (isRecord(next.app) && Object.prototype.hasOwnProperty.call(next.app, "presentation")) {
+    const nextApp = { ...next.app };
+    delete nextApp.presentation;
+    next.app = nextApp;
+  }
+  return { value: next, ...(style ? { style } : {}) };
+}
+
 interface SanitizedSystemInput {
   readonly value: unknown;
-  readonly memoryByPackage: ReadonlyMap<string, { memory?: PocketMemoryBudget; memoryPolicy?: PocketMemoryPolicy }>;
+  readonly defaultPresentation?: Record<string, unknown>;
+  readonly memoryByPackage: ReadonlyMap<string, {
+    memory?: PocketMemoryBudget;
+    memoryPolicy?: PocketMemoryPolicy;
+    presentationStyle?: string;
+  }>;
   readonly diagnostics: readonly ContractDiagnostic[];
 }
 
 /** Remove only this SDK extension before the pinned upstream schema validator. */
 function sanitizeSystemMemory(input: unknown): SanitizedSystemInput {
   const diagnostics: ContractDiagnostic[] = [];
-  const memoryByPackage = new Map<string, { memory?: PocketMemoryBudget; memoryPolicy?: PocketMemoryPolicy }>();
+  const memoryByPackage = new Map<string, {
+    memory?: PocketMemoryBudget;
+    memoryPolicy?: PocketMemoryPolicy;
+    presentationStyle?: string;
+  }>();
   if (!isRecord(input) || !isRecord(input.applications) || !Array.isArray(input.applications.catalog)) {
     return { value: input, memoryByPackage, diagnostics };
+  }
+  let defaultPresentation: Record<string, unknown> | undefined;
+  if (Object.prototype.hasOwnProperty.call(input.applications, "presentation")) {
+    if (!isRecord(input.applications.presentation)) {
+      diagnostics.push(diagnostic(
+        "system.invalidPresentation",
+        "/applications/presentation",
+        "must be an object when provided",
+      ));
+    } else {
+      for (const key of Object.keys(input.applications.presentation)) {
+        if (key !== "style") {
+          diagnostics.push(diagnostic(
+            "system.invalidPresentation",
+            `/applications/presentation/${key}`,
+            `unknown presentation field ${key}`,
+          ));
+        }
+      }
+      const rawStyle = input.applications.presentation.style;
+      if (rawStyle !== undefined) {
+        const parsed = parsePresentationStyleField(rawStyle, "/applications/presentation/style", diagnostics);
+        if (parsed) defaultPresentation = { ...input.applications.presentation, style: parsed };
+      } else {
+        defaultPresentation = { ...input.applications.presentation };
+      }
+    }
   }
   const catalog = input.applications.catalog.map((rawEntry, index) => {
     if (!isRecord(rawEntry)) return rawEntry;
@@ -269,15 +391,36 @@ function sanitizeSystemMemory(input: unknown): SanitizedSystemInput {
       `/applications/catalog/${index}`,
       diagnostics,
     );
-    if (typeof rawEntry.package === "string") memoryByPackage.set(packageId, parsed);
-    const { memory: _memory, memoryPolicy: _memoryPolicy, ...baseEntry } = rawEntry;
-    return baseEntry;
+    let presentationStyle: string | undefined;
+    let sanitizedPresentation = rawEntry.presentation;
+    if (isRecord(rawEntry.presentation) && Object.prototype.hasOwnProperty.call(rawEntry.presentation, "style")) {
+      presentationStyle = parsePresentationStyleField(
+        rawEntry.presentation.style,
+        `/applications/catalog/${index}/presentation/style`,
+        diagnostics,
+      );
+      const { style: _style, ...restPresentation } = rawEntry.presentation;
+      sanitizedPresentation = Object.keys(restPresentation).length > 0 ? restPresentation : undefined;
+    }
+    if (typeof rawEntry.package === "string") {
+      memoryByPackage.set(packageId, {
+        ...parsed,
+        ...(presentationStyle ? { presentationStyle } : {}),
+      });
+    }
+    const { memory: _memory, memoryPolicy: _memoryPolicy, presentation: _presentation, ...baseEntry } = rawEntry;
+    return {
+      ...baseEntry,
+      ...(sanitizedPresentation !== undefined ? { presentation: sanitizedPresentation } : {}),
+    };
   });
+  const { presentation: _appPresentation, ...baseApplications } = input.applications;
   return {
     value: {
       ...input,
-      applications: { ...input.applications, catalog },
+      applications: { ...baseApplications, catalog },
     },
+    ...(defaultPresentation ? { defaultPresentation } : {}),
     memoryByPackage,
     diagnostics,
   };
@@ -285,7 +428,13 @@ function sanitizeSystemMemory(input: unknown): SanitizedSystemInput {
 
 function normalizeContract(
   system: PocketSystemV1,
-  memoryByPackage: ReadonlyMap<string, { memory?: PocketMemoryBudget; memoryPolicy?: PocketMemoryPolicy }>,
+  memoryByPackage: ReadonlyMap<string, {
+    memory?: PocketMemoryBudget;
+    memoryPolicy?: PocketMemoryPolicy;
+    presentationStyle?: string;
+  }>,
+  defaultPresentation?: Record<string, unknown>,
+  manifestStyleByPackage?: ReadonlyMap<string, string>,
 ): PocketSystemWithMemory {
   return {
     $schema: system.$schema,
@@ -301,25 +450,36 @@ function normalizeContract(
         mutable: system.applications.installPolicy.mutable,
       },
       backgroundExecution: system.applications.backgroundExecution,
-      catalog: system.applications.catalog.map((entry) => ({
-        package: entry.package,
-        manifest: entry.manifest,
-        required: entry.required,
-        ...(memoryByPackage.get(entry.package)?.memory
-          ? { memory: { ...memoryByPackage.get(entry.package)!.memory } }
-          : {}),
-        ...(memoryByPackage.get(entry.package)?.memoryPolicy
-          ? { memoryPolicy: memoryByPackage.get(entry.package)!.memoryPolicy }
-          : {}),
-        ...(entry.presentation
-          ? {
-              presentation: {
-                title: entry.presentation.title,
-                viewport: [entry.presentation.viewport[0], entry.presentation.viewport[1]] as const,
-              },
-            }
-          : {}),
-      })),
+      ...(defaultPresentation ? { presentation: { ...defaultPresentation } } : {}),
+      catalog: system.applications.catalog.map((entry) => {
+        const resolvedStyle = memoryByPackage.get(entry.package)?.presentationStyle
+          ?? manifestStyleByPackage?.get(entry.package);
+        const hasPresentation = Boolean(entry.presentation || resolvedStyle);
+        return {
+          package: entry.package,
+          manifest: entry.manifest,
+          required: entry.required,
+          ...(memoryByPackage.get(entry.package)?.memory
+            ? { memory: { ...memoryByPackage.get(entry.package)!.memory } }
+            : {}),
+          ...(memoryByPackage.get(entry.package)?.memoryPolicy
+            ? { memoryPolicy: memoryByPackage.get(entry.package)!.memoryPolicy }
+            : {}),
+          ...(hasPresentation
+            ? {
+                presentation: {
+                  ...(entry.presentation
+                    ? {
+                        title: entry.presentation.title,
+                        viewport: [entry.presentation.viewport[0], entry.presentation.viewport[1]] as const,
+                      }
+                    : {}),
+                  ...(resolvedStyle ? { style: resolvedStyle } : {}),
+                },
+              }
+            : {}),
+        };
+      }),
     },
     installation: {
       installedPackages: [...system.installation.installedPackages],
@@ -344,10 +504,12 @@ function attachMemoryToPlan(
       ...entry,
       ...(memory?.memory ? { memory: { ...memory.memory } } : {}),
       ...(memory?.memoryPolicy ? { memoryPolicy: memory.memoryPolicy } : {}),
+      ...(memory?.presentation ? { presentation: { ...memory.presentation } } : {}),
     };
   };
   return {
     ...plan,
+    ...(contract.applications.presentation ? { presentation: { ...contract.applications.presentation } } : {}),
     systemUI: attach(plan.systemUI),
     applications: plan.applications.map(attach),
   };
@@ -397,6 +559,7 @@ export async function validateSystemDocument(
   const installed = new Set(system.installation.installedPackages);
   const checkedPackages: ValidatedSystemPackage[] = [];
   const outputOwners = new Map<string, string>();
+  const manifestStyleByPackage = new Map<string, string>();
 
   system.applications.catalog.forEach((entry, index) => {
     const entryPath = `/applications/catalog/${index}`;
@@ -467,7 +630,11 @@ export async function validateSystemDocument(
         ));
       }
     }
-    const manifestResult = api.validatePocketManifest(fontValidation.schemaInput);
+    const sanitizedManifest = sanitizeManifestPresentation(fontValidation.schemaInput, entryPath, diagnostics);
+    if (sanitizedManifest.style) {
+      manifestStyleByPackage.set(entry.package, sanitizedManifest.style);
+    }
+    const manifestResult = api.validatePocketManifest(sanitizedManifest.value);
     if (!manifestResult.ok) {
       for (const item of manifestResult.diagnostics) {
         // Invalid fonts already have the SDK's precise portable-path error;
@@ -553,7 +720,12 @@ export async function validateSystemDocument(
     ok: true,
     value: {
       kind: "validated-pocket-system-contract",
-      contract: normalizeContract(system, sanitized.memoryByPackage),
+      contract: normalizeContract(
+        system,
+        sanitized.memoryByPackage,
+        sanitized.defaultPresentation,
+        manifestStyleByPackage,
+      ),
       packages: checkedPackages,
     },
   };

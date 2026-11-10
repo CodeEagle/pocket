@@ -1,15 +1,40 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
 import {
+  DEFAULT_SYSTEM_PRESETS,
   forwardHostPacket,
+  isSystemPresetsEvent,
+  normalizePresentationStyle,
+  parseSystemPresets,
+  SYSTEM_PRESETS_EVENT,
+  systemPresetsBridgeObject,
   type BridgeObject,
   type HostDisplayViewportSnapshot,
   type HostEvent,
+  type HostSystemPresetsSnapshot,
+  type MiniAppPresentationStyle,
+  type MiniAppPresentationStyleInput,
+  type PocketSystemDensity,
+  type PocketSystemPresets,
 } from "./host.ts";
 import {
   EMPTY_DISPLAY_GEOMETRY,
   parseDisplayGeometry,
   type DisplayGeometry,
 } from "./responsive.ts";
+
+export {
+  DEFAULT_SYSTEM_PRESETS,
+  isSystemPresetsEvent,
+  normalizePresentationStyle,
+  parseSystemPresets,
+  SYSTEM_PRESETS_EVENT,
+  systemPresetsBridgeObject,
+  type HostSystemPresetsSnapshot,
+  type MiniAppPresentationStyle,
+  type MiniAppPresentationStyleInput,
+  type PocketSystemDensity,
+  type PocketSystemPresets,
+};
 
 export type DisplayEventHandler = ((packet: Record<string, unknown>) => void) & {
   __binaryCapable?: boolean;
@@ -19,9 +44,11 @@ export interface DisplayGeometryBridge {
   __pocketEvent?: DisplayEventHandler;
   onEvent?: (listener: (event: HostEvent) => void) => () => void;
   getLatestDisplayViewport?: () => HostDisplayViewportSnapshot | undefined;
+  getLatestSystemPresets?: () => HostSystemPresetsSnapshot | undefined;
   __pocketHostBridge?: {
     onEvent?: (listener: (event: HostEvent) => void) => () => void;
     getLatestDisplayViewport?: () => HostDisplayViewportSnapshot | undefined;
+    getLatestSystemPresets?: () => HostSystemPresetsSnapshot | undefined;
   };
   ui?: { __viewport?: { w?: unknown; h?: unknown } };
 }
@@ -62,6 +89,7 @@ interface LatestDisplayFact {
 // camera/status cluster). This is a cache of the existing event lane, not a
 // second transport or a poller.
 const latestDisplayFacts = new WeakMap<object, LatestDisplayFact>();
+const latestSystemPresetFacts = new WeakMap<object, HostSystemPresetsSnapshot>();
 
 // Keep one wrapper per host bridge. A page can be replaced while another
 // subscriber (for example the app shell) remains mounted; a wrapper-per-page
@@ -86,6 +114,12 @@ function subscribeDisplayBridge(
           const previous = latestDisplayFacts.get(bridge)?.geometry ?? initialGeometry;
           const geometry = parseDisplayGeometry(event.params, previous);
           latestDisplayFacts.set(bridge, { event, geometry });
+        }
+      } else if (isSystemPresetsEvent(event)) {
+        if (typeof bridge.getLatestSystemPresets !== "function") {
+          const previous = latestSystemPresetFacts.get(bridge)?.presets ?? DEFAULT_SYSTEM_PRESETS;
+          const presets = parseSystemPresets(event.params, previous);
+          latestSystemPresetFacts.set(bridge, { event, presets });
         }
       }
       for (const current of [...listeners]) {
@@ -151,6 +185,14 @@ function subscribeDisplayBridge(
 function latestDisplayFact(bridge: DisplayGeometryBridge): LatestDisplayFact | HostDisplayViewportSnapshot | undefined {
   if (typeof bridge.getLatestDisplayViewport === "function") return bridge.getLatestDisplayViewport();
   return latestDisplayFacts.get(bridge);
+}
+
+function latestSystemPresetFact(bridge: DisplayGeometryBridge): HostSystemPresetsSnapshot | undefined {
+  if (typeof bridge.getLatestSystemPresets === "function") return bridge.getLatestSystemPresets();
+  if (bridge.__pocketHostBridge && typeof bridge.__pocketHostBridge.getLatestSystemPresets === "function") {
+    return bridge.__pocketHostBridge.getLatestSystemPresets();
+  }
+  return latestSystemPresetFacts.get(bridge);
 }
 
 function finite(value: unknown, fallback: number): number {
@@ -258,6 +300,119 @@ export function createDisplayGeometry(options: DisplayGeometryOptions = {}): () 
   });
   return geometry;
 }
+
+export interface SystemPresetsOptions {
+  /** Existing host event bridge; defaults to the global PocketJS bridge. */
+  bridge?: DisplayGeometryBridge;
+  /** Used when the host has not sent a platform.presets event yet. */
+  fallback?: PocketSystemPresets;
+  /** Synchronous notification when system presets change. */
+  onChange?: (presets: PocketSystemPresets) => void;
+}
+
+export function getSystemPresetsSnapshot(
+  bridge: DisplayGeometryBridge = globalDisplayBridge(),
+  fallback: PocketSystemPresets = DEFAULT_SYSTEM_PRESETS,
+): PocketSystemPresets {
+  const resolved = resolvedDisplayBridge(bridge);
+  const latest = latestSystemPresetFact(resolved) ?? latestSystemPresetFact(bridge);
+  return latest ? latest.presets : fallback;
+}
+
+export function subscribeSystemPresets(
+  listener: (presets: PocketSystemPresets) => void,
+  bridge: DisplayGeometryBridge = globalDisplayBridge(),
+  fallback: PocketSystemPresets = DEFAULT_SYSTEM_PRESETS,
+): () => void {
+  const resolved = resolvedDisplayBridge(bridge);
+  let current = getSystemPresetsSnapshot(resolved, fallback);
+  const initialFact = latestSystemPresetFact(resolved) ?? latestSystemPresetFact(bridge);
+  let lastApplied = initialFact?.event;
+  const receive = (event: HostEvent): void => {
+    if (!isSystemPresetsEvent(event)) return;
+    lastApplied = event;
+    current = parseSystemPresets(event.params, current);
+    try {
+      listener(current);
+    } catch {
+      // Keep the shared event lane live.
+    }
+  };
+  const unsubscribe = subscribeDisplayBridge(
+    resolved,
+    receive,
+    latestDisplayFact(resolved)?.event,
+    initialDisplayGeometry(resolved, EMPTY_DISPLAY_GEOMETRY, bridge),
+  );
+  const latest = latestSystemPresetFact(resolved) ?? latestSystemPresetFact(bridge);
+  if (latest && latest.event !== lastApplied) {
+    lastApplied = latest.event;
+    current = latest.presets;
+    try {
+      listener(current);
+    } catch {
+      // Keep subscription setup non-throwing.
+    }
+  }
+  return unsubscribe;
+}
+
+export function createSystemPresets(options: SystemPresetsOptions = {}): () => PocketSystemPresets {
+  const bridge = options.bridge ?? globalDisplayBridge();
+  const fallback = options.fallback ?? DEFAULT_SYSTEM_PRESETS;
+  const initialBridge = resolvedDisplayBridge(bridge);
+  const initialFact = latestSystemPresetFact(initialBridge) ?? latestSystemPresetFact(bridge);
+  const initialPresets = initialFact ? initialFact.presets : fallback;
+  let lastAppliedEvent: HostEvent | undefined = initialFact?.event;
+  const [presets, setPresets] = createSignal<PocketSystemPresets>(initialPresets);
+  let mounted = false;
+  let disposed = false;
+  onMount(() => {
+    mounted = true;
+    const activeBridge = resolvedDisplayBridge(bridge);
+    const receive = (event: HostEvent): void => {
+      if (disposed || !isSystemPresetsEvent(event)) return;
+      lastAppliedEvent = event;
+      const next = parseSystemPresets(event.params, presets());
+      setPresets(next);
+      try {
+        options.onChange?.(next);
+      } catch {
+        // A presets observer must not break the existing host event lane.
+      }
+    };
+    const unsubscribe = subscribeDisplayBridge(
+      activeBridge,
+      receive,
+      latestDisplayFact(activeBridge)?.event,
+      initialDisplayGeometry(activeBridge, EMPTY_DISPLAY_GEOMETRY, bridge),
+    );
+    const latest = latestSystemPresetFact(activeBridge) ?? latestSystemPresetFact(bridge);
+    if (latest && latest.event !== lastAppliedEvent) {
+      receive({
+        ...latest.event,
+        method: SYSTEM_PRESETS_EVENT,
+        params: systemPresetsBridgeObject(latest.presets),
+      });
+    }
+    onCleanup(() => {
+      disposed = true;
+      unsubscribe();
+    });
+  });
+  return () => {
+    if (!mounted && !disposed) {
+      const activeBridge = resolvedDisplayBridge(bridge);
+      const latest = latestSystemPresetFact(activeBridge) ?? latestSystemPresetFact(bridge);
+      if (latest && latest.event !== lastAppliedEvent) {
+        return latest.presets;
+      }
+    }
+    return presets();
+  };
+}
+
+export const useSystemPresets = createSystemPresets;
 
 function displayGeometryBridgeObject(geometry: DisplayGeometry): BridgeObject {
   return {

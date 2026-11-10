@@ -1,12 +1,29 @@
 # Flutter FPS 与 PocketJS 帧节奏测量设计
 
-本文件记录 Demo 根层独立 Flutter HUD 的测量口径、能耗消融和开源方案调研。实现与验收均使用 Flutter 3.35.7 / Dart 3.9.2；下文区分普通 Flutter 运行与集成测试绑定的测量。
+本文件记录 Pocket SDK 与 Demo Flutter HUD 的测量口径、能耗消融和开源方案调研。实现与验收均使用 Flutter 3.35.7 / Dart 3.9.2；下文区分普通 Flutter 运行与集成测试绑定的测量。
+
+## SDK `showDebugFps` 更新（2026-11-10）
+
+SDK 的 `PocketView.showDebugFps` 现在复用 `FlutterFrameMonitor`，通过 Flutter engine `FrameTiming` 的 `vsyncStart` 时间戳显示 Flutter cadence FPS。紧凑 HUD 由 `CustomPaint` 绘制，可在 Release 运行；官方 `PerformanceOverlay` 在 Release 引擎中不绘制，因此没有用于该开关。全屏 PocketView 的 HUD 放在底部安全区左侧，嵌入式预览使用顶部角标；所有位置都由 `IgnorePointer` 穿透输入。旧版 Guest `ticks/s` 文字角标已经移除。`PocketView.onPerformanceSample` 与 `PocketPerformanceSample.fps` 仍保持原有 Guest tick/native-turn 口径并继续供 JS 诊断使用，两种数值不会混用。
+
+迁移前检查了保留父项目 `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo`：`lib/core/perf_monitor.dart` 提供独立的 `addTimingsCallback` 监测器和历史状态，`lib/ui/mini_app_host_page.dart` 将状态栏 HUD 与历史抽屉放在 Pocket viewport 上方。保留的 Demo `FlutterFrameMonitor` 被提升到 SDK 作为唯一实现，Demo 原路径改为兼容导出；安全区底部由该 HUD 的 `SafeArea` 明确占用，避免落入 Home indicator 区域。没有复制第二份计数器或监测状态。
+
+本次验证命令均通过：
+
+```sh
+cd sdk/packages/pocket_flutter
+flutter test --no-pub --no-test-assets test/pocket_view_viewport_test.dart --plain-name 'shows the Flutter FPS HUD inside the safe area'
+flutter test --no-pub --no-test-assets test/pocket_view_viewport_test.dart --plain-name 'hides the Flutter FPS HUD when disabled'
+flutter test --no-pub --no-test-assets test/pocket_performance_test.dart --plain-name 'keeps a long gap crossing the sample boundary'
+cd ../../../demo
+flutter test --no-pub test/flutter_frame_monitor_test.dart
+```
 
 ## 结论
 
 Demo 同时保留两条互不混淆的信号：
 
-1. **Guest 调度轮转率**：SDK 原 `showDebugFps` 角标现在明确显示为 `Guest ticks/s`；它来自 `PocketView` 的活跃 ticker 与 native `frameDelta` 调用链，统计的是 Guest scheduler turn / native frameDelta 调用在活动窗口中的轮转率（含未改变画面的轮转），不是 Flutter engine 的全视图 FPS。
+1. **Guest 调度轮转率**：`PocketPerformanceSample.fps` 来自 `PocketView` 的活跃 ticker 与 native `frameDelta` 调用链，统计 Guest scheduler turn / native frameDelta 调用在活动窗口中的轮转率（含未改变画面的轮转），不是 Flutter engine 的全视图 FPS。它通过 `PocketView.onPerformanceSample` 提供给 JS 诊断；自 2026-11-10 起，SDK 的 `showDebugFps` 不再把该值显示成文字角标。
 2. **Flutter frame cadence**：根层 `FlutterFrameMonitor` 只接收 Flutter engine 的 `FrameTiming`，用相邻 `vsyncStart` 时间戳间隔统计 Flutter 的报告帧节奏。
 
 `buildDuration`、`rasterDuration`、`totalSpan` 都是单帧阶段/延迟指标，不能当作 FPS 的倒数。尤其 `totalSpan` 是从 `vsyncStart` 到 raster 完成的跨度；`1e6 / totalSpanUs` 不是平台显示 cadence。
@@ -21,7 +38,7 @@ Demo 同时保留两条互不混淆的信号：
 
 - Pocket 原有角标关闭：`PocketAppConfig.showFps: false`。
 - 数字 HUD 默认由 `FLUTTER_FPS` 控制，`false` 时应同时停止 monitor listener/展示层，作为能耗消融开关。
-- Flutter 官方 engine 图由 `FLUTTER_PERFORMANCE_OVERLAY` 控制：
+- Debug 运行时 Flutter 官方 engine 图由 `FLUTTER_PERFORMANCE_OVERLAY` 控制（Release 不绘制官方 overlay）：
 
 ```sh
 flutter run --dart-define=FLUTTER_PERFORMANCE_OVERLAY=true
@@ -85,7 +102,7 @@ guestTickRate = nativeTurnCount / activeWindowDurationSeconds
 
 相关实现：
 
-- [`FlutterFrameMonitor` 被动 collector/HUD](../../demo/lib/flutter_frame_monitor.dart)
+- [`FlutterFrameMonitor` 被动 collector/HUD](../packages/pocket_flutter/lib/src/flutter_frame_monitor.dart)
 - [`PocketView._onTick` 与性能窗口](../packages/pocket_flutter/lib/src/pocket_view.dart)
 - [`PocketPerformanceSample` 字段定义](../packages/pocket_flutter/lib/src/pocket_performance.dart)
 - [`PocketSession.runtime.performance` 注册与 sample 投递](../lib/src/pocket_session.dart)

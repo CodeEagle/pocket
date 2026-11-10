@@ -108,9 +108,7 @@ void main() {
     },
   );
 
-  testWidgets('null builder retains the default package startup indicator', (
-    tester,
-  ) async {
+  testWidgets('null builder keeps local session startup quiet', (tester) async {
     final session = PocketSession(config: _config);
     addTearDown(session.dispose);
 
@@ -120,7 +118,7 @@ void main() {
 
     expect(
       find.byKey(const ValueKey<String>('pocket-startup-progress')),
-      findsOneWidget,
+      findsNothing,
     );
   });
 
@@ -153,5 +151,38 @@ void main() {
 
     final view = tester.widget<PocketView>(find.byType(PocketView));
     expect(view.loadingBuilder, same(builder));
+  });
+
+  testWidgets('ready local PocketView stays blank until its first frame', (
+    tester,
+  ) async {
+    final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+    addTearDown(() {
+      debugPocketSelfOwnedRuntimeFactory = previousFactory;
+    });
+    debugPocketSelfOwnedRuntimeFactory = (_) {
+      throw StateError('zero-size startup surface must not start a runtime');
+    };
+
+    final session = PocketSession(config: _config)..ready = true;
+    addTearDown(session.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 0,
+          height: 0,
+          child: PocketGuestSession(config: _config, session: session),
+        ),
+      ),
+    );
+
+    expect(find.byType(PocketView), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      findsNothing,
+    );
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 }

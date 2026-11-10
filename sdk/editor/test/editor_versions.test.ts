@@ -34,7 +34,7 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function writeSystemProject(workspace: string, id: string, rootAppId: string): void {
+function writeSystemProject(workspace: string, id: string, rootAppId: string, childAppId = "child.app"): void {
   const project = join(workspace, "projects", id);
   const child = join(project, "child");
   mkdirSync(child, { recursive: true });
@@ -45,7 +45,7 @@ function writeSystemProject(workspace: string, id: string, rootAppId: string): v
   writeFileSync(join(child, "pocket.json"), JSON.stringify({
     "$schema": "https://pocketjs.dev/schema/pocket-2.json",
     pocket: 2,
-    id: "child.app",
+    id: childAppId,
     name: "child-app",
     title: "Child App",
     version: "0.1.0",
@@ -72,10 +72,10 @@ function writeSystemProject(workspace: string, id: string, rootAppId: string): v
       backgroundExecution: "suspend",
       catalog: [
         { package: rootAppId, manifest: "pocket.json", required: true, memory: { heapLimitBytes: 134217728 } },
-        { package: "child.app", manifest: "child/pocket.json", required: true, memoryPolicy: "UI_MINI" },
+        { package: childAppId, manifest: "child/pocket.json", required: true, memoryPolicy: "UI_MINI" },
       ],
     },
-    installation: { installedPackages: [rootAppId, "child.app"] },
+    installation: { installedPackages: [rootAppId, childAppId] },
   }, null, 2) + "\n");
 }
 
@@ -271,6 +271,40 @@ test("editor version journal covers immutable child releases and offline archive
     expect(childStatus.error).toBeUndefined();
     const childCollisionPublish = await request(server, "/api/projects/child-collision/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(childCollisionPublish.response.status).toBe(409);
+
+    const stateBeforeSourceRemoval = readFileSync(statePath);
+    const historyBeforeSourceRemoval = readFileSync(historyPath);
+    rmSync(join(workspace, "projects/root-app"), { recursive: true, force: true });
+
+    const historicalIndex = await request(server, new URL(firstVersions.value.appConfigUrl).pathname);
+    expect(historicalIndex.response.status).toBe(200);
+    expect(historicalIndex.value.kind).toBe("pocket-editor-package-index");
+    expect(historicalIndex.value.projectId).toBe("root-app");
+    expect(historicalIndex.value.latest.releaseId).toBe(secondEntry.releaseId);
+
+    const historicalHost = await request(server, historicalIndex.value.latest.hostConfigUrl);
+    expect(historicalHost.response.status).toBe(200);
+    expect(historicalHost.value.kind).toBe("pocket-editor-app-host");
+    const historicalManifest = await request(server, historicalIndex.value.latest.manifestUrl);
+    expect(historicalManifest.response.status).toBe(200);
+    const historicalPayload = JSON.parse(Buffer.from(historicalManifest.value.payload, "base64").toString("utf8"));
+    const historicalPublicKey = Buffer.from(historicalHost.value.POCKET_UPDATE_PUBLIC_KEY, "base64");
+    const historicalPublicPem = createPublicKey({
+      key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), historicalPublicKey]),
+      format: "der",
+      type: "spki",
+    }).export({ format: "pem", type: "spki" });
+    expect(JSON.parse(new TextDecoder().decode(verifySignedManifest(historicalManifest.value, historicalPublicPem))).appId).toBe("root.app");
+
+    const historicalBlobPath = new URL(
+      `blobs/${historicalPayload.entry.sha256}`,
+      `http://${server.hostname}:${server.port}${historicalIndex.value.latest.manifestUrl}`,
+    ).pathname;
+    const historicalBlob = await request(server, historicalBlobPath);
+    expect(historicalBlob.response.status).toBe(200);
+    expect(sha256(new Uint8Array(historicalBlob.value))).toBe(historicalPayload.entry.sha256);
+    expect(readFileSync(statePath)).toEqual(stateBeforeSourceRemoval);
+    expect(readFileSync(historyPath)).toEqual(historyBeforeSourceRemoval);
   } finally {
     server.stop(true);
     rmSync(workspace, { recursive: true, force: true });
@@ -441,6 +475,137 @@ test("legacy stable publish migrates signed bytes into the first journal entry",
     expect(migratedHost.compositorSurfaces).toEqual({});
   } finally {
     secondServer.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("explicit external package reuse keeps the signed owner release and root journal separate", { timeout: 180_000 }, async () => {
+  const workspace = temporaryWorkspace();
+  const fixture = temporaryWorkspace();
+  const appJs = join(fixture, "root.js");
+  const bytecode = join(fixture, "root.qjbc");
+  const metadata = join(fixture, "root.bytecode.json");
+  const pak = join(fixture, "root.pak");
+  writeFileSync(appJs, "globalThis.__root_generation = 1;\n");
+  writeFileSync(bytecode, Buffer.from([0x50, 0x4a, 0x42, 0x43, 1, 2, 3]));
+  writeFileSync(metadata, JSON.stringify({ entryFormat: "quickjs-bytecode", runtimeAbi: "fixture-root-abi", bytecodeBytes: 7 }));
+  writeFileSync(pak, pack([{ key: "fixture:text", dtype: 0, data: new Uint8Array([1, 2, 3, 4]) }]));
+  const server = await startEditor({
+    port: 0,
+    updateHost: "127.0.0.1",
+    updatePort: 0,
+    updateHostVersion: "4.0.0",
+    workspace,
+    buildRunner: async () => ({ appJs, bytecode, metadata, pak, runtimeAbi: "fixture-root-abi", bytecodeMetadata: JSON.parse(readFileSync(metadata, "utf8")) }),
+  });
+  const createBuild = async (projectId: string, rootAppId: string, childAppId: string, reuse?: string[]) => {
+    const created = await request(server, "/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: projectId, name: projectId, appId: rootAppId, version: "1.0.0", build: 1 }) });
+    expect(created.response.status).toBe(201);
+    writeSystemProject(workspace, projectId, rootAppId, childAppId);
+    if (reuse) {
+      const saved = await request(server, `/api/projects/${projectId}/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ reusePublishedPackages: reuse }) });
+      expect(saved.response.status).toBe(200);
+    }
+    const build = await request(server, `/api/projects/${projectId}/build`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(build.response.status).toBe(202);
+    const status = await waitForBuild(server, projectId);
+    expect(status.error, status.logs.join("\n")).toBeUndefined();
+    return status;
+  };
+  try {
+    const ownerStatus = await createBuild("owner-app", "root.owner", "child.app");
+    const ownerPublish = await request(server, "/api/projects/owner-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(ownerPublish.response.status).toBe(200);
+    const ownerHistoryPath = join(workspace, "states/owner-app.versions.json");
+    const ownerStatePath = join(workspace, "states/owner-app.json");
+    const ownerHistoryBefore = readFileSync(ownerHistoryPath);
+    const ownerStateBefore = readFileSync(ownerStatePath);
+    const ownerHistory = JSON.parse(ownerHistoryBefore.toString()) as { entries: any[] };
+    const ownerEntry = ownerHistory.entries[0]!;
+    const ownerChild = ownerEntry.packages.find((pkg: any) => pkg.id === "child.app");
+    const ownerRoot = ownerEntry.packages.find((pkg: any) => pkg.id === "root.owner");
+    expect(ownerChild).toBeTruthy();
+    expect(ownerRoot).toBeTruthy();
+    const ownerRootHost = JSON.parse(readFileSync(join(workspace, "updates", ownerRoot.artifactRoot, "host.json"), "utf8")) as any;
+    const ownerChildDescriptor = ownerRootHost.applications["child.app"];
+    const ownerChildManifestBytes = readFileSync(join(workspace, "updates", ownerChild.artifactRoot, "latest.json"));
+    const ownerChildBootstrapBytes = readFileSync(join(workspace, "updates", ownerChild.artifactRoot, "bootstrap/app.bytecode.json"));
+
+    const collisionStatus = await createBuild("collision-app", "root.collision", "child.app");
+    expect(collisionStatus.error).toBeUndefined();
+    const unoptedPublish = await request(server, "/api/projects/collision-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(unoptedPublish.response.status).toBe(409);
+    expect(readFileSync(ownerHistoryPath)).toEqual(ownerHistoryBefore);
+    expect(readFileSync(ownerStatePath)).toEqual(ownerStateBefore);
+
+    await createBuild("reuse-app", "root.reuse", "child.app", ["child.app"]);
+    const reusePublish = await request(server, "/api/projects/reuse-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(reusePublish.response.status, JSON.stringify(reusePublish.value)).toBe(200);
+    const reuseVersions = await request(server, "/api/projects/reuse-app/versions");
+    const reuseEntry = reuseVersions.value.history[0];
+    expect(reuseEntry.packages.map((pkg: any) => pkg.id)).toEqual(["root.reuse"]);
+    const reuseIndex = await request(server, new URL(reuseVersions.value.appConfigUrl).pathname);
+    expect(reuseIndex.response.status).toBe(200);
+    const reuseHost = await request(server, new URL(reuseIndex.value.latest.hostConfigUrl, reuseVersions.value.appConfigUrl).pathname);
+    expect(reuseHost.response.status).toBe(200);
+    const reusedDescriptor = reuseHost.value.applications["child.app"];
+    const mutableReuseHost = await request(server, new URL(reusePublish.value.hostConfigUrl).pathname);
+    expect(mutableReuseHost.response.status).toBe(200);
+    expect(mutableReuseHost.value.applications["child.app"].packageVersion).toBe(ownerEntry.packageVersion);
+    expect(mutableReuseHost.value.applications["child.app"].reusedReleaseId).toBe(ownerEntry.releaseId);
+    expect(reusedDescriptor.reusedProjectId).toBe("owner-app");
+    expect(reusedDescriptor.reusedReleaseId).toBe(ownerEntry.releaseId);
+    expect(reusedDescriptor.packageVersion).toBe(ownerEntry.packageVersion);
+    expect(reusedDescriptor.packageVersion).not.toBe(reuseEntry.releaseId);
+    expect(new URL(reusedDescriptor.manifestUrl).pathname).toBe(new URL(ownerChildDescriptor.manifestUrl).pathname);
+    expect(new URL(reusedDescriptor.hostConfigUrl).pathname).toBe(new URL(ownerChildDescriptor.hostConfigUrl).pathname);
+    expect(reusedDescriptor.keyId).toBe(ownerChildDescriptor.keyId);
+    expect(reusedDescriptor.publicKey).toBe(ownerChildDescriptor.publicKey);
+    expect(reusedDescriptor.config.updates.namespace).toBe(ownerChildDescriptor.config.updates.namespace);
+    expect(reusedDescriptor.config.updates.branchNamespace).toBe(ownerChildDescriptor.config.updates.branchNamespace);
+    expect(reusedDescriptor.role).toBe("miniapp");
+    expect((await request(server, "/stable/pocket/4.0.0/child.app/latest.json")).value.projectId).toBe("owner-app");
+    expect(readFileSync(ownerHistoryPath)).toEqual(ownerHistoryBefore);
+    expect(readFileSync(ownerStatePath)).toEqual(ownerStateBefore);
+    expect(readFileSync(join(workspace, "updates", ownerChild.artifactRoot, "latest.json"))).toEqual(ownerChildManifestBytes);
+    expect(readFileSync(join(workspace, "updates", ownerChild.artifactRoot, "bootstrap/app.bytecode.json"))).toEqual(ownerChildBootstrapBytes);
+    expect(ownerStatus.builtRevision).toBeTruthy();
+
+    await createBuild("lantern-owner", "pocket.demo.lantern", "owner.internal");
+    const lanternOwnerPublish = await request(server, "/api/projects/lantern-owner/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(lanternOwnerPublish.response.status).toBe(200);
+    const lanternHistoryPath = join(workspace, "states/lantern-owner.versions.json");
+    const lanternHistoryBefore = readFileSync(lanternHistoryPath);
+    const lanternHistory = JSON.parse(lanternHistoryBefore.toString()) as { entries: any[] };
+    const lanternEntry = lanternHistory.entries[0]!;
+    const lanternRoot = lanternEntry.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern");
+    const lanternRootHost = JSON.parse(readFileSync(join(workspace, "updates", lanternRoot.artifactRoot, "host.json"), "utf8")) as any;
+    await createBuild("lantern-reuse", "root.lantern.reuse", "pocket.demo.lantern", ["pocket.demo.lantern"]);
+    const lanternReusePublish = await request(server, "/api/projects/lantern-reuse/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(lanternReusePublish.response.status, JSON.stringify(lanternReusePublish.value)).toBe(200);
+    const lanternReuseVersions = await request(server, "/api/projects/lantern-reuse/versions");
+    expect(lanternReuseVersions.value.history[0].packages.map((pkg: any) => pkg.id)).toEqual(["root.lantern.reuse"]);
+    const lanternReuseIndex = await request(server, new URL(lanternReuseVersions.value.appConfigUrl).pathname);
+    const lanternReuseHost = await request(server, new URL(lanternReuseIndex.value.latest.hostConfigUrl, lanternReuseVersions.value.appConfigUrl).pathname);
+    const lanternDescriptor = lanternReuseHost.value.applications["pocket.demo.lantern"];
+    expect(lanternDescriptor.reusedProjectId).toBe("lantern-owner");
+    expect(lanternDescriptor.reusedReleaseId).toBe(lanternEntry.releaseId);
+    expect(lanternDescriptor.packageVersion).toBe(lanternEntry.packageVersion);
+    expect(lanternDescriptor.role).toBe("miniapp");
+    expect(lanternDescriptor.config.appId).toBe("pocket.demo.lantern");
+    expect(lanternDescriptor.config.updates.namespace).toBe(lanternRootHost.POCKET_STORE_NAMESPACE);
+    expect(lanternDescriptor.config.updates.branchNamespace).toBe(lanternRootHost.POCKET_UPDATE_BRANCH_NAMESPACE);
+    expect((await request(server, "/stable/pocket/4.0.0/pocket.demo.lantern/latest.json")).value.projectId).toBe("lantern-owner");
+    expect(readFileSync(lanternHistoryPath)).toEqual(lanternHistoryBefore);
+
+    await createBuild("missing-reuse", "root.missing", "missing.app", ["missing.app"]);
+    const unavailablePublish = await request(server, "/api/projects/missing-reuse/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(unavailablePublish.response.status).toBe(400);
+    expect(unavailablePublish.value.error).toContain("no unique published release");
+    expect(existsSync(join(workspace, "states/missing-reuse.versions.json"))).toBe(false);
+  } finally {
+    server.stop(true);
     rmSync(workspace, { recursive: true, force: true });
     rmSync(fixture, { recursive: true, force: true });
   }

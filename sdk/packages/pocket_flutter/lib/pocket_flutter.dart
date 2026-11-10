@@ -3,6 +3,7 @@ export 'src/pocket_binary_codec.dart';
 export 'src/pocket_display.dart';
 export 'src/pocket_display_geometry.dart';
 export 'src/pocket_duplex.dart';
+export 'src/flutter_frame_monitor.dart';
 export 'src/pocket_model.dart';
 export 'src/pocket_memory_limits.dart';
 export 'src/pocket_guest_security.dart';

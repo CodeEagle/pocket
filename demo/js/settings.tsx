@@ -13,9 +13,14 @@ import {
   toMobileColor,
 } from "@pocket/ui";
 import { version } from "./package.json";
-import type { AccentColor, DemoEvent, DemoState, InterfaceDensity } from "./state.ts";
+import type { AccentColor, DemoEvent, DemoState, InterfaceDensity, MiniAppPresentationMode } from "./state.ts";
 
-type Appearance = { dark: boolean; accent: AccentColor; density: InterfaceDensity };
+type Appearance = {
+  dark: boolean;
+  accent: AccentColor;
+  density: InterfaceDensity;
+  presentationStyle?: MiniAppPresentationMode;
+};
 
 /** Only recognized preferences cross the persisted-data boundary. */
 export function readAppearance(value: unknown): Appearance | undefined {
@@ -26,11 +31,18 @@ export function readAppearance(value: unknown): Appearance | undefined {
     dark: record.dark === true,
     accent: record.accent === "violet" || record.accent === "teal" || record.accent === "rose" ? record.accent : "blue",
     density: record.density === "touch" || record.density === "desktop" ? record.density : "auto",
+    ...(record.presentationStyle === "page" ? { presentationStyle: "page" as const } : {}),
   };
 }
 
 export function storedAppearance(state: DemoState): Appearance & { version: number } {
-  return { version: 1, dark: state.mobileDark, accent: state.accentColor, density: state.interfaceDensity };
+  return {
+    version: 1,
+    dark: state.mobileDark,
+    accent: state.accentColor,
+    density: state.interfaceDensity,
+    ...(state.miniAppPresentationStyle === "page" ? { presentationStyle: "page" as const } : {}),
+  };
 }
 
 export function SettingsPage(props: {
@@ -86,6 +98,22 @@ export function SettingsPage(props: {
               onChange={(id) => props.dispatch({ type: "setInterfaceDensity", value: id as InterfaceDensity })}
             />
           </MobileCard>
+          <MobileCard
+            title="MiniApp presentation"
+            detail="Global default transition when an app manifest has no presentation.style override."
+          >
+            <MobileSegmentedControl
+              items={[
+                { id: "sheet", label: "Sheet (Bottom-Up)" },
+                { id: "page", label: "Page (Push)" },
+              ]}
+              active={props.state().miniAppPresentationStyle}
+              onChange={(id) => props.dispatch({ type: "setMiniAppPresentationStyle", value: id as MiniAppPresentationMode })}
+            />
+            <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>
+              Profile configures "page" in pocket.json; Lobby & Lantern follow this global setting.
+            </Text>
+          </MobileCard>
           <MobileCard title="Your preferences">
             <MobileListTile title="Device storage" detail={props.status()} />
             <MobileButton label="Reset appearance" kind="outlined" onPress={() => setResetOpen(true)} />
@@ -99,7 +127,7 @@ export function SettingsPage(props: {
         <MobileDialog
           open={resetOpen()}
           title="Reset appearance?"
-          body="Restore the light theme, blue accent and automatic density. Your other data stays on this device."
+          body="Restore the light theme, blue accent, automatic density and bottom-up sheet MiniApp presentation. Your other data stays on this device."
           confirmLabel="Reset"
           onConfirm={() => {
             props.dispatch({ type: "resetAppearance" });

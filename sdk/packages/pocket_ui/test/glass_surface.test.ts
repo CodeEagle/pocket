@@ -37,18 +37,22 @@ export const SafeAreaScaffold = (props: any) => ({ type: "scaffold", props });
 export const SafeAreaScaffoldContext = createContext({
   hasScaffold: false,
   reservedActions: 0,
+  reservedLeadingActions: 0,
   geometry: () => ({ width: 390, height: 669, safeArea: { top: 0, right: 0, bottom: 0, left: 0 }, keyboardInset: 0, reservedRegions: [] }),
   topRightContentReserve: () => 0,
   topRightReserveForBand: () => 0,
+  sideReservesForBand: () => ({ left: 0, right: 0 }),
 });
 export const ScrollablePageContext = createContext({
   offset: () => 0,
   max: () => 0,
 });
 export const ScrollContourItem = (props: any) => ({ type: "scroll-contour-item", props });
-export const useScrollContourReserve = () => ({ nodeRef: () => {}, reserve: () => 0, syncLayout: () => false });
+export const useScrollContourReserve = () => ({ leftReserve: () => 0, nodeRef: () => {}, reserve: () => 0, reserves: () => ({ left: 0, right: 0 }), syncLayout: () => false });
 `);
 writeFileSync(join(isolatedSourceRoot, "responsive.ts"), readFileSync(join(import.meta.dir, "../src/responsive.ts")));
+writeFileSync(join(isolatedSourceRoot, "host.ts"), readFileSync(join(import.meta.dir, "../src/host.ts")));
+writeFileSync(join(isolatedSourceRoot, "display.ts"), readFileSync(join(import.meta.dir, "../src/display.ts")));
 writeFileSync(join(isolatedSourceRoot, "motion.ts"), readFileSync(join(import.meta.dir, "../src/motion.ts")));
 writeFileSync(join(isolatedSourceRoot, "accessibility.ts"), readFileSync(join(import.meta.dir, "../src/accessibility.ts")));
 

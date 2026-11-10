@@ -5,7 +5,7 @@ import type { PocketSystemV1 } from "../../../sdk/packages/pocket_ui/src/system.
 mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60 }));
 mock.module("solid-js", () => ({ onCleanup: () => {} }));
 const { buildShowcaseSystemConfiguration, isOfficialDemoLaunchable } = await import("../system.ts");
-const { officialDemos, showcaseCompositorSurfaces } = await import("../official_demos.ts");
+const { officialDemos, readTrustedCompositorSurfaceIds, showcaseCompositorSurfaces } = await import("../official_demos.ts");
 
 const base: PocketSystemV1 = {
   pocketSystem: 1,
@@ -62,7 +62,13 @@ const limited = {
 };
 
 test("official entries are cataloged, but only supported packages are installed and authorized", () => {
-  const configuration = buildShowcaseSystemConfiguration(base, [hero, limited]);
+  const trustedAvailableIds = new Set([
+    "pocket.demo.profile",
+    "pocket.demo.lobby",
+    "pocket.demo.lantern",
+    hero.appId,
+  ]);
+  const configuration = buildShowcaseSystemConfiguration(base, [hero, limited], trustedAvailableIds);
   const { manifest, policies } = configuration;
   const heroCatalog = manifest.applications.catalog.find((entry) => entry.package === hero.appId)!;
   const limitedCatalog = manifest.applications.catalog.find((entry) => entry.package === limited.appId)!;
@@ -100,6 +106,49 @@ test("official entries are cataloged, but only supported packages are installed 
   assert.equal(surfaces["pocket.demo.lantern"], 63);
   assert.equal(surfaces[hero.appId], 14);
   assert.equal(surfaces[limited.appId], undefined);
+});
+
+test("launchable official demos stay cataloged but uninstalled without a trusted host surface", () => {
+  const configuration = buildShowcaseSystemConfiguration(base, [hero, limited], new Set([
+    "pocket.demo.profile",
+    "pocket.demo.lobby",
+    "pocket.demo.lantern",
+  ]));
+  const heroCatalog = configuration.manifest.applications.catalog.find((entry) => entry.package === hero.appId)!;
+
+  assert.equal(heroCatalog.required, false);
+  assert.equal(configuration.manifest.applications.catalog.some((entry) => entry.package === limited.appId), true);
+  assert.deepEqual(configuration.manifest.installation.installedPackages, [
+    "pocket.host.demo",
+    "pocket.demo.profile",
+    "pocket.demo.lobby",
+    "pocket.demo.lantern",
+  ]);
+  assert.deepEqual(configuration.policies["pocket.host.demo"]?.allowedOpenApps, [
+    "pocket.demo.profile",
+    "pocket.demo.lobby",
+    "pocket.demo.lantern",
+  ]);
+  assert.equal(configuration.policies[hero.appId], undefined);
+
+  const incompleteBaseRegistry = buildShowcaseSystemConfiguration(base, [hero], new Set([hero.appId]));
+  assert.equal(incompleteBaseRegistry.manifest.installation.installedPackages.includes(hero.appId), false);
+});
+
+test("trusted compositor IDs reject malformed native registries", () => {
+  assert.deepEqual([...readTrustedCompositorSurfaceIds({
+    "pocket.demo.profile": 2,
+    "pocket.demo.lobby": 2,
+    "pocket.demo.lantern": 63,
+    [hero.appId]: 14,
+  })], []);
+  assert.deepEqual([...readTrustedCompositorSurfaceIds(null)], []);
+  assert.deepEqual([...readTrustedCompositorSurfaceIds({
+    "pocket.demo.profile": 2,
+    "pocket.demo.lobby": 3,
+    "pocket.demo.lantern": 63,
+    [hero.appId]: 14,
+  })], ["pocket.demo.profile", "pocket.demo.lobby", "pocket.demo.lantern", hero.appId]);
 });
 
 test("duplicate official IDs and oversized handle catalogs fail closed", () => {

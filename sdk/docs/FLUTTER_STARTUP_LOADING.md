@@ -2,9 +2,9 @@
 
 ## 接入范围与来源
 
-`PocketApp`、嵌入现有Flutter页面的 `PocketGuest` 和底层 `PocketView` 都支持 `loadingBuilder`。不传时仍有默认加载提示；传入时可以用宿主自己的图片和排版展示相同的真实阶段数据，无需修改Demo，也无需再维护一套启动状态。
+`PocketApp`、嵌入现有Flutter页面的 `PocketGuest` 和底层 `PocketView` 都支持 `loadingBuilder`。默认界面只在签名远程包或宿主配置实际加载期间显示进度；内嵌资源、健康缓存和本地首帧准备保持安静，直到首帧可显示。传入 `loadingBuilder` 时，宿主仍会收到本地及远程启动的真实阶段数据并自行渲染。
 
-保留父工程（排除`pocket_host/`）的 `lib/main.dart:8` 立即runApp，首帧后才预热；`lib/ui/mini_app_host_page.dart:57` 直接挂载渲染面，没有可移植的资源Loading API。当前SDK原本在 `PocketSession.ready` 前有包下载/校验提示，之后PocketView只有转圈。这个ready仅表示可以挂载运行时，不能当作游戏首帧已准备好。本改动适配现有会话与资源解码边界，不增加Dart业务状态机或新的native通信通道。
+保留父工程（排除`pocket_host/`）的 `lib/main.dart:8` 立即runApp，首帧后才预热；`lib/ui/mini_app_host_page.dart:57` 直接挂载渲染面，没有可移植的资源Loading API。`PocketSession.ready` 只表示可以挂载运行时，不能当作游戏首帧已准备好。本 SDK 在本地准备首帧时保留渲染准入门，但默认不遮挡宿主界面；自定义builder仍可显示已有进度事实。
 
 ## 公共 API
 
@@ -40,7 +40,7 @@ PocketGuest(
 - `decodingInitialResources`：初始DrawList及auxiliary DrawList引用的去重图片/纹理资源，按现有解码future完成事实计数。计数属于当前首帧/几何资源批次，后续几何帧可能引用新的资源并开始新批次；它不是整个PAK、所有剧情图片或未来动态资源的累计进度。
 - `applyingDisplayGeometry`：消费当前安全区/显示几何并取得零时间布局帧；该帧新引用的资源仍经过现有首帧解码门。
 
-Loading沿用PocketView原有的`_loading`准入门，只有实际资源与安全区布局准备好后才由原有onReady结束；不因为Session.ready或controller已经绑定就提前显示游戏。错误、资源超时和销毁沿用原有路径，不用成功占位替代。
+PocketView沿用原有的`_loading`准入门，只有实际资源与安全区布局准备好后才由原有onReady结束；不因为Session.ready或controller已经绑定就提前显示游戏。默认本地启动保持空白，传入的builder仍可绘制阶段信息；错误、资源超时和销毁沿用原有路径，错误面优先于builder，不用成功占位替代。
 
 SDK Loading负责JS游戏画面出现前的运行资源；游戏画面出现后的语言、存档等业务准备仍由JS自己的Loading负责。二者不共用或复制业务状态。Flutter容器的大小与安全区传递保持现有渲染面，不用Loading外套尺寸不同的视口。
 
@@ -77,7 +77,13 @@ SDK Loading负责JS游戏画面出现前的运行资源；游戏画面出现后�
 
 ## 动态远程容器
 
-`PocketSystemHost.fromHostConfig` 在签名目录尚未与根 runtime generation 匹配时，也显示既有 Session 的真实包进度和错误。此阶段仍禁止构造 `PocketView`，但不再返回没有反馈的纯色占位。自定义 Debug 容器在调用 SDK 之前自行读取 Host 配置时，仍须接入 `PocketHostConfig.load` 的 `onProgress` 与取消令牌；`PocketView.loadingBuilder` 只处理它实际挂载之后的启动阶段。
+`PocketSystemHost.fromHostConfig` 在签名目录尚未与根 runtime generation 匹配且远程包准备仍在进行时，显示既有 Session 的真实包进度和错误。包下载完成后的本地 catalog/挂载准入保持安静，此阶段仍禁止构造 `PocketView`。自定义 Debug 容器在调用 SDK 之前自行读取 Host 配置时，仍须接入 `PocketHostConfig.load` 的 `onProgress` 与取消令牌；`PocketView.loadingBuilder` 只处理它实际挂载之后的启动阶段。
+
+## 本地启动默认保持安静（2026-11-10）
+
+SDK默认指示器现在绑定到可确认的远程工作：`PocketSystemHostApplication` 的远程Host配置读取，以及 `PocketSession` 的签名包准备。未配置远程入口时，延迟的本地catalog读取不会显示加载圈；已加载包的健康缓存也不会把后台cache-first更新显示成阻塞式启动。`PocketSystemHost` 在包传输完成后等待本地目录或首帧时保留背景色，不显示合成进度。
+
+底层 `PocketView` 没有独立远程下载来源，因此默认在首帧前保持空白；显式 `loadingBuilder` 仍接收 runtime、首帧资源和显示几何进度。宿主启动失败与PocketView运行时/资源错误仍展示错误面，错误优先于自定义builder。
 
 ## 默认原生解压与 App 单份源码（2026-11-09）
 

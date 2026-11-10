@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,6 +7,28 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 
 void main() {
+  testWidgets('local bundled catalog bootstrap stays quiet', (tester) async {
+    final catalog = Completer<PocketBundledApplicationCatalog>();
+    await tester.pumpWidget(
+      PocketSystemHostApplication(
+        loadBundledApplications: () => catalog.future,
+        buildSystemUI: (_) =>
+            throw StateError('catalog is still loading locally'),
+        buildApplications: (_) => const <String, PocketAppConfig>{},
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      findsNothing,
+    );
+    expect(find.text('初始化'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    catalog.complete(PocketBundledApplicationCatalog.empty);
+  });
+
   testWidgets('custom exit does not wait for or reopen a pending container', (
     tester,
   ) async {
@@ -23,6 +46,10 @@ void main() {
       ),
     );
     await tester.pump();
+    expect(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      findsNothing,
+    );
     await tester.tap(find.byKey(const ValueKey('pocket-container-exit')));
     await tester.pump();
     expect(exits, 1);
@@ -74,7 +101,11 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 350));
-      expect(find.text('初始化'), findsOneWidget);
+      expect(find.text('初始化'), findsNothing);
+      expect(
+        find.byKey(const ValueKey<String>('pocket-startup-progress')),
+        findsNothing,
+      );
       expect(pending.isCompleted, isFalse);
       switch (exit) {
         case 'button':
@@ -88,8 +119,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 350));
       expect(find.text('主界面 0'), findsOneWidget);
       expect(find.byType(PocketSystemHostApplication), findsNothing);
-      // The slow request is deliberately still pending. The retained parent
-      // route must already accept input before any network result arrives.
+      // The opaque custom callback is deliberately still pending. The
+      // retained parent route must already accept input before it completes.
       await tester.tap(find.text('主界面 0'));
       await tester.pump();
       expect(find.text('主界面 1'), findsOneWidget);
@@ -102,7 +133,7 @@ void main() {
     });
   }
 
-  testWidgets('changing the host link replaces stale content with loading', (
+  testWidgets('changing an opaque host loader stays quiet until its result', (
     tester,
   ) async {
     Widget host(Future<PocketHostConfig?> Function() load) =>
@@ -126,12 +157,11 @@ void main() {
     await tester.pumpWidget(host(() => next.future));
     await tester.pump();
     expect(find.textContaining('old link'), findsNothing);
-    expect(find.text('初始化'), findsOneWidget);
-    final indicator = tester.widget<LinearProgressIndicator>(
-      find.byType(LinearProgressIndicator),
+    expect(find.text('初始化'), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('pocket-startup-progress')),
+      findsNothing,
     );
-    expect(indicator.value, isNull);
-    expect(indicator.color, Colors.white);
 
     next.completeError(StateError('new link'));
     await tester.pump();
@@ -140,4 +170,41 @@ void main() {
     expect(find.byType(LinearProgressIndicator), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('SDK URL-backed host config keeps request progress visible', (
+    tester,
+  ) async {
+    var createdClients = 0;
+    await HttpOverrides.runWithHttpOverrides(() async {
+      await tester.pumpWidget(
+        PocketSystemHostApplication(
+          hostConfigUrl: Uri.parse('http://127.0.0.1:1/host.json'),
+          loadBundledApplications: () async =>
+              PocketBundledApplicationCatalog.empty,
+          buildSystemUI: (_) => const PocketAppConfig(appId: 'test.host'),
+          buildApplications: (_) => const <String, PocketAppConfig>{},
+        ),
+      );
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey<String>('pocket-startup-progress')),
+        findsOneWidget,
+      );
+      expect(createdClients, 1);
+      expect(find.text('初始化'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, _RealHttpOverrides(() => createdClients++));
+  });
+}
+
+final class _RealHttpOverrides extends HttpOverrides {
+  _RealHttpOverrides(this.onCreate);
+
+  final VoidCallback onCreate;
+
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    onCreate();
+    return super.createHttpClient(context);
+  }
 }

@@ -393,3 +393,23 @@ macOS 本地服务可用 `bash scripts/editor_service.sh start` 启动、`status
 以上服务命令从 `/Volumes/ORICO/Development/Github/pocket/sdk` 执行；它使用 SDK
 目录下的 `editor/`、`packages/` 和编译工具。Showcase 的 `../demo` 不会被复制成
 SDK 实现，也不会回到旧 `pocket_host` 路径。
+
+## SystemUI 宿主容器关闭协议（`system.container.close`）
+
+- **来源与保留行为**：参考保留母工程
+  `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/lib/ui/mini_app_host_page.dart`
+  的宿主页面退出交互，将容器退出触发权下沉至 JS SystemUI（如 Demo Home 顶栏返回/退出按钮），
+  Flutter 仅保留边界回调传输。
+- **Dart 宿主边界（`sdk/lib/src/pocket_system_host.dart`）**：
+  - `PocketSystemHost` 与 `PocketSystemHost.fromHostConfig` 提供可选 `VoidCallback? onClose`。
+  - `system.container.close` 注册在现有 `_SystemRuntimePlugin`（`_systemRequestCapabilities`）
+    受信任列表中，仅允许 `system-ui` 实例调用 `_handleSystemCapability`；子应用无该插件权限。
+  - 若宿主未配置 `onClose`，返回 `PocketCapabilityException('capability_unavailable', 'Host container close is not configured')`；
+    配置后触发 `onClose()` 并返回 `{'closed': true}`。
+- **JS SystemUI SDK（`sdk/packages/pocket_ui/src/system.ts`）**：
+  - `PocketSystemKernel.closeContainer()` 复用现有 `host.request("system.container.close", {})` 通道。
+  - 若不可信子应用尝试通过 `system.request` 转发 `system.container.close`，内核直接以
+    `system_context_denied` 拒绝。
+- **验证**：`sdk/packages/pocket_ui/test/system_kernel.test.ts` 与
+  `sdk/test/pocket_system_host_test.dart` 覆盖可信触发、未配置回调返回 `capability_unavailable`
+  以及子应用越权拒绝。

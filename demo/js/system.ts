@@ -1,18 +1,39 @@
-import { installPocketSystem, type PocketSystemV1 } from "@pocket/ui/system";
+import { installPocketSystem, type PocketSystemPresetUpdate, type PocketSystemV1 } from "@pocket/ui/system";
 import { createPocketUpdateClient, type PocketUpdateStateOptions } from "@pocket/ui/updates";
 import { hostError, type HostBridge } from "@pocket/ui/host";
 import type { JsonObject } from "@pocket/ui/host";
 import type { PocketSystemPolicies } from "@pocket/ui/system";
 import { onCleanup } from "solid-js";
 import manifest from "./pocket.system.json";
+import lanternManifest from "./apps/lantern/pocket.json";
+import lobbyManifest from "./apps/lobby/pocket.json";
+import profileManifest from "./apps/profile/pocket.json";
 import {
   officialDemoAppId,
   officialDemos,
   isOfficialDemoLaunchable,
+  readTrustedCompositorSurfaceIds,
   type OfficialDemo,
 } from "./official_demos.ts";
 
 export { isOfficialDemoLaunchable } from "./official_demos.ts";
+
+const BUILTIN_APP_MANIFESTS: Readonly<Record<string, unknown>> = {
+  "pocket.demo.lantern": lanternManifest,
+  "pocket.demo.lobby": lobbyManifest,
+  "pocket.demo.profile": profileManifest,
+};
+
+function manifestPresentationOf(appManifest: unknown): JsonObject | undefined {
+  if (!appManifest || typeof appManifest !== "object" || Array.isArray(appManifest)) return undefined;
+  const record = appManifest as Record<string, unknown>;
+  const appSection = record.app && typeof record.app === "object" && !Array.isArray(record.app)
+    ? record.app as Record<string, unknown>
+    : undefined;
+  const rawPresentation = appSection?.presentation ?? record.presentation;
+  if (!rawPresentation || typeof rawPresentation !== "object" || Array.isArray(rawPresentation)) return undefined;
+  return { ...(rawPresentation as JsonObject) };
+}
 
 function presentationOf(demo: OfficialDemo): JsonObject {
   return {
@@ -33,9 +54,16 @@ function presentationOf(demo: OfficialDemo): JsonObject {
 export function buildShowcaseSystemConfiguration(
   base: PocketSystemV1 = manifest as PocketSystemV1,
   demos: readonly OfficialDemo[] = officialDemos,
+  trustedAvailableIds: ReadonlySet<string> = new Set(),
 ): { manifest: PocketSystemV1; policies: PocketSystemPolicies } {
   if (demos.length > 59) throw new RangeError("Official demo catalog exceeds reserved compositor handles 4..62");
   const seen = new Set(base.applications.catalog.map((entry) => entry.package));
+  const officialPackageIds = new Set(demos.map(officialDemoAppId));
+  const systemUI = base.roles.systemUI;
+  const installedBaseChildren = base.installation.installedPackages.filter(
+    (appId) => appId !== systemUI && !officialPackageIds.has(appId),
+  );
+  const baseRegistryIsComplete = installedBaseChildren.every((appId) => trustedAvailableIds.has(appId));
   const launchableIds: string[] = [];
   const officialCatalog = demos.map((demo) => {
     if (!demo.id || !demo.title || !demo.assets?.manifest) {
@@ -44,7 +72,9 @@ export function buildShowcaseSystemConfiguration(
     const packageId = officialDemoAppId(demo);
     if (seen.has(packageId)) throw new TypeError(`Duplicate official demo package: ${packageId}`);
     seen.add(packageId);
-    if (isOfficialDemoLaunchable(demo)) launchableIds.push(packageId);
+    if (baseRegistryIsComplete && isOfficialDemoLaunchable(demo) && trustedAvailableIds.has(packageId)) {
+      launchableIds.push(packageId);
+    }
     return {
       package: packageId,
       manifest: demo.assets.manifest,
@@ -52,15 +82,29 @@ export function buildShowcaseSystemConfiguration(
       presentation: presentationOf(demo),
     };
   });
+  const baseCatalog = base.applications.catalog.map((entry) => {
+    const manifestPresentation = manifestPresentationOf(BUILTIN_APP_MANIFESTS[entry.package]);
+    if (!manifestPresentation && !entry.presentation) return entry;
+    return {
+      ...entry,
+      presentation: {
+        ...(manifestPresentation ?? {}),
+        ...(entry.presentation ?? {}),
+      },
+    };
+  });
   const nextManifest: PocketSystemV1 = {
     ...base,
     applications: {
       ...base.applications,
-      catalog: [...base.applications.catalog, ...officialCatalog],
+      catalog: [...baseCatalog, ...officialCatalog],
     },
     installation: {
       ...base.installation,
-      installedPackages: [...new Set([...base.installation.installedPackages, ...launchableIds])],
+      installedPackages: [...new Set([
+        ...base.installation.installedPackages.filter((appId) => !officialPackageIds.has(appId)),
+        ...launchableIds,
+      ])],
     },
   };
   const policies: PocketSystemPolicies = {
@@ -94,15 +138,25 @@ export function buildShowcaseSystemConfiguration(
 }
 
 /** Product policy stays in the SystemUI guest, outside the Flutter shell. */
-export function installShowcaseSystem(bridge: HostBridge, state?: PocketUpdateStateOptions) {
-  const configuration = buildShowcaseSystemConfiguration();
+export function installShowcaseSystem(
+  bridge: HostBridge,
+  state?: PocketUpdateStateOptions,
+  presets?: PocketSystemPresetUpdate,
+) {
+  const configuration = buildShowcaseSystemConfiguration(
+    manifest as PocketSystemV1,
+    officialDemos,
+    readTrustedCompositorSurfaceIds(),
+  );
   const system = installPocketSystem(configuration.manifest, {
     bridge,
     maxResidentApps: 3,
     policies: configuration.policies,
+    presets,
   });
+  // The host already prepares cache-first updates in the background for the
+  // next open. A second guest auto-refresh would apply them over a live page.
   const updates = createPocketUpdateClient(bridge, {
-    autoRefresh: true,
     state: state && {
       ...state,
       storage: {

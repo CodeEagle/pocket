@@ -2,7 +2,7 @@ import { For, Show, createContext, createEffect, createMemo, createSignal, onCle
 import { Focusable, FocusScope, Image, Text, View, type NodeMirror, type ViewProps } from "@pocketjs/framework/solid/components";
 import { BTN, focusNode } from "@pocketjs/framework/input";
 import { onButtonPress } from "@pocketjs/framework/solid/lifecycle";
-import { ScrollablePage, avoidDisplayOcclusions, sideContourReservesForBand, MINI_APP_HOST_ACTION_RESERVE, createDisplayGeometry, deliverTextInputEvent, EMPTY_DISPLAY_GEOMETRY, InputField, pageInsets, useAccessibilityPreferences, wrapTextLines } from "@pocket/ui";
+import { ScrollablePage, avoidDisplayOcclusions, sideContourReservesForBand, MINI_APP_HOST_ACTION_RESERVE, createDisplayGeometry, createSystemPresets, deliverTextInputEvent, EMPTY_DISPLAY_GEOMETRY, InputField, pageInsets, useAccessibilityPreferences, wrapTextLines } from "@pocket/ui";
 import { Video } from "@pocket/ui/video";
 import { PocketStoredImage, type PocketImagesClient } from "@pocket/ui/images";
 import type { HostBridge } from "@pocket/ui/host";
@@ -406,6 +406,7 @@ export function NovelView(props: NovelViewProps): JSX.Element {
   const accessibility = useAccessibilityPreferences();
   const reduceMotion = () => accessibility().reduceMotion;
   const display = createDisplayGeometry({ fallback: { ...EMPTY_DISPLAY_GEOMETRY, width: 360, height: 640 } });
+  const presets = createSystemPresets();
   const visualViewport = createMemo(() => ({ width: display().width, height: display().height }));
   const layout = createMemo(() => {
     const geometry = display();
@@ -419,14 +420,17 @@ export function NovelView(props: NovelViewProps): JSX.Element {
   const headerBounds = createMemo(() => {
     const geometry = display();
     const current = layout();
+    const isPage = presets().presentationStyle === "page";
     const globalRight = geometry.width - current.insetL - current.width;
     const top = current.insetT + 8;
     // Page insets deliberately release local corner occlusions. Reuse the
     // framework contour contract for this control band, including space for
-    // the host close target when that target moves inward around a cutout.
+    // the host back/close target when that target moves inward around a cutout.
     const contour = sideContourReservesForBand(geometry, top, top + 44, { rampPx: 0, bottomTrim: 0 });
-    const left = current.insetL + Math.max(20, contour.left - current.insetL + 20);
-    const right = geometry.width - globalRight - MINI_APP_HOST_ACTION_RESERVE - Math.max(0, contour.right - globalRight);
+    const leftActionReserve = isPage ? MINI_APP_HOST_ACTION_RESERVE : 20;
+    const rightActionReserve = isPage ? 20 : MINI_APP_HOST_ACTION_RESERVE;
+    const left = current.insetL + leftActionReserve + Math.max(0, contour.left - current.insetL);
+    const right = geometry.width - globalRight - rightActionReserve - Math.max(0, contour.right - globalRight);
     const target = { left, top, width: Math.max(1, right - left), height: 44 };
     const safe = avoidDisplayOcclusions(geometry, target, { prefer: "vertical" }).rect;
     return { insetL: safe.left - current.insetL, insetT: safe.top - current.insetT, width: safe.width, height: safe.height };

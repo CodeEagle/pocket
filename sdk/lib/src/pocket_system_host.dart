@@ -77,6 +77,7 @@ const List<String> _platformRequestCapabilities = <String>[
 ];
 
 const List<String> _systemRequestCapabilities = <String>[
+  'system.container.close',
   'system.runtime.configure',
   'system.runtime.create',
   'system.runtime.prepareOpen',
@@ -380,6 +381,17 @@ final class _PocketSystemHostApplicationState
   PocketHostLoadProgress? _hostConfigProgress;
   PocketCancellationToken _hostConfigProgressOwner = PocketCancellationToken();
   bool _remoteDismissed = false;
+  bool _remoteHostConfigLoading = false;
+
+  bool get _hasRemoteHostConfigEntry =>
+      widget.loadHostConfig != null ||
+      widget.hostConfigUrl != null ||
+      const String.fromEnvironment('POCKET_HOST_CONFIG_URL').isNotEmpty;
+
+  bool get _hasSdkRemoteHostConfigEntry =>
+      widget.loadHostConfig == null &&
+      (widget.hostConfigUrl != null ||
+          const String.fromEnvironment('POCKET_HOST_CONFIG_URL').isNotEmpty);
 
   @override
   void initState() {
@@ -414,6 +426,11 @@ final class _PocketSystemHostApplicationState
     _hostConfigProgressOwner.cancel();
     final progressOwner = PocketCancellationToken();
     _hostConfigProgressOwner = progressOwner;
+    _remoteHostConfigLoading =
+        !localOnly &&
+        widget.initialHostConfig == null &&
+        widget.initialHostConfigError == null &&
+        _hasSdkRemoteHostConfigEntry;
     final hostFuture = localOnly
         ? Future.value(
             const _SystemHostLoadResult<PocketHostConfig?>(null, null),
@@ -423,8 +440,11 @@ final class _PocketSystemHostApplicationState
     final host = await hostFuture;
     if (mounted &&
         identical(_hostConfigProgressOwner, progressOwner) &&
-        _hostConfigProgress != null) {
-      setState(() => _hostConfigProgress = null);
+        (_remoteHostConfigLoading || _hostConfigProgress != null)) {
+      setState(() {
+        _remoteHostConfigLoading = false;
+        _hostConfigProgress = null;
+      });
     }
     final catalog = await catalogFuture;
     return _SystemHostBootstrap(host: host, catalog: catalog);
@@ -550,11 +570,9 @@ final class _PocketSystemHostApplicationState
             bootstrap?.catalog.value ?? PocketBundledApplicationCatalog.empty;
         final error = bootstrap?.host.error ?? bootstrap?.catalog.error;
         final remoteEntry =
-            widget.loadHostConfig != null ||
-            widget.hostConfigUrl != null ||
+            _hasRemoteHostConfigEntry ||
             widget.initialHostConfig != null ||
-            widget.initialHostConfigError != null ||
-            const String.fromEnvironment('POCKET_HOST_CONFIG_URL').isNotEmpty;
+            widget.initialHostConfigError != null;
         final canExit =
             !_remoteDismissed &&
             (bootstrap?.host.value != null ||
@@ -572,15 +590,19 @@ final class _PocketSystemHostApplicationState
         );
         Widget body;
         if (bootstrap == null) {
-          final background = widget.backgroundColor;
-          body = PocketStartupIndicator(
-            stage: _hostConfigProgress?.stage ?? 'initializing',
-            downloadedBytes: _hostConfigProgress?.downloadedBytes,
-            totalBytes: _hostConfigProgress?.totalBytes,
-            foregroundColor: background.computeLuminance() > 0.179
-                ? Colors.black
-                : Colors.white,
-          );
+          if (_remoteHostConfigLoading) {
+            final background = widget.backgroundColor;
+            body = PocketStartupIndicator(
+              stage: _hostConfigProgress?.stage ?? 'initializing',
+              downloadedBytes: _hostConfigProgress?.downloadedBytes,
+              totalBytes: _hostConfigProgress?.totalBytes,
+              foregroundColor: background.computeLuminance() > 0.179
+                  ? Colors.black
+                  : Colors.white,
+            );
+          } else {
+            body = const SizedBox.expand();
+          }
         } else if (error != null) {
           body = loadingError(error);
         } else {
@@ -595,12 +617,14 @@ final class _PocketSystemHostApplicationState
                     applications: applications,
                     controller: widget.controller,
                     recordings: widget.recordings,
+                    onClose: widget.onExit,
                   )
                 : PocketSystemHost.fromHostConfig(
                     key: ObjectKey(_hostConfigProgressOwner),
                     config: remote,
                     controller: widget.controller,
                     recordings: widget.recordings,
+                    onClose: _exitRemote,
                     approveSystemUI:
                         widget.approveSystemUI ??
                         ((app) => app.withNativePolicy(
@@ -693,6 +717,8 @@ final class PocketSystemHost extends StatefulWidget {
     this.controller,
     this.recordings,
     this.catalogLoader,
+    this.onClose,
+    this.cacheFirst = false,
     this.backgroundColor = const Color(0xFF000000),
   });
 
@@ -712,6 +738,8 @@ final class PocketSystemHost extends StatefulWidget {
     PocketSystemHostApplicationApprover? approveApplication,
     Future<PocketHostConfig?> Function(String? rootPayloadSha256)?
     reloadHostConfig,
+    VoidCallback? onClose,
+    bool cacheFirst = false,
     Color backgroundColor = const Color(0xFF000000),
   }) {
     PocketAppConfig approveRoot(PocketAppConfig value) =>
@@ -735,26 +763,26 @@ final class PocketSystemHost extends StatefulWidget {
     final allowedHttpHosts = Set<String>.unmodifiable(
       config.systemUI.updates?.debugHttpHosts ?? const <String>[],
     );
-    final reload =
-        reloadHostConfig ??
-        (config.catalog.isEmpty
-            ? null
-            : (String? rootPayloadSha256) async {
-                // A generation carrying the same signed root can reuse the
-                // already verified descriptor. Otherwise the single source
-                // URL is fetched again and its immutable version record is
-                // selected by the mounted payload hash.
-                if (rootPayloadSha256 != null &&
-                    config.rootPayloadSha256?.toLowerCase() ==
-                        rootPayloadSha256.toLowerCase()) {
-                  return config;
-                }
-                return PocketHostConfig.load(
-                  config.source,
-                  allowInsecureHttpHosts: allowedHttpHosts,
-                  requiredRootPayloadSha256: rootPayloadSha256,
-                );
-              });
+    final reload = config.catalog.isEmpty
+        ? null
+        : (String? rootPayloadSha256) async {
+            // Reuse the verified descriptor before invoking any custom IO.
+            // Direct host documents have no immutable catalog to refresh.
+            if (rootPayloadSha256 != null &&
+                config.rootPayloadSha256?.toLowerCase() ==
+                    rootPayloadSha256.toLowerCase()) {
+              return config;
+            }
+            if (reloadHostConfig != null) {
+              return reloadHostConfig(rootPayloadSha256);
+            }
+            return PocketHostConfig.load(
+              config.source,
+              allowInsecureHttpHosts: allowedHttpHosts,
+              requiredRootPayloadSha256: rootPayloadSha256,
+              cacheFirst: cacheFirst,
+            );
+          };
     final loader = reload == null
         ? null
         : (String? rootPayloadSha256) async {
@@ -770,6 +798,8 @@ final class PocketSystemHost extends StatefulWidget {
       controller: controller,
       recordings: recordings,
       catalogLoader: loader,
+      onClose: onClose,
+      cacheFirst: cacheFirst,
       backgroundColor: backgroundColor,
     );
   }
@@ -798,6 +828,15 @@ final class PocketSystemHost extends StatefulWidget {
   /// supplied root payload hash; the host installs its child registry
   /// atomically only after that match is verified.
   final PocketSystemHostCatalogLoader? catalogLoader;
+
+  /// Optional host callback invoked when the trusted SystemUI requests
+  /// closure of the current host container via `system.container.close`.
+  final VoidCallback? onClose;
+
+  /// Reuse a healthy, verified SystemUI package before checking remote updates.
+  /// Cache misses still await the signed download; updates are staged for the
+  /// next open without hiding the current cached UI.
+  final bool cacheFirst;
 
   /// Opaque root fill for the SystemUI surface, including startup and error
   /// states. Child compositor sessions stay transparent and reveal this fill.
@@ -1013,14 +1052,16 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     unawaited(_systemUIInstance.firstFrame!.future.catchError((Object _) {}));
     _systemUIInstance.session.addListener(_systemUIChanged);
     unawaited(
-      _systemUIInstance.session.initialize().catchError((Object error) {
-        _systemUIInstance.startupError = error;
-        final firstFrame = _systemUIInstance.firstFrame;
-        if (firstFrame != null && !firstFrame.isCompleted) {
-          firstFrame.completeError(error);
-        }
-        _publishFacts(sessionChanged: true);
-      }),
+      _systemUIInstance.session
+          .initialize(cacheFirst: widget.cacheFirst)
+          .catchError((Object error) {
+            _systemUIInstance.startupError = error;
+            final firstFrame = _systemUIInstance.firstFrame;
+            if (firstFrame != null && !firstFrame.isCompleted) {
+              firstFrame.completeError(error);
+            }
+            _publishFacts(sessionChanged: true);
+          }),
     );
     _publishFacts();
   }
@@ -1125,6 +1166,13 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
               style: TextStyle(color: foreground),
             ),
           ),
+        );
+      }
+      if (!session.remotePackagePreparationInProgress &&
+          session.transferProgress == null) {
+        return ColoredBox(
+          color: widget.backgroundColor,
+          child: const SizedBox.expand(),
         );
       }
       final progress = session.transferProgress;
@@ -1321,6 +1369,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       );
     }
     return await switch (capability) {
+      'system.container.close' => _closeContainer(ownerGeneration),
       'system.runtime.configure' => _configure(params, ownerGeneration),
       'system.runtime.create' => _create(params, ownerGeneration),
       'system.runtime.prepareOpen' => _prepareOpen(params, ownerGeneration),
@@ -1338,6 +1387,19 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'System capability is unavailable',
       ),
     };
+  }
+
+  Future<Map<String, Object?>> _closeContainer(int ownerGeneration) async {
+    _ensureOwnerGeneration(ownerGeneration);
+    final onClose = widget.onClose;
+    if (onClose == null) {
+      throw const PocketCapabilityException(
+        'capability_unavailable',
+        'Host container close is not configured',
+      );
+    }
+    onClose();
+    return const <String, Object?>{'closed': true};
   }
 
   Future<Object?> _configure(
@@ -1661,6 +1723,46 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     return result;
   }
 
+  List<Map<String, dynamic>> _parseInitialEvents(Object? rawEvents) {
+    if (rawEvents == null) return const <Map<String, dynamic>>[];
+    if (rawEvents is! List || rawEvents.length > 16) {
+      throw const PocketCapabilityException(
+        'invalid_event',
+        'initialEvents must be an array of at most 16 host events',
+      );
+    }
+    final result = <Map<String, dynamic>>[];
+    for (final raw in rawEvents) {
+      if (raw is! Map) {
+        throw const PocketCapabilityException(
+          'invalid_event',
+          'each initialEvent must be an object',
+        );
+      }
+      final entry = Map<String, dynamic>.from(raw);
+      final rawMethod = entry['method'] ?? entry['event'] ?? entry['name'];
+      if (rawMethod is! String || rawMethod.trim().isEmpty) {
+        throw const PocketCapabilityException(
+          'invalid_event',
+          'initialEvent method must be a non-empty string',
+        );
+      }
+      final rawParams =
+          entry['params'] ?? entry['payload'] ?? const <String, dynamic>{};
+      if (rawParams is! Map) {
+        throw const PocketCapabilityException(
+          'invalid_event',
+          'initialEvent params must be an object',
+        );
+      }
+      result.add(<String, dynamic>{
+        'method': rawMethod,
+        'params': Map<String, dynamic>.from(rawParams),
+      });
+    }
+    return List<Map<String, dynamic>>.unmodifiable(result);
+  }
+
   Future<void> _configureStorage(
     Map<String, Set<String>> grants,
     String signature,
@@ -1695,6 +1797,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final appId = _requiredString(params, 'appId');
     final prepareForOpen = params['prepareForOpen'] == true;
     final cacheFirst = params['cacheFirst'] == true;
+    final initialEvents = _parseInitialEvents(params['initialEvents']);
     final trustedConfig = _trustedApplications[appId];
     if (trustedConfig == null) {
       throw PocketCapabilityException(
@@ -1751,7 +1854,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       ),
     ]);
     instance.config = childConfig;
-    instance.session = PocketSession(config: childConfig);
+    instance.session = PocketSession(config: childConfig)
+      ..setInitialEvents(initialEvents);
     instance.observedGeneration = instance.session.generation;
     instance.announcedGeneration = instance.session.generation;
     instance.changeListener = () => _instanceChanged(instance);
@@ -1820,6 +1924,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     _ensureOwnerGeneration(ownerGeneration);
     final instanceId = _requiredString(params, 'instanceId');
     final cacheFirst = params['cacheFirst'] == true;
+    final hasInitialEvents = params.containsKey('initialEvents');
+    final initialEvents = hasInitialEvents
+        ? _parseInitialEvents(params['initialEvents'])
+        : const <Map<String, dynamic>>[];
     final rawGeneration = params['generation'];
     if (rawGeneration is! num ||
         !rawGeneration.isFinite ||
@@ -1856,6 +1964,9 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'runtime_busy',
         'Only a hidden runtime can be prepared before presentation',
       );
+    }
+    if (hasInitialEvents) {
+      instance.session.setInitialEvents(initialEvents);
     }
 
     late final Map<String, Object?> result;

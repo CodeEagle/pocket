@@ -456,10 +456,17 @@ void main() {
     },
   );
 
-  testWidgets('keeps the guest tick diagnostic inside the local safe area', (
+  testWidgets('shows the Flutter FPS HUD inside the safe area', (
     tester,
   ) async {
     _configureDuoLikeView(tester);
+    tester.view.viewInsets = FakeViewPadding.zero;
+    tester.view.padding = const FakeViewPadding(
+      top: 10,
+      right: 20,
+      bottom: 30,
+      left: 5,
+    );
     final runtime = _ViewportRuntime();
     await tester.pumpWidget(
       MaterialApp(
@@ -477,13 +484,50 @@ void main() {
     );
     await tester.pump();
 
-    final label = find.textContaining('Guest ticks/s');
-    expect(label, findsOneWidget);
-    final position = tester.widget<Positioned>(
-      find.ancestor(of: label, matching: find.byType(Positioned)).first,
+    final monitor = find.byType(FlutterFrameMonitor);
+    expect(monitor, findsOneWidget);
+    expect(tester.widget<FlutterFrameMonitor>(monitor).enabled, isTrue);
+    expect(find.textContaining('Guest ticks/s'), findsNothing);
+    final hud = find.byKey(const ValueKey<String>('flutter-frame-monitor-hud'));
+    expect(hud, findsOneWidget);
+    final safeArea = tester.widget<SafeArea>(
+      find.ancestor(of: hud, matching: find.byType(SafeArea)).first,
     );
-    expect(position.top, 16);
-    expect(position.right, 26);
+    expect(safeArea.bottom, isTrue);
+    final hudRect = tester.getRect(hud);
+    expect(hudRect.bottom, lessThanOrEqualTo(450));
+    final ignorePointer = tester.widget<IgnorePointer>(
+      find.ancestor(of: hud, matching: find.byType(IgnorePointer)).first,
+    );
+    expect(ignorePointer.ignoring, isTrue);
+  });
+
+  testWidgets('hides the Flutter FPS HUD when disabled', (
+    tester,
+  ) async {
+    _configureDuoLikeView(tester);
+    final runtime = _ViewportRuntime();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            showDebugFps: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(FlutterFrameMonitor), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('flutter-frame-monitor-hud')),
+      findsNothing,
+    );
   });
 
   testWidgets(

@@ -242,8 +242,23 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
   assert.equal(host.calls.find((call) => call.capability === "system.runtime.awaitFirstFrame")?.options?.timeoutFrames, 2700);
   assert.deepEqual(
     host.calls.find((call) => call.capability === "system.runtime.create")?.params,
-    { appId: PROFILE, prepareForOpen: true, cacheFirst: true, memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 } },
-    "runtime.create forwards the catalog budget request",
+    {
+      appId: PROFILE,
+      prepareForOpen: true,
+      cacheFirst: true,
+      memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 },
+      initialEvents: [{
+        method: "platform.presets",
+        params: {
+          darkMode: false,
+          colorScheme: "light",
+          accentColor: "blue",
+          density: "auto",
+          presentationStyle: "sheet",
+        },
+      }],
+    },
+    "runtime.create forwards the catalog budget request and initial presets event",
   );
   const profileInstance = kernel.snapshot().residents.find((r) => r.appId === PROFILE)!.instanceId;
   const profileGen = host.generations.get(profileInstance)!;
@@ -259,8 +274,23 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
   assert.equal(openLobby.ok, true);
   assert.deepEqual(
     host.calls.find((call) => call.capability === "system.runtime.create" && call.params.appId === LOBBY)?.params,
-    { appId: LOBBY, prepareForOpen: true, cacheFirst: true, memory: { heapLimitBytes: 128 * 1024 * 1024 } },
-    "compatibility memory policy maps to a heap-only request",
+    {
+      appId: LOBBY,
+      prepareForOpen: true,
+      cacheFirst: true,
+      memory: { heapLimitBytes: 128 * 1024 * 1024 },
+      initialEvents: [{
+        method: "platform.presets",
+        params: {
+          darkMode: false,
+          colorScheme: "light",
+          accentColor: "blue",
+          density: "auto",
+          presentationStyle: "sheet",
+        },
+      }],
+    },
+    "compatibility memory policy maps to a heap-only request with initial presets event",
   );
   const lobbyLaunchId = ((openLobby.value as JsonObject).requestId) as string;
   const lobbyInstance = kernel.snapshot().residents.find((r) => r.appId === LOBBY)!.instanceId;
@@ -956,4 +986,130 @@ test("pending boot lifecycle stays ordered when the new controller becomes ready
     assert.equal((await invoke(systemRequest("open-ordered", "platform.apps.open", { appId: PROFILE }))).ok, true);
     assert.deepEqual(delivered, ["onInit", "onLoad", "frozenInStack", "onWillAppear", "onDidAppear"]);
   } finally { kernel.dispose(); }
+});
+
+test("resident SystemUI receives platform.messages.send immediately while child app is foreground", async () => {
+  const { host, kernel, invoke } = createEnv();
+  await kernel.ready;
+  try {
+    const opened = await invoke(systemRequest("msg-open-profile", "platform.apps.open", { appId: PROFILE }));
+    assert.equal(opened.ok, true);
+    const profile = kernel.snapshot().residents.find((record) => record.appId === PROFILE)!;
+    const before = host.posted.length;
+
+    const sent = await invoke({
+      requestId: "msg-profile-to-system",
+      sourceAppId: PROFILE,
+      sourceInstanceId: profile.instanceId,
+      sourceGeneration: profile.generation!,
+      capability: "platform.messages.send",
+      params: { appId: SYSTEM_UI, topic: "status", data: { ok: true } },
+    });
+    assert.equal(sent.ok, true);
+    const sentValue = sent.value as JsonObject;
+    assert.equal(typeof sentValue.messageId, "string");
+    assert.deepEqual(sentValue, { sent: true, queued: false, messageId: sentValue.messageId });
+
+    const messages = host.posted.slice(before).filter((post) => post.event === "platform.message");
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0]!.instanceId, "system-ui");
+    assert.deepEqual(messages[0]!.params, {
+      id: sentValue.messageId,
+      sourceAppId: PROFILE,
+      targetAppId: SYSTEM_UI,
+      topic: "status",
+      data: { ok: true },
+    });
+
+    const denied = await invoke({
+      requestId: "msg-profile-to-unauthorized",
+      sourceAppId: PROFILE,
+      sourceInstanceId: profile.instanceId,
+      sourceGeneration: profile.generation!,
+      capability: "platform.messages.send",
+      params: { appId: NOTES, topic: "status", data: { ok: false } },
+    });
+    assert.equal(denied.ok, false);
+    assert.equal((denied.error as JsonObject).code, "message_denied");
+  } finally { kernel.dispose(); }
+});
+
+test("closeContainer sends system.container.close over the existing host bridge and rejects untrusted child requests", async () => {
+  const { host, kernel, invoke } = createEnv();
+  await kernel.ready;
+  let closeSupported = true;
+  const baseRequest = host.request.bind(host);
+  host.request = async (capability, params = {}, options) => {
+    if (capability === "system.container.close") {
+      host.calls.push({ capability, params, options });
+      if (!closeSupported) {
+        const error = new Error("Host container close is not configured") as Error & { code?: string };
+        error.code = "capability_unavailable";
+        throw error;
+      }
+      return { closed: true } as never;
+    }
+    return await baseRequest(capability, params, options) as never;
+  };
+  try {
+    const result = await kernel.closeContainer();
+    assert.deepEqual(result, { closed: true });
+    assert.deepEqual(
+      host.calls.filter((call) => call.capability === "system.container.close").map((call) => call.params),
+      [{}],
+    );
+
+    closeSupported = false;
+    await assert.rejects(
+      () => kernel.closeContainer(),
+      (error: { code?: string }) => error?.code === "capability_unavailable",
+    );
+
+    const opened = await invoke(systemRequest("close-open-profile", "platform.apps.open", { appId: PROFILE }));
+    assert.equal(opened.ok, true);
+    const profile = kernel.snapshot().residents.find((record) => record.appId === PROFILE)!;
+    const childAttempt = await invoke({
+      requestId: "child-close-container",
+      sourceAppId: PROFILE,
+      sourceInstanceId: profile.instanceId,
+      sourceGeneration: profile.generation!,
+      capability: "system.container.close",
+      params: {},
+    });
+    assert.equal(childAttempt.ok, false);
+    assert.equal((childAttempt.error as JsonObject).code, "system_context_denied");
+  } finally { kernel.dispose(); }
+});
+
+
+test("container close remains available while SystemUI configuration is blocked", async () => {
+  const host = new TestHost();
+  const baseRequest = host.request.bind(host);
+  let releaseConfigure!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseConfigure = resolve; });
+  host.request = async (capability, params = {}, options) => {
+    if (capability === "system.runtime.configure") await gate;
+    if (capability === "system.container.close") {
+      host.calls.push({ capability, params, options });
+      return { closed: true } as never;
+    }
+    return await baseRequest(capability, params, options) as never;
+  };
+  const kernel = installPocketSystem(manifest, { bridge: host, policies });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const closed = await Promise.race([
+      kernel.closeContainer(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("close waited for runtime configuration")), 2000);
+      }),
+    ]);
+    assert.deepEqual(closed, { closed: true });
+    assert.equal(host.calls.some((call) => call.capability === "system.runtime.configure"), false);
+  } finally {
+    clearTimeout(timeout);
+    releaseConfigure();
+    await kernel.ready;
+    kernel.dispose();
+  }
 });

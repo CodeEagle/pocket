@@ -14,6 +14,7 @@ class _FirstFrameRuntime implements PocketRuntime {
   final List<int> frameDeltas = <int>[];
   final List<Map<String, dynamic>> sentMessages = <Map<String, dynamic>>[];
   bool sawDisplayViewportBeforeFrame = false;
+  bool sawInitialPresetsBeforeFrame = false;
 
   @override
   PocketFrame eval(String source) => initialFrame;
@@ -27,6 +28,11 @@ class _FirstFrameRuntime implements PocketRuntime {
     frameDeltas.add(deltaMilliseconds);
     sawDisplayViewportBeforeFrame = sentMessages.any(
       (message) => message['name'] == 'display.viewport',
+    );
+    sawInitialPresetsBeforeFrame = sentMessages.any(
+      (message) =>
+          message['name'] == 'platform.presets' &&
+          (message['payload'] as Map?)?['presentationStyle'] == 'page',
     );
     return initialFrame;
   }
@@ -232,12 +238,11 @@ void main() {
       );
       await tester.pump();
 
-      // This is the negative check for the old eager-publish behavior: the
-      // old implementation hid the loading surface and called onReady before
-      // the decoder completed, so this assertion must fail on that version.
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
-      expect(find.text('Decoding first-frame image resources'), findsOneWidget);
-      expect(find.text('0 / 1 first-frame resources decoded'), findsOneWidget);
+      // The local first frame remains gated but quiet; the image is not
+      // exposed until its resource is paintable.
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.text('Decoding first-frame image resources'), findsNothing);
+      expect(find.text('0 / 1 first-frame resources decoded'), findsNothing);
       expect(ready, isFalse);
 
       decode.complete(await _onePixelImage(tester));
@@ -498,7 +503,7 @@ void main() {
       expect(runtime.resizeCalls, 1);
       expect(runtime.resizeSizes.single, const Size(322, 480));
       expect(ready, isFalse);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
 
       resizedDecode.complete(await _onePixelImage(tester));
       await tester.runAsync(() async => resizedDecode.future);
@@ -571,6 +576,85 @@ void main() {
         isTrue,
       );
       expect(runtime.frameCalls, greaterThan(0));
+    },
+  );
+
+  testWidgets(
+    'delivers initialEvents at zero elapsed delta before first frame is admitted even when active is false',
+    (tester) async {
+      final runtime = _FirstFrameRuntime(
+        const PocketFrame(
+          width: 320,
+          height: 480,
+          ops: <PocketOp>[
+            PocketRectOp(
+              x: 0,
+              y: 0,
+              width: 320,
+              height: 480,
+              color: 0xff101827,
+            ),
+          ],
+          events: <PocketEvent>[],
+          resources: <PocketImageResource>[],
+        ),
+      );
+      var ready = false;
+      var readySawPresets = false;
+      var readyFrameCalls = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              active: false,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              showDebugFps: false,
+              initialEvents: const <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'method': 'platform.presets',
+                  'params': <String, dynamic>{
+                    'darkMode': true,
+                    'colorScheme': 'dark',
+                    'accentColor': 'violet',
+                    'density': 'desktop',
+                    'presentationStyle': 'page',
+                  },
+                },
+              ],
+              onReady: (_) {
+                ready = true;
+                readySawPresets = runtime.sawInitialPresetsBeforeFrame;
+                readyFrameCalls = runtime.frameCalls;
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(ready, isTrue);
+      expect(readySawPresets, isTrue);
+      expect(readyFrameCalls, 1);
+      expect(runtime.frameDeltas, equals(<int>[0]));
+      final presetsMessage = runtime.sentMessages.singleWhere(
+        (message) => message['name'] == 'platform.presets',
+      );
+      expect(
+        presetsMessage['payload'],
+        equals(<String, dynamic>{
+          'darkMode': true,
+          'colorScheme': 'dark',
+          'accentColor': 'violet',
+          'density': 'desktop',
+          'presentationStyle': 'page',
+        }),
+      );
     },
   );
 }

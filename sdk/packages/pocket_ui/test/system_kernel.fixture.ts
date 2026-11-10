@@ -315,6 +315,7 @@ assert.deepEqual(kernel.surfaceBindings(), [{
   instanceId: profileInstance,
   surfaceHandle: 2,
   focused: true,
+  presentationStyle: "sheet",
 }]);
 const registry = globalObject.ui.__surfaces;
 registry["pocket.flutter.surface"] = 1;
@@ -325,6 +326,7 @@ assert.deepEqual(kernel.surfaceBindings(), [{
   instanceId: profileInstance,
   surfaceHandle: 2,
   focused: true,
+  presentationStyle: "sheet",
 }], "legacy Flutter and dynamic glass/platform handles coexist in ui.__surfaces");
 delete registry["pocket.flutter.surface"];
 delete registry["pocket.glass.blur"];
@@ -365,8 +367,8 @@ let presentationChanges = 0;
 const stopPresentations = kernel.subscribe(() => { presentationChanges += 1; });
 await kernel.presentSurfaces([PROFILE, LOBBY], LOBBY);
 assert.deepEqual(kernel.surfaceBindings(), [
-  { appId: PROFILE, instanceId: profileInstance, surfaceHandle: 2, focused: false },
-  { appId: LOBBY, instanceId: lobbyInstance, surfaceHandle: 3, focused: true },
+  { appId: PROFILE, instanceId: profileInstance, surfaceHandle: 2, focused: false, presentationStyle: "sheet" },
+  { appId: LOBBY, instanceId: lobbyInstance, surfaceHandle: 3, focused: true, presentationStyle: "sheet" },
 ]);
 assert.equal(
   host.calls.some((call) => call.capability === "system.runtime.present"),

@@ -1,7 +1,20 @@
 import { after, simulationHz } from "@pocketjs/framework/clock";
 import {
+  createSystemPresets,
+  getSystemPresetsSnapshot,
+  subscribeSystemPresets,
+  useSystemPresets,
+  type SystemPresetsOptions,
+} from "./display.ts";
+import {
   createHostBridge,
+  DEFAULT_SYSTEM_PRESETS,
   forwardHostPacket,
+  isSystemPresetsEvent,
+  normalizePresentationStyle,
+  parseSystemPresets,
+  SYSTEM_PRESETS_EVENT,
+  systemPresetsBridgeObject,
   type BridgeObject,
   type BridgeValue,
   type HostBridge,
@@ -9,8 +22,35 @@ import {
   type HostPacketHandler,
   type HostSend,
   type JsonValue,
+  type MiniAppPresentationStyle,
+  type MiniAppPresentationStyleInput,
+  type PocketSystemDensity,
+  type PocketSystemPresets,
 } from "./host.ts";
 import { createMediaController, type MediaController, type MediaControllerOptions } from "./media.ts";
+
+export {
+  createSystemPresets,
+  DEFAULT_SYSTEM_PRESETS,
+  getSystemPresetsSnapshot,
+  isSystemPresetsEvent,
+  normalizePresentationStyle,
+  parseSystemPresets,
+  subscribeSystemPresets,
+  SYSTEM_PRESETS_EVENT,
+  systemPresetsBridgeObject,
+  useSystemPresets,
+  type MiniAppPresentationStyle,
+  type MiniAppPresentationStyleInput,
+  type PocketSystemDensity,
+  type PocketSystemPresets,
+  type SystemPresetsOptions,
+};
+
+export interface AppLaunchOptions {
+  presentationStyle?: MiniAppPresentationStyleInput;
+  presentation?: { style?: MiniAppPresentationStyleInput };
+}
 
 export interface AppResult {
   requestId: string;
@@ -62,6 +102,8 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
   const earlyResults = new Map<string, AppResult>();
   const messageListeners = new Set<(message: AppMessage) => void>();
   const lifecycleListeners = new Set<(event: BridgeObject) => void>();
+  const presetsListeners = new Set<(presets: PocketSystemPresets) => void>();
+  let latestPresets: PocketSystemPresets = getSystemPresetsSnapshot(host, DEFAULT_SYSTEM_PRESETS);
   let disposed = false;
   const suppliedMedia = options.media && typeof options.media === "object" &&
     typeof (options.media as MediaController).register === "function"
@@ -104,7 +146,18 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
       for (const listener of [...messageListeners]) {
         try { listener(value as AppMessage); } catch { /* isolate consumer callbacks */ }
       }
+    } else if (name === SYSTEM_PRESETS_EVENT) {
+      latestPresets = parseSystemPresets(value, latestPresets);
+      for (const listener of [...presetsListeners]) {
+        try { listener(latestPresets); } catch { /* isolate consumer callbacks */ }
+      }
     } else if (name === "platform.lifecycle" || name === "platform.launch") {
+      if (isSystemPresetsEvent(name, value)) {
+        latestPresets = parseSystemPresets(value, latestPresets);
+        for (const listener of [...presetsListeners]) {
+          try { listener(latestPresets); } catch { /* isolate consumer callbacks */ }
+        }
+      }
       for (const listener of [...lifecycleListeners]) {
         try { listener(value as BridgeObject); } catch { /* isolate consumer callbacks */ }
       }
@@ -138,14 +191,23 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
     name === "platform.apps.open" || name === "platform.apps.prewarm"
       ? { timeoutFrames: 90 * simulationHz() }
       : undefined);
-  const launchApp = async (appId: string, argumentsValue: BridgeValue = null): Promise<AppLaunch> => {
+  const launchApp = async (
+    appId: string,
+    argumentsValue: BridgeValue = null,
+    launchOptions?: AppLaunchOptions,
+  ): Promise<AppLaunch> => {
     if (disposed) throw new Error("Platform client is disposed");
     if (pending.size >= 32) throw new Error("Too many pending app results");
     // The SystemUI root remains foreground while a child is on top. This
     // coverage gate pauses registered videos without freezing root scheduling.
     const releaseCoverage = media?.beginCoverage("platform.apps.open");
     try {
-      const opened = await request("platform.apps.open", { appId, arguments: argumentsValue }) as BridgeObject;
+      const requestedStyle = launchOptions?.presentationStyle ?? launchOptions?.presentation?.style;
+      const opened = await request("platform.apps.open", {
+        appId,
+        arguments: argumentsValue,
+        ...(requestedStyle ? { presentationStyle: requestedStyle } : {}),
+      }) as BridgeObject;
       if (disposed) throw new Error("Platform client is disposed");
       if (typeof opened.requestId !== "string" || !opened.requestId) {
         throw new Error("Host returned an invalid launch token");
@@ -176,10 +238,17 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
 
   return {
     media,
+    presets: (): PocketSystemPresets =>
+      disposed ? latestPresets : (host.getLatestSystemPresets?.()?.presets ?? latestPresets),
+    onPresets(listener: (presets: PocketSystemPresets) => void) {
+      if (disposed) return () => {};
+      presetsListeners.add(listener);
+      return () => { presetsListeners.delete(listener); };
+    },
     listApps: () => request("platform.apps.list"),
     launchApp,
-    openApp: async (appId: string, argumentsValue: BridgeValue = null) =>
-      (await launchApp(appId, argumentsValue)).result,
+    openApp: async (appId: string, argumentsValue: BridgeValue = null, launchOptions?: AppLaunchOptions) =>
+      (await launchApp(appId, argumentsValue, launchOptions)).result,
     returnResult: (value: BridgeValue = null) => request("platform.apps.return", { value }),
     prewarm: (appId: string) => request("platform.apps.prewarm", { appId }),
     storage: {
@@ -237,6 +306,7 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
       earlyResults.clear();
       messageListeners.clear();
       lifecycleListeners.clear();
+      presetsListeners.clear();
     },
   };
 }

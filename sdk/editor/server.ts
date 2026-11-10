@@ -9,7 +9,7 @@
  */
 
 import { constants as fsConstants, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createPublicKey, randomUUID } from "node:crypto";
 import {
   cp,
   open,
@@ -30,8 +30,10 @@ import {
   packageArtifacts,
   pocketReleaseDirectory,
   sha256Hex,
+  verifySignedManifest,
   type PackageResult,
   type PublicKeyConfig,
+  type SignedManifest,
 } from "../scripts/package_update.ts";
 import { buildGuest } from "../scripts/build_guest.ts";
 import { createStudioCodex, type StudioExecutionContext, type StudioScope } from "./codex.ts";
@@ -93,6 +95,7 @@ export type EditorConfig = {
   output: string;
   framework: string;
   template: "app" | "game";
+  reusePublishedPackages?: string[];
 };
 
 export type ArtifactInfo = {
@@ -817,6 +820,14 @@ function validateConfig(id: string, input: Record<string, unknown>): EditorConfi
     throw err;
   }
   if (input.tickHz !== undefined && (!Number.isSafeInteger(input.tickHz) || Number(input.tickHz) < 1 || Number(input.tickHz) > 120)) throw new Error("tickHz must be an integer from 1 through 120");
+  if (input.reusePublishedPackages !== undefined) {
+    if (!Array.isArray(input.reusePublishedPackages) || input.reusePublishedPackages.some((packageId) => typeof packageId !== "string" || !appIdPattern.test(packageId))) {
+      throw new Error("reusePublishedPackages must be an array of valid package IDs");
+    }
+    const packageIds = input.reusePublishedPackages as string[];
+    if (new Set(packageIds).size !== packageIds.length) throw new Error("reusePublishedPackages cannot contain duplicate package IDs");
+    config.reusePublishedPackages = [...packageIds];
+  }
   if (!config.entry || isAbsolute(config.entry) || config.entry.includes("\0") || config.entry.split(/[\\/]+/).includes("..")) throw new Error("entry must be a project-relative path");
   if (!outputPattern.test(config.output)) throw new Error("output contains unsafe characters");
   if (!frameworkPattern.test(config.framework)) throw new Error("framework is unsupported");
@@ -825,6 +836,7 @@ function validateConfig(id: string, input: Record<string, unknown>): EditorConfi
   config.build = input.build === undefined ? config.build : Number(input.build);
   config.tickHz = input.tickHz === undefined ? config.tickHz : Number(input.tickHz);
   config.title = typeof input.title === "string" ? input.title.trim() : config.name;
+  if (config.reusePublishedPackages?.includes(config.appId)) throw new Error("the root app cannot reuse its own published package");
   return config;
 }
 
@@ -1274,7 +1286,7 @@ async function publishProject(
   origin: string,
   hostVersion: string,
   channel: "test" | "release" = "release",
-  options: { offline?: boolean; hostVersionSource?: string; packageVersion?: string } = {},
+  options: { offline?: boolean; hostVersionSource?: string; packageVersion?: string; reusedPackages?: AggregateHostPackage[] } = {},
 ): Promise<PublishResult> {
   if (state.builtRevision !== state.revision || !state.artifacts) throw new Error("build the current source before publishing");
   const offline = options.offline === true;
@@ -1296,6 +1308,18 @@ async function publishProject(
   const resourceSnapshot = await readResourceSnapshot(snapshotPath);
   const rootPackage = resourceSnapshot.packages.find((pkg) => pkg.id === config.appId);
   if (!rootPackage) throw new Error(`resource snapshot does not contain root package ${config.appId}`);
+  const reuseIds = config.reusePublishedPackages ?? [];
+  const snapshotPackageIds = new Set(resourceSnapshot.packages.map((pkg) => pkg.id));
+  if (reuseIds.some((packageId) => packageId === config.appId || !snapshotPackageIds.has(packageId))) {
+    throw new Error("reusePublishedPackages must name catalog child packages in the current build");
+  }
+  if (offline && reuseIds.length > 0) throw new Error("offline archives cannot reuse packages published by another project");
+  const reusedPackages = options.reusedPackages ?? [];
+  const reusedPackageIds = new Set(reusedPackages.map((pkg) => pkg.id));
+  if (new Set(reusedPackages.map((pkg) => pkg.id)).size !== reusedPackages.length ||
+      reuseIds.length !== reusedPackages.length || reuseIds.some((packageId) => !reusedPackages.some((pkg) => pkg.id === packageId))) {
+    throw new Error("reused package descriptors do not match reusePublishedPackages");
+  }
   const packageVersion = slot;
   // A fixed package index follows the newest host/slot release across every
   // compatibility branch. Keep anti-rollback floors equally broad; otherwise
@@ -1409,7 +1433,7 @@ async function publishProject(
       if (config.build !== previousRootBuild) legacyStableEquivalent = false;
     }
     if (!offline && channel === "release") {
-      const currentPackageIds = new Set(resourceSnapshot.packages.map((pkg) => pkg.id));
+      const currentPackageIds = new Set(resourceSnapshot.packages.filter((pkg) => !reusedPackageIds.has(pkg.id)).map((pkg) => pkg.id));
       for (const prior of slotEntries.filter((entry) => entry.build === config.build)) {
         const priorPackageIds = new Set(prior.packages.map((pkg) => pkg.id));
         if (priorPackageIds.size !== currentPackageIds.size || [...priorPackageIds].some((packageId) => !currentPackageIds.has(packageId))) {
@@ -1439,7 +1463,7 @@ async function publishProject(
       ...(parsedOrigin.protocol === "http:" ? { POCKET_UPDATE_DEBUG_HTTP_HOST: parsedOrigin.hostname } : {}),
     }, null, 2) + "\n");
     for (const pkg of resourceSnapshot.packages) {
-      if (pkg.id === rootPackage.id) continue;
+      if (pkg.id === rootPackage.id || reusedPackageIds.has(pkg.id)) continue;
       const packageDirectory = resourceArtifactDirectory(buildDir, pkg);
       const packageMetadata = await readJsonFile<Record<string, unknown>>(join(packageDirectory, "app.bytecode.json"));
       const previousPackage = previousEntry?.packages.find((entry) => entry.id === pkg.id);
@@ -1641,6 +1665,7 @@ async function publishProject(
       };
       aggregatePackages.push(descriptor);
     }
+    aggregatePackages.push(...reusedPackages);
     const rootHostPath = join(releaseDir, "host.json");
     const rootHost = await readJsonFile<Record<string, unknown>>(rootHostPath, {});
     // Immutable descriptors keep the channel prefix they were published
@@ -2108,6 +2133,187 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     }
     return undefined;
   };
+  const resolveReusePublishedPackage = async (
+    packageId: string,
+    host: string,
+    channel: "test" | "release",
+    origin: string,
+    publishingKey: PublicKeyConfig,
+    exceptProjectId: string,
+  ): Promise<AggregateHostPackage> => {
+    const slot = versionSlot(channel);
+    const files = await readdir(workspace.states, { withFileTypes: true });
+    const owners: ResolvedPublishedPackage[] = [];
+    for (const file of files) {
+      if (!file.isFile() || !file.name.endsWith(".versions.json")) continue;
+      const ownerId = file.name.slice(0, -".versions.json".length);
+      if (!projectIdPattern.test(ownerId)) continue;
+      let history: VersionHistory;
+      try {
+        history = await readVersionHistory(join(workspace.states, file.name));
+      } catch {
+        continue;
+      }
+      const entry = history.entries.find((candidate) =>
+        candidate.hostVersion === host && candidate.slot === slot && candidate.channel === channel &&
+        candidate.packages.some((candidatePackage) => candidatePackage.id === packageId));
+      const pkg = entry?.packages.find((candidate) => candidate.id === packageId);
+      if (entry && pkg) owners.push({ projectId: ownerId, entry, package: pkg });
+    }
+    const ownerIds = new Set(owners.map((owner) => owner.projectId));
+    if (ownerIds.size !== 1 || owners.length === 0) throw new Error(`reused package ${packageId} has no unique published ${channel} owner for host ${host}`);
+    const owner = owners[0]!;
+    if (owner.projectId === exceptProjectId) throw new Error(`reused package ${packageId} must be owned by a different project`);
+    const { entry, package: pkg } = owner;
+    if (!entry.releaseId || entry.packageVersion !== entry.releaseId) throw new Error(`reused package ${packageId} has no immutable owner release`);
+
+    const rootPackage = await entryRootPackage(entry);
+    if (!rootPackage) throw new Error(`reused package ${packageId} owner release has no verifiable root package`);
+    const rootEnvelope = await readJsonFile<SignedManifest>(safeArtifactFile(workspace.updates, `${rootPackage.artifactRoot}/latest.json`));
+    const rootHost = await readJsonFile<Record<string, unknown>>(safeArtifactFile(workspace.updates, `${rootPackage.artifactRoot}/host.json`));
+    const release = isObject(rootHost.release) ? rootHost.release : undefined;
+    const rootKeyId = rootHost.POCKET_UPDATE_KEY_ID;
+    const rootPublicKey = rootHost.POCKET_UPDATE_PUBLIC_KEY;
+    if (rootHost.kind !== "pocket-editor-app-host" || rootHost.systemUI !== rootPackage.id ||
+        release?.appId !== rootPackage.id || release.releaseId !== entry.releaseId ||
+        release.channel !== channel || release.slot !== slot || rootHost.POCKET_HOST_VERSION !== host ||
+        typeof rootKeyId !== "string" || typeof rootPublicKey !== "string" ||
+        rootKeyId !== entry.keyId || rootKeyId !== publishingKey.keyId || rootPublicKey !== publishingKey.publicKeyBase64 ||
+        typeof rootEnvelope.payload !== "string" || sha256Hex(Buffer.from(rootEnvelope.payload, "base64")) !== entry.payloadSha256 ||
+        rootEnvelope.keyId !== rootKeyId) {
+      throw new Error(`reused package ${packageId} owner root descriptor does not match the signed host release`);
+    }
+    const publicBytes = Buffer.from(rootPublicKey, "base64");
+    if (publicBytes.byteLength !== 32) throw new Error(`reused package ${packageId} has an invalid Ed25519 trust key`);
+    const publicPem = createPublicKey({
+      key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), publicBytes]),
+      format: "der",
+      type: "spki",
+    }).export({ format: "pem", type: "spki" }).toString();
+    const decodePayload = (envelope: SignedManifest): Record<string, unknown> => {
+      const bytes = verifySignedManifest(envelope, publicPem);
+      const value = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+      if (!isObject(value)) throw new Error("signed package payload is not an object");
+      return value;
+    };
+    const rootPayload = decodePayload(rootEnvelope);
+    if (rootPayload.appId !== rootPackage.id || rootPayload.version !== entry.version || Number(rootPayload.build) !== entry.build) {
+      throw new Error(`reused package ${packageId} owner root signature does not match its release journal`);
+    }
+
+    const immutablePath = historyPackagePath(host, packageId, entry.releaseId);
+    const manifestUrl = `${origin}${immutablePath}/latest.json`;
+    const hostConfigUrl = `${origin}${immutablePath}/host.json`;
+    const envelope = await readJsonFile<SignedManifest>(safeArtifactFile(workspace.updates, `${pkg.artifactRoot}/latest.json`));
+    const packageHost = await readJsonFile<Record<string, unknown>>(safeArtifactFile(workspace.updates, `${pkg.artifactRoot}/host.json`));
+    const rootApplications = isObject(rootHost.applications) ? rootHost.applications : undefined;
+    const storedDescriptor = rootApplications && isObject(rootApplications[packageId]) ? rootApplications[packageId] : undefined;
+    if (!storedDescriptor || storedDescriptor.id !== packageId || storedDescriptor.appId !== packageId ||
+        storedDescriptor.version !== pkg.version || Number(storedDescriptor.build) !== pkg.build ||
+        storedDescriptor.packageVersion !== entry.packageVersion || storedDescriptor.keyId !== rootKeyId ||
+        storedDescriptor.publicKey !== rootPublicKey || typeof storedDescriptor.manifestUrl !== "string" ||
+        typeof storedDescriptor.hostConfigUrl !== "string" || typeof storedDescriptor.updateUrl !== "string") {
+      throw new Error(`reused package ${packageId} owner aggregate descriptor does not match its release`);
+    }
+    const expectedPath = `${immutablePath}/latest.json`;
+    for (const field of ["manifestUrl", "updateUrl"] as const) {
+      if (new URL(String(storedDescriptor[field]), origin).pathname !== expectedPath) throw new Error(`reused package ${packageId} has a mutable package URL`);
+    }
+    if (new URL(storedDescriptor.hostConfigUrl, origin).pathname !== `${immutablePath}/host.json`) throw new Error(`reused package ${packageId} has a mutable host config URL`);
+    if (typeof envelope.payload !== "string" || envelope.keyId !== rootKeyId ||
+        sha256Hex(Buffer.from(envelope.payload, "base64")) !== storedDescriptor.payloadSha256) {
+      throw new Error(`reused package ${packageId} signed manifest does not match its descriptor`);
+    }
+    const payload = decodePayload(envelope);
+    if (payload.appId !== packageId || payload.version !== pkg.version || Number(payload.build) !== pkg.build || !Array.isArray(payload.files)) {
+      throw new Error(`reused package ${packageId} signature does not match its owner journal`);
+    }
+    for (const file of payload.files) {
+      if (!isObject(file) || typeof file.url !== "string" || !Number.isSafeInteger(file.size) || typeof file.sha256 !== "string") {
+        throw new Error(`reused package ${packageId} signed file list is invalid`);
+      }
+      const bytes = new Uint8Array(await readFile(safeArtifactFile(workspace.updates, `${pkg.artifactRoot}/${file.url}`)));
+      if (bytes.byteLength !== file.size || sha256Hex(bytes) !== file.sha256) throw new Error(`reused package ${packageId} signed artifact is missing or corrupt`);
+    }
+
+    const isRootPackage = rootPackage.id === packageId;
+    let packageConfig: Record<string, unknown>;
+    let packageBootstrap: unknown;
+    if (isRootPackage) {
+      if (packageHost.kind !== "pocket-editor-app-host") throw new Error(`reused root package ${packageId} has no aggregate host descriptor`);
+      packageBootstrap = storedDescriptor.bootstrapAssets;
+      const packageUpdates: Record<string, unknown> = {
+        baseUrl: `${origin}/${channelUpdatePrefix(channel)}`,
+        hostVersion: host,
+        packageVersion: entry.packageVersion,
+        compatVersion: entry.compatVersion,
+        keyId: rootKeyId,
+        publicKey: rootPublicKey,
+        namespace: rootHost.POCKET_STORE_NAMESPACE,
+        branchNamespace: rootHost.POCKET_UPDATE_BRANCH_NAMESPACE,
+      };
+      if (typeof rootHost.POCKET_UPDATE_DEBUG_HTTP_HOST === "string") packageUpdates.debugHttpHosts = [rootHost.POCKET_UPDATE_DEBUG_HTTP_HOST];
+      packageConfig = {
+        appId: packageId,
+        downloadOnOpen: true,
+        metadataAsset: `assets/apps/${packageId}/app.bytecode.json`,
+        updates: packageUpdates,
+      };
+      if (isObject(packageBootstrap) && Object.hasOwn(packageBootstrap, `assets/apps/${packageId}/guest-manifest.json`)) {
+        packageConfig.manifestAsset = `assets/apps/${packageId}/guest-manifest.json`;
+      }
+    } else {
+      if (packageHost.kind !== "pocket-mini-app-host-template" || !isObject(packageHost.config) ||
+          packageHost.config.appId !== packageId || !isObject(packageHost.config.updates)) {
+        throw new Error(`reused package ${packageId} has no mini-app host configuration`);
+      }
+      const childUpdates = packageHost.config.updates;
+      if (childUpdates.hostVersion !== host || childUpdates.packageVersion !== entry.packageVersion ||
+          childUpdates.compatVersion !== entry.compatVersion || childUpdates.keyId !== rootKeyId ||
+          childUpdates.publicKey !== rootPublicKey || !isObject(packageHost.bootstrapAssets)) {
+        throw new Error(`reused package ${packageId} mini-app trust configuration does not match its owner release`);
+      }
+      packageBootstrap = packageHost.bootstrapAssets;
+      packageConfig = structuredClone(packageHost.config);
+      const updates = packageConfig.updates as Record<string, unknown>;
+      updates.baseUrl = `${origin}/${channelUpdatePrefix(channel)}`;
+    }
+    if (!isObject(packageBootstrap) || !isObject(storedDescriptor.bootstrapAssets) ||
+        JSON.stringify(packageBootstrap) !== JSON.stringify(storedDescriptor.bootstrapAssets)) {
+      throw new Error(`reused package ${packageId} bootstrap descriptor was not retained`);
+    }
+    const bootstrapAssets: Record<string, { url: string; sha256: string; size: number }> = {};
+    for (const [asset, value] of Object.entries(packageBootstrap)) {
+      const prefix = `assets/apps/${packageId}/`;
+      const name = asset.startsWith(prefix) ? asset.slice(prefix.length) : "";
+      if (!["app.bytecode.json", "guest-manifest.json"].includes(name) || !isObject(value) ||
+          typeof value.sha256 !== "string" || !Number.isSafeInteger(value.size)) {
+        throw new Error(`reused package ${packageId} bootstrap descriptor is invalid`);
+      }
+      const bytes = new Uint8Array(await readFile(safeArtifactFile(workspace.updates, `${pkg.artifactRoot}/bootstrap/${name}`)));
+      if (bytes.byteLength !== value.size || sha256Hex(bytes) !== value.sha256) throw new Error(`reused package ${packageId} bootstrap artifact is missing or corrupt`);
+      bootstrapAssets[asset] = { url: `${origin}${immutablePath}/bootstrap/${name}`, sha256: value.sha256, size: value.size as number };
+    }
+    if (!bootstrapAssets[`assets/apps/${packageId}/app.bytecode.json`]) throw new Error(`reused package ${packageId} is missing its bootstrap metadata`);
+    return {
+      ...storedDescriptor,
+      id: packageId,
+      appId: packageId,
+      version: pkg.version,
+      build: pkg.build,
+      packageVersion: entry.packageVersion,
+      updateUrl: manifestUrl,
+      manifestUrl,
+      hostConfigUrl,
+      keyId: rootKeyId,
+      publicKey: rootPublicKey,
+      payloadSha256: sha256Hex(Buffer.from(envelope.payload, "base64")),
+      bootstrapAssets,
+      config: packageConfig,
+      reusedReleaseId: entry.releaseId,
+      reusedProjectId: owner.projectId,
+    };
+  };
   const findLegacyPublishedOwner = async (host: string, packageId: string, slot: VersionSlot, exceptProjectId: string): Promise<string | undefined> => {
     let entries: Array<import("node:fs").Dirent> = [];
     try {
@@ -2186,6 +2392,11 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           const routePackageVersion = compatVersion ?? mutableSlot;
           const rewritePackage = (value: unknown): void => {
             if (!isObject(value) || typeof value.id !== "string") return;
+            // Reused packages belong to another immutable release. Keep that
+            // child's owner-specific fixed index namespace and release pin;
+            // rewriting it to the root compat branch would break both trust
+            // and the original package URL.
+            if (typeof value.reusedReleaseId === "string" && typeof value.reusedProjectId === "string") return;
             const packagePath = `/pocket/${hostVersion}/${encodeURIComponent(value.id)}/${routePackageVersion}`;
             value.packageVersion = routePackageVersion;
             value.updateUrl = `${baseUrl}${packagePath}/latest.json`;
@@ -2692,13 +2903,21 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       if (!projectIdPattern.test(projectId)) continue;
       let history: VersionHistory;
       let state: EditorState;
-      let config: EditorConfig;
       try {
         history = await readVersionHistory(join(workspace.states, file.name));
         state = await loadState(workspace, projectId);
-        config = await loadConfig(projectDirectory(workspace, projectId), projectId);
       } catch {
         continue;
+      }
+      // Historical package indexes are journal-derived and must remain
+      // available after the editable project source has been removed. The
+      // project config is only needed to discover an optional legacy package
+      // that predates the version journal.
+      let config: EditorConfig | undefined;
+      try {
+        config = await loadConfig(projectDirectory(workspace, projectId), projectId);
+      } catch {
+        config = undefined;
       }
       const matching = history.entries.filter((entry) => entry.hostVersion === host && entry.packages.some((pkg) => pkg.id === packageId));
       if (matching.length === 0) continue;
@@ -2714,7 +2933,9 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       // selected compat branch controls `latest`; older compatibility branches
       // remain available as immutable descriptors for rollback/audit.
       const records = (await Promise.all(slotEntries.map((entry) => packageIndexRecord(projectId, entry, packageId)))).filter((entry): entry is Record<string, unknown> => !!entry);
-      const legacyRecord = await legacyPackageIndexRecord(projectId, config, state, host, slot, packageId, slotEntries);
+      const legacyRecord = config
+        ? await legacyPackageIndexRecord(projectId, config, state, host, slot, packageId, slotEntries)
+        : undefined;
       if (legacyRecord && !records.some((entry) =>
         (legacyRecord.releaseId && entry.releaseId === legacyRecord.releaseId) ||
         (legacyRecord.payloadSha256 && entry.payloadSha256 === legacyRecord.payloadSha256 && entry.version === legacyRecord.version))) {
@@ -3717,14 +3938,35 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             const publishSlot = versionSlot(publishChannel);
             const publishHistory = await readVersionHistory(versionHistoryPath(workspace.states, id));
             const publishCompatVersion = await resolveCompatVersion(id, config, state, publishHistory);
+            const reusePackageIds = new Set(config.reusePublishedPackages ?? []);
             const publishPackageIds = new Set<string>([config.appId]);
+            let publishSnapshot: Awaited<ReturnType<typeof readResourceSnapshot>> | undefined;
             if (state.builtRevision !== null) {
               try {
-                const snapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`));
-                for (const pkg of snapshot.packages) publishPackageIds.add(pkg.id);
+                publishSnapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`));
+                const packageIds = new Set(publishSnapshot.packages.map((pkg) => pkg.id));
+                for (const packageId of reusePackageIds) {
+                  if (packageId === config.appId || !packageIds.has(packageId)) return failure(`reusePublishedPackages must name a catalog child package: ${packageId}`, 400);
+                }
+                for (const pkg of publishSnapshot.packages) {
+                  if (!reusePackageIds.has(pkg.id)) publishPackageIds.add(pkg.id);
+                }
               } catch {
                 // publishProject performs the authoritative snapshot check;
                 // retain the root lock when a stale build has no snapshot.
+              }
+            }
+            let boundOrigin = `http://127.0.0.1:${server.port}`;
+            try {
+              boundOrigin = versionBackendOrigin();
+            } catch (error) {
+              pushLog(state, `LAN version backend unavailable: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            const reusedPackages: AggregateHostPackage[] = [];
+            if (reusePackageIds.size > 0 && publishSnapshot) {
+              const { key } = await editorUpdateTrust(workspace, id);
+              for (const packageId of reusePackageIds) {
+                reusedPackages.push(await resolveReusePublishedPackage(packageId, updateHostVersion, publishChannel, boundOrigin, key, id));
               }
             }
             // The public fixed index omits compatVersion, so a package slot is
@@ -3742,13 +3984,11 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
                 return failure(`package ${packageId} ${publishSlot} slot is owned by project ${owner}; use a unique appId`, 409);
               }
             }
-            let boundOrigin = `http://127.0.0.1:${server.port}`;
-            try {
-              boundOrigin = versionBackendOrigin();
-            } catch (error) {
-              pushLog(state, `LAN version backend unavailable: ${error instanceof Error ? error.message : String(error)}`);
-            }
-            const result = await publishProject(workspace, id, config, state, boundOrigin, updateHostVersion, publishChannel, { hostVersionSource: updateHostVersionSource, packageVersion: publishCompatVersion });
+            const result = await publishProject(workspace, id, config, state, boundOrigin, updateHostVersion, publishChannel, {
+              hostVersionSource: updateHostVersionSource,
+              packageVersion: publishCompatVersion,
+              reusedPackages,
+            });
             return json({
               status: publicStatus(id, state),
               manifest: result.envelope,

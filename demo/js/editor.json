@@ -6,6 +6,9 @@
   "version": "0.1.0",
   "build": 1,
   "tickHz": 60,
+  "reusePublishedPackages": [
+    "pocket.demo.lantern"
+  ],
   "entry": "app.tsx",
   "output": "showcase-app",
   "framework": "solid"

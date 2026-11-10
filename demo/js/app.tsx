@@ -31,6 +31,7 @@ import {
   toMobileColor,
   MobileDialog,
   MobilePopup,
+  MobileSegmentedControl,
   MobileToast,
   NavigationBar,
   MobileAppBar,
@@ -82,7 +83,7 @@ import { HardwarePage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx"
 import { createHostBridge, hostError, type HostBridge, type HostEvent, type JsonValue } from "@pocket/ui/host";
 import { VideoPage } from "./video-page.tsx";
 import { RecordingPanel } from "./recording-panel.tsx";
-import { createPocketPlatformClient } from "@pocket/ui/platform";
+import { createPocketPlatformClient, type AppLaunchOptions } from "@pocket/ui/platform";
 import { createPlatformExperience, isUnsupportedPlatformError } from "@pocket/ui/platform-experience";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
 import { installShowcaseSystem } from "./system.ts";
@@ -103,6 +104,7 @@ import {
   type CapabilityState,
   type DemoEvent,
   type DemoState,
+  type MiniAppPresentationMode,
   type PerformanceJank,
   type PerformancePoint,
   type PerformanceSnapshot,
@@ -584,7 +586,28 @@ function App() {
   });
   const platform = createPocketPlatformClient(undefined, { bridge: host });
   const accessibility = createAccessibilityPreferences({ bridge: host });
-  const system = installShowcaseSystem(host, showcaseUpdateState(platform.storage, state, setState, routeOf));
+  const system = installShowcaseSystem(
+    host,
+    showcaseUpdateState(platform.storage, state, setState, routeOf),
+    {
+      darkMode: mobileDark(),
+      accentColor: state().accentColor,
+      density: state().interfaceDensity,
+      presentationStyle: state().miniAppPresentationStyle,
+    },
+  );
+  const syncSystemPresets = (): void => {
+    void system.setPresets({
+      darkMode: mobileDark(),
+      accentColor: state().accentColor,
+      density: state().interfaceDensity,
+      presentationStyle: state().miniAppPresentationStyle,
+    });
+  };
+  createEffect(() => {
+    if (!preferencesReady()) return;
+    syncSystemPresets();
+  });
   const experience = createPlatformExperience(host);
   let systemUiKey = "";
   const syncSystemUi = (force = false): void => {
@@ -602,9 +625,12 @@ function App() {
       if (!isUnsupportedPlatformError(error)) console.warn("system UI", hostError(error).code);
     });
   };
-  createEffect(() => syncSystemUi());
+  createEffect(() => {
+    if (!preferencesReady()) return;
+    syncSystemUi();
+  });
   const removeExperienceLifecycle = platform.onLifecycle((event) => {
-    if (event.state === "onResume" || event.state === "onDidAppear") syncSystemUi(true);
+    if (preferencesReady() && (event.state === "onResume" || event.state === "onDidAppear")) syncSystemUi(true);
   });
   let requestSequence = 0;
   let lastPublishedPerformanceContext = "";
@@ -637,7 +663,13 @@ function App() {
     if (event.type === "navigate" && event.route !== state().route) pendingTransitionDirection = "forward";
     if (event.type === "popRoute" && state().routeStack.length > 1) pendingTransitionDirection = "reverse";
     setState((current) => reduceDemoState(current, event));
-    if (event.type === "setMobileDark" || event.type === "setAccentColor" || event.type === "setInterfaceDensity" || event.type === "resetAppearance") {
+    if (
+      event.type === "setMobileDark" ||
+      event.type === "setAccentColor" ||
+      event.type === "setInterfaceDensity" ||
+      event.type === "setMiniAppPresentationStyle" ||
+      event.type === "resetAppearance"
+    ) {
       const value = storedAppearance(state());
       const revision = ++saveRevision;
       setPreferencesStatus("Saving preferences…");
@@ -660,7 +692,6 @@ function App() {
     setPreferencesReady(false);
     setPreferencesStatus("Loading your preferences…");
     try {
-      await system.ready;
       const saved = readAppearance(await platform.storage.get("appearance"));
       if (saved) dispatch({ type: "restoreAppearance", ...saved });
       setPreferencesStatus(saved ? "Saved on this device" : "Using the default appearance");
@@ -892,6 +923,16 @@ function App() {
     });
   });
 
+  const requestCloseContainer = (): void => {
+    void host.request("system.container.close", {}).catch((error) => {
+      const failure = hostError(error);
+      setState((current) => ({
+        ...current,
+        lastAction: `Container close unavailable (${failure.code})`,
+      }));
+    });
+  };
+
   const renderRoute = (route: Route): JSX.Element => {
     switch (route) {
       case "home":
@@ -921,6 +962,8 @@ function App() {
   // (including the Home header and mobile AppBar) starts below the status bar
   // without teaching each page its own safe-area state.
   return (
+    <Show when={preferencesReady()}>
+    {() => (
     <AppleSemanticsProvider bridge={host}>
     <AccessibilityPreferencesProvider value={accessibility}>
     <MobileThemeProvider theme={theme} density={() => state().interfaceDensity}>
@@ -939,7 +982,14 @@ function App() {
             <MobileAppBar
               title={state().route === "home" ? demoTitle : state().route === "gallery" ? "UI Collection" : state().route === "about" ? "Host" : state().route === "settings" ? "Settings" : state().route === "mobile" ? "Mobile UI" : state().route === "transitions" ? "Transitions" : state().route === "hardware" ? "Hardware" : state().route === "video" ? "Video Lab" : state().route === "apple" ? "Apple Glass" : hostTabs.find((tab) => tab.id === state().route)?.label ?? "Frame diagnostics"}
               centered={!isPrimaryRoute(state().route)}
-              leading={isPrimaryRoute(state().route) ? undefined : <MobileBackButton onPress={() => dispatch({ type: "popRoute" })} />}
+              leading={state().route === "home"
+                ? <MobileBackButton onPress={requestCloseContainer} />
+                : isPrimaryRoute(state().route)
+                ? undefined
+                : <MobileBackButton onPress={() => dispatch({ type: "popRoute" })} />}
+              trailing={state().route === "home"
+                ? <MobileButton label="退出容器" kind="danger" compact onPress={requestCloseContainer} />
+                : undefined}
             />
             <View class="flex-1 w-full h-full overflow-hidden">
               <For each={mountedRoutes()}>{(route) => (
@@ -973,6 +1023,8 @@ function App() {
     </MobileThemeProvider>
     </AccessibilityPreferencesProvider>
     </AppleSemanticsProvider>
+    )}
+    </Show>
   );
 }
 
@@ -1026,7 +1078,7 @@ function HomePage(props: {
           />
           <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>Draft: {props.state().draft || "(empty)"}</Text>
         </MobileCard>
-        <PlatformAppsCard platform={props.platform} system={props.system} />
+        <PlatformAppsCard state={props.state} dispatch={props.dispatch} platform={props.platform} system={props.system} />
         <MobileListTile
           title={props.runtime.phase === "ready" ? "Runtime ready" : props.runtime.phase === "error" ? "Runtime unavailable" : "Connecting"}
           detail="Explore the host behind your experience."
@@ -1049,10 +1101,16 @@ function miniAppResultSummary(value: JsonValue | undefined): string {
   return parts.length > 0 ? parts.join(" · ") : valueSummary(value);
 }
 
-function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatformClient>; system: ReturnType<typeof installShowcaseSystem> }): JSX.Element {
+function PlatformAppsCard(props: {
+  state: () => DemoState;
+  dispatch: (event: DemoEvent) => void;
+  platform: ReturnType<typeof createPocketPlatformClient>;
+  system: ReturnType<typeof installShowcaseSystem>;
+}): JSX.Element {
   const theme = useMobileTheme();
   const [status, setStatus] = createSignal("Preparing apps...");
   const [showAllOfficial, setShowAllOfficial] = createSignal(false);
+  const [launchOverride, setLaunchOverride] = createSignal<"default" | MiniAppPresentationMode>("default");
   const officialDemos = createMemo(() => props.system.snapshot().catalog.flatMap((entry) => {
     const presentation = entry.presentation as Record<string, unknown> | undefined;
     if (presentation?.officialDemo !== true) return [];
@@ -1086,13 +1144,19 @@ function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatf
     setMessage(`Message from ${message.sourceAppId}: · ${miniAppResultSummary(message.data)}`);
   });
   onCleanup(stopMessages);
-  const open = async (appId: string) => {
+  const open = async (appId: string, explicitStyle?: MiniAppPresentationMode) => {
     try {
       await props.system.ready;
-      const result = await props.platform.openApp(appId, { source: "showcase" });
+      const mode = explicitStyle ?? (launchOverride() === "default" ? undefined : launchOverride());
+      const options: AppLaunchOptions | undefined = mode ? { presentationStyle: mode } : undefined;
+      const result = await props.platform.openApp(appId, { source: "showcase" }, options);
       setStatus(result.cancelled ? `Cancelled: ${result.reason ?? "closed"}` : `App result: · ${miniAppResultSummary(result.value)}`);
     } catch (error) { setStatus(hostError(error).message); }
   };
+  const effectiveProfileStyle = () => launchOverride() === "default" ? "page (pocket.json)" : `${launchOverride()} (override)`;
+  const effectiveLobbyStyle = () => launchOverride() === "default"
+    ? `${props.state().miniAppPresentationStyle} (global)`
+    : `${launchOverride()} (override)`;
   return (
     <MobileCard>
       <View class="flex-row items-center justify-between">
@@ -1104,6 +1168,47 @@ function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatf
         <MobileButton label="Open lobby app" kind="text" onPress={() => void open("pocket.demo.lobby")} />
         <MobileButton label="雾港末班信 · Visual Novel" kind="tonal" onPress={() => void open("pocket.demo.lantern")} />
       </View>
+      <View
+        class={theme().name === "dark"
+          ? "flex-col gap-2 p-3 rounded-xl bg-[#09090B] border-[#27272A]"
+          : "flex-col gap-2 p-3 rounded-xl bg-[#FAFAFA] border-[#E4E4E7]"}
+        style={{ radius: 12, borderWidth: 1 }}
+      >
+        <Text class={theme().name === "dark" ? "text-xs text-[#FAFAFA] font-bold" : "text-xs text-[#09090B] font-bold"}>
+          Global default presentation
+        </Text>
+        <MobileSegmentedControl
+          items={[
+            { id: "sheet", label: "Sheet (Bottom-Up)" },
+            { id: "page", label: "Page (Push)" },
+          ]}
+          active={props.state().miniAppPresentationStyle}
+          onChange={(id) => props.dispatch({ type: "setMiniAppPresentationStyle", value: id as MiniAppPresentationMode })}
+        />
+        <Text class={theme().name === "dark" ? "text-xs text-[#FAFAFA] font-bold" : "text-xs text-[#09090B] font-bold"}>
+          Launch override
+        </Text>
+        <MobileSegmentedControl
+          items={[
+            { id: "default", label: "Default" },
+            { id: "sheet", label: "Force Sheet" },
+            { id: "page", label: "Force Page" },
+          ]}
+          active={launchOverride()}
+          onChange={(id) => setLaunchOverride(id as "default" | MiniAppPresentationMode)}
+        />
+        <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>
+          {`Effective · Profile: ${effectiveProfileStyle()} · Lobby: ${effectiveLobbyStyle()}`}
+        </Text>
+        <View class="flex-row flex-wrap items-center gap-1.5 pt-1">
+          <MobileButton label="Profile · Sheet" kind="tonal" compact onPress={() => void open("pocket.demo.profile", "sheet")} />
+          <MobileButton label="Profile · Page" kind="tonal" compact onPress={() => void open("pocket.demo.profile", "page")} />
+          <MobileButton label="Lobby · Sheet" kind="tonal" compact onPress={() => void open("pocket.demo.lobby", "sheet")} />
+          <MobileButton label="Lobby · Page" kind="tonal" compact onPress={() => void open("pocket.demo.lobby", "page")} />
+          <MobileButton label="VN · Sheet" kind="outlined" compact onPress={() => void open("pocket.demo.lantern", "sheet")} />
+          <MobileButton label="VN · Page" kind="outlined" compact onPress={() => void open("pocket.demo.lantern", "page")} />
+        </View>
+      </View>
       <View class="flex-col gap-1.5 pt-2">
         <Text class={theme().name === "dark" ? "text-sm text-[#FAFAFA] font-bold" : "text-sm text-[#09090B] font-bold"}>Official upstream demos</Text>
         <Text class={theme().name === "dark" ? "text-xs text-[#A1A1AA]" : "text-xs text-[#71717A]"}>Pointer/touch fallback is available where listed; it does not emulate a physical gamepad.</Text>
@@ -1114,14 +1219,20 @@ function PlatformAppsCard(props: { platform: ReturnType<typeof createPocketPlatf
           const capabilityDetail = demo.missingCapabilities.length > 0
             ? `Host gap: ${demo.missingCapabilities.join(", ")}`
             : fallback;
-          const details = [demo.status, demo.launchability === "portable_pointer_fallback" ? fallback : "", capabilityDetail, demo.statusReason]
+          const details = [
+            demo.status,
+            !demo.installed ? "Not installed in this host: no native surface is registered" : "",
+            demo.launchability === "portable_pointer_fallback" ? fallback : "",
+            capabilityDetail,
+            demo.statusReason,
+          ]
             .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index)
             .join(" · ");
           return (
             <View class="flex-col gap-1 p-2 rounded-lg bg-[#09090B] border-[#27272A]" style={{ radius: 8, borderWidth: 1 }}>
               <MobileListTile title={demo.title} detail={details} />
               <MobileButton
-                label={demo.installed ? `Open ${demo.id} demo` : "Platform-limited"}
+                label={demo.installed ? `Open ${demo.id} demo` : "Not installed in this host"}
                 disabled={!demo.installed}
                 onPress={() => void open(demo.appId)}
               />

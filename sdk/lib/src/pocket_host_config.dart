@@ -15,8 +15,12 @@ import 'pocket_config.dart';
 const _hostConfigMaxBytes = 2 * 1024 * 1024;
 const _bootstrapAssetMaxBytes = 16 * 1024 * 1024;
 const _bootstrapTotalMaxBytes = 64 * 1024 * 1024;
+const _hostCacheMaxEntries = 16;
+const _hostCacheMaxFileBytes =
+    _bootstrapTotalMaxBytes + (4 * _hostConfigMaxBytes);
 const _httpRequestTimeout = Duration(seconds: 10);
 const _httpBodyTimeout = Duration(seconds: 10);
+int _atomicWriteSequence = 0;
 
 /// Observed bytes while the host bootstrap document and its required assets
 /// are read. [totalBytes] is null when the response has no declared length;
@@ -286,6 +290,7 @@ final class PocketHostConfig {
     Set<String> allowInsecureHttpHosts = const <String>{},
     Directory? trustAnchorDirectory,
     String? requiredRootPayloadSha256,
+    bool cacheFirst = false,
     PocketHostLoadProgressCallback? onProgress,
     PocketCancellationToken? cancellation,
   }) async {
@@ -300,6 +305,32 @@ final class PocketHostConfig {
       throw const FormatException(
         'Pocket host bootstrap requires HTTPS or an explicitly allowed HTTP host',
       );
+    }
+    Directory? resolvedTrustDirectory = trustAnchorDirectory;
+    Future<Directory> getTrustDirectory() async {
+      final existing = resolvedTrustDirectory;
+      if (existing != null) return existing;
+      final resolved = await _awaitCancellable(
+        getApplicationSupportDirectory(),
+        cancellation,
+      );
+      resolvedTrustDirectory = resolved;
+      return resolved;
+    }
+
+    if (cacheFirst) {
+      cancellation?.throwIfCancelled();
+      final trustDirectory = await getTrustDirectory();
+      cancellation?.throwIfCancelled();
+      final cached = await _tryLoadCachedHostConfig(
+        parsed,
+        allowedHttpHosts: effectiveAllowedHosts,
+        trustDirectory: trustDirectory,
+        requiredRootPayloadSha256: requiredRootPayloadSha256,
+        cancellation: cancellation,
+      );
+      cancellation?.throwIfCancelled();
+      if (cached != null) return cached;
     }
     final owned = client == null;
     final http = client ?? HttpClient();
@@ -344,16 +375,18 @@ final class PocketHostConfig {
         packageIndexSource: resolved.isIndex ? parsed : null,
       );
       cancellation?.throwIfCancelled();
-      final Directory trustDirectory =
-          trustAnchorDirectory ??
-          await _awaitCancellable(
-            getApplicationSupportDirectory(),
-            cancellation,
-          );
+      final trustDirectory = await getTrustDirectory();
       cancellation?.throwIfCancelled();
       await _checkTrustAnchor(
         loaded,
         directory: trustDirectory,
+        cancellation: cancellation,
+      );
+      cancellation?.throwIfCancelled();
+      await _persistCachedHostConfig(
+        loaded,
+        resolved: resolved,
+        trustDirectory: trustDirectory,
         cancellation: cancellation,
       );
       cancellation?.throwIfCancelled();
@@ -371,6 +404,7 @@ final class PocketHostConfig {
   /// returned document and are never read from separate environment fields.
   static Future<PocketHostConfig?> loadFromEnvironment({
     String? requiredRootPayloadSha256,
+    bool cacheFirst = false,
     PocketHostLoadProgressCallback? onProgress,
     PocketCancellationToken? cancellation,
   }) {
@@ -385,6 +419,7 @@ final class PocketHostConfig {
     return load(
       uri,
       requiredRootPayloadSha256: requiredRootPayloadSha256,
+      cacheFirst: cacheFirst,
       onProgress: onProgress,
       cancellation: cancellation,
     );
@@ -539,6 +574,64 @@ Future<void> _hydrateBootstrapAssets(
   required Set<String> allowedHttpHosts,
   PocketHostLoadProgressCallback? onProgress,
   PocketCancellationToken? cancellation,
+}) => _processBootstrapAssets(
+  document,
+  source: source,
+  baseUri: baseUri,
+  allowedHttpHosts: allowedHttpHosts,
+  cancellation: cancellation,
+  loadAsset: (spec, {inlineMetadata, inlineManifest}) async {
+    final bytes = await _fetchBytes(
+      client,
+      spec.uri,
+      maxBytes: spec.expectedSize,
+      progressStage: 'bootstrapAsset',
+      progressTotalBytes: spec.expectedSize,
+      onProgress: onProgress,
+      cancellation: cancellation,
+    );
+    cancellation?.throwIfCancelled();
+    final actualHash = await _awaitCancellable(
+      _bootstrapBytesSha256InWorker(bytes),
+      cancellation,
+    );
+    cancellation?.throwIfCancelled();
+    if (bytes.length != spec.expectedSize ||
+        actualHash.toLowerCase() != spec.expectedHash.toLowerCase()) {
+      throw FormatException(
+        'Bootstrap asset verification failed: ${spec.name}',
+      );
+    }
+    return (utf8.decode(bytes), bytes.length);
+  },
+);
+
+final class _BootstrapAssetSpec {
+  const _BootstrapAssetSpec({
+    required this.name,
+    required this.uri,
+    required this.expectedHash,
+    required this.expectedSize,
+  });
+
+  final String name;
+  final Uri uri;
+  final String expectedHash;
+  final int expectedSize;
+}
+
+Future<void> _processBootstrapAssets(
+  Map<String, dynamic> document, {
+  required Uri source,
+  required Uri baseUri,
+  required Set<String> allowedHttpHosts,
+  required PocketCancellationToken? cancellation,
+  required Future<(String, int)?> Function(
+    _BootstrapAssetSpec spec, {
+    required String? inlineMetadata,
+    required String? inlineManifest,
+  })
+  loadAsset,
 }) async {
   cancellation?.throwIfCancelled();
   final applications = _object(document['applications'], 'applications');
@@ -549,6 +642,8 @@ Future<void> _hydrateBootstrapAssets(
     if (package == null) {
       throw FormatException('Pocket host application ${entry.key} is invalid');
     }
+    final inlineMetadata = _string(package, 'bootstrapMetadataJson');
+    final inlineManifest = _string(package, 'bootstrapManifestJson');
     // Inline bootstrap values are not trusted input. They are populated only
     // below, after the declared bytes pass the host-origin/hash/size checks.
     package.remove('bootstrapMetadataJson');
@@ -563,22 +658,20 @@ Future<void> _hydrateBootstrapAssets(
     var manifestVerified = false;
     for (final assetEntry in rawAssets.entries) {
       cancellation?.throwIfCancelled();
-      final descriptor = _object(
-        assetEntry.value,
-        'bootstrapAssets.${assetEntry.key}',
-      );
+      final name = assetEntry.key.toString();
+      final descriptor = _object(assetEntry.value, 'bootstrapAssets.$name');
       final urlValue = _string(descriptor, 'url');
       final expectedHash = _string(descriptor, 'sha256');
       final expectedSize = _integer(descriptor, 'size', required: true);
       if (urlValue == null || expectedHash == null || expectedSize == null) {
-        throw FormatException('Invalid bootstrap asset ${assetEntry.key}');
+        throw FormatException('Invalid bootstrap asset $name');
       }
       if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(expectedHash)) {
-        throw FormatException('Invalid bootstrap asset hash ${assetEntry.key}');
+        throw FormatException('Invalid bootstrap asset hash $name');
       }
       if (expectedSize <= 0 || expectedSize > _bootstrapAssetMaxBytes) {
         throw FormatException(
-          'Invalid bootstrap asset size ${assetEntry.key}: $expectedSize',
+          'Invalid bootstrap asset size $name: $expectedSize',
         );
       }
       if (totalBytes > _bootstrapTotalMaxBytes - expectedSize) {
@@ -593,34 +686,24 @@ Future<void> _hydrateBootstrapAssets(
         allowedHttpHosts: allowedHttpHosts,
         label: 'Bootstrap asset',
       );
-      final bytes = await _fetchBytes(
-        client,
-        uri,
-        maxBytes: expectedSize,
-        progressStage: 'bootstrapAsset',
-        progressTotalBytes: expectedSize,
-        onProgress: onProgress,
-        cancellation: cancellation,
+      final verified = await loadAsset(
+        _BootstrapAssetSpec(
+          name: name,
+          uri: uri,
+          expectedHash: expectedHash,
+          expectedSize: expectedSize,
+        ),
+        inlineMetadata: inlineMetadata,
+        inlineManifest: inlineManifest,
       );
       cancellation?.throwIfCancelled();
-      totalBytes += bytes.length;
-      final actualHash = await _awaitCancellable(
-        Isolate.run<String>(() => _bootstrapBytesSha256(bytes)),
-        cancellation,
-      );
-      cancellation?.throwIfCancelled();
-      if (bytes.length != expectedSize ||
-          actualHash.toLowerCase() != expectedHash.toLowerCase()) {
-        throw FormatException(
-          'Bootstrap asset verification failed: ${assetEntry.key}',
-        );
-      }
-      final name = assetEntry.key.toString();
+      if (verified == null) continue;
+      totalBytes += verified.$2;
       if (name.endsWith('app.bytecode.json')) {
-        package['bootstrapMetadataJson'] = utf8.decode(bytes);
+        package['bootstrapMetadataJson'] = verified.$1;
         metadataVerified = true;
       } else if (name.endsWith('guest-manifest.json')) {
-        package['bootstrapManifestJson'] = utf8.decode(bytes);
+        package['bootstrapManifestJson'] = verified.$1;
         manifestVerified = true;
       }
     }
@@ -720,33 +803,11 @@ Future<_ResolvedHostDocument> _resolveHostDocument(
     cancellation: cancellation,
   );
   cancellation?.throwIfCancelled();
-  if (descriptor['kind'] != 'pocket-editor-app-host') {
-    throw const FormatException(
-      'Pocket package index descriptor is not a host config',
-    );
-  }
-  final expectedRoot =
-      _string(index, 'systemUI') ?? _string(index, 'rootAppId');
-  if (expectedRoot != null && descriptor['systemUI'] != expectedRoot) {
-    throw const FormatException(
-      'Pocket package index and host descriptor select different SystemUI apps',
-    );
-  }
-  final expectedPayload = selected.rootPayloadSha256;
-  if (expectedPayload != null) {
-    final applications = _object(descriptor['applications'], 'applications');
-    final rootId = _string(descriptor, 'systemUI');
-    final root = rootId == null ? null : _packageMap(applications[rootId]);
-    final actualPayload =
-        (root == null ? null : _string(root, 'payloadSha256')) ??
-        _string(descriptor, 'rootPayloadSha256');
-    if (actualPayload == null ||
-        actualPayload.toLowerCase() != expectedPayload.toLowerCase()) {
-      throw const FormatException(
-        'Pocket package index does not match the immutable root descriptor',
-      );
-    }
-  }
+  _verifyHostDescriptorDocument(
+    descriptor,
+    expectedRoot: _string(index, 'systemUI') ?? _string(index, 'rootAppId'),
+    expectedPayloadSha256: selected.rootPayloadSha256,
+  );
   return _ResolvedHostDocument(
     document: descriptor,
     baseUri: descriptorUri,
@@ -754,6 +815,37 @@ Future<_ResolvedHostDocument> _resolveHostDocument(
     selectedCatalogEntry: selected,
     isIndex: true,
   );
+}
+
+void _verifyHostDescriptorDocument(
+  Map<String, dynamic> descriptor, {
+  String? expectedRoot,
+  String? expectedPayloadSha256,
+}) {
+  if (descriptor['kind'] != 'pocket-editor-app-host') {
+    throw const FormatException(
+      'Pocket package index descriptor is not a host config',
+    );
+  }
+  if (expectedRoot != null && descriptor['systemUI'] != expectedRoot) {
+    throw const FormatException(
+      'Pocket package index and host descriptor select different SystemUI apps',
+    );
+  }
+  if (expectedPayloadSha256 != null) {
+    final applications = _object(descriptor['applications'], 'applications');
+    final rootId = _string(descriptor, 'systemUI');
+    final root = rootId == null ? null : _packageMap(applications[rootId]);
+    final actualPayload =
+        (root == null ? null : _string(root, 'payloadSha256')) ??
+        _string(descriptor, 'rootPayloadSha256');
+    if (actualPayload == null ||
+        actualPayload.toLowerCase() != expectedPayloadSha256.toLowerCase()) {
+      throw const FormatException(
+        'Pocket package index does not match the immutable root descriptor',
+      );
+    }
+  }
 }
 
 PocketHostCatalogEntry _catalogEntry(
@@ -1041,6 +1133,375 @@ Future<List<int>> _readHttpBytes(
   }
 }
 
+Future<PocketHostConfig?> _tryLoadCachedHostConfig(
+  Uri source, {
+  required Set<String> allowedHttpHosts,
+  required Directory trustDirectory,
+  required String? requiredRootPayloadSha256,
+  required PocketCancellationToken? cancellation,
+}) async {
+  cancellation?.throwIfCancelled();
+  final cacheDir = _hostConfigCacheDirectory(trustDirectory);
+  if (!await cacheDir.exists()) return null;
+  final sourceKey = _hostConfigSourceKey(source);
+  final expectedRootHash = requiredRootPayloadSha256?.toLowerCase();
+  if (expectedRootHash != null &&
+      !RegExp(r'^[0-9a-f]{64}$').hasMatch(expectedRootHash)) {
+    return null;
+  }
+  final file = expectedRootHash != null
+      ? _hostConfigRootCacheFile(cacheDir, sourceKey, expectedRootHash)
+      : _hostConfigLatestCacheFile(cacheDir, sourceKey);
+  return _readCachedHostConfigFile(
+    file,
+    source: source,
+    allowedHttpHosts: allowedHttpHosts,
+    trustDirectory: trustDirectory,
+    expectedRootHash: expectedRootHash,
+    cancellation: cancellation,
+  );
+}
+
+Future<PocketHostConfig?> _readCachedHostConfigFile(
+  File file, {
+  required Uri source,
+  required Set<String> allowedHttpHosts,
+  required Directory trustDirectory,
+  required String? expectedRootHash,
+  required PocketCancellationToken? cancellation,
+}) async {
+  cancellation?.throwIfCancelled();
+  if (!await file.exists()) return null;
+  Map<String, dynamic> envelope;
+  try {
+    final stat = await file.stat();
+    if (stat.size <= 0 || stat.size > _hostCacheMaxFileBytes) {
+      await _deleteQuietly(file);
+      return null;
+    }
+    final raw = await _awaitCancellable(file.readAsString(), cancellation);
+    cancellation?.throwIfCancelled();
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      await _deleteQuietly(file);
+      return null;
+    }
+    envelope = Map<String, dynamic>.from(decoded);
+  } on PocketUpdateCancellation {
+    rethrow;
+  } on Object {
+    await _deleteQuietly(file);
+    return null;
+  }
+
+  PocketHostConfig loaded;
+  try {
+    if (envelope['schemaVersion'] != 1 ||
+        envelope['kind'] != 'pocket-host-bootstrap-cache') {
+      throw const FormatException('Unsupported Pocket host bootstrap cache');
+    }
+    final cachedSource = _string(envelope, 'source');
+    if (cachedSource != _hostConfigSourceKey(source)) {
+      throw const FormatException(
+        'Pocket host bootstrap cache source mismatch',
+      );
+    }
+    final isIndex = _boolean(envelope, 'isIndex') ?? false;
+    final baseUriString = _string(envelope, 'baseUri');
+    if (baseUriString == null) {
+      throw const FormatException(
+        'Pocket host bootstrap cache missing baseUri',
+      );
+    }
+    final baseUri = _resolveSameOriginUri(
+      source,
+      baseUriString,
+      source: source,
+      allowedHttpHosts: allowedHttpHosts,
+      label: 'Cached Pocket host descriptor',
+    );
+    final document = _object(envelope['document'], 'document');
+    final catalog = <PocketHostCatalogEntry>[];
+    PocketHostCatalogEntry? selectedCatalogEntry;
+    if (isIndex) {
+      final rawCatalog = envelope['catalog'];
+      if (rawCatalog is! List || rawCatalog.isEmpty) {
+        throw const FormatException(
+          'Cached Pocket package index catalog must be a non-empty array',
+        );
+      }
+      for (final raw in rawCatalog) {
+        if (raw is! Map) {
+          throw const FormatException(
+            'Cached Pocket package index entry is invalid',
+          );
+        }
+        final entry = _catalogEntry(
+          const <String, dynamic>{},
+          Map<String, dynamic>.from(raw),
+          source,
+          allowedHttpHosts,
+        );
+        if (!catalog.any(
+          (candidate) =>
+              candidate.hostConfigUrl == entry.hostConfigUrl &&
+              candidate.rootPayloadSha256 == entry.rootPayloadSha256,
+        )) {
+          catalog.add(entry);
+        }
+      }
+      final rawSelected = _object(
+        envelope['selectedCatalogEntry'],
+        'selectedCatalogEntry',
+      );
+      final parsedSelected = _catalogEntry(
+        const <String, dynamic>{},
+        rawSelected,
+        source,
+        allowedHttpHosts,
+      );
+      for (final entry in catalog) {
+        if (entry.hostConfigUrl == parsedSelected.hostConfigUrl &&
+            entry.rootPayloadSha256?.toLowerCase() ==
+                parsedSelected.rootPayloadSha256?.toLowerCase()) {
+          selectedCatalogEntry = entry;
+          break;
+        }
+      }
+      selectedCatalogEntry ??= parsedSelected;
+      if (!catalog.contains(selectedCatalogEntry)) {
+        catalog.insert(0, selectedCatalogEntry);
+      }
+    }
+    _verifyHostDescriptorDocument(
+      document,
+      expectedPayloadSha256:
+          expectedRootHash ?? selectedCatalogEntry?.rootPayloadSha256,
+    );
+    if (expectedRootHash != null &&
+        selectedCatalogEntry?.rootPayloadSha256?.toLowerCase() !=
+            expectedRootHash) {
+      throw const FormatException(
+        'Cached Pocket host descriptor root payload hash mismatch',
+      );
+    }
+    await _verifyCachedBootstrapAssets(
+      document,
+      source: source,
+      baseUri: baseUri,
+      allowedHttpHosts: allowedHttpHosts,
+      cancellation: cancellation,
+    );
+    cancellation?.throwIfCancelled();
+    loaded = PocketHostConfig.fromJson(
+      document,
+      source: source,
+      allowInsecureHttpHosts: allowedHttpHosts,
+      catalog: catalog,
+      selectedCatalogEntry: selectedCatalogEntry,
+      packageIndexSource: isIndex ? source : null,
+    );
+  } on PocketUpdateCancellation {
+    rethrow;
+  } on Object {
+    await _deleteQuietly(file);
+    return null;
+  }
+
+  cancellation?.throwIfCancelled();
+  await _checkTrustAnchor(
+    loaded,
+    directory: trustDirectory,
+    cancellation: cancellation,
+  );
+  cancellation?.throwIfCancelled();
+  return loaded;
+}
+
+Future<void> _verifyCachedBootstrapAssets(
+  Map<String, dynamic> document, {
+  required Uri source,
+  required Uri baseUri,
+  required Set<String> allowedHttpHosts,
+  required PocketCancellationToken? cancellation,
+}) => _processBootstrapAssets(
+  document,
+  source: source,
+  baseUri: baseUri,
+  allowedHttpHosts: allowedHttpHosts,
+  cancellation: cancellation,
+  loadAsset: (spec, {inlineMetadata, inlineManifest}) async {
+    String? inlineContent;
+    if (spec.name.endsWith('app.bytecode.json')) {
+      inlineContent = inlineMetadata;
+    } else if (spec.name.endsWith('guest-manifest.json')) {
+      inlineContent = inlineManifest;
+    } else {
+      return null;
+    }
+    if (inlineContent == null) {
+      throw FormatException(
+        'Cached bootstrap asset missing content: ${spec.name}',
+      );
+    }
+    final bytes = utf8.encode(inlineContent);
+    final actualHash = _bootstrapBytesSha256(bytes);
+    if (bytes.length != spec.expectedSize ||
+        actualHash.toLowerCase() != spec.expectedHash.toLowerCase()) {
+      throw FormatException(
+        'Cached bootstrap asset verification failed: ${spec.name}',
+      );
+    }
+    return (inlineContent, bytes.length);
+  },
+);
+
+Future<void> _persistCachedHostConfig(
+  PocketHostConfig config, {
+  required _ResolvedHostDocument resolved,
+  required Directory trustDirectory,
+  required PocketCancellationToken? cancellation,
+}) async {
+  cancellation?.throwIfCancelled();
+  final cacheDir = _hostConfigCacheDirectory(trustDirectory);
+  final sourceKey = _hostConfigSourceKey(config.source);
+  final envelope = <String, dynamic>{
+    'schemaVersion': 1,
+    'kind': 'pocket-host-bootstrap-cache',
+    'source': sourceKey,
+    'baseUri': resolved.baseUri.toString(),
+    'isIndex': resolved.isIndex,
+    'catalog': <Map<String, dynamic>>[
+      for (final entry in config.catalog) _catalogEntryToJson(entry),
+    ],
+    if (config.selectedCatalogEntry != null)
+      'selectedCatalogEntry': _catalogEntryToJson(config.selectedCatalogEntry!),
+    'document': resolved.document,
+  };
+  final encoded = jsonEncode(envelope);
+  if (utf8.encode(encoded).length > _hostCacheMaxFileBytes) {
+    return;
+  }
+  cancellation?.throwIfCancelled();
+  await cacheDir.create(recursive: true);
+  cancellation?.throwIfCancelled();
+  final rootHash = config.rootPayloadSha256?.toLowerCase();
+  if (rootHash != null && RegExp(r'^[0-9a-f]{64}$').hasMatch(rootHash)) {
+    final rootFile = _hostConfigRootCacheFile(cacheDir, sourceKey, rootHash);
+    await _writeFileAtomically(rootFile, encoded, cancellation: cancellation);
+  }
+  final isLatestSelection =
+      !resolved.isIndex ||
+      (config.catalog.isNotEmpty &&
+          config.selectedCatalogEntry != null &&
+          config.selectedCatalogEntry!.hostConfigUrl ==
+              config.catalog.first.hostConfigUrl &&
+          config.selectedCatalogEntry!.rootPayloadSha256?.toLowerCase() ==
+              config.catalog.first.rootPayloadSha256?.toLowerCase());
+  if (isLatestSelection) {
+    final latestFile = _hostConfigLatestCacheFile(cacheDir, sourceKey);
+    await _writeFileAtomically(latestFile, encoded, cancellation: cancellation);
+  }
+  await _pruneHostConfigCache(cacheDir, cancellation: cancellation);
+}
+
+Map<String, dynamic> _catalogEntryToJson(PocketHostCatalogEntry entry) =>
+    <String, dynamic>{
+      if (entry.releaseId != null) 'releaseId': entry.releaseId,
+      if (entry.packageId != null) 'packageId': entry.packageId,
+      if (entry.version != null) 'version': entry.version,
+      if (entry.build != null) 'build': entry.build,
+      'hostConfigUrl': entry.hostConfigUrl.toString(),
+      if (entry.rootPayloadSha256 != null)
+        'rootPayloadSha256': entry.rootPayloadSha256,
+    };
+
+Directory _hostConfigCacheDirectory(Directory trustDirectory) =>
+    Directory('${trustDirectory.path}/pocket-host-cache');
+
+String _hostConfigSourceKey(Uri source) =>
+    source.replace(fragment: null).toString();
+
+File _hostConfigLatestCacheFile(Directory cacheDir, String sourceKey) {
+  final digest = sha256.convert(utf8.encode('latest\n$sourceKey')).toString();
+  return File('${cacheDir.path}/entry_${digest.substring(0, 32)}.json');
+}
+
+File _hostConfigRootCacheFile(
+  Directory cacheDir,
+  String sourceKey,
+  String lowercaseRootPayloadSha256,
+) {
+  final digest = sha256
+      .convert(utf8.encode('root\n$sourceKey\n$lowercaseRootPayloadSha256'))
+      .toString();
+  return File('${cacheDir.path}/entry_${digest.substring(0, 32)}.json');
+}
+
+Future<void> _writeFileAtomically(
+  File file,
+  String contents, {
+  required PocketCancellationToken? cancellation,
+}) async {
+  cancellation?.throwIfCancelled();
+  final sequence = ++_atomicWriteSequence;
+  final temporary = File(
+    '${file.path}.tmp-${DateTime.now().microsecondsSinceEpoch}-$sequence',
+  );
+  try {
+    cancellation?.throwIfCancelled();
+    await temporary.writeAsString(contents, flush: true);
+    cancellation?.throwIfCancelled();
+    await temporary.rename(file.path);
+  } catch (_) {
+    await _deleteQuietly(temporary);
+    rethrow;
+  }
+}
+
+Future<void> _pruneHostConfigCache(
+  Directory cacheDir, {
+  required PocketCancellationToken? cancellation,
+}) async {
+  cancellation?.throwIfCancelled();
+  try {
+    if (!await cacheDir.exists()) return;
+    final entries = <(File, DateTime)>[];
+    await for (final entity in cacheDir.list(followLinks: false)) {
+      cancellation?.throwIfCancelled();
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.isEmpty
+          ? ''
+          : entity.uri.pathSegments.last;
+      if (name.contains('.tmp-')) {
+        await _deleteQuietly(entity);
+        continue;
+      }
+      if (!name.startsWith('entry_') || !name.endsWith('.json')) continue;
+      final stat = await entity.stat();
+      entries.add((entity, stat.modified));
+    }
+    if (entries.length <= _hostCacheMaxEntries) return;
+    entries.sort((a, b) => b.$2.compareTo(a.$2));
+    for (final stale in entries.skip(_hostCacheMaxEntries)) {
+      cancellation?.throwIfCancelled();
+      await _deleteQuietly(stale.$1);
+    }
+  } on PocketUpdateCancellation {
+    rethrow;
+  } on Object {
+    // Pruning is best-effort maintenance and must not fail a verified load.
+  }
+}
+
+Future<void> _deleteQuietly(File file) async {
+  try {
+    if (await file.exists()) await file.delete();
+  } on Object {
+    // Ignore best-effort cleanup errors.
+  }
+}
+
 /// Pins the first trust anchor accepted for the caller's exact host URL.
 ///
 /// Policy mode stores the host-owned root anchor and may rotate release keys
@@ -1162,6 +1623,11 @@ void _checkCancellation(
     rethrow;
   }
 }
+
+// Keep the worker closure outside HTTP loader contexts: those capture an
+// HttpClient, which cannot cross an isolate boundary.
+Future<String> _bootstrapBytesSha256InWorker(List<int> bytes) =>
+    Isolate.run<String>(() => _bootstrapBytesSha256(bytes));
 
 String _bootstrapBytesSha256(List<int> bytes) =>
     sha256.convert(bytes).toString();

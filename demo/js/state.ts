@@ -26,6 +26,7 @@ export type Route =
 
 export type AccentColor = "blue" | "violet" | "teal" | "rose";
 export type InterfaceDensity = "auto" | "touch" | "desktop";
+export type MiniAppPresentationMode = "sheet" | "page";
 
 export function isPrimaryRoute(route: Route): boolean {
   return route === "home" || route === "gallery" || route === "about" || route === "settings";
@@ -200,6 +201,8 @@ export interface DemoState {
   mobileDark: boolean;
   accentColor: AccentColor;
   interfaceDensity: InterfaceDensity;
+  /** Global default MiniApp presentation style when a package has no manifest override. */
+  miniAppPresentationStyle: MiniAppPresentationMode;
   lastAction: string;
   runtimeInfo: CapabilityState;
   pluginsList: CapabilityState;
@@ -231,8 +234,15 @@ export interface DemoState {
 export type DemoEvent =
   | { type: "setAccentColor"; value: AccentColor }
   | { type: "setInterfaceDensity"; value: InterfaceDensity }
+  | { type: "setMiniAppPresentationStyle"; value: MiniAppPresentationMode }
   | { type: "resetAppearance" }
-  | { type: "restoreAppearance"; dark: boolean; accent: AccentColor; density: InterfaceDensity }
+  | {
+      type: "restoreAppearance";
+      dark: boolean;
+      accent: AccentColor;
+      density: InterfaceDensity;
+      presentationStyle?: MiniAppPresentationMode;
+    }
   | { type: "navigate"; route: Route }
   | { type: "popRoute" }
   | { type: "setTransitionMode"; mode: TransitionMode }
@@ -592,6 +602,7 @@ export function initialDemoState(): DemoState {
     mobileDark: false,
     accentColor: "blue",
     interfaceDensity: "auto",
+    miniAppPresentationStyle: "sheet",
     lastAction: "Ready",
     runtimeInfo: idleCapability(),
     pluginsList: idleCapability(),
@@ -663,13 +674,32 @@ export function reduceDemoState(state: DemoState, event: DemoEvent): DemoState {
   }
   switch (event.type) {
     case "resetAppearance":
-      return { ...state, mobileDark: false, accentColor: "blue", interfaceDensity: "auto", lastAction: "Appearance reset" };
+      return {
+        ...state,
+        mobileDark: false,
+        accentColor: "blue",
+        interfaceDensity: "auto",
+        miniAppPresentationStyle: "sheet",
+        lastAction: "Appearance reset",
+      };
     case "restoreAppearance":
-      return { ...state, mobileDark: event.dark, accentColor: event.accent, interfaceDensity: event.density };
+      return {
+        ...state,
+        mobileDark: event.dark,
+        accentColor: event.accent,
+        interfaceDensity: event.density,
+        miniAppPresentationStyle: event.presentationStyle === "page" ? "page" : "sheet",
+      };
     case "setAccentColor":
       return { ...state, accentColor: event.value, lastAction: `Accent set to ${event.value}` };
     case "setInterfaceDensity":
       return { ...state, interfaceDensity: event.value, lastAction: `Density set to ${event.value}` };
+    case "setMiniAppPresentationStyle":
+      return {
+        ...state,
+        miniAppPresentationStyle: event.value,
+        lastAction: `MiniApp style set to ${event.value}`,
+      };
     case "navigate":
       {
         const existing = state.routeStack.lastIndexOf(event.route);

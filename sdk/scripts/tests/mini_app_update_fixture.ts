@@ -155,9 +155,8 @@ async function openChild(): Promise<void> {
   }
 }
 
-// The first real child entry is deliberately a resident prewarm. It does not
-// create a compositor surface, so a later prepareOpen failure can leave this
-// caller visible and retry against the same child instance.
+// Prewarm a real child session so the FFI test can distinguish an immediate
+// cached open from a cold download and later consume a staged package.
 void prewarmChild();
 host.onEvent?.((event) => {
   if (event.method !== "input.pointer" || event.params.phase !== "up") return;

@@ -217,9 +217,9 @@ void main() {
         };
         expect(
           find.byKey(const ValueKey<String>('pocket-startup-progress')),
-          findsOneWidget,
+          findsNothing,
         );
-        expect(find.text(expectedStage), findsOneWidget);
+        expect(find.text(expectedStage), findsNothing);
         // The previous compositor map is still the constructor map, but the
         // held signed-catalog boundary must prevent its PocketView from mounting.
         expect(find.byType(PocketView), findsNothing);

@@ -203,6 +203,50 @@ panel stays within its `(39,90,298,642)` content clip and returning restores
 full scene art. Final title/body/menu/return PNGs and the browser acceptance
 log are retained with the evidence above (CSS viewport1440×1000, DPR2).
 
+## Independent Lantern release refresh, 2026-11-10
+
+The source owner is `demo/js/apps/lantern` (`pocket.json` name
+`pocket-demo-lantern`). The published index
+`/test/pocket/0.1.0/pocket.demo.lantern/latest.json` still pointed to
+`0.1.0-test.4`, published 2026-11-09T04:12:40.489Z, payload SHA-256
+`2c82f70f73dd4897f71de8a10fff32917c39e04a7f893b42845401db7a0a3cff`. Its
+signed entry identified a 1,231,811-byte QJBC with SHA-256
+`ff35d9f74270ed4dd644489d038e30d509f99d7b6d67969c11003e551ec4fc27`; this
+matched the owner build artifact byte-for-byte. That artifact's bundled
+`StageBackground` sized its cover from the safe-area layout, so the published
+package could leave the system bars uncovered. The current source instead uses
+the full `visualViewport` for `StageBackground` and confines safe-area clipping
+to interactive `StageItems` (`packages/pocket_vn/src/view.tsx`, lines 298–328,
+390–401 and 1152–1188). This isolates the failure to the stale independent
+Lantern release; adding another SDK safe-area layer would duplicate the existing
+split.
+
+The owner can be opened in the existing Studio workspace with
+`npm run editor:restart -- --project-root=/absolute/path/to/pocket/demo/js/apps/lantern --update-package-version=0.1.0`.
+The official local build endpoint is `POST /api/projects/pocket-demo-lantern/build`
+with `x-pocket-editor: 1` and `{}`; poll
+`GET /api/projects/pocket-demo-lantern/status` until `busy` is false. The
+validated QJBC was 1,270,321 bytes at
+`sdk/.pocket-build/editor-workspace-8791/builds/pocket-demo-lantern/1/app.qjbc`
+(SHA-256 `0c32f5360aa105042a3e00807fb8bbc7abc98b17fc4c78aa9667ea909fbefb49`,
+runtime ABI unchanged). The owner published that validated QJBC as
+`0.1.0-test.5` at 2026-11-10T06:59:22.772Z (payload SHA-256
+`1b4a0061889a687b6bcd3791871c0fb1dd63a2edb40a8ef18c8febee2681d8a8`); its
+signed entry SHA and size match the Editor artifact. With that artifact supplied through
+`POCKET_SAFE_VN_GUEST_BYTECODE`, `POCKET_SAFE_VN_GUEST_PAK` and
+`POCKET_SAFE_VN_GUEST_METADATA`, `bun test tests/novel_safe_area_native.test.ts`
+passes 2 tests / 107 assertions: background reaches all viewport edges across
+portrait, landscape and safe-area updates, while labels and real pointer actions
+remain within and operate in the safe content area. The Showcase index now points
+to `0.1.0-test.8` (payload SHA-256
+`343b0f02247fa6286b81b700a7283918e259b5bd6ffd40f322a40c26f31e6418`); test.7
+remains an immutable earlier release. No duplicate SDK safe-area patch was
+needed.
+
 The reusable development rule and delivery checklist live in
 [`AI_APP_DEVELOPMENT.md`](AI_APP_DEVELOPMENT.md#游戏视口与安全区), with entry
 references in the project-template guide and generated Game README.
+
+### Physical iPhone confirmation after publication
+
+The first post-publication visit still ran cached Lantern test.4 while test.5 downloaded; this explains the initial unchanged borders. After closing Lantern to Pocket Home and reopening it, the user confirmed the background issue resolved. Device active pointer was read again as `0.1.0-test.5-5-427fd5b64224aae10179fcea43ebe43a40fd1013817447e341b3b7e5e5e89fe8`. This confirms the staged child package is consumed on a subsequent open without clearing caches; it is distinct from updating the root Showcase alone.

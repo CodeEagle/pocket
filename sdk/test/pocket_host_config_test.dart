@@ -50,6 +50,52 @@ void main() {
     }
   });
 
+  test(
+    'custom catalog reload respects direct hosts and verified root reuse',
+    () async {
+      final direct = PocketHostConfig.fromJson(_document());
+      var calls = 0;
+      Future<PocketHostConfig?> reload(String? hash) async {
+        calls++;
+        return direct;
+      }
+
+      final directHost = PocketSystemHost.fromHostConfig(
+        config: direct,
+        reloadHostConfig: reload,
+      );
+      expect(directHost.catalogLoader, isNull);
+      expect(calls, 0);
+
+      final entry = PocketHostCatalogEntry(
+        releaseId: 'release-1',
+        packageId: 'pocket.host.demo',
+        version: '0.1.0',
+        build: 1,
+        hostConfigUrl: Uri.parse('https://updates.example.test/host.json'),
+        rootPayloadSha256: 'ABC123',
+      );
+      final indexed = PocketHostConfig(
+        source: direct.source,
+        systemUI: direct.systemUI,
+        applications: direct.applications,
+        hostVersion: direct.hostVersion,
+        packageVersion: direct.packageVersion,
+        catalog: [entry],
+        selectedCatalogEntry: entry,
+      );
+      final host = PocketSystemHost.fromHostConfig(
+        config: indexed,
+        reloadHostConfig: reload,
+      );
+      final reused = await host.catalogLoader!('abc123');
+      expect(reused!.rootPayloadSha256, 'ABC123');
+      expect(calls, 0);
+      await host.catalogLoader!('different-root');
+      expect(calls, 1);
+    },
+  );
+
   test('one host document configures root and every mini app on one endpoint', () {
     final config = PocketHostConfig.fromJson(
       _document(),
@@ -791,6 +837,328 @@ void main() {
         ),
         isTrue,
       );
+    },
+  );
+
+  test(
+    'cacheFirst warm load completes with zero HTTP requests and retains bootstrap assets; cold/corrupt/trust-mismatch handled safely',
+    () async {
+      final metadata = utf8.encode(
+        '{"runtimeAbi":"quickjs-bytecode-v1","bytecodeBytes":1,"build":1}',
+      );
+      final manifest = utf8.encode('{"requires":[],"optional":[],"build":1}');
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      var serverClosed = false;
+      addTearDown(() async {
+        if (!serverClosed) {
+          serverClosed = true;
+          await server.close(force: true);
+        }
+      });
+      final base = 'http://127.0.0.1:${server.port}';
+      final document = _document(baseUrl: base);
+      final applications = document['applications'] as Map<String, dynamic>;
+      for (final entry in applications.entries) {
+        final package = Map<String, dynamic>.from(entry.value as Map);
+        final prefix = entry.key == 'pocket.host.demo' ? 'root' : entry.key;
+        package['bootstrapAssets'] = <String, dynamic>{
+          'assets/apps/${entry.key}/app.bytecode.json': {
+            'url': '../../bootstrap/$prefix/metadata',
+            'sha256': sha256.convert(metadata).toString(),
+            'size': metadata.length,
+          },
+          'assets/apps/${entry.key}/guest-manifest.json': {
+            'url': '../../bootstrap/$prefix/manifest',
+            'sha256': sha256.convert(manifest).toString(),
+            'size': manifest.length,
+          },
+        };
+        if (entry.key == 'pocket.host.demo') {
+          package['payloadSha256'] = 'a' * 64;
+        }
+        applications[entry.key] = package;
+      }
+      final historicalDocument =
+          jsonDecode(jsonEncode(document)) as Map<String, dynamic>;
+      final historicalApplications =
+          historicalDocument['applications'] as Map<String, dynamic>;
+      (historicalApplications['pocket.host.demo']
+              as Map<String, dynamic>)['payloadSha256'] =
+          'b' * 64;
+      final index = <String, dynamic>{
+        'schemaVersion': 1,
+        'kind': 'pocket-editor-package-index',
+        'systemUI': 'pocket.host.demo',
+        'rootAppId': 'pocket.host.demo',
+        'latest': <String, dynamic>{
+          'releaseId': 'test-release-1',
+          'rootPayloadSha256': 'a' * 64,
+          'hostConfigUrl': '/history/test-release-1/host.json',
+        },
+        'versions': <dynamic>[
+          <String, dynamic>{
+            'releaseId': 'old-release',
+            'rootPayloadSha256': 'b' * 64,
+            'hostConfigUrl': '/history/old-release/host.json',
+          },
+        ],
+      };
+
+      var httpRequests = 0;
+      server.listen((request) {
+        httpRequests++;
+        final path = request.uri.path;
+        if (path == '/test/pocket/0.1.0/pocket.host.demo/latest.json') {
+          request.response
+            ..headers.contentType = ContentType.json
+            ..write(jsonEncode(index))
+            ..close();
+          return;
+        }
+        if (path == '/history/test-release-1/host.json') {
+          request.response
+            ..headers.contentType = ContentType.json
+            ..write(jsonEncode(document))
+            ..close();
+          return;
+        }
+        if (path == '/history/old-release/host.json') {
+          request.response
+            ..headers.contentType = ContentType.json
+            ..write(jsonEncode(historicalDocument))
+            ..close();
+          return;
+        }
+        final parts = path.split('/');
+        final bytes = parts.length >= 4 && parts[1] == 'bootstrap'
+            ? (parts.last == 'metadata' ? metadata : manifest)
+            : null;
+        if (bytes == null) {
+          request.response.statusCode = HttpStatus.notFound;
+        } else {
+          request.response
+            ..headers.contentType = ContentType.json
+            ..add(bytes);
+        }
+        request.response.close();
+      });
+
+      final indexUri = Uri.parse(
+        '$base/test/pocket/0.1.0/pocket.host.demo/latest.json',
+      );
+
+      // 1. Cold start with cacheFirst: true fetches over network and persists cache.
+      final coldLoaded = await PocketHostConfig.load(
+        indexUri,
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        cacheFirst: true,
+      );
+      expect(httpRequests, greaterThan(0));
+      expect(coldLoaded.rootPayloadSha256, 'a' * 64);
+      expect(coldLoaded.systemUI.bootstrapMetadataJson, utf8.decode(metadata));
+      expect(
+        coldLoaded.applications['pocket.demo.profile']!.bootstrapManifestJson,
+        utf8.decode(manifest),
+      );
+
+      // Also warm historical root entry ('b' * 64).
+      final warmHistorical = await PocketHostConfig.load(
+        indexUri,
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        requiredRootPayloadSha256: 'b' * 64,
+        cacheFirst: true,
+      );
+      expect(warmHistorical.rootPayloadSha256, 'b' * 64);
+
+      // 2. Stop HTTP server completely; warm cacheFirst load must succeed with zero network!
+      serverClosed = true;
+      await server.close(force: true);
+      final requestsBeforeOffline = httpRequests;
+      final progressEvents = <PocketHostLoadProgress>[];
+
+      final cachedLoaded = await PocketHostConfig.load(
+        indexUri,
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        cacheFirst: true,
+        onProgress: progressEvents.add,
+      );
+      expect(httpRequests, requestsBeforeOffline);
+      expect(progressEvents, isEmpty);
+      expect(cachedLoaded.source, indexUri);
+      expect(cachedLoaded.rootPayloadSha256, 'a' * 64);
+      expect(cachedLoaded.selectedCatalogEntry?.releaseId, 'test-release-1');
+      expect(cachedLoaded.catalog.length, 2);
+      expect(
+        cachedLoaded.systemUI.bootstrapMetadataJson,
+        utf8.decode(metadata),
+      );
+      expect(
+        cachedLoaded.systemUI.bootstrapManifestJson,
+        utf8.decode(manifest),
+      );
+      expect(
+        cachedLoaded.applications['pocket.demo.profile']!.bootstrapMetadataJson,
+        utf8.decode(metadata),
+      );
+      expect(
+        cachedLoaded.applications['pocket.demo.profile']!.bootstrapManifestJson,
+        utf8.decode(manifest),
+      );
+      expect(
+        cachedLoaded.systemUI.updates!.indexUrl,
+        '$base/test/pocket/0.1.0/pocket.host.demo/latest.json',
+      );
+
+      // Exact historical root payload hash selection from cache works offline too.
+      final cachedHistorical = await PocketHostConfig.load(
+        indexUri,
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        requiredRootPayloadSha256: 'b' * 64,
+        cacheFirst: true,
+      );
+      expect(cachedHistorical.rootPayloadSha256, 'b' * 64);
+      expect(cachedHistorical.selectedCatalogEntry?.releaseId, 'old-release');
+      expect(
+        cachedHistorical.systemUI.bootstrapMetadataJson,
+        utf8.decode(metadata),
+      );
+
+      // Uncached historical root hash attempts network (and fails since server is closed).
+      await expectLater(
+        PocketHostConfig.load(
+          indexUri,
+          allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+          trustAnchorDirectory: trustDirectory,
+          requiredRootPayloadSha256: 'c' * 64,
+          cacheFirst: true,
+        ),
+        throwsA(anything),
+      );
+
+      // Unsupported transports are rejected before reading a bootstrap cache.
+      // Debug builds intentionally auto-allow HTTP, so do not contact a real LAN host.
+      final lanUri = indexUri.replace(scheme: 'ftp');
+      await expectLater(
+        PocketHostConfig.load(
+          lanUri,
+          trustAnchorDirectory: trustDirectory,
+          cacheFirst: true,
+        ),
+        throwsA(isA<FormatException>()),
+      );
+
+      // 4. Trust mismatch is never silently accepted from cache.
+      final trustFile = File('${trustDirectory.path}/pocket-host-trust.json');
+      final trustJson =
+          jsonDecode(trustFile.readAsStringSync()) as Map<String, dynamic>;
+      final anchors = trustJson['anchors'] as Map<String, dynamic>;
+      final anchorKey = indexUri
+          .replace(query: null, fragment: null)
+          .toString();
+      (anchors[anchorKey] as Map<String, dynamic>)['keyId'] =
+          'different-pinned-key';
+      trustFile.writeAsStringSync(jsonEncode(trustJson));
+
+      await expectLater(
+        PocketHostConfig.load(
+          indexUri,
+          allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+          trustAnchorDirectory: trustDirectory,
+          cacheFirst: true,
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('trust anchor changed'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'corrupted or tampered bootstrap cache falls back to network and re-validates',
+    () async {
+      final metadata = utf8.encode(
+        '{"runtimeAbi":"quickjs-bytecode-v1","bytecodeBytes":1,"build":1}',
+      );
+      final manifest = utf8.encode('{"requires":[],"optional":[],"build":1}');
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final base = 'http://127.0.0.1:${server.port}';
+      final document = _document(baseUrl: base);
+      final applications = document['applications'] as Map<String, dynamic>;
+      for (final entry in applications.entries) {
+        final package = Map<String, dynamic>.from(entry.value as Map);
+        package['bootstrapAssets'] = <String, dynamic>{
+          'assets/apps/${entry.key}/app.bytecode.json': {
+            'url': '$base/metadata',
+            'sha256': sha256.convert(metadata).toString(),
+            'size': metadata.length,
+          },
+          'assets/apps/${entry.key}/guest-manifest.json': {
+            'url': '$base/manifest',
+            'sha256': sha256.convert(manifest).toString(),
+            'size': manifest.length,
+          },
+        };
+        applications[entry.key] = package;
+      }
+
+      var hostRequests = 0;
+      server.listen((request) {
+        if (request.uri.path == '/host.json') {
+          hostRequests++;
+          request.response
+            ..headers.contentType = ContentType.json
+            ..write(jsonEncode(document))
+            ..close();
+          return;
+        }
+        final bytes = request.uri.path == '/metadata' ? metadata : manifest;
+        request.response
+          ..headers.contentType = ContentType.json
+          ..add(bytes)
+          ..close();
+      });
+
+      final hostUri = Uri.parse('$base/host.json');
+      await PocketHostConfig.load(
+        hostUri,
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        cacheFirst: true,
+      );
+      expect(hostRequests, 1);
+
+      // Corrupt the cached bootstrap asset content so its sha256 check fails.
+      final cacheDir = Directory('${trustDirectory.path}/pocket-host-cache');
+      final cacheFiles = cacheDir.listSync().whereType<File>().toList();
+      expect(cacheFiles, isNotEmpty);
+      for (final file in cacheFiles) {
+        final raw = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+        final doc = raw['document'] as Map<String, dynamic>;
+        final apps = doc['applications'] as Map<String, dynamic>;
+        final root = apps['pocket.host.demo'] as Map<String, dynamic>;
+        root['bootstrapMetadataJson'] = '{"runtimeAbi":"tampered","build":999}';
+        file.writeAsStringSync(jsonEncode(raw));
+      }
+
+      // Loading with cacheFirst: true detects the hash mismatch, evicts the corrupt cache,
+      // and falls back to fetching a clean copy from the network.
+      final recovered = await PocketHostConfig.load(
+        hostUri,
+        allowInsecureHttpHosts: const <String>{'127.0.0.1'},
+        trustAnchorDirectory: trustDirectory,
+        cacheFirst: true,
+      );
+      expect(hostRequests, 2);
+      expect(recovered.systemUI.bootstrapMetadataJson, utf8.decode(metadata));
     },
   );
 }

@@ -57,10 +57,138 @@ export interface HostEvent {
   readonly raw: Record<string, unknown>;
 }
 
+export const SYSTEM_PRESETS_EVENT = "platform.presets";
+
+export type MiniAppPresentationStyle = "sheet" | "page";
+
+export type MiniAppPresentationStyleInput =
+  | MiniAppPresentationStyle
+  | "modal"
+  | "bottom-sheet"
+  | "push";
+
+export type PocketSystemDensity = "auto" | "touch" | "desktop";
+
+export interface PocketSystemPresets {
+  darkMode: boolean;
+  colorScheme: "light" | "dark";
+  accentColor: string;
+  density: PocketSystemDensity;
+  presentationStyle: MiniAppPresentationStyle;
+}
+
+export const DEFAULT_SYSTEM_PRESETS: PocketSystemPresets = {
+  darkMode: false,
+  colorScheme: "light",
+  accentColor: "blue",
+  density: "auto",
+  presentationStyle: "sheet",
+};
+
+export function normalizePresentationStyle(
+  value: unknown,
+  fallback: MiniAppPresentationStyle = "sheet",
+): MiniAppPresentationStyle {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "page" || normalized === "push") return "page";
+    if (normalized === "sheet" || normalized === "modal" || normalized === "bottom-sheet") return "sheet";
+    return fallback;
+  }
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    if ("style" in record) return normalizePresentationStyle(record.style, fallback);
+    if ("presentationStyle" in record) return normalizePresentationStyle(record.presentationStyle, fallback);
+  }
+  return fallback;
+}
+
+export function parseSystemPresets(
+  value: unknown,
+  fallback: PocketSystemPresets = DEFAULT_SYSTEM_PRESETS,
+): PocketSystemPresets {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const top = value as Record<string, unknown>;
+  const nested = top.presets !== null && typeof top.presets === "object" && !Array.isArray(top.presets)
+    ? top.presets as Record<string, unknown>
+    : undefined;
+  const source = nested ? { ...top, ...nested } : top;
+
+  let darkMode = fallback.darkMode;
+  if (typeof source.darkMode === "boolean") {
+    darkMode = source.darkMode;
+  } else if (source.colorScheme === "dark") {
+    darkMode = true;
+  } else if (source.colorScheme === "light") {
+    darkMode = false;
+  }
+  const colorScheme: "light" | "dark" = darkMode ? "dark" : "light";
+
+  let accentColor = fallback.accentColor;
+  const rawAccent = source.accentColor !== undefined ? source.accentColor : source.accent;
+  if (typeof rawAccent === "string" && rawAccent.trim().length > 0) {
+    accentColor = rawAccent.trim();
+  } else if (typeof rawAccent === "number" && Number.isFinite(rawAccent)) {
+    const rgb = ((rawAccent >>> 0) & 0x00ffffff).toString(16).padStart(6, "0");
+    accentColor = `#${rgb}`;
+  }
+
+  let density: PocketSystemDensity = fallback.density;
+  if (source.density === "auto" || source.density === "touch" || source.density === "desktop") {
+    density = source.density;
+  }
+
+  const rawPresentation = source.presentationStyle
+    ?? top.presentationStyle
+    ?? source.defaultPresentationStyle
+    ?? source.presentation
+    ?? top.presentation;
+  const presentationStyle = normalizePresentationStyle(rawPresentation, fallback.presentationStyle);
+
+  return {
+    darkMode,
+    colorScheme,
+    accentColor,
+    density,
+    presentationStyle,
+  };
+}
+
+export function systemPresetsBridgeObject(presets: PocketSystemPresets): BridgeObject {
+  return {
+    darkMode: presets.darkMode,
+    colorScheme: presets.colorScheme,
+    accentColor: presets.accentColor,
+    density: presets.density,
+    presentationStyle: presets.presentationStyle,
+  };
+}
+
+export function isSystemPresetsEvent(
+  eventOrMethod: { readonly method: string; readonly params?: unknown } | string,
+  params?: unknown,
+): boolean {
+  const method = typeof eventOrMethod === "string" ? eventOrMethod : eventOrMethod.method;
+  const payload = typeof eventOrMethod === "string" ? params : eventOrMethod.params;
+  if (method === SYSTEM_PRESETS_EVENT) return true;
+  if (method !== "platform.launch" || !isObject(payload)) return false;
+  return (
+    isObject(payload.presets) ||
+    typeof payload.presentationStyle === "string" ||
+    isObject(payload.presentation)
+  );
+}
+
 /** The latest merged display viewport observed at the host event ingress. */
 export interface HostDisplayViewportSnapshot {
   readonly event: HostEvent;
   readonly geometry: DisplayGeometry;
+}
+
+/** The latest merged system presets observed at the host event ingress. */
+export interface HostSystemPresetsSnapshot {
+  readonly event: HostEvent;
+  readonly presets: PocketSystemPresets;
 }
 
 export type HostEventListener = (event: HostEvent) => void;
@@ -82,6 +210,8 @@ export interface HostBridge {
   onEvent?(listener: HostEventListener): () => void;
   /** Read the canonical viewport fact without replaying it to other listeners. */
   getLatestDisplayViewport?(): HostDisplayViewportSnapshot | undefined;
+  /** Read the canonical system presets fact without replaying it to other listeners. */
+  getLatestSystemPresets?(): HostSystemPresetsSnapshot | undefined;
   /** Subscribe to the deterministic guest clock used for bounded operations. */
   onTick?(listener: () => void): () => void;
   /** Official guest-clock deadline scheduling, which wakes an idle runtime. */
@@ -240,6 +370,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
   const eventListeners = new Set<HostEventListener>();
   const tickListeners = new Set<() => void>();
   let latestDisplayViewport: HostDisplayViewportSnapshot | undefined;
+  let latestSystemPresets: HostSystemPresetsSnapshot | undefined;
   let diagnosticsReported = 0;
   const diagnose = (
     kind: HostBridgeDiagnosticKind,
@@ -276,6 +407,10 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       // there is not yet a display listener. This is not a general event replay
       // buffer; arbitrary HostBridge subscribers still receive only live events.
       latestDisplayViewport = { event, geometry };
+    } else if (isSystemPresetsEvent(event)) {
+      const previous = latestSystemPresets?.presets ?? DEFAULT_SYSTEM_PRESETS;
+      const presets = parseSystemPresets(event.params, previous);
+      latestSystemPresets = { event, presets };
     }
     if (eventListeners.size === 0) return false;
     for (const listener of [...eventListeners]) {
@@ -419,6 +554,10 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       return disposed ? undefined : latestDisplayViewport;
     },
 
+    getLatestSystemPresets(): HostSystemPresetsSnapshot | undefined {
+      return disposed ? undefined : latestSystemPresets;
+    },
+
     onTick(listener: () => void): () => void {
       if (disposed) return () => {};
       tickListeners.add(listener);
@@ -444,6 +583,7 @@ export function createHostBridge(sendOverride?: HostSend, options: HostBridgeOpt
       eventListeners.clear();
       tickListeners.clear();
       latestDisplayViewport = undefined;
+      latestSystemPresets = undefined;
     },
   };
   globalObject.__pocketHostBridge = bridge;

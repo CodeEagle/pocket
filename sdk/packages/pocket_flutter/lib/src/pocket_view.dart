@@ -15,6 +15,7 @@ import 'package:video_player/video_player.dart';
 import 'pocket_assets.dart';
 import 'pocket_binary_codec.dart';
 import 'pocket_compositor.dart';
+import 'flutter_frame_monitor.dart';
 import 'pocket_display.dart';
 import 'pocket_display_geometry.dart';
 import 'pocket_duplex.dart';
@@ -575,6 +576,7 @@ class PocketView extends StatefulWidget {
     this.packageSource,
     this.auxiliaryViewport,
     this.displayGeometry,
+    this.initialEvents = const <Map<String, dynamic>>[],
     this.imageResourceDecoder,
     this.loadingBuilder,
     this.onReady,
@@ -736,13 +738,19 @@ class PocketView extends StatefulWidget {
   /// platforms that do not register it.
   final PocketDisplayGeometrySource? displayGeometry;
 
+  /// Opaque host events delivered to the guest at zero elapsed time alongside
+  /// initial `display.viewport` publication, before [onReady] admits the first
+  /// frame. Each entry must contain a non-empty string `method` (or `name`) and
+  /// an optional map `params` (or `payload`).
+  final List<Map<String, dynamic>> initialEvents;
+
   /// Test-only override for decoding a native resource.
   @visibleForTesting
   final PocketImageResourceDecoder? imageResourceDecoder;
 
   /// Builds a custom loading surface from observed startup facts. It is used
   /// until the existing first-frame [onReady] gate opens. When null, PocketView
-  /// shows its default stage and image-resource count indicator.
+  /// stays blank until that frame; errors still render their error surface.
   final PocketLoadingBuilder? loadingBuilder;
   final ValueChanged<PocketViewController>? onReady;
   final PocketEventCallback? onEvent;
@@ -1088,8 +1096,6 @@ class _PocketViewState extends State<PocketView>
   final Set<DateTime> _dirtyDeliveredLongFrameTimestamps = <DateTime>{};
   DateTime? _lastUnmatchedLongFrameTimestamp;
   bool _frameTimingListenerAttached = false;
-  double? _fps;
-  double? _sessionMinFps;
   double _refreshHz = 60;
   final GlobalKey _hostKey = GlobalKey(debugLabel: 'pocket-host');
   // Keep the scene widget instance stable across unrelated parent setState
@@ -1864,7 +1870,9 @@ class _PocketViewState extends State<PocketView>
       _loading = false;
       final safeAreaSentImmediately = _reportSafeArea();
       if (_runtime == null || _error != null) return;
-      if (safeAreaSentImmediately) {
+      final initialEventsSentImmediately = _sendInitialEvents();
+      if (_runtime == null || _error != null) return;
+      if (safeAreaSentImmediately || initialEventsSentImmediately) {
         final deltaFn = debugPocketFrameDeltaAtOverride ?? pocketFrameDeltaAt;
         final geometryFrame = deltaFn(runtime, 0);
         _idleWakeCreditMicroseconds = 0;
@@ -2562,7 +2570,6 @@ class _PocketViewState extends State<PocketView>
     _deliveredLongFrameEvents.clear();
     _dirtyDeliveredLongFrameTimestamps.clear();
     _lastUnmatchedLongFrameTimestamp = null;
-    _fps = null;
   }
 
   double _nativeDurationP95() {
@@ -2610,10 +2617,7 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  void _deliverPerformanceSample(
-    PocketPerformanceSample sample, {
-    bool updateDebugOverlay = true,
-  }) {
+  void _deliverPerformanceSample(PocketPerformanceSample sample) {
     final callback = widget.onPerformanceSample;
     if (callback != null) {
       try {
@@ -2633,9 +2637,6 @@ class _PocketViewState extends State<PocketView>
           ),
         );
       }
-    }
-    if (updateDebugOverlay && widget.showDebugFps && mounted) {
-      setState(() {});
     }
   }
 
@@ -2666,8 +2667,7 @@ class _PocketViewState extends State<PocketView>
     _performanceMaxGapMs = 0;
     _performanceSlowFrames = 0;
     _performanceNativeDurationsMs.clear();
-    _fps = null;
-    _deliverPerformanceSample(burstSample, updateDebugOverlay: false);
+    _deliverPerformanceSample(burstSample);
   }
 
   void _queueDeliveredLongFrameUpdates() {
@@ -2756,11 +2756,6 @@ class _PocketViewState extends State<PocketView>
     if (durationMs < 1000 || _performanceFrames == 0) return;
 
     final fps = _performanceFrames * 1000.0 / durationMs;
-    _fps = fps;
-    final previousMinimum = _sessionMinFps;
-    _sessionMinFps = previousMinimum == null
-        ? fps
-        : math.min(previousMinimum, fps);
     final events = List<PocketLongFrameEvent>.of(
       _performanceLongFrameEvents,
       growable: false,
@@ -3584,6 +3579,35 @@ class _PocketViewState extends State<PocketView>
       _failRuntime(error);
     }
     return false;
+  }
+
+  bool _sendInitialEvents() {
+    final runtime = _runtime;
+    final events = widget.initialEvents;
+    if (runtime == null || events.isEmpty) return false;
+    var sent = false;
+    try {
+      for (var index = 0; index < events.length; index++) {
+        final entry = events[index];
+        final rawMethod = entry['method'] ?? entry['name'] ?? entry['event'];
+        if (rawMethod is! String || rawMethod.isEmpty) continue;
+        final rawParams = entry['params'] ?? entry['payload'];
+        final params = rawParams is Map
+            ? Map<String, dynamic>.from(rawParams)
+            : const <String, dynamic>{};
+        runtime.send(<String, dynamic>{
+          'type': 'event',
+          'id': 'dart-init-${DateTime.now().microsecondsSinceEpoch}-$index',
+          'name': rawMethod,
+          'payload': params,
+        });
+        sent = true;
+      }
+    } catch (error) {
+      _failRuntime(error);
+      return false;
+    }
+    return sent;
   }
 
   static const Duration _firstFrameResourceTimeout = Duration(seconds: 5);
@@ -6546,69 +6570,6 @@ class _PocketViewState extends State<PocketView>
     if (shouldDispose) runtime.dispose();
   }
 
-  Color _fpsLabelColor() {
-    final fps = _fps;
-    if (fps == null) return Colors.white;
-    if (fps < 45) return Colors.redAccent;
-    // Compare the measured cadence with the actual display refresh rate; a
-    // 120/144-Hz surface is warned below its own budget while sub-45 FPS stays
-    // red on all panels.
-    if (fps < _refreshHz) return Colors.amberAccent;
-    return Colors.greenAccent;
-  }
-
-  /// Returns the inset for diagnostics in this PocketView's local host
-  /// coordinates. Safe-area values are reported in guest logical pixels, so
-  /// map them through the same canvas geometry used by pointer/IME mapping;
-  /// never read whole-window padding directly for a nested or fixed preview.
-  EdgeInsets _diagnosticOverlayInsets(BuildContext context) {
-    final hostContext = _hostKey.currentContext;
-    final object = hostContext?.findRenderObject();
-    if (hostContext == null || object is! RenderBox || !object.hasSize) {
-      return EdgeInsets.zero;
-    }
-    if (!_displayGeometryMatchesView(hostContext, object)) {
-      // A live resize is between Flutter layout and the first matching native
-      // frame. Keep diagnostics at their conservative host edge for one
-      // frame instead of using stale frame coordinates.
-      return EdgeInsets.zero;
-    }
-    final frame = Size(_frame.width, _frame.height);
-    if (!frame.width.isFinite ||
-        !frame.height.isFinite ||
-        frame.width <= 0 ||
-        frame.height <= 0) {
-      return EdgeInsets.zero;
-    }
-    final geometry = _canvasGeometryForHost(object);
-    if (geometry.size.width <= 0 || geometry.size.height <= 0) {
-      return EdgeInsets.zero;
-    }
-    final scaleX = geometry.size.width / frame.width;
-    final scaleY = geometry.size.height / frame.height;
-    if (!scaleX.isFinite || !scaleY.isFinite || scaleX <= 0 || scaleY <= 0) {
-      return EdgeInsets.zero;
-    }
-    final safe = _safeAreaForHost(
-      object,
-      hostContext,
-      geometry: geometry,
-      referenceRect: _compositorDisplayReferenceRect(object, geometry),
-    );
-    final right =
-        object.size.width -
-        (geometry.origin.dx + geometry.size.width - safe.right * scaleX);
-    final bottom =
-        object.size.height -
-        (geometry.origin.dy + geometry.size.height - safe.bottom * scaleY);
-    return EdgeInsets.only(
-      left: math.max(0, geometry.origin.dx + safe.left * scaleX),
-      top: math.max(0, geometry.origin.dy + safe.top * scaleY),
-      right: math.max(0, right),
-      bottom: math.max(0, bottom),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final layout = LayoutBuilder(
@@ -6618,7 +6579,7 @@ class _PocketViewState extends State<PocketView>
         final content = _buildContent(context);
         final background =
             widget.backgroundColor ??
-            (_loading || _error != null ? const Color(0xff101827) : null);
+            (_error != null ? const Color(0xff101827) : null);
         return background == null
             ? content
             : ColoredBox(color: background, child: content);
@@ -6826,72 +6787,7 @@ class _PocketViewState extends State<PocketView>
     return false;
   }
 
-  String _startupStageLabel(PocketStartupStage stage) => switch (stage) {
-    PocketStartupStage.preparingPackage => 'Preparing application package',
-    PocketStartupStage.startingRuntime =>
-      'Reading PocketJS resources and starting runtime',
-    PocketStartupStage.decodingInitialResources =>
-      'Decoding first-frame image resources',
-    PocketStartupStage.applyingDisplayGeometry =>
-      'Applying display geometry and resources',
-  };
-
-  Widget _defaultStartupLoading(BuildContext context) {
-    final background = widget.backgroundColor ?? const Color(0xff101827);
-    final color = background.computeLuminance() > 0.179
-        ? Colors.black
-        : Colors.white;
-    final progress = _startupProgress;
-    final total = progress.resourcesTotal;
-    final decoded = progress.resourcesDecoded;
-    final resourceSummary = total == null || total <= 0
-        ? null
-        : '${decoded ?? 0} / $total first-frame resources decoded';
-    return Center(
-      child: Semantics(
-        liveRegion: true,
-        label: [
-          _startupStageLabel(progress.stage),
-          if (resourceSummary != null) resourceSummary,
-        ].join('. '),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox.square(
-                dimension: 36,
-                child: CircularProgressIndicator(color: color),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                _startupStageLabel(progress.stage),
-                textAlign: TextAlign.center,
-                style: TextStyle(color: color, fontWeight: FontWeight.w600),
-              ),
-              if (resourceSummary != null) ...[
-                const SizedBox(height: 6),
-                Text(
-                  resourceSummary,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: color.withValues(alpha: 0.78),
-                    fontSize: 12,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildContent(BuildContext context) {
-    if (_loading) {
-      return widget.loadingBuilder?.call(context, _startupProgress) ??
-          _defaultStartupLoading(context);
-    }
     if (_error != null) {
       return Center(
         child: Padding(
@@ -6902,6 +6798,10 @@ class _PocketViewState extends State<PocketView>
           ),
         ),
       );
+    }
+    if (_loading) {
+      return widget.loadingBuilder?.call(context, _startupProgress) ??
+          const SizedBox.expand();
     }
     final content = _retainedSceneWidget ??= ValueListenableBuilder<int>(
       valueListenable: _sceneRevision,
@@ -7020,33 +6920,7 @@ class _PocketViewState extends State<PocketView>
       },
     );
     if (!widget.showDebugFps) return content;
-    final fpsText = _fps?.toStringAsFixed(0) ?? '--';
-    final minimumText = _sessionMinFps?.toStringAsFixed(0) ?? '--';
-    final diagnosticInsets = _diagnosticOverlayInsets(context);
-    return Stack(
-      children: <Widget>[
-        content,
-        Positioned(
-          top: diagnosticInsets.top + 6,
-          right: diagnosticInsets.right + 6,
-          child: IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: const Color(0xb3000000),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                child: Text(
-                  'Guest ticks/s $fpsText | min $minimumText',
-                  style: TextStyle(fontSize: 11, color: _fpsLabelColor()),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
+    return FlutterFrameMonitor(child: content);
   }
 
   Size _fitSurfaceSize(

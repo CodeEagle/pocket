@@ -2,7 +2,6 @@ import { createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { mount } from "@pocketjs/framework/solid";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import {
-  MOBILE_THEME_LIGHT,
   MobileAppBar,
   MobileBadge,
   MobileButton,
@@ -11,6 +10,7 @@ import {
   SafeAreaScaffold,
   ScrollablePage,
   StatusBar,
+  useMobileTheme,
 } from "@pocket/ui";
 import { createPocketPlatformClient } from "@pocket/ui/platform";
 
@@ -38,6 +38,52 @@ function profileFromValue(value: unknown): Profile | undefined {
     uid: candidate.uid,
     vipLevel: typeof candidate.vipLevel === "number" ? candidate.vipLevel : undefined,
   };
+}
+
+function LobbyContent(props: {
+  status: () => string;
+  statusOk: () => boolean;
+  identity: () => Profile | undefined;
+  visits: () => number;
+  count: () => number;
+  lastMessage: () => string;
+  onSendUpdate: () => void;
+  onReturnResult: () => void;
+}): JSX.Element {
+  const theme = useMobileTheme();
+  const isDark = () => theme().name === "dark";
+  return (
+    <View class="flex-col gap-3 p-4">
+      <StatusBar label="Lobby platform state" detail={props.status()} ok={props.statusOk()} />
+      <MobileCard
+        title="Shared identity"
+        detail={props.identity() ? `${props.identity()!.role} · UID ${props.identity()!.uid}` : "Waiting for profile guest data"}
+      >
+        <Text class={isDark() ? "text-xl text-[#FAFAFA] font-bold" : "text-xl text-slate-950 font-bold"}>{props.identity()?.name ?? "Guest"}</Text>
+        <Text class={isDark() ? "text-xs text-[#A1A1AA]" : "text-xs text-slate-600"}>Namespace: identity · storage.get()</Text>
+      </MobileCard>
+      <MobileCard title="Independent lobby counter" detail="This state belongs to Guest B and is not the profile state.">
+        <View class="flex-row items-center justify-between">
+          <View class="flex-col gap-1">
+            <Text class={isDark() ? "text-xs text-[#A1A1AA]" : "text-xs text-slate-600"}>visits</Text>
+            <Text class={isDark() ? "text-xl text-[#FAFAFA] font-bold" : "text-xl text-slate-950 font-bold"}>{props.visits()}</Text>
+          </View>
+          <View class="flex-col gap-1">
+            <Text class={isDark() ? "text-xs text-[#A1A1AA]" : "text-xs text-slate-600"}>count</Text>
+            <Text class={isDark() ? "text-xl text-[#FAFAFA] font-bold" : "text-xl text-slate-950 font-bold"}>{props.count()}</Text>
+          </View>
+        </View>
+        <MobileButton label="Increment lobby counter" onPress={props.onSendUpdate} />
+        <Text class={isDark() ? "text-xs text-[#A1A1AA]" : "text-xs text-slate-600"}>{props.lastMessage()}</Text>
+      </MobileCard>
+      <MobileCard title="Cross-app handoff" detail="The host receives both the message and the awaited return value.">
+        <View class="flex-col gap-2">
+          <MobileButton label="Send lobby update to Showcase" kind="outlined" onPress={props.onSendUpdate} />
+          <MobileButton label="Return visits to caller" onPress={props.onReturnResult} />
+        </View>
+      </MobileCard>
+    </View>
+  );
 }
 
 function LobbyApp(): JSX.Element {
@@ -108,7 +154,7 @@ function LobbyApp(): JSX.Element {
   };
 
   return (
-    <MobileThemeProvider theme={MOBILE_THEME_LIGHT}>
+    <MobileThemeProvider>
       <SafeAreaScaffold
         reservedActions="mini-app"
         appBar={() => (
@@ -120,36 +166,16 @@ function LobbyApp(): JSX.Element {
         )}
       >
         <ScrollablePage>
-          <View class="flex-col gap-3 p-4">
-            <StatusBar label="Lobby platform state" detail={status()} ok={statusOk()} />
-            <MobileCard
-              title="Shared identity"
-              detail={identity() ? `${identity()!.role} · UID ${identity()!.uid}` : "Waiting for profile guest data"}
-            >
-              <Text class="text-xl text-slate-950 font-bold">{identity()?.name ?? "Guest"}</Text>
-              <Text class="text-xs text-slate-600">Namespace: identity · storage.get()</Text>
-            </MobileCard>
-            <MobileCard title="Independent lobby counter" detail="This state belongs to Guest B and is not the profile state.">
-              <View class="flex-row items-center justify-between">
-                <View class="flex-col gap-1">
-                  <Text class="text-xs text-slate-600">visits</Text>
-                  <Text class="text-xl text-slate-950 font-bold">{visits()}</Text>
-                </View>
-                <View class="flex-col gap-1">
-                  <Text class="text-xs text-slate-600">count</Text>
-                  <Text class="text-xl text-slate-950 font-bold">{count()}</Text>
-                </View>
-              </View>
-              <MobileButton label="Increment lobby counter" onPress={() => { void sendLobbyUpdate(); }} />
-              <Text class="text-xs text-slate-600">{lastMessage()}</Text>
-            </MobileCard>
-            <MobileCard title="Cross-app handoff" detail="The host receives both the message and the awaited return value.">
-              <View class="flex-col gap-2">
-                <MobileButton label="Send lobby update to Showcase" kind="outlined" onPress={() => { void sendLobbyUpdate(); }} />
-                <MobileButton label="Return visits to caller" onPress={() => { void returnResult(); }} />
-              </View>
-            </MobileCard>
-          </View>
+          <LobbyContent
+            status={status}
+            statusOk={statusOk}
+            identity={identity}
+            visits={visits}
+            count={count}
+            lastMessage={lastMessage}
+            onSendUpdate={() => { void sendLobbyUpdate(); }}
+            onReturnResult={() => { void returnResult(); }}
+          />
         </ScrollablePage>
       </SafeAreaScaffold>
     </MobileThemeProvider>

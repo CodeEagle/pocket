@@ -21,7 +21,7 @@ import {
   type NodeMirror,
   type ViewProps,
 } from "@pocketjs/framework/solid/components";
-import { createDisplayGeometry, subscribeHostEvents } from "./display.ts";
+import { createDisplayGeometry, createSystemPresets, subscribeHostEvents } from "./display.ts";
 import {
   availableDisplayPanes,
   avoidDisplayOcclusions,
@@ -43,7 +43,7 @@ import {
 } from "./responsive.ts";
 import { useRouteActive } from "./route.tsx";
 import { HostBridgeAbiError, type HostEvent } from "./host.ts";
-import { useAnimatedNumber } from "./mobile.tsx";
+import { useAnimatedNumber, useMobileTheme } from "./mobile.tsx";
 
 /**
  * Safe-area aware guest shell for standalone pages.
@@ -77,12 +77,13 @@ export interface SafeAreaScaffoldProps {
 export type SafeAreaEdge = "top" | "right" | "bottom" | "left";
 export type SafeAreaEdges = "all" | "none" | readonly SafeAreaEdge[];
 export type SafeAreaSlot = JSX.Element | (() => JSX.Element);
-export type SafeAreaReservedActions = "none" | "mini-app" | number;
+export type SafeAreaReservedActions = "none" | "mini-app" | "mini-app-left" | "mini-app-right" | number;
 export const MINI_APP_HOST_ACTION_RESERVE = 60;
 
 export interface SafeAreaScaffoldContextValue {
   hasScaffold: boolean;
   reservedActions: number;
+  reservedLeadingActions: number;
   geometry: () => DisplayGeometry;
   /** Local right reserve for a top body band under status icons. */
   topRightContentReserve: () => number;
@@ -101,6 +102,7 @@ export interface SafeAreaScaffoldContextValue {
 export const SafeAreaScaffoldContext = createContext<SafeAreaScaffoldContextValue>({
   hasScaffold: false,
   reservedActions: 0,
+  reservedLeadingActions: 0,
   geometry: () => EMPTY_DISPLAY_GEOMETRY,
   topRightContentReserve: () => 0,
   topRightReserveForBand: () => 0,
@@ -127,10 +129,26 @@ export interface ScrollablePageContextValue {
 
 export const ScrollablePageContext = createContext<ScrollablePageContextValue | undefined>(undefined);
 
-function reservedActionWidth(value: SafeAreaReservedActions | undefined): number {
-  if (value === "mini-app") return MINI_APP_HOST_ACTION_RESERVE;
-  if (value === "none" || value === undefined) return 0;
-  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+function resolveReservedActionWidths(
+  value: SafeAreaReservedActions | undefined,
+  presentationStyle: "sheet" | "page",
+): { leading: number; trailing: number } {
+  if (value === "mini-app") {
+    return presentationStyle === "page"
+      ? { leading: MINI_APP_HOST_ACTION_RESERVE, trailing: 0 }
+      : { leading: 0, trailing: MINI_APP_HOST_ACTION_RESERVE };
+  }
+  if (value === "mini-app-left") {
+    return { leading: MINI_APP_HOST_ACTION_RESERVE, trailing: 0 };
+  }
+  if (value === "mini-app-right") {
+    return { leading: 0, trailing: MINI_APP_HOST_ACTION_RESERVE };
+  }
+  if (value === "none" || value === undefined) {
+    return { leading: 0, trailing: 0 };
+  }
+  const numeric = typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+  return { leading: 0, trailing: numeric };
 }
 
 export function SafeAreaScaffold(props: SafeAreaScaffoldProps): JSX.Element {
@@ -142,14 +160,24 @@ export function SafeAreaScaffold(props: SafeAreaScaffoldProps): JSX.Element {
   const ownedGeometry = props.geometry === undefined && edges !== "none"
     ? createDisplayGeometry()
     : undefined;
+  const ownedPresets = props.reservedActions === "mini-app"
+    ? createSystemPresets()
+    : undefined;
   const geometry = (): DisplayGeometry => typeof props.geometry === "function"
     ? props.geometry()
     : props.geometry
       ?? ownedGeometry?.()
       ?? (parentScaffold.hasScaffold ? parentScaffold.geometry() : EMPTY_DISPLAY_GEOMETRY);
-  const reservedActions = props.reservedActions !== undefined
-    ? reservedActionWidth(props.reservedActions)
-    : parentScaffold.reservedActions;
+  const reservedLeadingActions = (): number => {
+    if (props.reservedActions === undefined) return parentScaffold.reservedLeadingActions;
+    const style = ownedPresets ? ownedPresets().presentationStyle : "sheet";
+    return resolveReservedActionWidths(props.reservedActions, style).leading;
+  };
+  const reservedTrailingActions = (): number => {
+    if (props.reservedActions === undefined) return parentScaffold.reservedActions;
+    const style = ownedPresets ? ownedPresets().presentationStyle : "sheet";
+    return resolveReservedActionWidths(props.reservedActions, style).trailing;
+  };
   const consumesLeft = edges === "all" || (edges !== "none" && edges.includes("left"));
   const consumesRight = edges === "all" || (edges !== "none" && edges.includes("right"));
   const bodyLeftInset = (): number => {
@@ -201,13 +229,20 @@ export function SafeAreaScaffold(props: SafeAreaScaffoldProps): JSX.Element {
   return (
     <SafeAreaScaffoldContext.Provider value={{
       hasScaffold: true,
-      reservedActions,
+      get reservedActions() { return reservedTrailingActions(); },
+      get reservedLeadingActions() { return reservedLeadingActions(); },
       geometry,
       topRightContentReserve,
       topRightReserveForBand,
       sideReservesForBand,
     }}>
-      <SafeAreaScaffoldBody {...props} edges={edges} geometry={geometry} />
+      <SafeAreaScaffoldBody
+        {...props}
+        edges={edges}
+        geometry={geometry}
+        reservedLeadingActions={reservedLeadingActions}
+        reservedTrailingActions={reservedTrailingActions}
+      />
     </SafeAreaScaffoldContext.Provider>
   );
 }
@@ -215,7 +250,10 @@ export function SafeAreaScaffold(props: SafeAreaScaffoldProps): JSX.Element {
 function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
   edges: SafeAreaEdges;
   geometry: () => DisplayGeometry;
+  reservedLeadingActions: () => number;
+  reservedTrailingActions: () => number;
 }): JSX.Element {
+  const theme = useMobileTheme();
   const insets = () => pageInsets(props.geometry());
   // Resolve slots inside the provider-owned body. A getter-backed app-bar
   // (`appBar={() => <MobileAppBar ... />}`) therefore sees the host-action
@@ -229,9 +267,9 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
   const hasAppBar = props.appBar !== undefined && props.appBar !== null;
   const hasBottomBar = bottomBar !== undefined && bottomBar !== null;
   const intrinsic = props.edges === "none";
-  const canvasClass = () => props.class ?? (intrinsic
-    ? "flex-col w-full bg-[#FAFAFA]"
-    : "flex-col w-full h-full bg-[#FAFAFA]");
+  const canvasClass = () => props.class ?? (theme().name === "dark"
+    ? (intrinsic ? "flex-col w-full bg-[#09090B]" : "flex-col w-full h-full bg-[#09090B]")
+    : (intrinsic ? "flex-col w-full bg-[#FAFAFA]" : "flex-col w-full h-full bg-[#FAFAFA]"));
   const consumes = (edge: SafeAreaEdge): boolean =>
     props.edges === "all" || (props.edges !== "none" && props.edges.includes(edge));
   const bodyLeftInset = () => {
@@ -253,17 +291,28 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
     if (intrinsic || !hasAppBar) return 0;
     const current = props.geometry();
     const padding = pageInsets(current);
+    const existingReserve = props.reservedLeadingActions();
     const appBarTop = consumes("top") ? padding.top : 0;
-    return Math.max(
-      0,
-      sideContourReservesForBand(current, appBarTop, appBarTop + 56, { rampPx: 0 }).left - bodyLeftInset(),
-    );
+    if (existingReserve <= 0) {
+      return Math.max(
+        0,
+        sideContourReservesForBand(current, appBarTop, appBarTop + 56, { rampPx: 0 }).left - bodyLeftInset(),
+      );
+    }
+    const target = {
+      left: bodyLeftInset(),
+      top: appBarTop,
+      width: existingReserve,
+      height: 56,
+    };
+    const local = avoidDisplayOcclusions(current, target, { prefer: "horizontal" });
+    return Math.max(0, local.offsetX) + (leftOcclusionFrames(current).length > 0 && bodyLeftInset() === 0 ? DISPLAY_UI_SAFETY_GAP : 0);
   };
   const appBarTrailingReserve = () => {
     if (intrinsic || !hasAppBar) return 0;
     const current = props.geometry();
     const padding = pageInsets(current);
-    const existingReserve = reservedActionWidth(props.reservedActions);
+    const existingReserve = props.reservedTrailingActions();
     const appBarTop = consumes("top") ? padding.top : 0;
     const contour = topRightOcclusionFrame(current);
     if (existingReserve <= 0) {

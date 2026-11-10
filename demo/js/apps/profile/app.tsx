@@ -2,7 +2,6 @@ import { For, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { mount } from "@pocketjs/framework/solid";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import {
-  MOBILE_THEME_LIGHT,
   MobileAppBar,
   MobileBadge,
   MobileButton,
@@ -11,6 +10,7 @@ import {
   SafeAreaScaffold,
   ScrollablePage,
   StatusBar,
+  useMobileTheme,
 } from "@pocket/ui";
 import type { JsonValue } from "@pocket/ui/host";
 import { createPocketPlatformClient } from "@pocket/ui/platform";
@@ -59,6 +59,19 @@ function profileFromValue(value: unknown): Profile | undefined {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function ProfileSummary(props: { profile: () => Profile }): JSX.Element {
+  const theme = useMobileTheme();
+  const isDark = () => theme().name === "dark";
+  return (
+    <View class="flex-col gap-1">
+      <Text class={isDark() ? "text-xs text-[#A1A1AA]" : "text-xs text-slate-600"}>Current selection</Text>
+      <Text class={isDark() ? "text-lg text-[#FAFAFA] font-bold" : "text-lg text-slate-950 font-bold"}>{props.profile().name}</Text>
+      <Text class={isDark() ? "text-xs text-[#A1A1AA]" : "text-xs text-slate-600"}>{props.profile().role}</Text>
+      <Text class={isDark() ? "text-xs text-[#A1A1AA]" : "text-xs text-slate-600"}>UID {props.profile().uid} · VIP {props.profile().vipLevel}</Text>
+    </View>
+  );
 }
 
 function ProfileApp(): JSX.Element {
@@ -140,7 +153,7 @@ function ProfileApp(): JSX.Element {
   };
 
   return (
-    <MobileThemeProvider theme={MOBILE_THEME_LIGHT}>
+    <MobileThemeProvider>
       <SafeAreaScaffold
         reservedActions="mini-app"
         appBar={() => (
@@ -158,12 +171,7 @@ function ProfileApp(): JSX.Element {
               title="PocketNexus identity"
               detail="A real JS-owned profile guest. The saved value is shared only through the host allowlist."
             >
-              <View class="flex-col gap-1">
-                <Text class="text-xs text-slate-600">Current selection</Text>
-                <Text class="text-lg text-slate-950 font-bold">{selectedProfile().name}</Text>
-                <Text class="text-xs text-slate-600">{selectedProfile().role}</Text>
-                <Text class="text-xs text-slate-600">UID {selectedProfile().uid} · VIP {selectedProfile().vipLevel}</Text>
-              </View>
+              <ProfileSummary profile={selectedProfile} />
             </MobileCard>
             <MobileCard title="Choose an account" detail="Select the identity to share with Lobby.">
               <View class="flex-col gap-2">

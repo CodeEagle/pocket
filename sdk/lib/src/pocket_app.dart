@@ -20,7 +20,9 @@ final class PocketApp extends StatelessWidget {
   final Color backgroundColor;
 
   /// Replaces Pocket's startup presentation with host-owned rendering of the
-  /// observed package/runtime progress. Defaults to Pocket's built-in loader.
+  /// observed package/runtime progress. The default UI shows a loader only
+  /// while a signed remote package is being prepared; local startup stays
+  /// quiet until its first PocketView frame. Errors remain visible.
   final PocketLoadingBuilder? loadingBuilder;
 
   @override
@@ -55,7 +57,9 @@ final class PocketGuest extends StatelessWidget {
   final Color? backgroundColor;
 
   /// Replaces Pocket's startup presentation with host-owned rendering of the
-  /// observed package/runtime progress. Defaults to Pocket's built-in loader.
+  /// observed package/runtime progress. The default UI shows a loader only
+  /// while a signed remote package is being prepared; local startup stays
+  /// quiet until its first PocketView frame. Errors remain visible.
   final PocketLoadingBuilder? loadingBuilder;
 
   @override
@@ -109,8 +113,10 @@ final class PocketGuestSession extends StatefulWidget {
   /// surfaces so they do not allocate the extra render layer.
   final bool enableSceneCapture;
 
-  /// Host-owned Flutter presentation for actual package/runtime startup work.
-  /// Business state and app navigation remain in the guest.
+  /// Optional host-owned Flutter presentation for startup work. A supplied
+  /// builder receives local and remote startup facts; the default UI only
+  /// shows a loader during signed remote package preparation. Business state
+  /// and app navigation remain in the guest.
   final PocketLoadingBuilder? loadingBuilder;
 
   /// Optional host-owned Session.  When supplied, this widget only attaches
@@ -236,6 +242,9 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
           ),
         );
       }
+      if (!session.remotePackagePreparationInProgress) {
+        return const SizedBox.expand();
+      }
       return PocketStartupIndicator(
         stage: session.stage,
         preparationProgress: progress?.preparationProgress,
@@ -279,6 +288,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       pakAsset: config.pakAsset,
       showDebugFps: config.showFps,
       packageSource: session.active?.source,
+      initialEvents: session.initialEvents,
       onPerformanceSample: (sample) {
         if (epoch == session.generation) session.onPerformanceSample(sample);
       },

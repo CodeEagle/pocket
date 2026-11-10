@@ -176,17 +176,48 @@ final class PocketSession extends ChangeNotifier {
   bool _busy = true;
   bool _packageAdmissionInFlight = false;
   bool _recovering = false;
+  bool _remotePackagePreparationInProgress = false;
   Object? failure;
   PocketUpdateProgress? _transferProgress;
   Future<void>? _promotion;
   int generation = 0;
   String stage = 'initializing';
   String? lastError;
+  List<Map<String, dynamic>> _initialEvents = const <Map<String, dynamic>>[];
+
+  /// Opaque host events delivered to each fresh [PocketView] generation at zero
+  /// elapsed time before [onReady] admits the first frame.
+  List<Map<String, dynamic>> get initialEvents => _initialEvents;
+
+  /// Updates the opaque initial host events forwarded to [PocketView] during
+  /// startup or generation remount.
+  void setInitialEvents(List<Map<String, dynamic>> events) {
+    if (_disposed) return;
+    _initialEvents = events.isEmpty
+        ? const <Map<String, dynamic>>[]
+        : List<Map<String, dynamic>>.unmodifiable(<Map<String, dynamic>>[
+            for (final event in events)
+              Map<String, dynamic>.unmodifiable(
+                Map<String, dynamic>.from(event),
+              ),
+          ]);
+  }
 
   /// The latest immutable progress fact from the active signed-package
   /// transfer. It is null when no update preparation is currently reporting
   /// progress; consumers should use [stage] for the broader session phase.
   PocketUpdateProgress? get transferProgress => _transferProgress;
+
+  /// Whether startup is currently waiting for signed package preparation.
+  /// Embedded and healthy cached starts leave this false.
+  bool get remotePackagePreparationInProgress =>
+      _remotePackagePreparationInProgress;
+
+  void _setRemotePackagePreparationInProgress(bool value) {
+    if (_remotePackagePreparationInProgress == value) return;
+    _remotePackagePreparationInProgress = value;
+    if (!_disposed && hasListeners) notifyListeners();
+  }
 
   void _recordTransferProgress(
     PocketUpdateProgress progress, {
@@ -442,6 +473,12 @@ final class PocketSession extends ChangeNotifier {
         _scheduleCacheFirstPreparation();
       }
     } catch (error) {
+      _logCandidateFailure(
+        'initialize-admission-failure',
+        active,
+        error,
+        targetGeneration: generation,
+      );
       if (_downloadOnOpen || prepareForOpen || cacheFirst) {
         final failed = active;
         if (cacheFirst && failed?.needsActivation == true) {
@@ -512,6 +549,7 @@ final class PocketSession extends ChangeNotifier {
     // A new open or refresh owns a fresh progress lifetime. Do not expose a
     // completed or interrupted transfer from an earlier attempt.
     _clearTransferProgress();
+    _setRemotePackagePreparationInProgress(true);
     final token = _download = PocketCancellationToken();
     final idleTimeoutReached = Completer<PocketPreparedPackage>();
     var acceptProgress = true;
@@ -612,6 +650,7 @@ final class PocketSession extends ChangeNotifier {
       // Progress describes a live transfer only. Keep the broader session
       // phase in `stage`, but do not leave a completed download fact behind.
       _clearTransferProgress();
+      _setRemotePackagePreparationInProgress(false);
     }
   }
 
@@ -1584,6 +1623,31 @@ final class PocketSession extends ChangeNotifier {
     await hook(payloadHash, targetGeneration);
   }
 
+  void _logCandidateFailure(
+    String event,
+    PocketPreparedPackage? candidate,
+    Object error, {
+    required int targetGeneration,
+  }) {
+    final version = candidate?.version ?? _embeddedVersion;
+    final build = candidate?.build ?? _embeddedBuild;
+    final payloadSha256 = candidate == null
+        ? 'none'
+        : sha256.convert(candidate.package.manifest.payloadBytes).toString();
+    final errorMessage = error
+        .toString()
+        .replaceAll(RegExp(r'[\r\n]+'), ' ')
+        .trim();
+    final boundedError = errorMessage.length <= 512
+        ? errorMessage
+        : '${errorMessage.substring(0, 512)}…';
+    debugPrint(
+      '[Pocket][$appId] event=$event candidate=$version build=$build '
+      'payloadSha256=$payloadSha256 generation=$targetGeneration '
+      'stage=$stage error=$boundedError',
+    );
+  }
+
   Future<void> _mount(
     PocketPreparedPackage? next, {
     bool resetCache = false,
@@ -1717,6 +1781,12 @@ final class PocketSession extends ChangeNotifier {
   Future<void> onError(Object error) async {
     if (_disposed || _recovering) return;
     _recovering = true;
+    _logCandidateFailure(
+      'runtime-recovery',
+      active,
+      error,
+      targetGeneration: generation,
+    );
     // An old guest can fail during the response-to-mount delay. Cancel that
     // candidate before scheduling recovery so it cannot overwrite fallback.
     _mountTimer?.cancel();

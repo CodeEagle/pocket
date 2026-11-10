@@ -218,6 +218,7 @@ export class NativeSession {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly artifacts: NativeArtifacts;
   private readonly memory: { heapLimitBytes?: number; maxPakBytes?: number } | undefined;
+  private readonly compositorSurfaces: Readonly<Record<string, number>>;
   private output = "";
   private stderr = "";
   private readonly deadline: ReturnType<typeof setTimeout>;
@@ -238,10 +239,12 @@ export class NativeSession {
       deferCapabilities?: readonly string[];
       deadlineMs?: number;
       memory?: { heapLimitBytes?: number; maxPakBytes?: number };
+      compositorSurfaces?: Readonly<Record<string, number>>;
     } = {},
   ) {
     this.artifacts = artifacts;
     this.memory = options.memory;
+    this.compositorSurfaces = options.compositorSurfaces ?? showcaseCompositorSurfaces();
     this.width = options.width ?? 390;
     this.height = options.height ?? 760;
     this.storage = options.storage ?? {};
@@ -468,7 +471,13 @@ export class NativeSession {
   }
 
   async boot(): Promise<Frame> {
-    this.send({ op: "create", width: this.width, height: this.height, compositorSurfaces: showcaseCompositorSurfaces(), ...(this.memory ? { memory: this.memory } : {}) });
+    this.send({
+      op: "create",
+      width: this.width,
+      height: this.height,
+      compositorSurfaces: this.compositorSurfaces,
+      ...(this.memory ? { memory: this.memory } : {}),
+    });
     assert.equal((await this.waitLine()).ok, true, "pocket_probe create failed");
     this.send({ op: "loadBytecode", bytecodePath: this.artifacts.bytecodePath, pakPath: this.artifacts.pakPath });
     const loaded = await this.waitLine();

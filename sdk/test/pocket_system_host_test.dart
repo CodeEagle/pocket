@@ -5,12 +5,93 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pocket_flutter/pocket_flutter.dart'
+    show
+        PocketBytecodeRuntime,
+        PocketCompositorRuntime,
+        PocketEvent,
+        PocketFrame,
+        PocketImageResource,
+        PocketOp,
+        PocketRectOp,
+        PocketRuntime,
+        PocketView,
+        debugPocketSelfOwnedRuntimeFactory;
 import 'package:pocket_flutter/src/pocket_compositor.dart';
 import 'package:pocket_flutter/src/pocket_memory_limits.dart';
 import 'package:pocket_sdk/src/pocket_app.dart' show PocketGuestSession;
 import 'package:pocket_sdk/src/pocket_config.dart';
 import 'package:pocket_sdk/src/pocket_system_host.dart';
 import 'package:pocket_services/pocket_services.dart';
+
+final class _ProbeChildRuntime
+    implements PocketRuntime, PocketCompositorRuntime, PocketBytecodeRuntime {
+  int frameCalls = 0;
+  final List<int> frameDeltas = <int>[];
+  final List<Map<String, dynamic>> sentMessages = <Map<String, dynamic>>[];
+  Map<String, dynamic>? presetsBeforeFirstFrame;
+
+  static const PocketFrame _frame = PocketFrame(
+    width: 240,
+    height: 320,
+    ops: <PocketOp>[
+      PocketRectOp(x: 0, y: 0, width: 240, height: 320, color: 0xff101827),
+    ],
+    events: <PocketEvent>[],
+    resources: <PocketImageResource>[],
+  );
+
+  @override
+  void configureCompositor(Map<String, int> applications) {}
+
+  @override
+  String? get actualAbi => 'system-host-unit-abi';
+
+  @override
+  PocketFrame loadBytecode(
+    Uint8List bytecode,
+    Uint8List pak, {
+    String? expectedRuntimeAbi,
+  }) => _frame;
+
+  @override
+  PocketFrame eval(String source) => _frame;
+
+  @override
+  PocketFrame load(String source, Uint8List pak) => _frame;
+
+  @override
+  PocketFrame frame(int deltaMilliseconds) {
+    frameCalls += 1;
+    frameDeltas.add(deltaMilliseconds);
+    for (final message in sentMessages) {
+      if (message['name'] == 'platform.presets' &&
+          message['payload'] is Map<String, dynamic>) {
+        presetsBeforeFirstFrame = Map<String, dynamic>.from(
+          message['payload'] as Map<String, dynamic>,
+        );
+      }
+    }
+    return _frame;
+  }
+
+  @override
+  bool resizeViewport(double width, double height) => false;
+
+  @override
+  void enableAuxiliary(double width, double height) {}
+
+  @override
+  void send(Map<String, dynamic> message) {
+    sentMessages.add(Map<String, dynamic>.from(message));
+  }
+
+  @override
+  String? get lastError => null;
+
+  @override
+  void dispose() {}
+}
 
 final class _RegistryCapturePlugin extends PocketPlugin {
   _RegistryCapturePlugin(this.onRegistered);
@@ -854,6 +935,430 @@ void main() {
         expect(resumedChild.enableSceneCapture, isTrue);
         expect(tester.takeException(), isNull);
       } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        controller.dispose();
+      }
+    },
+  );
+
+  testWidgets(
+    'system.container.close invokes onClose for trusted SystemUI and rejects unavailable or untrusted child requests',
+    (tester) async {
+      final controller = PocketSystemHostController();
+      late PocketHostRegistry rootRegistry;
+      late PocketHostRegistry childRegistry;
+      var closeCount = 0;
+
+      try {
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Center(
+              child: SizedBox.shrink(
+                child: PocketSystemHost(
+                  systemUI: PocketAppConfig(
+                    appId: rootId,
+                    bytecodeAsset: 'test/root.qjbc',
+                    pakAsset: 'test/root.pak',
+                    metadataAsset: 'test/root.metadata.json',
+                    manifestAsset: 'test/root.manifest.json',
+                    additionalCapabilities: const {'ui.compositor-surfaces'},
+                    compositorSurfaces: const <String, int>{childId: 2},
+                    pluginFactories: <PocketPluginFactory>[
+                      (_) => _RegistryCapturePlugin((registry) {
+                        rootRegistry = registry;
+                      }),
+                    ],
+                  ),
+                  applications: <String, PocketAppConfig>{
+                    childId: PocketAppConfig(
+                      appId: childId,
+                      bytecodeAsset: 'test/child.qjbc',
+                      pakAsset: 'test/child.pak',
+                      metadataAsset: 'test/child.metadata.json',
+                      manifestAsset: 'test/child.manifest.json',
+                      pluginFactories: <PocketPluginFactory>[
+                        (_) => _RegistryCapturePlugin((registry) {
+                          childRegistry = registry;
+                        }),
+                      ],
+                    ),
+                  },
+                  controller: controller,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await waitFor(
+          tester,
+          controller,
+          (entry) => entry.isSystemUI && entry.ready,
+        );
+        await expectLater(
+          invokeSystem(tester, rootRegistry, 'system.container.close'),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'capability_unavailable',
+            ),
+          ),
+          reason:
+              'a host without onClose must report capability_unavailable honestly',
+        );
+
+        await invokeSystem(
+          tester,
+          rootRegistry,
+          'system.runtime.configure',
+          <String, dynamic>{
+            'systemUI': rootId,
+            'grants': <Map<String, Object?>>[
+              {'appId': rootId, 'sharedNamespaces': <String>[]},
+              {'appId': childId, 'sharedNamespaces': <String>[]},
+            ],
+          },
+        );
+        final created = Map<String, dynamic>.from(
+          await invokeSystem(
+                tester,
+                rootRegistry,
+                'system.runtime.create',
+                <String, dynamic>{'appId': childId},
+              )
+              as Map,
+        );
+        await waitFor(
+          tester,
+          controller,
+          (entry) => entry.instanceId == created['instanceId'] && entry.ready,
+        );
+        expect(
+          childRegistry.registrationFor('system.container.close'),
+          isNull,
+          reason:
+              'untrusted child runtimes must not receive system.container.close',
+        );
+
+        // Unmount the first host before attaching this controller again.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Center(
+              child: SizedBox.shrink(
+                child: PocketSystemHost(
+                  key: const ValueKey<String>('with-close'),
+                  systemUI: PocketAppConfig(
+                    appId: rootId,
+                    bytecodeAsset: 'test/root.qjbc',
+                    pakAsset: 'test/root.pak',
+                    metadataAsset: 'test/root.metadata.json',
+                    manifestAsset: 'test/root.manifest.json',
+                    additionalCapabilities: const {'ui.compositor-surfaces'},
+                    compositorSurfaces: const <String, int>{childId: 2},
+                    pluginFactories: <PocketPluginFactory>[
+                      (_) => _RegistryCapturePlugin((registry) {
+                        rootRegistry = registry;
+                      }),
+                    ],
+                  ),
+                  applications: <String, PocketAppConfig>{
+                    childId: const PocketAppConfig(
+                      appId: childId,
+                      bytecodeAsset: 'test/child.qjbc',
+                      pakAsset: 'test/child.pak',
+                      metadataAsset: 'test/child.metadata.json',
+                      manifestAsset: 'test/child.manifest.json',
+                    ),
+                  },
+                  controller: controller,
+                  onClose: () {
+                    closeCount += 1;
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await waitFor(
+          tester,
+          controller,
+          (entry) => entry.isSystemUI && entry.ready,
+        );
+        final closed = await invokeSystem(
+          tester,
+          rootRegistry,
+          'system.container.close',
+        );
+        expect(closed, equals(<String, Object?>{'closed': true}));
+        expect(closeCount, 1);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        controller.dispose();
+      }
+    },
+  );
+
+  testWidgets(
+    'system.runtime.create and prepareOpen forward initialEvents into child PocketView before its first frame',
+    (tester) async {
+      final controller = PocketSystemHostController();
+      late PocketHostRegistry rootRegistry;
+      final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+      final createdRuntimes = <_ProbeChildRuntime>[];
+      debugPocketSelfOwnedRuntimeFactory = (_) {
+        final runtime = _ProbeChildRuntime();
+        createdRuntimes.add(runtime);
+        return runtime;
+      };
+
+      binding.defaultBinaryMessenger.setMockMessageHandler('flutter/assets', (
+        data,
+      ) async {
+        if (data == null) return null;
+        final requested = utf8.decode(data.buffer.asUint8List());
+        if (requested.endsWith('.qjbc')) {
+          return ByteData(1);
+        }
+        if (requested.endsWith('.pak')) {
+          return ByteData(0);
+        }
+        final Object content;
+        if (requested.endsWith('metadata.json')) {
+          content = <String, Object?>{
+            'entryFormat': 'quickjs-bytecode',
+            'formatVersion': 1,
+            'kind': 'script',
+            'bindingGeneration': 1,
+            'tickHz': 60,
+            'runtimeAbi': 'system-host-unit-abi',
+            'bytecodeBytes': 1,
+            'build': 1,
+            'version': '1.0.0',
+          };
+        } else if (requested.contains('root.manifest.json')) {
+          content = <String, Object?>{
+            'capabilities': <String, Object?>{
+              'requires': <String>[
+                'ui.compositor-surfaces',
+                'system.runtime.configure',
+                'system.runtime.create',
+                'system.runtime.prepareOpen',
+                'system.runtime.awaitFirstFrame',
+                'system.runtime.destroy',
+                'system.runtime.post',
+                'system.runtime.respond',
+              ],
+            },
+          };
+        } else {
+          content = <String, Object?>{
+            'capabilities': <String, Object?>{'requires': <String>[]},
+          };
+        }
+        return ByteData.sublistView(
+          Uint8List.fromList(utf8.encode(jsonEncode(content))),
+        );
+      });
+
+      try {
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Center(
+              child: SizedBox(
+                width: 240,
+                height: 320,
+                child: PocketSystemHost(
+                  systemUI: PocketAppConfig(
+                    appId: rootId,
+                    bytecodeAsset: 'test/root.qjbc',
+                    pakAsset: 'test/root.pak',
+                    metadataAsset: 'test/root.metadata.json',
+                    manifestAsset: 'test/root.manifest.json',
+                    additionalCapabilities: const {'ui.compositor-surfaces'},
+                    compositorSurfaces: const <String, int>{childId: 2},
+                    pluginFactories: <PocketPluginFactory>[
+                      (_) => _RegistryCapturePlugin((registry) {
+                        rootRegistry = registry;
+                      }),
+                    ],
+                  ),
+                  applications: const <String, PocketAppConfig>{
+                    childId: PocketAppConfig(
+                      appId: childId,
+                      bytecodeAsset: 'test/child.qjbc',
+                      pakAsset: 'test/child.pak',
+                      metadataAsset: 'test/child.metadata.json',
+                      manifestAsset: 'test/child.manifest.json',
+                    ),
+                  },
+                  controller: controller,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await waitFor(
+          tester,
+          controller,
+          (entry) => entry.isSystemUI && entry.firstFrameReady,
+        );
+        await invokeSystem(
+          tester,
+          rootRegistry,
+          'system.runtime.configure',
+          <String, dynamic>{
+            'systemUI': rootId,
+            'grants': <Map<String, Object?>>[
+              {'appId': rootId, 'sharedNamespaces': <String>[]},
+              {'appId': childId, 'sharedNamespaces': <String>[]},
+            ],
+          },
+        );
+
+        await expectLater(
+          invokeSystem(
+            tester,
+            rootRegistry,
+            'system.runtime.create',
+            <String, dynamic>{
+              'appId': childId,
+              'initialEvents': <Object?>[
+                <String, Object?>{'method': '', 'params': <String, Object?>{}},
+              ],
+            },
+          ),
+          throwsA(
+            isA<PocketCapabilityException>().having(
+              (error) => error.code,
+              'code',
+              'invalid_event',
+            ),
+          ),
+        );
+
+        final created = Map<String, dynamic>.from(
+          await invokeSystem(
+                tester,
+                rootRegistry,
+                'system.runtime.create',
+                <String, dynamic>{
+                  'appId': childId,
+                  'prepareForOpen': true,
+                  'cacheFirst': true,
+                  'initialEvents': <Map<String, Object?>>[
+                    <String, Object?>{
+                      'method': 'platform.presets',
+                      'params': <String, Object?>{
+                        'darkMode': true,
+                        'colorScheme': 'dark',
+                        'accentColor': 'violet',
+                        'density': 'desktop',
+                        'presentationStyle': 'page',
+                      },
+                    },
+                  ],
+                },
+              )
+              as Map,
+        );
+        final childInstance = await waitFor(
+          tester,
+          controller,
+          (entry) =>
+              entry.instanceId == created['instanceId'] &&
+              entry.firstFrameReady,
+        );
+        expect(createdRuntimes.length, greaterThanOrEqualTo(2));
+        final childRuntime = createdRuntimes.last;
+        expect(
+          childRuntime.presetsBeforeFirstFrame,
+          equals(<String, dynamic>{
+            'darkMode': true,
+            'colorScheme': 'dark',
+            'accentColor': 'violet',
+            'density': 'desktop',
+            'presentationStyle': 'page',
+          }),
+          reason:
+              'child PocketView must evaluate initialEvents at delta=0 before firstFrameReady is admitted',
+        );
+        expect(childRuntime.frameDeltas.first, 0);
+
+        final childPocketView = tester
+            .widgetList<PocketView>(find.byType(PocketView, skipOffstage: false))
+            .singleWhere((view) => view.bytecodeAsset == 'test/child.qjbc');
+        expect(
+          childPocketView.initialEvents,
+          equals(<Map<String, dynamic>>[
+            <String, dynamic>{
+              'method': 'platform.presets',
+              'params': <String, dynamic>{
+                'darkMode': true,
+                'colorScheme': 'dark',
+                'accentColor': 'violet',
+                'density': 'desktop',
+                'presentationStyle': 'page',
+              },
+            },
+          ]),
+        );
+
+        // Verify prepareOpen also updates session.initialEvents for subsequent remounts.
+        await invokeSystem(
+          tester,
+          rootRegistry,
+          'system.runtime.prepareOpen',
+          <String, dynamic>{
+            'instanceId': childInstance.instanceId,
+            'generation': childInstance.generation,
+            'cacheFirst': true,
+            'initialEvents': <Map<String, Object?>>[
+              <String, Object?>{
+                'method': 'platform.presets',
+                'params': <String, Object?>{
+                  'darkMode': false,
+                  'colorScheme': 'light',
+                  'accentColor': 'teal',
+                  'density': 'touch',
+                  'presentationStyle': 'sheet',
+                },
+              },
+            ],
+          },
+        );
+        expect(
+          childInstance.session.initialEvents,
+          equals(<Map<String, dynamic>>[
+            <String, dynamic>{
+              'method': 'platform.presets',
+              'params': <String, dynamic>{
+                'darkMode': false,
+                'colorScheme': 'light',
+                'accentColor': 'teal',
+                'density': 'touch',
+                'presentationStyle': 'sheet',
+              },
+            },
+          ]),
+        );
+      } finally {
+        debugPocketSelfOwnedRuntimeFactory = previousFactory;
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
         await tester.runAsync(

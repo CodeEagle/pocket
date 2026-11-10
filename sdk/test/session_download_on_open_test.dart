@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
@@ -442,6 +444,111 @@ void main() {
   );
 
   test(
+    'warm cache keeps its generation and bridge through a blocked same-manifest refresh',
+    () async {
+      final release = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release;
+
+      final first = session();
+      try {
+        await first.initialize();
+        await waitForHealthy(first);
+      } finally {
+        await closeQuietly(first);
+      }
+
+      // Reopen from the exact package that was just made healthy. Hold its
+      // identical signed manifest so the local runtime can be observed before
+      // the background refresh finishes.
+      updateServer.holdPath = '/manifest.json';
+      final manifestRequests = updateServer.count('/manifest.json');
+      late PocketHostRegistry registry;
+      var providerCreations = 0;
+      var generationMounts = 0;
+      final cached = PocketSession(
+        config: config().copyWith(
+          pluginFactories: [
+            (_) {
+              providerCreations++;
+              return _CaptureUpdateRegistry((captured) => registry = captured);
+            },
+          ],
+        ),
+        beforeGenerationMount: (_, _) async {
+          generationMounts++;
+        },
+      );
+      try {
+        await cached
+            .initialize(prepareForOpen: true, cacheFirst: true)
+            .timeout(const Duration(seconds: 2));
+        await waitUntil(
+          () => updateServer.count('/manifest.json') > manifestRequests,
+        );
+        expect(cached.ready, isTrue);
+        expect(cached.remotePackagePreparationInProgress, isTrue);
+        expect(cached.active?.version, '2.0.0');
+        expect(cached.generation, 0);
+
+        final mountedPackage = cached.active!.package;
+        final expectedPayloadHash = crypto.sha256
+            .convert(
+              base64Decode(
+                (jsonDecode(utf8.decode(release.envelope)) as Map)['payload']
+                    as String,
+              ),
+            )
+            .toString();
+        expect(cached.mountedPayloadSha256, expectedPayloadHash);
+        final controller = cached.controller;
+        final bridgeRegistry = registry;
+        final generation = cached.generation;
+
+        updateServer.releaseHeldResponse();
+        await waitUntil(() => !cached.remotePackagePreparationInProgress);
+        await waitForHealthy(cached);
+        expect(cached.active?.package, same(mountedPackage));
+        expect(cached.mountedPayloadSha256, expectedPayloadHash);
+        expect(cached.generation, generation);
+        expect(identical(cached.controller, controller), isTrue);
+        expect(identical(registry, bridgeRegistry), isTrue);
+        expect(providerCreations, 1);
+        expect(generationMounts, 1);
+
+        // Exercise the same host check/apply route used by the JS updater. The
+        // server returns the same signed payload, so apply stays a no-op and
+        // leaves the active generation and bridge in place.
+        final checked = await registry
+            .registrationFor('updates.check')!
+            .request!(const {});
+        expect((checked as Map)['availableVersion'], '2.0.0');
+        final applied = await registry
+            .registrationFor('updates.apply')!
+            .request!(const {});
+        expect((applied as Map)['scheduled'], isFalse);
+        expect(applied['version'], '2.0.0');
+
+        expect(cached.active?.package, same(mountedPackage));
+        expect(cached.mountedPayloadSha256, expectedPayloadHash);
+        expect(cached.generation, generation);
+        expect(identical(cached.controller, controller), isTrue);
+        expect(identical(registry, bridgeRegistry), isTrue);
+        expect(providerCreations, 1);
+        expect(generationMounts, 1);
+      } finally {
+        updateServer.releaseHeldResponse();
+        await closeQuietly(cached);
+      }
+    },
+  );
+
+  test(
     'stale apply precondition leaves the signed candidate untouched',
     () async {
       final release2 = await _makeRelease(
@@ -682,6 +789,8 @@ void main() {
         await waitUntil(
           () => updateServer.count('/manifest.json') > manifestRequests,
         );
+        expect(cached.ready, isTrue);
+        expect(cached.remotePackagePreparationInProgress, isTrue);
         expect(cached.active?.version, '2.0.0');
         expect(cached.generation, 0);
         final repeatedOpen = await cached
@@ -696,6 +805,7 @@ void main() {
 
         updateServer.releaseHeldResponse();
         await waitForAvailableVersion(cached, '3.0.0');
+        expect(cached.remotePackagePreparationInProgress, isFalse);
         expect(cached.active?.version, '2.0.0');
         expect(cached.generation, 0);
         await waitForHealthy(cached);
@@ -757,6 +867,88 @@ void main() {
       } finally {
         updateServer.releaseHeldResponse();
         await closeQuietly(nextOpen);
+      }
+    },
+  );
+
+  test(
+    'cacheFirst logs the real error when a staged root fails admission',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release2;
+      final first = session();
+      try {
+        await first.initialize();
+        await waitForHealthy(first);
+      } finally {
+        await closeQuietly(first);
+      }
+
+      final release3 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 3,
+        version: '3.0.0',
+      );
+      updateServer.current = release3;
+      final cached = session();
+      try {
+        await cached.initialize(prepareForOpen: true, cacheFirst: true);
+        await waitForAvailableVersion(cached, '3.0.0');
+      } finally {
+        await closeQuietly(cached);
+      }
+
+      final releaseEnvelope =
+          jsonDecode(utf8.decode(release3.envelope)) as Map<String, dynamic>;
+      final candidatePayloadSha256 = crypto.sha256
+          .convert(base64Decode(releaseEnvelope['payload'] as String))
+          .toString();
+      final logs = <String>[];
+      final previousDebugPrint = debugPrint;
+      debugPrint = (message, {wrapWidth}) {
+        if (message != null) logs.add(message);
+      };
+      final reopened = PocketSession(
+        config: config(),
+        beforeGenerationMount: (payloadSha256, _) async {
+          if (payloadSha256 == candidatePayloadSha256) {
+            throw StateError('root catalog rejected staged package');
+          }
+        },
+      );
+      try {
+        await reopened.initialize(prepareForOpen: true, cacheFirst: true);
+
+        expect(reopened.active?.version, '2.0.0');
+        final admissionLogs = logs
+            .where(
+              (line) => line.contains('event=initialize-admission-failure'),
+            )
+            .toList();
+        expect(admissionLogs, hasLength(1));
+        expect(admissionLogs.single, contains('candidate=3.0.0'));
+        expect(admissionLogs.single, contains('build=3'));
+        expect(
+          admissionLogs.single,
+          contains('payloadSha256=$candidatePayloadSha256'),
+        );
+        expect(admissionLogs.single, contains('generation=0'));
+        expect(admissionLogs.single, contains('stage=initializing'));
+        expect(
+          admissionLogs.single,
+          contains('Bad state: root catalog rejected staged package'),
+        );
+      } finally {
+        debugPrint = previousDebugPrint;
+        await closeQuietly(reopened);
       }
     },
   );
