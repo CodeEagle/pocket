@@ -70,6 +70,45 @@ async function makeSpineProject(): Promise<string> {
   return project;
 }
 
+async function makeLive2dProject(): Promise<string> {
+  const project = await makeProject();
+  const models = join(project, "models");
+  await mkdir(join(models, "core"), { recursive: true });
+  await mkdir(join(models, "tex"), { recursive: true });
+  await mkdir(join(models, "mtn"), { recursive: true });
+  await mkdir(join(models, "exp"), { recursive: true });
+  await writeFile(join(models, "actor.model3.json"), JSON.stringify({
+    Version: 3,
+    FileReferences: {
+      Moc: "core/actor.moc3",
+      Textures: ["tex/page.png"],
+      Physics: "actor.physics3.json",
+      Pose: "actor.pose3.json",
+      Expressions: [{ Name: "smile", File: "exp/smile.exp3.json" }],
+      Motions: { Idle: [{ File: "mtn/idle.motion3.json" }] },
+    },
+    Groups: [
+      { Target: "Parameter", Name: "EyeBlink", Ids: ["ParamEyeLOpen", "ParamEyeROpen"] },
+      { Target: "Parameter", Name: "LipSync", Ids: ["ParamMouthOpenY"] },
+    ],
+  }));
+  await writeFile(join(models, "core/actor.moc3"), Buffer.from([0x4d, 0x4f, 0x43, 0x33]));
+  await writeFile(join(models, "actor.physics3.json"), JSON.stringify({ Version: 3, PhysicsSettings: [] }));
+  await writeFile(join(models, "actor.pose3.json"), JSON.stringify({ Version: 3, Groups: [] }));
+  await writeFile(join(models, "mtn/idle.motion3.json"), JSON.stringify({ Version: 3, Meta: {}, Curves: [] }));
+  await writeFile(join(models, "exp/smile.exp3.json"), JSON.stringify({ Version: 3, Parameters: [] }));
+  const assets = structuredClone(sampleAssets) as any;
+  assets.models = {
+    actor: {
+      kind: "live2d",
+      source: "models/actor.model3.json",
+      textures: { "tex/page.png": "art/mira.png" },
+    },
+  };
+  await writeFile(join(project, "novel.assets.json"), `${JSON.stringify(assets, null, 2)}\n`);
+  return project;
+}
+
 test("scene asset diagnostics distinguish model-backed, static and hidden characters", async () => {
   const project = await makeProject();
   try {
@@ -806,6 +845,60 @@ test("Spine model source and texture routes use registered paths and official me
     registry.models.hero.source = "../outside.spine.json";
     const unsafeWrite = await route(project, "PUT", "/api/projects/test-project/novel/assets", registry);
     assert.equal(unsafeWrite.status, 422);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
+test("Live2D source and resource routes authorize exact Model3 references", async () => {
+  const project = await makeLive2dProject();
+  try {
+    const sourceResponse = await route(project, "GET", "/api/projects/test-project/novel/models/source?key=actor");
+    assert.equal(sourceResponse.status, 200);
+    const source = await sourceResponse.json() as any;
+    assert.equal(source.kind, "live2d");
+    assert.equal(source.document.FileReferences.Moc, "core/actor.moc3");
+    assert.deepEqual(source.animationNames, ["Idle:0"]);
+    assert.deepEqual(source.expressionNames, ["smile"]);
+    assert.equal(source.physics.Version, 3);
+    assert.equal(source.pose.Version, 3);
+    assert.deepEqual(source.missingTexturePages, []);
+    assert.equal(source.browserConfig.coreUrl, "/novel/live2d-core.js");
+    assert.ok(source.browserConfig.assets["models/core/actor.moc3"].includes("asset=models%2Fcore%2Factor.moc3"));
+    assert.ok(source.browserConfig.assets["models/tex/page.png"].includes("asset=models%2Ftex%2Fpage.png"));
+    assert.ok(source.browserConfig.assets["models/mtn/idle.motion3.json"].includes("asset=models%2Fmtn%2Fidle.motion3.json"));
+
+    const moc = await route(project, "GET", "/api/projects/test-project/novel/models/resource?key=actor&asset=models%2Fcore%2Factor.moc3");
+    assert.equal(moc.status, 200);
+    assert.equal(moc.headers.get("content-type"), "application/octet-stream");
+    assert.deepEqual(Buffer.from(await moc.arrayBuffer()), Buffer.from([0x4d, 0x4f, 0x43, 0x33]));
+
+    const motion = await route(project, "GET", "/api/projects/test-project/novel/models/resource?key=actor&asset=models%2Fmtn%2Fidle.motion3.json");
+    assert.equal(motion.status, 200);
+    assert.equal((await motion.json() as any).Version, 3);
+
+    const texture = await route(project, "GET", "/api/projects/test-project/novel/models/resource?key=actor&asset=models%2Ftex%2Fpage.png");
+    assert.equal(texture.status, 200);
+    assert.equal(texture.headers.get("content-type"), "image/png");
+    const traversal = await route(project, "GET", "/api/projects/test-project/novel/models/resource?key=actor&asset=models%2F..%2Fstory.json");
+    assert.equal(traversal.status, 404, "only files referenced from the registered Model3 document are served");
+    const undeclared = await route(project, "GET", "/api/projects/test-project/novel/models/resource?key=actor&asset=models%2Fother.moc3");
+    assert.equal(undeclared.status, 404);
+
+    const registry = JSON.parse(await readFile(join(project, "novel.assets.json"), "utf8")) as any;
+    registry.models.actor.textures = {};
+    await writeFile(join(project, "novel.assets.json"), JSON.stringify(registry));
+    const missingPage = await route(project, "GET", "/api/projects/test-project/novel/models/source?key=actor");
+    assert.deepEqual((await missingPage.json() as any).missingTexturePages, ["tex/page.png"]);
+    const missingTexture = await route(project, "GET", "/api/projects/test-project/novel/models/resource?key=actor&asset=models%2Ftex%2Fpage.png");
+    assert.equal(missingTexture.status, 404);
+
+    const outside = join(project, "outside.moc3");
+    await writeFile(outside, Buffer.from([0x4d, 0x4f, 0x43, 0x33]));
+    await rm(join(project, "models/core/actor.moc3"));
+    await symlink(outside, join(project, "models/core/actor.moc3"));
+    const linked = await route(project, "GET", "/api/projects/test-project/novel/models/resource?key=actor&asset=models%2Fcore%2Factor.moc3");
+    assert.equal(linked.status, 404, "Model3 resource symlinks are rejected");
   } finally {
     await rm(project, { recursive: true, force: true });
   }

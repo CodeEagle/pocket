@@ -33,11 +33,12 @@ use pocket_flutter::{
     pocket_configure_worker, pocket_create, pocket_create_with_density_and_tick_hz,
     pocket_create_with_memory_limits, pocket_destroy, pocket_eval, pocket_frame, pocket_last_error,
     pocket_load_bytecode_files, pocket_load_files, pocket_next_wake_delay_ms,
-    pocket_resize_viewport, pocket_send, pocket_trace_clock_begin_json,
+    pocket_resize_viewport, pocket_send, pocket_send_binary, pocket_trace_clock_begin_json,
     pocket_trace_clock_end_json, pocket_trace_clock_mode,
 };
 use serde::de::Deserialize;
 use serde_json::{json, Value};
+use base64::Engine;
 use std::ffi::{c_void, CStr, CString};
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -264,6 +265,7 @@ unsafe fn command(command: &Value, handle: &mut Handle) -> (bool, Value) {
             | "configureWorker"
             | "eval"
             | "send"
+            | "sendBinary"
             | "resize"
             | "frame"
             | "compositor"
@@ -615,6 +617,23 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
             };
             if pocket_send((*handle).cast(), message.as_ptr()) != 0 {
                 return (false, native_error(*handle, "pocket_send"));
+            }
+            (false, json!({"ok": true}))
+        }
+        "sendBinary" => {
+            if handle.is_null() {
+                return (false, error_response("create a native runtime before sending"));
+            }
+            let encoded = match command.get("base64").and_then(Value::as_str) {
+                Some(value) if value.len() <= 6 * 1024 * 1024 => value,
+                _ => return (false, error_response("sendBinary requires bounded base64")),
+            };
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                Ok(bytes) if !bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024 => bytes,
+                _ => return (false, error_response("sendBinary contains invalid or oversized bytes")),
+            };
+            if pocket_send_binary((*handle).cast(), bytes.as_ptr(), bytes.len()) != 0 {
+                return (false, native_error(*handle, "pocket_send_binary"));
             }
             (false, json!({"ok": true}))
         }

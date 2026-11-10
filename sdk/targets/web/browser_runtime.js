@@ -12,6 +12,7 @@ const { BrowserGameInput } = require("./game_input.js");
 const { createPocketWorkerTransport } = require("./worker_transport.js");
 const { PocketRenderWorkerHost } = require("./render_worker_transport.js");
 const { observeRenderHost } = require("./render_observations.js");
+const { createBrowserLive2d, live2dCapabilities } = require("./live2d_browser.js");
 
 function numberOr(value, fallback) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -106,12 +107,19 @@ class PocketWebRuntime {
         if (this.active && !this.disposed) this.host?.inputFrame([...this.pointers.values()]);
       } }) : null;
     this.wx = createBrowserWx(this);
+    this.live2d = createBrowserLive2d(this.config.live2d,
+      this.qjbcUrl ? new URL(this.qjbcUrl, document.baseURI).href : document.baseURI);
+    this.capabilityHandlers = Object.create(null);
+    if (this.live2d) for (const name of live2dCapabilities) {
+      this.capabilityHandlers[name] = (params, context) => this.live2d.invoke(name, params, context);
+    }
     const hostOptions = {
       wx: this.wx, config: this.config, canvas: this.canvas, context: this.context,
       onInput: (value) => this.updateInput(value), onError: (error) => this.onError?.(error),
       isActive: () => this.active && !this.disposed,
       sampleInput: () => this.gameInput?.state(),
       onWorkerChannel: (channel, data) => this.workerTransport?.receive(channel, data),
+      capabilityHandlers: this.capabilityHandlers,
     };
     if (this.renderWorker) {
       const base = document.baseURI;
@@ -121,7 +129,7 @@ class PocketWebRuntime {
           workerUrl: absolute(options.renderWorkerUrl) || new URL("./pocket-render-worker.js", import.meta.url).href,
           engineUrl: absolute(this.engineUrl), qjbcUrl: absolute(this.qjbcUrl), pakUrl: absolute(this.pakUrl),
           cache: this.cache,
-          capabilityNames: [...new Set([...registeredCapabilityNames(), ...(this.config.requires || []), ...(this.config.optional || [])])],
+          capabilityNames: [...new Set([...Object.keys(this.capabilityHandlers), ...registeredCapabilityNames(), ...(this.config.requires || []), ...(this.config.optional || [])])],
           boundary: (operation, params, signal) => this.browserBoundary(operation, params, signal),
         });
       } catch (error) { this.gameInput?.dispose(); throw error; }
@@ -143,6 +151,10 @@ class PocketWebRuntime {
 
   async browserBoundary(operation, params, signal) {
     if (this.disposed || signal.aborted) throw Object.assign(new Error("Browser host is disposed"), { code: "cancelled" });
+    if (Object.hasOwn(this.capabilityHandlers, params.capability)) {
+      if (operation === "permission") return true;
+      if (operation === "capability.invoke") return this.capabilityHandlers[params.capability](params.params || {}, { signal });
+    }
     if (operation === "permission") return requestCapabilityPermission(params.capability, params.params || {}, { signal, wx: this.wx });
     if (operation === "capability.invoke") return invokeRegisteredCapability(params.capability, params.params || {}, { signal, wx: this.wx });
     const store = browserStorage();
@@ -278,9 +290,11 @@ class PocketWebRuntime {
   dispose() {
     if (this.disposed) return;
     this.disposed = true; this.active = false;
+    const released = this.live2d?.dispose().catch(error => this.onError?.(error)); this.live2d = null;
     removeEventListener("resize", this.handleResize); removeEventListener("visibilitychange", this.handleVisibility);
     for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"]) this.canvas.removeEventListener(type, this.handlePointer);
     this.pointers.clear(); this.gameInput?.dispose(); this.gameInput = null; this.workerTransportUnsubscribe?.(); this.workerTransportUnsubscribe = null; this.workerTransport?.dispose(); this.workerTransport = null; this.host.dispose(); if (this.ownsInputElement) this.inputElement?.remove();
+    return released;
   }
 }
 

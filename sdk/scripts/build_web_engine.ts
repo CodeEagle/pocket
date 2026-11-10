@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { buildWechat } from "./build_wechat.ts";
+import { SDK_VERSION } from "./prebuilt_tools.mjs";
 
 const SDK_ROOT = resolve(import.meta.dir, "..");
 const DEFAULT_OUT = join(SDK_ROOT, ".pocket-build", "web-engine");
@@ -115,7 +116,7 @@ export async function buildWebEngine(options: BuildWebEngineOptions): Promise<{ 
     writeFileSync(join(output, "manifest.json"), `${JSON.stringify({
       schemaVersion: 1,
       kind: "pocket-web-engine",
-      sdkVersion: "0.1.0",
+      sdkVersion: SDK_VERSION,
       sourceBuild: true,
       externalGuestAbi: "web_boot + web_set_identity",
       wasm: "pocketjs.wasm",

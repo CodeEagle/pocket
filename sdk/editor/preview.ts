@@ -25,6 +25,8 @@ import { resolveNativeProbePath } from "../scripts/native_probe_path.ts";
 import { servePreviewMedia } from "./preview_media_assets.ts";
 import type { LocalBluetoothProvider } from "./local_bluetooth.ts";
 import { hotCommandSource, hotIdentity, type HotIdentity } from "./hot_reload.ts";
+import { createPreviewLive2d } from "./live2d.ts";
+import { encodeMessage } from "../targets/wechat/template/binary-bridge.js";
 
 export type PreviewArtifactPaths = {
   /** Absolute path to the current Editor qjbc artifact. */
@@ -1215,6 +1217,7 @@ function previewFrameSummary(value: PreviewFrame): JsonRecord {
 }
 
 type PreviewRuntime = {
+  live2d?: ReturnType<typeof createPreviewLive2d>;
   appId: string;
   instanceId: string;
   generation: number;
@@ -2012,7 +2015,11 @@ class PreviewSession {
     // the root. Close its native trace clock before stopping its probe so the
     // completed capture is exportable instead of being misclassified as a
     // transport failure by the later global teardown.
-    for (const runtime of runtimes) await this.finishPreviewRecordingCapture(runtime);
+    for (const runtime of runtimes) {
+      await runtime.live2d?.dispose();
+      runtime.live2d = undefined;
+      await this.finishPreviewRecordingCapture(runtime);
+    }
     if (this.rootRuntime) {
       this.emitWebBluetoothScopeDispose(this.rootRuntime);
       await this.failBrowserPluginRuntime(this.rootRuntime, "runtime_stopped", "preview runtime stopped");
@@ -2400,7 +2407,7 @@ class PreviewSession {
 
   private recordableProbeCommand(command: JsonRecord): boolean {
     const operation = command.op;
-    if (!["create", "compositor", "configureWorker", "load", "loadBytecode", "eval", "frame", "send", "resize"].includes(String(operation))) return false;
+    if (!["create", "compositor", "configureWorker", "load", "loadBytecode", "eval", "frame", "send", "sendBinary", "resize"].includes(String(operation))) return false;
     // Recording control responses are real guest-visible boundaries. The
     // initial start response is sent while the old runtime is pending restart
     // (and is therefore intentionally not captured); active status/repeated
@@ -2569,6 +2576,9 @@ class PreviewSession {
     }
     if (operation === "send") {
       return { index: 0, kind: "send", args: { message: cloneJson(command.message) }, result: { sent: true, traceClock }, error: null };
+    }
+    if (operation === "sendBinary") {
+      return { index: 0, kind: "send", args: { binaryBase64: command.base64 }, result: { sent: true, traceClock }, error: null };
     }
     if (operation === "resize") {
       return { index: 0, kind: "resize", args: { width: command.width, height: command.height }, result: { resized: true, traceClock }, error: null };
@@ -2891,7 +2901,9 @@ class PreviewSession {
           }
           framesCompared += 1;
         } else if (entry.kind === "send") {
-          const command: JsonRecord = { op: "send", message: cloneJson(entry.args.message) };
+          const command: JsonRecord = typeof entry.args.binaryBase64 === "string"
+            ? { op: "sendBinary", base64: entry.args.binaryBase64 }
+            : { op: "send", message: cloneJson(entry.args.message) };
           if (entry.result.traceClock) command.traceClock = cloneJson(entry.result.traceClock);
           response = await probe.checked(command);
         } else if (entry.kind === "resize") {
@@ -2945,10 +2957,13 @@ class PreviewSession {
       ok: !error,
       ...(error ? { error } : { result: result === undefined ? null : result }),
     };
-    await runtime.probe.checked({
-      op: "send",
-      message: { type: "event", name: "host.response", payload },
-    });
+    const message = { type: "event", name: "host.response", payload };
+    if (capability.startsWith("media.live2d.model.")) {
+      const bytes = encodeMessage(message, 4 * 1024 * 1024);
+      await runtime.probe.checked({ op: "sendBinary", base64: Buffer.from(bytes).toString("base64") });
+    } else {
+      await runtime.probe.checked({ op: "send", message });
+    }
     runtime.needsPump = true;
   }
 
@@ -3339,6 +3354,12 @@ class PreviewSession {
   }
 
   private async genericCapabilityResult(runtime: PreviewRuntime, capability: string, params: JsonRecord): Promise<unknown> {
+    if (["media.live2d.model.load", "media.live2d.model.update", "media.live2d.model.release"].includes(capability)) {
+      const bytecode = runtime.artifacts.bytecodePath ?? runtime.artifacts.bytecode;
+      if (!bytecode) throw new Error("Live2D preview requires compiled Guest artifacts");
+      runtime.live2d ??= createPreviewLive2d(bytecode);
+      return runtime.live2d.invoke(capability, params, {});
+    }
     if (capability === "runtime.info") {
       return {
         entryFormat: "quickjs-bytecode",
@@ -3612,6 +3633,8 @@ class PreviewSession {
           }
         }
         this.dropRuntimeResources(child.appId);
+        await child.live2d?.dispose();
+        child.live2d = undefined;
         await this.finishPreviewRecordingCapture(child);
         await child.probe.stop();
         await respond({ destroyed: true });

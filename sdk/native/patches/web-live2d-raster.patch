@@ -1,0 +1,1459 @@
+diff --git a/engine/raster/src/lib.rs b/engine/raster/src/lib.rs
+--- a/engine/raster/src/lib.rs
++++ b/engine/raster/src/lib.rs
+@@ -45,9 +45,14 @@
+ 
+ #![no_std]
+ 
++extern crate alloc;
++
++use alloc::vec::Vec;
+ use pocket_drivers::DamageRect;
++use pocket_drivers::RenderError;
+ use pocket_drivers::RenderResources;
+ use pocket_drivers::TexView;
++use pocket_draw_ops::Operation;
+ use pocket_spec::{self as spec, draw_op};
+ 
+ mod surface;
+@@ -59,7 +64,7 @@
+ pub const MAX_RENDER_SCALE: u32 = 4;
+ /// Integer clip rect: x0/y0 inclusive, x1/y1 exclusive.
+ #[derive(Clone, Copy)]
+-struct Clip {
++pub(crate) struct Clip {
+     x0: i32,
+     y0: i32,
+     x1: i32,
+@@ -139,10 +144,18 @@
+ 
+ /// Opaque framebuffer target. `blend` performs integer src-over compositing;
+ /// concrete targets differ only in storage format.
+-trait RenderTarget {
++pub(crate) trait RenderTarget {
+     fn pixel_len(&self) -> usize;
+     fn blend(&mut self, offset: usize, r: u32, g: u32, b: u32, a: u32);
+     fn fill_opaque(&mut self, start: usize, len: usize, r: u32, g: u32, b: u32);
++    fn composite_mesh(&mut self, offset: usize, source: [u32; 4], blend: u32) {
++        if source[3] == 0 {
++            return;
++        }
++        let straight = |channel: u32| ((channel * 255 + source[3] / 2) / source[3]).min(255);
++        self.blend(offset, straight(source[0]), straight(source[1]), straight(source[2]), source[3]);
++        let _ = blend;
++    }
+ 
+     #[inline]
+     fn clear_black(&mut self) {
+@@ -193,6 +206,19 @@
+         let byte_start = start * 4;
+         fill_opaque_span::<ARGB>(&mut self.bytes[byte_start..byte_start + len * 4], r, g, b);
+     }
++
++    #[inline]
++    fn composite_mesh(&mut self, offset: usize, source: [u32; 4], blend: u32) {
++        if source[3] == 0 { return; }
++        let o = offset * 4;
++        let (ri, gi, bi) = if ARGB { (2, 1, 0) } else { (0, 1, 2) };
++        let destination = [self.bytes[o + ri] as u32, self.bytes[o + gi] as u32, self.bytes[o + bi] as u32];
++        let result = composite_mesh_opaque(destination, source, blend);
++        self.bytes[o + ri] = result[0] as u8;
++        self.bytes[o + gi] = result[1] as u8;
++        self.bytes[o + bi] = result[2] as u8;
++        self.bytes[o + 3] = 255;
++    }
+ }
+ 
+ /// RGBA8 target that keeps coverage. The colour bytes are premultiplied: they
+@@ -245,6 +271,19 @@
+     #[inline]
+     fn clear_black(&mut self) {
+         self.bytes.fill(0);
++    }
++
++    #[inline]
++    fn composite_mesh(&mut self, offset: usize, source: [u32; 4], blend: u32) {
++        let o = offset * 4;
++        let destination = [
++            self.bytes[o] as u32,
++            self.bytes[o + 1] as u32,
++            self.bytes[o + 2] as u32,
++            self.bytes[o + 3] as u32,
++        ];
++        let result = composite_mesh_premultiplied(destination, source, blend);
++        self.bytes[o..o + 4].copy_from_slice(&result.map(|channel| channel as u8));
+     }
+ }
+ 
+@@ -316,6 +355,13 @@
+     #[inline]
+     fn fill_opaque(&mut self, start: usize, len: usize, r: u32, g: u32, b: u32) {
+         self.pixels[start..start + len].fill(pack_rgb565(r, g, b));
++    }
++
++    #[inline]
++    fn composite_mesh(&mut self, offset: usize, source: [u32; 4], blend: u32) {
++        let destination = unpack_rgb565(self.pixels[offset]);
++        let result = composite_mesh_opaque([destination.0, destination.1, destination.2], source, blend);
++        self.pixels[offset] = pack_rgb565(result[0], result[1], result[2]);
+     }
+ }
+ 
+@@ -359,6 +405,299 @@
+             "raster span crossed a compact RGB565 window row"
+         );
+         self.pixels[local..local + len].fill(pack_rgb565(r, g, b));
++    }
++
++    #[inline]
++    fn composite_mesh(&mut self, offset: usize, source: [u32; 4], blend: u32) {
++        let local = self.local_offset(offset);
++        let destination = unpack_rgb565(self.pixels[local]);
++        let result = composite_mesh_opaque([destination.0, destination.1, destination.2], source, blend);
++        self.pixels[local] = pack_rgb565(result[0], result[1], result[2]);
++    }
++}
++
++#[inline]
++fn composite_mesh_opaque(destination: [u32; 3], source: [u32; 4], blend: u32) -> [u32; 3] {
++    let alpha = source[3];
++    if alpha == 0 { return destination; }
++    let straight = |channel: u32| ((channel * 255 + alpha / 2) / alpha).min(255);
++    let source_rgb = [straight(source[0]), straight(source[1]), straight(source[2])];
++    core::array::from_fn(|index| {
++        let dest = destination[index];
++        match blend {
++            // BlendMode.plus adds premultiplied source directly to the
++            // destination; interpolating a saturated straight result would
++            // incorrectly reduce partially opaque highlights.
++            1 => (dest + source[index]).min(255),
++            2 | 3 => {
++                let blended = if blend == 2 {
++                    (dest * source_rgb[index] + 127) / 255
++                } else {
++                    255 - (((255 - dest) * (255 - source_rgb[index]) + 127) / 255)
++                };
++                (blended * alpha + dest * (255 - alpha) + 127) / 255
++            }
++            _ => (source[index] + (dest * (255 - alpha) + 127) / 255).min(255),
++        }
++    })
++}
++
++#[inline]
++fn composite_mesh_premultiplied(destination: [u32; 4], source: [u32; 4], blend: u32) -> [u32; 4] {
++    let (sa, da) = (source[3], destination[3]);
++    if sa == 0 { return destination; }
++    if blend == 1 {
++        return [
++            (source[0] + destination[0]).min(255),
++            (source[1] + destination[1]).min(255),
++            (source[2] + destination[2]).min(255),
++            (sa + da).min(255),
++        ];
++    }
++    let alpha = sa + (da * (255 - sa) + 127) / 255;
++    if blend == 0 {
++        return [
++            (source[0] + (destination[0] * (255 - sa) + 127) / 255).min(255),
++            (source[1] + (destination[1] * (255 - sa) + 127) / 255).min(255),
++            (source[2] + (destination[2] * (255 - sa) + 127) / 255).min(255),
++            alpha.min(255),
++        ];
++    }
++    let unpremultiply = |color: u32, coverage: u32| {
++        if coverage == 0 { 0 } else { ((color * 255 + coverage / 2) / coverage).min(255) }
++    };
++    let overlap_alpha = sa * da;
++    let color = |index: usize| {
++        let source_straight = unpremultiply(source[index], sa);
++        let destination_straight = unpremultiply(destination[index], da);
++        let blended = if blend == 2 {
++            (source_straight * destination_straight + 127) / 255
++        } else {
++            255 - (((255 - source_straight) * (255 - destination_straight) + 127) / 255)
++        };
++        let source_only = (source[index] * (255 - da) + 127) / 255;
++        let destination_only = (destination[index] * (255 - sa) + 127) / 255;
++        let overlap = (blended * overlap_alpha + 32_512) / 65_025;
++        (source_only + destination_only + overlap).min(255)
++    };
++    [color(0), color(1), color(2), alpha.min(255)]
++}
++
++#[derive(Default)]
++pub(crate) struct MeshScratch {
++    layer: Vec<u8>,
++    mask: Vec<u8>,
++}
++
++#[derive(Clone, Copy)]
++struct MeshMask {
++    bounds: Clip,
++    inverted: bool,
++}
++
++#[derive(Clone, Copy)]
++struct MeshLayer {
++    bounds: Clip,
++    blend: u32,
++    tint: [f32; 6],
++    mask: Option<MeshMask>,
++}
++
++struct MeshLayerTarget<'a> {
++    pixels: &'a mut [u8],
++    stride: i32,
++    height: i32,
++    bounds: Clip,
++}
++
++impl MeshLayerTarget<'_> {
++    fn local_pixel(&self, full_offset: usize) -> Option<usize> {
++        let stride = self.stride as usize;
++        if stride == 0 { return None; }
++        let x = (full_offset % stride) as i32;
++        let y = (full_offset / stride) as i32;
++        if y >= self.height || x < self.bounds.x0 || x >= self.bounds.x1 || y < self.bounds.y0 || y >= self.bounds.y1 { return None; }
++        Some(((y - self.bounds.y0) as usize * (self.bounds.x1 - self.bounds.x0) as usize + (x - self.bounds.x0) as usize) * 4)
++    }
++}
++
++impl RenderTarget for MeshLayerTarget<'_> {
++    fn pixel_len(&self) -> usize { self.stride as usize * self.height as usize }
++
++    fn blend(&mut self, offset: usize, r: u32, g: u32, b: u32, a: u32) {
++        if a == 0 { return; }
++        let Some(local) = self.local_pixel(offset) else { return; };
++        let inverse = 255 - a;
++        for (index, source) in [r, g, b].into_iter().enumerate() {
++            self.pixels[local + index] = ((source * a + self.pixels[local + index] as u32 * inverse + 127) / 255) as u8;
++        }
++        self.pixels[local + 3] = ((a * 255 + self.pixels[local + 3] as u32 * inverse + 127) / 255) as u8;
++    }
++
++    fn fill_opaque(&mut self, start: usize, len: usize, r: u32, g: u32, b: u32) {
++        for offset in start..start.saturating_add(len) { self.blend(offset, r, g, b, 255); }
++    }
++}
++
++struct MeshMaskTarget<'a> {
++    alpha: &'a mut [u8],
++    stride: i32,
++    height: i32,
++    bounds: Clip,
++}
++
++impl MeshMaskTarget<'_> {
++    fn local_pixel(&self, full_offset: usize) -> Option<usize> {
++        let stride = self.stride as usize;
++        if stride == 0 { return None; }
++        let x = (full_offset % stride) as i32;
++        let y = (full_offset / stride) as i32;
++        if y >= self.height || x < self.bounds.x0 || x >= self.bounds.x1 || y < self.bounds.y0 || y >= self.bounds.y1 { return None; }
++        Some((y - self.bounds.y0) as usize * (self.bounds.x1 - self.bounds.x0) as usize + (x - self.bounds.x0) as usize)
++    }
++}
++
++impl RenderTarget for MeshMaskTarget<'_> {
++    fn pixel_len(&self) -> usize { self.stride as usize * self.height as usize }
++
++    fn blend(&mut self, offset: usize, _r: u32, _g: u32, _b: u32, a: u32) {
++        if a == 0 { return; }
++        let Some(local) = self.local_pixel(offset) else { return; };
++        let dest = self.alpha[local] as u32;
++        self.alpha[local] = (a + (dest * (255 - a) + 127) / 255).min(255) as u8;
++    }
++
++    fn fill_opaque(&mut self, start: usize, len: usize, _r: u32, _g: u32, _b: u32) {
++        for offset in start..start.saturating_add(len) {
++            if let Some(local) = self.local_pixel(offset) { self.alpha[local] = 255; }
++        }
++    }
++}
++
++#[inline]
++fn rect_pixels(rect: Clip) -> usize {
++    if rect.x0 >= rect.x1 || rect.y0 >= rect.y1 { return 0; }
++    (rect.x1 - rect.x0) as usize * (rect.y1 - rect.y0) as usize
++}
++
++pub(crate) fn has_mesh_layer(words: &[u32], viewport: DamageRect) -> Result<bool, RenderError> {
++    for operation in pocket_draw_ops::DrawOps::new(words, viewport) {
++        if operation.map_err(|_| RenderError::InvalidFrame)?.opcode == draw_op::MESH_LAYER_BEGIN {
++            return Ok(true);
++        }
++    }
++    Ok(false)
++}
++
++pub(crate) fn ensure_mesh_scratch(scratch: &mut MeshScratch, has_mesh: bool, region: Clip) -> Result<(), RenderError> {
++    if !has_mesh { return Ok(()); }
++    let width = usize::try_from(region.x1 - region.x0).map_err(|_| RenderError::InvalidFrame)?;
++    let height = usize::try_from(region.y1 - region.y0).map_err(|_| RenderError::InvalidFrame)?;
++    let pixels = width.checked_mul(height).ok_or(RenderError::InvalidFrame)?;
++    reserve_scratch(&mut scratch.layer, pixels.checked_mul(4).ok_or(RenderError::InvalidFrame)?)?;
++    reserve_scratch(&mut scratch.mask, pixels)?;
++    Ok(())
++}
++
++fn reserve_scratch(buffer: &mut Vec<u8>, required: usize) -> Result<(), RenderError> {
++    if required > buffer.capacity() {
++        buffer.try_reserve_exact(required.saturating_sub(buffer.len())).map_err(|_| RenderError::Unsupported)?;
++    }
++    if buffer.len() < required { buffer.resize(required, 0); }
++    Ok(())
++}
++
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn render_mesh_operation<T: RenderTarget>(
++    resources: &(impl RenderResources + ?Sized),
++    operation: &Operation<'_>,
++    target: &mut T,
++    stride: i32,
++    height: i32,
++    scale: i32,
++    clip: Clip,
++    layer: &mut Option<MeshLayer>,
++    scratch: &mut MeshScratch,
++) -> Result<bool, RenderError> {
++    match operation.opcode {
++        draw_op::MESH_LAYER_BEGIN => {
++            let bounds = packed_bounds(operation.words[1], operation.words[2], scale).intersect(clip);
++            scratch.layer[..rect_pixels(bounds) * 4].fill(0);
++            let tint = core::array::from_fn(|index| f32::from_bits(operation.words[4 + index]));
++            *layer = Some(MeshLayer { bounds, blend: operation.words[3], tint, mask: None });
++            return Ok(true);
++        }
++        draw_op::MESH_MASK_BEGIN => {
++            let state = layer.as_mut().ok_or(RenderError::InvalidFrame)?;
++            let bounds = packed_bounds(operation.words[2], operation.words[3], scale).intersect(state.bounds).intersect(clip);
++            scratch.mask[..rect_pixels(bounds)].fill(0);
++            state.mask = Some(MeshMask { bounds, inverted: operation.words[1] != 0 });
++            return Ok(true);
++        }
++        draw_op::MESH_LAYER_RESTORE => {
++            let state = layer.take().ok_or(RenderError::InvalidFrame)?;
++            composite_mesh_layer(target, stride, state, scratch);
++            return Ok(true);
++        }
++        _ => {}
++    }
++    let Some(state) = *layer else { return Ok(false); };
++    if matches!(operation.opcode, draw_op::SCISSOR | draw_op::SCISSOR_POP) { return Ok(true); }
++    if !matches!(operation.opcode, draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT | draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT) {
++        return Ok(true);
++    }
++    let Some(mask) = state.mask else {
++        let triangle_clip = clip.intersect(state.bounds);
++        if triangle_clip.x0 >= triangle_clip.x1 || triangle_clip.y0 >= triangle_clip.y1 { return Ok(true); }
++        let operation_resources = OperationResources::new(resources, operation, scale as u32)?;
++        let bytes = rect_pixels(state.bounds) * 4;
++        let mut isolated = MeshLayerTarget { pixels: &mut scratch.layer[..bytes], stride, height, bounds: state.bounds };
++        render_mesh_triangle(&operation_resources, &mut isolated, stride, scale, triangle_clip, operation, Some(state.tint));
++        return Ok(true);
++    };
++    let triangle_clip = clip.intersect(mask.bounds);
++    if triangle_clip.x0 >= triangle_clip.x1 || triangle_clip.y0 >= triangle_clip.y1 { return Ok(true); }
++    let operation_resources = OperationResources::new(resources, operation, scale as u32)?;
++    let bytes = rect_pixels(mask.bounds);
++    let mut isolated = MeshMaskTarget { alpha: &mut scratch.mask[..bytes], stride, height, bounds: mask.bounds };
++    render_mesh_triangle(&operation_resources, &mut isolated, stride, scale, triangle_clip, operation, None);
++    Ok(true)
++}
++
++fn packed_bounds(xy_word: u32, wh_word: u32, scale: i32) -> Clip {
++    let (x, y) = xy(xy_word, scale);
++    let (width, height) = wh(wh_word, scale);
++    Clip { x0: x, y0: y, x1: x.saturating_add(width), y1: y.saturating_add(height) }
++}
++
++fn composite_mesh_layer<T: RenderTarget>(target: &mut T, stride: i32, layer: MeshLayer, scratch: &MeshScratch) {
++    let width = (layer.bounds.x1 - layer.bounds.x0).max(0) as usize;
++    for y in layer.bounds.y0..layer.bounds.y1 {
++        for x in layer.bounds.x0..layer.bounds.x1 {
++            let local = ((y - layer.bounds.y0) as usize * width + (x - layer.bounds.x0) as usize) * 4;
++            let mut source = [
++                scratch.layer[local] as u32,
++                scratch.layer[local + 1] as u32,
++                scratch.layer[local + 2] as u32,
++                scratch.layer[local + 3] as u32,
++            ];
++            if source[3] == 0 { continue; }
++            if let Some(mask) = layer.mask {
++                let factor = if x >= mask.bounds.x0 && x < mask.bounds.x1 && y >= mask.bounds.y0 && y < mask.bounds.y1 {
++                    let mask_width = (mask.bounds.x1 - mask.bounds.x0) as usize;
++                    let index = (y - mask.bounds.y0) as usize * mask_width + (x - mask.bounds.x0) as usize;
++                    let coverage = scratch.mask[index] as u32;
++                    if mask.inverted { 255 - coverage } else { coverage }
++                } else if mask.inverted {
++                    255
++                } else {
++                    0
++                };
++                for channel in &mut source { *channel = (*channel * factor + 127) / 255; }
++                if source[3] == 0 { continue; }
++            }
++            target.composite_mesh((y * stride + x) as usize, source, layer.blend);
++        }
+     }
+ }
+ 
+@@ -543,7 +882,10 @@
+         width,
+         height,
+     };
+-    render_scaled_clipped(ui, words, &mut target, full_width, scale_i, physical);
++    let mut scratch = MeshScratch::default();
++    let has_mesh = has_mesh_layer(words, logical_screen).unwrap_or(false);
++    if ensure_mesh_scratch(&mut scratch, has_mesh, physical).is_err() { return; }
++    render_scaled_clipped_with_scratch(ui, words, &mut target, full_width, scale_i, physical, &mut scratch);
+ }
+ 
+ /// Clear and repaint only the supplied logical damage rectangles into an
+@@ -593,11 +935,15 @@
+     scale: u32,
+     clear: bool,
+ ) {
+-    let (width, _height, screen) = target_geometry(ui, target, scale);
++    let (width, height, screen) = target_geometry(ui, target, scale);
++    let mut scratch = MeshScratch::default();
++    let viewport = DamageRect::new(0, 0, width / scale as i32, height / scale as i32);
++    let Ok(has_mesh) = has_mesh_layer(words, viewport) else { return; };
++    if ensure_mesh_scratch(&mut scratch, has_mesh, screen).is_err() { return; }
+     if clear {
+         target.clear_black();
+     }
+-    render_scaled_clipped(ui, words, target, width, scale as i32, screen);
++    render_scaled_clipped_with_scratch(ui, words, target, width, scale as i32, screen, &mut scratch);
+ }
+ 
+ fn render_scaled_regions_impl<T: RenderTarget>(
+@@ -608,6 +954,10 @@
+     regions: &[DamageRect],
+ ) {
+     let (width, height, screen) = target_geometry(ui, target, scale);
++    let mut scratch = MeshScratch::default();
++    let viewport = DamageRect::new(0, 0, width / scale as i32, height / scale as i32);
++    let Ok(has_mesh) = has_mesh_layer(words, viewport) else { return; };
++    if ensure_mesh_scratch(&mut scratch, has_mesh, screen).is_err() { return; }
+     render_damage_regions(
+         ui,
+         words,
+@@ -617,6 +967,7 @@
+         scale as i32,
+         screen,
+         regions,
++        &mut scratch,
+     );
+ }
+ 
+@@ -677,6 +1028,7 @@
+     scale: i32,
+     screen: Clip,
+     regions: &[DamageRect],
++    scratch: &mut MeshScratch,
+ ) {
+     let logical_screen = DamageRect::new(0, 0, width / scale, height / scale);
+     for &region in regions {
+@@ -695,7 +1047,7 @@
+             continue;
+         }
+         clear_black_rect(target, width, physical);
+-        render_scaled_clipped(ui, words, target, width, scale, physical);
++        render_scaled_clipped_with_scratch(ui, words, target, width, scale, physical, scratch);
+     }
+ }
+ 
+@@ -715,12 +1067,58 @@
+     scale: i32,
+     screen: Clip,
+ ) {
++    let mut scratch = MeshScratch::default();
++    let logical_width = screen.x1 / scale;
++    let logical_height = screen.y1 / scale;
++    let viewport = DamageRect::new(0, 0, logical_width, logical_height);
++    let has_mesh = has_mesh_layer(words, viewport).unwrap_or(false);
++    if ensure_mesh_scratch(&mut scratch, has_mesh, screen).is_err() { return; }
++    render_scaled_clipped_with_scratch(ui, words, target, width, scale, screen, &mut scratch);
++}
++
++fn render_scaled_clipped_with_scratch<T: RenderTarget>(
++    ui: &(impl RenderResources + ?Sized),
++    words: &[u32],
++    target: &mut T,
++    width: i32,
++    scale: i32,
++    screen: Clip,
++    scratch: &mut MeshScratch,
++) {
+     let mut stack: [Clip; 32] = [screen; 32];
+     let mut depth: usize = 0;
+     let mut clip = screen;
++    let mut mesh_layer = None;
+ 
+     let mut i = 0usize;
+     while i < words.len() {
++        let opcode = words[i];
++        let mesh_len = match opcode {
++            draw_op::MESH_LAYER_BEGIN => Some(10),
++            draw_op::MESH_MASK_BEGIN => Some(4),
++            draw_op::MESH_LAYER_RESTORE => Some(1),
++            draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT => Some(12),
++            draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => Some(15),
++            _ => None,
++        };
++        if let Some(len) = mesh_len.filter(|_| {
++            mesh_layer.is_some() || matches!(opcode, draw_op::MESH_LAYER_BEGIN | draw_op::MESH_MASK_BEGIN | draw_op::MESH_LAYER_RESTORE)
++        }) {
++            if i + len > words.len() { return; }
++            let operation = Operation {
++                opcode,
++                words: &words[i..i + len],
++                clip: DamageRect::new(clip.x0 / scale, clip.y0 / scale, clip.x1 / scale, clip.y1 / scale),
++            };
++            if render_mesh_operation(ui, &operation, target, width, screen.y1, scale, clip, &mut mesh_layer, scratch).is_err() {
++                return;
++            }
++            i += len;
++            continue;
++        }
++        if mesh_layer.is_some() && !matches!(opcode, draw_op::SCISSOR | draw_op::SCISSOR_POP) {
++            return;
++        }
+         match words[i] {
+             draw_op::RECT => {
+                 if i + 4 > words.len() {
+@@ -830,18 +1228,36 @@
+                 tri(target, width, scale, clip, &words[i + 1..i + 7]);
+                 i += 7;
+             }
+-            draw_op::TEX_TRI => {
++            draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT => {
+                 if i + 12 > words.len() {
+                     return;
+                 }
+-                tex_tri(ui, target, width, scale, clip, &words[i + 1..i + 12]);
++                tex_tri(
++                    ui,
++                    target,
++                    width,
++                    scale,
++                    clip,
++                    &words[i + 1..i + 12],
++                    words[i] == draw_op::TEX_TRI_REPEAT,
++                    None,
++                );
+                 i += 12;
+             }
+-            draw_op::TEX_TRI_FLOAT => {
++            draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => {
+                 if i + 15 > words.len() {
+                     return;
+                 }
+-                tex_tri_float(ui, target, width, scale, clip, &words[i + 1..i + 15]);
++                tex_tri_float(
++                    ui,
++                    target,
++                    width,
++                    scale,
++                    clip,
++                    &words[i + 1..i + 15],
++                    words[i] == draw_op::TEX_TRI_REPEAT_FLOAT,
++                    None,
++                );
+                 i += 15;
+             }
+             draw_op::TEXT_RUN => {
+@@ -1194,6 +1610,86 @@
+     ))
+ }
+ 
++/// Deterministic bilinear sample with repeat addressing. Coordinates are
++/// reduced before fixed-point conversion, so the documented +/-1,000,000 UV
++/// range cannot overflow the sampler's signed 24.8 intermediate.
++#[inline]
++fn sample_linear_repeat(view: &TexView, u: f32, v: f32) -> Option<(u32, u32, u32, u32)> {
++    if view.w == 0 || view.h == 0 {
++        return None;
++    }
++    let repeated = |coordinate: f32, extent: u32| {
++        let unit = repeat_unit(coordinate);
++        let fixed = (unit * extent as f32 * 256.0) as i32 - 128;
++        let base = fixed >> 8;
++        let first = base.rem_euclid(extent as i32) as u32;
++        let second = (first + 1) % extent;
++        (first, second, (fixed & 255) as u32)
++    };
++    let (x0, x1, fx) = repeated(u, view.w);
++    let (y0, y1, fy) = repeated(v, view.h);
++    let width = view.w as usize;
++    let c00 = texel(view, y0 as usize * width + x0 as usize)?;
++    let c01 = texel(view, y0 as usize * width + x1 as usize)?;
++    let c10 = texel(view, y1 as usize * width + x0 as usize)?;
++    let c11 = texel(view, y1 as usize * width + x1 as usize)?;
++    let lerp8 = |a: u32, b: u32, f: u32| (a * (256 - f) + b * f) >> 8;
++    let mix = |c0: u32, c1: u32, c2: u32, c3: u32| {
++        lerp8(
++            lerp8(c0, c1, fx),
++            lerp8(c2, c3, fx),
++            fy,
++        )
++    };
++    Some((
++        mix(c00.0, c01.0, c10.0, c11.0),
++        mix(c00.1, c01.1, c10.1, c11.1),
++        mix(c00.2, c01.2, c10.2, c11.2),
++        mix(c00.3, c01.3, c10.3, c11.3),
++    ))
++}
++
++#[inline]
++fn repeat_unit(coordinate: f32) -> f32 {
++    let fraction = coordinate - coordinate as i32 as f32;
++    if fraction < 0.0 { fraction + 1.0 } else { fraction }
++}
++
++#[inline]
++fn sample_texture(view: &TexView, u: f32, v: f32, repeat: bool) -> Option<(u32, u32, u32, u32)> {
++    if repeat {
++        if view.linear {
++            sample_linear_repeat(view, u, v)
++        } else {
++            let u = repeat_unit(u);
++            let v = repeat_unit(v);
++            let x = (u * view.w as f32) as usize;
++            let y = (v * view.h as f32) as usize;
++            texel(view, y * view.w as usize + x)
++        }
++    } else if view.linear {
++        sample_linear(view, u, v)
++    } else {
++        let x = ((u * view.w as f32) as i32).clamp(0, view.w as i32 - 1);
++        let y = ((v * view.h as f32) as i32).clamp(0, view.h as i32 - 1);
++        texel(view, (y * view.w as i32 + x) as usize)
++    }
++}
++
++#[inline]
++fn apply_mesh_tint(r: u32, g: u32, b: u32, tint: [f32; 6]) -> (u32, u32, u32) {
++    let channel = |value: u32, multiply: f32, screen: f32| {
++        let scale = (1.0 - screen) * multiply;
++        let offset = screen * multiply * 255.0;
++        (value as f32 * scale + offset + 0.5).clamp(0.0, 255.0) as u32
++    };
++    (
++        channel(r, tint[0], tint[3]),
++        channel(g, tint[1], tint[4]),
++        channel(b, tint[2], tint[5]),
++    )
++}
++
+ // ---- TEX_TRI_FLOAT: subpixel barycentric mesh triangle --------------------
+ 
+ fn tex_tri_float<T: RenderTarget>(
+@@ -1203,11 +1699,13 @@
+     scale: i32,
+     clip: Clip,
+     p: &[u32],
++    repeat: bool,
++    tint: Option<[f32; 6]>,
+ ) {
+     let handle = p[0] as i32;
+     let scale = scale as f32;
+-    let (mut x0, mut y0) = (f32::from_bits(p[1]) * scale, f32::from_bits(p[2]) * scale);
+-    let (mut u0, mut v0) = (f32::from_bits(p[3]), f32::from_bits(p[4]));
++    let (x0, y0) = (f32::from_bits(p[1]) * scale, f32::from_bits(p[2]) * scale);
++    let (u0, v0) = (f32::from_bits(p[3]), f32::from_bits(p[4]));
+     let (mut x1, mut y1) = (f32::from_bits(p[5]) * scale, f32::from_bits(p[6]) * scale);
+     let (mut u1, mut v1) = (f32::from_bits(p[7]), f32::from_bits(p[8]));
+     let (mut x2, mut y2) = (f32::from_bits(p[9]) * scale, f32::from_bits(p[10]) * scale);
+@@ -1263,8 +1761,6 @@
+     let (min_y, max_y) = (min_y.max(clip.y0), max_y.min(clip.y1));
+     let (mr, mg, mb, ma) = channels(modulate);
+     let identity = modulate == 0xffff_ffff;
+-    let (twf, thf) = (view.w as f32, view.h as f32);
+-    let (tw_max, th_max) = (view.w as i32 - 1, view.h as i32 - 1);
+     for py in min_y..max_y {
+         let sy = py as f32 + 0.5;
+         for px in min_x..max_x {
+@@ -1283,13 +1779,7 @@
+             }
+             let (f0, f1, f2) = ((w0 / area) as f32, (w1 / area) as f32, (w2 / area) as f32);
+             let (u, v) = (u0 * f0 + u1 * f1 + u2 * f2, v0 * f0 + v1 * f1 + v2 * f2);
+-            let sample = if view.linear {
+-                sample_linear(&view, u, v)
+-            } else {
+-                let tx = ((u * twf) as i32).clamp(0, tw_max);
+-                let ty = ((v * thf) as i32).clamp(0, th_max);
+-                texel(&view, (ty * view.w as i32 + tx) as usize)
+-            };
++            let sample = sample_texture(&view, u, v, repeat);
+             let Some((mut r, mut g, mut b, mut a)) = sample else {
+                 return;
+             };
+@@ -1299,6 +1789,9 @@
+                 b = (b * mb + 127) / 255;
+                 a = (a * ma + 127) / 255;
+             }
++            if let Some(tint) = tint {
++                (r, g, b) = apply_mesh_tint(r, g, b, tint);
++            }
+             target.blend((py * stride + px) as usize, r, g, b, a);
+         }
+     }
+@@ -1314,6 +1807,8 @@
+     scale: i32,
+     clip: Clip,
+     p: &[u32],
++    repeat: bool,
++    tint: Option<[f32; 6]>,
+ ) {
+     let handle = p[0] as i32;
+     let (x0, y0) = xy(p[1], scale);
+@@ -1346,8 +1841,6 @@
+     let max_y = y0.max(y1).max(y2).min(clip.y1);
+     let (mr, mg, mb, ma) = channels(modulate);
+     let identity = modulate == 0xffff_ffff;
+-    let (twf, thf) = (view.w as f32, view.h as f32);
+-    let (tw_max, th_max) = (view.w as i32 - 1, view.h as i32 - 1);
+     let inv_area = 1.0f32 / area as f32;
+     for py in min_y..max_y {
+         let sy = 2 * py as i64 + 1;
+@@ -1368,13 +1861,7 @@
+             let v = v0 * f0 + v1 * f1 + v2 * f2;
+             // Nearest is the golden-pinned default path; linear is opt-in
+             // per texture (spec::img::FLAG_LINEAR).
+-            let sample = if view.linear {
+-                sample_linear(&view, u, v)
+-            } else {
+-                let tx = ((u * twf) as i32).clamp(0, tw_max);
+-                let ty = ((v * thf) as i32).clamp(0, th_max);
+-                texel(&view, (ty * view.w as i32 + tx) as usize)
+-            };
++            let sample = sample_texture(&view, u, v, repeat);
+             let Some((mut r, mut g, mut b, mut a)) = sample else {
+                 return;
+             };
+@@ -1384,8 +1871,52 @@
+                 b = (b * mb + 127) / 255;
+                 a = (a * ma + 127) / 255;
+             }
++            if let Some(tint) = tint {
++                (r, g, b) = apply_mesh_tint(r, g, b, tint);
++            }
+             target.blend((py * stride + px) as usize, r, g, b, a);
+         }
++    }
++}
++
++/// Render one validated mesh triangle into an opaque or isolated target. The
++/// surface renderer uses this entry point to reuse the ordinary barycentric
++/// coverage, modulation and texture samplers for layer and mask triangles.
++pub(crate) fn render_mesh_triangle<T: RenderTarget>(
++    resources: &(impl RenderResources + ?Sized),
++    target: &mut T,
++    stride: i32,
++    scale: i32,
++    clip: Clip,
++    operation: &Operation<'_>,
++    tint: Option<[f32; 6]>,
++) {
++    let repeat = matches!(
++        operation.opcode,
++        draw_op::TEX_TRI_REPEAT | draw_op::TEX_TRI_REPEAT_FLOAT
++    );
++    match operation.opcode {
++        draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT => tex_tri(
++            resources,
++            target,
++            stride,
++            scale,
++            clip,
++            &operation.words[1..],
++            repeat,
++            tint,
++        ),
++        draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => tex_tri_float(
++            resources,
++            target,
++            stride,
++            scale,
++            clip,
++            &operation.words[1..],
++            repeat,
++            tint,
++        ),
++        _ => {}
+     }
+ }
+ 
+diff --git a/engine/raster/src/surface.rs b/engine/raster/src/surface.rs
+--- a/engine/raster/src/surface.rs
++++ b/engine/raster/src/surface.rs
+@@ -8,8 +8,9 @@
+ use pocket_spec::{draw_op, psm};
+ 
+ use super::{
+-    blend_rgb565_pixel, clear_black_rect, fill_opaque_span, pack_rgb565, render_scaled_clipped,
+-    Clip, RenderTarget, RgbaTarget, MAX_RENDER_SCALE,
++    blend_rgb565_pixel, clear_black_rect, composite_mesh_opaque, ensure_mesh_scratch,
++    fill_opaque_span, has_mesh_layer, pack_rgb565, render_mesh_operation, render_scaled_clipped,
++    Clip, MeshScratch, RenderTarget, RgbaTarget, MAX_RENDER_SCALE,
+ };
+ 
+ const FORMATS: &[PixelFormat] = &[
+@@ -21,10 +22,11 @@
+ /// Synchronous software renderer with an explicit physical-pixels-per-logical
+ /// pixel scale. It clears and replays the DrawList inside each frame damage
+ /// rectangle that intersects the acquired region; an empty damage list
+-/// redraws the whole region. No temporary framebuffer or per-frame
+-/// allocation is needed.
++/// redraws the whole region. Isolated mesh effects reuse bounded scratch
++/// storage across frames.
+ pub struct RasterRenderer {
+     scale: u32,
++    scratch: MeshScratch,
+ }
+ 
+ impl RasterRenderer {
+@@ -32,7 +34,7 @@
+         if !(1..=MAX_RENDER_SCALE).contains(&scale) {
+             return Err(RenderError::Unsupported);
+         }
+-        Ok(Self { scale })
++        Ok(Self { scale, scratch: MeshScratch::default() })
+     }
+ 
+     pub fn scale(&self) -> u32 {
+@@ -57,14 +59,15 @@
+     fn render(&mut self, frame: &mut FrameInput<'_>) -> Result<(), RenderError> {
+         match &mut frame.target {
+             Target::CpuVisible(surface) if frame.damage.is_empty() => {
+-                render_surface(frame.resources, &frame.list.words, surface, self.scale)
+-            }
+-            Target::CpuVisible(surface) => render_surface_regions(
++                render_surface_with_scratch(frame.resources, &frame.list.words, surface, self.scale, &mut self.scratch)
++            }
++            Target::CpuVisible(surface) => render_surface_regions_with_scratch(
+                 frame.resources,
+                 &frame.list.words,
+                 surface,
+                 self.scale,
+                 frame.damage,
++                &mut self.scratch,
+             ),
+             _ => Err(RenderError::Unsupported),
+         }
+@@ -90,8 +93,23 @@
+     surface: &mut Surface<'_>,
+     scale: u32,
+ ) -> Result<(), RenderError> {
++    render_surface_with_scratch(resources, words, surface, scale, &mut MeshScratch::default())
++}
++
++fn render_surface_with_scratch(
++    resources: &(impl RenderResources + ?Sized),
++    words: &[u32],
++    surface: &mut Surface<'_>,
++    scale: u32,
++    scratch: &mut MeshScratch,
++) -> Result<(), RenderError> {
+     validate_supported_draw_list(resources, words)?;
+     let geometry = Geometry::new(resources, surface, scale)?;
++    let has_mesh = has_mesh_layer(words, geometry.viewport)?;
++    if has_mesh && surface.format() != PixelFormat::Rgba8888 {
++        return Err(RenderError::Unsupported);
++    }
++    ensure_mesh_scratch(scratch, has_mesh, geometry.region)?;
+     let mut target = SurfaceTarget::new(surface, geometry);
+     render_clipped(
+         resources,
+@@ -100,6 +118,7 @@
+         geometry,
+         geometry.region,
+         scale,
++        scratch,
+     )
+ }
+ 
+@@ -121,18 +140,29 @@
+         return Err(RenderError::InvalidFrame);
+     }
+     let viewport = DamageRect::new(0, 0, viewport_w as i32, viewport_h as i32);
++    let mut mesh_layer = false;
++    let mut mesh_mask = false;
+     for operation in DrawOps::new(words, viewport) {
+         let operation = operation.map_err(|_| RenderError::InvalidFrame)?;
+-        if matches!(
++        if matches!(operation.opcode, draw_op::ROUNDED_RECT | draw_op::ARC | draw_op::ROUNDED_GRADIENT) {
++            return Err(RenderError::Unsupported);
++        }
++        match operation.opcode {
++            draw_op::MESH_LAYER_BEGIN => mesh_layer = true,
++            draw_op::MESH_MASK_BEGIN => mesh_mask = true,
++            draw_op::MESH_LAYER_RESTORE => { mesh_layer = false; mesh_mask = false; }
++            _ if mesh_layer && !matches!(
++                operation.opcode,
++                draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT | draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT
++                    | draw_op::SCISSOR | draw_op::SCISSOR_POP
++            ) => return Err(RenderError::Unsupported),
++            _ => {}
++        }
++        if mesh_mask && !matches!(
+             operation.opcode,
+-            draw_op::MESH_LAYER_BEGIN
+-                | draw_op::MESH_MASK_BEGIN
++            draw_op::MESH_MASK_BEGIN | draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT
++                | draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT | draw_op::SCISSOR | draw_op::SCISSOR_POP
+                 | draw_op::MESH_LAYER_RESTORE
+-                | draw_op::TEX_TRI_REPEAT
+-                | draw_op::TEX_TRI_REPEAT_FLOAT
+-                | draw_op::ROUNDED_RECT
+-                | draw_op::ARC
+-                | draw_op::ROUNDED_GRADIENT
+         ) {
+             return Err(RenderError::Unsupported);
+         }
+@@ -153,18 +183,34 @@
+     scale: u32,
+     regions: &[Rect],
+ ) -> Result<(), RenderError> {
++    render_surface_regions_with_scratch(resources, words, surface, scale, regions, &mut MeshScratch::default())
++}
++
++fn render_surface_regions_with_scratch(
++    resources: &(impl RenderResources + ?Sized),
++    words: &[u32],
++    surface: &mut Surface<'_>,
++    scale: u32,
++    regions: &[Rect],
++    scratch: &mut MeshScratch,
++) -> Result<(), RenderError> {
+     // Reject unsupported records before clearing or painting any acquired
+     // rectangle. A frame that cannot be represented by this software backend
+     // must leave the target untouched.
+     validate_supported_draw_list(resources, words)?;
+     let geometry = Geometry::new(resources, surface, scale)?;
++    let has_mesh = has_mesh_layer(words, geometry.viewport)?;
++    if has_mesh && surface.format() != PixelFormat::Rgba8888 {
++        return Err(RenderError::Unsupported);
++    }
++    ensure_mesh_scratch(scratch, has_mesh, geometry.region)?;
+     let mut target = SurfaceTarget::new(surface, geometry);
+     for &region in regions {
+         let root = physical(region).intersect(geometry.region);
+         if root.x0 >= root.x1 || root.y0 >= root.y1 {
+             continue;
+         }
+-        render_clipped(resources, words, &mut target, geometry, root, scale)?;
++        render_clipped(resources, words, &mut target, geometry, root, scale, scratch)?;
+     }
+     Ok(())
+ }
+@@ -177,13 +223,41 @@
+     geometry: Geometry,
+     root: Clip,
+     scale: u32,
++    scratch: &mut MeshScratch,
+ ) -> Result<(), RenderError> {
+     clear_black_rect(target, geometry.width, root);
++    let scale_i32 = scale as i32;
++    let mut mesh_layer = None;
+     for operation in DrawOps::new(words, geometry.viewport) {
+         let operation = operation.map_err(|_| RenderError::InvalidFrame)?;
++        let clip = operation_clip(&operation, geometry, scale_i32, root);
++        if render_mesh_operation(
++            resources,
++            &operation,
++            target,
++            geometry.width,
++            geometry.height,
++            scale_i32,
++            clip,
++            &mut mesh_layer,
++            scratch,
++        )? {
++            continue;
++        }
+         render_one(resources, &operation, target, geometry, root, scale)?;
+     }
+     Ok(())
++}
++
++fn operation_clip(operation: &Operation<'_>, geometry: Geometry, scale: i32, root: Clip) -> Clip {
++    let clip = operation.clip.intersect(geometry.viewport);
++    Clip {
++        x0: clip.x0 * scale,
++        y0: clip.y0 * scale,
++        x1: clip.x1 * scale,
++        y1: clip.y1 * scale,
++    }
++    .intersect(root)
+ }
+ 
+ /// Physical rectangle as a clip. Coordinates saturate at `i32::MAX`, beyond
+@@ -243,8 +317,6 @@
+         draw_op::MESH_LAYER_BEGIN
+             | draw_op::MESH_MASK_BEGIN
+             | draw_op::MESH_LAYER_RESTORE
+-            | draw_op::TEX_TRI_REPEAT
+-            | draw_op::TEX_TRI_REPEAT_FLOAT
+             | draw_op::ROUNDED_RECT
+             | draw_op::ARC
+             | draw_op::ROUNDED_GRADIENT
+@@ -307,7 +379,7 @@
+             texture: None,
+             font: None,
+         };
+-        if operation.opcode == draw_op::TEX_TRI_FLOAT {
++        if matches!(operation.opcode, draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT) {
+             for &word in &[2usize, 3, 6, 7, 10, 11] {
+                 if !f32::from_bits(operation.words[word]).is_finite() {
+                     return Err(RenderError::InvalidFrame);
+@@ -315,16 +387,21 @@
+             }
+         }
+         match operation.opcode {
+-            draw_op::TEX_QUAD | draw_op::TEX_TRI | draw_op::TEX_TRI_FLOAT => {
++            draw_op::TEX_QUAD
++            | draw_op::TEX_TRI
++            | draw_op::TEX_TRI_REPEAT
++            | draw_op::TEX_TRI_FLOAT
++            | draw_op::TEX_TRI_REPEAT_FLOAT => {
+                 if let Some(view) = source.texture(operation.words[1] as i32) {
+                     if !validate_texture(&view)? {
+                         return Ok(result);
+                     }
+                     let coordinates: &[usize] = match operation.opcode {
+                         draw_op::TEX_QUAD => &[4, 5, 6, 7],
+-                        draw_op::TEX_TRI => &[3, 4, 6, 7, 9, 10],
++                        draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT => &[3, 4, 6, 7, 9, 10],
+                         _ => &[4, 5, 8, 9, 12, 13],
+                     };
++                    let repeat = matches!(operation.opcode, draw_op::TEX_TRI_REPEAT | draw_op::TEX_TRI_REPEAT_FLOAT);
+                     for (index, &word) in coordinates.iter().enumerate() {
+                         let uv = f32::from_bits(operation.words[word]);
+                         let extent = if index % 2 == 0 { view.w } else { view.h };
+@@ -332,7 +409,8 @@
+                         // a signed coordinate. Leave room for interpolation
+                         // intermediates, including clamped out-of-range UVs.
+                         if !uv.is_finite()
+-                            || (view.linear
++                            || (repeat && uv.abs() > 1_000_000.0)
++                            || (!repeat && view.linear
+                                 && uv.abs() * extent as f32 * 256.0 > i32::MAX as f32 / 4.0)
+                         {
+                             return Err(RenderError::InvalidFrame);
+@@ -594,4 +672,17 @@
+             _ => unreachable!("surface format validated before rendering"),
+         }
+     }
+-}
++
++    fn composite_mesh(&mut self, offset: usize, source: [u32; 4], blend: u32) {
++        assert_eq!(self.format, PixelFormat::Rgba8888, "mesh blend requires RGBA8888");
++        let local = self.local_offset(offset, 1);
++        let destination = [
++            self.pixels[local] as u32,
++            self.pixels[local + 1] as u32,
++            self.pixels[local + 2] as u32,
++        ];
++        let result = composite_mesh_opaque(destination, source, blend);
++        self.blend(offset, result[0], result[1], result[2], 255);
++    }
++}
++
+diff --git a/engine/raster/tests/driver.rs b/engine/raster/tests/driver.rs
+--- a/engine/raster/tests/driver.rs
++++ b/engine/raster/tests/driver.rs
+@@ -4,8 +4,8 @@
+     RenderResources, Renderer, Surface, Synchronization, Target, TargetOwnership, TexView,
+ };
+ use pocket_raster::{
+-    render_operation, render_surface, render_surface_regions, validate_supported_draw_list,
+-    RasterRenderer,
++    render_operation, render_scaled, render_scaled_premultiplied, render_surface,
++    render_surface_regions, validate_supported_draw_list, RasterRenderer,
+ };
+ use pocket_spec::{draw_op, psm};
+ 
+@@ -29,16 +29,22 @@
+         0
+     }
+     fn texture(&self, handle: i32) -> Option<TexView<'_>> {
+-        (handle == 0 || handle == 1).then_some(TexView {
+-            pixels: &[
+-                255, 0, 0, 255, 0, 255, 0, 192, 0, 0, 255, 128, 255, 255, 255, 64,
+-            ],
+-            w: 2,
+-            h: 2,
+-            psm: psm::PSM_8888,
+-            palette: None,
+-            linear: handle == 0,
+-        })
++        static CHECKER: [u8; 16] = [
++            255, 0, 0, 255, 0, 255, 0, 192, 0, 0, 255, 128, 255, 255, 255, 64,
++        ];
++        static SOURCE: [u8; 4] = [64, 128, 192, 255];
++        static TINTED: [u8; 4] = [51, 102, 153, 255];
++        static MASK: [u8; 4] = [255, 255, 255, 255];
++        static BRIGHT: [u8; 4] = [200, 200, 200, 255];
++        let (pixels, w, h, linear) = match handle {
++            0 | 1 => (&CHECKER[..], 2, 2, handle == 0),
++            2 => (&SOURCE[..], 1, 1, false),
++            3 => (&TINTED[..], 1, 1, false),
++            4 => (&MASK[..], 1, 1, false),
++            5 => (&BRIGHT[..], 1, 1, false),
++            _ => return None,
++        };
++        Some(TexView { pixels, w, h, psm: psm::PSM_8888, palette: None, linear })
+     }
+     fn font_atlas(&self, slot: u8) -> Option<FontView<'_>> {
+         (slot == 0).then_some(FontView {
+@@ -58,48 +64,75 @@
+     w as u32 | ((h as u32) << 16)
+ }
+ 
+-fn mesh_effect_words() -> Vec<u32> {
++fn fixed_mesh_triangle(opcode: u32, texture: u32, points: [(i16, i16); 3], uv: [(f32, f32); 3]) -> Vec<u32> {
++    let mut words = vec![opcode, texture];
++    for index in 0..3 {
++        words.extend_from_slice(&[
++            xy(points[index].0, points[index].1),
++            uv[index].0.to_bits(),
++            uv[index].1.to_bits(),
++        ]);
++    }
++    words.push(u32::MAX);
++    words
++}
++
++fn float_mesh_triangle(opcode: u32, texture: u32, points: [(f32, f32); 3], uv: [(f32, f32); 3]) -> Vec<u32> {
++    let mut words = vec![opcode, texture];
++    for index in 0..3 {
++        words.extend_from_slice(&[
++            points[index].0.to_bits(),
++            points[index].1.to_bits(),
++            uv[index].0.to_bits(),
++            uv[index].1.to_bits(),
++        ]);
++    }
++    words.push(u32::MAX);
++    words
++}
++
++fn mesh_layer_header(blend: u32, multiply: [f32; 3], screen: [f32; 3]) -> Vec<u32> {
++    let mut words = vec![draw_op::MESH_LAYER_BEGIN, xy(0, 0), wh(8, 6), blend];
++    words.extend(multiply.into_iter().map(f32::to_bits));
++    words.extend(screen.into_iter().map(f32::to_bits));
++    words
++}
++
++fn covering_triangles(texture: u32) -> Vec<Vec<u32>> {
+     vec![
+-        draw_op::MESH_LAYER_BEGIN,
+-        xy(0, 0),
+-        wh(8, 6),
+-        0,
+-        1.0f32.to_bits(),
+-        1.0f32.to_bits(),
+-        1.0f32.to_bits(),
+-        0.0f32.to_bits(),
+-        0.0f32.to_bits(),
+-        0.0f32.to_bits(),
++        fixed_mesh_triangle(draw_op::TEX_TRI, texture, [(0, 0), (8, 0), (0, 6)], [(0.0, 0.0); 3]),
++        fixed_mesh_triangle(draw_op::TEX_TRI, texture, [(8, 0), (8, 6), (0, 6)], [(0.0, 0.0); 3]),
++    ]
++}
++
++fn mesh_words(blend: u32, multiply: [f32; 3], screen: [f32; 3], triangles: &[Vec<u32>]) -> Vec<u32> {
++    let mut words = mesh_layer_header(blend, multiply, screen);
++    words.extend(triangles.iter().flatten().copied());
++    words.push(draw_op::MESH_LAYER_RESTORE);
++    words
++}
++
++fn mesh_mask_words(inverted: bool) -> Vec<u32> {
++    mesh_mask_words_with_bounds(inverted, xy(0, 0), wh(8, 6))
++}
++
++fn mesh_mask_words_with_bounds(inverted: bool, mask_xy: u32, mask_wh: u32) -> Vec<u32> {
++    let mut words = mesh_layer_header(0, [1.0; 3], [0.0; 3]);
++    words.extend(covering_triangles(2).iter().flatten().copied());
++    words.extend_from_slice(&[
++        draw_op::MESH_MASK_BEGIN,
++        u32::from(inverted),
++        mask_xy,
++        mask_wh,
++    ]);
++    words.extend(fixed_mesh_triangle(
+         draw_op::TEX_TRI,
+-        0,
+-        xy(0, 0),
+-        0.0f32.to_bits(),
+-        0.0f32.to_bits(),
+-        xy(7, 0),
+-        1.0f32.to_bits(),
+-        0.0f32.to_bits(),
+-        xy(0, 5),
+-        0.0f32.to_bits(),
+-        1.0f32.to_bits(),
+-        u32::MAX,
+-        draw_op::MESH_MASK_BEGIN,
+-        0,
+-        xy(0, 0),
+-        wh(8, 6),
+-        draw_op::TEX_TRI,
+-        1,
+-        xy(0, 0),
+-        0.0f32.to_bits(),
+-        0.0f32.to_bits(),
+-        xy(7, 0),
+-        1.0f32.to_bits(),
+-        0.0f32.to_bits(),
+-        xy(0, 5),
+-        0.0f32.to_bits(),
+-        1.0f32.to_bits(),
+-        u32::MAX,
+-        draw_op::MESH_LAYER_RESTORE,
+-    ]
++        4,
++        [(0, 0), (8, 0), (0, 6)],
++        [(0.0, 0.0); 3],
++    ));
++    words.push(draw_op::MESH_LAYER_RESTORE);
++    words
+ }
+ 
+ fn words() -> Vec<u32> {
+@@ -519,46 +552,177 @@
+ }
+ 
+ #[test]
+-fn software_surface_rejects_mesh_effects_explicitly() {
+-    let resources = Resources::fixture();
+-    let list = mesh_effect_words();
+-    assert_eq!(
+-        validate_supported_draw_list(&resources, &list),
+-        Err(RenderError::Unsupported)
+-    );
+-
++fn software_surface_renders_mesh_blends_and_rgb_tint() {
++    let resources = Resources::fixture();
++    let expected = [
++        (0, [64, 128, 192]),
++        (1, [192, 192, 224]),
++        (2, [32, 32, 24]),
++        (3, [160, 160, 200]),
++    ];
++    for (blend, expected_rgb) in expected {
++        let triangles = covering_triangles(2);
++        let list = mesh_words(blend, [1.0; 3], [0.0; 3], &triangles);
++        let mut pixels = [0; 8 * 6 * 4];
++        let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888).unwrap();
++        let mut words = vec![draw_op::RECT, xy(0, 0), wh(8, 6), 0xff20_4080];
++        words.extend(list);
++        render_surface(&resources, &words, &mut surface, 1).unwrap();
++        let offset = (1 * 8 + 1) * 4;
++        assert_eq!(&pixels[offset..offset + 4], &[expected_rgb[0], expected_rgb[1], expected_rgb[2], 255]);
++    }
++
++    let triangles = covering_triangles(3);
++    let tinted = mesh_words(
++        0,
++        [0.5, 1.0, 0.8],
++        [0.2, 0.0, 0.1],
++        &triangles,
++    );
++    let mut pixels = [0; 8 * 6 * 4];
++    let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888).unwrap();
++    render_surface(&resources, &tinted, &mut surface, 1).unwrap();
++    let offset = (1 * 8 + 1) * 4;
++    assert_eq!(&pixels[offset..offset + 4], &[46, 102, 131, 255]);
++
++    let mut partial = covering_triangles(5);
++    for triangle in &mut partial { *triangle.last_mut().unwrap() = 0x80ff_ffff; }
++    let additive = mesh_words(1, [1.0; 3], [0.0; 3], &partial);
++    let mut pixels = [0; 8 * 6 * 4];
++    let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888).unwrap();
++    let mut words = vec![draw_op::RECT, xy(0, 0), wh(8, 6), 0xff14_64c8];
++    words.extend(additive);
++    render_surface(&resources, &words, &mut surface, 1).unwrap();
++    let offset = (1 * 8 + 1) * 4;
++    assert_eq!(&pixels[offset..offset + 4], &[255, 200, 120, 255]);
++}
++
++#[test]
++fn software_surface_applies_normal_and_inverted_mesh_masks() {
++    let resources = Resources::fixture();
++    for (inverted, expected_left, expected_right) in [
++        (false, [64, 128, 192, 255], [0, 0, 0, 255]),
++        (true, [0, 0, 0, 255], [64, 128, 192, 255]),
++    ] {
++        let words = mesh_mask_words(inverted);
++        assert_eq!(validate_supported_draw_list(&resources, &words), Ok(()));
++        let mut pixels = [0x37; 8 * 6 * 4];
++        let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888).unwrap();
++        render_surface(&resources, &words, &mut surface, 1).unwrap();
++        let left = (1 * 8 + 1) * 4;
++        let right = (4 * 8 + 6) * 4;
++        assert_eq!(&pixels[left..left + 4], &expected_left);
++        assert_eq!(&pixels[right..right + 4], &expected_right);
++        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
++    }
++}
++
++#[test]
++fn normal_mask_clears_outside_smaller_mask_bounds_but_inverted_mask_preserves_it() {
++    let resources = Resources::fixture();
++    for (inverted, expected_right) in [
++        (false, [0, 0, 0, 255]),
++        (true, [64, 128, 192, 255]),
++    ] {
++        let words = mesh_mask_words_with_bounds(inverted, xy(0, 0), wh(4, 6));
++        let mut pixels = [0; 8 * 6 * 4];
++        let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888).unwrap();
++        render_surface(&resources, &words, &mut surface, 1).unwrap();
++        let right = (4 * 8 + 6) * 4;
++        assert_eq!(&pixels[right..right + 4], &expected_right);
++    }
++}
++
++#[test]
++fn legacy_capture_rasters_mesh_layers_for_opaque_and_premultiplied_web_paths() {
++    let resources = Resources::fixture();
++    let opaque_triangles = vec![covering_triangles(2).remove(0)];
++    let opaque_words = mesh_words(0, [1.0; 3], [0.0; 3], &opaque_triangles);
++    let mut opaque = [0; 8 * 6 * 4];
++    render_scaled(&resources, &opaque_words, &mut opaque, 1);
++    let sample = (1 * 8 + 1) * 4;
++    assert_eq!(&opaque[sample..sample + 4], &[64, 128, 192, 255]);
++    let uncovered = (5 * 8 + 7) * 4;
++    assert_eq!(&opaque[uncovered..uncovered + 4], &[0, 0, 0, 255]);
++
++    let mut partial = vec![covering_triangles(2).remove(0)];
++    for triangle in &mut partial { *triangle.last_mut().unwrap() = 0x80ff_ffff; }
++    let transparent_words = mesh_words(0, [1.0; 3], [0.0; 3], &partial);
++    let mut premultiplied = [0; 8 * 6 * 4];
++    render_scaled_premultiplied(&resources, &transparent_words, &mut premultiplied, 1);
++    assert_eq!(&premultiplied[sample..sample + 4], &[32, 64, 96, 128]);
++    assert_eq!(&premultiplied[uncovered..uncovered + 4], &[0, 0, 0, 0]);
++}
++
++#[test]
++fn mesh_opcode_detection_ignores_matching_payload_words() {
++    let resources = Resources::fixture();
++    let words = [draw_op::RECT, xy(0, 0), wh(8, 6), draw_op::MESH_LAYER_BEGIN];
++    assert_eq!(validate_supported_draw_list(&resources, &words), Ok(()));
++    let mut pixels = [0x37; 8 * 6 * 2];
++    let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 2, PixelFormat::Rgb565).unwrap();
++    assert_eq!(render_surface(&resources, &words, &mut surface, 1), Ok(()));
++}
++
++#[test]
++fn software_surface_repeats_fixed_and_packed_float_mesh_uvs() {
++    let resources = Resources::fixture();
++    let fixed = fixed_mesh_triangle(
++        draw_op::TEX_TRI_REPEAT,
++        0,
++        [(0, 0), (7, 0), (0, 5)],
++        [(1.25, 0.25); 3],
++    );
++    let floating = float_mesh_triangle(
++        draw_op::TEX_TRI_REPEAT_FLOAT,
++        0,
++        [(0.0, 0.0), (7.0, 0.0), (0.0, 5.0)],
++        [(1.25, 0.25); 3],
++    );
++    for words in [fixed, floating] {
++        assert_eq!(validate_supported_draw_list(&resources, &words), Ok(()));
++        let mut pixels = [0; 8 * 6 * 4];
++        let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888).unwrap();
++        render_surface(&resources, &words, &mut surface, 1).unwrap();
++        let offset = (1 * 8 + 1) * 4;
++        assert_eq!(&pixels[offset..offset + 4], &[255, 0, 0, 255]);
++    }
++
++    let invalid = float_mesh_triangle(
++        draw_op::TEX_TRI_REPEAT_FLOAT,
++        0,
++        [(0.0, 0.0), (7.0, 0.0), (0.0, 5.0)],
++        [(1_000_001.0, 0.25); 3],
++    );
+     let mut pixels = [0x37; 8 * 6 * 4];
+-    let mut surface = Surface::new(
+-        &mut pixels,
+-        Rect::new(0, 0, 8, 6),
+-        8 * 4,
+-        PixelFormat::Rgba8888,
+-    )
+-    .unwrap();
+-    assert_eq!(
+-        render_surface(&resources, &list, &mut surface, 1),
+-        Err(RenderError::Unsupported)
+-    );
++    let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888).unwrap();
++    assert_eq!(render_surface(&resources, &invalid, &mut surface, 1), Err(RenderError::InvalidFrame));
++}
++
++#[test]
++fn mesh_effects_report_unsupported_for_non_rgba_surfaces_before_writes() {
++    let resources = Resources::fixture();
++    let list = mesh_words(0, [1.0; 3], [0.0; 3], &covering_triangles(2));
++    let mut pixels = [0x37; 8 * 6 * 2];
++    let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 2, PixelFormat::Rgb565).unwrap();
++    assert_eq!(render_surface(&resources, &list, &mut surface, 1), Err(RenderError::Unsupported));
+     assert!(pixels.iter().all(|byte| *byte == 0x37));
+-
+-    let repeated = vec![
+-        draw_op::TEX_TRI_REPEAT,
+-        0,
+-        xy(0, 0),
+-        0.0f32.to_bits(),
+-        0.0f32.to_bits(),
+-        xy(7, 0),
+-        1.25f32.to_bits(),
+-        0.0f32.to_bits(),
+-        xy(0, 5),
+-        0.0f32.to_bits(),
+-        1.0f32.to_bits(),
+-        u32::MAX,
+-    ];
+-    assert_eq!(
+-        validate_supported_draw_list(&resources, &repeated),
+-        Err(RenderError::Unsupported)
+-    );
++}
++
++#[test]
++fn software_surface_rejects_nested_mesh_layers_before_writes() {
++    let resources = Resources::fixture();
++    let mut words = mesh_layer_header(0, [1.0; 3], [0.0; 3]);
++    words.extend(covering_triangles(2)[0].iter().copied());
++    words.extend(mesh_layer_header(0, [1.0; 3], [0.0; 3]));
++    words.extend(covering_triangles(2)[0].iter().copied());
++    words.push(draw_op::MESH_LAYER_RESTORE);
++    assert_eq!(validate_supported_draw_list(&resources, &words), Err(RenderError::InvalidFrame));
++
++    let mut pixels = [0x37; 8 * 6 * 4];
++    let mut surface = Surface::new(&mut pixels, Rect::new(0, 0, 8, 6), 8 * 4, PixelFormat::Rgba8888).unwrap();
++    assert_eq!(render_surface(&resources, &words, &mut surface, 1), Err(RenderError::InvalidFrame));
++    assert!(pixels.iter().all(|byte| *byte == 0x37));
+ }
+ 
+ #[test]
+diff --git a/engine/present/src/compositor.rs b/engine/present/src/compositor.rs
+--- a/engine/present/src/compositor.rs
++++ b/engine/present/src/compositor.rs
+@@ -127,8 +127,8 @@
+     surfaces: &[Option<CompositorRaster>],
+ ) -> Result<(), RenderError> {
+     // Validate the entire list before the first clear or surface composite.
+-    // The software compositor cannot express mesh layers or repeated texture
+-    // sampling, so partial fallback would silently change their appearance.
++    // The raster backend handles mesh layers and repeated texture sampling;
++    // partial fallback for records it cannot express would change appearance.
+     raster::validate_supported_draw_list(ui, words)?;
+     let (viewport_width, viewport_height) = ui.viewport();
+     raster::render_scaled(ui, &[], framebuffer, scale);

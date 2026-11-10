@@ -161,6 +161,31 @@ test("host transport keeps model asset references, forwards Core mesh facts and 
   expect(calls.filter((call) => call.capability === pocketLive2dReleaseCapability)).toHaveLength(1);
 });
 
+test("host transport preserves the supported Core-visible memory accounting marker", async () => {
+  const webModelInfo = { ...nativeModelInfo, memoryAccounting: "core-visible-buffers" };
+  const client = createPocketLive2dClient({
+    async request(capability: string): Promise<unknown> {
+      if (capability === pocketLive2dLoadCapability) return webModelInfo;
+      if (capability === pocketLive2dReleaseCapability) return { released: true };
+      throw new Error(`unexpected capability ${capability}`);
+    },
+  });
+  const info = await client.load({ id: "web", assetPrefix: "", manifest: parseCubismModel3(model3) });
+  expect(info.nativeBytes).toBe(nativeModelInfo.nativeBytes);
+  expect(info.memoryAccounting).toBe("core-visible-buffers");
+  await client.dispose();
+
+  const invalidClient = createPocketLive2dClient({
+    async request(capability: string): Promise<unknown> {
+      if (capability === pocketLive2dLoadCapability) return { ...nativeModelInfo, memoryAccounting: "wasm-heap-estimate" };
+      throw new Error(`unexpected capability ${capability}`);
+    },
+  });
+  await expect(invalidClient.load({ id: "invalid", assetPrefix: "", manifest: parseCubismModel3(model3) }))
+    .rejects.toThrow(/unsupported accounting basis/);
+  await invalidClient.dispose();
+});
+
 test("opt-in topology transport merges sparse native facts into a complete frame", async () => {
   const calls: Array<{ capability: string; params: Record<string, unknown> }> = [];
   let updates = 0;

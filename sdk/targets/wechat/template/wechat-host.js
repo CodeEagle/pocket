@@ -40,6 +40,7 @@ function decodeUtf8(bytes) {
 }
 
 function createAbortController() {
+  if (typeof globalThis.AbortController === "function") return new globalThis.AbortController();
   let aborted = false;
   const listeners = [];
   return {
@@ -76,6 +77,7 @@ class PocketWechatHost {
     this.onWorkerChannel = options.onWorkerChannel;
     this.isActive = options.isActive;
     this.sampleInput = options.sampleInput;
+    this.capabilityHandlers = options.capabilityHandlers || Object.create(null);
     this.instance = null;
     this.exports = null;
     this.host = 0;
@@ -107,6 +109,7 @@ class PocketWechatHost {
         config: { ...app, enginePath: this.config.enginePath },
         isActive: () => this.visible && !this.disposed,
         onInput: this.onInput, onError: this.onError,
+        capabilityHandlers: this.capabilityHandlers,
       }));
     }
   }
@@ -420,8 +423,25 @@ class PocketWechatHost {
     }, delay);
   }
 
-  wake() {
+  wake(deferred = false) {
     if (!this.exports || this.disposed || !this.visible) return;
+    if (deferred) {
+      // A frame already queued by the active scheduler will deliver the guest
+      // response. Otherwise yield host responses to the existing frame cadence
+      // so resolved local capabilities cannot recursively pump WASM in one
+      // promise-microtask turn.
+      if (this.running && !this.scheduledIdle) return;
+      this.stopScheduled();
+      this.running = true;
+      this.timer = setTimeout(() => {
+        this.running = false;
+        this.timer = 0;
+        if (!this.visible || this.disposed) return;
+        this.advance();
+        this.schedule();
+      }, 16);
+      return;
+    }
     this.stopScheduled();
     this.advance();
     this.schedule();
@@ -530,7 +550,8 @@ class PocketWechatHost {
     }, REQUEST_TIMEOUT_MS);
     try {
       const authorize = permissionHandler;
-      if (systemTransport || isWechatBuiltinCapability(request.capability)) {
+      if (systemTransport || isWechatBuiltinCapability(request.capability) ||
+          Object.hasOwn(this.capabilityHandlers, request.capability)) {
         // JS SystemUI owns app policy; the host only carries its transport.
       } else if (typeof authorize === "function") {
         const allowed = await authorize(request.capability, request.params || {}, {
@@ -545,9 +566,10 @@ class PocketWechatHost {
       const result = systemTransport
         ? await this.system.request(this, request, record.controller.signal)
         : await this.dispatchCapability(request.capability, request.params || {}, record.controller.signal);
-      if (!this.pending.delete(request.requestId) || generation !== this.generation || record.cancelled) return;
-      clearTimeout(record.timer);
+      if (!this.pending.has(request.requestId) || generation !== this.generation || record.cancelled) return;
       this.respond(request, true, result, null);
+      this.pending.delete(request.requestId);
+      clearTimeout(record.timer);
     } catch (error) {
       if (!this.pending.delete(request.requestId) || generation !== this.generation || record.cancelled) return;
       clearTimeout(record.timer);
@@ -565,6 +587,9 @@ class PocketWechatHost {
   }
 
   async dispatchCapability(capability, params, signal) {
+    if (Object.hasOwn(this.capabilityHandlers, capability)) {
+      return this.capabilityHandlers[capability](params, { signal, wx: this.wx });
+    }
     if (isWechatBuiltinCapability(capability)) return wechatBuiltinCapability(this, capability, params);
     if (capability.startsWith("platform.storage.")) return this.storage(capability, params);
     const handler = capabilityHandlers[capability];
@@ -636,7 +661,7 @@ class PocketWechatHost {
         ok,
         ...(ok ? { result: result === undefined ? null : result } : { error }),
       },
-    });
+    }, request.capability.startsWith("media.live2d.model.") ? 4 * 1024 * 1024 : 64 * 1024);
     this.deliverResponse(packet);
   }
 
@@ -646,7 +671,7 @@ class PocketWechatHost {
       this.exports.web_wechat_deliver(this.host, pointer, length), "PocketJS rejected a host response.",
     ));
     this.drainOutbound();
-    this.wake();
+    this.wake(true);
   }
 
   deliverGuestEvent(method, params, wake = true) {

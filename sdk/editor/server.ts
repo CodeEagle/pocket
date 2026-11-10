@@ -38,7 +38,7 @@ import {
 import { buildGuest } from "../scripts/build_guest.ts";
 import { createStudioCodex, type StudioExecutionContext, type StudioScope } from "./codex.ts";
 import { compositorSurfacesFromProject, createPreviewManager } from "./preview.ts";
-import { handleNovelRoute } from "./novel.ts";
+import { handleNovelRoute, serveNovelLive2dCore } from "./novel.ts";
 import { createNovelBackup } from "./novel-backups.ts";
 import { createLocalBluetoothProvider } from "./local_bluetooth.ts";
 import { previewDevice } from "./preview_device.ts";
@@ -3549,6 +3549,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       let releasePublishSlot: (() => void) | undefined;
       try {
         if (path === "/api/preview/device" && method === "GET") return json(previewDevice);
+        if (path === "/novel/live2d-core.js" && method === "GET") return serveNovelLive2dCore();
         if (path === "/health" && method === "GET") return json({
           ok: true,
           service: "pocket-editor",

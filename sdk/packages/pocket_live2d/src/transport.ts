@@ -37,6 +37,10 @@ export interface PocketLive2dModelInfo {
   readonly modelId: string;
   readonly drawableCount: number;
   readonly mocVersion: number;
+  /** Host accounting basis for nativeBytes when Core does not expose its
+   * complete model allocation. Absent preserves providers with exact native
+   * allocation accounting. */
+  readonly memoryAccounting?: "core-visible-buffers";
   readonly nativeBytes: number;
   readonly parameterCount: number;
   readonly parameterDefaults: readonly Live2dParameterValue[];
@@ -264,6 +268,13 @@ function validatePlacement(placement: PocketLive2dPlacement): void {
 function parseModelInfo(value: unknown): PocketLive2dModelInfo {
   const root = object(value, "load result");
   const canvas = object(root.canvas, "load result.canvas");
+  let memoryAccounting: PocketLive2dModelInfo["memoryAccounting"];
+  if (root.memoryAccounting !== undefined) {
+    if (root.memoryAccounting !== "core-visible-buffers") {
+      throw new TypeError("load result.memoryAccounting has an unsupported accounting basis");
+    }
+    memoryAccounting = root.memoryAccounting;
+  }
   if (!Array.isArray(root.parameterDefaults)) throw new TypeError("load result.parameterDefaults must be an array");
   const parameterDefaults = root.parameterDefaults.map((entry, index): Live2dParameterValue => {
     const parameter = object(entry, `load result.parameterDefaults[${index}]`);
@@ -281,6 +292,7 @@ function parseModelInfo(value: unknown): PocketLive2dModelInfo {
     modelId: string(root.modelId, "load result.modelId"),
     drawableCount: integer(root.drawableCount, "load result.drawableCount"),
     mocVersion: integer(root.mocVersion, "load result.mocVersion"),
+    ...(memoryAccounting === undefined ? {} : { memoryAccounting }),
     nativeBytes: integer(root.nativeBytes, "load result.nativeBytes"),
     parameterCount: integer(root.parameterCount, "load result.parameterCount"),
     parameterDefaults,

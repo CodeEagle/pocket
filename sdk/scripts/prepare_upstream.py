@@ -52,6 +52,7 @@ PATCHES = (
     ("native-arcs.patch", "native arc DrawList op"),
     ("native-rounded-gradients.patch", "native rounded gradient DrawList op"),
     ("native-rounded-radius-threshold.patch", "native rounded radius threshold fallback"),
+    ("web-live2d-raster.patch", "Web Live2D software raster"),
 )
 
 # Later patches can intentionally supersede one earlier diff hunk. The
@@ -142,12 +143,15 @@ SUPERSEDED_PATCH_MARKERS = {
             "fn triangle_bounds_float(",
             "spec::draw_op::TEX_TRI_FLOAT | spec::draw_op::TEX_TRI_REPEAT_FLOAT",
         ),
+        "engine/present/src/compositor.rs": (
+            "// The raster backend handles mesh layers and repeated texture sampling;",
+            "partial fallback for records it cannot express would change appearance.",
+        ),
         "engine/raster/src/surface.rs": (
-            "operation.opcode == draw_op::TEX_TRI_FLOAT",
+            "draw_op::MESH_LAYER_BEGIN",
             "draw_op::TEX_TRI_REPEAT_FLOAT",
         ),
         "engine/raster/tests/driver.rs": (
-            "fn software_surface_rejects_mesh_effects_explicitly()",
             "fn float_mesh_triangle_preserves_subpixel_coverage_in_software_raster()",
             "fn float_mesh_shared_edge_uses_top_left_coverage_once()",
             "fn software_surface_rejects_native_shape_ops_before_writing()",
@@ -315,6 +319,9 @@ SUPERSEDED_PATCH_MARKERS = {
     "native rounded gradient DrawList op": {
         # The retained gradient test scanner was extended to skip the new
         # 11-word record while checking the flat-shadow fallback.
+        "engine/raster/src/surface.rs": (
+            "draw_op::ROUNDED_GRADIENT",
+        ),
         "engine/core/src/tests.rs": (
             "fn native_rounded_shadows_preserve_layers_and_fallbacks()",
             "spec::draw_op::ROUNDED_GRADIENT => i += 11,",
@@ -350,14 +357,15 @@ SUPERSEDED_PATCH_MARKERS = {
         "engine/core/src/lib.rs": (
             "self.upload_texture_flags_with_limit(&blob[8..], w, h, psm, flags, spec::IMG_MAX_DIM)",
         ),
+        "engine/raster/src/lib.rs": (
+            "fn tex_tri_float<T: RenderTarget>(",
+        ),
         "engine/render/draw-ops/src/lib.rs": (
             "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => 15,",
         ),
         "engine/raster/src/surface.rs": (
-            "operation.opcode == draw_op::TEX_TRI_FLOAT",
             "draw_op::TEX_TRI_REPEAT_FLOAT",
-            "| draw_op::ROUNDED_RECT\n                | draw_op::ARC\n                | draw_op::ROUNDED_GRADIENT",
-            "| draw_op::ROUNDED_RECT\n            | draw_op::ARC\n            | draw_op::ROUNDED_GRADIENT",
+            "draw_op::ROUNDED_GRADIENT",
         ),
         "engine/raster/tests/driver.rs": (
             "fn float_mesh_triangle_preserves_subpixel_coverage_in_software_raster()",
@@ -402,10 +410,18 @@ FINAL_CONTRACTS = {
         "draw_op::ROUNDED_GRADIENT => 11,",
     ),
     "engine/raster/src/surface.rs": (
-        "| draw_op::ROUNDED_RECT\n                | draw_op::ARC\n                | draw_op::ROUNDED_GRADIENT",
-        "| draw_op::ROUNDED_RECT\n            | draw_op::ARC\n            | draw_op::ROUNDED_GRADIENT",
+        "let has_mesh = has_mesh_layer(words, geometry.viewport)?;",
+        "if render_mesh_operation(",
+        "if matches!(operation.opcode, draw_op::ROUNDED_RECT | draw_op::ARC | draw_op::ROUNDED_GRADIENT)",
     ),
     "engine/raster/tests/driver.rs": (
+        "fn software_surface_renders_mesh_blends_and_rgb_tint()",
+        "fn software_surface_applies_normal_and_inverted_mesh_masks()",
+        "fn normal_mask_clears_outside_smaller_mask_bounds_but_inverted_mask_preserves_it()",
+        "fn software_surface_repeats_fixed_and_packed_float_mesh_uvs()",
+        "fn legacy_capture_rasters_mesh_layers_for_opaque_and_premultiplied_web_paths()",
+        "fn mesh_opcode_detection_ignores_matching_payload_words()",
+        "fn software_surface_rejects_nested_mesh_layers_before_writes()",
         "fn software_surface_rejects_native_shape_ops_before_writing()",
     ),
     "engine/core/src/draw.rs": (
@@ -535,8 +551,14 @@ FINAL_CONTRACTS = {
         "draw_op::ROUNDED_GRADIENT => 11,",
     ),
     "engine/raster/src/lib.rs": (
-        "fn tex_tri_float<T: RenderTarget>(",
-        "draw_op::TEX_TRI_FLOAT =>",
+        "fn sample_linear_repeat(view: &TexView, u: f32, v: f32)",
+        "pub(crate) fn has_mesh_layer(words: &[u32], viewport: DamageRect)",
+        "pub(crate) fn render_mesh_operation<T: RenderTarget>(",
+        "fn composite_mesh_opaque(",
+        "fn composite_mesh_premultiplied(",
+        "1 => (dest + source[index]).min(255),",
+        "draw_op::TEX_TRI | draw_op::TEX_TRI_REPEAT => tex_tri(",
+        "draw_op::TEX_TRI_FLOAT | draw_op::TEX_TRI_REPEAT_FLOAT => tex_tri_float(",
     ),
     "engine/core/src/lib.rs": (
         "self.upload_texture_flags_with_limit(data, w, h, psm, flags, spec::TEX_MAX_DIM)",

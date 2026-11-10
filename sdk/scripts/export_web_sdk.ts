@@ -79,6 +79,25 @@ function copyTree(source: string, target: string): void {
   });
 }
 
+function copyWebLive2dPackage(out: string): void {
+  const source = join(SDK_ROOT, "packages/pocket_live2d");
+  const sourceManifest = JSON.parse(readFileSync(join(source, "package.json"), "utf8")) as Record<string, unknown>;
+  if (sourceManifest.name !== "@pocket/live2d" || typeof sourceManifest.version !== "string" || !sourceManifest.exports || typeof sourceManifest.exports !== "object") {
+    throw new Error("invalid @pocket/live2d package manifest");
+  }
+  const target = join(out, "packages/pocket_live2d");
+  copyTree(join(source, "src"), join(target, "src"));
+  copyFile(join(source, "scripts/bootstrap_cubism_web_core.sh"), join(target, "scripts/bootstrap_cubism_web_core.sh"));
+  write(join(target, "package.json"), `${JSON.stringify({
+    name: sourceManifest.name,
+    version: sourceManifest.version,
+    type: sourceManifest.type ?? "module",
+    sideEffects: sourceManifest.sideEffects ?? false,
+    exports: sourceManifest.exports,
+    files: ["src"],
+  }, null, 2)}\n`);
+}
+
 function write(path: string, contents: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, contents);
@@ -135,6 +154,9 @@ function copySources(out: string): void {
   rmSync(join(out, "packages/pocket_vn/test"), { recursive: true, force: true });
   copyTree(join(SDK_ROOT, "packages/pocket_spine"), join(out, "packages/pocket_spine"));
   rmSync(join(out, "packages/pocket_spine/test"), { recursive: true, force: true });
+  // The Web consumer only needs the JS Live2D API. Flutter plugins, native
+  // Core bindings and generated native caches remain source-SDK concerns.
+  copyWebLive2dPackage(out);
   copyFile(
     join(SDK_ROOT, "packages/pocket_flutter/shaders/liquid_glass.frag"),
     join(out, "packages/pocket_flutter/shaders/liquid_glass.frag"),
@@ -156,6 +178,8 @@ function copySources(out: string): void {
     "WEB_WORKER_IMPLEMENTATION.md",
     "LARGE_IMAGE_IMPLEMENTATION.md",
     "WEB_RENDER_WORKER.md",
+    "WEB_LIVE2D.md",
+    "EDITOR_LIVE2D.md",
     "NPM_TOOLCHAIN.md",
     "WINDOWS_BUILD.md",
     "WECHAT_HOST_IMPLEMENTATION.md",
@@ -185,9 +209,10 @@ function writeRepositoryFiles(out: string, platform?: Platform): void {
     type: "module",
     license: "MIT",
     engines: { node: ">=22.22.2" },
-    workspaces: ["packages/pocket_ui", "packages/pocket_tftc", "packages/pocket_spine"],
+    workspaces: ["packages/pocket_ui", "packages/pocket_tftc", "packages/pocket_spine", "packages/pocket_live2d"],
     dependencies: {
       "@pocket/spine": "0.1.0",
+      "@pocket/live2d": "0.1.0",
       bun: "1.3.9",
       "find-process": "2.1.1",
       "tree-kill": "1.2.2",
@@ -246,12 +271,15 @@ function writeRepositoryFiles(out: string, platform?: Platform): void {
   const renderWorkerRow = existsSync(join(out, "docs/WEB_RENDER_WORKER.md"))
     ? "| 7d | [WEB_RENDER_WORKER.md](docs/WEB_RENDER_WORKER.md) | 渲染 Worker 的显式开启、OffscreenCanvas、主线程边界与 A/B 验证。 |\n"
     : "";
+  const live2dRow = existsSync(join(out, "docs/WEB_LIVE2D.md"))
+    ? "| 7e | [WEB_LIVE2D.md](docs/WEB_LIVE2D.md) | Web Live2D 的 Moc allowlist、Cubism Core 输入和导出边界。 |\n"
+    : "";
   if (generatedReadme.includes(navigationMarker) && !generatedReadme.includes("docs/GAME_INPUT_IMPLEMENTATION.md")) {
     write(generatedReadmePath, generatedReadme.replace(navigationMarker, navigationMarker +
       "| 7a | [GAME_INPUT_IMPLEMENTATION.md](docs/GAME_INPUT_IMPLEMENTATION.md) | 键盘、按钮、双摇杆的按需开启与输入来源合并。 |\n" +
       "| 7b | [WEB_WORKER_IMPLEMENTATION.md](docs/WEB_WORKER_IMPLEMENTATION.md) | 独立 Worker QJBC、HTTP、channel、背压和生命周期。 |\n" +
       "| 7c | [LARGE_IMAGE_IMPLEMENTATION.md](docs/LARGE_IMAGE_IMPLEMENTATION.md) | 大图资源预处理、打包和运行时验证边界。 |\n" +
-      renderWorkerRow));
+      renderWorkerRow + live2dRow));
   }
 
   if (platform) {

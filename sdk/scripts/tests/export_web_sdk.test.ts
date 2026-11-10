@@ -1,8 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
 import {
   existsSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -90,6 +92,10 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
     "packages/pocket_vn/src/engine.ts",
     "packages/pocket_vn/src/asset-references.ts",
     "packages/pocket_vn/src/collections.ts",
+    "packages/pocket_live2d/src/index.ts",
+    "docs/WEB_LIVE2D.md",
+    "docs/EDITOR_LIVE2D.md",
+    "packages/pocket_live2d/scripts/bootstrap_cubism_web_core.sh",
     "packages/pocket_spine/src/index.ts",
     "packages/pocket_flutter/shaders/liquid_glass.frag",
   ]) expect(existsSync(join(output, path)), path).toBe(true);
@@ -101,14 +107,24 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(existsSync(join(output, "packages/pocket_vn/test"))).toBe(false);
   expect(existsSync(join(output, "packages/pocket_spine/test"))).toBe(false);
   expect(existsSync(join(output, "packages/pocket_spine/node_modules"))).toBe(false);
-  expect(existsSync(join(output, "packages/pocket_live2d"))).toBe(false);
+  for (const path of [
+    "packages/pocket_live2d/native",
+    "packages/pocket_live2d/ios",
+    "packages/pocket_live2d/macos",
+    "packages/pocket_live2d/android",
+    "packages/pocket_live2d/windows",
+    "packages/pocket_live2d/test",
+    "packages/pocket_live2d/node_modules",
+  ]) expect(existsSync(join(output, path)), path).toBe(false);
 
   const manifest = JSON.parse(readFileSync(join(output, "package.json"), "utf8"));
   expect(manifest.version).toBe(SDK_VERSION);
   expect(manifest.workspaces).toContain("packages/pocket_tftc");
   expect(manifest.workspaces).toContain("packages/pocket_ui");
   expect(manifest.workspaces).toContain("packages/pocket_spine");
+  expect(manifest.workspaces).toContain("packages/pocket_live2d");
   expect(manifest.dependencies?.["@pocket/spine"]).toBe("0.1.0");
+  expect(manifest.dependencies?.["@pocket/live2d"]).toBe("0.1.0");
   expect(manifest.dependencies?.["@pocket/ui"]).toBeUndefined();
   expect(manifest.dependencies?.["find-process"]).toBe("2.1.1");
   expect(manifest.dependencies?.["tree-kill"]).toBe("1.2.2");
@@ -126,11 +142,38 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   const spineManifest = JSON.parse(readFileSync(join(output, "packages/pocket_spine/package.json"), "utf8"));
   expect(spineManifest.name).toBe("@pocket/spine");
   expect(spineManifest.dependencies?.["@esotericsoftware/spine-core"]).toBe("4.3.13");
+  const live2dManifest = JSON.parse(readFileSync(join(output, "packages/pocket_live2d/package.json"), "utf8"));
+  expect(live2dManifest.name).toBe("@pocket/live2d");
+  expect(live2dManifest.files).toEqual(["src"]);
+  expect(live2dManifest.dependencies).toBeUndefined();
+  for (const target of Object.values(live2dManifest.exports as Record<string, string>)) {
+    expect(existsSync(join(output, "packages/pocket_live2d", target.replace(/^\.\//, "")))).toBe(true);
+  }
+  const installRoot = mkdtempSync(join(tmpdir(), "pocket-web-live2d-install-test-"));
+  try {
+    mkdirSync(join(installRoot, "packages"), { recursive: true });
+    cpSync(join(output, "packages/pocket_live2d"), join(installRoot, "packages/pocket_live2d"), { recursive: true });
+    writeFileSync(join(installRoot, "package.json"), JSON.stringify({
+      name: "pocket-web-live2d-install-test",
+      private: true,
+      workspaces: ["packages/pocket_live2d"],
+      dependencies: { "@pocket/live2d": "0.1.0" },
+    }));
+    const install = spawnSync("npm", ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"], {
+      cwd: installRoot,
+      encoding: "utf8",
+    });
+    expect(install.status).toBe(0);
+    expect(realpathSync(join(installRoot, "node_modules/@pocket/live2d"))).toBe(realpathSync(join(installRoot, "packages/pocket_live2d")));
+  } finally {
+    rmSync(installRoot, { recursive: true, force: true });
+  }
   const readme = readFileSync(join(output, "README.md"), "utf8");
   expect(readme).toContain("QJBC");
   expect(readme).toContain("docs/GAME_INPUT_IMPLEMENTATION.md");
   expect(readme).toContain("docs/WEB_WORKER_IMPLEMENTATION.md");
   expect(readme).toContain("docs/LARGE_IMAGE_IMPLEMENTATION.md");
+  expect(readme).toContain("docs/WEB_LIVE2D.md");
 }, 30_000);
 
 test("export_web_sdk packages only the requested platform archive and fails closed when it is absent", () => {

@@ -320,7 +320,7 @@
   function drawTriangle(context, op, image) {
     const points = Array.isArray(op.points) ? op.points : [];
     if (points.length !== 3) return;
-    if (op.type === "textureTriangle" && (!image || !Array.isArray(op.uvs) || op.uvs.length !== 6)) return;
+    if ((op.type === "textureTriangle" || op.type === "textureTriangleRepeat") && (!image || !Array.isArray(op.uvs) || op.uvs.length !== 6)) return;
     if (!image || !Array.isArray(op.uvs) || op.uvs.length !== 6) {
       context.beginPath();
       context.moveTo(number(points[0].x, 0), number(points[0].y, 0));
@@ -371,8 +371,121 @@
     context.closePath();
     context.clip();
     context.transform(a, b, c, d, e, f);
-    context.drawImage(image.canvas, 0, 0);
+    if (op.repeatTexture || op.type === "textureTriangleRepeat") {
+      const pattern = context.createPattern(image.canvas, "repeat");
+      context.fillStyle = pattern;
+      const xs = [u0, u1, u2], ys = [v0, v1, v2];
+      const left = Math.floor(Math.min(...xs)), top = Math.floor(Math.min(...ys));
+      context.fillRect(left, top, Math.ceil(Math.max(...xs)) - left + 1, Math.ceil(Math.max(...ys)) - top + 1);
+    } else context.drawImage(image.canvas, 0, 0);
     context.restore();
+  }
+
+  const meshScratch = new WeakMap();
+  const meshTintCache = new WeakMap();
+  function meshTint(image, values) {
+    if (!image || !values || values.every((v, i) => v === (i < 3 ? 1 : 0))) return image;
+    if (values.length !== 6 || values.some(v => !Number.isFinite(v) || v < 0 || v > 1)) throw new Error("Invalid mesh RGB tint");
+    let cache = meshTintCache.get(image);
+    if (!cache) meshTintCache.set(image, cache = new Map());
+    const key = values.join(",");
+    if (cache.has(key)) return cache.get(key);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width; canvas.height = image.height;
+    const ctx = canvas.getContext("2d");
+    const rgba = image.rgba || (() => { ctx.drawImage(image.canvas, 0, 0); return ctx.getImageData(0, 0, image.width, image.height).data; })();
+    const pixels = new ImageData(new Uint8ClampedArray(rgba), image.width, image.height);
+    for (let i = 0; i < pixels.data.length; i += 4) for (let c = 0; c < 3; c++) {
+      pixels.data[i + c] = Math.round((pixels.data[i + c] * (1 - values[c + 3]) + 255 * values[c + 3]) * values[c]);
+    }
+    ctx.putImageData(pixels, 0, 0);
+    const result = { canvas, width: image.width, height: image.height };
+    cache.set(key, result);
+    const limit = Math.max(1, Math.min(8, Math.floor(16 * 1024 * 1024 / (image.width * image.height * 4))));
+    while (cache.size > limit) { const old = cache.keys().next().value; cache.get(old).canvas.width = 0; cache.delete(old); }
+    return result;
+  }
+  function projectMeshGroup(context, begin, content, masks, maskBegin, resources) {
+    let scratch = meshScratch.get(context.canvas);
+    if (!scratch) {
+      scratch = [document.createElement("canvas"), document.createElement("canvas")];
+      meshScratch.set(context.canvas, scratch);
+    }
+    const prepare = canvas => {
+      if (canvas.width !== context.canvas.width || canvas.height !== context.canvas.height) {
+        canvas.width = context.canvas.width; canvas.height = context.canvas.height;
+      }
+      const ctx = canvas.getContext("2d"); ctx.resetTransform(); ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(context.getTransform());
+      return ctx;
+    };
+    const layer = prepare(scratch[0]);
+    layer.save(); clipRect(layer, begin.clip); clipRect(layer, begin);
+    for (const op of content) {
+      if (op.type !== "textureTriangle" && op.type !== "textureTriangleRepeat") throw new Error("Invalid mesh layer operation");
+      layer.save(); clipRect(layer, op.clip);
+      drawTriangle(layer, op, meshTint(resources.get(String(op.asset)), begin.uvs)); layer.restore();
+    }
+    layer.restore();
+    if (maskBegin) {
+      const mask = prepare(scratch[1]); mask.save(); clipRect(mask, maskBegin.clip); clipRect(mask, maskBegin);
+      for (const op of masks) {
+        mask.save(); clipRect(mask, op.clip);
+        drawTriangle(mask, { ...op, color: 0xffffffff }, resources.get(String(op.asset))); mask.restore();
+      }
+      mask.restore();
+      layer.save(); layer.resetTransform(); layer.globalCompositeOperation = maskBegin.color ? "destination-out" : "destination-in";
+      layer.drawImage(scratch[1], 0, 0); layer.restore();
+    }
+    context.save(); context.resetTransform();
+    const blend = ["source-over", "lighter", "multiply", "screen"][Number(begin.color || 0)];
+    if (!blend) { context.restore(); throw new Error("Unsupported mesh blend mode"); }
+    context.globalCompositeOperation = blend; context.drawImage(scratch[0], 0, 0); context.restore();
+  }
+  function meshTriangles(mesh) {
+    const bytes = mesh.geometry;
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 16) throw new Error("Invalid PMS1 mesh");
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const vertices = view.getUint32(4, true), indices = view.getUint32(8, true);
+    if (view.getUint32(0, true) !== 0x31534d50 || !vertices || vertices > 16384 || indices % 3 || indices > 98304 || bytes.byteLength !== 16 + vertices * 16 + indices * 4) throw new Error("Invalid PMS1 topology");
+    const packed = view.getUint32(12, true);
+    const color = ((packed & 0xff00ff00) | ((packed & 0xff) << 16) | ((packed >>> 16) & 0xff)) >>> 0;
+    const operations = [];
+    for (let i = 0; i < indices; i += 3) {
+      const points = [], uvs = [];
+      for (let j = 0; j < 3; j++) {
+        const vertex = view.getUint32(16 + vertices * 16 + (i + j) * 4, true);
+        if (vertex >= vertices) throw new Error("PMS1 index out of bounds");
+        const off = 16 + vertex * 16;
+        const values = [0, 4, 8, 12].map(delta => view.getFloat32(off + delta, true));
+        if (!values.every(Number.isFinite)) throw new Error("Non-finite PMS1 vertex");
+        points.push({ x: values[0], y: values[1] }); uvs.push(values[2], values[3]);
+      }
+      operations.push({ type: "textureTriangle", points, uvs, color, asset: mesh.texture, repeatTexture: mesh.effect?.repeatTexture === true });
+    }
+    return operations;
+  }
+  function projectModelMeshes(context, meshes, images) {
+    const resources = new Map(Object.entries(images)), byId = new Map(meshes.map(mesh => [mesh.id, mesh]));
+    for (const mesh of meshes) {
+      if (mesh.visible === false) continue;
+      if (!resources.has(mesh.texture)) throw new Error(`Model texture is missing: ${mesh.texture}`);
+      const effect = mesh.effect;
+      if (!effect) { for (const op of meshTriangles(mesh)) drawTriangle(context, op, resources.get(mesh.texture)); continue; }
+      const content = meshTriangles(mesh), masks = [];
+      for (const id of effect.masks || []) {
+        const source = byId.get(id);
+        if (!source) throw new Error("Live2D mask mesh is missing");
+        if (!resources.has(source.texture)) throw new Error(`Model mask texture is missing: ${source.texture}`);
+        masks.push(...meshTriangles(source));
+      }
+      // Authoring model coordinates share the existing 240 x 340 VN surface.
+      const bounds = { x: 0, y: 0, w: 240, h: 340 };
+      const blend = ["normal", "add", "multiply", "screen"].indexOf(effect.blend || "normal");
+      if (blend < 0) throw new Error("Unsupported Live2D blend mode");
+      projectMeshGroup(context, { ...bounds, color: blend, uvs: [...(effect.multiplyRgb || [1, 1, 1]), ...(effect.screenRgb || [0, 0, 0])] }, content, masks,
+        masks.length ? { ...bounds, color: effect.inverted ? 1 : 0 } : null, resources);
+    }
   }
 
   function fontSize(slot) {
@@ -606,13 +719,6 @@
     const width = number(frame.width, 1);
     const height = number(frame.height, 1);
     const ops = Array.isArray(frame.ops) ? frame.ops : [];
-    const unsupported = ops.find((op) => op && typeof op === "object" && (
-      op.type === "meshLayerBegin" || op.type === "meshMaskBegin" || op.type === "meshLayerRestore"
-      || op.type === "textureTriangleRepeat" || (op.type === "textureTriangle" && op.repeatTexture === true)
-    ));
-    if (unsupported) {
-      throw new Error(`Canvas2D preview does not support Live2D mesh effects or repeat sampling (${unsupported.type})`);
-    }
     context.clearRect(0, 0, width, height);
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
@@ -622,6 +728,19 @@
     for (let index = 0; index < ops.length; index += 1) {
       const op = ops[index];
       if (!op || typeof op !== "object") continue;
+      if (op.type === "meshLayerBegin") {
+        if (activeClip) { context.restore(); activeClip = null; }
+        const content = [], masks = []; let mask = null, end = index + 1;
+        for (; end < ops.length && ops[end].type !== "meshLayerRestore"; end++) {
+          const item = ops[end];
+          if (item.type === "meshLayerBegin") throw new Error("Nested mesh layers are invalid");
+          if (item.type === "meshMaskBegin") { if (mask) throw new Error("Duplicate mesh mask"); mask = item; }
+          else (mask ? masks : content).push(item);
+        }
+        if (end >= ops.length) throw new Error("Unclosed mesh layer");
+        projectMeshGroup(context, op, content, masks, mask, resources); index = end; continue;
+      }
+      if (op.type === "meshMaskBegin" || op.type === "meshLayerRestore") throw new Error("Mesh effect outside layer");
       const nextClip = op.clip && typeof op.clip === "object" ? op.clip : null;
       if (!sameClip(activeClip, nextClip)) {
         if (activeClip) context.restore();
@@ -666,7 +785,7 @@
         }
       } else if (kind === "image") {
         drawImage(context, resources.get(String(op.asset ?? "")), op);
-      } else if (kind === "triangle" || kind === "textureTriangle") {
+      } else if (kind === "triangle" || kind === "textureTriangle" || kind === "textureTriangleRepeat") {
         drawTriangle(context, op, resources.get(String(op.asset ?? "")));
       } else if (kind === "video") {
         drawVideo(context, videos?.get(videoKey(op)), op);
@@ -2842,6 +2961,8 @@
       for (const image of resources.values()) disposeResource(image);
       resources.clear();
       const glassScratch = glassScratchCache.get(canvas);
+      for (const scratch of meshScratch.get(canvas) || []) scratch.width = scratch.height = 0;
+      meshScratch.delete(canvas);
       if (glassScratch) {
         glassScratch.optics?.dispose();
         glassScratch.canvas.width = glassScratch.canvas.height = 0;
@@ -2862,6 +2983,7 @@
 
   global.PocketEditorPreview = {
     version: VERSION,
+    projectModelMeshes,
     protocol: { version: VERSION, source: SOURCE },
     mount: client,
     /** Project an already-canonical TEX_TRI-shaped operation (also used by the Novel mesh inspector). */

@@ -10,10 +10,11 @@
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, lstatSync, realpathSync } from "node:fs";
 import { open, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Condition, JsonValue, StoryDefinition, StoryInstruction, ValueExpression } from "../packages/pocket_vn/src/types.ts";
 import { createSpineRig, getSpineAtlasInfo, type SpineSkeletonInput } from "@pocket/spine";
+import { parseCubismModel3 } from "../packages/pocket_live2d/src/manifest.ts";
 import type { NovelModelDefinition } from "../packages/pocket_vn/src/models.ts";
 import { novelCharacterTransformIssue } from "../packages/pocket_vn/src/scene.ts";
 import { novelCameraInstructionIssue } from "../packages/pocket_vn/src/camera.ts";
@@ -37,6 +38,7 @@ import { validateNovelCollections, type NovelCollections } from "../packages/poc
 import { validateNovelInventory } from "../packages/pocket_vn/src/inventory.ts";
 import { isNovelChoiceSurface, novelChoiceSurfaceIssue, type NovelChoiceSurface } from "../packages/pocket_vn/src/choice-surface.ts";
 import { createNovelBackup, listNovelBackups, restoreNovelBackup } from "./novel-backups.ts";
+import { cubismWebCorePath } from "./live2d.ts";
 import { getNovelHistory, NOVEL_HISTORY_MAX_BYTES, NovelHistoryError, putNovelHistory } from "./novel-history.ts";
 import { createNovelWordDocument } from "./novel-word.ts";
 import {
@@ -54,6 +56,9 @@ const maxAssetsBytes = 512 * 1024;
 const maxLocalesBytes = 4 * 1024 * 1024;
 const maxModelSourceBytes = 12 * 1024 * 1024;
 const maxModelAtlasBytes = 2 * 1024 * 1024;
+const maxLive2dMocBytes = 32 * 1024 * 1024;
+const maxLive2dJsonBytes = 4 * 1024 * 1024;
+const maxLive2dCoreBytes = 4 * 1024 * 1024;
 const maxScriptLabels = 10_000;
 const maxInstructionsPerLabel = 20_000;
 const maxOptionsPerChoice = 128;
@@ -560,7 +565,7 @@ function isHistoryAssets(value: unknown): value is NovelAssetRegistry {
   return isAssetRegistry(candidate);
 }
 
-type RegisteredFileKind = "image" | "audio" | "video" | "spine-source" | "spine-atlas" | "live2d-source";
+type RegisteredFileKind = "image" | "audio" | "video" | "spine-source" | "spine-atlas" | "live2d-source" | "live2d-resource";
 
 function assetFileProblem(projectRoot: string, relativePath: string, kind: RegisteredFileKind): string | undefined {
   if (!relativePath || !/^[\w./-]+$/.test(relativePath) || relativePath.includes("\\") || isAbsolute(relativePath)) {
@@ -700,7 +705,6 @@ export function validateAssetRegistry(value: unknown, projectRoot?: string, stor
       else diagnostics.push({ severity: "error", code: "models.atlas.missing", message: `Spine model “${key}” requires an atlas file.`, location: { field: `models.${key}.atlas` } });
     } else {
       checkPath(`models.${key}.source`, model.source, "live2d-source");
-      diagnostics.push({ severity: "warning", code: "models.runtime.unsupported", message: `Live2D model “${key}” is registered, but the Novel Editor preview has no Live2D model runtime yet.`, location: { field: `models.${key}` } });
     }
     for (const [page, image] of Object.entries(model.textures)) checkPath(`models.${key}.textures.${page}`, image, "image");
   }
@@ -1203,6 +1207,43 @@ async function spineRuntimeBundle(): Promise<string> {
   return await output.text();
 }
 
+let live2dBundlePromise: Promise<string> | undefined;
+
+async function live2dRuntimeBundle(): Promise<string> {
+  const entry = join(root, "editor/live2d-preview-runtime.ts");
+  const build = await Bun.build({
+    entrypoints: [entry],
+    target: "browser",
+    format: "esm",
+    write: false,
+    sourcemap: "none",
+    minify: false,
+  });
+  if (!build.success) throw new Error(build.logs.map(log => log.message).join("\n") || "Pocket Live2D preview could not be bundled for the editor");
+  const output = build.outputs.find(item => item.path.endsWith(".js")) ?? build.outputs[0];
+  if (!output) throw new Error("Pocket Live2D preview build produced no browser module");
+  return await output.text();
+}
+
+/** Serve only the explicitly configured/cached Cubism Web Core host runtime. */
+export async function serveNovelLive2dCore(): Promise<Response> {
+  const corePath = cubismWebCorePath();
+  try {
+    const info = await stat(corePath);
+    if (!info.isFile()) return failure("Cubism Web Core is not a regular file", 503);
+    if (info.size > maxLive2dCoreBytes) return failure("Cubism Web Core exceeds the 4 MiB editor limit", 413);
+    const bytes = await readFile(corePath);
+    if (bytes.length > maxLive2dCoreBytes) return failure("Cubism Web Core exceeds the 4 MiB editor limit", 413);
+    return new Response(bytes, { headers: {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    } });
+  } catch {
+    return failure("Cubism Web Core is unavailable; configure POCKET_CUBISM_WEB_CORE or bootstrap the pinned Web Core cache", 503);
+  }
+}
+
 function page(projectId: string): Response {
   const html = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Pocket Novel Editor</title><link rel="stylesheet" href="/novel.css"></head>
@@ -1211,7 +1252,7 @@ function page(projectId: string): Response {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
-      "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
+      "content-security-policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
       "x-frame-options": "SAMEORIGIN",
     },
   });
@@ -1248,7 +1289,7 @@ async function registeredImage(projectRoot: string, relativePath: string): Promi
 async function readRegisteredModelFile(
   projectRoot: string,
   relativePath: string,
-  kind: "spine-source" | "spine-atlas" | "live2d-source",
+  kind: "spine-source" | "spine-atlas" | "live2d-source" | "live2d-resource",
   maxBytes: number,
 ): Promise<Buffer> {
   const problem = assetFileProblem(projectRoot, relativePath, kind);
@@ -1268,8 +1309,9 @@ async function readRegisteredModelFile(
   }
 }
 
-async function loadModelSource(projectRoot: string, key: string): Promise<{
+type LoadedSpineModelSource = {
   definition: NovelModelDefinition;
+  kind: "spine";
   skeleton: { format: "json"; data: string } | { format: "binary"; base64: string };
   atlasText: string;
   atlasPages: readonly string[];
@@ -1278,12 +1320,136 @@ async function loadModelSource(projectRoot: string, key: string): Promise<{
   animationNames: readonly string[];
   skinNames: readonly string[];
   unsupported: readonly { slot: string; reason: string; detail: string }[];
+};
+
+type LoadedLive2dModelSource = {
+  definition: NovelModelDefinition;
+  kind: "live2d";
+  document: unknown;
+  physics?: unknown;
+  pose?: unknown;
+  motions: Readonly<Record<string, unknown>>;
+  expressions: Readonly<Record<string, unknown>>;
+  atlasPages: readonly string[];
+  missingTexturePages: readonly string[];
+  premultipliedPages: readonly string[];
+  animationNames: readonly string[];
+  skinNames: readonly string[];
+  expressionNames: readonly string[];
+  unsupported: readonly { slot: string; reason: string; detail: string }[];
+  browserConfig: { coreUrl: string; assets: Readonly<Record<string, string>> };
+};
+
+function modelDirectory(source: string): string {
+  return posix.dirname(source);
+}
+
+function modelProviderPrefix(source: string): string {
+  const nativeSource = source.replace(/^assets\//, "");
+  const directory = posix.dirname(nativeSource);
+  return directory === "." ? "" : directory;
+}
+
+function providerAssetKey(prefix: string, reference: string): string {
+  return prefix ? `${prefix}/${reference}` : reference;
+}
+
+function parseReferencedModelJson(bytes: Buffer, reference: string): unknown {
+  try { return JSON.parse(bytes.toString("utf8")) as unknown; }
+  catch (error) {
+    throw Object.assign(new Error(`Live2D referenced JSON ${reference} is invalid: ${errorText(error)}`), { status: 422 });
+  }
+}
+
+async function readLive2dManifest(projectRoot: string, definition: NovelModelDefinition): Promise<{
+  document: unknown;
+  manifest: ReturnType<typeof parseCubismModel3>;
 }> {
+  const sourceBytes = await readRegisteredModelFile(projectRoot, definition.source, "live2d-source", maxModelSourceBytes);
+  const document = parseReferencedModelJson(sourceBytes, definition.source);
+  try { return { document, manifest: parseCubismModel3(document) }; }
+  catch (error) {
+    throw Object.assign(new Error(`Live2D Model3 document is invalid: ${errorText(error)}`), { status: 422 });
+  }
+}
+
+function cubismManifestReferences(manifest: ReturnType<typeof parseCubismModel3>): Set<string> {
+  const references = new Set<string>([manifest.moc, ...manifest.textures]);
+  if (manifest.physics) references.add(manifest.physics);
+  if (manifest.pose) references.add(manifest.pose);
+  for (const entries of Object.values(manifest.motions)) for (const entry of entries) references.add(entry.file);
+  for (const entry of manifest.expressions) references.add(entry.file);
+  if (manifest.userData) references.add(manifest.userData);
+  if (manifest.displayInfo) references.add(manifest.displayInfo);
+  return references;
+}
+
+async function readLive2dReferenceJson(projectRoot: string, definition: NovelModelDefinition, reference: string): Promise<unknown> {
+  const relativePath = posix.join(modelDirectory(definition.source), reference);
+  const bytes = await readRegisteredModelFile(projectRoot, relativePath, "live2d-resource", maxLive2dJsonBytes);
+  return parseReferencedModelJson(bytes, reference);
+}
+
+async function loadLive2dModelSource(
+  projectRoot: string,
+  key: string,
+  projectId: string,
+  definition: NovelModelDefinition,
+): Promise<LoadedLive2dModelSource> {
+  const { document, manifest } = await readLive2dManifest(projectRoot, definition);
+  if (manifest.textures.length > 16) throw Object.assign(new Error("Live2D models may reference at most 16 textures"), { status: 422 });
+  const references = cubismManifestReferences(manifest);
+  const jsonCache = new Map<string, Promise<unknown>>();
+  const readJson = (reference: string) => {
+    let pending = jsonCache.get(reference);
+    if (!pending) {
+      pending = readLive2dReferenceJson(projectRoot, definition, reference);
+      jsonCache.set(reference, pending);
+    }
+    return pending;
+  };
+  const motions: Record<string, unknown> = {};
+  for (const [group, entries] of Object.entries(manifest.motions)) {
+    for (const [index, entry] of entries.entries()) motions[`${group}:${index}`] = await readJson(entry.file);
+  }
+  const expressions: Record<string, unknown> = {};
+  for (const entry of manifest.expressions) expressions[entry.name] = await readJson(entry.file);
+  const physics = manifest.physics ? await readJson(manifest.physics) : undefined;
+  const pose = manifest.pose ? await readJson(manifest.pose) : undefined;
+  const missingPages = manifest.textures.filter(page => !definition.textures[page]);
+  const prefix = modelProviderPrefix(definition.source);
+  const assets: Record<string, string> = {};
+  const resourceEndpoint = `/api/projects/${encodeURIComponent(projectId)}/novel/models/resource`;
+  for (const reference of references) {
+    if (manifest.textures.includes(reference) && !definition.textures[reference]) continue;
+    const asset = providerAssetKey(prefix, reference);
+    assets[asset] = `${resourceEndpoint}?key=${encodeURIComponent(key)}&asset=${encodeURIComponent(asset)}`;
+  }
+  return {
+    definition,
+    kind: "live2d",
+    document,
+    ...(physics === undefined ? {} : { physics }),
+    ...(pose === undefined ? {} : { pose }),
+    motions,
+    expressions,
+    atlasPages: manifest.textures,
+    missingTexturePages: missingPages,
+    premultipliedPages: [],
+    animationNames: Object.keys(motions),
+    skinNames: [],
+    expressionNames: Object.keys(expressions),
+    unsupported: [],
+    browserConfig: { coreUrl: "/novel/live2d-core.js", assets },
+  };
+}
+
+async function loadModelSource(projectRoot: string, key: string, projectId: string): Promise<LoadedSpineModelSource | LoadedLive2dModelSource> {
   const registry = await readAssetRegistry(projectRoot);
   if (!isAssetRegistry(registry)) throw Object.assign(new Error("novel asset registry is invalid"), { status: 409 });
   const definition = registry.models?.[key];
   if (!definition) throw Object.assign(new Error("registered model not found"), { status: 404 });
-  if (definition.kind !== "spine") throw Object.assign(new Error("this preview currently supports Spine models only"), { status: 422 });
+  if (definition.kind === "live2d") return loadLive2dModelSource(projectRoot, key, projectId, definition);
   if (!definition.atlas) throw Object.assign(new Error("Spine model requires an atlas"), { status: 422 });
 
   const sourceBytes = await readRegisteredModelFile(projectRoot, definition.source, "spine-source", maxModelSourceBytes);
@@ -1304,6 +1470,7 @@ async function loadModelSource(projectRoot: string, key: string): Promise<{
       : []);
     return {
       definition,
+      kind: "spine",
       skeleton: skeleton.format === "binary"
         ? { format: "binary", base64: sourceBytes.toString("base64") }
         : { format: "json", data: skeleton.data },
@@ -1320,6 +1487,32 @@ async function loadModelSource(projectRoot: string, key: string): Promise<{
   }
 }
 
+async function registeredLive2dAsset(projectRoot: string, key: string, providerKey: string): Promise<Response> {
+  const registry = await readAssetRegistry(projectRoot);
+  if (!isAssetRegistry(registry)) return failure("novel asset registry is invalid", 409);
+  const definition = registry.models?.[key];
+  if (!definition || definition.kind !== "live2d") return failure("registered Live2D model not found", 404);
+  const { manifest } = await readLive2dManifest(projectRoot, definition);
+  const prefix = modelProviderPrefix(definition.source);
+  const reference = [...cubismManifestReferences(manifest)].find(item => providerAssetKey(prefix, item) === providerKey);
+  if (!reference) return failure("Live2D resource is not referenced by the registered Model3 document", 404);
+
+  if (manifest.textures.includes(reference)) {
+    const image = definition.textures[reference];
+    if (!image) return failure("registered Live2D texture is not mapped", 404);
+    return registeredImage(projectRoot, image);
+  }
+
+  const relativePath = posix.join(modelDirectory(definition.source), reference);
+  const maxBytes = reference === manifest.moc ? maxLive2dMocBytes : maxLive2dJsonBytes;
+  const bytes = await readRegisteredModelFile(projectRoot, relativePath, "live2d-resource", maxBytes);
+  return new Response(bytes, { headers: {
+    "content-type": "application/octet-stream",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  } });
+}
+
 /**
  * Handle `/novel`, its static client assets, and `/api/projects/:id/novel/*`.
  * `projectRoot` is supplied by the trusted local Editor server after project
@@ -1334,6 +1527,7 @@ export async function handleNovelRoute(request: Request, options: NovelEditorRou
   if (path === "/novel-localization.js" && method === "GET") return staticClientAsset("novel-localization.js");
   if (path === "/novel-localization.css" && method === "GET") return staticClientAsset("novel-localization.css");
   if (path === "/novel-rich-editor.js" && method === "GET") return staticClientAsset("novel-rich-editor.js");
+  if (path === "/novel/live2d-core.js" && method === "GET") return serveNovelLive2dCore();
   for (const asset of ["novel-authoring.js", "novel-authoring.css", "novel-stage.js", "novel-stage.css", "novel-backups.js", "novel-backups.css"] as const) {
     if (path === `/${asset}` && method === "GET") return staticClientAsset(asset);
   }
@@ -1372,7 +1566,7 @@ export async function handleNovelRoute(request: Request, options: NovelEditorRou
   }
   if (path === "/novel.js" && method === "GET") return staticClientAsset("novel.js");
   if (path === "/novel.css" && method === "GET") return staticClientAsset("novel.css");
-  const match = path.match(/^\/api\/projects\/([a-z][a-z0-9-]{0,47})\/novel(?:\/(story|assets|history|backups(?:\/restore)?|locales(?:\/diagnostics)?|diagnostics|export|runtime\.js|spine\.js|novel-(?:localization|rich-editor|authoring|stage|backups)\.js|models\/source|models\/resource))?$/);
+  const match = path.match(/^\/api\/projects\/([a-z][a-z0-9-]{0,47})\/novel(?:\/(story|assets|history|backups(?:\/restore)?|locales(?:\/diagnostics)?|diagnostics|export|runtime\.js|spine\.js|live2d\.js|novel-(?:localization|rich-editor|authoring|stage|backups)\.js|models\/source|models\/resource))?$/);
   if (!match || match[1] !== options.projectId) return failure("not found", 404);
   const endpoint = match[2] ?? "editor";
   try {
@@ -1382,6 +1576,13 @@ export async function handleNovelRoute(request: Request, options: NovelEditorRou
     if (endpoint === "novel-authoring.js" && method === "GET") return staticClientAsset("novel-authoring.js");
     if (endpoint === "novel-stage.js" && method === "GET") return staticClientAsset("novel-stage.js");
     if (endpoint === "novel-backups.js" && method === "GET") return staticClientAsset("novel-backups.js");
+    if (endpoint === "live2d.js" && method === "GET") {
+      live2dBundlePromise ??= live2dRuntimeBundle().catch(error => { live2dBundlePromise = undefined; throw error; });
+      const source = await live2dBundlePromise;
+      return new Response(source, {
+        headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" },
+      });
+    }
     if (endpoint === "history") {
       if (!options.workspaceRoot) return failure("Novel Editor history requires an Editor workspace", 503);
       const historyOptions = {
@@ -1575,10 +1776,17 @@ export async function handleNovelRoute(request: Request, options: NovelEditorRou
     if (endpoint === "models/source" && method === "GET") {
       const key = url.searchParams.get("key") ?? "";
       if (!isId(key)) return failure("invalid registered model key", 400);
-      return json(await loadModelSource(options.projectRoot, key));
+      return json(await loadModelSource(options.projectRoot, key, options.projectId));
     }
     if (endpoint === "models/resource" && method === "GET") {
       const key = url.searchParams.get("key") ?? "";
+      const assetKey = url.searchParams.get("asset");
+      if (assetKey !== null) {
+        if (!isId(key) || !assetKey || assetKey.length > 1024 || /[\u0000-\u001f]/.test(assetKey) || url.searchParams.has("page")) {
+          return failure("invalid registered Live2D resource key", 400);
+        }
+        return await registeredLive2dAsset(options.projectRoot, key, assetKey);
+      }
       const pageName = url.searchParams.get("page") ?? "";
       if (!isId(key) || !pageName || pageName.length > 256 || /[\u0000-\u001f]/.test(pageName)) return failure("invalid registered model texture key", 400);
       const registry = await readAssetRegistry(options.projectRoot);

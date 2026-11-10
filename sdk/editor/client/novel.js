@@ -28,8 +28,9 @@ const state = {
   selectedTimelineId: "",
   engineModule: null,
   spineModule: null,
+  live2dModule: null,
   modelSources: Object.create(null),
-  modelPreview: { key: "", controller: null, canvas: null, animation: "", skin: "", loop: true, running: false, error: "", frameCount: 0, generation: 0 },
+  modelPreview: { key: "", controller: null, canvas: null, animation: "", skin: "", expression: "", loop: true, running: false, error: "", frameCount: 0, generation: 0 },
   engine: null,
   engineUnsubscribe: null,
   noteDialog: null,
@@ -3527,6 +3528,7 @@ async function mountWorkspacePanel(container, key) {
       getAssets: () => state.assets,
       getEngineModule: () => state.engineModule,
       createSpinePreview: values => createStageSpinePreview(values),
+      createLive2dPreview: values => createStageLive2dPreview(values),
       getRuntime: () => ({ engine: state.engine }),
       getDraft: () => state.authoringDraft,
       hasUnsavedChanges: () => state.dirty || Boolean(state.authoringDraft),
@@ -3669,7 +3671,9 @@ function localAssetDiagnostics() {
       for (const page of source?.premultipliedPages || []) diagnostics.push({ severity: "error", code: "models.texture.pma", message: `模型 ${key} 的 Atlas 页 ${page} 使用 PMA；当前 Guest 纹理格式不支持安全显示。` });
       for (const item of source?.unsupported || []) diagnostics.push({ severity: "error", code: "models.runtime.unsupported", message: `模型 ${key} 的 slot ${item.slot} 使用不支持的 Spine 功能 ${item.reason}：${item.detail}` });
     } else {
-      diagnostics.push({ severity: "warning", code: "models.runtime.unsupported", message: `模型 ${key} 已登记；Guest Live2D 播放需要原生模型 host，浏览器编辑器当前不能提供该 host 或实时预览。` });
+      const source = state.modelSources[key];
+      for (const page of source?.missingTexturePages || []) diagnostics.push({ severity: "error", code: "models.texture.missing", message: `Live2D 模型 ${key} 的纹理页 ${page} 尚未映射项目图片。` });
+      for (const item of source?.unsupported || []) diagnostics.push({ severity: "error", code: "models.runtime.unsupported", message: `Live2D 模型 ${key} 的 ${item.slot} 使用不支持的功能 ${item.reason}：${item.detail}` });
     }
     for (const [page, path] of Object.entries(definition.textures || {})) check(`模型 ${key} 贴图 ${page}`, path, "image");
     for (const animation of definition.animations || []) {
@@ -3766,52 +3770,10 @@ async function loadModelTexture(key, pageName) {
   return { canvas, rgba, width: canvas.width, height: canvas.height };
 }
 
-function decodeNovelMesh(geometry) {
-  if (!(geometry instanceof Uint8Array) || geometry.byteLength < 16) throw new Error("Spine 返回了无效的 PMS1 mesh 缓冲区。");
-  const view = new DataView(geometry.buffer, geometry.byteOffset, geometry.byteLength);
-  if (view.getUint32(0, true) !== 0x31534d50) throw new Error("Spine mesh 不是 Pocket PMS1 格式。");
-  const vertexCount = view.getUint32(4, true);
-  const indexCount = view.getUint32(8, true);
-  if (!vertexCount || vertexCount > 16384 || indexCount < 3 || indexCount > 98304 || indexCount % 3) throw new Error("Spine PMS1 mesh 顶点或索引数量无效。");
-  if (geometry.byteLength !== 16 + vertexCount * 16 + indexCount * 4) throw new Error("Spine PMS1 mesh 长度与其顶点/索引数量不一致。");
-  const rawColor = view.getUint32(12, true);
-  const alpha = rawColor >>> 24;
-  const red = rawColor & 0xff;
-  const green = (rawColor >>> 8) & 0xff;
-  const blue = (rawColor >>> 16) & 0xff;
-  const color = ((alpha << 24) | (red << 16) | (green << 8) | blue) >>> 0;
-  const vertexOffset = 16;
-  const indexOffset = vertexOffset + vertexCount * 16;
-  const vertices = new Array(vertexCount);
-  for (let index = 0; index < vertexCount; index++) {
-    const offset = vertexOffset + index * 16;
-    const x = view.getFloat32(offset, true);
-    const y = view.getFloat32(offset + 4, true);
-    const u = view.getFloat32(offset + 8, true);
-    const v = view.getFloat32(offset + 12, true);
-    if (![x, y, u, v].every(Number.isFinite) || Math.abs(x) > 1_000_000 || Math.abs(y) > 1_000_000 || u < 0 || u > 1 || v < 0 || v > 1) throw new Error("Spine PMS1 mesh contains invalid coordinates or UVs.");
-    vertices[index] = { x, y, u, v };
-  }
-  const operations = [];
-  for (let index = 0; index < indexCount; index += 3) {
-    const a = view.getUint32(indexOffset + index * 4, true);
-    const b = view.getUint32(indexOffset + (index + 1) * 4, true);
-    const c = view.getUint32(indexOffset + (index + 2) * 4, true);
-    if (a >= vertexCount || b >= vertexCount || c >= vertexCount) throw new Error("Spine PMS1 mesh contains an out-of-range triangle index.");
-    const va = vertices[a], vb = vertices[b], vc = vertices[c];
-    operations.push({ type: "textureTriangle", color, points: [{ x: va.x, y: va.y }, { x: vb.x, y: vb.y }, { x: vc.x, y: vc.y }], uvs: [va.u, va.v, vb.u, vb.v, vc.u, vc.v] });
-  }
-  return operations;
-}
-
 function paintModelMeshes(meshes, context, images) {
-  const projector = window.PocketEditorPreview?.projectTriangle;
-  if (typeof projector !== "function") throw new Error("Pocket Editor 现有 TEX_TRI 投影器未加载。");
-  for (const mesh of meshes) {
-    const image = images[mesh.texture];
-    if (!image) throw new Error(`Spine mesh 引用了未加载的纹理 key：${mesh.texture}`);
-    for (const operation of decodeNovelMesh(mesh.geometry)) projector(context, operation, image);
-  }
+  const projector = window.PocketEditorPreview?.projectModelMeshes;
+  if (typeof projector !== "function") throw new Error("Pocket Editor 的 PMS1/TEX_TRI compositor 未加载。");
+  projector(context, meshes, images);
 }
 
 function createNovelSpineCanvasPreview({ canvas, modelKey, definition, source, loadTexture, loadFactory, animation, skin, loop = true, background = null, onFrame, onError }) {
@@ -3864,7 +3826,7 @@ function createNovelSpineCanvasPreview({ canvas, modelKey, definition, source, l
     const generation = ++preview.generation;
     try {
       if (!canvas || typeof canvas.getContext !== "function") throw new Error("无法取得模型预览画布。");
-      if (!definition || definition.kind !== "spine") throw new Error("浏览器舞台预览目前只支持 Spine 模型；Live2D 需要原生 Guest host。");
+      if (!definition || definition.kind !== "spine") throw new Error("Spine 舞台预览需要 Spine 模型资源。");
       if (source?.premultipliedPages?.length) throw new Error(`Atlas 页面 ${source.premultipliedPages.join("、")} 使用 PMA；当前纹理解码链路不能安全转换预乘 alpha。`);
       if (source?.missingTexturePages?.length) throw new Error(`Atlas 页面尚未映射贴图：${source.missingTexturePages.join("、")}。`);
       if (source?.unsupported?.length) {
@@ -3901,6 +3863,103 @@ function createNovelSpineCanvasPreview({ canvas, modelKey, definition, source, l
   return { start, dispose, get running() { return preview.running; }, get frameCount() { return preview.frameCount; } };
 }
 
+function createNovelLive2dCanvasPreview({ canvas, modelKey, definition, source, loadTexture, loadFactory, animation, expression, loop = true, background = null, onFrame, onError }) {
+  const preview = { generation: 0, frameId: 0, lastTime: 0, running: false, instance: null, provider: null, images: Object.create(null), frameCount: 0 };
+  const disposeImages = () => {
+    for (const image of Object.values(preview.images)) if (image?.canvas) image.canvas.width = image.canvas.height = 0;
+    preview.images = Object.create(null);
+  };
+  const dispose = () => {
+    preview.generation += 1;
+    preview.running = false;
+    preview.lastTime = 0;
+    if (preview.frameId) cancelAnimationFrame(preview.frameId);
+    preview.frameId = 0;
+    try { preview.instance?.dispose(); } catch {}
+    preview.instance = null;
+    try {
+      const pending = preview.provider?.dispose();
+      if (pending && typeof pending.catch === "function") void pending.catch(() => {});
+    } catch {}
+    preview.provider = null;
+    disposeImages();
+    if (canvas) canvas.width = canvas.height = 0;
+  };
+  const fail = error => {
+    const value = error instanceof Error ? error : new Error(String(error));
+    dispose();
+    onError?.(value);
+  };
+  const draw = async (now, generation) => {
+    if (!preview.running || preview.generation !== generation || !preview.instance) return;
+    if (!canvas?.isConnected) { dispose(); return; }
+    const delta = preview.lastTime ? Math.max(0, Math.min(100, now - preview.lastTime)) : 0;
+    preview.lastTime = now;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("无法取得 Live2D 模型预览画布。");
+    context.setTransform(2, 0, 0, 2, 0, 0);
+    context.clearRect(0, 0, 240, 350);
+    if (background) {
+      context.fillStyle = background;
+      context.fillRect(0, 0, 240, 350);
+    }
+    const meshes = await preview.instance.advance(delta);
+    if (preview.generation !== generation || !preview.running) return;
+    paintModelMeshes(meshes, context, preview.images);
+    preview.frameCount += 1;
+    onFrame?.({ frameCount: preview.frameCount, meshCount: meshes.length });
+    preview.frameId = requestAnimationFrame(next => { void draw(next, generation).catch(fail); });
+  };
+  const start = async () => {
+    const generation = ++preview.generation;
+    try {
+      if (!canvas || typeof canvas.getContext !== "function") throw new Error("无法取得模型预览画布。");
+      if (!definition || definition.kind !== "live2d" || source?.kind !== "live2d") throw new Error("Live2D 预览需要已登记并读取的 Model3 资源。");
+      if (source?.missingTexturePages?.length) throw new Error("Live2D 纹理尚未映射：" + source.missingTexturePages.join("、") + "。");
+      const pageByImage = new Map();
+      for (const pageName of source?.atlasPages ?? []) {
+        const imageKey = definition.textures?.[pageName];
+        if (!imageKey) throw new Error("Live2D 纹理尚未映射：" + pageName + "。");
+        if (!pageByImage.has(imageKey)) pageByImage.set(imageKey, pageName);
+      }
+      const pageResults = await Promise.allSettled([...pageByImage].map(async ([imageKey, pageName]) => [imageKey, await loadTexture(pageName)]));
+      for (const result of pageResults) if (result.status === "fulfilled") {
+        const [imageKey, image] = result.value;
+        preview.images[imageKey] = image;
+      }
+      const failedPage = pageResults.find(result => result.status === "rejected");
+      if (failedPage?.status === "rejected") throw failedPage.reason;
+      if (preview.generation !== generation) { disposeImages(); return; }
+      const module = await loadFactory();
+      if (typeof module?.createBrowserLive2d !== "function" || typeof module?.createNovelLive2dFactory !== "function") {
+        throw new Error("Live2D 编辑器模块未导出浏览器 Core provider 和 Pocket VN factory。");
+      }
+      preview.provider = module.createBrowserLive2d(source.browserConfig, base + "/");
+      const factory = module.createNovelLive2dFactory(
+        { request: (capability, params) => preview.provider.invoke(capability, params) },
+        { [definition.source]: source },
+      );
+      const intent = {
+        key: modelKey,
+        loop: loop !== false,
+        ...(animation ? { animation } : {}),
+        ...(expression ? { expression } : {}),
+      };
+      preview.instance = await factory(definition, intent);
+      if (preview.generation !== generation) { dispose(); return; }
+      canvas.width = 480;
+      canvas.height = 700;
+      preview.running = true;
+      preview.lastTime = 0;
+      preview.frameId = requestAnimationFrame(now => { void draw(now, generation).catch(fail); });
+    } catch (error) {
+      if (preview.generation === generation) dispose();
+      throw error;
+    }
+  };
+  return { start, dispose, get running() { return preview.running; }, get frameCount() { return preview.frameCount; } };
+}
+
 function createStageSpinePreview({ canvas, character, onFrame, onError }) {
   let disposed = false;
   let controller = null;
@@ -3911,7 +3970,7 @@ function createStageSpinePreview({ canvas, character, onFrame, onError }) {
       if (state.assetsDirty) throw new Error("请先保存当前的模型资源注册表，再预览 canonical 模型数据。");
       const definition = state.assets.models?.[key];
       if (!definition) throw new Error(`模型资源键 ${key} 不存在。`);
-      if (definition.kind !== "spine") throw new Error("浏览器舞台预览目前只支持 Spine；Live2D 需要原生 Guest host。");
+      if (definition.kind !== "spine") throw new Error("Spine 舞台预览需要 Spine 模型资源。");
       const source = state.modelSources[key] ?? await readModelInfo(key, { render: false });
       if (disposed) return;
       controller = createNovelSpineCanvasPreview({
@@ -3923,6 +3982,42 @@ function createStageSpinePreview({ canvas, character, onFrame, onError }) {
         loadFactory: async () => state.spineModule ??= await import(`${base}/spine.js`),
         animation: character.model?.animation,
         skin: character.model?.skin,
+        loop: character.model?.loop,
+        background: null,
+        onFrame,
+        onError,
+      });
+      if (disposed) { controller.dispose(); controller = null; return; }
+      await controller.start();
+    } catch (error) {
+      if (!disposed) onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+  return { start, dispose() { disposed = true; controller?.dispose(); controller = null; } };
+}
+
+function createStageLive2dPreview({ canvas, character, onFrame, onError }) {
+  let disposed = false;
+  let controller = null;
+  const start = async () => {
+    try {
+      const key = character.model?.key;
+      if (!key) throw new Error("所选角色没有模型资源键。");
+      if (state.assetsDirty) throw new Error("请先保存当前的模型资源注册表，再预览 canonical 模型数据。");
+      const definition = state.assets.models?.[key];
+      if (!definition) throw new Error("模型资源键 " + key + " 不存在。");
+      if (definition.kind !== "live2d") throw new Error("所选模型不是 Live2D。");
+      const source = state.modelSources[key] ?? await readModelInfo(key, { render: false });
+      if (disposed) return;
+      controller = createNovelLive2dCanvasPreview({
+        canvas,
+        modelKey: key,
+        definition,
+        source,
+        loadTexture: pageName => loadModelTexture(key, pageName),
+        loadFactory: async () => state.live2dModule ??= await import(base + "/live2d.js"),
+        animation: character.model?.animation,
+        expression: character.model?.expression,
         loop: character.model?.loop,
         background: null,
         onFrame,
@@ -3958,42 +4053,60 @@ async function toggleModelPreview(key) {
   const toggle = registeredModelCard(key)?.querySelector("[data-action='toggle-model-preview']");
   if (toggle) toggle.textContent = "停止预览";
   const generation = preview.generation;
-  modelPreviewStatus(key, "正在加载官方 Spine 运行库与贴图…");
+  modelPreviewStatus(key, "正在加载官方模型运行库与贴图…");
   try {
     if (state.assetsDirty) throw new Error("请先保存当前的模型资源注册表，再预览 canonical 模型数据。");
     const definition = state.assets.models?.[key];
     if (!definition) throw new Error("模型资源键不存在。");
-    if (definition.kind !== "spine") throw new Error("Live2D Guest 播放需要原生模型 host；当前浏览器编辑器没有这个 host，因此不能提供实时模型预览。");
+    if (definition.kind !== "spine" && definition.kind !== "live2d") throw new Error("模型运行类型不受支持。");
     const source = state.modelSources[key] ?? await readModelInfo(key, { render: false });
     if (preview.generation !== generation) return;
-    const controller = createNovelSpineCanvasPreview({
-      canvas: preview.canvas,
-      modelKey: key,
-      definition,
-      source,
-      loadTexture: pageName => loadModelTexture(key, pageName),
-      loadFactory: async () => state.spineModule ??= await import(`${base}/spine.js`),
-      animation: preview.animation,
-      skin: preview.skin,
-      loop: preview.loop,
-      background: "#101713",
-      onFrame: ({ frameCount, meshCount }) => {
-        if (preview.generation !== generation) return;
-        preview.frameCount = frameCount;
-        modelPreviewStatus(key, `Spine 官方运行库 · ${frameCount} 帧 · ${meshCount} 个 mesh`, "success");
-      },
-      onError: error => {
-        if (preview.generation !== generation) return;
-        preview.error = error.message;
-        disposeModelPreview();
-        modelPreviewStatus(key, `模型预览失败：${error.message}`, "error");
-      },
-    });
+    const onFrame = ({ frameCount, meshCount }) => {
+      if (preview.generation !== generation) return;
+      preview.frameCount = frameCount;
+      const renderer = definition.kind === "live2d" ? "Live2D Cubism Core" : "Spine 官方运行库";
+      modelPreviewStatus(key, `${renderer} · ${frameCount} 帧 · ${meshCount} 个 mesh`, "success");
+    };
+    const onError = error => {
+      if (preview.generation !== generation) return;
+      preview.error = error.message;
+      disposeModelPreview();
+      modelPreviewStatus(key, `模型预览失败：${error.message}`, "error");
+    };
+    const controller = definition.kind === "live2d"
+      ? createNovelLive2dCanvasPreview({
+        canvas: preview.canvas,
+        modelKey: key,
+        definition,
+        source,
+        loadTexture: pageName => loadModelTexture(key, pageName),
+        loadFactory: async () => state.live2dModule ??= await import(base + "/live2d.js"),
+        animation: preview.animation,
+        expression: preview.expression,
+        loop: preview.loop,
+        background: "#101713",
+        onFrame,
+        onError,
+      })
+      : createNovelSpineCanvasPreview({
+        canvas: preview.canvas,
+        modelKey: key,
+        definition,
+        source,
+        loadTexture: pageName => loadModelTexture(key, pageName),
+        loadFactory: async () => state.spineModule ??= await import(base + "/spine.js"),
+        animation: preview.animation,
+        skin: preview.skin,
+        loop: preview.loop,
+        background: "#101713",
+        onFrame,
+        onError,
+      });
     preview.controller = controller;
     await controller.start();
     if (preview.generation === generation) {
       preview.running = controller.running;
-      modelPreviewStatus(key, "正在绘制 Spine 实际 mesh…");
+      modelPreviewStatus(key, definition.kind === "live2d" ? "正在绘制 Live2D 实际网格与遮罩…" : "正在绘制 Spine 实际 mesh…");
     }
   } catch (error) {
     if (preview.generation !== generation) return;
@@ -4050,7 +4163,7 @@ function renderModelAssets(section) {
   const header = node("div", "nv-asset-group-head");
   header.append(node("h2", "", "骨骼与动态模型"), button("＋ 添加模型", "quiet", addNovelModel));
   group.append(header);
-  group.append(node("p", "nv-field-help", "Spine Skeleton、Atlas 与贴图保持项目内单一来源；浏览器预览调用官方 Spine factory，再把真实 PMS1 mesh 交给现有 TEX_TRI 投影器。Live2D 项目资源可登记并由 Guest 原生 host 播放，浏览器编辑器没有该 host，因此会明确标记不能实时预览。"));
+  group.append(node("p", "nv-field-help", "Spine 与 Live2D 模型及贴图都从项目注册表读取。预览复用 Pocket VN factory 和现有 PMS1/TEX_TRI 投影器；Live2D 的遮罩、重复 UV、着色与混合由 Pocket Editor 网格 compositor 绘制。"));
   const models = ensureModelRegistry();
   if (!Object.keys(models).length) group.append(node("div", "nv-empty", "尚未登记动态模型。"));
   for (const [key, definition] of Object.entries(models)) {
@@ -4093,7 +4206,7 @@ function renderModelAssets(section) {
         delete definition.atlas;
       }
       delete state.modelSources[key];
-    }, { select: [["spine", "Spine JSON / binary"], ["live2d", "Live2D Model3（浏览器预览不可用）"]], rerender: true });
+    }, { select: [["spine", "Spine JSON / binary"], ["live2d", "Live2D Model3"]], rerender: true });
     field(card, definition.kind === "spine" ? "Spine Skeleton 路径" : "Live2D Model3 路径", definition.source, value => {
       definition.source = value;
       invalidateModelForPathEdit(key);
@@ -4121,7 +4234,7 @@ function renderModelAssets(section) {
       rerenderWorkspace();
     }));
     textures.append(textureHead);
-    if (!texturePages.length) textures.append(node("p", "nv-field-help", "读取 Spine 信息后会显示 Atlas 的每一页。"));
+    if (!texturePages.length) textures.append(node("p", "nv-field-help", "读取模型信息后会显示其纹理页。"));
     for (const pageName of texturePages) {
       const row = node("div", "nv-model-texture-row");
       row.append(node("code", "nv-model-page-name", pageName));
@@ -4150,13 +4263,18 @@ function renderModelAssets(section) {
     }, { multiline: true, placeholder: "idle\nwalk" });
     const info = node("div", "nv-model-info");
     if (sourceInfo) {
-      info.append(node("strong", "", `官方 Spine 解析：${sourceInfo.animationNames.length} 个动作 · ${sourceInfo.skinNames.length} 个皮肤 · ${sourceInfo.atlasPages.length} 个 Atlas 页`));
-      info.append(node("p", "nv-field-help", `动作：${sourceInfo.animationNames.join("、") || "（无）"}；皮肤：${sourceInfo.skinNames.join("、") || "（无）"}`));
+      const isLive2d = sourceInfo.kind === "live2d";
+      info.append(node("strong", "", isLive2d
+        ? `Cubism Model3：${sourceInfo.animationNames.length} 个动作 · ${sourceInfo.expressionNames.length} 个表情 · ${sourceInfo.atlasPages.length} 个纹理页`
+        : `官方 Spine 解析：${sourceInfo.animationNames.length} 个动作 · ${sourceInfo.skinNames.length} 个皮肤 · ${sourceInfo.atlasPages.length} 个 Atlas 页`));
+      info.append(node("p", "nv-field-help", isLive2d
+        ? `动作：${sourceInfo.animationNames.join("、") || "（无）"}；表情：${sourceInfo.expressionNames.join("、") || "（无）"}`
+        : `动作：${sourceInfo.animationNames.join("、") || "（无）"}；皮肤：${sourceInfo.skinNames.join("、") || "（无）"}`));
       if (sourceInfo.missingTexturePages.length) info.append(node("p", "nv-asset-diagnostic error", `尚未映射：${sourceInfo.missingTexturePages.join("、")}`));
       if (sourceInfo.premultipliedPages.length) info.append(node("p", "nv-asset-diagnostic error", `PMA 页当前不支持：${sourceInfo.premultipliedPages.join("、")}`));
       for (const item of sourceInfo.unsupported) info.append(node("p", "nv-asset-diagnostic error", `不支持 ${item.slot} / ${item.reason}：${item.detail}`));
     } else {
-      info.append(node("p", "nv-field-help", definition.kind === "spine" ? "读取动作、皮肤和 Atlas 页会由官方 Spine 4.3 解析器完成。" : "Live2D 资源会通过 Pocket Guest 的原生模型 host 播放；浏览器编辑器没有此 host，因此不显示静态替代预览。"));
+      info.append(node("p", "nv-field-help", definition.kind === "spine" ? "读取动作、皮肤和 Atlas 页会由官方 Spine 4.3 解析器完成。" : "读取 Model3 与已引用的动作、表情、物理和姿态文件后，可通过 Cubism Web Core 预览真实变形网格。"));
     }
     card.append(info);
     const actions = node("div", "nv-inline-actions nv-model-actions");
@@ -4168,6 +4286,8 @@ function renderModelAssets(section) {
           if (missing.length) {
             setNotice(`已读取官方 Spine 元信息。请为 ${missing.join("、")} 添加贴图映射。`, "warning");
           }
+        } else if (loaded.missingTexturePages.length) {
+          setNotice(`已读取 Live2D Model3。请为 ${loaded.missingTexturePages.join("、")} 添加纹理映射。`, "warning");
         }
         renderWorkspace();
       } catch (error) {
@@ -4175,13 +4295,13 @@ function renderModelAssets(section) {
         setNotice(`模型信息读取失败：${error.message}`, "error");
       }
     }));
-    if (definition.kind === "spine") {
+    if (definition.kind === "spine" || definition.kind === "live2d") {
       const previewToggle = button(state.modelPreview.running && state.modelPreview.key === key ? "停止预览" : "实时预览", "secondary", () => { void toggleModelPreview(key); });
       previewToggle.dataset.action = "toggle-model-preview";
       actions.append(previewToggle);
     }
     card.append(actions);
-    if (sourceInfo?.animationNames?.length || sourceInfo?.skinNames?.length) {
+    if (sourceInfo?.animationNames?.length || sourceInfo?.skinNames?.length || sourceInfo?.expressionNames?.length) {
       const playback = node("div", "nv-model-playback-controls");
       const animation = node("label", "nv-field");
       animation.append(node("span", "nv-field-label", "预览动作"));
@@ -4196,19 +4316,36 @@ function renderModelAssets(section) {
       });
       animation.append(animationSelect);
       playback.append(animation);
-      const skin = node("label", "nv-field");
-      skin.append(node("span", "nv-field-label", "预览皮肤"));
-      const skinSelect = node("select", "nv-input");
-      option(skinSelect, "", `默认${sourceInfo.skinNames[0] ? `（${sourceInfo.skinNames[0]}）` : ""}`);
-      for (const name of sourceInfo.skinNames) option(skinSelect, name, name);
-      skinSelect.value = state.modelPreview.key === key ? state.modelPreview.skin || "" : "";
-      skinSelect.addEventListener("change", () => {
-        state.modelPreview.key = key;
-        state.modelPreview.skin = skinSelect.value;
-        if (state.modelPreview.running) { disposeModelPreview(); void toggleModelPreview(key); }
-      });
-      skin.append(skinSelect);
-      playback.append(skin);
+      if (sourceInfo.skinNames?.length) {
+        const skin = node("label", "nv-field");
+        skin.append(node("span", "nv-field-label", "预览皮肤"));
+        const skinSelect = node("select", "nv-input");
+        option(skinSelect, "", `默认${sourceInfo.skinNames[0] ? `（${sourceInfo.skinNames[0]}）` : ""}`);
+        for (const name of sourceInfo.skinNames) option(skinSelect, name, name);
+        skinSelect.value = state.modelPreview.key === key ? state.modelPreview.skin || "" : "";
+        skinSelect.addEventListener("change", () => {
+          state.modelPreview.key = key;
+          state.modelPreview.skin = skinSelect.value;
+          if (state.modelPreview.running) { disposeModelPreview(); void toggleModelPreview(key); }
+        });
+        skin.append(skinSelect);
+        playback.append(skin);
+      }
+      if (sourceInfo.expressionNames?.length) {
+        const expression = node("label", "nv-field");
+        expression.append(node("span", "nv-field-label", "预览表情"));
+        const expressionSelect = node("select", "nv-input");
+        option(expressionSelect, "", `默认${sourceInfo.expressionNames[0] ? `（${sourceInfo.expressionNames[0]}）` : ""}`);
+        for (const name of sourceInfo.expressionNames) option(expressionSelect, name, name);
+        expressionSelect.value = state.modelPreview.key === key ? state.modelPreview.expression || "" : "";
+        expressionSelect.addEventListener("change", () => {
+          state.modelPreview.key = key;
+          state.modelPreview.expression = expressionSelect.value;
+          if (state.modelPreview.running) { disposeModelPreview(); void toggleModelPreview(key); }
+        });
+        expression.append(expressionSelect);
+        playback.append(expression);
+      }
       const loop = node("label", "nv-check");
       const loopInput = node("input");
       loopInput.type = "checkbox";

@@ -471,7 +471,7 @@ export function mount(container, options) {
     controls.append(order);
     if (character.model?.key) {
       const definition = current.assets?.models?.[character.model.key];
-      if (definition?.kind === "live2d") controls.append(element("p", "nv-field-help", "舞台实时预览仅支持官方 Spine；Live2D 需要原生 Guest host，请在真实试玩中核对姿态。"));
+      if (definition?.kind === "live2d") controls.append(element("p", "nv-field-help", "舞台使用官方 Cubism Web Core 与 Pocket VN Live2D factory，按实际姿态绘制 PMS1 网格、遮罩与混合效果。"));
       else if (!definition) controls.append(element("p", "nv-stage-asset-error", `未登记动态模型资源 · ${character.model.key}`));
       else controls.append(element("p", "nv-field-help", "舞台使用官方 Spine 运行库预览该场景的真实网格与动作。"));
     }
@@ -608,7 +608,8 @@ export function mount(container, options) {
       if (character.model?.key) {
         const modelKey = character.model.key;
         const definition = state.assets?.models?.[modelKey];
-        if (definition?.kind === "spine") {
+        if (definition?.kind === "spine" || definition?.kind === "live2d") {
+          const previewKind = definition.kind;
           const signature = JSON.stringify({ model: character.model, definition });
           let preview = previousPreviews.get(id);
           if (preview && preview.signature !== signature) {
@@ -620,15 +621,13 @@ export function mount(container, options) {
             canvas.width = 480;
             canvas.height = 700;
             canvas.setAttribute("aria-hidden", "true");
-            const status = element("span", "nv-authoring-model-status", "正在加载官方 Spine 预览…");
-            preview = { signature, canvas, status, handle: null };
-            previewsToStart.push({ id, character, preview });
+            const status = element("span", "nv-authoring-model-status", previewKind === "live2d" ? "正在加载 Cubism Web Core 预览…" : "正在加载官方 Spine 预览…");
+            preview = { signature, kind: previewKind, canvas, status, handle: null };
+            previewsToStart.push({ id, character, preview, kind: previewKind });
           }
           preview.canvas.dataset.modelPreviewCharacter = id;
           nextPreviews.set(id, preview);
           item.append(preview.canvas, preview.status);
-        } else if (definition?.kind === "live2d") {
-          item.append(element("span", "nv-stage-missing-character", `Live2D 需要原生 Guest host · ${id}`));
         } else {
           item.append(element("span", "nv-stage-missing-character", `未登记动态模型资源 · ${modelKey}`));
         }
@@ -648,13 +647,14 @@ export function mount(container, options) {
       if (nextPreviews.get(id) !== previous) disposeModelPreview(previous);
     }
     modelPreviews = nextPreviews;
-    for (const { id, character, preview } of previewsToStart) {
-      if (typeof options.createSpinePreview !== "function") {
-        preview.status.textContent = "Pocket Spine 预览未连接。";
+    for (const { id, character, preview, kind } of previewsToStart) {
+      const createPreview = kind === "live2d" ? options.createLive2dPreview : options.createSpinePreview;
+      if (typeof createPreview !== "function") {
+        preview.status.textContent = kind === "live2d" ? "Pocket Live2D 预览未连接。" : "Pocket Spine 预览未连接。";
         continue;
       }
       const isCurrentPreview = () => !disposed && modelPreviews.get(id) === preview && preview.canvas.isConnected;
-      preview.handle = options.createSpinePreview({
+      preview.handle = createPreview({
         canvas: preview.canvas,
         character,
         onFrame: ({ frameCount, meshCount }) => {
@@ -663,13 +663,13 @@ export function mount(container, options) {
           preview.canvas.dataset.frameCount = String(frameCount);
           preview.canvas.dataset.meshCount = String(meshCount);
           if (firstFrame) {
-            preview.status.textContent = "Spine 动画预览中";
+            preview.status.textContent = kind === "live2d" ? "Live2D 动画预览中" : "Spine 动画预览中";
             preview.status.dataset.kind = "success";
           }
         },
         onError: error => {
           if (!isCurrentPreview()) return;
-          preview.status.textContent = `Spine 预览失败：${error.message}`;
+          preview.status.textContent = `${kind === "live2d" ? "Live2D" : "Spine"} 预览失败：${error.message}`;
           preview.status.dataset.kind = "error";
         },
       });

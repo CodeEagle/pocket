@@ -217,7 +217,7 @@ test("registry asset path diagnostics identify fields while retaining the editab
   }
 });
 
-test("Spine and Live2D registry paths keep field locations and optional runtime support semantics", async () => {
+test("Spine and Live2D registry paths keep field locations without blanket Live2D warnings", async () => {
   const project = await makeProject();
   try {
     const spineCases: Array<{ field: string; update: (assets: any) => void }> = [
@@ -243,7 +243,7 @@ test("Spine and Live2D registry paths keep field locations and optional runtime 
     };
     const live2dDiagnostics = validateAssetRegistry(live2dAssets, project);
     assert.deepEqual(live2dDiagnostics.filter(issue => issue.severity === "error"), []);
-    assert.ok(live2dDiagnostics.some(issue => issue.code === "models.runtime.unsupported" && issue.location?.field === "models.actor"));
+    assert.equal(live2dDiagnostics.some(issue => issue.code === "models.runtime.unsupported"), false);
 
     live2dAssets.models.actor.source = "models/missing.model3.json";
     const live2dSource = validateAssetRegistry(live2dAssets, project).find(issue => issue.code === "assets.missing");

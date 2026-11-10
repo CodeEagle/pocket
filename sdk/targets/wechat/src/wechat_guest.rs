@@ -15,6 +15,9 @@ use serde_json::json;
 use std::{cell::RefCell, rc::Rc};
 
 const MAX_HOST_PACKET: usize = 64 * 1024;
+// A real model frame contains bounded packed PMS1 buffers. Guest requests
+// retain the smaller limit; only trusted host responses use the binary budget.
+const MAX_HOST_RESPONSE: usize = 4 * 1024 * 1024;
 
 fn layout_value<'js>(ctx: Ctx<'js>, host: usize, id: i32) -> rquickjs::Result<Value<'js>> {
     let host = unsafe { &*(host as *const WasmHost) };
@@ -227,7 +230,7 @@ fn with_guest<T>(host: &WasmHost, f: impl for<'js> FnOnce(Ctx<'js>) -> Result<T,
 
 #[no_mangle]
 pub unsafe extern "C" fn web_wechat_deliver(host: &WasmHost, p: *const u8, n: usize) -> i32 {
-    if n == 0 || n > MAX_HOST_PACKET {
+    if n == 0 || n > MAX_HOST_RESPONSE {
         return -1;
     }
     let bytes = std::slice::from_raw_parts(p, n);
