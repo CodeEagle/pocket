@@ -133,6 +133,8 @@ function copySources(out: string): void {
   rmSync(join(out, "packages/pocket_tftc/test"), { recursive: true, force: true });
   copyTree(join(SDK_ROOT, "packages/pocket_vn"), join(out, "packages/pocket_vn"));
   rmSync(join(out, "packages/pocket_vn/test"), { recursive: true, force: true });
+  copyTree(join(SDK_ROOT, "packages/pocket_spine"), join(out, "packages/pocket_spine"));
+  rmSync(join(out, "packages/pocket_spine/test"), { recursive: true, force: true });
   copyFile(
     join(SDK_ROOT, "packages/pocket_flutter/shaders/liquid_glass.frag"),
     join(out, "packages/pocket_flutter/shaders/liquid_glass.frag"),
@@ -183,8 +185,9 @@ function writeRepositoryFiles(out: string, platform?: Platform): void {
     type: "module",
     license: "MIT",
     engines: { node: ">=22.22.2" },
-    workspaces: ["packages/pocket_ui", "packages/pocket_tftc"],
+    workspaces: ["packages/pocket_ui", "packages/pocket_tftc", "packages/pocket_spine"],
     dependencies: {
+      "@pocket/spine": "0.1.0",
       bun: "1.3.9",
       "find-process": "2.1.1",
       "tree-kill": "1.2.2",

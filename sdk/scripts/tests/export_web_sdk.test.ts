@@ -90,6 +90,7 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
     "packages/pocket_vn/src/engine.ts",
     "packages/pocket_vn/src/asset-references.ts",
     "packages/pocket_vn/src/collections.ts",
+    "packages/pocket_spine/src/index.ts",
     "packages/pocket_flutter/shaders/liquid_glass.frag",
   ]) expect(existsSync(join(output, path)), path).toBe(true);
 
@@ -98,11 +99,16 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(existsSync(join(output, "editor/test"))).toBe(false);
   expect(existsSync(join(output, "packages/pocket_tftc/test"))).toBe(false);
   expect(existsSync(join(output, "packages/pocket_vn/test"))).toBe(false);
+  expect(existsSync(join(output, "packages/pocket_spine/test"))).toBe(false);
+  expect(existsSync(join(output, "packages/pocket_spine/node_modules"))).toBe(false);
+  expect(existsSync(join(output, "packages/pocket_live2d"))).toBe(false);
 
   const manifest = JSON.parse(readFileSync(join(output, "package.json"), "utf8"));
   expect(manifest.version).toBe(SDK_VERSION);
   expect(manifest.workspaces).toContain("packages/pocket_tftc");
   expect(manifest.workspaces).toContain("packages/pocket_ui");
+  expect(manifest.workspaces).toContain("packages/pocket_spine");
+  expect(manifest.dependencies?.["@pocket/spine"]).toBe("0.1.0");
   expect(manifest.dependencies?.["@pocket/ui"]).toBeUndefined();
   expect(manifest.dependencies?.["find-process"]).toBe("2.1.1");
   expect(manifest.dependencies?.["tree-kill"]).toBe("1.2.2");
@@ -117,6 +123,9 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(manifest.scripts.setup).not.toContain("flutter");
   expect(manifest.dependencies?.["@abandonware/noble"]).toBeUndefined();
   expect(manifest.optionalDependencies?.["@abandonware/noble"]).toBe("1.9.2-26");
+  const spineManifest = JSON.parse(readFileSync(join(output, "packages/pocket_spine/package.json"), "utf8"));
+  expect(spineManifest.name).toBe("@pocket/spine");
+  expect(spineManifest.dependencies?.["@esotericsoftware/spine-core"]).toBe("4.3.13");
   const readme = readFileSync(join(output, "README.md"), "utf8");
   expect(readme).toContain("QJBC");
   expect(readme).toContain("docs/GAME_INPUT_IMPLEMENTATION.md");

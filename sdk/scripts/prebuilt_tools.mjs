@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
-export const SDK_VERSION = '0.1.6';
+export const SDK_VERSION = '0.1.7';
 export const UPSTREAM_REVISION = '99924de47c62fa36f526a8791055d91cbbdb3836';
 export const BYTECODE_ABI = 'quickjs-bytecode-v1:5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021';
 export const platformPackageName = (platform = process.platform, arch = process.arch) => `@pocket/tools-${platform}-${arch}`;
