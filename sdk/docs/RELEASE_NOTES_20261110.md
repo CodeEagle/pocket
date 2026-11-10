@@ -24,6 +24,10 @@ The updated FunApp Release was installed with application data preserved. Its fi
 - Local `agy` Argon Medium reviews found no remaining blocking issues in these changes. The modal-route shake edge case found during review was fixed before installation.
 - Web SDK distribution is exported from the committed source snapshot and verified separately. A source package is not an npm publication or a deployed website.
 
+## Release build follow-up
+
+The `sdk-v0.1.2` CI run stopped before publication because the Demo Flutter lockfile did not match the repository-pinned Flutter 3.47.9. The lockfile is regenerated with that exact toolchain and checked again with `--enforce-lockfile`; the release workflow keeps the strict lock check. The corrected distribution advances to 0.1.3 and uses a new immutable release tag.
+
 ## Detailed records
 
 - [Cached startup and Home exit](CACHE_NO_REFRESH_HOME_EXIT.md)

@@ -22,7 +22,7 @@ No source-evaluation or mock-runtime fallback is provided. Missing browser hardw
 
 ## Release operation
 
-The current SDK distribution version is **0.1.2**. `.github/workflows/toolchain.yml` is the existing build, verification and GitHub Release workflow; it validates `sdk/package.json` against the shared `SDK_VERSION`, then builds both `darwin-arm64` and `win32-x64` packages. Push the matching `sdk-v0.1.2` tag to trigger it automatically, or dispatch the workflow with `publish_release=true` and `update_existing_release=false`. The Release is created only after both platform packages pass consumer acceptance; it includes the standalone SDK tarballs, platform tool archives, checksums and acceptance reports. The workflow does not publish to npm.
+The current SDK distribution version is **0.1.3**. `.github/workflows/toolchain.yml` is the existing build, verification and GitHub Release workflow; it validates `sdk/package.json` against the shared `SDK_VERSION`, then builds both `darwin-arm64` and `win32-x64` packages. Push the matching `sdk-v0.1.3` tag to trigger it automatically, or dispatch the workflow with `publish_release=true` and `update_existing_release=false`. The Release is created only after both platform packages pass consumer acceptance; it includes the standalone SDK tarballs, platform tool archives, checksums and acceptance reports. The workflow does not publish to npm.
 
 The exporter’s optional `--publish` operation publishes the standalone source repository and is separate from the versioned GitHub Release attachments.
 

@@ -28,7 +28,7 @@ registry；开发者应下载与当前系统匹配的独立 SDK 包：
 
 ## GitHub Actions 发布
 
-`.github/workflows/toolchain.yml` 是 0.1.2 的唯一发布入口。它在 macOS arm64 和
+`.github/workflows/toolchain.yml` 是 0.1.3 的唯一发布入口。它在 macOS arm64 和
 Windows x64 runner 上从固定上游源码构建平台工具包，再分别生成两个带
 `npm-shrinkwrap.json` 的独立 SDK tarball。每个 SDK tarball 只保留自己的平台工具包，
 并在对应目标平台的干净目录中执行 `npm run setup`、`npm run doctor`，再运行：
@@ -39,11 +39,11 @@ node scripts/tests/platform_package_smoke.mjs --sdk-root=/path/to/sdk
 
 该验收会实际加载平台 Noble addon，构建 App/Game 模板的 QJBC/PAK，驱动 Preview 输入
 并检查 Studio 固定 8791 端口的启动、健康检查、状态和停止。两个平台全部通过后，工作流
-才会生成 GitHub Release 附件：`pocket-web-sdk-tools-darwin-arm64-0.1.2.tgz`、
-`pocket-web-sdk-tools-win32-x64-0.1.2.tgz`、对应裸平台包、`SHA256SUMS` 以及两平台
+才会生成 GitHub Release 附件：`pocket-web-sdk-tools-darwin-arm64-0.1.3.tgz`、
+`pocket-web-sdk-tools-win32-x64-0.1.3.tgz`、对应裸平台包、`SHA256SUMS` 以及两平台
 验收 JSON。工作流不会执行 `npm publish`。
 
-推送 `sdk-v0.1.2` 这类版本 tag，或手动运行带发布开关的工作流：
+推送 `sdk-v0.1.3` 这类版本 tag，或手动运行带发布开关的工作流：
 
 ```sh
 gh workflow run toolchain.yml -f publish_release=true -f update_existing_release=false
@@ -168,7 +168,7 @@ Windows BLE 实机的连接、notify、battery 和断连验收。
 ## Windows 历史 consumer 验收
 
 Windows CI 已切换到 Node.js 24 LTS（最低 Node.js 22.22.2），因为
-`octane@0.1.26` 声明了 `engines >=22.22.2`；Node 20 会让 npm 的 optional
+`octane@0.1.36` 声明了 `engines >=22.22.2`；Node 20 会让 npm 的 optional
 platform dependency 检查失败并删除整个平台包。现已使用 Node 24 LTS，并由
 此前 consumer run `42205580194` 完成干净安装、平台包解析、Preview smoke 和 Noble
 WinRT 加载。Linux 仍未完成独立平台包构建；Windows CI 绿灯也不能替代 Windows
