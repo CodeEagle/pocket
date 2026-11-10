@@ -168,7 +168,7 @@ Windows BLE 实机的连接、notify、battery 和断连验收。
 ## Windows 历史 consumer 验收
 
 Windows CI 已切换到 Node.js 24 LTS（最低 Node.js 22.22.2），因为
-`octane@0.1.36` 声明了 `engines >=22.22.2`；Node 20 会让 npm 的 optional
+`octane@0.1.26` 声明了 `engines >=22.22.2`；Node 20 会让 npm 的 optional
 platform dependency 检查失败并删除整个平台包。现已使用 Node 24 LTS，并由
 此前 consumer run `42205580194` 完成干净安装、平台包解析、Preview smoke 和 Noble
 WinRT 加载。Linux 仍未完成独立平台包构建；Windows CI 绿灯也不能替代 Windows
