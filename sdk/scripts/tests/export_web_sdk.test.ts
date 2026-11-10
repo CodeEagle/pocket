@@ -1,14 +1,53 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { SDK_VERSION } from "../prebuilt_tools.mjs";
 
 const repository = resolve(import.meta.dir, "../../..");
+const sdkBuild = join(repository, "sdk", ".pocket-build");
 const output = mkdtempSync(join(tmpdir(), "pocket-web-sdk-export-test-"));
 const darwinOutput = mkdtempSync(join(tmpdir(), "pocket-web-sdk-export-darwin-test-"));
 const windowsOutput = mkdtempSync(join(tmpdir(), "pocket-web-sdk-export-windows-test-"));
 const missingPlatformOutput = mkdtempSync(join(tmpdir(), "pocket-web-sdk-export-missing-test-"));
+
+function withPlatformArchiveFixtures<T>(run: (fixtures: ReadonlyMap<string, Buffer>) => T): T {
+  const buildDirectoryExisted = existsSync(sdkBuild);
+  mkdirSync(sdkBuild, { recursive: true });
+  const originals = new Map<string, Buffer | undefined>();
+  const fixtures = new Map<string, Buffer>();
+  for (const platform of ["darwin-arm64", "win32-x64"]) {
+    const name = `pocket-tools-${platform}-${SDK_VERSION}.tgz`;
+    const path = join(sdkBuild, name);
+    originals.set(name, existsSync(path) ? readFileSync(path) : undefined);
+    // A sentinel file verifies the exporter copies the selected archive. It is
+    // deliberately not a valid package and does not stand in for a real build.
+    const bytes = Buffer.from(`export-test fixture: ${name}`);
+    fixtures.set(name, bytes);
+    writeFileSync(path, bytes);
+  }
+  try {
+    return run(fixtures);
+  } finally {
+    for (const [name, original] of originals) {
+      const path = join(sdkBuild, name);
+      if (original === undefined) rmSync(path, { force: true });
+      else writeFileSync(path, original);
+    }
+    if (!buildDirectoryExisted && readdirSync(sdkBuild).length === 0) {
+      rmSync(sdkBuild, { recursive: true, force: true });
+    }
+  }
+}
 
 afterAll(() => {
   for (const path of [output, darwinOutput, windowsOutput, missingPlatformOutput]) rmSync(path, { recursive: true, force: true });
@@ -61,7 +100,7 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(existsSync(join(output, "packages/pocket_vn/test"))).toBe(false);
 
   const manifest = JSON.parse(readFileSync(join(output, "package.json"), "utf8"));
-  expect(manifest.version).toBe("0.1.1");
+  expect(manifest.version).toBe(SDK_VERSION);
   expect(manifest.workspaces).toContain("packages/pocket_tftc");
   expect(manifest.workspaces).toContain("packages/pocket_ui");
   expect(manifest.dependencies?.["@pocket/ui"]).toBeUndefined();
@@ -85,44 +124,47 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(readme).toContain("docs/LARGE_IMAGE_IMPLEMENTATION.md");
 }, 30_000);
 
-test("export_web_sdk can produce a single-platform SDK package", () => {
-  for (const [platform, target, os, cpu] of [
-    ["darwin-arm64", darwinOutput, "darwin", "arm64"],
-    ["win32-x64", windowsOutput, "win32", "x64"],
-  ] as const) {
-    const result = spawnSync("bun", ["sdk/scripts/export_web_sdk.ts", "--out", target, "--platform", platform], {
-      cwd: repository,
-      encoding: "utf8",
-    });
-    expect(`${result.stdout}${result.stderr}`).toContain("export_web_sdk: generated");
-    expect(result.status).toBe(0);
-    const manifest = JSON.parse(readFileSync(join(target, "package.json"), "utf8"));
-    expect(manifest.name).toBe(`@pocket/web-sdk-tools-${platform}`);
-    expect(manifest.os).toEqual([os]);
-    expect(manifest.cpu).toEqual([cpu]);
-    expect(Object.keys(manifest.optionalDependencies).filter((name) => name.startsWith("@pocket/tools-"))).toEqual([
-      `@pocket/tools-${platform}`,
-    ]);
-    expect(existsSync(join(target, `prebuilt/pocket-tools-${platform}-0.1.1.tgz`))).toBe(true);
-    const readme = readFileSync(join(target, "README.md"), "utf8");
-    expect(readme).toContain(`# Pocket Web SDK (${platform})`);
-  }
-}, 30_000);
+test("export_web_sdk packages only the requested platform archive and fails closed when it is absent", () => {
+  withPlatformArchiveFixtures((fixtures) => {
+    for (const [platform, target, os, cpu] of [
+      ["darwin-arm64", darwinOutput, "darwin", "arm64"],
+      ["win32-x64", windowsOutput, "win32", "x64"],
+    ] as const) {
+      const result = spawnSync("bun", ["sdk/scripts/export_web_sdk.ts", "--out", target, "--platform", platform], {
+        cwd: repository,
+        encoding: "utf8",
+      });
+      expect(`${result.stdout}${result.stderr}`).toContain("export_web_sdk: generated");
+      expect(result.status).toBe(0);
+      const manifest = JSON.parse(readFileSync(join(target, "package.json"), "utf8"));
+      expect(manifest.version).toBe(SDK_VERSION);
+      expect(manifest.name).toBe(`@pocket/web-sdk-tools-${platform}`);
+      expect(manifest.os).toEqual([os]);
+      expect(manifest.cpu).toEqual([cpu]);
+      expect(
+        Object.keys(manifest.optionalDependencies).filter((name) => name.startsWith("@pocket/tools-")),
+      ).toEqual([`@pocket/tools-${platform}`]);
+      const archiveName = `pocket-tools-${platform}-${SDK_VERSION}.tgz`;
+      expect(readFileSync(join(target, "prebuilt", archiveName))).toEqual(fixtures.get(archiveName));
+      const readme = readFileSync(join(target, "README.md"), "utf8");
+      expect(readme).toContain(`# Pocket Web SDK (${platform})`);
+    }
 
-test("export_web_sdk rejects a requested platform whose archive is unavailable", () => {
-  const archive = join(repository, "sdk/.pocket-build/pocket-tools-win32-x64-0.1.1.tgz");
-  const hiddenArchive = `${archive}.test-hidden`;
-  expect(existsSync(archive)).toBe(true);
-  renameSync(archive, hiddenArchive);
-  try {
-    const result = spawnSync("bun", [
-      "sdk/scripts/export_web_sdk.ts",
-      "--out", missingPlatformOutput,
-      "--platform", "win32-x64",
-    ], { cwd: repository, encoding: "utf8" });
-    expect(result.status).not.toBe(0);
-    expect(`${result.stdout}${result.stderr}`).toContain("missing win32-x64 prebuilt archive");
-  } finally {
-    renameSync(hiddenArchive, archive);
-  }
+    const archiveName = `pocket-tools-win32-x64-${SDK_VERSION}.tgz`;
+    const archive = join(sdkBuild, archiveName);
+    rmSync(archive);
+    try {
+      const result = spawnSync("bun", [
+        "sdk/scripts/export_web_sdk.ts",
+        "--out",
+        missingPlatformOutput,
+        "--platform",
+        "win32-x64",
+      ], { cwd: repository, encoding: "utf8" });
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`).toContain("missing win32-x64 prebuilt archive");
+    } finally {
+      writeFileSync(archive, fixtures.get(archiveName)!);
+    }
+  });
 }, 30_000);

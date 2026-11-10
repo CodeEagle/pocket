@@ -3,11 +3,11 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { BYTECODE_ABI, UPSTREAM_REVISION, validateToolsPackage, resolvePrebuiltTools, nativeBindingEnvironment } from '../prebuilt_tools.mjs';
+import { BYTECODE_ABI, SDK_VERSION, UPSTREAM_REVISION, validateToolsPackage, resolvePrebuiltTools, nativeBindingEnvironment } from '../prebuilt_tools.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'pocket-prebuilt-integrity-'));
-  const manifest: any = { schemaVersion: 1, sdkVersion: '0.1.1', upstreamRevision: UPSTREAM_REVISION,
+  const manifest: any = { schemaVersion: 1, sdkVersion: SDK_VERSION, upstreamRevision: UPSTREAM_REVISION,
     bytecodeAbi: BYTECODE_ABI, platform: process.platform, arch: process.arch, files: {} };
   const suffix = process.platform === 'win32' ? '.exe' : '';
   for (const file of [

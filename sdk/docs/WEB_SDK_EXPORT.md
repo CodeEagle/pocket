@@ -20,6 +20,12 @@ No source-evaluation or mock-runtime fallback is provided. Missing browser hardw
 
 `sdk/scripts/export_web_sdk.ts` creates a reproducible source repository containing the Web/WeChat builders, browser target, Editor, native probe source, pinned bootstrap, JS UI package, shader resource, license and selected integration documentation. Web builds use the main-thread renderer by default; pass `--render-worker` to include `pocket-render-worker.js`, or set `renderWorker: true` at runtime when that asset is present. `sdk/scripts/package_toolchain.ts` carries the precompiled entry from `.pocket-build/web-engine/pocket-render-worker.js` in the matching platform toolchain package into `web/pocket-render-worker.js` next to the matching `pocket-web.js` when available. `renderWorker: false` or `--no-render-worker` explicitly selects a main-thread package. The runtime fails clearly when `OffscreenCanvas` or the required worker policy is unavailable. It deliberately excludes `.cache`, native `target`, `node_modules`, Flutter/Dart packages and generated binaries. With `--publish`, it uses the CodeEagle GitHub credential for API creation and an SSH Git remote.
 
+## Release operation
+
+The current SDK distribution version is **0.1.2**. `.github/workflows/toolchain.yml` is the existing build, verification and GitHub Release workflow; it validates `sdk/package.json` against the shared `SDK_VERSION`, then builds both `darwin-arm64` and `win32-x64` packages. Push the matching `sdk-v0.1.2` tag to trigger it automatically, or dispatch the workflow with `publish_release=true` and `update_existing_release=false`. The Release is created only after both platform packages pass consumer acceptance; it includes the standalone SDK tarballs, platform tool archives, checksums and acceptance reports. The workflow does not publish to npm.
+
+The exporter’s optional `--publish` operation publishes the standalone source repository and is separate from the versioned GitHub Release attachments.
+
 ## Validation
 
 - Focused Web/export tests: 3 passed, 0 failed.

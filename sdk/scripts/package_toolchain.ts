@@ -21,11 +21,11 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { SDK_VERSION } from "./prebuilt_tools.mjs";
 
 const SDK_ROOT = resolve(import.meta.dir, "..");
 const DEFAULT_OUT = join(SDK_ROOT, ".pocket-build", "toolchain-package");
 const PINNED_REVISION = "99924de47c62fa36f526a8791055d91cbbdb3836";
-const SDK_VERSION = "0.1.1";
 
 export type PackageToolchainOptions = { sdkRoot: string; out: string; force: boolean; version: string };
 export type PackageToolchainDependencies = {

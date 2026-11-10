@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { packageToolchain, readBytecodeAbi } from "../package_toolchain.ts";
+import { SDK_VERSION } from "../prebuilt_tools.mjs";
 
 function fixture(withNoble = true, withRenderWorker = true): string {
   const root = mkdtempSync(join(tmpdir(), "pocket-toolchain-package-test-"));
@@ -48,7 +49,7 @@ test("packages compiler sources and records payload hashes", () => {
   const root = fixture();
   const output = join(root, ".pocket-build", "out");
   try {
-    packageToolchain({ sdkRoot: root, out: output, force: false, version: "0.1.1" }, { readAbi: () => "quickjs-bytecode-v1:test-abi" });
+    packageToolchain({ sdkRoot: root, out: output, force: false, version: SDK_VERSION }, { readAbi: () => "quickjs-bytecode-v1:test-abi" });
     expect(existsSync(join(output, "bin/pocketjs_bytecode"))).toBe(true);
     expect(existsSync(join(output, "compiler/framework/entry.ts"))).toBe(true);
     expect(existsSync(join(output, "engine/pocketjs.wasm"))).toBe(true);
@@ -77,7 +78,7 @@ test("fails before creating an output package when a native binary is absent", (
   const output = join(root, ".pocket-build", "out");
   rmSync(join(root, "native", "target", "release", "pocket_probe"));
   try {
-    expect(() => packageToolchain({ sdkRoot: root, out: output, force: false, version: "0.1.1" }, { readAbi: () => "quickjs-bytecode-v1:test-abi" })).toThrow("missing release binary");
+    expect(() => packageToolchain({ sdkRoot: root, out: output, force: false, version: SDK_VERSION }, { readAbi: () => "quickjs-bytecode-v1:test-abi" })).toThrow("missing release binary");
     expect(existsSync(output)).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -88,7 +89,7 @@ test("keeps the package usable when optional Noble binding is unavailable", () =
   const root = fixture(false);
   const output = join(root, ".pocket-build", "out");
   try {
-    packageToolchain({ sdkRoot: root, out: output, force: false, version: "0.1.1" }, { readAbi: () => "quickjs-bytecode-v1:test-abi" });
+    packageToolchain({ sdkRoot: root, out: output, force: false, version: SDK_VERSION }, { readAbi: () => "quickjs-bytecode-v1:test-abi" });
     const manifest = JSON.parse(readFileSync(join(output, "manifest.json"), "utf8"));
     expect(manifest.noble.included).toBe(false);
     expect(manifest.hci.included).toBe(false);
@@ -102,7 +103,7 @@ test("does not advertise a render Worker when the compiled asset is absent", () 
   const root = fixture(true, false);
   const output = join(root, ".pocket-build", "out");
   try {
-    packageToolchain({ sdkRoot: root, out: output, force: false, version: "0.1.1" }, { readAbi: () => "quickjs-bytecode-v1:test-abi" });
+    packageToolchain({ sdkRoot: root, out: output, force: false, version: SDK_VERSION }, { readAbi: () => "quickjs-bytecode-v1:test-abi" });
     const manifest = JSON.parse(readFileSync(join(output, "manifest.json"), "utf8"));
     expect(manifest.webEngine.included).toBe(true);
     expect(manifest.webEngine.renderWorker).toBeUndefined();
@@ -131,7 +132,7 @@ test("rejects packaging when inline-fonts compiler sources are missing", () => {
   const output = join(root, ".pocket-build", "out");
   rmSync(join(root, ".cache", "pocketjs", "framework", "src", "inline-fonts.ts"));
   try {
-    expect(() => packageToolchain({ sdkRoot: root, out: output, force: false, version: "0.1.1" }, { readAbi: () => "quickjs-bytecode-v1:test-abi" })).toThrow(/missing patched compiler source.*inline-fonts\.ts/);
+    expect(() => packageToolchain({ sdkRoot: root, out: output, force: false, version: SDK_VERSION }, { readAbi: () => "quickjs-bytecode-v1:test-abi" })).toThrow(/missing patched compiler source.*inline-fonts\.ts/);
     expect(existsSync(output)).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
