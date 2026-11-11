@@ -133,18 +133,22 @@ function inside(path, root) {
   return child === base || child.startsWith(`${base}/`);
 }
 
+function sameFileSystemPath(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  if (normalized(resolve(left)) === normalized(resolve(right))) return true;
+  const canonical = process.platform === "win32" ? (realpathSync.native || realpathSync) : realpathSync;
+  try { return normalized(canonical(left)) === normalized(canonical(right)); }
+  catch { return false; }
+}
+
 function commandIncludesPath(command, expectedPath) {
   if (normalized(command).includes(normalized(expectedPath))) return true;
-  let canonical;
-  try { canonical = normalized(realpathSync(expectedPath)); }
-  catch { return false; }
   // Windows may report an 8.3 path in one process and a long path in another.
   // Compare actual files; a matching basename alone is never sufficient ownership.
   for (const match of String(command).matchAll(/"([^"]+)"|'([^']+)'|(\S+)/g)) {
     const candidate = match[1] || match[2] || match[3];
     if (!candidate || !candidate.replaceAll("\\", "/").endsWith("/editor/server.ts")) continue;
-    try { if (normalized(realpathSync(candidate)) === canonical) return true; }
-    catch { /* process arguments need not all be paths */ }
+    if (sameFileSystemPath(candidate, expectedPath)) return true;
   }
   return false;
 }
@@ -295,7 +299,7 @@ function makePidRecord(pid, config, startedAt = new Date().toISOString()) {
 function parsePidRecord(raw) {
   try {
     const record = JSON.parse(raw);
-    if (record.server !== SERVER || record.workspace !== WORKSPACE || record.port !== PORT) return undefined;
+    if (!sameFileSystemPath(record.server, SERVER) || !sameFileSystemPath(record.workspace, WORKSPACE) || record.port !== PORT) return undefined;
     if (record.pid !== null && (!Number.isInteger(record.pid) || record.pid <= 0)) return undefined;
     // Older PID records have no config. A live server's health response can
     // supply its existing binding during the first restart after this update.
@@ -320,7 +324,7 @@ function writeStoppedRecord(config) {
 }
 
 function configFromHealth(health) {
-  if (!health || health.ok !== true || health.service !== "pocket-editor" || resolve(health.workspace || "") !== WORKSPACE) return {};
+  if (!health || health.ok !== true || health.service !== "pocket-editor" || !sameFileSystemPath(health.workspace, WORKSPACE)) return {};
   return serviceConfig(health);
 }
 
@@ -647,15 +651,7 @@ async function main() {
 }
 
 function isEntrypoint(entry = process.argv[1], moduleUrl = import.meta.url) {
-  if (!entry) return false;
-  const entryPath = resolve(entry);
-  const modulePath = resolve(fileURLToPath(moduleUrl));
-  if (entryPath === modulePath) return true;
-  try {
-    return realpathSync(entryPath) === realpathSync(modulePath);
-  } catch {
-    return false;
-  }
+  return Boolean(entry && sameFileSystemPath(entry, fileURLToPath(moduleUrl)));
 }
 
 export { configFromHealth, editorToolEnvironment, isEntrypoint, commandIncludesPath, protectedRetirementPlan, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
