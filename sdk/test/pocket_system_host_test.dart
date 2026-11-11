@@ -15,6 +15,7 @@ import 'package:pocket_flutter/pocket_flutter.dart'
         PocketFrame,
         PocketImageResource,
         PocketOp,
+        PocketHostSurfaceOp,
         PocketRectOp,
         PocketRuntime,
         PocketView,
@@ -31,6 +32,8 @@ final class _ProbeChildRuntime
   int frameCalls = 0;
   final List<int> frameDeltas = <int>[];
   final List<Map<String, dynamic>> sentMessages = <Map<String, dynamic>>[];
+  void Function(Map<String, dynamic> message)? onMessage;
+  PocketFrame? frameOverride;
   Map<String, dynamic>? presetsBeforeFirstFrame;
 
   static const PocketFrame _frame = PocketFrame(
@@ -74,7 +77,7 @@ final class _ProbeChildRuntime
         );
       }
     }
-    return _frame;
+    return frameOverride ?? _frame;
   }
 
   @override
@@ -85,7 +88,9 @@ final class _ProbeChildRuntime
 
   @override
   void send(Map<String, dynamic> message) {
-    sentMessages.add(Map<String, dynamic>.from(message));
+    final copy = Map<String, dynamic>.from(message);
+    sentMessages.add(copy);
+    onMessage?.call(copy);
   }
 
   @override
@@ -230,6 +235,255 @@ void main() {
       await tester.pump(const Duration(milliseconds: 16));
     }
     fail('Timed out waiting for host instance');
+  }
+
+  Future<void> verifyBackGestureRegistrationTarget(
+    WidgetTester tester, {
+    required bool registerChild,
+    required bool staleChildRegistration,
+  }) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final controller = PocketSystemHostController();
+    late PocketHostRegistry rootRegistry;
+    final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+    final runtimes = <_ProbeChildRuntime>[];
+    debugPocketSelfOwnedRuntimeFactory = (_) {
+      final runtime = _ProbeChildRuntime();
+      runtimes.add(runtime);
+      return runtime;
+    };
+    binding.defaultBinaryMessenger.setMockMessageHandler('flutter/assets', (
+      data,
+    ) async {
+      if (data == null) return null;
+      final requested = utf8.decode(data.buffer.asUint8List());
+      if (requested.endsWith('.qjbc')) return ByteData(1);
+      if (requested.endsWith('.pak')) return ByteData(0);
+      final Object content;
+      if (requested.endsWith('metadata.json')) {
+        content = <String, Object?>{
+          'entryFormat': 'quickjs-bytecode',
+          'formatVersion': 1,
+          'kind': 'script',
+          'bindingGeneration': 1,
+          'tickHz': 60,
+          'runtimeAbi': 'system-host-unit-abi',
+          'bytecodeBytes': 1,
+          'version': '1.0.0',
+          'build': 1,
+        };
+      } else if (requested.contains('root.manifest.json')) {
+        content = <String, Object?>{
+          'capabilities': <String, Object?>{
+            'requires': <String>[
+              'ui.compositor-surfaces',
+              'system.runtime.configure',
+              'system.runtime.create',
+              'system.runtime.awaitFirstFrame',
+              'system.runtime.destroy',
+              'system.runtime.post',
+              'system.runtime.respond',
+            ],
+          },
+        };
+      } else {
+        content = <String, Object?>{
+          'capabilities': <String, Object?>{'requires': <String>[]},
+        };
+      }
+      return ByteData.sublistView(
+        Uint8List.fromList(utf8.encode(jsonEncode(content))),
+      );
+    });
+
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PocketSystemHost(
+              systemUI: PocketAppConfig(
+                appId: rootId,
+                bytecodeAsset: 'test/root.qjbc',
+                pakAsset: 'test/root.pak',
+                metadataAsset: 'test/root.metadata.json',
+                manifestAsset: 'test/root.manifest.json',
+                additionalCapabilities: const {'ui.compositor-surfaces'},
+                compositorSurfaces: const <String, int>{childId: 2},
+                pluginFactories: <PocketPluginFactory>[
+                  (_) => _RegistryCapturePlugin((registry) {
+                    rootRegistry = registry;
+                  }),
+                ],
+              ),
+              applications: const <String, PocketAppConfig>{
+                childId: PocketAppConfig(
+                  appId: childId,
+                  bytecodeAsset: 'test/child.qjbc',
+                  pakAsset: 'test/child.pak',
+                  metadataAsset: 'test/child.metadata.json',
+                  manifestAsset: 'test/child.manifest.json',
+                ),
+              },
+              controller: controller,
+            ),
+          ),
+        ),
+      );
+
+      final root = await waitFor(
+        tester,
+        controller,
+        (entry) => entry.isSystemUI && entry.ready && entry.firstFrameReady,
+      );
+      await invokeSystem(
+        tester,
+        rootRegistry,
+        'system.runtime.configure',
+        <String, dynamic>{
+          'systemUI': rootId,
+          'grants': <Map<String, Object?>>[
+            {'appId': rootId, 'sharedNamespaces': <String>[]},
+            {'appId': childId, 'sharedNamespaces': <String>[]},
+          ],
+        },
+      );
+      final created = Map<String, dynamic>.from(
+        await invokeSystem(
+              tester,
+              rootRegistry,
+              'system.runtime.create',
+              <String, dynamic>{'appId': childId},
+            )
+            as Map,
+      );
+      await waitFor(
+        tester,
+        controller,
+        (entry) => entry.instanceId == created['instanceId'] && entry.ready,
+      );
+      final rootRuntime = runtimes.first;
+      rootRuntime.frameOverride = PocketFrame(
+        width: 240,
+        height: 320,
+        ops: const <PocketOp>[
+          PocketHostSurfaceOp(
+            x: 0,
+            y: 0,
+            width: 240,
+            height: 320,
+            id: 'focused-child',
+            kind: 'application',
+            parameters: <String, dynamic>{},
+            surfaceHandle: 2,
+            focused: true,
+          ),
+        ],
+        events: const <PocketEvent>[],
+        resources: const <PocketImageResource>[],
+      );
+      await tester.pump(const Duration(milliseconds: 32));
+      final focusedChild = await waitFor(
+        tester,
+        controller,
+        (entry) =>
+            entry.instanceId == created['instanceId'] &&
+            entry.firstFrameReady &&
+            entry.foreground &&
+            entry.compositorFocused,
+      );
+      if (registerChild) {
+        focusedChild.session.onEvent(
+          PocketEvent(
+            id: 'gesture-ready-${focusedChild.generation}',
+            method: 'platform.back.gesture.ready',
+            params: const <String, Object?>{'ready': true},
+          ),
+        );
+      }
+      if (staleChildRegistration) focusedChild.session.generation++;
+
+      expect(runtimes, hasLength(2));
+      final childRuntime = runtimes.last;
+      void answerStart(
+        _ProbeChildRuntime runtime,
+        PocketSystemInstanceSnapshot instance,
+      ) {
+        runtime.onMessage = (message) {
+          if (message['name'] != 'platform.back.gesture') return;
+          final payload = (message['payload'] as Map).cast<String, dynamic>();
+          if (payload['phase'] != 'start') return;
+          instance.session.onEvent(
+            PocketEvent(
+              id: 'gesture-response-${payload['gestureId']}',
+              method: 'platform.back.gesture.response',
+              params: <String, Object?>{
+                'gestureId': payload['gestureId'],
+                'handled': true,
+              },
+            ),
+          );
+        };
+      }
+
+      answerStart(rootRuntime, root);
+      answerStart(childRuntime, focusedChild);
+      final pointer = await tester.startGesture(const Offset(12, 200));
+      await tester.pump();
+      List<Map<String, dynamic>> gestureStarts(_ProbeChildRuntime runtime) =>
+          runtime.sentMessages
+              .where(
+                (message) =>
+                    message['name'] == 'platform.back.gesture' &&
+                    (message['payload'] as Map)['phase'] == 'start',
+              )
+              .toList();
+      if (registerChild && !staleChildRegistration) {
+        expect(
+          gestureStarts(childRuntime),
+          hasLength(1),
+          reason:
+              'a child registered in its current generation must be asked first',
+        );
+        expect(gestureStarts(rootRuntime), isEmpty);
+      } else {
+        expect(
+          gestureStarts(childRuntime),
+          isEmpty,
+          reason:
+              'an unregistered or stale child must not receive a start handshake',
+        );
+        expect(
+          gestureStarts(rootRuntime),
+          hasLength(1),
+          reason:
+              'SystemUI should receive the gesture directly when child is ineligible',
+        );
+      }
+      await pointer.cancel();
+      await tester.pump();
+      expect(
+        (rootRuntime.sentMessages + childRuntime.sentMessages).where(
+          (message) => message['name'] == 'platform.back.request',
+        ),
+        isEmpty,
+        reason: 'a cancelled edge gesture must not dispatch discrete Back',
+      );
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      if (staleChildRegistration) {
+        // Advancing the synthetic generation remounts its PocketView and
+        // starts the normal one-second health observation timer. Let it
+        // retire while the test binding is still active.
+        await tester.pump(const Duration(seconds: 1));
+      }
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      debugDefaultTargetPlatformOverride = null;
+      debugPocketSelfOwnedRuntimeFactory = previousFactory;
+      controller.dispose();
+    }
   }
 
   testWidgets('system Back asks the guest before closing the embedded host', (
@@ -444,16 +698,27 @@ void main() {
           controller,
           (entry) => entry.isSystemUI && entry.firstFrameReady,
         );
+        runtime.onMessage = (message) {
+          if (message['name'] != 'platform.back.gesture') return;
+          final payload = (message['payload'] as Map).cast<String, dynamic>();
+          if (payload['phase'] != 'start') return;
+          root.session.onEvent(
+            PocketEvent(
+              id: 'gesture-response-${payload['gestureId']}',
+              method: 'platform.back.gesture.response',
+              params: <String, Object?>{
+                'gestureId': payload['gestureId'],
+                'handled': false,
+              },
+            ),
+          );
+        };
         List<Map<String, dynamic>> requests() => runtime.sentMessages
             .where((message) => message['name'] == 'platform.back.request')
             .toList();
 
         // 1. Retained parent velocity-based left-edge fling (startX=30 < 36, dx=56 < 88, velocity > 260).
-        await tester.flingFrom(
-          const Offset(30, 200),
-          const Offset(56, 0),
-          600,
-        );
+        await tester.flingFrom(const Offset(30, 200), const Offset(56, 0), 600);
         await tester.pump();
         expect(
           requests(),
@@ -505,6 +770,37 @@ void main() {
         debugPocketSelfOwnedRuntimeFactory = previousFactory;
         controller.dispose();
       }
+    },
+  );
+
+  testWidgets('back gesture skips a child without ready registration', (
+    tester,
+  ) async {
+    await verifyBackGestureRegistrationTarget(
+      tester,
+      registerChild: false,
+      staleChildRegistration: false,
+    );
+  });
+
+  testWidgets('back gesture asks a current-generation registered child first', (
+    tester,
+  ) async {
+    await verifyBackGestureRegistrationTarget(
+      tester,
+      registerChild: true,
+      staleChildRegistration: false,
+    );
+  });
+
+  testWidgets(
+    'back gesture ignores ready registration from an old generation',
+    (tester) async {
+      await verifyBackGestureRegistrationTarget(
+        tester,
+        registerChild: true,
+        staleChildRegistration: true,
+      );
     },
   );
 

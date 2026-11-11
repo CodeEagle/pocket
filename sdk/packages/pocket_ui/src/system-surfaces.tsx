@@ -19,6 +19,12 @@ import type { PocketSystemKernel, PocketSystemSurfaceBinding, PocketSystemOpenin
 
 type CloseSurface = (binding: PocketSystemSurfaceBinding) => void | Promise<void>;
 type AnimateDismiss = () => Promise<void>;
+export interface PocketMiniAppBackGesturePreview {
+  instanceId: string;
+  requestId: string;
+  width: number;
+  progress: number;
+}
 type SurfaceProps = {
   system: Pick<PocketSystemKernel, "surfaceBindings" | "subscribe"> &
     Partial<Pick<PocketSystemKernel, "onBeforeDismiss" | "snapshot" | "presets">>;
@@ -26,6 +32,8 @@ type SurfaceProps = {
   systemUIFocused?: boolean;
   class?: string;
   style?: JSX.CSSProperties;
+  /** Presentation of the existing top invocation frame while edge-back is held. */
+  backGesture?: PocketMiniAppBackGesturePreview;
 } & (
   /** Request kernel cancellation; its before-dismiss boundary runs the exit. */
   { presentation: "mini-app"; onClose: CloseSurface } |
@@ -78,7 +86,8 @@ export function SystemAppSurfaces(props: SurfaceProps): JSX.Element {
         class={props.class ?? "absolute inset-0 w-full h-full"} style={props.style} />
     }>
       <MiniAppSurface binding={binding} presets={presets} systemUIFocused={props.systemUIFocused}
-        class={props.class} style={props.style} onClose={props.onClose!}
+        class={props.class} style={props.style} backGesture={props.backGesture} system={props.system}
+        onClose={props.onClose!}
         registerDismiss={animate => {
           dismissers.set(instanceId, animate);
           return () => { if (dismissers.get(instanceId) === animate) dismissers.delete(instanceId); };
@@ -108,6 +117,8 @@ function MiniAppSurface(props: {
   systemUIFocused?: boolean;
   class?: string;
   style?: JSX.CSSProperties;
+  backGesture?: PocketMiniAppBackGesturePreview;
+  system: SurfaceProps["system"];
   onClose: CloseSurface;
   registerDismiss: (animate: AnimateDismiss) => () => void;
 }): JSX.Element {
@@ -206,6 +217,22 @@ function MiniAppSurface(props: {
   const animateDismiss = (): Promise<void> => {
     if (pendingDismiss) return pendingDismiss.promise;
     if (phase() === "waiting") return Promise.resolve();
+    const preview = props.backGesture;
+    const stack = props.system.snapshot?.().stack;
+    const top = stack?.[stack.length - 1];
+    if (
+      preview?.instanceId === props.binding().instanceId &&
+      preview.requestId === top?.requestId &&
+      top?.instanceId === preview.instanceId &&
+      preview.progress >= 1
+    ) {
+      // The user already settled the same invocation frame fully offscreen.
+      // Let the kernel run its normal result/cancel path without animating it
+      // out a second time after the interactive transition completes.
+      setTimeline(1);
+      setPhase("waiting");
+      return Promise.resolve();
+    }
     let resolve!: () => void;
     const promise = new Promise<void>(complete => { resolve = complete; });
     pendingDismiss = { promise, resolve };
@@ -213,6 +240,18 @@ function MiniAppSurface(props: {
     transitionAnchored = false;
     setPhase("closing");
     return promise;
+  };
+  const previewProgress = (): number => {
+    const preview = props.backGesture;
+    return preview?.instanceId === props.binding().instanceId
+      ? Math.max(0, Math.min(1, preview.progress))
+      : 0;
+  };
+  const previewX = (): number => {
+    const preview = props.backGesture;
+    return preview?.instanceId === props.binding().instanceId
+      ? Math.max(0, Math.min(1, preview.progress)) * Math.max(1, preview.width)
+      : 0;
   };
   onCleanup(props.registerDismiss(animateDismiss));
   onFrame(() => {
@@ -248,14 +287,14 @@ function MiniAppSurface(props: {
 
   return <View class={props.class ?? "absolute inset-0 w-full h-full"} style={props.style}>
     <FocusScope class="absolute inset-0 w-full h-full" active={() => props.binding().focused && !props.systemUIFocused} autoFocus restoreFocus>
-    <View class="absolute inset-0 w-full h-full bg-black" style={{ opacity: timeline() * 0.16 }} />
+    <View class="absolute inset-0 w-full h-full bg-black" style={{ opacity: timeline() * 0.16 * (1 - previewProgress()) }} />
     <View
       class={darkMode()
         ? "absolute left-0 top-0 w-full overflow-hidden bg-[#09090B]"
         : "absolute left-0 top-0 w-full overflow-hidden bg-white"}
       style={presentationStyle() === "page"
-        ? { height: Math.max(1, height()), translateX: entryOffsetX() * (1 - timeline()), translateY: 0 }
-        : { height: Math.max(1, height()), translateX: 0, translateY: entryOffsetY() * (1 - timeline()) }}
+        ? { height: Math.max(1, height()), translateX: entryOffsetX() * (1 - timeline()) + previewX(), translateY: 0 }
+        : { height: Math.max(1, height()), translateX: previewX(), translateY: entryOffsetY() * (1 - timeline()) }}
     >
       <CompositorSurface package={props.binding().appId}
         focused={props.binding().focused && !props.systemUIFocused && phase() !== "closing" && phase() !== "waiting"}

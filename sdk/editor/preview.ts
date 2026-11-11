@@ -1261,6 +1261,10 @@ type PendingSystemRequest = {
   capability: string;
   params: JsonRecord;
   sent: boolean;
+  /** Deferred requests use the outer root pump instead of recursively pumping a live frame. */
+  deferred?: boolean;
+  /** Preserve a finite 48-pump failure contract across outer turns. */
+  deferredPumps?: number;
   resolve: (value: boolean) => void;
   reject: (error: Error) => void;
 };
@@ -3401,13 +3405,13 @@ class PreviewSession {
     const root = this.rootRuntime;
     if (!root) throw new Error("preview SystemUI runtime is not ready");
     const requestId = `preview-system-${++this.nextSystemRequestId}`;
-    // A child can issue storage/message/app requests while SystemUI is
-    // synchronously servicing its own runtime.awaitFirstFrame. Pumping the
-    // root recursively in that window deadlocks JS SystemUI's serialized
-    // queue. Keep the request pending and let the outer root turn service it
-    // after awaitFirstFrame returns; the later system.runtime.respond path
-    // pumps the child again.
-    const deferToOuterRootTurn = source !== root && root.pumping > 0;
+    // Any runtime can issue a platform request while the root is synchronously
+    // pumping. Re-entering the same QuickJS realm from that frame can deadlock
+    // SystemUI's serialized request queue (including root-owned startup
+    // storage reads while initialize() is still awaiting host work). Keep it
+    // pending until the outer root turn unwinds; its normal system.request /
+    // system.runtime.respond flow will deliver the real JS-owned result.
+    const deferToOuterRootTurn = root.pumping > 0;
     const response = deferToOuterRootTurn
       ? undefined
       : new Promise<boolean>((resolveResponse, rejectResponse) => {
@@ -3417,6 +3421,7 @@ class PreviewSession {
           capability,
           params,
           sent: false,
+          deferred: false,
           resolve: resolveResponse,
           reject: rejectResponse,
         });
@@ -3432,6 +3437,8 @@ class PreviewSession {
         capability,
         params,
         sent: false,
+        deferred: true,
+        deferredPumps: 0,
         resolve: () => {},
         reject: () => {},
       });
@@ -4368,19 +4375,44 @@ class PreviewSession {
         this.startChildFramePump(child, childDelta);
       }
     }
-    // A child may emit its first-frame host request while the root is inside
-    // system.runtime.awaitFirstFrame. That request is deferred to avoid
-    // re-entering JS SystemUI's serialized queue; give the root a post-child
-    // turn so it cannot remain pending until unrelated input arrives.
-    for (
-      let attempt = 0;
-      attempt < 4 && this.rootRuntime && [...this.pendingSystemRequests.values()].some((pending) => pending.source !== this.rootRuntime && !pending.sent);
-      attempt += 1
-    ) {
-      for (const [requestId, pending] of this.pendingSystemRequests) {
-        if (pending.source !== this.rootRuntime && !pending.sent) await this.sendPendingSystemRequest(requestId, this.rootRuntime);
+    // A runtime may emit a host request while the root is inside a frame (for
+    // example the root's startup storage read while SystemUI.initialize is
+    // still awaiting async host work). Service deferred requests after the
+    // root turn has unwound. A missing SystemUI response remains bounded by
+    // the same 48-pump contract as the synchronous request path.
+    const rootAfterTurn = this.rootRuntime;
+    for (let attempt = 0; attempt < 48 && rootAfterTurn; attempt += 1) {
+      const deferred = [...this.pendingSystemRequests.entries()]
+        .filter(([, pending]) => pending.deferred === true);
+      if (deferred.length === 0) break;
+      for (const [requestId, pending] of deferred) {
+        if (!pending.sent) await this.sendPendingSystemRequest(requestId, rootAfterTurn);
       }
-      await this.pumpRuntime(this.rootRuntime, 0);
+      // The root queue may be waiting for these asynchronous host boundaries;
+      // a zero-delta pump cannot resolve them while this operation owns the
+      // serialized editor lane. Resume from their existing completion turn.
+      if (this.childRuntimeLoads.size > 0 || this.pendingPresentations.size > 0) break;
+      await this.pumpRuntime(rootAfterTurn, 0);
+      const stillPending = [...this.pendingSystemRequests.entries()]
+        .filter(([, pending]) => pending.deferred === true && pending.sent);
+      if (stillPending.length === 0) continue;
+      // Child creation and browser presentation are external boundaries. Let
+      // their existing completion callbacks enter the operation queue before
+      // spending the remaining finite pump budget.
+      if (this.childRuntimeLoads.size > 0 || this.pendingPresentations.size > 0) break;
+      const schedule = await rootAfterTurn.probe.checked({ op: "schedule" });
+      if (Number(schedule.nextWakeDelayMs) === 0) break;
+      for (const [, pending] of stillPending) pending.deferredPumps = (pending.deferredPumps ?? 0) + 1;
+      const expired = stillPending.find(([, pending]) => (pending.deferredPumps ?? 0) >= 48);
+      if (expired) {
+        const message = `SystemUI did not respond to ${expired[1].capability}`;
+        const failure = new Error(message);
+        for (const [requestId, pending] of stillPending) {
+          this.pendingSystemRequests.delete(requestId);
+          pending.reject(failure);
+        }
+        throw failure;
+      }
     }
     if (runtime.frame) {
       this.publishCompositedFrame(runtime.frame);

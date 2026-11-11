@@ -1,33 +1,16 @@
-# Native back navigation
+# Native back navigation and interactive edge-back
 
-## Ownership
+## Ownership and fallback
 
-Flutter reports a back action through `PocketSystemHostController.requestBack()`;
-it does not mirror a guest route stack. The host sends
-`platform.back.request` to the compositor-focused child guest, if one exists.
-That guest may pop one of its own JS pages and answer
-`platform.back.response` with `handled: true`. If it declines or has no
-listener, the host asks trusted SystemUI. A stale reply from a closed or
-replaced session is ignored, and concurrent native back callbacks share one
-request.
+Flutter reports a back action through `PocketSystemHostController.requestBack()`; it does not mirror a guest route stack. The host sends the existing `platform.back.request` to the compositor-focused child guest, if one exists. That guest may pop one of its own JS pages and answer `platform.back.response` with `handled: true`. If it declines or has no listener, the host asks trusted SystemUI. A stale reply from a closed or replaced session is ignored, and concurrent native back callbacks share one request.
 
-SystemUI resolves its own state in JS. `PocketSystemKernel.handleBack()` first
-cancels one foreground child app call using the existing result/cancellation
-path. The Showcase then pops `demo/js/state.ts`'s `routeStack`; only when both
-stacks are at their roots does it call `system.closeContainer()`. If the guest
-protocol times out or no SystemUI listener is available, the Flutter boundary
-falls back to the configured `onClose`, the enclosing Navigator route, or the
-platform root exit.
+SystemUI resolves its own state in JS. `PocketSystemKernel.handleBack()` first cancels one foreground child app call using the existing result/cancellation path. The Showcase then pops `demo/js/state.ts`'s `routeStack`; only when both stacks are at their roots does it call `system.closeContainer()`. If the guest protocol times out or no SystemUI listener is available, the Flutter boundary falls back to the configured `onClose`, the enclosing Navigator route, or the platform root exit.
 
-`PocketSystemHost` owns the loaded-host `PopScope`, so direct embeddings receive
-native back as well as `PocketSystemHostApplication`. The application shell
-keeps its immediate exit while remote host configuration is still pending; a
-loaded host delegates to the guest boundary and cannot both pop JS and exit the
-container for the same platform callback.
+`PocketSystemHost` owns the loaded-host `PopScope`, so direct embeddings receive native back as well as `PocketSystemHostApplication`. The application shell keeps its immediate exit while remote host configuration is pending; a loaded host delegates to the guest boundary and cannot both pop JS and exit the container for the same platform callback. The enclosing Flutter route is also guarded so its nested Navigator cannot claim the edge drag before the embedded guest.
 
-The application also guards its enclosing Flutter route: its nested Navigator
-cannot otherwise stop the outer Cupertino route from claiming the edge drag.
-Both route boundaries delegate to the same controller rather than owning stacks.
+The helper announces `platform.back.gesture.ready { ready }` when its interactive handler is registered or removed. Native transport records this capability only for the current session generation. A focused child without a current registration is skipped immediately, so SystemUI can preview its existing Mini App call stack without waiting 600 ms for an unsupported child. No route state is added to Dart.
+
+On iOS, the host sends a continuous `platform.back.gesture` event to the focused child or SystemUI and locks that recipient's runtime generation for the gesture. A handled start suppresses the discrete request for that same gesture. An unsupported start or negotiation timeout follows the existing discrete-back threshold fallback. Native code owns pointer recognition, event delivery, focus selection, and generation locking; it does not own JS route policy.
 
 ## Consumer integration
 
@@ -42,70 +25,56 @@ back.setHandler(() => {
   router.pop();
   return true;
 });
-// During guest cleanup: back.dispose();
+back.setGestureHandler((event) => {
+  if (event.phase === "start") {
+    if (!router.canPop()) return false;
+    beginInteractivePop(event);
+    return true;
+  }
+  if (event.phase === "update") updateInteractivePop(event);
+  else if (event.phase === "end" || event.phase === "cancel") settleInteractivePop(event);
+});
+// During guest cleanup:
+back.dispose();
 ```
 
-`router` above is the consumer's existing JS router, not an SDK-provided stack.
-For host-owned back inputs outside the Flutter route, call
-`await controller.requestBack()` and apply the host's exit only if it returns
-`false`. A native UINavigationController or another embedding container that
-removes Flutter directly must forward its back action through that entry point.
-The SDK cannot intercept an external container removing its rendering surface.
-Each guest reply has a 600 ms budget; handlers should dispatch navigation promptly.
+`router` above is the consumer's existing JS router, not an SDK-provided stack. Only a synchronous `true` from the start callback accepts the gesture. The helper responds immediately with `platform.back.gesture.response { gestureId, handled }`; later phases are delivered only for that accepted ID. A newer start cancels the previous accepted gesture, and cancellation/disposal notify the handler once.
 
-## Retained behavior and adaptation
+For host-owned back inputs outside the Flutter route, call `await controller.requestBack()` and apply host exit only if it returns `false`. A native UINavigationController or another embedding container that removes Flutter directly must forward its back action through that entry point. The SDK cannot intercept an external container removing its rendering surface. Each discrete guest reply has a 600 ms budget; handlers should dispatch navigation promptly.
 
-The retained parent `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo`
-was inspected with `pocket_host/` excluded. Its
-`lib/render/pocket_ui_components.dart:3828–3846` handles an edge drag beginning
-within 36 logical pixels and a positive primary velocity above 260, then calls
-the legacy Dart runner's `canPopCurrentStack` / `popPageWithResult` in
-`lib/core/pocketjs_bundle_runner.dart:477,901`. We preserve its user-visible
-behavior that one successful back gesture pops one page, but route policy now
-stays in the JS guest and mini-app kernel. No copy of the legacy Dart stack is
-introduced.
+## Retained source and adaptation
 
-Android system back enters through Flutter's `PopScope`. On iOS, a lightweight
-pointer listener covers the embedded left-edge gesture: it records a start in
-the first 36 logical pixels. On pointer-up it accepts either at least 88
-horizontal logical pixels or a short horizontal fling beyond Flutter's touch
-slop with release velocity above 260 logical pixels/s. Vertical travel must
-remain within 72 logical pixels and smaller than horizontal travel. Cancelled
-drags are ignored. One raw-pointer velocity tracker avoids competing with
-`PocketView`'s gesture arena; there is no second drag recognizer or route stack.
-The device platform, rather than the consumer's visual theme, selects iOS input.
-It commits the existing JS transition on release; it
-does not implement an interactive transition that tracks the finger.
+The retained parent `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` was inspected with `pocket_host/` excluded:
 
-The first phone build rejected all short flings below 88 logical pixels,
-including fast edge swipes that the retained parent accepts. The follow-up
-restores that retained velocity path and adds `[PocketBack]` input/dispatch
-facts for phone diagnosis. This is an evidenced recognizer gap; it does not
-by itself prove the cause of any individual phone gesture without a trace.
+| Source | Retained behavior |
+| --- | --- |
+| `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/lib/render/pocket_ui_components.dart` | `PocketMultiTabFrameworkViewport` recognizes an edge drag beginning within 36 logical pixels, checks `canPopCurrentStack`, and calls `popPageWithResult()` on release above 260 logical px/s. `PocketPageTransitionCompositor` already consumes the retained outgoing page and transition progress listenable. |
+| `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/lib/core/pocketjs_bundle_runner.dart` | `pushPageForResult()` retains and freezes the parent page tree. `popPageWithResult()` removes the child, resolves its pending result, and starts the existing reverse transition. |
 
-## Validation
+The parent provides a discrete swipe-to-pop but does not expose live progress or a cancelled preview. This adaptation preserves its one-page pop behavior and retained page state while moving the preview and route decision to the JS guest. It does not copy the legacy Dart stack or add a second renderer.
 
-- `sdk/packages/pocket_ui/test/back_navigation.test.ts` — 2 passing tests for
-  handled, unhandled, throwing, and disposed JS back handlers (reviewed and run
-  by the parent agent).
-- `bun test sdk/packages/pocket_ui/test/system_kernel.test.ts` — 21 passing
-  tests, including a regression that calls `handleBack()`, verifies one child
-  app call is cancelled, its pending caller receives one `platform.result`
-  with reason `back`, and a second call at the root is unhandled.
-- `demo/js/tests/back_navigation_native.test.ts` — built through pinned
-  `buildGuest` into `/tmp/pocket-back-validation-20261110`; real QuickJS/native
-  frames verify pointer-pushed Mobile UI returns to Home on the back request
-  without a close RPC, then root back sends exactly one close RPC (run by the
-  parent agent).
-- `demo/js/tests/navigation_native.test.ts` — 2 passing cases against the same
-  compiled guest for retained route state and secondary-route Back (run by the
-  parent agent).
-- `cd sdk && flutter test test/pocket_system_host_test.dart
-  test/pocket_host_loading_test.dart --reporter expanded` — 15 passing widget
-  tests, including the loaded host system-pop path, handled/unhandled protocol
-  replies, concurrent back request deduplication, and pending-configuration
-  immediate exit, cancelled/completed iOS edge input, and the outer route guard
-  (run by the parent agent). These are widget tests, not an iPhone device run.
-- Targeted Flutter analysis reported no issues. One consolidated Argon Medium
-  review was requested after implementation and validation; the CLI timed out
-  after five minutes without a conclusion. No review approval is claimed.
+## Interactive route behavior
+
+`createPocketBackNavigation()` keeps the discrete `platform.back.request` lane and adds `setGestureHandler(handler | undefined)`. It tracks only the active gesture ID. The Showcase accepts a start while its route transition is idle and no details modal is open. If the kernel has a foreground Mini App invocation, the gesture binds its existing instance/request IDs; otherwise a previous entry in `routeStack` is required. The kernel remains the source of app-call stack membership.
+
+The existing retained `RouteView` instances keep their page signals, scroll state, and content mounted. Each route owns its own `SafeAreaScaffold`, `MobileAppBar`, content, and (for primary routes) `NavigationBar`; route views are layered in existing stack order. During a drag the current page follows `dx`, while the previous page follows `-0.3 * width * (1 - progress)`. Each page uses an opaque background. This preserves the current page's viewport and vertical layout through start, update, and cancel while revealing the actual previous page and its chrome.
+
+The route stack is unchanged while dragging and settling. Both page and Mini App back use `shouldCommitPocketBackGesture`: only an `end` whose latest `progress > 0.5` commits. Exactly 50%, a smaller distance, or pointer cancellation settles to zero. Velocity never bypasses this distance rule. Dragging past 80% and then back to 30% before release cancels. The cubic settle runs for 180–260 ms from the current position. This is Pocket's chosen product rule, not a numerical requirement from Apple HIG. Apple's [HIG Gestures](https://developer.apple.com/design/human-interface-guidelines/gestures/) gives no fixed completion percentage; the [UIKit update documentation](https://developer.apple.com/documentation/uikit/uipercentdriveninteractivetransition/update%28_%3A%29) leaves the threshold to the application.
+
+For Showcase routes, reaching one dispatches a single `popRoute` after advancing the existing route observer, avoiding a second reverse animation. For Mini Apps, `SystemAppSurfaces` translates the existing matching `MiniAppSurface`, including its compositor surface and chrome. It does not clone or replace the child. Cancelling leaves the invocation untouched. Reaching one calls `system.handleBack()` once; the existing kernel cancellation/result path reports reason `back`. Its existing before-dismiss boundary skips the second exit animation only when the completed preview's instance/request IDs match the kernel's top frame. External stack changes clear an obsolete preview. Continuous guest frames run during settle, rather than an idle drag.
+
+Android system back and root/child routes that decline an interactive start keep their existing discrete behavior. The device platform selects iOS input; the consumer's visual theme does not.
+
+## Validation and delivery
+
+- Helper unit tests: 5 pass, including 49%, 50%, 51%, reverse travel and unconditional cancellation. Readiness registration/removal and gesture-ID gating share the existing event lane.
+- Flutter host tests: 20 pass across `pocket_system_host_test.dart`, `pocket_host_loading_test.dart`, and `pocket_back_edge_regression_test.dart`. New tests exercise real host/pointer routing with probe runtimes: unregistered child and stale generation go directly to root; current-generation registered child receives start first. Host and test analysis are clean.
+- Actual Editor-built QuickJS bytecode: both navigation regressions pass, retaining page scroll/local state and Apple Glass secondary-route behavior. All three back regressions pass. The new root Mini App case feeds official runtime create/first-frame facts to the real JS kernel, checks its compositor binding moves by 49% width, cancels without a result, cancels after 80%→30% reversal despite high velocity, and completes at 51% with exactly one `platform.result` carrying reason `back`. A root-only native probe cannot establish actual child-content state; that requires the child runtime or physical-device validation.
+- Existing JS kernel tests: 21 pass, including the retained cancellation/result and before-dismiss paths.
+- Native release build and strict code-signature verification pass. Installing the new build was blocked because CoreDevice reported the physical iPhone unavailable (error 4016). The prior test.11 build remains the last confirmed installed release.
+
+The retained parent source was reused for edge recognition and one-page result semantics. The adaptation reuses the current JS kernel stack and MiniAppSurface dismissal boundary. Ablation removed the tentative 45%/velocity shortcut, duplicate stack policy, duplicate presentation wrappers, and temporary device-file tracing. No generated compiler/runtime artifacts are source.
+
+The user confirmed Apple Glass follows the finger on the physical device. Lobby was the uncovered app-call path. Local host and native-engine checks supplement, but do not replace, confirmation of the new Lobby feel on the phone.
+
+Release `0.1.0-test.12/build12` is published. The signed index payload digest, entry bytecode, pak, and runtime ABI match the tested `sdk/.pocket-build/back-phone-20261110/lobby-final` artifact; evidence is `lobby-validation.json` in that evidence directory. The consolidated Argon Medium review was requested after validation, but its 180-second print deadline expired without returning a review result. It is not recorded as a passed review; the request/timeout is in `lobby-medium-review.log`. The newly built native package is ready for installation once the physical iPhone reconnects.

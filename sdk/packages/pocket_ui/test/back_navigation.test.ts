@@ -1,5 +1,8 @@
 import { test, expect } from "bun:test";
-import { createPocketBackNavigation } from "../src/back-navigation.ts";
+import {
+  createPocketBackNavigation,
+  shouldCommitPocketBackGesture,
+} from "../src/back-navigation.ts";
 import type { BridgeObject, HostEvent } from "../src/host.ts";
 
 function harness() {
@@ -20,6 +23,9 @@ function harness() {
     responses,
     request(requestId: string) {
       listener?.({ method: "platform.back.request", params: { requestId } });
+    },
+    gesture(params: BridgeObject) {
+      listener?.({ method: "platform.back.gesture", params });
     },
   };
 }
@@ -66,4 +72,101 @@ test("disposing a back handler suppresses a late response and removes its listen
   h.request("after-dispose");
   await flush();
   expect(h.responses).toEqual([]);
+});
+
+test("back gestures synchronously negotiate start and gate later phases by handled gesture id", () => {
+  const h = harness();
+  const received: string[] = [];
+  h.navigation.setGestureHandler((event) => {
+    received.push(`${event.phase}:${event.gestureId}`);
+    return event.phase === "start" && event.gestureId !== "declined";
+  });
+  const event = (gestureId: string, phase: string) => ({
+    gestureId,
+    phase,
+    dx: phase === "start" ? 1 : 120,
+    width: 390,
+    velocity: 0,
+    progress: phase === "start" ? 0 : 120 / 390,
+  });
+
+  h.gesture(event("first", "start"));
+  expect(h.responses).toEqual([
+    { method: "platform.back.gesture.ready", params: { ready: true } },
+    {
+      method: "platform.back.gesture.response",
+      params: { gestureId: "first", handled: true },
+    },
+  ]);
+  h.gesture(event("stale", "update"));
+  h.gesture(event("first", "update"));
+  h.gesture(event("declined", "start"));
+  h.gesture(event("first", "end"));
+  h.gesture(event("declined", "update"));
+
+  expect(received).toEqual([
+    "start:first",
+    "update:first",
+    "cancel:first",
+    "start:declined",
+  ]);
+  expect(h.responses).toEqual([
+    { method: "platform.back.gesture.ready", params: { ready: true } },
+    {
+      method: "platform.back.gesture.response",
+      params: { gestureId: "first", handled: true },
+    },
+    {
+      method: "platform.back.gesture.response",
+      params: { gestureId: "declined", handled: false },
+    },
+  ]);
+  h.navigation.dispose();
+  expect(h.responses.at(-1)).toEqual({
+    method: "platform.back.gesture.ready",
+    params: { ready: false },
+  });
+});
+
+test("replacing or disposing a gesture handler cancels its active gesture once", () => {
+  const h = harness();
+  const received: string[] = [];
+  const handler = (event: { gestureId: string; phase: string }) => {
+    received.push(`${event.phase}:${event.gestureId}`);
+    return event.phase === "start";
+  };
+  h.navigation.setGestureHandler(handler);
+  const start = {
+    gestureId: "active",
+    phase: "start",
+    dx: 1,
+    width: 390,
+    velocity: 0,
+    progress: 0,
+  };
+  h.gesture(start);
+  h.navigation.setGestureHandler(undefined);
+  h.navigation.dispose();
+  expect(received).toEqual(["start:active", "cancel:active"]);
+  expect(h.responses.filter((response) => response.method === "platform.back.gesture.ready")).toEqual([
+    { method: "platform.back.gesture.ready", params: { ready: true } },
+    { method: "platform.back.gesture.ready", params: { ready: false } },
+  ]);
+});
+
+test("interactive back commits only past half-width using the latest end progress", () => {
+  const gesture = (phase: "update" | "end" | "cancel", progress: number) => ({
+    gestureId: "distance",
+    phase,
+    dx: progress * 390,
+    width: 390,
+    velocity: 2_000,
+    progress,
+  });
+  expect(shouldCommitPocketBackGesture(gesture("end", 0.49))).toBe(false);
+  expect(shouldCommitPocketBackGesture(gesture("end", 0.5))).toBe(false);
+  expect(shouldCommitPocketBackGesture(gesture("end", 0.51))).toBe(true);
+  expect(shouldCommitPocketBackGesture(gesture("update", 0.8))).toBe(false);
+  expect(shouldCommitPocketBackGesture(gesture("end", 0.3))).toBe(false);
+  expect(shouldCommitPocketBackGesture(gesture("cancel", 0.8))).toBe(false);
 });

@@ -81,7 +81,11 @@ import {
 } from "@pocket/ui";
 import { HardwarePage, MobileUiPage, TransitionsPage } from "./mobile-pages.tsx";
 import { createHostBridge, hostError, type HostBridge, type HostEvent, type JsonValue } from "@pocket/ui/host";
-import { createPocketBackNavigation } from "@pocket/ui/back-navigation";
+import {
+  createPocketBackNavigation,
+  shouldCommitPocketBackGesture,
+  type PocketBackGestureEvent,
+} from "@pocket/ui/back-navigation";
 import { VideoPage } from "./video-page.tsx";
 import { RecordingPanel } from "./recording-panel.tsx";
 import { createPocketPlatformClient, type AppLaunchOptions } from "@pocket/ui/platform";
@@ -163,6 +167,22 @@ const showcaseTabs = [
   { id: "about" as const, label: "Host", kind: "host" as const },
   { id: "settings" as const, label: "Settings", kind: "settings" as const },
 ];
+
+type BackGestureTarget =
+  | { kind: "route"; fromRoute: Route; toRoute: Route }
+  | { kind: "mini-app"; instanceId: string; requestId: string };
+
+type ActiveBackGesture = {
+  gestureId: string;
+  target: BackGestureTarget;
+  width: number;
+  progress: number;
+  phase: "dragging" | "settling" | "committing";
+  settleFrom: number;
+  settleTo: number;
+  settleElapsedMs: number;
+  settleDurationMs: number;
+};
 
 function decode(line: string): BridgeMessage | undefined {
   try {
@@ -599,6 +619,7 @@ function App() {
   );
   const backNavigation = createPocketBackNavigation(host);
   backNavigation.setHandler(async () => {
+    cancelBackGesture();
     if (await system.handleBack()) return true;
     if (state().routeStack.length > 1) {
       dispatch({ type: "popRoute" });
@@ -660,6 +681,8 @@ function App() {
     elapsedMs: number;
     progress: number;
   } | undefined>(undefined);
+  const [backGesture, setBackGesture] = createSignal<ActiveBackGesture | undefined>(undefined);
+  let cancelBackGesture = (): void => {};
 
   const publishPerformanceContext = (): void => {
     const current = state();
@@ -675,6 +698,9 @@ function App() {
   };
 
   const dispatch = (event: DemoEvent): void => {
+    if (event.type === "navigate" || event.type === "popRoute") {
+      cancelBackGesture();
+    }
     if (event.type === "navigate" && event.route !== state().route) pendingTransitionDirection = "forward";
     if (event.type === "popRoute" && state().routeStack.length > 1) pendingTransitionDirection = "reverse";
     setState((current) => reduceDemoState(current, event));
@@ -722,6 +748,176 @@ function App() {
   const isShowcaseRoute = (route: Route): boolean =>
     route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple";
 
+  const clampBackProgress = (value: number): number => Math.max(0, Math.min(1, value));
+  const backGestureForegroundX = (): number => {
+    const gesture = backGesture();
+    return gesture?.target.kind === "route" ? clampBackProgress(gesture.progress) * gesture.width : 0;
+  };
+  const backGestureBackgroundX = (): number => {
+    const gesture = backGesture();
+    return gesture?.target.kind === "route" ? -0.3 * gesture.width * (1 - clampBackProgress(gesture.progress)) : 0;
+  };
+  const backGestureRouteFrom = (): Route | undefined => {
+    const gesture = backGesture();
+    return gesture?.target.kind === "route" ? gesture.target.fromRoute : undefined;
+  };
+  const backGestureRouteTo = (): Route | undefined => {
+    const gesture = backGesture();
+    return gesture?.target.kind === "route" ? gesture.target.toRoute : undefined;
+  };
+  const miniAppBackPreview = () => {
+    const gesture = backGesture();
+    return gesture?.target.kind === "mini-app" ? {
+      instanceId: gesture.target.instanceId,
+      requestId: gesture.target.requestId,
+      width: gesture.width,
+      progress: gesture.progress,
+    } : undefined;
+  };
+  cancelBackGesture = (): void => setBackGesture(undefined);
+  const unsubscribeBackStack = system.subscribe(() => {
+    const gesture = backGesture();
+    if (gesture?.target.kind !== "mini-app") return;
+    const snapshot = system.snapshot();
+    const top = snapshot.stack[snapshot.stack.length - 1];
+    if (top?.instanceId !== gesture.target.instanceId || top.requestId !== gesture.target.requestId) {
+      cancelBackGesture();
+    }
+  });
+  onCleanup(unsubscribeBackStack);
+
+  const canStartBackGesture = (event: PocketBackGestureEvent): boolean => {
+    const current = state();
+    if (
+      event.phase !== "start" ||
+      event.width <= 0 ||
+      current.detailsOpen ||
+      routeTransition() !== undefined
+    ) return false;
+    const snapshot = system.snapshot();
+    const top = snapshot.stack[snapshot.stack.length - 1];
+    if (snapshot.foregroundAppId !== null && snapshot.foregroundAppId !== snapshot.systemUI) {
+      if (!top?.requestId || top.instanceId !== snapshot.foregroundInstanceId || top.appId !== snapshot.foregroundAppId) return false;
+      const call = snapshot.pendingCalls.find((candidate) =>
+        candidate.requestId === top.requestId &&
+        candidate.targetInstanceId === top.instanceId &&
+        !candidate.completionPending);
+      const binding = system.surfaceBindings({ includeStack: true }).find((candidate) => candidate.instanceId === top.instanceId);
+      return call !== undefined && binding?.focused === true && binding.ready !== false;
+    }
+    // Root showcase navigation remains the same stack; MiniApp calls above it
+    // use their existing invocation frame and request/result path.
+    return current.routeStack.length > 1;
+  };
+
+  const finishBackGesture = (gesture: ActiveBackGesture): void => {
+    if (gesture.settleTo >= 1 && gesture.target.kind === "route") {
+      const current = state();
+      const destination = current.routeStack[current.routeStack.length - 2];
+      if (current.route === gesture.target.fromRoute && destination === gesture.target.toRoute) {
+        // Advance the existing route observer before dispatch so its normal
+        // transition does not replay after this interactive transition.
+        previousRoute = gesture.target.toRoute;
+        pendingTransitionDirection = "forward";
+        dispatch({ type: "popRoute" });
+        pendingTransitionDirection = "forward";
+      }
+      setBackGesture(undefined);
+      return;
+    }
+    if (gesture.settleTo >= 1 && gesture.target.kind === "mini-app") {
+      if (gesture.phase === "committing") return;
+      const stack = system.snapshot().stack;
+      const top = stack[stack.length - 1];
+      if (top?.instanceId !== gesture.target.instanceId || top.requestId !== gesture.target.requestId) {
+        setBackGesture(undefined);
+        return;
+      }
+      const current: ActiveBackGesture = { ...gesture, phase: "committing", progress: 1 };
+      setBackGesture(current);
+      void system.handleBack().then((handled) => {
+        if (backGesture()?.gestureId !== current.gestureId) return;
+        if (handled) {
+          // The kernel's before-dismiss callback sees progress 1 and removes
+          // the existing frame immediately. Keep the preview until it does.
+          setBackGesture(undefined);
+        } else {
+          beginBackSettle({ ...current, progress: 1 }, 0);
+        }
+      }).catch(() => {
+        if (backGesture()?.gestureId === current.gestureId) beginBackSettle({ ...current, progress: 1 }, 0);
+      });
+      return;
+    }
+    setBackGesture(undefined);
+  };
+
+  const beginBackSettle = (gesture: ActiveBackGesture, target: 0 | 1): void => {
+    const progress = clampBackProgress(gesture.progress);
+    if (Math.abs(target - progress) < 0.001) {
+      finishBackGesture({ ...gesture, progress, settleTo: target });
+      return;
+    }
+    setBackGesture({
+      ...gesture,
+      progress,
+      phase: "settling",
+      settleFrom: progress,
+      settleTo: target,
+      settleElapsedMs: 0,
+      settleDurationMs: Math.max(180, Math.min(260, 180 + Math.abs(target - progress) * 80)),
+    });
+  };
+
+  const handleBackGesture = (event: PocketBackGestureEvent): boolean | void => {
+    if (event.phase === "start") {
+      if (!canStartBackGesture(event)) return false;
+      const current = state();
+      const snapshot = system.snapshot();
+      const top = snapshot.stack[snapshot.stack.length - 1];
+      let target: BackGestureTarget;
+      if (top?.requestId && top.instanceId === snapshot.foregroundInstanceId &&
+          top.appId === snapshot.foregroundAppId && snapshot.foregroundAppId !== snapshot.systemUI) {
+        target = { kind: "mini-app", instanceId: top.instanceId, requestId: top.requestId };
+      } else {
+        const toRoute = current.routeStack[current.routeStack.length - 2];
+        if (!toRoute) return false;
+        target = { kind: "route", fromRoute: current.route, toRoute };
+      }
+      const progress = clampBackProgress(event.progress);
+      setBackGesture({
+        gestureId: event.gestureId,
+        target,
+        width: event.width,
+        progress,
+        phase: "dragging",
+        settleFrom: progress,
+        settleTo: progress,
+        settleElapsedMs: 0,
+        settleDurationMs: 0,
+      });
+      return true;
+    }
+
+    const current = backGesture();
+    if (!current || current.gestureId !== event.gestureId) return;
+    if (current.phase === "committing") return;
+    if (current.phase === "settling") {
+      if (event.phase === "cancel") beginBackSettle(current, 0);
+      return;
+    }
+    const progress = clampBackProgress(event.progress);
+    if (event.phase === "update") {
+      setBackGesture({ ...current, progress });
+      return;
+    }
+
+    const terminal = { ...current, progress };
+    beginBackSettle(terminal, shouldCommitPocketBackGesture(event) ? 1 : 0);
+  };
+
+  backNavigation.setGestureHandler(handleBackGesture);
+
   // One JS route gate owns playback policy; the Flutter host only executes it.
   // This also pauses a video before its page is removed from the draw tree.
   createEffect(() => platform.media?.setCurrentPage(state().route));
@@ -762,15 +958,30 @@ function App() {
   onFrame(() => {
     host.tick();
     const transition = routeTransition();
-    if (!transition) return;
-    const elapsedMs = transition.elapsedMs + 1000 / routeTransitionTickHz;
-    const progress = Math.max(0, Math.min(1, elapsedMs / routeTransitionDuration));
-    if (progress >= 1) {
-      setRouteTransition(undefined);
-    } else {
-      setRouteTransition((current) => current ? { ...current, elapsedMs, progress } : current);
+    if (transition) {
+      const elapsedMs = transition.elapsedMs + 1000 / routeTransitionTickHz;
+      const progress = Math.max(0, Math.min(1, elapsedMs / routeTransitionDuration));
+      if (progress >= 1) {
+        setRouteTransition(undefined);
+      } else {
+        setRouteTransition((current) => current ? { ...current, elapsedMs, progress } : current);
+      }
     }
-  }, { continuous: () => routeTransition() !== undefined });
+    const gesture = backGesture();
+    if (gesture?.phase === "settling") {
+      const elapsedMs = gesture.settleElapsedMs + 1000 / routeTransitionTickHz;
+      const linear = Math.min(1, elapsedMs / gesture.settleDurationMs);
+      const eased = 1 - (1 - linear) ** 3;
+      const progress = gesture.settleFrom + (gesture.settleTo - gesture.settleFrom) * eased;
+      if (linear >= 1) {
+        finishBackGesture({ ...gesture, progress: gesture.settleTo });
+      } else {
+        setBackGesture({ ...gesture, progress, settleElapsedMs: elapsedMs });
+      }
+    }
+  }, {
+    continuous: () => routeTransition() !== undefined || backGesture()?.phase === "settling",
+  });
 
   const requestCapability = (key: CapabilityKey, capability: string, params: Record<string, JsonValue> = {}): void => {
     if (state()[key].phase === "loading") return;
@@ -972,6 +1183,32 @@ function App() {
     }
   };
 
+  const routeTitle = (route: Route): string => route === "home" ? demoTitle
+    : route === "gallery" ? "UI Collection"
+    : route === "about" ? "Host"
+    : route === "settings" ? "Settings"
+    : route === "mobile" ? "Mobile UI"
+    : route === "transitions" ? "Transitions"
+    : route === "hardware" ? "Hardware"
+    : route === "video" ? "Video Lab"
+    : route === "apple" ? "Apple Glass"
+    : hostTabs.find((tab) => tab.id === route)?.label ?? "Frame diagnostics";
+
+  const renderRouteAppBar = (route: Route): JSX.Element => (
+    <MobileAppBar
+      title={routeTitle(route)}
+      centered={!isPrimaryRoute(route)}
+      leading={route === "home"
+        ? <MobileBackButton onPress={requestCloseContainer} />
+        : isPrimaryRoute(route)
+        ? undefined
+        : <MobileBackButton onPress={() => dispatch({ type: "popRoute" })} />}
+      trailing={route === "home"
+        ? <MobileButton label="退出容器" kind="danger" compact onPress={requestCloseContainer} />
+        : undefined}
+    />
+  );
+
   // The retained Flutter host consumed MediaQuery.padding.top before its page
   // body. PocketView reports the equivalent logical inset through
   // display.viewport; consume it once at the SystemUI shell so every route
@@ -986,42 +1223,52 @@ function App() {
     <Screen
       class={mobileDark() ? "w-full h-full flex-col bg-[#0E1728] overflow-hidden" : "w-full h-full flex-col bg-[#F5F6FA] overflow-hidden"}
     >
-      <SafeAreaScaffold
-        edges={isPrimaryRoute(state().route) ? ["top"] : ["top", "bottom"]}
-        geometry={() => displayGeometry()}
-        class={mobileDark() ? "flex-col w-full h-full bg-[#09090B]" : "flex-col w-full h-full bg-[#FAFAFA]"}
-      >
-      <FocusScope class="flex-1 flex-col overflow-hidden" autoFocus restoreFocus>
-        {/* Visibility is derived from the route, without a second nav state. */}
-        <View class="flex-1 flex-col h-full overflow-hidden">
-          <View class="flex-1 flex-col w-full h-full overflow-hidden" style={{ translateX: transitionDescriptor().inTx, translateY: transitionDescriptor().inTy, scale: transitionDescriptor().inScale }}>
-            <MobileAppBar
-              title={state().route === "home" ? demoTitle : state().route === "gallery" ? "UI Collection" : state().route === "about" ? "Host" : state().route === "settings" ? "Settings" : state().route === "mobile" ? "Mobile UI" : state().route === "transitions" ? "Transitions" : state().route === "hardware" ? "Hardware" : state().route === "video" ? "Video Lab" : state().route === "apple" ? "Apple Glass" : hostTabs.find((tab) => tab.id === state().route)?.label ?? "Frame diagnostics"}
-              centered={!isPrimaryRoute(state().route)}
-              leading={state().route === "home"
-                ? <MobileBackButton onPress={requestCloseContainer} />
-                : isPrimaryRoute(state().route)
-                ? undefined
-                : <MobileBackButton onPress={() => dispatch({ type: "popRoute" })} />}
-              trailing={state().route === "home"
-                ? <MobileButton label="退出容器" kind="danger" compact onPress={requestCloseContainer} />
-                : undefined}
-            />
-            <View class="flex-1 w-full h-full overflow-hidden">
-              <For each={mountedRoutes()}>{(route) => (
-                <RouteView active={state().route === route}>
-                  {renderRoute(route)}
-                </RouteView>
-              )}</For>
-            </View>
-          </View>
-          <NavigationBar route={state().route} onNavigate={navigate} items={showcaseTabs} visible={isPrimaryRoute(state().route)} dark={mobileDark()} accentColor={theme().accentColor} geometry={() => displayGeometry()} />
-        </View>
+      <FocusScope class="relative flex-1 flex-col w-full h-full overflow-hidden" autoFocus restoreFocus>
+        <For each={mountedRoutes()}>{(route) => (
+          <RouteView
+            class="absolute inset-0 w-full h-full overflow-hidden"
+            active={state().route === route || backGestureRouteTo() === route}
+            style={{
+              bgColor: mobileDark() ? "#09090B" : "#FAFAFA",
+              translateX: backGestureRouteFrom() !== undefined
+                ? backGestureRouteFrom() === route
+                  ? backGestureForegroundX()
+                  : backGestureRouteTo() === route
+                    ? backGestureBackgroundX()
+                    : 0
+                : route === state().route ? transitionDescriptor().inTx : 0,
+              translateY: backGestureRouteFrom() === undefined && route === state().route ? transitionDescriptor().inTy : 0,
+              scale: backGestureRouteFrom() === undefined && route === state().route ? transitionDescriptor().inScale : 1,
+            }}
+          >
+            <SafeAreaScaffold
+              edges={isPrimaryRoute(route) ? ["top"] : ["top", "bottom"]}
+              geometry={() => displayGeometry()}
+              class={mobileDark()
+                ? "flex-col w-full h-full bg-[#09090B]"
+                : "flex-col w-full h-full bg-[#FAFAFA]"}
+              appBar={() => renderRouteAppBar(route)}
+              bottomBar={isPrimaryRoute(route) ? (
+                <NavigationBar
+                  route={route}
+                  onNavigate={navigate}
+                  items={showcaseTabs}
+                  visible
+                  dark={mobileDark()}
+                  accentColor={theme().accentColor}
+                  geometry={() => displayGeometry()}
+                />
+              ) : undefined}
+            >
+              {renderRoute(route)}
+            </SafeAreaScaffold>
+          </RouteView>
+        )}</For>
       </FocusScope>
-      </SafeAreaScaffold>
       <SystemAppSurfaces
         system={system}
         systemUIFocused={state().detailsOpen}
+        backGesture={miniAppBackPreview()}
         presentation="mini-app"
         onClose={async (binding) => {
           const frame = system.snapshot().stack.find((entry) => entry.instanceId === binding.instanceId);

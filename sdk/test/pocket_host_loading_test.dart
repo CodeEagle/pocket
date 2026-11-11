@@ -133,9 +133,23 @@ void main() {
             findsOneWidget,
             reason: 'a cancelled edge gesture must retain the container',
           );
-          final swipe = await tester.startGesture(const Offset(8, 200));
-          await swipe.moveTo(const Offset(120, 200));
-          await swipe.up();
+          final swipe = await tester.createGesture(pointer: 2);
+          await swipe.down(
+            const Offset(8, 200),
+            timeStamp: const Duration(milliseconds: 900),
+          );
+          await swipe.moveTo(
+            const Offset(120, 200),
+            timeStamp: const Duration(milliseconds: 1100),
+          );
+          await tester.pump();
+          expect(
+            find.byType(PocketSystemHostApplication),
+            findsOneWidget,
+            reason: 'the container waits for the edge gesture end phase',
+          );
+          expect(pending.isCompleted, isFalse);
+          await swipe.up(timeStamp: const Duration(milliseconds: 1150));
       }
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 550));

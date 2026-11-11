@@ -11,10 +11,10 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/gestures.dart' show VelocityTracker, kTouchSlop;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'
-    show HapticFeedback, LogicalKeyboardKey, SystemNavigator;
+import 'package:flutter/services.dart' show LogicalKeyboardKey, SystemNavigator;
 import 'package:path_provider/path_provider.dart';
-import 'package:pocket_flutter/pocket_flutter.dart' show PocketViewController;
+import 'package:pocket_flutter/pocket_flutter.dart'
+    show PocketViewController, PocketEvent;
 import 'package:pocket_services/pocket_services.dart';
 import 'package:pocket_flutter/src/pocket_memory_limits.dart';
 import 'package:pocket_flutter/src/pocket_view.dart' show PocketViewCapture;
@@ -34,6 +34,9 @@ const Duration _platformRequestTimeout = Duration(seconds: 30);
 const Duration _nativeBackRequestTimeout = Duration(milliseconds: 600);
 const String _nativeBackRequestEvent = 'platform.back.request';
 const String _nativeBackResponseEvent = 'platform.back.response';
+const String _nativeBackGestureEvent = 'platform.back.gesture';
+const String _nativeBackGestureResponseEvent = 'platform.back.gesture.response';
+const String _nativeBackGestureReadyEvent = 'platform.back.gesture.ready';
 
 String _runtimeFailureCode(Object error, {String fallback = 'runtime_failed'}) {
   if (error is PocketCapabilityException) return error.code;
@@ -695,8 +698,12 @@ final class _PocketSystemHostApplicationState
                     if (!didPop && canExit && !systemHostMounted) _exitRemote();
                   },
                   child: _PocketEdgeBackListener(
-                    onBack: (!systemHostMounted && canExit)
-                        ? _exitRemote
+                    onGesture: (!systemHostMounted && canExit)
+                        ? (input) {
+                            if (input['phase'] == 'end' &&
+                                input['fallbackCompleted'] == true)
+                              _exitRemote();
+                          }
                         : null,
                     child: Scaffold(
                       appBar: canExit
@@ -903,6 +910,12 @@ final class PocketSystemHostController extends ChangeNotifier {
   Future<bool> requestBack() =>
       _owner?._requestBack() ?? Future<bool>.value(false);
 
+  Future<bool> _beginBackGesture(Map<String, dynamic> input) =>
+      _owner?._beginBackGesture(input) ?? Future<bool>.value(false);
+
+  void _updateBackGesture(Map<String, dynamic> input) =>
+      _owner?._updateBackGesture(input);
+
   void _attach(_PocketSystemHostState owner) {
     if (_owner != null && !identical(_owner, owner)) {
       throw StateError('PocketSystemHostController is already attached');
@@ -999,6 +1012,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   final Map<String, _PendingPlatformRequest> _pendingRequests =
       <String, _PendingPlatformRequest>{};
   Future<bool>? _activeBackRequest;
+  _NativeBackGesture? _backGesture;
 
   Future<void>? _configurationFuture;
   int? _configurationFutureGeneration;
@@ -1033,6 +1047,13 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
           _catalogGeneration == _systemUIInstance.session.generation);
 
   Future<bool> _requestBack() {
+    final gesture = _backGesture;
+    if (gesture != null) {
+      _updateBackGesture(<String, dynamic>{
+        ...gesture.start,
+        'phase': 'cancel',
+      });
+    }
     final active = _activeBackRequest;
     if (active != null) return active;
     late final Future<bool> tracked;
@@ -1041,6 +1062,179 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     });
     _activeBackRequest = tracked;
     return tracked;
+  }
+
+  // Only input ownership and guest generations live here. JS decides whether
+  // a page can be dragged and whether its final position commits navigation.
+  Future<bool> _beginBackGesture(Map<String, dynamic> input) async {
+    final previous = _backGesture;
+    if (previous != null) {
+      _updateBackGesture(<String, dynamic>{
+        ...previous.start,
+        'phase': 'cancel',
+      });
+    }
+    if (_disposed || !_catalogMatchesMountedGeneration) return false;
+    final focused = _focusedBackInputRuntime;
+    final gesture = _NativeBackGesture(Map<String, dynamic>.of(input), focused);
+    _backGesture = gesture;
+    final targets = <_RuntimeInstance>[
+      // A guest with no registered interactive handler cannot answer start.
+      // Skip the timeout and let SystemUI preview its existing app-call stack.
+      if (focused != null &&
+          focused.backGestureGeneration == focused.session.generation)
+        focused,
+      _systemUIInstance,
+    ];
+    for (final target in targets) {
+      final generation = target.session.generation;
+      final handled = await _sendBackGestureStart(target, input);
+      if (!identical(_backGesture, gesture)) {
+        if (handled &&
+            _isCurrent(target) &&
+            target.session.generation == generation) {
+          target.session.controller.send(
+            method: _nativeBackGestureEvent,
+            params: <String, dynamic>{...input, 'phase': 'cancel'},
+          );
+        }
+        return true; // A superseded contact must never close a newer page.
+      }
+      if (!_isCurrent(target) ||
+          target.session.generation != generation ||
+          !_backInputFocusMatches(gesture) ||
+          _disposed) {
+        if (handled &&
+            _isCurrent(target) &&
+            target.session.generation == generation) {
+          target.session.controller.send(
+            method: _nativeBackGestureEvent,
+            params: <String, dynamic>{...input, 'phase': 'cancel'},
+          );
+        }
+        _backGesture = null;
+        return true;
+      }
+      if (!handled) {
+        // Also retires a start whose response arrived after the time budget.
+        target.session.controller.send(
+          method: _nativeBackGestureEvent,
+          params: <String, dynamic>{...input, 'phase': 'cancel'},
+        );
+        continue;
+      }
+      gesture.target = target;
+      gesture.generation = generation;
+      final latest = gesture.latest;
+      if (latest != null) _updateBackGesture(latest);
+      return true;
+    }
+    if (identical(_backGesture, gesture)) _backGesture = null;
+    return !_lifecycleResumed || gesture.latest?['phase'] == 'cancel';
+  }
+
+  void _updateBackGesture(Map<String, dynamic> input) {
+    final gesture = _backGesture;
+    if (gesture == null || input['gestureId'] != gesture.start['gestureId'])
+      return;
+    input = <String, dynamic>{...gesture.latest ?? gesture.start, ...input};
+    gesture.latest = input;
+    final target = gesture.target;
+    if (target == null) {
+      return; // Coalesce movement while start is negotiated.
+    }
+    if (_disposed ||
+        !_isCurrent(target) ||
+        target.session.generation != gesture.generation ||
+        !_backInputFocusMatches(gesture)) {
+      if (!_disposed &&
+          _isCurrent(target) &&
+          target.session.generation == gesture.generation) {
+        target.session.controller.send(
+          method: _nativeBackGestureEvent,
+          params: <String, dynamic>{...input, 'phase': 'cancel'},
+        );
+      }
+      _backGesture = null;
+      return;
+    }
+    target.session.controller.send(
+      method: _nativeBackGestureEvent,
+      params: input,
+    );
+    if (input['phase'] == 'end' || input['phase'] == 'cancel')
+      _backGesture = null;
+  }
+
+  void _watchBackGestureRegistration(_RuntimeInstance instance) {
+    instance.session.addEventListener((event) {
+      if (event.method != _nativeBackGestureReadyEvent ||
+          event.params['ready'] is! bool ||
+          !_isCurrent(instance))
+        return;
+      instance.backGestureGeneration = event.params['ready'] == true
+          ? instance.session.generation
+          : null;
+    });
+  }
+
+  _RuntimeInstance? get _focusedBackInputRuntime {
+    for (final instance in _applications.values) {
+      if (instance.compositorVisible && instance.compositorFocused)
+        return instance;
+    }
+    return null;
+  }
+
+  bool _backInputFocusMatches(_NativeBackGesture gesture) {
+    final focused = _focusedBackInputRuntime;
+    return identical(focused, gesture.focused) &&
+        (focused == null ||
+            focused.session.generation == gesture.focusedGeneration);
+  }
+
+  Future<bool> _sendBackGestureStart(
+    _RuntimeInstance target,
+    Map<String, dynamic> input,
+  ) async {
+    if (!_isCurrent(target) ||
+        target.closing ||
+        !target.firstFrameReady ||
+        target.session.failure != null ||
+        !target.session.controller.isReady)
+      return false;
+    final session = target.session;
+    final generation = session.generation;
+    final response = Completer<bool>();
+    void listener(PocketEvent event) {
+      if (event.method == _nativeBackGestureResponseEvent &&
+          event.params['gestureId'] == input['gestureId'] &&
+          event.params['handled'] is bool &&
+          session.generation == generation &&
+          _isCurrent(target) &&
+          !response.isCompleted) {
+        response.complete(event.params['handled'] as bool);
+      }
+    }
+
+    session.addEventListener(listener);
+    try {
+      if (!session.controller.send(
+        method: _nativeBackGestureEvent,
+        params: input,
+      ))
+        return false;
+      return await response.future.timeout(
+        _nativeBackRequestTimeout,
+        onTimeout: () {
+          return false;
+        },
+      );
+    } catch (error) {
+      return false;
+    } finally {
+      session.removeEventListener(listener);
+    }
   }
 
   Future<bool> _dispatchBackRequest() async {
@@ -1202,6 +1396,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
           ? null
           : _prepareSystemUIGeneration,
     );
+    _watchBackGestureRegistration(_systemUIInstance);
     _systemUIGeneration = _systemUIInstance.session.generation;
     // A fixed-index bootstrap may advance between Flutter loading the host
     // document and the signed root mount. Dynamic hosts must therefore resolve
@@ -1257,6 +1452,13 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _lifecycleState = state;
+    final gesture = _backGesture;
+    if (state != AppLifecycleState.resumed && gesture != null) {
+      _updateBackGesture(<String, dynamic>{
+        'gestureId': gesture.start['gestureId'],
+        'phase': 'cancel',
+      });
+    }
     for (final instance in _applications.values) {
       _applyForeground(instance);
     }
@@ -2037,6 +2239,7 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     instance.config = childConfig;
     instance.session = PocketSession(config: childConfig)
       ..setInitialEvents(initialEvents);
+    _watchBackGestureRegistration(instance);
     instance.observedGeneration = instance.session.generation;
     instance.announcedGeneration = instance.session.generation;
     instance.changeListener = () => _instanceChanged(instance);
@@ -3316,6 +3519,7 @@ final class _RuntimeInstance {
   Completer<void>? firstFrame;
   Completer<void>? firstVisibleFrame;
   int observedGeneration = 0;
+  int? backGestureGeneration;
   int announcedGeneration = 0;
   int? reportedFailureGeneration;
   bool firstFrameReady = false;
@@ -3357,6 +3561,47 @@ final class _PocketBackInputBoundary extends StatefulWidget {
 final class _PocketBackInputBoundaryState
     extends State<_PocketBackInputBoundary> {
   bool _backPending = false;
+  String? _gestureId;
+  Future<bool>? _gestureAcceptance;
+
+  void _onGesture(Map<String, dynamic> input) {
+    final id = input['gestureId'] as String;
+    final phase = input['phase'];
+    if (phase == 'start') {
+      if (_backPending) return;
+      _gestureId = id;
+      _gestureAcceptance = widget.controller._beginBackGesture(input);
+      return;
+    }
+    if (_gestureId != id) return;
+    widget.controller._updateBackGesture(input);
+    if (phase != 'end' && phase != 'cancel') return;
+    final acceptance = _gestureAcceptance;
+    unawaited(() async {
+      final handled = await (acceptance ?? Future<bool>.value(false));
+      if (!mounted || _gestureId != id) return;
+      _gestureId = null;
+      _gestureAcceptance = null;
+      final lifecycle = WidgetsBinding.instance.lifecycleState;
+      if (!handled &&
+          phase == 'end' &&
+          input['fallbackCompleted'] == true &&
+          (lifecycle == null || lifecycle == AppLifecycleState.resumed)) {
+        await _requestBack(source: 'edgeGesture');
+      }
+    }());
+  }
+
+  @override
+  void dispose() {
+    final id = _gestureId;
+    if (id != null)
+      widget.controller._updateBackGesture(<String, dynamic>{
+        'gestureId': id,
+        'phase': 'cancel',
+      });
+    super.dispose();
+  }
 
   Future<void> _requestBack({required String source}) async {
     if (_backPending) return;
@@ -3381,17 +3626,14 @@ final class _PocketBackInputBoundaryState
     onPopInvokedWithResult: (didPop, _) {
       if (!didPop) unawaited(_requestBack(source: 'popScope'));
     },
-    child: _PocketEdgeBackListener(
-      onBack: () => unawaited(_requestBack(source: 'edgeGesture')),
-      child: widget.child,
-    ),
+    child: _PocketEdgeBackListener(onGesture: _onGesture, child: widget.child),
   );
 }
 
 final class _PocketEdgeBackListener extends StatefulWidget {
-  const _PocketEdgeBackListener({required this.onBack, required this.child});
+  const _PocketEdgeBackListener({required this.onGesture, required this.child});
 
-  final VoidCallback? onBack;
+  final ValueChanged<Map<String, dynamic>>? onGesture;
   final Widget child;
 
   @override
@@ -3401,16 +3643,29 @@ final class _PocketEdgeBackListener extends StatefulWidget {
 
 final class _PocketEdgeBackListenerState
     extends State<_PocketEdgeBackListener> {
+  static int _sequence = 0;
   int? _pointer;
   Offset? _origin;
+  Offset? _position;
   VelocityTracker? _velocity;
+  String? _gestureId;
+  double _width = 1;
 
-  void _commitBack({required String trigger}) {
-    final onBack = widget.onBack;
-    if (onBack == null) return;
-    debugPrint('[PocketBack] edge commit ($trigger)');
-    unawaited(HapticFeedback.mediumImpact());
-    onBack();
+  void _emit(String phase, {double velocity = 0, bool completed = false}) {
+    final origin = _origin;
+    final position = _position;
+    final id = _gestureId;
+    if (origin == null || position == null || id == null) return;
+    final dx = position.dx - origin.dx;
+    widget.onGesture?.call(<String, dynamic>{
+      'gestureId': id,
+      'phase': phase,
+      'dx': dx,
+      'width': _width,
+      'velocity': velocity,
+      'progress': (dx / _width).clamp(0.0, 1.0),
+      'fallbackCompleted': completed,
+    });
   }
 
   void _onDown(PointerDownEvent event) {
@@ -3419,62 +3674,92 @@ final class _PocketEdgeBackListenerState
         event.localPosition.dx > 36)
       return;
     _pointer = event.pointer;
-    _origin = event.position;
+    _origin = _position = event.position;
+    _gestureId = 'native-edge-${++_sequence}';
+    _width = (context.size?.width ?? MediaQuery.sizeOf(context).width).clamp(
+      1.0,
+      double.infinity,
+    );
     _velocity = VelocityTracker.withKind(event.kind)
       ..addPosition(event.timeStamp, event.position);
     debugPrint(
       '[PocketBack] edge start x=${event.localPosition.dx.toStringAsFixed(1)}',
     );
+    _emit('start');
   }
 
   void _onMove(PointerMoveEvent event) {
-    if (_pointer == event.pointer) {
-      _velocity?.addPosition(event.timeStamp, event.position);
+    if (_pointer != event.pointer) return;
+    _position = event.position;
+    _velocity?.addPosition(event.timeStamp, event.position);
+    final delta = event.position - _origin!;
+    // A vertical gesture belongs to the page and must not later turn into Back.
+    if (delta.dy.abs() > kTouchSlop && delta.dy.abs() > delta.dx.abs()) {
+      _emit('cancel');
+      _clear();
+      return;
     }
+    _emit('update');
   }
 
   void _onUp(PointerUpEvent event) {
     if (_pointer != event.pointer) return;
-    final origin = _origin;
-    _velocity?.addPosition(event.timeStamp, event.position);
+    _position = event.position;
+    // Match Flutter's drag recognizer: velocity uses down/move samples only.
     final velocity = _velocity?.getVelocity().pixelsPerSecond.dx ?? 0;
-    _clear(event);
-    if (origin == null || widget.onBack == null) return;
-    final dx = event.position.dx - origin.dx;
-    final dy = event.position.dy - origin.dy;
-    final horizontal = dx > dy.abs() && dy.abs() <= 72;
+    final delta = event.position - _origin!;
+    final horizontal = delta.dx > delta.dy.abs() && delta.dy.abs() <= 72;
     final completed =
-        horizontal && (dx >= 88 || (dx >= kTouchSlop && velocity > 260));
+        horizontal &&
+        (delta.dx >= 88 || (delta.dx >= kTouchSlop && velocity > 260));
     debugPrint(
-      '[PocketBack] edge release dx=${dx.toStringAsFixed(1)} dy=${dy.toStringAsFixed(1)} vx=${velocity.toStringAsFixed(1)} accepted=$completed',
+      '[PocketBack] edge release dx=${delta.dx.toStringAsFixed(1)} vx=${velocity.toStringAsFixed(1)} accepted=$completed',
     );
-    if (completed) {
-      _commitBack(trigger: dx >= 88 ? 'distance' : 'velocity');
-    }
+    _emit(
+      horizontal ? 'end' : 'cancel',
+      velocity: velocity,
+      completed: completed,
+    );
+    _clear();
   }
 
-  void _clear(PointerEvent event) {
+  void _onCancel(PointerCancelEvent event) {
     if (_pointer != event.pointer) return;
+    _emit('cancel');
+    _clear();
+  }
+
+  void _clear() {
     _pointer = null;
-    _origin = null;
+    _origin = _position = null;
     _velocity = null;
+    _gestureId = null;
   }
 
   @override
   Widget build(BuildContext context) {
-    final onBack = widget.onBack;
-    if (defaultTargetPlatform != TargetPlatform.iOS || onBack == null) {
+    if (defaultTargetPlatform != TargetPlatform.iOS || widget.onGesture == null)
       return widget.child;
-    }
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: _onDown,
       onPointerMove: _onMove,
       onPointerUp: _onUp,
-      onPointerCancel: _clear,
+      onPointerCancel: _onCancel,
       child: widget.child,
     );
   }
+}
+
+final class _NativeBackGesture {
+  _NativeBackGesture(this.start, this.focused)
+    : focusedGeneration = focused?.session.generation;
+  final Map<String, dynamic> start;
+  final _RuntimeInstance? focused;
+  final int? focusedGeneration;
+  Map<String, dynamic>? latest;
+  _RuntimeInstance? target;
+  int? generation;
 }
 
 final class _PendingPlatformRequest {
