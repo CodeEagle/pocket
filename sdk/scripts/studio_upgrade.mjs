@@ -913,12 +913,38 @@ export async function spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersi
     `--target-version=${targetVersion}`,
     ...(handoffToken ? [`--handoff-token=${handoffToken}`] : []),
   ];
+  if (process.platform === 'win32') {
+    closeSync(logFd);
+    // ShellExecute launches outside Bun's inherited handle table. Direct Bun
+    // CreateProcess inherits the live listening socket even with stdio ignored.
+    const psString = value => "'" + String(value).replaceAll("'", "''") + "'";
+    const argumentLine = args.map(arg => '"' + arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1') + '"').join(' ');
+    const command = `$ErrorActionPreference='Stop'; $p=Start-Process -FilePath (Get-Command node -CommandType Application | Select-Object -First 1 -ExpandProperty Source) -ArgumentList ${psString(argumentLine)} -WorkingDirectory ${psString(resolvedRoot)} -WindowStyle Hidden -PassThru; Write-Output $p.Id`;
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
+      cwd: resolvedRoot,
+      windowsHide: true,
+      env: { ...process.env, ...(handoffToken ? { POCKET_UPGRADE_HANDOFF_TOKEN: handoffToken } : {}) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    await new Promise((resolveSpawn, rejectSpawn) => {
+      const timeout = setTimeout(() => { child.kill(); rejectSpawn(new Error('启动独立升级进程超时')); }, 15_000);
+      child.once('error', error => { clearTimeout(timeout); rejectSpawn(error); });
+      child.once('close', code => {
+        clearTimeout(timeout);
+        if (code === 0 && /^\d+$/.test(stdout.trim()) && Number(stdout.trim()) > 0) resolveSpawn();
+        else rejectSpawn(new Error(`无法启动独立升级进程：${stderr.trim() || code}`));
+      });
+    });
+    return;
+  }
   let child;
   try {
     child = spawn(
-      // The service CLI is a Node entrypoint. Bun 1.3.9 on Windows resolves
-      // 8.3 paths differently from Node, invalidating its own PID ownership.
-      process.platform === 'win32' && process.versions.bun ? 'node' : process.execPath,
+      process.execPath,
       args,
       {
         cwd: resolvedRoot,
@@ -928,7 +954,7 @@ export async function spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersi
           ...process.env,
           ...(handoffToken ? { POCKET_UPGRADE_HANDOFF_TOKEN: handoffToken } : {}),
         },
-        stdio: process.platform === 'win32' ? 'ignore' : ['ignore', logFd, logFd],
+        stdio: ['ignore', logFd, logFd],
       },
     );
   } finally {
