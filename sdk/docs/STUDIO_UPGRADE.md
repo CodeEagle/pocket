@@ -61,3 +61,9 @@
   - 验证前端存在未保存草稿（`dirty`）时暂缓自动升级，点击保存后自动触发真实 detached `editor_service.mjs upgrade-apply` 子进程交接，`/health` 的 `pid` 发生真实变化、`version` 升至 `0.1.11`（含新 ABI），Playwright 直接观测到浏览器原生自动页面刷新（`page.waitForNavigation`）且無需任何测试钩子或手动 `page.reload()`。
   - 模拟新版启动崩溃与真实 CLI 回滚流程，验证旧版回滚健康 truthfulness 及浏览器无刷新死循环。
 - **真实 0.1.10 发布包跨平台校验**：已对公开发布的 `0.1.10` macOS (`darwin-arm64`) 与 Windows (`win32-x64`) 独立 SDK 归档完成真实解压与 `validateStagedStandaloneSdk` 校验。
+
+### 0.1.12 发布验证修正
+
+- macOS 的 `/var` 与 `/private/var` 临时目录别名可能使 Node ESM 的规范路径与 CLI 参数不同。服务入口在路径字符串不同时比较 `realpathSync`，并增加通过符号目录执行真实 CLI 的回归测试，避免命令未执行却返回成功。
+- 升级浏览器测试复用现有编辑器测试所用 Bun 1.4.4；实际独立 SDK 子服务仍由 `resolveManagedBun` 使用固定 Bun 1.3.9。Chromium 启动设置 15 秒超时并输出阶段信息，便于定位平台进程故障。
+- 隔离源码快照验证：升级、服务配置、预编译工具、工具打包、SDK 导出共 34 项测试、284 项断言通过；包含真实进程替换、自动网页导航与失败回滚。

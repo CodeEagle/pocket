@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   configFromHealth,
   editorToolEnvironment,
+  isEntrypoint,
   makePidRecord,
   mergeLaunchOptions,
   parseArgs,
@@ -11,6 +15,7 @@ import {
 } from "../editor_service.mjs";
 
 const fixture = (name: string) => resolve(tmpdir(), name);
+const SCRIPT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "editor_service.mjs");
 
 describe("editor service launch config", () => {
   test("first launch without explicit values stays on the generic SDK", () => {
@@ -122,5 +127,27 @@ describe("editor service launch config", () => {
   test("editorToolEnvironment accepts an explicit sdkRoot argument", () => {
     const env = editorToolEnvironment({ compilerPath: fixture("custom-compiler.ts") }, fixture("custom-sdk"));
     expect(env.POCKET_COMPILER_PATH).toBe(fixture("custom-compiler.ts"));
+  });
+
+  test("CLI entrypoint guard resolves symlinked parent directories and executes main()", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "pocket-editor-service-symlink-"));
+    try {
+      const symlinkedScriptsDir = join(tempDir, "scripts-link");
+      symlinkSync(dirname(SCRIPT_PATH), symlinkedScriptsDir, "dir");
+      const symlinkedEntry = join(symlinkedScriptsDir, "editor_service.mjs");
+      const canonicalModuleUrl = pathToFileURL(SCRIPT_PATH).href;
+
+      expect(isEntrypoint(symlinkedEntry, canonicalModuleUrl)).toBe(true);
+      expect(isEntrypoint(join(tempDir, "missing.mjs"), canonicalModuleUrl)).toBe(false);
+
+      const cliRun = spawnSync("node", [symlinkedEntry, "start", "--port=9999"], {
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      expect(cliRun.status).toBe(1);
+      expect(cliRun.stderr).toContain("Pocket Studio：Studio 固定使用 8791，不能指定其他端口");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

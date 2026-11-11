@@ -21,6 +21,7 @@ import { chromium } from "playwright";
 import {
   BYTECODE_ABI,
   UPSTREAM_REVISION,
+  resolveManagedBun,
 } from "../../scripts/prebuilt_tools.mjs";
 import {
   acquireUpgradeApplyLock,
@@ -57,6 +58,7 @@ const { startEditor } = await import("../server.ts");
 const PLATFORM = process.platform;
 const ARCH = process.arch;
 const TUPLE = `${PLATFORM}-${ARCH}`;
+const SDK_BUN = resolveManagedBun(resolve(import.meta.dir, "../.."));
 
 function encodeTarOctal(value: number, length: number): string {
   const octal = Math.max(0, Math.trunc(value)).toString(8);
@@ -1060,7 +1062,9 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
     const v11BuildRoot = mkdtempSync(join(tmpdir(), "pocket-e2e-real-cli-v11-"));
     const testPort = await allocateFreeLoopbackPort();
     let releaseServer: ReturnType<typeof Bun.serve> | undefined;
-    const browser = await chromium.launch({ headless: true });
+    console.info(`[upgrade lifecycle] launching Chromium on ${PLATFORM}, runner ${Bun.version}, SDK Bun ${SDK_BUN}`);
+    const browser = await chromium.launch({ headless: true, timeout: 15_000 });
+    console.info("[upgrade lifecycle] Chromium ready");
 
     const futureRevision = "2222222222333333333344444444445555555555";
     const futureAbi = `quickjs-bytecode-v1:${"b".repeat(64)}`;
@@ -1068,8 +1072,8 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
     const childEnv: Record<string, string | undefined> = {
       ...process.env,
       POCKET_STUDIO_TEST_PORT: String(testPort),
-      POCKET_BUN: process.execPath,
-      POCKET_EDITOR_BUN: process.execPath,
+      POCKET_BUN: SDK_BUN,
+      POCKET_EDITOR_BUN: SDK_BUN,
     };
     // Temporarily unset POCKET_SOURCE_BUILD for the child service so real prebuiltEnvironment & future ABI validation run!
     delete childEnv.POCKET_SOURCE_BUILD;
@@ -1131,6 +1135,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
 
       childEnv.POCKET_TEST_RELEASES_URL = `http://127.0.0.1:${releaseServer.port}/releases`;
 
+      console.info("[upgrade lifecycle] starting standalone CLI");
       // Start the initial 0.1.10 standalone service using the real editor_service.mjs CLI
       const startRes = spawnSync(
         "node",
@@ -1142,6 +1147,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
         ],
         { cwd: standaloneRoot, env: childEnv as NodeJS.ProcessEnv, encoding: "utf8", timeout: 20_000 },
       );
+      if (startRes.status !== 0) throw new Error(`Standalone CLI failed: ${startRes.error || ""}\n${startRes.stdout}\n${startRes.stderr}`);
       expect(startRes.status).toBe(0);
 
       const initialHealth = (await (await fetch(`http://127.0.0.1:${testPort}/health`)).json()) as {
@@ -1267,14 +1273,16 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
     const v11BuildRoot = mkdtempSync(join(tmpdir(), "pocket-e2e-real-rollback-v11-"));
     const testPort = await allocateFreeLoopbackPort();
     let releaseServer: ReturnType<typeof Bun.serve> | undefined;
-    const browser = await chromium.launch({ headless: true });
+    console.info(`[upgrade lifecycle] launching Chromium on ${PLATFORM}, runner ${Bun.version}, SDK Bun ${SDK_BUN}`);
+    const browser = await chromium.launch({ headless: true, timeout: 15_000 });
+    console.info("[upgrade lifecycle] Chromium ready");
 
     const childEnv: Record<string, string | undefined> = {
       ...process.env,
       POCKET_STUDIO_TEST_PORT: String(testPort),
       POCKET_STUDIO_UPGRADE_HEALTH_TIMEOUT_MS: "2500",
-      POCKET_BUN: process.execPath,
-      POCKET_EDITOR_BUN: process.execPath,
+      POCKET_BUN: SDK_BUN,
+      POCKET_EDITOR_BUN: SDK_BUN,
     };
     delete childEnv.POCKET_SOURCE_BUILD;
 

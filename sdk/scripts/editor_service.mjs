@@ -10,7 +10,7 @@
 import { createRequire } from "node:module";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prebuiltEnvironment } from "./prebuilt_tools.mjs";
@@ -580,9 +580,21 @@ async function main() {
   return restart(options);
 }
 
-export { configFromHealth, editorToolEnvironment, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
+function isEntrypoint(entry = process.argv[1], moduleUrl = import.meta.url) {
+  if (!entry) return false;
+  const entryPath = resolve(entry);
+  const modulePath = resolve(fileURLToPath(moduleUrl));
+  if (entryPath === modulePath) return true;
+  try {
+    return realpathSync(entryPath) === realpathSync(modulePath);
+  } catch {
+    return false;
+  }
+}
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+export { configFromHealth, editorToolEnvironment, isEntrypoint, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
+
+if (isEntrypoint()) {
   main().catch(error => {
     console.error(`Pocket Studio：${error?.message || error}`);
     process.exitCode = 1;

@@ -119,7 +119,7 @@ Canvas 的字体、圆角栅格、资源解码与 Flutter 可能不同，浏览�
 | `scripts/editor_service.mjs` | npm 统一启动器，固定 8791，复用进程管理库、既有 Editor、工作区与独立自升级替换/回滚流程。 |
 | `scripts/studio_upgrade.mjs` | Studio 内置自升级协调器：稳定版 GitHub Release 检查、HTTPS 来源校验、平台归档 + SHA-256 验证、安全 tar 解压、暂存校验与回滚状态记录。 |
 
-## Studio 内置自升级（v0.1.11+）
+## Studio 内置自升级（v0.1.12+）
 
 完整来源审计、逐文件备份与嵌套自定义文件保留事务、跨进程互斥锁、回滚健康确认及崩溃自愈设计见 [`STUDIO_UPGRADE.md`](STUDIO_UPGRADE.md)。
 

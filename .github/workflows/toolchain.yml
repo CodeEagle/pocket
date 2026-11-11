@@ -144,7 +144,7 @@ jobs:
         working-directory: sdk
         env:
           POCKET_SOURCE_BUILD: "1"
-        run: bun test --timeout 60000 editor/test/studio_upgrade.test.ts
+        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts
 
       - name: Build Noble N-API binding
         if: runner.os != 'Windows'
