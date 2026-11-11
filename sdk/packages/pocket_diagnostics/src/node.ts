@@ -36,6 +36,15 @@ import {
 } from "./types.ts";
 
 const noFollowFlag = fsConstants.O_NOFOLLOW ?? 0;
+// Bun 1.3.9 on Windows does not reliably create a missing file with numeric
+// O_CREAT flags. Use its portable Node string modes there; POSIX retains
+// O_NOFOLLOW in addition to the existing lstat/symlink checks.
+const appendFlags = process.platform === "win32" ? "a"
+  : fsConstants.O_CREAT | fsConstants.O_APPEND | fsConstants.O_WRONLY | noFollowFlag;
+const exclusiveFlags = process.platform === "win32" ? "wx"
+  : fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollowFlag;
+const readWriteFlags = process.platform === "win32" ? "r+"
+  : fsConstants.O_RDWR | noFollowFlag;
 
 export const DEFAULT_JOURNAL_FILENAME = "diagnostics.jsonl";
 export const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
@@ -195,7 +204,7 @@ async function atomicWriteFile(
   const tempPath = join(directory, `.diag-${randomUUID()}.tmp`);
   const handle = await open(
     tempPath,
-    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollowFlag,
+    exclusiveFlags,
     0o600,
   );
   try {
@@ -272,7 +281,7 @@ export function createFileDiagnosticsStorage(
     }
     activeHandle = await open(
       activePath,
-      fsConstants.O_CREAT | fsConstants.O_APPEND | fsConstants.O_WRONLY | noFollowFlag,
+      appendFlags,
       0o600,
     );
     return activeHandle;
@@ -526,7 +535,7 @@ export function createFileDiagnosticsStorage(
         }
         const activePath = join(canonicalDir, filename);
         if (!(await assertRegularOrMissing(activePath))) return;
-        const rwHandle = await open(activePath, fsConstants.O_RDWR | noFollowFlag);
+        const rwHandle = await open(activePath, readWriteFlags);
         try {
           await rwHandle.sync();
         } finally {
@@ -548,7 +557,7 @@ export function createFileDiagnosticsStorage(
         }
         const activePath = join(canonicalDir, filename);
         if (!(await assertRegularOrMissing(activePath))) return;
-        const rwHandle = await open(activePath, fsConstants.O_RDWR | noFollowFlag);
+        const rwHandle = await open(activePath, readWriteFlags);
         try {
           await rwHandle.sync();
         } finally {

@@ -1,5 +1,15 @@
 # Pocket Diagnostics Package (`@pocket/diagnostics`)
 
+## Windows journal creation
+
+Build 42978280004 passed macOS consumer acceptance but Windows Studio startup
+failed when Bun 1.3.9 opened a missing journal with numeric `O_CREAT` flags.
+The Windows adapter uses portable Node modes `a`, `wx` and `r+`; POSIX retains
+numeric `O_NOFOLLOW`. Existing directory/file symlink checks, exclusive temporary
+files, rotation and crash fsync remain. The release workflow now runs the actual
+diagnostics disk suite on both platforms before packaging. A fresh nested Studio
+workspace regression covers first append, exclusive rewrite, close and reopen.
+
 ## Source-first review and retained behavior
 
 Before implementing `@pocket/diagnostics`, the retained parent repository at `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo` (excluding `pocket_host/`) and the current SDK storage/logging modules were inspected:

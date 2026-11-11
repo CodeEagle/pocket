@@ -132,6 +132,10 @@ jobs:
         working-directory: sdk
         run: npm install --ignore-scripts --legacy-peer-deps --no-audit --no-fund
 
+      - name: Verify diagnostics persistence on platform
+        working-directory: sdk
+        run: bun test packages/pocket_diagnostics/test/diagnostics.test.ts
+
       - name: Build Noble N-API binding
         if: runner.os != 'Windows'
         working-directory: sdk

@@ -339,6 +339,23 @@ describe("@pocket/diagnostics/node durable file persistence", () => {
     await reopened.close();
   });
 
+  test("creates a fresh Studio journal and persists compaction before restart", async () => {
+    const dir = join(await makeTempDir(), "editor-workspace-8791", "diagnostics");
+    const first = createFileDiagnostics({ directory: dir });
+    await first.recordLog({ message: "Studio started" });
+    await first.recordCrash(new Error("preview exited"));
+    expect((await readFile(first.journalPath, "utf8")).trim().split("\n")).toHaveLength(2);
+    // Selective clear rewrites via an exclusive temporary file, then close
+    // reopens the retained journal for fsync without an active append handle.
+    expect(await first.clear({ kind: "log" })).toBe(1);
+    await first.close();
+    const reopened = createFileDiagnostics({ directory: dir });
+    const records = await reopened.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]?.message).toBe("preview exited");
+    await reopened.close();
+  });
+
   test("serializes concurrent writes without corrupting JSONL lines", async () => {
     const dir = await makeTempDir();
     const diag = createFileDiagnostics({
