@@ -353,7 +353,7 @@ async function waitForHealth(timeoutMs = 30000, expectedVersion = undefined) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const health = await readHealth();
-    if (health?.ok === true && health.service === "pocket-editor" && resolve(health.workspace || "") === WORKSPACE) {
+    if (health?.ok === true && health.service === "pocket-editor" && sameFileSystemPath(health.workspace, WORKSPACE)) {
       if (!expectedVersion || health.version === expectedVersion) return true;
     }
     await sleep(250);

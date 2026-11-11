@@ -928,7 +928,7 @@ export async function spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersi
           ...process.env,
           ...(handoffToken ? { POCKET_UPGRADE_HANDOFF_TOKEN: handoffToken } : {}),
         },
-        stdio: ['ignore', logFd, logFd],
+        stdio: process.platform === 'win32' ? 'ignore' : ['ignore', logFd, logFd],
       },
     );
   } finally {
