@@ -1192,8 +1192,12 @@ impl WorkerRuntime {
     }
 
     /// Attach the worker's native channels before evaluating the UI bundle.
-    /// `context` is the UI realm's rquickjs `JSContext` pointer.
-    pub fn attach_ui(
+    ///
+    /// # Safety
+    ///
+    /// `context` must be a valid, live UI realm `JSContext` pointer on the
+    /// calling thread.
+    pub unsafe fn attach_ui(
         &self,
         context: *mut rquickjs::qjs::JSContext,
     ) -> Result<WorkerUiBridge, WorkerError> {
@@ -4310,7 +4314,7 @@ mod tests {
         .unwrap();
         worker.wait_ready(Duration::from_secs(2)).unwrap();
         let mut bridge = ui_context
-            .with(|ctx| worker.attach_ui(ctx.as_raw().as_ptr()))
+            .with(|ctx| unsafe { worker.attach_ui(ctx.as_raw().as_ptr()) })
             .unwrap();
         ui_context.with(|ctx| {
             ctx.eval::<(), _>(
@@ -4383,7 +4387,7 @@ mod tests {
         .unwrap();
         worker.wait_ready(Duration::from_secs(2)).unwrap();
         let mut bridge = ui_context
-            .with(|ctx| worker.attach_ui(ctx.as_raw().as_ptr()))
+            .with(|ctx| unsafe { worker.attach_ui(ctx.as_raw().as_ptr()) })
             .unwrap();
         ui_context.with(|ctx| {
             ctx.eval::<(), _>(
@@ -4753,7 +4757,7 @@ mod tests {
         .unwrap();
         worker.wait_ready(Duration::from_secs(2)).unwrap();
         let mut bridge = ui_context
-            .with(|ctx| worker.attach_ui(ctx.as_raw().as_ptr()))
+            .with(|ctx| unsafe { worker.attach_ui(ctx.as_raw().as_ptr()) })
             .unwrap();
         ui_context.with(|ctx| {
             ctx.eval::<(), _>("__pocketWorkerChannels.configure(2,0);")
@@ -5075,7 +5079,7 @@ mod tests {
         .unwrap();
         worker.wait_ready(Duration::from_secs(2)).unwrap();
         let mut bridge = ui_context
-            .with(|ctx| worker.attach_ui(ctx.as_raw().as_ptr()))
+            .with(|ctx| unsafe { worker.attach_ui(ctx.as_raw().as_ptr()) })
             .unwrap();
         ui_context.with(|ctx| {
             ctx.eval::<(), _>("__pocketWorkerChannels.configure(2,0);")
@@ -5182,7 +5186,7 @@ mod tests {
         .unwrap();
         worker.wait_ready(Duration::from_secs(2)).unwrap();
         let mut bridge = ui_context
-            .with(|ctx| worker.attach_ui(ctx.as_raw().as_ptr()))
+            .with(|ctx| unsafe { worker.attach_ui(ctx.as_raw().as_ptr()) })
             .unwrap();
         ui_context.with(|ctx| {
             ctx.eval::<(), _>("__pocketWorkerChannels.configure(2,0);")

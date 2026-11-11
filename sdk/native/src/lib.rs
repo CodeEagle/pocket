@@ -22,7 +22,10 @@ use pocket_guest_rquickjs::{BindingProfile, RquickjsGuest};
 use pocket_runtime::{AssetRegistry, Guest, GuestEnvironment, GuestFrame, OpContext};
 use pocket_spec::BINDING_GENERATION;
 use pocketjs_core::{damage::DamageRect, Ui};
-use rquickjs::{Coerced, Ctx, Exception, FromJs, Function, Object, Value};
+use rquickjs::{
+    function::{FromParams, IntoJsFunc, ParamRequirement, Params},
+    Coerced, Ctx, Exception, FromJs, Function, Object, Value,
+};
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1239,18 +1242,13 @@ const UNCHANGED_FRAME_JSON: &str = "{\"unchanged\":true}";
 /// press callback cannot observe a dirty/stale frame. Detached and stale
 /// generation-tagged ids return `None`; the primary and optional auxiliary
 /// roots are the only valid parent-less nodes.
-fn committed_layout(ops: &OpContext, id: i32) -> Result<Option<(f32, f32, f32, f32)>, String> {
-    if id == 0 {
+const MAX_BATCH_LAYOUT_IDS: usize = 256;
+
+fn committed_layout_in_ui(ui: &Ui, id: i32) -> Result<Option<(f32, f32, f32, f32)>, String> {
+    if id == 0 || !ui.node_exists(id) {
         return Ok(None);
     }
-    let mut core = ops
-        .core_mut()
-        .map_err(|error| format!("layout query: {error:?}"))?;
-    core.ui.relayout_outputs();
-    if !core.ui.node_exists(id) {
-        return Ok(None);
-    }
-    let auxiliary_root = core.ui.auxiliary_surface_root();
+    let auxiliary_root = ui.auxiliary_surface_root();
     let mut current = id;
     let mut x = 0.0_f32;
     let mut y = 0.0_f32;
@@ -1258,7 +1256,7 @@ fn committed_layout(ops: &OpContext, id: i32) -> Result<Option<(f32, f32, f32, f
     let mut height = 0.0_f32;
     let mut depth = 0usize;
     loop {
-        let Some((local_x, local_y, local_w, local_h)) = core.ui.layout_of(current) else {
+        let Some((local_x, local_y, local_w, local_h)) = ui.layout_of(current) else {
             return Ok(None);
         };
         if current == id {
@@ -1267,7 +1265,7 @@ fn committed_layout(ops: &OpContext, id: i32) -> Result<Option<(f32, f32, f32, f
         }
         x += local_x;
         y += local_y;
-        let parent = core.ui.node_parent(current);
+        let parent = ui.node_parent(current);
         if parent == 0 {
             if current != pocket_spec::ROOT_ID && current != auxiliary_root {
                 return Ok(None);
@@ -1286,6 +1284,35 @@ fn committed_layout(ops: &OpContext, id: i32) -> Result<Option<(f32, f32, f32, f
     Ok(Some((x, y, width, height)))
 }
 
+fn committed_layout(ops: &OpContext, id: i32) -> Result<Option<(f32, f32, f32, f32)>, String> {
+    if id == 0 {
+        return Ok(None);
+    }
+    let mut core = ops
+        .core_mut()
+        .map_err(|error| format!("layout query: {error:?}"))?;
+    core.ui.relayout_outputs();
+    committed_layout_in_ui(&core.ui, id)
+}
+
+fn committed_layouts(
+    ops: &OpContext,
+    ids: &[i32],
+) -> Result<Vec<Option<(f32, f32, f32, f32)>>, String> {
+    if ids.is_empty() || ids.iter().all(|&id| id == 0) {
+        return Ok(vec![None; ids.len()]);
+    }
+    let mut core = ops
+        .core_mut()
+        .map_err(|error| format!("layout query: {error:?}"))?;
+    core.ui.relayout_outputs();
+    let mut out = Vec::with_capacity(ids.len());
+    for &id in ids {
+        out.push(committed_layout_in_ui(&core.ui, id)?);
+    }
+    Ok(out)
+}
+
 fn js_layout<'js>(ctx: Ctx<'js>, ops: &OpContext, id: i32) -> rquickjs::Result<Value<'js>> {
     let Some((x, y, width, height)) = committed_layout(ops, id)
         .map_err(|error| Exception::throw_internal(&ctx, error.as_str()))?
@@ -1298,6 +1325,74 @@ fn js_layout<'js>(ctx: Ctx<'js>, ops: &OpContext, id: i32) -> rquickjs::Result<V
     result.set("width", width)?;
     result.set("height", height)?;
     Ok(result.into_value())
+}
+
+fn js_layouts<'js>(
+    ctx: Ctx<'js>,
+    ops: &OpContext,
+    ids_val: Value<'js>,
+) -> rquickjs::Result<Value<'js>> {
+    let Some(array) = ids_val.as_array() else {
+        return Err(Exception::throw_type(
+            &ctx,
+            "getLayouts expects an array of node ids",
+        ));
+    };
+    let len = array.len();
+    if len > MAX_BATCH_LAYOUT_IDS {
+        return Err(Exception::throw_range(
+            &ctx,
+            "getLayouts batch exceeds limit",
+        ));
+    }
+    let mut parsed_ids = Vec::with_capacity(len);
+    for idx in 0..len {
+        let elem: Value<'js> = array.get(idx)?;
+        let id = if let Some(id) = elem.as_int() {
+            id
+        } else if let Some(n) = elem.as_number() {
+            if n.is_finite() && n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64 {
+                n as i32
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        parsed_ids.push(id);
+    }
+    let rects = committed_layouts(ops, &parsed_ids)
+        .map_err(|error| Exception::throw_internal(&ctx, error.as_str()))?;
+    let out = rquickjs::Array::new(ctx.clone())?;
+    for (idx, rect) in rects.into_iter().enumerate() {
+        let val = if let Some((x, y, width, height)) = rect {
+            let obj = Object::new(ctx.clone())?;
+            obj.set("x", x)?;
+            obj.set("y", y)?;
+            obj.set("width", width)?;
+            obj.set("height", height)?;
+            obj.into_value()
+        } else {
+            Value::new_null(ctx.clone())
+        };
+        out.set(idx, val)?;
+    }
+    Ok(out.into_value())
+}
+
+struct LayoutsFunction {
+    ops: OpContext,
+}
+
+impl<'js> IntoJsFunc<'js, (Ctx<'js>, Value<'js>)> for LayoutsFunction {
+    fn param_requirements() -> ParamRequirement {
+        <(Ctx<'js>, Value<'js>)>::param_requirements()
+    }
+
+    fn call<'a>(&self, params: Params<'a, 'js>) -> rquickjs::Result<Value<'js>> {
+        let (ctx, ids) = <(Ctx<'js>, Value<'js>)>::from_params(&mut params.access())?;
+        js_layouts(ctx, &self.ops, ids)
+    }
 }
 
 fn empty_frame_json(host: &HostState) -> String {
@@ -1477,7 +1572,7 @@ fn start_worker(host: &mut HostState) -> Result<(), String> {
     }
     let attached = host
         .guest
-        .with(|ctx| runtime.attach_ui(ctx.as_raw().as_ptr()))
+        .with(|ctx| unsafe { runtime.attach_ui(ctx.as_raw().as_ptr()) })
         .ok_or("UI context is not initialized")?;
     match attached {
         Ok(bridge) => {
@@ -1959,6 +2054,8 @@ fn install_bridge(
             let get_layout =
                 Function::new(ctx.clone(), move |ctx, id| js_layout(ctx, &layout_ops, id))?;
             bridge.set("getLayout", get_layout)?;
+            let get_layouts = Function::new(ctx.clone(), LayoutsFunction { ops: ops.clone() })?;
+            bridge.set("getLayouts", get_layouts)?;
             globals.set("pocket", bridge)?;
             if let Some(provider) = offload.clone() {
                 offload::OffloadHost::install(ctx.clone(), provider, None)?;
@@ -4993,7 +5090,7 @@ fn validate_memory_limits(
     };
 
     Ok(MemoryLimits {
-        heap_limit_bytes: heap_limit_bytes,
+        heap_limit_bytes,
         max_pak_bytes,
     })
 }
@@ -11406,6 +11503,63 @@ mod smoke_tests {
                 "truncated opcode {opcode} must return Err instead of panicking"
             );
         }
+        unsafe {
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn get_layouts_batches_committed_rects_and_enforces_batch_limit() {
+        let handle = pocket_create(320.0, 240.0);
+        let source = CString::new(
+            r#"
+            const n1 = ui.createNode(0);
+            ui.setProp(n1, 1, 80);
+            ui.setProp(n1, 2, 36);
+            ui.insertBefore(1, n1, 0);
+
+            const n2 = ui.createNode(0);
+            ui.setProp(n2, 1, 120);
+            ui.setProp(n2, 2, 44);
+            ui.insertBefore(1, n2, 0);
+
+            const single1 = pocket.getLayout(n1);
+            const single2 = pocket.getLayout(n2);
+            const batch = pocket.getLayouts([n1, 0, n2, 999999]);
+            if (!Array.isArray(batch) || batch.length !== 4) {
+              throw new Error('unexpected batch length');
+            }
+            if (JSON.stringify(batch[0]) !== JSON.stringify(single1)) {
+              throw new Error('batch[0] mismatch: ' + JSON.stringify(batch[0]) + ' vs ' + JSON.stringify(single1));
+            }
+            if (batch[1] !== null) {
+              throw new Error('batch[1] expected null');
+            }
+            if (JSON.stringify(batch[2]) !== JSON.stringify(single2)) {
+              throw new Error('batch[2] mismatch: ' + JSON.stringify(batch[2]) + ' vs ' + JSON.stringify(single2));
+            }
+            if (batch[3] !== null) {
+              throw new Error('batch[3] expected null');
+            }
+            let threwRange = false;
+            try {
+              pocket.getLayouts(new Array(257).fill(n1));
+            } catch (err) {
+              threwRange = err instanceof RangeError;
+            }
+            if (!threwRange) {
+              throw new Error('expected RangeError for >256 ids');
+            }
+            globalThis.frame = function() {};
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { pocket_eval(handle, source.as_ptr()) },
+            0,
+            "getLayouts test failed: {}",
+            unsafe { CStr::from_ptr(pocket_last_error(handle)).to_string_lossy() }
+        );
         unsafe {
             pocket_destroy(handle);
         }

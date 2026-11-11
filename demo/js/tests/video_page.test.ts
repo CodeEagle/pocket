@@ -54,7 +54,7 @@ test("Video Lab separates expected policy from native observation and bounds its
   assert.match(source, /unknown \(host snapshot not observed\)/);
   assert.match(source, /video\.snapshot/);
   assert.match(source, /Supported: bundled local MP4 assets/);
-  assert.match(source, /Not exposed: seek\/progress, volume/);
+  assert.match(source, /Inspect and seek use real native position\/duration facts\. Volume, playback-completion callbacks and network URL assets are not exposed by this page\./);
   assert.match(source, /Resize \/ Duo \/ BoxFit/);
   assert.match(source, /Background \/ foreground/);
   assert.match(source, /nativeLabelFor\(FEED_A_ID\)/);

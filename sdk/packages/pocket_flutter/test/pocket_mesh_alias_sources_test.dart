@@ -204,7 +204,7 @@ Future<_Raster> _renderVertices(
 
 Future<ui.Image> _solidTexture(int width, int height) async {
   final recorder = ui.PictureRecorder();
-  final canvas = ui.Canvas(recorder)
+  ui.Canvas(recorder)
     ..drawColor(const ui.Color(0xffffffff), ui.BlendMode.src);
   final picture = recorder.endRecording();
   try {

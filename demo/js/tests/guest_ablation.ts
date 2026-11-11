@@ -83,10 +83,39 @@ function frameFor(bytecode: string, pak: string): Frame {
   ];
 
   // Discover the real initial platform request from bytecode execution before
-  // replying in a fresh probe. The response is correlated by its actual
-  // requestId, and the bar style is part of the boot contract.
-  const discovery = runProbe([...baseCommands, command("quit")]);
-  const discoveryFrame = discovery.find((response) => response.frame)?.frame;
+  // replying in a fresh probe. Saved appearance is restored before the root
+  // business UI draws or emits platform.systemUi.set.
+  const firstDiscovery = runProbe([...baseCommands, command("quit")]);
+  const firstDiscoveryFrame = firstDiscovery.find((response) => response.frame)?.frame;
+  assert.ok(firstDiscoveryFrame, "guest_ablation discovery frame is missing JSON");
+  const appearanceRequest = (firstDiscoveryFrame.events ?? []).find(
+    (event) => event.name === "host.request" &&
+      event.payload?.capability === "platform.storage.get" &&
+      (event.payload?.params as JsonObject | undefined)?.key === "appearance",
+  );
+  const storageBootstrapCommands: JsonObject[] = appearanceRequest
+    ? [
+        command("send", {
+          message: {
+            type: "event",
+            name: "host.response",
+            payload: {
+              requestId: appearanceRequest.payload!.requestId,
+              capability: "platform.storage.get",
+              ok: true,
+              result: null,
+            },
+          },
+        }),
+        command("frame", { deltaMs: 16 }),
+        command("frame", { deltaMs: 16 }),
+      ]
+    : [];
+
+  const discovery = storageBootstrapCommands.length > 0
+    ? runProbe([...baseCommands, ...storageBootstrapCommands, command("quit")])
+    : firstDiscovery;
+  const discoveryFrame = discovery.filter((response) => response.frame).at(-1)?.frame;
   assert.ok(discoveryFrame, "guest_ablation discovery frame is missing JSON");
   const systemUiRequest = (discoveryFrame.events ?? []).find(
     (event) => event.name === "host.request" && event.payload?.capability === "platform.systemUi.set",
@@ -101,6 +130,7 @@ function frameFor(bytecode: string, pak: string): Frame {
 
   const responses = runProbe([
     ...baseCommands,
+    ...storageBootstrapCommands,
     command("send", {
       message: {
         type: "event",
@@ -157,8 +187,9 @@ try {
   const alteredBytecode = join(alteredBuild, "app.qjbc");
   await Bun.write(alteredSource, original.replace(marker, replacement));
 
-  const configuredCompiler = process.env.POCKET_BYTECODE_COMPILER
-    ? resolve(process.env.POCKET_BYTECODE_COMPILER)
+  const rawCompiler = process.env.POCKET_BYTECODE_COMPILER?.trim() || process.env.POCKET_BYTECODE_BIN?.trim();
+  const configuredCompiler = rawCompiler
+    ? resolve(rawCompiler)
     : undefined;
   const bytecodeCompiler = configuredCompiler ?? [
     join(sdkRoot, "native/target/aarch64-apple-darwin/release/pocketjs_bytecode"),

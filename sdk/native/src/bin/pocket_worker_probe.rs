@@ -77,7 +77,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         ""
     };
     let mut bridge = ui_context.with(|ctx| -> Result<WorkerUiBridge, Box<dyn Error>> {
-        let bridge = worker.attach_ui(ctx.as_raw().as_ptr())?;
+        let bridge = unsafe { worker.attach_ui(ctx.as_raw().as_ptr()) }?;
         let setup = format!(
             "__pocketWorkerChannels.configure(1,0);\
              __pocketWorkerChannels.configure(2,0);\

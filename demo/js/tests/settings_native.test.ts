@@ -23,8 +23,12 @@ function rootColor(frame: Frame): number | undefined {
   )?.color;
 }
 
+function isBoxLikeOp(op: DrawOp): boolean {
+  return op.type === "rect" || op.type === "rounded" || op.type === "roundedGradient";
+}
+
 function rectContains(rect: DrawOp, point: { x: number; y: number }): boolean {
-  return rect.type === "rect" &&
+  return isBoxLikeOp(rect) &&
     typeof rect.x === "number" && typeof rect.y === "number" &&
     typeof rect.w === "number" && typeof rect.h === "number" &&
     point.x >= rect.x && point.x <= rect.x + rect.w &&
@@ -33,12 +37,11 @@ function rectContains(rect: DrawOp, point: { x: number; y: number }): boolean {
 
 function buttonRect(frame: Frame, label: string): DrawOp {
   const point = center(textOp(frame, label), label);
-  // Rounded native shapes are painted as atlas corners plus center strips, so
-  // no single draw op necessarily covers the text. Reconstruct the extent
-  // from the nearby rect strips instead of depending on one implementation
-  // detail of the compositor.
+  // Rounded native shapes are painted as native rounded ops or atlas corners plus
+  // center strips, so reconstruct the extent from nearby box ops instead of
+  // depending on one implementation detail of the compositor.
   const candidates = (frame.ops ?? [])
-    .filter((op) => op.type === "rect" && typeof op.x === "number" && typeof op.y === "number" &&
+    .filter((op) => isBoxLikeOp(op) && typeof op.x === "number" && typeof op.y === "number" &&
       typeof op.w === "number" && typeof op.h === "number" && typeof op.color === "number")
     .filter((op) => (op.w ?? 0) <= 330 && (op.h ?? 0) <= 60)
     .filter((op) => {
@@ -69,7 +72,7 @@ function navAccentColor(frame: Frame, label: string): number | undefined {
   const labelOp = textOp(frame, label, (op) => (op.y ?? 0) > frameHeight - 90);
   const point = center(labelOp, label);
   const colors = (frame.ops ?? [])
-    .filter((op) => op.type === "rect" && typeof op.color === "number")
+    .filter((op) => isBoxLikeOp(op) && typeof op.color === "number")
     .filter((op) => (op.y ?? 0) >= frameHeight - 100 && (op.y ?? 0) <= frameHeight)
     .filter((op) => (op.x ?? 0) <= point.x + 14 && (op.x ?? 0) + (op.w ?? 0) >= point.x - 14)
     .filter((op) => (op.w ?? 0) <= 28 && (op.h ?? 0) <= 28)

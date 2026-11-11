@@ -112,6 +112,7 @@ function bootstrap(width = 360, height = 640): JsonObject[] {
     { op: "create", width, height, compositorSurfaces },
     { op: "loadBytecode", bytecodePath, pakPath },
     { op: "frame", deltaMs: 16 },
+    ...storageAppearanceBootstrapCommands,
     hostResponse(bootRequestId("platform.systemUi.set"), "platform.systemUi.set", {
       applied: true,
     }),
@@ -221,12 +222,37 @@ function frameMatching(
 
 // Discover real request IDs from actual bytecode execution. Adding an unrelated
 // bootstrap capability must not redirect a synthetic response to another RPC.
-const bootRequests = framesOf(runProbe([
+const initialBootRequests = framesOf(runProbe([
   { op: "create", width: 360, height: 640, compositorSurfaces },
   { op: "loadBytecode", bytecodePath, pakPath },
   { op: "frame", deltaMs: 16 },
   { op: "quit" },
 ])).flatMap((frame) => frameEvents(frame, "host.request"));
+const appearanceBootRequest = initialBootRequests.find(
+  (request) =>
+    request.payload?.capability === "platform.storage.get" &&
+    (request.payload?.params as JsonObject | undefined)?.key === "appearance",
+);
+const storageAppearanceBootstrapCommands: JsonObject[] = appearanceBootRequest
+  ? [
+      hostResponse(
+        String(appearanceBootRequest.payload!.requestId),
+        "platform.storage.get",
+        null as unknown as JsonObject,
+      ),
+      { op: "frame", deltaMs: 16 },
+      { op: "frame", deltaMs: 16 },
+    ]
+  : [];
+const bootRequests = storageAppearanceBootstrapCommands.length > 0
+  ? framesOf(runProbe([
+      { op: "create", width: 360, height: 640, compositorSurfaces },
+      { op: "loadBytecode", bytecodePath, pakPath },
+      { op: "frame", deltaMs: 16 },
+      ...storageAppearanceBootstrapCommands,
+      { op: "quit" },
+    ])).flatMap((frame) => frameEvents(frame, "host.request"))
+  : initialBootRequests;
 function bootRequestIds(capability: string): string[] {
   const packets = bootRequests.filter((request) => request.payload?.capability === capability);
   assert.ok(packets.length > 0, `missing bootstrap RPC ${capability}`);
@@ -783,7 +809,7 @@ assert.match(
   "diagnostics.recording.started must render active recording status on Runtime page",
 );
 
-const initialEvents = frameEvents(resultFrames[0], "host.request");
+const initialEvents = bootRequests;
 const initialSystemUiRequest = initialEvents.find(
   (item) => item.payload?.capability === "platform.systemUi.set",
 );
@@ -793,9 +819,20 @@ assert.deepEqual(
   initialSystemUiParams,
   "initial platform.systemUi.set must use the light showcase bar style",
 );
+const expectedInitialCapabilities = [
+  ...(appearanceBootRequest ? ["platform.storage.get"] : []),
+  "platform.systemUi.set",
+  "runtime.info",
+  "runtime.performance",
+  "plugins.list",
+  "plugins.packageInfo",
+  "updates.status",
+  "updates.status",
+  "system.runtime.configure",
+].sort();
 assert.deepEqual(
   initialEvents.map((item) => item.payload?.capability).sort(),
-  ["platform.systemUi.set", "runtime.info", "runtime.performance", "plugins.list", "plugins.packageInfo", "updates.status", "updates.status", "system.runtime.configure"].sort(),
+  expectedInitialCapabilities,
   "initial guest host.request capability set drifted",
 );
 const loadResponse = checked(resultResponses[1], "pocket_load_bytecode_files");

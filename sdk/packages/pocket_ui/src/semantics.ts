@@ -118,6 +118,7 @@ interface SemanticSnapshotNode {
 
 type PocketLayoutGlobal = {
   getLayout?: (id: number) => unknown;
+  getLayouts?: (ids: readonly number[]) => unknown;
 };
 
 const layoutGlobal = globalThis as typeof globalThis & {
@@ -172,24 +173,87 @@ function readRouteActive(
   return readBoolean(control.routeActive ?? providerRouteActive, true);
 }
 
+function parseCommittedRect(raw: unknown): AppleSemanticRect | undefined {
+  if (!isRecord(raw)) return undefined;
+  const x = finiteNumber(raw.x);
+  const y = finiteNumber(raw.y);
+  const width = finiteNumber(raw.width ?? raw.w);
+  const height = finiteNumber(raw.height ?? raw.h);
+  if (x === undefined || y === undefined || width === undefined || height === undefined) {
+    return undefined;
+  }
+  if (width <= 0 || height <= 0) return undefined;
+  return { x, y, width, height };
+}
+
 function readCommittedLayout(node: NodeMirror | undefined): AppleSemanticRect | undefined {
   const getLayout = layoutGlobal.pocket?.getLayout;
   if (!node || typeof getLayout !== "function") return undefined;
   try {
-    const raw = getLayout(node.id);
-    if (!isRecord(raw)) return undefined;
-    const x = finiteNumber(raw.x);
-    const y = finiteNumber(raw.y);
-    const width = finiteNumber(raw.width ?? raw.w);
-    const height = finiteNumber(raw.height ?? raw.h);
-    if (x === undefined || y === undefined || width === undefined || height === undefined) {
-      return undefined;
-    }
-    if (width <= 0 || height <= 0) return undefined;
-    return { x, y, width, height };
+    return parseCommittedRect(getLayout(node.id));
   } catch {
     return undefined;
   }
+}
+
+function readCommittedLayoutsBatch(
+  nodes: readonly (NodeMirror | undefined)[],
+): readonly (AppleSemanticRect | undefined)[] {
+  if (nodes.length === 0) return [];
+  const getLayouts = layoutGlobal.pocket?.getLayouts;
+  if (typeof getLayouts === "function") {
+    try {
+      const ids: number[] = [];
+      const indexMap: number[] = [];
+      for (let idx = 0; idx < nodes.length; idx++) {
+        const node = nodes[idx];
+        if (node) {
+          ids.push(node.id);
+          indexMap.push(idx);
+        }
+      }
+      if (ids.length === 0) return new Array(nodes.length).fill(undefined);
+      const rawBatch = getLayouts(ids);
+      if (Array.isArray(rawBatch) && rawBatch.length === ids.length) {
+        const out = new Array<AppleSemanticRect | undefined>(nodes.length).fill(undefined);
+        for (let k = 0; k < ids.length; k++) {
+          out[indexMap[k]!] = parseCommittedRect(rawBatch[k]);
+        }
+        return out;
+      }
+    } catch {
+      // Fall back to individual getLayout reads when batch host call fails.
+    }
+  }
+  return nodes.map((node) => readCommittedLayout(node));
+}
+
+function semanticSnapshotsEqual(
+  left: readonly SemanticSnapshotNode[],
+  right: readonly SemanticSnapshotNode[],
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let idx = 0; idx < left.length; idx++) {
+    const a = left[idx]!;
+    const b = right[idx]!;
+    if (
+      a.guestId !== b.guestId ||
+      a.nativeId !== b.nativeId ||
+      a.label !== b.label ||
+      a.role !== b.role ||
+      a.selected !== b.selected ||
+      a.disabled !== b.disabled ||
+      a.enabled !== b.enabled ||
+      !Object.is(a.checked, b.checked) ||
+      !Object.is(a.rect.x, b.rect.x) ||
+      !Object.is(a.rect.y, b.rect.y) ||
+      !Object.is(a.rect.width, b.rect.width) ||
+      !Object.is(a.rect.height, b.rect.height)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function globalBridge(): AppleSemanticsBridge {
@@ -245,7 +309,7 @@ export function createAppleSemanticsStore(options: AppleSemanticsOptions = {}): 
   const entries = new Map<string, SemanticEntry>();
   let disposed = false;
   let hasSnapshot = false;
-  let lastSignature = "";
+  let lastNodes: readonly SemanticSnapshotNode[] = [];
   let lastGeneration = 0;
 
   const armInitialMeasurement = (entry: SemanticEntry): void => {
@@ -264,8 +328,7 @@ export function createAppleSemanticsStore(options: AppleSemanticsOptions = {}): 
   const emitPayload = (nodes: readonly SemanticSnapshotNode[], force = false): boolean => {
     if (disposed && !force) return false;
     if (typeof bridge.emit !== "function") return false;
-    const signature = JSON.stringify(nodes);
-    if (!force && hasSnapshot && signature === lastSignature) {
+    if (!force && hasSnapshot && semanticSnapshotsEqual(lastNodes, nodes)) {
       return true;
     }
     const generation = lastGeneration + 1;
@@ -296,7 +359,7 @@ export function createAppleSemanticsStore(options: AppleSemanticsOptions = {}): 
     }
     if (accepted) {
       lastGeneration = generation;
-      lastSignature = signature;
+      lastNodes = nodes;
       hasSnapshot = true;
     }
     return accepted;
@@ -304,14 +367,22 @@ export function createAppleSemanticsStore(options: AppleSemanticsOptions = {}): 
 
   const flush = (): void => {
     if (disposed) return;
-    const nodes: SemanticSnapshotNode[] = [];
-    let pendingAdmission = false;
+    const activeEntries: SemanticEntry[] = [];
     for (const entry of entries.values()) {
       const routeActive = readRouteActive(entry.control, options.routeActive);
       if (entry.routeActive === false && routeActive) armInitialMeasurement(entry);
       entry.routeActive = routeActive;
       if (!routeActive) continue;
-      const committed = readCommittedLayout(entry.node);
+      activeEntries.push(entry);
+    }
+    const committedBatch = readCommittedLayoutsBatch(
+      activeEntries.map((entry) => entry.node),
+    );
+    const nodes: SemanticSnapshotNode[] = [];
+    let pendingAdmission = false;
+    for (let idx = 0; idx < activeEntries.length; idx++) {
+      const entry = activeEntries[idx]!;
+      const committed = committedBatch[idx];
       if (!committed || !entry.node) {
         if (entry.needsInitialMeasurement) {
           entry.initialMeasurementFrames -= 1;

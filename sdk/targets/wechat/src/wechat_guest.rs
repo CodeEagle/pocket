@@ -9,7 +9,7 @@ use pocket_runtime::{
 };
 use rquickjs::{
     function::{FromParams, Function, IntoJsFunc, ParamRequirement, Params},
-    Ctx, Object, Value,
+    Array, Ctx, Exception, Object, Value,
 };
 use serde_json::json;
 use std::{cell::RefCell, rc::Rc};
@@ -18,6 +18,7 @@ const MAX_HOST_PACKET: usize = 64 * 1024;
 // A real model frame contains bounded packed PMS1 buffers. Guest requests
 // retain the smaller limit; only trusted host responses use the binary budget.
 const MAX_HOST_RESPONSE: usize = 4 * 1024 * 1024;
+const MAX_BATCH_LAYOUT_IDS: usize = 256;
 
 fn layout_value<'js>(ctx: Ctx<'js>, host: usize, id: i32) -> rquickjs::Result<Value<'js>> {
     let host = unsafe { &*(host as *const WasmHost) };
@@ -63,6 +64,64 @@ impl<'js> IntoJsFunc<'js, (Ctx<'js>, i32)> for LayoutFunction {
     fn call<'a>(&self, params: Params<'a, 'js>) -> rquickjs::Result<Value<'js>> {
         let (ctx, id) = <(Ctx<'js>, i32)>::from_params(&mut params.access())?;
         layout_value(ctx, self.host, id)
+    }
+}
+
+fn layouts_value<'js>(ctx: Ctx<'js>, host: usize, ids_val: Value<'js>) -> rquickjs::Result<Value<'js>> {
+    let Some(array) = ids_val.as_array() else {
+        return Err(Exception::throw_type(
+            &ctx,
+            "getLayouts expects an array of node ids",
+        ));
+    };
+    let len = array.len();
+    if len > MAX_BATCH_LAYOUT_IDS {
+        return Err(Exception::throw_range(
+            &ctx,
+            "getLayouts batch exceeds limit",
+        ));
+    }
+    let out = Array::new(ctx.clone())?;
+    for idx in 0..len {
+        let elem: Value<'js> = array.get(idx)?;
+        let id = if let Some(id) = elem.as_int() {
+            id
+        } else if let Some(n) = elem.as_number() {
+            if n.is_finite() && n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64 {
+                n as i32
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let value = if id == 0 {
+            Value::new_null(ctx.clone())
+        } else {
+            let v = layout_value(ctx.clone(), host, id)?;
+            if v.is_undefined() {
+                Value::new_null(ctx.clone())
+            } else {
+                v
+            }
+        };
+        out.set(idx, value)?;
+    }
+    Ok(out.into_value())
+}
+
+struct LayoutsFunction {
+    host: usize,
+}
+
+impl<'js> IntoJsFunc<'js, (Ctx<'js>, Value<'js>)> for LayoutsFunction {
+    fn param_requirements() -> ParamRequirement {
+        <(Ctx<'js>, Value<'js>)>::param_requirements()
+    }
+
+    fn call<'a>(&self, params: Params<'a, 'js>) -> rquickjs::Result<Value<'js>> {
+        let (ctx, ids) = <(Ctx<'js>, Value<'js>)>::from_params(&mut params.access())?;
+        layouts_value(ctx, self.host, ids)
     }
 }
 
@@ -125,6 +184,8 @@ impl Guest for WechatGuest {
             pocket.set("_emitValue", emit)?;
             let get_layout = Function::new(ctx.clone(), LayoutFunction { host: self.host })?;
             pocket.set("getLayout", get_layout)?;
+            let get_layouts = Function::new(ctx.clone(), LayoutsFunction { host: self.host })?;
+            pocket.set("getLayouts", get_layouts)?;
             globals.set("pocket", pocket)?;
             // WX capabilities use the async host bridge. There is no native
             // offload provider here; keep the pinned coverage uploader while

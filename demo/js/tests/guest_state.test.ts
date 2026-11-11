@@ -609,6 +609,16 @@ test("tracked app.qjbc renders performance state through native probe", () => {
     assert.ok(found?.payload?.requestId, `missing boot request ${capability}`);
     return String(found.payload.requestId);
   };
+  const appearanceRequest = bootRequests.find(
+    (e: any) => e.payload?.capability === "platform.storage.get" && e.payload?.params?.key === "appearance",
+  );
+  const storageAppearanceBootstrap: Record<string, unknown>[] = appearanceRequest?.payload?.requestId
+    ? [
+        sendResponse(String(appearanceRequest.payload.requestId), "platform.storage.get", null as unknown as Record<string, unknown>),
+        { op: "frame", deltaMs: 16 },
+        { op: "frame", deltaMs: 16 },
+      ]
+    : [];
   const mixedProbeResult = {
     latest: null,
     history: [{
@@ -629,6 +639,7 @@ test("tracked app.qjbc renders performance state through native probe", () => {
   };
   const navFrames = runProbeCommands([
     ...baseCommands,
+    ...storageAppearanceBootstrap,
     sendResponse(requestIdFor("runtime.info"), "runtime.info", {
       entryFormat: "quickjs-bytecode",
       runtimeAbi: String(metadata.runtimeAbi),
@@ -674,6 +685,7 @@ test("tracked app.qjbc renders performance state through native probe", () => {
   assert.ok(perfRequestIds.length > 0, "performance request was not emitted by tracked app.qjbc");
   const renderedFrames = runProbeCommands([
     ...baseCommands,
+    ...storageAppearanceBootstrap,
     sendResponse(requestIdFor("runtime.info"), "runtime.info", {
       entryFormat: "quickjs-bytecode",
       runtimeAbi: String(metadata.runtimeAbi),
