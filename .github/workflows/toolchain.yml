@@ -387,7 +387,7 @@ jobs:
           NOTES
           sed -i "s/-VERSION\.tgz/-${SDK_VERSION}.tgz/g" release-notes.md
           printf '\n分发构建：[Action %s](https://github.com/%s/actions/runs/%s)，提交 %s。\n' "$GITHUB_RUN_ID" "$GH_REPO" "$GITHUB_RUN_ID" "$GITHUB_SHA" >> release-notes.md
-          tag_commit="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null || true)"
+          tag_commit="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null)" || tag_commit=""
           if [ -n "$tag_commit" ] && [ "$tag_commit" != "$GITHUB_SHA" ] && [ "$ALLOW_RELEASE_UPDATE" != "1" ]; then
             echo "Release tag points to another commit: $tag_commit" >&2
             exit 1
