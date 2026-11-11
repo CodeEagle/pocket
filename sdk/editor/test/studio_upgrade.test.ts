@@ -1254,6 +1254,18 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(readFileSync(preservedProjectMarker, "utf8")).toBe("keep-my-project-data\n");
       expect(readFileSync(nestedCustomPackage, "utf8")).toBe("export const custom = 42;\n");
       expect(readFileSync(join(configuredProjectRoot, "app.tsx"), "utf8")).toContain("unsaved user draft");
+    } catch (error) {
+      console.error(`[upgrade lifecycle failure] ${standaloneRoot}`);
+      for (const file of ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"]) {
+        const path = join(standaloneRoot, ".pocket-build", file);
+        if (existsSync(path)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(path, "utf8").slice(-16000)}`);
+      }
+      for (const context of browser.contexts()) {
+        for (const page of context.pages()) {
+          console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
+        }
+      }
+      throw error;
     } finally {
       await browser.close();
       spawnSync("node", [join(standaloneRoot, "scripts", "editor_service.mjs"), "stop"], {
@@ -1385,6 +1397,18 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(JSON.parse(readFileSync(join(standaloneRoot, "package.json"), "utf8")).version).toBe("0.1.10");
       expect(readFileSync(nestedCustomFile, "utf8")).toBe('export const keep = "nested-consumer-file";\n');
       expect(readPersistedUpgradeStatus(standaloneRoot)?.rolledBack).toBe(true);
+    } catch (error) {
+      console.error(`[upgrade lifecycle failure] ${standaloneRoot}`);
+      for (const file of ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"]) {
+        const path = join(standaloneRoot, ".pocket-build", file);
+        if (existsSync(path)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(path, "utf8").slice(-16000)}`);
+      }
+      for (const context of browser.contexts()) {
+        for (const page of context.pages()) {
+          console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
+        }
+      }
+      throw error;
     } finally {
       await browser.close();
       spawnSync("node", [join(standaloneRoot, "scripts", "editor_service.mjs"), "stop"], {
