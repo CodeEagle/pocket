@@ -10751,11 +10751,21 @@ mod smoke_tests {
     }
 
     #[test]
-    fn binary_bridge_handles_reentrant_getter_emit_and_preserves_proto_data_property() {
+    fn binary_bridge_handles_reentrant_getter_emit_and_defines_own_data_properties() {
         let handle = pocket_create(80.0, 80.0);
         let source = CString::new(
             r#"
+            let setterCalled = false;
+            Object.defineProperty(Object.prototype, "answer", {
+                configurable: true,
+                set() { setterCalled = true; }
+            });
             const handler = function(packet) {
+                const answer = Object.getOwnPropertyDescriptor(packet.payload, "answer");
+                if (setterCalled || !answer || answer.value !== 42 ||
+                    !answer.writable || !answer.enumerable || !answer.configurable) {
+                    throw new Error("expected answer as an own data property without invoking the setter");
+                }
                 if (!Object.prototype.hasOwnProperty.call(packet.payload, "__proto__")) {
                     throw new Error("expected __proto__ as an own property");
                 }
@@ -10790,6 +10800,7 @@ mod smoke_tests {
                 "type": "event",
                 "name": "proto.check",
                 "payload": {
+                    "answer": 42,
                     "__proto__": { "evil": true }
                 }
             }),

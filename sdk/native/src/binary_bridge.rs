@@ -9,7 +9,7 @@
 pub use crate::binary_offload::{decode_offload_completion, encode_offload_request};
 
 use rquickjs::object::Property;
-use rquickjs::{Array, ArrayBuffer, Ctx, FromJs, Object, TypedArray, Value};
+use rquickjs::{qjs, Array, ArrayBuffer, Ctx, FromJs, Object, TypedArray, Value};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 /// Leading magic byte identifying a binary TLV message packet (`0xB1` is never
@@ -703,23 +703,55 @@ fn decode_js_value<'js>(
             for _ in 0..count {
                 let key = reader.str()?;
                 let child = decode_js_value(ctx, reader, depth + 1)?;
-                if key == "__proto__" {
-                    object
-                        .prop(
-                            key,
-                            Property::from(child).configurable().enumerable().writable(),
-                        )
-                        .map_err(|error| error.to_string())?;
-                } else {
-                    object
-                        .set(key, child)
-                        .map_err(|error| error.to_string())?;
-                }
+                define_decoded_property(&object, key, &child)?;
             }
             Ok(object.into_value())
         }
         other => Err(format!("unknown binary bridge value tag 0x{other:02x}")),
     }
+}
+
+fn define_decoded_property<'js>(
+    object: &Object<'js>,
+    key: &str,
+    value: &Value<'js>,
+) -> Result<(), String> {
+    const FLAGS: i32 = (qjs::JS_PROP_C_W_E
+        | qjs::JS_PROP_HAS_CONFIGURABLE
+        | qjs::JS_PROP_HAS_WRITABLE
+        | qjs::JS_PROP_HAS_ENUMERABLE
+        | qjs::JS_PROP_HAS_VALUE
+        | qjs::JS_PROP_THROW) as i32;
+    let ctx = object.ctx().as_raw().as_ptr();
+    // SAFETY: The decoder owns both values in this context. QuickJS borrows
+    // them and retains its own reference to the value when defining the property.
+    unsafe {
+        let atom = if key.is_ascii() {
+            qjs::JS_NewAtomLen(ctx, key.as_ptr().cast(), key.len() as _)
+        } else {
+            // JS_NewAtomLen can match UTF-8 bytes against a Latin-1 atom.
+            let name = rquickjs::String::from_str(object.ctx().clone(), key)
+                .map_err(|error| error.to_string())?;
+            qjs::JS_ValueToAtom(ctx, name.as_value().as_raw())
+        };
+        if atom == qjs::JS_ATOM_NULL {
+            return Err(rquickjs::Error::Exception.to_string());
+        }
+        let result = qjs::JS_DefineProperty(
+            ctx,
+            object.as_value().as_raw(),
+            atom,
+            value.as_raw(),
+            qjs::JS_UNDEFINED,
+            qjs::JS_UNDEFINED,
+            FLAGS,
+        );
+        qjs::JS_FreeAtom(ctx, atom);
+        if result < 0 {
+            return Err(rquickjs::Error::Exception.to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Convert a `serde_json::Value` directly into a QuickJS `Value` on `ctx`
@@ -772,6 +804,36 @@ mod tests {
     use super::*;
     use rquickjs::{Context, Runtime};
     use serde_json::json;
+
+    #[test]
+    fn binary_object_keys_preserve_utf8_nuls_and_last_duplicate_value() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            ctx.eval::<(), _>(r#"globalThis.keepLatin1Atom = { "\u00c3\u00a9": true };"#)
+                .unwrap();
+            let mut wire = EncoderState::new(4096);
+            wire.push_u8(TAG_OBJECT).unwrap();
+            wire.push_u32(5).unwrap();
+            for (key, value) in [("é", 1), ("a\0b", 2), ("10", 3), ("2", 4), ("é", 5)] {
+                wire.push_str(key).unwrap();
+                wire.push_u8(TAG_INT64).unwrap();
+                wire.push_i64(value).unwrap();
+            }
+            let decoded = decode_to_js(&ctx, &wire.bytes).unwrap();
+            ctx.globals().set("decoded", decoded).unwrap();
+            let verified: bool = ctx
+                .eval(
+                    r#"
+                    Object.getPrototypeOf(decoded) === Object.prototype &&
+                    JSON.stringify(Object.keys(decoded)) === JSON.stringify(["2", "10", "é", "a\0b"]) &&
+                    decoded["é"] === 5 && decoded["a\0b"] === 2
+                    "#,
+                )
+                .unwrap();
+            assert!(verified);
+        });
+    }
 
     #[test]
     fn binary_tlv_roundtrips_json_and_quickjs_values_with_uint8array() {

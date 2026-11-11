@@ -49,6 +49,28 @@ The Pocket SDK replaces intermediate `JSON.stringify` / `JSON.parse` / `jsonEnco
   - `sdk/packages/pocket_flutter/lib/src/pocket_offload_binding.dart`
   - `sdk/packages/pocket_flutter/lib/src/pocket_view.dart`
 
+## Native object decoding
+
+The retained parent demo dispatches action maps in
+`pocketjs_flutter_demo/lib/core/pocketjs_bundle_runner.dart` and uses JSON
+strings at the native boundary in
+`pocketjs_flutter_demo/native/pocket_runtime_multi.c`. The SDK reuses its
+existing TLV decoder and the pinned rquickjs/QuickJS property-definition
+operation to deliver those values directly to the guest.
+
+Each object entry becomes a writable, enumerable, configurable own data
+property. Duplicate keys keep the last value. The decoder calls
+`JS_DefineProperty` with borrowed values to avoid building rquickjs descriptor
+wrappers for every field. ASCII keys use length-aware atom lookup, including
+embedded NUL bytes. Other keys become QuickJS strings before atomization to
+avoid matching UTF-8 bytes against an existing Latin-1 atom.
+
+The native tests cover inherited setters, `__proto__`, UTF-8 key collisions,
+embedded NUL bytes, numeric key ordering and duplicate keys. On Apple M4, six
+alternating release-build batches through `pocket_send_binary` measured median
+dispatch times of 1.82 → 1.66 µs for an eight-field payload and 9.18 → 7.95 µs
+for an 80-field payload, compared with the previous `Object::prop` decoder.
+
 ## Typed host surfaces (2026-11-05)
 
 `PFB1` version 1 flags are bit 0 (text alignment and compositor handle/focus)
