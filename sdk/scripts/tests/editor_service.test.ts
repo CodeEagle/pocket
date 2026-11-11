@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8,6 +8,9 @@ import {
   configFromHealth,
   editorToolEnvironment,
   isEntrypoint,
+  protectedRetirementPlan,
+  commandIncludesPath,
+  upgradeApply,
   makePidRecord,
   mergeLaunchOptions,
   parseArgs,
@@ -133,7 +136,7 @@ describe("editor service launch config", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "pocket-editor-service-symlink-"));
     try {
       const symlinkedScriptsDir = join(tempDir, "scripts-link");
-      symlinkSync(dirname(SCRIPT_PATH), symlinkedScriptsDir, "dir");
+      symlinkSync(dirname(SCRIPT_PATH), symlinkedScriptsDir, process.platform === "win32" ? "junction" : "dir");
       const symlinkedEntry = join(symlinkedScriptsDir, "editor_service.mjs");
       const canonicalModuleUrl = pathToFileURL(SCRIPT_PATH).href;
 
@@ -150,4 +153,57 @@ describe("editor service launch config", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+});
+
+
+test("upgrade retirement excludes the updater ancestry while retaining worker tree cleanup", () => {
+  const processes = [
+    { pid: 100, ppid: 1 }, // old Studio
+    { pid: 110, ppid: 100 }, // compiler worker
+    { pid: 111, ppid: 110 }, // compiler child, retired by its subtree root
+    { pid: 120, ppid: 100 }, // optional intermediary
+    { pid: 121, ppid: 120 }, // upgrader
+    { pid: 122, ppid: 121 }, // updater probe, must survive
+    { pid: 123, ppid: 120 }, // intermediary's other worker
+    { pid: 999, ppid: 1 }, // unrelated process
+  ];
+  expect(protectedRetirementPlan(processes, 100, 121)).toEqual({
+    subtreeRoots: [110, 123], directPids: [120, 100],
+  });
+  expect(protectedRetirementPlan(processes, 100, 120)).toEqual({
+    subtreeRoots: [110], directPids: [100],
+  });
+  expect(protectedRetirementPlan(processes, 100, 999)).toBeNull();
+  expect(protectedRetirementPlan([{ pid: 1, ppid: 2 }, { pid: 2, ppid: 1 }], 100, 1)).toBeNull();
+});
+
+
+test("service ownership resolves aliased command paths and rejects unrelated files", () => {
+  const root = mkdtempSync(join(tmpdir(), "pocket-command-path-"));
+  try {
+    const actual = join(root, "actual sdk");
+    mkdirSync(join(actual, "editor"), { recursive: true });
+    writeFileSync(join(actual, "editor", "server.ts"), "// fixture");
+    const alias = join(root, "alias");
+    symlinkSync(actual, alias, process.platform === "win32" ? "junction" : "dir");
+    expect(commandIncludesPath(`bun "${join(alias, "editor", "server.ts")}" --port=8791`, join(actual, "editor", "server.ts"))).toBe(true);
+    expect(commandIncludesPath(`bun "${join(actual, "editor", "server.ts")}"`, join(alias, "editor", "server.ts"))).toBe(true);
+    expect(commandIncludesPath(`bun "${join(root, "unrelated", "editor", "server.ts")}"`, join(actual, "editor", "server.ts"))).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("pre-stop upgrade failures persist an error rather than leaving the UI restarting", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pocket-upgrade-early-error-"));
+  try {
+    mkdirSync(join(root, ".pocket-build"), { recursive: true });
+    const statusPath = join(root, ".pocket-build", "sdk-upgrade-status.json");
+    writeFileSync(statusPath, JSON.stringify({ status: "restarting", currentVersion: "0.1.10" }));
+    await expect(upgradeApply({ stageDir: join(root, "missing-stage"), targetVersion: "0.1.11" }, { sdkRoot: root })).rejects.toThrow();
+    const status = JSON.parse(readFileSync(statusPath, "utf8"));
+    expect(status.status).toBe("error");
+    expect(status.error).toBeTruthy();
+    expect(status.currentVersion).toBe("0.1.10");
+    expect(status.rolledBack).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

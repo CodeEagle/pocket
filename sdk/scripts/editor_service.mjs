@@ -20,6 +20,7 @@ import {
   isSdkBackupComplete,
   prepareSdkUpgradeBackup,
   readInstalledSdkInfo,
+  readPersistedUpgradeStatus,
   recoverInterruptedSdkUpgrade,
   restoreBackedUpSdkFiles,
   validateStagedStandaloneSdk,
@@ -132,11 +133,27 @@ function inside(path, root) {
   return child === base || child.startsWith(`${base}/`);
 }
 
+function commandIncludesPath(command, expectedPath) {
+  if (normalized(command).includes(normalized(expectedPath))) return true;
+  let canonical;
+  try { canonical = normalized(realpathSync(expectedPath)); }
+  catch { return false; }
+  // Windows may report an 8.3 path in one process and a long path in another.
+  // Compare actual files; a matching basename alone is never sufficient ownership.
+  for (const match of String(command).matchAll(/"([^"]+)"|'([^']+)'|(\S+)/g)) {
+    const candidate = match[1] || match[2] || match[3];
+    if (!candidate || !candidate.replaceAll("\\", "/").endsWith("/editor/server.ts")) continue;
+    try { if (normalized(realpathSync(candidate)) === canonical) return true; }
+    catch { /* process arguments need not all be paths */ }
+  }
+  return false;
+}
+
 function sameCheckoutServer(info, expectedPort) {
   const pid = Number(info?.pid);
   if (!Number.isInteger(pid) || pid <= 0) return false;
   const command = normalized(processCommand(info));
-  let pathMatch = command.includes(normalized(SERVER));
+  let pathMatch = commandIncludesPath(processCommand(info), SERVER);
   if (!pathMatch && command.includes("sdk/editor/server.ts")) {
     const cwd = processCwd(pid);
     pathMatch = inside(cwd, CHECKOUT_ROOT) || inside(cwd, SDK_ROOT);
@@ -168,12 +185,48 @@ async function assertPortOwnership(port, allowForeign) {
   const processes = await findPortProcesses(port);
   const foreign = processes.filter(info => !sameCheckoutServer(info, port));
   if (foreign.length && !allowForeign) {
+    if (STANDALONE_FIXTURE_PORT) console.error("[upgrade ownership]", JSON.stringify({ server: SERVER, foreign }));
     throw new Error(`端口 ${port} 已被其他程序占用（PID ${foreign.map(info => info.pid).join(", ")}），不会接管或换端口`);
   }
   return { processes, owned: processes.filter(info => sameCheckoutServer(info, port)), foreign };
 }
 
-function killTree(pid, signal) {
+// Windows taskkill /T follows parent IDs even for detached processes. Keep the
+// updater branch safe while retiring every other worker subtree.
+function protectedRetirementPlan(processes, targetPid, protectedPid) {
+  const parents = new Map(processes.map(info => [Number(info.pid), Number(info.ppid)]));
+  const path = [];
+  const visited = new Set();
+  let pid = Number(protectedPid);
+  while (pid > 0 && !visited.has(pid)) {
+    visited.add(pid);
+    path.push(pid);
+    if (pid === Number(targetPid)) break;
+    pid = parents.get(pid);
+  }
+  if (path.at(-1) !== Number(targetPid)) return null;
+  const protectedPath = new Set(path);
+  const directPids = path.filter(pid => pid !== Number(protectedPid));
+  const ancestors = new Set(directPids);
+  const subtreeRoots = processes
+    .filter(info => ancestors.has(Number(info.ppid)) && !protectedPath.has(Number(info.pid)))
+    .map(info => Number(info.pid));
+  return { subtreeRoots, directPids };
+}
+
+async function killTree(pid, signal, protectedPid) {
+  if (process.platform === "win32" && protectedPid) {
+    const processes = await findProcess("name", "");
+    const plan = protectedRetirementPlan(processes, pid, protectedPid);
+    if (plan) {
+      for (const childPid of plan.subtreeRoots) await killTree(childPid, signal);
+      for (const directPid of plan.directPids) {
+        try { process.kill(directPid, signal); }
+        catch (error) { if (error.code !== "ESRCH") throw error; }
+      }
+      return;
+    }
+  }
   return new Promise(resolveKill => {
     try { treeKill(Number(pid), signal, () => resolveKill()); }
     catch { resolveKill(); }
@@ -190,7 +243,7 @@ async function waitProcessesGone(pids, timeoutMs = 10_000) {
   return !pids.some(pid => { try { process.kill(Number(pid), 0); return true; } catch { return false; } });
 }
 
-async function stopOwnedPort(port, required) {
+async function stopOwnedPort(port, required, protectedPid) {
   const state = await assertPortOwnership(port, !required);
   const record = port === PORT ? readPidRecord() : undefined;
   if (record && Number.isInteger(record.pid) && !state.owned.some(info => Number(info.pid) === record.pid)) {
@@ -199,14 +252,14 @@ async function stopOwnedPort(port, required) {
   }
   if (!state.owned.length) return;
   const pids = state.owned.map(info => Number(info.pid));
-  for (const pid of pids) await killTree(pid, "SIGTERM");
+  for (const pid of pids) await killTree(pid, "SIGTERM", protectedPid);
   if (!(await waitProcessesGone(pids, 1500))) {
     for (const pid of pids) {
       try { process.kill(pid, 0); } catch { continue; }
       const current = (await findProcess("pid", pid))?.[0];
       if (!current) continue;
       if (!sameCheckoutServer(current, port)) throw new Error(`拒绝强制停止未知进程 PID ${pid}`);
-      await killTree(pid, "SIGKILL");
+      await killTree(pid, "SIGKILL", protectedPid);
     }
   }
   const remaining = (await findPortProcesses(port)).filter(info => required || sameCheckoutServer(info, port));
@@ -444,7 +497,7 @@ async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
     }
 
     cleanupLegacyLaunchd();
-    await stopOwnedPort(PORT, true);
+    await stopOwnedPort(PORT, true, process.pid);
     for (const port of LEGACY_PORTS) await stopOwnedPort(port, false);
 
     let filesMutated = false;
@@ -537,6 +590,19 @@ async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
       rmSync(backupDir, FS_REMOVE_OPTIONS);
       throw new Error(`升级失败并已回滚到 v${previousVersion}：${reason}`);
     }
+  } catch (error) {
+    const status = readPersistedUpgradeStatus(sdkRoot);
+    if (status?.status !== "error") {
+      writePersistedUpgradeStatus(sdkRoot, {
+        ...status,
+        status: "error",
+        latestVersion: targetVersion,
+        rolledBack: false,
+        error: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    throw error;
   } finally {
     releaseLock();
   }
@@ -592,7 +658,7 @@ function isEntrypoint(entry = process.argv[1], moduleUrl = import.meta.url) {
   }
 }
 
-export { configFromHealth, editorToolEnvironment, isEntrypoint, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
+export { configFromHealth, editorToolEnvironment, isEntrypoint, commandIncludesPath, protectedRetirementPlan, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
 
 if (isEntrypoint()) {
   main().catch(error => {
