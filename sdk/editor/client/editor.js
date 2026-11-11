@@ -77,6 +77,12 @@ let resourcesGeneration = 0;
 let versionSnapshot = null;
 let versionsLoading = false;
 let versionsGeneration = 0;
+let studioUpgradeState = null;
+let studioUpgradePollTimer = null;
+let studioUpgradePeriodicTimer = null;
+let studioUpgradePendingReloadVersion = null;
+let studioUpgradeDeferredAutoApply = false;
+const STUDIO_UPGRADE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 function storedPreviewPaneHeight() {
   try {
@@ -1213,6 +1219,7 @@ async function saveResources() {
     resourcesSaving = false;
     renderResourceState();
     updateActionStates();
+    resumeDeferredStudioUpgrade();
   }
 }
 
@@ -1746,6 +1753,9 @@ async function loadProjects(preferred) {
   try {
     const health = await api("/health");
     if (health?.csrfToken) csrfToken = health.csrfToken;
+    if (health?.version && !studioUpgradeState) {
+      renderStudioUpgrade({ currentVersion: health.version, status: "checking" });
+    }
     configuredProjectId = health?.projectId;
     localBluetoothAvailable = health?.bluetooth?.local === true;
     bluetoothProvider = "local";
@@ -1809,6 +1819,7 @@ async function saveProject() {
   } finally {
     saving = false;
     updateActionStates();
+    resumeDeferredStudioUpgrade();
   }
 }
 
@@ -2544,9 +2555,267 @@ window.addEventListener("beforeunload", (event) => {
   }
 });
 
+function stopStudioUpgradePolling() {
+  if (studioUpgradePollTimer) {
+    clearTimeout(studioUpgradePollTimer);
+    studioUpgradePollTimer = null;
+  }
+}
+
+function isStudioUpgradeWorkDeferred() {
+  return Boolean(
+    dirty ||
+    resourcesDirty ||
+    saving ||
+    resourcesSaving ||
+    publishing ||
+    startingDeploy ||
+    startingWechat ||
+    currentStatus?.busy ||
+    wechatState?.state === "building" ||
+    (activeDeploy && ["queued", "building", "starting", "stopping"].includes(String(activeDeploy.status || "").toLowerCase()))
+  );
+}
+
+function resumeDeferredStudioUpgrade() {
+  if (isStudioUpgradeWorkDeferred()) {
+    if (studioUpgradeState) renderStudioUpgrade(studioUpgradeState);
+    return;
+  }
+  if (studioUpgradePendingReloadVersion) {
+    studioUpgradePendingReloadVersion = null;
+    window.location.reload();
+    return;
+  }
+  if (studioUpgradeDeferredAutoApply) {
+    studioUpgradeDeferredAutoApply = false;
+    void checkStudioUpgrade({ autoApply: true });
+  } else if (studioUpgradeState) {
+    renderStudioUpgrade(studioUpgradeState);
+  }
+}
+
+function renderStudioUpgrade(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return;
+  studioUpgradeState = { ...(studioUpgradeState || {}), ...snapshot };
+  const bar = $("studio-upgrade-bar");
+  const versionEl = $("studio-upgrade-version");
+  const statusEl = $("studio-upgrade-status");
+  const actionBtn = $("studio-upgrade-action");
+  const releaseLink = $("studio-upgrade-release");
+  if (!bar || !versionEl || !statusEl || !actionBtn) return;
+
+  const currentVersion = studioUpgradeState.currentVersion || "—";
+  const latestVersion = studioUpgradeState.latestVersion || "";
+  const status = studioUpgradeState.status || "idle";
+  const mode = studioUpgradeState.mode || "source";
+  const upgradeAvailable = Boolean(studioUpgradeState.upgradeAvailable);
+  const error = studioUpgradeState.error || "";
+  const deferredReason = studioUpgradeState.deferredReason || "";
+  const releaseUrl = studioUpgradeState.releaseUrl || "";
+
+  versionEl.textContent = latestVersion && latestVersion !== currentVersion
+    ? `v${currentVersion} → v${latestVersion}`
+    : `v${currentVersion}`;
+
+  if (releaseLink) {
+    if (releaseUrl && /^https?:\/\//i.test(releaseUrl)) {
+      releaseLink.href = releaseUrl;
+      releaseLink.hidden = false;
+    } else {
+      releaseLink.hidden = true;
+    }
+  }
+
+  let statusText = "等待检查更新";
+  let tone = "";
+  let buttonLabel = "检查更新";
+  let buttonDisabled = false;
+
+  if (studioUpgradePendingReloadVersion) {
+    statusText = `已升级至 v${studioUpgradePendingReloadVersion}（保存未保存修改后将自动刷新页面）`;
+    tone = "warn";
+    buttonLabel = "立即刷新";
+    buttonDisabled = false;
+  } else if (status === "checking") {
+    statusText = "正在检查 GitHub 稳定版更新…";
+    tone = "warn";
+    buttonLabel = "检查中…";
+    buttonDisabled = true;
+  } else if (status === "downloading") {
+    statusText = `正在下载 v${studioUpgradeState.targetVersion || latestVersion} 升级包…`;
+    tone = "warn";
+    buttonLabel = "升级中…";
+    buttonDisabled = true;
+  } else if (status === "applying") {
+    statusText = `正在校验并暂存 v${studioUpgradeState.targetVersion || latestVersion}…`;
+    tone = "warn";
+    buttonLabel = "升级中…";
+    buttonDisabled = true;
+  } else if (status === "restarting") {
+    statusText = `正在应用 v${studioUpgradeState.targetVersion || latestVersion} 并重启 Studio…`;
+    tone = "warn";
+    buttonLabel = "重启中…";
+    buttonDisabled = true;
+  } else if (status === "error") {
+    statusText = error || "升级检查失败";
+    tone = "bad";
+    buttonLabel = mode === "standalone" && upgradeAvailable ? "重试升级" : "重试检查";
+  } else if (upgradeAvailable) {
+    if (mode === "source") {
+      statusText = `发现新版本 v${latestVersion}（源码仓库模式，不自动覆盖 Git 工作区）`;
+      tone = "warn";
+      buttonLabel = "重新检查";
+    } else if (dirty || resourcesDirty) {
+      statusText = `发现新版本 v${latestVersion}（当前有未保存修改，保存后将自动升级）`;
+      tone = "warn";
+      buttonLabel = "立即升级";
+    } else if (deferredReason) {
+      statusText = `发现新版本 v${latestVersion}（${deferredReason}）`;
+      tone = "warn";
+      buttonLabel = "立即升级";
+    } else {
+      statusText = `发现新版本 v${latestVersion}`;
+      tone = "warn";
+      buttonLabel = "立即升级";
+    }
+  } else if (status === "up-to-date") {
+    statusText = mode === "source" ? "已是最新稳定版（源码仓库模式）" : "已是最新稳定版";
+    tone = "good";
+    buttonLabel = "检查更新";
+  }
+
+  if (tone) bar.dataset.state = tone;
+  else delete bar.dataset.state;
+  statusEl.textContent = statusText;
+  statusEl.title = statusText;
+  actionBtn.textContent = buttonLabel;
+  actionBtn.disabled = buttonDisabled;
+}
+
+async function pollStudioRestart(targetVersion, previousVersion, attempt = 0) {
+  stopStudioUpgradePolling();
+  if (attempt > 120) {
+    renderStudioUpgrade({
+      status: "error",
+      error: `等待 Studio 重启到 v${targetVersion} 超时，请手动检查服务状态。`,
+    });
+    return;
+  }
+  try {
+    const response = await fetch("/health", {
+      cache: "no-store",
+      headers: { "x-pocket-editor": "1" },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (response.ok) {
+      const health = await response.json();
+      if (health?.ok === true && health.service === "pocket-editor") {
+        if (health.csrfToken) csrfToken = health.csrfToken;
+        if (health.version === targetVersion) {
+          if (dirty || resourcesDirty) {
+            studioUpgradePendingReloadVersion = targetVersion;
+            renderStudioUpgrade({
+              currentVersion: targetVersion,
+              latestVersion: targetVersion,
+              status: "up-to-date",
+              upgradeAvailable: false,
+              error: null,
+            });
+            return;
+          }
+          renderStudioUpgrade({
+            currentVersion: targetVersion,
+            latestVersion: targetVersion,
+            status: "up-to-date",
+            upgradeAvailable: false,
+            error: null,
+          });
+          window.location.reload();
+          return;
+        }
+        if (attempt >= 2 && health.version === previousVersion) {
+          const latestStatus = await api("/api/studio/upgrade").catch(() => null);
+          if (latestStatus && latestStatus.status === "error") {
+            renderStudioUpgrade(latestStatus);
+            if (latestStatus.error) showNotice(latestStatus.error, "error");
+            return;
+          }
+        }
+      }
+    }
+  } catch {
+    // Server is mid-restart; continue polling.
+  }
+  studioUpgradePollTimer = setTimeout(() => {
+    void pollStudioRestart(targetVersion, previousVersion, attempt + 1);
+  }, 350);
+}
+
+async function checkStudioUpgrade({ autoApply = true, forceApply = false } = {}) {
+  try {
+    const deferAutoApply = autoApply && !forceApply && isStudioUpgradeWorkDeferred();
+    renderStudioUpgrade({ status: "checking", error: null });
+    const previousVersion = studioUpgradeState?.currentVersion;
+    const result = await api("/api/studio/upgrade/check", {
+      method: "POST",
+      body: JSON.stringify({ autoApply: deferAutoApply ? false : autoApply, forceApply }),
+    });
+    if (result?.upgradeAvailable && result?.mode === "standalone" && (deferAutoApply || result?.deferredReason)) {
+      studioUpgradeDeferredAutoApply = true;
+    } else if (!result?.upgradeAvailable) {
+      studioUpgradeDeferredAutoApply = false;
+    }
+    renderStudioUpgrade(result);
+    if (result?.status === "restarting" || result?.status === "applying" || result?.status === "downloading") {
+      studioUpgradeDeferredAutoApply = false;
+      const targetVersion = result.targetVersion || result.latestVersion;
+      if (targetVersion) {
+        void pollStudioRestart(targetVersion, previousVersion || result.currentVersion);
+      }
+    } else if (result?.status === "error" && result.rolledBack && result.error) {
+      showNotice(result.error, "error");
+    }
+    return result;
+  } catch (error) {
+    renderStudioUpgrade({ status: "error", error: normalizeError(error).message });
+    return null;
+  }
+}
+
+function startPeriodicStudioUpgradeChecks() {
+  if (studioUpgradePeriodicTimer) clearInterval(studioUpgradePeriodicTimer);
+  studioUpgradePeriodicTimer = setInterval(() => {
+    if (studioUpgradePollTimer || studioUpgradePendingReloadVersion) return;
+    if (["checking", "downloading", "applying", "restarting"].includes(studioUpgradeState?.status)) return;
+    void checkStudioUpgrade({ autoApply: true });
+  }, STUDIO_UPGRADE_CHECK_INTERVAL_MS);
+}
+
+$("studio-upgrade-action")?.addEventListener("click", () => {
+  if (studioUpgradePendingReloadVersion) {
+    if ((dirty || resourcesDirty) && !window.confirm("当前仍有未保存修改，立即刷新会丢弃草稿，是否继续？")) return;
+    studioUpgradePendingReloadVersion = null;
+    window.location.reload();
+    return;
+  }
+  if ((dirty || resourcesDirty) && studioUpgradeState?.mode === "standalone" && studioUpgradeState?.upgradeAvailable) {
+    studioUpgradeDeferredAutoApply = true;
+    studioUpgradeDeferredAutoApply = true;
+    renderStudioUpgrade(studioUpgradeState);
+    showNotice("请先保存源文件或资源策略修改，保存后将自动升级。", "info");
+    return;
+  }
+  const mode = studioUpgradeState?.mode;
+  const upgradeAvailable = Boolean(studioUpgradeState?.upgradeAvailable);
+  const forceApply = mode === "standalone" && upgradeAvailable;
+  void checkStudioUpgrade({ autoApply: true, forceApply });
+});
+
 // The runner owns the mobile device profile. Load it once before selecting a
 // project so both the Canvas presentation and the WeChat iframe use the same
 // logical screen and safe-area contract.
 void loadPreviewDevice()
-  .then(() => Promise.all([loadProjects(), loadDevices()]))
+  .then(() => Promise.all([loadProjects(), loadDevices(), checkStudioUpgrade({ autoApply: true })]))
+  .then(() => startPeriodicStudioUpgradeChecks())
   .catch(showNotice);

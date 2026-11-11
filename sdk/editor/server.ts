@@ -45,6 +45,7 @@ import { previewDevice } from "./preview_device.ts";
 import { createEditorDeviceManager, type DeploymentSnapshot } from "./devices.ts";
 import { createWechatPreviewManager } from "./wechat.ts";
 import { createStudioDiagnostics, handleDiagnosticsRequest } from "./diagnostics.ts";
+import { createStudioUpgradeManager, readInstalledSdkInfo } from "../scripts/studio_upgrade.mjs";
 import { resolveProjectTemplate } from "../scripts/project_templates.ts";
 import { chooseUpdateHost, startUpdateEndpoint } from "./update_endpoint.ts";
 import {
@@ -184,6 +185,10 @@ export type StartEditorOptions = {
   projectRoot?: string;
   /** Trusted Flutter consumer directory, bound to the configured JS project. */
   flutterRoot?: string;
+  /** Optional SDK root override for Studio self-upgrade tests. */
+  upgradeSdkRoot?: string;
+  /** Optional Studio self-upgrade release/transport overrides for tests. */
+  upgradeOptions?: Record<string, unknown>;
   /** Used by service tests; production always uses the real runner below. */
   buildRunner?: BuildRunner;
 };
@@ -2060,6 +2065,14 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const sdkRoot = root;
   const sdkRootStat = lstatIfExists(sdkRoot);
   if (!sdkRootStat?.isDirectory() || sdkRootStat.isSymbolicLink()) throw new Error("editor SDK root must be a real directory");
+  const upgradeTargetRoot = resolve(options.upgradeSdkRoot ?? process.env.POCKET_STUDIO_UPGRADE_SDK_ROOT ?? sdkRoot);
+  const installedSdkVersion = readInstalledSdkInfo(upgradeTargetRoot).currentVersion;
+  let canApplyStudioUpgrade = (): { allowed: boolean; reason?: string } => ({ allowed: true });
+  const studioUpgrade = createStudioUpgradeManager({
+    sdkRoot: upgradeTargetRoot,
+    canApplyUpgrade: () => canApplyStudioUpgrade(),
+    ...(options.upgradeOptions ?? {}),
+  });
   type ResolvedPublishedPackage = { projectId: string; entry: PublishedVersion; package: PublishedVersionPackage };
   const resolveCompatVersion = async (id: string, config: EditorConfig, state?: EditorState, history?: VersionHistory): Promise<string> => {
     if (updatePackageVersion) return updatePackageVersion;
@@ -3512,6 +3525,22 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     // share the SDK/project write boundary.
     devices.listDeployments().some((job) => ["queued", "building", "starting", "stopping"].includes(job.state));
 
+  canApplyStudioUpgrade = (): { allowed: boolean; reason?: string } => {
+    const busyWork =
+      projectWrites.size > 0 ||
+      publishSlots.size > 0 ||
+      sdkScopeBlocked("") ||
+      [...states.values()].some((state) => state.busy) ||
+      [...states.keys()].some((projectId) => codex.isBusy(projectId) || wechat.isBuilding(projectId));
+    if (busyWork) {
+      return {
+        allowed: false,
+        reason: "当前有正在执行的项目保存、构建、发布或部署任务，已暂缓自动升级",
+      };
+    }
+    return { allowed: true };
+  };
+
   function armNovelBackup(id: string, state: EditorState, retryMs?: number): void {
     const previous = backupTimers.get(id);
     if (previous) clearTimeout(previous);
@@ -3559,6 +3588,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         if (path === "/health" && method === "GET") return json({
           ok: true,
           service: "pocket-editor",
+          pid: process.pid,
+          version: installedSdkVersion,
           csrfToken,
           bluetooth: { local: !!localBluetooth },
           workspace: workspace.root,
@@ -3566,6 +3597,26 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           ...(flutterRoot ? { flutterRoot } : {}),
           ...(updatePackageVersion ? { updatePackageVersion } : {}),
         });
+        if (path === "/api/studio/upgrade" && method === "GET") return json(studioUpgrade.status());
+        if (path === "/api/studio/upgrade/check" && method === "POST") {
+          let body: Record<string, unknown> = {};
+          const raw = await request.text();
+          if (raw.trim()) {
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+            } catch {
+              return failure("upgrade check payload must be JSON", 400);
+            }
+          }
+          return json(await studioUpgrade.check({
+            autoApply: body.autoApply !== false,
+            forceApply: body.forceApply === true,
+          }));
+        }
+        if (path === "/api/studio/upgrade/apply" && method === "POST") {
+          return json(await studioUpgrade.apply());
+        }
         if ((path === "/novel" || path === "/novel/resource") && method === "GET") {
           const id = asProjectId(url.searchParams.get("project"));
           if (!existsSync(projectDir(id))) return failure("project not found", 404);

@@ -136,6 +136,16 @@ jobs:
         working-directory: sdk
         run: bun test packages/pocket_diagnostics/test/diagnostics.test.ts
 
+      - name: Install Playwright Chromium for upgrade verification
+        working-directory: sdk
+        run: npx playwright install chromium
+
+      - name: Verify Studio upgrade on platform
+        working-directory: sdk
+        env:
+          POCKET_SOURCE_BUILD: "1"
+        run: bun test --timeout 60000 editor/test/studio_upgrade.test.ts
+
       - name: Build Noble N-API binding
         if: runner.os != 'Windows'
         working-directory: sdk
@@ -171,6 +181,18 @@ jobs:
           New-Item -ItemType Directory -Force native/target/release | Out-Null
           Copy-Item native/target/x86_64-pc-windows-msvc/release/pocket_probe.exe native/target/release/
           Copy-Item native/target/x86_64-pc-windows-msvc/release/pocketjs_bytecode.exe native/target/release/
+
+      - name: Verify bytecode compiler input termination
+        if: runner.os != 'Windows'
+        working-directory: sdk
+        run: cargo test --locked --release --manifest-path native/Cargo.toml --bin pocketjs_bytecode
+
+      - name: Verify Windows bytecode compiler input termination
+        if: runner.os == 'Windows'
+        working-directory: sdk
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo test --locked --release --target x86_64-pc-windows-msvc --manifest-path native/Cargo.toml --bin pocketjs_bytecode
 
       - name: Verify Windows runtime dependencies
         if: runner.os == 'Windows'

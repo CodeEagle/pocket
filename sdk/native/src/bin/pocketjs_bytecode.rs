@@ -116,10 +116,11 @@ fn parse_args() -> Args {
 }
 
 fn compile_script(ctx: Ctx<'_>, source: &[u8], filename: &CString) -> Result<Vec<u8>, String> {
+    let input = CString::new(source).map_err(|_| "input source contains a NUL byte".to_owned())?;
     let value = unsafe {
         qjs::JS_Eval(
             ctx.as_raw().as_ptr(),
-            source.as_ptr().cast(),
+            input.as_ptr(),
             source.len().try_into().map_err(|_| "source is too large")?,
             filename.as_ptr(),
             (qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_STRICT | qjs::JS_EVAL_FLAG_COMPILE_ONLY)
@@ -242,4 +243,126 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &bytecode::engine_abi()[..8]
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pocket_flutter::bytecode::BytecodeExpectation;
+
+    #[test]
+    fn compile_script_zero_terminates_subslice_without_altering_source_hash() {
+        let sentinel_backing = b"var answer = 1=";
+        let sentinel_source = &sentinel_backing[..b"var answer = 1".len()];
+        assert_eq!(sentinel_backing[sentinel_source.len()], b'=');
+
+        let filename = CString::new("app.js").unwrap();
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+
+        // Prove that QuickJS JS_Eval overreads `input[input_len]` when not NUL-terminated:
+        // `var answer = 1` followed by `=` at `input[input_len]` causes the lexer to parse
+        // the trailing `=` sentinel and fail with a compile exception.
+        let unpadded_failed = context.with(|ctx| unsafe {
+            let value = qjs::JS_Eval(
+                ctx.as_raw().as_ptr(),
+                sentinel_source.as_ptr().cast(),
+                sentinel_source.len() as _,
+                filename.as_ptr(),
+                (qjs::JS_EVAL_TYPE_GLOBAL
+                    | qjs::JS_EVAL_FLAG_STRICT
+                    | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32,
+            );
+            let is_err = qjs::JS_VALUE_GET_NORM_TAG(value) == qjs::JS_TAG_EXCEPTION;
+            if is_err {
+                let _ = ctx.catch();
+            } else {
+                qjs::JS_FreeValue(ctx.as_raw().as_ptr(), value);
+            }
+            is_err
+        });
+        assert!(
+            unpadded_failed,
+            "raw JS_Eval on subslice backed by '=' sentinel at slice end fails without NUL termination"
+        );
+
+        let payload = context
+            .with(|ctx| compile_script(ctx, sentinel_source, &filename))
+            .expect("compile_script must NUL-terminate source slice so QuickJS lexer does not read trailing '='");
+
+        let standalone_source = sentinel_source.to_vec();
+        let standalone_payload = context
+            .with(|ctx| compile_script(ctx, &standalone_source, &filename))
+            .expect("compile_script on standalone Vec");
+        assert_eq!(payload, standalone_payload);
+
+        let artifact = bytecode::encode(
+            BytecodeKind::Script,
+            DEFAULT_FLAGS,
+            BINDING_GENERATION,
+            60,
+            sentinel_source,
+            &payload,
+        )
+        .unwrap();
+        let decoded = bytecode::validate(
+            &artifact,
+            BytecodeExpectation {
+                kind: BytecodeKind::Script,
+                binding_generation: BINDING_GENERATION,
+                tick_hz: 60,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.source_sha256,
+            pocketjs_core::sha256::sha256(b"var answer = 1")
+        );
+        assert_eq!(
+            bytecode::sha256_hex(sentinel_source),
+            bytecode::sha256_hex(b"var answer = 1")
+        );
+        assert_ne!(
+            bytecode::sha256_hex(sentinel_source),
+            bytecode::sha256_hex(sentinel_backing)
+        );
+        assert_ne!(
+            bytecode::sha256_hex(sentinel_source),
+            bytecode::sha256_hex(b"var answer = 1\0")
+        );
+        assert_eq!(decoded.payload, payload.as_slice());
+
+        let metadata_value = serde_json::json!({
+            "entryFormat": bytecode::ENTRY_FORMAT,
+            "formatVersion": bytecode::FORMAT_VERSION,
+            "kind": "script",
+            "bindingGeneration": BINDING_GENERATION,
+            "tickHz": 60,
+            "runtimeAbi": bytecode::runtime_abi(),
+            "engineAbi": bytecode::engine_abi_hex(),
+            "headerBytes": bytecode::HEADER_LEN,
+            "bytecodeBytes": artifact.len(),
+            "sourceSha256": bytecode::sha256_hex(sentinel_source),
+            "payloadSha256": bytecode::sha256_hex(&payload),
+        });
+        assert_eq!(
+            metadata_value["sourceSha256"].as_str().unwrap(),
+            bytecode::sha256_hex(b"var answer = 1")
+        );
+        assert_eq!(
+            metadata_value["payloadSha256"].as_str().unwrap(),
+            bytecode::sha256_hex(&standalone_payload)
+        );
+    }
+
+    #[test]
+    fn compile_script_rejects_interior_nul_bytes() {
+        let filename = CString::new("app.js").unwrap();
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let err = context
+            .with(|ctx| compile_script(ctx, b"var a = 1;\0var b = 2;", &filename))
+            .unwrap_err();
+        assert_eq!(err, "input source contains a NUL byte");
+    }
 }

@@ -115,8 +115,30 @@ Canvas 的字体、圆角栅格、资源解码与 Flutter 可能不同，浏览�
 | `editor/preview.ts`、`client/preview.js` | 使用现有 native probe/FrameResult；新增本地 SSE 与 Canvas 投影适配，不复刻布局引擎。 |
 | `editor/devices.ts` | 可信消费者绑定、固定命令、设备枚举、部署任务与进程生命周期。 |
 | `editor/codex.ts` | 复用 pinned PocketJS `tools/companion/codex.ts` 的 CLI/App Server 传输，增加项目/图片/区域/任务边界。 |
-| `editor/client/` | 编辑、预览、设备日志、悬浮对话的纯网页 UI。 |
-| `scripts/editor_service.mjs` | npm 统一启动器，固定 8791，复用进程管理库、既有 Editor 与工作区。 |
+| `editor/client/` | 编辑、预览、设备日志、悬浮对话与 Studio 自升级状态展示的纯网页 UI。 |
+| `scripts/editor_service.mjs` | npm 统一启动器，固定 8791，复用进程管理库、既有 Editor、工作区与独立自升级替换/回滚流程。 |
+| `scripts/studio_upgrade.mjs` | Studio 内置自升级协调器：稳定版 GitHub Release 检查、HTTPS 来源校验、平台归档 + SHA-256 验证、安全 tar 解压、暂存校验与回滚状态记录。 |
+
+## Studio 内置自升级（v0.1.11+）
+
+完整来源审计、逐文件备份与嵌套自定义文件保留事务、跨进程互斥锁、回滚健康确认及崩溃自愈设计见 [`STUDIO_UPGRADE.md`](STUDIO_UPGRADE.md)。
+
+### 架构与升级边界
+
+1. **自动检查与语义化版本过滤**：Studio 启动并打开网页时自动请求 `/api/studio/upgrade/check`，向 `CodeEagle/pocket` 的 GitHub Releases 查询最新稳定版 `sdk-v<major>.<minor>.<patch>`（忽略 `draft`、`prerelease` 与非稳定标签），合并并发检查请求。
+2. **模式识别与 Git 源码保护**：
+   - **受管独立安装模式（`standalone`）**：当 `package.json` 为 `@pocket/web-sdk-tools`（或 `@pocket/web-sdk-tools-<platform>`）、包含匹配的 `provenance.json` 且不存在 `.git` 源码仓库特征时，发现更新版本后自动下载当前平台归档 `pocket-web-sdk-tools-<platform>-<arch>-<version>.tgz` 与 `.sha256` 校验文件并自动应用。
+   - **源码仓库模式（`source`）**：在 Git 源码工作区（如包含 `.git`、`demo/` 或 `editor/test`）中，Studio 顶部栏正常检查并提示新版本，但拒绝自动或手动覆盖源码目录（`POST /api/studio/upgrade/apply` 返回 409）。
+3. **安全下载、解压与暂存内部一致性校验**：
+   - 仅允许受信任 GitHub HTTPS 发布源（测试环境可通过显式 loopback 选项接入合成 fixture 服务），限制响应体大小与超时时间。
+   - 严格比对 `.sha256` 摘要后，在内存中解析 POSIX ustar/PAX 归档，拒绝路径穿越（`..`）、绝对路径、盘符路径、反斜杠、非 `package/` 顶层前缀以及符号链接/硬链接/特殊设备文件。
+   - 在 `.pocket-build/sdk-upgrade-stage-<version>` 中暂存解压后的 SDK，并解压内置 `prebuilt/pocket-tools-<platform>-<arch>-<version>.tgz`，校核暂存包内部的 `package.json`、`provenance.json`、`scripts/prebuilt_tools.mjs` 与平台工具包 `manifest.json` 之间的目标版本、编译器版本（`upstreamRevision`）、QuickJS `bytecodeAbi` 与全部预编译二进制哈希（支持未来版本平滑升级编译器或 ABI）。
+4. **先完整备份后停服、嵌套自定义文件保留、真实进程交接与失败自动回滚**：
+   - 暂存校验通过后，通过跨进程互斥锁 `.pocket-build/sdk-upgrade-apply.lock.json` 与外部独立 Node 进程执行 `node scripts/editor_service.mjs upgrade-apply`。
+   - 在停止本仓库所属的 8791 Studio 服务进程**之前**，先完成逐文件完整备份并写入 `backup-complete.json` 事务标记（若备份未完成绝不停服或执行破坏性回滚）。
+   - 仅按文件清单更新或移除 SDK 自身文件及 `node_modules/@pocket/tools-<platform>-<arch>`；完整保留消费者在受管目录内（如 `packages/my-custom-package/`）及 `.pocket-build/`、根目录下创建的所有自定义文件与配置。
+   - 启动新版 Studio 并轮询 `/health` 确认新进程 `pid` 与 `version === targetVersion`。若应用或新版健康检查失败，立即从已完成备份恢复旧版文件、重启旧版 Studio，并在验证旧版 `/health` 恢复正常后才标记 `rolledBack: true`；若升级途中进程意外中断，下次服务启动时自动通过 `recoverInterruptedSdkUpgrade` 恢复。
+   - 浏览器端每次 `/health` 探针均设超时上限，仅在确认新版本号已就绪后才自动刷新页面。
 
 实现前检查了保留的旧工程 `pocketjs_flutter_demo`（排除 `pocket_host/`），参考 `native/` 的 Guest 执行链和 `web_wasm_preview/index.html`。保留当前 SDK 已迁移的 Editor 项目/构建工作流，扩展现有 native probe。旧网页中的演示图形不是通用 Guest 执行器，因此没有复制为“Demo 已支持网页”的占位实现。Codex 接入复用当前 pinned 上游 `tools/companion/codex.ts` 传输；没有复制用户凭证或引入新的认证存储。没有保留新模块的兼容别名、重复模型清单或后台空闲帧轮询。原来的签名发布入口保留在折叠的 Advanced 区域。npm 用户路径消费平台包；Rust/Python/补丁脚本只用于 SDK 发布侧生成下一版平台包。
 

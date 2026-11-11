@@ -10,10 +10,21 @@
 import { createRequire } from "node:module";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prebuiltEnvironment } from "./prebuilt_tools.mjs";
+import {
+  acquireUpgradeApplyLock,
+  applyStagedSdkFiles,
+  isSdkBackupComplete,
+  prepareSdkUpgradeBackup,
+  readInstalledSdkInfo,
+  recoverInterruptedSdkUpgrade,
+  restoreBackedUpSdkFiles,
+  validateStagedStandaloneSdk,
+  writePersistedUpgradeStatus,
+} from "./studio_upgrade.mjs";
 import { nativeProbeCandidates, nativeProbeSourceInputs, selectNativeProbe } from "./native_probe_path.ts";
 
 const require = createRequire(import.meta.url);
@@ -25,13 +36,24 @@ const SDK_ROOT = resolve(SCRIPT_DIR, "..");
 const CHECKOUT_ROOT = resolve(SDK_ROOT, "..");
 const SERVER = join(SDK_ROOT, "editor", "server.ts");
 const HOST = "127.0.0.1";
-const PORT = 8791;
-const LEGACY_PORTS = [8790, 8792, 8793];
+const STANDALONE_FIXTURE_PORT =
+  process.env.POCKET_STUDIO_TEST_PORT &&
+  existsSync(join(SDK_ROOT, ".pocket-studio-test-fixture")) &&
+  !existsSync(join(CHECKOUT_ROOT, ".git")) &&
+  !existsSync(join(SDK_ROOT, "editor", "test"))
+    ? Number(process.env.POCKET_STUDIO_TEST_PORT)
+    : null;
+const PORT =
+  Number.isInteger(STANDALONE_FIXTURE_PORT) && STANDALONE_FIXTURE_PORT > 0 && STANDALONE_FIXTURE_PORT <= 65535
+    ? STANDALONE_FIXTURE_PORT
+    : 8791;
+const LEGACY_PORTS = STANDALONE_FIXTURE_PORT ? [] : [8790, 8792, 8793];
 const WORKSPACE = join(SDK_ROOT, ".pocket-build", "editor-workspace-8791");
 const LOG = join(SDK_ROOT, ".pocket-build", "editor-service-8791.log");
 const PID_FILE = join(SDK_ROOT, ".pocket-build", "editor-service-8791.pid.json");
 const PATH_HASH = sha256Path(SDK_ROOT).slice(0, 16);
 const HEALTH_URL = `http://${HOST}:${PORT}/health`;
+const FS_REMOVE_OPTIONS = { recursive: true, force: true, maxRetries: 10, retryDelay: 200 };
 
 function sha256Path(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -60,24 +82,25 @@ function checkFixedEnvironment() {
  * override is limited to the Editor child and never changes standalone SDK
  * selection. An explicit POCKET_NATIVE_PROBE remains authoritative.
  */
-function editorToolEnvironment(options = {}) {
+function editorToolEnvironment(options = {}, sdkRoot = SDK_ROOT) {
+  const resolvedSdkRoot = resolve(options?.sdkRoot || sdkRoot || SDK_ROOT);
   const explicitCompiler = options.compilerPath || process.env.POCKET_COMPILER_PATH;
   const explicitProbe = options.nativeProbe || process.env.POCKET_NATIVE_PROBE;
   const explicitOverrides = {};
   if (explicitCompiler?.trim()) explicitOverrides.POCKET_COMPILER_PATH = resolve(explicitCompiler);
   if (explicitProbe?.trim()) explicitOverrides.POCKET_NATIVE_PROBE = resolve(explicitProbe);
   if (process.env.POCKET_SOURCE_BUILD === "1") return { ...process.env, ...explicitOverrides };
-  const toolEnv = prebuiltEnvironment(SDK_ROOT);
+  const toolEnv = prebuiltEnvironment(resolvedSdkRoot);
   // Preserve the two supported explicit tool overrides. The npm defaults stay
   // in place when neither is supplied.
   if (explicitOverrides.POCKET_NATIVE_PROBE) return { ...toolEnv, ...explicitOverrides };
   if (explicitOverrides.POCKET_COMPILER_PATH) toolEnv.POCKET_COMPILER_PATH = explicitOverrides.POCKET_COMPILER_PATH;
 
-  const candidates = nativeProbeCandidates(SDK_ROOT);
+  const candidates = nativeProbeCandidates(resolvedSdkRoot);
   if (!candidates.some(candidate => existsSync(candidate))) return toolEnv;
   const probe = selectNativeProbe({
     candidates,
-    sourceInputs: nativeProbeSourceInputs(SDK_ROOT),
+    sourceInputs: nativeProbeSourceInputs(resolvedSdkRoot),
   });
   return { ...toolEnv, POCKET_NATIVE_PROBE: probe };
 }
@@ -269,11 +292,13 @@ async function readHealth() {
   } catch { return undefined; }
 }
 
-async function waitForHealth(timeoutMs = 30000) {
+async function waitForHealth(timeoutMs = 30000, expectedVersion = undefined) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const health = await readHealth();
-    if (health?.ok === true && health.service === "pocket-editor" && resolve(health.workspace || "") === WORKSPACE) return true;
+    if (health?.ok === true && health.service === "pocket-editor" && resolve(health.workspace || "") === WORKSPACE) {
+      if (!expectedVersion || health.version === expectedVersion) return true;
+    }
     await sleep(250);
   }
   return false;
@@ -313,10 +338,6 @@ async function restart(explicitOptions) {
   const record = readPidRecord();
   const previous = { ...(record?.config ?? {}), ...configFromHealth(await readHealth()) };
   const options = mergeLaunchOptions(explicitOptions, previous);
-  const toolEnv = editorToolEnvironment(options);
-  const bun = toolEnv.POCKET_BUN || toolEnv.POCKET_EDITOR_BUN || "bun";
-  const runtime = spawnSync(bun, ["--version"], { encoding: "utf8", timeout: 5000, windowsHide: true });
-  if (runtime.status !== 0) throw new Error("npm Bun 不可用，请执行 npm run setup");
   for (const root of [options.projectRoot, options.flutterRoot].filter(Boolean)) {
     if (!existsSync(root)) throw new Error(`项目目录不存在：${root}`);
   }
@@ -324,6 +345,27 @@ async function restart(explicitOptions) {
   cleanupLegacyLaunchd();
   await stopOwnedPort(PORT, true);
   for (const port of LEGACY_PORTS) await stopOwnedPort(port, false);
+  const recovered = recoverInterruptedSdkUpgrade(SDK_ROOT);
+  if (recovered && process.env.POCKET_UPGRADE_RECOVERY_REEXEC !== "1") {
+    writeStoppedRecord(options);
+    const reexec = spawnSync(
+      process.execPath,
+      [join(SDK_ROOT, "scripts", "editor_service.mjs"), ...process.argv.slice(2)],
+      {
+        cwd: CHECKOUT_ROOT,
+        stdio: "inherit",
+        windowsHide: true,
+        env: { ...process.env, POCKET_UPGRADE_RECOVERY_REEXEC: "1" },
+      },
+    );
+    if (reexec.error) throw reexec.error;
+    if (reexec.status !== 0) process.exit(reexec.status ?? 1);
+    return;
+  }
+  const toolEnv = editorToolEnvironment(options, SDK_ROOT);
+  const bun = toolEnv.POCKET_BUN || toolEnv.POCKET_EDITOR_BUN || "bun";
+  const runtime = spawnSync(bun, ["--version"], { encoding: "utf8", timeout: 5000, windowsHide: true });
+  if (runtime.status !== 0) throw new Error("npm Bun 不可用，请执行 npm run setup");
   await startChild(options, toolEnv, bun);
   if (!(await waitForHealth())) {
     await stopOwnedPort(PORT, true).catch(() => {});
@@ -363,37 +405,182 @@ async function status() {
   process.exitCode = 1;
 }
 
+async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
+  const sdkRoot = resolve(runtimeOptions.sdkRoot || SDK_ROOT);
+  const { stageDir, targetVersion, handoffToken } = upgradeParams;
+  if (!stageDir || !targetVersion) throw new Error("upgrade-apply 需要 --stage-dir 与 --target-version");
+  const resolvedStageDir = resolve(stageDir);
+  const releaseLock = acquireUpgradeApplyLock(sdkRoot, {
+    phase: "applying",
+    targetVersion,
+    stageDir: resolvedStageDir,
+    ...(handoffToken ? { handoffToken } : {}),
+  });
+  try {
+    const installed = readInstalledSdkInfo(sdkRoot);
+    if (installed.mode !== "standalone") {
+      throw new Error("源码检出或 Git 工作区模式不支持自动覆盖升级");
+    }
+    const previousVersion = installed.currentVersion;
+    validateStagedStandaloneSdk(resolvedStageDir, targetVersion);
+    const healthTimeoutMs = runtimeOptions.healthTimeoutMs ?? Number(process.env.POCKET_STUDIO_UPGRADE_HEALTH_TIMEOUT_MS || 30000);
+
+    const record = readPidRecord();
+    const previousConfig = { ...(record?.config ?? {}), ...configFromHealth(await readHealth()) };
+    const options = mergeLaunchOptions({}, previousConfig);
+    const backupDir = join(sdkRoot, ".pocket-build", `sdk-upgrade-backup-${previousVersion}`);
+
+    await assertPortOwnership(PORT, false);
+    // Validate and complete backup BEFORE stopping the running service so an
+    // incomplete backup never leaves the user with a stopped service or wiped files.
+    prepareSdkUpgradeBackup(sdkRoot, resolvedStageDir, backupDir);
+    if (!isSdkBackupComplete(backupDir)) {
+      throw new Error("升级前完整备份未能完成，已中止服务停止与文件变更");
+    }
+
+    if (handoffToken) {
+      // Allow the parent Studio HTTP response to flush before stopping the old service.
+      await sleep(150);
+    }
+
+    cleanupLegacyLaunchd();
+    await stopOwnedPort(PORT, true);
+    for (const port of LEGACY_PORTS) await stopOwnedPort(port, false);
+
+    let filesMutated = false;
+    try {
+      filesMutated = true;
+      applyStagedSdkFiles(sdkRoot, resolvedStageDir, backupDir);
+      const toolEnv = editorToolEnvironment(options, sdkRoot);
+      const bun = toolEnv.POCKET_BUN || toolEnv.POCKET_EDITOR_BUN || "bun";
+      await startChild(options, toolEnv, bun);
+      if (!(await waitForHealth(healthTimeoutMs, targetVersion))) {
+        throw new Error(`升级到 v${targetVersion} 后 Studio 健康检查或版本确认失败`);
+      }
+      writePersistedUpgradeStatus(sdkRoot, {
+        status: "up-to-date",
+        previousVersion,
+        currentVersion: targetVersion,
+        latestVersion: targetVersion,
+        appliedAt: new Date().toISOString(),
+        rolledBack: false,
+        error: null,
+      });
+      rmSync(resolvedStageDir, FS_REMOVE_OPTIONS);
+      rmSync(backupDir, FS_REMOVE_OPTIONS);
+      console.log(`Pocket Studio 已升级并重启至 v${targetVersion}：http://${HOST}:${PORT}`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await stopOwnedPort(PORT, true).catch(() => {});
+      if (!filesMutated || !isSdkBackupComplete(backupDir)) {
+        writePersistedUpgradeStatus(sdkRoot, {
+          status: "error",
+          previousVersion,
+          currentVersion: previousVersion,
+          latestVersion: targetVersion,
+          rolledBack: false,
+          error: `升级中止（未应用破坏性更改）：${reason}`,
+          updatedAt: new Date().toISOString(),
+        });
+        rmSync(resolvedStageDir, FS_REMOVE_OPTIONS);
+        rmSync(backupDir, FS_REMOVE_OPTIONS);
+        throw error;
+      }
+      try {
+        restoreBackedUpSdkFiles(sdkRoot, backupDir);
+      } catch (restoreError) {
+        writePersistedUpgradeStatus(sdkRoot, {
+          status: "error",
+          previousVersion,
+          currentVersion: previousVersion,
+          latestVersion: targetVersion,
+          rolledBack: false,
+          error: `升级失败且文件回滚异常：${reason} / ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+          updatedAt: new Date().toISOString(),
+        });
+        throw error;
+      }
+      let rollbackHealthy = false;
+      let rollbackStartError = "";
+      try {
+        const rollbackEnv = editorToolEnvironment(options, sdkRoot);
+        const rollbackBun = rollbackEnv.POCKET_BUN || rollbackEnv.POCKET_EDITOR_BUN || "bun";
+        await startChild(options, rollbackEnv, rollbackBun);
+        rollbackHealthy = Boolean(await waitForHealth(healthTimeoutMs, previousVersion));
+      } catch (startErr) {
+        rollbackStartError = startErr instanceof Error ? startErr.message : String(startErr);
+      }
+      if (!rollbackHealthy) {
+        writePersistedUpgradeStatus(sdkRoot, {
+          status: "error",
+          previousVersion,
+          currentVersion: previousVersion,
+          latestVersion: targetVersion,
+          rolledBack: false,
+          error: `升级至 v${targetVersion} 失败，文件已恢复到 v${previousVersion}，但旧版服务重启健康检查未通过${rollbackStartError ? `（${rollbackStartError}）` : ""}：${reason}`,
+          updatedAt: new Date().toISOString(),
+        });
+        rmSync(resolvedStageDir, FS_REMOVE_OPTIONS);
+        rmSync(backupDir, FS_REMOVE_OPTIONS);
+        throw new Error(`升级失败且回滚后服务未就绪：${reason}`);
+      }
+      writePersistedUpgradeStatus(sdkRoot, {
+        status: "error",
+        previousVersion,
+        currentVersion: previousVersion,
+        latestVersion: targetVersion,
+        rolledBack: true,
+        error: `升级至 v${targetVersion} 失败，已自动回滚到 v${previousVersion}：${reason}`,
+        updatedAt: new Date().toISOString(),
+      });
+      rmSync(resolvedStageDir, FS_REMOVE_OPTIONS);
+      rmSync(backupDir, FS_REMOVE_OPTIONS);
+      throw new Error(`升级失败并已回滚到 v${previousVersion}：${reason}`);
+    }
+  } finally {
+    releaseLock();
+  }
+}
+
 function parseArgs(argv, env = process.env) {
   const args = [...argv];
-  const command = ["start", "restart", "stop", "status"].includes(args[0]) ? args.shift() : "restart";
+  const command = ["start", "restart", "stop", "status", "upgrade-apply"].includes(args[0]) ? args.shift() : "restart";
   const options = {};
+  const upgrade = {};
   for (const arg of args) {
     if (arg.startsWith("--project-root=")) options.projectRoot = resolve(arg.slice("--project-root=".length));
     else if (arg.startsWith("--flutter-root=")) options.flutterRoot = resolve(arg.slice("--flutter-root=".length));
     else if (arg.startsWith("--update-package-version=")) options.updatePackageVersion = arg.slice("--update-package-version=".length);
+    else if (command === "upgrade-apply" && arg.startsWith("--stage-dir=")) upgrade.stageDir = resolve(arg.slice("--stage-dir=".length));
+    else if (command === "upgrade-apply" && arg.startsWith("--target-version=")) upgrade.targetVersion = arg.slice("--target-version=".length).trim();
+    else if (command === "upgrade-apply" && arg.startsWith("--handoff-token=")) upgrade.handoffToken = arg.slice("--handoff-token=".length).trim();
     else if (arg.startsWith("--port=")) {
       if (arg.slice("--port=".length) !== String(PORT)) throw new Error("Studio 固定使用 8791，不能指定其他端口");
     } else throw new Error(`未知参数：${arg}`);
+  }
+  if (command === "upgrade-apply") {
+    upgrade.handoffToken ??= env.POCKET_UPGRADE_HANDOFF_TOKEN?.trim() || undefined;
   }
   options.projectRoot ??= env.POCKET_EDITOR_PROJECT_ROOT || undefined;
   options.flutterRoot ??= env.POCKET_EDITOR_FLUTTER_ROOT || undefined;
   options.updatePackageVersion ??= env.POCKET_EDITOR_PACKAGE_VERSION || undefined;
   options.compilerPath = env.POCKET_COMPILER_PATH || undefined;
   options.nativeProbe = env.POCKET_NATIVE_PROBE || undefined;
-  return { command, options: serviceConfig(options) };
+  return { command, options: serviceConfig(options), upgrade };
 }
 
 async function main() {
   checkFixedEnvironment();
-  const { command, options } = parseArgs(process.argv.slice(2));
+  const { command, options, upgrade } = parseArgs(process.argv.slice(2));
   if (command === "status") return status();
   if (command === "stop") return stop();
+  if (command === "upgrade-apply") return upgradeApply(upgrade);
   // Both start and restart intentionally replace the current same-checkout
   // process so source and native helper changes are picked up immediately.
   return restart(options);
 }
 
-export { configFromHealth, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig };
+export { configFromHealth, editorToolEnvironment, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {

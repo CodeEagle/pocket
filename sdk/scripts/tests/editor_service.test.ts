@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
   configFromHealth,
+  editorToolEnvironment,
   makePidRecord,
   mergeLaunchOptions,
   parseArgs,
@@ -92,5 +93,34 @@ describe("editor service launch config", () => {
       pid: null,
       config: { projectRoot: fixture("lantern"), compilerPath: fixture("compiler/build.ts") },
     });
+  });
+
+  test("parses upgrade-apply stage directory, target version, and handoff token arguments", () => {
+    const parsed = parseArgs([
+      "upgrade-apply",
+      `--stage-dir=${fixture("sdk-upgrade-stage-0.1.11")}`,
+      "--target-version=0.1.11",
+      "--handoff-token=token-123",
+    ], {});
+    expect(parsed.command).toBe("upgrade-apply");
+    expect(parsed.upgrade).toEqual({
+      stageDir: fixture("sdk-upgrade-stage-0.1.11"),
+      targetVersion: "0.1.11",
+      handoffToken: "token-123",
+    });
+
+    const parsedFromEnv = parseArgs([
+      "upgrade-apply",
+      `--stage-dir=${fixture("sdk-upgrade-stage-0.1.11")}`,
+      "--target-version=0.1.11",
+    ], {
+      POCKET_UPGRADE_HANDOFF_TOKEN: "env-token-456",
+    });
+    expect(parsedFromEnv.upgrade.handoffToken).toBe("env-token-456");
+  });
+
+  test("editorToolEnvironment accepts an explicit sdkRoot argument", () => {
+    const env = editorToolEnvironment({ compilerPath: fixture("custom-compiler.ts") }, fixture("custom-sdk"));
+    expect(env.POCKET_COMPILER_PATH).toBe(fixture("custom-compiler.ts"));
   });
 });

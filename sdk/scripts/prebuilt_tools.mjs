@@ -3,15 +3,23 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
-export const SDK_VERSION = '0.1.10';
+export const SDK_VERSION = '0.1.11';
 export const UPSTREAM_REVISION = '99924de47c62fa36f526a8791055d91cbbdb3836';
 export const BYTECODE_ABI = 'quickjs-bytecode-v1:5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021';
 export const platformPackageName = (platform = process.platform, arch = process.arch) => `@pocket/tools-${platform}-${arch}`;
 
-export function validateToolsPackage(directory, platform = process.platform, arch = process.arch) {
+export function validateToolsPackage(directory, platform = process.platform, arch = process.arch, expectedSdkVersion = SDK_VERSION, options = {}) {
   const root = resolve(directory);
   const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'));
-  if (manifest.schemaVersion !== 1 || manifest.sdkVersion !== SDK_VERSION || manifest.upstreamRevision !== UPSTREAM_REVISION || manifest.bytecodeAbi !== BYTECODE_ABI) {
+  const expectedUpstreamRevision = options.expectedUpstreamRevision ?? UPSTREAM_REVISION;
+  const expectedBytecodeAbi = options.expectedBytecodeAbi ?? BYTECODE_ABI;
+  const revisionOk = expectedUpstreamRevision === null
+    ? (typeof manifest.upstreamRevision === 'string' && manifest.upstreamRevision.trim().length > 0)
+    : manifest.upstreamRevision === expectedUpstreamRevision;
+  const abiOk = expectedBytecodeAbi === null
+    ? (typeof manifest.bytecodeAbi === 'string' && /^quickjs-bytecode-v\d+:[0-9a-f]{16,}$/i.test(manifest.bytecodeAbi.trim()))
+    : manifest.bytecodeAbi === expectedBytecodeAbi;
+  if (manifest.schemaVersion !== 1 || manifest.sdkVersion !== expectedSdkVersion || !revisionOk || !abiOk) {
     throw new Error(`Pocket 预编译工具版本/ABI 不匹配：${root}`);
   }
   if (manifest.platform !== platform || manifest.arch !== arch) throw new Error(`Pocket 工具平台不匹配：需要 ${platform}/${arch}，实际 ${manifest.platform}/${manifest.arch}`);
@@ -39,14 +47,38 @@ export function validateToolsPackage(directory, platform = process.platform, arc
   return { root, manifest, compiler: join(root, 'compiler'), bytecode: join(root, `bin/pocketjs_bytecode${suffix}`), probe: join(root, `bin/pocket_probe${suffix}`) };
 }
 
-export function resolvePrebuiltTools(sdkRoot, env = process.env) {
+export function readPrebuiltToolsSourceConstants(prebuiltToolsMjsPath) {
+  if (!existsSync(prebuiltToolsMjsPath) || !statSync(prebuiltToolsMjsPath).isFile()) return {};
+  const source = readFileSync(prebuiltToolsMjsPath, 'utf8');
+  const readConst = (name) => {
+    const match = source.match(new RegExp(`export\\s+const\\s+${name}\\s*=\\s*['"]([^'"]+)['"]`));
+    return match ? match[1] : undefined;
+  };
+  return {
+    sdkVersion: readConst('SDK_VERSION'),
+    upstreamRevision: readConst('UPSTREAM_REVISION'),
+    bytecodeAbi: readConst('BYTECODE_ABI'),
+  };
+}
+
+export function resolvePrebuiltTools(sdkRoot, env = process.env, expectedSdkVersion = SDK_VERSION) {
+  const resolvedSdkRoot = resolve(sdkRoot);
   let directory = env.POCKET_TOOLS_PACKAGE?.trim();
   const name = platformPackageName();
+  let pkgVersion = expectedSdkVersion;
+  try {
+    const pkg = JSON.parse(readFileSync(join(resolvedSdkRoot, 'package.json'), 'utf8'));
+    if (typeof pkg.version === 'string' && pkg.version.trim()) pkgVersion = pkg.version.trim();
+  } catch {}
+  const onDiskConstants = readPrebuiltToolsSourceConstants(join(resolvedSdkRoot, 'scripts', 'prebuilt_tools.mjs'));
   if (!directory) {
-    try { directory = dirname(createRequire(join(resolve(sdkRoot), 'package.json')).resolve(`${name}/package.json`)); }
-    catch { throw Object.assign(new Error(`尚未安装 ${name}@${SDK_VERSION}。请运行 npm run setup，或安装当前系统对应的 Pocket 预编译平台包。不会自动安装 Rust 或回退到源码编译。`), { code: 'POCKET_TOOLS_MISSING' }); }
+    try { directory = dirname(createRequire(join(resolvedSdkRoot, 'package.json')).resolve(`${name}/package.json`)); }
+    catch { throw Object.assign(new Error(`尚未安装 ${name}@${pkgVersion}。请运行 npm run setup，或安装当前系统对应的 Pocket 预编译平台包。不会自动安装 Rust 或回退到源码编译。`), { code: 'POCKET_TOOLS_MISSING' }); }
   }
-  return validateToolsPackage(directory);
+  return validateToolsPackage(directory, process.platform, process.arch, pkgVersion, {
+    expectedUpstreamRevision: onDiskConstants.upstreamRevision ?? UPSTREAM_REVISION,
+    expectedBytecodeAbi: onDiskConstants.bytecodeAbi ?? BYTECODE_ABI,
+  });
 }
 
 export function resolveManagedBun(sdkRoot, env = process.env) {

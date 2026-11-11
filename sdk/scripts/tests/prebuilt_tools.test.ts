@@ -62,3 +62,36 @@ test('native bindings use node-gyp-build scoped environment without mutating cal
   });
   expect(nativeBindingEnvironment({ root, manifest: { noble: { included: false } } })).toEqual({});
 });
+
+test('resolvePrebuiltTools reads updated on-disk scripts/prebuilt_tools.mjs constants after an SDK upgrade without weakening validation', () => {
+  const sdkRoot = mkdtempSync(join(tmpdir(), 'pocket-post-apply-sdk-'));
+  const f = fixture();
+  try {
+    const futureVersion = '0.2.0';
+    const futureRevision = '1111111111222222222233333333334444444444';
+    const futureAbi = `quickjs-bytecode-v1:${'f'.repeat(64)}`;
+    f.manifest.sdkVersion = futureVersion;
+    f.manifest.upstreamRevision = futureRevision;
+    f.manifest.bytecodeAbi = futureAbi;
+    f.save();
+
+    writeFileSync(join(sdkRoot, 'package.json'), JSON.stringify({ name: '@pocket/web-sdk', version: futureVersion }));
+    mkdirSync(join(sdkRoot, 'scripts'), { recursive: true });
+    writeFileSync(
+      join(sdkRoot, 'scripts', 'prebuilt_tools.mjs'),
+      `export const SDK_VERSION = '${futureVersion}';\nexport const UPSTREAM_REVISION = '${futureRevision}';\nexport const BYTECODE_ABI = '${futureAbi}';\n`,
+    );
+
+    const validated = resolvePrebuiltTools(sdkRoot, { POCKET_TOOLS_PACKAGE: f.root });
+    expect(validated.manifest.sdkVersion).toBe(futureVersion);
+    expect(validated.manifest.bytecodeAbi).toBe(futureAbi);
+
+    // Tampering with the on-disk manifest ABI must still fail strict validation
+    f.manifest.bytecodeAbi = `quickjs-bytecode-v1:${'0'.repeat(64)}`;
+    f.save();
+    expect(() => resolvePrebuiltTools(sdkRoot, { POCKET_TOOLS_PACKAGE: f.root })).toThrow(/ABI 不匹配/);
+  } finally {
+    rmSync(sdkRoot, { recursive: true, force: true });
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
