@@ -8,6 +8,7 @@
  */
 
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   cp,
   mkdir,
@@ -19,7 +20,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { buildGuest, type BuildGuestResult } from "../scripts/build_guest.ts";
 import { parsePakLayout, type PakLayoutPart } from "../scripts/package_update.ts";
 import { validateSystemFile, type ValidatedSystemPackage } from "../scripts/build_system.ts";
@@ -313,6 +314,118 @@ async function copyAssetTree(source: string, destination: string): Promise<void>
   await walk(source, destination);
 }
 
+const LIVE2D_CATALOG_FILENAME = "novel.native-assets.json" as const;
+const LIVE2D_MAX_MODEL_BYTES = 32 * 1024 * 1024;
+const live2dBundlePathPattern = /^native-models\/([a-f0-9]{64})\.moc3$/;
+
+function live2dAssetKey(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    value.startsWith("/") ||
+    value.split("/").some((part) => !part || part === "." || part === "..")
+  ) {
+    throw new Error(`invalid Live2D native asset key: ${String(value)}`);
+  }
+  return value;
+}
+
+/**
+ * Copy only `buildGuest`'s validated `novel.native-assets.json` catalog and
+ * its allowlisted `native-models/<sha256>.moc3` files into an immutable
+ * package snapshot or preview staging directory.
+ */
+export async function copyBuiltNativeModels(
+  sourceDirectory: string,
+  destinationDirectory: string,
+  confinementRoot = sourceDirectory,
+): Promise<void> {
+  const catalogPath = join(sourceDirectory, LIVE2D_CATALOG_FILENAME);
+  let catalogStat: ReturnType<typeof lstatSync>;
+  try {
+    catalogStat = lstatSync(catalogPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (catalogStat.isSymbolicLink() || !catalogStat.isFile()) {
+    throw new Error(`${LIVE2D_CATALOG_FILENAME} is not a regular file: ${catalogPath}`);
+  }
+  const canonicalRoot = realpathSync(confinementRoot);
+  const catalogReal = realpathSync(catalogPath);
+  if (catalogReal !== canonicalRoot && !catalogReal.startsWith(canonicalRoot + sep)) {
+    throw new Error(`${LIVE2D_CATALOG_FILENAME} escapes package root: ${catalogPath}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(catalogPath, "utf8"));
+  } catch (error) {
+    throw new Error(`invalid ${LIVE2D_CATALOG_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.assets)) {
+    throw new Error(`invalid ${LIVE2D_CATALOG_FILENAME}; expected { version: 1, assets: Record<string, string> }`);
+  }
+  const sourceModelsDir = join(sourceDirectory, "native-models");
+  try {
+    const dirStat = lstatSync(sourceModelsDir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      throw new Error(`native-models is not a regular directory: ${sourceModelsDir}`);
+    }
+    const dirReal = realpathSync(sourceModelsDir);
+    if (dirReal !== canonicalRoot && !dirReal.startsWith(canonicalRoot + sep)) {
+      throw new Error(`native-models escapes package root: ${sourceModelsDir}`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const assets: Record<string, string> = Object.create(null);
+  const copied = new Set<string>();
+  await mkdir(join(destinationDirectory, "native-models"), { recursive: true });
+  for (const [rawKey, rawPath] of Object.entries(parsed.assets)) {
+    const key = live2dAssetKey(rawKey);
+    const match = typeof rawPath === "string" ? live2dBundlePathPattern.exec(rawPath) : null;
+    if (!match) {
+      throw new Error(`${LIVE2D_CATALOG_FILENAME} contains a non-allowlisted Live2D native model path for ${key}`);
+    }
+    const relativePath = rawPath as string;
+    const expectedHash = match[1]!;
+    assets[key] = relativePath;
+    if (copied.has(relativePath)) continue;
+    const modelSource = join(sourceDirectory, relativePath);
+    let modelStat: ReturnType<typeof lstatSync>;
+    try {
+      modelStat = lstatSync(modelSource);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`allowlisted Live2D model is missing: ${modelSource}`);
+      }
+      throw error;
+    }
+    if (modelStat.isSymbolicLink() || !modelStat.isFile()) {
+      throw new Error(`allowlisted Live2D model is not a regular file: ${modelSource}`);
+    }
+    const modelReal = realpathSync(modelSource);
+    if (!modelReal.startsWith(canonicalRoot + sep)) {
+      throw new Error(`allowlisted Live2D model escapes package root: ${modelSource}`);
+    }
+    if (modelStat.size > LIVE2D_MAX_MODEL_BYTES) {
+      throw new Error(`allowlisted Live2D model exceeds 32 MiB: ${modelSource}`);
+    }
+    const bytes = new Uint8Array(await readFile(modelSource));
+    if (bytes.byteLength > LIVE2D_MAX_MODEL_BYTES || createHash("sha256").update(bytes).digest("hex") !== expectedHash) {
+      throw new Error(`allowlisted Live2D model hash mismatch: ${modelSource}`);
+    }
+    await writeFile(join(destinationDirectory, relativePath), bytes);
+    copied.add(relativePath);
+  }
+  await writeFile(
+    join(destinationDirectory, LIVE2D_CATALOG_FILENAME),
+    `${JSON.stringify({ version: 1, assets }, null, 2)}\n`,
+  );
+}
+
 async function copyBuiltPackage(source: BuildGuestResult, destination: string): Promise<void> {
   await mkdir(destination, { recursive: true });
   const copy = async (name: string, sourcePath: string | undefined): Promise<void> => {
@@ -325,6 +438,7 @@ async function copyBuiltPackage(source: BuildGuestResult, destination: string): 
   await copy("guest-manifest.json", join(source.outDir, "guest-manifest.json"));
   await copy("app.worker.qjbc", source.worker?.bytecode);
   await copy("app.worker.bytecode.json", source.worker?.metadata);
+  await copyBuiltNativeModels(source.outDir, destination);
 }
 
 function packageTitle(entry: ValidatedSystemPackage | undefined, fallback: string, id: string): string {

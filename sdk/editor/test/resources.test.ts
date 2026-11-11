@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { packPak } from "../../scripts/package_update.ts";
+import { copyBuiltNativeModels } from "../resources.ts";
 import { startEditor } from "../server.ts";
 
 function temporaryDirectory(): string {
@@ -138,6 +140,55 @@ test("Editor exposes catalog resources, validates placements, and snapshots poli
     expect(locked.status).toBe(400);
   } finally {
     server.stop(true);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("copyBuiltNativeModels copies only allowlisted hashed moc3 binaries and enforces confinement", async () => {
+  const directory = temporaryDirectory();
+  try {
+    const source = join(directory, "source");
+    const destination = join(directory, "destination");
+    mkdirSync(join(source, "native-models"), { recursive: true });
+    const moc = Buffer.from("live2d-moc3-binary-fixture");
+    const hash = createHash("sha256").update(moc).digest("hex");
+    const bundlePath = `native-models/${hash}.moc3`;
+    writeFileSync(join(source, bundlePath), moc);
+    writeFileSync(join(source, "native-models/unlisted.moc3"), "must not copy");
+    writeFileSync(
+      join(source, "novel.native-assets.json"),
+      JSON.stringify({ version: 1, assets: { "models/Hiyori.moc3": bundlePath } }),
+    );
+    await copyBuiltNativeModels(source, destination);
+    expect(JSON.parse(readFileSync(join(destination, "novel.native-assets.json"), "utf8"))).toEqual({
+      version: 1,
+      assets: { "models/Hiyori.moc3": bundlePath },
+    });
+    expect(readFileSync(join(destination, bundlePath))).toEqual(moc);
+    expect(existsSync(join(destination, "native-models/unlisted.moc3"))).toBe(false);
+
+    // Reject hash mismatch
+    writeFileSync(join(source, bundlePath), "tampered");
+    await expect(copyBuiltNativeModels(source, join(directory, "tampered"))).rejects.toThrow(/hash mismatch/);
+    writeFileSync(join(source, bundlePath), moc);
+
+    // Reject non-allowlisted bundle path
+    writeFileSync(
+      join(source, "novel.native-assets.json"),
+      JSON.stringify({ version: 1, assets: { "models/Hiyori.moc3": "../escape.moc3" } }),
+    );
+    await expect(copyBuiltNativeModels(source, join(directory, "escape"))).rejects.toThrow(/non-allowlisted/);
+
+    // Reject symlinked model
+    const symlinkSource = join(directory, "symlink-source");
+    mkdirSync(join(symlinkSource, "native-models"), { recursive: true });
+    symlinkSync(join(source, bundlePath), join(symlinkSource, bundlePath));
+    writeFileSync(
+      join(symlinkSource, "novel.native-assets.json"),
+      JSON.stringify({ version: 1, assets: { "models/Hiyori.moc3": bundlePath } }),
+    );
+    await expect(copyBuiltNativeModels(symlinkSource, join(directory, "symlink-dest"))).rejects.toThrow(/not a regular file/);
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });

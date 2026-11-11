@@ -95,12 +95,44 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
         const context = canvas.getContext("2d")!;
         const targetText = frame.ops.find((op: any) => op.type === "text" && op.text === "Save identity & open Lobby");
         if (!targetText) return null;
-        // The native button emits its four corner images and three same-color
-        // strips adjacent to the label. Match that local geometry instead of
-        // requiring byte-identical clip objects shared by every page control.
         const targetY = Number(targetText.y);
         const nearLabel = (op: any) => Math.abs(Number(op.y) - targetY) < 32;
-        const rects = frame.ops.filter((op: any) => op.type === "rect" && Number(op.color) === 0xff315deb && Number(op.w) >= 300 && nearLabel(op));
+        const roundeds = frame.ops.filter((op: any) => op.type === "rounded" && Number(op.w ?? op.width) >= 300 && nearLabel(op));
+        if (roundeds.length === 1) {
+          const shape = roundeds[0];
+          const left = Number(shape.x);
+          const top = Number(shape.y);
+          const width = Number(shape.w ?? shape.width);
+          const height = Number(shape.h ?? shape.height);
+          const right = left + width;
+          const bottom = top + height;
+          const radius = Number(shape.radius);
+          if (![left, top, right, bottom, radius].every(Number.isFinite) || left < 0 || top < 0 || bottom > canvas.height || right > canvas.width || width <= 0 || height <= 0) return null;
+          const x = Math.max(0, Math.min(canvas.width - 1, Math.round(left + 20)));
+          const pixel = (atY: number, atX = x) => Array.from(context.getImageData(atX, atY, 1, 1).data);
+          const color = Number(shape.color) >>> 0;
+          const core = [(color >>> 16) & 255, (color >>> 8) & 255, color & 255, (color >>> 24) & 255];
+          const rows = [];
+          for (let y = Math.floor(top) + 2; y < Math.ceil(bottom) - 2; y += 1) rows.push({ y, rgba: pixel(y) });
+          const edgeY = Math.max(0, Math.min(canvas.height - 1, Math.floor(bottom) - 1));
+          const edgePixels = [{ y: edgeY, rgba: pixel(edgeY) }];
+          const cornerPixels: number[][] = [];
+          const cornerSize = Math.max(1, Math.ceil(radius) + 1);
+          for (let y = Math.max(0, Math.floor(top)); y < Math.min(canvas.height, Math.floor(top) + cornerSize); y += 1) {
+            for (let x = Math.max(0, Math.floor(left)); x < Math.min(canvas.width, Math.floor(left) + cornerSize); x += 1) cornerPixels.push(pixel(y, x));
+          }
+          const cornerBackground = pixel(Math.max(0, Math.floor(top) - 1), Math.max(0, Math.floor(left) - 1));
+          const clip = shape.clip;
+          const outsideClip = clip ? pixel(Math.max(0, Math.floor(Number(clip.y) - 1)), Math.round(canvas.width / 2)) : [];
+          return { variant: "native-rounded", roundeds, left, top, bottom, radius, core, rows, edgePixels, cornerPixels, cornerBackground, clip, outsideClip, canvas: { width: canvas.width, height: canvas.height } };
+        }
+
+        // Retain coverage for the legacy fallback: three same-color strips and
+        // four corner-mask images from older native renderers.
+        const masks = frame.ops.filter((op: any) => op.type === "image" && String(op.asset).includes("pocket.demo.profile") && nearLabel(op));
+        const fallbackColor = Number(masks[0]?.color ?? 0xff315deb) >>> 0;
+        const core = [(fallbackColor >>> 16) & 255, (fallbackColor >>> 8) & 255, fallbackColor & 255, (fallbackColor >>> 24) & 255];
+        const rects = frame.ops.filter((op: any) => op.type === "rect" && (Number(op.color) >>> 0) === fallbackColor && Number(op.w) >= 300 && nearLabel(op));
         const left = rects.length > 0 ? Math.min(...rects.map((op: any) => Number(op.x))) : Number.NaN;
         const top = rects.length > 0 ? Math.min(...rects.map((op: any) => Number(op.y))) : Number.NaN;
         const right = rects.length > 0 ? Math.max(...rects.map((op: any) => Number(op.x) + Number(op.w))) : Number.NaN;
@@ -110,7 +142,7 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
         // Find masks by their app/color and the four outer corners implied by
         // the three fill rects, rather than assuming a historical 10px radius.
         const images = frame.ops.filter((op: any) => {
-          if (op.type !== "image" || !String(op.asset).includes("pocket.demo.profile") || Number(op.color) !== 0xff315deb || !nearLabel(op)) return false;
+          if (op.type !== "image" || !String(op.asset).includes("pocket.demo.profile") || (Number(op.color) >>> 0) !== fallbackColor || !nearLabel(op)) return false;
           const x = Number(op.x);
           const y = Number(op.y);
           const width = Number(op.w);
@@ -121,10 +153,9 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
         });
         if (images.length !== 4 || rects.length !== 3) return null;
         if (![left, top, bottom].every(Number.isFinite) || left < 0 || top < 0 || bottom > canvas.height || bottom <= top) return null;
-        const geometry = { left, top, bottom, rects, images, clip: rects[0]?.clip, text: frame.ops.find((op: any) => op.type === "text" && op.text === "Save identity & open Lobby") };
+        const geometry = { variant: "legacy-fallback", left, top, bottom, rects, images, clip: rects[0]?.clip, text: frame.ops.find((op: any) => op.type === "text" && op.text === "Save identity & open Lobby") };
         const x = Math.max(0, Math.min(canvas.width - 1, Math.round(left + 20)));
         const pixel = (atY: number, atX = x) => Array.from(context.getImageData(atX, atY, 1, 1).data);
-        const core = [49, 93, 235, 255];
         const rows = [];
         for (let y = Math.floor(top) + 2; y < Math.ceil(bottom) - 2; y += 1) rows.push({ y, rgba: pixel(y) });
         // Chromium's fractional fill edge lands in the last pixel before the
@@ -141,7 +172,9 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
         return { ...geometry, core, rows, internalEdges, edgePixels, cornerPixels, outsideClip, canvas: { width: canvas.width, height: canvas.height } };
       });
       if (candidate) {
-        const key = JSON.stringify(candidate.rects.map((op: any) => [op.x, op.y, op.w, op.h]));
+        const key = candidate.variant === "native-rounded"
+          ? JSON.stringify(candidate.roundeds.map((op: any) => [op.x, op.y, op.w, op.h, op.radius]))
+          : JSON.stringify(candidate.rects.map((op: any) => [op.x, op.y, op.w, op.h]));
         stableSamples = key === previousGeometry ? stableSamples + 1 : 0;
         previousGeometry = key;
         rendered = candidate;
@@ -159,14 +192,17 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
       if (!targetText) return { frame: { width: frame.width, height: frame.height }, ops: frame.ops.filter((op: any) => op.type === "text").map((op: any) => ({ text: op.text, x: op.x, y: op.y, w: op.w, h: op.h })) };
       const targetY = Number(targetText.y);
       const nearLabel = (op: any) => Math.abs(Number(op.y) - targetY) < 32;
-      const rects = frame.ops.filter((op: any) => op.type === "rect" && Number(op.color) === 0xff315deb && Number(op.w) >= 300 && nearLabel(op));
+      const roundeds = frame.ops.filter((op: any) => op.type === "rounded" && Number(op.w ?? op.width) >= 300 && nearLabel(op));
+      const masks = frame.ops.filter((op: any) => op.type === "image" && String(op.asset).includes("pocket.demo.profile") && nearLabel(op));
+      const fallbackColor = Number(masks[0]?.color ?? 0xff315deb) >>> 0;
+      const rects = frame.ops.filter((op: any) => op.type === "rect" && (Number(op.color) >>> 0) === fallbackColor && Number(op.w) >= 300 && nearLabel(op));
       const left = rects.length ? Math.min(...rects.map((op: any) => Number(op.x))) : Number(targetText.x);
       const top = rects.length ? Math.min(...rects.map((op: any) => Number(op.y))) : targetY;
       const right = rects.length ? Math.max(...rects.map((op: any) => Number(op.x) + Number(op.w))) : left;
       const bottom = rects.length ? Math.max(...rects.map((op: any) => Number(op.y) + Number(op.h))) : targetY + Number(targetText.h);
       const atEdge = (a: number, b: number) => Math.abs(a - b) <= 0.01;
       const images = frame.ops.filter((op: any) => {
-        if (op.type !== "image" || !String(op.asset).includes("pocket.demo.profile") || Number(op.color) !== 0xff315deb || !nearLabel(op)) return false;
+        if (op.type !== "image" || !String(op.asset).includes("pocket.demo.profile") || (Number(op.color) >>> 0) !== fallbackColor || !nearLabel(op)) return false;
         const x = Number(op.x);
         const y = Number(op.y);
         return (atEdge(x, left) || atEdge(x + Number(op.w), right)) &&
@@ -184,11 +220,23 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
       const outsideClip = context && clip
         ? Array.from(context.getImageData(Math.round(frame.width / 2), Math.max(0, Math.floor(Number(clip.y) - 1)), 1, 1).data)
         : [];
-      return { frame: { width: frame.width, height: frame.height }, canvas: canvas && { width: canvas.width, height: canvas.height }, targetText, rects, images, clip, pixelColumnX: px, pixelRows, outsideClip };
+      return { frame: { width: frame.width, height: frame.height }, canvas: canvas && { width: canvas.width, height: canvas.height }, targetText, roundeds, rects, images, clip, pixelColumnX: px, pixelRows, outsideClip };
     });
     assert.ok(rendered, `native Profile rounded button did not settle inside the preview canvas: ${JSON.stringify(failureDiagnostics)}`);
-    assert.equal(rendered.rects.length, 3, `Profile button should have 3 rounded fill rects: ${JSON.stringify(rendered.rects)}`);
-    assert.equal(rendered.images.length, 4, `Profile button should have 4 corner masks: ${JSON.stringify(rendered.images)}`);
+    if (rendered.variant === "native-rounded") {
+      assert.equal(rendered.roundeds.length, 1, `Profile button should use one native rounded DrawOp: ${JSON.stringify(rendered.roundeds)}`);
+      assert.equal(rendered.radius, 8, "Profile button keeps its 8px native corner radius");
+      assert.ok(rendered.rows.every((row: any) => row.rgba.every((value: number, index: number) => value === rendered.core[index])), `native rounded fill has an interior seam: ${JSON.stringify({ rows: rendered.rows, roundeds: rendered.roundeds })}`);
+      assert.ok(rendered.edgePixels.every((row: any) => row.rgba.join(",") === rendered.core.join(",")), `native rounded-fill bottom edge is not opaque: ${JSON.stringify(rendered.edgePixels)}`);
+      assert.ok(rendered.cornerPixels.some((rgba: number[]) => rgba.some((value, index) => value !== rendered.core[index] && value !== rendered.cornerBackground[index])), `native rounded corner antialiasing was lost: ${JSON.stringify({ cornerPixels: rendered.cornerPixels, cornerBackground: rendered.cornerBackground })}`);
+    } else {
+      assert.equal(rendered.rects.length, 3, `Profile button should have 3 rounded fill rects: ${JSON.stringify(rendered.rects)}`);
+      assert.equal(rendered.images.length, 4, `Profile button should have 4 corner masks: ${JSON.stringify(rendered.images)}`);
+      assert.ok(rendered.rows.every((row: any) => row.rgba.every((value: number, index: number) => value === rendered.core[index])), `legacy rounded fallback has an interior seam: ${JSON.stringify({ edgePixels: rendered.edgePixels, rows: rendered.rows, rects: rendered.rects, images: rendered.images, canvas: rendered.canvas })}`);
+      assert.ok(rendered.edgePixels.every((row: any) => row.rgba.join(",") === rendered.core.join(",")), `legacy rounded-fill edge is not opaque: ${JSON.stringify(rendered.edgePixels)}`);
+      assert.ok(rendered.cornerPixels.some((rgba: number[]) => rgba.some((value, index) => value !== rendered.core[index] && value !== 255)), `legacy corner-mask antialiasing was lost: ${JSON.stringify(rendered.cornerPixels)}`);
+    }
+    assert.ok(rendered.outsideClip.length === 0 || rendered.outsideClip.slice(0, 3).join(",") !== rendered.core.slice(0, 3).join(","), `clip leaked the rounded fill outside its child clip: ${JSON.stringify(rendered.outsideClip)}`);
     return rendered;
   } finally {
     if (!sharedBrowser) await browser.close();
@@ -197,15 +245,12 @@ async function renderProfileButton(clientPath: string, sharedBrowser?: Awaited<R
   }
 }
 
-test("viewport-synced native rounded button edges do not leave Canvas2D seams", { timeout: 180_000 }, async () => {
+test("native rounded DrawOp keeps the Profile button fill and corners seamless", { timeout: 180_000 }, async () => {
   assert.ok(probe, `pocket_probe is required for rounded seam acceptance: ${probeCandidates.join(", ")}`);
   const browser = await chromium.launch({ headless: true });
   try {
     const result = await renderProfileButton(join(sdkRoot, "editor/client/preview.js"), browser);
-    assert.ok(result.rows.every((row: any) => row.rgba.every((value: number, index: number) => value === result.core[index])), `viewport-synced rounded fill still has an interior seam: ${JSON.stringify({ edgePixels: result.edgePixels, rows: result.rows, rects: result.rects, images: result.images, canvas: result.canvas })}`);
-    assert.ok(result.edgePixels.every((row: any) => row.rgba.join(",") === result.core.join(",")), `viewport-synced rounded-fill edge is not opaque: ${JSON.stringify(result.edgePixels)}`);
-    assert.ok(result.cornerPixels.some((rgba: number[]) => rgba.some((value, index) => value !== result.core[index] && value !== 255)), `corner-mask antialiasing was lost: ${JSON.stringify(result.cornerPixels)}`);
-    assert.ok(result.outsideClip.length === 0 || result.outsideClip.slice(0, 3).join(",") !== result.core.slice(0, 3).join(","), `clip leaked the rounded fill outside its child clip: ${JSON.stringify(result.outsideClip)}`);
+    assert.equal(result.variant, "native-rounded", `current native output should use the rounded DrawOp: ${JSON.stringify({ roundeds: result.roundeds, rects: result.rects, images: result.images })}`);
   } finally {
     await browser.close();
   }

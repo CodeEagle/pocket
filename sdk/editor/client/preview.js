@@ -531,14 +531,47 @@
     return scratch;
   }
 
+  function roundedPath(context, x, y, width, height, radius) {
+    const r = clamp(radius, 0, Math.min(width, height) / 2);
+    if (r <= 0) {
+      context.rect(x, y, width, height);
+    } else if (typeof context.roundRect === "function") {
+      context.roundRect(x, y, width, height, r);
+    } else {
+      context.moveTo(x + r, y);
+      context.lineTo(x + width - r, y);
+      context.arcTo(x + width, y, x + width, y + r, r);
+      context.lineTo(x + width, y + height - r);
+      context.arcTo(x + width, y + height, x + width - r, y + height, r);
+      context.lineTo(x + r, y + height);
+      context.arcTo(x, y + height, x, y + height - r, r);
+      context.lineTo(x, y + r);
+      context.arcTo(x, y, x + r, y, r);
+      context.closePath();
+    }
+  }
+
   function roundedClip(context, x, y, width, height, radius) {
     context.beginPath();
-    if (radius > 0 && typeof context.roundRect === "function") {
-      context.roundRect(x, y, width, height, radius);
-    } else {
-      context.rect(x, y, width, height);
-    }
+    roundedPath(context, x, y, width, height, radius);
     context.clip();
+  }
+
+  function createLinearGradient(context, x, y, width, height, op) {
+    const direction = Math.trunc(number(op.direction ?? op.dir, 0));
+    const horizontal = direction === 2 || direction === 3;
+    const reverse = direction === 0 || direction === 2;
+    const gradient = horizontal
+      ? context.createLinearGradient(reverse ? x + width : x, y, reverse ? x : x + width, y)
+      : context.createLinearGradient(x, reverse ? y + height : y, x, reverse ? y : y + height);
+    gradient.addColorStop(0, argb(op.from ?? op.fromColor ?? 0));
+    const viaColor = op.viaColor ?? op.via_color;
+    const viaPosition = number(op.viaPosition ?? op.via_position, Number.NaN);
+    if (viaColor !== undefined && viaColor !== null && viaPosition > 0 && viaPosition < 1) {
+      gradient.addColorStop(viaPosition, argb(viaColor));
+    }
+    gradient.addColorStop(1, argb(op.to ?? op.toColor ?? 0));
+    return gradient;
   }
 
   /** Paint one real browser-side backdrop blur for a native `glass` surface. */
@@ -754,21 +787,42 @@
       if (kind === "rect") {
         context.fillStyle = argb(op.color ?? 0);
         context.fillRect(number(op.x, 0), number(op.y, 0), number(op.w, 0), number(op.h, 0));
-      } else if (kind === "gradient") {
+      } else if (kind === "rounded") {
         const x = number(op.x, 0);
         const y = number(op.y, 0);
-        const w = number(op.w, 0);
-        const h = number(op.h, 0);
-        const direction = Number(op.direction);
-        const horizontal = direction === 2 || direction === 3;
-        const reverse = direction === 1 || direction === 3;
-        const gradient = horizontal
-          ? context.createLinearGradient(reverse ? x + w : x, y, reverse ? x : x + w, y)
-          : context.createLinearGradient(x, reverse ? y + h : y, x, reverse ? y : y + h);
-        gradient.addColorStop(0, argb(op.from ?? 0));
-        gradient.addColorStop(1, argb(op.to ?? 0));
-        context.fillStyle = gradient;
-        context.fillRect(x, y, w, h);
+        const w = number(op.w, op.width ?? 0);
+        const h = number(op.h, op.height ?? 0);
+        if (w <= 0 || h <= 0) continue;
+        const shortest = Math.min(w, h);
+        const radius = clamp(number(op.radius, 0), 0, shortest / 2);
+        const borderWidth = clamp(number(op.borderWidth ?? op.border_width, 0), 0, shortest / 2);
+        context.fillStyle = argb(op.color ?? 0);
+        context.beginPath();
+        roundedPath(context, x, y, w, h, radius);
+        const innerW = w - borderWidth * 2;
+        const innerH = h - borderWidth * 2;
+        if (borderWidth > 0 && innerW > 0 && innerH > 0) {
+          const innerRadius = clamp(radius - borderWidth, 0, Math.min(innerW, innerH) / 2);
+          roundedPath(context, x + borderWidth, y + borderWidth, innerW, innerH, innerRadius);
+          context.fill("evenodd");
+        } else {
+          context.fill();
+        }
+      } else if (kind === "gradient" || kind === "roundedGradient") {
+        const x = number(op.x, 0);
+        const y = number(op.y, 0);
+        const w = number(op.w, op.width ?? 0);
+        const h = number(op.h, op.height ?? 0);
+        if (w <= 0 || h <= 0) continue;
+        context.fillStyle = createLinearGradient(context, x, y, w, h, op);
+        if (kind === "roundedGradient") {
+          const radius = clamp(number(op.radius, 0), 0, Math.min(w, h) / 2);
+          context.beginPath();
+          roundedPath(context, x, y, w, h, radius);
+          context.fill();
+        } else {
+          context.fillRect(x, y, w, h);
+        }
       } else if (kind === "text") {
         const size = fontSize(op.fontSlot);
         context.font = `${fontWeight(op.fontSlot)} ${size}px system-ui, -apple-system, sans-serif`;

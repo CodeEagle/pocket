@@ -153,9 +153,69 @@ test("editor shows reconnecting without a toast and restores ready after SSE rec
     assert.match(await page.locator("#preview-state").innerText(), /就绪/);
     assert.equal(await page.locator("#capture-preview").isDisabled(), false);
 
-    await page.evaluate(() => (window as any).__deliverPreviewMessage({ type: "preview.error", error: "native frame failed" }));
+    const fullError = '{"error":"pointer move for unknown contact id 0","phase":"move","pointerId":0}';
+    await page.evaluate((errorText) => {
+      (window as any).__copiedNotice = "";
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: async (value: string) => {
+            (window as any).__copiedNotice = value;
+          },
+        },
+      });
+      (window as any).__deliverPreviewMessage({ type: "preview.error", error: errorText });
+    }, fullError);
     assert.equal(await page.locator("#notice").evaluate((element) => (element as HTMLElement).hidden), false);
-    assert.equal(await page.locator("#notice-message").innerText(), "native frame failed");
+    assert.equal(await page.locator("#notice").getAttribute("role"), "alert");
+    assert.equal(await page.locator("#notice-message").innerText(), fullError);
+    assert.equal(await page.locator("#notice-message").getAttribute("role"), "button");
+
+    await page.locator("#notice-message").click();
+    assert.equal(await page.evaluate(() => (window as any).__copiedNotice), fullError);
+    assert.equal(await page.locator("#notice").evaluate((element) => (element as HTMLElement).hidden), false);
+    assert.equal(await page.locator("#notice").getAttribute("data-copied"), "true");
+    assert.equal(await page.locator("#notice-icon").innerText(), "✓");
+    assert.equal(await page.locator("#notice-message").innerText(), `已复制错误信息：${fullError}`);
+
+    await page.locator("#notice-message").focus();
+    await page.evaluate(() => { (window as any).__copiedNotice = ""; });
+    await page.keyboard.press("Enter");
+    assert.equal(await page.evaluate(() => (window as any).__copiedNotice), fullError);
+
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+      document.execCommand = (command: string) => {
+        if (command === "copy") {
+          const active = document.activeElement as HTMLTextAreaElement | null;
+          (window as any).__copiedExec = active?.value ?? "";
+          return true;
+        }
+        return false;
+      };
+    });
+    await page.locator("#notice").click({ position: { x: 12, y: 12 } });
+    assert.equal(await page.evaluate(() => (window as any).__copiedExec), fullError);
+    assert.equal(await page.locator("#notice").evaluate((element) => (element as HTMLElement).hidden), false);
+
+    await page.locator("#notice-close").click();
+    assert.equal(await page.locator("#notice").evaluate((element) => (element as HTMLElement).hidden), true);
+    assert.equal(await page.locator("#notice-message").innerText(), "");
+
+    // A delayed clipboard permission result must not replace a newer error.
+    await page.evaluate((errorText) => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+        writeText: () => new Promise<void>((resolve) => { (window as any).__finishNoticeCopy = resolve; }),
+      } });
+      (window as any).__deliverPreviewMessage({ type: "preview.error", error: errorText });
+    }, fullError);
+    await page.locator("#notice-message").click();
+    await page.evaluate(() => {
+      (window as any).__deliverPreviewMessage({ type: "preview.error", error: "newer runtime failure" });
+      (window as any).__finishNoticeCopy();
+    });
+    assert.equal(await page.locator("#notice-message").innerText(), "newer runtime failure");
+    assert.equal(await page.locator("#notice").getAttribute("data-copied"), null);
   } finally {
     await browser.close();
     server.stop(true);

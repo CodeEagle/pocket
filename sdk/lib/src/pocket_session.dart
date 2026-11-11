@@ -299,6 +299,8 @@ final class PocketSession extends ChangeNotifier {
     late final List<String> sources;
     await Future.wait<void>([
       performance.initialize(),
+      if (config.diagnostics != null)
+        config.diagnostics!.ensureCollector().then<void>((_) {}),
       Future.wait<String>([
         config.bootstrapMetadataJson != null
             ? Future.value(config.bootstrapMetadataJson!)
@@ -463,6 +465,13 @@ final class PocketSession extends ChangeNotifier {
       if (_disposed) return;
       stage = 'loading';
       ready = true;
+      config.diagnostics?.recordSessionLog(
+        appId: appId,
+        generation: generation,
+        tag: 'session.ready',
+        message: 'Session generation $generation initialized (${active?.version ?? _embeddedVersion})',
+        revision: active?.build ?? _embeddedBuild,
+      );
       notifyListeners();
       _watchStartup();
     }
@@ -475,12 +484,13 @@ final class PocketSession extends ChangeNotifier {
       if (scheduleCacheFirstPreparation) {
         _scheduleCacheFirstPreparation();
       }
-    } catch (error) {
+    } catch (error, stackTrace) {
       _logCandidateFailure(
         'initialize-admission-failure',
         active,
         error,
         targetGeneration: generation,
+        stackTrace: stackTrace,
       );
       if (_downloadOnOpen || prepareForOpen || cacheFirst) {
         final failed = active;
@@ -1361,6 +1371,13 @@ final class PocketSession extends ChangeNotifier {
   void onReady(PocketViewController _) {
     _firstFrameReady = true;
     _startupTimer?.cancel();
+    config.diagnostics?.recordSessionLog(
+      appId: appId,
+      generation: generation,
+      tag: 'session.first_frame',
+      message: 'First frame ready for generation $generation',
+      revision: active?.build ?? _embeddedBuild,
+    );
     final recordingStarted = _pendingRecordingStartedStatus;
     _pendingRecordingStartedStatus = null;
     if (recordingStarted != null && !_disposed) {
@@ -1391,6 +1408,13 @@ final class PocketSession extends ChangeNotifier {
         if (_disposed || generation != mountedGeneration) return;
         stage = _updates == null ? 'not_configured' : 'ready';
         _busy = false;
+        config.diagnostics?.recordSessionLog(
+          appId: appId,
+          generation: mountedGeneration,
+          tag: 'session.healthy',
+          message: 'Generation $mountedGeneration promoted healthy (${package?.version ?? _embeddedVersion})',
+          revision: package?.build ?? _embeddedBuild,
+        );
         _send('updates.changed', await status());
       } catch (error) {
         await onError(error);
@@ -1648,6 +1672,7 @@ final class PocketSession extends ChangeNotifier {
     PocketPreparedPackage? candidate,
     Object error, {
     required int targetGeneration,
+    StackTrace? stackTrace,
   }) {
     final version = candidate?.version ?? _embeddedVersion;
     final build = candidate?.build ?? _embeddedBuild;
@@ -1666,6 +1691,22 @@ final class PocketSession extends ChangeNotifier {
       'payloadSha256=$payloadSha256 generation=$targetGeneration '
       'stage=$stage error=$boundedError',
     );
+    final diagnostics = config.diagnostics;
+    if (diagnostics != null) {
+      unawaited(
+        diagnostics.recordSessionCrash(
+          appId: appId,
+          generation: targetGeneration,
+          stage: stage,
+          event: event,
+          error: error,
+          stackTrace: stackTrace,
+          revision: build,
+          version: version,
+          payloadSha256: payloadSha256,
+        ),
+      );
+    }
   }
 
   Future<void> _mount(
@@ -1746,10 +1787,25 @@ final class PocketSession extends ChangeNotifier {
         _embeddedRollbackFallback = embeddedRollbackFallback;
         _candidate = null;
         stage = 'loading';
+        config.diagnostics?.recordSessionLog(
+          appId: appId,
+          generation: generation,
+          tag: 'session.mount',
+          message:
+              'Mounted generation $generation (${next?.version ?? _embeddedVersion})',
+          revision: next?.build ?? _embeddedBuild,
+        );
         notifyListeners();
         _watchStartup();
       });
-    } catch (error) {
+    } catch (error, stackTrace) {
+      _logCandidateFailure(
+        'mount-failure',
+        next,
+        error,
+        targetGeneration: targetGeneration,
+        stackTrace: stackTrace,
+      );
       lastError = '$error';
       if (_downloadOnOpen && (previous == null || !restorePreviousOnFailure)) {
         _failWithoutEmbedded(error);
@@ -1912,6 +1968,7 @@ final class PocketSession extends ChangeNotifier {
       if (_promotion != null) _promotion!,
       if (_mountOperation != null) _mountOperation!,
       _bridgeOperation,
+      if (config.diagnostics != null) config.diagnostics!.flush(),
     ];
     return Future.wait<void>(pending).then<void>((_) {});
   }

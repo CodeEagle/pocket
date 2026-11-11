@@ -56,8 +56,10 @@ export 'package:pocket_services/pocket_services.dart'
         PocketCapabilityKind,
         PocketCapabilityException,
         PocketHostStreamContext;
+export 'package:pocket_diagnostics/pocket_diagnostics.dart';
 export 'src/pocket_app.dart' show PocketApp, PocketGuest;
 export 'src/pocket_config.dart';
+export 'src/pocket_diagnostics.dart' show PocketHostDiagnostics;
 export 'src/pocket_bundled_application_catalog.dart';
 export 'src/pocket_host_config.dart';
 export 'src/pocket_session.dart'

@@ -22,6 +22,7 @@ import 'package:pocket_flutter/src/pocket_view.dart' show PocketViewCapture;
 import 'pocket_app.dart' show PocketGuestSession, PocketGuestSessionState;
 import 'pocket_bundled_application_catalog.dart';
 import 'pocket_config.dart';
+import 'pocket_diagnostics.dart';
 import 'pocket_host_config.dart';
 import 'pocket_image_store.dart';
 import 'pocket_startup_indicator.dart';
@@ -221,6 +222,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     this.initialCatalogError,
     this.controller,
     this.recordings,
+    this.diagnostics,
     this.approveSystemUI,
     this.approveApplication,
     this.appBuilder,
@@ -251,6 +253,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     Object? initialCatalogError,
     PocketSystemHostController? controller,
     PocketRecordingLibrary? recordings,
+    PocketHostDiagnostics? diagnostics,
     PocketSystemHostSystemUIApprover? approveSystemUI,
     PocketSystemHostApplicationApprover? approveApplication,
     PocketSystemHostAppBuilder? appBuilder,
@@ -303,6 +306,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
       initialCatalogError: initialCatalogError,
       controller: controller,
       recordings: recordings,
+      diagnostics: diagnostics,
       approveSystemUI: approveSystemUI,
       approveApplication: approveApplication,
       appBuilder: appBuilder,
@@ -325,6 +329,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     Object? initialCatalogError,
     PocketSystemHostController? controller,
     PocketRecordingLibrary? recordings,
+    PocketHostDiagnostics? diagnostics,
     PocketSystemHostSystemUIApprover? approveSystemUI,
     PocketSystemHostApplicationApprover? approveApplication,
     PocketSystemHostAppBuilder? appBuilder,
@@ -342,6 +347,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
        initialCatalogError = initialCatalogError,
        controller = controller,
        recordings = recordings,
+       diagnostics = diagnostics,
        approveSystemUI = approveSystemUI,
        approveApplication = approveApplication,
        appBuilder = appBuilder,
@@ -367,6 +373,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
   final Object? initialCatalogError;
   final PocketSystemHostController? controller;
   final PocketRecordingLibrary? recordings;
+  final PocketHostDiagnostics? diagnostics;
   final PocketSystemHostSystemUIApprover? approveSystemUI;
   final PocketSystemHostApplicationApprover? approveApplication;
   final PocketSystemHostAppBuilder? appBuilder;
@@ -636,6 +643,7 @@ final class _PocketSystemHostApplicationState
                     applications: applications,
                     controller: widget.controller ?? _backController,
                     recordings: widget.recordings,
+                    diagnostics: widget.diagnostics,
                     onClose: widget.onExit,
                   )
                 : PocketSystemHost.fromHostConfig(
@@ -643,6 +651,7 @@ final class _PocketSystemHostApplicationState
                     config: remote,
                     controller: widget.controller ?? _backController,
                     recordings: widget.recordings,
+                    diagnostics: widget.diagnostics,
                     onClose: _exitRemote,
                     approveSystemUI:
                         widget.approveSystemUI ??
@@ -762,6 +771,7 @@ final class PocketSystemHost extends StatefulWidget {
     this.maxInstances = 8,
     this.controller,
     this.recordings,
+    this.diagnostics,
     this.catalogLoader,
     this.onClose,
     this.cacheFirst = false,
@@ -780,6 +790,7 @@ final class PocketSystemHost extends StatefulWidget {
     int maxInstances = 8,
     PocketSystemHostController? controller,
     PocketRecordingLibrary? recordings,
+    PocketHostDiagnostics? diagnostics,
     PocketSystemHostSystemUIApprover? approveSystemUI,
     PocketSystemHostApplicationApprover? approveApplication,
     Future<PocketHostConfig?> Function(String? rootPayloadSha256)?
@@ -843,6 +854,7 @@ final class PocketSystemHost extends StatefulWidget {
       maxInstances: maxInstances,
       controller: controller,
       recordings: recordings,
+      diagnostics: diagnostics,
       catalogLoader: loader,
       onClose: onClose,
       cacheFirst: cacheFirst,
@@ -867,6 +879,11 @@ final class PocketSystemHost extends StatefulWidget {
   /// Explicit bounded debug recording for every native guest generation.
   /// Only SystemUI receives the optional export/replay diagnostic controls.
   final PocketRecordingLibrary? recordings;
+
+  /// Persistent crash and session boundary diagnostics collector shared across
+  /// SystemUI and child runtimes. When omitted, the host automatically owns a
+  /// default app-support diagnostics instance.
+  final PocketHostDiagnostics? diagnostics;
 
   /// Optional signed-root catalog reload boundary. The loader runs at the
   /// native session's pre-mount boundary and is also reused by the
@@ -1002,6 +1019,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     with WidgetsBindingObserver {
   late PocketSystemHostController _controller;
   late final PocketRecordingLibrary? _recordings;
+  late final PocketHostDiagnostics? _diagnostics;
+  bool _ownsDiagnostics = false;
   late final _RuntimeInstance _systemUIInstance;
   final LinkedHashMap<String, _RuntimeInstance> _applications =
       LinkedHashMap<String, _RuntimeInstance>();
@@ -1367,8 +1386,25 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
             ? PocketRecordingLibrary()
             : null);
 
-    final rootConfig =
+    final explicitDiagnostics = widget.diagnostics ?? widget.systemUI.diagnostics;
+    _ownsDiagnostics = explicitDiagnostics == null;
+    _diagnostics = explicitDiagnostics ?? PocketHostDiagnostics();
+    if (_diagnostics case final diagnostics?
+        when diagnostics.captureFlutterErrors ||
+            diagnostics.capturePlatformDispatcherErrors) {
+      unawaited(
+        diagnostics
+            .ensureCollector()
+            .then<void>((_) {})
+            .catchError((Object _) {}),
+      );
+    }
+
+    final recordedRootConfig =
         _recordings?.attach(widget.systemUI, controls: true) ?? widget.systemUI;
+    final rootConfig =
+        _diagnostics?.attach(recordedRootConfig, controls: true) ??
+        recordedRootConfig;
     final systemConfig = _ensureSystemCaps(rootConfig)
         .withPlugins(<PocketPluginFactory>[
           ...rootConfig.pluginFactories,
@@ -1441,6 +1477,11 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         'Remount PocketSystemHost to change its recording library',
       );
     }
+    if (!identical(oldWidget.diagnostics, widget.diagnostics)) {
+      throw StateError(
+        'Remount PocketSystemHost to change its diagnostics collector',
+      );
+    }
     if (!identical(oldWidget.controller, widget.controller)) {
       _controller._detach(this);
       _controller = widget.controller ?? PocketSystemHostController();
@@ -1496,6 +1537,11 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       _closeInstance(instance, removeFromTree: false);
     }
     unawaited(_systemUIInstance.session.close().catchError((Object _) {}));
+    if (_ownsDiagnostics) {
+      unawaited(_diagnostics?.close().catchError((Object _) {}) ?? Future<void>.value());
+    } else {
+      unawaited(_diagnostics?.flush().catchError((Object _) {}) ?? Future<void>.value());
+    }
     final dataFuture = _platformDataFuture;
     if (dataFuture != null) {
       unawaited(
@@ -2220,11 +2266,16 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       isSystemUI: false,
       ownerGeneration: ownerGeneration,
     );
-    final capturedConfig = widget.recordings != null
+    final recordedConfig = widget.recordings != null
         ? widget.recordings!.attach(admittedConfig)
         : _recordings != null && admittedConfig.recordingFactory == null
         ? _recordings.attach(admittedConfig)
         : admittedConfig;
+    final capturedConfig = widget.diagnostics != null
+        ? widget.diagnostics!.attach(recordedConfig)
+        : _diagnostics != null && recordedConfig.diagnostics == null
+        ? _diagnostics.attach(recordedConfig)
+        : recordedConfig;
     final childConfig = capturedConfig.withPlugins(<PocketPluginFactory>[
       ...capturedConfig.pluginFactories,
       (_) => _PlatformProxyPlugin(this, instance, ownerGeneration),

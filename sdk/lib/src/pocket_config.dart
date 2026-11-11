@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_services/pocket_services.dart';
 
+import 'pocket_diagnostics.dart';
+
 /// A new provider instance is created for each verified guest generation.
 typedef PocketPluginFactory =
     PocketPlugin Function(PocketViewController controller);
@@ -239,6 +241,7 @@ final class PocketAppConfig {
     this.pluginFactories = const [],
     this.additionalCapabilities = const {},
     this.recordingFactory,
+    this.diagnostics,
     this.compositorSurfaces = const {},
     this.workerHttpOrigins = const {},
     this.offloadProviderFactory,
@@ -308,6 +311,10 @@ final class PocketAppConfig {
   /// Keep the callback stable across parent rebuilds, as with plugin factories.
   final PocketRecordingController Function()? recordingFactory;
 
+  /// Optional host-owned diagnostics collector for durable crash and session
+  /// boundary log persistence.
+  final PocketHostDiagnostics? diagnostics;
+
   /// Copy this config while replacing extensions or the memory allowance.
   ///
   /// The constructor below is the single field-preserving copy boundary used
@@ -319,6 +326,7 @@ final class PocketAppConfig {
     PocketMemoryLimits? memoryLimits,
     PocketUpdateConfig? updates,
     PocketRecordingController Function()? recordingFactory,
+    PocketHostDiagnostics? diagnostics,
     bool? downloadOnOpen,
     Iterable<String>? fontFamilyFallback,
     bool? keyboardInputEnabled,
@@ -350,6 +358,7 @@ final class PocketAppConfig {
         ? this.additionalCapabilities
         : Set<String>.unmodifiable(additionalCapabilities),
     recordingFactory: recordingFactory ?? this.recordingFactory,
+    diagnostics: diagnostics ?? this.diagnostics,
     compositorSurfaces: compositorSurfaces ?? this.compositorSurfaces,
     workerHttpOrigins: workerHttpOrigins,
     offloadProviderFactory: offloadProviderFactory,
@@ -384,6 +393,7 @@ final class PocketAppConfig {
     pluginFactories: policy.pluginFactories,
     additionalCapabilities: policy.additionalCapabilities,
     recordingFactory: policy.recordingFactory,
+    diagnostics: policy.diagnostics ?? diagnostics,
     compositorSurfaces: compositorSurfaces,
     workerHttpOrigins: policy.workerHttpOrigins,
     offloadProviderFactory: policy.offloadProviderFactory,
@@ -435,6 +445,7 @@ final class PocketAppConfig {
           keyboardAutofocus == other.keyboardAutofocus &&
           mapEquals(keyboardButtonMap, other.keyboardButtonMap) &&
           recordingFactory == other.recordingFactory &&
+          diagnostics == other.diagnostics &&
           offloadProviderFactory == other.offloadProviderFactory &&
           mapEquals(compositorSurfaces, other.compositorSurfaces) &&
           setEquals(workerHttpOrigins, other.workerHttpOrigins) &&
@@ -462,6 +473,7 @@ final class PocketAppConfig {
       keyboardButtonMap.entries.map((e) => Object.hash(e.key, e.value)),
     ),
     recordingFactory,
+    diagnostics,
     offloadProviderFactory,
     Object.hashAllUnordered(workerHttpOrigins),
     Object.hashAllUnordered(

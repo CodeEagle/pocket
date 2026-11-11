@@ -16,6 +16,10 @@
 //! * `{"op":"frame","deltaMs":16}` -> `{ "ok": true, "frame": {...} }`
 //!   Add `"rawFrame":true` on an untraced frame command to pass through the
 //!   validated native JSON without converting it through a serde_json value.
+//!   Add `"resourceEncoding":"base64"` on `frame`, or on `load`,
+//!   `loadBytecode`, and `eval` with `"render":true`, to serialize
+//!   `FrameResource` pixel/palette payloads as lossless base64 strings with
+//!   `"bytesEncoding":"base64"`.
 //! * `{"op":"resize","width":390,"height":400}` updates the live viewport
 //! * `{"op":"traceMode","mode":1}` selects the existing native recording
 //!   clock (0 live, 1 record, 2 replay) before load/eval.
@@ -31,8 +35,8 @@
 use pocket_flutter::{
     pocket_bytecode_runtime_abi, pocket_configure_compositor, pocket_configure_guest_security,
     pocket_configure_worker, pocket_create, pocket_create_with_density_and_tick_hz,
-    pocket_create_with_memory_limits, pocket_destroy, pocket_eval, pocket_frame, pocket_last_error,
-    pocket_load_bytecode_files, pocket_load_files, pocket_next_wake_delay_ms,
+    pocket_create_with_memory_limits, pocket_destroy, pocket_eval, pocket_frame_for_probe_json,
+    pocket_last_error, pocket_load_bytecode_files, pocket_load_files, pocket_next_wake_delay_ms,
     pocket_resize_viewport, pocket_send, pocket_send_binary, pocket_trace_clock_begin_json,
     pocket_trace_clock_end_json, pocket_trace_clock_mode,
 };
@@ -158,19 +162,32 @@ fn validate_raw_json(bytes: &[u8]) -> Result<(), serde_json::Error> {
     deserializer.end()
 }
 
-unsafe fn frame_response_mode(handle: Handle, delta_ms: f64, raw_frame: bool) -> ProbeResponse {
-    let pointer = pocket_frame(handle.cast(), delta_ms);
+fn compact_resources_requested(command: &Value) -> Result<bool, String> {
+    match command.get("resourceEncoding") {
+        None => Ok(false),
+        Some(Value::String(encoding)) if encoding == "base64" => Ok(true),
+        Some(_) => Err("resourceEncoding must be \"base64\"".to_owned()),
+    }
+}
+
+unsafe fn frame_response_mode(
+    handle: Handle,
+    delta_ms: f64,
+    raw_frame: bool,
+    compact_resources: bool,
+) -> ProbeResponse {
+    let pointer = pocket_frame_for_probe_json(handle.cast(), delta_ms, compact_resources);
     if pointer.is_null() {
         return ProbeResponse::Json(native_error(handle, "pocket_frame"));
     }
 
     let bytes = CStr::from_ptr(pointer).to_bytes();
+    if bytes.len() > MAX_RAW_FRAME_BYTES {
+        return ProbeResponse::Json(error_response(
+            "pocket_frame returned JSON larger than 64 MiB",
+        ));
+    }
     if raw_frame {
-        if bytes.len() > MAX_RAW_FRAME_BYTES {
-            return ProbeResponse::Json(error_response(
-                "pocket_frame returned JSON larger than 64 MiB",
-            ));
-        }
         // The runtime owns this JSON and normally emits canonical UTF-8. Validate
         // it without materializing a serde_json::Value tree, then keep its bytes
         // unchanged for the probe's response writer.
@@ -190,8 +207,8 @@ unsafe fn frame_response_mode(handle: Handle, delta_ms: f64, raw_frame: bool) ->
     }
 }
 
-unsafe fn frame_response(handle: Handle, delta_ms: f64) -> Value {
-    match frame_response_mode(handle, delta_ms, false) {
+unsafe fn frame_response(handle: Handle, delta_ms: f64, compact_resources: bool) -> Value {
+    match frame_response_mode(handle, delta_ms, false, compact_resources) {
         ProbeResponse::Json(response) => response,
         ProbeResponse::RawFrame(_) => unreachable!("parsed frame response cannot be raw"),
     }
@@ -205,10 +222,14 @@ unsafe fn frame_command(command: &Value, handle: Handle, raw_frame: bool) -> Pro
         Ok(value) => value,
         Err(error) => return ProbeResponse::Json(error_response(error)),
     };
+    let compact_resources = match compact_resources_requested(command) {
+        Ok(value) => value,
+        Err(error) => return ProbeResponse::Json(error_response(error)),
+    };
     // The preceding UI frame latches the coalesced Worker wake. Allow the next
     // provider completion to publish a fresh event.
     PROBE_WORKER_WAKE.store(false, Ordering::Release);
-    frame_response_mode(handle, delta_ms, raw_frame)
+    frame_response_mode(handle, delta_ms, raw_frame, compact_resources)
 }
 
 fn raw_frame_requested(command: &Value) -> bool {
@@ -525,13 +546,17 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 },
                 None => return (false, error_response("load requires pakPath")),
             };
+            let compact_resources = match compact_resources_requested(command) {
+                Ok(value) => value,
+                Err(error) => return (false, error_response(error)),
+            };
             let result =
                 pocket_load_files((*handle).cast(), source_path.as_ptr(), pak_path.as_ptr());
             if result != 0 {
                 return (false, native_error(*handle, "pocket_load_files"));
             }
             if command.get("render") == Some(&Value::Bool(true)) {
-                return (false, frame_response(*handle, 0.0));
+                return (false, frame_response(*handle, 0.0, compact_resources));
             }
             (false, json!({"ok": true}))
         }
@@ -556,6 +581,10 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 },
                 None => return (false, error_response("loadBytecode requires pakPath")),
             };
+            let compact_resources = match compact_resources_requested(command) {
+                Ok(value) => value,
+                Err(error) => return (false, error_response(error)),
+            };
             let result = pocket_load_bytecode_files(
                 (*handle).cast(),
                 bytecode_path.as_ptr(),
@@ -568,7 +597,7 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 .to_string_lossy()
                 .into_owned();
             if command.get("render") == Some(&Value::Bool(true)) {
-                let mut response = frame_response(*handle, 0.0);
+                let mut response = frame_response(*handle, 0.0, compact_resources);
                 response["runtimeAbi"] = Value::String(abi);
                 return (false, response);
             }
@@ -588,11 +617,15 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 },
                 None => return (false, error_response("eval requires source")),
             };
+            let compact_resources = match compact_resources_requested(command) {
+                Ok(value) => value,
+                Err(error) => return (false, error_response(error)),
+            };
             if pocket_eval((*handle).cast(), source.as_ptr()) != 0 {
                 return (false, native_error(*handle, "pocket_eval"));
             }
             if command.get("render") == Some(&Value::Bool(true)) {
-                return (false, frame_response(*handle, 0.0));
+                return (false, frame_response(*handle, 0.0, compact_resources));
             }
             (false, json!({"ok": true}))
         }
@@ -843,6 +876,138 @@ mod tests {
             );
             destroy(&mut recorded);
             destroy(&mut replayed);
+        }
+    }
+
+    #[test]
+    fn resource_encoding_base64_works_across_raw_traced_and_render_commands() {
+        unsafe {
+            let dir = std::env::temp_dir().join(format!(
+                "pocket-probe-compact-test-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let source_path = dir.join("app.js");
+            let pak_path = dir.join("app.pak");
+            let source = "const img = ui.createNode(2); ui.setProp(img, 1, 16); ui.setProp(img, 2, 16); ui.setImage(img, ui.__textures.sample); ui.insertBefore(1, img, 0); globalThis.frame = function() {};";
+            std::fs::write(&source_path, source).unwrap();
+
+            let key = b"ui:img.sample";
+            let blob: [u8; 12] = [1, 0, 1, 0, 3, 0, 0, 0, 12, 34, 56, 255];
+            let dir_off = 32usize;
+            let names_off = dir_off + 24;
+            let blob_off = (names_off + key.len() + 15) & !15;
+            let pak_len = (blob_off + blob.len() + 15) & !15;
+            let mut pak = vec![0u8; pak_len];
+            pak[0..4].copy_from_slice(&0x4b50_4344u32.to_le_bytes());
+            pak[4..6].copy_from_slice(&1u16.to_le_bytes());
+            pak[8..12].copy_from_slice(&1u32.to_le_bytes());
+            pak[12..16].copy_from_slice(&(dir_off as u32).to_le_bytes());
+            pak[16..20].copy_from_slice(&(names_off as u32).to_le_bytes());
+            pak[20..24].copy_from_slice(&(blob_off as u32).to_le_bytes());
+            pak[24..28].copy_from_slice(&(pak_len as u32).to_le_bytes());
+            pak[dir_off + 4..dir_off + 8].copy_from_slice(&(blob_off as u32).to_le_bytes());
+            pak[dir_off + 8..dir_off + 12].copy_from_slice(&(blob.len() as u32).to_le_bytes());
+            pak[dir_off + 12..dir_off + 16].copy_from_slice(&0u32.to_le_bytes());
+            pak[dir_off + 16..dir_off + 18].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            pak[names_off..names_off + key.len()].copy_from_slice(key);
+            pak[blob_off..blob_off + blob.len()].copy_from_slice(&blob);
+            std::fs::write(&pak_path, &pak).unwrap();
+
+            let src_str = source_path.to_str().unwrap();
+            let pak_str = pak_path.to_str().unwrap();
+
+            let mut legacy = std::ptr::null_mut();
+            run(&mut legacy, json!({"op":"create", "width":80, "height":40}));
+            let legacy_load = run(
+                &mut legacy,
+                json!({"op":"load", "sourcePath":src_str, "pakPath":pak_str, "render":true}),
+            );
+            let legacy_res = &legacy_load["frame"]["resources"][0];
+            assert!(legacy_res.get("bytesEncoding").is_none());
+            assert!(legacy_res["pixels"].is_array());
+
+            let mut compact_load_handle = std::ptr::null_mut();
+            run(
+                &mut compact_load_handle,
+                json!({"op":"create", "width":80, "height":40}),
+            );
+            let compact_load = run(
+                &mut compact_load_handle,
+                json!({"op":"load", "sourcePath":src_str, "pakPath":pak_str, "render":true, "resourceEncoding":"base64"}),
+            );
+            let compact_res = &compact_load["frame"]["resources"][0];
+            assert_eq!(compact_res["bytesEncoding"], "base64");
+            let decoded_pixels = base64::engine::general_purpose::STANDARD
+                .decode(compact_res["pixels"].as_str().unwrap())
+                .unwrap();
+            let expected_pixels: Vec<u8> = legacy_res["pixels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect();
+            assert_eq!(decoded_pixels, expected_pixels);
+
+            let mut raw_compact = std::ptr::null_mut();
+            run(
+                &mut raw_compact,
+                json!({"op":"create", "width":80, "height":40}),
+            );
+            run(
+                &mut raw_compact,
+                json!({"op":"load", "sourcePath":src_str, "pakPath":pak_str}),
+            );
+            let (_, raw_response) = command_response(
+                &json!({"op":"frame", "deltaMs":16, "rawFrame":true, "resourceEncoding":"base64"}),
+                &mut raw_compact,
+            );
+            let ProbeResponse::RawFrame(raw_bytes) = raw_response else {
+                panic!("expected RawFrame for untraced rawFrame + resourceEncoding:base64");
+            };
+            let parsed_raw: Value = serde_json::from_slice(&raw_bytes).unwrap();
+            assert_eq!(parsed_raw["resources"][0]["bytesEncoding"], "base64");
+            assert_eq!(parsed_raw["resources"][0]["pixels"], compact_res["pixels"]);
+
+            let mut traced_compact = std::ptr::null_mut();
+            run(
+                &mut traced_compact,
+                json!({"op":"create", "width":80, "height":40}),
+            );
+            run(&mut traced_compact, json!({"op":"traceMode", "mode":1}));
+            run(
+                &mut traced_compact,
+                json!({"op":"load", "sourcePath":src_str, "pakPath":pak_str, "traceClock":{}}),
+            );
+            let (_, traced_response) = command_response(
+                &json!({"op":"frame", "deltaMs":16, "rawFrame":true, "resourceEncoding":"base64", "traceClock":{}}),
+                &mut traced_compact,
+            );
+            let ProbeResponse::Json(traced_json) = traced_response else {
+                panic!("expected Json response for traced frame with resourceEncoding:base64");
+            };
+            assert_eq!(traced_json["ok"], true);
+            assert!(traced_json.get("traceClock").is_some());
+            assert_eq!(
+                traced_json["frame"]["resources"][0]["bytesEncoding"],
+                "base64"
+            );
+
+            let (_, invalid_encoding) = command_response(
+                &json!({"op":"frame", "deltaMs":16, "resourceEncoding":"hex"}),
+                &mut raw_compact,
+            );
+            let ProbeResponse::Json(invalid_json) = invalid_encoding else {
+                panic!("expected error Json response");
+            };
+            assert_eq!(invalid_json["ok"], false);
+
+            destroy(&mut legacy);
+            destroy(&mut compact_load_handle);
+            destroy(&mut raw_compact);
+            destroy(&mut traced_compact);
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

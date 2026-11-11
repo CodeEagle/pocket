@@ -482,6 +482,13 @@ packages:
       relative: true
     source: path
     version: "0.1.0"
+  pocket_diagnostics:
+    dependency: transitive
+    description:
+      path: "../sdk/packages/pocket_diagnostics"
+      relative: true
+    source: path
+    version: "0.1.0"
   pocket_flutter:
     dependency: "direct dev"
     description:

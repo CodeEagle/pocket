@@ -6658,10 +6658,64 @@ fn publish_frame_sequence(host: &mut HostState, frame: u64) {
     host.frame_delta_v2_published = Some(frame);
 }
 
+#[derive(Serialize)]
+struct CompactFrameResource<'a> {
+    asset: &'a str,
+    revision: u64,
+    width: u32,
+    height: u32,
+    psm: u32,
+    linear: bool,
+    #[serde(rename = "bytesEncoding")]
+    bytes_encoding: &'static str,
+    pixels: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    palette: Option<String>,
+}
+
+impl<'a> From<&'a FrameResource> for CompactFrameResource<'a> {
+    fn from(resource: &'a FrameResource) -> Self {
+        use base64::Engine;
+        Self {
+            asset: &resource.asset,
+            revision: resource.revision,
+            width: resource.width,
+            height: resource.height,
+            psm: resource.psm,
+            linear: resource.linear,
+            bytes_encoding: "base64",
+            pixels: base64::engine::general_purpose::STANDARD.encode(&resource.pixels),
+            palette: resource
+                .palette
+                .as_ref()
+                .map(|palette| base64::engine::general_purpose::STANDARD.encode(palette)),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CompactFrameResult<'a> {
+    frame: u64,
+    width: f32,
+    height: f32,
+    #[serde(serialize_with = "serialize_rc_ops")]
+    ops: &'a Rc<Vec<FrameOp>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auxiliary: &'a Option<SurfaceFrame>,
+    events: &'a [OutboundEvent],
+    resources: Vec<CompactFrameResource<'a>>,
+    #[serde(rename = "releasedResources", skip_serializing_if = "Vec::is_empty")]
+    released_resources: &'a Vec<String>,
+}
+
 /// Serialize a complete frame for both the legacy ABI and the delta ABI's
 /// changed-frame fallback. Both entry points therefore consume the same
 /// BuiltFrame and drain the same events/resources.
-fn complete_frame_output(host: &mut HostState, built: BuiltFrame) -> *const c_char {
+fn complete_frame_output(
+    host: &mut HostState,
+    built: BuiltFrame,
+    compact_resources: bool,
+) -> *const c_char {
     let is_static = frame_has_no_transient_data(&built);
     if built.draw_cache_hit && is_static {
         if let Some(cached) = host.frame_json_cache.as_deref() {
@@ -6675,7 +6729,26 @@ fn complete_frame_output(host: &mut HostState, built: BuiltFrame) -> *const c_ch
         }
     }
     let frame = built.result;
-    match serde_json::to_string(&frame) {
+    let encoded = if compact_resources && !frame.resources.is_empty() {
+        let compact = CompactFrameResult {
+            frame: frame.frame,
+            width: frame.width,
+            height: frame.height,
+            ops: &frame.ops,
+            auxiliary: &frame.auxiliary,
+            events: &frame.events,
+            resources: frame
+                .resources
+                .iter()
+                .map(CompactFrameResource::from)
+                .collect(),
+            released_resources: &frame.released_resources,
+        };
+        serde_json::to_string(&compact)
+    } else {
+        serde_json::to_string(&frame)
+    };
+    match encoded {
         Ok(json) => {
             host.frame_json_serializations = host.frame_json_serializations.wrapping_add(1);
             host.frame_json_serialized_bytes = host
@@ -6719,7 +6792,24 @@ fn failed_frame_output(host: &mut HostState, error: String) -> *const c_char {
 pub unsafe extern "C" fn pocket_frame(handle: *mut HostState, delta_ms: f64) -> *const c_char {
     guard_host_mut(handle, "pocket_frame", ptr::null(), |host| {
         match build_frame(host, delta_ms, false, false) {
-            Ok(built) => complete_frame_output(host, built),
+            Ok(built) => complete_frame_output(host, built, false),
+            Err(error) => failed_frame_output(host, error),
+        }
+    })
+}
+
+/// Rust-only probe entry point that shares `pocket_frame`'s single
+/// `build_frame` execution and `complete_frame_output` cache/error path while
+/// optionally serializing `FrameResource` pixel/palette buffers as lossless
+/// base64 strings (`bytesEncoding: "base64"`).
+pub unsafe fn pocket_frame_for_probe_json(
+    handle: *mut HostState,
+    delta_ms: f64,
+    compact_resources: bool,
+) -> *const c_char {
+    guard_host_mut(handle, "pocket_frame", ptr::null(), |host| {
+        match build_frame(host, delta_ms, false, false) {
+            Ok(built) => complete_frame_output(host, built, compact_resources),
             Err(error) => failed_frame_output(host, error),
         }
     })
@@ -7053,7 +7143,7 @@ pub unsafe extern "C" fn pocket_frame_delta(
                 host.output = c_string(UNCHANGED_FRAME_JSON);
                 host.output.as_ptr()
             }
-            Ok(built) => complete_frame_output(host, built),
+            Ok(built) => complete_frame_output(host, built, false),
             Err(error) => failed_frame_output(host, error),
         }
     })
@@ -11318,6 +11408,207 @@ mod smoke_tests {
         }
         unsafe {
             pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn probe_compact_resource_json_matches_legacy_and_shrinks_large_textures_under_64_mib() {
+        use base64::Engine;
+
+        let source = CString::new(
+            r#"
+            const img = ui.createNode(2);
+            ui.setProp(img, 1, 16);
+            ui.setProp(img, 2, 16);
+            ui.setImage(img, ui.__textures.rgba_sample);
+            ui.insertBefore(1, img, 0);
+
+            const txt = ui.createNode(1);
+            ui.setProp(txt, 1, 64);
+            ui.setProp(txt, 2, 16);
+            ui.setProp(txt, 100, 1);
+            ui.setText(txt, 'A');
+            ui.insertBefore(1, txt, 0);
+            globalThis.frame = function() {};
+            "#,
+        )
+        .unwrap();
+
+        let mut rgba = vec![2, 0, 2, 0, pocket_spec::psm::PSM_8888 as u8, 0, 0, 0];
+        let rgba_pixels: [u8; 16] = [
+            10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 128,
+        ];
+        rgba.extend_from_slice(&rgba_pixels);
+        let font = test_font_atlas(0, 4, 6, 2, b'A' as u32, &[255]);
+        let pak = pak_entries(&[("ui:img.rgba_sample", &rgba), ("ui:font.0", &font)]);
+
+        let legacy_handle = pocket_create(96.0, 48.0);
+        let compact_handle = pocket_create(96.0, 48.0);
+        assert_eq!(
+            unsafe { pocket_load(legacy_handle, source.as_ptr(), pak.as_ptr(), pak.len()) },
+            0
+        );
+        assert_eq!(
+            unsafe { pocket_load(compact_handle, source.as_ptr(), pak.as_ptr(), pak.len()) },
+            0
+        );
+
+        let legacy_ptr = unsafe { pocket_frame_for_probe_json(legacy_handle, 16.0, false) };
+        let compact_ptr = unsafe { pocket_frame_for_probe_json(compact_handle, 16.0, true) };
+        assert!(!legacy_ptr.is_null());
+        assert!(!compact_ptr.is_null());
+        let legacy: serde_json::Value =
+            serde_json::from_slice(unsafe { CStr::from_ptr(legacy_ptr) }.to_bytes()).unwrap();
+        let compact: serde_json::Value =
+            serde_json::from_slice(unsafe { CStr::from_ptr(compact_ptr) }.to_bytes()).unwrap();
+
+        assert_eq!(compact["frame"], legacy["frame"]);
+        assert_eq!(compact["width"], legacy["width"]);
+        assert_eq!(compact["height"], legacy["height"]);
+        assert_eq!(compact["ops"], legacy["ops"]);
+        assert_eq!(compact["events"], legacy["events"]);
+
+        let legacy_resources = legacy["resources"].as_array().unwrap();
+        let compact_resources = compact["resources"].as_array().unwrap();
+        assert_eq!(compact_resources.len(), legacy_resources.len());
+        assert!(
+            compact_resources.len() >= 2,
+            "expected RGBA and PSM5 font resources"
+        );
+        let mut saw_palette = false;
+        for (leg, cmp) in legacy_resources.iter().zip(compact_resources.iter()) {
+            assert_eq!(cmp["asset"], leg["asset"]);
+            assert_eq!(cmp["revision"], leg["revision"]);
+            assert_eq!(cmp["width"], leg["width"]);
+            assert_eq!(cmp["height"], leg["height"]);
+            assert_eq!(cmp["psm"], leg["psm"]);
+            assert_eq!(cmp["linear"], leg["linear"]);
+            assert_eq!(cmp["bytesEncoding"], "base64");
+            assert!(leg.get("bytesEncoding").is_none());
+
+            let expected_pixels: Vec<u8> = leg["pixels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect();
+            let decoded_pixels = base64::engine::general_purpose::STANDARD
+                .decode(cmp["pixels"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(decoded_pixels, expected_pixels);
+
+            match (leg.get("palette"), cmp.get("palette")) {
+                (Some(leg_pal), Some(cmp_pal)) => {
+                    saw_palette = true;
+                    let expected_palette: Vec<u8> = leg_pal
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_u64().unwrap() as u8)
+                        .collect();
+                    let decoded_palette = base64::engine::general_purpose::STANDARD
+                        .decode(cmp_pal.as_str().unwrap())
+                        .unwrap();
+                    assert_eq!(decoded_palette, expected_palette);
+                }
+                (None, None) => {}
+                other => panic!("palette presence mismatch: {other:?}"),
+            }
+        }
+        assert!(saw_palette, "expected at least one PSM5 palette resource");
+
+        // Second frame has no new resources; compact and legacy share the exact
+        // no-resource serialization and frame_json_cache path.
+        let legacy_second = unsafe {
+            CStr::from_ptr(pocket_frame_for_probe_json(legacy_handle, 16.0, false))
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        let compact_second = unsafe {
+            CStr::from_ptr(pocket_frame_for_probe_json(compact_handle, 16.0, true))
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(compact_second, legacy_second);
+
+        let compact_third = unsafe {
+            CStr::from_ptr(pocket_frame_for_probe_json(compact_handle, 16.0, true))
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(unsafe { (*compact_handle).frame_json_cache_hits }, 1);
+        assert!(compact_third.starts_with("{\"frame\":3,"));
+
+        unsafe {
+            pocket_destroy(legacy_handle);
+            pocket_destroy(compact_handle);
+        }
+
+        // Hiyori-sized fixture: two 2048x2048 RGBA8888 pages (32 MiB raw pixels).
+        // Legacy numeric JSON array expands each byte >= 2 chars (100+ -> 4 chars),
+        // exceeding 64 MiB; compact base64 is ~42.7 MiB and stays well below 64 MiB.
+        let page_pixels = vec![128u8; 2048 * 2048 * 4];
+        let large_frame = FrameResult {
+            frame: 1,
+            width: 390.0,
+            height: 844.0,
+            ops: Rc::new(Vec::new()),
+            auxiliary: None,
+            events: Vec::new(),
+            resources: vec![
+                FrameResource {
+                    asset: "hiyori_page_0".to_owned(),
+                    revision: 1,
+                    width: 2048,
+                    height: 2048,
+                    psm: pocket_spec::psm::PSM_8888,
+                    linear: true,
+                    pixels: page_pixels.clone(),
+                    palette: None,
+                },
+                FrameResource {
+                    asset: "hiyori_page_1".to_owned(),
+                    revision: 1,
+                    width: 2048,
+                    height: 2048,
+                    psm: pocket_spec::psm::PSM_8888,
+                    linear: true,
+                    pixels: page_pixels,
+                    palette: None,
+                },
+            ],
+            released_resources: Vec::new(),
+        };
+        let legacy_large_json = serde_json::to_string(&large_frame).unwrap();
+        assert!(
+            legacy_large_json.len() > 64 * 1024 * 1024,
+            "legacy 2x2048 RGBA JSON should exceed 64 MiB, got {}",
+            legacy_large_json.len()
+        );
+        drop(legacy_large_json);
+
+        let host_handle = pocket_create(390.0, 844.0);
+        let compact_ptr = unsafe {
+            complete_frame_output(
+                &mut *host_handle,
+                BuiltFrame {
+                    result: large_frame,
+                    draw_cache_hit: false,
+                },
+                true,
+            )
+        };
+        let compact_bytes = unsafe { CStr::from_ptr(compact_ptr).to_bytes() };
+        assert!(
+            compact_bytes.len() < 64 * 1024 * 1024,
+            "compact 2x2048 RGBA JSON must be under 64 MiB, got {}",
+            compact_bytes.len()
+        );
+        unsafe {
+            pocket_destroy(host_handle);
         }
     }
 }

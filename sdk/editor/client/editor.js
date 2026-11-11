@@ -241,14 +241,107 @@ async function loadPreviewDevice() {
 }
 
 let noticeTimer;
+let noticeCopyText = "";
+
+function persistBrowserDiagnostic(kind, error, unhandled = false) {
+  if (!currentId) return;
+  let normalized;
+  try { normalized = normalizeError(error); }
+  catch { normalized = new Error(String(error)); }
+  // Reporting failures go to the browser console, avoiding a recursive error toast.
+  void api(`/api/projects/${encodeURIComponent(currentId)}/diagnostics`, {
+    method: "POST",
+    body: JSON.stringify({ kind, message: normalized.message.slice(0, 8192), unhandled,
+      error: { name: normalized.name, message: normalized.message.slice(0, 8192), stack: normalized.stack?.slice(0, 16384) } }),
+  }).catch((failure) => console.warn("Diagnostic record could not be persisted", failure));
+}
+
+window.addEventListener("error", (event) => {
+  if (event.error || event.message) persistBrowserDiagnostic("crash", event.error || event.message, true);
+});
+window.addEventListener("unhandledrejection", (event) => persistBrowserDiagnostic("crash", event.reason, true));
+
+$("export-diagnostics")?.addEventListener("click", () => {
+  if (!currentId) return;
+  const link = document.createElement("a");
+  link.href = `/api/projects/${encodeURIComponent(currentId)}/diagnostics?download=1`;
+  link.download = `${currentId}-diagnostics.json`;
+  link.click();
+});
+
+async function writeClipboardText(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+  }
+  try {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.append(input);
+    input.select();
+    const copied = document.execCommand("copy");
+    input.remove();
+    return Boolean(copied);
+  } catch {
+    return false;
+  }
+}
+
+async function copyErrorNotice() {
+  if (noticeEl.hidden || noticeEl.dataset.tone !== "error" || !noticeCopyText) return;
+  const text = noticeCopyText;
+  const copied = await writeClipboardText(text);
+  if (noticeEl.hidden || noticeEl.dataset.tone !== "error" || noticeCopyText !== text) return;
+  clearTimeout(noticeTimer);
+  const messageEl = $("notice-message");
+  const iconEl = $("notice-icon");
+  if (!copied) {
+    noticeEl.dataset.copied = "failed";
+    messageEl.textContent = `${text}\n（自动复制失败，请手动选择复制）`;
+    return;
+  }
+  noticeEl.dataset.copied = "true";
+  iconEl.textContent = "✓";
+  messageEl.textContent = `已复制错误信息：${text}`;
+  noticeTimer = setTimeout(() => {
+    if (noticeEl.hidden || noticeEl.dataset.tone !== "error" || noticeCopyText !== text) return;
+    delete noticeEl.dataset.copied;
+    iconEl.textContent = "!";
+    messageEl.textContent = text;
+  }, 1800);
+}
 
 function showNotice(message, tone = "error") {
   clearTimeout(noticeTimer);
   const kind = ["success", "info", "error"].includes(tone) ? tone : "error";
+  const text = localizedMessage(message);
+  if (kind === "error") persistBrowserDiagnostic("log", normalizeError(message));
+  noticeCopyText = kind === "error" ? text : "";
+  delete noticeEl.dataset.copied;
   noticeEl.dataset.tone = kind;
   noticeEl.setAttribute("role", kind === "error" ? "alert" : "status");
+  if (kind === "error") {
+    noticeEl.title = "点击复制错误信息";
+  } else {
+    noticeEl.removeAttribute("title");
+  }
   $("notice-icon").textContent = { success: "✓", info: "i", error: "!" }[kind];
-  $("notice-message").textContent = localizedMessage(message);
+  const messageEl = $("notice-message");
+  messageEl.textContent = text;
+  if (kind === "error") {
+    messageEl.setAttribute("role", "button");
+    messageEl.tabIndex = 0;
+    messageEl.setAttribute("aria-label", "点击复制错误信息");
+  } else {
+    messageEl.removeAttribute("role");
+    messageEl.removeAttribute("tabindex");
+    messageEl.removeAttribute("aria-label");
+  }
   noticeEl.hidden = false;
   if (kind !== "error") noticeTimer = setTimeout(clearNotice, kind === "success" ? 3500 : 5000);
 }
@@ -256,13 +349,43 @@ function showNotice(message, tone = "error") {
 function clearNotice() {
   clearTimeout(noticeTimer);
   noticeTimer = undefined;
+  noticeCopyText = "";
+  delete noticeEl.dataset.copied;
   noticeEl.hidden = true;
-  $("notice-message").textContent = "";
+  noticeEl.removeAttribute("title");
+  const messageEl = $("notice-message");
+  messageEl.textContent = "";
+  messageEl.removeAttribute("role");
+  messageEl.removeAttribute("tabindex");
+  messageEl.removeAttribute("aria-label");
 }
 
-noticeEl.addEventListener("click", clearNotice);
+$("notice-close")?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  clearNotice();
+});
+noticeEl.addEventListener("click", (event) => {
+  if (event.target instanceof Element && event.target.closest("#notice-close")) {
+    clearNotice();
+    return;
+  }
+  if (noticeEl.dataset.tone === "error") {
+    const selection = window.getSelection?.();
+    if (selection && !selection.isCollapsed && noticeEl.contains(selection.anchorNode)) return;
+    void copyErrorNotice();
+    return;
+  }
+  clearNotice();
+});
 noticeEl.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") clearNotice();
+  if (event.key === "Escape") {
+    clearNotice();
+    return;
+  }
+  if (noticeEl.dataset.tone === "error" && (event.key === "Enter" || event.key === " ") && !(event.target instanceof Element && event.target.closest("#notice-close"))) {
+    event.preventDefault();
+    void copyErrorNotice();
+  }
 });
 
 function setText(id, value) {
@@ -289,6 +412,7 @@ function markDirty(value = true) {
 }
 
 function updateActionStates() {
+  if ($("export-diagnostics")) $("export-diagnostics").disabled = !currentId;
   const hasProject = Boolean(currentId);
   const busy = Boolean(currentStatus?.busy);
   const built = Boolean(currentStatus && currentStatus.builtRevision === currentStatus.revision && !currentStatus.error);

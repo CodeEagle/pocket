@@ -8,7 +8,18 @@ import 'package:pocket_audio/pocket_audio.dart';
 import 'package:pocket_live2d/pocket_live2d.dart';
 import 'flutter_frame_monitor.dart';
 
-void main() => runApp(pocketHostApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final diagnostics = PocketHostDiagnostics(
+    captureFlutterErrors: true,
+    capturePlatformDispatcherErrors: true,
+  );
+  await diagnostics
+      .ensureCollector()
+      .then<void>((_) {})
+      .catchError((Object error) => debugPrint('Pocket diagnostics initialization failed: $error'));
+  runApp(pocketHostApp(diagnostics: diagnostics));
+}
 
 final showcaseConfig = PocketAppConfig(
   appId: 'pocket.host.demo',
@@ -18,7 +29,6 @@ final showcaseConfig = PocketAppConfig(
   additionalCapabilities: {'ui.compositor-surfaces'},
   memoryLimits: PocketMemoryLimits(heapLimitBytes: 128 * 1024 * 1024, maxPakBytes: 8 * 1024 * 1024),
 );
-
 final showcaseNativePolicies = <String, PocketAppConfig>{
   'dev.pocket-nexus.worker-http': PocketAppConfig(
     appId: 'dev.pocket-nexus.worker-http',
@@ -58,10 +68,10 @@ final showcaseNativePolicies = <String, PocketAppConfig>{
     memoryLimits: PocketMemoryLimits(maxPakBytes: 8 * 1024 * 1024),
   ),
 };
-
 Widget pocketHostApp({
   PocketSystemHostController? systemController,
   PocketRecordingLibrary? recordings,
+  PocketHostDiagnostics? diagnostics,
   PocketBundledApplicationCatalog? bundledApplications,
   Map<String, PocketAppConfig>? nativePolicies,
   FlutterFrameMonitorController? frameMonitorController,
@@ -77,6 +87,7 @@ Widget pocketHostApp({
   initialBundledApplications: bundledApplications,
   controller: systemController,
   recordings: recordings,
+  diagnostics: diagnostics,
   appBuilder: (context, child) => FlutterFrameMonitor(
     enabled: showFlutterFps,
     controller: frameMonitorController,

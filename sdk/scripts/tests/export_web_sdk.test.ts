@@ -65,6 +65,8 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
 
   for (const path of [
     "editor/server.ts",
+    "editor/diagnostics.ts",
+    "packages/pocket_diagnostics/src/node.ts",
     "scripts/project_templates.ts",
     "scripts/editor_service.mjs",
     "scripts/toolchain.mjs",

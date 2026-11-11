@@ -44,6 +44,7 @@ import { createLocalBluetoothProvider } from "./local_bluetooth.ts";
 import { previewDevice } from "./preview_device.ts";
 import { createEditorDeviceManager, type DeploymentSnapshot } from "./devices.ts";
 import { createWechatPreviewManager } from "./wechat.ts";
+import { createStudioDiagnostics, handleDiagnosticsRequest } from "./diagnostics.ts";
 import { resolveProjectTemplate } from "../scripts/project_templates.ts";
 import { chooseUpdateHost, startUpdateEndpoint } from "./update_endpoint.ts";
 import {
@@ -62,6 +63,7 @@ import {
 import {
   applyResourcePlacements,
   buildResourceSnapshot,
+  copyBuiltNativeModels,
   emptyResourceInventory,
   readResourcePolicy,
   readResourceSnapshot,
@@ -1084,6 +1086,7 @@ async function stageGeneratedPreviewApplications(
       }
       await cp(source, join(targetDirectory, name));
     }
+    await copyBuiltNativeModels(sourceDirectory, targetDirectory, canonicalRoot);
   }
   return entries.length;
 }
@@ -1126,6 +1129,7 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
     if (existsSync(join(temp, "app.worker.bytecode.json"))) {
       await copy("app.worker.bytecode.json", join(temp, "app.worker.bytecode.json"));
     }
+    await copyBuiltNativeModels(temp, stagingDir);
     // The source manifest is the protocol/capability declaration. Generate
     // the artifact from the safe source path so injected/mock runners and the
     // real compiler follow the same release identity from the current Editor
@@ -2050,6 +2054,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     return loading;
   };
   const projectDir = (id: string) => projectDirectory(workspace, id);
+  const diagnostics = createStudioDiagnostics(workspace.root);
   await mkdir(join(workspace.root, "wechat-preview"), { recursive: true });
   const wechat = createWechatPreviewManager({ projectDirectory: projectDir, workspaceRoot: join(workspace.root, "wechat-preview") });
   const sdkRoot = root;
@@ -3384,6 +3389,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   });
   const localBluetooth = ["darwin", "win32"].includes(process.platform) ? createLocalBluetoothProvider() : undefined;
   const preview = createPreviewManager({
+    diagnostics,
     localBluetooth,
     width: previewDevice.screenWidth,
     height: previewDevice.screenHeight,
@@ -3640,6 +3646,10 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         const id = parts[2] ? asProjectId(parts[2]) : "";
         const exists = existsSync(projectDir(id));
         if (!exists) return failure("project not found", 404);
+        if (parts[3] === "diagnostics" && parts.length === 4) {
+          const state = await getState(id);
+          return await handleDiagnosticsRequest(diagnostics, request, id, state.builtRevision ?? undefined);
+        }
         // Reserve before any awaited validation/body parsing. Manager-level
         // reservations alone cannot exclude a simultaneous source/AI request.
         // Preview input and cancellation remain available during long tasks.
@@ -4024,16 +4034,16 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     versionBackendOrigin();
   }
   const stop = server.stop.bind(server);
+  await diagnostics.recordLog({ message: "Studio started", ...(workspace.projectId ? { projectId: workspace.projectId } : {}) });
   server.stop = ((closeActiveConnections?: boolean) => {
     backupSchedulerStopped = true;
     for (const timer of backupTimers.values()) clearTimeout(timer);
     backupTimers.clear();
     codex.dispose();
-    void preview.dispose();
-    void devices.dispose();
+    const cleanup = Promise.all([preview.dispose(), devices.dispose()]);
     wechat.dispose();
     deviceUpdates?.stop();
-    return stop(closeActiveConnections);
+    return Promise.all([stop(closeActiveConnections), cleanup]).then(() => diagnostics.close());
   }) as typeof server.stop;
   return server;
 }

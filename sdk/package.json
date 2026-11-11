@@ -8,7 +8,8 @@
     "packages/pocket_tftc",
     "packages/pocket_vn",
     "packages/pocket_spine",
-    "packages/pocket_live2d"
+    "packages/pocket_live2d",
+    "packages/pocket_diagnostics"
   ],
   "dependencies": {
     "@pocket/ui": "0.1.0",

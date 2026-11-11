@@ -27,6 +27,7 @@ import type { LocalBluetoothProvider } from "./local_bluetooth.ts";
 import { hotCommandSource, hotIdentity, type HotIdentity } from "./hot_reload.ts";
 import { createPreviewLive2d } from "./live2d.ts";
 import { encodeMessage } from "../targets/wechat/template/binary-bridge.js";
+import type { DiagnosticsCollector } from "../packages/pocket_diagnostics/src/types.ts";
 
 export type PreviewArtifactPaths = {
   /** Absolute path to the current Editor qjbc artifact. */
@@ -95,6 +96,8 @@ type ResolvedPreviewWorker = {
 export type PreviewResolver<T> = T | ((projectId: string) => T | Promise<T>);
 
 export type PreviewManagerOptions = {
+  /** Optional durable collector owned by the embedding host. */
+  diagnostics?: Pick<DiagnosticsCollector, "recordLog" | "recordCrash">;
   /** Resolve the project directory used by the caller's Editor state. */
   projectDirectory?: PreviewResolver<string>;
   /** Resolve real artifact paths. `artifact` is an accepted singular alias. */
@@ -827,6 +830,8 @@ class NativeProbe {
   private readonly pending: Array<{ resolve: (value: JsonRecord) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
   private readonly stderr: string[] = [];
   private closed = false;
+  private stopping = false;
+  private errorHandler?: (error: Error) => void;
   private observer?: NativeProbeObserver;
   private decorator?: NativeProbeCommandDecorator;
   private wakeHandler?: () => void;
@@ -875,11 +880,13 @@ class NativeProbe {
     if (this.closed) return;
     this.closed = true;
     this.lines.close();
+    const failure = new Error(`${error.message}${this.stderr.length ? `: ${this.stderr.join("").trim()}` : ""}`);
     while (this.pending.length) {
       const next = this.pending.shift()!;
       clearTimeout(next.timer);
-      next.reject(new Error(`${error.message}${this.stderr.length ? `: ${this.stderr.join("").trim()}` : ""}`));
+      next.reject(failure);
     }
+    if (!this.stopping) this.errorHandler?.(failure);
   }
 
   async command(command: JsonRecord): Promise<JsonRecord> {
@@ -904,7 +911,10 @@ class NativeProbe {
   }
 
   async checked(command: JsonRecord): Promise<JsonRecord> {
-    const actualCommand = this.decorator?.(command) ?? command;
+    const decorated = this.decorator?.(command) ?? command;
+    const returnsFrame = decorated.op === "frame" || decorated.render === true &&
+      ["load", "loadBytecode", "eval"].includes(String(decorated.op));
+    const actualCommand = returnsFrame ? { ...decorated, resourceEncoding: "base64" } : decorated;
     const response = await this.command(actualCommand);
     if (response.ok !== true) {
       throw new Error(typeof response.error === "string" ? response.error : "pocket_probe operation failed");
@@ -925,7 +935,12 @@ class NativeProbe {
     this.wakeHandler = handler;
   }
 
+  setErrorHandler(handler: (error: Error) => void): void {
+    this.errorHandler = handler;
+  }
+
   async stop(): Promise<void> {
+    this.stopping = true;
     if (this.closed) return;
     try {
       await this.checked({ op: "quit" });
@@ -1031,7 +1046,8 @@ function sha256Hex(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function previewBytes(value: unknown): Uint8Array {
+function previewBytes(value: unknown, encoding?: unknown): Uint8Array {
+  if (encoding === "base64" && typeof value === "string") return Buffer.from(value, "base64");
   if (!Array.isArray(value)) return new Uint8Array();
   return new Uint8Array(value.map((item) => {
     const number = Number(item);
@@ -1065,10 +1081,27 @@ function previewOpSummary(value: unknown): JsonRecord {
   else if (type === "rounded") {
     result.color = previewInteger(op.color);
     result.radius = previewDouble(op.radius);
+    const borderWidth = Number(op.borderWidth ?? op.border_width ?? 0);
+    if (Number.isFinite(borderWidth) && borderWidth > 0) result.borderWidth = previewDouble(borderWidth);
+  } else if (type === "arc") {
+    result.color = previewInteger(op.color);
+    result.radius = previewDouble(Number(op.radius ?? 0));
+    result.strokeWidth = previewDouble(Number(op.strokeWidth ?? op.borderWidth ?? op.border_width ?? 0));
+    result.startAngle = previewDouble(Number(op.startAngle ?? op.start_angle ?? 0));
+    result.sweepAngle = previewDouble(Number(op.sweepAngle ?? op.sweep_angle ?? 0));
   } else if (type === "gradient") {
     result.fromColor = previewInteger(op.from ?? op.fromColor);
     result.toColor = previewInteger(op.to ?? op.toColor);
     result.direction = previewInteger(op.direction);
+  } else if (type === "roundedGradient") {
+    result.fromColor = previewInteger(op.from ?? op.fromColor ?? op.from_color);
+    result.toColor = previewInteger(op.to ?? op.toColor ?? op.to_color);
+    result.direction = previewInteger(op.direction ?? op.dir);
+    result.radius = previewDouble(op.radius);
+    const viaColor = op.viaColor ?? op.via_color;
+    const viaPosition = op.viaPosition ?? op.via_position;
+    if (viaColor !== undefined && viaColor !== null) result.viaColor = previewInteger(viaColor);
+    if (viaPosition !== undefined && viaPosition !== null) result.viaPosition = previewDouble(Number(viaPosition));
   } else if (type === "triangle") {
     result.points = Array.isArray(op.points) ? op.points.map((point) => {
       const item = asRecord(point, "recording triangle point");
@@ -1142,8 +1175,8 @@ function previewEventSummary(value: unknown): JsonRecord {
 
 function previewResourceSummary(value: unknown): JsonRecord {
   const resource = asRecord(value, "recording frame resource");
-  const pixels = previewBytes(resource.pixels);
-  const palette = resource.palette === undefined || resource.palette === null ? undefined : previewBytes(resource.palette);
+  const pixels = previewBytes(resource.pixels, resource.bytesEncoding);
+  const palette = resource.palette === undefined || resource.palette === null ? undefined : previewBytes(resource.palette, resource.bytesEncoding);
   return {
     asset: resource.asset,
     revision: previewInteger(resource.revision),
@@ -1823,6 +1856,7 @@ class PreviewSession {
         pumping: 0,
       };
       probe.setObserver((command, response) => this.observeProbeCommand(runtime, command, response));
+      probe.setErrorHandler((error) => this.reportError(error, runtime));
       probe.setDecorator((command) => this.decorateProbeCommand(command));
       this.ensurePreviewRecordingCapture(runtime);
       try {
@@ -1920,9 +1954,7 @@ class PreviewSession {
     try {
       await this.starting;
     } catch (error) {
-      this.state = "error";
-      this.error = errorText(error);
-      this.emit({ type: "error", error: this.error });
+      this.reportError(error);
       throw error;
     } finally {
       this.starting = undefined;
@@ -2060,10 +2092,11 @@ class PreviewSession {
     const part = query.get("part");
     if (query.get("scope") !== this.resourceScope || !resource ||
         this.resourceWireVersion(resource) !== query.get("revision") ||
-        (part !== "pixels" && part !== "palette") || !Array.isArray(resource[part])) {
+        (part !== "pixels" && part !== "palette") ||
+        !(Array.isArray(resource[part]) || resource.bytesEncoding === "base64" && typeof resource[part] === "string")) {
       return new Response("resource not found", { status: 404, headers: { "cache-control": "no-store" } });
     }
-    const bytes = Buffer.from(resource[part] as number[]);
+    const bytes = previewBytes(resource[part], resource.bytesEncoding);
     return new Response(request.method === "HEAD" ? null : bytes, { headers: {
       "content-type": "application/octet-stream", "cache-control": "no-store",
       "content-length": String(bytes.byteLength),
@@ -2074,14 +2107,17 @@ class PreviewSession {
     const candidate = value as { type?: string; frame?: PreviewFrame } | null;
     if (candidate?.type !== "frame" || !Array.isArray(candidate.frame?.resources)) return encodePreviewStreamPacket(value);
     const resources = candidate.frame.resources.map(resource => {
-      if (!Array.isArray(resource.pixels)) return resource;
+      const encoded = resource.bytesEncoding === "base64";
+      if (!Array.isArray(resource.pixels) && !(encoded && typeof resource.pixels === "string")) return resource;
       const { pixels, palette, ...metadata } = resource;
       const url = (part: string) => {
         const query = new URLSearchParams({ asset: String(resource.asset), revision: this.resourceWireVersion(resource), scope: this.resourceScope, part });
         return `/api/projects/${encodeURIComponent(this.id)}/preview/resource?${query}`;
       };
-      return { ...metadata, bytesEncoding: "external", pixelsUrl: url("pixels"), pixelsBytes: pixels.length,
-        ...(Array.isArray(palette) ? { paletteUrl: url("palette"), paletteBytes: palette.length } : {}) };
+      const byteLength = (value: unknown) => encoded && typeof value === "string"
+        ? Buffer.byteLength(value, "base64") : Array.isArray(value) ? value.length : 0;
+      return { ...metadata, bytesEncoding: "external", pixelsUrl: url("pixels"), pixelsBytes: byteLength(pixels),
+        ...(Array.isArray(palette) || encoded && typeof palette === "string" ? { paletteUrl: url("palette"), paletteBytes: byteLength(palette) } : {}) };
     });
     return encodePreviewStreamPacket({ ...candidate, frame: { ...candidate.frame, resources } });
   }
@@ -2438,6 +2474,13 @@ class PreviewSession {
   }
 
   private async observeProbeCommand(runtime: PreviewRuntime, command: JsonRecord, response: JsonRecord): Promise<void> {
+    if (command.op === "load" || command.op === "loadBytecode") {
+      await this.manager.options.diagnostics?.recordLog({
+        source: "studio.preview", projectId: this.id, runtimeId: runtime.appId,
+        revision: this.artifactRevision, message: "Guest bytecode loaded",
+        data: { generation: runtime.generation, instanceId: runtime.instanceId },
+      }).catch((error) => console.error("Preview lifecycle log could not be persisted", error));
+    }
     if (!this.previewRecordingActive() || !this.recordableProbeCommand(command)) return;
     const item: PreviewProbeHistoryEntry = {
       command: cloneJson(command),
@@ -3845,6 +3888,7 @@ class PreviewSession {
     };
     const recording = this.previewRecordingActive();
     probe.setObserver((command, response) => this.observeProbeCommand(runtime, command, response));
+    probe.setErrorHandler((error) => this.reportError(error, runtime));
     probe.setDecorator((command) => this.decorateProbeCommand(command));
     this.ensurePreviewRecordingCapture(runtime);
     try {
@@ -4769,9 +4813,15 @@ class PreviewSession {
     });
   }
 
-  reportError(error: unknown): void {
+  reportError(error: unknown, runtime = this.rootRuntime): void {
+    const repeated = this.state === "error" && this.error === errorText(error);
     this.state = "error";
     this.error = errorText(error);
+    if (!repeated) void this.manager.options.diagnostics?.recordCrash(error, {
+      source: "studio.preview", projectId: this.id, revision: this.artifactRevision,
+      runtimeId: runtime?.appId,
+      data: { frame: this.frame?.frame, children: [...this.childRuntimes.keys()] },
+    }).catch((failure) => console.error("Preview crash record could not be persisted", failure));
     this.emit({ type: "error", error: this.error });
   }
 
@@ -4951,6 +5001,10 @@ class PreviewManagerImpl implements PreviewManager {
       // runtime. Native guest/transport failures still move the session to
       // error so the UI can show a real fault rather than silently stalling.
       if (route !== "input" || !isRecoverableInputFailure(message)) session?.reportError(error);
+      else await this.options.diagnostics?.recordLog({
+        source: "studio.preview.input", projectId, severity: "warn", message,
+        data: { route },
+      }).catch((failure) => console.error("Preview input record could not be persisted", failure));
       return failure(message, message.includes("not found") ? 404 : 400);
     }
   }

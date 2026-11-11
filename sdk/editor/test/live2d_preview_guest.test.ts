@@ -1,12 +1,14 @@
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "bun:test";
 import { buildGuest } from "../../scripts/build_guest.ts";
-import { cubismWebCorePath } from "../live2d.ts";
+import { createPreviewLive2d, cubismWebCorePath } from "../live2d.ts";
 import { createPreviewManager } from "../preview.ts";
+import { buildResourceSnapshot } from "../resources.ts";
 
 const sdkRoot = resolve(import.meta.dir, "../..");
 const repoRoot = resolve(sdkRoot, "..");
@@ -165,5 +167,187 @@ mount(() => <App />);
     await manager?.dispose();
     await rm(project, { recursive: true, force: true });
     await rm(output, { recursive: true, force: true });
+  }
+}, 120_000);
+
+test.skipIf(!existsSync(hiyoriMoc) || !existsSync(webCore))("child package resource snapshot retains novel.native-assets.json and native-models for createPreviewLive2d after temporary build removal", { timeout: 120_000 }, async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "pocket-live2d-subpackage-snapshot-"));
+  const rootProject = join(workspace, "project");
+  const childProject = join(rootProject, "apps/lantern");
+  const buildDir = join(workspace, "build");
+  const tempRootOut = join(workspace, "temp-root-out");
+  await mkdir(join(childProject, "models"), { recursive: true });
+  await mkdir(join(childProject, "art"), { recursive: true });
+  await mkdir(buildDir, { recursive: true });
+  await mkdir(tempRootOut, { recursive: true });
+  let provider: ReturnType<typeof createPreviewLive2d> | undefined;
+  try {
+    const mocBytes = await readFile(hiyoriMoc);
+    const expectedHash = createHash("sha256").update(mocBytes).digest("hex");
+    const expectedBundlePath = `native-models/${expectedHash}.moc3`;
+    await writeFile(join(childProject, "models/Hiyori.moc3"), mocBytes);
+    await writeFile(join(childProject, "models/Hiyori.model3.json"), JSON.stringify({
+      Version: 3,
+      FileReferences: { Moc: "Hiyori.moc3", Textures: ["texture_00.png"] },
+    }));
+    await writeFile(
+      join(childProject, "art/texture.png"),
+      Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
+    );
+
+    await writeFile(join(rootProject, "package.json"), JSON.stringify({
+      name: "pocket-live2d-root",
+      private: true,
+      type: "module",
+      dependencies: { "@pocket/ui": `file:${uiPackage}` },
+    }));
+    await writeFile(join(rootProject, "pocket.json"), JSON.stringify({
+      $schema: "https://pocketjs.dev/schema/pocket-2.json",
+      pocket: 2,
+      id: "pocket.test.root",
+      name: "root",
+      title: "Root",
+      version: "0.1.0",
+      engine: {
+        capabilities: {
+          requires: ["text.glyphs.baked", "ui.compositor-surfaces"],
+          enhances: [],
+        },
+      },
+      app: {
+        entry: "app.tsx",
+        output: "root-app",
+        framework: "solid",
+        viewport: { fixed: { logical: [360, 640], presentation: "native" } },
+      },
+    }));
+    await writeFile(join(rootProject, "manifest.json"), JSON.stringify({ capabilities: { requires: [] } }));
+    await writeFile(join(rootProject, "app.tsx"), `
+import { mount } from "@pocketjs/framework/solid";
+import { Screen, Text } from "@pocketjs/framework/solid/components";
+mount(() => <Screen><Text>root</Text></Screen>);
+`, "utf8");
+
+    await writeFile(join(childProject, "package.json"), JSON.stringify({
+      name: "pocket-live2d-child",
+      private: true,
+      type: "module",
+      dependencies: {
+        "@pocket/ui": `file:${uiPackage}`,
+        "@pocket/vn": `file:${vnPackage}`,
+        "@pocket/live2d": `file:${live2dPackage}`,
+      },
+    }));
+    await writeFile(join(childProject, "pocket.json"), JSON.stringify({
+      $schema: "https://pocketjs.dev/schema/pocket-2.json",
+      pocket: 2,
+      id: "pocket.demo.lantern",
+      name: "lantern",
+      title: "Lantern",
+      version: "0.1.0",
+      engine: {
+        capabilities: {
+          requires: ["text.glyphs.baked"],
+          enhances: [],
+        },
+      },
+      app: {
+        entry: "app.tsx",
+        output: "lantern-app",
+        framework: "solid",
+        viewport: { fixed: { logical: [360, 640], presentation: "native" } },
+      },
+    }));
+    await writeFile(join(childProject, "manifest.json"), JSON.stringify({
+      capabilities: {
+        requires: ["media.live2d.model.load", "media.live2d.model.update", "media.live2d.model.release"],
+      },
+    }));
+    await writeFile(join(childProject, "novel.assets.json"), JSON.stringify({
+      models: {
+        hiyori: {
+          kind: "live2d",
+          source: "models/Hiyori.model3.json",
+          textures: { "texture_00.png": "art/texture.png" },
+        },
+      },
+    }));
+    await writeFile(join(childProject, "app.tsx"), `
+import { mount } from "@pocketjs/framework/solid";
+import { Screen, Text } from "@pocketjs/framework/solid/components";
+mount(() => <Screen><Text>lantern</Text></Screen>);
+`, "utf8");
+
+    const systemPath = join(rootProject, "pocket.system.json");
+    await writeFile(systemPath, JSON.stringify({
+      $schema: "https://pocketjs.dev/schema/pocket-system-1.json",
+      pocketSystem: 1,
+      id: "pocket.test.system",
+      name: "pocket-test-system",
+      title: "Test System",
+      version: "0.1.0",
+      roles: { systemUI: "pocket.test.root" },
+      applications: {
+        installPolicy: { model: "managed", mutable: false },
+        backgroundExecution: "suspend",
+        catalog: [
+          { package: "pocket.test.root", manifest: "pocket.json", required: true },
+          { package: "pocket.demo.lantern", manifest: "apps/lantern/pocket.json", required: true },
+        ],
+      },
+      installation: {
+        installedPackages: ["pocket.test.root", "pocket.demo.lantern"],
+      },
+    }));
+
+    const rootBuilt = await buildGuest({ projectRoot: rootProject, outDir: tempRootOut, tickHz: 60 });
+    await cp(rootBuilt.source, join(buildDir, "app.js"));
+    await cp(rootBuilt.pak, join(buildDir, "app.pak"));
+    await cp(rootBuilt.bytecode, join(buildDir, "app.qjbc"));
+    await cp(rootBuilt.metadata, join(buildDir, "app.bytecode.json"));
+    await cp(join(tempRootOut, "guest-manifest.json"), join(buildDir, "guest-manifest.json"));
+    const rootMeta = JSON.parse(await readFile(rootBuilt.metadata, "utf8")) as { runtimeAbi: string };
+    await rm(tempRootOut, { recursive: true, force: true });
+
+    const resourceSnapshot = await buildResourceSnapshot({
+      projectRoot: rootProject,
+      buildDirectory: buildDir,
+      revision: 1,
+      rootPackageId: "pocket.test.root",
+      rootTitle: "Root",
+      rootManifest: "pocket.json",
+      rootVersion: "0.1.0",
+      rootBuild: 1,
+      rootRuntimeAbi: rootMeta.runtimeAbi,
+      tickHz: 60,
+      systemFile: systemPath,
+    });
+
+    // Remove the source project's .moc3 to prove createPreviewLive2d reads only
+    // from the immutable child snapshot directory next to app.qjbc.
+    await rm(join(childProject, "models/Hiyori.moc3"), { force: true });
+
+    const childInventory = resourceSnapshot.packages.find((pkg) => pkg.id === "pocket.demo.lantern");
+    assert.ok(childInventory, "snapshot must include child package");
+    assert.equal(childInventory.artifactDirectory, "subpackages/pocket.demo.lantern");
+    const childSnapshotDir = join(buildDir, childInventory.artifactDirectory);
+    const catalog = JSON.parse(await readFile(join(childSnapshotDir, "novel.native-assets.json"), "utf8"));
+    assert.deepEqual(catalog, {
+      version: 1,
+      assets: { "models/Hiyori.moc3": expectedBundlePath },
+    });
+    assert.deepEqual(await readFile(join(childSnapshotDir, expectedBundlePath)), mocBytes);
+
+    provider = createPreviewLive2d(join(childSnapshotDir, "app.qjbc"));
+    const loaded = await provider.invoke("media.live2d.model.load", {
+      id: "snapshot-hiyori",
+      mocAsset: "models/Hiyori.moc3",
+      textures: ["models/texture_00.png", "models/texture_01.png"],
+    }) as { modelId: string; drawableCount: number };
+    assert.equal(loaded.drawableCount, 134);
+    await provider.invoke("media.live2d.model.release", { modelId: loaded.modelId });
+  } finally {
+    await provider?.dispose?.();
+    await rm(workspace, { recursive: true, force: true });
   }
 }, 120_000);

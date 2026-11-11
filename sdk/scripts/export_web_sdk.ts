@@ -157,6 +157,8 @@ function copySources(out: string): void {
   // The Web consumer only needs the JS Live2D API. Flutter plugins, native
   // Core bindings and generated native caches remain source-SDK concerns.
   copyWebLive2dPackage(out);
+  copyFile(join(SDK_ROOT, "packages/pocket_diagnostics/package.json"), join(out, "packages/pocket_diagnostics/package.json"));
+  copyTree(join(SDK_ROOT, "packages/pocket_diagnostics/src"), join(out, "packages/pocket_diagnostics/src"));
   copyFile(
     join(SDK_ROOT, "packages/pocket_flutter/shaders/liquid_glass.frag"),
     join(out, "packages/pocket_flutter/shaders/liquid_glass.frag"),
@@ -209,7 +211,7 @@ function writeRepositoryFiles(out: string, platform?: Platform): void {
     type: "module",
     license: "MIT",
     engines: { node: ">=22.22.2" },
-    workspaces: ["packages/pocket_ui", "packages/pocket_tftc", "packages/pocket_spine", "packages/pocket_live2d"],
+    workspaces: ["packages/pocket_ui", "packages/pocket_tftc", "packages/pocket_spine", "packages/pocket_live2d", "packages/pocket_diagnostics"],
     dependencies: {
       "@pocket/spine": "0.1.0",
       "@pocket/live2d": "0.1.0",
