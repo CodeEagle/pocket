@@ -755,12 +755,12 @@ final class PocketPackage {
   );
 
   Future<PocketPackageArtifact> readArtifact() async {
-    final bytes = Uint8List.fromList(await entryFile.readAsBytes());
+    final bytes = await entryFile.readAsBytes();
     return PocketPackageArtifact(
       package: this,
       entryBytes: bytes,
       entrySource: manifest.payload.isBytecode ? null : utf8.decode(bytes),
-      pakBytes: Uint8List.fromList(await pakFile.readAsBytes()),
+      pakBytes: await pakFile.readAsBytes(),
     );
   }
 }
@@ -1707,7 +1707,7 @@ final class PocketPackageStore {
       );
       if (!await manifestFile.exists()) return null;
       final bytes = await manifestFile.readAsBytes();
-      final signed = PocketSignedManifest.fromBytes(Uint8List.fromList(bytes));
+      final signed = PocketSignedManifest.fromBytes(bytes);
       return signed.payload.build;
     } catch (_) {
       return null;
@@ -1917,7 +1917,7 @@ final class PocketPackageStore {
       if (!await manifestFile.exists()) continue;
       try {
         final signed = PocketSignedManifest.fromBytes(
-          Uint8List.fromList(await manifestFile.readAsBytes()),
+          await manifestFile.readAsBytes(),
         );
         await verifier.verify(signed);
         final package = PocketPackage(
@@ -2060,7 +2060,7 @@ final class PocketPackageStore {
       );
     }
     final signed = PocketSignedManifest.fromBytes(
-      Uint8List.fromList(await manifestFile.readAsBytes()),
+      await manifestFile.readAsBytes(),
     );
     await verifier.verify(signed);
 

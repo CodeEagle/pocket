@@ -1590,9 +1590,9 @@ fn notify_once(pending: &AtomicBool, notify: Option<Notify>) {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        unsafe {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             notify();
-        }
+        }));
     }
 }
 

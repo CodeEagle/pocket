@@ -1990,7 +1990,7 @@ class _PocketViewState extends State<PocketView>
         }
         final bytes = await File(packageSource.entryPath).readAsBytes();
         return runtime.loadBytecode(
-          Uint8List.fromList(bytes),
+          bytes,
           await _readPakFile(packageSource.pakPath),
           expectedRuntimeAbi: packageSource.runtimeAbi,
         );
@@ -2104,8 +2104,7 @@ class _PocketViewState extends State<PocketView>
   }
 
   Future<Uint8List> _readPakFile(String filePath) async {
-    final bytes = await File(filePath).readAsBytes();
-    return Uint8List.fromList(bytes);
+    return File(filePath).readAsBytes();
   }
 
   double _readRefreshRate() {

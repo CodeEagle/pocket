@@ -45,6 +45,7 @@ package_ios_xcframework() {
   }
   trap cleanup_xcframework_lock EXIT
   rm -rf "$temporary"
+  xcrun strip -S "$device" "$simulator"
   xcodebuild -create-xcframework \
     -library "$device" \
     -library "$simulator" \
@@ -115,6 +116,9 @@ case "${1:-}" in
     # macOS links the static archive into Runner and resolves FFI symbols from
     # the process. Keep the dylib in native/target for standalone Rust checks;
     # embedding it would trigger Xcode27 LINKEDIT alignment failures.
+    # Strip debug sections (-S) so stdlib DWARF/LLVM bitcode metadata does not
+    # bloat the archive when LTO is enabled.
+    xcrun strip -S "$ROOT/native/target/aarch64-apple-darwin/release/libpocket_flutter.a"
     cp "$ROOT/native/target/aarch64-apple-darwin/release/libpocket_flutter.a" \
       "$PACKAGE_ROOT/macos/Frameworks/libpocket_flutter.a"
     ;;

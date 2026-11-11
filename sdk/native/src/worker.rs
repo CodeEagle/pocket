@@ -78,6 +78,7 @@ const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 30_000;
 const MAX_HTTP_TIMEOUT_MS: u64 = 120_000;
 const MAX_HTTP_REDIRECTS: usize = 3;
+const SHARED_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 #[allow(dead_code)]
 const HTTP_READ_SLICE: Duration = Duration::from_millis(100);
 #[allow(dead_code)]
@@ -851,14 +852,17 @@ struct WorkerState {
     node_names: OnceLock<Vec<CString>>,
     drivers: OnceLock<Vec<CWorkerDriver>>,
     nodes: OnceLock<Vec<CWorkerNode>>,
+    http_agent: ureq::Agent,
 }
 impl WorkerState {
     fn wake_host(&self) {
         let Some(notify) = self.notify else {
             return;
         };
-        notify_once(&self.wake_pending, || unsafe {
-            notify();
+        notify_once(&self.wake_pending, || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                notify();
+            }));
         });
     }
 
@@ -1167,6 +1171,10 @@ impl WorkerRuntime {
             node_names: OnceLock::new(),
             drivers: OnceLock::new(),
             nodes: OnceLock::new(),
+            http_agent: ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout_connect(SHARED_HTTP_CONNECT_TIMEOUT)
+                .build(),
         });
         install_node_table(&state, &declaration)?;
         let bytecode = artifact.payload.to_vec();
@@ -1759,6 +1767,10 @@ unsafe fn trace_state(context: *mut c_void) -> Option<&'static WorkerState> {
     (!context.is_null()).then(|| &*(context as *const WorkerState))
 }
 
+fn catch_worker_callback<T, F: FnOnce() -> T>(sentinel: T, f: F) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(sentinel)
+}
+
 unsafe extern "C" fn ui_trace_callback(
     context: *mut c_void,
     phase: u32,
@@ -1771,116 +1783,119 @@ unsafe extern "C" fn ui_trace_callback(
     decision: u32,
     status: i32,
 ) -> i32 {
-    let Some(state) = trace_state(context) else {
-        return -1;
-    };
-    let _publish_unlock = (phase == UI_TRACE_PUBLISH_AFTER)
-        .then(|| {
-            release_capture_gate_if_held(
-                &state.capture_gate_owner,
-                CAPTURE_GATE_UI_PUBLISH,
-                &state.mutation_gate,
-            )
-        })
-        .flatten();
-    let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
-        return 0;
-    };
-    let mode = trace.mode();
-    if mode == Mode::Live {
-        return 0;
-    }
-    if phase == UI_TRACE_PUBLISH_BEFORE {
-        if mode == Mode::Replay {
-            let result = unsafe {
-                await_replay_event(state, trace, TraceActor::Ui, session, "channel.publish")
-            };
-            if let Err(error) = result {
-                state.trace_failure(error);
-                return -1;
-            }
-        }
-        state.mutation_gate.lock();
-        state
-            .capture_gate_owner
-            .store(CAPTURE_GATE_UI_PUBLISH, Ordering::Release);
-        return 0;
-    }
-    if phase == UI_TRACE_PUBLISH_AFTER && (size > MAX_PAYLOAD || (size != 0 && bytes.is_null())) {
-        trace.mark_incomplete("UI Worker channel record exceeds 1024 bytes");
-        return 0;
-    }
-    let data = match phase {
-        UI_TRACE_PUBLISH_AFTER => {
-            let payload = if size == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(bytes, size)
-            };
-            serde_json::json!({
-                "generation": state.generation,
-                "direction": "ui-to-worker",
-                "channel": channel,
-                "bytesBase64": trace_bytes_base64(payload),
-                "status": status,
+    catch_worker_callback(-1, || {
+        let Some(state) = trace_state(context) else {
+            return -1;
+        };
+        let _publish_unlock = (phase == UI_TRACE_PUBLISH_AFTER)
+            .then(|| {
+                release_capture_gate_if_held(
+                    &state.capture_gate_owner,
+                    CAPTURE_GATE_UI_PUBLISH,
+                    &state.mutation_gate,
+                )
             })
+            .flatten();
+        let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
+            return 0;
+        };
+        let mode = trace.mode();
+        if mode == Mode::Live {
+            return 0;
         }
-        UI_TRACE_LATCH => {
-            if count as usize > MAX_EVENTS
-                || (stride as usize) < MAX_PAYLOAD
-                || (count != 0 && (bytes.is_null() || lengths.is_null()))
-            {
-                state.trace_failure("UI Worker latch mirror descriptor is invalid".into());
-                return -1;
-            }
-            let mut records = Vec::with_capacity(count as usize);
-            for index in 0..count as usize {
-                let length = *lengths.add(index) as usize;
-                if length > MAX_PAYLOAD {
-                    state.trace_failure("UI Worker latch record exceeds 1024 bytes".into());
+        if phase == UI_TRACE_PUBLISH_BEFORE {
+            if mode == Mode::Replay {
+                let result = unsafe {
+                    await_replay_event(state, trace, TraceActor::Ui, session, "channel.publish")
+                };
+                if let Err(error) = result {
+                    state.trace_failure(error);
                     return -1;
                 }
-                let record = std::slice::from_raw_parts(
-                    bytes.add(index.saturating_mul(stride as usize)),
-                    length,
-                );
-                records.push(trace_bytes_base64(record));
             }
-            serde_json::json!({
-                "generation": state.generation,
-                "channel": channel,
-                "snapshot": decision != 0,
-                "recordsBase64": records,
-                "status": status,
-            })
+            state.mutation_gate.lock();
+            state
+                .capture_gate_owner
+                .store(CAPTURE_GATE_UI_PUBLISH, Ordering::Release);
+            return 0;
         }
-        _ => {
-            state.trace_failure(format!("unsupported UI Worker trace phase {phase}"));
-            return -1;
+        if phase == UI_TRACE_PUBLISH_AFTER && (size > MAX_PAYLOAD || (size != 0 && bytes.is_null()))
+        {
+            trace.mark_incomplete("UI Worker channel record exceeds 1024 bytes");
+            return 0;
         }
-    };
-    let kind = if phase == UI_TRACE_LATCH {
-        "channel.latch"
-    } else {
-        "channel.publish"
-    };
-    let result = if phase == UI_TRACE_LATCH {
-        trace.observe_gated(
-            TraceActor::Ui,
-            session,
-            kind,
-            &["channel.publish", "turn.facts"],
-            || data,
-        )
-    } else {
-        trace.observe_now(TraceActor::Ui, session, kind, || data)
-    };
-    if let Err(error) = result {
-        state.trace_failure(error);
-        -1
-    } else {
-        0
-    }
+        let data = match phase {
+            UI_TRACE_PUBLISH_AFTER => {
+                let payload = if size == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(bytes, size)
+                };
+                serde_json::json!({
+                    "generation": state.generation,
+                    "direction": "ui-to-worker",
+                    "channel": channel,
+                    "bytesBase64": trace_bytes_base64(payload),
+                    "status": status,
+                })
+            }
+            UI_TRACE_LATCH => {
+                if count as usize > MAX_EVENTS
+                    || (stride as usize) < MAX_PAYLOAD
+                    || (count != 0 && (bytes.is_null() || lengths.is_null()))
+                {
+                    state.trace_failure("UI Worker latch mirror descriptor is invalid".into());
+                    return -1;
+                }
+                let mut records = Vec::with_capacity(count as usize);
+                for index in 0..count as usize {
+                    let length = *lengths.add(index) as usize;
+                    if length > MAX_PAYLOAD {
+                        state.trace_failure("UI Worker latch record exceeds 1024 bytes".into());
+                        return -1;
+                    }
+                    let record = std::slice::from_raw_parts(
+                        bytes.add(index.saturating_mul(stride as usize)),
+                        length,
+                    );
+                    records.push(trace_bytes_base64(record));
+                }
+                serde_json::json!({
+                    "generation": state.generation,
+                    "channel": channel,
+                    "snapshot": decision != 0,
+                    "recordsBase64": records,
+                    "status": status,
+                })
+            }
+            _ => {
+                state.trace_failure(format!("unsupported UI Worker trace phase {phase}"));
+                return -1;
+            }
+        };
+        let kind = if phase == UI_TRACE_LATCH {
+            "channel.latch"
+        } else {
+            "channel.publish"
+        };
+        let result = if phase == UI_TRACE_LATCH {
+            trace.observe_gated(
+                TraceActor::Ui,
+                session,
+                kind,
+                &["channel.publish", "turn.facts"],
+                || data,
+            )
+        } else {
+            trace.observe_now(TraceActor::Ui, session, kind, || data)
+        };
+        if let Err(error) = result {
+            state.trace_failure(error);
+            -1
+        } else {
+            0
+        }
+    })
 }
 
 unsafe extern "C" fn trace_fact_callback(
@@ -1894,39 +1909,41 @@ unsafe extern "C" fn trace_fact_callback(
     data: *const u8,
     size: usize,
 ) -> i32 {
-    let Some(state) = trace_state(context) else {
-        return -1;
-    };
-    let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
-        return 0;
-    };
-    if trace.mode() != Mode::Record {
-        return 0;
-    }
-    if size > MAX_PAYLOAD || (size != 0 && data.is_null()) {
-        trace.mark_incomplete("Worker IO fact exceeds 1024 bytes");
-        return 0;
-    }
-    let result = trace.observe_now(TraceActor::Io, session, "io.fact", || {
-        let bytes = if size == 0 {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts(data, size)
+    catch_worker_callback(-1, || {
+        let Some(state) = trace_state(context) else {
+            return -1;
         };
-        serde_json::json!({
-            "action": if action == TRACE_FACT_FINISH { "finish" } else { "emit" },
-            "handle": handle,
-            "request": request,
-            "kind": kind,
-            "status": status,
-            "offset": offset,
-            "bytesBase64": trace_bytes_base64(bytes),
-        })
-    });
-    if result.is_err() {
-        return -1;
-    }
-    0
+        let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
+            return 0;
+        };
+        if trace.mode() != Mode::Record {
+            return 0;
+        }
+        if size > MAX_PAYLOAD || (size != 0 && data.is_null()) {
+            trace.mark_incomplete("Worker IO fact exceeds 1024 bytes");
+            return 0;
+        }
+        let result = trace.observe_now(TraceActor::Io, session, "io.fact", || {
+            let bytes = if size == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(data, size)
+            };
+            serde_json::json!({
+                "action": if action == TRACE_FACT_FINISH { "finish" } else { "emit" },
+                "handle": handle,
+                "request": request,
+                "kind": kind,
+                "status": status,
+                "offset": offset,
+                "bytesBase64": trace_bytes_base64(bytes),
+            })
+        });
+        if result.is_err() {
+            return -1;
+        }
+        0
+    })
 }
 
 unsafe extern "C" fn trace_facts_callback(
@@ -1934,30 +1951,54 @@ unsafe extern "C" fn trace_facts_callback(
     facts: *const CWorkerFact,
     count: usize,
 ) -> i32 {
-    let Some(state) = trace_state(context) else {
-        return -1;
-    };
-    let _facts_unlock = release_capture_gate_if_held(
-        &state.capture_gate_owner,
-        CAPTURE_GATE_FACTS,
-        &state.mutation_gate,
-    );
-    let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
-        return 0;
-    };
-    if trace.mode() == Mode::Live {
-        return 0;
-    }
-    if count > 16 || (count != 0 && facts.is_null()) {
-        state.trace_failure("official Worker facts exceed the configured turn limit".into());
-        return -1;
-    }
-    let values = match (0..count)
-        .map(|index| worker_fact_json(&*facts.add(index)))
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(values) => values,
-        Err(error) => {
+    catch_worker_callback(-1, || {
+        let Some(state) = trace_state(context) else {
+            return -1;
+        };
+        let _facts_unlock = release_capture_gate_if_held(
+            &state.capture_gate_owner,
+            CAPTURE_GATE_FACTS,
+            &state.mutation_gate,
+        );
+        let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
+            return 0;
+        };
+        if trace.mode() == Mode::Live {
+            return 0;
+        }
+        if count > 16 || (count != 0 && facts.is_null()) {
+            state.trace_failure("official Worker facts exceed the configured turn limit".into());
+            return -1;
+        }
+        let values = match (0..count)
+            .map(|index| worker_fact_json(&*facts.add(index)))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(values) => values,
+            Err(error) => {
+                *state
+                    .errors
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(error.clone());
+                if trace.mode() == Mode::Replay {
+                    trace.fail_replay(error);
+                }
+                return -1;
+            }
+        };
+        let sequence = state.trace_sequence.load(Ordering::Acquire);
+        let now = state.trace_now_micros.load(Ordering::Acquire);
+        // C calls this while the core lock still protects the fact snapshot.
+        // BEFORE_FACTS gates Replay and consumes any preceding UI/IO events, so
+        // this comparison is a no-wait commit under the same lock.
+        let result = trace.observe_now(TraceActor::Worker, session, "turn.facts", || {
+            serde_json::json!({
+                "sequence": sequence,
+                "nowMicros": now,
+                "facts": values,
+            })
+        });
+        if let Err(error) = result {
             *state
                 .errors
                 .lock()
@@ -1967,30 +2008,8 @@ unsafe extern "C" fn trace_facts_callback(
             }
             return -1;
         }
-    };
-    let sequence = state.trace_sequence.load(Ordering::Acquire);
-    let now = state.trace_now_micros.load(Ordering::Acquire);
-    // C calls this while the core lock still protects the fact snapshot.
-    // BEFORE_FACTS gates Replay and consumes any preceding UI/IO events, so
-    // this comparison is a no-wait commit under the same lock.
-    let result = trace.observe_now(TraceActor::Worker, session, "turn.facts", || {
-        serde_json::json!({
-            "sequence": sequence,
-            "nowMicros": now,
-            "facts": values,
-        })
-    });
-    if let Err(error) = result {
-        *state
-            .errors
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(error.clone());
-        if trace.mode() == Mode::Replay {
-            trace.fail_replay(error);
-        }
-        return -1;
-    }
-    0
+        0
+    })
 }
 
 unsafe fn inject_replay_io_facts(
@@ -2184,244 +2203,246 @@ unsafe extern "C" fn trace_turn_callback(
     resume_at_micros: u64,
     output: *mut u64,
 ) -> i32 {
-    let Some(state) = trace_state(context) else {
-        return -1;
-    };
-    let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
-        return 0;
-    };
-    let mode = trace.mode();
-    if mode == Mode::Live {
-        return 0;
-    }
-    if input.is_null() {
-        state.trace_failure("Worker trace callback received no turn context".into());
-        return -1;
-    }
-    let input = &mut *input;
-    if input.struct_size < std::mem::size_of::<CWorkerContext>() as u32 {
-        state.trace_failure("Worker trace context ABI is too small".into());
-        return -1;
-    }
-    if mode == Mode::Replay && phase == TRACE_DEFERRED {
-        let next = match unsafe { wait_for_worker_frontier(state, trace, session) } {
-            Ok(next) => next,
-            Err(error) => {
-                state.trace_failure(error);
-                return -1;
-            }
+    catch_worker_callback(-1, || {
+        let Some(state) = trace_state(context) else {
+            return -1;
         };
-        if state.stop_requested.load(Ordering::Acquire)
-            || next.as_ref().is_some_and(|event| {
-                event.session.as_str() == session && event.kind == "worker.exit"
-            })
-        {
-            // The Host stop transaction releases this gate. Stop the pinned
-            // runner from inside the gate so C returns from this step instead
-            // of trying to start one more turn and consuming worker.exit as a
-            // turn admission event.
-            let runner = state.runner.load(Ordering::Acquire);
-            if !runner.is_null() {
-                unsafe { pocket_worker_runner_stop(runner) };
-            }
+        let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
+            return 0;
+        };
+        let mode = trace.mode();
+        if mode == Mode::Live {
+            return 0;
+        }
+        if input.is_null() {
+            state.trace_failure("Worker trace callback received no turn context".into());
             return -1;
         }
-    }
-    let result = (|| -> Result<(), String> {
-        match phase {
-            TRACE_BEFORE_STEP => {
-                if mode == Mode::Replay {
-                    await_replay_event(state, trace, TraceActor::Worker, session, "turn.begin")?;
+        let input = &mut *input;
+        if input.struct_size < std::mem::size_of::<CWorkerContext>() as u32 {
+            state.trace_failure("Worker trace context ABI is too small".into());
+            return -1;
+        }
+        if mode == Mode::Replay && phase == TRACE_DEFERRED {
+            let next = match unsafe { wait_for_worker_frontier(state, trace, session) } {
+                Ok(next) => next,
+                Err(error) => {
+                    state.trace_failure(error);
+                    return -1;
                 }
-                let generation = state.generation;
-                let sequence = input.sequence;
-                let now = input.now_micros;
-                match mode {
-                    Mode::Live => {}
-                    Mode::Record => {
-                        trace.observe(TraceActor::Worker, session, "turn.begin", || {
-                            serde_json::json!({
-                                "generation": generation,
-                                "sequence": sequence,
-                                "nowMicros": now,
-                            })
-                        })?;
-                    }
-                    Mode::Replay => {
-                        let expected = trace
-                            .take(TraceActor::Worker, session, "turn.begin")?
-                            .ok_or_else(|| "Worker replay is missing turn.begin".to_owned())?;
-                        if expected["generation"].as_u64() != Some(generation as u64)
-                            || expected["sequence"].as_u64() != Some(sequence as u64)
-                        {
-                            return Err("Worker replay turn generation/sequence differs".into());
-                        }
-                        let expected_now = expected["nowMicros"]
-                            .as_u64()
-                            .ok_or_else(|| "Worker replay turn clock is invalid".to_owned())?;
-                        input.now_micros = expected_now;
-                        state.clock.set_replay_now(expected_now);
-                    }
+            };
+            if state.stop_requested.load(Ordering::Acquire)
+                || next.as_ref().is_some_and(|event| {
+                    event.session.as_str() == session && event.kind == "worker.exit"
+                })
+            {
+                // The Host stop transaction releases this gate. Stop the pinned
+                // runner from inside the gate so C returns from this step instead
+                // of trying to start one more turn and consuming worker.exit as a
+                // turn admission event.
+                let runner = state.runner.load(Ordering::Acquire);
+                if !runner.is_null() {
+                    unsafe { pocket_worker_runner_stop(runner) };
                 }
-                state
-                    .trace_sequence
-                    .store(sequence as u64, Ordering::Release);
-                state
-                    .trace_now_micros
-                    .store(input.now_micros, Ordering::Release);
+                return -1;
             }
-            TRACE_BEFORE_FACTS => {
-                if mode == Mode::Replay {
-                    // Park before taking the core's fact snapshot. Earlier UI
-                    // publishes in this turn must reach the core before it is
-                    // observed; the post-observe trace callback cannot repair
-                    // a snapshot that was taken too early.
-                    await_replay_event(state, trace, TraceActor::Worker, session, "turn.facts")?;
-                }
-                if mode != Mode::Live {
-                    state.mutation_gate.lock();
-                    state
-                        .capture_gate_owner
-                        .store(CAPTURE_GATE_FACTS, Ordering::Release);
-                }
-            }
-            TRACE_IDLE | TRACE_END => {
-                if mode == Mode::Replay {
-                    await_replay_event(state, trace, TraceActor::Worker, session, "turn.end")?;
-                }
-                let generation = state.generation;
-                let sequence = input.sequence;
-                let executed = phase == TRACE_END && status != 0;
-                let actual = serde_json::json!({
-                    "generation": generation,
-                    "sequence": sequence,
-                    "executed": executed,
-                    "elapsedMicros": elapsed_micros,
-                });
-                match mode {
-                    Mode::Live => {}
-                    Mode::Record => {
-                        trace.observe(TraceActor::Worker, session, "turn.end", || actual)?;
+        }
+        let result = (|| -> Result<(), String> {
+            match phase {
+                TRACE_BEFORE_STEP => {
+                    if mode == Mode::Replay {
+                        await_replay_event(state, trace, TraceActor::Worker, session, "turn.begin")?;
                     }
-                    Mode::Replay => {
-                        let expected = trace
-                            .take(TraceActor::Worker, session, "turn.end")?
-                            .ok_or_else(|| "Worker replay is missing turn.end".to_owned())?;
-                        if expected["generation"].as_u64() != Some(generation as u64)
-                            || expected["sequence"].as_u64() != Some(sequence as u64)
-                            || expected["executed"].as_bool() != Some(executed)
-                        {
-                            return Err("Worker replay turn completion differs".into());
-                        }
-                        let recorded = expected["elapsedMicros"]
-                            .as_u64()
-                            .ok_or_else(|| "Worker replay turn duration is invalid".to_owned())?;
-                        state.clock.advance_replay(recorded)?;
-                        if !output.is_null() {
-                            *output = recorded;
-                        }
-                    }
-                }
-            }
-            TRACE_DEFERRED => {
-                if mode == Mode::Record {
-                    if status != 0 {
-                        let actual = serde_json::json!({
-                            "generation": state.generation,
-                            "nowMicros": input.now_micros,
-                            "resumeAtMicros": resume_at_micros,
-                        });
-                        trace.observe(TraceActor::Worker, session, "turn.deferred", || actual)?;
-                    }
-                    if !output.is_null() {
-                        *output = if status != 0 { resume_at_micros } else { 0 };
-                    }
-                } else if mode == Mode::Replay {
-                    // The replay pre-gate above has waited for the next Worker
-                    // event without holding the core lock and handled stop.
-                    let next = trace.peek_replay()?;
-                    if next.as_ref().is_some_and(|event| {
-                        event.session.as_str() == session && event.kind == "turn.deferred"
-                    }) {
-                        let expected = trace
-                            .take(TraceActor::Worker, session, "turn.deferred")?
-                            .ok_or_else(|| "Worker replay is missing turn.deferred".to_owned())?;
-                        if expected["generation"].as_u64() != Some(state.generation as u64) {
-                            return Err("Worker replay quota boundary differs".into());
-                        }
-                        let recorded_now = expected["nowMicros"]
-                            .as_u64()
-                            .ok_or_else(|| "Worker replay quota clock is invalid".to_owned())?;
-                        if recorded_now < input.now_micros {
-                            return Err("Worker replay quota clock moved backwards".into());
-                        }
-                        let resume = expected["resumeAtMicros"]
-                            .as_u64()
-                            .ok_or_else(|| "Worker replay resume deadline is invalid".to_owned())?;
-                        if resume < recorded_now {
-                            return Err("Worker replay resume deadline precedes its clock".into());
-                        }
-                        input.now_micros = recorded_now;
-                        // A recorded quota deferral is only a deadline, not a
-                        // clock jump. UI ingress can wake the runner again
-                        // before that deadline, producing another deferred
-                        // decision at an earlier time. The runner gate follows
-                        // the next event; turn.begin advances the clock when
-                        // the recording actually reaches the deadline.
-                        state.clock.set_replay_now(recorded_now);
-                        if !output.is_null() {
-                            *output = resume;
-                        }
-                    } else {
-                        let expected = next
-                            .as_ref()
-                            .filter(|event| {
-                                event.session.as_str() == session && event.kind == "turn.begin"
-                            })
-                            .ok_or_else(|| match next.as_ref() {
-                                Some(event) => format!(
-                                    "Worker replay expected turn.begin or turn.deferred, got event {} {}/{}",
-                                    event.seq, event.session, event.kind
-                                ),
-                                None => "Worker replay expected turn.begin or turn.deferred, got end of batch".to_owned(),
+                    let generation = state.generation;
+                    let sequence = input.sequence;
+                    let now = input.now_micros;
+                    match mode {
+                        Mode::Live => {}
+                        Mode::Record => {
+                            trace.observe(TraceActor::Worker, session, "turn.begin", || {
+                                serde_json::json!({
+                                    "generation": generation,
+                                    "sequence": sequence,
+                                    "nowMicros": now,
+                                })
                             })?;
-                        let expected_sequence = state
-                            .trace_sequence
-                            .load(Ordering::Acquire)
-                            .checked_add(1)
-                            .ok_or_else(|| "Worker replay turn sequence overflow".to_owned())?;
-                        if expected.data["generation"].as_u64() != Some(state.generation as u64)
-                            || expected.data["sequence"].as_u64() != Some(expected_sequence as u64)
-                        {
-                            return Err("Worker replay turn admission identity differs".into());
                         }
-                        let recorded_now = expected.data["nowMicros"]
-                            .as_u64()
-                            .ok_or_else(|| "Worker replay turn clock is invalid".to_owned())?;
-                        if recorded_now < input.now_micros {
-                            return Err("Worker replay turn clock moved backwards".into());
+                        Mode::Replay => {
+                            let expected = trace
+                                .take(TraceActor::Worker, session, "turn.begin")?
+                                .ok_or_else(|| "Worker replay is missing turn.begin".to_owned())?;
+                            if expected["generation"].as_u64() != Some(generation as u64)
+                                || expected["sequence"].as_u64() != Some(sequence as u64)
+                            {
+                                return Err("Worker replay turn generation/sequence differs".into());
+                            }
+                            let expected_now = expected["nowMicros"]
+                                .as_u64()
+                                .ok_or_else(|| "Worker replay turn clock is invalid".to_owned())?;
+                            input.now_micros = expected_now;
+                            state.clock.set_replay_now(expected_now);
                         }
-                        state.clock.set_replay_now(recorded_now);
-                        input.now_micros = recorded_now;
-                        if !output.is_null() {
-                            // UINT64_MAX tells the C quota gate to recalculate
-                            // its window at this recorded logical time.
-                            *output = u64::MAX;
+                    }
+                    state
+                        .trace_sequence
+                        .store(sequence as u64, Ordering::Release);
+                    state
+                        .trace_now_micros
+                        .store(input.now_micros, Ordering::Release);
+                }
+                TRACE_BEFORE_FACTS => {
+                    if mode == Mode::Replay {
+                        // Park before taking the core's fact snapshot. Earlier UI
+                        // publishes in this turn must reach the core before it is
+                        // observed; the post-observe trace callback cannot repair
+                        // a snapshot that was taken too early.
+                        await_replay_event(state, trace, TraceActor::Worker, session, "turn.facts")?;
+                    }
+                    if mode != Mode::Live {
+                        state.mutation_gate.lock();
+                        state
+                            .capture_gate_owner
+                            .store(CAPTURE_GATE_FACTS, Ordering::Release);
+                    }
+                }
+                TRACE_IDLE | TRACE_END => {
+                    if mode == Mode::Replay {
+                        await_replay_event(state, trace, TraceActor::Worker, session, "turn.end")?;
+                    }
+                    let generation = state.generation;
+                    let sequence = input.sequence;
+                    let executed = phase == TRACE_END && status != 0;
+                    let actual = serde_json::json!({
+                        "generation": generation,
+                        "sequence": sequence,
+                        "executed": executed,
+                        "elapsedMicros": elapsed_micros,
+                    });
+                    match mode {
+                        Mode::Live => {}
+                        Mode::Record => {
+                            trace.observe(TraceActor::Worker, session, "turn.end", || actual)?;
+                        }
+                        Mode::Replay => {
+                            let expected = trace
+                                .take(TraceActor::Worker, session, "turn.end")?
+                                .ok_or_else(|| "Worker replay is missing turn.end".to_owned())?;
+                            if expected["generation"].as_u64() != Some(generation as u64)
+                                || expected["sequence"].as_u64() != Some(sequence as u64)
+                                || expected["executed"].as_bool() != Some(executed)
+                            {
+                                return Err("Worker replay turn completion differs".into());
+                            }
+                            let recorded = expected["elapsedMicros"]
+                                .as_u64()
+                                .ok_or_else(|| "Worker replay turn duration is invalid".to_owned())?;
+                            state.clock.advance_replay(recorded)?;
+                            if !output.is_null() {
+                                *output = recorded;
+                            }
                         }
                     }
                 }
+                TRACE_DEFERRED => {
+                    if mode == Mode::Record {
+                        if status != 0 {
+                            let actual = serde_json::json!({
+                                "generation": state.generation,
+                                "nowMicros": input.now_micros,
+                                "resumeAtMicros": resume_at_micros,
+                            });
+                            trace.observe(TraceActor::Worker, session, "turn.deferred", || actual)?;
+                        }
+                        if !output.is_null() {
+                            *output = if status != 0 { resume_at_micros } else { 0 };
+                        }
+                    } else if mode == Mode::Replay {
+                        // The replay pre-gate above has waited for the next Worker
+                        // event without holding the core lock and handled stop.
+                        let next = trace.peek_replay()?;
+                        if next.as_ref().is_some_and(|event| {
+                            event.session.as_str() == session && event.kind == "turn.deferred"
+                        }) {
+                            let expected = trace
+                                .take(TraceActor::Worker, session, "turn.deferred")?
+                                .ok_or_else(|| "Worker replay is missing turn.deferred".to_owned())?;
+                            if expected["generation"].as_u64() != Some(state.generation as u64) {
+                                return Err("Worker replay quota boundary differs".into());
+                            }
+                            let recorded_now = expected["nowMicros"]
+                                .as_u64()
+                                .ok_or_else(|| "Worker replay quota clock is invalid".to_owned())?;
+                            if recorded_now < input.now_micros {
+                                return Err("Worker replay quota clock moved backwards".into());
+                            }
+                            let resume = expected["resumeAtMicros"]
+                                .as_u64()
+                                .ok_or_else(|| "Worker replay resume deadline is invalid".to_owned())?;
+                            if resume < recorded_now {
+                                return Err("Worker replay resume deadline precedes its clock".into());
+                            }
+                            input.now_micros = recorded_now;
+                            // A recorded quota deferral is only a deadline, not a
+                            // clock jump. UI ingress can wake the runner again
+                            // before that deadline, producing another deferred
+                            // decision at an earlier time. The runner gate follows
+                            // the next event; turn.begin advances the clock when
+                            // the recording actually reaches the deadline.
+                            state.clock.set_replay_now(recorded_now);
+                            if !output.is_null() {
+                                *output = resume;
+                            }
+                        } else {
+                            let expected = next
+                                .as_ref()
+                                .filter(|event| {
+                                    event.session.as_str() == session && event.kind == "turn.begin"
+                                })
+                                .ok_or_else(|| match next.as_ref() {
+                                    Some(event) => format!(
+                                        "Worker replay expected turn.begin or turn.deferred, got event {} {}/{}",
+                                        event.seq, event.session, event.kind
+                                    ),
+                                    None => "Worker replay expected turn.begin or turn.deferred, got end of batch".to_owned(),
+                                })?;
+                            let expected_sequence = state
+                                .trace_sequence
+                                .load(Ordering::Acquire)
+                                .checked_add(1)
+                                .ok_or_else(|| "Worker replay turn sequence overflow".to_owned())?;
+                            if expected.data["generation"].as_u64() != Some(state.generation as u64)
+                                || expected.data["sequence"].as_u64() != Some(expected_sequence as u64)
+                            {
+                                return Err("Worker replay turn admission identity differs".into());
+                            }
+                            let recorded_now = expected.data["nowMicros"]
+                                .as_u64()
+                                .ok_or_else(|| "Worker replay turn clock is invalid".to_owned())?;
+                            if recorded_now < input.now_micros {
+                                return Err("Worker replay turn clock moved backwards".into());
+                            }
+                            state.clock.set_replay_now(recorded_now);
+                            input.now_micros = recorded_now;
+                            if !output.is_null() {
+                                // UINT64_MAX tells the C quota gate to recalculate
+                                // its window at this recorded logical time.
+                                *output = u64::MAX;
+                            }
+                        }
+                    }
+                }
+                _ => return Err(format!("unsupported Worker trace phase {phase}")),
             }
-            _ => return Err(format!("unsupported Worker trace phase {phase}")),
+            Ok(())
+        })();
+        match result {
+            Ok(()) => 0,
+            Err(error) => {
+                state.trace_failure(error);
+                -1
+            }
         }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => 0,
-        Err(error) => {
-            state.trace_failure(error);
-            -1
-        }
-    }
+    })
 }
 
 unsafe extern "C" fn trace_boundary_callback(
@@ -2429,45 +2450,47 @@ unsafe extern "C" fn trace_boundary_callback(
     phase: u32,
     decision: u32,
 ) -> i32 {
-    let Some(state) = trace_state(context) else {
-        return -1;
-    };
-    let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
-        return 0;
-    };
-    let mode = trace.mode();
-    if mode == Mode::Live || phase != TRACE_BEFORE_OPERATION {
-        return 0;
-    }
-    let kind = match decision {
-        OP_OPEN => "io.open",
-        OP_SUBMIT => "io.submit",
-        OP_CANCEL => "io.cancel",
-        OP_CLOSE => "io.close",
-        OP_WRITE => "io.write",
-        OP_PUBLISH => "channel.publish",
-        OP_TIMER => "timer.set",
-        OP_DECLARE_CHANNEL => "channel.declare",
-        _ => {
-            state.trace_failure(format!("unsupported Worker operation boundary {decision}"));
+    catch_worker_callback(-1, || {
+        let Some(state) = trace_state(context) else {
             return -1;
+        };
+        let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
+            return 0;
+        };
+        let mode = trace.mode();
+        if mode == Mode::Live || phase != TRACE_BEFORE_OPERATION {
+            return 0;
         }
-    };
-    if mode == Mode::Replay {
-        if let Err(error) =
-            unsafe { await_replay_event(state, trace, TraceActor::Worker, session, kind) }
-        {
-            state.trace_failure(error);
-            return -1;
+        let kind = match decision {
+            OP_OPEN => "io.open",
+            OP_SUBMIT => "io.submit",
+            OP_CANCEL => "io.cancel",
+            OP_CLOSE => "io.close",
+            OP_WRITE => "io.write",
+            OP_PUBLISH => "channel.publish",
+            OP_TIMER => "timer.set",
+            OP_DECLARE_CHANNEL => "channel.declare",
+            _ => {
+                state.trace_failure(format!("unsupported Worker operation boundary {decision}"));
+                return -1;
+            }
+        };
+        if mode == Mode::Replay {
+            if let Err(error) =
+                unsafe { await_replay_event(state, trace, TraceActor::Worker, session, kind) }
+            {
+                state.trace_failure(error);
+                return -1;
+            }
         }
-    }
-    if decision == OP_PUBLISH {
-        state.mutation_gate.lock();
-        state
-            .capture_gate_owner
-            .store(CAPTURE_GATE_WORKER_PUBLISH, Ordering::Release);
-    }
-    0
+        if decision == OP_PUBLISH {
+            state.mutation_gate.lock();
+            state
+                .capture_gate_owner
+                .store(CAPTURE_GATE_WORKER_PUBLISH, Ordering::Release);
+        }
+        0
+    })
 }
 
 unsafe extern "C" fn trace_operation_callback(
@@ -2484,72 +2507,74 @@ unsafe extern "C" fn trace_operation_callback(
     direction: u32,
     status: i32,
 ) -> i32 {
-    let Some(state) = trace_state(context) else {
-        return -1;
-    };
-    let _publish_unlock = (operation == OP_PUBLISH)
-        .then(|| {
-            release_capture_gate_if_held(
-                &state.capture_gate_owner,
-                CAPTURE_GATE_WORKER_PUBLISH,
-                &state.mutation_gate,
-            )
-        })
-        .flatten();
-    let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
-        return 0;
-    };
-    if trace.mode() == Mode::Live {
-        return 0;
-    }
-    if size > MAX_PAYLOAD || (size != 0 && bytes.is_null()) {
-        trace.mark_incomplete("Worker operation payload exceeds 1024 bytes");
-        return 0;
-    }
-    let kind = match operation {
-        OP_OPEN => "io.open",
-        OP_SUBMIT => "io.submit",
-        OP_CANCEL => "io.cancel",
-        OP_CLOSE => "io.close",
-        OP_WRITE => "io.write",
-        OP_PUBLISH => "channel.publish",
-        OP_TIMER => "timer.set",
-        OP_DECLARE_CHANNEL => "channel.declare",
-        _ => {
-            state.trace_failure(format!("unsupported Worker operation {operation}"));
+    catch_worker_callback(-1, || {
+        let Some(state) = trace_state(context) else {
             return -1;
+        };
+        let _publish_unlock = (operation == OP_PUBLISH)
+            .then(|| {
+                release_capture_gate_if_held(
+                    &state.capture_gate_owner,
+                    CAPTURE_GATE_WORKER_PUBLISH,
+                    &state.mutation_gate,
+                )
+            })
+            .flatten();
+        let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
+            return 0;
+        };
+        if trace.mode() == Mode::Live {
+            return 0;
         }
-    };
-    let name = if name.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(name).to_string_lossy().into_owned())
-    };
-    let payload = if size == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(bytes, size)
-    };
-    let data = serde_json::json!({
-        "generation": state.generation,
-        "operation": operation,
-        "id": id,
-        "code": code,
-        "name": name,
-        "bytesBase64": trace_bytes_base64(payload),
-        "deadlineMicros": deadline_micros,
-        "periodMicros": period_micros,
-        "capacity": capacity,
-        "direction": direction,
-        "status": status,
-    });
-    match trace.observe_now(TraceActor::Worker, session, kind, || data) {
-        Ok(_) => 0,
-        Err(error) => {
-            state.trace_failure(error);
-            -1
+        if size > MAX_PAYLOAD || (size != 0 && bytes.is_null()) {
+            trace.mark_incomplete("Worker operation payload exceeds 1024 bytes");
+            return 0;
         }
-    }
+        let kind = match operation {
+            OP_OPEN => "io.open",
+            OP_SUBMIT => "io.submit",
+            OP_CANCEL => "io.cancel",
+            OP_CLOSE => "io.close",
+            OP_WRITE => "io.write",
+            OP_PUBLISH => "channel.publish",
+            OP_TIMER => "timer.set",
+            OP_DECLARE_CHANNEL => "channel.declare",
+            _ => {
+                state.trace_failure(format!("unsupported Worker operation {operation}"));
+                return -1;
+            }
+        };
+        let name = if name.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(name).to_string_lossy().into_owned())
+        };
+        let payload = if size == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(bytes, size)
+        };
+        let data = serde_json::json!({
+            "generation": state.generation,
+            "operation": operation,
+            "id": id,
+            "code": code,
+            "name": name,
+            "bytesBase64": trace_bytes_base64(payload),
+            "deadlineMicros": deadline_micros,
+            "periodMicros": period_micros,
+            "capacity": capacity,
+            "direction": direction,
+            "status": status,
+        });
+        match trace.observe_now(TraceActor::Worker, session, kind, || data) {
+            Ok(_) => 0,
+            Err(error) => {
+                state.trace_failure(error);
+                -1
+            }
+        }
+    })
 }
 
 unsafe extern "C" fn trace_scalar_callback(
@@ -2558,101 +2583,111 @@ unsafe extern "C" fn trace_scalar_callback(
     actual: f64,
     output: *mut f64,
 ) -> i32 {
-    let Some(state) = trace_state(context) else {
-        return -1;
-    };
-    let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
-        return 0;
-    };
-    if trace.mode() == Mode::Live {
-        return 0;
-    }
-    if trace.mode() == Mode::Replay {
-        if let Err(error) =
-            unsafe { await_replay_event(state, trace, TraceActor::Worker, session, "clock.scalar") }
-        {
-            state.trace_failure(error);
+    catch_worker_callback(-1, || {
+        let Some(state) = trace_state(context) else {
             return -1;
+        };
+        let (Some(trace), Some(session)) = (&state.trace, &state.session) else {
+            return 0;
+        };
+        if trace.mode() == Mode::Live {
+            return 0;
         }
-    }
-    if name.is_null() || output.is_null() || !actual.is_finite() {
-        state.trace_failure("Worker scalar callback arguments are invalid".into());
-        return -1;
-    }
-    let source = CStr::from_ptr(name).to_string_lossy().into_owned();
-    match trace.mode() {
-        Mode::Live => {}
-        Mode::Record => {
-            if let Err(error) = trace.observe(
-                TraceActor::Worker,
-                session,
-                "clock.scalar",
-                || serde_json::json!({"source": source, "value": actual}),
-            ) {
+        if trace.mode() == Mode::Replay {
+            if let Err(error) = unsafe {
+                await_replay_event(state, trace, TraceActor::Worker, session, "clock.scalar")
+            } {
                 state.trace_failure(error);
                 return -1;
             }
         }
-        Mode::Replay => {
-            let expected = match trace.take(TraceActor::Worker, session, "clock.scalar") {
-                Ok(Some(value)) => value,
-                Ok(None) => {
-                    state.trace_failure("Worker replay is missing clock.scalar".into());
-                    return -1;
-                }
-                Err(error) => {
+        if name.is_null() || output.is_null() || !actual.is_finite() {
+            state.trace_failure("Worker scalar callback arguments are invalid".into());
+            return -1;
+        }
+        let source = CStr::from_ptr(name).to_string_lossy().into_owned();
+        match trace.mode() {
+            Mode::Live => {}
+            Mode::Record => {
+                if let Err(error) =
+                    trace.observe(TraceActor::Worker, session, "clock.scalar", || {
+                        serde_json::json!({"source": source, "value": actual})
+                    })
+                {
                     state.trace_failure(error);
                     return -1;
                 }
-            };
-            if expected["source"].as_str() != Some(&source) {
-                state.trace_failure("Worker replay scalar source differs".into());
-                return -1;
             }
-            let Some(value) = expected["value"].as_f64().filter(|value| value.is_finite()) else {
-                state.trace_failure("Worker replay scalar value is invalid".into());
-                return -1;
-            };
-            *output = value;
+            Mode::Replay => {
+                let expected = match trace.take(TraceActor::Worker, session, "clock.scalar") {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        state.trace_failure("Worker replay is missing clock.scalar".into());
+                        return -1;
+                    }
+                    Err(error) => {
+                        state.trace_failure(error);
+                        return -1;
+                    }
+                };
+                if expected["source"].as_str() != Some(&source) {
+                    state.trace_failure("Worker replay scalar source differs".into());
+                    return -1;
+                }
+                let Some(value) = expected["value"].as_f64().filter(|value| value.is_finite())
+                else {
+                    state.trace_failure("Worker replay scalar value is invalid".into());
+                    return -1;
+                };
+                *output = value;
+            }
         }
-    }
-    0
+        0
+    })
 }
 
 unsafe extern "C" fn core_lock(context: *mut c_void) {
-    if !context.is_null() {
-        (&*(context as *const WorkerState)).core_lock.lock();
-    }
+    catch_worker_callback((), || {
+        if !context.is_null() {
+            (&*(context as *const WorkerState)).core_lock.lock();
+        }
+    });
 }
 unsafe extern "C" fn core_unlock(context: *mut c_void) {
-    if !context.is_null() {
-        (&*(context as *const WorkerState)).core_lock.unlock();
-    }
+    catch_worker_callback((), || {
+        if !context.is_null() {
+            (&*(context as *const WorkerState)).core_lock.unlock();
+        }
+    });
 }
 unsafe extern "C" fn core_wake(context: *mut c_void) {
-    if context.is_null() {
-        return;
-    }
-    let state = &*(context as *const WorkerState);
-    // Core operations performed by the owner runner (timer registration,
-    // publish, dispatch) happen before it reaches its wait callback. They
-    // still notify the UI, but must not leave a stale self-wake in the
-    // runner's condition variable.
-    if !state
-        .owner_thread
-        .get()
-        .is_some_and(|owner| owner == &thread::current().id())
-    {
-        state.pulse.signal();
-    }
-    state.wake_host();
+    catch_worker_callback((), || {
+        if context.is_null() {
+            return;
+        }
+        let state = &*(context as *const WorkerState);
+        // Core operations performed by the owner runner (timer registration,
+        // publish, dispatch) happen before it reaches its wait callback. They
+        // still notify the UI, but must not leave a stale self-wake in the
+        // runner's condition variable.
+        if !state
+            .owner_thread
+            .get()
+            .is_some_and(|owner| owner == &thread::current().id())
+        {
+            state.pulse.signal();
+        }
+        state.wake_host();
+    });
 }
 unsafe extern "C" fn core_now(context: *mut c_void) -> u64 {
-    if context.is_null() {
-        now_micros()
-    } else {
-        (&*(context as *const WorkerState)).clock.now_micros()
-    }
+    catch_worker_callback(0, || {
+        if context.is_null() {
+            now_micros()
+        } else {
+            (&*(context as *const WorkerState)).clock.now_micros()
+        }
+    })
 }
 
 #[cfg(any(
@@ -2683,66 +2718,72 @@ unsafe extern "C" {
 }
 
 unsafe extern "C" fn cpu_now_micros(context: *mut c_void) -> u64 {
-    // The QuickJS interrupt handler uses the runner thread's CPU time for its
-    // per-turn safety guard. Replay gates consume no CPU; deterministic quota
-    // accounting still uses the Worker virtual wall clock elsewhere.
-    #[cfg(any(
-        target_os = "android",
-        target_os = "ios",
-        target_os = "linux",
-        target_os = "macos"
-    ))]
-    {
-        let mut value = ThreadCpuTimespec {
-            seconds: 0,
-            nanoseconds: 0,
-        };
-        if clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut value) == 0
-            && value.seconds >= 0
-            && value.nanoseconds >= 0
+    catch_worker_callback(0, || {
+        // The QuickJS interrupt handler uses the runner thread's CPU time for its
+        // per-turn safety guard. Replay gates consume no CPU; deterministic quota
+        // accounting still uses the Worker virtual wall clock elsewhere.
+        #[cfg(any(
+            target_os = "android",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "macos"
+        ))]
         {
-            let micros = (value.seconds as u128)
-                .saturating_mul(1_000_000)
-                .saturating_add(value.nanoseconds as u128 / 1_000);
-            return micros.min(u64::MAX as u128) as u64;
-        }
-    }
-    let _ = context;
-    now_micros()
-}
-unsafe extern "C" fn runner_wait(context: *mut c_void, deadline: u64) {
-    if !context.is_null() {
-        let state = &*(context as *const WorkerState);
-        if let Some(trace) = &state.trace {
-            if trace.mode() == Mode::Replay {
-                // The runner uses this callback both for its replay event
-                // gate and for the C core's post-stop destruction wait. The
-                // former exits as soon as stop is requested; the latter must
-                // sleep until canceled native requests signal completion.
-                // Returning immediately here would turn the pinned runner's
-                // busy-destroy retry into a tight polling loop.
-                if state.stop_requested.load(Ordering::Acquire) {
-                    state.pulse.wait_runner(deadline, &state.clock);
-                    return;
-                }
-                if let Err(error) = trace.wait_runner_or_stop(
-                    state.session.as_deref().unwrap_or(""),
-                    &state.stop_requested,
-                ) {
-                    state.trace_failure(error);
-                }
-                return;
+            let mut value = ThreadCpuTimespec {
+                seconds: 0,
+                nanoseconds: 0,
+            };
+            if clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut value) == 0
+                && value.seconds >= 0
+                && value.nanoseconds >= 0
+            {
+                let micros = (value.seconds as u128)
+                    .saturating_mul(1_000_000)
+                    .saturating_add(value.nanoseconds as u128 / 1_000);
+                return micros.min(u64::MAX as u128) as u64;
             }
         }
-        state.clock.wait_until_resumed(&state.stop_requested);
-        state.pulse.wait_runner(deadline, &state.clock);
-    }
+        let _ = context;
+        now_micros()
+    })
+}
+unsafe extern "C" fn runner_wait(context: *mut c_void, deadline: u64) {
+    catch_worker_callback((), || {
+        if !context.is_null() {
+            let state = &*(context as *const WorkerState);
+            if let Some(trace) = &state.trace {
+                if trace.mode() == Mode::Replay {
+                    // The runner uses this callback both for its replay event
+                    // gate and for the C core's post-stop destruction wait. The
+                    // former exits as soon as stop is requested; the latter must
+                    // sleep until canceled native requests signal completion.
+                    // Returning immediately here would turn the pinned runner's
+                    // busy-destroy retry into a tight polling loop.
+                    if state.stop_requested.load(Ordering::Acquire) {
+                        state.pulse.wait_runner(deadline, &state.clock);
+                        return;
+                    }
+                    if let Err(error) = trace.wait_runner_or_stop(
+                        state.session.as_deref().unwrap_or(""),
+                        &state.stop_requested,
+                    ) {
+                        state.trace_failure(error);
+                    }
+                    return;
+                }
+            }
+            state.clock.wait_until_resumed(&state.stop_requested);
+            state.pulse.wait_runner(deadline, &state.clock);
+        }
+    });
 }
 unsafe extern "C" fn runner_pause_wait(context: *mut c_void) {
-    if !context.is_null() {
-        let state = &*(context as *const WorkerState);
-        state.clock.wait_until_resumed(&state.stop_requested);
-    }
+    catch_worker_callback((), || {
+        if !context.is_null() {
+            let state = &*(context as *const WorkerState);
+            state.clock.wait_until_resumed(&state.stop_requested);
+        }
+    });
 }
 fn owner_thread(state: Arc<WorkerState>, bytecode: Vec<u8>) {
     let _ = state.owner_thread.set(thread::current().id());
@@ -2975,24 +3016,26 @@ unsafe extern "C" fn driver_open(
     bytes: *const u8,
     size: usize,
 ) -> i32 {
-    let Some(state) = node_state(context, WorkerResourceKind::Http) else {
-        return STATUS_UNSUPPORTED;
-    };
-    if size == 0 || size > MAX_PAYLOAD || bytes.is_null() {
-        return STATUS_INVALID;
-    }
-    let source = std::slice::from_raw_parts(bytes, size);
-    match parse_http_descriptor(source, &state.allowed_origins) {
-        Ok(descriptor) => {
-            state
-                .resources
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .insert(handle, descriptor);
-            STATUS_OK
+    catch_worker_callback(STATUS_FAILED, || {
+        let Some(state) = node_state(context, WorkerResourceKind::Http) else {
+            return STATUS_UNSUPPORTED;
+        };
+        if size == 0 || size > MAX_PAYLOAD || bytes.is_null() {
+            return STATUS_INVALID;
         }
-        Err(_) => STATUS_INVALID,
-    }
+        let source = std::slice::from_raw_parts(bytes, size);
+        match parse_http_descriptor(source, &state.allowed_origins) {
+            Ok(descriptor) => {
+                state
+                    .resources
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .insert(handle, descriptor);
+                STATUS_OK
+            }
+            Err(_) => STATUS_INVALID,
+        }
+    })
 }
 
 unsafe extern "C" fn driver_validate(
@@ -3004,22 +3047,24 @@ unsafe extern "C" fn driver_validate(
     size: usize,
     capacity: usize,
 ) -> i32 {
-    let Some(state) = node_state(context, WorkerResourceKind::Http) else {
-        return STATUS_UNSUPPORTED;
-    };
-    if opcode != 1 || size != 0 || capacity != 0 {
-        return STATUS_INVALID;
-    }
-    if state
-        .resources
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .contains_key(&handle)
-    {
-        STATUS_OK
-    } else {
-        STATUS_INVALID
-    }
+    catch_worker_callback(STATUS_FAILED, || {
+        let Some(state) = node_state(context, WorkerResourceKind::Http) else {
+            return STATUS_UNSUPPORTED;
+        };
+        if opcode != 1 || size != 0 || capacity != 0 {
+            return STATUS_INVALID;
+        }
+        if state
+            .resources
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains_key(&handle)
+        {
+            STATUS_OK
+        } else {
+            STATUS_INVALID
+        }
+    })
 }
 
 unsafe extern "C" fn driver_start(
@@ -3032,143 +3077,79 @@ unsafe extern "C" fn driver_start(
     size: usize,
     _capacity: usize,
 ) -> i32 {
-    let Some(state) = node_state(context, WorkerResourceKind::Http) else {
-        return STATUS_UNSUPPORTED;
-    };
-    if state.offline_shutdown.load(Ordering::Acquire) {
-        return STATUS_CANCELLED;
-    }
-    if opcode != 1 || size != 0 || core.is_null() {
-        return STATUS_INVALID;
-    }
-    let Some(descriptor) = state
-        .resources
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(&handle)
-        .cloned()
-    else {
-        return STATUS_INVALID;
-    };
-    if let Some(trace) = &state.trace {
-        if trace.mode() != Mode::Live {
-            let Some(session) = &state.session else {
-                return STATUS_FAILED;
-            };
-            if trace.mode() == Mode::Replay {
-                if let Err(error) = unsafe {
-                    await_replay_event(
-                        state.as_ref(),
-                        trace,
-                        TraceActor::Worker,
-                        session,
-                        "io.request",
-                    )
-                } {
+    catch_worker_callback(STATUS_FAILED, || {
+        let Some(state) = node_state(context, WorkerResourceKind::Http) else {
+            return STATUS_UNSUPPORTED;
+        };
+        if state.offline_shutdown.load(Ordering::Acquire) {
+            return STATUS_CANCELLED;
+        }
+        if opcode != 1 || size != 0 || core.is_null() {
+            return STATUS_INVALID;
+        }
+        let Some(descriptor) = state
+            .resources
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&handle)
+            .cloned()
+        else {
+            return STATUS_INVALID;
+        };
+        if let Some(trace) = &state.trace {
+            if trace.mode() != Mode::Live {
+                let Some(session) = &state.session else {
+                    return STATUS_FAILED;
+                };
+                if trace.mode() == Mode::Replay {
+                    if let Err(error) = unsafe {
+                        await_replay_event(
+                            state.as_ref(),
+                            trace,
+                            TraceActor::Worker,
+                            session,
+                            "io.request",
+                        )
+                    } {
+                        state.trace_failure(error);
+                        return STATUS_FAILED;
+                    }
+                }
+                let data = serde_json::json!({
+                    "generation": state.generation,
+                    "handle": handle,
+                    "request": request,
+                    "url": descriptor.url.as_str(),
+                    "method": &descriptor.method,
+                    "headers": &descriptor.headers,
+                    "body": &descriptor.body,
+                    "timeoutMicros": descriptor.timeout.as_micros(),
+                    "maxBytes": descriptor.max_bytes,
+                });
+                if let Err(error) = trace.observe(TraceActor::Worker, session, "io.request", || data)
+                {
                     state.trace_failure(error);
                     return STATUS_FAILED;
                 }
             }
-            let data = serde_json::json!({
-                "generation": state.generation,
-                "handle": handle,
-                "request": request,
-                "url": descriptor.url.as_str(),
-                "method": &descriptor.method,
-                "headers": &descriptor.headers,
-                "body": &descriptor.body,
-                "timeoutMicros": descriptor.timeout.as_micros(),
-                "maxBytes": descriptor.max_bytes,
-            });
-            if let Err(error) = trace.observe(TraceActor::Worker, session, "io.request", || data) {
-                state.trace_failure(error);
-                return STATUS_FAILED;
-            }
         }
-    }
-    // Serialize the final replay/live decision and provider admission against
-    // prepare_replay_stop(). Do not hold this lock while the trace event above
-    // may wait for another actor.
-    let _offline_gate = state
-        .offline_gate
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if state.offline_shutdown.load(Ordering::Acquire) {
-        return STATUS_CANCELLED;
-    }
-    if state
-        .trace
-        .as_ref()
-        .is_some_and(|trace| trace.mode() == Mode::Replay)
-    {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let finished = Arc::new(AtomicBool::new(false));
-        state
-            .requests
+        // Serialize the final replay/live decision and provider admission against
+        // prepare_replay_stop(). Do not hold this lock while the trace event above
+        // may wait for another actor.
+        let _offline_gate = state
+            .offline_gate
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(
-                request,
-                ActiveRequest {
-                    handle,
-                    cancel,
-                    finished,
-                    join: None,
-                    replay_stub: true,
-                },
-            );
-        return STATUS_OK;
-    }
-    let cancel = Arc::new(AtomicBool::new(false));
-    let finished = Arc::new(AtomicBool::new(false));
-    let state_for_task = Arc::clone(&state);
-    let cancel_for_task = Arc::clone(&cancel);
-    let cancel_for_panic = Arc::clone(&cancel);
-    let finished_for_task = Arc::clone(&finished);
-    let core_address = core as usize;
-    let task = thread::Builder::new()
-        .name(format!("pocket-http-{request}"))
-        .spawn(move || {
-            let _guard = RequestCompletion {
-                state: Arc::clone(&state_for_task),
-                finished: Arc::clone(&finished_for_task),
-            };
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_http_request(
-                    &state_for_task,
-                    core_address as *mut CWorkerCore,
-                    handle,
-                    request,
-                    descriptor,
-                    Arc::clone(&cancel_for_task),
-                )
-            }));
-            if result.is_err() {
-                let message = b"HTTP provider panicked";
-                let _ = emit_with_backpressure(
-                    &state_for_task,
-                    core_address as *mut CWorkerCore,
-                    handle,
-                    request,
-                    FACT_ERROR,
-                    0,
-                    message,
-                    Instant::now() + Duration::from_secs(1),
-                    &cancel_for_panic,
-                );
-                let _ = unsafe {
-                    pocket_worker_finish(
-                        core_address as *mut CWorkerCore,
-                        handle,
-                        request,
-                        STATUS_FAILED,
-                        0,
-                    )
-                };
-            }
-        });
-    match task {
-        Ok(join) => {
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.offline_shutdown.load(Ordering::Acquire) {
+            return STATUS_CANCELLED;
+        }
+        if state
+            .trace
+            .as_ref()
+            .is_some_and(|trace| trace.mode() == Mode::Replay)
+        {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let finished = Arc::new(AtomicBool::new(false));
             state
                 .requests
                 .lock()
@@ -3179,14 +3160,81 @@ unsafe extern "C" fn driver_start(
                         handle,
                         cancel,
                         finished,
-                        join: Some(join),
-                        replay_stub: false,
+                        join: None,
+                        replay_stub: true,
                     },
                 );
-            STATUS_OK
+            return STATUS_OK;
         }
-        Err(_) => STATUS_FAILED,
-    }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let state_for_task = Arc::clone(&state);
+        let cancel_for_task = Arc::clone(&cancel);
+        let cancel_for_panic = Arc::clone(&cancel);
+        let finished_for_task = Arc::clone(&finished);
+        let core_address = core as usize;
+        let task = thread::Builder::new()
+            .name(format!("pocket-http-{request}"))
+            .spawn(move || {
+                let _guard = RequestCompletion {
+                    state: Arc::clone(&state_for_task),
+                    finished: Arc::clone(&finished_for_task),
+                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_http_request(
+                        &state_for_task,
+                        core_address as *mut CWorkerCore,
+                        handle,
+                        request,
+                        descriptor,
+                        Arc::clone(&cancel_for_task),
+                    )
+                }));
+                if result.is_err() {
+                    let message = b"HTTP provider panicked";
+                    let _ = emit_with_backpressure(
+                        &state_for_task,
+                        core_address as *mut CWorkerCore,
+                        handle,
+                        request,
+                        FACT_ERROR,
+                        0,
+                        message,
+                        Instant::now() + Duration::from_secs(1),
+                        &cancel_for_panic,
+                    );
+                    let _ = unsafe {
+                        pocket_worker_finish(
+                            core_address as *mut CWorkerCore,
+                            handle,
+                            request,
+                            STATUS_FAILED,
+                            0,
+                        )
+                    };
+                }
+            });
+        match task {
+            Ok(join) => {
+                state
+                    .requests
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .insert(
+                        request,
+                        ActiveRequest {
+                            handle,
+                            cancel,
+                            finished,
+                            join: Some(join),
+                            replay_stub: false,
+                        },
+                    );
+                STATUS_OK
+            }
+            Err(_) => STATUS_FAILED,
+        }
+    })
 }
 
 struct RequestCompletion {
@@ -3206,31 +3254,33 @@ unsafe extern "C" fn driver_cancel(
     _handle: u32,
     request: u32,
 ) {
-    let Some(state) = node_state(context, WorkerResourceKind::Http) else {
-        return;
-    };
-    let mut requests = state
-        .requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let replay_stub = requests.get_mut(&request).map(|active| {
-        active.cancel.store(true, Ordering::Release);
-        let replay_stub = active.replay_stub && !active.finished.load(Ordering::Acquire);
-        if replay_stub {
-            active.finished.store(true, Ordering::Release);
+    catch_worker_callback((), || {
+        let Some(state) = node_state(context, WorkerResourceKind::Http) else {
+            return;
+        };
+        let mut requests = state
+            .requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let replay_stub = requests.get_mut(&request).map(|active| {
+            active.cancel.store(true, Ordering::Release);
+            let replay_stub = active.replay_stub && !active.finished.load(Ordering::Acquire);
+            if replay_stub {
+                active.finished.store(true, Ordering::Release);
+            }
+            replay_stub
+        });
+        drop(requests);
+        if replay_stub == Some(true) && !core.is_null() {
+            // Replay has no provider thread to finish a request. On a failed or
+            // missing tape, finish the dummy slot so teardown cannot wait forever
+            // for an event that the tape did not contain.
+            let _ = pocket_worker_complete(core, request, STATUS_CANCELLED, ptr::null(), 0);
         }
-        replay_stub
+        if replay_stub.is_some() {
+            state.pulse.signal();
+        }
     });
-    drop(requests);
-    if replay_stub == Some(true) && !core.is_null() {
-        // Replay has no provider thread to finish a request. On a failed or
-        // missing tape, finish the dummy slot so teardown cannot wait forever
-        // for an event that the tape did not contain.
-        let _ = pocket_worker_complete(core, request, STATUS_CANCELLED, ptr::null(), 0);
-    }
-    if replay_stub.is_some() {
-        state.pulse.signal();
-    }
 }
 
 unsafe extern "C" fn driver_close(
@@ -3238,45 +3288,47 @@ unsafe extern "C" fn driver_close(
     _core: *mut CWorkerCore,
     handle: u32,
 ) -> i32 {
-    let Some(state) = node_state(context, WorkerResourceKind::Http) else {
-        return STATUS_UNSUPPORTED;
-    };
-    let mut requests = state
-        .requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if requests
-        .values()
-        .any(|active| active.handle == handle && !active.finished.load(Ordering::Acquire))
-    {
-        for active in requests.values().filter(|active| active.handle == handle) {
-            active.cancel.store(true, Ordering::Release);
+    catch_worker_callback(STATUS_FAILED, || {
+        let Some(state) = node_state(context, WorkerResourceKind::Http) else {
+            return STATUS_UNSUPPORTED;
+        };
+        let mut requests = state
+            .requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if requests
+            .values()
+            .any(|active| active.handle == handle && !active.finished.load(Ordering::Acquire))
+        {
+            for active in requests.values().filter(|active| active.handle == handle) {
+                active.cancel.store(true, Ordering::Release);
+            }
+            state.pulse.signal();
+            return STATUS_BUSY;
         }
-        state.pulse.signal();
-        return STATUS_BUSY;
-    }
-    let finished = requests
-        .iter()
-        .filter_map(|(id, active)| (active.handle == handle).then_some(*id))
-        .collect::<Vec<_>>();
-    let joins = finished
-        .into_iter()
-        .filter_map(|id| {
-            requests
-                .remove(&id)
-                .and_then(|mut active| active.join.take())
-        })
-        .collect::<Vec<_>>();
-    drop(requests);
-    for join in joins {
-        let _ = join.join();
-    }
-    state
-        .resources
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .remove(&handle);
-    STATUS_OK
+        let finished = requests
+            .iter()
+            .filter_map(|(id, active)| (active.handle == handle).then_some(*id))
+            .collect::<Vec<_>>();
+        let joins = finished
+            .into_iter()
+            .filter_map(|id| {
+                requests
+                    .remove(&id)
+                    .and_then(|mut active| active.join.take())
+            })
+            .collect::<Vec<_>>();
+        drop(requests);
+        for join in joins {
+            let _ = join.join();
+        }
+        state
+            .resources
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&handle);
+        STATUS_OK
+    })
 }
 
 unsafe extern "C" fn driver_write(
@@ -3286,7 +3338,7 @@ unsafe extern "C" fn driver_write(
     _bytes: *const u8,
     _size: usize,
 ) -> i32 {
-    STATUS_UNSUPPORTED
+    catch_worker_callback(STATUS_UNSUPPORTED, || STATUS_UNSUPPORTED)
 }
 
 #[derive(Deserialize)]
@@ -3457,9 +3509,16 @@ fn perform_http(
         let remaining = deadline
             .saturating_duration_since(Instant::now())
             .max(Duration::from_millis(1));
-        let agent = http_agent(remaining);
+        let owned_agent;
+        let agent = if remaining >= SHARED_HTTP_CONNECT_TIMEOUT {
+            &state.http_agent
+        } else {
+            owned_agent = http_agent(remaining);
+            &owned_agent
+        };
         let mut request = agent
             .request(&method, url.as_str())
+            .timeout(remaining)
             .set("accept-encoding", "identity");
         for (name, value) in &headers {
             if request_header_allowed(name) {
@@ -3496,6 +3555,10 @@ fn perform_http(
                     body = None;
                     headers.remove("content-type");
                 }
+                let _ = response
+                    .into_reader()
+                    .take(4096)
+                    .read_to_end(&mut Vec::new());
                 url = next;
                 continue;
             }
@@ -4882,5 +4945,269 @@ mod tests {
         );
         assert_eq!(cancelled_error, Err("HTTP request cancelled".to_owned()));
         worker.destroy_and_join().unwrap();
+    }
+
+    #[test]
+    fn worker_http_pool_reuses_single_tcp_connection_for_sequential_keep_alive_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let accepted_connections = Arc::new(AtomicUsize::new(0));
+        let accepted_for_thread = Arc::clone(&accepted_connections);
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            accepted_for_thread.fetch_add(1, Ordering::Relaxed);
+            let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            for idx in 0..2 {
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 512];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap_or(0);
+                    if count == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                let body = if idx == 0 { "one" } else { "two" };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let desc1 = serde_json::json!({
+            "url": format!("{origin}/first"),
+            "method": "GET",
+            "timeoutMs": 15000,
+            "maxBytes": 64,
+        })
+        .to_string();
+        let desc2 = serde_json::json!({
+            "url": format!("{origin}/second"),
+            "method": "GET",
+            "timeoutMs": 15000,
+            "maxBytes": 64,
+        })
+        .to_string();
+        let desc1_bytes = desc1
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let desc2_bytes = desc2
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            r#"
+            __pocketWorker.declareChannel(2,0,64,4,0);
+            const h1=__pocketWorker.open(3,"net",new Uint8Array([{desc1_bytes}]));
+            if(h1<=0) throw new Error("HTTP open 1 failed");
+            const r1=__pocketWorker.submit(h1,1,new Uint8Array(0),0);
+            if(r1<=0) throw new Error("HTTP submit 1 failed");
+            let h2=0;
+            const buf1=[];
+            const buf2=[];
+            globalThis.__pocketWorkerTurn=(context,facts)=>{{
+              for(const fact of facts) {{
+                if(fact.handle===h1) {{
+                  if(fact.kind===3) buf1.push(...fact.data);
+                  else if(fact.kind===2) {{
+                    __pocketWorker.publish(2,new Uint8Array([1,...buf1]));
+                    __pocketWorker.close(h1);
+                    h2=__pocketWorker.open(3,"net",new Uint8Array([{desc2_bytes}]));
+                    if(h2<=0) throw new Error("HTTP open 2 failed");
+                    const r2=__pocketWorker.submit(h2,1,new Uint8Array(0),0);
+                    if(r2<=0) throw new Error("HTTP submit 2 failed");
+                  }}
+                }} else if(fact.handle===h2) {{
+                  if(fact.kind===3) buf2.push(...fact.data);
+                  else if(fact.kind===2) {{
+                    __pocketWorker.publish(2,new Uint8Array([2,...buf2]));
+                    __pocketWorker.close(h2);
+                  }}
+                }}
+              }}
+            }};
+            "#
+        );
+        let bytecode = compile_worker_bytecode(&source);
+        let declaration = WorkerDeclaration {
+            entry: "worker.js".into(),
+            nodes: vec![WorkerNodeDeclaration {
+                name: "net".into(),
+                kind: WorkerResourceKind::Http,
+            }],
+            channels: vec![WorkerChannelDeclaration {
+                name: "results".into(),
+                kind: WorkerChannelKind::Ring,
+                direction: WorkerChannelDirection::WorkerToUi,
+                record_bytes: 64,
+                capacity: 4,
+            }],
+        };
+        let policy = WorkerPolicy {
+            allowed_http_origins: vec![origin],
+            required_capabilities: vec!["net.http".into()],
+        };
+        let limits = WorkerLimits::default();
+        let trace = WorkerTrace::new(Mode::Live);
+        let ui_runtime = JsRuntime::new().unwrap();
+        let ui_context = Context::full(&ui_runtime).unwrap();
+        let mut worker = WorkerRuntime::spawn_traced(
+            &bytecode,
+            pocket_spec::BINDING_GENERATION,
+            60,
+            declaration,
+            policy,
+            limits,
+            Some(test_worker_wake),
+            Arc::clone(&trace),
+            "worker:pool:1".to_owned(),
+        )
+        .unwrap();
+        worker.wait_ready(Duration::from_secs(2)).unwrap();
+        let mut bridge = ui_context
+            .with(|ctx| worker.attach_ui(ctx.as_raw().as_ptr()))
+            .unwrap();
+        ui_context.with(|ctx| {
+            ctx.eval::<(), _>("__pocketWorkerChannels.configure(2,0);")
+                .unwrap();
+        });
+        let outputs =
+            collect_worker_outputs(&ui_context, &mut bridge, &[1, 2], "pool", &trace, &[]);
+        assert!(outputs.iter().any(|r| r.as_slice() == &[1, b'o', b'n', b'e']));
+        assert!(outputs.iter().any(|r| r.as_slice() == &[2, b't', b'w', b'o']));
+        assert_eq!(
+            accepted_connections.load(Ordering::Relaxed),
+            1,
+            "sequential requests with timeout >= 10s must reuse 1 single pooled TCP connection"
+        );
+        worker.request_stop_and_wait();
+        bridge.detach();
+        worker.destroy_and_join().unwrap();
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn worker_http_sub_10s_timeout_does_not_regress_to_shared_connect_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let stop_server = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop_server);
+        let server_thread = thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf);
+            while !stop_for_thread.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let descriptor = serde_json::json!({
+            "url": format!("{origin}/hang"),
+            "method": "GET",
+            "timeoutMs": 200,
+            "maxBytes": 64,
+        })
+        .to_string();
+        let descriptor_bytes = descriptor
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            r#"
+            __pocketWorker.declareChannel(2,0,64,4,0);
+            const h=__pocketWorker.open(3,"net",new Uint8Array([{descriptor_bytes}]));
+            if(h<=0) throw new Error("HTTP open failed");
+            const r=__pocketWorker.submit(h,1,new Uint8Array(0),0);
+            if(r<=0) throw new Error("HTTP submit failed");
+            globalThis.__pocketWorkerTurn=(context,facts)=>{{
+              for(const fact of facts) {{
+                if(fact.kind===2) {{
+                  __pocketWorker.publish(2,new Uint8Array([2,fact.status & 0xff]));
+                  __pocketWorker.close(h);
+                }}
+              }}
+            }};
+            "#
+        );
+        let bytecode = compile_worker_bytecode(&source);
+        let declaration = WorkerDeclaration {
+            entry: "worker.js".into(),
+            nodes: vec![WorkerNodeDeclaration {
+                name: "net".into(),
+                kind: WorkerResourceKind::Http,
+            }],
+            channels: vec![WorkerChannelDeclaration {
+                name: "results".into(),
+                kind: WorkerChannelKind::Ring,
+                direction: WorkerChannelDirection::WorkerToUi,
+                record_bytes: 64,
+                capacity: 4,
+            }],
+        };
+        let policy = WorkerPolicy {
+            allowed_http_origins: vec![origin],
+            required_capabilities: vec!["net.http".into()],
+        };
+        let limits = WorkerLimits::default();
+        let trace = WorkerTrace::new(Mode::Live);
+        let ui_runtime = JsRuntime::new().unwrap();
+        let ui_context = Context::full(&ui_runtime).unwrap();
+        let started = Instant::now();
+        let mut worker = WorkerRuntime::spawn_traced(
+            &bytecode,
+            pocket_spec::BINDING_GENERATION,
+            60,
+            declaration,
+            policy,
+            limits,
+            Some(test_worker_wake),
+            Arc::clone(&trace),
+            "worker:short-timeout:1".to_owned(),
+        )
+        .unwrap();
+        worker.wait_ready(Duration::from_secs(2)).unwrap();
+        let mut bridge = ui_context
+            .with(|ctx| worker.attach_ui(ctx.as_raw().as_ptr()))
+            .unwrap();
+        ui_context.with(|ctx| {
+            ctx.eval::<(), _>("__pocketWorkerChannels.configure(2,0);")
+                .unwrap();
+        });
+        let outputs = collect_worker_outputs(
+            &ui_context,
+            &mut bridge,
+            &[2],
+            "short-timeout",
+            &trace,
+            &[],
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "200ms HTTP timeout took {elapsed:?} (must fail in < 1.5s)"
+        );
+        assert!(outputs
+            .iter()
+            .any(|r| r.as_slice() == &[2, (STATUS_FAILED as u8)]));
+        stop_server.store(true, Ordering::Release);
+        worker.request_stop_and_wait();
+        bridge.detach();
+        worker.destroy_and_join().unwrap();
+        server_thread.join().unwrap();
     }
 }

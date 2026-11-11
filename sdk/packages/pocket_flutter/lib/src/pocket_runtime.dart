@@ -945,7 +945,7 @@ final class FfiPocketRuntime
     final sourcePointer = source.toNativeUtf8(allocator: calloc);
     Pointer<Uint8> pakPointer = Pointer<Uint8>.fromAddress(0);
     if (pak.isNotEmpty) {
-      pakPointer = calloc<Uint8>(pak.length);
+      pakPointer = malloc<Uint8>(pak.length);
       pakPointer.asTypedList(pak.length).setAll(0, pak);
     }
     _traceTransactionBegin();
@@ -961,7 +961,7 @@ final class FfiPocketRuntime
       rethrow;
     } finally {
       calloc.free(sourcePointer);
-      if (pakPointer.address != 0) calloc.free(pakPointer);
+      if (pakPointer.address != 0) malloc.free(pakPointer);
       _recordContentHash('source', source);
       _recordContentHashBytes('pak', pak);
       final traceClock = _traceTransactionEnd();
@@ -1006,13 +1006,14 @@ final class FfiPocketRuntime
     }
     final load = _loadBytecode ??= _lookupRequiredLoadBytecode();
     _traceTransactionBegin();
-    final bytecodePointer = calloc<Uint8>(bytecode.length);
-    final pakPointer = calloc<Uint8>(pak.length);
-    bytecodePointer.asTypedList(bytecode.length).setAll(0, bytecode);
-    pakPointer.asTypedList(pak.length).setAll(0, pak);
+    final bytecodePointer = malloc<Uint8>(bytecode.length);
+    Pointer<Uint8> pakPointer = nullptr;
     PocketFrame? output;
     Object? failure;
     try {
+      pakPointer = malloc<Uint8>(pak.length);
+      bytecodePointer.asTypedList(bytecode.length).setAll(0, bytecode);
+      pakPointer.asTypedList(pak.length).setAll(0, pak);
       final result = load(
         _handle,
         bytecodePointer,
@@ -1027,8 +1028,8 @@ final class FfiPocketRuntime
       failure = error;
       rethrow;
     } finally {
-      calloc.free(bytecodePointer);
-      calloc.free(pakPointer);
+      malloc.free(bytecodePointer);
+      if (pakPointer != nullptr) malloc.free(pakPointer);
       _recordContentHashBytes('bytecode', bytecode);
       _recordContentHashBytes('pak', pak);
       final traceClock = _traceTransactionEnd();
@@ -2499,7 +2500,7 @@ final class FfiPocketRuntime
     final pathDigest = pocketSha256(utf8.encode(path));
     Uint8List? bytes;
     try {
-      bytes = Uint8List.fromList(File(path).readAsBytesSync());
+      bytes = File(path).readAsBytesSync();
     } on Object {
       bytes = null;
       // A file descriptor without content cannot reconstruct the load on an

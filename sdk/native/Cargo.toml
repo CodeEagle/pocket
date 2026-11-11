@@ -33,3 +33,8 @@ cc = "1"
 rquickjs = { version = "0.12", features = ["bindgen"] }
 
 [workspace]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"

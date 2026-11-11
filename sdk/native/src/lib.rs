@@ -71,6 +71,39 @@ struct NodeMeta {
     from_pack: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+struct NodeRegistry {
+    entries: Vec<NodeMeta>,
+    revision: u64,
+}
+
+impl NodeRegistry {
+    #[inline]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[inline]
+    fn write(&mut self) -> &mut Vec<NodeMeta> {
+        self.revision = self.revision.wrapping_add(1);
+        &mut self.entries
+    }
+}
+
+impl std::ops::Deref for NodeRegistry {
+    type Target = [NodeMeta];
+
+    #[inline]
+    fn deref(&self) -> &[NodeMeta] {
+        &self.entries
+    }
+}
+
 /// A contact captured by the host between two guest frames.  PocketJS's
 /// canonical frame ABI deliberately carries contacts as packed u32 words;
 /// keeping the decoded form here lets `pocket_send(input.pointer)` resolve a
@@ -430,12 +463,20 @@ impl Serialize for OutboundEvent {
     }
 }
 
+fn serialize_rc_ops<S>(ops: &Rc<Vec<FrameOp>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    ops.as_slice().serialize(serializer)
+}
+
 #[derive(Serialize)]
 struct FrameResult {
     frame: u64,
     width: f32,
     height: f32,
-    ops: Vec<FrameOp>,
+    #[serde(serialize_with = "serialize_rc_ops")]
+    ops: Rc<Vec<FrameOp>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auxiliary: Option<SurfaceFrame>,
     events: Vec<OutboundEvent>,
@@ -448,7 +489,8 @@ struct FrameResult {
 struct SurfaceFrame {
     width: f32,
     height: f32,
-    ops: Vec<FrameOp>,
+    #[serde(serialize_with = "serialize_rc_ops")]
+    ops: Rc<Vec<FrameOp>>,
 }
 
 /// The decoded DrawList is normally identical for several vblanks.  Keep the
@@ -468,10 +510,10 @@ struct FrameDrawCache {
     /// DrawList equality check alone would incorrectly treat those frames as
     /// static and let the Dart image cache keep stale pixels.
     raster_revision: u64,
-    nodes: Vec<NodeMeta>,
+    nodes_revision: u64,
     ops: Rc<Vec<FrameOp>>,
     auxiliary: Option<SurfaceFrame>,
-    generic_texture_handles: Vec<i32>,
+    generic_texture_handles: Rc<Vec<i32>>,
 }
 
 impl FrameDrawCache {
@@ -482,13 +524,13 @@ impl FrameDrawCache {
         height: f32,
         auxiliary_size: Option<(f32, f32)>,
         raster_revision: u64,
-        nodes: &[NodeMeta],
+        nodes_revision: u64,
     ) -> bool {
         self.width == width
             && self.height == height
             && self.auxiliary_size == auxiliary_size
             && self.raster_revision == raster_revision
-            && self.nodes == nodes
+            && self.nodes_revision == nodes_revision
             && self.words == words
     }
 
@@ -543,13 +585,14 @@ pub struct HostState {
     /// Opt-in guest hardening/quota policy. Configuration survives reloads;
     /// the associated fatal marker and live node IDs are per-realm state.
     guest_security: Rc<RefCell<guest_security::GuestSecurityState>>,
-    nodes: Rc<RefCell<Vec<NodeMeta>>>,
+    nodes: Rc<RefCell<NodeRegistry>>,
     outbound: Rc<RefCell<Vec<OutboundEvent>>>,
     /// One lock-free SPSC channel per runtime. Reload closes this generation
     /// and installs a new Arc rather than clearing a ring borrowed by another
     /// isolate.
     duplex: Arc<duplex::DuplexRing>,
     duplex_ingress_consumer: duplex::IngressConsumer,
+    poisoned: bool,
     last_error: String,
     error_output: CString,
     output: CString,
@@ -1089,6 +1132,79 @@ fn set_error(host: &mut HostState, error: impl Into<String>) {
     host.error_output = c_string(&host.last_error);
 }
 
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        (*msg).to_owned()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "unknown panic payload".to_owned()
+    }
+}
+
+#[inline]
+fn catch_ffi_unwind<T, F>(sentinel: T, f: F) -> T
+where
+    T: Copy,
+    F: FnOnce() -> T,
+{
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(sentinel)
+}
+
+unsafe fn guard_host_mut<T, F>(
+    handle: *mut HostState,
+    fn_name: &'static str,
+    sentinel: T,
+    f: F,
+) -> T
+where
+    T: Copy,
+    F: FnOnce(&mut HostState) -> T,
+{
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(host) = handle.as_mut() else {
+            return sentinel;
+        };
+        if host.poisoned {
+            if host.last_error.is_empty() {
+                set_error(host, "host runtime is poisoned after a previous native panic");
+            }
+            return sentinel;
+        }
+        f(host)
+    }));
+    match result {
+        Ok(value) => value,
+        Err(payload) => {
+            let msg = panic_payload_message(payload);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(host) = handle.as_mut() {
+                    host.poisoned = true;
+                    set_error(host, format!("native panic in {fn_name}: {msg}"));
+                }
+            }));
+            sentinel
+        }
+    }
+}
+
+unsafe fn guard_host_ref<T, F>(handle: *const HostState, sentinel: T, f: F) -> T
+where
+    T: Copy,
+    F: FnOnce(&HostState) -> T,
+{
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(host) = handle.as_ref() else {
+            return sentinel;
+        };
+        if host.poisoned {
+            return sentinel;
+        }
+        f(host)
+    }))
+    .unwrap_or(sentinel)
+}
+
 fn guest_security_fatal(host: &HostState) -> Option<String> {
     guest_security::fatal(&host.guest_security)
 }
@@ -1241,18 +1357,17 @@ fn stop_worker_checked(host: &mut HostState) -> Result<(), String> {
 /// this preserves cancellation and exit facts in the recording.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_stop_async(handle: *mut HostState) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if let Err(error) = stop_worker_checked(host) {
-        set_error(host, error);
-        return -1;
-    }
-    if let Some(provider) = &host.offload {
-        provider.shutdown();
-    }
-    clear_error(host);
-    0
+    guard_host_mut(handle, "pocket_stop_async", -1, |host| {
+        if let Err(error) = stop_worker_checked(host) {
+            set_error(host, error);
+            return -1;
+        }
+        if let Some(provider) = &host.offload {
+            provider.shutdown();
+        }
+        clear_error(host);
+        0
+    })
 }
 
 impl Drop for HostState {
@@ -1388,63 +1503,64 @@ pub unsafe extern "C" fn pocket_configure_worker(
     config_json: *const c_char,
     notify: Option<unsafe extern "C" fn()>,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    let result = (|| -> Result<PendingWorker, String> {
-        if host.guest_loaded || host.worker_program.is_some() {
-            return Err("worker must be configured once before guest evaluation".into());
-        }
-        if bytes.is_null() || length == 0 || length > 64 * 1024 * 1024 || config_json.is_null() {
-            return Err("invalid worker bytecode/configuration".into());
-        }
-        let json = CStr::from_ptr(config_json).to_bytes();
-        if json.len() > 64 * 1024 {
-            return Err("worker configuration exceeds 64 KiB".into());
-        }
-        let config: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
-        if config["protocolVersion"] != 1
-            || config["bindingGeneration"] != BINDING_GENERATION
-            || config["tickHz"] != host.tick_hz
-            || config["nativeGeneration"]
-                .as_u64()
-                .filter(|v| *v > 0 && *v <= u32::MAX as u64)
-                .is_none()
-            || config["expectedRuntimeAbi"] != bytecode::runtime_abi()
-        {
-            return Err("worker protocol/binding/tick/ABI mismatch".into());
-        }
-        let bytecode = std::slice::from_raw_parts(bytes, length);
-        bytecode::validate(
-            bytecode,
-            bytecode::BytecodeExpectation {
-                kind: bytecode::BytecodeKind::Script,
-                binding_generation: BINDING_GENERATION,
-                tick_hz: host.tick_hz,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(PendingWorker {
-            bytecode: bytecode.to_vec(),
-            config,
-            notify,
-        })
-    })();
-    match result {
-        Ok(program) => {
-            if let Err(error) = ensure_async_trace(host) {
-                set_error(host, error);
-                return -1;
+    guard_host_mut(handle, "pocket_configure_worker", -1, |host| {
+        let result = (|| -> Result<PendingWorker, String> {
+            if host.guest_loaded || host.worker_program.is_some() {
+                return Err("worker must be configured once before guest evaluation".into());
             }
-            host.worker_program = Some(program);
-            clear_error(host);
-            0
+            if bytes.is_null() || length == 0 || length > 64 * 1024 * 1024 || config_json.is_null()
+            {
+                return Err("invalid worker bytecode/configuration".into());
+            }
+            let json = CStr::from_ptr(config_json).to_bytes();
+            if json.len() > 64 * 1024 {
+                return Err("worker configuration exceeds 64 KiB".into());
+            }
+            let config: serde_json::Value =
+                serde_json::from_slice(json).map_err(|e| e.to_string())?;
+            if config["protocolVersion"] != 1
+                || config["bindingGeneration"] != BINDING_GENERATION
+                || config["tickHz"] != host.tick_hz
+                || config["nativeGeneration"]
+                    .as_u64()
+                    .filter(|v| *v > 0 && *v <= u32::MAX as u64)
+                    .is_none()
+                || config["expectedRuntimeAbi"] != bytecode::runtime_abi()
+            {
+                return Err("worker protocol/binding/tick/ABI mismatch".into());
+            }
+            let bytecode = std::slice::from_raw_parts(bytes, length);
+            bytecode::validate(
+                bytecode,
+                bytecode::BytecodeExpectation {
+                    kind: bytecode::BytecodeKind::Script,
+                    binding_generation: BINDING_GENERATION,
+                    tick_hz: host.tick_hz,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(PendingWorker {
+                bytecode: bytecode.to_vec(),
+                config,
+                notify,
+            })
+        })();
+        match result {
+            Ok(program) => {
+                if let Err(error) = ensure_async_trace(host) {
+                    set_error(host, error);
+                    return -1;
+                }
+                host.worker_program = Some(program);
+                clear_error(host);
+                0
+            }
+            Err(e) => {
+                set_error(host, e);
+                -1
+            }
         }
-        Err(e) => {
-            set_error(host, e);
-            -1
-        }
-    }
+    })
 }
 
 fn checked_duplex_u32(value: f64) -> Option<u32> {
@@ -1456,7 +1572,7 @@ fn install_bridge(
     guest: &RquickjsGuest,
     ops: OpContext,
     security: Rc<RefCell<guest_security::GuestSecurityState>>,
-    nodes: Rc<RefCell<Vec<NodeMeta>>>,
+    nodes: Rc<RefCell<NodeRegistry>>,
     outbound: Rc<RefCell<Vec<OutboundEvent>>>,
     duplex: Arc<duplex::DuplexRing>,
     auxiliary: Option<(i32, f32, f32)>,
@@ -1608,7 +1724,8 @@ fn install_bridge(
             let register = Function::new(
                 ctx.clone(),
                 move |_ctx: Ctx<'_>, id: i32, kind: String, payload: Value<'_>| {
-                    let mut list = register_nodes.borrow_mut();
+                    let mut registry = register_nodes.borrow_mut();
+                    let list = registry.write();
                     list.retain(|node| node.id != id);
                     let mut meta = NodeMeta {
                         id,
@@ -1739,8 +1856,8 @@ fn install_bridge(
                             "video surface parameters require a non-empty asset",
                         ));
                     }
-                    let mut list = surface_nodes.borrow_mut();
-                    if list.iter().any(|n| {
+                    let mut registry = surface_nodes.borrow_mut();
+                    if registry.iter().any(|n| {
                         n.kind == "hostSurface" && n.video_id == package && n.surface < 100
                     }) {
                         return Err(rquickjs::Error::new_from_js_message(
@@ -1749,13 +1866,13 @@ fn install_bridge(
                             "application surface is host-owned",
                         ));
                     }
-                    let existing = list.iter().position(|n| {
+                    let existing = registry.iter().position(|n| {
                         (n.kind == "hostSurface" || n.kind == "video") && n.video_id == package
                     });
                     let handle = if let Some(index) = existing {
-                        list[index].surface
+                        registry[index].surface
                     } else {
-                        if list
+                        if registry
                             .iter()
                             .filter(|n| n.kind == "hostSurface" || n.kind == "video")
                             .count()
@@ -1796,11 +1913,13 @@ fn install_bridge(
                         surface: handle,
                         from_pack: false,
                     };
+                    let list = registry.write();
                     if let Some(index) = existing {
                         list[index] = meta;
                     } else {
                         list.push(meta);
                     }
+                    drop(registry);
                     let ui: Object = ctx.globals().get("ui")?;
                     let surfaces: Object = ui.get("__surfaces")?;
                     surfaces.set(package, handle)?;
@@ -1821,7 +1940,7 @@ fn install_bridge(
                             "application surface is host-owned",
                         ));
                     }
-                    release_nodes.borrow_mut().retain(|n| {
+                    release_nodes.borrow_mut().write().retain(|n| {
                         !((n.kind == "hostSurface" || n.kind == "video") && n.video_id == package)
                     });
                     let ui: Object = ctx.globals().get("ui")?;
@@ -1888,14 +2007,15 @@ fn install_bridge(
 /// single-producer duplex endpoint twice and recreate retained provider state.
 fn install_compositor_apps(
     ctx: &Ctx<'_>,
-    nodes: &Rc<RefCell<Vec<NodeMeta>>>,
+    nodes: &Rc<RefCell<NodeRegistry>>,
     applications: &BTreeMap<String, i32>,
 ) -> rquickjs::Result<()> {
     let ui: Object = ctx.globals().get("ui")?;
     let surfaces: Object = ui.get("__surfaces")?;
     for (app_id, handle) in applications {
         surfaces.set(app_id.as_str(), *handle)?;
-        let mut list = nodes.borrow_mut();
+        let mut registry = nodes.borrow_mut();
+        let list = registry.write();
         list.retain(|node| !(node.kind == "hostSurface" && node.surface == *handle));
         list.push(NodeMeta {
             id: -*handle,
@@ -3131,7 +3251,7 @@ fn build_frame(
         let auxiliary_size = core.ui.auxiliary_viewport();
         let (width, height) = core.ui.viewport();
         let raster_revision = core.ui.raster_revision();
-        let nodes = host.nodes.borrow();
+        let nodes_revision = host.nodes.borrow().revision();
         let t_emit = sampling.then(Instant::now);
         let primary_hit = {
             let draw = core.ui.draw();
@@ -3142,7 +3262,7 @@ fn build_frame(
                     height,
                     auxiliary_size,
                     raster_revision,
-                    &nodes,
+                    nodes_revision,
                 )
             })
         };
@@ -3194,35 +3314,36 @@ fn build_frame(
         // frame happens to emit no bridge events.
         host.frame_json_cache = None;
         host.draw_decode_count = host.draw_decode_count.wrapping_add(1);
-        let nodes = host.nodes.borrow().clone();
+        let nodes_revision = host.nodes.borrow().revision();
         let (ops, auxiliary, generic_texture_handles) = {
             // GLYPH_RUN page preparation allocates shared core textures, so
             // both primary and auxiliary DrawLists decode through one mutable
             // Ui borrow and one deduplicated generic-resource set.
             let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
+            let nodes = host.nodes.borrow();
             let mut generic_texture_handles = HashSet::new();
             let t_decode = sampling.then(Instant::now);
-            let ops = decode_draw_ops(
+            let ops = Rc::new(decode_draw_ops(
                 &words,
                 width,
                 height,
                 &nodes,
                 &mut core.ui,
                 &mut generic_texture_handles,
-            )?;
+            )?);
             let auxiliary = match (auxiliary_size, auxiliary_words.as_deref()) {
                 (Some((auxiliary_width, auxiliary_height)), Some(auxiliary_words)) => {
                     Some(SurfaceFrame {
                         width: auxiliary_width,
                         height: auxiliary_height,
-                        ops: decode_draw_ops(
+                        ops: Rc::new(decode_draw_ops(
                             auxiliary_words,
                             auxiliary_width,
                             auxiliary_height,
                             &nodes,
                             &mut core.ui,
                             &mut generic_texture_handles,
-                        )?,
+                        )?),
                     })
                 }
                 (Some(_), None) => return Err("auxiliary draw list was not produced".to_owned()),
@@ -3232,7 +3353,8 @@ fn build_frame(
             if let Some(t) = t_decode {
                 host.last_stage_timings.draw_decode_us = t.elapsed().as_micros() as u64;
             }
-            let generic_texture_handles = generic_texture_handles.into_iter().collect::<Vec<_>>();
+            let generic_texture_handles =
+                Rc::new(generic_texture_handles.into_iter().collect::<Vec<_>>());
             (ops, auxiliary, generic_texture_handles)
         };
         host.draw_cache = Some(FrameDrawCache {
@@ -3242,10 +3364,10 @@ fn build_frame(
             height,
             auxiliary_size,
             raster_revision,
-            nodes,
-            ops: Rc::new(ops.clone()),
+            nodes_revision,
+            ops: Rc::clone(&ops),
             auxiliary: auxiliary.clone(),
-            generic_texture_handles: generic_texture_handles.clone(),
+            generic_texture_handles: Rc::clone(&generic_texture_handles),
         });
         Some((ops, auxiliary, generic_texture_handles))
     };
@@ -3253,16 +3375,16 @@ fn build_frame(
     // Borrow retained DrawOps for resource bookkeeping. Delta callers only
     // need owned operations when a draw/resource/event actually changed.
     let (ops, auxiliary, generic_texture_handles) = match decoded.as_ref() {
-        Some((ops, auxiliary, textures)) => (ops, auxiliary, textures),
+        Some((ops, auxiliary, textures)) => (ops.as_slice(), auxiliary, textures.as_slice()),
         None => {
             let cache = host
                 .draw_cache
                 .as_ref()
                 .expect("draw cache hit must have a cache");
             (
-                cache.ops.as_ref(),
+                cache.ops.as_slice(),
                 &cache.auxiliary,
-                &cache.generic_texture_handles,
+                cache.generic_texture_handles.as_slice(),
             )
         }
     };
@@ -3454,11 +3576,15 @@ fn build_frame(
         && resources.is_empty()
         && released_resources.is_empty();
     let (ops, auxiliary) = if unchanged {
-        (Vec::new(), None)
+        (Rc::new(Vec::new()), None)
     } else if let Some((ops, auxiliary, _)) = decoded {
         (ops, auxiliary)
     } else {
-        (ops.clone(), auxiliary.clone())
+        let cache = host
+            .draw_cache
+            .as_ref()
+            .expect("draw cache hit must have a cache");
+        (Rc::clone(&cache.ops), cache.auxiliary.clone())
     };
     host.frame = host.frame.wrapping_add(1);
     drop(core);
@@ -3665,8 +3791,17 @@ fn append_draw_operation_cached(
     let words = operation.words;
     match operation.opcode {
         1 => {
-            let (x, y, w, h) = unpack_rect(words[1], words[2]);
-            let color = words[3];
+            let (x, y, w, h) = unpack_rect(
+                *words
+                    .get(1)
+                    .ok_or_else(|| "RECT is missing its position".to_owned())?,
+                *words
+                    .get(2)
+                    .ok_or_else(|| "RECT is missing its size".to_owned())?,
+            );
+            let color = *words
+                .get(3)
+                .ok_or_else(|| "RECT is missing its color".to_owned())?;
             out.push(FrameOp {
                 kind: "rect",
                 x,
@@ -3786,7 +3921,9 @@ fn append_draw_operation_cached(
                 ));
             }
             for glyph in 0..count {
-                let gid_word = words[4 + glyph * 2];
+                let gid_word = *words
+                    .get(4 + glyph * 2)
+                    .ok_or_else(|| "GLYPH_RUN is truncated".to_owned())?;
                 if gid_word & 0xffff_0000 != 0 {
                     return Err(format!(
                         "GLYPH_RUN glyph {glyph} has nonzero reserved gid bits"
@@ -3805,8 +3942,13 @@ fn append_draw_operation_cached(
                 return Ok(());
             };
             for glyph in 0..count {
-                let xy = words[3 + glyph * 2];
-                let gid = (words[4 + glyph * 2] & 0xffff) as u16;
+                let xy = *words
+                    .get(3 + glyph * 2)
+                    .ok_or_else(|| "GLYPH_RUN is truncated".to_owned())?;
+                let gid = (*words
+                    .get(4 + glyph * 2)
+                    .ok_or_else(|| "GLYPH_RUN is truncated".to_owned())?
+                    & 0xffff) as u16;
                 if gid >= glyph_count {
                     // Upstream renderers skip out-of-range gids as well.
                     continue;
@@ -3866,8 +4008,18 @@ fn append_draw_operation_cached(
             }
         }
         4 => {
-            let (x, y, w, h) = unpack_rect(words[2], words[3]);
-            let texture = words[1] as i32;
+            let texture = *words
+                .get(1)
+                .ok_or_else(|| "TEX_QUAD is missing its texture handle".to_owned())?
+                as i32;
+            let (x, y, w, h) = unpack_rect(
+                *words
+                    .get(2)
+                    .ok_or_else(|| "TEX_QUAD is missing its position".to_owned())?,
+                *words
+                    .get(3)
+                    .ok_or_else(|| "TEX_QUAD is missing its size".to_owned())?,
+            );
             let asset = match texture_cache.as_deref_mut() {
                 Some(cache) => cache.resolve(
                     texture,
@@ -4127,20 +4279,32 @@ fn append_draw_operation_cached(
             });
         }
         11 => {
-            let (x, y, w, h) = unpack_rect(words[1], words[2]);
-            let blend = words[3];
+            let (x, y, w, h) = unpack_rect(
+                *words
+                    .get(1)
+                    .ok_or_else(|| "MESH_LAYER_BEGIN is missing its position".to_owned())?,
+                *words
+                    .get(2)
+                    .ok_or_else(|| "MESH_LAYER_BEGIN is missing its size".to_owned())?,
+            );
+            let blend = *words
+                .get(3)
+                .ok_or_else(|| "MESH_LAYER_BEGIN is missing its blend mode".to_owned())?;
             if blend > 3 {
                 return Err(format!(
                     "MESH_LAYER_BEGIN has unsupported blend mode {blend}"
                 ));
             }
+            let tint_words = words
+                .get(4..10)
+                .ok_or_else(|| "MESH_LAYER_BEGIN is missing its RGB tints".to_owned())?;
             let tints = [
-                f32::from_bits(words[4]),
-                f32::from_bits(words[5]),
-                f32::from_bits(words[6]),
-                f32::from_bits(words[7]),
-                f32::from_bits(words[8]),
-                f32::from_bits(words[9]),
+                f32::from_bits(tint_words[0]),
+                f32::from_bits(tint_words[1]),
+                f32::from_bits(tint_words[2]),
+                f32::from_bits(tint_words[3]),
+                f32::from_bits(tint_words[4]),
+                f32::from_bits(tint_words[5]),
             ];
             if tints
                 .iter()
@@ -4185,8 +4349,17 @@ fn append_draw_operation_cached(
             });
         }
         12 => {
-            let (x, y, w, h) = unpack_rect(words[2], words[3]);
-            let inverted = words[1];
+            let inverted = *words
+                .get(1)
+                .ok_or_else(|| "MESH_MASK_BEGIN is missing its inversion flag".to_owned())?;
+            let (x, y, w, h) = unpack_rect(
+                *words
+                    .get(2)
+                    .ok_or_else(|| "MESH_MASK_BEGIN is missing its position".to_owned())?,
+                *words
+                    .get(3)
+                    .ok_or_else(|| "MESH_MASK_BEGIN is missing its size".to_owned())?,
+            );
             if inverted > 1 {
                 return Err("MESH_MASK_BEGIN has an invalid inversion flag".to_owned());
             }
@@ -4460,11 +4633,36 @@ fn append_draw_operation_cached(
         }
         5 | 6 => {}
         9 => {
-            let x = f32::from_bits(words[2]);
-            let y = f32::from_bits(words[3]);
-            let w = f32::from_bits(words[4]);
-            let line_height = f32::from_bits(words[5]);
-            let bytes = words[7] as usize;
+            let header = *words
+                .get(1)
+                .ok_or_else(|| "TEXT_RUN is missing its header".to_owned())?;
+            let x = f32::from_bits(
+                *words
+                    .get(2)
+                    .ok_or_else(|| "TEXT_RUN is missing x".to_owned())?,
+            );
+            let y = f32::from_bits(
+                *words
+                    .get(3)
+                    .ok_or_else(|| "TEXT_RUN is missing y".to_owned())?,
+            );
+            let w = f32::from_bits(
+                *words
+                    .get(4)
+                    .ok_or_else(|| "TEXT_RUN is missing w".to_owned())?,
+            );
+            let line_height = f32::from_bits(
+                *words
+                    .get(5)
+                    .ok_or_else(|| "TEXT_RUN is missing line height".to_owned())?,
+            );
+            let color_word = *words
+                .get(6)
+                .ok_or_else(|| "TEXT_RUN is missing color".to_owned())?;
+            let bytes = *words
+                .get(7)
+                .ok_or_else(|| "TEXT_RUN is missing byte length".to_owned())?
+                as usize;
             let packed_end = 8usize
                 .checked_add(bytes.div_ceil(4))
                 .ok_or_else(|| "TEXT_RUN payload length overflow".to_owned())?;
@@ -4484,7 +4682,7 @@ fn append_draw_operation_cached(
             // callback used by Ui::relayout_outputs(). words[1]&0xff is the
             // PocketJS font slot, not a pixel size; map the pinned slot table
             // before handing it to Flutter's TextPainter.
-            let font_slot = (words[1] & 0xff) as u8;
+            let font_slot = (header & 0xff) as u8;
             let line_height = if line_height.is_finite() && line_height > 0.0 {
                 line_height
             } else {
@@ -4504,7 +4702,7 @@ fn append_draw_operation_cached(
                 fit: None,
                 autoplay: None,
                 repeat_texture: false,
-                color: Some(argb_from_abgr(words[6])),
+                color: Some(argb_from_abgr(color_word)),
                 from_color: None,
                 to_color: None,
                 direction: None,
@@ -4512,7 +4710,7 @@ fn append_draw_operation_cached(
                 via_position: None,
                 size: Some(font_slot_px(font_slot)),
                 font_slot: Some(font_slot),
-                text_align: Some(((words[1] >> 8) & 0xff).min(2) as u8),
+                text_align: Some(((header >> 8) & 0xff).min(2) as u8),
                 surface_handle: None,
                 focused: None,
                 radius: None,
@@ -4529,16 +4727,44 @@ fn append_draw_operation_cached(
             });
         }
         10 => {
-            let x = f32::from_bits(words[2]);
-            let y = f32::from_bits(words[3]);
-            let w = f32::from_bits(words[4]);
-            let h = f32::from_bits(words[5]);
+            let surface = *words
+                .get(1)
+                .ok_or_else(|| "SURFACE_QUAD is missing its surface handle".to_owned())?
+                as i32;
+            let x = f32::from_bits(
+                *words
+                    .get(2)
+                    .ok_or_else(|| "SURFACE_QUAD is missing x".to_owned())?,
+            );
+            let y = f32::from_bits(
+                *words
+                    .get(3)
+                    .ok_or_else(|| "SURFACE_QUAD is missing y".to_owned())?,
+            );
+            let w = f32::from_bits(
+                *words
+                    .get(4)
+                    .ok_or_else(|| "SURFACE_QUAD is missing w".to_owned())?,
+            );
+            let h = f32::from_bits(
+                *words
+                    .get(5)
+                    .ok_or_else(|| "SURFACE_QUAD is missing h".to_owned())?,
+            );
+            let visible_xy = *words
+                .get(6)
+                .ok_or_else(|| "SURFACE_QUAD is missing visible position".to_owned())?;
+            let visible_wh = *words
+                .get(7)
+                .ok_or_else(|| "SURFACE_QUAD is missing visible size".to_owned())?;
+            let flags = *words
+                .get(8)
+                .ok_or_else(|| "SURFACE_QUAD is missing flags".to_owned())?;
             let visible =
-                pocket_draw_ops::logical_rect(words[6], words[7]).intersect(operation.clip);
+                pocket_draw_ops::logical_rect(visible_xy, visible_wh).intersect(operation.clip);
             if visible.is_empty() {
                 return Ok(());
             }
-            let surface = words[1] as i32;
             let video = nodes
                 .iter()
                 .find(|node| {
@@ -4582,7 +4808,7 @@ fn append_draw_operation_cached(
                 font_slot: None,
                 text_align: None,
                 surface_handle: Some(surface),
-                focused: Some(words[8] & 1 != 0),
+                focused: Some(flags & 1 != 0),
                 radius: None,
                 border_width: None,
                 start_angle: None,
@@ -4917,7 +5143,9 @@ fn install_text_measure(ui: &mut Ui, metrics: Rc<RefCell<TextMetrics>>) {
 /// sequentially from one Dart isolate.
 #[no_mangle]
 pub extern "C" fn pocket_create(width: f64, height: f64) -> *mut HostState {
-    pocket_create_with_memory_limits(width, height, 1, DEFAULT_TICK_HZ, 0, 0)
+    catch_ffi_unwind(ptr::null_mut(), || {
+        pocket_create_with_memory_limits(width, height, 1, DEFAULT_TICK_HZ, 0, 0)
+    })
 }
 
 /// Create an engine instance with an explicit core raster density.
@@ -4933,7 +5161,9 @@ pub extern "C" fn pocket_create_with_density(
     height: f64,
     raster_density: u32,
 ) -> *mut HostState {
-    pocket_create_with_memory_limits(width, height, raster_density, DEFAULT_TICK_HZ, 0, 0)
+    catch_ffi_unwind(ptr::null_mut(), || {
+        pocket_create_with_memory_limits(width, height, raster_density, DEFAULT_TICK_HZ, 0, 0)
+    })
 }
 
 /// Create a host with explicit core/guest tick rate.
@@ -4949,7 +5179,9 @@ pub extern "C" fn pocket_create_with_density_and_tick_hz(
     raster_density: u32,
     tick_hz: u32,
 ) -> *mut HostState {
-    pocket_create_with_memory_limits(width, height, raster_density, tick_hz, 0, 0)
+    catch_ffi_unwind(ptr::null_mut(), || {
+        pocket_create_with_memory_limits(width, height, raster_density, tick_hz, 0, 0)
+    })
 }
 
 /// Create an engine instance with an immutable per-runtime memory policy.
@@ -4969,31 +5201,33 @@ pub extern "C" fn pocket_create_with_memory_limits(
     heap_limit_bytes: u64,
     max_pak_bytes: u64,
 ) -> *mut HostState {
-    let memory_limits = match validate_memory_limits(heap_limit_bytes, max_pak_bytes) {
-        Ok(memory_limits) => memory_limits,
-        Err(error) => return create_error_host(width, height, error),
-    };
-    if !(1..=4).contains(&raster_density) {
-        // Creation failures in this ABI return a destroyable opaque handle so
-        // callers can retrieve the diagnostic through pocket_last_error. Build
-        // a density-1 fallback only to carry that error; it must not escape as
-        // a usable runtime because last_error is non-empty.
-        return create_error_host(
-            width,
-            height,
-            format!("raster density must be an integer from 1 through 4 (got {raster_density})"),
-        );
-    }
-    if !(1..=MAX_HOST_TICK_HZ).contains(&tick_hz) {
-        return create_error_host(
-            width,
-            height,
-            format!(
-                "tick rate must be an integer from 1 through {MAX_HOST_TICK_HZ} (got {tick_hz})"
-            ),
-        );
-    }
-    create_host(width, height, raster_density, tick_hz, memory_limits)
+    catch_ffi_unwind(ptr::null_mut(), || {
+        let memory_limits = match validate_memory_limits(heap_limit_bytes, max_pak_bytes) {
+            Ok(memory_limits) => memory_limits,
+            Err(error) => return create_error_host(width, height, error),
+        };
+        if !(1..=4).contains(&raster_density) {
+            // Creation failures in this ABI return a destroyable opaque handle so
+            // callers can retrieve the diagnostic through pocket_last_error. Build
+            // a density-1 fallback only to carry that error; it must not escape as
+            // a usable runtime because last_error is non-empty.
+            return create_error_host(
+                width,
+                height,
+                format!("raster density must be an integer from 1 through 4 (got {raster_density})"),
+            );
+        }
+        if !(1..=MAX_HOST_TICK_HZ).contains(&tick_hz) {
+            return create_error_host(
+                width,
+                height,
+                format!(
+                    "tick rate must be an integer from 1 through {MAX_HOST_TICK_HZ} (got {tick_hz})"
+                ),
+            );
+        }
+        create_host(width, height, raster_density, tick_hz, memory_limits)
+    })
 }
 
 fn create_error_host(width: f64, height: f64, error: impl Into<String>) -> *mut HostState {
@@ -5042,10 +5276,11 @@ fn create_host(
             guest: RquickjsGuest::new(BindingProfile::Canonical),
             memory_limits,
             guest_security: guest_security.clone(),
-            nodes: Rc::new(RefCell::new(Vec::new())),
+            nodes: Rc::new(RefCell::new(NodeRegistry::new())),
             outbound: Rc::new(RefCell::new(Vec::new())),
             duplex: error_duplex,
             duplex_ingress_consumer: error_ingress_consumer,
+            poisoned: false,
             last_error: format!("{error:?}"),
             error_output: c_string(&format!("{error:?}")),
             output: c_string("{}"),
@@ -5115,10 +5350,11 @@ fn create_host(
             guest,
             memory_limits,
             guest_security: guest_security.clone(),
-            nodes: Rc::new(RefCell::new(Vec::new())),
+            nodes: Rc::new(RefCell::new(NodeRegistry::new())),
             outbound: Rc::new(RefCell::new(Vec::new())),
             duplex: error_duplex,
             duplex_ingress_consumer: error_ingress_consumer,
+            poisoned: false,
             last_error: format!("{error:?}"),
             error_output: c_string(&format!("{error:?}")),
             output: c_string("{}"),
@@ -5166,7 +5402,7 @@ fn create_host(
             last_stage_timings: NativeFrameStageTimingsUs::default(),
         }));
     }
-    let nodes = Rc::new(RefCell::new(Vec::new()));
+    let nodes = Rc::new(RefCell::new(NodeRegistry::new()));
     let outbound = Rc::new(RefCell::new(Vec::new()));
     let mut host = HostState {
         ops,
@@ -5177,6 +5413,7 @@ fn create_host(
         outbound: outbound.clone(),
         duplex,
         duplex_ingress_consumer,
+        poisoned: false,
         last_error: String::new(),
         error_output: c_string(""),
         output: c_string("{}"),
@@ -5264,86 +5501,84 @@ pub unsafe extern "C" fn pocket_configure_guest_security(
     handle: *mut HostState,
     config_json: *const c_char,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if host.guest_loaded {
-        set_error(
-            host,
-            "guest security policy must be configured before guest load/eval",
-        );
-        return -1;
-    }
-    if config_json.is_null() {
-        set_error(host, "null guest security config");
-        return -1;
-    }
-    if host.guest_security.borrow().configured {
-        set_error(host, "guest security policy is already configured");
-        return -1;
-    }
-    let config = match guest_security::parse_config(CStr::from_ptr(config_json).to_bytes()) {
-        Ok(config) => config,
-        Err(error) => {
-            set_error(host, error);
+    guard_host_mut(handle, "pocket_configure_guest_security", -1, |host| {
+        if host.guest_loaded {
+            set_error(
+                host,
+                "guest security policy must be configured before guest load/eval",
+            );
             return -1;
         }
-    };
-    let install = match host.guest.with(|ctx| -> rquickjs::Result<()> {
-        if config.harden_builtins {
-            guest_security::install_hardening(&ctx)?;
+        if config_json.is_null() {
+            set_error(host, "null guest security config");
+            return -1;
         }
-        if let Some(max_nodes) = config.max_nodes {
-            guest_security::install_node_quota(
-                &ctx,
-                host.ops.clone(),
-                host.guest_security.clone(),
-                max_nodes,
-            )?;
+        if host.guest_security.borrow().configured {
+            set_error(host, "guest security policy is already configured");
+            return -1;
         }
-        Ok(())
-    }) {
-        Some(result) => result.map_err(|error| format!("{error}")),
-        None => Err("guest context is not initialized".to_owned()),
-    };
-    if let Err(error) = install {
-        set_error(host, format!("guest security install: {error}"));
-        return -1;
-    }
-    {
-        let mut state = host.guest_security.borrow_mut();
-        state.configured = true;
-        state.harden_builtins = config.harden_builtins;
-        state.max_nodes = config.max_nodes;
-        state.max_draw_ops = config.max_draw_ops;
-        state.fatal = None;
-        state.node_ids.clear();
-    }
-    clear_error(host);
-    0
+        let config = match guest_security::parse_config(CStr::from_ptr(config_json).to_bytes()) {
+            Ok(config) => config,
+            Err(error) => {
+                set_error(host, error);
+                return -1;
+            }
+        };
+        let install = match host.guest.with(|ctx| -> rquickjs::Result<()> {
+            if config.harden_builtins {
+                guest_security::install_hardening(&ctx)?;
+            }
+            if let Some(max_nodes) = config.max_nodes {
+                guest_security::install_node_quota(
+                    &ctx,
+                    host.ops.clone(),
+                    host.guest_security.clone(),
+                    max_nodes,
+                )?;
+            }
+            Ok(())
+        }) {
+            Some(result) => result.map_err(|error| format!("{error}")),
+            None => Err("guest context is not initialized".to_owned()),
+        };
+        if let Err(error) = install {
+            set_error(host, format!("guest security install: {error}"));
+            return -1;
+        }
+        {
+            let mut state = host.guest_security.borrow_mut();
+            state.configured = true;
+            state.harden_builtins = config.harden_builtins;
+            state.max_nodes = config.max_nodes;
+            state.max_draw_ops = config.max_draw_ops;
+            state.fatal = None;
+            state.node_ids.clear();
+        }
+        clear_error(host);
+        0
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_trace_clock_mode(handle: *mut HostState, mode: u32) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    let was_replay = replay::is_replay(host);
-    match replay::set_mode(host, mode).and_then(|()| {
-        if was_replay && mode == 0 {
-            demand::leave_replay(host);
+    guard_host_mut(handle, "pocket_trace_clock_mode", -1, |host| {
+        let was_replay = replay::is_replay(host);
+        match replay::set_mode(host, mode).and_then(|()| {
+            if was_replay && mode == 0 {
+                demand::leave_replay(host);
+            }
+            refresh_trace_hooks(host)
+        }) {
+            Ok(()) => {
+                clear_error(host);
+                0
+            }
+            Err(error) => {
+                set_error(host, error);
+                -1
+            }
         }
-        refresh_trace_hooks(host)
-    }) {
-        Ok(()) => {
-            clear_error(host);
-            0
-        }
-        Err(error) => {
-            set_error(host, error);
-            -1
-        }
-    }
+    })
 }
 
 /// Begin one host FFI transaction with an ordered trace envelope, for example
@@ -5355,30 +5590,29 @@ pub unsafe extern "C" fn pocket_trace_clock_begin_json(
     handle: *mut HostState,
     intervals: *const c_char,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    let Some(intervals) = intervals.as_ref() else {
-        set_error(host, "null trace clock begin JSON");
-        return -1;
-    };
-    let intervals = match CStr::from_ptr(intervals).to_str() {
-        Ok(intervals) => intervals,
-        Err(_) => {
-            set_error(host, "trace clock begin JSON must be UTF-8");
+    guard_host_mut(handle, "pocket_trace_clock_begin_json", -1, |host| {
+        let Some(intervals) = intervals.as_ref() else {
+            set_error(host, "null trace clock begin JSON");
             return -1;
+        };
+        let intervals = match CStr::from_ptr(intervals).to_str() {
+            Ok(intervals) => intervals,
+            Err(_) => {
+                set_error(host, "trace clock begin JSON must be UTF-8");
+                return -1;
+            }
+        };
+        match replay::begin_json(host, intervals) {
+            Ok(()) => {
+                clear_error(host);
+                0
+            }
+            Err(error) => {
+                set_error(host, error);
+                -1
+            }
         }
-    };
-    match replay::begin_json(host, intervals) {
-        Ok(()) => {
-            clear_error(host);
-            0
-        }
-        Err(error) => {
-            set_error(host, error);
-            -1
-        }
-    }
+    })
 }
 
 /// End one host FFI transaction and return its ordered trace envelope as a
@@ -5386,20 +5620,19 @@ pub unsafe extern "C" fn pocket_trace_clock_begin_json(
 /// next trace-clock JSON call or host destruction.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_trace_clock_end_json(handle: *mut HostState) -> *const c_char {
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    match replay::end_json(host) {
-        Ok(json) => {
-            host.trace_output = c_string(&json);
-            clear_error(host);
-            host.trace_output.as_ptr()
+    guard_host_mut(handle, "pocket_trace_clock_end_json", ptr::null(), |host| {
+        match replay::end_json(host) {
+            Ok(json) => {
+                host.trace_output = c_string(&json);
+                clear_error(host);
+                host.trace_output.as_ptr()
+            }
+            Err(error) => {
+                set_error(host, error);
+                ptr::null()
+            }
         }
-        Err(error) => {
-            set_error(host, error);
-            ptr::null()
-        }
-    }
+    })
 }
 
 /// Resize a mounted PocketJS guest in place.
@@ -5415,72 +5648,71 @@ pub unsafe extern "C" fn pocket_resize_viewport(
     width: f64,
     height: f64,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if !width.is_finite()
-        || !height.is_finite()
-        || width < 1.0
-        || height < 1.0
-        || width > 32000.0
-        || height > 32000.0
-    {
-        set_error(host, "viewport must be finite and within 1..32000");
-        return -1;
-    }
-    if !host.guest_loaded {
-        set_error(host, "viewport cannot be resized before guest load/eval");
-        return -1;
-    }
-    let requested = (width as f32, height as f32);
-    if (host.viewport_width, host.viewport_height) == requested {
-        clear_error(host);
-        return 0;
-    }
-
-    let result = (|| -> Result<(), String> {
-        demand::before_external(host)?;
+    guard_host_mut(handle, "pocket_resize_viewport", -1, |host| {
+        if !width.is_finite()
+            || !height.is_finite()
+            || width < 1.0
+            || height < 1.0
+            || width > 32000.0
+            || height > 32000.0
         {
-            let mut core = host
-                .ops
-                .core_mut()
-                .map_err(|error| format!("viewport resize core: {error:?}"))?;
-            core.ui.set_viewport(requested.0, requested.1);
-            core.mutated();
+            set_error(host, "viewport must be finite and within 1..32000");
+            return -1;
         }
-        host.viewport_width = requested.0;
-        host.viewport_height = requested.1;
-        // A viewport change invalidates DrawList words, decoded op geometry and
-        // the static JSON fast path, but it does not release live textures.
-        // Keep frame_delta_v2_published so the caller can echo the last frame
-        // sequence and acknowledge its resource ledger even though the next
-        // packet must be a full frame (draw_cache is gone).
-        host.draw_cache = None;
-        host.frame_json_cache = None;
-
-        resize_guest_viewport(&host.guest, requested.0, requested.1)?;
-        let event = serde_json::json!({
-            "type": "event",
-            "id": format!("host-viewport-{}", host.frame.wrapping_add(1)),
-            "name": "display.viewport",
-            "payload": {
-                "width": requested.0,
-                "height": requested.1,
-            },
-        });
-        dispatch_guest_json(&host.guest, "__pocketEvent", &event, None)?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
+        if !host.guest_loaded {
+            set_error(host, "viewport cannot be resized before guest load/eval");
+            return -1;
+        }
+        let requested = (width as f32, height as f32);
+        if (host.viewport_width, host.viewport_height) == requested {
             clear_error(host);
-            0
+            return 0;
         }
-        Err(error) => {
-            set_error(host, error);
-            -1
+
+        let result = (|| -> Result<(), String> {
+            demand::before_external(host)?;
+            {
+                let mut core = host
+                    .ops
+                    .core_mut()
+                    .map_err(|error| format!("viewport resize core: {error:?}"))?;
+                core.ui.set_viewport(requested.0, requested.1);
+                core.mutated();
+            }
+            host.viewport_width = requested.0;
+            host.viewport_height = requested.1;
+            // A viewport change invalidates DrawList words, decoded op geometry and
+            // the static JSON fast path, but it does not release live textures.
+            // Keep frame_delta_v2_published so the caller can echo the last frame
+            // sequence and acknowledge its resource ledger even though the next
+            // packet must be a full frame (draw_cache is gone).
+            host.draw_cache = None;
+            host.frame_json_cache = None;
+
+            resize_guest_viewport(&host.guest, requested.0, requested.1)?;
+            let event = serde_json::json!({
+                "type": "event",
+                "id": format!("host-viewport-{}", host.frame.wrapping_add(1)),
+                "name": "display.viewport",
+                "payload": {
+                    "width": requested.0,
+                    "height": requested.1,
+                },
+            });
+            dispatch_guest_json(&host.guest, "__pocketEvent", &event, None)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                clear_error(host);
+                0
+            }
+            Err(error) => {
+                set_error(host, error);
+                -1
+            }
         }
-    }
+    })
 }
 
 /// Register a trusted asynchronous offload provider before guest evaluation.
@@ -5490,87 +5722,87 @@ pub unsafe extern "C" fn pocket_configure_offload(
     config: *const c_char,
     notify: Option<unsafe extern "C" fn()>,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    let result = (|| -> Result<Arc<offload::OffloadHost>, String> {
-        if host.guest_loaded || host.offload.is_some() || config.is_null() {
-            return Err("offload provider must be configured once before evaluation".into());
-        }
-        let bytes = CStr::from_ptr(config).to_bytes();
-        if bytes.len() > 16384 {
-            return Err("offload config exceeds 16 KiB".into());
-        }
-        let config: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        let number = |field: &str| {
-            config[field]
-                .as_u64()
-                .and_then(|v| u32::try_from(v).ok())
-                .filter(|v| *v > 0)
-                .ok_or_else(|| format!("invalid offload {field}"))
-        };
-        let generation = number("generation")?;
-        let session = number("session")?;
-        let timeout = number("timeoutMs")?;
-        if timeout > 60000 {
-            return Err("offload timeout exceeds 60s".into());
-        }
-        let methods: Vec<String> =
-            serde_json::from_value(config["methods"].clone()).map_err(|e| e.to_string())?;
-        if methods.is_empty()
-            || methods.len() > 64
-            || methods.iter().any(|s| {
-                s.is_empty()
-                    || s.len() > 64
-                    || !s.bytes().all(|c| {
-                        c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(&c)
-                    })
+    guard_host_mut(handle, "pocket_configure_offload", -1, |host| {
+        let result = (|| -> Result<Arc<offload::OffloadHost>, String> {
+            if host.guest_loaded || host.offload.is_some() || config.is_null() {
+                return Err("offload provider must be configured once before evaluation".into());
+            }
+            let bytes = CStr::from_ptr(config).to_bytes();
+            if bytes.len() > 16384 {
+                return Err("offload config exceeds 16 KiB".into());
+            }
+            let config: serde_json::Value =
+                serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            let number = |field: &str| {
+                config[field]
+                    .as_u64()
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v > 0)
+                    .ok_or_else(|| format!("invalid offload {field}"))
+            };
+            let generation = number("generation")?;
+            let session = number("session")?;
+            let timeout = number("timeoutMs")?;
+            if timeout > 60000 {
+                return Err("offload timeout exceeds 60s".into());
+            }
+            let methods: Vec<String> =
+                serde_json::from_value(config["methods"].clone()).map_err(|e| e.to_string())?;
+            if methods.is_empty()
+                || methods.len() > 64
+                || methods.iter().any(|s| {
+                    s.is_empty()
+                        || s.len() > 64
+                        || !s.bytes().all(|c| {
+                            c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(&c)
+                        })
+                })
+            {
+                return Err("invalid offload method allowlist".into());
+            }
+            let timeout = std::time::Duration::from_millis(timeout as u64);
+            Ok(if let Some(trace) = ensure_async_trace(host)? {
+                offload::OffloadHost::new_traced(
+                    generation,
+                    session,
+                    timeout,
+                    methods,
+                    if replay::is_replay(host) {
+                        None
+                    } else {
+                        notify
+                    },
+                    trace,
+                    format!("offload:{generation}"),
+                )
+            } else {
+                offload::OffloadHost::new(generation, session, timeout, methods, notify)
             })
-        {
-            return Err("invalid offload method allowlist".into());
-        }
-        let timeout = std::time::Duration::from_millis(timeout as u64);
-        Ok(if let Some(trace) = ensure_async_trace(host)? {
-            offload::OffloadHost::new_traced(
-                generation,
-                session,
-                timeout,
-                methods,
-                if replay::is_replay(host) {
-                    None
-                } else {
-                    notify
-                },
-                trace,
-                format!("offload:{generation}"),
-            )
-        } else {
-            offload::OffloadHost::new(generation, session, timeout, methods, notify)
-        })
-    })();
-    match result {
-        Ok(provider) => {
-            let installed = host
-                .guest
-                .with(|ctx| offload::OffloadHost::install(ctx, provider.clone(), None));
-            match installed {
-                Some(Ok(())) => {
-                    host.offload = Some(provider);
-                    clear_error(host);
-                    0
-                }
-                _ => {
-                    provider.shutdown();
-                    set_error(host, "offload UI installation failed");
-                    -1
+        })();
+        match result {
+            Ok(provider) => {
+                let installed = host
+                    .guest
+                    .with(|ctx| offload::OffloadHost::install(ctx, provider.clone(), None));
+                match installed {
+                    Some(Ok(())) => {
+                        host.offload = Some(provider);
+                        clear_error(host);
+                        0
+                    }
+                    _ => {
+                        provider.shutdown();
+                        set_error(host, "offload UI installation failed");
+                        -1
+                    }
                 }
             }
+            Err(e) => {
+                set_error(host, e);
+                -1
+            }
         }
-        Err(e) => {
-            set_error(host, e);
-            -1
-        }
-    }
+    })
 }
 
 /// Pop one bounded provider request/cancellation on the UI owner thread.
@@ -5579,25 +5811,24 @@ pub unsafe extern "C" fn pocket_offload_take(
     handle: *mut HostState,
     cancelled: u32,
 ) -> *const c_char {
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    let Some(provider) = &host.offload else {
-        return ptr::null();
-    };
-    let request = if cancelled == 0 {
-        provider.take_request()
-    } else {
-        provider.take_cancellation()
-    };
-    let Some(request) = request else {
-        return ptr::null();
-    };
-    host.offload_output = c_string(&serde_json::json!({
-        "generation":request.generation,"session":request.session,"id":request.id,
-        "method":request.method,"payload":request.payload,"timeoutMicros":request.timeout.as_micros() as u64,
-    }).to_string());
-    host.offload_output.as_ptr()
+    guard_host_mut(handle, "pocket_offload_take", ptr::null(), |host| {
+        let Some(provider) = &host.offload else {
+            return ptr::null();
+        };
+        let request = if cancelled == 0 {
+            provider.take_request()
+        } else {
+            provider.take_cancellation()
+        };
+        let Some(request) = request else {
+            return ptr::null();
+        };
+        host.offload_output = c_string(&serde_json::json!({
+            "generation":request.generation,"session":request.session,"id":request.id,
+            "method":request.method,"payload":request.payload,"timeoutMicros":request.timeout.as_micros() as u64,
+        }).to_string());
+        host.offload_output.as_ptr()
+    })
 }
 
 /// Binary counterpart of `pocket_offload_take`. Returns a borrowed `0xB2`
@@ -5608,39 +5839,47 @@ pub unsafe extern "C" fn pocket_offload_take_binary(
     cancelled: u32,
     out_byte_length: *mut u64,
 ) -> *const u8 {
-    if let Some(length) = out_byte_length.as_mut() {
-        *length = 0;
-    }
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    let Some(provider) = &host.offload else {
-        return ptr::null();
-    };
-    let request = if cancelled == 0 {
-        provider.take_request()
-    } else {
-        provider.take_cancellation()
-    };
-    let Some(request) = request else {
-        return ptr::null();
-    };
-    host.offload_binary_output = binary_bridge::encode_offload_request(&request);
-    if let Some(length) = out_byte_length.as_mut() {
-        *length = host.offload_binary_output.len() as u64;
-    }
-    host.offload_binary_output.as_ptr()
+    catch_ffi_unwind(ptr::null(), || {
+        if let Some(length) = out_byte_length.as_mut() {
+            *length = 0;
+        }
+        let ptr = guard_host_mut(handle, "pocket_offload_take_binary", ptr::null(), |host| {
+            let Some(provider) = &host.offload else {
+                return ptr::null();
+            };
+            let request = if cancelled == 0 {
+                provider.take_request()
+            } else {
+                provider.take_cancellation()
+            };
+            let Some(request) = request else {
+                return ptr::null();
+            };
+            host.offload_binary_output = binary_bridge::encode_offload_request(&request);
+            if let Some(length) = out_byte_length.as_mut() {
+                *length = host.offload_binary_output.len() as u64;
+            }
+            host.offload_binary_output.as_ptr()
+        });
+        if ptr.is_null() {
+            if let Some(length) = out_byte_length.as_mut() {
+                *length = 0;
+            }
+        }
+        ptr
+    })
 }
 
 /// Observe native replies without consuming them. No periodic probe is used;
 /// Dart checks this only while handling a native provider notification.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_offload_has_replies(handle: *const HostState) -> u32 {
-    handle
-        .as_ref()
-        .and_then(|host| host.offload.as_ref())
-        .map(|provider| u32::from(provider.has_replies()))
-        .unwrap_or(0)
+    guard_host_ref(handle, 0, |host| {
+        host.offload
+            .as_ref()
+            .map(|provider| u32::from(provider.has_replies()))
+            .unwrap_or(0)
+    })
 }
 
 /// Completion is generation/session/id scoped; stale or duplicate results fail.
@@ -5649,47 +5888,46 @@ pub unsafe extern "C" fn pocket_offload_complete(
     handle: *mut HostState,
     record: *const c_char,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    let Some(provider) = &host.offload else {
-        return -1;
-    };
-    if record.is_null() {
-        return -1;
-    }
-    let bytes = CStr::from_ptr(record).to_bytes();
-    if bytes.len() > 16384 {
-        return -1;
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return -1;
-    };
-    let Some(generation) = value["generation"]
-        .as_u64()
-        .and_then(|v| u32::try_from(v).ok())
-    else {
-        return -1;
-    };
-    let Some(session) = value["session"]
-        .as_u64()
-        .and_then(|v| u32::try_from(v).ok())
-    else {
-        return -1;
-    };
-    let Some(id) = value["id"].as_u64() else {
-        return -1;
-    };
-    let result = match (value["payload"].as_str(), value["error"].as_str()) {
-        (Some(payload), None) => Ok(payload.to_owned()),
-        (None, Some(error)) => Err(error.to_owned()),
-        _ => return -1,
-    };
-    if provider.complete(generation, session, id, result) {
-        0
-    } else {
-        -1
-    }
+    guard_host_mut(handle, "pocket_offload_complete", -1, |host| {
+        let Some(provider) = &host.offload else {
+            return -1;
+        };
+        if record.is_null() {
+            return -1;
+        }
+        let bytes = CStr::from_ptr(record).to_bytes();
+        if bytes.len() > 16384 {
+            return -1;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return -1;
+        };
+        let Some(generation) = value["generation"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+        else {
+            return -1;
+        };
+        let Some(session) = value["session"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+        else {
+            return -1;
+        };
+        let Some(id) = value["id"].as_u64() else {
+            return -1;
+        };
+        let result = match (value["payload"].as_str(), value["error"].as_str()) {
+            (Some(payload), None) => Ok(payload.to_owned()),
+            (None, Some(error)) => Err(error.to_owned()),
+            _ => return -1,
+        };
+        if provider.complete(generation, session, id, result) {
+            0
+        } else {
+            -1
+        }
+    })
 }
 
 /// Binary counterpart of `pocket_offload_complete`. Accepts a `0xB2` binary
@@ -5700,25 +5938,24 @@ pub unsafe extern "C" fn pocket_offload_complete_binary(
     record: *const u8,
     record_len: usize,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    let Some(provider) = &host.offload else {
-        return -1;
-    };
-    if record.is_null() || record_len == 0 || record_len > 16384 {
-        return -1;
-    }
-    let bytes = std::slice::from_raw_parts(record, record_len);
-    let Some((generation, session, id, result)) = binary_bridge::decode_offload_completion(bytes)
-    else {
-        return -1;
-    };
-    if provider.complete(generation, session, id, result) {
-        0
-    } else {
-        -1
-    }
+    guard_host_mut(handle, "pocket_offload_complete_binary", -1, |host| {
+        let Some(provider) = &host.offload else {
+            return -1;
+        };
+        if record.is_null() || record_len == 0 || record_len > 16384 {
+            return -1;
+        }
+        let bytes = std::slice::from_raw_parts(record, record_len);
+        let Some((generation, session, id, result)) = binary_bridge::decode_offload_completion(bytes)
+        else {
+            return -1;
+        };
+        if provider.complete(generation, session, id, result) {
+            0
+        } else {
+            -1
+        }
+    })
 }
 
 /// Install a trusted application-to-surface registry before evaluation.
@@ -5729,73 +5966,72 @@ pub unsafe extern "C" fn pocket_configure_compositor(
     handle: *mut HostState,
     registry: *const c_char,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if host.guest_loaded || registry.is_null() {
-        set_error(
-            host,
-            "compositor registry must be configured before guest load",
-        );
-        return -1;
-    }
-    let result = (|| -> Result<BTreeMap<String, i32>, String> {
-        let bytes = CStr::from_ptr(registry).to_bytes();
-        if bytes.len() > 16384 {
-            return Err("compositor registry exceeds 16 KiB".into());
+    guard_host_mut(handle, "pocket_configure_compositor", -1, |host| {
+        if host.guest_loaded || registry.is_null() {
+            set_error(
+                host,
+                "compositor registry must be configured before guest load",
+            );
+            return -1;
         }
-        let map: BTreeMap<String, i32> =
-            serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        if map.len() > 62 {
-            return Err("too many compositor applications".into());
-        }
-        let mut handles = HashSet::new();
-        for (id, handle) in &map {
-            if id.is_empty()
-                || id.len() > 128
-                || !id.as_bytes()[0].is_ascii_alphanumeric()
-                || !id
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
-                || id == POCKET_FLUTTER_SURFACE_PACKAGE
-                || !(2..=63).contains(handle)
-                || !handles.insert(*handle)
-            {
-                return Err("invalid or duplicate compositor application handle".into());
+        let result = (|| -> Result<BTreeMap<String, i32>, String> {
+            let bytes = CStr::from_ptr(registry).to_bytes();
+            if bytes.len() > 16384 {
+                return Err("compositor registry exceeds 16 KiB".into());
             }
-        }
-        Ok(map)
-    })();
-    match result {
-        Ok(map) => {
-            if !host.compositor_surfaces.is_empty() && host.compositor_surfaces != map {
-                set_error(host, "compositor registry is already configured");
-                return -1;
+            let map: BTreeMap<String, i32> =
+                serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            if map.len() > 62 {
+                return Err("too many compositor applications".into());
             }
-            let result = host
-                .guest
-                .with(|ctx| install_compositor_apps(&ctx, &host.nodes, &map));
-            match result {
-                Some(Ok(())) => {
-                    host.compositor_surfaces = map;
-                    clear_error(host);
-                    0
-                }
-                Some(Err(e)) => {
-                    set_error(host, e.to_string());
-                    -1
-                }
-                None => {
-                    set_error(host, "guest context is not initialized");
-                    -1
+            let mut handles = HashSet::new();
+            for (id, handle) in &map {
+                if id.is_empty()
+                    || id.len() > 128
+                    || !id.as_bytes()[0].is_ascii_alphanumeric()
+                    || !id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+                    || id == POCKET_FLUTTER_SURFACE_PACKAGE
+                    || !(2..=63).contains(handle)
+                    || !handles.insert(*handle)
+                {
+                    return Err("invalid or duplicate compositor application handle".into());
                 }
             }
+            Ok(map)
+        })();
+        match result {
+            Ok(map) => {
+                if !host.compositor_surfaces.is_empty() && host.compositor_surfaces != map {
+                    set_error(host, "compositor registry is already configured");
+                    return -1;
+                }
+                let result = host
+                    .guest
+                    .with(|ctx| install_compositor_apps(&ctx, &host.nodes, &map));
+                match result {
+                    Some(Ok(())) => {
+                        host.compositor_surfaces = map;
+                        clear_error(host);
+                        0
+                    }
+                    Some(Err(e)) => {
+                        set_error(host, e.to_string());
+                        -1
+                    }
+                    None => {
+                        set_error(host, "guest context is not initialized");
+                        -1
+                    }
+                }
+            }
+            Err(e) => {
+                set_error(host, e);
+                -1
+            }
         }
-        Err(e) => {
-            set_error(host, e);
-            -1
-        }
-    }
+    })
 }
 
 /// Enable one optional logical auxiliary output before loading a guest.
@@ -5810,90 +6046,89 @@ pub unsafe extern "C" fn pocket_enable_auxiliary(
     width: f64,
     height: f64,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if host.guest_loaded {
-        set_error(
-            host,
-            "auxiliary output must be enabled before guest load/eval",
-        );
-        return -1;
-    }
-    if !width.is_finite()
-        || !height.is_finite()
-        || width < 1.0
-        || height < 1.0
-        || width > 32000.0
-        || height > 32000.0
-    {
-        set_error(
-            host,
-            "auxiliary viewport must be finite and within 1..32000",
-        );
-        return -1;
-    }
-    let requested = (width as f32, height as f32);
-    if let Some(existing) = host.auxiliary_viewport {
-        if existing == requested {
-            clear_error(host);
-            return 0;
-        }
-        set_error(host, "auxiliary viewport is already configured");
-        return -1;
-    }
-    let root_result = host
-        .ops
-        .core_mut()
-        .map(|mut core| core.ui.create_auxiliary_surface(requested.0, requested.1));
-    let root = match root_result {
-        Ok(root) => root,
-        Err(error) => {
-            set_error(host, format!("auxiliary core setup: {error:?}"));
+    guard_host_mut(handle, "pocket_enable_auxiliary", -1, |host| {
+        if host.guest_loaded {
+            set_error(
+                host,
+                "auxiliary output must be enabled before guest load/eval",
+            );
             return -1;
         }
-    };
-    if root == 0 {
-        set_error(host, "core failed to create auxiliary surface");
-        return -1;
-    }
-    host.auxiliary_viewport = Some(requested);
-    host.draw_cache = None;
-    host.frame_delta_v2_published = None;
-    host.frame_json_cache = None;
-    let environment = match guest_environment(host, &[], None) {
-        Ok(environment) => environment,
-        Err(error) => {
+        if !width.is_finite()
+            || !height.is_finite()
+            || width < 1.0
+            || height < 1.0
+            || width > 32000.0
+            || height > 32000.0
+        {
+            set_error(
+                host,
+                "auxiliary viewport must be finite and within 1..32000",
+            );
+            return -1;
+        }
+        let requested = (width as f32, height as f32);
+        if let Some(existing) = host.auxiliary_viewport {
+            if existing == requested {
+                clear_error(host);
+                return 0;
+            }
+            set_error(host, "auxiliary viewport is already configured");
+            return -1;
+        }
+        let root_result = host
+            .ops
+            .core_mut()
+            .map(|mut core| core.ui.create_auxiliary_surface(requested.0, requested.1));
+        let root = match root_result {
+            Ok(root) => root,
+            Err(error) => {
+                set_error(host, format!("auxiliary core setup: {error:?}"));
+                return -1;
+            }
+        };
+        if root == 0 {
+            set_error(host, "core failed to create auxiliary surface");
+            return -1;
+        }
+        host.auxiliary_viewport = Some(requested);
+        host.draw_cache = None;
+        host.frame_delta_v2_published = None;
+        host.frame_json_cache = None;
+        let environment = match guest_environment(host, &[], None) {
+            Ok(environment) => environment,
+            Err(error) => {
+                set_error(host, error);
+                return -1;
+            }
+        };
+        if let Err(error) = host.guest.initialize(host.ops.clone(), &environment) {
+            let detail = host.guest.last_error().unwrap_or("no guest detail");
+            set_error(
+                host,
+                format!("guest auxiliary reinitialize: {error:?}: {detail}"),
+            );
+            return -1;
+        }
+        if let Err(error) = install_bridge(
+            &host.guest,
+            host.ops.clone(),
+            host.guest_security.clone(),
+            host.nodes.clone(),
+            host.outbound.clone(),
+            host.duplex.clone(),
+            auxiliary_descriptor(host),
+            &host.compositor_surfaces,
+            host.offload.clone(),
+            replay::mode(host),
+            host.trace.scalar_lane(),
+        ) {
             set_error(host, error);
             return -1;
         }
-    };
-    if let Err(error) = host.guest.initialize(host.ops.clone(), &environment) {
-        let detail = host.guest.last_error().unwrap_or("no guest detail");
-        set_error(
-            host,
-            format!("guest auxiliary reinitialize: {error:?}: {detail}"),
-        );
-        return -1;
-    }
-    if let Err(error) = install_bridge(
-        &host.guest,
-        host.ops.clone(),
-        host.guest_security.clone(),
-        host.nodes.clone(),
-        host.outbound.clone(),
-        host.duplex.clone(),
-        auxiliary_descriptor(host),
-        &host.compositor_surfaces,
-        host.offload.clone(),
-        replay::mode(host),
-        host.trace.scalar_lane(),
-    ) {
-        set_error(host, error);
-        return -1;
-    }
-    clear_error(host);
-    0
+        clear_error(host);
+        0
+    })
 }
 
 const MAX_SCRIPT_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -5939,7 +6174,7 @@ fn reset_host_for_load(host: &mut HostState) {
     guest_security::reset_runtime(&host.guest_security);
     // The new package is admitted before this reset. Retain its static texture
     // metadata while dropping the prior guest's transient host registrations.
-    host.nodes.borrow_mut().retain(|node| node.from_pack);
+    host.nodes.borrow_mut().write().retain(|node| node.from_pack);
     // A reload is a channel-generation boundary. Never clear cursors in an
     // Arc that may still be borrowed by a background Dart isolate.
     host.duplex.close();
@@ -6015,7 +6250,8 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
         install_text_measure(&mut core.ui, host.text_metrics.clone());
     }
     {
-        let mut nodes = host.nodes.borrow_mut();
+        let mut registry = host.nodes.borrow_mut();
+        let nodes = registry.write();
         nodes.retain(|node| !node.from_pack);
         for (index, texture) in assets.textures.iter().enumerate() {
             nodes.push(NodeMeta {
@@ -6090,37 +6326,38 @@ pub unsafe extern "C" fn pocket_load_files(
     source_path: *const c_char,
     pak_path: *const c_char,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if source_path.is_null() || pak_path.is_null() {
-        set_error(host, "null application file path");
-        return -1;
-    }
-    let result = (|| {
-        let source = read_application_file(
-            CStr::from_ptr(source_path),
-            MAX_SCRIPT_FILE_BYTES,
-            "guest source",
-        )?;
-        let source =
-            String::from_utf8(source).map_err(|_| "guest source is not UTF-8".to_owned())?;
-        let source =
-            CString::new(source).map_err(|_| "guest source contains a NUL byte".to_owned())?;
-        let pak = read_application_file(
-            CStr::from_ptr(pak_path),
-            package_file_limit(host),
-            "guest PAK",
-        )?;
-        Ok::<_, String>((source, pak))
-    })();
-    match result {
-        Ok((source, pak)) => pocket_load(handle, source.as_ptr(), pak.as_ptr(), pak.len()),
-        Err(error) => {
-            set_error(host, error);
-            -1
+    guard_host_mut(handle, "pocket_load_files", -1, |host| {
+        if source_path.is_null() || pak_path.is_null() {
+            set_error(host, "null application file path");
+            return -1;
         }
-    }
+        let result = (|| {
+            let source = read_application_file(
+                CStr::from_ptr(source_path),
+                MAX_SCRIPT_FILE_BYTES,
+                "guest source",
+            )?;
+            let source =
+                String::from_utf8(source).map_err(|_| "guest source is not UTF-8".to_owned())?;
+            let source =
+                CString::new(source).map_err(|_| "guest source contains a NUL byte".to_owned())?;
+            let pak = read_application_file(
+                CStr::from_ptr(pak_path),
+                package_file_limit(host),
+                "guest PAK",
+            )?;
+            Ok::<_, String>((source, pak))
+        })();
+        match result {
+            Ok((source, pak)) => {
+                pocket_load_inner(host, source.as_ptr(), pak.as_ptr(), pak.len())
+            }
+            Err(error) => {
+                set_error(host, error);
+                -1
+            }
+        }
+    })
 }
 
 /// Load an official PocketJS framework bundle and its raw PAK bytes.
@@ -6143,10 +6380,17 @@ pub unsafe extern "C" fn pocket_load(
     pak: *const u8,
     pak_len: usize,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
+    guard_host_mut(handle, "pocket_load", -1, |host| {
+        pocket_load_inner(host, source, pak, pak_len)
+    })
+}
 
+unsafe fn pocket_load_inner(
+    host: &mut HostState,
+    source: *const c_char,
+    pak: *const u8,
+    pak_len: usize,
+) -> i32 {
     if host.guest_loaded && host.offload.is_some() {
         set_error(
             host,
@@ -6213,10 +6457,18 @@ pub unsafe extern "C" fn pocket_load_bytecode(
     pak: *const u8,
     pak_len: usize,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
+    guard_host_mut(handle, "pocket_load_bytecode", -1, |host| {
+        pocket_load_bytecode_inner(host, bytecode, bytecode_len, pak, pak_len)
+    })
+}
 
+unsafe fn pocket_load_bytecode_inner(
+    host: &mut HostState,
+    bytecode: *const u8,
+    bytecode_len: usize,
+    pak: *const u8,
+    pak_len: usize,
+) -> i32 {
     if host.guest_loaded && host.offload.is_some() {
         set_error(
             host,
@@ -6301,39 +6553,38 @@ pub unsafe extern "C" fn pocket_load_bytecode_files(
     bytecode_path: *const c_char,
     pak_path: *const c_char,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if bytecode_path.is_null() || pak_path.is_null() {
-        set_error(host, "null bytecode or PAK file path");
-        return -1;
-    }
-    let result = (|| {
-        let bytecode = read_application_file(
-            CStr::from_ptr(bytecode_path),
-            MAX_BYTECODE_FILE_BYTES,
-            "guest bytecode",
-        )?;
-        let pak = read_application_file(
-            CStr::from_ptr(pak_path),
-            package_file_limit(host),
-            "guest PAK",
-        )?;
-        Ok::<_, String>((bytecode, pak))
-    })();
-    match result {
-        Ok((bytecode, pak)) => pocket_load_bytecode(
-            handle,
-            bytecode.as_ptr(),
-            bytecode.len(),
-            pak.as_ptr(),
-            pak.len(),
-        ),
-        Err(error) => {
-            set_error(host, error);
-            -1
+    guard_host_mut(handle, "pocket_load_bytecode_files", -1, |host| {
+        if bytecode_path.is_null() || pak_path.is_null() {
+            set_error(host, "null bytecode or PAK file path");
+            return -1;
         }
-    }
+        let result = (|| {
+            let bytecode = read_application_file(
+                CStr::from_ptr(bytecode_path),
+                MAX_BYTECODE_FILE_BYTES,
+                "guest bytecode",
+            )?;
+            let pak = read_application_file(
+                CStr::from_ptr(pak_path),
+                package_file_limit(host),
+                "guest PAK",
+            )?;
+            Ok::<_, String>((bytecode, pak))
+        })();
+        match result {
+            Ok((bytecode, pak)) => pocket_load_bytecode_inner(
+                host,
+                bytecode.as_ptr(),
+                bytecode.len(),
+                pak.as_ptr(),
+                pak.len(),
+            ),
+            Err(error) => {
+                set_error(host, error);
+                -1
+            }
+        }
+    })
 }
 
 /// ABI string embedded in bytecode metadata and package manifests. It is
@@ -6341,60 +6592,60 @@ pub unsafe extern "C" fn pocket_load_bytecode_files(
 /// returned pointer.
 #[no_mangle]
 pub extern "C" fn pocket_bytecode_runtime_abi() -> *const c_char {
-    static ABI: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
-    ABI.get_or_init(|| c_string(&bytecode::runtime_abi()))
-        .as_ptr()
+    catch_ffi_unwind(ptr::null(), || {
+        static ABI: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+        ABI.get_or_init(|| c_string(&bytecode::runtime_abi()))
+            .as_ptr()
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_eval(handle: *mut HostState, source: *const c_char) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-
-    if host.guest_loaded && host.offload.is_some() {
-        set_error(
-            host,
-            "offload guest reload requires a fresh native runtime generation",
-        );
-        return -1;
-    }
-    let Some(source) = source.as_ref() else {
-        set_error(host, "null source");
-        return -1;
-    };
-    let source = CStr::from_ptr(source).to_string_lossy();
-    if let Err(error) = demand::before_external(host) {
-        set_error(host, error);
-        return -1;
-    }
-    if let Err(error) = start_worker(host) {
-        set_error(host, error);
-        return -1;
-    }
-    match evaluate_guest(&mut host.guest, &source, host.tick_hz) {
-        Ok(()) => {
-            if let Some(error) = guest_security_fatal(host) {
+    guard_host_mut(handle, "pocket_eval", -1, |host| {
+        if host.guest_loaded && host.offload.is_some() {
+            set_error(
+                host,
+                "offload guest reload requires a fresh native runtime generation",
+            );
+            return -1;
+        }
+        let Some(source) = source.as_ref() else {
+            set_error(host, "null source");
+            return -1;
+        };
+        let source = CStr::from_ptr(source).to_string_lossy();
+        if let Err(error) = demand::before_external(host) {
+            set_error(host, error);
+            return -1;
+        }
+        if let Err(error) = start_worker(host) {
+            set_error(host, error);
+            return -1;
+        }
+        match evaluate_guest(&mut host.guest, &source, host.tick_hz) {
+            Ok(()) => {
+                if let Some(error) = guest_security_fatal(host) {
+                    stop_worker(host);
+                    host.outbound.borrow_mut().clear();
+                    set_error(host, error);
+                    return -1;
+                }
+                host.guest_loaded = true;
+                host.draw_cache = None;
+                host.frame_json_cache = None;
+                clear_error(host);
+                0
+            }
+            Err(error) => {
+                // A failed evaluation is not a frame boundary. Do not deliver
+                // requests emitted by partially executed JS on a later frame.
                 stop_worker(host);
                 host.outbound.borrow_mut().clear();
                 set_error(host, error);
-                return -1;
+                -1
             }
-            host.guest_loaded = true;
-            host.draw_cache = None;
-            host.frame_json_cache = None;
-            clear_error(host);
-            0
         }
-        Err(error) => {
-            // A failed evaluation is not a frame boundary. Do not deliver
-            // requests emitted by partially executed JS on a later frame.
-            stop_worker(host);
-            host.outbound.borrow_mut().clear();
-            set_error(host, error);
-            -1
-        }
-    }
+    })
 }
 
 fn frame_has_no_transient_data(frame: &BuiltFrame) -> bool {
@@ -6466,13 +6717,12 @@ fn failed_frame_output(host: &mut HostState, error: String) -> *const c_char {
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_frame(handle: *mut HostState, delta_ms: f64) -> *const c_char {
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    match build_frame(host, delta_ms, false, false) {
-        Ok(built) => complete_frame_output(host, built),
-        Err(error) => failed_frame_output(host, error),
-    }
+    guard_host_mut(handle, "pocket_frame", ptr::null(), |host| {
+        match build_frame(host, delta_ms, false, false) {
+            Ok(built) => complete_frame_output(host, built),
+            Err(error) => failed_frame_output(host, error),
+        }
+    })
 }
 
 /// Opaque ABI v2 endpoint. The normal host endpoint owns both external SPSC
@@ -6507,35 +6757,40 @@ unsafe fn clone_duplex_channel(
 pub unsafe extern "C" fn pocket_duplex_channel_acquire(
     handle: *mut HostState,
 ) -> *const duplex::DuplexRing {
-    let Some(host) = handle.as_ref() else {
-        return ptr::null();
-    };
-    Arc::into_raw(host.duplex.clone())
+    guard_host_mut(handle, "pocket_duplex_channel_acquire", ptr::null(), |host| {
+        Arc::into_raw(host.duplex.clone())
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_duplex_channel_retain(
     channel: *const duplex::DuplexRing,
 ) -> *const duplex::DuplexRing {
-    if channel.is_null() {
-        return ptr::null();
-    }
-    Arc::increment_strong_count(channel);
-    channel
+    catch_ffi_unwind(ptr::null(), || {
+        if channel.is_null() {
+            return ptr::null();
+        }
+        Arc::increment_strong_count(channel);
+        channel
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_duplex_channel_release(channel: *const duplex::DuplexRing) {
-    if !channel.is_null() {
-        Arc::decrement_strong_count(channel);
-    }
+    catch_ffi_unwind((), || {
+        if !channel.is_null() {
+            Arc::decrement_strong_count(channel);
+        }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_duplex_channel_close(channel: *const duplex::DuplexRing) {
-    if let Some(channel) = channel.as_ref() {
-        channel.close();
-    }
+    catch_ffi_unwind((), || {
+        if let Some(channel) = channel.as_ref() {
+            channel.close();
+        }
+    })
 }
 
 unsafe fn attach_duplex_endpoint(
@@ -6582,31 +6837,32 @@ fn make_duplex_endpoint(
 pub unsafe extern "C" fn pocket_duplex_endpoint_acquire(
     handle: *mut HostState,
 ) -> *mut DuplexEndpoint {
-    let Some(host) = handle.as_ref() else {
-        return ptr::null_mut();
-    };
-    make_duplex_endpoint(host.duplex.clone(), true, true)
+    guard_host_mut(handle, "pocket_duplex_endpoint_acquire", ptr::null_mut(), |host| {
+        make_duplex_endpoint(host.duplex.clone(), true, true)
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_duplex_attach_ingress_producer(
     channel: *const duplex::DuplexRing,
 ) -> *mut DuplexEndpoint {
-    attach_duplex_endpoint(channel, true, false)
+    catch_ffi_unwind(ptr::null_mut(), || attach_duplex_endpoint(channel, true, false))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_duplex_attach_egress_consumer(
     channel: *const duplex::DuplexRing,
 ) -> *mut DuplexEndpoint {
-    attach_duplex_endpoint(channel, false, true)
+    catch_ffi_unwind(ptr::null_mut(), || attach_duplex_endpoint(channel, false, true))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_duplex_endpoint_release(endpoint: *mut DuplexEndpoint) {
-    if !endpoint.is_null() {
-        drop(Box::from_raw(endpoint));
-    }
+    catch_ffi_unwind((), || {
+        if !endpoint.is_null() {
+            drop(Box::from_raw(endpoint));
+        }
+    })
 }
 
 /// Reserve a contiguous ingress batch. On success the returned pointer points
@@ -6619,21 +6875,23 @@ pub unsafe extern "C" fn pocket_duplex_ingress_reserve(
     max_count: u32,
     out_count: *mut u32,
 ) -> *mut u8 {
-    if endpoint.is_null() || out_count.is_null() {
-        return ptr::null_mut();
-    }
-    *out_count = 0;
-    let Some(producer) = (*endpoint).ingress.as_ref() else {
-        return ptr::null_mut();
-    };
-    let Some(reservation) = producer.reserve(max_count) else {
-        return ptr::null_mut();
-    };
-    let Some(payload) = producer.payload_ptr(reservation) else {
-        return ptr::null_mut();
-    };
-    *out_count = reservation.count();
-    payload
+    catch_ffi_unwind(ptr::null_mut(), || {
+        if endpoint.is_null() || out_count.is_null() {
+            return ptr::null_mut();
+        }
+        *out_count = 0;
+        let Some(producer) = (*endpoint).ingress.as_ref() else {
+            return ptr::null_mut();
+        };
+        let Some(reservation) = producer.reserve(max_count) else {
+            return ptr::null_mut();
+        };
+        let Some(payload) = producer.payload_ptr(reservation) else {
+            return ptr::null_mut();
+        };
+        *out_count = reservation.count();
+        payload
+    })
 }
 
 #[no_mangle]
@@ -6641,13 +6899,15 @@ pub unsafe extern "C" fn pocket_duplex_ingress_publish(
     endpoint: *mut DuplexEndpoint,
     count: u32,
 ) -> i32 {
-    if endpoint.is_null() {
-        return -1;
-    }
-    let Some(producer) = (*endpoint).ingress.as_ref() else {
-        return -2;
-    };
-    producer.commit_count(count) as i32
+    catch_ffi_unwind(-1, || {
+        if endpoint.is_null() {
+            return -1;
+        }
+        let Some(producer) = (*endpoint).ingress.as_ref() else {
+            return -2;
+        };
+        producer.commit_count(count) as i32
+    })
 }
 
 /// Return a contiguous egress batch. The pointer remains valid until this
@@ -6660,18 +6920,20 @@ pub unsafe extern "C" fn pocket_duplex_egress_peek(
     max_count: u32,
     out_count: *mut u32,
 ) -> *const u8 {
-    if endpoint.is_null() || out_count.is_null() {
-        return ptr::null();
-    }
-    *out_count = 0;
-    let Some(consumer) = (*endpoint).egress.as_ref() else {
-        return ptr::null();
-    };
-    let Some((payload, count)) = consumer.peek(max_count) else {
-        return ptr::null();
-    };
-    *out_count = count;
-    payload
+    catch_ffi_unwind(ptr::null(), || {
+        if endpoint.is_null() || out_count.is_null() {
+            return ptr::null();
+        }
+        *out_count = 0;
+        let Some(consumer) = (*endpoint).egress.as_ref() else {
+            return ptr::null();
+        };
+        let Some((payload, count)) = consumer.peek(max_count) else {
+            return ptr::null();
+        };
+        *out_count = count;
+        payload
+    })
 }
 
 #[no_mangle]
@@ -6679,28 +6941,30 @@ pub unsafe extern "C" fn pocket_duplex_egress_consume(
     endpoint: *mut DuplexEndpoint,
     count: u32,
 ) -> i32 {
-    if endpoint.is_null() {
-        return -1;
-    }
-    let Some(consumer) = (*endpoint).egress.as_ref() else {
-        return -2;
-    };
-    consumer.consume(count) as i32
+    catch_ffi_unwind(-1, || {
+        if endpoint.is_null() {
+            return -1;
+        }
+        let Some(consumer) = (*endpoint).egress.as_ref() else {
+            return -2;
+        };
+        consumer.consume(count) as i32
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn pocket_duplex_abi_version() -> u32 {
-    duplex::ABI_VERSION
+    catch_ffi_unwind(0, || duplex::ABI_VERSION)
 }
 
 #[no_mangle]
 pub extern "C" fn pocket_duplex_message_size() -> u32 {
-    duplex::MESSAGE_BYTES as u32
+    catch_ffi_unwind(0, || duplex::MESSAGE_BYTES as u32)
 }
 
 #[no_mangle]
 pub extern "C" fn pocket_duplex_capacity() -> u32 {
-    (duplex::RING_CAPACITY - 1) as u32
+    catch_ffi_unwind(0, || (duplex::RING_CAPACITY - 1) as u32)
 }
 
 /// Drain host-written duplex records on the runtime owner thread and invoke
@@ -6708,27 +6972,26 @@ pub extern "C" fn pocket_duplex_capacity() -> u32 {
 /// ingress queued; a throwing handler leaves the current record uncommitted.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_duplex_step(handle: *mut HostState) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if !host.guest_loaded {
-        set_error(host, "duplex step requires a loaded guest");
-        return -1;
-    }
-    if let Err(error) = demand::before_external(host) {
-        set_error(host, error);
-        return -1;
-    }
-    match drain_duplex(host) {
-        Ok(processed) => {
-            clear_error(host);
-            processed
+    guard_host_mut(handle, "pocket_duplex_step", -1, |host| {
+        if !host.guest_loaded {
+            set_error(host, "duplex step requires a loaded guest");
+            return -1;
         }
-        Err(error) => {
+        if let Err(error) = demand::before_external(host) {
             set_error(host, error);
-            -1
+            return -1;
         }
-    }
+        match drain_duplex(host) {
+            Ok(processed) => {
+                clear_error(host);
+                processed
+            }
+            Err(error) => {
+                set_error(host, error);
+                -1
+            }
+        }
+    })
 }
 
 /// Mark event-driven Worker/provider output on the native owner thread.
@@ -6736,14 +6999,14 @@ pub unsafe extern "C" fn pocket_duplex_step(handle: *mut HostState) -> i32 {
 /// consumes it. This is a notification, never a periodic polling probe.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_notify_external_work(handle: *mut HostState) {
-    if let Some(host) = handle.as_mut() {
+    guard_host_mut(handle, "pocket_notify_external_work", (), |host| {
         if let Err(error) = demand::before_external(host) {
             set_error(host, error);
             return;
         }
         host.external_work_pending = true;
         demand::invalidate(host);
-    }
+    });
 }
 
 /// Cached scheduler status from the last guest/core transaction. This query
@@ -6751,21 +7014,26 @@ pub unsafe extern "C" fn pocket_notify_external_work(handle: *mut HostState) {
 /// vsync (zero), known idle guests return -1, and a timer returns its delay.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_next_wake_delay_ms(handle: *mut HostState) -> f64 {
-    handle.as_ref().map(demand::delay_ms).unwrap_or(0.0)
+    if handle.is_null() {
+        return 0.0;
+    }
+    guard_host_mut(handle, "pocket_next_wake_delay_ms", -1.0, |host| {
+        demand::delay_ms(host)
+    })
 }
 
 /// Stop accounting idle wall time while the embedding application is in the
 /// background. The next resumed frame establishes its normal display delta.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_set_scheduler_paused(handle: *mut HostState, paused: i32) {
-    if let Some(host) = handle.as_mut() {
+    guard_host_mut(handle, "pocket_set_scheduler_paused", (), |host| {
         if let Some(worker) = &host.worker_runtime {
             worker.set_paused(paused != 0);
         }
         if let Err(error) = demand::set_paused(host, paused != 0) {
             set_error(host, error);
         }
-    }
+    });
 }
 
 /// Delta-aware frame ABI. The native engine still performs the complete
@@ -6778,18 +7046,17 @@ pub unsafe extern "C" fn pocket_frame_delta(
     handle: *mut HostState,
     delta_ms: f64,
 ) -> *const c_char {
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    match build_frame(host, delta_ms, true, false) {
-        Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
-            clear_error(host);
-            host.output = c_string(UNCHANGED_FRAME_JSON);
-            host.output.as_ptr()
+    guard_host_mut(handle, "pocket_frame_delta", ptr::null(), |host| {
+        match build_frame(host, delta_ms, true, false) {
+            Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
+                clear_error(host);
+                host.output = c_string(UNCHANGED_FRAME_JSON);
+                host.output.as_ptr()
+            }
+            Ok(built) => complete_frame_output(host, built),
+            Err(error) => failed_frame_output(host, error),
         }
-        Ok(built) => complete_frame_output(host, built),
-        Err(error) => failed_frame_output(host, error),
-    }
+    })
 }
 
 /// Full-frame binary counterpart of `pocket_frame`. Used by initial guest load
@@ -6801,56 +7068,68 @@ pub unsafe extern "C" fn pocket_frame_binary(
     delta_ms: f64,
     out_byte_length: *mut u64,
 ) -> *const u8 {
-    if let Some(length) = out_byte_length.as_mut() {
-        *length = 0;
-    }
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    let sampling = PERF_SAMPLING_ENABLED.load(Ordering::Relaxed);
-    let t_total = sampling.then(Instant::now);
-    match build_frame(host, delta_ms, false, false) {
-        Ok(built) => {
-            let t_encode = sampling.then(Instant::now);
-            reset_binary_output_buffer(&mut host.binary_output);
-            let encoded =
-                encode_binary_frame_append(&mut host.binary_output, &built.result, &built.result.ops);
-            if let Some(t) = t_encode {
-                host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
+    catch_ffi_unwind((), || {
+        if let Some(length) = out_byte_length.as_mut() {
+            *length = 0;
+        }
+    });
+    let res = guard_host_mut(handle, "pocket_frame_binary", ptr::null(), |host| {
+        let sampling = PERF_SAMPLING_ENABLED.load(Ordering::Relaxed);
+        let t_total = sampling.then(Instant::now);
+        match build_frame(host, delta_ms, false, false) {
+            Ok(built) => {
+                let t_encode = sampling.then(Instant::now);
+                reset_binary_output_buffer(&mut host.binary_output);
+                let encoded = encode_binary_frame_append(
+                    &mut host.binary_output,
+                    &built.result,
+                    &built.result.ops,
+                );
+                if let Some(t) = t_encode {
+                    host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
+                }
+                match encoded {
+                    Ok(()) => {
+                        if let Some(length) = out_byte_length.as_mut() {
+                            *length = host.binary_output.len() as u64;
+                        }
+                        publish_frame_sequence(host, built.result.frame);
+                        clear_error(host);
+                        if let Some(t) = t_total {
+                            let total_us = t.elapsed().as_micros() as u64;
+                            let accounted = host.last_stage_timings.js_tick_us
+                                + host.last_stage_timings.relayout_us
+                                + host.last_stage_timings.live2d_emit_us
+                                + host.last_stage_timings.draw_decode_us
+                                + host.last_stage_timings.splice_us
+                                + host.last_stage_timings.encode_us;
+                            host.last_stage_timings.other_us = total_us.saturating_sub(accounted);
+                        }
+                        host.binary_output.as_ptr()
+                    }
+                    Err(error) => {
+                        reset_binary_output_buffer(&mut host.binary_output);
+                        host.frame_delta_v2_published = None;
+                        set_error(host, format!("frame binary encode: {error}"));
+                        ptr::null()
+                    }
+                }
             }
-            match encoded {
-                Ok(()) => {
-                    if let Some(length) = out_byte_length.as_mut() {
-                        *length = host.binary_output.len() as u64;
-                    }
-                    publish_frame_sequence(host, built.result.frame);
-                    clear_error(host);
-                    if let Some(t) = t_total {
-                        let total_us = t.elapsed().as_micros() as u64;
-                        let accounted = host.last_stage_timings.js_tick_us
-                            + host.last_stage_timings.relayout_us
-                            + host.last_stage_timings.live2d_emit_us
-                            + host.last_stage_timings.draw_decode_us
-                            + host.last_stage_timings.splice_us
-                            + host.last_stage_timings.encode_us;
-                        host.last_stage_timings.other_us = total_us.saturating_sub(accounted);
-                    }
-                    host.binary_output.as_ptr()
-                }
-                Err(error) => {
-                    reset_binary_output_buffer(&mut host.binary_output);
-                    host.frame_delta_v2_published = None;
-                    set_error(host, format!("frame binary encode: {error}"));
-                    ptr::null()
-                }
+            Err(error) => {
+                reset_binary_output_buffer(&mut host.binary_output);
+                failed_frame_output(host, error);
+                ptr::null()
             }
         }
-        Err(error) => {
-            reset_binary_output_buffer(&mut host.binary_output);
-            failed_frame_output(host, error);
-            ptr::null()
-        }
+    });
+    if res.is_null() {
+        catch_ffi_unwind((), || {
+            if let Some(length) = out_byte_length.as_mut() {
+                *length = 0;
+            }
+        });
     }
+    res
 }
 
 /// Compact binary counterpart of `pocket_frame_delta`.  A zero output length
@@ -6863,43 +7142,56 @@ pub unsafe extern "C" fn pocket_frame_delta_binary(
     delta_ms: f64,
     out_byte_length: *mut u64,
 ) -> *const u8 {
-    if let Some(length) = out_byte_length.as_mut() {
-        *length = 0;
-    }
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    match build_frame(host, delta_ms, true, false) {
-        Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
-            reset_binary_output_buffer(&mut host.binary_output);
-            clear_error(host);
-            ptr::null()
+    catch_ffi_unwind((), || {
+        if let Some(length) = out_byte_length.as_mut() {
+            *length = 0;
         }
-        Ok(built) => {
-            reset_binary_output_buffer(&mut host.binary_output);
-            match encode_binary_frame_append(&mut host.binary_output, &built.result, &built.result.ops) {
-                Ok(()) => {
-                    if let Some(length) = out_byte_length.as_mut() {
-                        *length = host.binary_output.len() as u64;
+    });
+    let res = guard_host_mut(handle, "pocket_frame_delta_binary", ptr::null(), |host| {
+        match build_frame(host, delta_ms, true, false) {
+            Ok(built) if built.draw_cache_hit && frame_has_no_transient_data(&built) => {
+                reset_binary_output_buffer(&mut host.binary_output);
+                clear_error(host);
+                ptr::null()
+            }
+            Ok(built) => {
+                reset_binary_output_buffer(&mut host.binary_output);
+                match encode_binary_frame_append(
+                    &mut host.binary_output,
+                    &built.result,
+                    &built.result.ops,
+                ) {
+                    Ok(()) => {
+                        if let Some(length) = out_byte_length.as_mut() {
+                            *length = host.binary_output.len() as u64;
+                        }
+                        publish_frame_sequence(host, built.result.frame);
+                        clear_error(host);
+                        host.binary_output.as_ptr()
                     }
-                    publish_frame_sequence(host, built.result.frame);
-                    clear_error(host);
-                    host.binary_output.as_ptr()
-                }
-                Err(error) => {
-                    reset_binary_output_buffer(&mut host.binary_output);
-                    host.frame_delta_v2_published = None;
-                    set_error(host, format!("frame binary encode: {error}"));
-                    ptr::null()
+                    Err(error) => {
+                        reset_binary_output_buffer(&mut host.binary_output);
+                        host.frame_delta_v2_published = None;
+                        set_error(host, format!("frame binary encode: {error}"));
+                        ptr::null()
+                    }
                 }
             }
+            Err(error) => {
+                reset_binary_output_buffer(&mut host.binary_output);
+                failed_frame_output(host, error);
+                ptr::null()
+            }
         }
-        Err(error) => {
-            reset_binary_output_buffer(&mut host.binary_output);
-            failed_frame_output(host, error);
-            ptr::null()
-        }
+    });
+    if res.is_null() {
+        catch_ffi_unwind((), || {
+            if let Some(length) = out_byte_length.as_mut() {
+                *length = 0;
+            }
+        });
     }
+    res
 }
 
 /// Opt-in PFP1 binary frame delta ABI.
@@ -6926,184 +7218,199 @@ pub unsafe extern "C" fn pocket_frame_delta_binary_v2(
     base_frame: u64,
     out_byte_length: *mut u64,
 ) -> *const u8 {
-    if let Some(length) = out_byte_length.as_mut() {
-        *length = 0;
-    }
-    let Some(host) = handle.as_mut() else {
-        return ptr::null();
-    };
-    let sampling = PERF_SAMPLING_ENABLED.load(Ordering::Relaxed);
-    let t_total = sampling.then(Instant::now);
+    catch_ffi_unwind((), || {
+        if let Some(length) = out_byte_length.as_mut() {
+            *length = 0;
+        }
+    });
+    let res = guard_host_mut(handle, "pocket_frame_delta_binary_v2", ptr::null(), |host| {
+        let sampling = PERF_SAMPLING_ENABLED.load(Ordering::Relaxed);
+        let t_total = sampling.then(Instant::now);
 
-    // This is deliberately checked before build_frame.  The retained cache is
-    // the previous published visual baseline; an idle v2 transaction advances
-    // the internal diagnostic sequence but must not make an old client base
-    // appear stale on the next call.
-    let base_matches = host.frame_delta_v2_published == Some(base_frame);
-    let previous_ops = if base_matches {
-        host.draw_cache.as_ref().map(|cache| Rc::clone(&cache.ops))
-    } else {
-        None
-    };
-    let can_delta = base_matches && previous_ops.is_some();
-    if base_matches {
-        // Resource acknowledgement is independent of whether the retained
-        // DrawOps baseline is still spliceable. A resize (or another layout
-        // invalidation) deliberately drops draw_cache, but the caller can
-        // still echo the last published sequence. Capture that ledger before
-        // build_frame advances it for the next frame; if the next packet is
-        // dropped, this remains the exact baseline needed by a later stale-
-        // base resync.
-        host.frame_delta_v2_resource_base = host.sent_resources.clone();
-    }
+        // This is deliberately checked before build_frame.  The retained cache is
+        // the previous published visual baseline; an idle v2 transaction advances
+        // the internal diagnostic sequence but must not make an old client base
+        // appear stale on the next call.
+        let base_matches = host.frame_delta_v2_published == Some(base_frame);
+        let previous_ops = if base_matches {
+            host.draw_cache.as_ref().map(|cache| Rc::clone(&cache.ops))
+        } else {
+            None
+        };
+        let can_delta = base_matches && previous_ops.is_some();
+        if base_matches {
+            // Resource acknowledgement is independent of whether the retained
+            // DrawOps baseline is still spliceable. A resize (or another layout
+            // invalidation) deliberately drops draw_cache, but the caller can
+            // still echo the last published sequence. Capture that ledger before
+            // build_frame advances it for the next frame; if the next packet is
+            // dropped, this remains the exact baseline needed by a later stale-
+            // base resync.
+            host.frame_delta_v2_resource_base = host.sent_resources.clone();
+        }
 
-    match build_frame(host, delta_ms, false, !can_delta) {
-        Ok(built) => {
-            // A stable retained frame with no lifecycle/event metadata is the
-            // only zero-byte result. Keep `frame_delta_v2_published` unchanged
-            // so the caller's base remains the last sequence it received.
-            if can_delta && built.draw_cache_hit && frame_has_no_transient_data(&built) {
-                reset_binary_output_buffer(&mut host.binary_output);
+        match build_frame(host, delta_ms, false, !can_delta) {
+            Ok(built) => {
+                // A stable retained frame with no lifecycle/event metadata is the
+                // only zero-byte result. Keep `frame_delta_v2_published` unchanged
+                // so the caller's base remains the last sequence it received.
+                if can_delta && built.draw_cache_hit && frame_has_no_transient_data(&built) {
+                    reset_binary_output_buffer(&mut host.binary_output);
+                    clear_error(host);
+                    if let Some(t) = t_total {
+                        let total_us = t.elapsed().as_micros() as u64;
+                        let accounted = host.last_stage_timings.js_tick_us
+                            + host.last_stage_timings.relayout_us
+                            + host.last_stage_timings.live2d_emit_us
+                            + host.last_stage_timings.draw_decode_us;
+                        host.last_stage_timings.other_us = total_us.saturating_sub(accounted);
+                    }
+                    return ptr::null();
+                }
+
+                if can_delta {
+                    let previous_ops = previous_ops
+                        .as_deref()
+                        .expect("delta baseline must retain decoded operations");
+                    let t_splice = sampling.then(Instant::now);
+                    let splice = frame_delta::common_splice(previous_ops, &built.result.ops);
+                    if let Some(t) = t_splice {
+                        host.last_stage_timings.splice_us = t.elapsed().as_micros() as u64;
+                    }
+                    let insert_end = built
+                        .result
+                        .ops
+                        .len()
+                        .checked_sub(splice.suffix_count)
+                        .expect("common splice suffix cannot exceed result length");
+                    let retained_ops = splice.prefix_count + splice.suffix_count;
+                    let t_encode = sampling.then(Instant::now);
+                    // PFP1 adds 28 bytes. Every current PFB1 op is at least the
+                    // 33-byte tag/geometry/clip prefix, so one retained op is a
+                    // strict size win without a second full encoder/count pass.
+                    let encoded = if retained_ops.saturating_mul(MIN_BINARY_OP_BYTES)
+                        > frame_delta::HEADER_BYTES
+                    {
+                        let patch_res = frame_delta::encode_with_writer(
+                            &mut host.binary_output,
+                            base_frame,
+                            splice,
+                            built.result.ops.len(),
+                            |out| {
+                                encode_binary_frame_append(
+                                    out,
+                                    &built.result,
+                                    &built.result.ops[splice.prefix_count..insert_end],
+                                )
+                            },
+                        );
+                        match patch_res {
+                            Ok(()) => Ok(()),
+                            Err(_) => {
+                                reset_binary_output_buffer(&mut host.binary_output);
+                                encode_binary_frame_append(
+                                    &mut host.binary_output,
+                                    &built.result,
+                                    &built.result.ops,
+                                )
+                            }
+                        }
+                    } else {
+                        reset_binary_output_buffer(&mut host.binary_output);
+                        encode_binary_frame_append(
+                            &mut host.binary_output,
+                            &built.result,
+                            &built.result.ops,
+                        )
+                    };
+                    if let Some(t) = t_encode {
+                        host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
+                    }
+                    if let Err(error) = encoded {
+                        reset_binary_output_buffer(&mut host.binary_output);
+                        host.frame_delta_v2_published = None;
+                        set_error(host, format!("frame binary encode: {error}"));
+                        return ptr::null();
+                    }
+                } else {
+                    // First frame, invalid base, resize, reload, and any call
+                    // after a cache invalidation retain the original PFB1 ABI.
+                    let t_encode = sampling.then(Instant::now);
+                    reset_binary_output_buffer(&mut host.binary_output);
+                    let encoded = encode_binary_frame_append(
+                        &mut host.binary_output,
+                        &built.result,
+                        &built.result.ops,
+                    );
+                    if let Some(t) = t_encode {
+                        host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
+                    }
+                    if let Err(error) = encoded {
+                        reset_binary_output_buffer(&mut host.binary_output);
+                        host.frame_delta_v2_published = None;
+                        set_error(host, format!("frame binary encode: {error}"));
+                        return ptr::null();
+                    }
+                };
+                if let Some(length) = out_byte_length.as_mut() {
+                    *length = host.binary_output.len() as u64;
+                }
+                publish_frame_sequence(host, built.result.frame);
                 clear_error(host);
                 if let Some(t) = t_total {
                     let total_us = t.elapsed().as_micros() as u64;
                     let accounted = host.last_stage_timings.js_tick_us
                         + host.last_stage_timings.relayout_us
                         + host.last_stage_timings.live2d_emit_us
-                        + host.last_stage_timings.draw_decode_us;
+                        + host.last_stage_timings.draw_decode_us
+                        + host.last_stage_timings.splice_us
+                        + host.last_stage_timings.encode_us;
                     host.last_stage_timings.other_us = total_us.saturating_sub(accounted);
                 }
-                return ptr::null();
+                host.binary_output.as_ptr()
             }
-
-            if can_delta {
-                let previous_ops = previous_ops
-                    .as_deref()
-                    .expect("delta baseline must retain decoded operations");
-                let t_splice = sampling.then(Instant::now);
-                let splice = frame_delta::common_splice(previous_ops, &built.result.ops);
-                if let Some(t) = t_splice {
-                    host.last_stage_timings.splice_us = t.elapsed().as_micros() as u64;
-                }
-                let insert_end = built
-                    .result
-                    .ops
-                    .len()
-                    .checked_sub(splice.suffix_count)
-                    .expect("common splice suffix cannot exceed result length");
-                let retained_ops = splice.prefix_count + splice.suffix_count;
-                let t_encode = sampling.then(Instant::now);
-                // PFP1 adds 28 bytes. Every current PFB1 op is at least the
-                // 33-byte tag/geometry/clip prefix, so one retained op is a
-                // strict size win without a second full encoder/count pass.
-                let encoded = if retained_ops.saturating_mul(MIN_BINARY_OP_BYTES)
-                    > frame_delta::HEADER_BYTES
-                {
-                    let patch_res = frame_delta::encode_with_writer(
-                        &mut host.binary_output,
-                        base_frame,
-                        splice,
-                        built.result.ops.len(),
-                        |out| {
-                            encode_binary_frame_append(
-                                out,
-                                &built.result,
-                                &built.result.ops[splice.prefix_count..insert_end],
-                            )
-                        },
-                    );
-                    match patch_res {
-                        Ok(()) => Ok(()),
-                        Err(_) => {
-                            reset_binary_output_buffer(&mut host.binary_output);
-                            encode_binary_frame_append(
-                                &mut host.binary_output,
-                                &built.result,
-                                &built.result.ops,
-                            )
-                        }
-                    }
-                } else {
-                    reset_binary_output_buffer(&mut host.binary_output);
-                    encode_binary_frame_append(
-                        &mut host.binary_output,
-                        &built.result,
-                        &built.result.ops,
-                    )
-                };
-                if let Some(t) = t_encode {
-                    host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
-                }
-                if let Err(error) = encoded {
-                    reset_binary_output_buffer(&mut host.binary_output);
-                    host.frame_delta_v2_published = None;
-                    set_error(host, format!("frame binary encode: {error}"));
-                    return ptr::null();
-                }
-            } else {
-                // First frame, invalid base, resize, reload, and any call
-                // after a cache invalidation retain the original PFB1 ABI.
-                let t_encode = sampling.then(Instant::now);
-                reset_binary_output_buffer(&mut host.binary_output);
-                let encoded = encode_binary_frame_append(
-                    &mut host.binary_output,
-                    &built.result,
-                    &built.result.ops,
-                );
-                if let Some(t) = t_encode {
-                    host.last_stage_timings.encode_us = t.elapsed().as_micros() as u64;
-                }
-                if let Err(error) = encoded {
-                    reset_binary_output_buffer(&mut host.binary_output);
-                    host.frame_delta_v2_published = None;
-                    set_error(host, format!("frame binary encode: {error}"));
-                    return ptr::null();
-                }
-            };
+            Err(error) => {
+                host.binary_output.clear();
+                failed_frame_output(host, error);
+                ptr::null()
+            }
+        }
+    });
+    if res.is_null() {
+        catch_ffi_unwind((), || {
             if let Some(length) = out_byte_length.as_mut() {
-                *length = host.binary_output.len() as u64;
+                *length = 0;
             }
-            publish_frame_sequence(host, built.result.frame);
-            clear_error(host);
-            if let Some(t) = t_total {
-                let total_us = t.elapsed().as_micros() as u64;
-                let accounted = host.last_stage_timings.js_tick_us
-                    + host.last_stage_timings.relayout_us
-                    + host.last_stage_timings.live2d_emit_us
-                    + host.last_stage_timings.draw_decode_us
-                    + host.last_stage_timings.splice_us
-                    + host.last_stage_timings.encode_us;
-                host.last_stage_timings.other_us = total_us.saturating_sub(accounted);
-            }
-            host.binary_output.as_ptr()
-        }
-        Err(error) => {
-            host.binary_output.clear();
-            failed_frame_output(host, error);
-            ptr::null()
-        }
+        });
     }
+    res
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_set_perf_sampling_enabled(enabled: u32) {
-    let active = enabled != 0;
-    PERF_SAMPLING_ENABLED.store(active, Ordering::Relaxed);
-    if !active {
-        LIVE2D_UPDATE_NANOS.store(0, Ordering::Relaxed);
-    }
+    catch_ffi_unwind((), || {
+        let active = enabled != 0;
+        PERF_SAMPLING_ENABLED.store(active, Ordering::Relaxed);
+        if !active {
+            LIVE2D_UPDATE_NANOS.store(0, Ordering::Relaxed);
+        }
+    });
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_is_perf_sampling_enabled() -> u32 {
-    u32::from(PERF_SAMPLING_ENABLED.load(Ordering::Relaxed))
+    catch_ffi_unwind(0, || {
+        u32::from(PERF_SAMPLING_ENABLED.load(Ordering::Relaxed))
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_record_live2d_update_ns(nanos: u64) {
-    if PERF_SAMPLING_ENABLED.load(Ordering::Relaxed) {
-        LIVE2D_UPDATE_NANOS.fetch_add(nanos, Ordering::Relaxed);
-    }
+    catch_ffi_unwind((), || {
+        if PERF_SAMPLING_ENABLED.load(Ordering::Relaxed) {
+            LIVE2D_UPDATE_NANOS.fetch_add(nanos, Ordering::Relaxed);
+        }
+    });
 }
 
 #[no_mangle]
@@ -7114,20 +7421,19 @@ pub unsafe extern "C" fn pocket_last_frame_stage_timings_us(
     if out_timings.is_null() {
         return 0;
     }
-    let Some(host) = handle.as_ref() else {
-        return 0;
-    };
-    let t = &host.last_stage_timings;
-    let slice = std::slice::from_raw_parts_mut(out_timings, 8);
-    slice[0] = t.js_tick_us;
-    slice[1] = t.live2d_update_us;
-    slice[2] = t.live2d_emit_us;
-    slice[3] = t.relayout_us;
-    slice[4] = t.draw_decode_us;
-    slice[5] = t.splice_us;
-    slice[6] = t.encode_us;
-    slice[7] = t.other_us;
-    8
+    guard_host_ref(handle, 0, |host| {
+        let t = &host.last_stage_timings;
+        let slice = std::slice::from_raw_parts_mut(out_timings, 8);
+        slice[0] = t.js_tick_us;
+        slice[1] = t.live2d_update_us;
+        slice[2] = t.live2d_emit_us;
+        slice[3] = t.relayout_us;
+        slice[4] = t.draw_decode_us;
+        slice[5] = t.splice_us;
+        slice[6] = t.encode_us;
+        slice[7] = t.other_us;
+        8
+    })
 }
 
 const MAX_INBOUND_BINARY_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -7138,134 +7444,147 @@ pub unsafe extern "C" fn pocket_send_binary(
     message: *const u8,
     message_len: usize,
 ) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    if message.is_null() || message_len == 0 {
-        set_error(host, "null or empty binary message");
-        return -1;
-    }
-    if message_len > MAX_INBOUND_BINARY_MESSAGE_BYTES {
-        set_error(host, "binary message exceeds maximum bridge limit");
-        return -1;
-    }
-    let bytes = std::slice::from_raw_parts(message, message_len);
-    let meta = match binary_bridge::inspect_binary_envelope(bytes) {
-        Ok(meta) => meta,
-        Err(error) => {
-            set_error(host, format!("invalid binary message: {error}"));
+    guard_host_mut(handle, "pocket_send_binary", -1, |host| {
+        if message.is_null() || message_len == 0 {
+            set_error(host, "null or empty binary message");
             return -1;
         }
-    };
-    let target = if meta.is_response() {
-        "__pocketDeliver"
-    } else {
-        "__pocketEvent"
-    };
-    if host.guest_loaded {
-        if let Err(error) = demand::before_external(host) {
-            set_error(host, error);
+        if message_len > MAX_INBOUND_BINARY_MESSAGE_BYTES {
+            set_error(host, "binary message exceeds maximum bridge limit");
             return -1;
         }
-        if let Err(error) = drain_duplex(host) {
-            set_error(host, error);
-            return -1;
-        }
-    }
-    if meta.is_input() {
-        let parsed = match binary_bridge::decode_to_json(bytes) {
-            Ok(value) => value,
+        let bytes = std::slice::from_raw_parts(message, message_len);
+        let meta = match binary_bridge::inspect_binary_envelope(bytes) {
+            Ok(meta) => meta,
             Err(error) => {
-                set_error(host, format!("invalid binary input message: {error}"));
+                set_error(host, format!("invalid binary message: {error}"));
                 return -1;
             }
         };
-        if let Err(error) = queue_input(host, &parsed) {
-            set_error(host, error);
-            return -1;
+        let target = if meta.is_response() {
+            "__pocketDeliver"
+        } else {
+            "__pocketEvent"
+        };
+        if host.guest_loaded {
+            if let Err(error) = demand::before_external(host) {
+                set_error(host, error);
+                return -1;
+            }
+            if let Err(error) = drain_duplex(host) {
+                set_error(host, error);
+                return -1;
+            }
         }
-    }
-    match dispatch_guest_binary(&host.guest, target, bytes) {
-        Ok(()) => {
-            clear_error(host);
-            0
+        if meta.is_input() {
+            let parsed = match binary_bridge::decode_to_json(bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    set_error(host, format!("invalid binary input message: {error}"));
+                    return -1;
+                }
+            };
+            if let Err(error) = queue_input(host, &parsed) {
+                set_error(host, error);
+                return -1;
+            }
         }
-        Err(error) => {
-            host.outbound.borrow_mut().clear();
-            set_error(host, format!("dispatch {target}: {error}"));
-            -1
+        match dispatch_guest_binary(&host.guest, target, bytes) {
+            Ok(()) => {
+                clear_error(host);
+                0
+            }
+            Err(error) => {
+                host.outbound.borrow_mut().clear();
+                set_error(host, format!("dispatch {target}: {error}"));
+                -1
+            }
         }
-    }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_send(handle: *mut HostState, message: *const c_char) -> i32 {
-    let Some(host) = handle.as_mut() else {
-        return -1;
-    };
-    let Some(message) = message.as_ref() else {
-        set_error(host, "null message");
-        return -1;
-    };
-    let line = CStr::from_ptr(message).to_string_lossy();
-    let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
-        Ok(value) => value,
-        Err(error) => {
-            set_error(host, format!("invalid JSON message: {error}"));
+    guard_host_mut(handle, "pocket_send", -1, |host| {
+        let Some(message) = message.as_ref() else {
+            set_error(host, "null message");
             return -1;
+        };
+        let line = CStr::from_ptr(message).to_string_lossy();
+        let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                set_error(host, format!("invalid JSON message: {error}"));
+                return -1;
+            }
+        };
+        let target = if parsed.get("type").and_then(|v| v.as_str()) == Some("response") {
+            "__pocketDeliver"
+        } else {
+            "__pocketEvent"
+        };
+        // Explicit legacy callers must preserve the same edge ordering as the
+        // binary ABI. Drain published records before dispatching their next edge.
+        if host.guest_loaded {
+            if let Err(error) = demand::before_external(host) {
+                set_error(host, error);
+                return -1;
+            }
+            if let Err(error) = drain_duplex(host) {
+                set_error(host, error);
+                return -1;
+            }
         }
-    };
-    let target = if parsed.get("type").and_then(|v| v.as_str()) == Some("response") {
-        "__pocketDeliver"
-    } else {
-        "__pocketEvent"
-    };
-    // Explicit legacy callers must preserve the same edge ordering as the
-    // binary ABI. Drain published records before dispatching their next edge.
-    if host.guest_loaded {
-        if let Err(error) = demand::before_external(host) {
+        if let Err(error) = queue_input(host, &parsed) {
             set_error(host, error);
             return -1;
         }
-        if let Err(error) = drain_duplex(host) {
-            set_error(host, error);
-            return -1;
+        match dispatch_guest_json(&host.guest, target, &parsed, Some(&line)) {
+            Ok(()) => {
+                clear_error(host);
+                0
+            }
+            Err(error) => {
+                host.outbound.borrow_mut().clear();
+                set_error(host, format!("dispatch {target}: {error}"));
+                -1
+            }
         }
-    }
-    if let Err(error) = queue_input(host, &parsed) {
-        set_error(host, error);
-        return -1;
-    }
-    match dispatch_guest_json(&host.guest, target, &parsed, Some(&line)) {
-        Ok(()) => {
-            clear_error(host);
-            0
-        }
-        Err(error) => {
-            host.outbound.borrow_mut().clear();
-            set_error(host, format!("dispatch {target}: {error}"));
-            -1
-        }
-    }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_last_error(handle: *mut HostState) -> *const c_char {
-    if let Some(host) = handle.as_ref() {
+    catch_ffi_unwind(ptr::null(), || {
+        let Some(host) = handle.as_ref() else {
+            return ptr::null();
+        };
         host.error_output.as_ptr()
-    } else {
-        ptr::null()
-    }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pocket_destroy(handle: *mut HostState) {
-    if !handle.is_null() {
-        // Make the generation boundary visible to any retained background
-        // channel handle before dropping the owner-side QuickJS state.
-        (*handle).duplex.close();
-        drop(Box::from_raw(handle));
-    }
+    catch_ffi_unwind((), || {
+        if !handle.is_null() {
+            // Make the generation boundary visible to any retained background
+            // channel handle before dropping the owner-side QuickJS state.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (*handle).duplex.close();
+            }));
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(Box::from_raw(handle));
+            }));
+        }
+    });
+}
+
+#[doc(hidden)]
+#[no_mangle]
+pub unsafe extern "C" fn pocket_test_trigger_panic(handle: *mut HostState) -> i32 {
+    guard_host_mut(handle, "pocket_test_trigger_panic", -1, |_host| {
+        panic!("simulated FFI panic for catch_unwind verification");
+    })
 }
 
 #[cfg(test)]
@@ -8748,7 +9067,7 @@ mod smoke_tests {
             frame: 1,
             width: 32.0,
             height: 32.0,
-            ops: vec![op],
+            ops: Rc::new(vec![op]),
             auxiliary: None,
             events: Vec::new(),
             resources: Vec::new(),
@@ -8786,7 +9105,7 @@ mod smoke_tests {
         auxiliary_frame.auxiliary = Some(SurfaceFrame {
             width: 12.0,
             height: 8.0,
-            ops: vec![make_rounded(1.0)],
+            ops: Rc::new(vec![make_rounded(1.0)]),
         });
         let encoded_auxiliary = encode_binary_frame(&auxiliary_frame).unwrap();
         assert_eq!(
@@ -8854,7 +9173,7 @@ mod smoke_tests {
             frame: 12,
             width: 240.0,
             height: 240.0,
-            ops,
+            ops: Rc::new(ops),
             auxiliary: None,
             events: Vec::new(),
             resources: Vec::new(),
@@ -8966,7 +9285,7 @@ mod smoke_tests {
             frame: 13,
             width: 240.0,
             height: 160.0,
-            ops,
+            ops: Rc::new(ops),
             auxiliary: None,
             events: Vec::new(),
             resources: Vec::new(),
@@ -8991,7 +9310,7 @@ mod smoke_tests {
         auxiliary_frame.auxiliary = Some(SurfaceFrame {
             width: 80.0,
             height: 60.0,
-            ops: vec![gradient.clone()],
+            ops: Rc::new(vec![gradient.clone()]),
         });
         let encoded_auxiliary = encode_binary_frame(&auxiliary_frame).unwrap();
         assert_eq!(
@@ -10868,6 +11187,136 @@ mod smoke_tests {
 
         unsafe {
             pocket_set_perf_sampling_enabled(0);
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn node_metadata_mutation_bumps_revision_and_invalidates_draw_cache() {
+        let handle = pocket_create(160.0, 120.0);
+        let source = CString::new(
+            r#"
+            const surface = pocket.registerSurface('test.video', 'video', JSON.stringify({asset:'clip-initial.mp4', fit:'contain', autoplay:false}));
+            const node = ui.createNode(3);
+            ui.setProp(node, 1, 60);
+            ui.setProp(node, 2, 40);
+            ui.setCompositorSurface(node, surface, 0);
+            ui.insertBefore(1, node, 0);
+            globalThis.frame = function() {};
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+
+        let rev1 = unsafe { (*handle).nodes.borrow().revision() };
+        let frame1 = frame_json(handle);
+        let ops1 = frame1["ops"].as_array().unwrap();
+        let video_op1 = ops1
+            .iter()
+            .find(|op| op["type"] == "video")
+            .expect("initial video op must be emitted");
+        assert_eq!(video_op1["id"], "test.video");
+        assert_eq!(video_op1["asset"], "clip-initial.mp4");
+        assert_eq!(video_op1["fit"], "contain");
+        assert_eq!(video_op1["autoplay"], false);
+
+        // Second identical frame hits the DrawList cache (delta returns unchanged).
+        let delta_hit = unsafe {
+            CStr::from_ptr(pocket_frame_delta(handle, 16.0))
+                .to_str()
+                .unwrap()
+        };
+        let delta_hit_json: serde_json::Value = serde_json::from_str(delta_hit).unwrap();
+        assert_eq!(delta_hit_json["unchanged"], true);
+
+        // Mutate node metadata without changing C layout / DrawList words.
+        let update_meta = CString::new(
+            r#"
+            pocket.registerSurface('test.video', 'video', JSON.stringify({asset:'clip-updated.mp4', fit:'fill', autoplay:true}));
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, update_meta.as_ptr()) }, 0);
+        let rev2 = unsafe { (*handle).nodes.borrow().revision() };
+        assert!(
+            rev2 > rev1,
+            "mutating node metadata must increment nodes_revision"
+        );
+
+        let delta_miss = unsafe {
+            CStr::from_ptr(pocket_frame_delta(handle, 16.0))
+                .to_str()
+                .unwrap()
+        };
+        let delta_miss_json: serde_json::Value = serde_json::from_str(delta_miss).unwrap();
+        assert!(
+            delta_miss_json.get("unchanged").is_none(),
+            "metadata mutation must invalidate FrameDrawCache"
+        );
+        let ops2 = delta_miss_json["ops"].as_array().unwrap();
+        let video_op2 = ops2
+            .iter()
+            .find(|op| op["type"] == "video")
+            .expect("updated video op must be emitted");
+        assert_eq!(video_op2["id"], "test.video");
+        assert_eq!(video_op2["asset"], "clip-updated.mp4");
+        assert_eq!(video_op2["fit"], "fill");
+        assert_eq!(video_op2["autoplay"], true);
+
+        // Releasing surface metadata also increments revision and invalidates cache.
+        let _ = unsafe { pocket_frame_delta(handle, 16.0) };
+        let release_meta = CString::new(
+            r#"
+            pocket.releaseSurface('test.video');
+            "#,
+        )
+        .unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, release_meta.as_ptr()) }, 0);
+        let rev3 = unsafe { (*handle).nodes.borrow().revision() };
+        assert!(rev3 > rev2);
+        let delta_after_release = unsafe {
+            CStr::from_ptr(pocket_frame_delta(handle, 16.0))
+                .to_str()
+                .unwrap()
+        };
+        let delta_after_release_json: serde_json::Value =
+            serde_json::from_str(delta_after_release).unwrap();
+        assert!(delta_after_release_json.get("unchanged").is_none());
+
+        unsafe {
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn truncated_drawlist_opcodes_return_err_without_panicking() {
+        let handle = pocket_create(160.0, 120.0);
+        let ui = unsafe { &mut (*handle).ops.core_mut().unwrap().ui };
+        let nodes = Vec::new();
+        let mut generic_handles = HashSet::new();
+
+        for &opcode in &[1u32, 3, 4, 7, 8, 9, 10, 11, 12, 17, 18] {
+            let truncated = [opcode];
+            let operation = pocket_draw_ops::Operation {
+                opcode,
+                words: &truncated,
+                clip: DamageRect::new(0, 0, 160, 120),
+            };
+            let mut out = Vec::new();
+            let res = append_draw_operation_cached(
+                &mut out,
+                &operation,
+                &nodes,
+                ui,
+                &mut generic_handles,
+                None,
+            );
+            assert!(
+                res.is_err(),
+                "truncated opcode {opcode} must return Err instead of panicking"
+            );
+        }
+        unsafe {
             pocket_destroy(handle);
         }
     }
