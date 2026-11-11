@@ -916,7 +916,9 @@ export async function spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersi
   let child;
   try {
     child = spawn(
-      process.execPath,
+      // The service CLI is a Node entrypoint. Bun 1.3.9 on Windows resolves
+      // 8.3 paths differently from Node, invalidating its own PID ownership.
+      process.platform === 'win32' && process.versions.bun ? 'node' : process.execPath,
       args,
       {
         cwd: resolvedRoot,
