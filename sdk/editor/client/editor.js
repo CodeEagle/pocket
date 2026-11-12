@@ -432,6 +432,7 @@ function updateActionStates() {
   $("preview-open").disabled = !previewPath;
   if ($("copy-preview-link")) $("copy-preview-link").disabled = !previewPath;
   if ($("source-toggle")) $("source-toggle").disabled = !hasProject;
+  if ($("source-split-toggle")) $("source-split-toggle").disabled = !hasProject;
   $("capture-preview").disabled = !previewReady;
   if ($("toggle-regions")) {
     $("toggle-regions").disabled = !previewReady;
@@ -1745,6 +1746,7 @@ function setEnabled(enabled) {
   $("file-picker").disabled = !enabled;
   for (const id of ["config-name", "config-app-id", "config-version", "config-build", "config-tick"]) $(id).disabled = !enabled;
   if ($("source-toggle")) $("source-toggle").disabled = !enabled;
+  if ($("source-split-toggle")) $("source-split-toggle").disabled = !enabled;
   updateActionStates();
 }
 
@@ -2047,14 +2049,20 @@ function layoutPreviewFrame() {
   const gridStyle = previewSurfaces ? getComputedStyle(previewSurfaces) : null;
   const gridColumns = gridStyle?.gridTemplateColumns.split(/\s+/).map((value) => Number.parseFloat(value)).filter((value) => Number.isFinite(value) && value > 0) || [];
   const stageWidth = gridColumns[0] || availableWidth;
-  const availableHeight = Math.max(1, (previewStageWrap?.clientHeight || previewStage.getBoundingClientRect().height) - verticalPadding);
+  const targetWrapHeight = Number.isFinite(previewPaneHeight) && previewPaneHeight > 0
+    ? previewPaneHeight
+    : (previewStageWrap?.clientHeight || previewStage.getBoundingClientRect().height);
+  const availableHeight = Math.max(1, targetWrapHeight - verticalPadding);
   // The selected viewport remains the logical width/height sent to the
   // guest. Only the presentation scale changes with the available pane size;
   // cap it at 1 so a tall pane never invents a larger logical viewport.
   const scale = Math.min(stageWidth / viewport.width, availableHeight / viewport.height, 1);
   if (!Number.isFinite(scale) || scale <= 0) return;
-  previewStage.style.width = `${Math.round(viewport.width * scale)}px`;
-  previewStage.style.height = `${Math.round(viewport.height * scale)}px`;
+  const targetStageWidth = Math.round(viewport.width * scale);
+  const targetStageHeight = Math.round(viewport.height * scale);
+  previewStage.style.transition = "none";
+  previewStage.style.width = `${targetStageWidth}px`;
+  previewStage.style.height = `${targetStageHeight}px`;
   previewStage.style.aspectRatio = "auto";
   previewFrame.style.width = `${viewport.width}px`;
   previewFrame.style.height = `${viewport.height}px`;
@@ -2440,14 +2448,38 @@ $("version-app-config-copy")?.addEventListener("click", () => {
   if (button && url) void copyVersionUrl(url, button, "App 接入地址");
 });
 $("versions-open").addEventListener("click", () => {
-  const panel = $("version-manager");
-  panel.open = true;
-  panel.scrollIntoView({ behavior: "smooth", block: "start" });
-  void loadVersions();
+  switchInspectorTab("versions");
 });
 $("versions-refresh").addEventListener("click", () => { void loadVersions(); });
+for (const [tab, sel] of [
+  ["versions", "#version-manager > summary"],
+  ["resources", "#resources-panel > summary"],
+  ["settings", "#editor-tools > summary"],
+]) {
+  document.querySelector(sel)?.addEventListener("click", (event) => {
+    const details = event.currentTarget?.parentElement;
+    if (!(details instanceof HTMLDetailsElement)) return;
+    if (details.open) {
+      // It is about to close!
+      const othersOpen = ["resources-panel", "version-manager", "editor-tools"]
+        .filter((id) => id !== details.id)
+        .some((id) => $(id)?.open);
+      if (!othersOpen) {
+        clearInspectorActiveUi();
+      }
+    } else {
+      syncInspectorAccordion(tab);
+    }
+  });
+}
 $("version-manager").addEventListener("toggle", (event) => {
-  if (event.currentTarget.open && !versionSnapshot) void loadVersions();
+  handleInspectorPanelToggle("versions", event.currentTarget);
+});
+$("resources-panel")?.addEventListener("toggle", (event) => {
+  handleInspectorPanelToggle("resources", event.currentTarget);
+});
+$("editor-tools")?.addEventListener("toggle", (event) => {
+  handleInspectorPanelToggle("settings", event.currentTarget);
 });
 $("refresh-preview").addEventListener("click", () => { void refreshPreview(); });
 $("preview-open").addEventListener("click", () => { if (previewPath) window.open(previewBrowserUrl().href, "_blank", "noopener"); });
@@ -2533,19 +2565,187 @@ $("wechat-start")?.addEventListener("click", () => { void startWechat(); });
 $("wechat-stop")?.addEventListener("click", () => { void stopWechat(); });
 setupPreviewHeightControl();
 
-const sourceDialog = $("source-dialog");
+const sourceDock = $("source-dock");
+const consoleDock = $("console-dock");
+
+function clearInspectorActiveUi() {
+  syncInspectorAccordion(null);
+}
+
+function syncInspectorAccordion(activeTab) {
+  const resourcesPanel = $("resources-panel");
+  const versionManager = $("version-manager");
+  const editorTools = $("editor-tools");
+  if (activeTab === "resources") {
+    if (versionManager?.open) versionManager.open = false;
+    if (editorTools?.open) editorTools.open = false;
+  } else if (activeTab === "versions") {
+    if (resourcesPanel?.open) resourcesPanel.open = false;
+    if (editorTools?.open) editorTools.open = false;
+  } else if (activeTab === "settings") {
+    if (resourcesPanel?.open) resourcesPanel.open = false;
+    if (versionManager?.open) versionManager.open = false;
+  }
+  const tabMap = {
+    resources: $("inspector-tab-resources"),
+    versions: $("inspector-tab-versions"),
+    settings: $("inspector-tab-settings"),
+  };
+  for (const [key, btn] of Object.entries(tabMap)) {
+    if (!btn) continue;
+    const selected = key === activeTab;
+    btn.classList.toggle("active", selected);
+    btn.setAttribute("aria-selected", String(selected));
+  }
+  const railMap = {
+    resources: $("rail-resources"),
+    versions: $("rail-versions"),
+    settings: $("rail-settings"),
+  };
+  for (const [key, btn] of Object.entries(railMap)) {
+    if (!btn) continue;
+    const selected = key === activeTab;
+    btn.classList.toggle("active", selected);
+    btn.setAttribute("aria-pressed", String(selected));
+  }
+}
+
+function handleInspectorPanelToggle(tab, panel) {
+  if (!panel) return;
+  if (panel.open) {
+    syncInspectorAccordion(tab);
+    if (tab === "versions" && !versionSnapshot) void loadVersions();
+  } else if (!$("resources-panel")?.open && !$("version-manager")?.open && !$("editor-tools")?.open) {
+    clearInspectorActiveUi();
+  }
+}
+
+function switchInspectorTab(tab) {
+  const resourcesPanel = $("resources-panel");
+  const versionManager = $("version-manager");
+  const editorTools = $("editor-tools");
+  if (tab === "resources" && resourcesPanel) {
+    if (versionManager) versionManager.open = false;
+    if (editorTools) editorTools.open = false;
+    resourcesPanel.open = true;
+    syncInspectorAccordion("resources");
+    resourcesPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } else if (tab === "versions" && versionManager) {
+    if (resourcesPanel) resourcesPanel.open = false;
+    if (editorTools) editorTools.open = false;
+    versionManager.open = true;
+    syncInspectorAccordion("versions");
+    versionManager.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    void loadVersions();
+  } else if (tab === "settings" && editorTools) {
+    if (resourcesPanel) resourcesPanel.open = false;
+    if (versionManager) versionManager.open = false;
+    editorTools.open = true;
+    syncInspectorAccordion("settings");
+    editorTools.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+function toggleSourceDock(force) {
+  if (!sourceDock) return;
+  const nextOpen = typeof force === "boolean" ? force : sourceDock.hidden;
+  sourceDock.hidden = !nextOpen;
+  for (const id of ["source-split-toggle", "rail-source"]) {
+    const btn = $(id);
+    if (btn) {
+      btn.classList.toggle("active", nextOpen);
+      btn.setAttribute("aria-pressed", String(nextOpen));
+    }
+  }
+  if (nextOpen && sourceEl && !sourceEl.disabled) {
+    sourceEl.focus();
+  }
+  requestAnimationFrame(() => layoutPreviewFrame());
+}
+
+function switchConsoleTab(tabKey) {
+  for (const btn of document.querySelectorAll("[data-console-tab]")) {
+    const active = btn.dataset.consoleTab === tabKey;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+  }
+  for (const pane of document.querySelectorAll("[data-console-pane]")) {
+    pane.hidden = pane.dataset.consolePane !== tabKey;
+  }
+  if (consoleDock?.classList.contains("collapsed")) {
+    toggleConsoleDock(false);
+  }
+}
+
+function toggleConsoleDock(forceCollapsed) {
+  if (!consoleDock) return;
+  const collapsed = typeof forceCollapsed === "boolean"
+    ? forceCollapsed
+    : !consoleDock.classList.contains("collapsed");
+  consoleDock.classList.toggle("collapsed", collapsed);
+  const consoleCollapseToggle = $("console-collapse-toggle");
+  if (consoleCollapseToggle) {
+    consoleCollapseToggle.setAttribute("aria-expanded", String(!collapsed));
+  }
+  const railConsole = $("rail-console");
+  if (railConsole) {
+    railConsole.classList.toggle("active", !collapsed);
+    railConsole.setAttribute("aria-pressed", String(!collapsed));
+  }
+  requestAnimationFrame(() => layoutPreviewFrame());
+}
+
+for (const btn of document.querySelectorAll("[data-console-tab]")) {
+  btn.addEventListener("click", () => switchConsoleTab(btn.dataset.consoleTab));
+}
+$("console-collapse-toggle")?.addEventListener("click", () => toggleConsoleDock());
+$("rail-console")?.addEventListener("click", () => toggleConsoleDock());
+
+$("inspector-tab-resources")?.addEventListener("click", () => switchInspectorTab("resources"));
+$("inspector-tab-versions")?.addEventListener("click", () => switchInspectorTab("versions"));
+$("inspector-tab-settings")?.addEventListener("click", () => switchInspectorTab("settings"));
+
+$("rail-stage")?.addEventListener("click", () => {
+  previewStageWrap?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
+$("rail-source")?.addEventListener("click", () => toggleSourceDock());
+$("rail-resources")?.addEventListener("click", () => switchInspectorTab("resources"));
+$("rail-versions")?.addEventListener("click", () => $("versions-open")?.click());
+$("rail-settings")?.addEventListener("click", () => switchInspectorTab("settings"));
+
 $("novel-open")?.addEventListener("click", () => {
   if (currentId) window.open(`/novel?project=${encodeURIComponent(currentId)}`, "_blank", "noopener");
 });
-$("source-toggle")?.addEventListener("click", () => sourceDialog?.showModal());
-$("source-close")?.addEventListener("click", () => sourceDialog?.close());
-sourceDialog?.addEventListener("click", (event) => {
-  if (event.target === sourceDialog) sourceDialog.close();
+$("source-toggle")?.addEventListener("click", () => {
+  const options = document.querySelector(".preview-options");
+  if (options instanceof HTMLDetailsElement) options.open = false;
+  toggleSourceDock(true);
 });
-document.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+$("source-split-toggle")?.addEventListener("click", () => toggleSourceDock());
+$("source-close")?.addEventListener("click", () => toggleSourceDock(false));
+
+window.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
+  if (createDialog?.open || Boolean(document.querySelector("dialog[open], #novel-studio-modal:not([hidden])"))) return;
+  if (!(event.metaKey || event.ctrlKey)) return;
+  const key = event.key.toLowerCase();
+  if (key === "s") {
     event.preventDefault();
-    void saveProject().catch(() => {});
+    if (!$("save")?.disabled) $("save")?.click();
+    else void saveProject().catch(() => {});
+  } else if (key === "b") {
+    if (!$("build")?.disabled) {
+      event.preventDefault();
+      $("build")?.click();
+    }
+  } else if (key === "j") {
+    event.preventDefault();
+    toggleConsoleDock();
+  } else if (key === "e") {
+    if (!$("source-split-toggle")?.disabled) {
+      event.preventDefault();
+      toggleSourceDock();
+    }
   }
 });
 window.addEventListener("beforeunload", (event) => {
