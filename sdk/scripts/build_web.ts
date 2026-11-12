@@ -163,7 +163,7 @@ export async function buildWeb(options: BuildWebOptions): Promise<{ outDir: stri
     if (!engine) throw new Error("build_web: a prebuilt generic PocketJS engine is required; set POCKET_WEB_ENGINE (the npm release supplies this file)");
     const runtime = prebuiltFile(options.runtimePath, "POCKET_WEB_RUNTIME");
     if (!runtime) throw new Error("build_web: a prebundled browser host is required; set POCKET_WEB_RUNTIME (the npm release supplies pocket-web.js)");
-    const built = await buildGuest({ projectRoot, outDir: guest, entry: options.entry, tickHz: options.tickHz, rasterDensity: options.rasterDensity });
+    const built = await buildGuest({ projectRoot, outDir: guest, entry: options.entry, tickHz: options.tickHz, rasterDensity: options.rasterDensity, bakeFonts: true });
     const metadata = readJson(built.metadata);
     const live2d = prepareWebLive2dArtifacts(guest, output, options.live2dCorePath);
     const pocket = readJson(join(projectRoot, "pocket.json"));

@@ -27,6 +27,8 @@ export type BuildGuestOptions = {
   tickHz?: number;
   /** Integer raster density used while baking glyphs and image assets. */
   rasterDensity?: number;
+  /** Explicitly bake DCFA font atlases into the PAK even when pocket.json declares no custom fonts. */
+  bakeFonts?: boolean;
   /** Copy runtime artifacts and the project's ordinary assets to a host directory. */
   copyAssetsTo?: string;
   /** Keep a diagnostic copy of the generated JavaScript source. */
@@ -707,6 +709,8 @@ export function parseBuildGuestArgs(args: string[]): BuildGuestOptions {
     else if (arg.startsWith("--entry=")) result.entry = arg.slice("--entry=".length);
     else if (arg.startsWith("--tick-hz=")) result.tickHz = Number(arg.slice("--tick-hz=".length));
     else if (arg.startsWith("--density=")) result.rasterDensity = checkedRasterDensity(Number(arg.slice("--density=".length)));
+    else if (arg === "--bake-fonts") result.bakeFonts = true;
+    else if (arg === "--no-bake-fonts") result.bakeFonts = false;
     else if (arg.startsWith("--copy-assets-to=")) result.copyAssetsTo = arg.slice("--copy-assets-to=".length);
     else if (arg.startsWith("--keep-source=")) result.keepSource = arg.slice("--keep-source=".length);
     else throw new Error(`build_guest: unknown option ${arg}`);
@@ -841,9 +845,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       : [];
     const compilerEntry = prepareCompilerEntry(projectRoot, entry, preparedUi.packageRoot, options.log, vnEntries, usesVn ? novelImageLiterals(projectRoot) : [], bundledModels);
     compilerEntryCleanup = compilerEntry.cleanup;
+    const skipFontBaking = primaryFontArguments.length === 0 && options.bakeFonts !== true;
     report(`build_guest: compiler=${compiler}`, options.log);
     report(`build_guest: source=${entry}`, options.log);
-    runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes", ...primaryFontArguments], root, options.log);
+    runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes", ...(skipFontBaking ? ["--no-bake-fonts"] : []), ...primaryFontArguments], root, options.log);
 
     const compilerBase = compilerEntry.path.replace(/^.*[\\/]/, "").replace(/\.(?:tsx?|vue)$/, "");
     const compilerSource = join(output, `${compilerBase}.js`);
@@ -980,6 +985,15 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     if (usesVn) copyNovelNativeModels(projectRoot, output, bundledModels);
     if (assets) {
       mkdirSync(assets, { recursive: true });
+      // Copy ordinary project resources first so freshly compiled runtime
+      // artifacts (app.pak, app.qjbc, app.bytecode.json, guest-manifest.json)
+      // always win even if stale artifacts existed under projectRoot/assets.
+      const mocSources = new Set(Object.entries(bundledModels).flatMap(([source, raw]) => {
+        const model = raw as { kind: string; document?: { FileReferences?: { Moc?: string } } };
+        return model.kind === "live2d" ? [resolve(projectRoot, dirname(source), model.document!.FileReferences!.Moc!)] : [];
+      }));
+      copyProjectAssets(projectRoot, assets, mocSources);
+      if (usesVn) copyNovelNativeModels(projectRoot, assets, bundledModels);
       copyFileSync(bytecode, join(assets, "app.qjbc"));
       copyFileSync(metadata, join(assets, "app.bytecode.json"));
       if (worker) {
@@ -989,15 +1003,6 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       if (!manifestObj) throw new Error(`build_guest: missing or invalid guest manifest: ${guestManifest}`);
       copyFileSync(generatedManifest, join(assets, "guest-manifest.json"));
       copyFileSync(pak, join(assets, "app.pak"));
-      // Keep ordinary project resources beside the runtime artifacts. This
-      // destination is also the Flutter asset root for built-in consumers;
-      // binary media stays a loose file and never enters the image PAK.
-      const mocSources = new Set(Object.entries(bundledModels).flatMap(([source, raw]) => {
-        const model = raw as { kind: string; document?: { FileReferences?: { Moc?: string } } };
-        return model.kind === "live2d" ? [resolve(projectRoot, dirname(source), model.document!.FileReferences!.Moc!)] : [];
-      }));
-      copyProjectAssets(projectRoot, assets, mocSources);
-      if (usesVn) copyNovelNativeModels(projectRoot, assets, bundledModels);
     }
     if (options.keepSource) {
       mkdirSync(resolve(options.keepSource, ".."), { recursive: true });

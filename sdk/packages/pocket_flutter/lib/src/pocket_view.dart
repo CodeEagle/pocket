@@ -20,6 +20,7 @@ import 'flutter_frame_monitor.dart';
 import 'pocket_display.dart';
 import 'pocket_display_geometry.dart';
 import 'pocket_duplex.dart';
+import 'pocket_host_fonts.dart';
 import 'pocket_model.dart';
 import 'pocket_package.dart';
 import 'pocket_performance.dart';
@@ -681,8 +682,8 @@ class PocketView extends StatefulWidget {
   /// on a 60-Hz display.
   final int tickHz;
 
-  /// Additional font families tried after the PocketInter/PocketMono slot
-  /// family. An empty list preserves the original POC font lookup behavior.
+  /// Additional font families tried after the host system UI / monospace slot
+  /// font stack, synchronized with native text measurement.
   final List<String> fontFamilyFallback;
 
   /// Called on the view's ticker immediately before [PocketRuntime.frame].
@@ -1353,10 +1354,22 @@ class _PocketViewState extends State<PocketView>
       // leave a stale BTN bit latched in the guest.
       _syncKeyboardButtons();
     }
+    final fallbackChanged = !listEquals(
+      oldWidget.fontFamilyFallback,
+      widget.fontFamilyFallback,
+    );
+    if (fallbackChanged && _runtime != null) {
+      if (syncPocketHostFonts(
+        _runtime!,
+        fontFamilyFallback: widget.fontFamilyFallback,
+      )) {
+        _wakeTicker();
+      }
+    }
     if (oldWidget.inputEnabled != widget.inputEnabled ||
         oldWidget.viewport != widget.viewport ||
         oldWidget.enableDuplexPointerInput != widget.enableDuplexPointerInput ||
-        !listEquals(oldWidget.fontFamilyFallback, widget.fontFamilyFallback) ||
+        fallbackChanged ||
         !identical(oldWidget.hostSurfaceBuilder, widget.hostSurfaceBuilder) ||
         !setEquals(
           oldWidget.hostSurfaceResidents,
@@ -1790,6 +1803,10 @@ class _PocketViewState extends State<PocketView>
           auxiliaryViewport.height,
         );
       }
+      syncPocketHostFonts(
+        runtime,
+        fontFamilyFallback: widget.fontFamilyFallback,
+      );
       final implicitBytecode =
           widget.bytecodeAsset == null &&
           widget.bytecodeBytes == null &&

@@ -101,7 +101,10 @@ test("pinned build bakes pocket.json regular and bold faces into PAK metrics and
   const configured = join(project, "configured");
   const baseline = join(project, "baseline");
   const fontPath = join(configured, "fonts/NotoSansCJK-Demo.otf");
-  const packagedFont = join(resolvePrebuiltTools(sdkRoot).compiler, "assets/fonts/NotoSansCJK-Demo.otf");
+  const compilerRoot = process.env.POCKET_SOURCE_BUILD === "1"
+    ? join(sdkRoot, ".cache/pocketjs")
+    : resolvePrebuiltTools(sdkRoot).compiler;
+  const packagedFont = join(compilerRoot, "assets/fonts/NotoSansCJK-Demo.otf");
   try {
     mkdirSync(baseline, { recursive: true });
     mkdirSync(configured, { recursive: true });
@@ -110,8 +113,13 @@ test("pinned build bakes pocket.json regular and bold faces into PAK metrics and
     writeProject(baseline);
     writeProject(configured, { regular: "fonts/NotoSansCJK-Demo.otf", bold: "fonts/NotoSansCJK-Demo.otf" });
 
-    const defaultBuild = await buildGuest({ projectRoot: baseline, outDir: join(baseline, "out") });
+    const hostFontBuild = await buildGuest({ projectRoot: baseline, outDir: join(baseline, "out-host") });
+    const hostEntries = unpack(new Uint8Array(readFileSync(hostFontBuild.pak)));
+    expect(hostEntries.some((blob) => blob.key.startsWith("ui:font."))).toBe(false);
+
+    const defaultBuild = await buildGuest({ projectRoot: baseline, outDir: join(baseline, "out"), bakeFonts: true });
     const primaryBuild = await buildGuest({ projectRoot: configured, outDir: join(configured, "out") });
+    expect(readFileSync(hostFontBuild.pak).byteLength).toBeLessThan(readFileSync(defaultBuild.pak).byteLength);
     const defaultRegular = fontAtlas(defaultBuild.pak, 6);
     const primaryRegular = fontAtlas(primaryBuild.pak, 6);
     const defaultBold = fontAtlas(defaultBuild.pak, 13);

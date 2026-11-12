@@ -600,15 +600,13 @@ final class PocketCanvasPainter extends CustomPainter {
           final lineHeight = op.size > 0 && op.height > 0
               ? op.height / textLines / op.size
               : null;
-          final textStyle = TextStyle(
-            color: Color(op.color),
+          final textStyle = pocketTextStyleForSlot(
+            slot: op.fontSlot,
             fontSize: op.size,
-            fontFamily: _fontFamilyForSlot(op.fontSlot),
-            fontFamilyFallback: fontFamilyFallback.isEmpty
-                ? null
-                : fontFamilyFallback,
-            fontWeight: _fontWeightForSlot(op.fontSlot),
+            color: Color(op.color),
+            fontFamilyFallback: fontFamilyFallback,
             height: lineHeight,
+            letterSpacing: op.tracking,
           );
           TextPainter layoutLine(String value) =>
               textLayoutCache?.obtain(
@@ -619,30 +617,62 @@ final class PocketCanvasPainter extends CustomPainter {
               (TextPainter(
                 text: TextSpan(text: value, style: textStyle),
                 textDirection: TextDirection.ltr,
+                textScaler: TextScaler.noScaling,
               )..layout());
-          if (op.align == 1 || op.align == 2) {
-            final alignFactor = op.align == 1 ? 0.5 : 1.0;
-            if (lines == null) {
-              final text = layoutLine(op.text);
-              final offset = (op.width - text.width) * alignFactor;
-              text.paint(canvas, Offset(op.x + offset, op.y));
-              if (textLayoutCache == null) text.dispose();
-            } else {
-              final advance = op.height / lines.length;
-              for (var lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-                final text = layoutLine(lines[lineIdx]);
+          final affine = op.affine;
+          final originX = affine == null ? op.x : 0.0;
+          final originY = affine == null ? op.y : 0.0;
+          if (affine != null) {
+            canvas.save();
+            canvas.translate(op.x, op.y);
+            canvas.transform(
+              Float64List.fromList(<double>[
+                affine[0],
+                affine[1],
+                0,
+                0,
+                affine[2],
+                affine[3],
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                1,
+              ]),
+            );
+          }
+          try {
+            if (op.align == 1 || op.align == 2) {
+              final alignFactor = op.align == 1 ? 0.5 : 1.0;
+              if (lines == null) {
+                final text = layoutLine(op.text);
                 final offset = (op.width - text.width) * alignFactor;
-                text.paint(
-                  canvas,
-                  Offset(op.x + offset, op.y + lineIdx * advance),
-                );
+                text.paint(canvas, Offset(originX + offset, originY));
                 if (textLayoutCache == null) text.dispose();
+              } else {
+                final advance = op.height / lines.length;
+                for (var lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+                  final text = layoutLine(lines[lineIdx]);
+                  final offset = (op.width - text.width) * alignFactor;
+                  text.paint(
+                    canvas,
+                    Offset(originX + offset, originY + lineIdx * advance),
+                  );
+                  if (textLayoutCache == null) text.dispose();
+                }
               }
+            } else {
+              final text = layoutLine(op.text);
+              text.paint(canvas, Offset(originX, originY));
+              if (textLayoutCache == null) text.dispose();
             }
-          } else {
-            final text = layoutLine(op.text);
-            text.paint(canvas, Offset(op.x, op.y));
-            if (textLayoutCache == null) text.dispose();
+          } finally {
+            if (affine != null) canvas.restore();
           }
         case PocketImageOp():
           final image = images[op.asset];
@@ -1309,15 +1339,26 @@ bool _pocketRoundedGradientPaintsAt(PocketRoundedGradientOp op, Offset point) {
 /// remains the authority for JS activation; this is only the Flutter sibling
 /// hit-test needed to choose between a host surface and later root paint.
 bool _pocketOpPaintsAt(PocketOp op, Offset point) {
-  if (op is PocketHostSurfaceOp ||
-      op.width <= 0 ||
-      op.height <= 0 ||
-      !Rect.fromLTWH(op.x, op.y, op.width, op.height).contains(point)) {
+  if (op is PocketHostSurfaceOp || op.width <= 0 || op.height <= 0) {
     return false;
   }
   final clip = op.clip;
   if (clip != null &&
       !Rect.fromLTWH(clip.x, clip.y, clip.width, clip.height).contains(point)) {
+    return false;
+  }
+  if (op is PocketTextOp && op.affine != null) {
+    if (!_pocketArgbPaints(op.color)) return false;
+    final m = op.affine!;
+    final det = m[0] * m[3] - m[1] * m[2];
+    if (!det.isFinite || det.abs() <= 1e-9) return false;
+    final dx = point.dx - op.x;
+    final dy = point.dy - op.y;
+    final lx = (m[3] * dx - m[2] * dy) / det;
+    final ly = (m[0] * dy - m[1] * dx) / det;
+    return lx >= 0 && lx <= op.width && ly >= 0 && ly <= op.height;
+  }
+  if (!Rect.fromLTWH(op.x, op.y, op.width, op.height).contains(point)) {
     return false;
   }
   return switch (op) {
@@ -1613,7 +1654,9 @@ bool _pocketOpEquals(
           first.size == other.size &&
           first.color == other.color &&
           first.fontSlot == other.fontSlot &&
-          first.align == other.align;
+          first.align == other.align &&
+          first.tracking == other.tracking &&
+          _pocketDoubleListNullableEquals(first.affine, other.affine);
     case PocketImageOp():
       final other = second as PocketImageOp;
       return first.asset == other.asset &&
@@ -1700,25 +1743,7 @@ final Float64List _identityMatrix = Float64List.fromList(<double>[
   1,
 ]);
 
-String? _fontFamilyForSlot(int? slot) {
-  if (slot != null && slot >= 16 && slot <= 18) return 'PocketMono';
-  return 'PocketInter';
-}
 
-FontWeight? _fontWeightForSlot(int? slot) {
-  if (slot == 7 ||
-      slot == 8 ||
-      slot == 9 ||
-      slot == 10 ||
-      slot == 11 ||
-      slot == 12 ||
-      slot == 13 ||
-      slot == 15 ||
-      slot == 20) {
-    return FontWeight.w700;
-  }
-  return null;
-}
 
 (Alignment, Alignment) _gradientAlignment(int direction) {
   return switch (direction) {

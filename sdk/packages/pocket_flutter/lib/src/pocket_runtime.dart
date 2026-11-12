@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'pocket_binary_codec.dart';
 import 'pocket_duplex.dart';
 import 'pocket_guest_security.dart';
+import 'pocket_host_fonts.dart';
 import 'pocket_model.dart';
 import 'pocket_memory_limits.dart';
 import 'pocket_offload_runtime.dart';
@@ -505,6 +506,36 @@ typedef _LastFrameStageTimingsNative =
     Uint32 Function(Pointer<Void> handle, Pointer<Uint64> outTimings);
 typedef _LastFrameStageTimingsDart =
     int Function(Pointer<Void> handle, Pointer<Uint64> outTimings);
+typedef _HostGlyphMeasureNative =
+    Float Function(UintPtr userData, Uint8 slot, Uint32 codepoint);
+typedef _SetHostFontMetricsNative =
+    Int32 Function(
+      Pointer<Void> handle,
+      Uint32 slotCount,
+      Pointer<Float> lineHeights,
+      Pointer<Float> cjkAdvances,
+      Pointer<Float> asciiAdvances,
+    );
+typedef _SetHostFontMetricsDart =
+    int Function(
+      Pointer<Void> handle,
+      int slotCount,
+      Pointer<Float> lineHeights,
+      Pointer<Float> cjkAdvances,
+      Pointer<Float> asciiAdvances,
+    );
+typedef _SetHostGlyphCallbackNative =
+    Int32 Function(
+      Pointer<Void> handle,
+      Pointer<NativeFunction<_HostGlyphMeasureNative>> callback,
+      UintPtr userData,
+    );
+typedef _SetHostGlyphCallbackDart =
+    int Function(
+      Pointer<Void> handle,
+      Pointer<NativeFunction<_HostGlyphMeasureNative>> callback,
+      int userData,
+    );
 
 /// Per-frame native stage durations in microseconds (`pocket.native`).
 @immutable
@@ -655,11 +686,93 @@ final class FfiPocketRuntime
   _SetPerfSamplingDart? _setPerfSampling;
   _LastFrameStageTimingsDart? _lastFrameStageTimings;
   bool _perfSamplingLookedUp = false;
+  _SetHostFontMetricsDart? _setHostFontMetrics;
+  _SetHostGlyphCallbackDart? _setHostGlyphCallback;
+  bool _hostFontAbiLookedUp = false;
+  NativeCallable<_HostGlyphMeasureNative>? _hostGlyphCallback;
   Pointer<Uint64>? _stageTimingsBuffer;
   Pointer<Uint64>? _frameLengthBuffer;
   Pointer<Uint8>? _sendBuffer;
   int _sendBufferCapacity = 0;
   static const int _maxRetainedSendBufferBytes = 64 * 1024;
+
+  void _lookupHostFontAbi() {
+    if (_hostFontAbiLookedUp) return;
+    _hostFontAbiLookedUp = true;
+    try {
+      _setHostFontMetrics = _library
+          .lookupFunction<_SetHostFontMetricsNative, _SetHostFontMetricsDart>(
+            'pocket_set_host_font_metrics',
+          );
+      _setHostGlyphCallback = _library.lookupFunction<
+        _SetHostGlyphCallbackNative,
+        _SetHostGlyphCallbackDart
+      >('pocket_set_host_glyph_measure_callback');
+    } on Object {
+      _setHostFontMetrics = null;
+      _setHostGlyphCallback = null;
+    }
+  }
+
+  /// Synchronizes pre-warmed 21-slot host font metrics and a synchronous
+  /// on-demand scalar advance callback into the native runtime.
+  ///
+  /// Returns `false` when recording/replay is active (preserving platform-
+  /// independent deterministic tapes) or on older native libraries.
+  bool syncHostFonts({
+    List<String> fontFamilyFallback = const <String>[],
+  }) {
+    _checkAlive();
+    if (_recordingController != null || _traceClockReplayMode) return false;
+    _lookupHostFontAbi();
+    final setMetrics = _setHostFontMetrics;
+    final setCallback = _setHostGlyphCallback;
+    if (setMetrics == null || setCallback == null) return false;
+
+    final metrics = PocketHostFontMetrics.forFallback(fontFamilyFallback);
+    final fallbackCopy = List<String>.unmodifiable(fontFamilyFallback);
+    final lhPtr = calloc<Float>(pocketHostFontSlotCount);
+    final cjkPtr = calloc<Float>(pocketHostFontSlotCount);
+    final asciiCount = pocketHostFontSlotCount * pocketHostAsciiCount;
+    final asciiPtr = calloc<Float>(asciiCount);
+    try {
+      lhPtr.asTypedList(pocketHostFontSlotCount).setAll(0, metrics.lineHeights);
+      cjkPtr
+          .asTypedList(pocketHostFontSlotCount)
+          .setAll(0, metrics.cjkAdvances);
+      asciiPtr.asTypedList(asciiCount).setAll(0, metrics.asciiAdvances);
+      final status = setMetrics(
+        _handle,
+        pocketHostFontSlotCount,
+        lhPtr,
+        cjkPtr,
+        asciiPtr,
+      );
+      if (status != 0) _throwLastError('pocket_set_host_font_metrics failed');
+    } finally {
+      calloc.free(lhPtr);
+      calloc.free(cjkPtr);
+      calloc.free(asciiPtr);
+    }
+
+    final callable = NativeCallable<_HostGlyphMeasureNative>.isolateLocal(
+      (int _, int slot, int codepoint) => measurePocketHostScalarAdvance(
+        slot,
+        codepoint,
+        fontFamilyFallback: fallbackCopy,
+      ),
+      exceptionalReturn: -1.0,
+    );
+    final cbStatus = setCallback(_handle, callable.nativeFunction, 0);
+    if (cbStatus != 0) {
+      callable.close();
+      _throwLastError('pocket_set_host_glyph_measure_callback failed');
+    }
+    _hostGlyphCallback?.close();
+    _hostGlyphCallback = callable;
+    _invalidateDeltaBase();
+    return true;
+  }
 
   bool get collectDecodeTiming => _collectDecodeTiming;
 
@@ -2199,6 +2312,8 @@ final class FfiPocketRuntime
       calloc.free(sendScratch);
     }
     _destroy(_handle);
+    _hostGlyphCallback?.close();
+    _hostGlyphCallback = null;
     _offloadBinding?.disposeAfterNative();
     _offloadBinding = null;
     _workerWake?.close();
@@ -2792,6 +2907,8 @@ final class FfiPocketRuntime
         result['color'] = value.color;
         result['fontSlot'] = value.fontSlot;
         result['align'] = value.align;
+        if (value.tracking != 0.0) result['tracking'] = value.tracking;
+        if (value.affine != null) result['affine'] = value.affine;
       case PocketImageOp value:
         result['asset'] = value.asset;
         result['uv'] = value.uv;

@@ -69,6 +69,19 @@ const uint8_t *pocket_offload_take_binary(HostState *handle, uint32_t cancelled,
 int32_t pocket_offload_complete_binary(HostState *handle, const uint8_t *record,
                                        size_t record_len);
 
+/* Host-native font metric synchronization & on-demand glyph advance callback.
+ * slot_count must be in 21..=24; line_heights and cjk_advances hold slot_count
+ * floats, and ascii_advances holds slot_count * 95 floats (0x20..=0x7E). */
+typedef float (*PocketGlyphMeasureCallback)(uintptr_t user_data, uint8_t slot,
+                                            uint32_t codepoint);
+int32_t pocket_set_host_font_metrics(HostState *handle, uint32_t slot_count,
+                                     const float *line_heights,
+                                     const float *cjk_advances,
+                                     const float *ascii_advances);
+int32_t pocket_set_host_glyph_measure_callback(
+    HostState *handle, PocketGlyphMeasureCallback callback,
+    uintptr_t user_data);
+
 /* Opt-in performance sampling gate and per-stage microsecond attribution.
  * Order of out_timings[8]: js_tick, live2d_update, live2d_emit, relayout,
  * draw_decode, splice, encode, other. */
