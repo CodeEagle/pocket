@@ -6,16 +6,22 @@ import { spawnSync } from "node:child_process";
 
 test("mesh patch applies to the pinned predecessor and is repeatably detectable", () => {
   const sdk = resolve(import.meta.dir, "../..");
-  const laterPatchNames = [
-    "image-mesh-subpixel.patch",
-    "image-mesh-subpixel-backends.patch",
-    "image-high-resolution-pak.patch",
-    "input-touch-coordinate-sidecar.patch",
-  ];
-  const patches = ["image-mesh.patch", ...laterPatchNames].map(name => ({
+  const bootstrap = readFileSync(join(sdk, "scripts/prepare_upstream.py"), "utf8");
+  const patchList = bootstrap.slice(bootstrap.indexOf("PATCHES = ("), bootstrap.indexOf("SUPERSEDED_PATCH_MARKERS ="));
+  const names = [...patchList.matchAll(/\("([^"]+\.patch)",/g)].map(match => match[1]!);
+  const laterPatchNames = names.slice(names.indexOf("image-mesh.patch") + 1);
+  const sources = ["image-mesh.patch", ...laterPatchNames].map(name => ({
     name,
     source: readFileSync(join(sdk, "native/patches", name), "utf8"),
   }));
+  const baseTargets = new Set([...sources[0]!.source.matchAll(/^\+\+\+ b\/(.+)$/gm)].map(match => match[1]!));
+  // Replay only the retained-mesh contract's files. Later patches also add
+  // independent tests/resources whose subsequent successors are outside this
+  // chain (for example high-resolution IMG assertions in core/tests.rs).
+  const patches = sources.map(({ name, source }) => ({ name, source: source
+    .split(/^diff --git /m.test(source) ? /(?=^diff --git )/m : /(?=^--- a\/)/m)
+    .filter(section => baseTargets.has(section.match(/^\+\+\+ b\/(.+)$/m)?.[1] ?? ""))
+    .join("") }));
   const temporary = mkdtempSync(join(tmpdir(), "pocket-mesh-patch-"));
   try {
     const targets = [...new Set(patches.flatMap(({ source }) =>

@@ -2,7 +2,7 @@
 /**
  * Cross-platform Pocket Studio service manager.
  *
- * Studio owns one local endpoint: 127.0.0.1:8791. Process discovery is
+ * Studio owns port 8791 on the local and LAN interfaces. Process discovery is
  * restricted to this checkout's editor/server.ts; unrelated listeners are
  * never moved or killed.
  */
@@ -27,6 +27,7 @@ import {
   writePersistedUpgradeStatus,
 } from "./studio_upgrade.mjs";
 import { nativeProbeCandidates, nativeProbeSourceInputs, selectNativeProbe } from "./native_probe_path.ts";
+import { chooseUpdateHost } from "../editor/update_endpoint.ts";
 
 const require = createRequire(import.meta.url);
 const findProcess = require("find-process").default;
@@ -37,6 +38,7 @@ const SDK_ROOT = resolve(SCRIPT_DIR, "..");
 const CHECKOUT_ROOT = resolve(SDK_ROOT, "..");
 const SERVER = join(SDK_ROOT, "editor", "server.ts");
 const HOST = "127.0.0.1";
+const BIND_HOST = "0.0.0.0";
 const STANDALONE_FIXTURE_PORT =
   process.env.POCKET_STUDIO_TEST_PORT &&
   existsSync(join(SDK_ROOT, ".pocket-studio-test-fixture")) &&
@@ -62,6 +64,10 @@ function sha256Path(value) {
 
 function labelForPort(port) { return `com.pocket.editor.${PATH_HASH}.${port}`; }
 function sleep(ms) { return new Promise(resolveSleep => setTimeout(resolveSleep, ms)); }
+function printLanAddress() {
+  try { console.log(`局域网：http://${chooseUpdateHost()}:${PORT}`); }
+  catch { /* A LAN interface is optional; loopback remains available. */ }
+}
 function normalized(value) {
   const path = String(value || "").replaceAll("\\", "/");
   return process.platform === "win32" ? path.toLowerCase() : path;
@@ -377,7 +383,7 @@ async function startChild(options, toolEnv, bun) {
   if (options.nativeProbe) env.POCKET_NATIVE_PROBE = options.nativeProbe;
   let child;
   try {
-    child = spawn(bun, [SERVER, `--host=${HOST}`, `--port=${PORT}`, `--workspace=${WORKSPACE}`], {
+    child = spawn(bun, [SERVER, `--host=${BIND_HOST}`, `--port=${PORT}`, `--workspace=${WORKSPACE}`], {
       cwd: CHECKOUT_ROOT, detached: true, windowsHide: true, env,
       stdio: ["ignore", logFd, logFd],
     });
@@ -430,6 +436,7 @@ async function restart(explicitOptions) {
     throw new Error(`Studio 在固定端口 ${PORT} 启动失败，请查看 ${LOG}`);
   }
   console.log(`Pocket Studio 已重启：http://${HOST}:${PORT}`);
+  printLanAddress();
   console.log(`项目：${options.projectRoot || "未指定（通用 SDK）"}`);
   console.log(`日志：${LOG}`);
 }
@@ -451,6 +458,7 @@ async function status() {
   if (state.owned.length) {
     if (!(await waitForHealth(1500))) throw new Error(`Studio 进程存在但健康检查失败，请执行 npm restart。日志：${LOG}`);
     console.log(`Pocket Studio 运行中：http://${HOST}:${PORT} PID=${state.owned.map(info => info.pid).join(",")}`);
+    printLanAddress();
     if (record && state.owned.some(info => Number(info.pid) === record.pid)) console.log(`PID 文件已验证：${PID_FILE}`);
     return;
   }
@@ -526,6 +534,7 @@ async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
       rmSync(resolvedStageDir, FS_REMOVE_OPTIONS);
       rmSync(backupDir, FS_REMOVE_OPTIONS);
       console.log(`Pocket Studio 已升级并重启至 v${targetVersion}：http://${HOST}:${PORT}`);
+      printLanAddress();
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       await stopOwnedPort(PORT, true).catch(() => {});

@@ -22,7 +22,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -47,7 +47,7 @@ import { createWechatPreviewManager } from "./wechat.ts";
 import { createStudioDiagnostics, handleDiagnosticsRequest } from "./diagnostics.ts";
 import { createStudioUpgradeManager, readInstalledSdkInfo } from "../scripts/studio_upgrade.mjs";
 import { resolveProjectTemplate } from "../scripts/project_templates.ts";
-import { chooseUpdateHost, startUpdateEndpoint } from "./update_endpoint.ts";
+import { chooseUpdateHost, isLocalNetworkAddress, startUpdateEndpoint } from "./update_endpoint.ts";
 import {
   currentVersion,
   emptyVersionHistory,
@@ -1890,8 +1890,16 @@ function contentType(path: string): string {
   }
 }
 
-function validateRequestSecurity(req: Request, url: URL, serverPort: number, csrfToken: string): Response | null {
+function validateRequestSecurity(req: Request, url: URL, serverPort: number, csrfToken: string, bindHost: string): Response | null {
   const allowedHostnames = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+  if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(bindHost)) {
+    for (const entries of Object.values(networkInterfaces())) {
+      for (const entry of entries ?? []) {
+        if (entry.internal) continue;
+        allowedHostnames.add(entry.family === "IPv6" ? `[${entry.address}]` : entry.address);
+      }
+    }
+  }
 
   const hostHeader = req.headers.get("host");
   if (!hostHeader) {
@@ -1939,7 +1947,7 @@ function validateRequestSecurity(req: Request, url: URL, serverPort: number, csr
       const originPort = originUrl.port || "80";
       if (
         originUrl.protocol !== url.protocol ||
-        !allowedHostnames.has(originUrl.hostname) ||
+        originUrl.origin !== dummyUrl.origin ||
         originPort !== String(serverPort)
       ) {
         return failure("forbidden: cross-origin requests not allowed", 403);
@@ -1957,7 +1965,7 @@ function validateRequestSecurity(req: Request, url: URL, serverPort: number, csr
       const refererPort = refererUrl.port || "80";
       if (
         refererUrl.protocol !== url.protocol ||
-        !allowedHostnames.has(refererUrl.hostname) ||
+        refererUrl.origin !== dummyUrl.origin ||
         refererPort !== String(serverPort)
       ) {
         return failure("forbidden: cross-origin referer not allowed", 403);
@@ -3216,6 +3224,13 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     if (!deviceUpdates) {
       const hostname = options.updateHost ?? (process.env.POCKET_EDITOR_UPDATE_HOST || chooseUpdateHost());
       const port = options.updatePort ?? Number(process.env.POCKET_EDITOR_UPDATE_PORT || server.port);
+      // The LAN Editor already serves published packages. Do not bind a
+      // second server to an address/port covered by its wildcard listener.
+      const localAddress = hostname === "127.0.0.1" || Object.values(networkInterfaces())
+        .some(entries => entries?.some(entry => entry.family === "IPv4" && entry.address === hostname));
+      if (port === server.port && (server.hostname === hostname || (server.hostname === "0.0.0.0" && localAddress))) {
+        return `http://${hostname}:${server.port}`;
+      }
       deviceUpdates = startUpdateEndpoint({ hostname, port, read: (path, servingOrigin) => readPublishedResponse(path, servingOrigin) });
       console.log(`Pocket version backend listening at ${deviceUpdates.origin} (signed published packages only)`);
     }
@@ -3575,8 +3590,10 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     idleTimeout: 120,
     maxRequestBodySize: maxAssetBytes,
     async fetch(request): Promise<Response> {
+      const peer = server.requestIP(request);
+      if (!peer || !isLocalNetworkAddress(peer.address)) return failure("forbidden: local network access only", 403);
       const url = new URL(request.url);
-      const securityError = validateRequestSecurity(request, url, server.port, csrfToken);
+      const securityError = validateRequestSecurity(request, url, server.port, csrfToken, server.hostname);
       if (securityError) return securityError;
       const path = url.pathname;
       const method = request.method.toUpperCase();

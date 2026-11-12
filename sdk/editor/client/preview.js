@@ -1433,6 +1433,8 @@ void main() {
     context.restore();
   }
 
+  const PREVIEW_MESH_WIRE_CODEC = "retained-v1";
+
   function client(root, options) {
     const projectId = String(options.projectId || root.dataset.projectId || "");
     const canvas = root.querySelector("canvas") || document.createElement("canvas");
@@ -1481,6 +1483,7 @@ void main() {
     let stream = null;
     let closed = false;
     let resourceReconnectTimer = 0;
+    const meshWireDecoder = global.PocketPreviewMeshWireDecoder?.();
     let webBluetoothEnabled = (() => {
       try { return new URL(global.location.href).searchParams.get("webBluetooth") === "1"; } catch { return false; }
     })();
@@ -3000,13 +3003,23 @@ void main() {
 
     function connect() {
       const generation = ++connectionGeneration;
+      meshWireDecoder?.reset();
       const endpoint = `${options.basePath || `/api/projects/${encodeURIComponent(projectId)}/preview`}/stream`;
-      const params = new URLSearchParams({ presentation: "browser", resources: "http", clientId: webBluetoothClientId });
+      const params = new URLSearchParams({
+        presentation: "browser",
+        resources: "http",
+        clientId: webBluetoothClientId,
+      });
+      if (meshWireDecoder) params.set("meshes", PREVIEW_MESH_WIRE_CODEC);
       if (webBluetoothEnabled) { params.set("webBluetooth", "1"); params.set("bluetoothProvider", bluetoothProvider); }
       const current = new EventSource(`${endpoint}?${params.toString()}`);
       stream = current;
       current.onopen = () => {
         if (generation !== connectionGeneration || stream !== current || closed) return;
+        // Browser EventSource automatic reconnects reuse the same EventSource
+        // instance while the server starts a fresh per-connection encoder.
+        // Reset decoder state on every open edge so slot IDs remain coherent.
+        meshWireDecoder?.reset();
         installAccessibilityMediaQueryListeners();
         // Replay the current snapshot after every stream connection. The
         // server caches it for guests that mount after this page connects.
@@ -3016,8 +3029,21 @@ void main() {
         if (generation !== connectionGeneration || stream !== current || closed) return;
         try {
           const packet = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
-          if (packet.type === "frame") installFrame(packet.frame);
-          else if (packet.type === "status") {
+          if (packet.type === "frame") {
+            let decodedFrame;
+            try {
+              if (packet.frame?.meshWire && !meshWireDecoder) throw new Error("Unsupported preview mesh transport");
+              decodedFrame = meshWireDecoder ? meshWireDecoder.decode(packet.frame) : packet.frame;
+            } catch (decodeError) {
+              meshWireDecoder?.reset();
+              const detail = String(decodeError?.message || decodeError);
+              status.textContent = `Preview stream error: ${detail}`;
+              announce("preview.error", { error: detail });
+              reconnectAfterResourceFailure();
+              return;
+            }
+            installFrame(decodedFrame);
+          } else if (packet.type === "status") {
             const state = packet.status?.state;
             if (state === "error") cancelPointerContacts();
             else if (state === "starting" || state === "stopped") resetPointerContacts();
@@ -3445,6 +3471,7 @@ void main() {
         glassScratch.backdropKey = null;
       }
       glassScratchCache.delete(canvas);
+      meshWireDecoder?.reset();
       cancelPointerContacts();
       connectionGeneration += 1;
       stream?.close();
@@ -3460,6 +3487,7 @@ void main() {
   global.PocketEditorPreview = {
     version: VERSION,
     projectModelMeshes,
+    createMeshWireDecoder: global.PocketPreviewMeshWireDecoder,
     protocol: { version: VERSION, source: SOURCE },
     mount: client,
     /** Project an already-canonical TEX_TRI-shaped operation (also used by the Novel mesh inspector). */
