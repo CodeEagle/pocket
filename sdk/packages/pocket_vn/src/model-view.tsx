@@ -95,11 +95,16 @@ export function NovelModelView(props: {
         const mask = ids.get(id);
         if (mask === undefined) throw new Error(`Missing model mask mesh: ${id}`);
         return mask;
-      }, effectBuffers.get(node)) : new Uint8Array(0);
+      }) : new Uint8Array(0);
+      // Encode separately: effects and their colour arrays may be mutated in
+      // place, so reusing the committed buffer would erase the comparison.
+      const previous = effectBuffers.get(node);
+      if (previous && previous.length === bytes.length && bytes.every((value, offset) => value === previous[offset])) return;
       if (!ops.setMeshEffect(node, bytes)) throw new Error("Pocket refused invalid model compositing");
       if (mesh.effect) effectBuffers.set(node, bytes); else effectBuffers.delete(node);
     }); } catch (cause) { failCurrent?.(cause); return; }
-    for (const node of effectBuffers.keys()) if (!nodeIds.slice(0, frame.length).includes(node)) effectBuffers.delete(node);
+    const activeNodes = new Set(nodeIds.slice(0, frame.length));
+    for (const node of effectBuffers.keys()) if (!activeNodes.has(node)) effectBuffers.delete(node);
     nodeIds.length = frame.length;
   });
   return result;

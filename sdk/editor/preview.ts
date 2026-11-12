@@ -3060,8 +3060,12 @@ class PreviewSession {
     const rootGeneration = root.generation;
     const requestedPump = runtime.needsPump;
     runtime.needsPump = false;
-    const frameDelta = Math.max(0, deltaMs) + (runtime.pendingFrameDeltaMs ?? 0);
-    runtime.pendingFrameDeltaMs = 0;
+    // Settle the response at the same display time. Consuming another tick's
+    // queued delta here starts a new animation/host request inside the settle
+    // chain, which can keep it alive until its 32-pass safety limit. Retain
+    // that elapsed time for the next display pump, after publishing this one.
+    const frameDelta = Math.max(0, deltaMs) + (pass === 0 ? runtime.pendingFrameDeltaMs ?? 0 : 0);
+    if (pass === 0) runtime.pendingFrameDeltaMs = 0;
     const flight = { generation };
     runtime.frameInFlight = flight;
     void runtime.probe.checked({ op: "frame", deltaMs: frameDelta, rawFrame: true }).then(

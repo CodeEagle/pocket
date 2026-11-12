@@ -84,16 +84,20 @@ function App() {
 
   const animations = createNovelAnimationDriver();
   let x = 12;
+  let step = 0;
+  const effect = { blend: "normal", repeatTexture: true, multiplyRgb: [1, 1, 1] };
   let geometry = encodeNovelMesh({ vertices: [x, 14, 0, 0, x + 18, 14, 1, 0, x + 4, 34, 0, 1], indices: [0, 1, 2] });
   const factory = () => ({
     setIntent() {},
     advance(deltaMs: number) {
       if (deltaMs > 0) {
+        step++;
+        if (step === 3) effect.multiplyRgb[0] = 0.5;
         x += 4;
         geometry = encodeNovelMesh({ vertices: [x, 14, 0, 0, x + 18, 14, 1, 0, x + 4, 34, 0, 1], indices: [0, 1, 2] }, geometry);
         setMetrics(value => ({ ...value, advances: value.advances + 1 }));
       }
-      return [{ id: "body", texture: "fixture/texture.png", geometry, effect: { blend: "normal", repeatTexture: true } }];
+      return [{ id: "body", texture: "fixture/texture.png", geometry, effect: step >= 4 ? undefined : effect }];
     },
     dispose() {},
   });
@@ -102,7 +106,7 @@ function App() {
     after(3 / 60, () => {
       setMetrics(value => ({ ...value, scheduled: value.scheduled + 1 }));
       animations.advance(16);
-      if (++scheduled < 4) scheduleAdvance();
+      if (++scheduled < 6) scheduleAdvance();
     });
   };
   onMount(scheduleAdvance);
@@ -294,7 +298,9 @@ test("NovelModelView batches one async frame commit without losing retained PMS1
     assert.equal(facts.batched!.scheduled, facts.unbatched!.scheduled, "both controls must receive the same deterministic timer advances");
     assert.ok(facts.unbatched!.advances >= 3, "fixture must exercise several reused-buffer updates");
     assert.ok(facts.batched!.setMesh < facts.unbatched!.setMesh, "batch must reduce actual setMesh submissions");
-    assert.ok(facts.batched!.setMeshEffect < facts.unbatched!.setMeshEffect, "batch must reduce actual setMeshEffect submissions");
+    assert.equal(facts.batched!.setMeshEffect, 3, "only initial effect, in-place tint change and effect removal may cross the native boundary");
+    assert.equal(facts.unbatched!.setMeshEffect, 3, "duplicate signal commits must also skip unchanged encoded effects");
+    assert.equal(facts.batched!.advances, 6, "keep advancing after effect removal to detect repeated empty submissions");
     assert.deepEqual(facts.batched!.meshOps, facts.unbatched!.meshOps, "native PMS1 output for every frame must remain identical");
     const renderedFirstVertexX = facts.batched!.meshOps.map(ops => ops[0]?.points?.[0]?.x).filter((value): value is number => value !== undefined);
     assert.ok(new Set(renderedFirstVertexX).size >= 3, "in-place versioned PMS1 buffer changes must reach native output on repeated frames");

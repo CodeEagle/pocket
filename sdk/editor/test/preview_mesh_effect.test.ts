@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "bun:test";
 import { chromium } from "playwright";
 
-test("Canvas2D projects real PMS1 masks, inverted masks, repeat UV, tint and blend", { timeout: 30_000 }, async () => {
+for (const fallback of [false, true]) test(`mesh projection handles masks, repeat UV, tint, blend and updates (${fallback ? "Canvas fallback" : "GPU"})`, { timeout: 30_000 }, async () => {
   const source = readFileSync(new URL("../client/preview.js", import.meta.url), "utf8");
   const server = Bun.serve({ port: 0, fetch: () => new Response(`<script>${source.replaceAll("</script", "<\\/script")}</script>`, { headers: { "content-type": "text/html" } }) });
   const browser = await chromium.launch({ headless: true });
@@ -11,6 +11,12 @@ test("Canvas2D projects real PMS1 masks, inverted masks, repeat UV, tint and ble
     const page = await browser.newPage();
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
+    if (fallback) await page.addInitScript(() => {
+      const original = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function(kind: string, ...args: any[]) {
+        return kind === "webgl2" ? null : (original as any).call(this, kind, ...args);
+      } as typeof original;
+    });
     await page.goto(`http://127.0.0.1:${server.port}`);
     const results = await page.evaluate(() => {
       const canvas = document.createElement("canvas"); canvas.width = 240; canvas.height = 340;
@@ -39,8 +45,32 @@ test("Canvas2D projects real PMS1 masks, inverted masks, repeat UV, tint and ble
       ctx.clearRect(0, 0, 240, 340); ctx.fillStyle = "blue"; ctx.fillRect(0, 0, 80, 80);
       (window as any).PocketEditorPreview.projectModelMeshes(ctx, [{ ...target, effect: { ...target.effect, masks: [], blend: "multiply" } }], images);
       const blend = pixel(10);
+      let patterns = 0, clears = 0;
+      const proto = CanvasRenderingContext2D.prototype;
+      const originalPattern = proto.createPattern, originalClear = proto.clearRect;
+      proto.createPattern = function(...args: Parameters<typeof originalPattern>) { patterns++; return originalPattern.apply(this, args); };
+      proto.clearRect = function(...args: Parameters<typeof originalClear>) { clears++; return originalClear.apply(this, args); };
+      paint([target, { ...target, id: "second", effect: { ...target.effect, inverted: true } }, mask]);
+      const combined = [pixel(10), pixel(70)];
+      patterns = clears = 0;
+      paint([target, { ...target, id: "second", effect: { ...target.effect, inverted: true } }, mask]);
+      const warmPatterns = patterns, warmClears = clears;
+      // A new frame must rerasterize a mask changed in place.
+      const maskView = new DataView(mask.geometry.buffer);
+      for (let vertex = 0; vertex < 4; vertex++) maskView.setFloat32(16 + vertex * 16, maskView.getFloat32(16 + vertex * 16, true) + 100, true);
+      paint([target, mask]);
+      const movedMask = pixel(10);
+      // Canvas-only sources are mutable (video/authoring); never retain their pattern.
+      const dynamic = images.red as { canvas: HTMLCanvasElement; width: number; height: number; rgba?: Uint8ClampedArray };
+      delete dynamic.rgba;
+      dynamic.canvas.getContext("2d")!.fillStyle = "blue";
+      dynamic.canvas.getContext("2d")!.fillRect(0, 0, 2, 1);
+      patterns = 0;
+      paint([{ ...target, effect: { ...target.effect, masks: [] } }]);
+      const dynamicPixel = pixel(10), dynamicPatterns = patterns;
+      proto.createPattern = originalPattern; proto.clearRect = originalClear;
       paint([{ id: "colored-spine", texture: "white", geometry: geometry(1, 0xff0000ff) }]);
-      return { normal, inverted, repeat, tint, blend, packedRed: pixel(10) };
+      return { normal, inverted, repeat, tint, blend, combined, warmPatterns, warmClears, movedMask, dynamicPixel, dynamicPatterns, packedRed: pixel(10) };
     });
     assert.deepEqual(results.normal, [[255, 0, 0, 255], [0, 0, 0, 0]]);
     assert.deepEqual(results.inverted, [[0, 0, 0, 0], [255, 0, 0, 255]]);
@@ -48,6 +78,11 @@ test("Canvas2D projects real PMS1 masks, inverted masks, repeat UV, tint and ble
     assert.deepEqual(results.tint, [128, 255, 0, 255]);
     assert.deepEqual(results.blend, [0, 0, 0, 255]);
     assert.deepEqual(results.packedRed, [255, 0, 0, 255]);
+    assert.deepEqual(results.combined, [[255, 0, 0, 255], [255, 0, 0, 255]]);
+    assert.equal(results.warmPatterns, 0);
+    assert.equal(results.warmClears, 4, "two contents share one rasterized mask despite different inversion");
+    assert.deepEqual(results.movedMask, [0, 0, 0, 0]);
+    assert.deepEqual(results.dynamicPixel, [0, 0, 255, 255]);
     assert.deepEqual(errors, []);
   } finally { await browser.close(); await server.stop(true); }
 });

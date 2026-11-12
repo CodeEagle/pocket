@@ -213,6 +213,7 @@
     }
     context.putImageData(data, 0, 0);
     const result = { canvas, width: image.width, height: image.height, revision: image.revision };
+    meshCachedCanvases.add(canvas);
     variants.set(tint, result);
     // Interrupted transitions can produce unlimited distinct colours. Keep a
     // small LRU, also bounded by pixel area for large textures.
@@ -224,6 +225,9 @@
       const oldest = variants.keys().next().value;
       const retired = variants.get(oldest);
       variants.delete(oldest);
+      evictMeshGlTexture(retired.canvas);
+      meshPatternCache.delete(retired.canvas);
+      meshCachedCanvases.delete(retired.canvas);
       retired.canvas.width = retired.canvas.height = 0;
     }
     return result;
@@ -232,9 +236,22 @@
   function disposeResource(image) {
     if (!image) return;
     for (const variant of tintedImageCache.get(image)?.values() ?? []) {
+      evictMeshGlTexture(variant.canvas);
+      meshPatternCache.delete(variant.canvas);
+      meshCachedCanvases.delete(variant.canvas);
       variant.canvas.width = variant.canvas.height = 0;
     }
     tintedImageCache.delete(image);
+    for (const variant of meshTintCache.get(image)?.values() ?? []) {
+      evictMeshGlTexture(variant.canvas);
+      meshPatternCache.delete(variant.canvas);
+      meshCachedCanvases.delete(variant.canvas);
+      variant.canvas.width = variant.canvas.height = 0;
+    }
+    meshTintCache.delete(image);
+    evictMeshGlTexture(image.canvas);
+    meshPatternCache.delete(image.canvas);
+    meshCachedCanvases.delete(image.canvas);
     image.canvas.width = image.canvas.height = 0;
     image.rgba = null;
   }
@@ -372,7 +389,24 @@
     context.clip();
     context.transform(a, b, c, d, e, f);
     if (op.repeatTexture || op.type === "textureTriangleRepeat") {
-      const pattern = context.createPattern(image.canvas, "repeat");
+      if (image.width <= 0 || image.height <= 0 || image.canvas.width <= 0 || image.canvas.height <= 0) {
+        context.restore();
+        return;
+      }
+      let pattern;
+      // Uploaded RGBA resources and our tint canvases are immutable until
+      // disposal. Canvas-only sources can change every frame (e.g. video).
+      if (image.rgba || meshCachedCanvases.has(image.canvas)) {
+        let patterns = meshPatternCache.get(image.canvas);
+        if (!patterns) meshPatternCache.set(image.canvas, patterns = new WeakMap());
+        pattern = patterns.get(context);
+        if (!pattern) {
+          pattern = context.createPattern(image.canvas, "repeat");
+          if (pattern) patterns.set(context, pattern);
+        }
+      } else {
+        pattern = context.createPattern(image.canvas, "repeat");
+      }
       context.fillStyle = pattern;
       const xs = [u0, u1, u2], ys = [v0, v1, v2];
       const left = Math.floor(Math.min(...xs)), top = Math.floor(Math.min(...ys));
@@ -383,6 +417,8 @@
 
   const meshScratch = new WeakMap();
   const meshTintCache = new WeakMap();
+  const meshPatternCache = new WeakMap();
+  const meshCachedCanvases = new WeakSet();
   function meshTint(image, values) {
     if (!image || !values || values.every((v, i) => v === (i < 3 ? 1 : 0))) return image;
     if (values.length !== 6 || values.some(v => !Number.isFinite(v) || v < 0 || v > 1)) throw new Error("Invalid mesh RGB tint");
@@ -399,13 +435,354 @@
       pixels.data[i + c] = Math.round((pixels.data[i + c] * (1 - values[c + 3]) + 255 * values[c + 3]) * values[c]);
     }
     ctx.putImageData(pixels, 0, 0);
-    const result = { canvas, width: image.width, height: image.height };
+    meshCachedCanvases.add(canvas);
+    const result = { canvas, width: image.width, height: image.height, revision: image.revision };
     cache.set(key, result);
     const limit = Math.max(1, Math.min(8, Math.floor(16 * 1024 * 1024 / (image.width * image.height * 4))));
-    while (cache.size > limit) { const old = cache.keys().next().value; cache.get(old).canvas.width = 0; cache.delete(old); }
+    while (cache.size > limit) {
+      const old = cache.keys().next().value;
+      const retired = cache.get(old);
+      evictMeshGlTexture(retired.canvas);
+      meshPatternCache.delete(retired.canvas);
+      meshCachedCanvases.delete(retired.canvas);
+      retired.canvas.width = 0;
+      cache.delete(old);
+    }
     return result;
   }
-  function projectMeshGroup(context, begin, content, masks, maskBegin, resources) {
+
+  const MESH_GL_TEXTURE_BUDGET = 64 * 1024 * 1024;
+  let meshGlState = null;
+  let meshGlFailed = false;
+
+  function evictMeshGlTexture(canvas) {
+    if (!canvas || !meshGlState || !meshGlState.textures.has(canvas)) return;
+    const entry = meshGlState.textures.get(canvas);
+    meshGlState.textures.delete(canvas);
+    meshGlState.textureBytes = Math.max(0, meshGlState.textureBytes - entry.bytes);
+    if (!meshGlFailed && meshGlState.gl && !meshGlState.gl.isContextLost()) {
+      try { meshGlState.gl.deleteTexture(entry.texture); } catch { /* context lost */ }
+    }
+  }
+
+  function getMeshGlRasterizer() {
+    if (meshGlFailed || typeof document === "undefined") return null;
+    if (meshGlState) {
+      if (meshGlState.gl.isContextLost()) {
+        meshGlFailed = true;
+        meshGlState.textures.clear();
+        meshGlState.textureBytes = 0;
+        meshGlState = null;
+        return null;
+      }
+      return meshGlState;
+    }
+    let canvas, gl;
+    try {
+      canvas = document.createElement("canvas");
+      gl = canvas.getContext("webgl2", {
+        alpha: true,
+        premultipliedAlpha: true,
+        antialias: false,
+        depth: false,
+        stencil: false,
+        preserveDrawingBuffer: false,
+      });
+    } catch {
+      gl = null;
+    }
+    if (!gl) {
+      meshGlFailed = true;
+      return null;
+    }
+    const onLost = (event) => {
+      event?.preventDefault?.();
+      meshGlFailed = true;
+      if (meshGlState) {
+        meshGlState.textures.clear();
+        meshGlState.textureBytes = 0;
+        meshGlState = null;
+      }
+    };
+    canvas.addEventListener?.("webglcontextlost", onLost);
+    const compile = (type, source) => {
+      const shader = gl.createShader(type);
+      if (!shader) return null;
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        gl.deleteShader(shader);
+        return null;
+      }
+      return shader;
+    };
+    const vs = compile(gl.VERTEX_SHADER, `#version 300 es
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+layout(location = 2) in float a_alpha;
+uniform vec2 u_resolution;
+out vec2 v_uv;
+out float v_alpha;
+void main() {
+  vec2 ndc = (a_pos / u_resolution) * 2.0 - 1.0;
+  gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+  v_uv = a_uv;
+  v_alpha = a_alpha;
+}`);
+    const fs = compile(gl.FRAGMENT_SHADER, `#version 300 es
+precision highp float;
+in vec2 v_uv;
+in float v_alpha;
+uniform sampler2D u_tex;
+out vec4 outColor;
+void main() {
+  outColor = texture(u_tex, v_uv) * v_alpha;
+}`);
+    if (!vs || !fs) {
+      if (vs) gl.deleteShader(vs);
+      if (fs) gl.deleteShader(fs);
+      meshGlFailed = true;
+      return null;
+    }
+    const program = gl.createProgram();
+    if (!program) {
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      meshGlFailed = true;
+      return null;
+    }
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      gl.deleteProgram(program);
+      meshGlFailed = true;
+      return null;
+    }
+    const vao = gl.createVertexArray();
+    const vbo = gl.createBuffer();
+    const dynamicTex = gl.createTexture();
+    const uResolution = gl.getUniformLocation(program, "u_resolution");
+    const uTex = gl.getUniformLocation(program, "u_tex");
+    if (!vao || !vbo || !dynamicTex || uResolution === null || uTex === null) {
+      if (vao) gl.deleteVertexArray(vao);
+      if (vbo) gl.deleteBuffer(vbo);
+      if (dynamicTex) gl.deleteTexture(dynamicTex);
+      gl.deleteProgram(program);
+      meshGlFailed = true;
+      return null;
+    }
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 8);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 20, 16);
+    gl.bindVertexArray(null);
+    meshGlState = {
+      canvas,
+      gl,
+      program,
+      vao,
+      vbo,
+      dynamicTex,
+      uResolution,
+      uTex,
+      vertices: new Float32Array(1024 * 15),
+      textures: new Map(),
+      textureBytes: 0,
+    };
+    return meshGlState;
+  }
+
+  function uploadMeshGlTexture(state, image) {
+    const { gl, textures } = state;
+    const sourceCanvas = image?.canvas;
+    if (!sourceCanvas || sourceCanvas.width <= 0 || sourceCanvas.height <= 0 || image.width <= 0 || image.height <= 0) return null;
+    const cacheable = Boolean(image.rgba || meshCachedCanvases.has(sourceCanvas));
+    const revision = Number(image.revision) || 0;
+    const width = sourceCanvas.width;
+    const height = sourceCanvas.height;
+    if (cacheable) {
+      const existing = textures.get(sourceCanvas);
+      if (existing && existing.revision === revision && existing.width === width && existing.height === height) {
+        textures.delete(sourceCanvas);
+        textures.set(sourceCanvas, existing);
+        return existing.texture;
+      }
+      if (existing) evictMeshGlTexture(sourceCanvas);
+    }
+    const bytes = Math.ceil(width * height * 4 * 4 / 3);
+    if (cacheable) {
+      while (textures.size > 0 && state.textureBytes + bytes > MESH_GL_TEXTURE_BUDGET) {
+        const oldest = textures.keys().next().value;
+        evictMeshGlTexture(oldest);
+      }
+    }
+    const retain = cacheable && bytes <= MESH_GL_TEXTURE_BUDGET;
+    const tex = retain ? gl.createTexture() : state.dynamicTex;
+    if (!tex) return null;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceCanvas);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    if (cacheable && bytes <= MESH_GL_TEXTURE_BUDGET) {
+      textures.set(sourceCanvas, { texture: tex, revision, width, height, bytes });
+      state.textureBytes += bytes;
+    }
+    return tex;
+  }
+
+  function tryDrawMeshBatchWebGL(layer, ops, imageProvider, overrideColor) {
+    if (!Array.isArray(ops) || ops.length === 0) return true;
+    if (layer.globalAlpha !== 1 || layer.globalCompositeOperation !== "source-over") return false;
+    const targetCanvas = layer?.canvas;
+    if (!targetCanvas || targetCanvas.width <= 0 || targetCanvas.height <= 0) return false;
+    const first = ops[0];
+    if (!first || (first.type !== "textureTriangle" && first.type !== "textureTriangleRepeat")) return false;
+    const assetKey = String(first.asset ?? "");
+    const firstClip = first.clip && typeof first.clip === "object" ? first.clip : null;
+    const repeat = Boolean(first.repeatTexture || first.type === "textureTriangleRepeat");
+    for (let i = 0; i < ops.length; i += 1) {
+      const op = ops[i];
+      if (!op || (op.type !== "textureTriangle" && op.type !== "textureTriangleRepeat")) return false;
+      if (String(op.asset ?? "") !== assetKey) return false;
+      const opRepeat = Boolean(op.repeatTexture || op.type === "textureTriangleRepeat");
+      if (opRepeat !== repeat) return false;
+      const clip = op.clip && typeof op.clip === "object" ? op.clip : null;
+      if (!sameClip(firstClip, clip)) return false;
+      if (!Array.isArray(op.points) || op.points.length !== 3 || !Array.isArray(op.uvs) || op.uvs.length !== 6) return false;
+      const rawColor = overrideColor !== undefined ? overrideColor : op.color;
+      if (rawColor !== undefined && rawColor !== null) {
+        const tint = Number(rawColor) >>> 0;
+        const alphaByte = (tint >>> 24) & 0xff;
+        if (alphaByte !== 0 && (tint & 0x00ffffff) !== 0x00ffffff) return false;
+      }
+    }
+    const image = imageProvider(assetKey);
+    if (!image || !image.canvas || image.width <= 0 || image.height <= 0 || image.canvas.width <= 0 || image.canvas.height <= 0) return false;
+    const state = getMeshGlRasterizer();
+    if (!state) return false;
+    const { canvas: glCanvas, gl } = state;
+    if (gl.isContextLost()) {
+      meshGlFailed = true;
+      meshGlState = null;
+      return false;
+    }
+    const transform = layer.getTransform();
+    const mA = number(transform.a, 1);
+    const mB = number(transform.b, 0);
+    const mC = number(transform.c, 0);
+    const mD = number(transform.d, 1);
+    const mE = number(transform.e, 0);
+    const mF = number(transform.f, 0);
+    const neededFloats = ops.length * 15;
+    if (state.vertices.length < neededFloats) {
+      state.vertices = new Float32Array(Math.max(neededFloats, state.vertices.length * 2));
+    }
+    const verts = state.vertices;
+    let offset = 0;
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    const texW = image.width;
+    const texH = image.height;
+    for (let i = 0; i < ops.length; i += 1) {
+      const op = ops[i];
+      let alpha = 1;
+      const rawColor = overrideColor !== undefined ? overrideColor : op.color;
+      if (rawColor !== undefined && rawColor !== null) {
+        alpha = (((Number(rawColor) >>> 0) >>> 24) & 0xff) / 255;
+        if (alpha === 0) continue;
+      }
+      const p0 = op.points[0], p1 = op.points[1], p2 = op.points[2];
+      const uvs = op.uvs;
+      const u0 = uvs[0] * texW, v0 = uvs[1] * texH;
+      const u1 = uvs[2] * texW, v1 = uvs[3] * texH;
+      const u2 = uvs[4] * texW, v2 = uvs[5] * texH;
+      const determinant = u0 * (v1 - v2) + u1 * (v2 - v0) + u2 * (v0 - v1);
+      if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-7) continue;
+      const p0x = Number(p0.x), p0y = Number(p0.y);
+      const p1x = Number(p1.x), p1y = Number(p1.y);
+      const p2x = Number(p2.x), p2y = Number(p2.y);
+      if (!Number.isFinite(p0x) || !Number.isFinite(p0y) || !Number.isFinite(p1x) || !Number.isFinite(p1y) ||
+          !Number.isFinite(p2x) || !Number.isFinite(p2y) || !uvs.every(Number.isFinite)) continue;
+      verts[offset++] = mA * p0x + mC * p0y + mE;
+      verts[offset++] = mB * p0x + mD * p0y + mF;
+      verts[offset++] = uvs[0];
+      verts[offset++] = uvs[1];
+      verts[offset++] = alpha;
+      verts[offset++] = mA * p1x + mC * p1y + mE;
+      verts[offset++] = mB * p1x + mD * p1y + mF;
+      verts[offset++] = uvs[2];
+      verts[offset++] = uvs[3];
+      verts[offset++] = alpha;
+      verts[offset++] = mA * p2x + mC * p2y + mE;
+      verts[offset++] = mB * p2x + mD * p2y + mF;
+      verts[offset++] = uvs[4];
+      verts[offset++] = uvs[5];
+      verts[offset++] = alpha;
+      for (let vertex = offset - 15; vertex < offset; vertex += 5) {
+        left = Math.min(left, verts[vertex]); top = Math.min(top, verts[vertex + 1]);
+        right = Math.max(right, verts[vertex]); bottom = Math.max(bottom, verts[vertex + 1]);
+      }
+    }
+    if (offset === 0) return true;
+    // Copy only this batch's physical bounds, not a full viewport per mask
+    // or atlas run. One physical pixel pads the raster bounds.
+    left = Math.max(0, Math.floor(left) - 1); top = Math.max(0, Math.floor(top) - 1);
+    right = Math.min(targetCanvas.width, Math.ceil(right) + 1);
+    bottom = Math.min(targetCanvas.height, Math.ceil(bottom) + 1);
+    const width = right - left, height = bottom - top;
+    if (width <= 0 || height <= 0) return true;
+    if (glCanvas.width !== targetCanvas.width || glCanvas.height !== targetCanvas.height) {
+      glCanvas.width = targetCanvas.width; glCanvas.height = targetCanvas.height;
+    }
+    gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(left, glCanvas.height - bottom, width, height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const texture = uploadMeshGlTexture(state, image);
+    if (!texture) return false;
+    const wrap = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+    gl.useProgram(state.program);
+    gl.uniform2f(state.uResolution, glCanvas.width, glCanvas.height);
+    gl.uniform1i(state.uTex, 0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.bindVertexArray(state.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, state.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, verts.subarray(0, offset), gl.STREAM_DRAW);
+    gl.drawArrays(gl.TRIANGLES, 0, offset / 5);
+    gl.bindVertexArray(null);
+    if (gl.isContextLost()) {
+      meshGlFailed = true;
+      state.textures.clear();
+      state.textureBytes = 0;
+      meshGlState = null;
+      return false;
+    }
+    layer.save();
+    if (firstClip) clipRect(layer, firstClip);
+    layer.resetTransform();
+    layer.drawImage(glCanvas, left, top, width, height, left, top, width, height);
+    layer.restore();
+    return true;
+  }
+
+  function projectMeshGroup(context, begin, content, masks, maskBegin, resources, reuseMask = false) {
     let scratch = meshScratch.get(context.canvas);
     if (!scratch) {
       scratch = [document.createElement("canvas"), document.createElement("canvas")];
@@ -422,18 +799,26 @@
     const layer = prepare(scratch[0]);
     layer.save(); clipRect(layer, begin.clip); clipRect(layer, begin);
     for (const op of content) {
-      if (op.type !== "textureTriangle" && op.type !== "textureTriangleRepeat") throw new Error("Invalid mesh layer operation");
-      layer.save(); clipRect(layer, op.clip);
-      drawTriangle(layer, op, meshTint(resources.get(String(op.asset)), begin.uvs)); layer.restore();
+      if (!op || (op.type !== "textureTriangle" && op.type !== "textureTriangleRepeat")) throw new Error("Invalid mesh layer operation");
+    }
+    if (!tryDrawMeshBatchWebGL(layer, content, asset => meshTint(resources.get(asset), begin.uvs))) {
+      for (const op of content) {
+        layer.save(); clipRect(layer, op.clip);
+        drawTriangle(layer, op, meshTint(resources.get(String(op.asset)), begin.uvs)); layer.restore();
+      }
     }
     layer.restore();
     if (maskBegin) {
-      const mask = prepare(scratch[1]); mask.save(); clipRect(mask, maskBegin.clip); clipRect(mask, maskBegin);
-      for (const op of masks) {
-        mask.save(); clipRect(mask, op.clip);
-        drawTriangle(mask, { ...op, color: 0xffffffff }, resources.get(String(op.asset))); mask.restore();
+      if (!reuseMask) {
+        const mask = prepare(scratch[1]); mask.save(); clipRect(mask, maskBegin.clip); clipRect(mask, maskBegin);
+        if (!tryDrawMeshBatchWebGL(mask, masks, asset => resources.get(asset), 0xffffffff)) {
+          for (const op of masks) {
+            mask.save(); clipRect(mask, op.clip);
+            drawTriangle(mask, { ...op, color: 0xffffffff }, resources.get(String(op.asset))); mask.restore();
+          }
+        }
+        mask.restore();
       }
-      mask.restore();
       layer.save(); layer.resetTransform(); layer.globalCompositeOperation = maskBegin.color ? "destination-out" : "destination-in";
       layer.drawImage(scratch[1], 0, 0); layer.restore();
     }
@@ -467,24 +852,40 @@
   }
   function projectModelMeshes(context, meshes, images) {
     const resources = new Map(Object.entries(images)), byId = new Map(meshes.map(mesh => [mesh.id, mesh]));
+    const decodedMasks = new Map();
+    // Only the last mask occupies the shared scratch canvas. Reuse within
+    // this call, never across frames where geometry/resources may change.
+    let lastMaskIds = null;
     for (const mesh of meshes) {
       if (mesh.visible === false) continue;
       if (!resources.has(mesh.texture)) throw new Error(`Model texture is missing: ${mesh.texture}`);
       const effect = mesh.effect;
-      if (!effect) { for (const op of meshTriangles(mesh)) drawTriangle(context, op, resources.get(mesh.texture)); continue; }
+      if (!effect) {
+        const content = meshTriangles(mesh);
+        if (!tryDrawMeshBatchWebGL(context, content, asset => resources.get(asset))) {
+          for (const op of content) drawTriangle(context, op, resources.get(mesh.texture));
+        }
+        continue;
+      }
       const content = meshTriangles(mesh), masks = [];
-      for (const id of effect.masks || []) {
+      const maskIds = effect.masks || [];
+      for (const id of maskIds) {
         const source = byId.get(id);
         if (!source) throw new Error("Live2D mask mesh is missing");
         if (!resources.has(source.texture)) throw new Error(`Model mask texture is missing: ${source.texture}`);
-        masks.push(...meshTriangles(source));
+        let decoded = decodedMasks.get(id);
+        if (!decoded) decodedMasks.set(id, decoded = meshTriangles(source));
+        masks.push(...decoded);
       }
       // Authoring model coordinates share the existing 240 x 340 VN surface.
       const bounds = { x: 0, y: 0, w: 240, h: 340 };
       const blend = ["normal", "add", "multiply", "screen"].indexOf(effect.blend || "normal");
       if (blend < 0) throw new Error("Unsupported Live2D blend mode");
+      const reuseMask = masks.length > 0 && lastMaskIds !== null &&
+        lastMaskIds.length === maskIds.length && maskIds.every((id, i) => id === lastMaskIds[i]);
       projectMeshGroup(context, { ...bounds, color: blend, uvs: [...(effect.multiplyRgb || [1, 1, 1]), ...(effect.screenRgb || [0, 0, 0])] }, content, masks,
-        masks.length ? { ...bounds, color: effect.inverted ? 1 : 0 } : null, resources);
+        masks.length ? { ...bounds, color: effect.inverted ? 1 : 0 } : null, resources, reuseMask);
+      if (masks.length > 0) lastMaskIds = maskIds.slice();
     }
   }
 
@@ -758,9 +1159,30 @@
     let hasGlass = false;
     let backdropHasVideo = false;
     let activeClip = null;
+    let meshBatchFallbackEnd = 0;
     for (let index = 0; index < ops.length; index += 1) {
       const op = ops[index];
       if (!op || typeof op !== "object") continue;
+      // Native plain Live2D drawables arrive outside mesh layers. Batch only
+      // consecutive repeat-textured triangles; never reorder across UI/layers.
+      if (index >= meshBatchFallbackEnd && op.type === "textureTriangle" && op.repeatTexture === true) {
+        let end = index + 1;
+        for (; end < ops.length; end++) {
+          const next = ops[end];
+          if (next?.type !== "textureTriangle" || next.repeatTexture !== true ||
+              next.asset !== op.asset || !sameClip(op.clip, next.clip)) break;
+        }
+        if (end - index > 1) {
+          if (activeClip) { context.restore(); activeClip = null; }
+          if (tryDrawMeshBatchWebGL(context, ops.slice(index, end), asset => resources.get(asset))) {
+            index = end - 1;
+            continue;
+          }
+          // An unsupported batch stays on Canvas once; rescanning its tail
+          // for every triangle makes the compatibility path quadratic.
+          meshBatchFallbackEnd = end;
+        }
+      }
       if (op.type === "meshLayerBegin") {
         if (activeClip) { context.restore(); activeClip = null; }
         const content = [], masks = []; let mask = null, end = index + 1;
