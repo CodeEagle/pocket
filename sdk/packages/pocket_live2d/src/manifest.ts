@@ -10,6 +10,12 @@ export interface CubismExpressionReference {
   readonly file: string;
 }
 
+export interface CubismHitArea {
+  /** The model3 drawable ID whose current Core geometry forms the hit region. */
+  readonly id: string;
+  readonly name: string;
+}
+
 export interface CubismModel3Manifest {
   readonly version: 3;
   readonly moc: string;
@@ -20,6 +26,7 @@ export interface CubismModel3Manifest {
   readonly displayInfo?: string;
   readonly expressions: readonly CubismExpressionReference[];
   readonly motions: Readonly<Record<string, readonly CubismMotionReference[]>>;
+  readonly hitAreas: readonly CubismHitArea[];
   readonly groups: readonly {
     readonly target: "Parameter";
     readonly name: string;
@@ -127,6 +134,18 @@ export function parseCubismModel3(input: unknown): CubismModel3Manifest {
     return [{ target: "Parameter" as const, name: nonEmptyString(group.Name, `${path}.Name`), ids: group.Ids as string[] }];
   });
 
+  const hitAreasValue = model.HitAreas === undefined ? [] : model.HitAreas;
+  if (!Array.isArray(hitAreasValue)) throw new CubismManifestError("model3.HitAreas must be an array");
+  const hitAreaIds = new Set<string>();
+  const hitAreas = hitAreasValue.map((entry, index): CubismHitArea => {
+    const path = `model3.HitAreas[${index}]`;
+    const area = object(entry, path);
+    const id = nonEmptyString(area.Id, `${path}.Id`);
+    if (hitAreaIds.has(id)) throw new CubismManifestError(`${path}.Id must be unique`);
+    hitAreaIds.add(id);
+    return { id, name: nonEmptyString(area.Name, `${path}.Name`) };
+  });
+
   return {
     version: 3,
     moc: validateCubismAssetReference(references.Moc, "model3.FileReferences.Moc"),
@@ -137,6 +156,7 @@ export function parseCubismModel3(input: unknown): CubismModel3Manifest {
     ...(optionalReference(references, "DisplayInfo", "model3.FileReferences") === undefined ? {} : { displayInfo: optionalReference(references, "DisplayInfo", "model3.FileReferences")! }),
     expressions,
     motions,
+    hitAreas,
     groups,
   };
 }

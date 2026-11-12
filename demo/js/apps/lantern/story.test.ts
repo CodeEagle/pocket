@@ -1035,9 +1035,11 @@ test("all scene model animations and optional Spine skins exist in the bundled m
         : [])
       : [],
   ));
-  const definitions = assets.models as Record<string, { kind: string; animations?: readonly string[] }>;
+  const definitions = assets.models as Record<string, { kind: string; animations?: readonly string[]; interactive?: boolean }>;
   const spineSkins = new Set(miraSpine.skins.map(skin => skin.name));
   expect(sceneIntents.length).toBeGreaterThan(0);
+  expect(definitions.hiyori_sample?.interactive).toBe(true);
+  expect(definitions.mira_spine?.interactive).toBeUndefined();
 
   for (const { intent } of sceneIntents) {
     const definition = definitions[intent.key];

@@ -6,7 +6,10 @@ export interface NovelModelDefinition {
   atlas?: string;
   textures: Readonly<Record<string, string>>;
   animations?: readonly string[];
+  /** Opt in to model3 hit-area taps and Core-ranged pointer tracking. */
+  interactive?: boolean;
 }
+export interface NovelModelPoint { readonly x: number; readonly y: number; }
 export interface NovelModelMesh {
   id: string;
   texture: string;
@@ -29,6 +32,14 @@ export interface NovelModelInstance {
   setIntent(intent: CharacterModelIntent): void;
   /** Implementations serialize native work and report unsupported features. */
   advance(deltaMs: number): readonly NovelModelMesh[] | Promise<readonly NovelModelMesh[]>;
+  /** Optional Live2D hit-area/gesture surface, in the 240×350 model-view px coordinate space. */
+  hitTest?(point: NovelModelPoint): boolean;
+  /** Trigger a transient hit-area motion without changing narrative intent. */
+  tap?(point: NovelModelPoint): boolean;
+  /** Update drag tracking from an absolute point in model-view px. */
+  drag?(point: NovelModelPoint): void;
+  /** Release drag overrides; subsequent frames resume the authored motion values. */
+  endDrag?(): void;
   dispose(): void;
 }
 export type NovelModelFactory = (definition: NovelModelDefinition, intent: CharacterModelIntent) => NovelModelInstance | Promise<NovelModelInstance>;

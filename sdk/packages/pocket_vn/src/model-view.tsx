@@ -1,8 +1,9 @@
 import { Index, Show, batch, createEffect, createMemo, createRenderEffect, createSignal, onCleanup, untrack, type JSX } from "solid-js";
 import { getOps } from "@pocketjs/framework/solid";
-import { Text, View } from "@pocketjs/framework/solid/components";
+import { createGesture, type GestureContact } from "@pocketjs/framework/gesture";
+import { Text, View, type NodeMirror } from "@pocketjs/framework/solid/components";
 import type { CharacterModelIntent } from "./types.ts";
-import type { NovelAnimationDriver, NovelModelDefinition, NovelModelFactory, NovelModelInstance, NovelModelMesh } from "./models.ts";
+import type { NovelAnimationDriver, NovelModelDefinition, NovelModelFactory, NovelModelInstance, NovelModelMesh, NovelModelPoint } from "./models.ts";
 import { NovelMeshView } from "./mesh-view.tsx";
 import { encodeNovelMeshEffect } from "./mesh-effect.ts";
 
@@ -11,6 +12,10 @@ export function NovelModelView(props: {
   intent: CharacterModelIntent;
   factory?: NovelModelFactory;
   animations?: NovelAnimationDriver;
+  /** Enabled only for the active, unobscured story stage and opted-in models. */
+  interactive?: boolean;
+  /** Inverse of the existing stage transforms, returning the 240×350 model space. */
+  screenToModelPoint?: (point: NovelModelPoint) => NovelModelPoint | undefined;
 }): JSX.Element {
   const [meshes, setMeshes] = createSignal<readonly NovelModelMesh[]>([]);
   const [error, setError] = createSignal("");
@@ -19,7 +24,17 @@ export function NovelModelView(props: {
   const nodeIds: number[] = [];
   const effectBuffers = new Map<number, Uint8Array>();
   let current: NovelModelInstance | undefined;
+  let modelRootNode: NodeMirror | undefined;
+  let activeContactId: number | undefined;
+  let dragActive = false;
   let failCurrent: ((cause: unknown) => void) | undefined;
+  function clearInteraction(): void {
+    if (dragActive) {
+      dragActive = false;
+      try { current?.endDrag?.(); } catch (cause) { failCurrent?.(cause); }
+    }
+    activeContactId = undefined;
+  }
   // Story ticks may publish a fresh intent object with the same key. Keep
   // the official runtime alive until the resource itself changes.
   const resourceKey = createMemo(() => props.intent.key);
@@ -68,14 +83,75 @@ export function NovelModelView(props: {
       unregister = animations.register(advance);
       advance(0);
     }).catch(fail);
-    onCleanup(() => { alive = false; const removeAnimation = unregister; unregister = undefined; removeAnimation?.(); if (current === instance) current = undefined; if (failCurrent === fail) failCurrent = undefined; const activeInstance = instance; instance = undefined; activeInstance?.dispose(); });
+    onCleanup(() => { clearInteraction(); alive = false; const removeAnimation = unregister; unregister = undefined; removeAnimation?.(); if (current === instance) current = undefined; if (failCurrent === fail) failCurrent = undefined; const activeInstance = instance; instance = undefined; activeInstance?.dispose(); });
   });
   createEffect(() => {
     const intent = props.intent;
     try { current?.setIntent(intent); } catch (cause) { failCurrent?.(cause); }
   });
+  const modelPoint = (contact: GestureContact): NovelModelPoint | undefined => {
+    if (!props.interactive || !props.screenToModelPoint) return undefined;
+    try { return props.screenToModelPoint({ x: contact.x, y: contact.y }); }
+    catch { return undefined; }
+  };
+  const gesture = createGesture({
+    region: { node: () => props.interactive ? modelRootNode : undefined },
+    axis: "any",
+    onDown: contact => {
+      if (!props.interactive) return;
+      if (activeContactId !== undefined) {
+        if (contact.id !== activeContactId) {
+          // A second model contact invalidates the single-contact gesture.
+          // Cancel its recognizer tracks too, so lifting either finger cannot
+          // resolve the original contact as a tap.
+          clearInteraction();
+          gesture.cancel();
+        }
+        return;
+      }
+      if (!current?.hitTest) return;
+      const point = modelPoint(contact);
+      if (!point) return;
+      try {
+        if (current.hitTest(point)) activeContactId = contact.id;
+      } catch (cause) { failCurrent?.(cause); }
+    },
+    onTap: contact => {
+      if (contact.id !== activeContactId) return;
+      const point = modelPoint(contact);
+      try { if (point) current?.tap?.(point); } catch (cause) { failCurrent?.(cause); }
+      clearInteraction();
+    },
+    onPanStart: contact => {
+      if (contact.id !== activeContactId || !props.interactive) return;
+      dragActive = true;
+      const point = modelPoint(contact);
+      try { if (point) current?.drag?.(point); } catch (cause) { failCurrent?.(cause); }
+    },
+    onPanMove: contact => {
+      if (contact.id !== activeContactId || !dragActive || !props.interactive) return;
+      const point = modelPoint(contact);
+      try { if (point) current?.drag?.(point); } catch (cause) { failCurrent?.(cause); }
+    },
+    onPanEnd: contact => {
+      if (contact.id !== activeContactId) return;
+      const point = modelPoint(contact);
+      try { if (point) current?.drag?.(point); } catch (cause) { failCurrent?.(cause); }
+      clearInteraction();
+    },
+    onCancel: contact => {
+      if (contact.id === activeContactId) clearInteraction();
+    },
+  });
+  createEffect(() => {
+    if (!props.interactive) {
+      gesture.cancel();
+      clearInteraction();
+    }
+  });
+  onCleanup(() => clearInteraction());
   const nodesReady = createMemo(() => { nodeRevision(); return meshes().every((_, index) => nodeIds[index] !== undefined); });
-  const result = <View class="absolute inset-0 w-full h-full">
+  const result = <View ref={node => { modelRootNode = node; }} class="absolute inset-0 w-full h-full" debugName="vn-model-gesture-region">
     <Index each={meshes()}>{(mesh, index) => <NovelMeshView src={mesh().texture} geometry={mesh().geometry} version={version()} class="absolute inset-0 w-full h-full"
       style={{ opacity: nodesReady() && mesh().visible !== false ? 1 : 0 }}
       onNode={id => { nodeIds[index] = id; setNodeRevision(value => value + 1); }} />}</Index>

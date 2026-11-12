@@ -133,7 +133,7 @@ function App() {
   const ops = getOps() as any;
   const originalSetMesh = ops.setMesh.bind(ops);
   const originalSetMeshEffect = ops.setMeshEffect.bind(ops);
-  const [metrics, setMetrics] = createSignal({ advances: 0, meshes: 0, effects: 0, scheduled: 0 });
+  const [metrics, setMetrics] = createSignal({ advances: 0, meshes: 0, effects: 0, scheduled: 0, hits: 0, taps: 0, drags: 0, ends: 0 });
   ops.setMesh = (id: number, texture: number, bytes: Uint8Array) => {
     const result = originalSetMesh(id, texture, bytes);
     setMetrics(value => ({ ...value, meshes: value.meshes + 1 }));
@@ -152,6 +152,10 @@ function App() {
   let geometry = encodeNovelMesh({ vertices: [x, 14, 0, 0, x + 18, 14, 1, 0, x + 4, 34, 0, 1], indices: [0, 1, 2] });
   const factory = () => ({
     setIntent() {},
+    hitTest() { setMetrics(value => ({ ...value, hits: value.hits + 1 })); return true; },
+    tap() { setMetrics(value => ({ ...value, taps: value.taps + 1 })); return true; },
+    drag() { setMetrics(value => ({ ...value, drags: value.drags + 1 })); },
+    endDrag() { setMetrics(value => ({ ...value, ends: value.ends + 1 })); },
     advance(deltaMs: number) {
       if (deltaMs > 0) {
         step++;
@@ -174,8 +178,8 @@ function App() {
   };
   onMount(scheduleAdvance);
   return <Screen class="relative w-full h-full">
-    <NovelModelView definition={{ kind: "live2d", source: "fixture", textures: {} }} intent={{ key: "fixture" }} factory={factory as any} animations={animations} />
-        <Text class="absolute left-0 top-[60]">advances={metrics().advances} setMesh={metrics().meshes} setMeshEffect={metrics().effects} scheduled={metrics().scheduled}</Text>
+    <NovelModelView definition={{ kind: "live2d", source: "fixture", textures: {}, interactive: true }} intent={{ key: "fixture" }} factory={factory as any} animations={animations} interactive={true} screenToModelPoint={point => point} />
+        <Text class="absolute left-0 top-[60]">advances={metrics().advances} setMesh={metrics().meshes} setMeshEffect={metrics().effects} scheduled={metrics().scheduled} gestureHits={metrics().hits} taps={metrics().taps} drags={metrics().drags} ends={metrics().ends}</Text>
   </Screen>;
 }
 mount(() => <App />);
@@ -293,7 +297,7 @@ function preFixFailureLifecycleSource(production: string): string {
       if (current === instance) current = undefined;
       instance?.dispose();
       setMeshes([]);`;
-  const patchedCleanup = `    onCleanup(() => { alive = false; const removeAnimation = unregister; unregister = undefined; removeAnimation?.(); if (current === instance) current = undefined; if (failCurrent === fail) failCurrent = undefined; const activeInstance = instance; instance = undefined; activeInstance?.dispose(); });`;
+  const patchedCleanup = `    onCleanup(() => { clearInteraction(); alive = false; const removeAnimation = unregister; unregister = undefined; removeAnimation?.(); if (current === instance) current = undefined; if (failCurrent === fail) failCurrent = undefined; const activeInstance = instance; instance = undefined; activeInstance?.dispose(); });`;
   const originalCleanup = `    onCleanup(() => { alive = false; unregister?.(); if (current === instance) current = undefined; if (failCurrent === fail) failCurrent = undefined; instance?.dispose(); });`;
   assert.equal(production.split(patchedFailure).length - 1, 1, "production failure cleanup must stay an explicit guest-test target");
   assert.equal(production.split(patchedCleanup).length - 1, 1, "production owner cleanup must stay an explicit guest-test target");
@@ -332,6 +336,16 @@ test("NovelModelView batches one async frame commit without losing retained PMS1
         { op: "create", width: 320, height: 240 },
         { op: "loadBytecode", bytecodePath: built.bytecode, pakPath: built.pak },
         ...Array.from({ length: 48 }, () => ({ op: "frame", deltaMs: 1000 / 60 })),
+        { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "down", id: 31, x: 20, y: 20 } } },
+        { op: "frame", deltaMs: 16 },
+        { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "move", id: 31, x: 32, y: 26 } } },
+        { op: "frame", deltaMs: 16 },
+        { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "down", id: 32, x: 24, y: 24 } } },
+        { op: "frame", deltaMs: 16 },
+        { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "up", id: 31, x: 32, y: 26 } } },
+        { op: "frame", deltaMs: 16 },
+        { op: "send", message: { type: "event", name: "input.pointer", payload: { phase: "up", id: 32, x: 24, y: 24 } } },
+        { op: "frame", deltaMs: 16 },
         { op: "quit" },
       ];
       const responses = runProbe(probe, commands);
@@ -341,6 +355,7 @@ test("NovelModelView batches one async frame commit without losing retained PMS1
       assert.ok(finalText, `${variant} metrics text was not painted`);
       const match = /advances=(\d+) setMesh=(\d+) setMeshEffect=(\d+) scheduled=(\d+)/.exec(finalText!);
       assert.ok(match, `${variant} metrics malformed: ${finalText}`);
+      assert.match(finalText!, /gestureHits=1 taps=0 drags=[1-9]\d* ends=1/, `${variant} second contact must cancel the active drag without resolving a tap`);
       const meshOps = frames.map(frame => (frame.ops ?? []).filter(op => op.type === "textureTriangle" && op.asset === "fixture/texture.png"));
       assert.ok(meshOps.at(-1)!.length > 0, `${variant} must paint the native retained PMS1 triangle`);
       facts[variant] = {
