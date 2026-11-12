@@ -46,7 +46,7 @@ test("all-instruction table preserves the canonical story and builds the edited 
   mkdirSync(project, { recursive: true });
   mkdirSync(artifactRoot, { recursive: true });
 
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json"]) {
     cpSync(join(lantern, name), join(project, name), { recursive: true });
   }
   mkdirSync(join(project, "art"), { recursive: true });

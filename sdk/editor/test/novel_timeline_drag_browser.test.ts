@@ -102,7 +102,7 @@ test("timeline markers drag transactionally and saved times drive the pinned nat
   assert.ok(existsSync(nativeProbe), `pinned pocket_probe must exist: ${nativeProbe}`);
   mkdirSync(project, { recursive: true });
   mkdirSync(artifactRoot, { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts", "novel.locales.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     cpSync(join(lantern, name), join(project, name), { recursive: true });
   }
   mkdirSync(join(project, "art"), { recursive: true });

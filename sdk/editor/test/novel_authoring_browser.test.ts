@@ -32,7 +32,7 @@ function stageHiyoriForEditorFixture(project: string): void {
 test("author edits and persists a line, debugs the same core, builds it and clicks the native Guest", async () => {
   const project = mkdtempSync(join(tmpdir(), "pocket-novel-author-"));
   const workspace = mkdtempSync(join(tmpdir(), "pocket-novel-author-state-"));
-  for (const name of ["app.tsx", "story.ts", "story.json", "revision-map.json", "revision-map-v2.json", "revision-map-v3.json", "revision-map-v4.json", "revision-map-v5.json", "pocket.json", "manifest.json", "package.json", "novel.assets.json", "novel.locales.json", "fonts.json", "images.json", "fonts", "assets", "models"]) cpSync(join(source, name), join(project, name), { recursive: true });
+  for (const name of ["app.tsx", "story.ts", "story.json", "revision-map.json", "revision-map-v2.json", "revision-map-v3.json", "revision-map-v4.json", "revision-map-v5.json", "pocket.json", "manifest.json", "package.json", "novel.assets.json", "novel.locales.json", "images.json", "assets", "models"]) cpSync(join(source, name), join(project, name), { recursive: true });
   copyLanternArt(project);
   stageHiyoriForEditorFixture(project);
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id: "novel-author", appId: "pocket.demo.lantern", name: "Novel Authoring", version: "0.1.0", build: 1, entry: "app.tsx", framework: "solid", tickHz: 60 }));
@@ -221,7 +221,7 @@ test("instruction add/edit/copy/reorder/delete history survives reopen and execu
   const project = join(temporary, "project");
   const workspace = join(temporary, "workspace");
   mkdirSync(project, { recursive: true });
-  for (const name of ["app.tsx", "story.ts", "story.json", "revision-map.json", "revision-map-v2.json", "revision-map-v3.json", "revision-map-v4.json", "revision-map-v5.json", "pocket.json", "manifest.json", "package.json", "novel.assets.json", "novel.locales.json", "fonts.json", "images.json", "fonts", "assets", "models"]) cpSync(join(source, name), join(project, name), { recursive: true });
+  for (const name of ["app.tsx", "story.ts", "story.json", "revision-map.json", "revision-map-v2.json", "revision-map-v3.json", "revision-map-v4.json", "revision-map-v5.json", "pocket.json", "manifest.json", "package.json", "novel.assets.json", "novel.locales.json", "images.json", "assets", "models"]) cpSync(join(source, name), join(project, name), { recursive: true });
   copyLanternArt(project);
   stageHiyoriForEditorFixture(project);
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id: projectId, appId: "pocket.demo.lantern", name: "Instruction Workflow", version: "0.1.0", build: 1, entry: "app.tsx", framework: "solid", tickHz: 60 }));
@@ -502,7 +502,7 @@ test("instruction add/edit/copy/reorder/delete history survives reopen and execu
 test("model assets load official Spine data and paint animated PMS1 meshes through the shared TEX_TRI projector", async () => {
   const project = mkdtempSync(join(tmpdir(), "pocket-novel-model-author-"));
   const workspace = mkdtempSync(join(tmpdir(), "pocket-novel-model-state-"));
-  for (const name of ["app.tsx", "story.ts", "story.json", "revision-map.json", "revision-map-v2.json", "revision-map-v3.json", "revision-map-v4.json", "revision-map-v5.json", "pocket.json", "manifest.json", "package.json", "novel.assets.json", "novel.locales.json", "fonts.json", "images.json", "fonts", "assets", "models"]) cpSync(join(source, name), join(project, name), { recursive: true });
+  for (const name of ["app.tsx", "story.ts", "story.json", "revision-map.json", "revision-map-v2.json", "revision-map-v3.json", "revision-map-v4.json", "revision-map-v5.json", "pocket.json", "manifest.json", "package.json", "novel.assets.json", "novel.locales.json", "images.json", "assets", "models"]) cpSync(join(source, name), join(project, name), { recursive: true });
   copyLanternArt(project);
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id: "novel-model-author", appId: "pocket.demo.lantern", name: "Novel Model Authoring", version: "0.1.0", build: 1, entry: "app.tsx", framework: "solid", tickHz: 60 }));
   const server = await startEditor({ projectRoot: project, workspace, port: 0, updatePort: 0 });

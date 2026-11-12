@@ -13,7 +13,6 @@
     "build": "bun run prepare:live2d && bun ../../../../sdk/scripts/build_guest.ts --project-root=.",
     "test": "bun test story.test.ts",
     "prepare:art": "bun scripts/prepare_textures.ts",
-    "prepare:font": "bun scripts/prepare_font.ts",
     "prepare:audio": "bun scripts/generate_audio.ts",
     "prepare:voice": "bun scripts/generate_voice.ts",
     "prepare:live2d": "bun scripts/prepare_live2d.ts"

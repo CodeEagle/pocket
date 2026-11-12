@@ -139,7 +139,7 @@ export function classifyOfficialDemoLaunchability(demo: {
   };
 }
 
-function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputRoot: string; frames: number; warmup: number; tickHz: number; density: number } {
+function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputRoot: string; frames: number; warmup: number; tickHz: number; density: number; bakeFonts: boolean } {
   let mode: Mode = "all";
   let modeSet = false;
   let apps: string[] | null = null;
@@ -148,6 +148,7 @@ function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputR
   let warmup = 10;
   let tickHz = 60;
   let density = 1;
+  let bakeFonts = false;
   for (const arg of argv) {
     if (["all", "build", "benchmark"].includes(arg)) {
       if (modeSet) throw new Error("Use only one mode: all, build, or benchmark");
@@ -168,6 +169,10 @@ function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputR
     } else if (arg.startsWith("--density=")) {
       density = positiveInteger(arg.slice("--density=".length), "density");
       if (density > 4) throw new Error("density must be <= 4");
+    } else if (arg === "--bake-fonts") {
+      bakeFonts = true;
+    } else if (arg === "--no-bake-fonts") {
+      bakeFonts = false;
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -175,7 +180,7 @@ function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputR
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
-  return { mode, apps, outputRoot, frames, warmup, tickHz, density };
+  return { mode, apps, outputRoot, frames, warmup, tickHz, density, bakeFonts };
 }
 
 function positiveInteger(value: string, name: string): number {
@@ -205,6 +210,8 @@ Options:
   --warmup=N            Native warmup frames (default: 10)
   --tick-hz=N           Guest tick rate (default: 60)
   --density=N           Raster density, 1..4 (default: 1)
+  --no-bake-fonts       Use host-native system fonts (default)
+  --bake-fonts          Bake DCFA bitmap font atlases into app.pak
 
 Worker demos pass --worker-bytecode and a canonical --worker-config to
 pocket_bench. Their report distinguishes Worker attachment from HTTP request
@@ -485,7 +492,7 @@ async function makeWorkerDescriptor(
  * Focusable Request control so the Flutter pointer/touch path can exercise
  * the same channel without claiming to emulate input.buttons.
  */
-function prepareWorkerHttpSource(demo: Demo, entryAbsolute: string): {
+function prepareWorkerHttpSource(demo: Demo, entryAbsolute: string, bakeFonts = false): {
   entry: string;
   projectRoot: string;
   adaptation?: JsonObject;
@@ -530,7 +537,7 @@ function prepareWorkerHttpSource(demo: Demo, entryAbsolute: string): {
     name: "pocketjs-worker-http",
     title: "Worker HTTP",
     version: "0.1.0",
-    engine: { capabilities: { requires: ["runtime.worker", "net.http", "input.buttons", "text.glyphs.baked"] } },
+    engine: { capabilities: { requires: ["runtime.worker", "net.http", "input.buttons", bakeFonts ? "text.glyphs.baked" : "text.layout.native"] } },
     app: {
       entry: "apps/worker-http/worker-http-main.tsx",
       output: "worker-http-main",
@@ -555,7 +562,7 @@ function prepareWorkerHttpSource(demo: Demo, entryAbsolute: string): {
   };
 }
 
-async function buildDemo(demo: Demo, outputRoot: string, tickHz: number, density: number): Promise<void> {
+async function buildDemo(demo: Demo, outputRoot: string, tickHz: number, density: number, bakeFonts = false): Promise<void> {
   const entryAbsolute = join(upstreamRoot, demo.sourceEntry);
   const outputAbsolute = absoluteArtifactPath(outputRoot, `demos/${demo.id}`);
   const directAppMain = /^apps\/([^/]+)\/main\.tsx?$/.exec(demo.sourceEntry);
@@ -564,11 +571,14 @@ async function buildDemo(demo: Demo, outputRoot: string, tickHz: number, density
     : demo.sourceEntry.split("/").at(-1)!.replace(/\.tsx?$/, "");
   const frameworkSuffix = demo.framework === "vue-vapor" ? ".vue-vapor" : demo.framework === "octane" ? ".octane" : "";
   const outputName = `${baseOutputName}${frameworkSuffix}`;
+  const skipFontBaking = !bakeFonts;
+  const fontDelivery = skipFontBaking ? "host" : "baked";
   const bun = resolveManagedBun(sdkRoot);
   const pinnedTools = resolvePrebuiltTools(sdkRoot);
-  const mounted = prepareWorkerHttpSource(demo, entryAbsolute);
+  const mounted = prepareWorkerHttpSource(demo, entryAbsolute, bakeFonts);
   const upstreamBuildCommand = [bun, join(upstreamRoot, "tools/build.ts"), mounted.entry,
-    `--project-root=${mounted.projectRoot}`, `--outdir=${outputAbsolute}`, `--framework=${demo.framework}`, `--hz=${tickHz}`, `--density=${density}`];
+    `--project-root=${mounted.projectRoot}`, `--outdir=${outputAbsolute}`, `--framework=${demo.framework}`, `--hz=${tickHz}`, `--density=${density}`,
+    ...(skipFontBaking ? ["--no-bake-fonts"] : [])];
   const generatedSource = join(outputAbsolute, `${outputName}.js`);
   const generatedPak = join(outputAbsolute, `${outputName}.pak`);
   const bytecode = join(outputAbsolute, "app.qjbc");
@@ -583,7 +593,7 @@ async function buildDemo(demo: Demo, outputRoot: string, tickHz: number, density
       "--metadata", workerMetadata, "--kind", "script", "--tick-hz", String(tickHz)]
     : undefined;
   const command = {
-    wrapper: ["bun", "scripts/official_demos.ts", "build", `--apps=${demo.id}`],
+    wrapper: ["bun", "scripts/official_demos.ts", "build", `--apps=${demo.id}`, ...(bakeFonts ? ["--bake-fonts"] : [])],
     upstreamMountedEntry: upstreamBuildCommand,
     sdkPinnedQuickJsCompiler: bytecodeCommand,
     ...(workerBytecodeCommand ? { sdkPinnedQuickJsWorkerCompiler: workerBytecodeCommand } : {}),
@@ -607,20 +617,21 @@ async function buildDemo(demo: Demo, outputRoot: string, tickHz: number, density
     for (const path of [generatedSource, generatedPak, bytecode, metadata, ...(workerBytecode && workerMetadata ? [workerBytecode, workerMetadata] : [])]) {
       if (!existsSync(path) || statSync(path).size === 0) throw new Error(`Pinned build omitted or emptied artifact: ${path}`);
     }
+    const appMetadata = readJson(metadata) ?? {};
+    appMetadata.fonts = fontDelivery;
     if (demo.workerDeclaration && workerBytecode && workerMetadata) {
       demo.worker = await makeWorkerDescriptor(demo.workerDeclaration, workerBytecode, workerMetadata);
-      const appMetadata = readJson(metadata) ?? {};
       appMetadata.worker = demo.worker;
-      saveJson(metadata, appMetadata);
       demo.workerQjbcPath = relativeSlash(outputRoot, workerBytecode);
       demo.workerMetadataPath = relativeSlash(outputRoot, workerMetadata);
     }
+    saveJson(metadata, appMetadata);
     demo.qjbcPath = relativeSlash(outputRoot, bytecode);
     demo.pakPath = relativeSlash(outputRoot, generatedPak);
     demo.metadataPath = relativeSlash(outputRoot, metadata);
     if (mounted.adaptation) demo.sourceAdaptation = mounted.adaptation;
     demo.guestManifestPath = relativeSlash(outputRoot, join(outputAbsolute, "guest-manifest.json"));
-    saveJson(join(outputAbsolute, "guest-manifest.json"), officialGuestManifest(demo));
+    saveJson(join(outputAbsolute, "guest-manifest.json"), officialGuestManifest(demo, skipFontBaking));
     demo.build = {
       status: "passed",
       command,
@@ -685,22 +696,24 @@ function workerBenchConfig(demo: Demo, tickHz: number): JsonObject {
   };
 }
 
-function officialGuestManifest(demo: Demo): JsonObject {
+function officialGuestManifest(demo: Demo, skipFontBaking = true): JsonObject {
   const missing = [
     ...(demo.hostCompatibility?.missingSessionCapabilities ?? []),
     ...(demo.hostCompatibility?.conditionalRequiredCapabilities ?? []),
   ].filter((value: unknown): value is string => typeof value === "string");
   const demoted = missing.filter((value: string) => value === "input.buttons" || value === "input.touch" || value === "input.pointer");
-  const required = demo.requiredCapabilities.filter(capability => !demoted.includes(capability));
+  const baseRequired = demo.requiredCapabilities.filter(capability => !demoted.includes(capability) && !(skipFontBaking && capability === "text.glyphs.baked"));
+  const required = [...new Set([...baseRequired, ...(skipFontBaking ? ["text.layout.native"] : [])])];
   const optional = [...new Set([...demo.enhancedCapabilities, ...demoted])]
-    .filter(capability => !required.includes(capability)).sort();
+    .filter(capability => !(skipFontBaking && capability === "text.glyphs.baked") && !required.includes(capability)).sort();
   return {
     $schema: "https://pocketjs.dev/schema/pocket-guest-manifest.json",
     protocolVersion: 1,
-    capabilities: { requires: [...new Set(required)].sort(), optional },
+    capabilities: { requires: required.sort(), optional },
     permissions: { optional: [] },
     version: demo.version ?? "0.0.0",
     build: 1,
+    fonts: skipFontBaking ? "host" : "baked",
     ...(demo.workerDeclaration ? { domains: { worker: demo.workerDeclaration } } : {}),
     ...(demo.worker ? { worker: demo.worker } : {}),
     ...(demoted.length ? {
@@ -900,7 +913,7 @@ async function main(): Promise<void> {
   if (config.mode !== "benchmark") {
     for (const demo of demos) {
       console.log(`official_demos: build ${demo.id} (${demo.sourceEntry})`);
-      await buildDemo(demo, config.outputRoot, config.tickHz, config.density);
+      await buildDemo(demo, config.outputRoot, config.tickHz, config.density, config.bakeFonts);
       if (demo.build?.status === "failed") console.error(`official_demos: build failed ${demo.id}: ${demo.build.error}`);
     }
   } else {

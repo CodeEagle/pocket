@@ -17,7 +17,7 @@ test("Editor exports, imports and rejects interchange files before building the 
   const artifacts = process.env.POCKET_INTERCHANGE_ARTIFACT_DIR?.trim() || join(repository, "sdk/.pocket-build/novel-friendly-csv-20261108");
   mkdirSync(project);
   mkdirSync(artifacts, { recursive: true });
-  for (const name of ["pocket.json", "package.json", "manifest.json", "fonts.json", "fonts"]) cpSync(join(repository, "demo/js/apps/lantern", name), join(project, name), { recursive: true });
+  for (const name of ["pocket.json", "package.json", "manifest.json"]) cpSync(join(repository, "demo/js/apps/lantern", name), join(project, name), { recursive: true });
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id, appId: "pocket.demo.lantern", name: id, version: "0.1.0", entry: "app.tsx", framework: "solid", build: 1, tickHz: 60 }));
   const story = { id, version: 1, start: "start", custom: { retained: ["Mira", "Ren"] }, variableDefinitions: { _name: { lifetime: "session", defaultValue: "Mira" } }, replayEntries: [{ id: "memory", title: "Memory", location: { label: "stale_missing", index: 0 } }], script: { start: [{ type: "say", id: "opening", text: "Original import", custom: { retain: true } }, { type: "say", id: "quoted", text: 'Quoted "Ren"\nMira' }, { type: "ending", id: "end", text: "714" }], empty: [] } };
   writeFileSync(join(project, "story.json"), JSON.stringify(story));

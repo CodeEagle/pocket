@@ -1,12 +1,12 @@
 # Visual novel & host-native font rendering
 
-By default, Pocket Flutter builds skip DCFA bitmap font atlas baking (`fonts:
-"host"` in `app.bytecode.json` and `guest-manifest.json`, plus a `ui:fonts.host`
-intent marker in `app.pak`) and render all UI text through the host OS vector
-font stack (`text.layout.native`). When a project declares custom primary font
-files in `pocket.json` (such as Lantern's Noto Serif CJK subset) or passes
-`--bake-fonts` (`bakeFonts: true`), the compiler retains deterministic PAK font
-baking (`fonts: "baked"`).
+By default, Pocket Flutter builds (including the Lantern visual novel demo) skip
+DCFA bitmap font atlas baking (`fonts: "host"` in `app.bytecode.json` and
+`guest-manifest.json`, plus a `ui:fonts.host` intent marker in `app.pak`) and
+render all UI text through the host OS vector font stack (`text.layout.native`).
+When a project explicitly declares custom primary font files in `pocket.json` or
+passes `--bake-fonts` (`bakeFonts: true`), the compiler retains deterministic
+PAK font baking (`fonts: "baked"`).
 
 ## Default host-native font pipeline
 
@@ -43,30 +43,27 @@ When neither `fonts.regular`/`fonts.bold` nor `--bake-fonts` is specified:
    runs stay on vector `TEXT_RUN` records (`TEXT_RUN_FLAG_TRACKING` and
    `TEXT_RUN_FLAG_AFFINE`).
 
-## Custom primary fonts (Lantern visual novel)
+## Optional custom primary fonts
 
-Lantern uses the same Noto Serif CJK subset for the compiler's primary regular
-and bold faces and for Flutter's `PocketView.fontFamilyFallback` option. In
-this repository, `demo/js/apps/lantern/scripts/prepare_font.ts` prepares the
-subset from story, locale, app, and SDK text, and declares it in
-`demo/js/apps/lantern/pocket.json`:
+Lantern and the Demo showcase use host-native system fonts by default without
+bundling `.ttf` or `.otf` assets. Consumer projects that want a custom bundled
+typeface can declare project-relative font files in `pocket.json`:
 
 ```json
 {
   "fonts": {
-    "regular": "fonts/lantern.otf",
-    "bold": "fonts/lantern.otf"
+    "regular": "fonts/custom-regular.otf",
+    "bold": "fonts/custom-bold.otf"
   }
 }
 ```
 
 `sdk/scripts/build_guest.ts` resolves these paths from the project root and
 passes them to `tools/build.ts` as `--font-regular` and `--font-bold`, keeping
-`fonts: "baked"` automatically. `PocketView.fontFamilyFallback` is forwarded
-from `PocketAppConfig` through `PocketGuest` to both `PocketHostFontMetrics`
-measurement and `PocketCanvasPainter` / IME `TextField` rendering, and the Demo
-registers `demo/js/apps/lantern/fonts/lantern.otf` as `LanternSerif` in
-`demo/pubspec.yaml`.
+`fonts: "baked"` automatically, while `PocketAppConfig.fontFamilyFallback`
+forwards matching registered Flutter font families through `PocketGuest` to both
+`PocketHostFontMetrics` measurement and `PocketCanvasPainter` / IME `TextField`
+rendering.
 
 When dynamic fonts are loaded at runtime (for example via Flutter's
 `FontLoader.load()` or `PaintingBinding.instance.systemFonts`), `PocketView`
