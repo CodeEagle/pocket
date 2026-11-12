@@ -4,7 +4,7 @@
   "capabilities": {
     "requires": [
       "io.offload",
-      "text.glyphs.baked",
+      "text.layout.native",
       "text.layout.offload"
     ],
     "optional": [
@@ -16,6 +16,7 @@
   },
   "version": "0.1.0",
   "build": 1,
+  "fonts": "host",
   "hostAdaptation": {
     "kind": "flutter_pointer_fallback",
     "demotedRequirements": [

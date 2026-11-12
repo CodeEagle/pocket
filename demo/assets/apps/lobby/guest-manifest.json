@@ -3,10 +3,11 @@
   "protocolVersion": 1,
   "capabilities": {
     "requires": [
-      "text.glyphs.baked",
       "platform.apps.return",
+      "platform.messages.send",
       "platform.storage.get",
-      "platform.messages.send"
+      "text.glyphs.baked",
+      "text.layout.native"
     ],
     "optional": []
   },
@@ -14,5 +15,6 @@
     "optional": []
   },
   "version": "0.1.0",
-  "build": 1
+  "build": 1,
+  "fonts": "host"
 }

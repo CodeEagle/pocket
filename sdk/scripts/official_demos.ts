@@ -5,11 +5,10 @@
  * demo/build/official-demos and are ignored by git.
  */
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, statSync } from "node:fs";
+import { cpSync, existsSync, readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
 import { resolveManagedBun, resolvePrebuiltTools, UPSTREAM_REVISION } from "./prebuilt_tools.mjs";
 
 type JsonObject = Record<string, any>;
@@ -139,7 +138,7 @@ export function classifyOfficialDemoLaunchability(demo: {
   };
 }
 
-function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputRoot: string; frames: number; warmup: number; tickHz: number; density: number; bakeFonts: boolean } {
+function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputRoot: string; frames: number; warmup: number; tickHz: number; density: number; bakeFonts: boolean; benchBin: string | null } {
   let mode: Mode = "all";
   let modeSet = false;
   let apps: string[] | null = null;
@@ -149,6 +148,7 @@ function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputR
   let tickHz = 60;
   let density = 1;
   let bakeFonts = false;
+  let benchBin: string | null = null;
   for (const arg of argv) {
     if (["all", "build", "benchmark"].includes(arg)) {
       if (modeSet) throw new Error("Use only one mode: all, build, or benchmark");
@@ -173,6 +173,8 @@ function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputR
       bakeFonts = true;
     } else if (arg === "--no-bake-fonts") {
       bakeFonts = false;
+    } else if (arg.startsWith("--bench-bin=")) {
+      benchBin = resolve(arg.slice("--bench-bin=".length));
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -180,7 +182,7 @@ function parseArgs(argv: string[]): { mode: Mode; apps: string[] | null; outputR
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
-  return { mode, apps, outputRoot, frames, warmup, tickHz, density, bakeFonts };
+  return { mode, apps, outputRoot, frames, warmup, tickHz, density, bakeFonts, benchBin };
 }
 
 function positiveInteger(value: string, name: string): number {
@@ -212,6 +214,7 @@ Options:
   --density=N           Raster density, 1..4 (default: 1)
   --no-bake-fonts       Use host-native system fonts (default)
   --bake-fonts          Bake DCFA bitmap font atlases into app.pak
+  --bench-bin=PATH      Use an existing pocket_bench binary instead of cargo build
 
 Worker demos pass --worker-bytecode and a canonical --worker-config to
 pocket_bench. Their report distinguishes Worker attachment from HTTP request
@@ -501,7 +504,13 @@ function prepareWorkerHttpSource(demo: Demo, entryAbsolute: string, bakeFonts = 
   if (demo.id !== "worker-http" || !demo.requiredCapabilities.includes("input.buttons")) {
     return { entry: entryAbsolute, projectRoot: upstreamRoot, cleanup: () => {} };
   }
-  const tempRoot = mkdtempSync(join(tmpdir(), "pocket-official-worker-http-"));
+  const buildScratchRoot = join(sdkRoot, ".pocket-build");
+  mkdirSync(buildScratchRoot, { recursive: true });
+  const tempRoot = mkdtempSync(join(buildScratchRoot, "official-worker-http-"));
+  for (const linkName of ["tsconfig.json", "package.json", "framework", "contracts", "microts", "node_modules"]) {
+    const target = join(upstreamRoot, linkName);
+    if (existsSync(target)) symlinkSync(target, join(tempRoot, linkName));
+  }
   const appRoot = join(tempRoot, "apps", "worker-http");
   mkdirSync(appRoot, { recursive: true });
   const adaptedEntry = join(appRoot, "worker-http-main.tsx");
@@ -789,8 +798,9 @@ function benchArgs(
   return args;
 }
 
-function runNativeBench(demo: Demo, outputRoot: string, frames: number, warmup: number, tickHz: number, density: number, benchBuild: JsonObject): void {
-  const executable = process.platform === "win32" ? `${pocketBenchBinary}.exe` : pocketBenchBinary;
+function runNativeBench(demo: Demo, outputRoot: string, frames: number, warmup: number, tickHz: number, density: number, benchBuild: JsonObject, benchBin: string | null = null): void {
+  const configuredBench = benchBin || process.env.POCKET_BENCH_BIN?.trim();
+  const executable = configuredBench ? resolve(configuredBench) : (process.platform === "win32" ? `${pocketBenchBinary}.exe` : pocketBenchBinary);
   const workerConfigPath = demo.worker
     ? absoluteArtifactPath(outputRoot, `demos/${demo.id}/worker-config.json`)
     : undefined;
@@ -942,17 +952,27 @@ async function main(): Promise<void> {
 
   let benchBuild: JsonObject = { status: "not_run" };
   if (config.mode !== "build") {
-    const command = ["cargo", "build", "--locked", "--release", "--manifest-path", pocketBenchManifest, "--bin", "pocket_bench"];
-    try {
-      runCaptured(command, sdkRoot);
-      benchBuild = { status: "passed", command, binary: relativeSlash(repositoryRoot, pocketBenchBinary), completedAt: new Date().toISOString() };
-    } catch (error) {
-      benchBuild = { status: "failed", command, error: error instanceof Error ? error.message : String(error), completedAt: new Date().toISOString() };
-      console.error("official_demos: pocket_bench build failed; recording failure for the full benchmark sweep");
+    const configuredBench = config.benchBin || process.env.POCKET_BENCH_BIN?.trim();
+    if (configuredBench) {
+      const resolvedBench = resolve(configuredBench);
+      if (!existsSync(resolvedBench) || !statSync(resolvedBench).isFile()) {
+        benchBuild = { status: "failed", command: [resolvedBench], error: `POCKET_BENCH_BIN is missing or not a file: ${resolvedBench}`, completedAt: new Date().toISOString() };
+      } else {
+        benchBuild = { status: "passed", command: ["POCKET_BENCH_BIN"], binary: relativeSlash(repositoryRoot, resolvedBench), completedAt: new Date().toISOString() };
+      }
+    } else {
+      const command = ["cargo", "build", "--locked", "--release", "--manifest-path", pocketBenchManifest, "--bin", "pocket_bench"];
+      try {
+        runCaptured(command, sdkRoot);
+        benchBuild = { status: "passed", command, binary: relativeSlash(repositoryRoot, pocketBenchBinary), completedAt: new Date().toISOString() };
+      } catch (error) {
+        benchBuild = { status: "failed", command, error: error instanceof Error ? error.message : String(error), completedAt: new Date().toISOString() };
+        console.error("official_demos: pocket_bench build failed; recording failure for the full benchmark sweep");
+      }
     }
     for (const demo of demos) {
       console.log(`official_demos: native benchmark ${demo.id}`);
-      runNativeBench(demo, config.outputRoot, config.frames, config.warmup, config.tickHz, config.density, benchBuild);
+      runNativeBench(demo, config.outputRoot, config.frames, config.warmup, config.tickHz, config.density, benchBuild, config.benchBin);
       console.log(`official_demos: ${demo.id} => ${demo.status}`);
     }
   }

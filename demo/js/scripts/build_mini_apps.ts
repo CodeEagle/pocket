@@ -55,6 +55,7 @@ interface Options {
   warmup: number | null;
   tickHz: number | null;
   density: number | null;
+  benchBin: string | null;
 }
 
 function parsePositiveInteger(value: string, name: string, allowZero = false): number {
@@ -66,7 +67,7 @@ function parsePositiveInteger(value: string, name: string, allowZero = false): n
 }
 
 function parseOptions(args: string[]): Options {
-  const options: Options = { officialOnly: false, apps: null, frames: null, warmup: null, tickHz: null, density: null };
+  const options: Options = { officialOnly: false, apps: null, frames: null, warmup: null, tickHz: null, density: null, benchBin: null };
   for (const arg of args) {
     if (arg === "--official-only") options.officialOnly = true;
     else if (arg.startsWith("--apps=")) {
@@ -76,6 +77,7 @@ function parseOptions(args: string[]): Options {
     else if (arg.startsWith("--warmup=")) options.warmup = parsePositiveInteger(arg.slice("--warmup=".length), "warmup", true);
     else if (arg.startsWith("--tick-hz=")) options.tickHz = parsePositiveInteger(arg.slice("--tick-hz=".length), "tick-hz");
     else if (arg.startsWith("--density=")) options.density = parsePositiveInteger(arg.slice("--density=".length), "density");
+    else if (arg.startsWith("--bench-bin=")) options.benchBin = resolve(arg.slice("--bench-bin=".length));
     else if (arg === "--help" || arg === "-h") {
       console.log(`Usage: bun scripts/build_mini_apps.ts [--official-only] [--apps=hero,motions] [--frames=N] [--warmup=N]
 
@@ -143,7 +145,8 @@ function prepareMiniAppAssets(app: (typeof miniApps)[number]): void {
   }
 }
 
-function compactDemo(demo: OfficialDemo): Record<string, unknown> {
+function compactDemo(demo: OfficialDemo, stagedManifest?: Record<string, any>): Record<string, unknown> {
+  const manifestCaps = stagedManifest?.capabilities ?? {};
   const destination = join(officialAssetRoot, demo.id);
   const assets = {
     bytecode: assetRelative(join(destination, "app.qjbc")),
@@ -193,12 +196,19 @@ function compactDemo(demo: OfficialDemo): Record<string, unknown> {
     launchable: demo.launchable === true,
     launchability: demo.launchability ?? "platform_limited",
     guestManifestAdaptation: {
-      requiredCapabilities: stringList(demo.requiredCapabilities).filter(name => !pointerFallbackMissing.includes(name)),
-      optionalCapabilities: [...new Set([...stringList(demo.enhancedCapabilities), ...pointerFallbackMissing])].sort(),
+      requiredCapabilities: Array.isArray(manifestCaps.requires)
+        ? stringList(manifestCaps.requires)
+        : stringList(demo.requiredCapabilities).filter(name => !pointerFallbackMissing.includes(name)),
+      optionalCapabilities: Array.isArray(manifestCaps.optional)
+        ? stringList(manifestCaps.optional)
+        : [...new Set([...stringList(demo.enhancedCapabilities), ...pointerFallbackMissing])].sort(),
       demotedRequirements: pointerFallbackMissing,
+      ...(typeof stagedManifest?.fonts === "string" ? { fonts: stagedManifest.fonts } : {}),
       note: pointerFallbackMissing.length > 0
         ? "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
-        : "No capability was changed in the staged guest manifest.",
+        : stagedManifest?.fonts === "host"
+          ? "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
+          : "No capability was changed in the staged guest manifest.",
     },
     launchabilityDetails: {
       pointerFallbackCapabilities: pointerFallbackMissing,
@@ -280,6 +290,7 @@ function stageOfficialDemos(options: Options): { staged: number; failed: number;
   if (options.warmup !== null) command.push(`--warmup=${options.warmup}`);
   if (options.tickHz !== null) command.push(`--tick-hz=${options.tickHz}`);
   if (options.density !== null) command.push(`--density=${options.density}`);
+  if (options.benchBin !== null) command.push(`--bench-bin=${options.benchBin}`);
 
   console.log(`build_mini_apps: official build + native bench: ${command.join(" ")}`);
   const run = spawnSync(process.execPath, command, {
@@ -336,7 +347,7 @@ function stageOfficialDemos(options: Options): { staged: number; failed: number;
       throw new Error(`Missing official guest manifest for ${demo.id}: ${manifestSource}`);
     }
     copyFileSync(manifestSource, join(destination, "guest-manifest.json"));
-    return compactDemo(demo);
+    return compactDemo(demo, readObject(manifestSource));
   });
 
   const compactCatalog = {

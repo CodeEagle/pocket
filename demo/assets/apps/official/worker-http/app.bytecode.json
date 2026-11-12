@@ -1,22 +1,23 @@
 {
   "bindingGeneration": 12,
-  "bytecodeBytes": 122482,
+  "bytecodeBytes": 123048,
   "engineAbi": "5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
   "entryFormat": "quickjs-bytecode",
   "formatVersion": 1,
   "headerBytes": 124,
   "kind": "script",
-  "payloadSha256": "63ef21b611aa3fa33fad5f3670b158ac8897da42a20eee850787780742377166",
+  "payloadSha256": "35b680fef536c7d10cffac3f8e03bdbc2568bd170f862ce0bf54d72d767eaac4",
   "runtimeAbi": "quickjs-bytecode-v1:5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
-  "sourceSha256": "701c19fbebb7cfab8407622f83f05aa112ea28d598ce6027e69d6a2e4ba7f16e",
+  "sourceSha256": "0a50f26be7a83b1ad3a91b87e230ad0b3e6ddd4383ab661ac4c5b80c1a0d89ce",
   "tickHz": 60,
+  "fonts": "host",
   "worker": {
     "kind": "quickjs-bytecode",
     "protocolVersion": 1,
     "bytecode": {
       "path": "app.worker.qjbc",
       "bytes": 15064,
-      "sha256": "d1307a28300f1e9bd7285afcb3f06f66f4f2bf4d7bf3eb92910d2e89fdc45a2d"
+      "sha256": "9484583f9285185e3ef966126626b3a9aa6b3bbd73d51378581cd6ad028e792a"
     },
     "declaration": {
       "entry": "apps/worker-http/worker.ts",
@@ -48,8 +49,8 @@
       "runtime.worker"
     ],
     "formatVersion": 1,
-    "sourceSha256": "697d66e63eb7b57d6e8e8256db338d2de0ae352c6a49b61ce4e9c2f75d43464e",
-    "payloadSha256": "9802bf340a1242855291b83bc767c881141aa20368976b4fda492c2981ac31da",
+    "sourceSha256": "88a3a6b4b983846059df724e4a63bb3b2b523d7559138c3b27b1706e6a86dfb5",
+    "payloadSha256": "9d3faf5199cd06b2f45d67ac6b311429bd9b9e38f67da3802cc12a263821ec80",
     "runtimeAbi": "quickjs-bytecode-v1:5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
     "engineAbi": "5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
     "bindingGeneration": 12,

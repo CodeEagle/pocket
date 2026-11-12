@@ -146,6 +146,7 @@ test("client preview.js renders text size overrides, letterSpacing tracking, and
     window: undefined,
     document: {
       getElementById: () => null,
+      querySelector: () => null,
       createElement: () => ({ getContext: () => context }),
     },
     addEventListener() {},

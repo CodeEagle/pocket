@@ -1410,12 +1410,21 @@ class _PocketViewState extends State<PocketView>
       widget.fontFamilyFallback,
     );
     if (fallbackChanged) {
-      _textLayoutCache.clear();
-      if (_runtime != null) {
-        if (syncPocketHostFonts(
-          _runtime!,
+      final runtime = _runtime;
+      if (runtime is FfiPocketRuntime &&
+          runtime.isHostFontRefreshDeferredForRecording) {
+        _deferredViewHostFontRefresh = true;
+        syncPocketHostFonts(
+          runtime,
           fontFamilyFallback: widget.fontFamilyFallback,
-        )) {
+        );
+      } else {
+        _textLayoutCache.clear();
+        if (runtime != null &&
+            syncPocketHostFonts(
+              runtime,
+              fontFamilyFallback: widget.fontFamilyFallback,
+            )) {
           _wakeTicker();
         }
       }
