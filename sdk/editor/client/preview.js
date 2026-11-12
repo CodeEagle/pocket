@@ -517,6 +517,45 @@
     return "system-ui, -apple-system, sans-serif";
   }
 
+  function defaultSlotLineHeight(slot) {
+    return Math.max(1, Math.ceil(fontSize(slot) * 1.2));
+  }
+
+  function measureHostFontMetrics(doc = global.document) {
+    if (!doc || typeof doc.createElement !== "function") return null;
+    let scratch;
+    try { scratch = doc.createElement("canvas"); } catch { return null; }
+    const ctx = scratch && typeof scratch.getContext === "function" ? scratch.getContext("2d") : null;
+    if (!ctx || typeof ctx.measureText !== "function") return null;
+    const slotCount = 21;
+    const asciiStart = 0x20;
+    const asciiCount = 95;
+    const lineHeights = new Array(slotCount);
+    const cjkAdvances = new Array(slotCount);
+    const asciiAdvances = new Array(slotCount * asciiCount);
+    for (let slot = 0; slot < slotCount; slot++) {
+      const px = fontSize(slot);
+      ctx.font = `${fontWeight(slot)} ${px}px ${fontFamily(slot)}`;
+      if ("letterSpacing" in ctx) ctx.letterSpacing = "0px";
+      const sample = ctx.measureText("Mg汉");
+      const ascent = Number(sample?.fontBoundingBoxAscent ?? sample?.actualBoundingBoxAscent);
+      const descent = Number(sample?.fontBoundingBoxDescent ?? sample?.actualBoundingBoxDescent);
+      lineHeights[slot] = Number.isFinite(ascent) && Number.isFinite(descent) && ascent + descent > 0
+        ? Math.max(px, Math.ceil(ascent + descent))
+        : defaultSlotLineHeight(slot);
+      const cjkWidth = Number(ctx.measureText("汉")?.width);
+      cjkAdvances[slot] = Number.isFinite(cjkWidth) && cjkWidth > 0 ? cjkWidth : px;
+      for (let i = 0; i < asciiCount; i++) {
+        const ch = String.fromCharCode(asciiStart + i);
+        const width = Number(ctx.measureText(ch)?.width);
+        asciiAdvances[slot * asciiCount + i] = Number.isFinite(width) && width >= 0
+          ? width
+          : Math.max(1, Math.round(px * (i === 0 ? 0.32 : (slot >= 16 && slot <= 18 ? 0.6 : 0.56))));
+      }
+    }
+    return { lineHeights, cjkAdvances, asciiAdvances };
+  }
+
   function opTextAffine(op) {
     if (!Array.isArray(op.affine) || op.affine.length !== 4) return null;
     const values = op.affine.map((item) => Number(item));
@@ -1898,6 +1937,28 @@
         left.reduceTransparency === right.reduceTransparency;
     }
 
+    let hostFontMetrics = measureHostFontMetrics();
+
+    function publishHostFontMetrics() {
+      if (!hostFontMetrics) return;
+      void input({ type: "hostFonts", hostFonts: hostFontMetrics });
+    }
+
+    if (global.document?.fonts?.ready && typeof global.document.fonts.ready.then === "function") {
+      global.document.fonts.ready.then(() => {
+        if (closed) return;
+        const next = measureHostFontMetrics();
+        if (!next) return;
+        const changed = !hostFontMetrics ||
+          next.lineHeights.some((v, i) => v !== hostFontMetrics.lineHeights[i]) ||
+          next.cjkAdvances.some((v, i) => v !== hostFontMetrics.cjkAdvances[i]) ||
+          next.asciiAdvances.some((v, i) => v !== hostFontMetrics.asciiAdvances[i]);
+        if (!changed) return;
+        hostFontMetrics = next;
+        if (stream && stream.readyState === 1) publishHostFontMetrics();
+      }, () => {});
+    }
+
     function publishAccessibilityPreferences() {
       void input({ type: "accessibility", preferences: { ...accessibilityPreferences } });
     }
@@ -2701,6 +2762,7 @@
         installAccessibilityMediaQueryListeners();
         // Replay the current snapshot after every stream connection. The
         // server caches it for guests that mount after this page connects.
+        publishHostFontMetrics();
         publishAccessibilityPreferences();
       };
       current.onmessage = (event) => {
@@ -3151,6 +3213,7 @@
   global.PocketEditorPreview = {
     version: VERSION,
     drawFrame,
+    measureHostFontMetrics,
     projectModelMeshes,
     protocol: { version: VERSION, source: SOURCE },
     mount: client,

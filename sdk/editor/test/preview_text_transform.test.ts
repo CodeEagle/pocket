@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import vm from "node:vm";
-import { previewOpSummaryForTest, transformedChildOpForTest } from "../preview.ts";
+import { parseHostFontMetrics, previewOpSummaryForTest, transformedChildOpForTest } from "../preview.ts";
 
 const sdkRoot = resolve(import.meta.dir, "../..");
 
@@ -197,4 +197,50 @@ test("client preview.js renders text size overrides, letterSpacing tracking, and
   expect(fillTextCall?.letterSpacing).toBe("2px");
   // Centered inside local boxW=120 with measured=4*(8+2)=40 -> local offset=(120-40)/2=40.
   expect(fillTextCall?.args).toEqual(["HOST", 40, 0]);
+});
+
+test("client preview.js measures 21x95 ASCII and CJK host font table and parseHostFontMetrics validates it", () => {
+  const seenFonts: string[] = [];
+  const context = {
+    font: "",
+    letterSpacing: "0px",
+    measureText(text: string) {
+      seenFonts.push(this.font);
+      const pxMatch = /(\d+)px/.exec(this.font);
+      const px = pxMatch ? Number(pxMatch[1]) : 14;
+      const isMono = this.font.includes("monospace");
+      const cp = text.codePointAt(0) ?? 0x20;
+      const width = cp >= 0x3000 ? px : px * (isMono ? 0.62 : 0.52);
+      return {
+        width: Array.from(text).length === 1 ? width : width * Array.from(text).length,
+        fontBoundingBoxAscent: px * 0.9,
+        fontBoundingBoxDescent: px * 0.25,
+      };
+    },
+  };
+  const sandbox: Record<string, unknown> = {
+    window: undefined,
+    document: {
+      getElementById: () => null,
+      querySelector: () => null,
+      createElement: () => ({ getContext: () => context }),
+    },
+    addEventListener() {},
+    postMessage() {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  const script = readFileSync(join(sdkRoot, "editor/client/preview.js"), "utf8");
+  vm.runInNewContext(script, sandbox);
+
+  const api = sandbox.PocketEditorPreview as { measureHostFontMetrics: () => unknown };
+  const measured = api.measureHostFontMetrics();
+  const validated = parseHostFontMetrics(measured);
+  expect(validated.lineHeights.length).toBe(21);
+  expect(validated.cjkAdvances.length).toBe(21);
+  expect(validated.asciiAdvances.length).toBe(21 * 95);
+  expect(validated.cjkAdvances[0]).toBe(12);
+  expect(validated.asciiAdvances[16 * 95 + ("M".charCodeAt(0) - 0x20)]).toBeCloseTo(12 * 0.62, 5);
+  expect(seenFonts.some((f) => f.includes("ui-monospace"))).toBe(true);
+  expect(() => parseHostFontMetrics({ ...validated, lineHeights: [0, ...validated.lineHeights.slice(1)] })).toThrow(/positive/);
 });

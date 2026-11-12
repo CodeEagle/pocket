@@ -5106,6 +5106,9 @@ const ACTIVE_HOST_FONT_SLOTS: usize = 21;
 const HOST_ASCII_START: u32 = 0x20;
 const HOST_ASCII_COUNT: usize = 95;
 const MAX_HOST_GLYPH_CACHE_ENTRIES: usize = 16_384;
+const MAX_HOST_SEGMENT_CACHE_ENTRIES: usize = 16_384;
+const MAX_HOST_SEGMENT_CACHE_KEY_BYTES: usize = 4 * 1024;
+const MAX_HOST_SEGMENT_CACHE_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
 type HostGlyphMeasureCallback =
     unsafe extern "C" fn(user_data: usize, slot: u8, codepoint: u32) -> f32;
@@ -5194,10 +5197,39 @@ fn is_wide_scalar(codepoint: u32) -> bool {
     )
 }
 
+fn is_simple_unshaped_char(ch: char) -> bool {
+    let cp = ch as u32;
+    match cp {
+        0x09 | 0x0D | 0x20..=0x7E => true,
+        // Unambiguous CJK prose punctuation without variation-selector emoji forms.
+        0x00B7 | 0x2014 | 0x2018 | 0x2019 | 0x201C | 0x201D | 0x2026 | 0x30FB => true,
+        // CJK Radicals Supplement & Kangxi Radicals.
+        0x2E80..=0x2FDF => true,
+        // CJK Symbols & Punctuation, excluding combining/tone marks (0x302A..=0x302F).
+        0x3000..=0x3029 | 0x3030..=0x303F => true,
+        // Hiragana & Katakana, excluding combining voiced marks (0x3099..=0x309A).
+        0x3041..=0x3096 | 0x309D..=0x309F | 0x30A0..=0x30FF => true,
+        // Bopomofo, Hangul Compatibility Jamo, Kanbun, Bopomofo Ext, CJK Strokes, Katakana Ext.
+        0x3105..=0x312F | 0x3131..=0x318E | 0x3190..=0x31EF | 0x31F0..=0x31FF => true,
+        // CJK Unified Ideographs Ext A, Unified Ideographs, Yi Syllables & Radicals.
+        0x3400..=0x4DBF | 0x4E00..=0xA4CF => true,
+        // Precomposed Hangul Syllables (conjoining Jamo stay on the shaped path).
+        0xAC00..=0xD7A3 => true,
+        // CJK Compatibility Ideographs & Vertical/Small Form Variants.
+        0xF900..=0xFAFF | 0xFE10..=0xFE19 | 0xFE30..=0xFE6B => true,
+        // Halfwidth & Fullwidth Forms, excluding halfwidth voiced marks (0xFF9E..=0xFF9F).
+        0xFF01..=0xFF60 | 0xFF61..=0xFF9D | 0xFFE0..=0xFFE6 => true,
+        // CJK Unified Ideographs Extensions B..I & Compatibility Supplement.
+        0x20000..=0x323AF => true,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct TextMetrics {
     fonts: Vec<FontMetric>,
     fontless_pak: bool,
+    requires_host_fonts: bool,
     host_table: Option<HostFontTable>,
     glyph_callback: Option<HostGlyphCallback>,
     text_callback: Option<HostTextCallback>,
@@ -5205,6 +5237,7 @@ struct TextMetrics {
     glyph_cache: RefCell<HashMap<(u8, u32), (u64, f32)>>,
     segment_cache: RefCell<HashMap<Box<str>, Vec<(u8, u32, u64, f32)>>>,
     segment_cache_entries: std::cell::Cell<usize>,
+    segment_cache_bytes: std::cell::Cell<usize>,
     cache_generation: std::cell::Cell<u64>,
 }
 
@@ -5213,6 +5246,7 @@ impl TextMetrics {
         self.glyph_cache.borrow_mut().clear();
         self.segment_cache.borrow_mut().clear();
         self.segment_cache_entries.set(0);
+        self.segment_cache_bytes.set(0);
         self.cache_generation.set(0);
     }
 
@@ -5238,6 +5272,9 @@ impl TextMetrics {
     }
 
     fn lookup_segment_cached(&self, line: &str, slot: u8, tracking_bits: u32) -> Option<f32> {
+        if line.len() > MAX_HOST_SEGMENT_CACHE_KEY_BYTES {
+            return None;
+        }
         let cache = self.segment_cache.borrow();
         let bucket = cache.get(line)?;
         bucket
@@ -5247,9 +5284,27 @@ impl TextMetrics {
     }
 
     fn insert_segment_cached(&self, line: &str, slot: u8, tracking_bits: u32, width: f32) {
+        if line.len() > MAX_HOST_SEGMENT_CACHE_KEY_BYTES {
+            return;
+        }
         let gen = self.next_generation();
         let mut cache = self.segment_cache.borrow_mut();
-        if self.segment_cache_entries.get() >= MAX_HOST_GLYPH_CACHE_ENTRIES {
+        if let Some(bucket) = cache.get_mut(line) {
+            if let Some(existing) = bucket
+                .iter_mut()
+                .find(|(s, t, _, _)| *s == slot && *t == tracking_bits)
+            {
+                existing.2 = gen;
+                existing.3 = width;
+                return;
+            }
+        }
+        let needs_new_key = !cache.contains_key(line);
+        let added_bytes = if needs_new_key { line.len() } else { 0 };
+        if self.segment_cache_entries.get() >= MAX_HOST_SEGMENT_CACHE_ENTRIES
+            || self.segment_cache_bytes.get().saturating_add(added_bytes)
+                > MAX_HOST_SEGMENT_CACHE_TOTAL_BYTES
+        {
             let mut min_gen = u64::MAX;
             let mut max_gen = 0u64;
             for bucket in cache.values() {
@@ -5263,33 +5318,37 @@ impl TextMetrics {
             } else {
                 gen
             };
-            let mut remaining = 0usize;
-            cache.retain(|_, bucket| {
+            let mut remaining_entries = 0usize;
+            let mut remaining_bytes = 0usize;
+            cache.retain(|key, bucket| {
                 bucket.retain(|(_, _, g, _)| *g >= cutoff);
-                remaining += bucket.len();
-                !bucket.is_empty()
+                if bucket.is_empty() {
+                    false
+                } else {
+                    remaining_entries += bucket.len();
+                    remaining_bytes += key.len();
+                    true
+                }
             });
-            if remaining >= MAX_HOST_GLYPH_CACHE_ENTRIES {
+            if remaining_entries >= MAX_HOST_SEGMENT_CACHE_ENTRIES
+                || remaining_bytes.saturating_add(added_bytes) > MAX_HOST_SEGMENT_CACHE_TOTAL_BYTES
+            {
                 cache.clear();
-                remaining = 0;
+                remaining_entries = 0;
+                remaining_bytes = 0;
             }
-            self.segment_cache_entries.set(remaining);
+            self.segment_cache_entries.set(remaining_entries);
+            self.segment_cache_bytes.set(remaining_bytes);
         }
         if let Some(bucket) = cache.get_mut(line) {
-            if let Some(existing) = bucket
-                .iter_mut()
-                .find(|(s, t, _, _)| *s == slot && *t == tracking_bits)
-            {
-                existing.2 = gen;
-                existing.3 = width;
-                return;
-            }
             bucket.push((slot, tracking_bits, gen, width));
         } else {
             cache.insert(
                 line.to_owned().into_boxed_str(),
                 vec![(slot, tracking_bits, gen, width)],
             );
+            self.segment_cache_bytes
+                .set(self.segment_cache_bytes.get().saturating_add(line.len()));
         }
         self.segment_cache_entries
             .set(self.segment_cache_entries.get().saturating_add(1));
@@ -5358,6 +5417,20 @@ impl TextMetrics {
         }
     }
 
+    fn measure_uncached_host_scalar(&self, host: &HostFontTable, slot: u8, codepoint: u32) -> f32 {
+        let slot_idx = slot as usize;
+        if let Some(cb) = self.glyph_callback {
+            let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                (cb.func)(cb.user_data, slot, codepoint)
+            }))
+            .unwrap_or(-1.0);
+            if measured.is_finite() && measured >= 0.0 {
+                return measured;
+            }
+        }
+        Self::host_scalar_fallback(host, slot_idx, codepoint)
+    }
+
     fn advance_host_scalar(&self, host: &HostFontTable, slot: u8, codepoint: u32) -> f32 {
         let slot_idx = slot as usize;
         if codepoint == '\r' as u32 {
@@ -5374,21 +5447,10 @@ impl TextMetrics {
         if let Some(&(_, cached)) = self.glyph_cache.borrow().get(&(slot, codepoint)) {
             return cached;
         }
-        let resolved = if let Some(cb) = self.glyph_callback {
-            let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                (cb.func)(cb.user_data, slot, codepoint)
-            }))
-            .unwrap_or(-1.0);
-            if measured.is_finite() && measured >= 0.0 {
-                measured
-            } else {
-                Self::host_scalar_fallback(host, slot_idx, codepoint)
-            }
-        } else {
-            Self::host_scalar_fallback(host, slot_idx, codepoint)
-        };
+        let resolved =
+            self.settle_traced_advance(|| self.measure_uncached_host_scalar(host, slot, codepoint));
         // Cache both succeeded and fallback lookups so unmeasurable scalars
-        // never re-enter FFI on subsequent frames.
+        // never re-enter FFI or append duplicate trace scalars on later calls.
         self.insert_glyph_cached((slot, codepoint), resolved);
         resolved
     }
@@ -5407,6 +5469,44 @@ impl TextMetrics {
             return width.max(0.0);
         }
         let norm_tracking = if tracking == 0.0 { 0.0 } else { tracking };
+        // Simple unshaped lines (ASCII + CJK ideographs/kana/Hangul/fullwidth
+        // punctuation with no combining marks, joiners, variation selectors, or
+        // emoji) sum per-scalar glyph_cache advances in O(len), preserving O(1)
+        // per-character reuse across greedy line wrapping and typewriter reveals.
+        if line.chars().all(is_simple_unshaped_char) {
+            let ascii_table = &host.ascii_advances[slot_idx];
+            let mut width = 0.0f32;
+            let mut cursor = 0usize;
+            {
+                let cache = self.glyph_cache.borrow();
+                for (idx, ch) in line.char_indices() {
+                    let cp = ch as u32;
+                    if cp == '\r' as u32 {
+                        cursor = idx + ch.len_utf8();
+                    } else if cp == '\t' as u32 {
+                        width += ascii_table[0] * 4.0 + norm_tracking;
+                        cursor = idx + 1;
+                    } else if (0x20..=0x7E).contains(&cp) {
+                        width += ascii_table[(cp - 0x20) as usize] + norm_tracking;
+                        cursor = idx + 1;
+                    } else if let Some(&(_, cached)) = cache.get(&(slot, cp)) {
+                        width += cached + norm_tracking;
+                        cursor = idx + ch.len_utf8();
+                    } else {
+                        cursor = idx;
+                        break;
+                    }
+                }
+            }
+            if cursor < line.len() {
+                for ch in line[cursor..].chars() {
+                    if ch != '\r' {
+                        width += self.advance_host_scalar(host, slot, ch as u32) + norm_tracking;
+                    }
+                }
+            }
+            return width.max(0.0);
+        }
         let tracking_bits = norm_tracking.to_bits();
         if let Some(cached) = self.lookup_segment_cached(line, slot, tracking_bits) {
             return cached;
@@ -5430,7 +5530,8 @@ impl TextMetrics {
             let mut fallback = 0.0f32;
             for ch in line.chars() {
                 if ch != '\r' {
-                    fallback += self.advance_host_scalar(host, slot, ch as u32) + norm_tracking;
+                    fallback += self.measure_uncached_host_scalar(host, slot, ch as u32)
+                        + norm_tracking;
                 }
             }
             fallback.max(0.0)
@@ -5631,6 +5732,10 @@ fn parse_pak_font_metrics(pak: &[u8]) -> Result<TextMetrics, String> {
         }
         let name = std::str::from_utf8(&pak[name_start..name_end])
             .map_err(|_| "pak: entry name is not UTF-8".to_owned())?;
+        if name == "ui:fonts.host" {
+            metrics.requires_host_fonts = true;
+            continue;
+        }
         if !name.starts_with("ui:font.") {
             continue;
         }
@@ -6785,9 +6890,9 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
     // `ui:img.*` entry in the real core, then publishes the resulting name ->
     // texture handle table to framework/host.
     let metrics = parse_pak_font_metrics(pak)?;
-    if metrics.fonts.is_empty() && host.text_metrics.borrow().host_table.is_none() {
+    if metrics.requires_host_fonts && host.text_metrics.borrow().host_table.is_none() {
         return Err(
-            "pak admission: package contains no baked ui:font.* atlases and host font metrics are not installed"
+            "pak admission: package requires host-native fonts (ui:fonts.host) and host font metrics are not installed"
                 .to_owned(),
         );
     }
@@ -6807,6 +6912,7 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
     let use_host_or_fontless = {
         let mut current = host.text_metrics.borrow_mut();
         current.fontless_pak = metrics.fonts.is_empty();
+        current.requires_host_fonts = metrics.requires_host_fonts;
         current.fonts = metrics.fonts;
         current.host_table.is_some() || current.fontless_pak
     };
@@ -12536,14 +12642,20 @@ mod smoke_tests {
 
     #[test]
     fn fontless_pak_requires_host_font_metrics_and_preserves_active_guest_on_rejection() {
-        let mut pak = vec![0u8; 32];
+        let legacy_empty = empty_pak();
+        let mut pak = vec![0u8; 96];
         pak[0..4].copy_from_slice(&PAK_MAGIC.to_le_bytes());
         pak[4..6].copy_from_slice(&1u16.to_le_bytes());
-        pak[8..12].copy_from_slice(&0u32.to_le_bytes());
+        pak[8..12].copy_from_slice(&1u32.to_le_bytes());
         pak[12..16].copy_from_slice(&32u32.to_le_bytes());
-        pak[16..20].copy_from_slice(&32u32.to_le_bytes());
-        pak[20..24].copy_from_slice(&32u32.to_le_bytes());
-        pak[24..28].copy_from_slice(&32u32.to_le_bytes());
+        pak[16..20].copy_from_slice(&56u32.to_le_bytes());
+        pak[20..24].copy_from_slice(&80u32.to_le_bytes());
+        pak[24..28].copy_from_slice(&96u32.to_le_bytes());
+        pak[36..40].copy_from_slice(&80u32.to_le_bytes());
+        pak[40..44].copy_from_slice(&1u32.to_le_bytes());
+        pak[48..50].copy_from_slice(&13u16.to_le_bytes());
+        pak[56..69].copy_from_slice(b"ui:fonts.host");
+        pak[80] = 1;
 
         let handle = pocket_create(160.0, 120.0);
         let active_guest = CString::new(format!(
@@ -12557,6 +12669,16 @@ mod smoke_tests {
         let c_src = CString::new("globalThis.frame = () => {};").unwrap();
 
         unsafe {
+            // A legacy/empty PAK without ui:fonts.host loads without host font metrics.
+            assert_eq!(
+                pocket_load(
+                    handle,
+                    c_src.as_ptr(),
+                    legacy_empty.as_ptr(),
+                    legacy_empty.len()
+                ),
+                0
+            );
             assert_eq!(pocket_eval(handle, active_guest.as_ptr()), 0);
             assert_eq!(
                 pocket_load(handle, c_src.as_ptr(), pak.as_ptr(), pak.len()),
@@ -12564,7 +12686,7 @@ mod smoke_tests {
             );
             let err = CStr::from_ptr(pocket_last_error(handle)).to_string_lossy();
             assert!(
-                err.contains("contains no baked ui:font.* atlases"),
+                err.contains("requires host-native fonts"),
                 "unexpected error: {err}"
             );
             // Active guest remains intact after admission rejection.
@@ -12749,4 +12871,93 @@ mod smoke_tests {
             pocket_destroy(replay_handle);
         }
     }
+    #[test]
+    fn simple_cjk_fast_path_and_segment_cache_byte_budget_work_as_expected() {
+        #[derive(Default)]
+        struct Counters {
+            glyph_calls: usize,
+            text_calls: usize,
+        }
+        unsafe extern "C" fn glyph_cb(user_data: usize, _slot: u8, cp: u32) -> f32 {
+            let counters = &mut *(user_data as *mut Counters);
+            counters.glyph_calls += 1;
+            if cp >= 0x4E00 { 16.0 } else { 8.0 }
+        }
+        unsafe extern "C" fn text_cb(
+            user_data: usize,
+            _slot: u8,
+            tracking: f32,
+            utf8_ptr: *const u8,
+            utf8_len: usize,
+        ) -> f32 {
+            let counters = &mut *(user_data as *mut Counters);
+            counters.text_calls += 1;
+            let text = std::str::from_utf8(std::slice::from_raw_parts(utf8_ptr, utf8_len)).unwrap();
+            let count = text.chars().count() as f32;
+            (count * (14.0 + tracking) - 2.0).max(0.0)
+        }
+
+        let (lh, cjk, ascii) = default_probe_host_font_metrics();
+        let mut metrics = TextMetrics::default();
+        let mut host_table = HostFontTable {
+            line_heights: [16.0; HOST_FONT_SLOTS],
+            cjk_advances: [16.0; HOST_FONT_SLOTS],
+            ascii_advances: [[8.0; HOST_ASCII_COUNT]; HOST_FONT_SLOTS],
+        };
+        for slot in 0..ACTIVE_HOST_FONT_SLOTS {
+            host_table.line_heights[slot] = lh[slot];
+            host_table.cjk_advances[slot] = cjk[slot];
+            host_table.ascii_advances[slot]
+                .copy_from_slice(&ascii[slot * HOST_ASCII_COUNT..(slot + 1) * HOST_ASCII_COUNT]);
+        }
+        metrics.host_table = Some(host_table);
+        let mut counters = Counters::default();
+        let user_data = (&mut counters as *mut Counters) as usize;
+        metrics.glyph_callback = Some(HostGlyphCallback {
+            func: glyph_cb,
+            user_data,
+        });
+        metrics.text_callback = Some(HostTextCallback {
+            func: text_cb,
+            user_data,
+        });
+
+        // 500-char Chinese typewriter reveal: 500 distinct prefixes over 25 CJK chars.
+        let base_vocab: Vec<char> = "春江潮水连海平海上明月共潮生滟滟随波千万里何处春江".chars().collect();
+        assert_eq!(base_vocab.len(), 25);
+        let paragraph: String = (0..500).map(|i| base_vocab[i % base_vocab.len()]).collect();
+        let char_indices: Vec<usize> = paragraph
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .chain(std::iter::once(paragraph.len()))
+            .collect();
+        for end in char_indices.iter().skip(1) {
+            let prefix = &paragraph[..*end];
+            let (w, _) = metrics.measure(prefix, 4, 0.0, f32::NAN);
+            assert!(w > 0.0);
+        }
+        let unique_chars: std::collections::HashSet<char> = paragraph.chars().collect();
+        assert_eq!(counters.glyph_calls, unique_chars.len());
+        assert_eq!(counters.text_calls, 0);
+
+        // Complex scripts (combining marks, emoji ZWJ, Arabic) use whole-line text_callback.
+        let complex = "caf\u{0065}\u{0301} 👨‍👩‍👧 مرحبا";
+        let (cw1, _) = metrics.measure(complex, 4, 0.0, f32::NAN);
+        let (cw2, _) = metrics.measure(complex, 4, 0.0, f32::NAN);
+        assert_eq!(cw1, cw2);
+        assert_eq!(counters.text_calls, 1);
+
+        // Segment cache skips lines > 4 KiB and enforces the 4 MiB total key-byte ceiling.
+        let oversized = format!("👨‍👩‍👧{}", "a".repeat(MAX_HOST_SEGMENT_CACHE_KEY_BYTES + 64));
+        let _ = metrics.measure(&oversized, 4, 0.0, f32::NAN);
+        assert!(metrics.lookup_segment_cached(&oversized, 4, 0.0f32.to_bits()).is_none());
+
+        for i in 0..1500usize {
+            let key = format!("👨‍👩‍👧-{i:05}-{}", "x".repeat(3500));
+            assert!(key.len() <= MAX_HOST_SEGMENT_CACHE_KEY_BYTES);
+            metrics.insert_segment_cached(&key, 4, 0.0f32.to_bits(), 100.0);
+            assert!(metrics.segment_cache_bytes.get() <= MAX_HOST_SEGMENT_CACHE_TOTAL_BYTES);
+        }
+    }
+
 }

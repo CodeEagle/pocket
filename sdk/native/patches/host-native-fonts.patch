@@ -1032,10 +1032,9 @@ index a784428..97bc03c 100644
    };
  }
 diff --git a/tools/build.ts b/tools/build.ts
-index 58410b1..a954274 100644
 --- a/tools/build.ts
 +++ b/tools/build.ts
-@@ -100,6 +100,7 @@ let hzFlag: number | undefined;
+@@ -100,6 +100,7 @@
  let projectRoot = process.cwd();
  let inputsFile: string | undefined;
  let strictClasses = false;
@@ -1043,7 +1042,7 @@ index 58410b1..a954274 100644
  const buildInputs = new BuildInputs();
  for (const a of args) {
    if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
-@@ -116,6 +117,8 @@ for (const a of args) {
+@@ -116,6 +117,8 @@
    else if (a.startsWith("--hz=")) hzFlag = Number(a.slice("--hz=".length));
    else if (a.startsWith("--inputs-file=")) inputsFile = resolvePath(a.slice("--inputs-file=".length));
    else if (a === "--strict-classes") strictClasses = true;
@@ -1052,7 +1051,7 @@ index 58410b1..a954274 100644
    else if (!a.startsWith("-")) appArg = a;
  }
  
-@@ -346,21 +349,29 @@ console.log(
+@@ -346,21 +349,29 @@
  // The font policy covers runtime data independently of source literals.
  const fontsManifestPath = join(dirname(entry), "fonts.json");
  buildInputs.optional(fontsManifestPath);
@@ -1093,3 +1092,13 @@ index 58410b1..a954274 100644
  for (const a of atlases) {
    console.log(
      `  font: slot ${a.slot} (${a.px}px${a.bold ? " bold" : ""}) ${a.glyphCount} glyphs, ` +
+@@ -371,6 +382,9 @@
+ // demo images: any collected literal ending .png/.svg is a candidate asset name
+ const blobs: PakBlob[] = [
+   { key: KEY_STYLES, dtype: PAK_DTYPE.u8, data: styles.bin },
++  ...(!shouldBakeFonts
++    ? [{ key: "ui:fonts.host", dtype: PAK_DTYPE.u8, data: new Uint8Array([1]) }]
++    : []),
+   ...atlases.map((a) => ({ key: keyFont(a.slot), dtype: PAK_DTYPE.u8, data: a.bytes })),
+ ];
+ const appDir = dirname(entry);

@@ -52,6 +52,90 @@ type Handle = *mut c_void;
 
 const MAX_RAW_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
+fn parse_f32_array(value: Option<&Value>, label: &str, expected_len: usize) -> Result<Vec<f32>, String> {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Err(format!("{label} must be an array of {expected_len} numbers"));
+    };
+    if items.len() != expected_len {
+        return Err(format!(
+            "{label} must have {expected_len} numbers (got {})",
+            items.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(expected_len);
+    for (idx, item) in items.iter().enumerate() {
+        let Some(number) = item.as_f64() else {
+            return Err(format!("{label}[{idx}] must be a finite number"));
+        };
+        if !number.is_finite() {
+            return Err(format!("{label}[{idx}] must be finite"));
+        }
+        out.push(number as f32);
+    }
+    Ok(out)
+}
+
+unsafe fn apply_probe_host_fonts(
+    created: *mut pocket_flutter::HostState,
+    spec: Option<&Value>,
+    default_when_missing: bool,
+) -> Result<(), String> {
+    match spec {
+        None if default_when_missing => {
+            let (lh, cjk, ascii) = pocket_flutter::default_probe_host_font_metrics();
+            if pocket_flutter::pocket_set_host_font_metrics(
+                created,
+                lh.len() as u32,
+                lh.as_ptr(),
+                cjk.as_ptr(),
+                ascii.as_ptr(),
+            ) != 0
+            {
+                return Err(last_error(created.cast()));
+            }
+            Ok(())
+        }
+        None | Some(Value::Bool(false)) => Ok(()),
+        Some(Value::Bool(true)) => {
+            let (lh, cjk, ascii) = pocket_flutter::default_probe_host_font_metrics();
+            if pocket_flutter::pocket_set_host_font_metrics(
+                created,
+                lh.len() as u32,
+                lh.as_ptr(),
+                cjk.as_ptr(),
+                ascii.as_ptr(),
+            ) != 0
+            {
+                return Err(last_error(created.cast()));
+            }
+            Ok(())
+        }
+        Some(Value::Object(map)) => {
+            let slot_count = 21usize;
+            let lh = parse_f32_array(map.get("lineHeights"), "hostFonts.lineHeights", slot_count)?;
+            let cjk = parse_f32_array(map.get("cjkAdvances"), "hostFonts.cjkAdvances", slot_count)?;
+            let ascii = parse_f32_array(
+                map.get("asciiAdvances"),
+                "hostFonts.asciiAdvances",
+                slot_count * 95,
+            )?;
+            if pocket_flutter::pocket_set_host_font_metrics(
+                created,
+                slot_count as u32,
+                lh.as_ptr(),
+                cjk.as_ptr(),
+                ascii.as_ptr(),
+            ) != 0
+            {
+                return Err(last_error(created.cast()));
+            }
+            Ok(())
+        }
+        Some(_) => Err("hostFonts must be a boolean or metric table object".to_owned()),
+    }
+}
+
+
 enum ProbeResponse {
     Json(Value),
     RawFrame(Vec<u8>),
@@ -506,27 +590,11 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 destroy(handle);
                 return (false, error_response(detail));
             }
-            let install_host_fonts = match command.get("hostFonts") {
-                None => true,
-                Some(Value::Bool(enabled)) => *enabled,
-                Some(_) => {
+            match apply_probe_host_fonts(created, command.get("hostFonts"), true) {
+                Ok(()) => {}
+                Err(error) => {
                     destroy(handle);
-                    return (false, error_response("hostFonts must be a boolean"));
-                }
-            };
-            if install_host_fonts {
-                let (lh, cjk, ascii) = pocket_flutter::default_probe_host_font_metrics();
-                if pocket_flutter::pocket_set_host_font_metrics(
-                    created,
-                    lh.len() as u32,
-                    lh.as_ptr(),
-                    cjk.as_ptr(),
-                    ascii.as_ptr(),
-                ) != 0
-                {
-                    let detail = last_error(*handle);
-                    destroy(handle);
-                    return (false, error_response(detail));
+                    return (false, error_response(error));
                 }
             }
             if let Some(policy) = command.get("guestSecurity") {
@@ -692,6 +760,27 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 return (false, native_error(*handle, "pocket_send_binary"));
             }
             (false, json!({"ok": true}))
+        }
+        "setHostFonts" => {
+            if handle.is_null() {
+                return (
+                    false,
+                    error_response("create a native runtime before setting host fonts"),
+                );
+            }
+            let Some(spec) = command.get("hostFonts") else {
+                return (false, error_response("setHostFonts requires hostFonts"));
+            };
+            if !spec.is_object() && spec != &Value::Bool(true) {
+                return (
+                    false,
+                    error_response("setHostFonts requires true or a hostFonts metric table object"),
+                );
+            }
+            match apply_probe_host_fonts((*handle).cast(), Some(spec), false) {
+                Ok(()) => (false, json!({"ok": true})),
+                Err(error) => (false, error_response(error)),
+            }
         }
         "resize" => {
             if handle.is_null() {
@@ -1031,15 +1120,58 @@ mod tests {
                 &mut unconfigured,
                 json!({"op":"create", "width":80, "height":40, "hostFonts":false}),
             );
-            let (_, rejected) = command(
+            // Legacy/minimal PAK without ui:fonts.host marker continues to load cleanly.
+            let (_, legacy_admitted) = command(
                 &json!({"op":"load", "sourcePath":src_str, "pakPath":pak_str}),
+                &mut unconfigured,
+            );
+            assert_eq!(legacy_admitted["ok"], true);
+
+            // Explicit host-font PAK (ui:fonts.host) is rejected until hostFonts are installed.
+            let host_pak_path = dir.join("host_fonts.pak");
+            let mut host_pak = vec![0u8; 96];
+            host_pak[0..4].copy_from_slice(&0x4b504344u32.to_le_bytes());
+            host_pak[4..6].copy_from_slice(&1u16.to_le_bytes());
+            host_pak[8..12].copy_from_slice(&1u32.to_le_bytes());
+            host_pak[12..16].copy_from_slice(&32u32.to_le_bytes());
+            host_pak[16..20].copy_from_slice(&56u32.to_le_bytes());
+            host_pak[20..24].copy_from_slice(&80u32.to_le_bytes());
+            host_pak[24..28].copy_from_slice(&96u32.to_le_bytes());
+            host_pak[36..40].copy_from_slice(&80u32.to_le_bytes());
+            host_pak[40..44].copy_from_slice(&1u32.to_le_bytes());
+            host_pak[48..50].copy_from_slice(&13u16.to_le_bytes());
+            host_pak[56..69].copy_from_slice(b"ui:fonts.host");
+            host_pak[80] = 1;
+            std::fs::write(&host_pak_path, &host_pak).unwrap();
+            let host_pak_str = host_pak_path.to_str().unwrap();
+
+            let (_, rejected) = command(
+                &json!({"op":"load", "sourcePath":src_str, "pakPath":host_pak_str}),
                 &mut unconfigured,
             );
             assert_eq!(rejected["ok"], false);
             assert!(rejected["error"]
                 .as_str()
                 .unwrap_or("")
-                .contains("no baked ui:font.* atlases"));
+                .contains("requires host-native fonts"));
+
+            let (lh, cjk, ascii) = pocket_flutter::default_probe_host_font_metrics();
+            run(
+                &mut unconfigured,
+                json!({
+                    "op": "setHostFonts",
+                    "hostFonts": {
+                        "lineHeights": lh.to_vec(),
+                        "cjkAdvances": cjk.to_vec(),
+                        "asciiAdvances": ascii.to_vec(),
+                    }
+                }),
+            );
+            let (_, admitted_after_table) = command(
+                &json!({"op":"load", "sourcePath":src_str, "pakPath":host_pak_str}),
+                &mut unconfigured,
+            );
+            assert_eq!(admitted_after_table["ok"], true);
 
             destroy(&mut unconfigured);
             destroy(&mut legacy);

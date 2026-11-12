@@ -525,6 +525,7 @@ final class PocketRecordingController {
   int _asyncEventCount = 0;
   int _asyncEventBytes = 0;
   void Function()? _beforeFinish;
+  final List<void Function()> _afterFinishListeners = <void Function()>[];
   PocketRecording? _recording;
   int _retainedAssetBytes = 0;
   final Map<String, Uint8List> _replayAssets = <String, Uint8List>{};
@@ -570,6 +571,19 @@ final class PocketRecordingController {
   /// Detaches a native boundary before its runtime handle is destroyed.
   void clearBeforeFinish() {
     _beforeFinish = null;
+  }
+
+  /// Registers a callback invoked once after [finish] seals the recording.
+  void addAfterFinishListener(void Function() listener) {
+    if (!enabled || _finished) return;
+    if (!_afterFinishListeners.contains(listener)) {
+      _afterFinishListeners.add(listener);
+    }
+  }
+
+  /// Removes a previously registered post-finish listener.
+  void removeAfterFinishListener(void Function() listener) {
+    _afterFinishListeners.remove(listener);
   }
 
   void add(PocketRecordingEntry entry) {
@@ -716,6 +730,16 @@ final class PocketRecordingController {
       version: _version,
       incompleteReason: _incompleteReason,
     );
+    final listeners = List<void Function()>.of(_afterFinishListeners);
+    _afterFinishListeners.clear();
+    for (final listener in listeners) {
+      try {
+        listener();
+      } on Object {
+        // Post-finish host hooks (such as applying deferred font refreshes)
+        // must never invalidate an already-sealed recording artifact.
+      }
+    }
     return _recording!;
   }
 

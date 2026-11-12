@@ -721,6 +721,7 @@ final class FfiPocketRuntime
   _SetHostTextCallbackDart? _setHostTextCallback;
   bool _hostFontAbiLookedUp = false;
   bool _hasHostFonts = false;
+  List<String>? _deferredHostFontFallback;
   NativeCallable<_HostGlyphMeasureNative>? _hostGlyphCallback;
   NativeCallable<_HostTextMeasureNative>? _hostTextCallback;
   Pointer<Uint64>? _stageTimingsBuffer;
@@ -731,6 +732,19 @@ final class FfiPocketRuntime
 
   /// Whether 21-slot host font metrics have been installed into this runtime.
   bool get hasHostFonts => _hasHostFonts;
+
+  /// Whether an active recording already owns a locked host-font snapshot, so
+  /// mid-recording font refreshes must be deferred until [PocketRecordingController.finish].
+  bool get isHostFontRefreshDeferredForRecording =>
+      (_recordingController?.isRecording ?? false) &&
+      (_hasHostFonts || (_recordingController?.entryCount ?? 0) > 0);
+
+  void _applyDeferredHostFontRefreshAfterRecording() {
+    final pending = _deferredHostFontFallback;
+    if (pending == null || _disposed || _traceClockReplayMode) return;
+    _deferredHostFontFallback = null;
+    syncHostFonts(fontFamilyFallback: pending);
+  }
 
   void _lookupHostFontAbi() {
     if (_hostFontAbiLookedUp) return;
@@ -817,6 +831,11 @@ final class FfiPocketRuntime
   }) {
     _checkAlive();
     if (_traceClockReplayMode) return false;
+    if (isHostFontRefreshDeferredForRecording) {
+      _deferredHostFontFallback = List<String>.unmodifiable(fontFamilyFallback);
+      return false;
+    }
+    _deferredHostFontFallback = null;
     _lookupHostFontAbi();
     final setMetrics = _setHostFontMetrics;
     final setGlyphCallback = _setHostGlyphCallback;
@@ -1051,6 +1070,9 @@ final class FfiPocketRuntime
           ),
         );
         recording.bindBeforeFinish(runtime._captureStopBoundary);
+        recording.addAfterFinishListener(
+          runtime._applyDeferredHostFontRefreshAfterRecording,
+        );
       } catch (_) {
         runtime.dispose();
         rethrow;
@@ -2385,6 +2407,10 @@ final class FfiPocketRuntime
     }
     final controller = _recordingController;
     controller?.clearBeforeFinish();
+    controller?.removeAfterFinishListener(
+      _applyDeferredHostFontRefreshAfterRecording,
+    );
+    _deferredHostFontFallback = null;
     if (_traceClockConfigured) {
       try {
         _setTraceClockMode(0);

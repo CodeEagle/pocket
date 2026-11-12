@@ -801,9 +801,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
   if (typeof transformFile !== "function") {
     throw new Error("build_guest: pinned JSX transformer does not export transformFile");
   }
-  const [{ WORKER_PROTOCOL_VERSION, WORKER_RESOURCES, workerDeclarationSchema }, { validateSchema }] = await Promise.all([
+  const [{ WORKER_PROTOCOL_VERSION, WORKER_RESOURCES, workerDeclarationSchema }, { validateSchema }, { PAK_DTYPE, pack, unpack }] = await Promise.all([
     import(pathToFileURL(join(upstream, "contracts/spec/worker.ts")).href),
     import(pathToFileURL(join(upstream, "framework/src/manifest/schema.ts")).href),
+    import(pathToFileURL(join(upstream, "framework/compiler/pak.ts")).href),
   ]);
 
   const ownsOutput = options.outDir === undefined;
@@ -860,6 +861,17 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     }
     if (compilerSource !== source) copyFileSync(compilerSource, source);
     if (compilerPak !== pak) copyFileSync(compilerPak, pak);
+    if (skipFontBaking) {
+      const pakEntries = unpack(new Uint8Array(readFileSync(pak)));
+      if (!pakEntries.some((blob: { key: string }) => blob.key === "ui:fonts.host")) {
+        const repacked = pack([
+          ...pakEntries,
+          { key: "ui:fonts.host", dtype: PAK_DTYPE.u8, data: new Uint8Array([1]) },
+        ]);
+        writeFileSync(pak, repacked);
+        if (compilerPak !== pak) writeFileSync(compilerPak, repacked);
+      }
+    }
     const sourcePocket = readJsonObject(join(projectRoot, "pocket.json"));
     const domains = sourcePocket?.domains;
     const workerDeclaration = domains && typeof domains === "object" && !Array.isArray(domains)

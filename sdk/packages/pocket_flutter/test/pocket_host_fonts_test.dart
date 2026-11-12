@@ -322,18 +322,43 @@ void main() {
   );
 
   test(
-    'FfiPocketRuntime rejects font-less PAK until syncPocketHostFonts installs host metrics',
+    'FfiPocketRuntime admits legacy empty PAK and gates explicit ui:fonts.host PAK on syncPocketHostFonts',
     () {
       final runtime = FfiPocketRuntime.open(width: 200, height: 120);
       addTearDown(runtime.dispose);
-      final fontlessPak = Uint8List(32);
+
+      // Legacy 0-entry PAK without ui:fonts.host continues to load cleanly.
+      final emptyPak = Uint8List(32);
+      final emptyView = ByteData.sublistView(emptyPak);
+      emptyView.setUint32(0, 0x4b504344, Endian.little);
+      emptyView.setUint16(4, 1, Endian.little);
+      emptyView.setUint32(12, 32, Endian.little);
+      emptyView.setUint32(16, 32, Endian.little);
+      emptyView.setUint32(20, 32, Endian.little);
+      emptyView.setUint32(24, 32, Endian.little);
+      expect(
+        runtime.load('globalThis.frame = () => {};', emptyPak).width,
+        200,
+      );
+
+      // Explicit host-font PAK (ui:fonts.host) is rejected until host metrics exist.
+      final fontlessPak = Uint8List(96);
       final pakView = ByteData.sublistView(fontlessPak);
       pakView.setUint32(0, 0x4b504344, Endian.little);
       pakView.setUint16(4, 1, Endian.little);
+      pakView.setUint32(8, 1, Endian.little);
       pakView.setUint32(12, 32, Endian.little);
-      pakView.setUint32(16, 32, Endian.little);
-      pakView.setUint32(20, 32, Endian.little);
-      pakView.setUint32(24, 32, Endian.little);
+      pakView.setUint32(16, 56, Endian.little);
+      pakView.setUint32(20, 80, Endian.little);
+      pakView.setUint32(24, 96, Endian.little);
+      pakView.setUint32(36, 80, Endian.little);
+      pakView.setUint32(40, 1, Endian.little);
+      pakView.setUint16(48, 13, Endian.little);
+      const marker = 'ui:fonts.host';
+      for (var i = 0; i < marker.length; i++) {
+        fontlessPak[56 + i] = marker.codeUnitAt(i);
+      }
+      fontlessPak[80] = 1;
 
       expect(
         () => runtime.load('globalThis.frame = () => {};', fontlessPak),
@@ -341,7 +366,7 @@ void main() {
           isA<PocketRuntimeException>().having(
             (e) => e.message,
             'message',
-            contains('no baked ui:font.* atlases'),
+            contains('requires host-native fonts'),
           ),
         ),
       );
@@ -349,6 +374,76 @@ void main() {
       expect(syncPocketHostFonts(runtime), isTrue);
       final frame = runtime.load('globalThis.frame = () => {};', fontlessPak);
       expect(frame.width, 200);
+    },
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
+  );
+
+  test(
+    'FfiPocketRuntime defers mid-recording host font refreshes so recordings stay replayable',
+    () async {
+      final controller = PocketRecordingController();
+      final runtime = FfiPocketRuntime.open(
+        width: 240,
+        height: 140,
+        recording: controller,
+      );
+      addTearDown(runtime.dispose);
+
+      expect(syncPocketHostFonts(runtime), isTrue);
+      final initialSnapshot = controller.snapshot().metadata.hostFonts;
+      expect(initialSnapshot, isNotNull);
+
+      final emptyPak = Uint8List(32);
+      final emptyView = ByteData.sublistView(emptyPak);
+      emptyView.setUint32(0, 0x4b504344, Endian.little);
+      emptyView.setUint16(4, 1, Endian.little);
+      emptyView.setUint32(12, 32, Endian.little);
+      emptyView.setUint32(16, 32, Endian.little);
+      emptyView.setUint32(20, 32, Endian.little);
+      emptyView.setUint32(24, 32, Endian.little);
+
+      const source = '''
+        const root = ui.createNode(0);
+        ui.setProp(root, 0, 220);
+        ui.insertBefore(1, root, 0);
+        const t = ui.createNode(1);
+        ui.setProp(t, 97, 4);
+        ui.setText(t, "春江潮水 👨\u200d👩\u200d👧");
+        ui.insertBefore(root, t, 0);
+        let tick = 0;
+        globalThis.frame = () => {
+          tick++;
+          ui.setText(t, tick === 1 ? "春江潮水 👨\u200d👩\u200d👧" : "海上明月 👨\u200d👩\u200d👧");
+        };
+      ''';
+      runtime.load(source, emptyPak);
+      runtime.frameAt(16.0);
+
+      // Mid-recording refresh must be deferred instead of overwriting metadata
+      // or clearing native glyph/segment caches mid-tape.
+      expect(
+        runtime.syncHostFonts(fontFamilyFallback: const <String>['Courier']),
+        isFalse,
+      );
+      expect(runtime.isHostFontRefreshDeferredForRecording, isTrue);
+
+      runtime.frameAt(16.0);
+      final recording = controller.finish();
+      expect(recording.incomplete, isFalse);
+      expect(
+        recording.metadata.hostFonts!.asciiAdvances,
+        equals(initialSnapshot!.asciiAdvances),
+      );
+      // Once finish() seals the tape, the deferred refresh applies cleanly.
+      expect(runtime.isHostFontRefreshDeferredForRecording, isFalse);
+
+      final replay = await replayPocketRecording(
+        recording,
+        assets: PocketReplayAssets(source: source, pak: emptyPak),
+      );
+      expect(replay.matched, isTrue, reason: replay.firstMismatch?.reason);
     },
     skip: libraryPath == null
         ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'

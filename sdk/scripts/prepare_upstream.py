@@ -634,6 +634,7 @@ FINAL_CONTRACTS = {
     "tools/build.ts": (
         "--no-bake-fonts",
         "--bake-fonts",
+        "ui:fonts.host",
     ),
     "engine/present/src/damage.rs": (
         "spec::draw_op::ARC => arc_bounds(words, clip),",

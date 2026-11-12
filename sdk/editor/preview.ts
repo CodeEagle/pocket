@@ -236,6 +236,43 @@ function finiteNonNegative(value: unknown, label: string, maximum = 1024): numbe
   return number;
 }
 
+export type PreviewHostFontMetrics = {
+  lineHeights: number[];
+  cjkAdvances: number[];
+  asciiAdvances: number[];
+};
+
+const PREVIEW_HOST_FONT_SLOT_COUNT = 21;
+const PREVIEW_HOST_ASCII_COUNT = 95;
+
+export function parseHostFontMetrics(value: unknown): PreviewHostFontMetrics {
+  const record = asRecord(value, "hostFonts");
+  const parseList = (field: string, expectedLen: number, positive: boolean): number[] => {
+    const raw = record[field];
+    if (!Array.isArray(raw) || raw.length !== expectedLen) {
+      throw new Error(`hostFonts.${field} must be an array of ${expectedLen} numbers`);
+    }
+    return raw.map((entry, idx) => {
+      const n = Number(entry);
+      if (!Number.isFinite(n) || (positive ? n <= 0 : n < 0) || n > 4096) {
+        throw new Error(
+          `hostFonts.${field}[${idx}] must be a finite ${positive ? "positive" : "non-negative"} number <= 4096`,
+        );
+      }
+      return n;
+    });
+  };
+  return {
+    lineHeights: parseList("lineHeights", PREVIEW_HOST_FONT_SLOT_COUNT, true),
+    cjkAdvances: parseList("cjkAdvances", PREVIEW_HOST_FONT_SLOT_COUNT, true),
+    asciiAdvances: parseList(
+      "asciiAdvances",
+      PREVIEW_HOST_FONT_SLOT_COUNT * PREVIEW_HOST_ASCII_COUNT,
+      false,
+    ),
+  };
+}
+
 function parseAccessibilityPreferences(value: unknown): PreviewAccessibilityPreferences {
   const record = asRecord(value, "accessibility preferences");
   const booleanField = (name: keyof Pick<PreviewAccessibilityPreferences, "reduceMotion" | "increaseContrast" | "accessibleNavigation">): boolean => {
@@ -1727,6 +1764,8 @@ class PreviewSession {
   private tickHz: number;
   /** Latest browser accessibility facts, replayed to every newly loaded guest. */
   private accessibilityPreferences?: PreviewAccessibilityPreferences;
+  /** Latest browser-measured 21-slot host font metrics for faithful Studio layout. */
+  private hostFontMetrics?: PreviewHostFontMetrics;
 
   constructor(manager: PreviewManagerImpl, id: string) {
     this.manager = manager;
@@ -1913,6 +1952,7 @@ class PreviewSession {
           height: this.height,
           rasterDensity: this.manager.options.rasterDensity ?? 1,
           tickHz: this.tickHz,
+          ...(this.hostFontMetrics ? { hostFonts: this.hostFontMetrics } : {}),
         });
         // Recording is opt-in. A recording request arms a fresh runtime before
         // this method is entered, so the native clock is selected before the
@@ -3945,6 +3985,7 @@ class PreviewSession {
         height: initialHeight,
         rasterDensity: this.manager.options.rasterDensity ?? 1,
         tickHz: this.tickHz,
+        ...(this.hostFontMetrics ? { hostFonts: this.hostFontMetrics } : {}),
         ...(memory ? { memory } : {}),
       });
       if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
@@ -4645,6 +4686,19 @@ class PreviewSession {
         await this.replayAccessibilityPreferences(root);
         for (const child of this.childRuntimes.values()) {
           await this.replayAccessibilityPreferences(child);
+        }
+      } else if (kind === "hostFonts") {
+        const metrics = parseHostFontMetrics(input.hostFonts);
+        this.hostFontMetrics = metrics;
+        // Do not overwrite host metrics or clear native text caches mid-recording.
+        if (this.previewRecordingActive()) return;
+        const root = this.rootRuntime;
+        if (!root) return;
+        await root.probe.checked({ op: "setHostFonts", hostFonts: metrics });
+        root.needsPump = true;
+        for (const child of this.childRuntimes.values()) {
+          await child.probe.checked({ op: "setHostFonts", hostFonts: metrics });
+          child.needsPump = true;
         }
       } else if (kind === "semantic") {
         const action = parseAccessibilityAction(input);

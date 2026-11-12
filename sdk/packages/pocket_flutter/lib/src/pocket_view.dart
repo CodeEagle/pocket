@@ -1290,16 +1290,35 @@ class _PocketViewState extends State<PocketView>
     if (previous != null && previous != ratio) _markSceneNeedsBuild();
   }
 
+  PocketRecordingController? _ownedRecordingController;
+  bool _deferredViewHostFontRefresh = false;
+
   void _onSystemFontsChanged() {
+    _refreshHostFontsNow();
+  }
+
+  void _onOwnedRecordingFinished() {
+    if (_isDisposed || !_deferredViewHostFontRefresh) return;
+    _deferredViewHostFontRefresh = false;
     _refreshHostFontsNow();
   }
 
   bool _refreshHostFontsNow() {
     if (_isDisposed) return false;
+    final runtime = _runtime;
+    if (runtime is FfiPocketRuntime &&
+        runtime.isHostFontRefreshDeferredForRecording) {
+      _deferredViewHostFontRefresh = true;
+      syncPocketHostFonts(
+        runtime,
+        fontFamilyFallback: widget.fontFamilyFallback,
+      );
+      return false;
+    }
+    _deferredViewHostFontRefresh = false;
     PocketHostFontMetrics.clearCache();
     _textLayoutCache.clear();
     var synced = false;
-    final runtime = _runtime;
     if (runtime != null) {
       synced = syncPocketHostFonts(
         runtime,
@@ -1763,7 +1782,16 @@ class _PocketViewState extends State<PocketView>
           (debugPocketSelfOwnedRuntimeFactory != null
               ? debugPocketSelfOwnedRuntimeFactory!(runtimeViewport!)
               : FfiPocketRuntime.open(
-                  recording: widget.recordingFactory?.call(),
+                  recording: (() {
+                    final controller = widget.recordingFactory?.call();
+                    _ownedRecordingController
+                        ?.removeAfterFinishListener(_onOwnedRecordingFinished);
+                    _ownedRecordingController = controller;
+                    controller?.addAfterFinishListener(
+                      _onOwnedRecordingFinished,
+                    );
+                    return controller;
+                  })(),
                   memoryLimits: widget.memoryLimits,
                   width: runtimeViewport!.width,
                   height: runtimeViewport.height,
@@ -6854,6 +6882,11 @@ class _PocketViewState extends State<PocketView>
 
   void _detachRuntime({PocketRuntime? fallback}) {
     _cancelScheduledWake();
+    _ownedRecordingController?.removeAfterFinishListener(
+      _onOwnedRecordingFinished,
+    );
+    _ownedRecordingController = null;
+    _deferredViewHostFontRefresh = false;
     final runtime = _runtime ?? fallback;
     final shouldDispose = _runtime != null
         ? _ownsRuntime

@@ -1,30 +1,39 @@
 # Visual novel & host-native font rendering
 
 By default, Pocket Flutter builds skip DCFA bitmap font atlas baking (`fonts:
-"host"` in `app.bytecode.json` and `guest-manifest.json`) and render all UI text
-through the host OS vector font stack (`text.layout.native`). When a project
-declares custom primary font files in `pocket.json` (such as Lantern's Noto
-Serif CJK subset) or passes `--bake-fonts` (`bakeFonts: true`), the compiler
-retains deterministic PAK font baking (`fonts: "baked"`).
+"host"` in `app.bytecode.json` and `guest-manifest.json`, plus a `ui:fonts.host`
+intent marker in `app.pak`) and render all UI text through the host OS vector
+font stack (`text.layout.native`). When a project declares custom primary font
+files in `pocket.json` (such as Lantern's Noto Serif CJK subset) or passes
+`--bake-fonts` (`bakeFonts: true`), the compiler retains deterministic PAK font
+baking (`fonts: "baked"`).
 
 ## Default host-native font pipeline
 
 When neither `fonts.regular`/`fonts.bold` nor `--bake-fonts` is specified:
 
 1. `sdk/scripts/build_guest.ts` forwards `--no-bake-fonts` to the pinned
-   compiler, omitting `ui:font.*` bitmap atlases from `app.pak`, recording
-   `"fonts": "host"`, and adding `"text.layout.native"` to
-   `guest-manifest.json`'s `capabilities.requires`.
+   compiler, omitting `ui:font.*` bitmap atlases from `app.pak`, recording an
+   explicit `ui:fonts.host` PAK entry alongside `"fonts": "host"`, and adding
+   `"text.layout.native"` to `guest-manifest.json`'s `capabilities.requires`.
+   Legacy or minimal test PAKs without `ui:fonts.host` continue to load without
+   requiring host font tables.
 2. At runtime startup, `PocketHostFontMetrics` (`pocket_host_fonts.dart`) warms
    up line heights, fullwidth CJK reference advances, and printable ASCII
    (`0x20..0x7E`) advances across the 21 active PocketJS font slots (`0..20`)
    via Flutter's `TextPainter`, and installs them into the native host through
-   `pocket_set_host_font_metrics`.
-3. Non-ASCII lines (including CJK punctuation, emoji ZWJ sequences, combining
-   marks, and complex scripts) are measured lazily on the UI thread via
-   `pocket_set_host_text_measure_callback` using the exact same slot `TextStyle`
-   used by `PocketCanvasPainter`, cached with bounded generation eviction, and
-   recorded/replayed deterministically through `hostTextAdvance` trace scalars.
+   `pocket_set_host_font_metrics`. Studio's browser preview measures the same
+   21 × 95 ASCII + CJK table via `<canvas>.measureText` and synchronizes it into
+   `pocket_probe` (`create` / `setHostFonts`).
+3. Simple unshaped non-ASCII lines (CJK ideographs, kana, precomposed Hangul
+   syllables, and CJK punctuation without combining marks, joiners, variation
+   selectors, or emoji) reuse cached per-scalar widths via
+   `pocket_set_host_glyph_measure_callback`. Complex shaped lines (combining
+   marks, emoji ZWJ sequences, variation selectors, and complex scripts) invoke
+   `pocket_set_host_text_measure_callback` and cache whole-line widths within
+   both entry-count (`16,384`) and UTF-8 key-byte (`4 MiB`, `4 KiB`/line)
+   ceilings. Uncached advances record and replay deterministically through
+   `hostTextAdvance` trace scalars.
 4. `PocketCanvasPainter` (`pocket_view_painter.dart`) resolves slots directly
    against platform system fonts (proportional default family for slots `0..15`
    and `19..20`; platform monospace fallback chain `Menlo` / `SF Mono` /
@@ -64,7 +73,9 @@ When dynamic fonts are loaded at runtime (for example via Flutter's
 listens to `PaintingBinding.instance.systemFonts` (and exposes
 `PocketViewController.refreshHostFonts()`) to clear cached host metrics and
 `TextPainter` layouts, resynchronize native host font tables, and trigger a
-relayout/repaint.
+relayout/repaint. If a `PocketRecordingController` trace is actively recording,
+mid-recording font refreshes are deferred until `finish()` seals the recording
+so `metadata.hostFonts` and replay scalar caches stay consistent.
 
 ## Configuration rules
 
@@ -78,10 +89,12 @@ control is needed.
 ## Validation
 
 - `cd sdk && bun test scripts/tests/build_guest_fonts.test.ts` verifies both
-  default font-less (`fonts: "host"`, `text.layout.native`) and baked
-  (`fonts: "baked"`) PAK outputs plus path-traversal validation.
-- `cd sdk/native && cargo test` verifies native font-less PAK admission gating,
-  shaped UTF-8 callback caching/eviction, 3D baked preservation vs font-less
-  projection, and trace replay determinism.
+  default font-less (`fonts: "host"`, `ui:fonts.host`, `text.layout.native`)
+  and baked (`fonts: "baked"`) PAK outputs plus path-traversal validation.
+- `cd sdk/native && cargo test --locked` verifies native `ui:fonts.host` PAK
+  admission gating (while keeping legacy empty PAKs loadable), simple-line CJK
+  per-scalar fast path vs shaped UTF-8 callback routing, segment-cache byte
+  caps, 3D baked preservation vs font-less projection, and replay determinism.
 - `cd sdk/packages/pocket_flutter && flutter test` verifies Flutter host font
-  synchronization, dynamic font cache invalidation, and recording/replay parity.
+  synchronization, deferred mid-recording font refreshes, dynamic font cache
+  invalidation, and recording/replay parity.
