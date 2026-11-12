@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0d111a">
+  <meta name="theme-color" content="#090b0f">
   <title>Pocket Studio — 工作区</title>
   <link rel="stylesheet" href="/editor.css">
 </head>
@@ -16,49 +16,155 @@
         <button id="notice-close" class="notice-close" type="button" aria-label="关闭通知" title="关闭通知">×</button>
       </div>
 
-      <div class="project-switcher-bar" aria-label="项目工作区">
-        <details id="project-switcher" class="project-switcher">
-          <summary class="project-switcher-summary">
-            <span class="project-switcher-copy">
-              <span class="eyebrow">项目</span>
-              <strong id="project-title">选择项目</strong>
-              <small id="project-subtitle">创建 SDK 项目、编辑 JS 界面并在本地预览。</small>
-            </span>
-            <span class="project-switcher-meta"><span id="project-state" class="state-chip">暂无项目</span><span class="project-switcher-chevron" aria-hidden="true">⌄</span></span>
-          </summary>
-          <div class="project-switcher-menu">
-            <div class="project-switcher-menu-heading"><span>项目列表</span><span class="field-help">本地工作区</span></div>
-            <nav id="projects" class="project-list" aria-label="项目列表"></nav>
+      <header class="project-switcher-bar" aria-label="项目工作区">
+        <div class="command-bar-left">
+          <div class="studio-brand" aria-hidden="true" title="Pocket Studio">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M4.5 2.5h4.2a3.8 3.8 0 0 1 0 7.6H6.8v3.4H4.5V2.5Z" fill="currentColor"/>
+              <circle cx="11.5" cy="11.5" r="2" fill="#34d399"/>
+            </svg>
           </div>
-        </details>
-        <div id="studio-upgrade-bar" class="studio-upgrade-bar" role="region" aria-label="Studio 版本与自升级">
-          <div class="studio-upgrade-copy">
-            <span class="eyebrow">Studio SDK</span>
-            <strong id="studio-upgrade-version">v—</strong>
-            <small id="studio-upgrade-status" aria-live="polite">正在检查更新…</small>
-          </div>
-          <div class="studio-upgrade-actions">
-            <a id="studio-upgrade-release" class="text-button" href="#" target="_blank" rel="noopener" hidden>发布说明</a>
-            <button id="studio-upgrade-action" class="button quiet small-button" type="button">检查更新</button>
+          <details id="project-switcher" class="project-switcher">
+            <summary class="project-switcher-summary">
+              <span class="project-switcher-copy">
+                <span class="eyebrow">项目</span>
+                <strong id="project-title">选择项目</strong>
+                <small id="project-subtitle">创建 SDK 项目、编辑 JS 界面并在本地预览。</small>
+              </span>
+              <span class="project-switcher-meta"><span id="project-state" class="state-chip">暂无项目</span><span class="project-switcher-chevron" aria-hidden="true">⌄</span></span>
+            </summary>
+            <div class="project-switcher-menu">
+              <div class="project-switcher-menu-heading"><span>项目列表</span><span class="field-help">本地工作区</span></div>
+              <nav id="projects" class="project-list" aria-label="项目列表"></nav>
+            </div>
+          </details>
+          <button id="new-project" class="button secondary small-button" type="button">+ 新建项目</button>
+        </div>
+
+        <div class="command-bar-center" role="toolbar" aria-label="构建与工作区模式">
+          <button id="build" class="button primary small-button" type="button" title="构建项目 (⌘B)" disabled>构建 <kbd class="shortcut-hint">⌘B</kbd></button>
+          <div class="mode-capsule" role="group" aria-label="视图切换">
+            <button id="source-split-toggle" class="button secondary small-button" type="button" aria-pressed="false" title="切换左侧源码分栏 (⌘E)" disabled>源码分栏</button>
+            <button id="novel-open" class="button secondary small-button" type="button" disabled>剧情编辑</button>
+            <button id="versions-open" class="button secondary small-button" type="button" disabled>版本</button>
           </div>
         </div>
-        <button id="new-project" class="button primary small-button" type="button">新建项目</button>
-      </div>
+
+        <div class="command-bar-right">
+          <div id="studio-upgrade-bar" class="studio-upgrade-bar" role="region" aria-label="Studio 版本与自升级">
+            <div class="studio-upgrade-copy">
+              <span class="eyebrow">Studio SDK</span>
+              <strong id="studio-upgrade-version">v—</strong>
+              <small id="studio-upgrade-status" aria-live="polite">正在检查更新…</small>
+            </div>
+            <div class="studio-upgrade-actions">
+              <a id="studio-upgrade-release" class="text-button" href="#" target="_blank" rel="noopener" hidden>发布说明</a>
+              <button id="studio-upgrade-action" class="button quiet small-button" type="button">检查更新</button>
+            </div>
+          </div>
+        </div>
+      </header>
 
       <main class="workspace" id="workspace">
-        <section class="preview-column" aria-label="预览与项目工具">
+        <nav class="activity-rail" aria-label="工作区导航">
+          <button id="rail-stage" class="rail-button active" type="button" title="预览舞台" aria-label="预览舞台" aria-pressed="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="4" y="1.8" width="8" height="12.4" rx="1.8"/>
+              <line x1="7" y1="11.8" x2="9" y2="11.8"/>
+            </svg>
+          </button>
+          <button id="rail-source" class="rail-button" type="button" title="源码分栏 (⌘E)" aria-label="源码分栏" aria-pressed="false">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="5.5 4.5 2.2 8 5.5 11.5"/>
+              <polyline points="10.5 4.5 13.8 8 10.5 11.5"/>
+              <line x1="8.8" y1="3.2" x2="7.2" y2="12.8"/>
+            </svg>
+          </button>
+          <button id="rail-resources" class="rail-button" type="button" title="包资源策略" aria-label="包资源策略" aria-pressed="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M8 1.8 14 5v6l-6 3.2L2 11V5l6-3.2Z"/>
+              <path d="M2 5l6 3.2L14 5"/>
+              <line x1="8" y1="8.2" x2="8" y2="14.2"/>
+            </svg>
+          </button>
+          <button id="rail-versions" class="rail-button" type="button" title="版本发布与 OTA" aria-label="版本发布与 OTA" aria-pressed="false">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="5" cy="4" r="1.7"/>
+              <circle cx="5" cy="12" r="1.7"/>
+              <circle cx="11.5" cy="8" r="1.7"/>
+              <line x1="5" y1="5.7" x2="5" y2="10.3"/>
+              <path d="M6.7 4.4c2.2 0 3.1 1 3.7 2.1"/>
+            </svg>
+          </button>
+          <button id="rail-settings" class="rail-button" type="button" title="项目构建设置" aria-label="项目构建设置" aria-pressed="false">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.2"/>
+              <path d="M8 2v1.6M8 12.4V14M2 8h1.6M12.4 8H14M3.8 3.8l1.1 1.1M11.1 11.1l1.1 1.1M12.2 3.8l-1.1 1.1M4.9 11.1 3.8 12.2"/>
+            </svg>
+          </button>
+          <div class="rail-spacer"></div>
+          <button id="rail-console" class="rail-button active" type="button" title="终端与构建产物 (⌘J)" aria-label="终端与构建产物" aria-pressed="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="1.8" y="2.5" width="12.4" height="11" rx="1.8"/>
+              <polyline points="4.5 6.2 6.8 8.2 4.5 10.2"/>
+              <line x1="8.2" y1="10.2" x2="11.2" y2="10.2"/>
+            </svg>
+          </button>
+        </nav>
+
+        <aside id="source-dock" class="source-dock" aria-labelledby="source-panel-title" hidden>
+          <section class="panel source-panel" aria-labelledby="source-panel-title">
+            <div class="panel-header source-header">
+              <div class="source-tab-group">
+                <span class="eyebrow">源码</span>
+                <div class="file-heading">
+                  <h2 id="source-panel-title">app.tsx</h2>
+                  <select id="file-picker" aria-label="应用源码文件" disabled></select>
+                </div>
+              </div>
+              <div class="source-header-actions">
+                <span id="source-bytes" class="meta-chip">—</span>
+                <span id="save-status" class="status-text">就绪</span>
+                <button id="refresh-source" class="text-button" type="button" disabled>刷新文件</button>
+                <button id="save" class="button primary small-button" type="button" title="保存源码 (⌘S)" disabled>保存</button>
+                <button id="source-close" class="icon-button" type="button" aria-label="关闭源码编辑器" title="关闭源码分栏">×</button>
+              </div>
+            </div>
+            <textarea id="source" spellcheck="false" aria-label="应用源码文件" placeholder="选择项目以编辑其应用源码。" disabled></textarea>
+            <div class="source-foot"><span>Solid TSX · 界面由 JavaScript 管理</span><span id="source-revision">版本 —</span></div>
+          </section>
+        </aside>
+
+        <section class="preview-column stage-column" aria-label="预览与项目工具">
           <section class="panel preview-panel" aria-labelledby="preview-title">
+            <div class="preview-toolbar" role="group" aria-label="预览目标">
+              <div class="preview-target" aria-label="Flutter 预览控制">
+                <span class="control-label">Flutter</span>
+                <span id="preview-state" class="live-chip"><i></i>等待中</span>
+                <button id="preview-open" class="button secondary small-button" type="button" title="在新标签页打开预览" aria-label="在新标签页打开预览" disabled>打开</button>
+              </div>
+              <div class="preview-target wechat-validation-controls" aria-label="微信校验控制">
+                <span id="wechat-project-label" class="control-label">微信</span>
+                <span id="wechat-state" class="meta-chip" aria-live="polite">空闲</span>
+                <button id="wechat-start" class="button secondary small-button" type="button" disabled>运行</button>
+                <button id="wechat-stop" class="button quiet small-button" type="button" hidden>停止</button>
+                <a id="wechat-open" class="button secondary small-button" href="#" target="_blank" rel="noopener" hidden>打开</a>
+              </div>
+              <div class="preview-target preview-device-controls" aria-label="设备预览控制">
+                <span class="control-label">设备</span><label class="device-select-label"><span class="sr-only">目标设备</span><select id="device-picker" aria-label="部署目标" disabled><option value="">正在加载设备…</option></select></label>
+                <button id="deploy" class="button secondary small-button" type="button" disabled>运行</button>
+                <button id="deploy-cancel" class="button quiet small-button" type="button" hidden>停止</button>
+              </div>
+            </div>
+
             <div class="panel-header preview-header">
-              <h2 id="preview-title">预览</h2>
+              <h2 id="preview-title" class="sr-only">预览</h2>
               <div class="preview-actions" role="group" aria-label="预览工具">
                 <label class="viewport-select-label"><span class="sr-only">预览尺寸</span><select id="viewport-picker" aria-label="预览视口"><option value="mobile">手机</option><option value="tablet">平板 · 768 × 1023</option><option value="desktop">桌面 · 1023 × 768</option></select></label>
-                <button id="build" class="button secondary small-button" type="button" disabled>构建</button>
-                <button id="novel-open" class="button secondary small-button" type="button" disabled>剧情编辑</button>
-                <button id="versions-open" class="button secondary small-button" type="button" disabled>版本</button>
+                <button id="preview-bezel-toggle" class="button secondary small-button" type="button" aria-pressed="false" title="为支持的预览显示设备边框">设备边框</button>
+                <button id="toggle-regions" class="button secondary small-button" type="button" aria-pressed="false" title="显示 Flutter 预览中的区域 ID" disabled>区域 ID</button>
                 <button id="refresh-preview" class="button secondary small-button" type="button" disabled>刷新</button>
                 <button id="capture-preview" class="button secondary small-button" type="button" title="截取 Flutter 预览" disabled>截图</button>
-                <button id="toggle-regions" class="button secondary small-button" type="button" aria-pressed="false" title="显示 Flutter 预览中的区域 ID" disabled>区域 ID</button>
-                <button id="preview-bezel-toggle" class="button secondary small-button" type="button" aria-pressed="false" title="为支持的预览显示设备边框">设备边框</button>
                 <details class="preview-options">
                   <summary class="button secondary small-button">更多</summary>
                   <div class="preview-options-content">
@@ -81,25 +187,7 @@
                 </details>
               </div>
             </div>
-            <div class="preview-toolbar" role="group" aria-label="预览目标">
-              <div class="preview-target" aria-label="Flutter 预览控制">
-                <span class="control-label">Flutter</span>
-                <span id="preview-state" class="live-chip"><i></i>等待中</span>
-                <button id="preview-open" class="button secondary small-button" type="button" title="在新标签页打开预览" aria-label="在新标签页打开预览" disabled>打开</button>
-              </div>
-              <div class="preview-target wechat-validation-controls" aria-label="微信校验控制">
-                  <span id="wechat-project-label" class="control-label">微信</span>
-                  <span id="wechat-state" class="meta-chip" aria-live="polite">空闲</span>
-                  <button id="wechat-start" class="button secondary small-button" type="button" disabled>运行</button>
-                  <button id="wechat-stop" class="button quiet small-button" type="button" hidden>停止</button>
-                  <a id="wechat-open" class="button secondary small-button" href="#" target="_blank" rel="noopener" hidden>打开</a>
-                </div>
-              <div class="preview-target preview-device-controls" aria-label="设备预览控制">
-                  <span class="control-label">设备</span><label class="device-select-label"><span class="sr-only">目标设备</span><select id="device-picker" aria-label="部署目标" disabled><option value="">正在加载设备…</option></select></label>
-                  <button id="deploy" class="button secondary small-button" type="button" disabled>运行</button>
-                  <button id="deploy-cancel" class="button quiet small-button" type="button" hidden>停止</button>
-                </div>
-            </div>
+
             <div id="preview-stage-wrap" class="preview-stage-wrap">
               <div id="preview-surfaces" class="preview-surfaces">
                 <div class="preview-surface-slot">
@@ -131,157 +219,45 @@
                   <div class="preview-surface-label" aria-hidden="true"><strong>微信小程序</strong><span>微信 WASM · <em id="wechat-device-label">—</em></span></div>
                 </section>
               </div>
-              <button id="resize-preview-height" class="preview-height-resizer" type="button" role="separator" aria-orientation="horizontal" aria-label="调整预览高度" aria-valuemin="240" aria-valuemax="1200" aria-valuenow="668" tabindex="0"><span aria-hidden="true"></span></button>
+              <button id="resize-preview-height" class="preview-height-resizer" type="button" role="separator" aria-orientation="horizontal" aria-label="调整预览高度" aria-valuemin="240" aria-valuemax="1200" aria-valuenow="616" tabindex="0"><span aria-hidden="true"></span></button>
             </div>
           </section>
 
-          <details class="panel resources-panel" id="resources-panel">
-            <summary class="resources-summary">
-              <div class="resources-heading">
-                <div class="eyebrow">包资源</div>
-                <h2 id="resources-title">打开小程序时下载资源</h2>
-                <p>选择随已验证基础包发布的资源，或在打开时下载。</p>
+          <section id="console-dock" class="panel output-panel console-dock" aria-labelledby="output-title">
+            <div class="console-header">
+              <div class="console-tabs" role="tablist" aria-label="终端与构建输出">
+                <button id="console-tab-build" class="console-tab active" type="button" role="tab" aria-selected="true" aria-controls="console-pane-build" data-console-tab="build">构建日志</button>
+                <button id="console-tab-deploy" class="console-tab" type="button" role="tab" aria-selected="false" aria-controls="console-pane-deploy" data-console-tab="deploy">部署输出</button>
+                <button id="console-tab-artifacts" class="console-tab" type="button" role="tab" aria-selected="false" aria-controls="console-pane-artifacts" data-console-tab="artifacts">产物清单</button>
+                <button id="console-tab-signing" class="console-tab" type="button" role="tab" aria-selected="false" aria-controls="console-pane-signing" data-console-tab="signing">签名发布</button>
               </div>
-              <div class="resources-summary-actions">
-                <span id="resources-state" class="meta-chip">选择项目</span>
-                <span class="resources-chevron" aria-hidden="true">⌄</span>
+              <div class="console-actions">
+                <h2 id="output-title" class="sr-only">诊断</h2>
+                <button id="clear-log" class="text-button" type="button">清空</button>
+                <button id="console-collapse-toggle" class="icon-button console-collapse-button" type="button" aria-label="折叠或展开终端面板" aria-expanded="true" aria-controls="console-dock" title="折叠/展开终端 (⌘J)">⌄</button>
               </div>
-            </summary>
-            <div class="resources-content">
-              <div class="resources-notice">
-                <span>网络资源会在打开时下载，成功启动后可离线使用。必需的字体和样式会保留在基础包中。</span>
+            </div>
+            <div id="console-body" class="console-body">
+              <div id="console-pane-build" class="console-pane" role="tabpanel" aria-labelledby="console-tab-build" data-console-pane="build">
+                <pre id="log" class="build-log" aria-live="polite">尚未选择项目。</pre>
               </div>
-              <div class="resource-browser">
-                <aside class="resource-package-rail" aria-label="小程序包">
-                  <div class="resource-package-rail-heading">
-                    <span class="eyebrow">包</span>
-                    <span id="resource-package-count" class="resource-package-count" aria-live="polite"></span>
+              <div id="console-pane-deploy" class="console-pane" role="tabpanel" aria-labelledby="console-tab-deploy" data-console-pane="deploy" hidden>
+                <section class="panel deploy-panel" aria-labelledby="deploy-title">
+                  <div class="panel-header compact-header">
+                    <div><div class="eyebrow">设备目标</div><h2 id="deploy-title">部署构建</h2></div>
+                    <span id="deploy-state" class="meta-chip">暂无目标</span>
                   </div>
-                  <nav id="resource-package-list" class="resource-package-list" aria-label="小程序包"><span class="muted">选择项目以查看其包。</span></nav>
-                  <label class="resource-package-picker-legacy" for="resource-package-picker">
-                    <span class="sr-only">小程序包（旧版选择器）</span>
-                    <select id="resource-package-picker" aria-label="小程序包" aria-hidden="true" tabindex="-1" disabled></select>
-                  </label>
-                </aside>
-                <section class="resource-detail" aria-labelledby="resource-detail-title">
-                  <div class="resource-detail-header">
-                    <div class="resource-detail-heading">
-                        <span class="eyebrow">已选包</span>
-                        <h3 id="resource-detail-title">选择一个包</h3>
-                    </div>
-                    <div id="resource-package-meta" class="resource-package-meta" aria-live="polite"></div>
+                  <div class="deploy-body">
+                    <p id="device-help" class="field-help">部署到模拟器或已连接设备前，请先保存并构建。</p>
+                    <pre id="deploy-log" class="deploy-log" aria-live="polite">尚未部署。</pre>
                   </div>
-                  <div id="resource-list" class="resource-list resource-grid" role="list" aria-label="包资源"><span class="muted">选择项目以查看其包。</span></div>
                 </section>
               </div>
-              <div class="resources-footer">
-                <span id="resources-save-status" class="status-text" aria-live="polite">尚未加载策略</span>
-                <button id="save-resources" class="button secondary small-button" type="button" disabled>保存资源策略</button>
-              </div>
-            </div>
-          </details>
-
-          <section class="panel test-publish-panel" aria-labelledby="test-publish-title">
-            <div class="test-publish-card">
-              <div class="test-publish-copy">
-                <div class="eyebrow">测试包 / 热更新</div>
-                <strong id="test-publish-title">发布到本地版本后端</strong>
-                <span>为递增的测试构建签名，并以只读方式提供给同一局域网中的模拟器和设备。</span>
-              </div>
-              <button id="publish-test" class="button primary" type="button" disabled>发布测试包</button>
-            </div>
-            <div id="test-publish-info" class="test-publish-info" hidden></div>
-          </section>
-
-          <details class="panel version-manager" id="version-manager">
-            <summary class="version-manager-summary">
-              <div>
-                <div class="eyebrow">本地版本后端</div>
-                <h2>版本管理</h2>
-                <p>查看提供给模拟器和局域网设备的已签名测试/稳定版本槽。</p>
-              </div>
-              <div class="version-manager-actions">
-                <span id="version-manager-state" class="meta-chip">选择项目</span>
-                <span class="resources-chevron" aria-hidden="true">⌄</span>
-              </div>
-            </summary>
-            <div class="version-manager-content">
-              <div class="version-backend-heading">
-                <div><span class="eyebrow">后端</span><strong id="version-backend-origin">尚未启动</strong><span id="version-backend-detail" class="muted">打开此面板以启动只读后端。</span></div>
-                <div class="version-backend-actions">
-                  <button id="version-publish-test" class="button secondary small-button" type="button" disabled>发布测试版</button>
-                  <button id="version-publish-release" class="button primary small-button" type="button" disabled>发布稳定版</button>
-                  <button id="versions-refresh" class="button secondary small-button" type="button" disabled>刷新</button>
-                </div>
-              </div>
-              <section id="version-app-config" class="version-app-config" hidden aria-labelledby="version-app-config-title">
-                <div class="version-app-config-copy">
-                  <span class="eyebrow">APP 接入</span>
-                  <strong id="version-app-config-title">主包接入地址（catalog latest.json）</strong>
-                  <span>只需配置一次；关联 mini app 会从主包自动取得版本和资源。</span>
-                </div>
-                <div class="version-app-config-row">
-                  <a id="version-app-config-link" href="#" target="_blank" rel="noopener" aria-label="App 接入地址"></a>
-                  <button id="version-app-config-copy" class="text-button" type="button" disabled>复制 App 接入地址</button>
-                </div>
-              </section>
-              <div id="version-slots" class="version-slots"><span class="muted">发布测试版或稳定版以创建版本槽。</span></div>
-              <details class="version-host-guide" id="version-host-guide">
-                <summary>技术说明：App 接入地址与 catalog</summary>
-                <div class="version-host-guide-content">
-                  <p><strong>App 接入地址</strong> 是固定频道的签名 catalog（<code>latest.json</code>），记录主包和全部 mini app 的版本；mini app 不需要单独输入地址或密钥。</p>
-                  <p><strong>latest.json</strong> 是 App 运行时读取的签名更新清单；历史版本配置仅服务于对应版本，不是当前 App 接入地址。</p>
-                  <p><strong>Flutter</strong> 使用唯一 catalog 地址启动：<code>flutter run --dart-define=POCKET_HOST_CONFIG_URL='&lt;总入口URL&gt;'</code>；<strong>Mini app</strong> 使用 PocketAppConfig bootstrap。编辑器不会自动导入密钥。</p>
-                </div>
-              </details>
-              <section id="version-history" class="version-history" hidden aria-labelledby="version-history-title">
-                <div class="version-history-heading">
-                  <div>
-                    <span class="eyebrow">审计记录</span>
-                    <strong id="version-history-title">已发布版本</strong>
-                  </div>
-                  <span id="version-history-count" class="meta-chip"></span>
-                </div>
-                <div id="version-history-list" class="version-history-list"></div>
-              </section>
-            </div>
-          </details>
-
-          <details class="editor-tools" id="editor-tools">
-            <summary><span>项目、源码、设备与诊断</span><span class="advanced-summary">高级工具按需展开</span></summary>
-            <div class="editor-tools-content">
-              <section class="panel config-panel" aria-labelledby="config-title">
-                <div class="panel-header compact-header">
-                  <div><div class="eyebrow">项目配置</div><h2 id="config-title">构建设置</h2></div>
-                  <span id="build-state" class="meta-chip">尚未构建</span>
-                </div>
-                <div class="form-grid config-grid">
-                  <label>显示名称<input id="config-name" autocomplete="off" disabled></label>
-                  <label>应用 ID<input id="config-app-id" autocomplete="off" disabled></label>
-                  <label>版本<input id="config-version" autocomplete="off" disabled></label>
-                  <label>构建号<input id="config-build" type="number" min="0" step="1" disabled></label>
-                  <label>帧率<input id="config-tick" type="number" min="1" max="120" step="1" disabled></label>
-                </div>
-              </section>
-
-              <section class="panel deploy-panel" aria-labelledby="deploy-title">
-                <div class="panel-header compact-header">
-                  <div><div class="eyebrow">设备目标</div><h2 id="deploy-title">部署构建</h2></div>
-                  <span id="deploy-state" class="meta-chip">暂无目标</span>
-                </div>
-                <div class="deploy-body">
-                  <p id="device-help" class="field-help">部署到模拟器或已连接设备前，请先保存并构建。</p>
-                  <pre id="deploy-log" class="deploy-log" aria-live="polite">尚未部署。</pre>
-                </div>
-              </section>
-
-              <section class="panel output-panel" aria-labelledby="output-title">
-                <div class="panel-header compact-header">
-                  <div><div class="eyebrow">构建输出</div><h2 id="output-title">诊断</h2></div>
-                  <button id="clear-log" class="text-button" type="button">清空</button>
-                </div>
+              <div id="console-pane-artifacts" class="console-pane" role="tabpanel" aria-labelledby="console-tab-artifacts" data-console-pane="artifacts" hidden>
                 <div id="artifacts" class="artifact-list"><span class="muted">完成真实 QuickJS 构建后会显示构建输出。</span></div>
-                <details class="advanced-panel" id="advanced-panel">
+              </div>
+              <div id="console-pane-signing" class="console-pane" role="tabpanel" aria-labelledby="console-tab-signing" data-console-pane="signing" hidden>
+                <details class="advanced-panel" id="advanced-panel" open>
                   <summary><span>高级</span><span class="advanced-summary">签名发布</span></summary>
                   <div class="advanced-content">
                     <div class="publish-heading"><div><div class="eyebrow">签名发布</div><strong>发布此构建版本</strong><span>创建供宿主使用的配置发布更新。</span></div><div class="publish-actions"><span id="runtime-abi" class="meta-chip">ABI —</span><button id="publish" class="button secondary" type="button" disabled>发布正式版</button></div></div>
@@ -289,29 +265,153 @@
                     <span id="publish-status" class="publish-status">尚未发布</span>
                   </div>
                 </details>
-                <pre id="log" class="build-log" aria-live="polite">尚未选择项目。</pre>
-              </section>
+              </div>
             </div>
-          </details>
+          </section>
         </section>
+
+        <aside class="inspector-column" aria-label="检查器面板">
+          <div class="inspector-tabs" role="tablist" aria-label="检查器视图切换">
+            <button id="inspector-tab-resources" class="inspector-tab active" type="button" role="tab" aria-selected="true" aria-controls="resources-panel" data-inspector-tab="resources">包资源</button>
+            <button id="inspector-tab-versions" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="version-manager" data-inspector-tab="versions">版本发布</button>
+            <button id="inspector-tab-settings" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="editor-tools" data-inspector-tab="settings">项目设置</button>
+          </div>
+
+          <div class="inspector-body">
+            <details class="panel resources-panel" id="resources-panel" open>
+              <summary class="resources-summary">
+                <div class="resources-heading">
+                  <div class="eyebrow">包资源</div>
+                  <h2 id="resources-title">打开小程序时下载资源</h2>
+                  <p>选择随已验证基础包发布的资源，或在打开时下载。</p>
+                </div>
+                <div class="resources-summary-actions">
+                  <span id="resources-state" class="meta-chip">选择项目</span>
+                  <span class="resources-chevron" aria-hidden="true">⌄</span>
+                </div>
+              </summary>
+              <div class="resources-content">
+                <div class="resources-notice">
+                  <span>网络资源会在打开时下载，成功启动后可离线使用。必需的字体和样式会保留在基础包中。</span>
+                </div>
+                <div class="resource-browser">
+                  <aside class="resource-package-rail" aria-label="小程序包">
+                    <div class="resource-package-rail-heading">
+                      <span class="eyebrow">包</span>
+                      <span id="resource-package-count" class="resource-package-count" aria-live="polite"></span>
+                    </div>
+                    <nav id="resource-package-list" class="resource-package-list" aria-label="小程序包"><span class="muted">选择项目以查看其包。</span></nav>
+                    <label class="resource-package-picker-legacy" for="resource-package-picker">
+                      <span class="sr-only">小程序包（旧版选择器）</span>
+                      <select id="resource-package-picker" aria-label="小程序包" aria-hidden="true" tabindex="-1" disabled></select>
+                    </label>
+                  </aside>
+                  <section class="resource-detail" aria-labelledby="resource-detail-title">
+                    <div class="resource-detail-header">
+                      <div class="resource-detail-heading">
+                        <span class="eyebrow">已选包</span>
+                        <h3 id="resource-detail-title">选择一个包</h3>
+                      </div>
+                      <div id="resource-package-meta" class="resource-package-meta" aria-live="polite"></div>
+                    </div>
+                    <div id="resource-list" class="resource-list resource-grid" role="list" aria-label="包资源"><span class="muted">选择项目以查看其包。</span></div>
+                  </section>
+                </div>
+                <div class="resources-footer">
+                  <span id="resources-save-status" class="status-text" aria-live="polite">尚未加载策略</span>
+                  <button id="save-resources" class="button primary small-button" type="button" disabled>保存资源策略</button>
+                </div>
+              </div>
+            </details>
+
+            <details class="panel version-manager" id="version-manager">
+              <summary class="version-manager-summary">
+                <div>
+                  <div class="eyebrow">本地版本后端</div>
+                  <h2>版本管理</h2>
+                  <p>查看提供给模拟器和局域网设备的已签名测试/稳定版本槽。</p>
+                </div>
+                <div class="version-manager-actions">
+                  <span id="version-manager-state" class="meta-chip">选择项目</span>
+                  <span class="resources-chevron" aria-hidden="true">⌄</span>
+                </div>
+              </summary>
+              <div class="version-manager-content">
+                <section class="panel test-publish-panel" aria-labelledby="test-publish-title">
+                  <div class="test-publish-card">
+                    <div class="test-publish-copy">
+                      <div class="eyebrow">测试包 / 热更新</div>
+                      <strong id="test-publish-title">发布到本地版本后端</strong>
+                      <span>为递增的测试构建签名，并以只读方式提供给同一局域网中的模拟器和设备。</span>
+                    </div>
+                    <button id="publish-test" class="button primary small-button" type="button" disabled>发布测试包</button>
+                  </div>
+                  <div id="test-publish-info" class="test-publish-info" hidden></div>
+                </section>
+                <div class="version-backend-heading">
+                  <div><span class="eyebrow">后端</span><strong id="version-backend-origin">尚未启动</strong><span id="version-backend-detail" class="muted">打开此面板以启动只读后端。</span></div>
+                  <div class="version-backend-actions">
+                    <button id="version-publish-test" class="button secondary small-button" type="button" disabled>发布测试版</button>
+                    <button id="version-publish-release" class="button primary small-button" type="button" disabled>发布稳定版</button>
+                    <button id="versions-refresh" class="button secondary small-button" type="button" disabled>刷新</button>
+                  </div>
+                </div>
+                <section id="version-app-config" class="version-app-config" hidden aria-labelledby="version-app-config-title">
+                  <div class="version-app-config-copy">
+                    <span class="eyebrow">APP 接入</span>
+                    <strong id="version-app-config-title">主包接入地址（catalog latest.json）</strong>
+                    <span>只需配置一次；关联 mini app 会从主包自动取得版本和资源。</span>
+                  </div>
+                  <div class="version-app-config-row">
+                    <a id="version-app-config-link" href="#" target="_blank" rel="noopener" aria-label="App 接入地址"></a>
+                    <button id="version-app-config-copy" class="text-button" type="button" disabled>复制 App 接入地址</button>
+                  </div>
+                </section>
+                <div id="version-slots" class="version-slots"><span class="muted">发布测试版或稳定版以创建版本槽。</span></div>
+                <details class="version-host-guide" id="version-host-guide">
+                  <summary>技术说明：App 接入地址与 catalog</summary>
+                  <div class="version-host-guide-content">
+                    <p><strong>App 接入地址</strong> 是固定频道的签名 catalog（<code>latest.json</code>），记录主包和全部 mini app 的版本；mini app 不需要单独输入地址或密钥。</p>
+                    <p><strong>latest.json</strong> 是 App 运行时读取的签名更新清单；历史版本配置仅服务于对应版本，不是当前 App 接入地址。</p>
+                    <p><strong>Flutter</strong> 使用唯一 catalog 地址启动：<code>flutter run --dart-define=POCKET_HOST_CONFIG_URL='&lt;总入口URL&gt;'</code>；<strong>Mini app</strong> 使用 PocketAppConfig bootstrap。编辑器不会自动导入密钥。</p>
+                  </div>
+                </details>
+                <section id="version-history" class="version-history" hidden aria-labelledby="version-history-title">
+                  <div class="version-history-heading">
+                    <div>
+                      <span class="eyebrow">审计记录</span>
+                      <strong id="version-history-title">已发布版本</strong>
+                    </div>
+                    <span id="version-history-count" class="meta-chip"></span>
+                  </div>
+                  <div id="version-history-list" class="version-history-list"></div>
+                </section>
+              </div>
+            </details>
+
+            <details class="editor-tools" id="editor-tools">
+              <summary><span>项目配置与构建参数</span><span class="advanced-summary">应用元数据与帧率</span></summary>
+              <div class="editor-tools-content">
+                <section class="panel config-panel" aria-labelledby="config-title">
+                  <div class="panel-header compact-header">
+                    <div><div class="eyebrow">项目配置</div><h2 id="config-title">构建设置</h2></div>
+                    <span id="build-state" class="meta-chip">尚未构建</span>
+                  </div>
+                  <div class="form-grid config-grid">
+                    <label>显示名称<input id="config-name" autocomplete="off" disabled></label>
+                    <label>应用 ID<input id="config-app-id" autocomplete="off" disabled></label>
+                    <label>版本<input id="config-version" autocomplete="off" disabled></label>
+                    <label>构建号<input id="config-build" type="number" min="0" step="1" disabled></label>
+                    <label>帧率<input id="config-tick" type="number" min="1" max="120" step="1" disabled></label>
+                  </div>
+                </section>
+              </div>
+            </details>
+          </div>
+        </aside>
       </main>
     </div>
   </div>
-
-  <dialog id="source-dialog" class="source-dialog" aria-labelledby="source-dialog-title">
-    <div class="source-dialog-header"><div><div class="eyebrow">应用源码</div><h2 id="source-dialog-title">编辑源码</h2></div><button id="source-close" class="icon-button" type="button" aria-label="关闭源码编辑器">×</button></div>
-    <section class="panel source-panel" aria-labelledby="source-panel-title">
-      <div class="panel-header source-header">
-        <div>
-          <div class="eyebrow">源码文件</div>
-          <div class="file-heading"><h2 id="source-panel-title">app.tsx</h2><select id="file-picker" aria-label="应用源码文件" disabled></select></div>
-        </div>
-        <div class="source-header-actions"><button id="refresh-source" class="text-button" type="button" disabled>刷新文件</button><button id="save" class="button secondary small-button" type="button" disabled>保存</button><span id="save-status" class="status-text">就绪</span><span id="source-bytes" class="meta-chip">—</span></div>
-      </div>
-      <textarea id="source" spellcheck="false" aria-label="应用源码文件" placeholder="选择项目以编辑其应用源码。" disabled></textarea>
-      <div class="source-foot"><span>Solid TSX · 界面由 JavaScript 管理</span><span id="source-revision">版本 —</span></div>
-    </section>
-  </dialog>
 
   <dialog id="create-dialog">
     <form id="create-form" method="dialog">
