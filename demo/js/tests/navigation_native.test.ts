@@ -107,6 +107,49 @@ async function popSecondary(session: NativeSession, frame: Frame): Promise<Frame
   return settle(session, await session.tapPoint(backIconPoint(geometryFrame)));
 }
 
+test("native secondary-page arrow keeps the outgoing route and slides it right", { timeout: 30_000 }, async () => {
+  const session = new NativeSession(readNativeArtifacts("POCKET_NAVIGATION_ARROW_POP"), { width, height });
+  try {
+    let frame = await session.boot();
+    frame = await openMobileUi(session, frame);
+    frame = await session.settle(frame, 20);
+    frame = await session.settle(await session.tap("Controls", frame, (op) => (op.y ?? 0) < 150), 3);
+    frame = await session.settle(await session.tap("Enabled", frame), 3);
+    frame = await session.settle(await session.tap("+", frame), 3);
+    frame = await session.settle(await session.tap("+", frame), 3);
+    const retainedStateText = "State · off · level 5 · layout adaptive";
+    assert.ok(textOf(frame).includes(retainedStateText));
+    const currentPage = textOp(frame, "Mobile UI", (op) => (op.y ?? 999) < 60);
+
+    frame = await session.tapPoint(backIconPoint({
+      ...frame,
+      ops: (frame.ops ?? []).filter((op) => !(op.type === "text" && op.text === "Back")),
+    }));
+    const outgoingAtStart = textOp(frame, "Mobile UI", (op) => (op.y ?? 999) < 60);
+    assert.ok(textOf(frame).includes(retainedStateText),
+      "the popped RouteView must retain its local control state during exit");
+    assert.ok(
+      outgoingAtStart.x! >= currentPage.x! - 1,
+      `the popped route must remain painted when its arrow pop begins (${currentPage.x} -> ${outgoingAtStart.x})`,
+    );
+    frame = await session.frame();
+    const outgoingNextFrame = textOp(frame, "Mobile UI", (op) => (op.y ?? 999) < 60);
+    assert.ok(textOf(frame).includes(retainedStateText),
+      "the popped RouteView must keep its local state while moving on the next Guest frame");
+    assert.ok(
+      outgoingNextFrame.x! > outgoingAtStart.x! + 1,
+      `the retained outgoing route must move right on a real Guest frame (${outgoingAtStart.x} -> ${outgoingNextFrame.x})`,
+    );
+
+    frame = await session.settle(await session.frame(), 24);
+    assert.ok(textOps(frame, "Pocket").some((op) => (op.y ?? 999) < 60),
+      "the destination app bar must remain after the reverse transition");
+    assert.ok(!textOf(frame).includes(retainedStateText), "the outgoing route must be removed after the reverse transition");
+  } finally {
+    await session.quit();
+  }
+});
+
 test("native route stack preserves page scroll/local state and isolates popped routes", { timeout: 30_000 }, async () => {
   const artifacts = readNativeArtifacts();
 

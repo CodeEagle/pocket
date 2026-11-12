@@ -569,16 +569,31 @@ function CapabilityCard(props: {
 
 function App() {
   const [state, setState] = createSignal<DemoState>(initialDemoState());
+  const [routeTransition, setRouteTransition] = createSignal<{
+    from: Route;
+    to: Route;
+    direction: "forward" | "reverse";
+    elapsedMs: number;
+    progress: number;
+  } | undefined>(undefined);
   // The stack is the navigation source of truth. The Set is only an instance
   // cache for visited primary tabs; popped secondary routes leave this list
-  // and Solid disposes their resources. Every retained route owns its actual
+  // after their reverse transition. Every retained route owns its actual
   // local signals and ScrollablePage instead of mirrored scroll snapshots.
   const primaryPages = new Set<Route>(["home"]);
   const stack = createMemo(() => state().routeStack);
   const mountedRoutes = createMemo(() => {
     const entries = stack();
     for (const route of entries) if (isPrimaryRoute(route)) primaryPages.add(route);
-    return [...primaryPages, ...entries.filter((route) => !isPrimaryRoute(route))];
+    const mounted = [...primaryPages, ...entries.filter((route) => !isPrimaryRoute(route))];
+    const transition = routeTransition();
+    if (transition?.direction === "reverse" && !mounted.includes(transition.from)) {
+      // A pop removes the route from the stack immediately. Keep its existing
+      // subtree alive above the destination until the shared reverse
+      // transition finishes so the outgoing page can slide off to the right.
+      mounted.push(transition.from);
+    }
+    return mounted;
   });
   const displayGeometry = createDisplayGeometry();
   // One persisted appearance applies to the canvas and every mounted route.
@@ -673,14 +688,6 @@ function App() {
   const routeTransitionDuration = 220;
   const routeTransitionTickHz = simulationHz();
   let previousRoute: Route = initialDemoState().route;
-  let pendingTransitionDirection: "forward" | "reverse" = "forward";
-  const [routeTransition, setRouteTransition] = createSignal<{
-    from: Route;
-    to: Route;
-    direction: "forward" | "reverse";
-    elapsedMs: number;
-    progress: number;
-  } | undefined>(undefined);
   const [backGesture, setBackGesture] = createSignal<ActiveBackGesture | undefined>(undefined);
   let cancelBackGesture = (): void => {};
 
@@ -697,12 +704,21 @@ function App() {
     });
   };
 
-  const dispatch = (event: DemoEvent): void => {
+  const dispatch = (event: DemoEvent, options: { animatePop?: boolean } = {}): void => {
     if (event.type === "navigate" || event.type === "popRoute") {
       cancelBackGesture();
     }
-    if (event.type === "navigate" && event.route !== state().route) pendingTransitionDirection = "forward";
-    if (event.type === "popRoute" && state().routeStack.length > 1) pendingTransitionDirection = "reverse";
+    if (event.type === "popRoute" && options.animatePop !== false && state().routeStack.length > 1) {
+      const from = state().route;
+      const to = state().routeStack[state().routeStack.length - 2];
+      if (to) {
+        // Publish the reverse transition before shrinking the source of truth.
+        // That lets the retained RouteView move from the stack into the
+        // transition layer without disposal/recreation of its local state.
+        previousRoute = to;
+        setRouteTransition({ from, to, direction: "reverse", elapsedMs: 0, progress: 0 });
+      }
+    }
     setState((current) => reduceDemoState(current, event));
     if (
       event.type === "setMobileDark" ||
@@ -744,9 +760,6 @@ function App() {
   };
   onMount(() => { void restorePreferences(); });
 
-
-  const isShowcaseRoute = (route: Route): boolean =>
-    route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple";
 
   const clampBackProgress = (value: number): number => Math.max(0, Math.min(1, value));
   const backGestureForegroundX = (): number => {
@@ -818,9 +831,7 @@ function App() {
         // Advance the existing route observer before dispatch so its normal
         // transition does not replay after this interactive transition.
         previousRoute = gesture.target.toRoute;
-        pendingTransitionDirection = "forward";
-        dispatch({ type: "popRoute" });
-        pendingTransitionDirection = "forward";
+        dispatch({ type: "popRoute" }, { animatePop: false });
       }
       setBackGesture(undefined);
       return;
@@ -935,24 +946,33 @@ function App() {
     setRouteTransition({
       from,
       to: nextRoute,
-      direction: pendingTransitionDirection,
+      direction: "forward",
       elapsedMs: 0,
       progress: 0,
     });
-    pendingTransitionDirection = "forward";
   });
 
+  const isShowcaseRoute = (route: Route): boolean =>
+    route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple";
   const transitionDescriptor = () => {
     const transition = routeTransition();
-    if (!transition || (!isShowcaseRoute(transition.from) && !isShowcaseRoute(transition.to))) {
-      return computeTransitionDescriptor(state().transitionMode, 1, false, 360);
+    const width = Math.max(1, contentPaneWidth());
+    if (!transition || (transition.direction === "forward" &&
+        !isShowcaseRoute(transition.from) && !isShowcaseRoute(transition.to))) {
+      return computeTransitionDescriptor(state().transitionMode, 1, false, width);
     }
     return computeTransitionDescriptor(
       state().transitionMode,
       transition.progress,
       transition.direction === "reverse",
-      360,
+      width,
     );
+  };
+  const reverseExitFor = (route: Route) => {
+    const transition = routeTransition();
+    return transition?.direction === "reverse" && transition.from === route
+      ? transition
+      : undefined;
   };
 
   onFrame(() => {
@@ -1227,7 +1247,7 @@ function App() {
         <For each={mountedRoutes()}>{(route) => (
           <RouteView
             class="absolute inset-0 w-full h-full overflow-hidden"
-            active={state().route === route || backGestureRouteTo() === route}
+            active={state().route === route || backGestureRouteTo() === route || reverseExitFor(route) !== undefined}
             style={{
               bgColor: mobileDark() ? "#09090B" : "#FAFAFA",
               translateX: backGestureRouteFrom() !== undefined
@@ -1236,9 +1256,16 @@ function App() {
                   : backGestureRouteTo() === route
                     ? backGestureBackgroundX()
                     : 0
+                : reverseExitFor(route) ? transitionDescriptor().outTx
                 : route === state().route ? transitionDescriptor().inTx : 0,
-              translateY: backGestureRouteFrom() === undefined && route === state().route ? transitionDescriptor().inTy : 0,
-              scale: backGestureRouteFrom() === undefined && route === state().route ? transitionDescriptor().inScale : 1,
+              translateY: backGestureRouteFrom() === undefined
+                ? reverseExitFor(route) ? transitionDescriptor().outTy
+                  : route === state().route ? transitionDescriptor().inTy : 0
+                : 0,
+              scale: backGestureRouteFrom() === undefined
+                ? reverseExitFor(route) ? transitionDescriptor().outScale
+                  : route === state().route ? transitionDescriptor().inScale : 1
+                : 1,
             }}
           >
             <SafeAreaScaffold

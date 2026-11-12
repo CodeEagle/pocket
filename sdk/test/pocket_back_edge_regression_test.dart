@@ -220,6 +220,7 @@ void main() {
         );
         await tester.pump();
 
+        final cancelledStartIndex = _backGestures(runtime).length;
         final cancelled = await tester.createGesture(pointer: 2);
         await cancelled.down(
           const Offset(8, 200),
@@ -243,8 +244,11 @@ void main() {
         expect(closes, 0);
         expect(find.byType(PocketSystemHost), findsOneWidget);
         expect(
-          _backGestures(runtime).last['payload']['phase'],
-          'cancel',
+          _backGestures(runtime)
+              .skip(cancelledStartIndex)
+              .map((message) => message['payload']['phase'])
+              .toList(),
+          <Object?>['start', 'update', 'cancel'],
           reason: 'an accepted guest gesture must receive the native cancel',
         );
 
@@ -486,6 +490,75 @@ void main() {
         await tester.pump();
         binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
         await tester.pump();
+
+        // A release can still complete an overwhelmingly horizontal swipe
+        // after drifting vertically by more than the old 72px cutoff.
+        final diagonalStartIndex = _backGestures(runtime).length;
+        final diagonal = await tester.createGesture(pointer: 9);
+        const edgeStartX = 8.0;
+        const verticalDrift = 80.0;
+        await diagonal.down(
+          const Offset(edgeStartX, 200),
+          timeStamp: const Duration(milliseconds: 1600),
+        );
+        await tester.pump();
+        final diagonalStart = _lastBackGesture(runtime, phase: 'start');
+        _replyToBackGesture(root, diagonalStart, handled: true);
+        await tester.pump();
+        final edgeWidth = tester.getSize(find.byType(PocketSystemHost)).width;
+        final diagonalTarget = Offset(edgeWidth * 0.75, 200 + verticalDrift);
+        await diagonal.moveTo(
+          diagonalTarget,
+          timeStamp: const Duration(milliseconds: 1620),
+        );
+        await diagonal.up(timeStamp: const Duration(milliseconds: 1630));
+        await tester.pump();
+        final diagonalGestures = _backGestures(runtime)
+            .skip(diagonalStartIndex)
+            .map(
+              (message) => (message['payload'] as Map).cast<String, dynamic>(),
+            )
+            .toList();
+        expect(
+          diagonalGestures.map((gesture) => gesture['phase']).toList(),
+          <Object?>['start', 'update', 'end'],
+        );
+        final diagonalEnd = diagonalGestures.last;
+        expect(verticalDrift, greaterThan(72));
+        expect(
+          diagonalTarget.dx - edgeStartX,
+          greaterThan((diagonalEnd['width'] as num) / 2),
+        );
+        expect(_backRequests(runtime), hasLength(2));
+
+        // A vertical-dominant drag is cancelled as soon as the move makes
+        // that intent clear, independent of the horizontal release rule.
+        final verticalStartIndex = _backGestures(runtime).length;
+        final vertical = await tester.createGesture(pointer: 10);
+        await vertical.down(
+          const Offset(8, 200),
+          timeStamp: const Duration(milliseconds: 1700),
+        );
+        await tester.pump();
+        final verticalStart = _lastBackGesture(runtime, phase: 'start');
+        _replyToBackGesture(root, verticalStart, handled: true);
+        await tester.pump();
+        await vertical.moveTo(
+          const Offset(50, 300),
+          timeStamp: const Duration(milliseconds: 1740),
+        );
+        await tester.pump();
+        await vertical.up(timeStamp: const Duration(milliseconds: 1750));
+        await tester.pump();
+        expect(
+          _backGestures(runtime)
+              .skip(verticalStartIndex)
+              .map((message) => message['payload']['phase'])
+              .toList(),
+          <Object?>['start', 'cancel'],
+        );
+        expect(_backRequests(runtime), hasLength(2));
+
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());

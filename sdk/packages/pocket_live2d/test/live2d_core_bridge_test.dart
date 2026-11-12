@@ -401,6 +401,7 @@ Future<Map<String, Object?>> _update(
           'modelId': modelId,
           'parameters': parameters,
           'partOpacities': const <Object?>[],
+          'meshFormat': 'pms1',
         })
         as Map<String, Object?>;
 

@@ -87,7 +87,7 @@ void main() {
   );
 
   test(
-    'resets Core defaults before applying each absolute JS update',
+    'keeps unnegotiated updates readable by legacy Guests as plain arrays',
     () async {
       final load = await plugin.load(_loadRequest()) as Map<String, Object?>;
       final modelId = load['modelId']! as String;
@@ -113,18 +113,47 @@ void main() {
       expect(result['modelId'], modelId);
       final drawables = result['drawables']! as List<Map<String, Object?>>;
       expect(drawables.single['blendMode'], 10);
-      expect(
-        _decodeUint32(drawables.single['maskIndices']! as Uint8List),
-        <int>[0],
-      );
-      final meshBytes = drawables.single['meshBytes']! as Uint8List;
+      expect(drawables.single['positionsXYPixels'], <double>[
+        10,
+        10,
+        20,
+        10,
+        15,
+        20,
+      ]);
+      expect(drawables.single['uvs'], <double>[0, 0, 1, 0, 0.5, 1]);
+      expect(drawables.single['indices'], <int>[0, 1, 2]);
+      expect(drawables.single['maskIndices'], <int>[0]);
+      expect(drawables.single['positionsXYPixels'], isA<List<double>>());
+      expect(drawables.single.containsKey('meshBytes'), isFalse);
+      expect(jsonEncode(result), isNot(contains('ParamAngleX')));
+    },
+  );
+
+  test(
+    'explicit PMS1 negotiation preserves packed native mesh output',
+    () async {
+      final load = await plugin.load(_loadRequest()) as Map<String, Object?>;
+      final modelId = load['modelId']! as String;
+      final result =
+          await plugin.update(<String, dynamic>{
+                'modelId': modelId,
+                'parameters': const <Object?>[],
+                'partOpacities': const <Object?>[],
+                'meshFormat': 'pms1',
+                'placement': <String, Object>{'dx': 10, 'dy': 20, 'scale': 1},
+              })
+              as Map<String, Object?>;
+      final drawable =
+          (result['drawables']! as List<Map<String, Object?>>).single;
+      expect(drawable['positionsXYPixels'], isNull);
+      expect(drawable['maskIndices'], isA<Uint8List>());
+      final meshBytes = drawable['meshBytes']! as Uint8List;
       final meshData = ByteData.sublistView(meshBytes);
       expect(meshData.getUint32(0, Endian.little), pocketLive2dPms1Magic);
       expect(meshData.getUint32(4, Endian.little), 3);
       expect(meshData.getUint32(8, Endian.little), 3);
-      expect(meshData.getFloat32(16, Endian.little), 10.0);
-      expect(drawables.single['maskIndices'], isA<Uint8List>());
-      expect(jsonEncode(result), isNot(contains('ParamAngleX')));
+      expect(meshData.getFloat32(16, Endian.little), 20.0);
     },
   );
 
@@ -138,6 +167,7 @@ void main() {
         'parameters': const <Object?>[],
         'partOpacities': const <Object?>[],
         'cacheStaticTopology': true,
+        'meshFormat': 'pms1',
       };
 
       final first = await plugin.update(request()) as Map<String, Object?>;
@@ -166,10 +196,44 @@ void main() {
                 'parameters': const <Object?>[],
                 'partOpacities': const <Object?>[],
                 'cacheStaticTopology': true,
+                'meshFormat': 'pms1',
               })
               as Map<String, Object?>;
       expect(newFrame['topologyMode'], 'full');
       expect(models.last.topologyReads, <bool>[true]);
+    },
+  );
+
+  test(
+    'unnegotiated cached topology preserves the legacy array response shape',
+    () async {
+      final load = await plugin.load(_loadRequest()) as Map<String, Object?>;
+      final modelId = load['modelId']! as String;
+      final request = <String, dynamic>{
+        'modelId': modelId,
+        'parameters': const <Object?>[],
+        'partOpacities': const <Object?>[],
+        'cacheStaticTopology': true,
+      };
+      final first = await plugin.update(request) as Map<String, Object?>;
+      final firstDrawable =
+          (first['drawables']! as List<Map<String, Object?>>).single;
+      expect(first['topologyMode'], 'full');
+      expect(firstDrawable['positionsXYPixels'], isA<List<double>>());
+      expect(firstDrawable['uvs'], isA<List<double>>());
+      expect(firstDrawable['indices'], isA<List<int>>());
+      expect(firstDrawable['maskIndices'], isA<List<int>>());
+
+      final next = await plugin.update(request) as Map<String, Object?>;
+      final nextDrawable =
+          (next['drawables']! as List<Map<String, Object?>>).single;
+      expect(next['topologyMode'], 'cached-v1');
+      expect(nextDrawable['positionsXYPixels'], isA<List<double>>());
+      expect(nextDrawable.containsKey('uvs'), isFalse);
+      expect(nextDrawable.containsKey('indices'), isFalse);
+      expect(nextDrawable.containsKey('maskIndices'), isFalse);
+      expect(nextDrawable.containsKey('meshBytes'), isFalse);
+      expect(models.single.topologyReads, <bool>[true, false]);
     },
   );
 
@@ -181,6 +245,7 @@ void main() {
       'parameters': const <Object?>[],
       'partOpacities': const <Object?>[],
       'cacheStaticTopology': true,
+      'meshFormat': 'pms1',
     };
     await plugin.update(request);
     models.single.changeTopologyOnSecondRead = true;
@@ -219,8 +284,14 @@ void main() {
       final frame =
           await legacyPlugin.update(baseRequest) as Map<String, Object?>;
       expect(
-        ((frame['drawables']! as List<Map<String, Object?>>).single)['meshBytes'],
-        isA<Uint8List>(),
+        ((frame['drawables']! as List<Map<String, Object?>>)
+            .single)['meshBytes'],
+        isNull,
+      );
+      expect(
+        ((frame['drawables']! as List<Map<String, Object?>>)
+            .single)['positionsXYPixels'],
+        isA<List<double>>(),
       );
 
       final operationsBeforeOptIn = List<String>.of(
@@ -504,6 +575,7 @@ void main() {
                 'modelId': load['modelId'],
                 'parameters': const <Object?>[],
                 'partOpacities': const <Object?>[],
+                'meshFormat': 'pms1',
               })
               as Map<String, Object?>;
       final drawable =
@@ -526,14 +598,6 @@ PocketPluginContext _context(PocketLive2dPlugin plugin) => PocketPluginContext(
   sessionId: 'live2d-session',
   registry: PocketHostRegistry(),
 );
-
-List<int> _decodeUint32(Uint8List bytes) {
-  final view = ByteData.sublistView(bytes);
-  return <int>[
-    for (var offset = 0; offset < bytes.length; offset += 4)
-      view.getUint32(offset, Endian.little),
-  ];
-}
 
 final class _MemoryAssetBundle extends CachingAssetBundle {
   _MemoryAssetBundle(this.assets);

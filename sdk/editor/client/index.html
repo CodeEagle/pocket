@@ -260,7 +260,7 @@
                 <details class="advanced-panel" id="advanced-panel" open>
                   <summary><span>高级</span><span class="advanced-summary">签名发布</span></summary>
                   <div class="advanced-content">
-                    <div class="publish-heading"><div><div class="eyebrow">签名发布</div><strong>发布此构建版本</strong><span>创建供宿主使用的配置发布更新。</span></div><div class="publish-actions"><span id="runtime-abi" class="meta-chip">ABI —</span><button id="publish" class="button secondary" type="button" disabled>发布正式版</button></div></div>
+                    <div class="publish-heading"><div><div class="eyebrow">版本发布</div><strong>发布此构建版本</strong><span>选择应用和频道后，在版本管理中查看并发布签名构建。</span></div><div class="publish-actions"><span id="runtime-abi" class="meta-chip">ABI —</span><button id="open-version-manager-from-signing" class="button secondary" type="button" disabled>打开版本管理</button></div></div>
                     <div id="publish-info" class="publish-info" hidden></div>
                     <span id="publish-status" class="publish-status">尚未发布</span>
                   </div>
@@ -340,19 +340,29 @@
                 <section class="panel test-publish-panel" aria-labelledby="test-publish-title">
                   <div class="test-publish-card">
                     <div class="test-publish-copy">
-                      <div class="eyebrow">测试包 / 热更新</div>
+                      <div id="publish-channel-eyebrow" class="eyebrow">测试包 / 热更新</div>
                       <strong id="test-publish-title">发布到本地版本后端</strong>
-                      <span>为递增的测试构建签名，并以只读方式提供给同一局域网中的模拟器和设备。</span>
+                      <span id="publish-channel-description">为递增的测试构建签名，并以只读方式提供给同一局域网中的模拟器和设备。</span>
                     </div>
-                    <button id="publish-test" class="button primary small-button" type="button" disabled>发布测试包</button>
+                    <div class="publish-target-control">
+                      <div class="publish-target-selects">
+                        <label for="publish-target-picker"><span class="eyebrow">发布目标</span><select id="publish-target-picker" aria-label="发布目标" disabled><option value="">请选择项目</option></select></label>
+                        <label for="publish-target-channel"><span class="eyebrow">版本频道</span><select id="publish-target-channel" aria-label="发布版本频道" disabled><option value="test">测试</option><option value="release">稳定版</option></select></label>
+                      </div>
+                      <div id="publish-target-summary" class="publish-target-summary"><strong>请选择项目</strong><span>发布前会显示项目和构建状态。</span></div>
+                    </div>
+                    <div class="publish-target-actions">
+                      <span id="publish-target-action-label" class="publish-target-inline">目标：请选择项目</span>
+                      <button id="publish-test" class="button primary small-button" type="button" disabled>发布测试包</button>
+                    </div>
                   </div>
+                  <p id="publish-target-scope" class="publish-target-scope">发布范围：主应用和此项目内的普通子包。</p>
+                  <div id="publish-target-reused" class="publish-target-reused" hidden></div>
                   <div id="test-publish-info" class="test-publish-info" hidden></div>
                 </section>
                 <div class="version-backend-heading">
                   <div><span class="eyebrow">后端</span><strong id="version-backend-origin">尚未启动</strong><span id="version-backend-detail" class="muted">打开此面板以启动只读后端。</span></div>
                   <div class="version-backend-actions">
-                    <button id="version-publish-test" class="button secondary small-button" type="button" disabled>发布测试版</button>
-                    <button id="version-publish-release" class="button primary small-button" type="button" disabled>发布稳定版</button>
                     <button id="versions-refresh" class="button secondary small-button" type="button" disabled>刷新</button>
                   </div>
                 </div>

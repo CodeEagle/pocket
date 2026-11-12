@@ -102,7 +102,8 @@ export interface PocketLive2dClientOptions {
   /**
    * Opt into the versioned sparse response for Cubism's static UV/index/mask
    * topology. The public update result remains a complete PocketLive2dFrame.
-   * Defaults off so older native providers receive the original request shape.
+   * Defaults off so older native providers receive the original cache shape;
+   * the client always negotiates PMS1 and accepts a legacy host response.
    */
   cacheStaticTopology?: boolean;
 }
@@ -204,6 +205,7 @@ export function createPocketLive2dClient(
           modelId,
           parameters,
           partOpacities,
+          meshFormat: "pms1",
         };
         if (placement !== undefined) {
           request.placement = placement;
@@ -215,6 +217,7 @@ export function createPocketLive2dClient(
           await invoke(pocketLive2dUpdateCapability, request),
           modelId,
           options.cacheStaticTopology === true ? topologies : undefined,
+          placement,
         );
       });
     },
@@ -344,7 +347,11 @@ function parseParts(value: unknown): Live2dPartDefault[] {
 
 interface CachedDrawableTopology {
   readonly id: string;
-  readonly meshByteLength: number;
+  readonly format: "legacy" | "pms1";
+  readonly vertexCount: number;
+  readonly meshByteLength?: number;
+  readonly uvs?: number[];
+  readonly indices?: number[];
   readonly maskIndices: number[];
 }
 
@@ -352,6 +359,7 @@ function parseFrame(
   value: unknown,
   modelId: string,
   topologies?: Map<string, readonly CachedDrawableTopology[]>,
+  placement?: PocketLive2dPlacement,
 ): PocketLive2dFrame {
   const root = object(value, "frame result");
   if (root.modelId !== modelId || !Array.isArray(root.drawables)) throw new TypeError("frame result does not match requested model");
@@ -371,29 +379,70 @@ function parseFrame(
     ? new Array<CachedDrawableTopology>(root.drawables.length)
     : undefined;
   const drawables = root.drawables.map((entry, index): PocketLive2dDrawableFrame => {
-    const drawable = object(entry, `frame result.drawables[${index}]`);
-    const meshBytes = pms1Bytes(drawable.meshBytes, `drawables[${index}].meshBytes`);
-    const multiply = float32Array(drawable.multiplyColorRgba, `drawables[${index}].multiplyColorRgba`);
-    const screen = float32Array(drawable.screenColorRgba, `drawables[${index}].screenColorRgba`);
-    const id = string(drawable.id, `drawables[${index}].id`);
+    const path = `drawables[${index}]`;
+    const drawable = object(entry, `frame result.${path}`);
+    const multiply = float32Array(drawable.multiplyColorRgba, `${path}.multiplyColorRgba`);
+    const screen = float32Array(drawable.screenColorRgba, `${path}.screenColorRgba`);
+    const id = string(drawable.id, `${path}.id`);
+    const packed = Object.hasOwn(drawable, "meshBytes");
+    const opacity = finiteNumber(drawable.opacity, `${path}.opacity`);
+    let meshBytes: Uint8Array;
     let masks: number[];
-    if (cachedFrame) {
-      if (Object.hasOwn(drawable, "maskIndices")) {
-        throw new TypeError(`frame result.drawables[${index}] repeats cached topology`);
+    if (packed) {
+      meshBytes = pms1Bytes(drawable.meshBytes, `${path}.meshBytes`);
+      const vertexCount = pms1VertexCount(meshBytes, `${path}.meshBytes`);
+      if (cachedFrame) {
+        if (Object.hasOwn(drawable, "maskIndices")) {
+          throw new TypeError(`frame result.${path} repeats cached topology`);
+        }
+        const topology = cached![index]!;
+        if (topology.format !== "pms1" || id !== topology.id ||
+            vertexCount !== topology.vertexCount || meshBytes.byteLength !== topology.meshByteLength) {
+          throw new TypeError(`frame result.${path} changed cached drawable identity or vertex count`);
+        }
+        masks = topology.maskIndices;
+      } else {
+        masks = uint32Array(drawable.maskIndices, `${path}.maskIndices`, true);
+        if (nextTopology) {
+          nextTopology[index] = {
+            id, format: "pms1", vertexCount,
+            meshByteLength: meshBytes.byteLength, maskIndices: masks,
+          };
+        }
       }
-      const topology = cached![index]!;
-      if (id !== topology.id || meshBytes.byteLength !== topology.meshByteLength) {
-        throw new TypeError(`frame result.drawables[${index}] changed cached drawable identity or vertex count`);
-      }
-      masks = topology.maskIndices;
     } else {
-      masks = uint32Array(drawable.maskIndices, `drawables[${index}].maskIndices`, true);
-      if (nextTopology) {
-        nextTopology[index] = { id, meshByteLength: meshBytes.byteLength, maskIndices: masks };
+      const positions = float32Array(drawable.positionsXYPixels, `${path}.positionsXYPixels`, true);
+      let uvs: number[];
+      let indices: number[];
+      if (cachedFrame) {
+        if (Object.hasOwn(drawable, "uvs") || Object.hasOwn(drawable, "indices") || Object.hasOwn(drawable, "maskIndices")) {
+          throw new TypeError(`frame result.${path} repeats cached topology`);
+        }
+        const topology = cached![index]!;
+        if (topology.format !== "legacy" || id !== topology.id || positions.length !== topology.vertexCount * 2) {
+          throw new TypeError(`frame result.${path} changed cached drawable identity or vertex count`);
+        }
+        uvs = topology.uvs!;
+        indices = topology.indices!;
+        masks = topology.maskIndices;
+      } else {
+        uvs = float32Array(drawable.uvs, `${path}.uvs`, true);
+        indices = uint16Array(drawable.indices, `${path}.indices`, true);
+        masks = uint32Array(drawable.maskIndices, `${path}.maskIndices`, true);
+        const vertexCount = positions.length / 2;
+        if (nextTopology) {
+          nextTopology[index] = {
+            id, format: "legacy", vertexCount, uvs, indices, maskIndices: masks,
+          };
+        }
       }
+      meshBytes = packLegacyPms1(positions, uvs, indices, opacity, placement, path);
+    }
+    if (masks.some((value) => !Number.isInteger(value) || value < 0)) {
+      throw new TypeError(`frame result.${path}.maskIndices must contain non-negative integers`);
     }
     if (multiply.length !== 4 || screen.length !== 4) {
-      throw new TypeError(`frame result.drawables[${index}] has inconsistent mesh buffers`);
+      throw new TypeError(`frame result.${path} has inconsistent mesh buffers`);
     }
     return {
       id,
@@ -403,7 +452,7 @@ function parseFrame(
       blendMode: integer(drawable.blendMode, `drawables[${index}].blendMode`),
       constantFlags: integer(drawable.constantFlags, `drawables[${index}].constantFlags`),
       dynamicFlags: integer(drawable.dynamicFlags, `drawables[${index}].dynamicFlags`),
-      opacity: finiteNumber(drawable.opacity, `drawables[${index}].opacity`),
+      opacity,
       meshBytes,
       maskIndices: masks,
       multiplyColorRgba: multiply,
@@ -446,12 +495,71 @@ function pms1Bytes(value: unknown, path: string): Uint8Array {
   return value;
 }
 
+function pms1VertexCount(value: Uint8Array, path: string): number {
+  if (value.byteLength === 0) return 0;
+  const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
+  const vertexCount = view.getUint32(4, true);
+  const indexCount = view.getUint32(8, true);
+  if (view.getUint32(0, true) !== 0x31534d50 || vertexCount > 16_384 ||
+      indexCount > 98_304 || value.byteLength !== 16 + vertexCount * 16 + indexCount * 4) {
+    throw new TypeError(`${path} has an invalid PMS1 header`);
+  }
+  return vertexCount;
+}
+
 function float32Array(value: unknown, path: string, allowEmpty = false): number[] {
   return decodeNumericArray(value, path, 4, (view, offset) => view.getFloat32(offset, true), allowEmpty);
 }
 
 function uint32Array(value: unknown, path: string, allowEmpty = false): number[] {
   return decodeNumericArray(value, path, 4, (view, offset) => view.getUint32(offset, true), allowEmpty);
+}
+
+function uint16Array(value: unknown, path: string, allowEmpty = false): number[] {
+  return decodeNumericArray(value, path, 2, (view, offset) => view.getUint16(offset, true), allowEmpty);
+}
+
+function packLegacyPms1(
+  positions: readonly number[],
+  uvs: readonly number[],
+  indices: readonly number[],
+  opacity: number,
+  placement: PocketLive2dPlacement | undefined,
+  path: string,
+): Uint8Array {
+  const vertexCount = positions.length / 2;
+  if (positions.length % 2 !== 0 || uvs.length !== positions.length || indices.length % 3 !== 0 ||
+      indices.some((value) => !Number.isInteger(value) || value < 0 || value >= vertexCount)) {
+    throw new TypeError(`frame result.${path} has inconsistent mesh buffers`);
+  }
+  if (vertexCount === 0 || indices.length === 0) return new Uint8Array();
+  if (vertexCount > 16_384 || indices.length > 98_304) {
+    throw new RangeError(`${path} exceeds the PMS1 mesh limits`);
+  }
+  const bytes = new Uint8Array(16 + vertexCount * 16 + indices.length * 4);
+  const view = new DataView(bytes.buffer);
+  const alpha = Math.round(Math.max(0, Math.min(1, opacity * (placement?.opacity ?? 1))) * 255);
+  view.setUint32(0, 0x31534d50, true);
+  view.setUint32(4, vertexCount, true);
+  view.setUint32(8, indices.length, true);
+  view.setUint32(12, ((alpha << 24) | 0x00ffffff) >>> 0, true);
+  const dx = placement?.dx ?? 0;
+  const dy = placement?.dy ?? 0;
+  const scale = placement?.scale ?? 1;
+  let offset = 16;
+  for (let vertex = 0; vertex < vertexCount; vertex++) {
+    const pair = vertex * 2;
+    view.setFloat32(offset, dx + positions[pair]! * scale, true);
+    view.setFloat32(offset + 4, dy + positions[pair + 1]! * scale, true);
+    view.setFloat32(offset + 8, uvs[pair]!, true);
+    view.setFloat32(offset + 12, 1 - uvs[pair + 1]!, true);
+    offset += 16;
+  }
+  for (const index of indices) {
+    view.setUint32(offset, index, true);
+    offset += 4;
+  }
+  return bytes;
 }
 
 function decodeNumericArray(

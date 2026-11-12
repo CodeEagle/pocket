@@ -532,6 +532,10 @@ test("explicit external package reuse keeps the signed owner release and root jo
     const ownerChildManifestBytes = readFileSync(join(workspace, "updates", ownerChild.artifactRoot, "latest.json"));
     const ownerChildBootstrapBytes = readFileSync(join(workspace, "updates", ownerChild.artifactRoot, "bootstrap/app.bytecode.json"));
 
+    await createBuild("owner-test-app", "root.owner.test", "child.app");
+    const testOwnerPublish = await request(server, "/api/projects/owner-test-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "test" }) });
+    expect(testOwnerPublish.response.status).toBe(200);
+
     const collisionStatus = await createBuild("collision-app", "root.collision", "child.app");
     expect(collisionStatus.error).toBeUndefined();
     const unoptedPublish = await request(server, "/api/projects/collision-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
@@ -542,6 +546,15 @@ test("explicit external package reuse keeps the signed owner release and root jo
     await createBuild("reuse-app", "root.reuse", "child.app", ["child.app"]);
     const reusePublish = await request(server, "/api/projects/reuse-app/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(reusePublish.response.status, JSON.stringify(reusePublish.value)).toBe(200);
+    expect((await request(server, "/api/projects/reuse-app/publish-targets?channel=release")).value.targets.find((target: any) => target.appId === "child.app")).toMatchObject({
+      projectId: "owner-app",
+      publishedVersion: ownerChild.version,
+      canSelect: true,
+    });
+    expect((await request(server, "/api/projects/reuse-app/publish-targets?channel=test")).value.targets.find((target: any) => target.appId === "child.app")).toMatchObject({
+      projectId: "owner-test-app",
+      canSelect: true,
+    });
     const reuseVersions = await request(server, "/api/projects/reuse-app/versions");
     const reuseEntry = reuseVersions.value.history[0];
     expect(reuseEntry.packages.map((pkg: any) => pkg.id)).toEqual(["root.reuse"]);
@@ -572,16 +585,35 @@ test("explicit external package reuse keeps the signed owner release and root jo
     expect(readFileSync(join(workspace, "updates", ownerChild.artifactRoot, "bootstrap/app.bytecode.json"))).toEqual(ownerChildBootstrapBytes);
     expect(ownerStatus.builtRevision).toBeTruthy();
 
-    await createBuild("lantern-owner", "pocket.demo.lantern", "owner.internal");
-    const lanternOwnerPublish = await request(server, "/api/projects/lantern-owner/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    expect(lanternOwnerPublish.response.status).toBe(200);
-    const lanternHistoryPath = join(workspace, "states/lantern-owner.versions.json");
+    await createBuild("lantern-test-owner", "pocket.demo.lantern", "test.internal");
+    const lanternTestOwnerPublish = await request(server, "/api/projects/lantern-test-owner/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "test" }) });
+    expect(lanternTestOwnerPublish.response.status).toBe(200);
+    await createBuild("lantern-reuse", "root.lantern.reuse", "pocket.demo.lantern", ["pocket.demo.lantern"]);
+    const firstStableTargets = await request(server, "/api/projects/lantern-reuse/publish-targets?channel=release");
+    expect(firstStableTargets.value.targets[0]).toMatchObject({ canPublish: false });
+    const firstStableLanternTarget = firstStableTargets.value.targets.find((target: any) => target.appId === "pocket.demo.lantern");
+    expect(firstStableLanternTarget).toMatchObject({
+      projectId: "lantern-test-owner",
+      canSelect: true,
+      canPublish: true,
+    });
+    expect(firstStableLanternTarget.publishedVersion).toBeUndefined();
+    const lanternFirstStablePublish = await request(server, "/api/projects/lantern-test-owner/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "release" }) });
+    expect(lanternFirstStablePublish.response.status).toBe(200);
+    const lanternHistoryPath = join(workspace, "states/lantern-test-owner.versions.json");
     const lanternHistoryBefore = readFileSync(lanternHistoryPath);
     const lanternHistory = JSON.parse(lanternHistoryBefore.toString()) as { entries: any[] };
     const lanternEntry = lanternHistory.entries[0]!;
     const lanternRoot = lanternEntry.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern");
     const lanternRootHost = JSON.parse(readFileSync(join(workspace, "updates", lanternRoot.artifactRoot, "host.json"), "utf8")) as any;
-    await createBuild("lantern-reuse", "root.lantern.reuse", "pocket.demo.lantern", ["pocket.demo.lantern"]);
+    const lanternOldPayload = JSON.parse(readFileSync(join(workspace, "updates", lanternRoot.artifactRoot, "payload.json"), "utf8")) as any;
+    const firstPublishedStableTargets = await request(server, "/api/projects/lantern-reuse/publish-targets?channel=release");
+    expect(firstPublishedStableTargets.value.targets.find((target: any) => target.appId === "pocket.demo.lantern")).toMatchObject({
+      projectId: "lantern-test-owner",
+      publishedVersion: lanternRoot.version,
+      publishedBuild: lanternRoot.build,
+      canSelect: true,
+    });
     const lanternReusePublish = await request(server, "/api/projects/lantern-reuse/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(lanternReusePublish.response.status, JSON.stringify(lanternReusePublish.value)).toBe(200);
     const lanternReuseVersions = await request(server, "/api/projects/lantern-reuse/versions");
@@ -589,23 +621,273 @@ test("explicit external package reuse keeps the signed owner release and root jo
     const lanternReuseIndex = await request(server, new URL(lanternReuseVersions.value.appConfigUrl).pathname);
     const lanternReuseHost = await request(server, new URL(lanternReuseIndex.value.latest.hostConfigUrl, lanternReuseVersions.value.appConfigUrl).pathname);
     const lanternDescriptor = lanternReuseHost.value.applications["pocket.demo.lantern"];
-    expect(lanternDescriptor.reusedProjectId).toBe("lantern-owner");
+    expect(lanternDescriptor.reusedProjectId).toBe("lantern-test-owner");
     expect(lanternDescriptor.reusedReleaseId).toBe(lanternEntry.releaseId);
     expect(lanternDescriptor.packageVersion).toBe(lanternEntry.packageVersion);
     expect(lanternDescriptor.role).toBe("miniapp");
     expect(lanternDescriptor.config.appId).toBe("pocket.demo.lantern");
     expect(lanternDescriptor.config.updates.namespace).toBe(lanternRootHost.POCKET_STORE_NAMESPACE);
     expect(lanternDescriptor.config.updates.branchNamespace).toBe(lanternRootHost.POCKET_UPDATE_BRANCH_NAMESPACE);
-    expect((await request(server, "/stable/pocket/4.0.0/pocket.demo.lantern/latest.json")).value.projectId).toBe("lantern-owner");
+    expect((await request(server, "/stable/pocket/4.0.0/pocket.demo.lantern/latest.json")).value.projectId).toBe("lantern-test-owner");
+    expect(lanternReuseVersions.value.history[0].reusedPackages).toEqual([{
+      id: "pocket.demo.lantern",
+      version: lanternEntry.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern").version,
+      build: lanternEntry.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern").build,
+      ownerProjectId: "lantern-test-owner",
+      releaseId: lanternEntry.releaseId,
+    }]);
+    expect(lanternReuseVersions.value.slots.find((slot: any) => slot.name === "stable").reusedPackages[0].ownerProjectId).toBe("lantern-test-owner");
     expect(readFileSync(lanternHistoryPath)).toEqual(lanternHistoryBefore);
 
+    const lanternTargetsBeforeUpdate = await request(server, "/api/projects/lantern-reuse/publish-targets?channel=release");
+    expect(lanternTargetsBeforeUpdate.response.status).toBe(200);
+    expect(lanternTargetsBeforeUpdate.value.targets[0]).toMatchObject({ projectId: "lantern-reuse", appId: "root.lantern.reuse", kind: "root", canSelect: true });
+    const lanternTargetBeforeUpdate = lanternTargetsBeforeUpdate.value.targets.find((target: any) => target.appId === "pocket.demo.lantern");
+    expect(lanternTargetBeforeUpdate).toMatchObject({
+      projectId: "lantern-test-owner",
+      ownerProjectId: "lantern-test-owner",
+      ownerTitle: "lantern-test-owner",
+      kind: "reused",
+      publishedVersion: lanternEntry.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern").version,
+      publishedBuild: lanternEntry.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern").build,
+      canSelect: true,
+      canPublish: true,
+    });
+    const testLanternTargets = await request(server, "/api/projects/lantern-reuse/publish-targets?channel=test");
+    expect(testLanternTargets.value.targets.find((target: any) => target.appId === "pocket.demo.lantern")).toMatchObject({
+      projectId: "lantern-test-owner",
+      ownerProjectId: "lantern-test-owner",
+      publishedVersion: expect.stringContaining("-test."),
+      canSelect: true,
+    });
+
+    const lanternConfig = await request(server, "/api/projects/lantern-test-owner/config");
+    const lanternConfigUpdate = await request(server, "/api/projects/lantern-test-owner/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...lanternConfig.value, version: "1.1.0", build: 2 }),
+    });
+    expect(lanternConfigUpdate.response.status).toBe(200);
+    writeFileSync(bytecode, Buffer.from([0x50, 0x4a, 0x42, 0x43, 9, 2, 3]));
+    const staleLanternTargets = await request(server, "/api/projects/lantern-reuse/publish-targets?channel=release");
+    const staleLanternTarget = staleLanternTargets.value.targets.find((target: any) => target.appId === "pocket.demo.lantern");
+    expect(staleLanternTarget).toMatchObject({ canSelect: true, built: false, canPublish: false });
+    const lanternBuild = await request(server, "/api/projects/lantern-test-owner/build", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(lanternBuild.response.status).toBe(202);
+    const updatedLanternBuild = await waitForBuild(server, "lantern-test-owner");
+    expect(updatedLanternBuild.error, updatedLanternBuild.logs.join("\n")).toBeUndefined();
+    const readyLanternTargets = await request(server, "/api/projects/lantern-reuse/publish-targets?channel=release");
+    expect(readyLanternTargets.value.targets.find((target: any) => target.appId === "pocket.demo.lantern")).toMatchObject({
+      projectId: "lantern-test-owner",
+      canSelect: true,
+      built: true,
+      canPublish: true,
+    });
+
+    const ownerHistoryBeforeFailedRepublish = readFileSync(lanternHistoryPath);
+    const lanternBuiltBytecode = join(workspace, "builds/lantern-test-owner", String(updatedLanternBuild.builtRevision), "app.qjbc");
+    const lanternBuiltBytecodeBytes = readFileSync(lanternBuiltBytecode);
+    rmSync(lanternBuiltBytecode);
+    const failedOwnerRepublish = await request(server, "/api/projects/lantern-test-owner/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "release" }) });
+    expect(failedOwnerRepublish.response.status).toBe(400);
+    expect(readFileSync(lanternHistoryPath)).toEqual(ownerHistoryBeforeFailedRepublish);
+    const stillCurrentLanternIndex = await request(server, "/stable/pocket/4.0.0/pocket.demo.lantern/latest.json");
+    expect(stillCurrentLanternIndex.value.latest.releaseId).toBe(lanternEntry.releaseId);
+    writeFileSync(lanternBuiltBytecode, lanternBuiltBytecodeBytes);
+
+    const lanternOwnerUpdate = await request(server, "/api/projects/lantern-test-owner/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "release" }) });
+    expect(lanternOwnerUpdate.response.status, JSON.stringify(lanternOwnerUpdate.value)).toBe(200);
+    const updatedLanternHistory = JSON.parse(readFileSync(lanternHistoryPath, "utf8")) as { entries: any[] };
+    const updatedLanternEntry = updatedLanternHistory.entries[0]!;
+    const updatedLanternRoot = updatedLanternEntry.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern");
+    const updatedLanternPayload = JSON.parse(readFileSync(join(workspace, "updates", updatedLanternRoot.artifactRoot, "payload.json"), "utf8")) as any;
+    expect(updatedLanternEntry.releaseId).not.toBe(lanternEntry.releaseId);
+    expect(updatedLanternPayload.entry.sha256).not.toBe(lanternOldPayload.entry.sha256);
+    const updatedLanternTargets = await request(server, "/api/projects/lantern-reuse/publish-targets?channel=release");
+    expect(updatedLanternTargets.value.targets.find((target: any) => target.appId === "pocket.demo.lantern")).toMatchObject({
+      projectId: "lantern-test-owner",
+      publishedVersion: updatedLanternRoot.version,
+      publishedBuild: updatedLanternRoot.build,
+      publishedReleaseId: updatedLanternEntry.releaseId,
+      canSelect: true,
+      canPublish: true,
+    });
+    const stableLanternIndex = await request(server, "/stable/pocket/4.0.0/pocket.demo.lantern/latest.json");
+    expect(stableLanternIndex.value.latest.releaseId).toBe(updatedLanternEntry.releaseId);
+    const rootPinnedLantern = await request(server, "/api/projects/lantern-reuse/versions");
+    expect(rootPinnedLantern.value.slots.find((slot: any) => slot.name === "stable").reusedPackages[0].releaseId).toBe(lanternEntry.releaseId);
+
+    const duplicateOwnerJournalPath = join(workspace, "states/ambiguous-owner.versions.json");
+    writeFileSync(duplicateOwnerJournalPath, readFileSync(lanternHistoryPath));
+    const ambiguousTargets = await request(server, "/api/projects/lantern-reuse/publish-targets?channel=release");
+    expect(ambiguousTargets.value.targets.find((target: any) => target.appId === "pocket.demo.lantern")).toMatchObject({ canSelect: false, canPublish: false });
+    rmSync(duplicateOwnerJournalPath, { force: true });
+
     await createBuild("missing-reuse", "root.missing", "missing.app", ["missing.app"]);
+    const missingTargets = await request(server, "/api/projects/missing-reuse/publish-targets?channel=release");
+    expect(missingTargets.value.targets.find((target: any) => target.appId === "missing.app")).toMatchObject({ canSelect: false, canPublish: false });
     const unavailablePublish = await request(server, "/api/projects/missing-reuse/publish", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(unavailablePublish.response.status).toBe(400);
     expect(unavailablePublish.value.error).toContain("no unique published release");
     expect(existsSync(join(workspace, "states/missing-reuse.versions.json"))).toBe(false);
   } finally {
     server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("a reused owner source is restored from the validated root catalog and invalidates its old build", { timeout: 180_000 }, async () => {
+  const workspace = temporaryWorkspace();
+  const fixture = temporaryWorkspace();
+  const hostRoot = join(fixture, "host");
+  const lanternRoot = join(hostRoot, "apps/lantern");
+  mkdirSync(lanternRoot, { recursive: true });
+  const appJs = join(fixture, "lantern.js");
+  const bytecode = join(fixture, "lantern.qjbc");
+  const metadata = join(fixture, "lantern.bytecode.json");
+  const pak = join(fixture, "lantern.pak");
+  writeFileSync(appJs, "globalThis.__lantern_generation = 1;\n");
+  writeFileSync(bytecode, Buffer.from([0x50, 0x4a, 0x42, 0x43, 1, 2, 3]));
+  writeFileSync(metadata, JSON.stringify({ entryFormat: "quickjs-bytecode", runtimeAbi: "fixture-lantern-abi", bytecodeBytes: 7 }));
+  writeFileSync(pak, pack([{ key: "fixture:text", dtype: 0, data: new Uint8Array([1, 2, 3, 4]) }]));
+  writeFileSync(join(hostRoot, "editor.json"), JSON.stringify({
+    id: "catalog-host",
+    appId: "pocket.host.catalog",
+    name: "Catalog host",
+    title: "Catalog host",
+    version: "1.0.0",
+    build: 1,
+    tickHz: 60,
+    entry: "app.tsx",
+    output: "catalog-host",
+    framework: "solid",
+    reusePublishedPackages: ["pocket.demo.lantern"],
+  }, null, 2) + "\n");
+  writeFileSync(join(hostRoot, "pocket.json"), JSON.stringify({
+    $schema: "https://pocketjs.dev/schema/pocket-2.json", pocket: 2, id: "pocket.host.catalog",
+    name: "pocket-host-catalog", title: "Catalog host", version: "1.0.0",
+    engine: { capabilities: { requires: ["text.glyphs.baked"], enhances: [] } },
+    app: { entry: "app.tsx", output: "catalog-host", framework: "solid", viewport: { fixed: { logical: [360, 640], presentation: "native" } } },
+  }, null, 2) + "\n");
+  writeFileSync(join(hostRoot, "app.tsx"), "export {};\n");
+  writeFileSync(join(hostRoot, "manifest.json"), JSON.stringify({ protocolVersion: 1, capabilities: { requires: ["text.glyphs.baked"], optional: [] }, permissions: { optional: [] } }));
+  writeFileSync(join(hostRoot, "pocket.system.json"), JSON.stringify({
+    $schema: "https://pocketjs.dev/schema/pocket-system-1.json", pocketSystem: 1,
+    id: "catalog.system", name: "catalog-system", title: "Catalog system", version: "1.0.0",
+    roles: { systemUI: "pocket.host.catalog" },
+    applications: {
+      installPolicy: { model: "managed", mutable: false }, backgroundExecution: "suspend",
+      catalog: [
+        { package: "pocket.host.catalog", manifest: "pocket.json", required: true, memory: { heapLimitBytes: 134217728 } },
+        { package: "pocket.demo.lantern", manifest: "apps/lantern/pocket.json", required: true, memoryPolicy: "UI_MINI" },
+      ],
+    },
+    installation: { installedPackages: ["pocket.host.catalog", "pocket.demo.lantern"] },
+  }, null, 2) + "\n");
+  writeFileSync(join(lanternRoot, "editor.json"), JSON.stringify({
+    id: "pocket-demo-lantern", appId: "pocket.demo.lantern", name: "雾港末班信", title: "雾港末班信",
+    version: "0.1.0", build: 1, tickHz: 60, entry: "app.tsx", output: "lantern-app", framework: "solid",
+  }, null, 2) + "\n");
+  writeFileSync(join(lanternRoot, "pocket.json"), JSON.stringify({
+    $schema: "https://pocketjs.dev/schema/pocket-2.json", pocket: 2, id: "pocket.demo.lantern",
+    name: "pocket-demo-lantern", title: "雾港末班信", version: "0.1.0",
+    engine: { capabilities: { requires: ["text.glyphs.baked"], enhances: [] } },
+    app: { entry: "app.tsx", output: "lantern-app", framework: "solid", viewport: { fixed: { logical: [360, 640], presentation: "native" } } },
+  }, null, 2) + "\n");
+  writeFileSync(join(lanternRoot, "app.tsx"), "export {};\n");
+  writeFileSync(join(lanternRoot, "manifest.json"), JSON.stringify({ protocolVersion: 1, capabilities: { requires: ["text.glyphs.baked"], optional: [] }, permissions: { optional: [] } }));
+  const buildRunner = async () => ({
+    appJs, bytecode, metadata, pak, runtimeAbi: "fixture-lantern-abi",
+    bytecodeMetadata: JSON.parse(readFileSync(metadata, "utf8")),
+  });
+  const firstServer = await startEditor({
+    port: 0, updateHost: "127.0.0.1", updatePort: 0, updateHostVersion: "4.0.0",
+    workspace, projectRoot: lanternRoot, buildRunner,
+  });
+  let restoredServer: Awaited<ReturnType<typeof startEditor>> | undefined;
+  let oldHistory: { entries: any[] } | undefined;
+  let oldPayload: any;
+  try {
+    const firstBuild = await request(firstServer, "/api/projects/pocket-demo-lantern/build", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(firstBuild.response.status).toBe(202);
+    const firstOwnerStatus = await waitForBuild(firstServer, "pocket-demo-lantern");
+    expect(firstOwnerStatus.error, firstOwnerStatus.logs.join("\n")).toBeUndefined();
+    const firstOwnerPublish = await request(firstServer, "/api/projects/pocket-demo-lantern/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "release" }) });
+    expect(firstOwnerPublish.response.status).toBe(200);
+    const ownerHistoryPath = join(workspace, "states/pocket-demo-lantern.versions.json");
+    oldHistory = JSON.parse(readFileSync(ownerHistoryPath, "utf8")) as { entries: any[] };
+    const oldPackage = oldHistory.entries[0]!.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern");
+    oldPayload = JSON.parse(readFileSync(join(workspace, "updates", oldPackage.artifactRoot, "payload.json"), "utf8")) as any;
+    expect(readFileSync(join(workspace, "states/pocket-demo-lantern.json"), "utf8")).not.toContain("sourceProjectIdentity");
+  } finally {
+    firstServer.stop(true);
+  }
+
+  try {
+    const originalHistory = oldHistory!;
+    restoredServer = await startEditor({
+      port: 0, updateHost: "127.0.0.1", updatePort: 0, updateHostVersion: "4.0.0",
+      workspace, projectRoot: hostRoot, buildRunner,
+    });
+    const rootProjects = await request(restoredServer, "/api/projects");
+    const registeredOwner = rootProjects.value.find((project: any) => project.id === "pocket-demo-lantern");
+    expect(registeredOwner).toBeTruthy();
+    expect(registeredOwner.source).toEqual({
+      kind: "catalog-miniapp",
+      parentProjectId: "catalog-host",
+      sourceProjectTitle: "Catalog host",
+      sourcePath: "apps/lantern",
+    });
+    expect(registeredOwner.status).toMatchObject({ revision: 2, builtRevision: 1 });
+    const duplicateSourceProject = await request(restoredServer, "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "pocket-demo-lantern", name: "wrong copy", appId: "wrong.lantern", version: "9.0.0", build: 1 }),
+    });
+    expect(duplicateSourceProject.response.status).toBe(409);
+    expect(existsSync(join(workspace, "projects/pocket-demo-lantern"))).toBe(false);
+    const targets = await request(restoredServer, "/api/projects/catalog-host/publish-targets?channel=release");
+    const lanternTarget = targets.value.targets.find((target: any) => target.appId === "pocket.demo.lantern");
+    expect(lanternTarget).toMatchObject({
+      projectId: "pocket-demo-lantern",
+      ownerProjectId: "pocket-demo-lantern",
+      ownerTitle: "雾港末班信",
+      sourceProjectId: "catalog-host",
+      sourceProjectTitle: "Catalog host",
+      sourcePath: "apps/lantern",
+      canSelect: true,
+      built: false,
+      canPublish: false,
+      publishedVersion: originalHistory.entries[0]!.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern").version,
+    });
+    const persistedStaleState = JSON.parse(readFileSync(join(workspace, "states/pocket-demo-lantern.json"), "utf8"));
+    expect(persistedStaleState.sourceProjectIdentity).toContain("pocket.demo.lantern");
+    expect(persistedStaleState.revision).toBe(2);
+    await request(restoredServer, "/api/projects/catalog-host/publish-targets?channel=release");
+    expect(JSON.parse(readFileSync(join(workspace, "states/pocket-demo-lantern.json"), "utf8")).revision).toBe(2);
+
+    const restoredLanternConfig = await request(restoredServer, "/api/projects/pocket-demo-lantern/config");
+    const updatedConfig = await request(restoredServer, "/api/projects/pocket-demo-lantern/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...restoredLanternConfig.value, version: "0.2.0", build: 2 }),
+    });
+    expect(updatedConfig.response.status).toBe(200);
+    writeFileSync(bytecode, Buffer.from([0x50, 0x4a, 0x42, 0x43, 9, 2, 3]));
+    const ownerBuild = await request(restoredServer, "/api/projects/pocket-demo-lantern/build", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(ownerBuild.response.status).toBe(202);
+    const rebuilt = await waitForBuild(restoredServer, "pocket-demo-lantern");
+    expect(rebuilt.error, rebuilt.logs.join("\n")).toBeUndefined();
+    const ownerPublish = await request(restoredServer, "/api/projects/pocket-demo-lantern/publish", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "release" }) });
+    expect(ownerPublish.response.status, JSON.stringify(ownerPublish.value)).toBe(200);
+    const newHistory = JSON.parse(readFileSync(join(workspace, "states/pocket-demo-lantern.versions.json"), "utf8")) as { entries: any[] };
+    const newPackage = newHistory.entries[0]!.packages.find((pkg: any) => pkg.id === "pocket.demo.lantern");
+    const newPayload = JSON.parse(readFileSync(join(workspace, "updates", newPackage.artifactRoot, "payload.json"), "utf8")) as any;
+    expect(newPayload.entry.sha256).not.toBe(oldPayload.entry.sha256);
+    expect(newHistory.entries[0]!.releaseId).not.toBe(originalHistory.entries[0]!.releaseId);
+  } finally {
+    restoredServer?.stop(true);
     rmSync(workspace, { recursive: true, force: true });
     rmSync(fixture, { recursive: true, force: true });
   }

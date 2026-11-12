@@ -474,7 +474,7 @@ function validateCatalogSource(projectRoot: string, source: string): string {
   return manifestPath;
 }
 
-async function loadValidatedResourceCatalog(projectRoot: string, systemFile: string): Promise<ValidatedSystemPackage[]> {
+export async function loadValidatedResourceCatalog(projectRoot: string, systemFile: string): Promise<ValidatedSystemPackage[]> {
   const systemRelative = relative(projectRoot, resolve(systemFile)).replaceAll("\\", "/");
   const systemPath = validateCatalogSource(projectRoot, systemRelative);
   // The pinned validator reads catalog manifests itself. Establish the

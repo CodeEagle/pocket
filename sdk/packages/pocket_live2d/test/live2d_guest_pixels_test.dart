@@ -306,6 +306,7 @@ Future<void> _probeRawHiyoriFrame(DynamicLibrary core) async {
               'modelId': modelId,
               'parameters': const <Object?>[],
               'partOpacities': const <Object?>[],
+              'meshFormat': 'pms1',
             })
             as Map<String, Object?>;
     final outliers = <Map<String, Object?>>[];

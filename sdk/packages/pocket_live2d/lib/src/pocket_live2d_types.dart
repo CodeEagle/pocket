@@ -194,29 +194,44 @@ final class PocketLive2dDrawable {
   }
 
   Map<String, Object?> toJson({
+    bool packedMesh = true,
     bool includeTopology = true,
     PocketLive2dPlacement placement = PocketLive2dPlacement.identity,
     List<double>? uvsOverride,
     List<int>? indicesOverride,
-  }) =>
-      <String, Object?>{
-        'id': id,
-        'textureIndex': textureIndex,
-        'drawOrder': drawOrder,
-        'renderOrder': renderOrder,
-        'blendMode': blendMode,
-        'constantFlags': constantFlags,
-        'dynamicFlags': dynamicFlags,
-        'opacity': opacity,
-        'meshBytes': packPms1(
-          placement: placement,
-          uvsOverride: uvsOverride,
-          indicesOverride: indicesOverride,
-        ),
-        if (includeTopology) 'maskIndices': _uint32Bytes(maskIndices),
-        'multiplyColorRgba': _float32Bytes(multiplyColorRgba),
-        'screenColorRgba': _float32Bytes(screenColorRgba),
-      };
+  }) => <String, Object?>{
+    'id': id,
+    'textureIndex': textureIndex,
+    'drawOrder': drawOrder,
+    'renderOrder': renderOrder,
+    'blendMode': blendMode,
+    'constantFlags': constantFlags,
+    'dynamicFlags': dynamicFlags,
+    'opacity': opacity,
+    if (packedMesh)
+      'meshBytes': packPms1(
+        placement: placement,
+        uvsOverride: uvsOverride,
+        indicesOverride: indicesOverride,
+      )
+    else ...<String, Object?>{
+      // Keep unnegotiated replies as ordinary lists. Older Guests validate
+      // these fields with Array.isArray and cannot read typed buffers.
+      'positionsXYPixels': List<double>.of(positionsXYPixels),
+      if (includeTopology) 'uvs': List<double>.of(uvs),
+      if (includeTopology) 'indices': List<int>.of(indices),
+    },
+    if (includeTopology)
+      'maskIndices': packedMesh
+          ? _uint32Bytes(maskIndices)
+          : List<int>.of(maskIndices),
+    'multiplyColorRgba': packedMesh
+        ? _float32Bytes(multiplyColorRgba)
+        : List<double>.of(multiplyColorRgba),
+    'screenColorRgba': packedMesh
+        ? _float32Bytes(screenColorRgba)
+        : List<double>.of(screenColorRgba),
+  };
 }
 
 /// Packs one Live2D drawable into the exact PMS1 binary layout produced by

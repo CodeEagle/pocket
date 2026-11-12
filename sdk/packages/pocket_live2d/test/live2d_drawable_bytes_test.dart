@@ -113,7 +113,8 @@ void main() {
         screenColorRgba: const [0, 0, 0, 1],
       );
       final packed =
-          d.toJson(placement: placement)['meshBytes']! as Uint8List;
+          d.toJson(packedMesh: true, placement: placement)['meshBytes']!
+              as Uint8List;
       final expected = legacyJsEncodeNovelMesh(
         positionsXYPixels: positions,
         uvs: uvs,
@@ -142,7 +143,7 @@ void main() {
         30.0,
       ]);
       final view = Float32List.sublistView(backing, 1, 7);
-      final packet = drawable(view).toJson();
+      final packet = drawable(view).toJson(packedMesh: true);
       final bytes = packet['meshBytes']! as Uint8List;
       final expected = legacyJsEncodeNovelMesh(
         positionsXYPixels: view,
@@ -180,7 +181,8 @@ void main() {
         12.25,
         -8.75,
       ]).asUnmodifiableView();
-      final bytes = drawable(values).toJson()['meshBytes']! as Uint8List;
+      final bytes =
+          drawable(values).toJson(packedMesh: true)['meshBytes']! as Uint8List;
       expect(
         bytes,
         legacyJsEncodeNovelMesh(
@@ -202,7 +204,8 @@ void main() {
     'generic provider doubles retain float32 rounding and response isolation',
     () {
       final values = [1.0 / 3, -0.0, 1e-40, 2.5, -4.0, 8.0];
-      final bytes = drawable(values).toJson()['meshBytes']! as Uint8List;
+      final bytes =
+          drawable(values).toJson(packedMesh: true)['meshBytes']! as Uint8List;
       expect(
         bytes,
         legacyJsEncodeNovelMesh(
@@ -227,8 +230,13 @@ void main() {
     'empty typed and generic arrays retain the full/cached protocol shape',
     () {
       for (final positions in <List<double>>[Float32List(0), const []]) {
-        expect(drawable(positions).toJson()['meshBytes'], isEmpty);
-        final cached = drawable(positions).toJson(includeTopology: false);
+        expect(
+          drawable(positions).toJson(packedMesh: true)['meshBytes'],
+          isEmpty,
+        );
+        final cached = drawable(
+          positions,
+        ).toJson(packedMesh: true, includeTopology: false);
         expect(cached['meshBytes'], isEmpty);
         expect(cached.containsKey('maskIndices'), isFalse);
       }
