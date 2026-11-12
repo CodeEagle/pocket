@@ -321,51 +321,37 @@ void main() {
     skip: libraryPath == null,
   );
 
-  testWidgets(
-    'PocketView rejects fonts:host bytecode when injected FfiPocketRuntime lacks host font metrics',
-    (WidgetTester tester) async {
-      final unsynced = FfiPocketRuntime.open(width: 200, height: 120);
-      addTearDown(unsynced.dispose);
-      final fakeBytecode = Uint8List.fromList(<int>[1, 2, 3, 4]);
-      final fakePak = Uint8List(32);
-      final pakView = ByteData.sublistView(fakePak);
+  test(
+    'FfiPocketRuntime rejects font-less PAK until syncPocketHostFonts installs host metrics',
+    () {
+      final runtime = FfiPocketRuntime.open(width: 200, height: 120);
+      addTearDown(runtime.dispose);
+      final fontlessPak = Uint8List(32);
+      final pakView = ByteData.sublistView(fontlessPak);
       pakView.setUint32(0, 0x4b504344, Endian.little);
       pakView.setUint16(4, 1, Endian.little);
       pakView.setUint32(12, 32, Endian.little);
       pakView.setUint32(16, 32, Endian.little);
       pakView.setUint32(20, 32, Endian.little);
       pakView.setUint32(24, 32, Endian.little);
-      final metadata = jsonEncode(<String, Object?>{
-        'entryFormat': 'quickjs-bytecode',
-        'formatVersion': 1,
-        'kind': 'script',
-        'bindingGeneration': 1,
-        'tickHz': 60,
-        'runtimeAbi': unsynced.actualAbi,
-        'bytecodeBytes': fakeBytecode.length,
-        'fonts': 'host',
-      });
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SizedBox(
-              width: 200,
-              height: 120,
-              child: PocketView(
-                runtime: unsynced,
-                bytecodeBytes: fakeBytecode,
-                bytecodeMetadata: metadata,
-                pakBytes: fakePak,
-              ),
-            ),
+      expect(
+        () => runtime.load('globalThis.frame = () => {};', fontlessPak),
+        throwsA(
+          isA<PocketRuntimeException>().having(
+            (e) => e.message,
+            'message',
+            contains('no baked ui:font.* atlases'),
           ),
         ),
       );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 32));
-      expect(find.textContaining('text.layout.native'), findsOneWidget);
+
+      expect(syncPocketHostFonts(runtime), isTrue);
+      final frame = runtime.load('globalThis.frame = () => {};', fontlessPak);
+      expect(frame.width, 200);
     },
-    skip: libraryPath == null,
+    skip: libraryPath == null
+        ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
+        : false,
   );
 }
