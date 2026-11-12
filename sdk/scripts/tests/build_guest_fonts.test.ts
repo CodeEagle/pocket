@@ -116,9 +116,19 @@ test("pinned build bakes pocket.json regular and bold faces into PAK metrics and
     const hostFontBuild = await buildGuest({ projectRoot: baseline, outDir: join(baseline, "out-host") });
     const hostEntries = unpack(new Uint8Array(readFileSync(hostFontBuild.pak)));
     expect(hostEntries.some((blob) => blob.key.startsWith("ui:font."))).toBe(false);
+    const hostMetadata = JSON.parse(readFileSync(join(baseline, "out-host/app.bytecode.json"), "utf8"));
+    const hostManifest = JSON.parse(readFileSync(join(baseline, "out-host/guest-manifest.json"), "utf8"));
+    expect(hostMetadata.fonts).toBe("host");
+    expect(hostManifest.fonts).toBe("host");
+    expect(hostManifest.capabilities.requires).toContain("text.layout.native");
 
     const defaultBuild = await buildGuest({ projectRoot: baseline, outDir: join(baseline, "out"), bakeFonts: true });
     const primaryBuild = await buildGuest({ projectRoot: configured, outDir: join(configured, "out") });
+    const bakedMetadata = JSON.parse(readFileSync(join(baseline, "out/app.bytecode.json"), "utf8"));
+    const bakedManifest = JSON.parse(readFileSync(join(baseline, "out/guest-manifest.json"), "utf8"));
+    expect(bakedMetadata.fonts).toBe("baked");
+    expect(bakedManifest.fonts).toBe("baked");
+    expect(bakedManifest.capabilities.requires).not.toContain("text.layout.native");
     expect(readFileSync(hostFontBuild.pak).byteLength).toBeLessThan(readFileSync(defaultBuild.pak).byteLength);
     const defaultRegular = fontAtlas(defaultBuild.pak, 6);
     const primaryRegular = fontAtlas(primaryBuild.pak, 6);

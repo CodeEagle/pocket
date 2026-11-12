@@ -499,9 +499,66 @@
     return 14;
   }
 
+  function opFontSize(op) {
+    const explicit = Number(op.size);
+    return Number.isFinite(explicit) && explicit > 0 ? explicit : fontSize(op.fontSlot);
+  }
+
   function fontWeight(slot) {
     const index = Number(slot);
     return (index >= 7 && index <= 13) || index === 15 || index === 20 ? 700 : 400;
+  }
+
+  function fontFamily(slot) {
+    const index = Number(slot);
+    if (index >= 16 && index <= 18) {
+      return "ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace";
+    }
+    return "system-ui, -apple-system, sans-serif";
+  }
+
+  function opTextAffine(op) {
+    if (!Array.isArray(op.affine) || op.affine.length !== 4) return null;
+    const values = op.affine.map((item) => Number(item));
+    return values.every(Number.isFinite) ? values : null;
+  }
+
+  function measureTrackedLine(context, value, tracking) {
+    if (!value) return 0;
+    if (tracking === 0) return context.measureText(value).width;
+    if (typeof context.letterSpacing === "string") {
+      const previous = context.letterSpacing;
+      context.letterSpacing = `${tracking}px`;
+      const width = context.measureText(value).width;
+      context.letterSpacing = previous;
+      return width;
+    }
+    const symbols = Array.from(value);
+    let width = 0;
+    for (const symbol of symbols) {
+      width += context.measureText(symbol).width + tracking;
+    }
+    return Math.max(0, width);
+  }
+
+  function fillTrackedLine(context, value, x, y, tracking) {
+    if (!value) return;
+    if (tracking === 0) {
+      context.fillText(value, x, y);
+      return;
+    }
+    if (typeof context.letterSpacing === "string") {
+      const previous = context.letterSpacing;
+      context.letterSpacing = `${tracking}px`;
+      context.fillText(value, x, y);
+      context.letterSpacing = previous;
+      return;
+    }
+    let cursorX = x;
+    for (const symbol of Array.from(value)) {
+      context.fillText(symbol, cursorX, y);
+      cursorX += context.measureText(symbol).width + tracking;
+    }
   }
 
   function surfaceDescriptor(op) {
@@ -719,18 +776,41 @@
       } else if ([op.x, op.y, op.w, op.h].every((value) => Number.isFinite(Number(value)))) {
         bounds = { x: Number(op.x), y: Number(op.y), w: Number(op.w), h: Number(op.h) };
         if (op.type === "text") {
-          const size = fontSize(op.fontSlot);
-          if (bounds.y - size >= region.y + region.h || bounds.y + bounds.h + size <= region.y) continue;
+          const size = opFontSize(op);
+          const tracking = number(op.tracking, 0);
+          const affine = opTextAffine(op);
+          if (!affine && (bounds.y - size >= region.y + region.h || bounds.y + bounds.h + size <= region.y)) continue;
           const previousFont = context.font;
-          context.font = `${fontWeight(op.fontSlot)} ${size}px system-ui, -apple-system, sans-serif`;
+          context.font = `${fontWeight(op.fontSlot)} ${size}px ${fontFamily(op.fontSlot)}`;
           const lines = String(op.text ?? "").split("\n");
-          const measured = Math.max(0, ...lines.map((line) => context.measureText(line).width));
+          const measured = Math.max(0, ...lines.map((line) => measureTrackedLine(context, line, tracking)));
           context.font = previousFont;
           const align = Number(op.align);
           const offset = align === 1 ? (bounds.w - measured) / 2 : align === 2 ? bounds.w - measured : 0;
-          // Include glyph bearings/antialiasing beyond the advance box.
-          bounds = { x: bounds.x + Math.min(0, offset) - size, y: bounds.y - size,
-            w: Math.max(bounds.w, measured) + size * 2, h: bounds.h + size * 2 };
+          const minLx = Math.min(0, offset);
+          const maxLx = Math.max(bounds.w, offset + measured);
+          if (affine) {
+            const [a, b, c, d] = affine;
+            const corners = [
+              [minLx, 0],
+              [maxLx, 0],
+              [minLx, bounds.h],
+              [maxLx, bounds.h],
+            ].map(([lx, ly]) => [bounds.x + a * lx + c * ly, bounds.y + b * lx + d * ly]);
+            const xs = corners.map((pt) => pt[0]);
+            const ys = corners.map((pt) => pt[1]);
+            const pad = size * Math.max(1, Math.hypot(a, b), Math.hypot(c, d));
+            bounds = {
+              x: Math.min(...xs) - pad,
+              y: Math.min(...ys) - pad,
+              w: Math.max(...xs) - Math.min(...xs) + pad * 2,
+              h: Math.max(...ys) - Math.min(...ys) + pad * 2,
+            };
+          } else {
+            // Include glyph bearings/antialiasing beyond the advance box.
+            bounds = { x: bounds.x + minLx - size, y: bounds.y - size,
+              w: maxLx - minLx + size * 2, h: bounds.h + size * 2 };
+          }
         }
       }
       if (bounds && op.clip) {
@@ -824,19 +904,34 @@
           context.fillRect(x, y, w, h);
         }
       } else if (kind === "text") {
-        const size = fontSize(op.fontSlot);
-        context.font = `${fontWeight(op.fontSlot)} ${size}px system-ui, -apple-system, sans-serif`;
+        const size = opFontSize(op);
+        const tracking = number(op.tracking, 0);
+        const affine = opTextAffine(op);
+        context.save();
+        context.font = `${fontWeight(op.fontSlot)} ${size}px ${fontFamily(op.fontSlot)}`;
         context.fillStyle = argb(op.color ?? 0);
         context.textBaseline = "top";
+        const ox = number(op.x, 0);
+        const oy = number(op.y, 0);
+        const boxW = number(op.w, op.width ?? 0);
+        const boxH = number(op.h, op.height ?? size * 1.2);
+        if (affine) {
+          context.translate(ox, oy);
+          context.transform(affine[0], affine[1], affine[2], affine[3], 0, 0);
+        }
         const text = String(op.text ?? "");
         const lines = text.split("\n");
-        const lineHeight = number(op.h, size * 1.2) / Math.max(1, lines.length);
+        const lineHeight = boxH / Math.max(1, lines.length);
+        const align = Number(op.align);
         for (let line = 0; line < lines.length; line += 1) {
           const value = lines[line];
-          const align = Number(op.align);
-          const offset = align === 1 ? (number(op.w, 0) - context.measureText(value).width) / 2 : align === 2 ? number(op.w, 0) - context.measureText(value).width : 0;
-          context.fillText(value, number(op.x, 0) + offset, number(op.y, 0) + line * lineHeight);
+          const measured = measureTrackedLine(context, value, tracking);
+          const offset = align === 1 ? (boxW - measured) / 2 : align === 2 ? boxW - measured : 0;
+          const drawX = (affine ? 0 : ox) + offset;
+          const drawY = (affine ? 0 : oy) + line * lineHeight;
+          fillTrackedLine(context, value, drawX, drawY, tracking);
         }
+        context.restore();
       } else if (kind === "image") {
         drawImage(context, resources.get(String(op.asset ?? "")), op);
       } else if (kind === "triangle" || kind === "textureTriangle" || kind === "textureTriangleRepeat") {
@@ -867,11 +962,29 @@
 
   function visibleRegion(op, width, height) {
     if (!op || typeof op !== "object" || op.type === "hostSurface") return null;
-    const x = Number(op.x);
-    const y = Number(op.y);
-    const w = Number(op.w);
-    const h = Number(op.h);
+    let x = Number(op.x);
+    let y = Number(op.y);
+    let w = Number(op.w ?? op.width);
+    let h = Number(op.h ?? op.height);
     if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null;
+    if (op.type === "text") {
+      const affine = opTextAffine(op);
+      if (affine) {
+        const [a, b, c, d] = affine;
+        const corners = [
+          [x, y],
+          [x + a * w, y + b * w],
+          [x + c * h, y + d * h],
+          [x + a * w + c * h, y + b * w + d * h],
+        ];
+        const xs = corners.map((pt) => pt[0]);
+        const ys = corners.map((pt) => pt[1]);
+        x = Math.min(...xs);
+        y = Math.min(...ys);
+        w = Math.max(...xs) - x;
+        h = Math.max(...ys) - y;
+      }
+    }
     if (op.color !== undefined && ((Number(op.color) >>> 24) & 0xff) === 0) return null;
     // A full-viewport fill is the compositor background, not an inspectable
     // visual region. Test this before clip intersection so a clipped replay
@@ -3037,6 +3150,7 @@
 
   global.PocketEditorPreview = {
     version: VERSION,
+    drawFrame,
     projectModelMeshes,
     protocol: { version: VERSION, source: SOURCE },
     mount: client,

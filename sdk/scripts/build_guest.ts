@@ -941,6 +941,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       };
       metadataObj.worker = workerDescriptor;
     }
+    const fontDelivery = skipFontBaking ? "host" : "baked";
     let metadataModified = workerDescriptor !== undefined;
     if (metadataObj.version !== identity.version) {
       metadataObj.version = identity.version;
@@ -948,6 +949,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     }
     if (metadataObj.build !== identity.build) {
       metadataObj.build = identity.build;
+      metadataModified = true;
+    }
+    if (metadataObj.fonts !== fontDelivery) {
+      metadataObj.fonts = fontDelivery;
       metadataModified = true;
     }
     if (metadataModified) writeFileSync(metadata, `${JSON.stringify(metadataObj, null, 2)}\n`);
@@ -959,23 +964,29 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       const outputManifest = { ...manifestObj } as Record<string, unknown>;
       outputManifest.version = identity.version;
       outputManifest.build = identity.build;
+      outputManifest.fonts = fontDelivery;
       if (workerDeclaration !== undefined) {
         outputManifest.domains = { ...(outputManifest.domains as Record<string, unknown> | undefined), worker: workerDeclaration };
       }
       if (workerDescriptor) outputManifest.worker = workerDescriptor;
-      if (workerDescriptor) {
+      if (workerDescriptor || skipFontBaking) {
         const capabilities = outputManifest.capabilities && typeof outputManifest.capabilities === "object"
           ? outputManifest.capabilities as Record<string, unknown>
           : {};
+        const addedRequires = [
+          ...(workerDescriptor ? ["runtime.worker"] : []),
+          ...(skipFontBaking ? ["text.layout.native"] : []),
+        ];
+        const addedSet = new Set(addedRequires);
         const requires = Array.isArray(capabilities.requires)
           ? capabilities.requires.filter((value): value is string => typeof value === "string")
           : [];
         const optional = Array.isArray(capabilities.optional)
-          ? capabilities.optional.filter((value): value is string => typeof value === "string" && value !== "runtime.worker")
+          ? capabilities.optional.filter((value): value is string => typeof value === "string" && !addedSet.has(value))
           : [];
         outputManifest.capabilities = {
           ...capabilities,
-          requires: Array.from(new Set([...requires, "runtime.worker"])).sort(),
+          requires: Array.from(new Set([...requires, ...addedRequires])).sort(),
           optional,
         };
       }

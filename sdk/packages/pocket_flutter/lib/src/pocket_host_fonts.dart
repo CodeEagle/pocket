@@ -1,10 +1,13 @@
 import 'dart:collection' show LinkedHashMap;
+import 'dart:convert' show utf8;
+import 'dart:ffi' show Pointer, Uint8, Uint8Pointer;
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui show FontFeature;
 
 import 'package:flutter/painting.dart';
 
+import 'pocket_recording.dart';
 import 'pocket_runtime.dart';
 
 /// Active PocketJS font slots (`0..20`).
@@ -41,8 +44,9 @@ const List<double> pocketFontSlotSizes = <double>[
   10,
 ];
 
-/// Disables ligatures and kerning so PocketJS's additive per-scalar layout
-/// advances match whole-run `TextPainter` widths 1:1.
+/// Disables ligatures and kerning so PocketJS's additive ASCII advances
+/// match whole-run `TextPainter` widths 1:1 while preserving grapheme/ZWJ
+/// and script shaping (`ccmp`/`mark`/`mkmk`/`calt`) on non-ASCII runs.
 const List<ui.FontFeature> pocketAdditiveFontFeatures = <ui.FontFeature>[
   ui.FontFeature.disable('liga'),
   ui.FontFeature.disable('clig'),
@@ -52,8 +56,10 @@ const List<ui.FontFeature> pocketAdditiveFontFeatures = <ui.FontFeature>[
 
 const List<String> _defaultMonoFallback = <String>[
   'Menlo',
+  'SF Mono',
   'Consolas',
   'Roboto Mono',
+  'DejaVu Sans Mono',
   'Courier New',
 ];
 
@@ -126,13 +132,35 @@ double measurePocketHostScalarAdvance(
     return -1.0;
   }
   if (codepoint < 0x20 || codepoint == 0x7f) return 0.0;
+  return measurePocketHostTextRunString(
+    slot,
+    String.fromCharCode(codepoint),
+    fontFamilyFallback: fontFamilyFallback,
+  );
+}
+
+/// Measures a shaped single-line string (including grapheme clusters, emoji
+/// ZWJ sequences, combining marks, and complex scripts) using the exact slot
+/// [TextStyle] and [tracking] used by `PocketCanvasPainter`.
+double measurePocketHostTextRunString(
+  int slot,
+  String text, {
+  double tracking = 0.0,
+  List<String> fontFamilyFallback = const <String>[],
+}) {
+  if (slot < 0 || slot >= pocketHostFontSlotCount) return -1.0;
+  if (!tracking.isFinite) return -1.0;
+  if (text.isEmpty) return 0.0;
+  final sanitized = text.contains('\r') ? text.replaceAll('\r', '') : text;
+  if (sanitized.isEmpty) return 0.0;
   final style = pocketTextStyleForSlot(
     slot: slot,
     fontSize: pocketFontSizeForSlot(slot),
     fontFamilyFallback: fontFamilyFallback,
+    letterSpacing: tracking,
   );
   final painter = TextPainter(
-    text: TextSpan(text: String.fromCharCode(codepoint), style: style),
+    text: TextSpan(text: sanitized, style: style),
     textDirection: TextDirection.ltr,
     textScaler: TextScaler.noScaling,
   )..layout();
@@ -142,6 +170,31 @@ double measurePocketHostScalarAdvance(
   } finally {
     painter.dispose();
   }
+}
+
+/// FFI entry point decoding a borrowed UTF-8 slice and delegating to
+/// [measurePocketHostTextRunString].
+double measurePocketHostTextRunUtf8(
+  int slot,
+  double tracking,
+  Pointer<Uint8> utf8Ptr,
+  int utf8Len, {
+  List<String> fontFamilyFallback = const <String>[],
+}) {
+  if (utf8Len <= 0) return 0.0;
+  if (utf8Ptr.address == 0 || utf8Len > 1024 * 1024) return -1.0;
+  final String decoded;
+  try {
+    decoded = utf8.decode(utf8Ptr.asTypedList(utf8Len), allowMalformed: false);
+  } on FormatException {
+    return -1.0;
+  }
+  return measurePocketHostTextRunString(
+    slot,
+    decoded,
+    tracking: tracking,
+    fontFamilyFallback: fontFamilyFallback,
+  );
 }
 
 /// Pre-warmed 21-slot host font metric table pushed once per font stack to the
@@ -160,6 +213,12 @@ final class PocketHostFontMetrics {
   final Float32List lineHeights;
   final Float32List cjkAdvances;
   final Float32List asciiAdvances;
+
+  PocketHostFontMetricsSnapshot toSnapshot() => PocketHostFontMetricsSnapshot(
+    lineHeights: lineHeights,
+    cjkAdvances: cjkAdvances,
+    asciiAdvances: asciiAdvances,
+  );
 
   /// Returns cached or freshly measured 21-slot host font metrics for
   /// [fontFamilyFallback].
@@ -214,8 +273,9 @@ final class PocketHostFontMetrics {
         painter.text = TextSpan(text: '\u6C38', style: style);
         painter.layout();
         final cjkWidth = painter.width;
-        cjkAdvances[slot] =
-            cjkWidth.isFinite && cjkWidth > 0.0 ? cjkWidth : slotSize;
+        cjkAdvances[slot] = cjkWidth.isFinite && cjkWidth > 0.0
+            ? cjkWidth
+            : slotSize;
 
         final baseOffset = slot * pocketHostAsciiCount;
         for (var i = 0; i < pocketHostAsciiCount; i++) {
@@ -223,8 +283,9 @@ final class PocketHostFontMetrics {
           painter.text = TextSpan(text: charText, style: style);
           painter.layout();
           final width = painter.width;
-          asciiAdvances[baseOffset + i] =
-              width.isFinite && width >= 0.0 ? width : slotSize * 0.56;
+          asciiAdvances[baseOffset + i] = width.isFinite && width >= 0.0
+              ? width
+              : slotSize * 0.56;
         }
       }
     } finally {
@@ -238,8 +299,8 @@ final class PocketHostFontMetrics {
   }
 }
 
-/// Synchronizes OS/Flutter font metrics and on-demand glyph advance lookup into
-/// [runtime] when backed by [FfiPocketRuntime] outside deterministic replay.
+/// Synchronizes OS/Flutter font metrics and on-demand UTF-8 text run shaping
+/// into [runtime] when backed by [FfiPocketRuntime] outside deterministic replay.
 bool syncPocketHostFonts(
   PocketRuntime runtime, {
   List<String> fontFamilyFallback = const <String>[],

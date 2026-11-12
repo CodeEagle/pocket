@@ -98,6 +98,7 @@ final class PocketViewController {
   final Set<PocketDuplexEventCallback> _duplexListeners =
       <PocketDuplexEventCallback>{};
   _PocketSceneCaptureCallback? _captureScene;
+  bool Function()? _refreshHostFonts;
   bool _sceneCaptureInFlight = false;
 
   /// Only trusted, compiled host providers can authorize a platform texture.
@@ -110,6 +111,11 @@ final class PocketViewController {
   void revokePlatformTexture(int textureId) {
     if (_platformTextures.remove(textureId)) _surfacesChanged?.call();
   }
+
+  /// Clears cached host font metrics and [PocketTextLayoutCache] entries, then
+  /// resynchronizes 21-slot host metrics into the attached native runtime.
+  /// Call this after dynamically loading fonts (e.g., `FontLoader.load()`).
+  bool refreshHostFonts() => _refreshHostFonts?.call() ?? false;
 
   bool get isReady => _runtime != null;
 
@@ -472,6 +478,7 @@ final class PocketViewController {
     bool Function()? canSendImmediately,
     VoidCallback? onAppActiveChanged,
     _PocketSceneCaptureCallback? captureScene,
+    bool Function()? refreshHostFonts,
   }) {
     _clearPendingMessages();
     _generation++;
@@ -483,6 +490,7 @@ final class PocketViewController {
     _canSendImmediately = canSendImmediately;
     _onAppActiveChanged = onAppActiveChanged;
     _captureScene = captureScene;
+    _refreshHostFonts = refreshHostFonts;
   }
 
   void _detach(PocketRuntime runtime) {
@@ -497,6 +505,7 @@ final class PocketViewController {
     if (_runtime == null) {
       _generation++;
       _captureScene = null;
+      _refreshHostFonts = null;
       return;
     }
     _generation++;
@@ -508,6 +517,7 @@ final class PocketViewController {
     _canSendImmediately = null;
     _onAppActiveChanged = null;
     _captureScene = null;
+    _refreshHostFonts = null;
     _clearPendingMessages();
   }
 
@@ -1280,10 +1290,32 @@ class _PocketViewState extends State<PocketView>
     if (previous != null && previous != ratio) _markSceneNeedsBuild();
   }
 
+  void _onSystemFontsChanged() {
+    _refreshHostFontsNow();
+  }
+
+  bool _refreshHostFontsNow() {
+    if (_isDisposed) return false;
+    PocketHostFontMetrics.clearCache();
+    _textLayoutCache.clear();
+    var synced = false;
+    final runtime = _runtime;
+    if (runtime != null) {
+      synced = syncPocketHostFonts(
+        runtime,
+        fontFamilyFallback: widget.fontFamilyFallback,
+      );
+    }
+    _markSceneNeedsBuild();
+    if (synced) _wakeTicker();
+    return synced;
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    PaintingBinding.instance.systemFonts.addListener(_onSystemFontsChanged);
     _syncFrameTimingListener();
     _startDisplayGeometry();
   }
@@ -1358,12 +1390,15 @@ class _PocketViewState extends State<PocketView>
       oldWidget.fontFamilyFallback,
       widget.fontFamilyFallback,
     );
-    if (fallbackChanged && _runtime != null) {
-      if (syncPocketHostFonts(
-        _runtime!,
-        fontFamilyFallback: widget.fontFamilyFallback,
-      )) {
-        _wakeTicker();
+    if (fallbackChanged) {
+      _textLayoutCache.clear();
+      if (_runtime != null) {
+        if (syncPocketHostFonts(
+          _runtime!,
+          fontFamilyFallback: widget.fontFamilyFallback,
+        )) {
+          _wakeTicker();
+        }
       }
     }
     if (oldWidget.inputEnabled != widget.inputEnabled ||
@@ -1856,6 +1891,7 @@ class _PocketViewState extends State<PocketView>
         canSendImmediately: () => _effectiveActive && !_loading,
         onAppActiveChanged: _onControllerActivityChanged,
         captureScene: _capturePocketViewScene,
+        refreshHostFonts: _refreshHostFontsNow,
       );
       // Re-publish any source that was updated before the runtime finished
       // loading (keyboard or external provider). A neutral source does not
@@ -2097,6 +2133,13 @@ class _PocketViewState extends State<PocketView>
     if (actualAbi != null && actualAbi != metadata.runtimeAbi) {
       throw PocketRuntimeException(
         'bytecode runtimeAbi mismatch: package=${metadata.runtimeAbi} host=$actualAbi',
+      );
+    }
+    if (metadata.fonts == 'host' &&
+        runtime is FfiPocketRuntime &&
+        !runtime.hasHostFonts) {
+      throw const PocketRuntimeException(
+        'bytecode package requires host-native fonts (text.layout.native), but host font metrics are not installed',
       );
     }
     return runtime.loadBytecode(
@@ -6686,6 +6729,7 @@ class _PocketViewState extends State<PocketView>
   void dispose() {
     _isDisposed = true;
     if (!_disposeSignal.isCompleted) _disposeSignal.complete();
+    PaintingBinding.instance.systemFonts.removeListener(_onSystemFontsChanged);
     WidgetsBinding.instance.removeObserver(this);
     if (_frameTimingListenerAttached) {
       SchedulerBinding.instance.removeTimingsCallback(_onFrameTimings);

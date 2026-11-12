@@ -1122,6 +1122,11 @@ function previewOpSummary(value: unknown): JsonRecord {
     result.color = previewInteger(op.color);
     result.fontSlot = op.fontSlot === undefined ? null : previewInteger(op.fontSlot);
     result.align = previewInteger(op.align);
+    const tracking = Number(op.tracking ?? 0);
+    if (Number.isFinite(tracking) && tracking !== 0) result.tracking = previewDouble(tracking);
+    if (Array.isArray(op.affine) && op.affine.length === 4) {
+      result.affine = op.affine.map((item) => previewDouble(Number(item)));
+    }
   } else if (type === "image") {
     result.asset = op.asset;
     result.uv = op.uv === undefined ? null : Array.isArray(op.uv) ? op.uv.map((uv) => previewDouble(uv)) : op.uv;
@@ -1403,6 +1408,30 @@ function hostError(code: string, message: string): JsonRecord {
   return { code, message };
 }
 
+function previewFontSlotSize(slot: unknown): number {
+  const values = [12, 14, 16, 18, 20, 24, 36];
+  const index = Number(slot);
+  if (index >= 0 && index <= 6) return values[index];
+  if (index >= 7 && index <= 13) return values[index - 7];
+  if (index === 14 || index === 15) return 54;
+  if (index >= 16 && index <= 18) return values[index - 16];
+  if (index === 19 || index === 20) return 10;
+  return 14;
+}
+
+export function previewOpSummaryForTest(value: unknown): JsonRecord {
+  return previewOpSummary(value);
+}
+
+export function transformedChildOpForTest(
+  op: JsonRecord,
+  slot: SurfaceSlot,
+  child: PreviewFrame,
+  assetPrefix = "",
+): JsonRecord {
+  return transformedChildOp(op, slot, child, assetPrefix);
+}
+
 function transformedChildOp(
   op: JsonRecord,
   slot: SurfaceSlot,
@@ -1417,8 +1446,26 @@ function transformedChildOp(
   };
   number("x", scaleX, slot.x);
   number("y", scaleY, slot.y);
-  number("w", scaleX);
-  number("h", scaleY);
+  const hasTextAffine = op.type === "text" && Array.isArray(op.affine) && op.affine.length === 4 &&
+    op.affine.every((item) => typeof item === "number" && Number.isFinite(item));
+  if (hasTextAffine) {
+    const [a, b, c, d] = op.affine as number[];
+    // Keep w, h, size, and tracking in the text run's local coordinate space;
+    // the composed 2x2 matrix maps local (lx, ly) into parent surface space.
+    transformed.affine = [a * scaleX, b * scaleY, c * scaleX, d * scaleY];
+  } else {
+    number("w", scaleX);
+    number("h", scaleY);
+    if (op.type === "text" && (scaleX !== 1 || scaleY !== 1)) {
+      const baseSize = typeof op.size === "number" && Number.isFinite(op.size) && op.size > 0
+        ? op.size
+        : previewFontSlotSize(op.fontSlot);
+      transformed.size = baseSize * scaleY;
+      if (typeof op.tracking === "number" && Number.isFinite(op.tracking) && op.tracking !== 0) {
+        transformed.tracking = op.tracking * scaleX;
+      }
+    }
+  }
   if (typeof op.radius === "number" && Number.isFinite(op.radius)) transformed.radius = op.radius * Math.min(scaleX, scaleY);
   if (typeof op.asset === "string" && op.asset) transformed.asset = `${assetPrefix}${op.asset}`;
   // Every child operation must be clipped to its host-surface rect. Native

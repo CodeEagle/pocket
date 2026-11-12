@@ -66,6 +66,7 @@ final class PocketSession extends ChangeNotifier {
       _negotiatedCapabilities?.granted.contains(capability) ?? false;
   Set<String> get _builtInCapabilities => {
     'text.glyphs.baked',
+    'text.layout.native',
     'runtime.worker',
     'input.touch',
     'display.viewport.live',

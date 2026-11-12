@@ -11,6 +11,7 @@ export const POCKET_FLUTTER_TARGET_ID = "pocket-flutter";
  */
 const FLUTTER_TARGET_CAPABILITIES = [
   "text.glyphs.baked",
+  "text.layout.native",
   "runtime.worker",
   "input.touch",
   "display.viewport.live",

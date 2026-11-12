@@ -140,7 +140,10 @@ final class PocketHost {
     required Set<String> allowedCapabilities,
     PocketHostSend? send,
     PocketHostRawSend? sendRaw,
-    Iterable<String> builtInCapabilities = const <String>{'text.glyphs.baked'},
+    Iterable<String> builtInCapabilities = const <String>{
+      'text.glyphs.baked',
+      'text.layout.native',
+    },
   }) : allowedCapabilities = Set<String>.unmodifiable(allowedCapabilities),
        builtInCapabilities = Set<String>.unmodifiable(builtInCapabilities),
        _send = send,

@@ -506,6 +506,29 @@ unsafe fn command_inner(command: &Value, handle: &mut Handle) -> (bool, Value) {
                 destroy(handle);
                 return (false, error_response(detail));
             }
+            let install_host_fonts = match command.get("hostFonts") {
+                None => true,
+                Some(Value::Bool(enabled)) => *enabled,
+                Some(_) => {
+                    destroy(handle);
+                    return (false, error_response("hostFonts must be a boolean"));
+                }
+            };
+            if install_host_fonts {
+                let (lh, cjk, ascii) = pocket_flutter::default_probe_host_font_metrics();
+                if pocket_flutter::pocket_set_host_font_metrics(
+                    created,
+                    lh.len() as u32,
+                    lh.as_ptr(),
+                    cjk.as_ptr(),
+                    ascii.as_ptr(),
+                ) != 0
+                {
+                    let detail = last_error(*handle);
+                    destroy(handle);
+                    return (false, error_response(detail));
+                }
+            }
             if let Some(policy) = command.get("guestSecurity") {
                 let encoded = CString::new(policy.to_string()).expect("JSON has no literal NUL");
                 if pocket_configure_guest_security(created, encoded.as_ptr()) != 0 {
@@ -1003,6 +1026,22 @@ mod tests {
             };
             assert_eq!(invalid_json["ok"], false);
 
+            let mut unconfigured = std::ptr::null_mut();
+            run(
+                &mut unconfigured,
+                json!({"op":"create", "width":80, "height":40, "hostFonts":false}),
+            );
+            let (_, rejected) = command(
+                &json!({"op":"load", "sourcePath":src_str, "pakPath":pak_str}),
+                &mut unconfigured,
+            );
+            assert_eq!(rejected["ok"], false);
+            assert!(rejected["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no baked ui:font.* atlases"));
+
+            destroy(&mut unconfigured);
             destroy(&mut legacy);
             destroy(&mut compact_load_handle);
             destroy(&mut raw_compact);

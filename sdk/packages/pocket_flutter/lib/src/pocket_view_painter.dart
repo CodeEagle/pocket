@@ -312,6 +312,9 @@ final class PocketCanvasPainter extends CustomPainter {
   // visible without rebuilding every op object. Keep only identities used by
   // this block as an immutable snapshot for visual equality checks.
   final Map<String, ui.Image?> _imageIdentities;
+  final Float64List _textTransformScratch = Float64List(16)
+    ..[10] = 1.0
+    ..[15] = 1.0;
 
   /// A stable diagnostic counter used by widget tests and profiling builds.
   /// It counts actual [paint] calls, not frame/ticker callbacks. A retained
@@ -625,26 +628,11 @@ final class PocketCanvasPainter extends CustomPainter {
           if (affine != null) {
             canvas.save();
             canvas.translate(op.x, op.y);
-            canvas.transform(
-              Float64List.fromList(<double>[
-                affine[0],
-                affine[1],
-                0,
-                0,
-                affine[2],
-                affine[3],
-                0,
-                0,
-                0,
-                0,
-                1,
-                0,
-                0,
-                0,
-                0,
-                1,
-              ]),
-            );
+            _textTransformScratch[0] = affine[0];
+            _textTransformScratch[1] = affine[1];
+            _textTransformScratch[4] = affine[2];
+            _textTransformScratch[5] = affine[3];
+            canvas.transform(_textTransformScratch);
           }
           try {
             if (op.align == 1 || op.align == 2) {

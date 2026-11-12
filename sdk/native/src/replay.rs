@@ -39,6 +39,7 @@ pub(super) struct ScalarSample {
     value: f64,
 }
 
+#[derive(Debug)]
 pub(super) struct ScalarLane {
     mode: Mode,
     transaction_open: bool,
@@ -242,6 +243,16 @@ impl TraceClock {
                 "replay trace clock has {expected} intervals but only {consumed} were used"
             ));
         }
+        let lane_failure = if self.mode != Mode::Live {
+            let scalar_failure = self.scalar_lane.borrow().failure.clone();
+            self.failure.clone().or(scalar_failure)
+        } else {
+            None
+        };
+        if let Some(error) = lane_failure {
+            self.clear_transaction();
+            return Err(error);
+        }
         let scalar_values = {
             let lane = self.scalar_lane.borrow();
             if self.mode == Mode::Replay && lane.replay_index != lane.replayed.len() {
@@ -259,16 +270,6 @@ impl TraceClock {
                 Mode::Replay => lane.replayed.clone(),
             }
         };
-        let record_failure = if self.mode == Mode::Record {
-            let scalar_failure = self.scalar_lane.borrow().failure.clone();
-            self.failure.clone().or(scalar_failure)
-        } else {
-            None
-        };
-        if let Some(error) = record_failure {
-            self.clear_transaction();
-            return Err(error);
-        }
         let values = match self.mode {
             Mode::Live => Vec::new(),
             Mode::Record => self.recorded.clone(),
@@ -357,7 +358,10 @@ fn parse_intervals(input: &str) -> Result<ParsedInput, String> {
 }
 
 fn validate_scalar(kind: String, value: f64) -> Result<ScalarSample, String> {
-    if !matches!(kind.as_str(), "dateNow" | "mathRandom" | "performanceNow") {
+    if !matches!(
+        kind.as_str(),
+        "dateNow" | "mathRandom" | "performanceNow" | "hostTextAdvance"
+    ) {
         return Err(format!("unsupported trace scalar kind {kind:?}"));
     }
     if !value.is_finite() {
@@ -365,6 +369,9 @@ fn validate_scalar(kind: String, value: f64) -> Result<ScalarSample, String> {
     }
     if kind == "mathRandom" && !(0.0..1.0).contains(&value) {
         return Err("trace scalar mathRandom must be in [0,1)".to_owned());
+    }
+    if kind == "hostTextAdvance" && value < 0.0 {
+        return Err("trace scalar hostTextAdvance must be non-negative".to_owned());
     }
     Ok(ScalarSample { kind, value })
 }
@@ -428,6 +435,7 @@ pub(super) fn set_mode(host: &mut HostState, raw_mode: u32) -> Result<(), String
         host.worker_trace = Some(crate::worker_trace::WorkerTrace::new(mode));
     }
     host.trace.scalar_lane.borrow_mut().mode = mode;
+    host.text_metrics.borrow().clear_caches();
     // Live is also the explicit disable operation. It is allowed after a
     // guest has loaded so a recording controller can stop without leaving
     // scalar hooks or an open lane accumulating values in the background.
@@ -587,6 +595,35 @@ pub(super) fn scalar_value(
             Ok(expected.value)
         }
         Mode::Live => Ok(original),
+    }
+}
+
+pub(super) fn settle_host_text_advance<F: FnOnce() -> f32>(
+    lane: &Rc<RefCell<ScalarLane>>,
+    compute: F,
+) -> f32 {
+    let (mode, open) = {
+        let borrowed = lane.borrow();
+        (borrowed.mode, borrowed.transaction_open)
+    };
+    if !open || mode == Mode::Live {
+        return compute();
+    }
+    if mode == Mode::Replay {
+        match scalar_value(lane, "hostTextAdvance", 0.0) {
+            Ok(value) => value as f32,
+            Err(error) => {
+                let mut borrowed = lane.borrow_mut();
+                if borrowed.failure.is_none() {
+                    borrowed.failure = Some(error);
+                }
+                0.0
+            }
+        }
+    } else {
+        let measured = compute().max(0.0);
+        let _ = scalar_value(lane, "hostTextAdvance", measured as f64);
+        measured
     }
 }
 

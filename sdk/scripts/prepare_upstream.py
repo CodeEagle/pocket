@@ -324,14 +324,37 @@ SUPERSEDED_PATCH_MARKERS = {
         ),
         "engine/core/src/draw.rs": (
             "fn emit_inline_text(",
-            "self.fonts.uses_native_for(r.tracking, in_transform, self.in_3d)",
+            "self.fonts.uses_native_for(",
         ),
     },
     "native rounded gradient DrawList op": {
         # The retained gradient test scanner was extended to skip the new
         # 11-word record while checking the flat-shadow fallback.
+        "contracts/spec/spec.ts": (
+            "roundedGradient: 19,",
+            "export const TEXT_RUN_FLAG_TRACKING = 1 << 16;",
+            "export const TEXT_RUN_FLAG_AFFINE = 1 << 17;",
+        ),
+        "contracts/spec/gen-rust.ts": (
+            "ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.",
+            "TEXT_RUN_FLAG_TRACKING",
+            "TEXT_RUN_FLAG_AFFINE",
+        ),
+        "contracts/spec/gen-c.ts": (
+            "TEXT_RUN_FLAG_TRACKING",
+            "TEXT_RUN_FLAG_AFFINE",
+        ),
+        "contracts/generated/pocket_spec.h": (
+            "#define POCKET_DRAW_OP_ROUNDED_GRADIENT 19U",
+            "#define POCKET_DRAW_OP_TEXT_RUN_FLAG_TRACKING 0x00010000U",
+            "#define POCKET_DRAW_OP_TEXT_RUN_FLAG_AFFINE 0x00020000U",
+        ),
         "engine/raster/src/surface.rs": (
             "draw_op::ROUNDED_GRADIENT",
+        ),
+        "engine/raster/tests/driver.rs": (
+            "fn software_surface_rejects_native_shape_ops_before_writing()",
+            "fn render_scaled_skips_extended_text_run_without_misaligning_following_ops()",
         ),
         "engine/spec/src/lib.rs": (
             "pub const ROUNDED_GRADIENT: u32 = 19;",
@@ -352,6 +375,17 @@ SUPERSEDED_PATCH_MARKERS = {
         "engine/core/src/tests.rs": (
             "fn native_rounded_radius_threshold_preserves_legacy_square_fallback()",
             "fn native_transformed_text_routes_tracking_and_transforms_to_text_run()",
+            "fn perspective_3d_text_preserves_baked_glyphs_and_projects_fontless_text_run()",
+        ),
+    },
+    "Web Live2D software raster": {
+        "engine/raster/src/lib.rs": (
+            "draw_op::TEXT_RUN_FLAG_TRACKING",
+            "draw_op::TEXT_RUN_FLAG_AFFINE",
+        ),
+        "engine/raster/tests/driver.rs": (
+            "fn legacy_capture_rasters_mesh_layers_for_opaque_and_premultiplied_web_paths()",
+            "fn render_scaled_skips_extended_text_run_without_misaligning_following_ops()",
         ),
     },
     "bounded high-resolution IMG entries": {
@@ -793,6 +827,7 @@ def verify_final_contracts() -> None:
         "native_arcs_preserve_signed_geometry_and_legacy_fallback",
         "native_rounded_gradients_preserve_stops_directions_and_composition",
         "native_transformed_text_routes_tracking_and_transforms_to_text_run",
+        "perspective_3d_text_preserves_baked_glyphs_and_projects_fontless_text_run",
     ):
         declarations = re.findall(rf"^fn {re.escape(name)}\(", content, re.MULTILINE)
         if len(declarations) != 1:
