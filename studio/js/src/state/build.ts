@@ -119,6 +119,8 @@ export function createBuild(deps: { client: StudioClient; timers: Timers; toasts
       if (mine !== epoch) return;
       if (ring.size === 0) seedLogs(status.logs);
       applyStatus(status, state().busy);
+      // A dropped stream swallowed the terminal signal: the build we started is over.
+      if (active && status.busy !== true) finish({ ok: !status.error && status.builtRevision === status.revision, revision: status.revision, builtRevision: status.builtRevision });
     } catch (error) {
       if (mine === epoch) toasts.error(`读取构建状态失败：${errorText(error)}`);
     }
@@ -136,7 +138,11 @@ export function createBuild(deps: { client: StudioClient; timers: Timers; toasts
       timers,
       open: (h) => client.build.events(project, h.onEvent, h.onError, h.onEnd),
       onEvent: (event) => onEvent(event),
-      onResync: () => { expectSnapshot = true; },
+      onResync: () => {
+        expectSnapshot = true;
+        // A build may have finished while the stream was down: take the authoritative status.
+        void refresh();
+      },
       onState: (s) => { if (state().project === project) store.update({ stream: s }); },
     });
   }
@@ -156,12 +162,13 @@ export function createBuild(deps: { client: StudioClient; timers: Timers; toasts
     if (!project || state().busy || state().starting) return false;
     store.update({ starting: true, diagnostics: [] });
     try {
+      store.update({ busy: true });
       const status = await client.build.start(project);
       active = true;
       store.update({ status, busy: status.busy === true, starting: false });
       return true;
     } catch (error) {
-      store.update({ starting: false });
+      store.update({ starting: false, busy: false });
       toasts.error(`无法开始构建：${errorText(error)}`);
       return false;
     }

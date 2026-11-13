@@ -117,7 +117,7 @@ export function createStudio(deps: StudioDeps) {
     },
   };
   const updateBackend = deps.updates?.(handoff);
-  const selfUpdate = createSelfUpdate({ backend: updateBackend, toasts });
+  const selfUpdate = createSelfUpdate({ backend: updateBackend, toasts, confirmLeave: () => workspace.confirmLeave() });
 
   void settings.load();
   // Reopen the project only after BOTH the project list and the handoff restore have settled (either can come first).

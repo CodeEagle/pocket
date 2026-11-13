@@ -46,7 +46,7 @@ const norm = (s: UpdateStatus): Pick<SelfUpdateState, "activeVersion" | "activeB
   lastError: s.lastError ? String(s.lastError) : undefined,
 });
 
-export function createSelfUpdate(deps: { backend?: UpdateBackend; toasts: Toasts }) {
+export function createSelfUpdate(deps: { backend?: UpdateBackend; toasts: Toasts; /** Asks about unsaved edits; false cancels the apply (the guest is replaced and drafts are lost). */ confirmLeave?: () => Promise<boolean> }) {
   const { backend, toasts } = deps;
   const store = createStore<SelfUpdateState>({ phase: "idle" });
   const state = () => store.get();
@@ -92,6 +92,13 @@ export function createSelfUpdate(deps: { backend?: UpdateBackend; toasts: Toasts
   async function apply(): Promise<void> {
     if (busy || !backend || state().phase !== "available") return;
     busy = true;
+    let proceed = false;
+    try {
+      proceed = !deps.confirmLeave || (await deps.confirmLeave());
+    } catch (error) {
+      toasts.error(`无法确认未保存的更改：${errorText(error)}`);
+    }
+    if (!proceed) { busy = false; return; }
     store.update({ phase: "applying", message: "正在应用更新并重新加载 Studio…" });
     try {
       const result = await backend.apply();

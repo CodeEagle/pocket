@@ -508,6 +508,19 @@ describe("build", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("a stream drop whose reconnect first reports idle still finishes the run", async () => {
+    const { fake, timers, build } = buildFixture();
+    await flush();
+    const run = build.run();
+    await flush();
+    expect(build.state().busy).toBe(true);
+    fake.state.busy = false; fake.state.builtRevision = fake.state.revision; // finished while disconnected
+    fake.errorBuildStream();
+    timers.advance(500); await flush();
+    expect((await run).ok).toBe(true);
+    expect(build.state().busy).toBe(false);
+  });
+
   test("start is refused while busy; cancel calls the service", async () => {
     const { fake, build } = buildFixture();
     await flush();
@@ -554,16 +567,33 @@ describe("preview", () => {
     expect(preview.state().reloads).toBe(2);
   });
 
-  test("the first frame is awaited only once the surface is visible", async () => {
+  test("the first frame is awaited only once the surface is visible; a hidden surface never holds the run open", async () => {
     const { preview, log } = previewFixture();
     await flush();
-    const run = preview.run({ build: true });
-    await flush(20); await new Promise((r) => setTimeout(r, 5));
+    expect(await preview.run({ build: true })).toBe(true);
+    expect(preview.isRunning()).toBe(false);
     expect(preview.state().phase).toBe("loading");
     expect(log.some((l) => l.startsWith("frame:"))).toBe(false);
     preview.setSurfaceVisible(true);
-    expect(await run).toBe(true);
+    await flush(20); await new Promise((r) => setTimeout(r, 5));
     expect(log.some((l) => l.startsWith("frame:"))).toBe(true);
+    expect(preview.state()).toMatchObject({ phase: "running", reloads: 1 });
+  });
+
+  test("with the surface hidden every save still builds; the frame arrives when the surface opens", async () => {
+    const { fake, preview } = previewFixture();
+    await flush();
+    for (let i = 0; i < 3; i += 1) {
+      fake.state.revision += 1;
+      void preview.run({ build: true });
+      await flush(20); await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(fake.count("build.start")).toBe(3);
+    expect(preview.isRunning()).toBe(false);
+    expect(preview.state().phase).toBe("loading");
+    preview.setSurfaceVisible(true);
+    await flush(20); await new Promise((r) => setTimeout(r, 5));
+    expect(preview.state()).toMatchObject({ phase: "running", reloads: 1 });
   });
 
   test("failures surface as errors: build failure, publish failure, create failure, runtime unavailable", async () => {

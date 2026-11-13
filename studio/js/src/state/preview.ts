@@ -46,7 +46,8 @@ export function createPreview(deps: { client: StudioClient; runtime: PreviewRunt
   const store = createStore<PreviewState>({ phase: "idle", reloads: 0, surfaceVisible: false, runtime: "unknown" });
   let running = false;
   let queued: { build: boolean; since: number } | undefined;
-  let frameWaiter: (() => void) | undefined;
+  /** A loaded child whose first frame waits for the preview surface to become visible (never holds a run open). */
+  let pendingFrame: { instanceId: string; generation: number | string; since: number; mine: number } | undefined;
   let epoch = 0;
   const state = () => store.get();
 
@@ -75,18 +76,25 @@ export function createPreview(deps: { client: StudioClient; runtime: PreviewRunt
     try { await runtime.destroy(id); } catch { /* already gone */ }
   }
 
-  /** Resolves once the preview surface is on screen: a hidden child cannot produce a visible frame. */
-  function whenSurfaceVisible(): Promise<void> {
-    if (state().surfaceVisible) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      frameWaiter = () => { frameWaiter = undefined; resolve(); };
-    });
+  /** Waits for the child's first visible frame and flips to running. Guarded by the run epoch. */
+  async function finishFrame(instanceId: string, generation: number | string, since: number, mine: number): Promise<boolean> {
+    store.update({ message: "等待预览首帧…" });
+    try {
+      await runtime.awaitFirstFrame(instanceId, generation);
+    } catch (error) {
+      if (mine !== epoch) return false;
+      return fail((error as { code?: string }).code ?? "first_frame_failed", `预览首帧失败：${errorText(error)}`);
+    }
+    if (mine !== epoch) return false;
+    store.update({ phase: "running", message: undefined, code: undefined, reloads: state().reloads + 1, lastLatencyMs: Math.max(0, timers.now() - since) });
+    return true;
   }
 
   async function execute(withBuild: boolean, since: number): Promise<boolean> {
     const project = deps.project();
     if (!project) return fail("no_project", "请先打开项目", false);
     const mine = ++epoch;
+    pendingFrame = undefined;
     if (!(await ensureRuntime())) return false;
 
     let published: Record<string, unknown> | undefined;
@@ -122,19 +130,13 @@ export function createPreview(deps: { client: StudioClient; runtime: PreviewRunt
       return fail((error as { code?: string }).code ?? "reload_failed", `预览加载失败：${errorText(error)}`);
     }
     if (mine !== epoch) { try { await runtime.destroy(created.instanceId); } catch { /* ignore */ } return false; }
-    store.update({ instanceId: created.instanceId, message: state().surfaceVisible ? "等待预览首帧…" : "预览已加载，打开预览面板后显示" });
-    await whenSurfaceVisible();
-    if (mine !== epoch) return false;
-    store.update({ message: "等待预览首帧…" });
-    try {
-      await runtime.awaitFirstFrame(created.instanceId, created.generation);
-    } catch (error) {
-      if (mine !== epoch) return false;
-      return fail((error as { code?: string }).code ?? "first_frame_failed", `预览首帧失败：${errorText(error)}`);
+    store.update({ instanceId: created.instanceId });
+    if (!state().surfaceVisible) {
+      pendingFrame = { instanceId: created.instanceId, generation: created.generation, since, mine };
+      store.update({ message: "预览已加载，打开预览面板后显示" });
+      return true;
     }
-    if (mine !== epoch) return false;
-    store.update({ phase: "running", message: undefined, code: undefined, reloads: state().reloads + 1, lastLatencyMs: Math.max(0, timers.now() - since) });
-    return true;
+    return finishFrame(created.instanceId, created.generation, since, mine);
   }
 
   /** Builds (optionally), publishes and reloads. Calls made while a run is active coalesce into one follow-up run. */
@@ -161,14 +163,18 @@ export function createPreview(deps: { client: StudioClient; runtime: PreviewRunt
   function setSurfaceVisible(visible: boolean): void {
     if (state().surfaceVisible === visible) return;
     store.update({ surfaceVisible: visible });
-    if (visible) frameWaiter?.();
+    const pending = pendingFrame;
+    if (visible && pending && pending.mine === epoch && pending.instanceId === state().instanceId) {
+      pendingFrame = undefined;
+      void finishFrame(pending.instanceId, pending.generation, pending.since, pending.mine);
+    }
   }
 
   /** Closes the child (used when the project changes). */
   async function reset(): Promise<void> {
     epoch += 1;
     queued = undefined;
-    frameWaiter?.();
+    pendingFrame = undefined;
     await destroyChild();
     store.update({ phase: "idle", message: undefined, code: undefined, version: undefined, previewBuild: undefined });
   }
