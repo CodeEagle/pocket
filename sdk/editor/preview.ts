@@ -125,6 +125,19 @@ export type PreviewManagerOptions = {
   clientPath?: string;
   /** Explicit local native IO provider; never enabled by merely opening preview. */
   localBluetooth?: LocalBluetoothProvider;
+  /** Optional local host adapter config. It is bound to one Editor project ID,
+   * exposed only to that project's SystemUI root, and has an exact HTTP route
+   * allowlist for dio.request. */
+  previewHostAdapter?: PreviewHostAdapterConfig;
+};
+
+export type PreviewHostAdapterConfig = {
+  readonly projectId: string;
+  readonly hostConfig: Readonly<Record<string, unknown>>;
+  readonly http: {
+    readonly allowedOrigins: readonly string[];
+    readonly allowedRoutes: readonly { readonly method: "GET" | "POST"; readonly path: string }[];
+  };
 };
 
 /** Safe-area coordinates are in the same logical pixels as a PreviewFrame. */
@@ -482,6 +495,134 @@ function integerIn(value: unknown, label: string, min: number, max: number): num
 function asRecord(value: unknown, label: string): JsonRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
   return value as JsonRecord;
+}
+
+/** Parse the data-only opt-in host adapter file used by a local Editor launch. */
+export function parsePreviewHostAdapterConfig(value: unknown): PreviewHostAdapterConfig {
+  const input = asRecord(value, "preview host adapter");
+  if (Object.keys(input).some((key) => !["projectId", "hostConfig", "http"].includes(key))) {
+    throw new Error("preview host adapter has an unsupported field");
+  }
+  const projectId = input.projectId;
+  if (typeof projectId !== "string" || !/^[a-z][a-z0-9-]{0,47}$/.test(projectId)) {
+    throw new Error("preview host adapter projectId is invalid");
+  }
+  const rawHostConfig = asRecord(input.hostConfig, "preview hostConfig");
+  let serializedHostConfig: string;
+  try {
+    serializedHostConfig = JSON.stringify(rawHostConfig);
+  } catch {
+    throw new Error("preview hostConfig must be JSON data");
+  }
+  if (Buffer.byteLength(serializedHostConfig) > 16 * 1024) {
+    throw new Error("preview hostConfig exceeds 16 KiB");
+  }
+  const hostConfig = JSON.parse(serializedHostConfig) as Record<string, unknown>;
+  const http = asRecord(input.http, "preview host HTTP policy");
+  if (Object.keys(http).some((key) => !["allowedOrigins", "allowedRoutes"].includes(key))) {
+    throw new Error("preview host HTTP policy has an unsupported field");
+  }
+  if (!Array.isArray(http.allowedOrigins) || http.allowedOrigins.length > 32) {
+    throw new Error("preview host HTTP allowedOrigins must be an array of at most 32 exact origins");
+  }
+  const allowedOrigins = http.allowedOrigins.map((origin) => {
+    if (typeof origin !== "string" || origin.length > 512) throw new Error("preview host HTTP origin is invalid");
+    let parsed: URL;
+    try { parsed = new URL(origin); } catch { throw new Error("preview host HTTP origin is invalid"); }
+    if (parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== "/" || parsed.origin !== origin) {
+      throw new Error("preview host HTTP origins must be canonical origins without paths or credentials");
+    }
+    if (parsed.protocol === "http:") {
+      const port = Number(parsed.port);
+      if (parsed.hostname !== "127.0.0.1" || !parsed.port || !Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error("preview HTTP is allowed only for explicit 127.0.0.1 origins");
+      }
+    } else if (parsed.protocol !== "https:") {
+      throw new Error("preview HTTP origins must use HTTPS or explicit 127.0.0.1 loopback");
+    }
+    return origin;
+  });
+  if (new Set(allowedOrigins).size !== allowedOrigins.length) {
+    throw new Error("preview host HTTP origins must be unique");
+  }
+  if (!Array.isArray(http.allowedRoutes) || http.allowedRoutes.length > 64) {
+    throw new Error("preview host HTTP allowedRoutes must be an array of at most 64 routes");
+  }
+  const allowedRoutes = http.allowedRoutes.map((rawRoute) => {
+    const route = asRecord(rawRoute, "preview host HTTP route");
+    if (Object.keys(route).some((key) => !["method", "path"].includes(key))) {
+      throw new Error("preview host HTTP route has an unsupported field");
+    }
+    if ((route.method !== "GET" && route.method !== "POST") || typeof route.path !== "string" ||
+        route.path.length > 512 || route.path.includes("*") || !/^\/[A-Za-z0-9._~!$&'()+,;=:@%/-]+$/.test(route.path) ||
+        route.path.startsWith("//") || route.path.split("/").some((segment) => segment === "." || segment === "..")) {
+      throw new Error("preview host HTTP route must declare an exact GET/POST path");
+    }
+    const uuidSegments = route.path.split("/").filter((segment) => segment.startsWith(":"));
+    if (uuidSegments.some((segment) => segment !== ":uuid") || uuidSegments.length > 1) {
+      throw new Error("preview host HTTP route supports only a single :uuid path segment");
+    }
+    return { method: route.method, path: route.path };
+  });
+  if (new Set(allowedRoutes.map((route) => `${route.method} ${route.path}`)).size !== allowedRoutes.length) {
+    throw new Error("preview host HTTP routes must be unique");
+  }
+  return {
+    projectId,
+    hostConfig,
+    http: { allowedOrigins, allowedRoutes },
+  };
+}
+
+function previewHttpRouteMatches(
+  route: { readonly method: "GET" | "POST"; readonly path: string },
+  method: string,
+  pathname: string,
+): boolean {
+  if (route.method !== method) return false;
+  const routeSegments = route.path.split("/");
+  const requestSegments = pathname.split("/");
+  if (routeSegments.length !== requestSegments.length) return false;
+  return routeSegments.every((segment, index) => segment === ":uuid"
+    ? typeof requestSegments[index] === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestSegments[index]!)
+    : segment === requestSegments[index]);
+}
+
+const maxPreviewHttpResponseBytes = 1024 * 1024;
+
+async function readPreviewHttpResponseText(response: Response): Promise<string> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > maxPreviewHttpResponseBytes) {
+    try { await response.body?.cancel(); } catch { /* the size error is the useful failure */ }
+    throw new Error("preview HTTP response exceeds 1 MiB");
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      byteLength += value.byteLength;
+      if (byteLength > maxPreviewHttpResponseBytes) {
+        try { await reader.cancel(); } catch { /* retain the bounded-size error */ }
+        throw new Error("preview HTTP response exceeds 1 MiB");
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    try { await reader.cancel(error); } catch { /* the stream may already be closed */ }
+    throw error;
+  }
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 function asFrame(value: unknown): PreviewFrame {
@@ -1334,14 +1475,16 @@ type PendingBrowserEvent = {
 
 type PendingSystemRequest = {
   source: PreviewRuntime;
+  sourceGeneration: number;
+  rootRuntime: PreviewRuntime;
+  rootGeneration: number;
   requestId: string;
   capability: string;
   params: JsonRecord;
   sent: boolean;
   /** Deferred requests use the outer root pump instead of recursively pumping a live frame. */
   deferred?: boolean;
-  /** Preserve a finite 48-pump failure contract across outer turns. */
-  deferredPumps?: number;
+  timer?: ReturnType<typeof setTimeout>;
   resolve: (value: boolean) => void;
   reject: (error: Error) => void;
 };
@@ -1700,6 +1843,7 @@ class PreviewSession {
    * not yet reached the point where the child is in childRuntimes. */
   private readonly childRuntimeLoads = new Map<string, PendingChildRuntimeLoad>();
   private readonly pendingSystemRequests = new Map<string, PendingSystemRequest>();
+  private readonly pendingPreviewHttpControllers = new Set<AbortController>();
   private readonly pendingPresentations = new Map<string, {
     child: PreviewRuntime; published: boolean;
     respond: (result: unknown, error?: JsonRecord) => Promise<void>;
@@ -2008,7 +2152,10 @@ class PreviewSession {
         this.probe = probe;
         this.rootRuntime = runtime;
         this.childRuntimes.clear();
-        this.pendingSystemRequests.clear();
+        for (const requestId of this.pendingSystemRequests.keys()) {
+          const pending = this.takePendingSystemRequest(requestId);
+          pending?.reject(new Error("preview runtime was replaced before the SystemUI request completed"));
+        }
         this.systemConfigured = false;
         this.nextInstanceId = 0;
         this.nextSystemRequestId = 0;
@@ -2127,9 +2274,11 @@ class PreviewSession {
     this.childRuntimeLoads.clear();
     for (const load of childLoads) load.cancelled = true;
     await Promise.all(childLoads.map((load) => this.stopChildRuntimeLoad(load)));
+    for (const controller of this.pendingPreviewHttpControllers) controller.abort();
+    this.pendingPreviewHttpControllers.clear();
     const stopError = new Error("preview runtime stopped before the SystemUI request completed");
     for (const [requestId, pending] of this.pendingSystemRequests) {
-      this.pendingSystemRequests.delete(requestId);
+      this.takePendingSystemRequest(requestId);
       pending.reject(stopError);
     }
     const probe = this.probe;
@@ -3504,6 +3653,18 @@ class PreviewSession {
       await this.dispatchSystemRequest(runtime, requestId, capability, params, depth);
       return;
     }
+    if (capability === "dio.request") {
+      // HTTP is an asynchronous host boundary. Let the native frame and input
+      // queue unwind before waiting for network IO; the result returns through
+      // the same host.response contract on the serialized Editor lane.
+      const generation = runtime.generation;
+      const artifactSignature = this.artifactSignature;
+      void this.genericCapabilityResult(runtime, capability, params).then(
+        (result) => this.finishPreviewHttpRequest(runtime, generation, artifactSignature, requestId, { ok: true, result }),
+        (error: unknown) => this.finishPreviewHttpRequest(runtime, generation, artifactSignature, requestId, { ok: false, error }),
+      );
+      return;
+    }
     try {
       await this.sendHostResponse(runtime, requestId, capability, await this.genericCapabilityResult(runtime, capability, params));
     } catch (error) {
@@ -3513,6 +3674,27 @@ class PreviewSession {
       // would strand the serialized guest queue and look like a dead preview.
       await this.sendHostResponse(runtime, requestId, capability, null, hostError("unsupported_capability", errorText(error)));
     }
+  }
+
+  private finishPreviewHttpRequest(
+    runtime: PreviewRuntime,
+    generation: number,
+    artifactSignature: string | undefined,
+    requestId: string,
+    completion: { readonly ok: true; readonly result: unknown } | { readonly ok: false; readonly error: unknown },
+  ): void {
+    void this.enqueue(async () => {
+      const current = runtime === this.rootRuntime || this.childRuntimes.get(runtime.appId) === runtime;
+      if (this.disposed || !current || runtime.generation !== generation || this.artifactSignature !== artifactSignature) return;
+      if (completion.ok) {
+        await this.sendHostResponse(runtime, requestId, "dio.request", completion.result);
+      } else {
+        await this.sendHostResponse(runtime, requestId, "dio.request", null,
+          hostError("unsupported_capability", errorText(completion.error)));
+      }
+      if (runtime !== this.rootRuntime) await this.pumpRuntime(runtime, 0);
+      await this.tickNow(0);
+    }).catch((error) => this.reportError(error));
   }
 
   private async handleLocalStorageRequest(
@@ -3545,6 +3727,17 @@ class PreviewSession {
   }
 
   private async genericCapabilityResult(runtime: PreviewRuntime, capability: string, params: JsonRecord): Promise<unknown> {
+    if (capability === "funhub.host.config") {
+      if (runtime !== this.rootRuntime || !this.systemCatalog || runtime.appId !== this.systemCatalog.systemUI) {
+        throw new Error("preview host config is restricted to the SystemUI root");
+      }
+      const configured = this.manager.options.previewHostAdapter;
+      if (!configured || configured.projectId !== this.id) return {};
+      // Keep the server-side config object immutable and avoid sharing nested
+      // references with the guest-facing bridge value.
+      return JSON.parse(JSON.stringify(configured.hostConfig)) as JsonRecord;
+    }
+    if (capability === "dio.request") return this.requestPreviewHttp(runtime, params);
     if (["media.live2d.model.load", "media.live2d.model.update", "media.live2d.model.release"].includes(capability)) {
       const bytecode = runtime.artifacts.bytecodePath ?? runtime.artifacts.bytecode;
       if (!bytecode) throw new Error("Live2D preview requires compiled Guest artifacts");
@@ -3582,6 +3775,79 @@ class PreviewSession {
     throw new Error(`unsupported preview capability: ${capability}`);
   }
 
+  private async requestPreviewHttp(runtime: PreviewRuntime, params: JsonRecord): Promise<unknown> {
+    const adapter = this.manager.options.previewHostAdapter;
+    if (runtime !== this.rootRuntime || !this.systemCatalog || runtime.appId !== this.systemCatalog.systemUI ||
+        !adapter || adapter.projectId !== this.id) {
+      throw new Error("preview HTTP adapter is unavailable for this runtime");
+    }
+    const requestUrl = params.url;
+    const method = params.method;
+    if (typeof requestUrl !== "string" || requestUrl.length > 2048 || (method !== "GET" && method !== "POST")) {
+      throw new Error("preview HTTP request is invalid");
+    }
+    let url: URL;
+    try { url = new URL(requestUrl); } catch { throw new Error("preview HTTP request URL is invalid"); }
+    if (url.username || url.password || url.search || url.hash) throw new Error("preview HTTP URL must not contain credentials, query, or fragment");
+    if (!adapter.http.allowedOrigins.includes(url.origin)) throw new Error("preview HTTP origin denied");
+    if (!adapter.http.allowedRoutes.some((route) => previewHttpRouteMatches(route, method, url.pathname))) {
+      throw new Error("preview HTTP route denied");
+    }
+    const responseType = params.responseType === undefined ? "json" : params.responseType;
+    if (responseType !== "json" && responseType !== "text") throw new Error("preview HTTP responseType is unsupported");
+    const timeoutMs = params.timeoutMs === undefined ? 15_000 : integerIn(params.timeoutMs, "preview HTTP timeoutMs", 1, 30_000);
+    const headers: Record<string, string> = {};
+    if (params.headers !== undefined) {
+      const rawHeaders = asRecord(params.headers, "preview HTTP headers");
+      for (const [name, value] of Object.entries(rawHeaders)) {
+        const normalized = name.toLowerCase();
+        if (!new Set(["accept", "content-type", "authorization"]).has(normalized) ||
+            typeof value !== "string" || value.length > 4096 || /[\r\n]/.test(value)) {
+          throw new Error("preview HTTP header is not allowed");
+        }
+        headers[normalized] = value;
+      }
+    }
+    let body: string | undefined;
+    if (params.data !== undefined) {
+      if (method !== "POST") throw new Error("preview HTTP GET requests cannot include a body");
+      try { body = JSON.stringify(params.data); } catch { throw new Error("preview HTTP body is invalid"); }
+      if (Buffer.byteLength(body) > 64 * 1024) throw new Error("preview HTTP body exceeds 64 KiB");
+    }
+    const controller = new AbortController();
+    this.pendingPreviewHttpControllers.add(controller);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method,
+        headers,
+        ...(body === undefined ? {} : { body }),
+        redirect: "manual",
+        signal: controller.signal,
+      });
+      const responseText = await readPreviewHttpResponseText(response);
+      let data: unknown = responseText;
+      if (responseType === "json") {
+        if (!responseText) data = null;
+        else {
+          try { data = JSON.parse(responseText) as unknown; }
+          catch { throw new Error("preview HTTP response is not valid JSON"); }
+        }
+      }
+      return {
+        statusCode: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+        data,
+      };
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error("preview HTTP request timed out");
+      throw error instanceof Error ? error : new Error("preview HTTP request failed");
+    } finally {
+      clearTimeout(timer);
+      this.pendingPreviewHttpControllers.delete(controller);
+    }
+  }
+
   private async dispatchSystemRequest(
     source: PreviewRuntime,
     originalRequestId: string,
@@ -3599,36 +3865,30 @@ class PreviewSession {
     // pending until the outer root turn unwinds; its normal system.request /
     // system.runtime.respond flow will deliver the real JS-owned result.
     const deferToOuterRootTurn = root.pumping > 0;
+    const pendingFor = (resolve: (value: boolean) => void, reject: (error: Error) => void): PendingSystemRequest => ({
+      source,
+      sourceGeneration: source.generation,
+      rootRuntime: root,
+      rootGeneration: root.generation,
+      requestId: originalRequestId,
+      capability,
+      params,
+      sent: false,
+      deferred: deferToOuterRootTurn,
+      resolve,
+      reject,
+    });
     const response = deferToOuterRootTurn
       ? undefined
       : new Promise<boolean>((resolveResponse, rejectResponse) => {
-        this.pendingSystemRequests.set(requestId, {
-          source,
-          requestId: originalRequestId,
-          capability,
-          params,
-          sent: false,
-          deferred: false,
-          resolve: resolveResponse,
-          reject: rejectResponse,
-        });
+        this.registerPendingSystemRequest(requestId, pendingFor(resolveResponse, rejectResponse));
       });
     // A stop/transport failure can reject this promise while dispatch still
     // awaits a probe command; attach a handler immediately so disposal cannot
     // surface it as a process-level unhandled rejection.
     if (response) void response.catch(() => false);
     if (deferToOuterRootTurn) {
-      this.pendingSystemRequests.set(requestId, {
-        source,
-        requestId: originalRequestId,
-        capability,
-        params,
-        sent: false,
-        deferred: true,
-        deferredPumps: 0,
-        resolve: () => {},
-        reject: () => {},
-      });
+      this.registerPendingSystemRequest(requestId, pendingFor(() => {}, () => {}));
       // Do not enter root's native realm while it is executing a frame. The
       // outer tick sends this exact request after the root turn unwinds.
       return;
@@ -3649,20 +3909,24 @@ class PreviewSession {
         // animation inside this one serialized system.request turn: query the
         // official native demand after each pending pump so a hook that starts
         // on a later queue turn can still hand the request back to the normal
-        // ticker. A non-continuous root retains the bounded 48-pump contract.
+        // ticker. The bounded inline pump budget is only a yield point; the
+        // pending request's timer, not pump count, determines failure.
         if (this.pendingSystemRequests.has(requestId)) {
           const schedule = await root.probe.checked({ op: "schedule" });
           if (Number(schedule.nextWakeDelayMs) === 0) return;
         }
       }
       if (this.pendingSystemRequests.has(requestId)) {
-        throw new Error(`SystemUI did not respond to ${capability}`);
+        // Pump iterations are not elapsed time. SystemUI can be resolving this
+        // request through an asynchronous post or browser presentation; leave
+        // it pending and release operationTail so the normal root tick can
+        // deliver the response. Its wall-clock timer remains the finite bound.
+        return;
       }
       await response;
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
-      const pending = this.pendingSystemRequests.get(requestId);
-      this.pendingSystemRequests.delete(requestId);
+      const pending = this.takePendingSystemRequest(requestId);
       pending?.reject(failure);
       // Timeout/transport failure exits before the normal response await.
       // Consume the rejected promise or Bun treats it as an unhandled
@@ -3670,6 +3934,59 @@ class PreviewSession {
       if (response) await response.catch(() => false);
       throw failure;
     }
+  }
+
+  private registerPendingSystemRequest(requestId: string, pending: PendingSystemRequest): void {
+    this.pendingSystemRequests.set(requestId, pending);
+    const configuredTimeout = this.manager.options.commandTimeoutMs;
+    const timeoutMs = typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout)
+      ? Math.max(1, configuredTimeout)
+      : 15_000;
+    pending.timer = setTimeout(() => {
+      void this.enqueue(() => this.expirePendingSystemRequest(requestId, pending))
+        .catch((error) => this.reportError(error));
+    }, timeoutMs);
+  }
+
+  private clearPendingSystemRequestTimer(pending: PendingSystemRequest): void {
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.timer = undefined;
+  }
+
+  private takePendingSystemRequest(requestId: string): PendingSystemRequest | undefined {
+    const pending = this.pendingSystemRequests.get(requestId);
+    if (!pending) return undefined;
+    this.pendingSystemRequests.delete(requestId);
+    this.clearPendingSystemRequestTimer(pending);
+    return pending;
+  }
+
+  private pendingSystemRequestIsCurrent(pending: PendingSystemRequest): boolean {
+    if (this.disposed || this.rootRuntime !== pending.rootRuntime ||
+        pending.rootRuntime.generation !== pending.rootGeneration) return false;
+    if (pending.source === pending.rootRuntime) return pending.source.generation === pending.sourceGeneration;
+    return pending.source.generation === pending.sourceGeneration &&
+      this.childRuntimes.get(pending.source.appId) === pending.source;
+  }
+
+  private async expirePendingSystemRequest(requestId: string, expected: PendingSystemRequest): Promise<void> {
+    if (this.pendingSystemRequests.get(requestId) !== expected) return;
+    const pending = this.takePendingSystemRequest(requestId);
+    if (!pending) return;
+    const failure = new Error(`SystemUI did not respond to ${pending.capability}`);
+    pending.reject(failure);
+    if (!this.pendingSystemRequestIsCurrent(pending)) return;
+    await this.sendHostResponse(
+      pending.source,
+      pending.requestId,
+      pending.capability,
+      null,
+      hostError("system_request_timeout", failure.message),
+    );
+    // Deliver the rejection to the guest and publish its settled frame. A
+    // child already in flight will consume needsPump on its next safe turn.
+    if (pending.source.pumping > 0 || pending.source.frameInFlight) pending.source.needsPump = true;
+    await this.tickNow(0);
   }
 
   private async sendPendingSystemRequest(requestId: string, root: PreviewRuntime): Promise<void> {
@@ -3684,7 +4001,7 @@ class PreviewSession {
           requestId,
           sourceAppId: pending.source.appId,
           sourceInstanceId: pending.source.instanceId,
-          sourceGeneration: pending.source.generation,
+          sourceGeneration: pending.sourceGeneration,
           capability: pending.capability,
           params: pending.params,
         },
@@ -3816,7 +4133,7 @@ class PreviewSession {
         }
         for (const [pendingId, pending] of this.pendingSystemRequests) {
           if (pending.source !== child) continue;
-          this.pendingSystemRequests.delete(pendingId);
+          this.takePendingSystemRequest(pendingId);
           pending.reject(new Error(`runtime ${child.appId} was destroyed before ${pending.capability} completed`));
           try {
             await this.sendHostResponse(child, pending.requestId, pending.capability, null,
@@ -3851,8 +4168,10 @@ class PreviewSession {
         return;
       }
       if (capability === "system.runtime.respond") {
-        const pending = typeof params.requestId === "string" ? this.pendingSystemRequests.get(params.requestId) : undefined;
-        if (!pending) {
+        const responseRequestId = typeof params.requestId === "string" ? params.requestId : undefined;
+        const pending = responseRequestId ? this.takePendingSystemRequest(responseRequestId) : undefined;
+        if (!pending || !this.pendingSystemRequestIsCurrent(pending)) {
+          pending?.reject(new Error(`SystemUI response for ${pending.capability} arrived after its runtime was replaced`));
           // A child can be destroyed while SystemUI is still finishing a
           // response for it. Acknowledge this control request so the root
           // queue remains live, while deliberately not fabricating a result
@@ -3860,7 +4179,6 @@ class PreviewSession {
           await respond({ accepted: true, stale: true });
           return;
         }
-        this.pendingSystemRequests.delete(params.requestId as string);
         if (params.ok === true) {
           await this.sendHostResponse(pending.source, pending.requestId, pending.capability, params.value ?? null);
         } else {
@@ -4580,8 +4898,9 @@ class PreviewSession {
     // A runtime may emit a host request while the root is inside a frame (for
     // example the root's startup storage read while SystemUI.initialize is
     // still awaiting async host work). Service deferred requests after the
-    // root turn has unwound. A missing SystemUI response remains bounded by
-    // the same 48-pump contract as the synchronous request path.
+    // root turn has unwound. If SystemUI remains pending after this safe pump,
+    // let the next scheduled root turn continue; the request's wall-clock
+    // timeout provides the bound.
     const rootAfterTurn = this.rootRuntime;
     for (let attempt = 0; attempt < 48 && rootAfterTurn; attempt += 1) {
       const deferred = [...this.pendingSystemRequests.entries()]
@@ -4600,21 +4919,12 @@ class PreviewSession {
       if (stillPending.length === 0) continue;
       // Child creation and browser presentation are external boundaries. Let
       // their existing completion callbacks enter the operation queue before
-      // spending the remaining finite pump budget.
+      // the next root turn.
       if (this.childRuntimeLoads.size > 0 || this.pendingPresentations.size > 0) break;
-      const schedule = await rootAfterTurn.probe.checked({ op: "schedule" });
-      if (Number(schedule.nextWakeDelayMs) === 0) break;
-      for (const [, pending] of stillPending) pending.deferredPumps = (pending.deferredPumps ?? 0) + 1;
-      const expired = stillPending.find(([, pending]) => (pending.deferredPumps ?? 0) >= 48);
-      if (expired) {
-        const message = `SystemUI did not respond to ${expired[1].capability}`;
-        const failure = new Error(message);
-        for (const [requestId, pending] of stillPending) {
-          this.pendingSystemRequests.delete(requestId);
-          pending.reject(failure);
-        }
-        throw failure;
-      }
+      // One serialized tick must not consume an arbitrary number of zero-time
+      // pumps and mistake them for elapsed response time. schedule() below
+      // installs the next root turn while the request remains correlated.
+      break;
     }
     if (runtime.frame) {
       this.publishCompositedFrame(runtime.frame);

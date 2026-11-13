@@ -306,7 +306,14 @@ jobs:
             tests \
             scripts/tests \
             editor/test/preview_text_transform.test.ts \
-            editor/test/preview_recording_host_fonts.test.ts
+            editor/test/preview_recording_host_fonts.test.ts \
+            editor/test/preview_failure.test.ts \
+            editor/test/preview_host_adapter.test.ts \
+            editor/test/preview_http_async.test.ts \
+            editor/test/preview_system_request_pending.test.ts \
+            editor/test/preview_root_storage_startup.test.ts \
+            editor/test/preview_idle_mini_app.test.ts \
+            editor/test/preview_storage.test.ts
 
       - name: Run Showcase guest compilation, ablation, and native probe suites
         env:

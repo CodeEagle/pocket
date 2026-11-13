@@ -37,7 +37,12 @@ import {
 } from "../scripts/package_update.ts";
 import { buildGuest } from "../scripts/build_guest.ts";
 import { createStudioCodex, type StudioExecutionContext, type StudioScope } from "./codex.ts";
-import { compositorSurfacesFromProject, createPreviewManager } from "./preview.ts";
+import {
+  compositorSurfacesFromProject,
+  createPreviewManager,
+  parsePreviewHostAdapterConfig,
+  type PreviewHostAdapterConfig,
+} from "./preview.ts";
 import { handleNovelRoute, serveNovelLive2dCore } from "./novel.ts";
 import { createNovelBackup } from "./novel-backups.ts";
 import { createLocalBluetoothProvider } from "./local_bluetooth.ts";
@@ -188,6 +193,9 @@ export type StartEditorOptions = {
   projectRoot?: string;
   /** Trusted Flutter consumer directory, bound to the configured JS project. */
   flutterRoot?: string;
+  /** Optional private local host adapter JSON path. Also read from
+   * POCKET_EDITOR_PREVIEW_HOST_CONFIG_PATH when omitted. */
+  previewHostConfigPath?: string;
   /** Optional SDK root override for Studio self-upgrade tests. */
   upgradeSdkRoot?: string;
   /** Optional Studio self-upgrade release/transport overrides for tests. */
@@ -777,6 +785,25 @@ async function readJsonFile<T>(path: string, fallback?: T): Promise<T> {
     if (fallback !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") return fallback;
     throw error;
   }
+}
+
+function loadPreviewHostAdapterConfig(pathValue?: string): PreviewHostAdapterConfig | undefined {
+  const configuredPath = pathValue ?? process.env.POCKET_EDITOR_PREVIEW_HOST_CONFIG_PATH;
+  if (!configuredPath) return undefined;
+  if (!isAbsolute(configuredPath)) throw new Error("preview host config path must be absolute");
+  const path = resolve(configuredPath);
+  let file: ReturnType<typeof lstatSync>;
+  try { file = lstatSync(path); } catch { throw new Error("preview host config file is unavailable"); }
+  if (file.isSymbolicLink() || !file.isFile() || file.size <= 0 || file.size > 24 * 1024) {
+    throw new Error("preview host config must be a regular file no larger than 24 KiB");
+  }
+  if (process.platform !== "win32" && (file.mode & 0o077) !== 0) {
+    throw new Error("preview host config file must be readable only by its owner");
+  }
+  let raw: unknown;
+  try { raw = JSON.parse(readFileSync(path, "utf8")) as unknown; }
+  catch { throw new Error("preview host config file must contain valid JSON"); }
+  return parsePreviewHostAdapterConfig(raw);
 }
 
 async function parseJsonBody(request: Request, maxBytes = maxJsonBytes): Promise<Record<string, unknown>> {
@@ -2163,6 +2190,10 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       ? pocket.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
       : basename(projectRoot).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
     projectId = asProjectId(candidate || "external-project");
+  }
+  const previewHostAdapter = loadPreviewHostAdapterConfig(options.previewHostConfigPath);
+  if (previewHostAdapter && (!projectRoot || previewHostAdapter.projectId !== projectId)) {
+    throw new Error("preview host config must target the explicitly selected Editor project");
   }
   const workspace: Workspace = {
     root: workspaceRoot,
@@ -3760,6 +3791,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const preview = createPreviewManager({
     diagnostics,
     localBluetooth,
+    ...(previewHostAdapter ? { previewHostAdapter } : {}),
     width: previewDevice.screenWidth,
     height: previewDevice.screenHeight,
     safeArea: previewDevice.safeArea,
