@@ -87,6 +87,9 @@ A protected retirement must therefore avoid recursive OS tree termination.
 Build one plan from the process snapshot, exclude the updater and its visible
 descendants, and signal only the enumerated old-server PIDs in child-first
 order. Reject invalid snapshots or a target inside the protected subtree.
+Before TERM and KILL, share one identity check against current PID facts;
+missing or mismatched command/binary fields prevent signaling. Wait for every
+planned PID, including Workers that ignore TERM, before completing retirement.
 Individual process termination does not terminate children on Windows
 ([Microsoft process termination reference](https://learn.microsoft.com/en-us/windows/win32/procthread/terminating-a-process)).
 This retains cleanup of known old Workers without requiring a complete live
@@ -96,4 +99,4 @@ The PR CI now runs the same Windows standalone upgrade and rollback command as
 the Release job, including real detached CLI execution and Playwright Chromium
 navigation. Final macOS and Windows archives remain subject to the release
 installation/runtime gate. The unsuccessful 0.1.14 candidate was not published;
-its tag remains immutable, and the next candidate is 0.1.15.
+its tag remains immutable, and this release uses SDK version 0.1.15.
