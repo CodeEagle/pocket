@@ -32,6 +32,11 @@ atlases. The default Flutter host path uses OS metrics and vector text.
   owns deferred metric synchronization; View invalidates its layout cache and
   schedules repaint. This preserves standalone runtime use and one update
   boundary.
+- Preview keeps one active table during recording, defers the latest browser
+  update until captures stop, and synchronizes a child that was still loading
+  when the active table changed before attaching it. Two real native-probe
+  regressions cover recording root/child creation and the pending-load race;
+  failed refreshes remain observable and retryable.
 - Recognize the SDK's optional media capability vocabulary during system-plan
   validation without advertising audio availability in the default target.
 - Fix obsolete catalog, direct-value transport and patch-composition fixtures.
@@ -67,6 +72,19 @@ The native replay regression admits the maximum finite f32 value and rejects
 out-of-range recorded values. Final suite and release results are tracked by
 GitHub Actions for the reviewed commit.
 
-The local isolated SDK JS run passed all 161 test files. Release packaging
-preflight passed 13 tests with 158 assertions. These runs complement the
-Linux CI gate; they do not substitute for its Worker concurrency validation.
+After merging current main, the local isolated SDK JS run passed all 162 test
+files using the rebuilt native probe and matching WebAssembly/runtime. Native
+debug tests passed all 124 library tests plus the binary/integration/doc suites
+(one manual throughput test is ignored); release library tests also passed
+124/124 and release Clippy completed successfully. The original production
+Worker recording/replay regression passed 30 consecutive runs after the stop
+fix, alongside the deterministic boundary regression.
+
+Real Flutter FFI validation passed 281 host tests (one skip) and 201 SDK tests
+(ten fixture-dependent skips); Demo Flutter tests passed 54/54. Release
+packaging preflight passed 13 tests with 158 assertions. These runs complement
+the Linux CI gate; they do not substitute for its final-commit validation.
+
+Preview font-recording/child-load regressions passed 2/2 with real compiled
+guests and native probes; transformed-text tests passed 4/4. Both files are
+included explicitly in the isolated CI suite.

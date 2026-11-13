@@ -1769,6 +1769,8 @@ class PreviewSession {
   private accessibilityPreferences?: PreviewAccessibilityPreferences;
   /** Latest browser-measured 21-slot host font metrics for faithful Studio layout. */
   private hostFontMetrics?: PreviewHostFontMetrics;
+  /** Latest font table observed during a recording, committed after its captures stop. */
+  private pendingHostFontMetrics?: PreviewHostFontMetrics;
 
   constructor(manager: PreviewManagerImpl, id: string) {
     this.manager = manager;
@@ -2896,7 +2898,30 @@ class PreviewSession {
     state.stopped = true;
     state.pendingRestart = false;
     for (const capture of state.captures.values()) capture.stopped = true;
+    if (this.pendingHostFontMetrics) await this.applyHostFontMetrics(this.pendingHostFontMetrics);
     return this.previewRecordingStatus();
+  }
+
+  private async applyHostFontMetrics(metrics: PreviewHostFontMetrics): Promise<void> {
+    // Publish the active table before awaiting native updates so child loads
+    // that start during this refresh inherit the same version as the root.
+    this.hostFontMetrics = metrics;
+    const runtimes = [
+      ...(this.rootRuntime ? [this.rootRuntime] : []),
+      ...this.childRuntimes.values(),
+    ];
+    try {
+      await Promise.all(runtimes.map(async (runtime) => {
+        await runtime.probe.checked({ op: "setHostFonts", hostFonts: metrics });
+        runtime.needsPump = true;
+      }));
+      this.pendingHostFontMetrics = undefined;
+    } catch (error) {
+      // Keep the newest table available to future child loads and retryable
+      // after a transient native refresh failure.
+      this.pendingHostFontMetrics = metrics;
+      throw error;
+    }
   }
 
   private previewRecordingDocument(capture: PreviewRecordingCapture): JsonRecord {
@@ -4005,6 +4030,7 @@ class PreviewSession {
       needsPump: false,
       pumping: 0,
     };
+    const createHostFontMetrics = this.hostFontMetrics;
     const recording = this.previewRecordingActive();
     probe.setObserver((command, response) => this.observeProbeCommand(runtime, command, response));
     probe.setErrorHandler((error) => this.reportError(error, runtime));
@@ -4017,7 +4043,7 @@ class PreviewSession {
         height: initialHeight,
         rasterDensity: this.manager.options.rasterDensity ?? 1,
         tickHz: this.tickHz,
-        ...(this.hostFontMetrics ? { hostFonts: this.hostFontMetrics } : {}),
+        ...(createHostFontMetrics ? { hostFonts: createHostFontMetrics } : {}),
         ...(memory ? { memory } : {}),
       });
       if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
@@ -4049,6 +4075,18 @@ class PreviewSession {
       await this.enqueue(async () => {
         if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
         if (loadResponse.frame !== undefined) await this.ingestRuntimeFrame(runtime, loadResponse.frame, 0, false);
+        if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
+        // Child startup runs outside the serialized input lane. If a host
+        // table changed while this probe was loading, bring it up to date
+        // before exposing the child to the compositor.
+        let appliedFontMetrics = createHostFontMetrics;
+        while (this.hostFontMetrics && this.hostFontMetrics !== appliedFontMetrics) {
+          const latestFontMetrics = this.hostFontMetrics;
+          await probe.checked({ op: "setHostFonts", hostFonts: latestFontMetrics });
+          runtime.needsPump = true;
+          appliedFontMetrics = latestFontMetrics;
+          if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
+        }
         if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
         this.childRuntimes.set(appId, runtime);
         if (runtime.frame) {
@@ -4721,17 +4759,13 @@ class PreviewSession {
         }
       } else if (kind === "hostFonts") {
         const metrics = parseHostFontMetrics(input.hostFonts);
-        this.hostFontMetrics = metrics;
-        // Do not overwrite host metrics or clear native text caches mid-recording.
-        if (this.previewRecordingActive()) return;
-        const root = this.rootRuntime;
-        if (!root) return;
-        await root.probe.checked({ op: "setHostFonts", hostFonts: metrics });
-        root.needsPump = true;
-        for (const child of this.childRuntimes.values()) {
-          await child.probe.checked({ op: "setHostFonts", hostFonts: metrics });
-          child.needsPump = true;
+        // Keep every guest on the same table for the full recording. New child
+        // probes must inherit the currently applied table until captures stop.
+        if (this.previewRecordingActive()) {
+          this.pendingHostFontMetrics = metrics;
+          return;
         }
+        await this.applyHostFontMetrics(metrics);
       } else if (kind === "semantic") {
         const action = parseAccessibilityAction(input);
         let target: PreviewRuntime | undefined;

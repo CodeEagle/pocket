@@ -192,7 +192,9 @@ jobs:
             packages/pocket_tftc/test \
             packages/pocket_diagnostics/test \
             tests \
-            scripts/tests
+            scripts/tests \
+            editor/test/preview_text_transform.test.ts \
+            editor/test/preview_recording_host_fonts.test.ts
 
       - name: Run Showcase guest compilation, ablation, and native probe suites
         env:
