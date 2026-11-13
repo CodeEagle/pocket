@@ -28,6 +28,7 @@
     "./recording": "./src/recording.ts",
     "./system-surfaces": "./src/system-surfaces.tsx",
     "./inline-text": "./src/inline-text.tsx",
+    "./bytes": "./src/bytes.ts",
     "./dev": "./src/dev.ts"
   }
 }

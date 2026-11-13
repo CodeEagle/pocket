@@ -13,7 +13,7 @@ import { open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Condition, JsonValue, StoryDefinition, StoryInstruction, ValueExpression } from "../packages/pocket_vn/src/types.ts";
-import { createSpineRig, getSpineAtlasInfo, type SpineSkeletonInput } from "@pocket/spine";
+import type { SpineSkeletonInput } from "../packages/pocket_spine/src/index.ts";
 import { parseCubismModel3 } from "../packages/pocket_live2d/src/manifest.ts";
 import type { NovelModelDefinition } from "../packages/pocket_vn/src/models.ts";
 import { novelCharacterTransformIssue } from "../packages/pocket_vn/src/scene.ts";
@@ -1455,6 +1455,7 @@ async function loadModelSource(projectRoot: string, key: string, projectId: stri
   const sourceBytes = await readRegisteredModelFile(projectRoot, definition.source, "spine-source", maxModelSourceBytes);
   const atlasBytes = await readRegisteredModelFile(projectRoot, definition.atlas, "spine-atlas", maxModelAtlasBytes);
   const atlasText = atlasBytes.toString("utf8");
+  const { createSpineRig, getSpineAtlasInfo } = await import("@pocket/spine");
   const atlasInfo = getSpineAtlasInfo(atlasText);
   const atlasPages = atlasInfo.map(page => page.name);
   const skeleton: SpineSkeletonInput = definition.source.toLowerCase().endsWith(".skel")

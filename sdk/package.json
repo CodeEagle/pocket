@@ -5,11 +5,13 @@
   "type": "module",
   "workspaces": [
     "packages/pocket_ui",
+    "packages/pocket_looseleaf",
     "packages/pocket_tftc",
     "packages/pocket_vn",
     "packages/pocket_spine",
     "packages/pocket_live2d",
-    "packages/pocket_diagnostics"
+    "packages/pocket_diagnostics",
+    "packages/pocket_arc"
   ],
   "dependencies": {
     "@pocket/ui": "0.1.0",
@@ -21,7 +23,8 @@
     "@pocket/spine": "0.1.0",
     "@open-wxa/wxa-runner-core": "0.12.3",
     "node-gyp": "12.3.0",
-    "playwright": "1.64.1"
+    "playwright": "1.64.1",
+    "solid-js": "1.9.14"
   },
   "description": "Embeddable PocketJS bytecode host SDK for Flutter applications.",
   "scripts": {

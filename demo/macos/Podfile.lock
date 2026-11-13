@@ -24,7 +24,7 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/pocket_live2d/macos
 
 SPEC CHECKSUMS:
-  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
   pocket_archive: 765e8a14fcb84d2a1f7a8a7d9fe3857e3de4b475
   pocket_flutter: 973217006f34977ede6cd660a5bfb131fab945d2
   pocket_live2d: 08c1500611234d4e27cec65825064e2482a43d2f

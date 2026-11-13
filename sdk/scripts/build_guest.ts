@@ -217,7 +217,7 @@ function copyTree(source: string, target: string): void {
  */
 function publicUiPackageRoot(projectRoot: string, packageName = "@pocket/ui"): string | undefined {
   const slug = packageName.slice("@pocket/".length);
-  if (!["ui", "vn", "spine", "live2d"].includes(slug)) throw new Error(`Unknown SDK guest package: ${packageName}`);
+  if (!["ui", "looseleaf", "arc", "vn", "spine", "live2d"].includes(slug)) throw new Error(`Unknown SDK guest package: ${packageName}`);
   const packageDirectory = `pocket_${slug}`;
   const candidates = [join(projectRoot, "vendor", `pocket-${slug}`)];
   // A file dependency names source, while node_modules can be an older Bun
@@ -827,6 +827,24 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     const projectPackage = readJsonObject(join(projectRoot, "package.json"));
     const dependencies = projectPackage?.dependencies as Record<string, unknown> | undefined;
     const devDependencies = projectPackage?.devDependencies as Record<string, unknown> | undefined;
+    const usesLooseleaf = dependencies?.["@pocket/looseleaf"] !== undefined || devDependencies?.["@pocket/looseleaf"] !== undefined;
+    const preparedLooseleaf = usesLooseleaf ? await prepareUiPackage(projectRoot, entry, options.log, "@pocket/looseleaf") : undefined;
+    if (preparedLooseleaf) {
+      const cleanupUi = uiCleanup;
+      uiCleanup = () => { preparedLooseleaf.cleanup(); cleanupUi(); };
+    }
+    const looseleafEntries = preparedLooseleaf?.packageRoot
+      ? [join(preparedLooseleaf.packageRoot, "src/index.ts")].filter(existsSync)
+      : [];
+    const usesArc = dependencies?.["@pocket/arc"] !== undefined || devDependencies?.["@pocket/arc"] !== undefined;
+    const preparedArc = usesArc ? await prepareUiPackage(projectRoot, entry, options.log, "@pocket/arc") : undefined;
+    if (preparedArc) {
+      const cleanupUi = uiCleanup;
+      uiCleanup = () => { preparedArc.cleanup(); cleanupUi(); };
+    }
+    const arcEntries = preparedArc?.packageRoot
+      ? [join(preparedArc.packageRoot, "src/index.ts")].filter(existsSync)
+      : [];
     const usesVn = dependencies?.["@pocket/vn"] !== undefined || devDependencies?.["@pocket/vn"] !== undefined;
     const bundledModels = usesVn ? novelModelSources(projectRoot) : {};
     for (const name of ["@pocket/spine", "@pocket/live2d"]) {
@@ -844,7 +862,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     const vnEntries = preparedVn?.packageRoot
       ? [join(preparedVn.packageRoot, "src/index.ts"), join(preparedVn.packageRoot, "src/view.tsx")].filter(existsSync)
       : [];
-    const compilerEntry = prepareCompilerEntry(projectRoot, entry, preparedUi.packageRoot, options.log, vnEntries, usesVn ? novelImageLiterals(projectRoot) : [], bundledModels);
+    const compilerEntry = prepareCompilerEntry(projectRoot, entry, preparedUi.packageRoot, options.log, [...looseleafEntries, ...arcEntries, ...vnEntries], usesVn ? novelImageLiterals(projectRoot) : [], bundledModels);
     compilerEntryCleanup = compilerEntry.cleanup;
     const skipFontBaking = primaryFontArguments.length === 0 && options.bakeFonts !== true;
     report(`build_guest: compiler=${compiler}`, options.log);
