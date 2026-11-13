@@ -1,9 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
+import {
+  expectedSdkArchiveAssetNames,
+  isSdkBackupComplete,
+  recoverInterruptedSdkUpgrade,
+} from "../studio_upgrade.mjs";
 import {
   configFromHealth,
   editorToolEnvironment,
@@ -21,6 +28,82 @@ import {
 
 const fixture = (name: string) => resolve(tmpdir(), name);
 const SCRIPT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "editor_service.mjs");
+
+function tarOctal(value: number, width: number): string {
+  return `${Math.max(0, Math.trunc(value)).toString(8).padStart(width - 1, "0")}\0`;
+}
+
+function tarGzipFiles(files: Record<string, Buffer | string>): Buffer {
+  const blocks: Buffer[] = [];
+  for (const [name, content] of Object.entries(files).sort(([left], [right]) => left.localeCompare(right))) {
+    const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
+    const header = Buffer.alloc(512, 0);
+    header.write(`package/${name}`, 0, 100, "utf8");
+    header.write(tarOctal(0o644, 8), 100, 8, "utf8");
+    header.write(tarOctal(0, 8), 108, 8, "utf8");
+    header.write(tarOctal(0, 8), 116, 8, "utf8");
+    header.write(tarOctal(bytes.byteLength, 12), 124, 12, "utf8");
+    header.write(tarOctal(0, 12), 136, 12, "utf8");
+    header.fill(0x20, 148, 156);
+    header[156] = "0".charCodeAt(0);
+    header.write("ustar\0", 257, 6, "utf8");
+    header.write("00", 263, 2, "utf8");
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "utf8");
+    blocks.push(header, bytes);
+    if (bytes.byteLength % 512) blocks.push(Buffer.alloc(512 - (bytes.byteLength % 512), 0));
+  }
+  blocks.push(Buffer.alloc(1024, 0));
+  return gzipSync(Buffer.concat(blocks));
+}
+
+function createStandaloneFixture(root: string, version: string): void {
+  const platform = process.platform;
+  const arch = process.arch;
+  const tuple = `${platform}-${arch}`;
+  const upstreamRevision = "a".repeat(40);
+  const bytecodeAbi = `quickjs-bytecode-v1:${"b".repeat(64)}`;
+  const pkg = { name: `@pocket/web-sdk-tools-${tuple}`, version, type: "module" };
+  const provenance = { sourceRepository: "CodeEagle/pocket", pinnedPocketJsRevision: upstreamRevision };
+  const toolFiles = {
+    [`bin/pocketjs_bytecode${platform === "win32" ? ".exe" : ""}`]: Buffer.from("fixture bytecode tool"),
+    [`bin/pocket_probe${platform === "win32" ? ".exe" : ""}`]: Buffer.from("fixture probe tool"),
+    "compiler/tools/build.ts": Buffer.from("export {};\n"),
+    "compiler/framework/compiler/jsx-plugin.ts": Buffer.from("export {};\n"),
+    "compiler/framework/compiler/subpaths.ts": Buffer.from("export {};\n"),
+    "compiler/framework/src/inline-fonts.ts": Buffer.from("export {};\n"),
+    "compiler/tools/inline-text-slots.ts": Buffer.from("export {};\n"),
+  };
+  const toolManifest = {
+    schemaVersion: 1,
+    sdkVersion: version,
+    upstreamRevision,
+    bytecodeAbi,
+    platform,
+    arch,
+    files: Object.fromEntries(Object.entries(toolFiles).map(([path, bytes]) => [path, {
+      size: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    }])),
+  };
+  const toolsArchive = tarGzipFiles({
+    ...toolFiles,
+    "package.json": JSON.stringify({ name: `@pocket/tools-${tuple}`, version }),
+    "manifest.json": JSON.stringify(toolManifest),
+  });
+  const names = expectedSdkArchiveAssetNames(version, platform, arch);
+  mkdirSync(join(root, "editor"), { recursive: true });
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  mkdirSync(join(root, "prebuilt"), { recursive: true });
+  writeFileSync(join(root, "package.json"), JSON.stringify(pkg));
+  writeFileSync(join(root, "provenance.json"), JSON.stringify(provenance));
+  writeFileSync(join(root, "editor", "server.ts"), `// fixture ${version}\n`);
+  writeFileSync(join(root, "scripts", "editor_service.mjs"), `// fixture ${version}\n`);
+  writeFileSync(join(root, "scripts", "prebuilt_tools.mjs"),
+    `export const SDK_VERSION = '${version}';\nexport const UPSTREAM_REVISION = '${upstreamRevision}';\nexport const BYTECODE_ABI = '${bytecodeAbi}';\n`);
+  writeFileSync(join(root, "prebuilt", names.toolsArchiveName), toolsArchive);
+}
 
 describe("editor service launch config", () => {
   test("first launch without explicit values stays on the generic SDK", () => {
@@ -310,5 +393,51 @@ test("pre-stop upgrade failures persist an error rather than leaving the UI rest
     expect(status.error).toBeTruthy();
     expect(status.currentVersion).toBe("0.1.10");
     expect(status.rolledBack).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a port-retirement refusal removes the unused backup and stage without rolling back", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pocket-upgrade-stop-refused-"));
+  const stageDir = join(root, ".pocket-build", "sdk-upgrade-stage-0.1.15");
+  const backupDir = join(root, ".pocket-build", "sdk-upgrade-backup-0.1.14");
+  const lockPath = join(root, ".pocket-build", "sdk-upgrade-apply.lock.json");
+  const statusPath = join(root, ".pocket-build", "sdk-upgrade-status.json");
+  const consumerFile = join(root, ".pocket-build", "editor-workspace-8791", "projects", "sample", "app.tsx");
+  try {
+    createStandaloneFixture(root, "0.1.14");
+    createStandaloneFixture(stageDir, "0.1.15");
+    mkdirSync(dirname(consumerFile), { recursive: true });
+    writeFileSync(consumerFile, "// preserve consumer project\n");
+    writeFileSync(statusPath, JSON.stringify({
+      status: "restarting",
+      currentVersion: "0.1.14",
+      latestVersion: "0.1.15",
+    }));
+
+    const originalServer = readFileSync(join(root, "editor", "server.ts"), "utf8");
+    await expect(upgradeApply({ stageDir, targetVersion: "0.1.15" }, {
+      sdkRoot: root,
+      assertPortOwnership: async () => ({ processes: [], owned: [], foreign: [] }),
+      stopOwnedPort: async (port: number, required: boolean, protectedPid: number) => {
+        expect(port).toBeGreaterThan(0);
+        expect(required).toBe(true);
+        expect(protectedPid).toBe(process.pid);
+        expect(isSdkBackupComplete(backupDir)).toBe(true);
+        throw new Error("stop rejected by protected process guard");
+      },
+    })).rejects.toThrow("stop rejected by protected process guard");
+
+    expect(readFileSync(join(root, "package.json"), "utf8")).toContain('"version":"0.1.14"');
+    expect(readFileSync(join(root, "editor", "server.ts"), "utf8")).toBe(originalServer);
+    expect(readFileSync(consumerFile, "utf8")).toBe("// preserve consumer project\n");
+    expect(existsSync(backupDir)).toBe(false);
+    expect(existsSync(stageDir)).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(await recoverInterruptedSdkUpgrade(root)).toBeNull();
+    const status = JSON.parse(readFileSync(statusPath, "utf8"));
+    expect(status.status).toBe("error");
+    expect(status.currentVersion).toBe("0.1.14");
+    expect(status.rolledBack).toBe(false);
+    expect(status.error).toContain("stop rejected by protected process guard");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -516,13 +516,14 @@ async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
     const previousVersion = installed.currentVersion;
     validateStagedStandaloneSdk(resolvedStageDir, targetVersion);
     const healthTimeoutMs = runtimeOptions.healthTimeoutMs ?? Number(process.env.POCKET_STUDIO_UPGRADE_HEALTH_TIMEOUT_MS || 30000);
+    const assertOwnership = runtimeOptions.assertPortOwnership ?? assertPortOwnership;
 
     const record = readPidRecord();
     const previousConfig = { ...(record?.config ?? {}), ...configFromHealth(await readHealth()) };
     const options = mergeLaunchOptions({}, previousConfig);
     const backupDir = join(sdkRoot, ".pocket-build", `sdk-upgrade-backup-${previousVersion}`);
 
-    await assertPortOwnership(PORT, false);
+    await assertOwnership(PORT, false);
     // Validate and complete backup BEFORE stopping the running service so an
     // incomplete backup never leaves the user with a stopped service or wiped files.
     prepareSdkUpgradeBackup(sdkRoot, resolvedStageDir, backupDir);
@@ -535,9 +536,18 @@ async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
       await sleep(150);
     }
 
-    cleanupLegacyLaunchd();
-    await stopOwnedPort(PORT, true, process.pid);
-    for (const port of LEGACY_PORTS) await stopOwnedPort(port, false);
+    const retireOwnedPort = runtimeOptions.stopOwnedPort ?? stopOwnedPort;
+    try {
+      cleanupLegacyLaunchd();
+      await retireOwnedPort(PORT, true, process.pid);
+      for (const port of LEGACY_PORTS) await retireOwnedPort(port, false);
+    } catch (error) {
+      // The SDK files are still untouched. Do not leave a complete backup for
+      // startup recovery to mistake for an interrupted, applied upgrade.
+      rmSync(backupDir, FS_REMOVE_OPTIONS);
+      rmSync(resolvedStageDir, FS_REMOVE_OPTIONS);
+      throw error;
+    }
 
     let filesMutated = false;
     try {
