@@ -40,7 +40,15 @@ POCKET_BYTECODE_BIN="$PWD/sdk/native/target/release/pocketjs_bytecode" \
 bun run --cwd demo/js scripts/build_mini_apps.ts --mini-app=lantern
 ```
 
-CI checks the resulting nonempty `app.qjbc`, `app.pak`, `app.bytecode.json`
-and `guest-manifest.json` before passing the generated directory to the Flutter
-test job. The Hiyori staging and Lantern bundle are generated artifacts; neither
-is committed as a source cache.
+`buildGuest` checks and writes nonempty `app.qjbc`, `app.pak`,
+`app.bytecode.json` and `guest-manifest.json`; CI uploads that generated
+directory for the Flutter test job. The Hiyori staging and Lantern bundle are
+generated artifacts; neither is committed as a source cache.
+
+Validation on 2026-11-13 used the public `5-r.5` sparse checkout and the pinned
+PocketJS compiler/bytecode binary. `--mini-app=lantern` rebuilt QJBC (1,239,050
+bytes), PAK (60,849,776 bytes), metadata (590 bytes), manifest (846 bytes) and
+the 18-file Hiyori staging set with all expected hashes. With Flutter 3.47.9,
+`flutter test --no-pub test/official_demo_catalog_test.dart` passed all five
+tests, including the rootBundle check for every launchable app's compiled
+assets.
