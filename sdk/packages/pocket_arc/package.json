@@ -15,7 +15,7 @@
     "./overlays": "./src/overlays.tsx"
   },
   "scripts": {
-    "test": "bun test test"
+    "test": "node --experimental-transform-types test/arc.check.ts"
   },
   "files": [
     "src"

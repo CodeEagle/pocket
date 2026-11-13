@@ -45,3 +45,13 @@
   之前的验证范围见 `FLUTTER_3_50_UPGRADE.md`。本次 native probe 不等于物理设备 IME 或 GPU 视觉验收。
 
 日志和临时产物位于 `/tmp/pocket-flutter-350-validation/conflict-*`，不作为源码提交。
+
+## 原工作目录复验
+
+将最终代码装回原工作目录后，发现隔离工作树的临时 Solid 依赖链接并非普通安装产物。
+新增与固定上游相同的 `solid-js@1.9.14` 开发依赖并更新两个锁文件；
+ARC 的 node:assert/registerHooks 检查改用 Node transform-types 运行，
+通过原有窄范围 resolver 加载真实固定上游 lifecycle；命名为 arc.check.ts，
+避免 Bun 将这个 Node 专用检查误收集为测试。
+它只影响测试导入，不加入公共 SDK 运行路径或 mock 实现。
+普通安装后的 Looseleaf/bytes 7 项通过，ARC 单元/边界检查通过。

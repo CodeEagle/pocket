@@ -23,7 +23,8 @@
     "@pocket/spine": "0.1.0",
     "@open-wxa/wxa-runner-core": "0.12.3",
     "node-gyp": "12.3.0",
-    "playwright": "1.64.1"
+    "playwright": "1.64.1",
+    "solid-js": "1.9.14"
   },
   "description": "Embeddable PocketJS bytecode host SDK for Flutter applications.",
   "scripts": {
