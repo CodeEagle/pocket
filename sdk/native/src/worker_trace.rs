@@ -83,6 +83,7 @@ struct TraceState {
     incomplete: Option<String>,
     failure: Option<String>,
     stopped_sessions: HashSet<String>,
+    stopped_turn_begins: HashSet<String>,
     active_turns: HashSet<String>,
 }
 
@@ -132,8 +133,11 @@ fn stopped_event_allowed(state: &TraceState, actor: TraceActor, session: &str, k
         kind,
         "scheduler.stop" | "worker.exit" | "io.close" | "io.fact"
     ) || (actor == TraceActor::Worker
-        && state.active_turns.contains(session)
-        && worker_turn_event(kind))
+        && kind == "turn.begin"
+        && state.stopped_turn_begins.contains(session))
+        || (actor == TraceActor::Worker
+            && state.active_turns.contains(session)
+            && worker_turn_event(kind))
 }
 
 impl WorkerTrace {
@@ -152,6 +156,7 @@ impl WorkerTrace {
                 incomplete: None,
                 failure: None,
                 stopped_sessions: HashSet::new(),
+                stopped_turn_begins: HashSet::new(),
                 active_turns: HashSet::new(),
             }),
             changed: Condvar::new(),
@@ -179,6 +184,7 @@ impl WorkerTrace {
         state.replay_events.clear();
         state.failure = None;
         state.stopped_sessions.clear();
+        state.stopped_turn_begins.clear();
         state.total_events = 0;
         state.total_bytes = 0;
         state.next_seq = 0;
@@ -763,6 +769,50 @@ impl WorkerTrace {
         state.active_turns.contains(session) && worker_turn_event(kind)
     }
 
+    pub(crate) fn session_stopped(&self, session: &str) -> bool {
+        self.lock().stopped_sessions.contains(session)
+    }
+
+    pub(crate) fn can_admit_stopped_turn_begin(&self, session: &str) -> bool {
+        let state = self.lock();
+        state.stopped_sessions.contains(session)
+            && state.stopped_turn_begins.contains(session)
+            && replay_frontier_is_admitted_turn(&state, session)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_recorded_event(
+        &self,
+        kind: &str,
+        timeout: Duration,
+    ) -> Result<WorkerTraceEvent, String> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock();
+        loop {
+            if let Some(event) = state.batch_events.iter().find(|event| event.kind == kind) {
+                return Ok(event.clone());
+            }
+            if let Some(incomplete) = &state.incomplete {
+                return Err(incomplete.clone());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(format!("timed out waiting for recorded {kind}"));
+            }
+            let (next, result) = self
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|poison| poison.into_inner());
+            state = next;
+            if result.timed_out()
+                && Instant::now() >= deadline
+                && !state.batch_events.iter().any(|event| event.kind == kind)
+            {
+                return Err(format!("timed out waiting for recorded {kind}"));
+            }
+        }
+    }
+
     pub(crate) fn mark_incomplete(&self, message: impl Into<String>) {
         let mut state = self.lock();
         state.incomplete.get_or_insert_with(|| message.into());
@@ -1076,6 +1126,19 @@ impl WorkerTrace {
             }
             let expected = state.replay_events.pop_front().unwrap();
             state.next_seq = expected.seq.saturating_add(1);
+            if actor == TraceActor::Host && kind == "scheduler.stop" {
+                state.stopped_sessions.insert(session.to_owned());
+                state.stopped_turn_begins.remove(session);
+                if replay_frontier_is_admitted_turn(&state, session) {
+                    state.stopped_turn_begins.insert(session.to_owned());
+                }
+            }
+            if actor == TraceActor::Worker
+                && kind == "turn.begin"
+                && state.stopped_sessions.contains(session)
+            {
+                state.stopped_turn_begins.remove(session);
+            }
             update_active_turn(&mut state, actor, &expected);
             state.consumed_events.push(expected.clone());
             self.changed.notify_all();
@@ -1096,6 +1159,18 @@ impl WorkerTrace {
             Ok(())
         }
     }
+}
+
+fn replay_frontier_is_admitted_turn(state: &TraceState, session: &str) -> bool {
+    for event in &state.replay_events {
+        if event.session == session && event.kind == "io.fact" {
+            continue;
+        }
+        return event.session == session
+            && TraceActor::for_event(Mode::Replay, event) == TraceActor::Worker
+            && event.kind == "turn.begin";
+    }
+    false
 }
 
 fn validate_event(event: &WorkerTraceEvent) -> Result<(), String> {

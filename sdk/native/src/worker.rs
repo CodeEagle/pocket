@@ -823,6 +823,77 @@ struct RunnerLifecycle {
     allow_destroy: bool,
 }
 
+#[cfg(test)]
+struct BeforeStepTestHook {
+    trace_id: usize,
+    armed: AtomicBool,
+    reached: (Mutex<bool>, Condvar),
+    released: (Mutex<bool>, Condvar),
+}
+
+#[cfg(test)]
+static BEFORE_STEP_TEST_HOOK: OnceLock<Mutex<Option<Arc<BeforeStepTestHook>>>> = OnceLock::new();
+
+#[cfg(test)]
+fn before_step_test_hook() -> &'static Mutex<Option<Arc<BeforeStepTestHook>>> {
+    BEFORE_STEP_TEST_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn pause_before_step_for_test(state: &WorkerState) {
+    let Some(trace_id) = state
+        .trace
+        .as_ref()
+        .map(|trace| Arc::as_ptr(trace) as usize)
+    else {
+        return;
+    };
+    let hook = before_step_test_hook()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let Some(hook) = hook.filter(|hook| hook.trace_id == trace_id) else {
+        return;
+    };
+    if !hook.armed.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let (lock, cv) = &hook.reached;
+    *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
+    cv.notify_all();
+    let (lock, cv) = &hook.released;
+    let mut released = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !*released && Instant::now() < deadline {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        released = cv
+            .wait_timeout(released, timeout)
+            .unwrap_or_else(|poison| poison.into_inner())
+            .0;
+    }
+}
+
+#[cfg(test)]
+fn release_before_step_test_hook(state: &WorkerState) {
+    let Some(trace_id) = state
+        .trace
+        .as_ref()
+        .map(|trace| Arc::as_ptr(trace) as usize)
+    else {
+        return;
+    };
+    let hook = before_step_test_hook()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let Some(hook) = hook.filter(|hook| hook.trace_id == trace_id) else {
+        return;
+    };
+    let (lock, cv) = &hook.released;
+    *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
+    cv.notify_all();
+}
+
 struct WorkerState {
     generation: u32,
     owner_thread: OnceLock<thread::ThreadId>,
@@ -1299,6 +1370,13 @@ impl WorkerRuntime {
                 }
             }
         }
+        let drain_replay_turn = self.state.trace.as_ref().is_some_and(|trace| {
+            trace.mode() == Mode::Replay
+                && self.state.session.as_ref().is_some_and(|session| {
+                    trace.can_admit_stopped_turn_begin(session)
+                        || trace.can_finish_active_turn(session, "turn.end")
+                })
+        });
         self.state.stop_requested.store(true, Ordering::Release);
         if let Some(trace) = &self.state.trace {
             trace.notify_stop(self.state.session.as_deref());
@@ -1306,11 +1384,13 @@ impl WorkerRuntime {
         self.state.clock.set_paused(false);
         self.state.pulse.signal();
         let runner = self.state.runner.load(Ordering::Acquire);
-        if !runner.is_null() {
+        if !runner.is_null() && !drain_replay_turn {
             unsafe {
                 pocket_worker_runner_stop(runner);
             }
         }
+        #[cfg(test)]
+        release_before_step_test_hook(&self.state);
         self.state.pulse.signal();
         let (lock, cv) = &self.state.lifecycle;
         let mut lifecycle = lock.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -2113,10 +2193,16 @@ unsafe fn await_replay_event(
         if trace.mode() != Mode::Replay {
             return Ok(());
         }
-        let draining_stopped_turn = state.stop_requested.load(Ordering::Acquire)
+        let stop_requested =
+            state.stop_requested.load(Ordering::Acquire) || trace.session_stopped(session);
+        let draining_stopped_turn = stop_requested
             && actor == TraceActor::Worker
             && trace.can_finish_active_turn(session, kind);
-        if state.stop_requested.load(Ordering::Acquire) && !draining_stopped_turn {
+        let admitting_stopped_turn = stop_requested
+            && actor == TraceActor::Worker
+            && kind == "turn.begin"
+            && trace.can_admit_stopped_turn_begin(session);
+        if stop_requested && !draining_stopped_turn && !admitting_stopped_turn {
             return Err(format!(
                 "Worker replay stopped while awaiting {actor:?}/{session}/{kind}"
             ));
@@ -2196,6 +2282,25 @@ unsafe fn wait_for_worker_frontier(
     }
 }
 
+unsafe fn stop_before_unadmitted_worker_step(
+    state: &WorkerState,
+    trace: &WorkerTrace,
+    session: &str,
+) -> Result<bool, String> {
+    if !state.stop_requested.load(Ordering::Acquire) && !trace.session_stopped(session) {
+        return Ok(false);
+    }
+    inject_replay_io_facts(state, trace, session)?;
+    Ok(!trace.can_admit_stopped_turn_begin(session))
+}
+
+unsafe fn stop_runner(state: &WorkerState) {
+    let runner = state.runner.load(Ordering::Acquire);
+    if !runner.is_null() {
+        unsafe { pocket_worker_runner_stop(runner) };
+    }
+}
+
 unsafe extern "C" fn trace_turn_callback(
     context: *mut c_void,
     phase: u32,
@@ -2227,6 +2332,25 @@ unsafe extern "C" fn trace_turn_callback(
             state.trace_failure("Worker trace context ABI is too small".into());
             return -1;
         }
+        #[cfg(test)]
+        if phase == TRACE_DEFERRED {
+            pause_before_step_for_test(state);
+        }
+        if mode == Mode::Replay && phase == TRACE_BEFORE_STEP {
+            match unsafe { stop_before_unadmitted_worker_step(state, trace, session) } {
+                Ok(true) => {
+                    // A recorded turn.begin is the sole exception to stop.
+                    // The trace lane grants its admission exactly once.
+                    unsafe { stop_runner(state) };
+                    return -1;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    state.trace_failure(error);
+                    return -1;
+                }
+            }
+        }
         if mode == Mode::Replay && phase == TRACE_DEFERRED {
             let next = match unsafe { wait_for_worker_frontier(state, trace, session) } {
                 Ok(next) => next,
@@ -2235,19 +2359,14 @@ unsafe extern "C" fn trace_turn_callback(
                     return -1;
                 }
             };
-            if state.stop_requested.load(Ordering::Acquire)
-                || next.as_ref().is_some_and(|event| {
-                    event.session.as_str() == session && event.kind == "worker.exit"
-                })
-            {
+            if next.as_ref().is_some_and(|event| {
+                event.session.as_str() == session && event.kind == "worker.exit"
+            }) {
                 // The Host stop transaction releases this gate. Stop the pinned
                 // runner from inside the gate so C returns from this step instead
                 // of trying to start one more turn and consuming worker.exit as a
                 // turn admission event.
-                let runner = state.runner.load(Ordering::Acquire);
-                if !runner.is_null() {
-                    unsafe { pocket_worker_runner_stop(runner) };
-                }
+                unsafe { stop_runner(state) };
                 return -1;
             }
         }
@@ -2255,7 +2374,13 @@ unsafe extern "C" fn trace_turn_callback(
             match phase {
                 TRACE_BEFORE_STEP => {
                     if mode == Mode::Replay {
-                        await_replay_event(state, trace, TraceActor::Worker, session, "turn.begin")?;
+                        await_replay_event(
+                            state,
+                            trace,
+                            TraceActor::Worker,
+                            session,
+                            "turn.begin",
+                        )?;
                     }
                     let generation = state.generation;
                     let sequence = input.sequence;
@@ -2274,7 +2399,9 @@ unsafe extern "C" fn trace_turn_callback(
                         Mode::Replay => {
                             let expected = trace
                                 .take(TraceActor::Worker, session, "turn.begin")?
-                                .ok_or_else(|| "Worker replay is missing turn.begin".to_owned())?;
+                                .ok_or_else(|| {
+                                "Worker replay is missing turn.begin".to_owned()
+                            })?;
                             if expected["generation"].as_u64() != Some(generation as u64)
                                 || expected["sequence"].as_u64() != Some(sequence as u64)
                             {
@@ -2300,7 +2427,13 @@ unsafe extern "C" fn trace_turn_callback(
                         // publishes in this turn must reach the core before it is
                         // observed; the post-observe trace callback cannot repair
                         // a snapshot that was taken too early.
-                        await_replay_event(state, trace, TraceActor::Worker, session, "turn.facts")?;
+                        await_replay_event(
+                            state,
+                            trace,
+                            TraceActor::Worker,
+                            session,
+                            "turn.facts",
+                        )?;
                     }
                     if mode != Mode::Live {
                         state.mutation_gate.lock();
@@ -2337,9 +2470,9 @@ unsafe extern "C" fn trace_turn_callback(
                             {
                                 return Err("Worker replay turn completion differs".into());
                             }
-                            let recorded = expected["elapsedMicros"]
-                                .as_u64()
-                                .ok_or_else(|| "Worker replay turn duration is invalid".to_owned())?;
+                            let recorded = expected["elapsedMicros"].as_u64().ok_or_else(|| {
+                                "Worker replay turn duration is invalid".to_owned()
+                            })?;
                             state.clock.advance_replay(recorded)?;
                             if !output.is_null() {
                                 *output = recorded;
@@ -2355,7 +2488,8 @@ unsafe extern "C" fn trace_turn_callback(
                                 "nowMicros": input.now_micros,
                                 "resumeAtMicros": resume_at_micros,
                             });
-                            trace.observe(TraceActor::Worker, session, "turn.deferred", || actual)?;
+                            trace
+                                .observe(TraceActor::Worker, session, "turn.deferred", || actual)?;
                         }
                         if !output.is_null() {
                             *output = if status != 0 { resume_at_micros } else { 0 };
@@ -2369,7 +2503,9 @@ unsafe extern "C" fn trace_turn_callback(
                         }) {
                             let expected = trace
                                 .take(TraceActor::Worker, session, "turn.deferred")?
-                                .ok_or_else(|| "Worker replay is missing turn.deferred".to_owned())?;
+                                .ok_or_else(|| {
+                                    "Worker replay is missing turn.deferred".to_owned()
+                                })?;
                             if expected["generation"].as_u64() != Some(state.generation as u64) {
                                 return Err("Worker replay quota boundary differs".into());
                             }
@@ -2379,11 +2515,13 @@ unsafe extern "C" fn trace_turn_callback(
                             if recorded_now < input.now_micros {
                                 return Err("Worker replay quota clock moved backwards".into());
                             }
-                            let resume = expected["resumeAtMicros"]
-                                .as_u64()
-                                .ok_or_else(|| "Worker replay resume deadline is invalid".to_owned())?;
+                            let resume = expected["resumeAtMicros"].as_u64().ok_or_else(|| {
+                                "Worker replay resume deadline is invalid".to_owned()
+                            })?;
                             if resume < recorded_now {
-                                return Err("Worker replay resume deadline precedes its clock".into());
+                                return Err(
+                                    "Worker replay resume deadline precedes its clock".into()
+                                );
                             }
                             input.now_micros = recorded_now;
                             // A recorded quota deferral is only a deadline, not a
@@ -2415,7 +2553,8 @@ unsafe extern "C" fn trace_turn_callback(
                                 .checked_add(1)
                                 .ok_or_else(|| "Worker replay turn sequence overflow".to_owned())?;
                             if expected.data["generation"].as_u64() != Some(state.generation as u64)
-                                || expected.data["sequence"].as_u64() != Some(expected_sequence as u64)
+                                || expected.data["sequence"].as_u64()
+                                    != Some(expected_sequence as u64)
                             {
                                 return Err("Worker replay turn admission identity differs".into());
                             }
@@ -2613,11 +2752,12 @@ unsafe extern "C" fn trace_scalar_callback(
         match trace.mode() {
             Mode::Live => {}
             Mode::Record => {
-                if let Err(error) =
-                    trace.observe(TraceActor::Worker, session, "clock.scalar", || {
-                        serde_json::json!({"source": source, "value": actual})
-                    })
-                {
+                if let Err(error) = trace.observe(
+                    TraceActor::Worker,
+                    session,
+                    "clock.scalar",
+                    || serde_json::json!({"source": source, "value": actual}),
+                ) {
                     state.trace_failure(error);
                     return -1;
                 }
@@ -2937,18 +3077,23 @@ fn trace_worker_exit(state: &WorkerState, status: &'static str) {
         let drain_result: Result<(), String> = (|| loop {
             unsafe { inject_replay_io_facts(state, trace, session)? };
             let Some(next) = trace.peek_replay()? else {
-                break Ok(());
+                break Err("Worker replay is missing worker.exit".into());
             };
             if next.session == *session && next.kind == "io.fact" {
                 continue;
             }
-            if !(TraceActor::for_event(Mode::Replay, &next) == TraceActor::Worker
-                && next.session == *session)
+            if next.session == *session
+                && TraceActor::for_event(Mode::Replay, &next) == TraceActor::Worker
             {
-                trace.wait_for_advance(next.seq)?;
-                continue;
+                if next.kind == "worker.exit" {
+                    break Ok(());
+                }
+                break Err(format!(
+                    "Worker exited before replay event {} ({}) was consumed",
+                    next.seq, next.kind
+                ));
             }
-            break Ok(());
+            trace.wait_for_advance(next.seq)?;
         })();
         if let Err(error) = drain_result {
             *state
@@ -3130,7 +3275,8 @@ unsafe extern "C" fn driver_start(
                     "timeoutMicros": descriptor.timeout.as_micros(),
                     "maxBytes": descriptor.max_bytes,
                 });
-                if let Err(error) = trace.observe(TraceActor::Worker, session, "io.request", || data)
+                if let Err(error) =
+                    trace.observe(TraceActor::Worker, session, "io.request", || data)
                 {
                     state.trace_failure(error);
                     return STATUS_FAILED;
@@ -3943,6 +4089,188 @@ mod tests {
             &payload,
         )
         .unwrap()
+    }
+
+    struct BeforeStepBarrierGuard {
+        hook: Arc<BeforeStepTestHook>,
+    }
+
+    impl BeforeStepBarrierGuard {
+        fn install(trace: &Arc<WorkerTrace>) -> Self {
+            let hook = Arc::new(BeforeStepTestHook {
+                trace_id: Arc::as_ptr(trace) as usize,
+                armed: AtomicBool::new(true),
+                reached: (Mutex::new(false), Condvar::new()),
+                released: (Mutex::new(false), Condvar::new()),
+            });
+            *before_step_test_hook()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::clone(&hook));
+            Self { hook }
+        }
+
+        fn wait_until_reached(&self) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (lock, cv) = &self.hook.reached;
+            let mut reached = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+            while !*reached {
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                let (next, result) = cv
+                    .wait_timeout(reached, deadline - now)
+                    .unwrap_or_else(|poison| poison.into_inner());
+                reached = next;
+                if result.timed_out() && !*reached {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+
+    impl Drop for BeforeStepBarrierGuard {
+        fn drop(&mut self) {
+            let (lock, cv) = &self.hook.released;
+            *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
+            cv.notify_all();
+            let mut installed = before_step_test_hook()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if installed
+                .as_ref()
+                .is_some_and(|hook| Arc::ptr_eq(hook, &self.hook))
+            {
+                *installed = None;
+            }
+        }
+    }
+
+    fn stop_boundary_worker(
+        bytecode: &[u8],
+        trace: Arc<WorkerTrace>,
+        session: &str,
+    ) -> WorkerRuntime {
+        WorkerRuntime::spawn_traced(
+            bytecode,
+            pocket_spec::BINDING_GENERATION,
+            60,
+            WorkerDeclaration {
+                entry: "worker.js".into(),
+                nodes: Vec::new(),
+                channels: Vec::new(),
+            },
+            WorkerPolicy {
+                allowed_http_origins: Vec::new(),
+                required_capabilities: vec!["runtime.worker".into()],
+            },
+            WorkerLimits {
+                heap_bytes: 16 * 1024 * 1024,
+                stack_bytes: 1024 * 1024,
+                turn_budget_micros: 10_000,
+                window_micros: 100_000,
+                quota_micros: 50_000,
+            },
+            None,
+            trace,
+            session.to_owned(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn replay_stop_admits_only_the_recorded_turn_at_the_step_boundary() {
+        let session = "worker:stop-boundary:1";
+        let bytecode =
+            compile_worker_bytecode("globalThis.__pocketWorkerTurn=(context,facts)=>{};");
+        let record = WorkerTrace::new(Mode::Record);
+        record.begin_batch(&[]).unwrap();
+        let mut original = stop_boundary_worker(&bytecode, Arc::clone(&record), session);
+        original.wait_ready(Duration::from_secs(2)).unwrap();
+        let first_end = record
+            .wait_for_recorded_event("turn.end", Duration::from_secs(5))
+            .unwrap();
+        original.request_stop_and_wait();
+        original.destroy_and_join().unwrap();
+        assert_eq!(original.last_error(), None);
+        let events = record.finish_batch().unwrap();
+        let bootstrap = events
+            .iter()
+            .find(|event| event.kind == "bootstrap")
+            .unwrap()
+            .clone();
+        let scheduler_stop = events
+            .iter()
+            .find(|event| event.kind == "scheduler.stop")
+            .unwrap()
+            .clone();
+        let worker_exit = events
+            .iter()
+            .find(|event| event.kind == "worker.exit")
+            .unwrap()
+            .clone();
+        let first_begin = events
+            .iter()
+            .find(|event| {
+                event.kind == "turn.begin"
+                    && event.data["sequence"].as_u64() == first_end.data["sequence"].as_u64()
+            })
+            .unwrap()
+            .clone();
+        let sequence = first_begin.data["sequence"].as_u64();
+        let first_facts = events
+            .iter()
+            .find(|event| event.kind == "turn.facts" && event.data["sequence"].as_u64() == sequence)
+            .unwrap()
+            .clone();
+        let first_end = events
+            .iter()
+            .find(|event| event.kind == "turn.end" && event.data["sequence"].as_u64() == sequence)
+            .unwrap()
+            .clone();
+        let resequence = |mut tape: Vec<WorkerTraceEvent>| {
+            for (seq, event) in tape.iter_mut().enumerate() {
+                event.seq = seq as u64;
+            }
+            tape
+        };
+        let admitted_tape = resequence(vec![
+            bootstrap.clone(),
+            scheduler_stop.clone(),
+            first_begin,
+            first_facts,
+            first_end,
+            worker_exit.clone(),
+        ]);
+        let no_turn_tape = resequence(vec![bootstrap, scheduler_stop, worker_exit]);
+
+        for (tape, expected_turns) in [(admitted_tape, 1usize), (no_turn_tape, 0usize)] {
+            let replay = WorkerTrace::new(Mode::Replay);
+            replay.begin_batch(&tape).unwrap();
+            let replay_barrier = BeforeStepBarrierGuard::install(&replay);
+            let mut runtime = stop_boundary_worker(&bytecode, Arc::clone(&replay), session);
+            runtime.wait_ready(Duration::from_secs(2)).unwrap();
+            assert!(
+                replay_barrier.wait_until_reached(),
+                "Replay Worker did not reach the controlled step boundary: error={:?}",
+                runtime.last_error()
+            );
+            runtime.request_stop_and_wait();
+            runtime.destroy_and_join().unwrap();
+            assert_eq!(runtime.last_error(), None);
+            drop(replay_barrier);
+            let consumed = replay.finish_batch().unwrap();
+            assert_eq!(consumed, tape);
+            assert_eq!(
+                consumed
+                    .iter()
+                    .filter(|event| event.kind == "turn.begin")
+                    .count(),
+                expected_turns,
+                "replay must consume exactly the turn admission recorded in its tape"
+            );
+        }
     }
 
     fn collect_worker_outputs(
@@ -5087,8 +5415,12 @@ mod tests {
         });
         let outputs =
             collect_worker_outputs(&ui_context, &mut bridge, &[1, 2], "pool", &trace, &[]);
-        assert!(outputs.iter().any(|r| r.as_slice() == &[1, b'o', b'n', b'e']));
-        assert!(outputs.iter().any(|r| r.as_slice() == &[2, b't', b'w', b'o']));
+        assert!(outputs
+            .iter()
+            .any(|r| r.as_slice() == &[1, b'o', b'n', b'e']));
+        assert!(outputs
+            .iter()
+            .any(|r| r.as_slice() == &[2, b't', b'w', b'o']));
         assert_eq!(
             accepted_connections.load(Ordering::Relaxed),
             1,
@@ -5192,14 +5524,8 @@ mod tests {
             ctx.eval::<(), _>("__pocketWorkerChannels.configure(2,0);")
                 .unwrap();
         });
-        let outputs = collect_worker_outputs(
-            &ui_context,
-            &mut bridge,
-            &[2],
-            "short-timeout",
-            &trace,
-            &[],
-        );
+        let outputs =
+            collect_worker_outputs(&ui_context, &mut bridge, &[2], "short-timeout", &trace, &[]);
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_millis(1500),
