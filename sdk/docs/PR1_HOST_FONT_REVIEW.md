@@ -96,3 +96,82 @@ view and samples at most three real Guest frames for motion, checking state
 retention and non-decreasing x on each frame, then requiring full exit. This
 accounts for the event/transform commit boundary without removing the motion
 assertion. The tracked root bytecode/metadata were refreshed from this build.
+
+## Standalone upgrade release gate
+
+The standalone upgrade lifecycle fixture now copies the actual editor runtime
+tree, excluding tests/caches, as `export_web_sdk.ts` does. Its controlled server
+entry still exercises the real detached `editor_service.mjs` upgrade and
+rollback flow. This removes a manual import list that omitted the new
+`update_endpoint.ts`; the production exporter already included that module.
+Linux execution then exposed a real retirement bug: `detached: true` creates
+a new session but does not remove the updater from the old server's process
+ancestry. Recursive retirement could signal the updater before the old server,
+leaving the persisted upgrade in `applying`. Reuse the existing Windows
+`protectedRetirementPlan` on every platform, retire other Worker subtrees,
+and signal the ancestor chain without signaling the updater. If the updater
+was already reparented, require a complete ancestry chain outside the target
+before recursive retirement. This adds no second service state machine.
+The retained parent has no standalone SDK upgrade manager to migrate; this is
+an adaptation of the existing SDK service boundary.
+
+A real Node process-tree regression verifies that a detached updater still
+has the server as its parent, survives retirement, and leaves both the old
+server and its other Worker stopped. Browser tests wait for the observable
+dirty-draft deferral before asserting it; failed fixtures retain logs, process
+facts and persisted upgrade status before cleanup.
+
+The release command passed all 27 tests and 165 assertions on macOS with
+Playwright Chromium and Bun 1.4.4. The same group is included in Linux CI
+before packaging. SDK version 0.1.14 supersedes the unpublished 0.1.13 candidate.
+
+## Native test lifetime ablation
+
+Repeated Linux execution exposed heap corruption in the truncated draw-op
+parser regression. AddressSanitizer reproduced a `BorrowRefMut` drop after
+`pocket_destroy` had released the last owner of its `CoreState`. The test had
+borrowed `handle.ops.core_mut().ui` across destruction of that same handle.
+This regression tests parsing, so use a local `Ui::new()` and remove the
+unnecessary host/FFI lifecycle entirely. The original test fails under ASan;
+the adapted test and full library runs pass under ASan. Keep default parallel
+execution rather than masking the error by serializing tests.
+
+## Replay admission and stop boundaries
+
+`WorkerRuntime.wait_ready()` exposes the constructed core before the runner's
+first dispatch. The HTTP regression's UI publish could therefore precede its
+first `io.request`; replaying that prefix without a UI driver legitimately
+waited for the missing UI actor. Wait for the fixture server's actual request
+accept before publishing the command, and assert the stop prefix has no UI
+actor. Keep the complete recorded tape, HTTP/timer/duplex outputs and offline
+replay assertions unchanged.
+
+A separate Linux timeout core captured the Host waiting for runner exit while
+the runner slept in `Pulse.wait_runner(UINT64_MAX)`. The Host had admitted a
+recorded turn after stop. The pinned `engine/worker/src/runner.c` may invoke
+its wait callback after that step returns zero, before checking stop again.
+The callback must distinguish this running phase from its later busy-destroy
+phase using the existing lifecycle's `exited` fact. Return to the existing
+step-admission/stop guard while running; retain Pulse-based waiting after exit
+for pending native completion. Reuse the pinned callback boundary and existing
+lifecycle instead of introducing another stop state or polling loop.
+
+The pinned runner has a separate fault-retention loop that never returns to
+step admission. During replay stop, inspect the existing C runner failure
+flag and stop that faulted runner through its existing API; preserve its
+error and replay failure instead of treating it as a successful stop. The
+regression retains the original first-step/zero-turn boundaries and adds a
+real recorded idle turn with its stop pulse already consumed. Removing the
+running-phase guard reproduces the timeout; restoring it permits exit. A
+separate deliberately mismatched admission proves faulted shutdown terminates
+while the original replay error remains observable.
+
+The next Linux ASan run exposed the underlying error without hanging:
+`worker replay session ... was stopped before event ...`. A session wait had
+retained an older blanket stop rejection while the other trace waits used
+`stopped_event_allowed`. Host stop is recorded under the trace mutex before
+its atomic flag is stored; during that window an admitted active turn was
+incorrectly rejected. Reuse the existing policy under the same trace lock.
+A pure trace regression holds the atomic flag false, verifies the wait does
+not consume its frontier, then consumes facts/end/exit and verifies the full
+tape. The old policy fails this regression; the shared policy passes.

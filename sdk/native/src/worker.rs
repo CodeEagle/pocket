@@ -827,7 +827,9 @@ struct RunnerLifecycle {
 struct BeforeStepTestHook {
     trace_id: usize,
     armed: AtomicBool,
+    skip_before_step: AtomicUsize,
     hold_after_stop: AtomicBool,
+    hold_runner_wait: AtomicBool,
     reached: (Mutex<bool>, Condvar),
     released: (Mutex<bool>, Condvar),
     stop_reached: (Mutex<bool>, Condvar),
@@ -858,6 +860,16 @@ fn pause_before_step_for_test(state: &WorkerState) {
     let Some(hook) = hook.filter(|hook| hook.trace_id == trace_id) else {
         return;
     };
+    let skipped = hook.skip_before_step.load(Ordering::Acquire);
+    if skipped > 0 {
+        let _ = hook.skip_before_step.compare_exchange(
+            skipped,
+            skipped - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        return;
+    }
     if !hook.armed.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -930,6 +942,46 @@ fn pause_after_stop_consumed_for_test(state: &WorkerState) {
     }
 }
 
+#[cfg(test)]
+fn pause_runner_wait_for_test(state: &WorkerState, deadline: u64) {
+    let Some(trace_id) = state
+        .trace
+        .as_ref()
+        .map(|trace| Arc::as_ptr(trace) as usize)
+    else {
+        return;
+    };
+    let hook = before_step_test_hook()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let Some(hook) = hook.filter(|hook| hook.trace_id == trace_id) else {
+        return;
+    };
+    if !hook.hold_runner_wait.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    // The regression requires the stop pulse to have already been consumed,
+    // matching the C runner's second wait after its idle step. Do this before
+    // blocking the test thread so the production callback below sees the
+    // no-new-pulse state deterministically.
+    if state.pulse.snapshot() != state.pulse.runner_seen.load(Ordering::Acquire) {
+        state.pulse.wait_runner(deadline, &state.clock);
+    }
+    let (lock, cv) = &hook.stop_reached;
+    *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
+    cv.notify_all();
+    let (lock, cv) = &hook.stop_released;
+    let mut released = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !*released && Instant::now() < deadline {
+        released = cv
+            .wait_timeout(released, deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or_else(|poison| poison.into_inner())
+            .0;
+    }
+}
+
 struct WorkerState {
     generation: u32,
     owner_thread: OnceLock<thread::ThreadId>,
@@ -974,6 +1026,8 @@ impl WorkerState {
     }
 
     fn trace_failure(&self, error: String) {
+        #[cfg(test)]
+        eprintln!("Worker trace failure (session={:?}): {error}", self.session);
         *self
             .errors
             .lock()
@@ -1427,9 +1481,9 @@ impl WorkerRuntime {
                 pocket_worker_runner_stop(runner);
             }
         }
+        self.state.pulse.signal();
         #[cfg(test)]
         release_before_step_test_hook(&self.state);
-        self.state.pulse.signal();
         let (lock, cv) = &self.state.lifecycle;
         let mut lifecycle = lock.lock().unwrap_or_else(|poison| poison.into_inner());
         while !lifecycle.exited {
@@ -2933,8 +2987,38 @@ unsafe extern "C" fn runner_wait(context: *mut c_void, deadline: u64) {
     catch_worker_callback((), || {
         if !context.is_null() {
             let state = &*(context as *const WorkerState);
+            #[cfg(test)]
+            pause_runner_wait_for_test(state, deadline);
             if let Some(trace) = &state.trace {
                 if trace.mode() == Mode::Replay {
+                    if state.stop_requested.load(Ordering::Acquire)
+                        && !state
+                            .lifecycle
+                            .0
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .exited
+                    {
+                        let runner = state.runner.load(Ordering::Acquire);
+                        if !runner.is_null() && unsafe { pocket_worker_runner_failed(runner) } != 0
+                        {
+                            // A faulted C runner no longer reaches the replay
+                            // trace gate; its fault-retention loop waits until
+                            // the Host stops it. Preserve the recorded fault
+                            // and release that loop rather than treating it as
+                            // a stop-admitted turn.
+                            unsafe { pocket_worker_runner_stop(runner) };
+                            return;
+                        }
+                        // The C runner may call wait_until after finishing a
+                        // stop-admitted replay turn, before its next trace gate
+                        // can consume worker.exit. A pulse sent by the Host
+                        // before this wait is not enough to wake it again; let
+                        // the runner loop reach that gate. Once exited,
+                        // destruction uses the timed wait below while
+                        // outstanding native work drains.
+                        return;
+                    }
                     // The runner uses this callback both for its replay event
                     // gate and for the C core's post-stop destruction wait. The
                     // former exits as soon as stop is requested; the latter must
@@ -4145,7 +4229,9 @@ mod tests {
             let hook = Arc::new(BeforeStepTestHook {
                 trace_id: Arc::as_ptr(trace) as usize,
                 armed: AtomicBool::new(true),
+                skip_before_step: AtomicUsize::new(0),
                 hold_after_stop: AtomicBool::new(false),
+                hold_runner_wait: AtomicBool::new(false),
                 reached: (Mutex::new(false), Condvar::new()),
                 released: (Mutex::new(false), Condvar::new()),
                 stop_reached: (Mutex::new(false), Condvar::new()),
@@ -4179,6 +4265,38 @@ mod tests {
 
         fn hold_stop_consumed(&self) {
             self.hook.hold_after_stop.store(true, Ordering::Release);
+        }
+
+        fn skip_before_step(&self, count: usize) {
+            self.hook.skip_before_step.store(count, Ordering::Release);
+        }
+
+        fn hold_runner_wait(&self) {
+            self.hook.hold_runner_wait.store(true, Ordering::Release);
+        }
+
+        fn wait_until_runner_wait(&self) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (lock, cv) = &self.hook.stop_reached;
+            let mut reached = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+            while !*reached {
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                let (next, result) = cv
+                    .wait_timeout(reached, deadline - now)
+                    .unwrap_or_else(|poison| poison.into_inner());
+                reached = next;
+                if result.timed_out() && !*reached {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn release_runner_wait(&self) {
+            self.release_stop();
         }
 
         fn wait_until_stop_consumed(&self) -> bool {
@@ -4272,7 +4390,14 @@ mod tests {
         let mut original = stop_boundary_worker(&bytecode, Arc::clone(&record), session);
         original.wait_ready(Duration::from_secs(2)).unwrap();
         let first_end = record
-            .wait_for_recorded_event("turn.end", Duration::from_secs(5))
+            .wait_for_recorded_event("turn.end", Duration::from_secs(5), |event| {
+                event.data["executed"].as_bool() == Some(true)
+            })
+            .unwrap();
+        let recorded_idle_end = record
+            .wait_for_recorded_event("turn.end", Duration::from_secs(5), |event| {
+                event.data["executed"].as_bool() == Some(false)
+            })
             .unwrap();
         original.request_stop_and_wait();
         original.destroy_and_join().unwrap();
@@ -4293,45 +4418,114 @@ mod tests {
             .find(|event| event.kind == "worker.exit")
             .unwrap()
             .clone();
-        let first_begin = events
+        let boot_sequence = first_end.data["sequence"].as_u64().unwrap();
+        let boot_begin = events
             .iter()
             .find(|event| {
-                event.kind == "turn.begin"
-                    && event.data["sequence"].as_u64() == first_end.data["sequence"].as_u64()
+                event.kind == "turn.begin" && event.data["sequence"].as_u64() == Some(boot_sequence)
             })
             .unwrap()
             .clone();
-        let sequence = first_begin.data["sequence"].as_u64();
-        let first_facts = events
+        let boot_facts = events
             .iter()
-            .find(|event| event.kind == "turn.facts" && event.data["sequence"].as_u64() == sequence)
+            .find(|event| {
+                event.kind == "turn.facts" && event.data["sequence"].as_u64() == Some(boot_sequence)
+            })
             .unwrap()
             .clone();
-        let first_end = events
+        let boot_end = events
             .iter()
-            .find(|event| event.kind == "turn.end" && event.data["sequence"].as_u64() == sequence)
+            .find(|event| {
+                event.kind == "turn.end" && event.data["sequence"].as_u64() == Some(boot_sequence)
+            })
             .unwrap()
             .clone();
+        let idle_sequence = recorded_idle_end.data["sequence"].as_u64().unwrap();
+        assert_eq!(idle_sequence, boot_sequence + 1);
+        let idle_begin = events
+            .iter()
+            .find(|event| {
+                event.kind == "turn.begin" && event.data["sequence"].as_u64() == Some(idle_sequence)
+            })
+            .expect("recording should include the idle C step after bootstrap")
+            .clone();
+        let idle_facts = events
+            .iter()
+            .find(|event| {
+                event.kind == "turn.facts" && event.data["sequence"].as_u64() == Some(idle_sequence)
+            })
+            .unwrap()
+            .clone();
+        let idle_end = events
+            .iter()
+            .find(|event| {
+                event.kind == "turn.end" && event.data["sequence"].as_u64() == Some(idle_sequence)
+            })
+            .expect("recording should include the idle C step completion")
+            .clone();
+        assert_eq!(idle_end.data["executed"].as_bool(), Some(false));
         let resequence = |mut tape: Vec<WorkerTraceEvent>| {
             for (seq, event) in tape.iter_mut().enumerate() {
                 event.seq = seq as u64;
             }
             tape
         };
-        let admitted_tape = resequence(vec![
+        let boot_admitted_tape = resequence(vec![
             bootstrap.clone(),
             scheduler_stop.clone(),
-            first_begin,
-            first_facts,
-            first_end,
+            boot_begin.clone(),
+            boot_facts.clone(),
+            boot_end.clone(),
+            worker_exit.clone(),
+        ]);
+        let idle_admitted_tape = resequence(vec![
+            bootstrap.clone(),
+            boot_begin.clone(),
+            boot_facts.clone(),
+            boot_end.clone(),
+            scheduler_stop.clone(),
+            idle_begin,
+            idle_facts,
+            idle_end,
+            worker_exit.clone(),
+        ]);
+        let mut faulted_boot_begin = boot_begin.clone();
+        faulted_boot_begin.data["sequence"] = serde_json::json!(boot_sequence + 7);
+        let fault_tape = resequence(vec![
+            bootstrap.clone(),
+            scheduler_stop.clone(),
+            faulted_boot_begin,
             worker_exit.clone(),
         ]);
         let no_turn_tape = resequence(vec![bootstrap, scheduler_stop, worker_exit]);
 
-        for (tape, expected_turns, hold_stop_store) in [
-            (admitted_tape, 1usize, false),
-            (no_turn_tape.clone(), 0usize, false),
-            (no_turn_tape, 0usize, true),
+        for (
+            tape,
+            expected_turns,
+            hold_stop_store,
+            hold_runner_wait,
+            skip_before_step,
+            expect_fault,
+        ) in [
+            (
+                boot_admitted_tape,
+                Some(1usize),
+                false,
+                false,
+                0usize,
+                false,
+            ),
+            (
+                no_turn_tape.clone(),
+                Some(0usize),
+                false,
+                false,
+                0usize,
+                false,
+            ),
+            (no_turn_tape, Some(0usize), true, false, 0usize, false),
+            (idle_admitted_tape, Some(2usize), false, true, 1usize, false),
+            (fault_tape, None, false, false, 0usize, true),
         ] {
             let replay = WorkerTrace::new(Mode::Replay);
             replay.begin_batch(&tape).unwrap();
@@ -4339,6 +4533,10 @@ mod tests {
             if hold_stop_store {
                 replay_barrier.hold_stop_consumed();
             }
+            if hold_runner_wait {
+                replay_barrier.hold_runner_wait();
+            }
+            replay_barrier.skip_before_step(skip_before_step);
             let mut runtime = stop_boundary_worker(&bytecode, Arc::clone(&replay), session);
             runtime.wait_ready(Duration::from_secs(2)).unwrap();
             assert!(
@@ -4377,22 +4575,125 @@ mod tests {
                 drop(lifecycle);
                 replay_barrier.release_stop();
                 runtime = stop_thread.join().unwrap();
+            } else if hold_runner_wait {
+                let state = Arc::clone(&runtime.state);
+                let stop_thread = thread::spawn(move || {
+                    runtime.request_stop_and_wait();
+                    runtime
+                });
+                let reached_runner_wait = replay_barrier.wait_until_runner_wait();
+                let stop_requested = state.stop_requested.load(Ordering::Acquire);
+                let next_event = replay.peek_replay().unwrap();
+                let stop_pulse_consumed =
+                    state.pulse.snapshot() == state.pulse.runner_seen.load(Ordering::Acquire);
+                replay_barrier.release_runner_wait();
+                let frontier_is_exit = next_event
+                    .as_ref()
+                    .is_some_and(|event| event.kind == "worker.exit");
+                let (lock, cv) = &state.lifecycle;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut lifecycle = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                while !lifecycle.exited && Instant::now() < deadline {
+                    let (next, _) = cv
+                        .wait_timeout(
+                            lifecycle,
+                            deadline.saturating_duration_since(Instant::now()),
+                        )
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    lifecycle = next;
+                }
+                let exited = lifecycle.exited;
+                drop(lifecycle);
+                if !exited {
+                    // Release the old lost-wake path before asserting so a
+                    // failure cannot strand the worker or its owner thread.
+                    state.pulse.signal();
+                }
+                runtime = stop_thread.join().unwrap();
+                assert!(
+                    reached_runner_wait
+                        && stop_requested
+                        && stop_pulse_consumed
+                        && frontier_is_exit
+                        && exited,
+                    "stop-admitted idle C step did not return to the worker.exit gate: reached_runner_wait={reached_runner_wait} stop_requested={stop_requested} stop_pulse_consumed={stop_pulse_consumed} frontier={next_event:?} exited={exited} error={:?}",
+                    runtime.last_error()
+                );
+            } else if expect_fault {
+                let state = Arc::clone(&runtime.state);
+                let stop_thread = thread::spawn(move || {
+                    runtime.request_stop_and_wait();
+                    runtime
+                });
+                let (lock, cv) = &state.lifecycle;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut lifecycle = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                while !lifecycle.exited && Instant::now() < deadline {
+                    let (next, _) = cv
+                        .wait_timeout(
+                            lifecycle,
+                            deadline.saturating_duration_since(Instant::now()),
+                        )
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    lifecycle = next;
+                }
+                let exited = lifecycle.exited;
+                drop(lifecycle);
+                if !exited {
+                    let runner = state.runner.load(Ordering::Acquire);
+                    if !runner.is_null() {
+                        unsafe { pocket_worker_runner_stop(runner) };
+                    }
+                    state.pulse.signal();
+                }
+                runtime = stop_thread.join().unwrap();
+                assert!(exited, "faulted C runner did not exit after Host stop");
             } else {
                 runtime.request_stop_and_wait();
             }
             runtime.destroy_and_join().unwrap();
+            if expect_fault {
+                let error = runtime.last_error().unwrap_or_default();
+                assert!(
+                    error.contains("Worker replay turn admission identity differs"),
+                    "replay fault must remain visible after stopping the C runner: {error}"
+                );
+                drop(replay_barrier);
+                let replay_error = replay.finish_batch().unwrap_err();
+                assert!(replay_error.contains("admission identity differs"));
+                continue;
+            }
             assert_eq!(runtime.last_error(), None);
+            if hold_runner_wait {
+                assert!(runtime.is_stopped());
+                let state = Arc::clone(&runtime.state);
+                state
+                    .pulse
+                    .runner_seen
+                    .store(state.pulse.snapshot(), Ordering::Release);
+                let deadline = state.clock.now_micros().saturating_add(50_000);
+                let started = Instant::now();
+                unsafe {
+                    runner_wait(Arc::as_ptr(&state).cast_mut().cast(), deadline);
+                }
+                assert!(
+                    started.elapsed() >= Duration::from_millis(30),
+                    "post-exit core-destroy wait spun instead of honoring its deadline"
+                );
+            }
             drop(replay_barrier);
             let consumed = replay.finish_batch().unwrap();
             assert_eq!(consumed, tape);
-            assert_eq!(
-                consumed
-                    .iter()
-                    .filter(|event| event.kind == "turn.begin")
-                    .count(),
-                expected_turns,
-                "replay must consume exactly the turn admission recorded in its tape"
-            );
+            if let Some(expected_turns) = expected_turns {
+                assert_eq!(
+                    consumed
+                        .iter()
+                        .filter(|event| event.kind == "turn.begin")
+                        .count(),
+                    expected_turns,
+                    "replay must consume exactly the turn admission recorded in its tape"
+                );
+            }
         }
     }
 
@@ -4772,6 +5073,17 @@ mod tests {
                 "__pocketWorkerChannels.configure(1,0);__pocketWorkerChannels.configure(2,0);",
             )
             .unwrap();
+        });
+        let request_deadline = Instant::now() + Duration::from_secs(2);
+        while server.requests.load(Ordering::Acquire) == 0 {
+            assert!(
+                Instant::now() < request_deadline,
+                "HTTP request was not admitted before UI input: worker_error={:?}",
+                worker.last_error()
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        ui_context.with(|ctx| {
             let status: i32 = ctx
                 .eval("__pocketWorkerChannels.publish(1,new Uint8Array([7]))")
                 .unwrap();
@@ -4889,6 +5201,23 @@ mod tests {
             .position(|event| event.kind == "io.request")
             .expect("recording omitted HTTP request admission");
         let replay_prefix = &events[..=request_index];
+        let prefix_ui_events = replay_prefix
+            .iter()
+            .filter(|event| TraceActor::for_event(Mode::Replay, event) == TraceActor::Ui)
+            .map(|event| {
+                format!(
+                    "{} {:?}/{}/{}",
+                    event.seq,
+                    TraceActor::for_event(Mode::Replay, event),
+                    event.session,
+                    event.kind
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            prefix_ui_events.is_empty(),
+            "HTTP prefix replay is intentionally worker-only, got UI events: {prefix_ui_events:?}"
+        );
         let replay_stop = WorkerTrace::new(Mode::Replay);
         replay_stop.begin_batch(replay_prefix).unwrap();
         let mut active_replay = WorkerRuntime::spawn_traced(
@@ -4916,10 +5245,62 @@ mod tests {
             if has_active_stub {
                 break;
             }
-            assert!(
-                Instant::now() < stub_deadline,
-                "Replay HTTP stub was not admitted"
-            );
+            if Instant::now() >= stub_deadline {
+                let next_event = match replay_stop.peek_replay() {
+                    Ok(Some(event)) => format!(
+                        "{} {:?}/{}/{}",
+                        event.seq,
+                        TraceActor::for_event(Mode::Replay, &event),
+                        event.session,
+                        event.kind
+                    ),
+                    Ok(None) => "none".to_owned(),
+                    Err(error) => format!("trace-error: {error}"),
+                };
+                let prefix_context = replay_prefix
+                    .iter()
+                    .map(|event| {
+                        format!(
+                            "{} {:?}/{}/{}",
+                            event.seq,
+                            TraceActor::for_event(Mode::Replay, event),
+                            event.session,
+                            event.kind
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let requests = active_replay
+                    .state
+                    .requests
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .iter()
+                    .map(|(id, request)| {
+                        (
+                            *id,
+                            request.replay_stub,
+                            request.finished.load(Ordering::Acquire),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let (exited, allow_destroy) = {
+                    let lifecycle = active_replay
+                        .state
+                        .lifecycle
+                        .0
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    (lifecycle.exited, lifecycle.allow_destroy)
+                };
+                panic!(
+                    "Replay HTTP stub was not admitted: worker_error={:?}; next_replay_event={next_event}; replay_prefix={prefix_context:?}; worker_state={{stop_requested:{},offline_shutdown:{},runner_present:{},core_present:{},exited:{exited},allow_destroy:{allow_destroy}}}; requests={requests:?}",
+                    active_replay.last_error(),
+                    active_replay.state.stop_requested.load(Ordering::Acquire),
+                    active_replay.state.offline_shutdown.load(Ordering::Acquire),
+                    !active_replay.state.runner.load(Ordering::Acquire).is_null(),
+                    !active_replay.state.core.load(Ordering::Acquire).is_null(),
+                );
+            }
             thread::sleep(Duration::from_millis(1));
         }
         active_replay.prepare_replay_stop();

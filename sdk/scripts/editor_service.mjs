@@ -201,8 +201,8 @@ async function assertPortOwnership(port, allowForeign) {
   return { processes, owned: processes.filter(info => sameCheckoutServer(info, port)), foreign };
 }
 
-// Windows taskkill /T follows parent IDs even for detached processes. Keep the
-// updater branch safe while retiring every other worker subtree.
+// Keep the detached updater alive while retiring its old Studio process and
+// unrelated worker branches.
 function protectedRetirementPlan(processes, targetPid, protectedPid) {
   const parents = new Map(processes.map(info => [Number(info.pid), Number(info.ppid)]));
   const path = [];
@@ -224,17 +224,44 @@ function protectedRetirementPlan(processes, targetPid, protectedPid) {
   return { subtreeRoots, directPids };
 }
 
+function protectedProcessIsOutsideTargetTree(processes, targetPid, protectedPid) {
+  const parents = new Map(processes.map(info => [Number(info.pid), Number(info.ppid)]));
+  const target = Number(targetPid);
+  let pid = Number(protectedPid);
+  const visited = new Set();
+
+  // A detached updater may have already been reparented to init/launchd. Only
+  // fall back to recursive tree killing when this complete ancestry chain
+  // proves the updater is no longer beneath the process being retired.
+  while (pid > 1 && !visited.has(pid)) {
+    if (pid === target || !parents.has(pid)) return false;
+    visited.add(pid);
+    const parent = parents.get(pid);
+    if (!Number.isInteger(parent)) return false;
+    if (parent === target) return false;
+    if (parent === 1 || parent === 0) return target !== parent;
+    if (parent < 0 || !parents.has(parent)) return false;
+    pid = parent;
+  }
+  return pid === 1 && target !== 1;
+}
+
+function signalProcess(pid, signal) {
+  try { process.kill(Number(pid), signal); }
+  catch (error) { if (error.code !== "ESRCH") throw error; }
+}
+
 async function killTree(pid, signal, protectedPid) {
-  if (process.platform === "win32" && protectedPid) {
+  if (protectedPid) {
     const processes = await findProcess("name", "");
     const plan = protectedRetirementPlan(processes, pid, protectedPid);
-    if (plan) {
+    if (plan && Number(pid) !== Number(protectedPid) && plan.directPids.includes(Number(pid))) {
       for (const childPid of plan.subtreeRoots) await killTree(childPid, signal);
-      for (const directPid of plan.directPids) {
-        try { process.kill(directPid, signal); }
-        catch (error) { if (error.code !== "ESRCH") throw error; }
-      }
+      for (const directPid of plan.directPids) signalProcess(directPid, signal);
       return;
+    }
+    if (!protectedProcessIsOutsideTargetTree(processes, pid, protectedPid)) {
+      throw new Error(`拒绝递归停止进程 ${pid}：无法证明 updater ${protectedPid} 位于其进程树之外`);
     }
   }
   return new Promise(resolveKill => {
@@ -489,13 +516,14 @@ async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
     const previousVersion = installed.currentVersion;
     validateStagedStandaloneSdk(resolvedStageDir, targetVersion);
     const healthTimeoutMs = runtimeOptions.healthTimeoutMs ?? Number(process.env.POCKET_STUDIO_UPGRADE_HEALTH_TIMEOUT_MS || 30000);
+    const assertOwnership = runtimeOptions.assertPortOwnership ?? assertPortOwnership;
 
     const record = readPidRecord();
     const previousConfig = { ...(record?.config ?? {}), ...configFromHealth(await readHealth()) };
     const options = mergeLaunchOptions({}, previousConfig);
     const backupDir = join(sdkRoot, ".pocket-build", `sdk-upgrade-backup-${previousVersion}`);
 
-    await assertPortOwnership(PORT, false);
+    await assertOwnership(PORT, false);
     // Validate and complete backup BEFORE stopping the running service so an
     // incomplete backup never leaves the user with a stopped service or wiped files.
     prepareSdkUpgradeBackup(sdkRoot, resolvedStageDir, backupDir);
@@ -508,9 +536,19 @@ async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
       await sleep(150);
     }
 
-    cleanupLegacyLaunchd();
-    await stopOwnedPort(PORT, true, process.pid);
-    for (const port of LEGACY_PORTS) await stopOwnedPort(port, false);
+    const retireOwnedPort = runtimeOptions.stopOwnedPort ?? stopOwnedPort;
+    const removeLegacyLaunchAgents = runtimeOptions.cleanupLegacyLaunchd ?? cleanupLegacyLaunchd;
+    try {
+      removeLegacyLaunchAgents();
+      await retireOwnedPort(PORT, true, process.pid);
+      for (const port of LEGACY_PORTS) await retireOwnedPort(port, false);
+    } catch (error) {
+      // The SDK files are still untouched. Do not leave a complete backup for
+      // startup recovery to mistake for an interrupted, applied upgrade.
+      rmSync(backupDir, FS_REMOVE_OPTIONS);
+      rmSync(resolvedStageDir, FS_REMOVE_OPTIONS);
+      throw error;
+    }
 
     let filesMutated = false;
     try {
@@ -663,7 +701,7 @@ function isEntrypoint(entry = process.argv[1], moduleUrl = import.meta.url) {
   return Boolean(entry && sameFileSystemPath(entry, fileURLToPath(moduleUrl)));
 }
 
-export { configFromHealth, editorToolEnvironment, isEntrypoint, commandIncludesPath, protectedRetirementPlan, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
+export { configFromHealth, editorToolEnvironment, isEntrypoint, commandIncludesPath, protectedRetirementPlan, protectedProcessIsOutsideTargetTree, killTree, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
 
 if (isEntrypoint()) {
   main().catch(error => {

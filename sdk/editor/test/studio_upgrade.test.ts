@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { chromium } from "playwright";
 import {
@@ -200,7 +200,7 @@ function createStandaloneSdkTree(
     brokenToolsAbi?: boolean;
     upstreamRevision?: string;
     bytecodeAbi?: string;
-    extraPackageFiles?: Record<string, string>;
+    extraPackageFiles?: Record<string, string | Buffer>;
   } = {},
 ): {
   archiveBytes: Buffer;
@@ -1016,10 +1016,11 @@ function populateRealStandaloneScripts(
     upstreamRevision?: string;
     bytecodeAbi?: string;
     failOnVersion?: string;
-    extraPackageFiles?: Record<string, string>;
+    extraPackageFiles?: Record<string, string | Buffer>;
   } = {},
 ) {
   const repoScriptsDir = resolve(import.meta.dir, "../../scripts");
+  const repoEditorDir = resolve(import.meta.dir, "..");
   const repoNodeModules = resolve(import.meta.dir, "../../node_modules");
   const upstreamRevision = options.upstreamRevision ?? UPSTREAM_REVISION;
   const bytecodeAbi = options.bytecodeAbi ?? BYTECODE_ABI;
@@ -1029,10 +1030,32 @@ function populateRealStandaloneScripts(
     .replace(/export const UPSTREAM_REVISION = ['"][^'"]+['"];/, `export const UPSTREAM_REVISION = '${upstreamRevision}';`)
     .replace(/export const BYTECODE_ABI = ['"][^'"]+['"];/, `export const BYTECODE_ABI = '${bytecodeAbi}';`);
 
+  // Mirror export_web_sdk's editor source copy (which removes editor/test)
+  // instead of maintaining a second hand-written list of CLI runtime imports.
+  // The test's minimal server entry is overlaid below to keep lifecycle
+  // behavior controlled while editor_service.mjs uses the real editor helpers.
+  const editorRuntimeFiles: Record<string, Buffer> = {};
+  const ignoredEditorPathParts = new Set(["test", "node_modules", "target", ".cache", ".pocket-build", ".git"]);
+  const collectEditorRuntimeFiles = (currentDir: string): void => {
+    const entries = readdirSync(currentDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const fullPath = join(currentDir, entry.name);
+      const relPath = relative(repoEditorDir, fullPath).replaceAll("\\", "/");
+      if (relPath.split("/").some((part) => ignoredEditorPathParts.has(part))) continue;
+      if (entry.isDirectory()) {
+        collectEditorRuntimeFiles(fullPath);
+      } else if (entry.isFile()) {
+        editorRuntimeFiles[`editor/${relPath}`] = readFileSync(fullPath);
+      }
+    }
+  };
+  collectEditorRuntimeFiles(repoEditorDir);
+
   const archiveInfo = createStandaloneSdkTree(targetSdkRoot, version, {
     upstreamRevision,
     bytecodeAbi,
     extraPackageFiles: {
+      ...editorRuntimeFiles,
       "scripts/editor_service.mjs": readFileSync(join(repoScriptsDir, "editor_service.mjs"), "utf8"),
       "scripts/studio_upgrade.mjs": readFileSync(join(repoScriptsDir, "studio_upgrade.mjs"), "utf8"),
       "scripts/prebuilt_tools.mjs": prebuiltSource,
@@ -1053,6 +1076,102 @@ function populateRealStandaloneScripts(
     }
   }
   return archiveInfo;
+}
+
+function upgradeLifecycleProcessDiagnostics(sdkRoot: string): Record<string, unknown> {
+  const buildRoot = join(sdkRoot, ".pocket-build");
+  const readJson = (name: string): Record<string, unknown> | null => {
+    try {
+      return JSON.parse(readFileSync(join(buildRoot, name), "utf8")) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+  const pidRecord = readJson("editor-service-8791.pid.json");
+  const applyLock = readJson("sdk-upgrade-apply.lock.json");
+  const observedPids = [pidRecord?.pid, applyLock?.pid]
+    .map(Number)
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  const pidStatus = observedPids.map((pid) => {
+    try {
+      process.kill(pid, 0);
+      return { pid, alive: true };
+    } catch (error) {
+      return { pid, alive: (error as NodeJS.ErrnoException).code === "EPERM" };
+    }
+  });
+
+  if (process.platform === "win32") {
+    return { pidStatus, processTree: "ps is unavailable on win32" };
+  }
+  const ps = spawnSync("ps", ["-eo", "pid,ppid,stat,args"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  if (ps.error || ps.status !== 0) {
+    return {
+      pidStatus,
+      processTreeError: ps.error?.message || ps.stderr || `ps exited ${ps.status}`,
+    };
+  }
+
+  const rows = ps.stdout.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+    return match
+      ? [{ pid: Number(match[1]), ppid: Number(match[2]), state: match[3], command: match[4] }]
+      : [];
+  });
+  const treePids = new Set(observedPids);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      if (treePids.has(row.ppid) && !treePids.has(row.pid)) {
+        treePids.add(row.pid);
+        changed = true;
+      }
+    }
+  }
+  const relevantProcesses = rows.filter((row) =>
+    treePids.has(row.pid) || row.command.includes(sdkRoot),
+  );
+  return { pidStatus, processTree: relevantProcesses };
+}
+
+async function reportUpgradeLifecycleFailure(sdkRoot: string, browser: import("playwright").Browser): Promise<void> {
+  console.error(`[upgrade lifecycle failure] ${sdkRoot}`);
+  const buildRoot = join(sdkRoot, ".pocket-build");
+  const files = ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"];
+  for (const file of files) {
+    const source = join(buildRoot, file);
+    if (existsSync(source)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(source, "utf8").slice(-16000)}`);
+  }
+  console.error("[upgrade lifecycle processes]", JSON.stringify(upgradeLifecycleProcessDiagnostics(sdkRoot), null, 2));
+  for (const context of browser.contexts()) {
+    for (const page of context.pages()) {
+      console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
+    }
+  }
+
+  try {
+    const artifactDir = join(
+      process.env.RUNNER_TEMP || tmpdir(),
+      "pocket-studio-upgrade-diagnostics",
+      basename(sdkRoot),
+    );
+    mkdirSync(artifactDir, { recursive: true });
+    for (const file of files) {
+      const source = join(buildRoot, file);
+      if (existsSync(source)) copyFileSync(source, join(artifactDir, file));
+    }
+    writeFileSync(
+      join(artifactDir, "process-tree.json"),
+      `${JSON.stringify(upgradeLifecycleProcessDiagnostics(sdkRoot), null, 2)}\n`,
+    );
+    console.error(`[upgrade lifecycle diagnostics] ${artifactDir}`);
+  } catch (error) {
+    console.error("[upgrade lifecycle diagnostics copy failed]", error);
+  }
 }
 
 describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium UI integration", () => {
@@ -1186,17 +1305,34 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
         undefined,
         { timeout: 10_000 },
       );
+      // Project loading runs alongside the startup update check; do not simulate
+      // an edit until the actual source has loaded and the editor is enabled.
+      await page.waitForFunction(
+        () => {
+          const source = document.getElementById("source");
+          return source instanceof HTMLTextAreaElement
+            && !source.disabled
+            && source.value.includes("export default function App()")
+            && !(document.getElementById("project-state")?.textContent || "").includes("未选择项目");
+        },
+        undefined,
+        { timeout: 10_000 },
+      );
+      await page.locator("#rail-source").click();
+      await page.locator("#source").waitFor({ state: "visible", timeout: 10_000 });
 
       // Make source editor dirty and verify clicking upgrade defers apply while dirty
       await page.evaluate(() => {
         (window as unknown as { __ALLOW_AUTO_APPLY__?: boolean }).__ALLOW_AUTO_APPLY__ = true;
-        const source = document.getElementById("source") as HTMLTextAreaElement | null;
-        if (source) {
-          source.value = "// unsaved user draft\nexport default function App() { return null; }\n";
-          source.dispatchEvent(new Event("input", { bubbles: true }));
-        }
       });
+      await page.locator("#source").fill("// unsaved user draft\nexport default function App() { return null; }\n");
+      expect(await page.locator("#save").isEnabled()).toBe(true);
       await page.locator("#studio-upgrade-action").click();
+      await page.waitForFunction(
+        () => (document.getElementById("studio-upgrade-status")?.textContent || "").includes("未保存修改"),
+        undefined,
+        { timeout: 10_000 },
+      );
       const deferredBarText = await page.locator("#studio-upgrade-status").textContent();
       expect(deferredBarText).toContain("未保存修改");
 
@@ -1255,16 +1391,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(readFileSync(nestedCustomPackage, "utf8")).toBe("export const custom = 42;\n");
       expect(readFileSync(join(configuredProjectRoot, "app.tsx"), "utf8")).toContain("unsaved user draft");
     } catch (error) {
-      console.error(`[upgrade lifecycle failure] ${standaloneRoot}`);
-      for (const file of ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"]) {
-        const path = join(standaloneRoot, ".pocket-build", file);
-        if (existsSync(path)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(path, "utf8").slice(-16000)}`);
-      }
-      for (const context of browser.contexts()) {
-        for (const page of context.pages()) {
-          console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
-        }
-      }
+      await reportUpgradeLifecycleFailure(standaloneRoot, browser);
       throw error;
     } finally {
       await browser.close();
@@ -1398,16 +1525,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(readFileSync(nestedCustomFile, "utf8")).toBe('export const keep = "nested-consumer-file";\n');
       expect(readPersistedUpgradeStatus(standaloneRoot)?.rolledBack).toBe(true);
     } catch (error) {
-      console.error(`[upgrade lifecycle failure] ${standaloneRoot}`);
-      for (const file of ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"]) {
-        const path = join(standaloneRoot, ".pocket-build", file);
-        if (existsSync(path)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(path, "utf8").slice(-16000)}`);
-      }
-      for (const context of browser.contexts()) {
-        for (const page of context.pages()) {
-          console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
-        }
-      }
+      await reportUpgradeLifecycleFailure(standaloneRoot, browser);
       throw error;
     } finally {
       await browser.close();

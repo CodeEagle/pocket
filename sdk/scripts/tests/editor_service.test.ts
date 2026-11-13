@@ -1,14 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
+import {
+  expectedSdkArchiveAssetNames,
+  isSdkBackupComplete,
+  recoverInterruptedSdkUpgrade,
+} from "../studio_upgrade.mjs";
 import {
   configFromHealth,
   editorToolEnvironment,
   isEntrypoint,
   protectedRetirementPlan,
+  protectedProcessIsOutsideTargetTree,
+  killTree,
   commandIncludesPath,
   upgradeApply,
   makePidRecord,
@@ -19,6 +28,82 @@ import {
 
 const fixture = (name: string) => resolve(tmpdir(), name);
 const SCRIPT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "editor_service.mjs");
+
+function tarOctal(value: number, width: number): string {
+  return `${Math.max(0, Math.trunc(value)).toString(8).padStart(width - 1, "0")}\0`;
+}
+
+function tarGzipFiles(files: Record<string, Buffer | string>): Buffer {
+  const blocks: Buffer[] = [];
+  for (const [name, content] of Object.entries(files).sort(([left], [right]) => left.localeCompare(right))) {
+    const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
+    const header = Buffer.alloc(512, 0);
+    header.write(`package/${name}`, 0, 100, "utf8");
+    header.write(tarOctal(0o644, 8), 100, 8, "utf8");
+    header.write(tarOctal(0, 8), 108, 8, "utf8");
+    header.write(tarOctal(0, 8), 116, 8, "utf8");
+    header.write(tarOctal(bytes.byteLength, 12), 124, 12, "utf8");
+    header.write(tarOctal(0, 12), 136, 12, "utf8");
+    header.fill(0x20, 148, 156);
+    header[156] = "0".charCodeAt(0);
+    header.write("ustar\0", 257, 6, "utf8");
+    header.write("00", 263, 2, "utf8");
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "utf8");
+    blocks.push(header, bytes);
+    if (bytes.byteLength % 512) blocks.push(Buffer.alloc(512 - (bytes.byteLength % 512), 0));
+  }
+  blocks.push(Buffer.alloc(1024, 0));
+  return gzipSync(Buffer.concat(blocks));
+}
+
+function createStandaloneFixture(root: string, version: string): void {
+  const platform = process.platform;
+  const arch = process.arch;
+  const tuple = `${platform}-${arch}`;
+  const upstreamRevision = "a".repeat(40);
+  const bytecodeAbi = `quickjs-bytecode-v1:${"b".repeat(64)}`;
+  const pkg = { name: `@pocket/web-sdk-tools-${tuple}`, version, type: "module" };
+  const provenance = { sourceRepository: "CodeEagle/pocket", pinnedPocketJsRevision: upstreamRevision };
+  const toolFiles = {
+    [`bin/pocketjs_bytecode${platform === "win32" ? ".exe" : ""}`]: Buffer.from("fixture bytecode tool"),
+    [`bin/pocket_probe${platform === "win32" ? ".exe" : ""}`]: Buffer.from("fixture probe tool"),
+    "compiler/tools/build.ts": Buffer.from("export {};\n"),
+    "compiler/framework/compiler/jsx-plugin.ts": Buffer.from("export {};\n"),
+    "compiler/framework/compiler/subpaths.ts": Buffer.from("export {};\n"),
+    "compiler/framework/src/inline-fonts.ts": Buffer.from("export {};\n"),
+    "compiler/tools/inline-text-slots.ts": Buffer.from("export {};\n"),
+  };
+  const toolManifest = {
+    schemaVersion: 1,
+    sdkVersion: version,
+    upstreamRevision,
+    bytecodeAbi,
+    platform,
+    arch,
+    files: Object.fromEntries(Object.entries(toolFiles).map(([path, bytes]) => [path, {
+      size: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    }])),
+  };
+  const toolsArchive = tarGzipFiles({
+    ...toolFiles,
+    "package.json": JSON.stringify({ name: `@pocket/tools-${tuple}`, version }),
+    "manifest.json": JSON.stringify(toolManifest),
+  });
+  const names = expectedSdkArchiveAssetNames(version, platform, arch);
+  mkdirSync(join(root, "editor"), { recursive: true });
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  mkdirSync(join(root, "prebuilt"), { recursive: true });
+  writeFileSync(join(root, "package.json"), JSON.stringify(pkg));
+  writeFileSync(join(root, "provenance.json"), JSON.stringify(provenance));
+  writeFileSync(join(root, "editor", "server.ts"), `// fixture ${version}\n`);
+  writeFileSync(join(root, "scripts", "editor_service.mjs"), `// fixture ${version}\n`);
+  writeFileSync(join(root, "scripts", "prebuilt_tools.mjs"),
+    `export const SDK_VERSION = '${version}';\nexport const UPSTREAM_REVISION = '${upstreamRevision}';\nexport const BYTECODE_ABI = '${bytecodeAbi}';\n`);
+  writeFileSync(join(root, "prebuilt", names.toolsArchiveName), toolsArchive);
+}
 
 describe("editor service launch config", () => {
   test("first launch without explicit values stays on the generic SDK", () => {
@@ -178,6 +263,109 @@ test("upgrade retirement excludes the updater ancestry while retaining worker tr
 });
 
 
+test("upgrade retirement kills the real server tree but preserves its detached updater", { timeout: 10_000 }, async () => {
+  const source = `
+    const { spawn } = require("node:child_process");
+    const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const updater = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+    const waitForSpawn = (child) => new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+    Promise.all([waitForSpawn(worker), waitForSpawn(updater)]).then(() => {
+      updater.unref();
+      process.stdout.write(JSON.stringify({ workerPid: worker.pid, updaterPid: updater.pid }) + "\\n");
+    }, (error) => {
+      process.stderr.write(String(error));
+      process.exitCode = 1;
+    });
+    setInterval(() => {}, 1000);
+  `;
+  const server = spawn("node", ["-e", source], { stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  server.stderr.setEncoding("utf8");
+  server.stderr.on("data", (chunk) => { stderr += chunk; });
+
+  let childPids: { workerPid: number; updaterPid: number } | undefined;
+  try {
+    childPids = await new Promise<{ workerPid: number; updaterPid: number }>((resolveReady, rejectReady) => {
+      let output = "";
+      const timer = setTimeout(() => rejectReady(new Error(`process tree did not become ready: ${stderr}`)), 3_000);
+      server.once("error", (error) => {
+        clearTimeout(timer);
+        rejectReady(error);
+      });
+      server.once("exit", (code) => {
+        clearTimeout(timer);
+        rejectReady(new Error(`server process exited before ready (${code}): ${stderr}`));
+      });
+      server.stdout.setEncoding("utf8");
+      server.stdout.on("data", (chunk) => {
+        output += chunk;
+        const newline = output.indexOf("\n");
+        if (newline < 0) return;
+        clearTimeout(timer);
+        try { resolveReady(JSON.parse(output.slice(0, newline))); }
+        catch (error) { rejectReady(error); }
+      });
+    });
+
+    if (process.platform !== "win32") {
+      const updaterPpid = spawnSync("ps", ["-o", "ppid=", "-p", String(childPids.updaterPid)], { encoding: "utf8" });
+      expect(updaterPpid.status).toBe(0);
+      expect(Number(updaterPpid.stdout.trim())).toBe(server.pid);
+    }
+    await killTree(server.pid!, "SIGTERM", childPids.updaterPid);
+
+    const processState = (pid: number) => {
+      const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+      if (result.status === 0) {
+        const state = result.stdout.trim();
+        return state && !/^[ZX]/.test(state) ? "alive" : "exited";
+      }
+      try { process.kill(pid, 0); return "alive"; }
+      catch (error) { return error.code === "ESRCH" ? "exited" : "alive"; }
+    };
+    const waitForExit = async (pid: number) => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        if (processState(pid) === "exited") return true;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+      }
+      return false;
+    };
+
+    expect(await waitForExit(server.pid!)).toBe(true);
+    expect(await waitForExit(childPids.workerPid)).toBe(true);
+    expect(processState(childPids.updaterPid)).toBe("alive");
+  } finally {
+    for (const pid of [server.pid, childPids?.workerPid, childPids?.updaterPid]) {
+      if (!pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+    if (server.pid) server.kill("SIGKILL");
+  }
+});
+
+
+test("an updater already reparented to init is safe for recursive retirement", () => {
+  const processes = [
+    { pid: 1, ppid: 0 },
+    { pid: 100, ppid: 1 },
+    { pid: 200, ppid: 1 },
+  ];
+  expect(protectedProcessIsOutsideTargetTree(processes, 100, 200)).toBe(true);
+  expect(protectedProcessIsOutsideTargetTree([
+    { pid: 0, ppid: 0 },
+    { pid: 100, ppid: 0 },
+    { pid: 200, ppid: 0 },
+  ], 100, 200)).toBe(true);
+  expect(protectedProcessIsOutsideTargetTree(processes, 100, 300)).toBe(false);
+  expect(protectedProcessIsOutsideTargetTree([{ pid: 200, ppid: 100 }], 100, 200)).toBe(false);
+  expect(protectedProcessIsOutsideTargetTree([{ pid: 200, ppid: 999 }], 100, 200)).toBe(false);
+});
+
+
 test("service ownership resolves aliased command paths and rejects unrelated files", () => {
   const root = mkdtempSync(join(tmpdir(), "pocket-command-path-"));
   try {
@@ -205,5 +393,52 @@ test("pre-stop upgrade failures persist an error rather than leaving the UI rest
     expect(status.error).toBeTruthy();
     expect(status.currentVersion).toBe("0.1.10");
     expect(status.rolledBack).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a port-retirement refusal removes the unused backup and stage without rolling back", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pocket-upgrade-stop-refused-"));
+  const stageDir = join(root, ".pocket-build", "sdk-upgrade-stage-0.1.15");
+  const backupDir = join(root, ".pocket-build", "sdk-upgrade-backup-0.1.14");
+  const lockPath = join(root, ".pocket-build", "sdk-upgrade-apply.lock.json");
+  const statusPath = join(root, ".pocket-build", "sdk-upgrade-status.json");
+  const consumerFile = join(root, ".pocket-build", "editor-workspace-8791", "projects", "sample", "app.tsx");
+  try {
+    createStandaloneFixture(root, "0.1.14");
+    createStandaloneFixture(stageDir, "0.1.15");
+    mkdirSync(dirname(consumerFile), { recursive: true });
+    writeFileSync(consumerFile, "// preserve consumer project\n");
+    writeFileSync(statusPath, JSON.stringify({
+      status: "restarting",
+      currentVersion: "0.1.14",
+      latestVersion: "0.1.15",
+    }));
+
+    const originalServer = readFileSync(join(root, "editor", "server.ts"), "utf8");
+    await expect(upgradeApply({ stageDir, targetVersion: "0.1.15" }, {
+      sdkRoot: root,
+      assertPortOwnership: async () => ({ processes: [], owned: [], foreign: [] }),
+      cleanupLegacyLaunchd: () => {},
+      stopOwnedPort: async (port: number, required: boolean, protectedPid: number) => {
+        expect(port).toBeGreaterThan(0);
+        expect(required).toBe(true);
+        expect(protectedPid).toBe(process.pid);
+        expect(isSdkBackupComplete(backupDir)).toBe(true);
+        throw new Error("stop rejected by protected process guard");
+      },
+    })).rejects.toThrow("stop rejected by protected process guard");
+
+    expect(readFileSync(join(root, "package.json"), "utf8")).toContain('"version":"0.1.14"');
+    expect(readFileSync(join(root, "editor", "server.ts"), "utf8")).toBe(originalServer);
+    expect(readFileSync(consumerFile, "utf8")).toBe("// preserve consumer project\n");
+    expect(existsSync(backupDir)).toBe(false);
+    expect(existsSync(stageDir)).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(await recoverInterruptedSdkUpgrade(root)).toBeNull();
+    const status = JSON.parse(readFileSync(statusPath, "utf8"));
+    expect(status.status).toBe("error");
+    expect(status.currentVersion).toBe("0.1.14");
+    expect(status.rolledBack).toBe(false);
+    expect(status.error).toContain("stop rejected by protected process guard");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
