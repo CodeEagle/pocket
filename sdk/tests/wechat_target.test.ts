@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { decodeMessage } from "../targets/wechat/template/binary-bridge.js";
 import { PocketWechatHost, registerCapability, setPermissionHandler } from "../targets/wechat/template/wechat-host.js";
 
 function createFakeHost(overrides?: {
@@ -36,16 +37,16 @@ test("hide() rejects reentrant requests emitted synchronously during cancelPendi
   const deliveredPackets: Array<Record<string, any>> = [];
   let emittedReentrant = false;
   const originalDeliverResponse = host.deliverResponse.bind(host);
-  host.deliverResponse = (packet: string) => {
-    const parsed = JSON.parse(packet);
+  host.deliverResponse = (packet: Uint8Array) => {
+    const parsed = decodeMessage(packet);
     deliveredPackets.push(parsed);
     if (!emittedReentrant && parsed.payload?.requestId === "in-flight") {
       emittedReentrant = true;
-      host.outbound.push(JSON.stringify({
+      host.outbound.push({
         type: "event",
         name: "host.request",
         payload: { requestId: "reentrant-from-catch", capability: "test.cap", params: {} },
-      }));
+      });
     }
     originalDeliverResponse(packet);
   };

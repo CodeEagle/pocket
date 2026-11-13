@@ -1,3 +1,6 @@
+import { mock as moduleMock } from "bun:test";
+import * as pinnedSolid from "../../../.cache/pocketjs/node_modules/solid-js/dist/solid.js";
+moduleMock.module("solid-js", () => pinnedSolid);
 import { strict as assert } from "node:assert";
 import { mock } from "bun:test";
 

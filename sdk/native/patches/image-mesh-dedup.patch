@@ -1,0 +1,18 @@
+diff --git a/engine/core/src/mesh.rs b/engine/core/src/mesh.rs
+--- a/engine/core/src/mesh.rs
++++ b/engine/core/src/mesh.rs
+@@ -69,6 +69,14 @@
+         if node.node_type != spec::NodeType::Image as u8 { return false; }
+         if bytes.is_empty() { self.set_image(id, -1); return true; }
+         if tex_resolve(&self.textures, texture).is_none() || bytes.len() < 16 { return false; }
++        if node.tex == texture
++            && node.sprite_frames == 0
++            && node.mesh.as_ref().map_or(false, |mesh| mesh.bytes.as_slice() == bytes)
++        {
++            // The live node owns the exact validated bytes and texture. Any
++            // replacement or clear through set_image/set_sprite removed it.
++            return true;
++        }
+         let n = word(bytes, 4) as usize;
+         let m = word(bytes, 8) as usize;
+         if word(bytes, 0) != 0x31534d50 || n == 0 || n > MAX_VERTICES || m == 0 || m > MAX_INDICES || m % 3 != 0 || bytes.len() != 16 + n * 16 + m * 4 { return false; }

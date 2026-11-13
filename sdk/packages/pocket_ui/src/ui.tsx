@@ -1577,10 +1577,6 @@ export function InputField(props: {
       paddingB: current.paddingVertical,
     };
   };
-  const shellTextStyle = () => ({
-    textColor: props.value() ? appearance().textColor : appearance().placeholderColor,
-  });
-
   const visualRect = (): TextInputRect | undefined => {
     const currentNode = node;
     return (currentNode ? scrollPage?.visualRect?.(currentNode, lastRect) : undefined)
@@ -1880,6 +1876,14 @@ export function InputField(props: {
     if (activeTextInput === session) activeTextInput = undefined;
   });
 
+  const shellTextStyle = () => ({
+    textColor: overlayReady()
+      ? "#00000000"
+      : props.value()
+        ? appearance().textColor
+        : appearance().placeholderColor,
+  });
+
   return (
     <Focusable
       nodeRef={(current) => {
@@ -1890,14 +1894,14 @@ export function InputField(props: {
       style={shellStyle()}
       class="w-full rounded-xl"
     >
-      {/* Flutter's positioned TextField paints the same value once its
-          attached session is focused. Keep the guest glyph visible until the
-          host confirms that overlay, then restore it on submit/dismiss/close. */}
-      <Show when={!overlayReady()}>
-        <Text class={appearance().fontSize === 12 ? "text-xs" : appearance().fontSize === 16 ? "text-base" : "text-sm"} style={shellTextStyle()}>
-          {props.value() || props.placeholder || "Tap to type"}
-        </Text>
-      </Show>
+      {/* Keep the text node mounted to preserve input-shell height. The
+          attached Flutter TextField becomes the only visible copy on ACK. */}
+      <Text
+        class={appearance().fontSize === 12 ? "text-xs" : appearance().fontSize === 16 ? "text-base" : "text-sm"}
+        style={shellTextStyle()}
+      >
+        {props.value() || props.placeholder || "Tap to type"}
+      </Text>
     </Focusable>
   );
 }

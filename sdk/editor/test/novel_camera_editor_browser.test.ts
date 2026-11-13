@@ -15,7 +15,7 @@ test("camera editor preserves metadata through undo, save, and reload", { timeou
   const workspace = join(temporary, "workspace");
   const projectId = "camera-author";
   mkdirSync(project, { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts", "novel.locales.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     cpSync(join(source, name), join(project, name), { recursive: true });
   }
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id: projectId, appId: "pocket.demo.lantern", name: "Camera Authoring", version: "0.1.0", build: 1, entry: "app.tsx", framework: "solid", tickHz: 60 }));

@@ -7,6 +7,22 @@ function privateIPv4(address: string): boolean {
   return a === 10 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168);
 }
 
+/** Classify the actual socket peer, never a forwarded or Host header. */
+export function isLocalNetworkAddress(address: string): boolean {
+  if (isIP(address) === 4) {
+    return privateIPv4(address) || address.startsWith("127.") || address.startsWith("169.254.");
+  }
+  if (isIP(address) !== 6) return false;
+  const host = new URL(`http://[${address.split("%")[0]}]`).hostname.toLowerCase();
+  if (host === "[::1]" || /^\[(?:f[cd][0-9a-f]{2}|fe[89ab][0-9a-f]):/.test(host)) return true;
+  // URL canonicalization turns both dotted and hexadecimal mapped IPv4 into
+  // this form, so a public IPv4 cannot bypass the IPv4 check via IPv6.
+  const mapped = /^\[::ffff:([0-9a-f]+):([0-9a-f]+)\]$/.exec(host);
+  if (!mapped) return false;
+  const high = parseInt(mapped[1]!, 16), low = parseInt(mapped[2]!, 16);
+  return isLocalNetworkAddress(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+}
+
 const legacyUpdatePathPattern = /^\/updates\/[a-z][a-z0-9-]{0,47}\/.+/;
 const packageIndexPathPattern = /^(?:\/(?:test|stable))?\/pocket\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/latest\.json$/;
 const canonicalUpdatePathPattern =

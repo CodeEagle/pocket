@@ -653,7 +653,7 @@ void main() {
             .controller;
         expect(
           tester.widget<PocketView>(_gameViewFinder(tester)).fontFamilyFallback,
-          contains('LanternSerif'),
+          isEmpty,
         );
 
         Future<void> captureScreen(String layout, String screen) async {

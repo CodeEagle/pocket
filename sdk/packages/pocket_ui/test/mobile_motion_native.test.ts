@@ -59,7 +59,7 @@ function buttonBackgroundAlpha(frameValue: Frame, label: string): number {
   assert.ok(labelNode, `frame is missing button label ${label}`);
   const centerY = Number(labelNode.y) + Number(labelNode.h) / 2;
   const candidates = (frameValue.ops ?? []).filter((op) => {
-    if (op.type !== "rect") return false;
+    if (op.type !== "rect" && op.type !== "rounded") return false;
     const w = Number(op.w); const h = Number(op.h); const y = Number(op.y);
     return w > Number(labelNode.w) + 20 && h >= 6 && h <= 48 && Math.abs(y + h / 2 - centerY) <= 8;
   });
@@ -91,7 +91,7 @@ function markerMetric(frameValue: Frame, label: string, targetRgb?: number): num
   const labelX = Number(labelNode.x);
   const labelY = Number(labelNode.y) + Number(labelNode.h) / 2;
   const candidates = (frameValue.ops ?? []).filter((op) => {
-    if (op.type !== "rect" && op.type !== "image") return false;
+    if (op.type !== "rect" && op.type !== "rounded" && op.type !== "image") return false;
     const x = Number(op.x); const y = Number(op.y); const w = Number(op.w); const h = Number(op.h);
     return Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(w) && Number.isFinite(h)
       && x < labelX && x > labelX - 28 && w > 0 && h > 0 && w <= 12 && h <= 12
@@ -264,7 +264,8 @@ test("presence reverse is continuous and checkbox/radio marks animate", () => {
   assert.ok(reopenSamples.at(-1)!.opacity >= 1 - OPACITY_EPSILON, "rapid reopen must settle at the latest target");
 
   const checkPoint = centerPoint(initial, "MotionCheckOff");
-  assertStateMarker(framesAfterBoot(runProbe([...tap(checkPoint, FRAME_60), ...frames(18, FRAME_60)], FRAME_60)), "MotionCheckOn", "Checkbox", 0x00fafafa);
+  const checkFrames = framesAfterBoot(runProbe([...tap(checkPoint, FRAME_60), ...frames(18, FRAME_60)], FRAME_60));
+  assertStateMarker(checkFrames, "MotionCheckOn", "Checkbox", 0x00fafafa);
   const radioPoint = centerPoint(initial, "MotionRadioB");
   const radioFrames = framesAfterBoot(runProbe([...tap(radioPoint, FRAME_60), ...frames(18, FRAME_60)], FRAME_60));
   assertStateMarker(radioFrames, "MotionRadioB", "Radio selection", 0x0018181b);

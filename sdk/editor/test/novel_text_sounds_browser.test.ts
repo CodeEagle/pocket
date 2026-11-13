@@ -15,7 +15,7 @@ test("Editor authors glyph profiles and the rebuilt Guest requests the selected 
   const project = join(temporary, "project");
   const id = "glyph-author";
   mkdirSync(join(project, "assets/audio"), { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts"]) cpSync(join(source, name), join(project, name), { recursive: true });
+  for (const name of ["pocket.json", "manifest.json", "package.json"]) cpSync(join(source, name), join(project, name), { recursive: true });
   const sourceAudio = "audio/text_narrator.wav";
   for (const name of ["a.wav", "b.wav"]) cpSync(join(source, "assets", sourceAudio), join(project, "assets/audio", name));
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id, appId: "pocket.demo.lantern", name: id, version: "0.1.0", entry: "app.tsx", framework: "solid", build: 1, tickHz: 60 }));

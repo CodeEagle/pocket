@@ -17,6 +17,8 @@
   const MAX_INDICES = 98_304;
   const MAX_FRAME_BYTES = 3 * 1024 * 1024;
 
+  const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
   function error(code, message, cause) {
     const value = new Error(message, cause === undefined ? undefined : { cause });
     value.code = code;
@@ -115,12 +117,39 @@
     return bytes;
   }
 
+  function isFiniteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+
+  function isNonNegativeSafeInteger(value) {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+
   function floatBytes(values, name) {
     arrayLike(values, name);
     const bytes = new Uint8Array(values.length * 4);
     const view = new DataView(bytes.buffer);
     for (let index = 0; index < values.length; index++) {
-      view.setFloat32(index * 4, finite(values[index], `${name}[${index}]`), true);
+      const value = values[index];
+      if (!isFiniteNumber(value)) throw error("live2d_core_invalid", `Cubism Core returned a non-finite ${name}[${index}]`);
+      view.setFloat32(index * 4, value, true);
+    }
+    return bytes;
+  }
+
+  function rgbaBytes(values, baseOffset, index, kind) {
+    arrayLike(values, `drawable ${index} ${kind} color`);
+    if (baseOffset < 0 || baseOffset + 4 > values.length) {
+      throw error("live2d_core_invalid", `Cubism Core returned an invalid drawable ${index} ${kind} color array`);
+    }
+    const bytes = new Uint8Array(16);
+    const view = new DataView(bytes.buffer);
+    for (let component = 0; component < 4; component++) {
+      const value = values[baseOffset + component];
+      if (!isFiniteNumber(value)) {
+        throw error("live2d_core_invalid", `Cubism Core returned a non-finite drawable ${index} ${kind} color[${component}]`);
+      }
+      view.setFloat32(component * 4, value, true);
     }
     return bytes;
   }
@@ -130,7 +159,8 @@
     const bytes = new Uint8Array(values.length * 4);
     const view = new DataView(bytes.buffer);
     for (let index = 0; index < values.length; index++) {
-      const value = integer(values[index], `${name}[${index}]`);
+      const value = values[index];
+      if (!isNonNegativeSafeInteger(value)) throw error("live2d_core_invalid", `Cubism Core returned an invalid ${name}[${index}]`);
       view.setUint32(index * 4, value, true);
     }
     return bytes;
@@ -364,40 +394,85 @@
       if (drawable.textureIndices[index] < 0 || drawable.textureIndices[index] >= slot.textures.length) {
         throw error("live2d_texture_not_found", `Core drawable ${index} references an unavailable model texture`);
       }
+      const rawOpacity = drawable.opacities[index];
+      if (!isFiniteNumber(rawOpacity)) {
+        throw error("live2d_core_invalid", `Cubism Core returned a non-finite drawable ${index} opacity`);
+      }
       const byteLength = 16 + vertexCount * 16 + indexCount * 4;
       const bytes = new Uint8Array(byteLength);
-      const view = new DataView(bytes.buffer);
-      const opacity = Math.max(0, Math.min(1, finite(drawable.opacities[index], `drawable ${index} opacity`) * modelOpacity));
+      const opacity = Math.max(0, Math.min(1, rawOpacity * modelOpacity));
       const opacityByte = Math.floor(opacity * 255 + 0.5);
-      view.setUint32(0, PMS1_MAGIC, true);
-      view.setUint32(4, vertexCount, true);
-      view.setUint32(8, indexCount, true);
-      view.setUint32(12, ((opacityByte << 24) | 0x00ffffff) >>> 0, true);
+      const headerColor = ((opacityByte << 24) | 0x00ffffff) >>> 0;
       const originX = slot.canvas.originXPixels;
       const originY = slot.canvas.originYPixels;
       const pixelsPerUnit = slot.canvas.pixelsPerUnit;
+      const dx = placement.dx;
+      const dy = placement.dy;
+      const scale = placement.scale;
+
+      let u32;
+      let f32;
+      let view;
+      if (LITTLE_ENDIAN) {
+        u32 = new Uint32Array(bytes.buffer);
+        f32 = new Float32Array(bytes.buffer);
+        u32[0] = PMS1_MAGIC;
+        u32[1] = vertexCount;
+        u32[2] = indexCount;
+        u32[3] = headerColor;
+      } else {
+        view = new DataView(bytes.buffer);
+        view.setUint32(0, PMS1_MAGIC, true);
+        view.setUint32(4, vertexCount, true);
+        view.setUint32(8, indexCount, true);
+        view.setUint32(12, headerColor, true);
+      }
       let offset = 16;
       for (let vertex = 0; vertex < vertexCount; vertex++) {
         const pair = vertex * 2;
-        const x = originX + finite(positions[pair], `drawable ${index} x`) * pixelsPerUnit;
-        const y = originY - finite(positions[pair + 1], `drawable ${index} y`) * pixelsPerUnit;
-        const placedX = placement.dx + x * placement.scale;
-        const placedY = placement.dy + y * placement.scale;
-        const u = finite(uvs[pair], `drawable ${index} u`);
-        const v = 1 - finite(uvs[pair + 1], `drawable ${index} v`);
-        if (![placedX, placedY, u, v].every(value => Number.isFinite(value) && Math.abs(value) <= 1_000_000)) {
+        const rawX = positions[pair];
+        if (!isFiniteNumber(rawX)) throw error("live2d_core_invalid", `Cubism Core returned a non-finite drawable ${index} x`);
+        const rawY = positions[pair + 1];
+        if (!isFiniteNumber(rawY)) throw error("live2d_core_invalid", `Cubism Core returned a non-finite drawable ${index} y`);
+        const placedX = dx + (originX + rawX * pixelsPerUnit) * scale;
+        const placedY = dy + (originY - rawY * pixelsPerUnit) * scale;
+        const rawU = uvs[pair];
+        if (!isFiniteNumber(rawU)) throw error("live2d_core_invalid", `Cubism Core returned a non-finite drawable ${index} u`);
+        const rawV = uvs[pair + 1];
+        if (!isFiniteNumber(rawV)) throw error("live2d_core_invalid", `Cubism Core returned a non-finite drawable ${index} v`);
+        const u = rawU;
+        const v = 1 - rawV;
+        if (!Number.isFinite(placedX) || Math.abs(placedX) > 1_000_000 ||
+            !Number.isFinite(placedY) || Math.abs(placedY) > 1_000_000 ||
+            !Number.isFinite(u) || Math.abs(u) > 1_000_000 ||
+            !Number.isFinite(v) || Math.abs(v) > 1_000_000) {
           throw error("live2d_mesh_invalid", `Core drawable ${index} contains out-of-range mesh coordinates`);
         }
-        view.setFloat32(offset, placedX, true);
-        view.setFloat32(offset + 4, placedY, true);
-        view.setFloat32(offset + 8, u, true);
-        view.setFloat32(offset + 12, v, true);
+        if (f32) {
+          const word = offset >>> 2;
+          f32[word] = placedX;
+          f32[word + 1] = placedY;
+          f32[word + 2] = u;
+          f32[word + 3] = v;
+        } else {
+          view.setFloat32(offset, placedX, true);
+          view.setFloat32(offset + 4, placedY, true);
+          view.setFloat32(offset + 8, u, true);
+          view.setFloat32(offset + 12, v, true);
+        }
         offset += 16;
       }
       for (let item = 0; item < indexCount; item++) {
-        const vertexIndex = integer(indices[item], `drawable ${index} index ${item}`);
+        const vertexIndex = indices[item];
+        if (!isNonNegativeSafeInteger(vertexIndex)) {
+          throw error("live2d_core_invalid", `Cubism Core returned an invalid drawable ${index} index ${item}`);
+        }
         if (vertexIndex >= vertexCount) throw error("live2d_mesh_invalid", `Core drawable ${index} has an index outside its vertex range`);
-        view.setUint32(offset, vertexIndex, true);
+        if (u32) {
+          u32[offset >>> 2] = vertexIndex;
+        } else {
+          view.setUint32(offset, vertexIndex, true);
+        }
         offset += 4;
       }
       return bytes;
@@ -418,8 +493,8 @@
       }
       const meshBytes = makePms1(slot, d, index, placement, placement.opacity);
       const maskIndices = previous ? undefined : uint32Bytes(masks, `drawable ${index} masks`);
-      const multiplyColorRgba = floatBytes(d.multiplyColors.subarray(index * 4, index * 4 + 4), `drawable ${index} multiply color`);
-      const screenColorRgba = floatBytes(d.screenColors.subarray(index * 4, index * 4 + 4), `drawable ${index} screen color`);
+      const multiplyColorRgba = rgbaBytes(d.multiplyColors, index * 4, index, "multiply");
+      const screenColorRgba = rgbaBytes(d.screenColors, index * 4, index, "screen");
       const blendModes = d.blendModes;
       const constantFlags = integer(d.constantFlags[index], `drawable ${index} constant flags`);
       let blendMode;

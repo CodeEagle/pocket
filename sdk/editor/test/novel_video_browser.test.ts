@@ -21,7 +21,7 @@ test("Chromium authors video cues, keeps the shared image skin, saves/reopens, r
   const runtimeAssets = join(temporary, "runtime-assets");
   const id = "video-authoring";
   await mkdir(project, { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts", "novel.locales.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     await cp(join(source, name), join(project, name), { recursive: true });
   }
   await mkdir(join(project, "art/ui"), { recursive: true });

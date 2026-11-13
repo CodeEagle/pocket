@@ -751,7 +751,7 @@ void main() {
   );
 
   test(
-    'cacheFirst presents healthy cache through blocked HTTP and uses staged update on next open',
+    'cacheFirst presents healthy cache quickly and resident reopen consumes a pending update',
     () async {
       final release2 = await _makeRelease(
         keyPair: keyPair,
@@ -793,49 +793,37 @@ void main() {
         expect(cached.remotePackagePreparationInProgress, isTrue);
         expect(cached.active?.version, '2.0.0');
         expect(cached.generation, 0);
-        final repeatedOpen = await cached
-            .prepareForOpen(cacheFirst: true)
-            .timeout(const Duration(seconds: 1));
-        expect(repeatedOpen, <String, Object?>{
-          'configured': true,
-          'updated': false,
-        });
-        expect(cached.active?.version, '2.0.0');
-        expect(cached.generation, 0);
 
-        updateServer.releaseHeldResponse();
-        await waitForAvailableVersion(cached, '3.0.0');
-        expect(cached.remotePackagePreparationInProgress, isFalse);
-        expect(cached.active?.version, '2.0.0');
-        expect(cached.generation, 0);
-        await waitForHealthy(cached);
-        final healthy = await packageStore()
-            .scoped(appId)
-            .lastGood(verifier: verifier());
-        expect(healthy?.manifest.payload.version, '2.0.0');
-
-        // A resident open consumes the staged v3 package, then starts its own
-        // non-blocking refresh so each subsequent open can stage the next
-        // published version.
-        updateServer.holdPath = '/manifest.json';
-        final residentOpenManifestRequests = updateServer.count(
-          '/manifest.json',
+        var residentOpenCompleted = false;
+        final residentOpenFuture = cached.prepareForOpen(cacheFirst: true).then(
+          (result) {
+            residentOpenCompleted = true;
+            return result;
+          },
         );
-        final residentOpen = await cached.prepareForOpen(cacheFirst: true);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(residentOpenCompleted, isFalse);
+        expect(cached.active?.version, '2.0.0');
+        expect(cached.generation, 0);
+
+        // The in-flight response is this resident open's mutable-index check.
+        // Its successful stage must be consumed before the open reports ready.
+        updateServer.holdPath = null;
+        updateServer.releaseHeldResponse();
+        final residentOpen = await residentOpenFuture.timeout(
+          const Duration(seconds: 5),
+        );
         expect(residentOpen, <String, Object?>{
           'configured': true,
           'updated': true,
         });
         expect(cached.active?.version, '3.0.0');
         expect(cached.generation, 1);
-        await waitUntil(
-          () =>
-              updateServer.count('/manifest.json') >
-              residentOpenManifestRequests,
-        );
-        expect(cached.active?.version, '3.0.0');
-        expect(cached.generation, 1);
-        updateServer.releaseHeldResponse();
+        await waitForHealthy(cached);
+        final healthy = await packageStore()
+            .scoped(appId)
+            .lastGood(verifier: verifier());
+        expect(healthy?.manifest.payload.version, '3.0.0');
       } finally {
         updateServer.releaseHeldResponse();
         await closeQuietly(cached);
@@ -852,21 +840,112 @@ void main() {
             .timeout(const Duration(seconds: 2));
         expect(nextOpen.active?.version, '3.0.0');
         expect(nextOpen.generation, 0);
-        final repeatedOpen = await nextOpen.prepareForOpen(cacheFirst: true);
+
+        var repeatedOpenCompleted = false;
+        final repeatedOpenFuture = nextOpen
+            .prepareForOpen(cacheFirst: true)
+            .then((result) {
+              repeatedOpenCompleted = true;
+              return result;
+            });
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(repeatedOpenCompleted, isFalse);
+        updateServer.releaseHeldResponse();
+        final repeatedOpen = await repeatedOpenFuture.timeout(
+          const Duration(seconds: 5),
+        );
         expect(repeatedOpen, <String, Object?>{
           'configured': true,
           'updated': false,
         });
-        await waitUntil(
-          () => updateServer.count('/manifest.json') > nextOpenManifestRequests,
-        );
         expect(nextOpen.active?.version, '3.0.0');
         expect(nextOpen.generation, 0);
+        expect(
+          updateServer.count('/manifest.json'),
+          greaterThan(nextOpenManifestRequests),
+        );
         expect(updateServer.count(release3.entryPath), 1);
         expect(updateServer.count(release3.pakPath), 1);
       } finally {
         updateServer.releaseHeldResponse();
         await closeQuietly(nextOpen);
+      }
+    },
+  );
+
+  test(
+    'resident cache-first reopen falls back to the healthy package after a pending update fails',
+    () async {
+      final release2 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 2,
+        version: '2.0.0',
+      );
+      updateServer.current = release2;
+      final first = session();
+      try {
+        await first.initialize();
+        await waitForHealthy(first);
+      } finally {
+        await closeQuietly(first);
+      }
+
+      final release3 = await _makeRelease(
+        keyPair: keyPair,
+        appId: appId,
+        abi: abi,
+        build: 3,
+        version: '3.0.0',
+      );
+      updateServer.current = release3;
+      updateServer.holdPath = '/manifest.json';
+      final manifestRequests = updateServer.count('/manifest.json');
+      final cached = session();
+      try {
+        await cached.initialize(prepareForOpen: true, cacheFirst: true);
+        await waitUntil(
+          () => updateServer.count('/manifest.json') > manifestRequests,
+        );
+        expect(cached.active?.version, '2.0.0');
+
+        var residentOpenCompleted = false;
+        final residentOpenFuture = cached.prepareForOpen(cacheFirst: true).then(
+          (result) {
+            residentOpenCompleted = true;
+            return result;
+          },
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(residentOpenCompleted, isFalse);
+
+        // The manifest request already in flight succeeds, but subsequent
+        // signed blobs fail immediately. The resident open must settle and
+        // retain the verified cache rather than waiting forever or dropping it.
+        updateServer.holdPath = null;
+        updateServer.online = false;
+        updateServer.releaseHeldResponse();
+        final result = await residentOpenFuture.timeout(
+          const Duration(seconds: 5),
+        );
+        expect(result, <String, Object?>{'configured': true, 'updated': false});
+        expect(cached.active?.version, '2.0.0');
+        expect(cached.generation, 0);
+        expect(cached.failure, isNull);
+        expect(updateServer.count(release3.entryPath), greaterThan(0));
+        await waitUntil(
+          () => !cached.remotePackagePreparationInProgress,
+          timeout: const Duration(seconds: 5),
+        );
+        expect(
+          cached.lastError,
+          contains('Background update preparation failed'),
+        );
+        expect(cached.active?.version, '2.0.0');
+      } finally {
+        updateServer.releaseHeldResponse();
+        await closeQuietly(cached);
       }
     },
   );

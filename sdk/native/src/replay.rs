@@ -39,6 +39,7 @@ pub(super) struct ScalarSample {
     value: f64,
 }
 
+#[derive(Debug)]
 pub(super) struct ScalarLane {
     mode: Mode,
     transaction_open: bool,
@@ -242,6 +243,16 @@ impl TraceClock {
                 "replay trace clock has {expected} intervals but only {consumed} were used"
             ));
         }
+        let lane_failure = if self.mode != Mode::Live {
+            let scalar_failure = self.scalar_lane.borrow().failure.clone();
+            self.failure.clone().or(scalar_failure)
+        } else {
+            None
+        };
+        if let Some(error) = lane_failure {
+            self.clear_transaction();
+            return Err(error);
+        }
         let scalar_values = {
             let lane = self.scalar_lane.borrow();
             if self.mode == Mode::Replay && lane.replay_index != lane.replayed.len() {
@@ -259,16 +270,6 @@ impl TraceClock {
                 Mode::Replay => lane.replayed.clone(),
             }
         };
-        let record_failure = if self.mode == Mode::Record {
-            let scalar_failure = self.scalar_lane.borrow().failure.clone();
-            self.failure.clone().or(scalar_failure)
-        } else {
-            None
-        };
-        if let Some(error) = record_failure {
-            self.clear_transaction();
-            return Err(error);
-        }
         let values = match self.mode {
             Mode::Live => Vec::new(),
             Mode::Record => self.recorded.clone(),
@@ -357,7 +358,10 @@ fn parse_intervals(input: &str) -> Result<ParsedInput, String> {
 }
 
 fn validate_scalar(kind: String, value: f64) -> Result<ScalarSample, String> {
-    if !matches!(kind.as_str(), "dateNow" | "mathRandom" | "performanceNow") {
+    if !matches!(
+        kind.as_str(),
+        "dateNow" | "mathRandom" | "performanceNow" | "hostTextAdvance"
+    ) {
         return Err(format!("unsupported trace scalar kind {kind:?}"));
     }
     if !value.is_finite() {
@@ -365,6 +369,17 @@ fn validate_scalar(kind: String, value: f64) -> Result<ScalarSample, String> {
     }
     if kind == "mathRandom" && !(0.0..1.0).contains(&value) {
         return Err("trace scalar mathRandom must be in [0,1)".to_owned());
+    }
+    if kind == "hostTextAdvance" {
+        if value < 0.0 {
+            return Err("trace scalar hostTextAdvance must be non-negative".to_owned());
+        }
+        // Native measurement callbacks return f32. Replay converts this JSON
+        // f64 back to f32, so accepting a larger finite f64 would silently
+        // inject infinity into text layout and DrawOps.
+        if value > f32::MAX as f64 {
+            return Err("trace scalar hostTextAdvance must fit in a finite f32".to_owned());
+        }
     }
     Ok(ScalarSample { kind, value })
 }
@@ -428,6 +443,7 @@ pub(super) fn set_mode(host: &mut HostState, raw_mode: u32) -> Result<(), String
         host.worker_trace = Some(crate::worker_trace::WorkerTrace::new(mode));
     }
     host.trace.scalar_lane.borrow_mut().mode = mode;
+    host.text_metrics.borrow().clear_caches();
     // Live is also the explicit disable operation. It is allowed after a
     // guest has loaded so a recording controller can stop without leaving
     // scalar hooks or an open lane accumulating values in the background.
@@ -590,6 +606,47 @@ pub(super) fn scalar_value(
     }
 }
 
+pub(super) fn settle_host_text_advance<F: FnOnce() -> f32>(
+    lane: &Rc<RefCell<ScalarLane>>,
+    compute: F,
+) -> f32 {
+    let (mode, open) = {
+        let borrowed = lane.borrow();
+        (borrowed.mode, borrowed.transaction_open)
+    };
+    if !open || mode == Mode::Live {
+        return compute();
+    }
+    if mode == Mode::Replay {
+        match scalar_value(lane, "hostTextAdvance", 0.0) {
+            Ok(value) => value as f32,
+            Err(error) => {
+                let mut borrowed = lane.borrow_mut();
+                if borrowed.failure.is_none() {
+                    borrowed.failure = Some(error);
+                }
+                0.0
+            }
+        }
+    } else {
+        let measured = compute().max(0.0);
+        match scalar_value(lane, "hostTextAdvance", measured as f64) {
+            Ok(_) => measured,
+            Err(error) => {
+                record_host_text_measure_failure(lane, error);
+                0.0
+            }
+        }
+    }
+}
+
+pub(super) fn record_host_text_measure_failure(lane: &Rc<RefCell<ScalarLane>>, error: String) {
+    let mut borrowed = lane.borrow_mut();
+    if borrowed.mode == Mode::Record && borrowed.transaction_open && borrowed.failure.is_none() {
+        borrowed.failure = Some(error);
+    }
+}
+
 /// Install the opt-in scalar lane. The static Date constructor itself is not
 /// replaced: `new Date()` remains an explicit unsupported nondeterminism.
 pub(super) fn install_scalar_hooks<'js>(
@@ -713,6 +770,68 @@ mod tests {
         assert!(parse_intervals("[null]").is_err());
         assert!(validate_elapsed(f64::INFINITY).is_err());
         assert!(validate_elapsed(-0.1).is_err());
+    }
+
+    #[test]
+    fn host_text_advance_trace_values_must_fit_the_native_f32_contract() {
+        let max_f32 = f32::MAX as f64;
+        assert!(validate_scalar("hostTextAdvance".to_owned(), max_f32).is_ok());
+        let too_large = validate_scalar("hostTextAdvance".to_owned(), max_f32 * 2.0).unwrap_err();
+        assert!(too_large.contains("finite f32"), "error={too_large}");
+
+        let input = r#"{"idleMs":[],"scalars":[{"kind":"hostTextAdvance","value":1e300}]}"#;
+        let error = match parse_intervals(input) {
+            Err(error) => error,
+            Ok(_) => panic!("out-of-range hostTextAdvance unexpectedly parsed"),
+        };
+        assert!(error.contains("finite f32"), "error={error}");
+    }
+
+    #[test]
+    fn non_finite_recorded_host_text_advance_fails_the_transaction() {
+        let mut trace = TraceClock::default();
+        trace.mode = Mode::Record;
+        trace.transaction_open = true;
+        let lane = trace.scalar_lane();
+        {
+            let mut scalar_lane = lane.borrow_mut();
+            scalar_lane.mode = Mode::Record;
+            scalar_lane.transaction_open = true;
+        }
+
+        // The caller gets a finite width so Core layout cannot receive the
+        // overflow, and transaction completion retains the measurement error.
+        assert_eq!(settle_host_text_advance(&lane, || f32::INFINITY), 0.0);
+        let error = trace.finish().unwrap_err();
+        assert!(
+            error.contains("hostTextAdvance must be finite"),
+            "error={error}"
+        );
+    }
+
+    #[test]
+    fn host_font_width_overflow_stays_finite_and_fails_recording() {
+        let mut trace = TraceClock::default();
+        trace.mode = Mode::Record;
+        trace.transaction_open = true;
+        let lane = trace.scalar_lane();
+        {
+            let mut scalar_lane = lane.borrow_mut();
+            scalar_lane.mode = Mode::Record;
+            scalar_lane.transaction_open = true;
+        }
+        let mut metrics = crate::TextMetrics::default();
+        metrics.trace_lane = Some(lane.clone());
+        metrics.host_table = Some(crate::HostFontTable {
+            line_heights: [20.0; crate::HOST_FONT_SLOTS],
+            cjk_advances: [16.0; crate::HOST_FONT_SLOTS],
+            ascii_advances: [[f32::MAX; crate::HOST_ASCII_COUNT]; crate::HOST_FONT_SLOTS],
+        });
+
+        let (width, height) = metrics.measure("AA", 4, 0.0, f32::NAN);
+        assert_eq!((width, height), (0.0, 0.0));
+        let error = trace.finish().unwrap_err();
+        assert!(error.contains("exceeded finite f32 range"), "error={error}");
     }
 
     #[test]

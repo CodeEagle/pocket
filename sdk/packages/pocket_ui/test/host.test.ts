@@ -1,5 +1,7 @@
+import * as pinnedSolid from "../../../.cache/pocketjs/node_modules/solid-js/dist/solid.js";
 import { strict as assert } from "node:assert";
 import { mock, test } from "bun:test";
+mock.module("solid-js", () => pinnedSolid);
 import {
   createHostBridge,
   HostBridgeAbiError,

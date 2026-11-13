@@ -19,7 +19,7 @@ test("Editor authors one shared image skin, previews real pixels, preserves undo
   const output = join(temporary, "build");
   const id = "skin-authoring";
   await mkdir(join(project, "art/ui"), { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts", "novel.locales.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     await cp(join(source, name), join(project, name), { recursive: true });
   }
   await cp(frameImage, join(project, "art/ui/harbor-frame.png"));

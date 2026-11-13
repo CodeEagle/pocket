@@ -3,23 +3,16 @@
   "protocolVersion": 1,
   "capabilities": {
     "requires": [
+      "input.touch",
       "io.offload",
-      "text.glyphs.baked"
+      "text.layout.native"
     ],
-    "optional": [
-      "input.touch"
-    ]
+    "optional": []
   },
   "permissions": {
     "optional": []
   },
   "version": "0.1.0",
   "build": 1,
-  "hostAdaptation": {
-    "kind": "flutter_pointer_fallback",
-    "demotedRequirements": [
-      "input.touch"
-    ],
-    "note": "The mounted official source keeps its physical-button handler and adds a Focusable pointer/touch control where needed."
-  }
+  "fonts": "host"
 }

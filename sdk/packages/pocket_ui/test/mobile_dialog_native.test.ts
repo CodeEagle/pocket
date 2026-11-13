@@ -113,15 +113,67 @@ function assertEqualActionRow(frame: Frame, width: number, name: string): void {
   assert.ok(Math.abs(confirmCenter - cancelCenter - expectedDistance) <= 8, `${name} actions are not equal-width cells: centers=${cancelCenter},${confirmCenter}, expected distance=${expectedDistance}`);
 }
 
-function assertCompactPanel(frame: Frame, width: number, name: string): void {
-  const panels = (frame.ops ?? []).filter((op) => {
-    if (op.type !== "rect") return false;
-    const w = Number(op.w);
-    const h = Number(op.h);
+function assertCompactPanel(frame: Frame, width: number, name: string, labels: string[], actions: string[]): void {
+  const shapeOps = (frame.ops ?? []).filter((op) => op.type === "rect" || op.type === "rounded");
+  const panels = shapeOps.filter((op) => {
+    const panelWidth = Number(op.w);
     const x = Number(op.x);
-    return w >= 270 && w <= 292 && h >= 90 && h <= 120 && x >= -0.1 && x + w <= width + 0.1;
+    return Math.abs(panelWidth - 280) <= 2 && x >= -0.1 && x + panelWidth <= width + 0.1
+      && Math.abs(x + panelWidth / 2 - width / 2) <= 2;
   });
-  assert.ok(panels.some((op) => Math.abs(Number(op.x) + Number(op.w) / 2 - width / 2) <= 2), `${name} must use a centered compact panel near 280px: ${JSON.stringify(panels)}`);
+  assert.ok(panels.length, `${name} must expose a centered 280px panel shape`);
+  const panel = panels.sort((left, right) => Math.abs(Number(left.w) - 280) - Math.abs(Number(right.w) - 280))[0]!;
+  const panelBounds = {
+    left: Number(panel.x),
+    top: Number(panel.y),
+    right: Number(panel.x) + Number(panel.w),
+    bottom: Number(panel.y) + Number(panel.h),
+  };
+
+  const contentLabels = labels.filter((label) => !actions.includes(label));
+  const contentOps = contentLabels.map((label) => {
+    const op = textOps(frame, label)[0];
+    assert.ok(op, `${name} is missing panel content ${label}`);
+    return op!;
+  });
+  const actionShapes = actions.flatMap((label) => {
+    const text = textOps(frame, label)[0];
+    assert.ok(text, `${name} is missing action ${label}`);
+    const centerX = Number(text!.x) + Number(text!.w) / 2;
+    const centerY = Number(text!.y) + Number(text!.h) / 2;
+    const matching = shapeOps.filter((op) => {
+      const x = Number(op.x); const y = Number(op.y); const w = Number(op.w); const h = Number(op.h);
+      return h >= 32 && h <= 52 && w >= Number(text!.w) + 20
+        && centerX >= x - 0.1 && centerX <= x + w + 0.1
+        && centerY >= y - 0.1 && centerY <= y + h + 0.1;
+    });
+    assert.ok(matching.length, `${name} action ${label} must sit on a measured control shape`);
+    const shape = matching.sort((left, right) => Number(left.w) * Number(left.h) - Number(right.w) * Number(right.h))[0]!;
+    assert.ok(Number(shape.x) >= panelBounds.left - 0.1 && Number(shape.x) + Number(shape.w) <= panelBounds.right + 0.1,
+      `${name} action ${label} escaped its panel horizontally`);
+    assert.ok(Number(shape.y) >= panelBounds.top - 0.1 && Number(shape.y) + Number(shape.h) <= panelBounds.bottom + 0.1,
+      `${name} action ${label} escaped its panel vertically`);
+    return shape;
+  });
+
+  for (const item of contentOps) {
+    assert.ok(Number(item.x) >= panelBounds.left - 0.1 && Number(item.x) + Number(item.w) <= panelBounds.right + 0.1,
+      `${name} content ${item.text} escaped its panel horizontally`);
+    assert.ok(Number(item.y) >= panelBounds.top - 0.1 && Number(item.y) + Number(item.h) <= panelBounds.bottom + 0.1,
+      `${name} content ${item.text} escaped its panel vertically`);
+  }
+
+  const bodyOps = contentOps.slice(1);
+  const actionTop = Math.min(...actionShapes.map((op) => Number(op.y)));
+  const actionBottom = Math.max(...actionShapes.map((op) => Number(op.y) + Number(op.h)));
+  const contentHeight = contentOps[0]!.h! + bodyOps.reduce((height, op) => height + Number(op.h), 0)
+    + actionBottom - actionTop;
+  // MobileModalPanel uses p-4 (32px vertical), two gap-3 spaces (24px),
+  // natural title/body line heights, and a 44px action row. The two-pixel
+  // tolerance covers native integer quantization of its full rounded fill.
+  const expectedHeight = 32 + 24 + contentHeight;
+  assert.ok(Math.abs(Number(panel.h) - expectedHeight) <= 2,
+    `${name} panel height must match its measured content/padding budget: panel=${panel.h}, expected=${expectedHeight}`);
 }
 
 function assertOpaque(frame: Frame, label: string): void {
@@ -138,7 +190,7 @@ function alphaOf(op: DrawOp | undefined): number {
 
 function modalPanel(frame: Frame, width: number): DrawOp | undefined {
   const candidates = (frame.ops ?? []).filter((op) => {
-    if (op.type !== "rect") return false;
+    if (op.type !== "rect" && op.type !== "rounded") return false;
     const x = Number(op.x);
     const y = Number(op.y);
     const w = Number(op.w);
@@ -153,7 +205,7 @@ function modalPanel(frame: Frame, width: number): DrawOp | undefined {
 
 function modalBackdrops(frame: Frame, width: number, height: number): DrawOp[] {
   return (frame.ops ?? []).filter((op) => {
-    if (op.type !== "rect") return false;
+    if (op.type !== "rect" && op.type !== "rounded") return false;
     const color = Number(op.color) >>> 0;
     const red = (color >>> 16) & 0xff;
     const green = (color >>> 8) & 0xff;
@@ -483,7 +535,7 @@ mount(App);
       assert.equal(textOps(single, "Cancel").length, 0, `${width}px single-action dialog must not expose Cancel`);
       assert.equal(textOps(single, "Confirm").length, 0, `${width}px single-action dialog must not expose Confirm`);
       assertDialogContentFits(single, width, ["SingleTitle", "Dismiss this compact dialog.", "Close"], `${width}px single dialog`);
-      assertCompactPanel(single, width, `${width}px single dialog`);
+      assertCompactPanel(single, width, `${width}px single dialog`, ["SingleTitle", "Dismiss this compact dialog.", "Close"], ["Close"]);
 
       const close = centerPoint(single, "Close");
       const afterDismissFrames = framesOf(runProbe([
@@ -512,7 +564,7 @@ mount(App);
       assert.equal(textOps(details, "Cancel").length, 0, `${width}px persistent details dialog must not expose Cancel`);
       assert.equal(textOps(details, "Confirm").length, 0, `${width}px persistent details dialog must not expose Confirm`);
       assertDialogContentFits(details, width, ["DetailsTitle", "Mounted by parent route.", "Close"], `${width}px persistent details dialog`);
-      assertCompactPanel(details, width, `${width}px persistent details dialog`);
+      assertCompactPanel(details, width, `${width}px persistent details dialog`, ["DetailsTitle", "Mounted by parent route.", "Close"], ["Close"]);
 
       const detailsClose = centerPoint(details, "Close");
       const afterDetailsFrames = framesOf(runProbe([
@@ -559,7 +611,7 @@ mount(App);
       assert.equal(textOps(double, "Close").length, 0, `${width}px double-action dialog must not fall back to Close`);
       assertDialogContentFits(double, width, ["DoubleTitle", "Choose one action.", "Cancel", "Confirm"], `${width}px double dialog`);
       assertEqualActionRow(double, width, `${width}px double dialog`);
-      assertCompactPanel(double, width, `${width}px double dialog`);
+      assertCompactPanel(double, width, `${width}px double dialog`, ["DoubleTitle", "Choose one action.", "Cancel", "Confirm"], ["Cancel", "Confirm"]);
 
       const cancel = centerPoint(double, "Cancel");
       const afterCancelFrames = framesOf(runProbe([

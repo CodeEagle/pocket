@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pack } from "../../.cache/pocketjs/framework/compiler/pak.ts";
 import { startEditor } from "../server.ts";
+import { chooseUpdateHost } from "../update_endpoint.ts";
 import { verifySignedManifest } from "../../scripts/package_update.ts";
 
 function temporaryWorkspace(): string {
@@ -12,7 +13,10 @@ function temporaryWorkspace(): string {
 }
 
 async function unauthenticatedRequest(server: ReturnType<typeof Bun.serve>, path: string, init?: RequestInit): Promise<{ response: Response; value: any }> {
-  const response = await fetch(`http://${server.hostname}:${server.port}${path}`, init);
+  // Wildcard-bound test servers are still exercised through loopback unless a
+  // test explicitly targets the selected LAN interface.
+  const host = server.hostname === "0.0.0.0" ? "127.0.0.1" : server.hostname;
+  const response = await fetch(`http://${host}:${server.port}${path}`, init);
   const contentType = response.headers.get("content-type") || "";
   const value = contentType.includes("application/json") ? await response.json() : await response.arrayBuffer();
   return { response, value };
@@ -40,9 +44,9 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
   writeFileSync(metadata, JSON.stringify({ entryFormat: "quickjs-bytecode", runtimeAbi: "fixture-abi-v1", bytecodeBytes: 7 }));
   writeFileSync(pak, pack([{ key: "fixture:text", dtype: 0, data: new Uint8Array([1, 2, 3, 4]) }]));
   const server = await startEditor({
+    host: "0.0.0.0",
     port: 0,
     updateHost: "127.0.0.1",
-    updatePort: 0,
     updateHostVersion: "3.2.0",
     workspace,
     buildRunner: async ({ log }) => {
@@ -323,6 +327,65 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     server.stop(true);
     rmSync(workspace, { recursive: true, force: true });
     rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+let selectedLanHost: string | undefined;
+try { selectedLanHost = chooseUpdateHost(); } catch { /* LAN-specific integration is unavailable offline. */ }
+
+test.skipIf(!selectedLanHost)("editor on its LAN interface serves its page, preview resources, and same-origin CSRF writes", async () => {
+  const workspace = temporaryWorkspace();
+  const server = await startEditor({ host: "0.0.0.0", port: 0, workspace });
+  const lanOrigin = `http://${selectedLanHost}:${server.port}`;
+  try {
+    const [index, editorScript, healthResponse] = await Promise.all([
+      fetch(`${lanOrigin}/`),
+      fetch(`${lanOrigin}/editor.js`),
+      fetch(`${lanOrigin}/health`),
+    ]);
+    expect(index.status).toBe(200);
+    expect(await index.text()).toContain("Pocket");
+    expect(editorScript.status).toBe(200);
+    expect(await editorScript.text()).toContain("publishProject");
+    expect(healthResponse.status).toBe(200);
+    const health = await healthResponse.json() as { csrfToken: string };
+
+    const mismatchedOrigin = await fetch(`${lanOrigin}/api/projects`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: `http://127.0.0.1:${server.port}`,
+        "x-pocket-csrf": health.csrfToken,
+      },
+      body: JSON.stringify({ id: "foreign-origin", name: "Foreign Origin" }),
+    });
+    expect(mismatchedOrigin.status).toBe(403);
+
+    const invalidHost = await fetch(`${lanOrigin}/health`, { headers: { host: `192.0.2.123:${server.port}` } });
+    expect(invalidHost.status).toBe(403);
+
+    const created = await fetch(`${lanOrigin}/api/projects`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: lanOrigin,
+        "x-pocket-csrf": health.csrfToken,
+      },
+      body: JSON.stringify({ id: "lan-app", name: "LAN App" }),
+    });
+    expect(created.status).toBe(201);
+
+    const [resources, previewPage] = await Promise.all([
+      fetch(`${lanOrigin}/api/projects/lan-app/resources`),
+      fetch(`${lanOrigin}/api/projects/lan-app/preview`),
+    ]);
+    expect(resources.status).toBe(200);
+    expect(previewPage.status).toBe(200);
+    expect(previewPage.headers.get("content-type")).toContain("text/html");
+    expect(await previewPage.text()).toContain("data-pocket-preview");
+  } finally {
+    server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
   }
 });
 

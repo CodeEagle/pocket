@@ -64,8 +64,7 @@ test("Chromium edits inherited and explicit background layers, then the pinned G
   const id = "background-layers-authoring";
   mkdirSync(join(project, "art"), { recursive: true });
   mkdirSync(join(project, "assets", "audio"), { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "novel.locales.json"]) cpSync(join(lantern, name), join(project, name));
-  cpSync(join(lantern, "fonts"), join(project, "fonts"), { recursive: true });
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) cpSync(join(lantern, name), join(project, name));
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id, appId: "pocket.demo.background-layers", name: id, version: "0.1.0", build: 1, entry: "app.tsx", framework: "solid", tickHz: 60 }));
 
   const imageColors = { base: "#263e50", far: "#405b46", mid: "#855337", near: "#6d3a64" };

@@ -3,7 +3,7 @@
   "protocolVersion": 1,
   "capabilities": {
     "requires": [
-      "text.glyphs.baked"
+      "text.layout.native"
     ],
     "optional": [
       "input.buttons",
@@ -15,6 +15,7 @@
   },
   "version": "0.6.0",
   "build": 1,
+  "fonts": "host",
   "hostAdaptation": {
     "kind": "flutter_pointer_fallback",
     "demotedRequirements": [

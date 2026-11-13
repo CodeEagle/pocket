@@ -14,7 +14,7 @@ import type { NovelModelDefinition, NovelModelFactory, NovelAnimationDriver } fr
 import { NovelModelView } from "./model-view.tsx";
 import { resolveNovelCameraPose } from "./camera.ts";
 import { resolveNovelBackgroundLayerPose } from "./background-layers.ts";
-import { resolveNovelCharacterPlacement } from "./scene.ts";
+import { resolveNovelCharacterPlacement, screenPointToNovelModelPoint } from "./scene.ts";
 import { orderedNovelStageItems, resolveNovelSceneObjectGeometry, isNovelSceneObjectInteractive } from "./scene-objects.ts";
 import { createNovelViewportLayout, novelCharacterBounds, novelImageContainBounds, novelImageCoverBounds, type NovelImageBounds, type NovelImageDimensions } from "./viewport.ts";
 import { NovelAtmosphereView } from "./atmosphere-view.tsx";
@@ -328,7 +328,7 @@ function StageBackground(props: { stage: StageComposition; assets: NovelAssets; 
   </>;
 }
 
-type StageItemsProps = { stage: StageComposition; assets: NovelAssets; layout: ReturnType<typeof createNovelViewportLayout>; modelFactory?: NovelModelFactory; animations?: NovelAnimationDriver; message: MessageFormatter; variables?: Readonly<Record<string, JsonValue>>; interactive?: boolean; onObjectPress?: (id: string) => void };
+type StageItemsProps = { stage: StageComposition; assets: NovelAssets; layout: ReturnType<typeof createNovelViewportLayout>; modelFactory?: NovelModelFactory; animations?: NovelAnimationDriver; message: MessageFormatter; variables?: Readonly<Record<string, JsonValue>>; interactive?: boolean; modelInteractive?: boolean; reduceMotion?: boolean; onObjectPress?: (id: string) => void };
 
 function StageCharacter(props: StageItemsProps & { id: string }): JSX.Element {
   const character = () => props.stage.characters[props.id]!;
@@ -337,6 +337,10 @@ function StageCharacter(props: StageItemsProps & { id: string }): JSX.Element {
   const definition = () => model() && props.assets.models?.[model()!.key];
   const placement = () => resolveNovelCharacterPlacement(character());
   const bounds = () => novelCharacterBounds(character().position, placement(), props.layout.width, props.layout.artScale);
+  const cameraPose = () => resolveNovelCameraPose(props.stage.camera, { reduceMotion: props.reduceMotion === true });
+  const screenToModelPoint = (point: { readonly x: number; readonly y: number }) =>
+    screenPointToNovelModelPoint(point, props.layout, cameraPose(), { ...bounds(), ...placement() }, props.layout.artScale);
+  const modelInteractive = () => props.modelInteractive === true && definition()?.interactive === true;
   const imageBounds = () => {
     const frame = bounds();
     const item = character();
@@ -348,7 +352,8 @@ function StageCharacter(props: StageItemsProps & { id: string }): JSX.Element {
     <Show when={model()} fallback={<Show when={source()}>{asset => <Image src={asset()} class="absolute" style={imageBoundsStyle(imageBounds())} />}</Show>}>
     <Show when={definition()} fallback={<Text class="text-xs text-[#F0B78F]">{props.message("stage.missingModel", { key: model()?.key ?? "" })}</Text>}>{asset =>
         <View class="absolute" style={{ insetL: 0, insetT: 0, width: 240, height: 350, scale: props.layout.artScale, originX: -0.5, originY: -0.5 }}>
-          <NovelModelView definition={asset()} intent={model()!} factory={props.modelFactory} animations={props.animations} />
+          <NovelModelView definition={asset()} intent={model()!} factory={props.modelFactory} animations={props.animations}
+            interactive={modelInteractive()} screenToModelPoint={screenToModelPoint} />
         </View>
       }</Show>
     </Show>
@@ -395,7 +400,7 @@ function StageArt(props: { stage: StageComposition; assets: NovelAssets; layout:
     </View>
     <View class="absolute overflow-hidden" style={{ ...safeStageClipBounds(props.layout), hitPass: 1 }}>
       <View class="absolute inset-0 w-full h-full" style={{ ...localCameraStyle(cameraPose()), hitPass: 1 }}>
-        <StageItems stage={props.stage} assets={props.assets} layout={props.layout} modelFactory={props.modelFactory} animations={props.animations} message={props.message} />
+        <StageItems stage={props.stage} assets={props.assets} layout={props.layout} modelFactory={props.modelFactory} animations={props.animations} message={props.message} reduceMotion={props.reduceMotion} />
       </View>
     </View>
   </View>;
@@ -1175,7 +1180,7 @@ export function NovelView(props: NovelViewProps): JSX.Element {
     </View>
     <View class="absolute overflow-hidden" style={{ ...safeStageClipBounds(layout()), hitPass: 1 }}>
     <View class="absolute inset-0 w-full h-full" style={{ ...artCameraStyle(), hitPass: 1 }}>
-      <StageItems stage={visualStage()} assets={props.assets} layout={layout()} modelFactory={props.modelFactory} animations={props.animations} message={message} variables={snapshot().variables} interactive={!titleScreen() && panel() === "none" && !snapshot().paused && snapshot().phase === "say" && !transition()} onObjectPress={id => { try { props.engine.interactSceneObject(id); } catch (error) { fail(error); } }} />
+      <StageItems stage={visualStage()} assets={props.assets} layout={layout()} modelFactory={props.modelFactory} animations={props.animations} message={message} variables={snapshot().variables} interactive={!titleScreen() && panel() === "none" && !snapshot().paused && snapshot().phase === "say" && !transition()} modelInteractive={!titleScreen() && panel() === "none" && !snapshot().paused && (snapshot().phase === "say" || snapshot().phase === "wait" || snapshot().phase === "choice") && !transition()} reduceMotion={reduceMotion()} onObjectPress={id => { try { props.engine.interactSceneObject(id); } catch (error) { fail(error); } }} />
       <Show when={choiceSurface()}>{surface => <NovelChoiceSurfaceView layout={surface()} renderOption={(option, geometry, caption) =>
         <FocusTarget autoFocus={option.id === choice()?.options[0]?.id} onNode={option.id === choice()?.options[0]?.id ? rememberInteractionFocus : undefined}
           debugName={`vn-choice-${option.id}`} class="absolute flex-col items-center justify-center px-2"

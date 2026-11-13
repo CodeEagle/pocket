@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -10,6 +10,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -134,11 +135,300 @@ export function readInstalledSdkInfo(sdkRoot, platform = process.platform, arch 
     currentVersion,
     platformTuple: tuple,
     mode: isStandalone ? 'standalone' : 'source',
-    autoUpgradeSupported: isStandalone,
+    autoUpgradeSupported: true,
     modeReason: isStandalone
       ? '受管独立 Web SDK 安装目录'
-      : '源码仓库或开发检出模式（仅检查版本，不自动覆盖 Git 工作区）',
+      : 'Git 源码仓库（仅在 main 分支干净且可快进时自动更新）',
   };
+}
+
+function runGitSync(repoRoot, args, options = {}) {
+  const result = spawnSync('git', args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: options.maxBuffer ?? 32 * 1024 * 1024,
+    timeout: options.timeoutMs ?? 15_000,
+  });
+  if (result.error) throw new Error(`Git ${args[0]} 执行失败：${result.error.message}`);
+  if (result.status !== 0 && !options.allowFailure) {
+    throw new Error(`Git ${args[0]} 失败（退出码 ${result.status ?? 'unknown'}）`);
+  }
+  return { status: result.status ?? 1, stdout: String(result.stdout || ''), stderr: String(result.stderr || '') };
+}
+
+function sourceRepositoryRoot(sdkRoot) {
+  return resolve(resolve(sdkRoot), '..');
+}
+
+function canonicalFsPath(value) {
+  const path = realpathSync.native(resolve(value)).replaceAll('\\', '/');
+  return process.platform === 'win32' ? path.toLowerCase() : path;
+}
+
+function isCanonicalPocketOrigin(rawUrl) {
+  const value = String(rawUrl || '').trim().replace(/\/+$/, '');
+  if (/^git@github\.com:CodeEagle\/pocket(?:\.git)?$/i.test(value)) return true;
+  try {
+    const url = new URL(value);
+    const validUser = !url.username || (url.protocol === 'ssh:' && url.username === 'git');
+    return validUser
+      && url.hostname.toLowerCase() === 'github.com'
+      && url.pathname.replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase() === '/codeeagle/pocket'
+      && !url.password && !url.search && !url.hash
+      && (url.protocol === 'https:' || url.protocol === 'ssh:');
+  } catch {
+    return false;
+  }
+}
+
+function readSourceCheckout(sdkRoot) {
+  const repoRoot = sourceRepositoryRoot(sdkRoot);
+  const sdkRelativePath = relative(repoRoot, resolve(sdkRoot)).replaceAll('\\', '/');
+  if (!sdkRelativePath || sdkRelativePath.startsWith('../') || sdkRelativePath.startsWith('/')) {
+    return { repoRoot, sdkRelativePath, validRepo: false, reason: 'SDK 目录不在源码仓库内' };
+  }
+  try {
+    const topLevel = runGitSync(repoRoot, ['rev-parse', '--show-toplevel']).stdout.trim();
+    if (canonicalFsPath(topLevel) !== canonicalFsPath(repoRoot)) return { repoRoot, sdkRelativePath, validRepo: false, reason: 'SDK 所属仓库根目录不匹配' };
+    const branch = runGitSync(repoRoot, ['branch', '--show-current']).stdout.trim();
+    const head = runGitSync(repoRoot, ['rev-parse', '--verify', 'HEAD']).stdout.trim();
+    const status = runGitSync(repoRoot, ['status', '--porcelain=v1', '--untracked-files=all']).stdout;
+    const originResult = runGitSync(repoRoot, ['remote', 'get-url', 'origin'], { allowFailure: true });
+    const origin = originResult.status === 0 ? originResult.stdout.trim() : '';
+    return {
+      repoRoot,
+      sdkRelativePath,
+      validRepo: /^[0-9a-f]{40}$/i.test(head),
+      branch,
+      head,
+      dirty: status.length > 0,
+      origin,
+      originValid: isCanonicalPocketOrigin(origin),
+    };
+  } catch {
+    return { repoRoot, sdkRelativePath, validRepo: false, reason: '无法读取 Git 源码仓库状态' };
+  }
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableJson(value[key])]));
+}
+
+function gitJsonAt(repoRoot, commit, path) {
+  const result = runGitSync(repoRoot, ['show', `${commit}:${path}`], { allowFailure: true });
+  if (result.status !== 0) return null;
+  try { return JSON.parse(result.stdout); }
+  catch { throw new Error(`Git ${path} 不是有效 JSON`); }
+}
+
+function parsePrebuiltSourceConstants(source) {
+  const constants = {};
+  for (const name of ['SDK_VERSION', 'UPSTREAM_REVISION', 'BYTECODE_ABI']) {
+    const match = String(source || '').match(new RegExp(`export\\s+const\\s+${name}\\s*=\\s*['\"]([^'\"]+)['\"]`));
+    if (match) constants[name] = match[1];
+  }
+  return constants;
+}
+
+function sourceConstantsAtCommit(repoRoot, sdkRelativePath, commit) {
+  const source = runGitSync(repoRoot, ['show', `${commit}:${sdkRelativePath}/scripts/prebuilt_tools.mjs`]).stdout;
+  return parsePrebuiltSourceConstants(source);
+}
+
+function sourceCheckoutWriteConflicts(repoRoot, fromCommit, toCommit) {
+  const diff = runGitSync(repoRoot, [
+    'diff', '--no-renames', '--diff-filter=A', '--name-only', '-z', fromCommit, toCommit,
+  ]).stdout;
+  const additions = diff.split('\0').filter(Boolean);
+  const conflicts = [];
+  for (const relativePath of additions) {
+    const normalized = relativePath.replaceAll('\\', '/');
+    if (!normalized || normalized.startsWith('/') || normalized.split('/').some(part => part === '..' || part === '.')) {
+      conflicts.push(relativePath);
+      continue;
+    }
+    const parts = normalized.split('/');
+    let currentPath = repoRoot;
+    for (let index = 0; index < parts.length; index += 1) {
+      currentPath = join(currentPath, parts[index]);
+      let stat;
+      try { stat = lstatSync(currentPath); }
+      catch (error) {
+        if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') break;
+        conflicts.push(relativePath);
+        break;
+      }
+      if (stat.isSymbolicLink() || index === parts.length - 1 || !stat.isDirectory()) {
+        conflicts.push(relativePath);
+        break;
+      }
+    }
+  }
+  return conflicts;
+}
+
+function dependencyFingerprint(packageJson, lockFiles) {
+  const packageFields = [
+    'dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies',
+    'peerDependenciesMeta', 'overrides', 'workspaces', 'bundledDependencies',
+  ];
+  const dependencies = Object.fromEntries(packageFields
+    .filter(field => Object.hasOwn(packageJson, field))
+    .map(field => [field, packageJson[field]]));
+  const locks = Object.fromEntries(Object.entries(lockFiles).map(([name, lock]) => {
+    if (!lock) return [name, null];
+    const normalizedLock = structuredClone(lock);
+    // The root package version changes on every SDK release; dependency graph changes do not.
+    delete normalizedLock.version;
+    if (normalizedLock.packages?.['']) delete normalizedLock.packages[''].version;
+    return [name, normalizedLock];
+  }));
+  return JSON.stringify(stableJson({ dependencies, locks }));
+}
+
+export function inspectSourceUpdate(sdkRoot, targetCommit) {
+  const before = readSourceCheckout(sdkRoot);
+  const reject = reason => ({ ...before, targetCommit: null, canApply: false, deferredReason: reason });
+  if (!before.validRepo) return reject(before.reason || 'SDK 不在有效 Git 源码仓库中');
+  if (!before.originValid) return reject('origin 必须指向官方 CodeEagle/pocket 仓库');
+  if (before.branch !== 'main') return reject(`当前分支为 ${before.branch || 'detached HEAD'}；源码自动更新只允许 main`);
+  if (before.dirty) return reject('Git 工作区含有已暂存、已修改或未跟踪文件；保存或移除修改后再更新');
+  const target = String(targetCommit || '').trim();
+  if (!/^[0-9a-f]{40}$/i.test(target)) return reject('稳定版 Release tag 未解析为有效 Git commit');
+
+  const ancestry = runGitSync(before.repoRoot, ['merge-base', '--is-ancestor', before.head, target], { allowFailure: true });
+  if (ancestry.status !== 0) return reject('当前 main 与稳定版 Release 分叉，不能安全快进更新');
+  try {
+    if (sourceCheckoutWriteConflicts(before.repoRoot, before.head, target).length > 0) {
+      return reject('源码更新会覆盖现有的未跟踪或被忽略文件；请先安全移走冲突文件后重新检查');
+    }
+  } catch (error) {
+    return reject(error instanceof Error ? error.message : '无法检查源码更新路径冲突');
+  }
+
+  try {
+    const sdkRel = before.sdkRelativePath;
+    const currentPackage = gitJsonAt(before.repoRoot, before.head, `${sdkRel}/package.json`);
+    const targetPackage = gitJsonAt(before.repoRoot, target, `${sdkRel}/package.json`);
+    if (!currentPackage || !targetPackage) return reject('Release 缺少 SDK package.json，无法比较依赖');
+    const lockNames = ['npm-shrinkwrap.json', 'package-lock.json', 'bun.lock'];
+    const currentLocks = {};
+    const targetLocks = {};
+    for (const name of lockNames) {
+      currentLocks[name] = gitJsonAt(before.repoRoot, before.head, `${sdkRel}/${name}`);
+      targetLocks[name] = gitJsonAt(before.repoRoot, target, `${sdkRel}/${name}`);
+    }
+    if (dependencyFingerprint(currentPackage, currentLocks) !== dependencyFingerprint(targetPackage, targetLocks)) {
+      return reject('此版本改变了 SDK 依赖声明或锁文件；请手动更新源码并安装锁定依赖后再使用自动更新');
+    }
+  } catch (error) {
+    return reject(error instanceof Error ? error.message : '无法验证 Release 依赖变化');
+  }
+
+  const after = readSourceCheckout(sdkRoot);
+  if (!after.validRepo || after.head !== before.head || after.branch !== before.branch || after.dirty || after.origin !== before.origin) {
+    return { ...after, targetCommit: target, canApply: false, deferredReason: 'Git 工作区在检查期间发生变化；请重新检查后再更新' };
+  }
+  return { ...after, targetCommit: target, canApply: true, deferredReason: null };
+}
+
+function runGitAsync(repoRoot, args, timeoutMs = 120_000) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn('git', args, {
+      cwd: repoRoot,
+      windowsHide: true,
+      stdio: 'ignore',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectPromise(new Error(`Git ${args[0]} 超时`));
+    }, timeoutMs);
+    child.once('error', error => {
+      clearTimeout(timer);
+      rejectPromise(new Error(`Git ${args[0]} 执行失败：${error.message}`));
+    });
+    child.once('close', code => {
+      clearTimeout(timer);
+      if (code !== 0) rejectPromise(new Error(`Git ${args[0]} 失败（退出码 ${code ?? 'unknown'}）`));
+      else resolvePromise();
+    });
+  });
+}
+
+export async function fetchSourceReleaseCommit(sdkRoot, tagName, options = {}) {
+  const parsedTag = parseStableSemver(tagName);
+  if (!parsedTag || `sdk-v${parsedTag.version}` !== tagName) throw new Error('源码更新只接受正式版 SDK Release tag');
+  const checkout = readSourceCheckout(sdkRoot);
+  if (!checkout.validRepo || !checkout.originValid) throw new Error('源码更新要求 origin 指向官方 CodeEagle/pocket 仓库');
+  const temporaryRef = `refs/pocket-studio/source-upgrade/${randomUUID()}`;
+  const refspec = `+refs/tags/${tagName}:${temporaryRef}`;
+  try {
+    await runGitAsync(checkout.repoRoot, ['fetch', '--no-tags', 'origin', refspec], options.gitTimeoutMs);
+    const result = runGitSync(checkout.repoRoot, ['rev-parse', '--verify', `${temporaryRef}^{commit}`], { allowFailure: true });
+    const commit = result.stdout.trim();
+    if (result.status !== 0 || !/^[0-9a-f]{40}$/i.test(commit)) throw new Error(`官方 Release tag ${tagName} 未指向有效 commit`);
+    return commit;
+  } finally {
+    runGitSync(checkout.repoRoot, ['update-ref', '-d', temporaryRef], { allowFailure: true });
+  }
+}
+
+export function validateSourceReleaseStage(sdkRoot, targetCommit, targetVersion, stageRoot, platform = process.platform, arch = process.arch) {
+  const eligibility = inspectSourceUpdate(sdkRoot, targetCommit);
+  if (!eligibility.canApply) throw new Error(eligibility.deferredReason);
+  const sdkRel = eligibility.sdkRelativePath;
+  const targetPackage = gitJsonAt(eligibility.repoRoot, targetCommit, `${sdkRel}/package.json`);
+  if (!targetPackage || targetPackage.version !== targetVersion) {
+    throw new Error(`Git Release tag 的 SDK 版本与稳定版 v${targetVersion} 不匹配`);
+  }
+  const sourceConstants = sourceConstantsAtCommit(eligibility.repoRoot, sdkRel, targetCommit);
+  const stagedRoot = resolve(stageRoot);
+  const stagedPackage = JSON.parse(readFileSync(join(stagedRoot, 'package.json'), 'utf8'));
+  const provenance = JSON.parse(readFileSync(join(stagedRoot, 'provenance.json'), 'utf8'));
+  const stagedConstants = readPrebuiltToolsSourceConstants(join(stagedRoot, 'scripts', 'prebuilt_tools.mjs'));
+  const toolsDir = join(stagedRoot, '.staged-tools', `${platform}-${arch}`);
+  const toolsManifest = JSON.parse(readFileSync(join(toolsDir, 'manifest.json'), 'utf8'));
+  if (
+    stagedPackage.version !== targetVersion
+    || !/^[0-9a-f]{40}$/i.test(String(provenance.sourceCommit || ''))
+    || provenance.sourceCommit.toLowerCase() !== String(targetCommit).toLowerCase()
+    || sourceConstants.SDK_VERSION !== targetVersion
+    || stagedConstants.sdkVersion !== targetVersion
+    || !sourceConstants.UPSTREAM_REVISION
+    || sourceConstants.UPSTREAM_REVISION !== provenance.pinnedPocketJsRevision
+    || sourceConstants.UPSTREAM_REVISION !== stagedConstants.upstreamRevision
+    || sourceConstants.BYTECODE_ABI !== toolsManifest.bytecodeAbi
+    || sourceConstants.BYTECODE_ABI !== stagedConstants.bytecodeAbi
+    || toolsManifest.sdkVersion !== targetVersion
+  ) {
+    throw new Error('Release Git tag、SDK 归档与平台工具包的版本或 ABI 不一致');
+  }
+  return { ...eligibility, targetVersion, stagedToolsDir: toolsDir };
+}
+
+export function validateInstalledSourceTools(sdkRoot, platform = process.platform, arch = process.arch) {
+  const resolvedSdk = resolve(sdkRoot);
+  try {
+    const pkg = JSON.parse(readFileSync(join(resolvedSdk, 'package.json'), 'utf8'));
+    const constants = readPrebuiltToolsSourceConstants(join(resolvedSdk, 'scripts', 'prebuilt_tools.mjs'));
+    const toolsDir = join(resolvedSdk, 'node_modules', '@pocket', `tools-${platform}-${arch}`);
+    const tools = validateToolsPackage(toolsDir, platform, arch, pkg.version, {
+      expectedUpstreamRevision: constants.upstreamRevision,
+      expectedBytecodeAbi: constants.bytecodeAbi,
+    });
+    return { ready: true, toolsDir: tools.root, version: tools.manifest.sdkVersion };
+  } catch (error) {
+    return {
+      ready: false,
+      toolsDir: null,
+      version: null,
+      reason: `当前源码对应的预编译工具不可用；请先运行 npm run setup（${error instanceof Error ? error.message : '工具校验失败'}）`,
+    };
+  }
 }
 
 export function validateReleaseOriginUrl(rawUrl, options = {}) {
@@ -864,6 +1154,148 @@ export function restoreBackedUpSdkFiles(sdkRoot, backupRoot, platform = process.
   }
 }
 
+export function prepareSourceUpgradeBackup(sdkRoot, backupRoot, metadata = {}, platform = process.platform, arch = process.arch) {
+  const resolvedSdk = resolve(sdkRoot);
+  const resolvedBackup = resolve(backupRoot);
+  if (!/^[A-Za-z0-9_-]+$/.test(String(platform)) || !/^[A-Za-z0-9_-]+$/.test(String(arch))) {
+    throw new Error('源码更新备份的平台标识无效');
+  }
+  const tuple = `${platform}-${arch}`;
+  const toolsRelPath = join('node_modules', '@pocket', `tools-${tuple}`);
+  const existingToolsDir = join(resolvedSdk, toolsRelPath);
+  const eligibility = inspectSourceUpdate(resolvedSdk, metadata.targetCommit);
+  const checkout = readSourceCheckout(resolvedSdk);
+  if (!eligibility.canApply || !checkout.validRepo || !checkout.originValid || checkout.branch !== 'main' || checkout.dirty) {
+    throw new Error(eligibility.deferredReason || '源码更新备份要求官方 origin 上干净的 main 分支');
+  }
+  if (metadata.previousHead !== checkout.head || !/^[0-9a-f]{40}$/i.test(String(metadata.targetCommit || ''))) {
+    throw new Error('源码更新备份的 expected HEAD 或目标 commit 无效');
+  }
+  if (!existsSync(existingToolsDir) || !lstatSync(existingToolsDir).isDirectory()) {
+    throw new Error(`当前平台工具包不存在：${toolsRelPath}`);
+  }
+  const installed = readInstalledSdkInfo(resolvedSdk, platform, arch);
+  const oldPackage = gitJsonAt(checkout.repoRoot, checkout.head, `${checkout.sdkRelativePath}/package.json`);
+  const oldConstants = sourceConstantsAtCommit(checkout.repoRoot, checkout.sdkRelativePath, checkout.head);
+  if (
+    !oldPackage
+    || oldPackage.version !== installed.currentVersion
+    || oldConstants.SDK_VERSION !== installed.currentVersion
+  ) throw new Error('当前源码版本元数据不一致，拒绝创建源码升级备份');
+  validateToolsPackage(existingToolsDir, platform, arch, installed.currentVersion, {
+    expectedUpstreamRevision: oldConstants.UPSTREAM_REVISION,
+    expectedBytecodeAbi: oldConstants.BYTECODE_ABI,
+  });
+
+  removeTreeWithRetries(resolvedBackup);
+  mkdirSync(join(resolvedBackup, 'tools'), { recursive: true });
+  withBoundedFsRetries(() => cpSync(existingToolsDir, join(resolvedBackup, 'tools'), { recursive: true, force: true }));
+  const meta = {
+    schemaVersion: 1,
+    mode: 'source',
+    platform,
+    arch,
+    platformTuple: tuple,
+    previousVersion: installed.currentVersion,
+    previousHead: metadata.previousHead,
+    targetCommit: metadata.targetCommit,
+    targetVersion: metadata.targetVersion,
+    hadToolsDir: true,
+    createdAt: new Date().toISOString(),
+  };
+  writeFileSync(join(resolvedBackup, BACKUP_META_FILENAME), `${JSON.stringify(meta, null, 2)}\n`);
+  writeFileSync(join(resolvedBackup, BACKUP_COMPLETE_FILENAME), `${JSON.stringify({ completedAt: new Date().toISOString() }, null, 2)}\n`);
+  return meta;
+}
+
+export function applySourceReleaseTools(sdkRoot, stagedToolsDir, platform = process.platform, arch = process.arch) {
+  const resolvedSdk = resolve(sdkRoot);
+  const resolvedStagedTools = resolve(stagedToolsDir);
+  const tuple = `${platform}-${arch}`;
+  const sdkConstants = readPrebuiltToolsSourceConstants(join(resolvedSdk, 'scripts', 'prebuilt_tools.mjs'));
+  const tools = validateToolsPackage(resolvedStagedTools, platform, arch, sdkConstants.sdkVersion, {
+    expectedUpstreamRevision: sdkConstants.upstreamRevision,
+    expectedBytecodeAbi: sdkConstants.bytecodeAbi,
+  });
+  const toolsRelPath = join('node_modules', '@pocket', `tools-${tuple}`);
+  const targetTools = join(resolvedSdk, toolsRelPath);
+  removeTreeWithRetries(targetTools);
+  mkdirSync(dirname(targetTools), { recursive: true });
+  withBoundedFsRetries(() => cpSync(tools.root, targetTools, { recursive: true, force: true }));
+  return targetTools;
+}
+
+export function restoreSourceUpgrade(sdkRoot, backupRoot, expectedTargetHead = null, platform = process.platform, arch = process.arch) {
+  const resolvedSdk = resolve(sdkRoot);
+  const resolvedBackup = resolve(backupRoot);
+  if (!isSdkBackupComplete(resolvedBackup)) throw new Error('源码更新工具备份未完成，拒绝回滚');
+  const meta = JSON.parse(readFileSync(join(resolvedBackup, BACKUP_META_FILENAME), 'utf8'));
+  if (meta?.mode !== 'source' || !/^[0-9a-f]{40}$/i.test(String(meta.previousHead || '')) || !/^[0-9a-f]{40}$/i.test(String(meta.targetCommit || ''))) {
+    throw new Error('源码更新回滚记录无效');
+  }
+  const tuple = `${platform}-${arch}`;
+  if (
+    !/^[A-Za-z0-9_-]+$/.test(String(platform)) || !/^[A-Za-z0-9_-]+$/.test(String(arch))
+    || meta.platform !== platform || meta.arch !== arch || meta.platformTuple !== tuple
+    || meta.hadToolsDir !== true
+  ) throw new Error('源码更新回滚平台或旧工具备份标识无效');
+  const backupToolsDir = join(resolvedBackup, 'tools');
+  let backupStat;
+  try { backupStat = lstatSync(backupToolsDir); }
+  catch { throw new Error('源码更新 journal 缺少完整旧工具备份；Git 与当前工具包保持不变'); }
+  if (!backupStat.isDirectory() || backupStat.isSymbolicLink()) {
+    throw new Error('源码更新 journal 的旧工具备份目录无效；Git 与当前工具包保持不变');
+  }
+  const checkout = readSourceCheckout(resolvedSdk);
+  if (!checkout.validRepo || !checkout.originValid || checkout.branch !== 'main' || checkout.dirty) {
+    throw new Error('源码更新后工作区不再是官方 origin 上干净的 main；为保留用户文件，拒绝回滚 Git 或工具包');
+  }
+  const expected = String(expectedTargetHead || meta.targetCommit);
+  if (expected !== meta.targetCommit) throw new Error('源码更新回滚目标与备份 journal 不一致');
+  if (checkout.head !== meta.previousHead && checkout.head !== expected) {
+    throw new Error('源码更新后的 HEAD 与原提交或本次目标提交均不一致，拒绝破坏性回滚');
+  }
+  const targetAncestry = runGitSync(checkout.repoRoot, ['merge-base', '--is-ancestor', meta.previousHead, meta.targetCommit], { allowFailure: true });
+  if (targetAncestry.status !== 0) {
+    throw new Error('源码更新回滚 journal 中的原提交不是目标 Release 的祖先；Git、工具包及备份保持不变');
+  }
+  const targetPackage = gitJsonAt(checkout.repoRoot, meta.targetCommit, `${checkout.sdkRelativePath}/package.json`);
+  const targetConstants = sourceConstantsAtCommit(checkout.repoRoot, checkout.sdkRelativePath, meta.targetCommit);
+  if (
+    !targetPackage
+    || targetPackage.version !== meta.targetVersion
+    || parseStableSemver(String(meta.targetVersion || ''))?.version !== meta.targetVersion
+    || targetConstants.SDK_VERSION !== meta.targetVersion
+  ) throw new Error('源码更新 journal 中的目标版本与目标 Release 提交不一致；Git、工具包及备份保持不变');
+  const previousPackage = gitJsonAt(checkout.repoRoot, meta.previousHead, `${checkout.sdkRelativePath}/package.json`);
+  const previousConstants = sourceConstantsAtCommit(checkout.repoRoot, checkout.sdkRelativePath, meta.previousHead);
+  if (!previousPackage || previousPackage.version !== meta.previousVersion || previousConstants.SDK_VERSION !== meta.previousVersion) {
+    throw new Error('源码更新 journal 中的旧版本与 original HEAD 不一致；Git 与工具包保持不变');
+  }
+  validateToolsPackage(backupToolsDir, platform, arch, meta.previousVersion, {
+    expectedUpstreamRevision: previousConstants.UPSTREAM_REVISION,
+    expectedBytecodeAbi: previousConstants.BYTECODE_ABI,
+  });
+  if (checkout.head === expected && expected !== meta.previousHead) {
+    const conflicts = sourceCheckoutWriteConflicts(checkout.repoRoot, checkout.head, meta.previousHead);
+    if (conflicts.length > 0) {
+      throw new Error('源码回滚会覆盖现有的未跟踪或被忽略文件；Git、工具包及备份保持不变');
+    }
+    runGitSync(checkout.repoRoot, ['reset', '--keep', meta.previousHead]);
+    const restoredCheckout = readSourceCheckout(resolvedSdk);
+    if (restoredCheckout.head !== meta.previousHead || restoredCheckout.dirty) {
+      throw new Error('源码 Git 回退未能恢复干净的原 HEAD；工具包备份保留未变更');
+    }
+  }
+
+  const toolsRelPath = join('node_modules', '@pocket', `tools-${tuple}`);
+  const existingToolsDir = join(resolvedSdk, toolsRelPath);
+  removeTreeWithRetries(existingToolsDir);
+  mkdirSync(dirname(existingToolsDir), { recursive: true });
+  withBoundedFsRetries(() => cpSync(backupToolsDir, existingToolsDir, { recursive: true, force: true }));
+  return meta;
+}
+
 export function recoverInterruptedSdkUpgrade(sdkRoot, platform = process.platform, arch = process.arch) {
   const resolvedSdk = resolve(sdkRoot);
   const buildDir = join(resolvedSdk, '.pocket-build');
@@ -877,7 +1309,24 @@ export function recoverInterruptedSdkUpgrade(sdkRoot, platform = process.platfor
       continue;
     }
     const meta = JSON.parse(readFileSync(join(backupDir, BACKUP_META_FILENAME), 'utf8'));
-    restoreBackedUpSdkFiles(resolvedSdk, backupDir, platform, arch);
+    if (meta?.mode === 'source') {
+      try {
+        restoreSourceUpgrade(resolvedSdk, backupDir, meta.targetCommit, platform, arch);
+      } catch (error) {
+        const currentVersion = readInstalledSdkInfo(resolvedSdk, platform, arch).currentVersion;
+        const targetVersion = meta.targetVersion || readPersistedUpgradeStatus(resolvedSdk)?.targetVersion || null;
+        writePersistedUpgradeStatus(resolvedSdk, {
+          status: 'error',
+          previousVersion: meta.previousVersion,
+          currentVersion,
+          latestVersion: targetVersion,
+          rolledBack: false,
+          error: `中断的源码升级无法安全恢复；保留工作区、工具包及备份：${error instanceof Error ? error.message : String(error)}`,
+          updatedAt: new Date().toISOString(),
+        });
+        throw error;
+      }
+    } else restoreBackedUpSdkFiles(resolvedSdk, backupDir, platform, arch);
     removeTreeWithRetries(backupDir);
     const persisted = readPersistedUpgradeStatus(resolvedSdk);
     const targetVersion = persisted?.targetVersion || persisted?.latestVersion || null;
@@ -890,7 +1339,7 @@ export function recoverInterruptedSdkUpgrade(sdkRoot, platform = process.platfor
       error: `检测到上次升级（目标 v${targetVersion || 'unknown'}）中断，已在服务启动前自动恢复到 v${meta.previousVersion}`,
       updatedAt: new Date().toISOString(),
     });
-    return { restoredVersion: meta.previousVersion, targetVersion };
+    return { mode: meta.mode === 'source' ? 'source' : 'standalone', restoredVersion: meta.previousVersion, targetVersion };
   }
   return null;
 }
@@ -899,7 +1348,7 @@ export function computeSha256Hex(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-export async function spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersion, handoffToken) {
+export async function spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersion, handoffToken, sourceCommit = null) {
   const resolvedRoot = resolve(sdkRoot);
   const resolvedStage = resolve(stageDir);
   const serviceScript = join(resolvedRoot, 'scripts', 'editor_service.mjs');
@@ -911,6 +1360,7 @@ export async function spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersi
     'upgrade-apply',
     `--stage-dir=${resolvedStage}`,
     `--target-version=${targetVersion}`,
+    ...(sourceCommit ? [`--source-commit=${sourceCommit}`] : []),
     ...(handoffToken ? [`--handoff-token=${handoffToken}`] : []),
   ];
   if (process.platform === 'win32') {
@@ -981,7 +1431,7 @@ export function createStudioUpgradeManager(options = {}) {
   const getReleasesUrl = () => options.releasesUrl || process.env.POCKET_STUDIO_UPGRADE_RELEASES_URL || DEFAULT_GITHUB_RELEASES_URL;
   const canApplyUpgrade = typeof options.canApplyUpgrade === 'function' ? options.canApplyUpgrade : null;
   const triggerServiceUpgrade = options.triggerServiceUpgrade
-    ?? (({ stageDir, targetVersion, handoffToken }) => spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersion, handoffToken));
+    ?? (({ stageDir, targetVersion, handoffToken, sourceCommit }) => spawnDetachedServiceUpgrade(sdkRoot, stageDir, targetVersion, handoffToken, sourceCommit));
 
   const installedInitial = readInstalledSdkInfo(sdkRoot, platform, arch);
   const persistedInitial = readPersistedUpgradeStatus(sdkRoot);
@@ -1085,6 +1535,28 @@ export function createStudioUpgradeManager(options = {}) {
     return selectLatestStableRelease(parsed, platform, arch, { allowLoopbackHttp });
   }
 
+  async function inspectSourceCandidate(candidate) {
+    const checkout = inspectSourceUpdate(sdkRoot, null);
+    if (!checkout.validRepo || !checkout.originValid || checkout.branch !== 'main' || checkout.dirty) {
+      return { canApply: false, targetCommit: null, deferredReason: checkout.deferredReason };
+    }
+    try {
+      const targetCommit = await fetchSourceReleaseCommit(sdkRoot, candidate.tagName, { gitTimeoutMs: options.gitTimeoutMs });
+      const eligibility = inspectSourceUpdate(sdkRoot, targetCommit);
+      if (!eligibility.canApply) return { ...eligibility, targetCommit, canApply: false };
+      const tools = validateInstalledSourceTools(sdkRoot, platform, arch);
+      if (!tools.ready) return { ...eligibility, targetCommit, canApply: false, deferredReason: tools.reason };
+      return { ...eligibility, targetCommit, canApply: true, deferredReason: null };
+    } catch (error) {
+      return {
+        ...checkout,
+        targetCommit: null,
+        canApply: false,
+        deferredReason: `无法验证官方 Release tag 或源码仓库：${error instanceof Error ? error.message : 'Git 验证失败'}`,
+      };
+    }
+  }
+
   async function performApply(candidateOverride = null) {
     if (inFlightApplyPromise) return inFlightApplyPromise;
     if (isUpgradeApplyLockActive(sdkRoot)) {
@@ -1094,12 +1566,8 @@ export function createStudioUpgradeManager(options = {}) {
     }
     inFlightApplyPromise = (async () => {
       syncFromDiskAndEnvironment();
-      if (state.mode !== 'standalone' || !state.autoUpgradeSupported) {
-        const msg = '当前为源码检出模式，仅支持检查新版本，禁止自动覆盖 Git 工作区';
-        state.status = state.upgradeAvailable ? 'available' : state.status;
-        const err = new Error(msg);
-        err.status = 409;
-        throw err;
+      if (!state.autoUpgradeSupported) {
+        throw new Error('当前安装方式不支持自动升级');
       }
       const admission = evaluateCanApply();
       if (!admission.allowed) {
@@ -1110,7 +1578,6 @@ export function createStudioUpgradeManager(options = {}) {
         err.status = 409;
         throw err;
       }
-      state.deferredReason = null;
       const candidate = candidateOverride || cachedReleaseCandidate || await fetchReleaseCandidate();
       if (!candidate) {
         throw new Error('未找到可用的稳定版 SDK 发布');
@@ -1125,6 +1592,18 @@ export function createStudioUpgradeManager(options = {}) {
         state.error = null;
         return snapshot();
       }
+      let sourceCommit = null;
+      if (state.mode === 'source') {
+        const source = await inspectSourceCandidate(candidate);
+        if (!source.canApply) {
+          state.status = 'available';
+          state.deferredReason = source.deferredReason;
+          state.error = null;
+          return snapshot();
+        }
+        sourceCommit = source.targetCommit;
+      }
+      state.deferredReason = null;
       if (!candidate.hasMatchingPlatformAsset || !candidate.archiveUrl || !candidate.checksumUrl) {
         throw new Error(`发布 v${candidate.version} 缺少当前平台（${state.platformTuple}）的独立 Web SDK 归档或 SHA-256 校验文件`);
       }
@@ -1181,11 +1660,24 @@ export function createStudioUpgradeManager(options = {}) {
           err.status = 409;
           throw err;
         }
+        if (state.mode === 'source') {
+          const source = await inspectSourceCandidate(candidate);
+          if (!source.canApply || source.targetCommit !== sourceCommit) {
+            state.deferredReason = source.deferredReason || '官方 Release tag 或源码工作区在下载期间发生变化；请重新检查';
+            state.status = 'available';
+            const err = new Error(state.deferredReason);
+            err.status = 409;
+            throw err;
+          }
+        }
 
         state.status = 'applying';
         removeTreeWithRetries(stageDir);
         extractSafeTarGz(archiveBytes, stageDir, { stripTopLevelPackage: true });
         validateStagedStandaloneSdk(stageDir, targetVersion, platform, arch);
+        if (state.mode === 'source') {
+          validateSourceReleaseStage(sdkRoot, sourceCommit, targetVersion, stageDir, platform, arch);
+        }
 
         state.status = 'restarting';
         writePersistedUpgradeStatus(sdkRoot, {
@@ -1203,8 +1695,9 @@ export function createStudioUpgradeManager(options = {}) {
           targetVersion,
           stageDir,
           handoffToken,
+          ...(sourceCommit ? { mode: 'source', sourceCommit } : {}),
         });
-        await triggerServiceUpgrade({ sdkRoot, stageDir, targetVersion, handoffToken });
+        await triggerServiceUpgrade({ sdkRoot, stageDir, targetVersion, handoffToken, sourceCommit });
         handedOffToChild = true;
         return { ...state };
       } catch (error) {
@@ -1273,7 +1766,14 @@ export function createStudioUpgradeManager(options = {}) {
           throw new Error(`发现新版本 v${candidate.version}，但缺少当前平台（${state.platformTuple}）的独立 Web SDK 归档或校验文件`);
         }
         state.status = 'available';
-        if (state.mode === 'standalone' && state.autoUpgradeSupported && autoApply) {
+        if (state.mode === 'source') {
+          const source = await inspectSourceCandidate(candidate);
+          if (!source.canApply) {
+            state.deferredReason = source.deferredReason;
+            return snapshot();
+          }
+        }
+        if (state.autoUpgradeSupported && autoApply) {
           const persisted = readPersistedUpgradeStatus(sdkRoot);
           if (persisted?.rolledBack && persisted?.latestVersion === candidate.version && !checkOptions.forceApply) {
             state.status = 'error';

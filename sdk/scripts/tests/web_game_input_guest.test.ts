@@ -1,11 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { buildGuest } from "../build_guest.ts";
+import { resolvePrebuiltTools } from "../prebuilt_tools.mjs";
 import { BrowserGameInput } from "../../targets/web/game_input.js";
 import { encodeMessage } from "../../targets/wechat/template/binary-bridge.js";
+
+const sdkRoot = resolve(import.meta.dir, "../..");
 
 test("keyboard and controller facts execute real QJBC and change WebAssembly rendered pixels", async () => {
   const project = mkdtempSync(join(tmpdir(), "pocket-web-game-input-"));
@@ -26,9 +29,18 @@ function App() {
  return <View class="w-full h-full bg-black"><Text class="text-white">{count() + ":" + axis()}</Text></View>;
 }
 mount(() => <App />);`);
-    const built = await buildGuest({ projectRoot: project, outDir: join(project, "out") });
+    // This fixture feeds the browser software-raster engine directly, so it
+    // must carry baked glyphs even though native Flutter builds default to
+    // host-measured vector fonts.
+    const built = await buildGuest({ projectRoot: project, outDir: join(project, "out"), bakeFonts: true });
     const metadata = JSON.parse(readFileSync(built.metadata, "utf8"));
-    const wasmPath = process.env.POCKET_WEB_ENGINE || resolve(import.meta.dir, "../../node_modules/@pocket/tools-darwin-arm64/engine/pocketjs.wasm");
+    const configuredEngine = process.env.POCKET_WEB_ENGINE?.trim();
+    const wasmPath = configuredEngine
+      ? resolve(configuredEngine)
+      : process.env.POCKET_SOURCE_BUILD === "1"
+        ? join(sdkRoot, ".pocket-build/web-engine/pocketjs.wasm")
+        : join(resolvePrebuiltTools(sdkRoot).root, "engine/pocketjs.wasm");
+    expect(existsSync(wasmPath), `WebAssembly engine does not exist: ${wasmPath}`).toBe(true);
     const loaded = await WebAssembly.instantiate(readFileSync(wasmPath), {
       env: { __rquickjs_host_now_us: () => Date.now() * 1000 },
       pocket_wechat: { host_emit: () => 1 },

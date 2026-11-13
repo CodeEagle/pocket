@@ -40,11 +40,45 @@ test("GlassSurface updates Surface style.radius dynamically and PlatformTextureS
     );
     writeFileSync(isolatedMobilePath, transformed.code);
     writeFileSync(join(isolatedSourceRoot, "legacy.ts"), readFileSync(legacySourcePath));
+writeFileSync(join(isolatedSourceRoot, "ui.tsx"), `
+import { createContext } from "solid-js";
+import { View } from "@pocketjs/framework/solid/components";
+export const ContourConsumedContext = createContext(() => false);
+export const SafeAreaScaffold = (props: any) => ({ type: "scaffold", props });
+export const SafeAreaScaffoldContext = createContext({
+  hasScaffold: false,
+  reservedActions: 0,
+  reservedLeadingActions: 0,
+  geometry: () => ({ width: 390, height: 669, safeArea: { top: 0, right: 0, bottom: 0, left: 0 }, keyboardInset: 0, reservedRegions: [] }),
+  topRightContentReserve: () => 0,
+  topRightReserveForBand: () => 0,
+  sideReservesForBand: () => ({ left: 0, right: 0 }),
+});
+export const ScrollablePageContext = createContext({
+  offset: () => 0,
+  max: () => 0,
+});
+export const ScrollContourItem = (props: any) => View(props);
+export const useScrollContourReserve = () => ({ leftReserve: () => 0, nodeRef: () => {}, reserve: () => 0, reserves: () => ({ left: 0, right: 0 }), syncLayout: () => false });
+`);
+    for (const file of ["responsive.ts", "host.ts", "display.ts", "motion.ts", "accessibility.ts", "route.tsx"]) {
+      writeFileSync(join(isolatedSourceRoot, file), readFileSync(join(import.meta.dir, "../packages/pocket_ui/src", file)));
+    }
 
     writeFileSync(runnerPath, `
 import { strict as assert } from "node:assert";
 import { mock } from "bun:test";
 import { createEffect, createRoot, createSignal } from "solid-js";
+
+mock.module("react/jsx-dev-runtime", () => ({
+  Fragment: Symbol.for("surface-test-fragment"),
+  jsx: (type, props) => typeof type === "function" ? type(props) : ({ type, props }),
+  jsxs: (type, props) => typeof type === "function" ? type(props) : ({ type, props }),
+  jsxDEV: (type, props) => typeof type === "function" ? type(props) : ({ type, props }),
+}));
+mock.module("@pocketjs/framework/gesture", () => ({ createGesture: () => ({}) }));
+mock.module("@pocketjs/framework/clock", () => ({ simulationHz: () => 60, virtualNow: () => 0 }));
+mock.module("@pocketjs/framework/solid/lifecycle", () => ({ onFrame: () => () => {} }));
 
 const compositorNodes = [];
 const viewNodes = [];
@@ -62,6 +96,7 @@ mock.module("@pocketjs/framework/solid/components", () => ({
   },
   Focusable: (props) => ({ type: "focusable", props }),
   Modal: (props) => ({ type: "modal", props }),
+  Portal: (props) => ({ type: "portal", props }),
   Text: (props) => ({ type: "text", props }),
   View: (props) => {
     const node = { type: "view", class: undefined, style: undefined, children: undefined };
@@ -82,7 +117,7 @@ const glassRegistrations = [];
 globalThis.pocket = {
   registerSurface: (id, kind, payload) => {
     assert.equal(kind, "glass");
-    glassRegistrations.push({ id, payload: JSON.parse(payload) });
+    glassRegistrations.push({ id, payload });
     return true;
   },
   releaseSurface: () => {},
@@ -127,7 +162,7 @@ const textureReleases = [];
 globalThis.pocket = {
   registerSurface: (id, kind, payload) => {
     assert.equal(kind, "platformTexture");
-    textureRegistrations.push({ id, payload: JSON.parse(payload) });
+    textureRegistrations.push({ id, payload });
     return true;
   },
   releaseSurface: (id) => textureReleases.push(id),
@@ -163,7 +198,7 @@ globalThis.pocket = {
     assert.equal(kind, "platformTexture");
     const ok = !failFirst;
     failFirst = false;
-    retryAttempts.push({ id, ok, payload: JSON.parse(payload) });
+    retryAttempts.push({ id, ok, payload });
     return ok;
   },
   releaseSurface: (id) => textureReleases.push(id),

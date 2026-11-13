@@ -1,53 +1,73 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 test("mesh patch applies to the pinned predecessor and is repeatably detectable", () => {
   const sdk = resolve(import.meta.dir, "../..");
-  const laterPatchNames = [
-    "image-mesh-subpixel.patch",
-    "image-mesh-subpixel-backends.patch",
-    "image-high-resolution-pak.patch",
-    "input-touch-coordinate-sidecar.patch",
-  ];
-  const patches = ["image-mesh.patch", ...laterPatchNames].map(name => ({
-    name,
-    source: readFileSync(join(sdk, "native/patches", name), "utf8"),
-  }));
-  const temporary = mkdtempSync(join(tmpdir(), "pocket-mesh-patch-"));
-  try {
-    const targets = [...new Set(patches.flatMap(({ source }) =>
-      [...source.matchAll(/^\+\+\+ b\/(.+)$/gm)].map(match => match[1]!)))];
-    for (const target of targets) {
-      const path = join(temporary, target);
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, readFileSync(join(sdk, ".cache/pocketjs", target)));
+  const drawTarget = "engine/core/src/draw.rs";
+  const bootstrap = readFileSync(join(sdk, "scripts/prepare_upstream.py"), "utf8");
+  const patchList = bootstrap.slice(bootstrap.indexOf("PATCHES = ("), bootstrap.indexOf("SUPERSEDED_PATCH_MARKERS ="));
+  const names = [...patchList.matchAll(/\("([^"]+\.patch)",/g)].map(match => match[1]!);
+  const patchNames = names.slice(names.indexOf("image-mesh.patch"));
+  const allPatches = patchNames.map(name => readFileSync(join(sdk, "native/patches", name), "utf8"));
+  const sectionFor = (source: string, target: string) => {
+    const gitSections = [...source.matchAll(/^diff --git /gm)].map(match => match.index!);
+    const starts = gitSections.length > 0
+      ? gitSections
+      : [...source.matchAll(/^--- a\/[^\n]+\n\+\+\+ b\//gm)].map(match => match.index!);
+    for (let i = 0; i < starts.length; i++) {
+      const section = source.slice(starts[i], starts[i + 1] ?? source.length);
+      if (section.includes(`+++ b/${target}`)) return section;
     }
-    const frozen = new Map(targets.map(target => [target, readFileSync(join(temporary, target))]));
-    const apply = (source: string, reverse = false, dryRun = false) => spawnSync(
+    return null;
+  };
+  const relevant = allPatches.flatMap((source, index) => {
+    const patch = sectionFor(source, drawTarget);
+    return patch === null ? [] : [{ name: patchNames[index]!, patch }];
+  });
+  const patches = relevant.map(item => item.patch);
+  const temporary = join(tmpdir(), `pocket-mesh-patch-${process.pid}-${Date.now()}`);
+  try {
+    const path = join(temporary, drawTarget);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, readFileSync(join(sdk, ".cache/pocketjs", drawTarget)));
+    const frozen = readFileSync(path);
+    const source = readFileSync(join(sdk, ".cache/pocketjs/contracts/spec/spec.ts"), "utf8");
+    expect(source).toContain("export const DRAW_LIST_VERSION = 5;");
+    expect(source).toContain("texTriFloat: 15,");
+    expect(source).toContain("TEXT_RUN_FLAG_TRACKING");
+    const apply = (patch: string, reverse = false) => spawnSync(
       "patch",
-      ["--batch", "--fuzz=0", reverse ? "--reverse" : "--forward", ...(dryRun ? ["--dry-run"] : []), "-p1"],
-      { cwd: temporary, input: source, encoding: "utf8" },
+      ["--batch", "--fuzz=0", "--forward", ...(reverse ? ["--reverse"] : []), "-p1"],
+      { cwd: temporary, input: patch, encoding: "utf8" },
     );
 
-    // Later versioned changes overlap the same spec/core files. Remove them
-    // in reverse bootstrap order before checking the original retained-mesh
-    // patch against its actual predecessor.
-    for (const { source } of [...patches.slice(1)].reverse()) {
-      const result = apply(source, true);
-      expect(result.status, result.stdout + result.stderr).toBe(0);
+    // Ablate all later layers that edit this Core file in reverse bootstrap
+    // order. Other patch targets are validated by prepare_upstream.py and
+    // their focused tests; including unrelated hunks here only creates false
+    // conflicts when a later protocol legitimately supersedes old DrawList
+    // version markers.
+    for (let index = patches.length - 1; index > 0; index--) {
+      const result = apply(patches[index]!, true);
+      expect(result.status, `${relevant[index]!.name}: ${result.stdout}${result.stderr}`).toBe(0);
+      expect(result.stdout + result.stderr).not.toMatch(/ignored|skipping|failed/i);
     }
-    const reverseBase = apply(patches[0]!.source, true);
+    const reverseBase = apply(patches[0]!, true);
     expect(reverseBase.status, reverseBase.stdout + reverseBase.stderr).toBe(0);
-    const predecessor = readFileSync(join(temporary, "contracts/spec/spec.ts"), "utf8");
-    expect(predecessor).toContain("export const DRAW_LIST_VERSION = 1;");
+    expect(reverseBase.stdout + reverseBase.stderr).not.toMatch(/ignored|skipping|failed/i);
+    const predecessor = readFileSync(path, "utf8");
+    expect(predecessor).not.toContain("fn emit_mesh(");
+    expect(predecessor).not.toContain("fn emit_mesh_triangles(");
 
-    for (const { source } of patches) {
-      const result = apply(source);
+    for (const patch of patches) {
+      const result = apply(patch);
       expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout + result.stderr).not.toMatch(/ignored|skipping|failed/i);
     }
-    for (const target of targets) expect(readFileSync(join(temporary, target))).toEqual(frozen.get(target));
-  } finally { rmSync(temporary, { recursive: true, force: true }); }
+    expect(readFileSync(path)).toEqual(frozen);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
 });

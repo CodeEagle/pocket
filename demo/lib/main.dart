@@ -36,7 +36,6 @@ final showcaseNativePolicies = <String, PocketAppConfig>{
   ),
   'pocket.demo.lantern': PocketAppConfig(
     appId: 'pocket.demo.lantern',
-    fontFamilyFallback: <String>['LanternSerif'],
     pluginFactories: [
       createLanternAudioPlugin,
       (_) => PocketLive2dPlugin.fromBundledCatalog(

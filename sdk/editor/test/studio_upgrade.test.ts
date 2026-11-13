@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { chromium } from "playwright";
 import {
@@ -31,13 +31,16 @@ import {
   createStudioUpgradeManager,
   expectedSdkArchiveAssetNames,
   extractSafeTarGz,
+  inspectSourceUpdate,
   isSdkBackupComplete,
   parseStableSemver,
+  prepareSourceUpgradeBackup,
   prepareSdkUpgradeBackup,
   readInstalledSdkInfo,
   readPersistedUpgradeStatus,
   recoverInterruptedSdkUpgrade,
   restoreBackedUpSdkFiles,
+  restoreSourceUpgrade,
   selectLatestStableRelease,
   validateReleaseOriginUrl,
   validateStagedStandaloneSdk,
@@ -200,7 +203,8 @@ function createStandaloneSdkTree(
     brokenToolsAbi?: boolean;
     upstreamRevision?: string;
     bytecodeAbi?: string;
-    extraPackageFiles?: Record<string, string>;
+    sourceCommit?: string;
+    extraPackageFiles?: Record<string, string | Buffer>;
   } = {},
 ): {
   archiveBytes: Buffer;
@@ -213,6 +217,7 @@ function createStandaloneSdkTree(
   const expected = expectedSdkArchiveAssetNames(version, PLATFORM, ARCH);
   const upstreamRevision = options.upstreamRevision ?? UPSTREAM_REVISION;
   const bytecodeAbi = options.bytecodeAbi ?? BYTECODE_ABI;
+  const sourceCommit = options.sourceCommit ?? "a66b5a3";
 
   const toolsStaging = mkdtempSync(join(tmpdir(), `pocket-synth-tools-${version}-`));
   try {
@@ -243,7 +248,7 @@ function createStandaloneSdkTree(
   }, null, 2)}\n`);
   writeFileSync(join(sdkRoot, "provenance.json"), `${JSON.stringify({
     sourceRepository: "CodeEagle/pocket",
-    sourceCommit: "a66b5a3",
+    sourceCommit,
     pinnedPocketJsRevision: upstreamRevision,
     runtime: "QuickJS QJBC + PAK + PocketJS WebAssembly + Canvas2D",
   }, null, 2)}\n`);
@@ -304,6 +309,103 @@ function createStandaloneSdkTree(
   } finally {
     rmSync(packStaging, { recursive: true, force: true });
   }
+}
+
+function runFixtureGit(repository: string, ...args: string[]): string {
+  const result = spawnSync("git", args, { cwd: repository, encoding: "utf8", windowsHide: true, timeout: 15_000 });
+  if (result.error || result.status !== 0) throw new Error(`git ${args[0]} failed: ${result.error || result.stderr}`);
+  return result.stdout.trim();
+}
+
+function createSourceManagerCheckout(
+  currentVersion: string,
+  targetVersion: string,
+  options: { rollbackIgnoredPath?: "file" | "ancestor" } = {},
+) {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "pocket-source-upgrade-manager-"));
+  const repository = join(fixtureRoot, "repo");
+  const sdkRoot = join(repository, "sdk");
+  const remote = join(fixtureRoot, "remote.git");
+  const toolsDir = join(sdkRoot, "node_modules", "@pocket", `tools-${TUPLE}`);
+  const packageData = (version: string) => ({
+    name: "pocketjs-sdk",
+    version,
+    dependencies: { "fixture-dependency": "1.0.0" },
+  });
+  const packageLock = (version: string) => ({
+    name: "pocketjs-sdk",
+    version,
+    lockfileVersion: 3,
+    packages: {
+      "": { name: "pocketjs-sdk", version, dependencies: { "fixture-dependency": "1.0.0" } },
+      "node_modules/fixture-dependency": { version: "1.0.0" },
+    },
+  });
+  const writeVersion = (version: string) => {
+    writeFileSync(join(sdkRoot, "package.json"), `${JSON.stringify(packageData(version), null, 2)}\n`);
+    writeFileSync(join(sdkRoot, "package-lock.json"), `${JSON.stringify(packageLock(version), null, 2)}\n`);
+    writeFileSync(join(sdkRoot, "scripts", "prebuilt_tools.mjs"), `export const SDK_VERSION = '${version}';\nexport const UPSTREAM_REVISION = '${UPSTREAM_REVISION}';\nexport const BYTECODE_ABI = '${BYTECODE_ABI}';\n`);
+  };
+
+  mkdirSync(join(sdkRoot, "scripts"), { recursive: true });
+  mkdirSync(repository, { recursive: true });
+  writeFileSync(join(repository, ".gitignore"), "sdk/.pocket-build/\nsdk/node_modules/\n");
+  runFixtureGit(fixtureRoot, "init", "--bare", remote);
+  runFixtureGit(repository, "init", "--initial-branch=main");
+  runFixtureGit(repository, "config", "user.name", "Pocket Source Manager Test");
+  runFixtureGit(repository, "config", "user.email", "source-manager@example.invalid");
+  runFixtureGit(repository, "config", "commit.gpgsign", "false");
+  runFixtureGit(repository, "config", "tag.gpgsign", "false");
+  runFixtureGit(repository, "config", "core.autocrlf", "false");
+  runFixtureGit(repository, "remote", "add", "origin", "git@github.com:CodeEagle/pocket.git");
+  const sshScript = join(fixtureRoot, "ssh.mjs");
+  writeFileSync(sshScript, `import { spawn } from 'node:child_process';\nconst child = spawn('git', ['upload-pack', process.argv[2]], { stdio: 'inherit', windowsHide: true });\nchild.on('error', () => process.exit(1));\nchild.on('close', code => process.exit(code ?? 1));\n`);
+  const shellQuote = (value: string) => `'${value.replaceAll("'", "'\"'\"'")}'`;
+  runFixtureGit(repository, "config", "core.sshCommand", [process.execPath, sshScript, remote].map(shellQuote).join(" "));
+  writeVersion(currentVersion);
+  const rollbackIgnoredPath = options.rollbackIgnoredPath === "ancestor" ? "legacy-dir/old.txt" : "sdk/legacy-local.txt";
+  if (options.rollbackIgnoredPath) {
+    mkdirSync(dirname(join(repository, rollbackIgnoredPath)), { recursive: true });
+    writeFileSync(join(repository, rollbackIgnoredPath), "original source file\n");
+  }
+  createSyntheticToolsDirectory(toolsDir, currentVersion, PLATFORM, ARCH, { upstreamRevision: UPSTREAM_REVISION, bytecodeAbi: BYTECODE_ABI });
+  runFixtureGit(repository, "add", ".");
+  runFixtureGit(repository, "commit", "-m", "source baseline");
+  const base = runFixtureGit(repository, "rev-parse", "HEAD");
+  runFixtureGit(repository, "checkout", "-b", "release-next");
+  writeVersion(targetVersion);
+  if (options.rollbackIgnoredPath) {
+    rmSync(join(repository, rollbackIgnoredPath));
+    if (options.rollbackIgnoredPath === "ancestor") rmSync(join(repository, "legacy-dir"), { recursive: true, force: true });
+    const ignoredPattern = options.rollbackIgnoredPath === "ancestor" ? "/legacy-dir\n" : "/sdk/legacy-local.txt\n";
+    writeFileSync(join(repository, ".gitignore"), `sdk/.pocket-build/\nsdk/node_modules/\n${ignoredPattern}`);
+  }
+  runFixtureGit(repository, "add", "-A");
+  runFixtureGit(repository, "commit", "-m", "source release");
+  const target = runFixtureGit(repository, "rev-parse", "HEAD");
+  const tagName = `sdk-v${targetVersion}`;
+  runFixtureGit(repository, "tag", tagName, target);
+  runFixtureGit(repository, "push", remote, `${target}:refs/tags/${tagName}`);
+  runFixtureGit(repository, "checkout", "main");
+  return { fixtureRoot, repository, sdkRoot, remote, toolsDir, base, target, tagName, rollbackIgnoredPath, close: () => rmSync(fixtureRoot, { recursive: true, force: true }) };
+}
+
+function createSourceUpgradeAtTarget(
+  currentVersion: string,
+  targetVersion: string,
+  options: { rollbackIgnoredPath?: "file" | "ancestor" } = {},
+) {
+  const source = createSourceManagerCheckout(currentVersion, targetVersion, options);
+  const backupRoot = join(source.sdkRoot, ".pocket-build", "sdk-upgrade-backup-source-test");
+  prepareSourceUpgradeBackup(source.sdkRoot, backupRoot, {
+    previousHead: source.base,
+    targetCommit: source.target,
+    targetVersion,
+  }, PLATFORM, ARCH);
+  runFixtureGit(source.repository, "merge", "--ff-only", "--no-overwrite-ignore", source.target);
+  rmSync(source.toolsDir, { recursive: true, force: true });
+  createSyntheticToolsDirectory(source.toolsDir, targetVersion, PLATFORM, ARCH, { upstreamRevision: UPSTREAM_REVISION, bytecodeAbi: BYTECODE_ABI });
+  return { ...source, backupRoot };
 }
 
 describe("Studio built-in self-upgrade unit & security gates", () => {
@@ -387,50 +489,268 @@ describe("Studio built-in self-upgrade unit & security gates", () => {
     }
   });
 
-  test("distinguishes source Git checkout mode from standalone SDK install and never auto-overwrites source checkout", async () => {
-    const repoSdkRoot = resolve(import.meta.dir, "../..");
-    const sourceInfo = readInstalledSdkInfo(repoSdkRoot);
-    expect(sourceInfo.mode).toBe("source");
-    expect(sourceInfo.autoUpgradeSupported).toBe(false);
+  test("source Git checkout defers automatic updates on a non-main checkout", async () => {
+    const source = createSourceManagerCheckout("0.1.15", "0.1.16");
+    try {
+      runFixtureGit(source.repository, "checkout", "-b", "feature");
+      expect(runFixtureGit(source.repository, "branch", "--show-current")).toBe("feature");
+      const sourceInfo = readInstalledSdkInfo(source.sdkRoot);
+      expect(sourceInfo.mode).toBe("source");
+      expect(sourceInfo.autoUpgradeSupported).toBe(true);
 
-    let archiveFetched = false;
-    const manager = createStudioUpgradeManager({
-      sdkRoot: repoSdkRoot,
-      allowLoopbackHttp: true,
-      releasesUrl: "http://127.0.0.1:65530/releases",
-      fetchImpl: async (url: string) => {
-        if (url.endsWith("/releases")) {
-          return new Response(JSON.stringify([
-            {
-              tag_name: "sdk-v9.9.9",
+      let archiveFetched = false;
+      const handoffs: Array<Record<string, unknown>> = [];
+      const manager = createStudioUpgradeManager({
+        sdkRoot: source.sdkRoot,
+        allowLoopbackHttp: true,
+        releasesUrl: "http://127.0.0.1:65530/releases",
+        fetchImpl: async (url: string) => {
+          if (url.endsWith("/releases")) {
+            return new Response(JSON.stringify([
+              {
+                tag_name: "sdk-v9.9.9",
+                draft: false,
+                prerelease: false,
+                html_url: "https://github.com/CodeEagle/pocket/releases/tag/sdk-v9.9.9",
+                assets: [
+                  {
+                    name: `pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz`,
+                    browser_download_url: `http://127.0.0.1:65530/pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz`,
+                  },
+                  {
+                    name: `pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz.sha256`,
+                    browser_download_url: `http://127.0.0.1:65530/pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz.sha256`,
+                  },
+                ],
+              },
+            ]));
+          }
+          archiveFetched = true;
+          return new Response("should not download in source mode", { status: 500 });
+        },
+        triggerServiceUpgrade: async (handoff: Record<string, unknown>) => { handoffs.push(handoff); },
+      });
+
+      const checkResult = await manager.check({ autoApply: true });
+      expect(checkResult.mode).toBe("source");
+      expect(checkResult.upgradeAvailable).toBe(true);
+      expect(checkResult.latestVersion).toBe("9.9.9");
+      expect(checkResult.status).toBe("available");
+      expect(checkResult.deferredReason).toMatch(/main/);
+      expect(archiveFetched).toBe(false);
+      const applyResult = await manager.apply();
+      expect(applyResult.status).toBe("available");
+      expect(applyResult.deferredReason).toMatch(/main/);
+      expect(archiveFetched).toBe(false);
+      expect(handoffs).toHaveLength(0);
+    } finally {
+      source.close();
+    }
+  });
+
+  test("source checkout root accepts filesystem aliases but rejects a nested non-root SDK", () => {
+    const source = createSourceManagerCheckout("0.1.15", "0.1.16");
+    const aliasRoot = join(source.fixtureRoot, "repo-alias");
+    const nestedSdkRoot = join(source.repository, "nested", "sdk");
+    try {
+      symlinkSync(source.repository, aliasRoot, process.platform === "win32" ? "junction" : "dir");
+      const aliased = inspectSourceUpdate(join(aliasRoot, "sdk"), source.target);
+      expect(aliased.validRepo).toBe(true);
+      expect(aliased.canApply).toBe(true);
+
+      mkdirSync(nestedSdkRoot, { recursive: true });
+      const nested = inspectSourceUpdate(nestedSdkRoot, source.target);
+      expect(nested.validRepo).toBe(false);
+      expect(nested.deferredReason).toMatch(/仓库根目录不匹配/);
+    } finally {
+      source.close();
+    }
+  });
+
+  test("source auto check stages the release tools and hands off the verified tag commit", { timeout: 30_000 }, async () => {
+    const currentVersion = "0.1.15";
+    const targetVersion = "0.1.16";
+    const source = createSourceManagerCheckout(currentVersion, targetVersion);
+    const packageSource = mkdtempSync(join(tmpdir(), "pocket-source-manager-release-"));
+    try {
+      const release = createStandaloneSdkTree(packageSource, targetVersion, { sourceCommit: source.target });
+      const handoffs: Array<Record<string, unknown>> = [];
+      const requests: string[] = [];
+      const manager = createStudioUpgradeManager({
+        sdkRoot: source.sdkRoot,
+        platform: PLATFORM,
+        arch: ARCH,
+        releasesUrl: "http://127.0.0.1:65530/releases",
+        allowLoopbackHttp: true,
+        gitTimeoutMs: 10_000,
+        fetchImpl: async (input: RequestInfo | URL) => {
+          const url = String(input);
+          requests.push(url);
+          if (url.endsWith("/releases")) {
+            return new Response(JSON.stringify([{
+              tag_name: `sdk-v${targetVersion}`,
               draft: false,
               prerelease: false,
-              html_url: "https://github.com/CodeEagle/pocket/releases/tag/sdk-v9.9.9",
+              html_url: `https://github.com/CodeEagle/pocket/releases/tag/sdk-v${targetVersion}`,
               assets: [
-                {
-                  name: `pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz`,
-                  browser_download_url: `http://127.0.0.1:65530/pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz`,
-                },
-                {
-                  name: `pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz.sha256`,
-                  browser_download_url: `http://127.0.0.1:65530/pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz.sha256`,
-                },
+                { name: release.archiveName, browser_download_url: `http://127.0.0.1:65530/${release.archiveName}` },
+                { name: release.checksumName, browser_download_url: `http://127.0.0.1:65530/${release.checksumName}` },
               ],
-            },
-          ]));
-        }
-        archiveFetched = true;
-        return new Response("should not download in source mode", { status: 500 });
-      },
-    });
+            }]));
+          }
+          if (url.endsWith(release.checksumName)) return new Response(`${release.archiveSha256}  ${release.archiveName}\n`);
+          if (url.endsWith(release.archiveName)) return new Response(release.archiveBytes);
+          return new Response("unexpected source upgrade request", { status: 404 });
+        },
+        triggerServiceUpgrade: async (handoff: Record<string, unknown>) => { handoffs.push(handoff); },
+      });
 
-    const checkResult = await manager.check({ autoApply: true });
-    expect(checkResult.mode).toBe("source");
-    expect(checkResult.upgradeAvailable).toBe(true);
-    expect(checkResult.latestVersion).toBe("9.9.9");
-    expect(checkResult.status).toBe("available");
-    expect(archiveFetched).toBe(false);
-    await expect(manager.apply()).rejects.toThrow(/源码检出模式/);
+      const result = await manager.check({ autoApply: true });
+      expect(result.mode).toBe("source");
+      expect(result.autoUpgradeSupported).toBe(true);
+      expect(result.status).toBe("restarting");
+      expect(result.currentVersion).toBe(currentVersion);
+      expect(result.targetVersion).toBe(targetVersion);
+      expect(result.deferredReason).toBeNull();
+      expect(handoffs).toHaveLength(1);
+      expect(handoffs[0].sourceCommit).toBe(source.target);
+      expect(handoffs[0].targetVersion).toBe(targetVersion);
+      expect(requests.some(url => url.endsWith(release.archiveName))).toBe(true);
+      expect(runFixtureGit(source.repository, "rev-parse", "HEAD")).toBe(source.base);
+    } finally {
+      source.close();
+      rmSync(packageSource, { recursive: true, force: true });
+    }
+  });
+
+  test("source rollback restores the prior Git commit and matching platform tools", () => {
+    const source = createSourceUpgradeAtTarget("0.1.15", "0.1.16");
+    try {
+      expect(runFixtureGit(source.repository, "rev-parse", "HEAD")).toBe(source.target);
+      expect(JSON.parse(readFileSync(join(source.toolsDir, "manifest.json"), "utf8")).sdkVersion).toBe("0.1.16");
+
+      const restored = recoverInterruptedSdkUpgrade(source.sdkRoot, PLATFORM, ARCH);
+
+      expect(restored?.mode).toBe("source");
+      expect(restored?.restoredVersion).toBe("0.1.15");
+      expect(runFixtureGit(source.repository, "rev-parse", "HEAD")).toBe(source.base);
+      expect(JSON.parse(readFileSync(join(source.toolsDir, "manifest.json"), "utf8")).sdkVersion).toBe("0.1.15");
+      expect(runFixtureGit(source.repository, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+      expect(existsSync(source.backupRoot)).toBe(false);
+    } finally {
+      source.close();
+    }
+  });
+
+  test("source rollback rejects ignored user files that the old commit would restore", () => {
+    for (const collision of ["file", "ancestor"] as const) {
+      const source = createSourceUpgradeAtTarget("0.1.15", "0.1.16", { rollbackIgnoredPath: collision });
+      const ignoredPath = collision === "file" ? source.rollbackIgnoredPath : "legacy-dir";
+      const userFile = join(source.repository, ignoredPath);
+      try {
+        writeFileSync(userFile, "keep this user data\n");
+        expect(runFixtureGit(source.repository, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+
+        expect(() => recoverInterruptedSdkUpgrade(source.sdkRoot, PLATFORM, ARCH))
+          .toThrow(/未跟踪或被忽略文件/);
+
+        expect(runFixtureGit(source.repository, "rev-parse", "HEAD")).toBe(source.target);
+        expect(readFileSync(userFile, "utf8")).toBe("keep this user data\n");
+        expect(JSON.parse(readFileSync(join(source.toolsDir, "manifest.json"), "utf8")).sdkVersion).toBe("0.1.16");
+        expect(isSdkBackupComplete(source.backupRoot)).toBe(true);
+        expect(readPersistedUpgradeStatus(source.sdkRoot)?.rolledBack).toBe(false);
+      } finally {
+        source.close();
+      }
+    }
+  });
+
+  test("source rollback rejects missing, corrupt, or mismatched old tool backups without mutation", () => {
+    const corruptions = [
+      {
+        name: "missing tools directory",
+        apply: (source: ReturnType<typeof createSourceUpgradeAtTarget>) => rmSync(join(source.backupRoot, "tools"), { recursive: true, force: true }),
+        reason: /缺少完整旧工具备份/,
+      },
+      {
+        name: "corrupt tools manifest",
+        apply: (source: ReturnType<typeof createSourceUpgradeAtTarget>) => {
+          const manifestPath = join(source.backupRoot, "tools", "manifest.json");
+          const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+          manifest.bytecodeAbi = "quickjs-bytecode-v1:corrupted";
+          writeFileSync(manifestPath, JSON.stringify(manifest));
+        },
+        reason: /版本\/ABI 不匹配/,
+      },
+      {
+        name: "mismatched platform tuple",
+        apply: (source: ReturnType<typeof createSourceUpgradeAtTarget>) => {
+          const metaPath = join(source.backupRoot, "backup-meta.json");
+          const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+          meta.platformTuple = "../other-platform";
+          writeFileSync(metaPath, JSON.stringify(meta));
+        },
+        reason: /平台或旧工具备份标识无效/,
+      },
+    ];
+
+    for (const corruption of corruptions) {
+      const source = createSourceUpgradeAtTarget("0.1.15", "0.1.16");
+      try {
+        corruption.apply(source);
+        expect(() => restoreSourceUpgrade(source.sdkRoot, source.backupRoot, source.target, PLATFORM, ARCH), corruption.name)
+          .toThrow(corruption.reason);
+        expect(runFixtureGit(source.repository, "rev-parse", "HEAD"), corruption.name).toBe(source.target);
+        expect(JSON.parse(readFileSync(join(source.toolsDir, "manifest.json"), "utf8"), corruption.name).sdkVersion).toBe("0.1.16");
+        expect(isSdkBackupComplete(source.backupRoot), corruption.name).toBe(true);
+      } finally {
+        source.close();
+      }
+    }
+  });
+
+  test("source rollback rejects unrelated previous commits and forged target versions before mutation", () => {
+    const corruptions = [
+      {
+        name: "unrelated previous commit",
+        prepare: (source: ReturnType<typeof createSourceUpgradeAtTarget>) => {
+          runFixtureGit(source.repository, "checkout", "--detach", source.base);
+          runFixtureGit(source.repository, "checkout", "-b", "journal-unrelated");
+          writeFileSync(join(source.sdkRoot, "unrelated-journal-commit.txt"), "unrelated commit\n");
+          runFixtureGit(source.repository, "add", "sdk/unrelated-journal-commit.txt");
+          runFixtureGit(source.repository, "commit", "-m", "unrelated source history");
+          const unrelated = runFixtureGit(source.repository, "rev-parse", "HEAD");
+          runFixtureGit(source.repository, "checkout", "main");
+          return { previousHead: unrelated };
+        },
+        reason: /不是目标 Release 的祖先/,
+      },
+      {
+        name: "forged target version",
+        prepare: () => ({ targetVersion: "0.1.17" }),
+        reason: /目标版本与目标 Release 提交不一致/,
+      },
+    ];
+
+    for (const corruption of corruptions) {
+      const source = createSourceUpgradeAtTarget("0.1.15", "0.1.16");
+      try {
+        const metaPath = join(source.backupRoot, "backup-meta.json");
+        const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+        Object.assign(meta, corruption.prepare(source));
+        writeFileSync(metaPath, JSON.stringify(meta));
+
+        expect(() => recoverInterruptedSdkUpgrade(source.sdkRoot, PLATFORM, ARCH), corruption.name)
+          .toThrow(corruption.reason);
+
+        expect(runFixtureGit(source.repository, "rev-parse", "HEAD"), corruption.name).toBe(source.target);
+        expect(JSON.parse(readFileSync(join(source.toolsDir, "manifest.json"), "utf8"), corruption.name).sdkVersion).toBe("0.1.16");
+        expect(isSdkBackupComplete(source.backupRoot), corruption.name).toBe(true);
+        expect(readPersistedUpgradeStatus(source.sdkRoot)?.rolledBack, corruption.name).toBe(false);
+      } finally {
+        source.close();
+      }
+    }
   });
 
   test("validates staged SDK internal consistency and allows future compiler revision / bytecode ABI upgrades", () => {
@@ -656,7 +976,7 @@ describe("Studio built-in self-upgrade unit & security gates", () => {
         targetVersion: "0.1.11",
       });
       const recovered = recoverInterruptedSdkUpgrade(installRoot, PLATFORM, ARCH);
-      expect(recovered).toEqual({ restoredVersion: "0.1.10", targetVersion: "0.1.11" });
+      expect(recovered).toEqual({ mode: "standalone", restoredVersion: "0.1.10", targetVersion: "0.1.11" });
       expect(JSON.parse(readFileSync(join(installRoot, "package.json"), "utf8")).version).toBe("0.1.10");
       expect(existsSync(join(installRoot, "packages", "pocket_ui", "legacy_only.ts"))).toBe(true);
       expect(existsSync(join(installRoot, "packages", "pocket_ui", "new_v11_feature.ts"))).toBe(false);
@@ -1016,10 +1336,11 @@ function populateRealStandaloneScripts(
     upstreamRevision?: string;
     bytecodeAbi?: string;
     failOnVersion?: string;
-    extraPackageFiles?: Record<string, string>;
+    extraPackageFiles?: Record<string, string | Buffer>;
   } = {},
 ) {
   const repoScriptsDir = resolve(import.meta.dir, "../../scripts");
+  const repoEditorDir = resolve(import.meta.dir, "..");
   const repoNodeModules = resolve(import.meta.dir, "../../node_modules");
   const upstreamRevision = options.upstreamRevision ?? UPSTREAM_REVISION;
   const bytecodeAbi = options.bytecodeAbi ?? BYTECODE_ABI;
@@ -1029,10 +1350,32 @@ function populateRealStandaloneScripts(
     .replace(/export const UPSTREAM_REVISION = ['"][^'"]+['"];/, `export const UPSTREAM_REVISION = '${upstreamRevision}';`)
     .replace(/export const BYTECODE_ABI = ['"][^'"]+['"];/, `export const BYTECODE_ABI = '${bytecodeAbi}';`);
 
+  // Mirror export_web_sdk's editor source copy (which removes editor/test)
+  // instead of maintaining a second hand-written list of CLI runtime imports.
+  // The test's minimal server entry is overlaid below to keep lifecycle
+  // behavior controlled while editor_service.mjs uses the real editor helpers.
+  const editorRuntimeFiles: Record<string, Buffer> = {};
+  const ignoredEditorPathParts = new Set(["test", "node_modules", "target", ".cache", ".pocket-build", ".git"]);
+  const collectEditorRuntimeFiles = (currentDir: string): void => {
+    const entries = readdirSync(currentDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const fullPath = join(currentDir, entry.name);
+      const relPath = relative(repoEditorDir, fullPath).replaceAll("\\", "/");
+      if (relPath.split("/").some((part) => ignoredEditorPathParts.has(part))) continue;
+      if (entry.isDirectory()) {
+        collectEditorRuntimeFiles(fullPath);
+      } else if (entry.isFile()) {
+        editorRuntimeFiles[`editor/${relPath}`] = readFileSync(fullPath);
+      }
+    }
+  };
+  collectEditorRuntimeFiles(repoEditorDir);
+
   const archiveInfo = createStandaloneSdkTree(targetSdkRoot, version, {
     upstreamRevision,
     bytecodeAbi,
     extraPackageFiles: {
+      ...editorRuntimeFiles,
       "scripts/editor_service.mjs": readFileSync(join(repoScriptsDir, "editor_service.mjs"), "utf8"),
       "scripts/studio_upgrade.mjs": readFileSync(join(repoScriptsDir, "studio_upgrade.mjs"), "utf8"),
       "scripts/prebuilt_tools.mjs": prebuiltSource,
@@ -1053,6 +1396,102 @@ function populateRealStandaloneScripts(
     }
   }
   return archiveInfo;
+}
+
+function upgradeLifecycleProcessDiagnostics(sdkRoot: string): Record<string, unknown> {
+  const buildRoot = join(sdkRoot, ".pocket-build");
+  const readJson = (name: string): Record<string, unknown> | null => {
+    try {
+      return JSON.parse(readFileSync(join(buildRoot, name), "utf8")) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+  const pidRecord = readJson("editor-service-8791.pid.json");
+  const applyLock = readJson("sdk-upgrade-apply.lock.json");
+  const observedPids = [pidRecord?.pid, applyLock?.pid]
+    .map(Number)
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  const pidStatus = observedPids.map((pid) => {
+    try {
+      process.kill(pid, 0);
+      return { pid, alive: true };
+    } catch (error) {
+      return { pid, alive: (error as NodeJS.ErrnoException).code === "EPERM" };
+    }
+  });
+
+  if (process.platform === "win32") {
+    return { pidStatus, processTree: "ps is unavailable on win32" };
+  }
+  const ps = spawnSync("ps", ["-eo", "pid,ppid,stat,args"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  if (ps.error || ps.status !== 0) {
+    return {
+      pidStatus,
+      processTreeError: ps.error?.message || ps.stderr || `ps exited ${ps.status}`,
+    };
+  }
+
+  const rows = ps.stdout.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+    return match
+      ? [{ pid: Number(match[1]), ppid: Number(match[2]), state: match[3], command: match[4] }]
+      : [];
+  });
+  const treePids = new Set(observedPids);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      if (treePids.has(row.ppid) && !treePids.has(row.pid)) {
+        treePids.add(row.pid);
+        changed = true;
+      }
+    }
+  }
+  const relevantProcesses = rows.filter((row) =>
+    treePids.has(row.pid) || row.command.includes(sdkRoot),
+  );
+  return { pidStatus, processTree: relevantProcesses };
+}
+
+async function reportUpgradeLifecycleFailure(sdkRoot: string, browser: import("playwright").Browser): Promise<void> {
+  console.error(`[upgrade lifecycle failure] ${sdkRoot}`);
+  const buildRoot = join(sdkRoot, ".pocket-build");
+  const files = ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"];
+  for (const file of files) {
+    const source = join(buildRoot, file);
+    if (existsSync(source)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(source, "utf8").slice(-16000)}`);
+  }
+  console.error("[upgrade lifecycle processes]", JSON.stringify(upgradeLifecycleProcessDiagnostics(sdkRoot), null, 2));
+  for (const context of browser.contexts()) {
+    for (const page of context.pages()) {
+      console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
+    }
+  }
+
+  try {
+    const artifactDir = join(
+      process.env.RUNNER_TEMP || tmpdir(),
+      "pocket-studio-upgrade-diagnostics",
+      basename(sdkRoot),
+    );
+    mkdirSync(artifactDir, { recursive: true });
+    for (const file of files) {
+      const source = join(buildRoot, file);
+      if (existsSync(source)) copyFileSync(source, join(artifactDir, file));
+    }
+    writeFileSync(
+      join(artifactDir, "process-tree.json"),
+      `${JSON.stringify(upgradeLifecycleProcessDiagnostics(sdkRoot), null, 2)}\n`,
+    );
+    console.error(`[upgrade lifecycle diagnostics] ${artifactDir}`);
+  } catch (error) {
+    console.error("[upgrade lifecycle diagnostics copy failed]", error);
+  }
 }
 
 describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium UI integration", () => {
@@ -1186,17 +1625,34 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
         undefined,
         { timeout: 10_000 },
       );
+      // Project loading runs alongside the startup update check; do not simulate
+      // an edit until the actual source has loaded and the editor is enabled.
+      await page.waitForFunction(
+        () => {
+          const source = document.getElementById("source");
+          return source instanceof HTMLTextAreaElement
+            && !source.disabled
+            && source.value.includes("export default function App()")
+            && !(document.getElementById("project-state")?.textContent || "").includes("未选择项目");
+        },
+        undefined,
+        { timeout: 10_000 },
+      );
+      await page.locator("#rail-source").click();
+      await page.locator("#source").waitFor({ state: "visible", timeout: 10_000 });
 
       // Make source editor dirty and verify clicking upgrade defers apply while dirty
       await page.evaluate(() => {
         (window as unknown as { __ALLOW_AUTO_APPLY__?: boolean }).__ALLOW_AUTO_APPLY__ = true;
-        const source = document.getElementById("source") as HTMLTextAreaElement | null;
-        if (source) {
-          source.value = "// unsaved user draft\nexport default function App() { return null; }\n";
-          source.dispatchEvent(new Event("input", { bubbles: true }));
-        }
       });
+      await page.locator("#source").fill("// unsaved user draft\nexport default function App() { return null; }\n");
+      expect(await page.locator("#save").isEnabled()).toBe(true);
       await page.locator("#studio-upgrade-action").click();
+      await page.waitForFunction(
+        () => (document.getElementById("studio-upgrade-status")?.textContent || "").includes("未保存修改"),
+        undefined,
+        { timeout: 10_000 },
+      );
       const deferredBarText = await page.locator("#studio-upgrade-status").textContent();
       expect(deferredBarText).toContain("未保存修改");
 
@@ -1255,16 +1711,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(readFileSync(nestedCustomPackage, "utf8")).toBe("export const custom = 42;\n");
       expect(readFileSync(join(configuredProjectRoot, "app.tsx"), "utf8")).toContain("unsaved user draft");
     } catch (error) {
-      console.error(`[upgrade lifecycle failure] ${standaloneRoot}`);
-      for (const file of ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"]) {
-        const path = join(standaloneRoot, ".pocket-build", file);
-        if (existsSync(path)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(path, "utf8").slice(-16000)}`);
-      }
-      for (const context of browser.contexts()) {
-        for (const page of context.pages()) {
-          console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
-        }
-      }
+      await reportUpgradeLifecycleFailure(standaloneRoot, browser);
       throw error;
     } finally {
       await browser.close();
@@ -1398,16 +1845,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(readFileSync(nestedCustomFile, "utf8")).toBe('export const keep = "nested-consumer-file";\n');
       expect(readPersistedUpgradeStatus(standaloneRoot)?.rolledBack).toBe(true);
     } catch (error) {
-      console.error(`[upgrade lifecycle failure] ${standaloneRoot}`);
-      for (const file of ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"]) {
-        const path = join(standaloneRoot, ".pocket-build", file);
-        if (existsSync(path)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(path, "utf8").slice(-16000)}`);
-      }
-      for (const context of browser.contexts()) {
-        for (const page of context.pages()) {
-          console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
-        }
-      }
+      await reportUpgradeLifecycleFailure(standaloneRoot, browser);
       throw error;
     } finally {
       await browser.close();

@@ -300,6 +300,10 @@ struct FrameOp {
     uvs: Option<[f32; 6]>,
     /// Normalized source rectangle for an axis-aligned TEX_QUAD.
     uv: Option<[f32; 4]>,
+    /// Optional explicit tracking (letter-spacing in logical px) for TEXT_RUN.
+    tracking: Option<f32>,
+    /// Optional 2x2 linear transform `[a, b, c, d]` anchored at `(x, y)` for TEXT_RUN.
+    text_affine: Option<[f32; 4]>,
     /// Typed compositor descriptor used only by the PFB1 encoder. Keeping it
     /// out of the serde representation preserves the legacy JSON asset
     /// descriptor contract without building JSON on the binary hot path.
@@ -366,6 +370,10 @@ struct LegacyFrameOp<'a> {
     uvs: Option<&'a [f32]>,
     #[serde(rename = "uv", skip_serializing_if = "Option::is_none")]
     uv: Option<&'a [f32]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tracking: Option<f32>,
+    #[serde(rename = "affine", skip_serializing_if = "Option::is_none")]
+    text_affine: Option<&'a [f32]>,
     clip: &'a Clip,
 }
 
@@ -428,6 +436,8 @@ impl Serialize for FrameOp {
             colors: self.colors.as_ref().map(|v| v.as_slice()),
             uvs: self.uvs.as_ref().map(|v| v.as_slice()),
             uv: self.uv.as_ref().map(|v| v.as_slice()),
+            tracking: self.tracking.filter(|&v| v != 0.0),
+            text_affine: self.text_affine.as_ref().map(|v| v.as_slice()),
             clip: &self.clip,
         }
         .serialize(serializer)
@@ -688,6 +698,7 @@ const BINARY_FRAME_VERSION: u16 = 2;
 const BINARY_FRAME_ROUNDED_RING_VERSION: u16 = 3;
 const BINARY_FRAME_ARC_VERSION: u16 = 4;
 const BINARY_FRAME_ROUNDED_GRADIENT_VERSION: u16 = 5;
+const BINARY_FRAME_TEXT_TRANSFORM_VERSION: u16 = 6;
 
 struct BinaryFrameWriter {
     bytes: Vec<u8>,
@@ -796,6 +807,7 @@ impl BinaryFrameWriter {
             "triangle" => 3,
             "textureTriangle" if op.repeat_texture => 14,
             "textureTriangle" => 4,
+            "text" if op.tracking.is_some_and(|t| t != 0.0) || op.text_affine.is_some() => 18,
             "text" => 5,
             "image" => 6,
             "hostSurface" => 7,
@@ -909,6 +921,46 @@ impl BinaryFrameWriter {
                     None => self.u8(0),
                 }
                 self.u8(op.text_align.unwrap_or(0));
+            }
+            18 => {
+                let tracking = op.tracking.filter(|&t| t != 0.0);
+                if let Some(t) = tracking {
+                    if !t.is_finite() {
+                        return Err("text tracking must be finite".to_owned());
+                    }
+                }
+                if let Some(affine) = op.text_affine.as_ref() {
+                    if affine.iter().any(|v| !v.is_finite()) {
+                        return Err("text affine transform must be finite".to_owned());
+                    }
+                }
+                self.string(op.text.as_deref().unwrap_or(""))?;
+                self.f32(op.size.unwrap_or(16.0));
+                self.u32(op.color.unwrap_or(0));
+                match op.font_slot {
+                    Some(slot) => {
+                        self.u8(1);
+                        self.u8(slot);
+                    }
+                    None => self.u8(0),
+                }
+                self.u8(op.text_align.unwrap_or(0));
+                let mut ext_flags = 0u8;
+                if tracking.is_some() {
+                    ext_flags |= 0x01;
+                }
+                if op.text_affine.is_some() {
+                    ext_flags |= 0x02;
+                }
+                self.u8(ext_flags);
+                if let Some(t) = tracking {
+                    self.f32(t);
+                }
+                if let Some(affine) = op.text_affine.as_ref() {
+                    for value in affine {
+                        self.f32(*value);
+                    }
+                }
             }
             6 => {
                 self.string(op.asset.as_deref().unwrap_or(""))?;
@@ -1028,7 +1080,12 @@ fn scan_binary_frame_version(operations: &[FrameOp]) -> u16 {
     let mut version = BINARY_FRAME_VERSION;
     for op in operations {
         match op.kind {
-            "roundedGradient" => return BINARY_FRAME_ROUNDED_GRADIENT_VERSION,
+            "text" if op.tracking.is_some_and(|t| t != 0.0) || op.text_affine.is_some() => {
+                return BINARY_FRAME_TEXT_TRANSFORM_VERSION;
+            }
+            "roundedGradient" => {
+                version = version.max(BINARY_FRAME_ROUNDED_GRADIENT_VERSION);
+            }
             "arc" => version = version.max(BINARY_FRAME_ARC_VERSION),
             "rounded" if op.border_width.is_some_and(|width| width > 0.0) => {
                 version = version.max(BINARY_FRAME_ROUNDED_RING_VERSION);
@@ -1054,7 +1111,7 @@ fn encode_binary_frame_append(
     let result = (|| -> Result<(), String> {
         writer.u32(BINARY_FRAME_MAGIC);
         let mut version = scan_binary_frame_version(ops);
-        if version < BINARY_FRAME_ROUNDED_GRADIENT_VERSION {
+        if version < BINARY_FRAME_TEXT_TRANSFORM_VERSION {
             if let Some(auxiliary) = frame.auxiliary.as_ref() {
                 version = version.max(scan_binary_frame_version(&auxiliary.ops));
             }
@@ -1675,6 +1732,7 @@ fn install_bridge(
     offload: Option<Arc<offload::OffloadHost>>,
     trace_mode: replay::Mode,
     trace_lane: Rc<RefCell<replay::ScalarLane>>,
+    host_fonts: bool,
 ) -> Result<(), String> {
     guest
         .with(|ctx| {
@@ -2079,6 +2137,9 @@ fn install_bridge(
             let surfaces = Object::new(ctx.clone())?;
             surfaces.set(POCKET_FLUTTER_SURFACE_PACKAGE, POCKET_FLUTTER_SURFACE)?;
             ui.set("__surfaces", surfaces)?;
+            if host_fonts {
+                ui.set("__hostFonts", true)?;
+            }
             install_compositor_apps(&ctx, &nodes, compositor_surfaces)?;
             if let Some((root, width, height)) = auxiliary {
                 let descriptor = Object::new(ctx.clone())?;
@@ -3167,6 +3228,7 @@ fn run_guest_touch_frame(
     Ok(())
 }
 
+#[cfg(test)]
 fn decode_draw_ops(
     words: &[u32],
     width: f32,
@@ -3174,6 +3236,18 @@ fn decode_draw_ops(
     nodes: &[NodeMeta],
     ui: &mut Ui,
     generic_texture_handles: &mut HashSet<i32>,
+) -> Result<Vec<FrameOp>, String> {
+    decode_draw_ops_with_metrics(words, width, height, nodes, ui, generic_texture_handles, None)
+}
+
+fn decode_draw_ops_with_metrics(
+    words: &[u32],
+    width: f32,
+    height: f32,
+    nodes: &[NodeMeta],
+    ui: &mut Ui,
+    generic_texture_handles: &mut HashSet<i32>,
+    text_metrics: Option<&TextMetrics>,
 ) -> Result<Vec<FrameOp>, String> {
     let viewport = DamageRect::new(0, 0, width as i32, height as i32);
     let mut ops = Vec::with_capacity(words.len() / 8);
@@ -3187,6 +3261,7 @@ fn decode_draw_ops(
             ui,
             generic_texture_handles,
             Some(&mut texture_cache),
+            text_metrics,
         )?;
     }
     Ok(ops)
@@ -3418,28 +3493,31 @@ fn build_frame(
             // Ui borrow and one deduplicated generic-resource set.
             let mut core = host.ops.core_mut().map_err(|error| format!("{error:?}"))?;
             let nodes = host.nodes.borrow();
+            let text_metrics = host.text_metrics.borrow();
             let mut generic_texture_handles = HashSet::new();
             let t_decode = sampling.then(Instant::now);
-            let ops = Rc::new(decode_draw_ops(
+            let ops = Rc::new(decode_draw_ops_with_metrics(
                 &words,
                 width,
                 height,
                 &nodes,
                 &mut core.ui,
                 &mut generic_texture_handles,
+                Some(&text_metrics),
             )?);
             let auxiliary = match (auxiliary_size, auxiliary_words.as_deref()) {
                 (Some((auxiliary_width, auxiliary_height)), Some(auxiliary_words)) => {
                     Some(SurfaceFrame {
                         width: auxiliary_width,
                         height: auxiliary_height,
-                        ops: Rc::new(decode_draw_ops(
+                        ops: Rc::new(decode_draw_ops_with_metrics(
                             auxiliary_words,
                             auxiliary_width,
                             auxiliary_height,
                             &nodes,
                             &mut core.ui,
                             &mut generic_texture_handles,
+                            Some(&text_metrics),
                         )?),
                     })
                 }
@@ -3874,6 +3952,7 @@ fn append_draw_operation(
         ui,
         generic_texture_handles,
         None,
+        None,
     )
 }
 
@@ -3884,6 +3963,7 @@ fn append_draw_operation_cached(
     ui: &mut Ui,
     generic_texture_handles: &mut HashSet<i32>,
     mut texture_cache: Option<&mut TextureDecodeCache>,
+    text_metrics: Option<&TextMetrics>,
 ) -> Result<(), String> {
     let words = operation.words;
     match operation.opcode {
@@ -3930,6 +4010,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -3989,6 +4071,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4098,6 +4182,8 @@ fn append_draw_operation_cached(
                     colors: None,
                     uvs: None,
                     uv: Some(page.uv(gid)),
+                    tracking: None,
+                    text_affine: None,
                     surface_kind: None,
                     surface_parameters: None,
                     clip: clip_of(operation.clip),
@@ -4200,6 +4286,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: Some(uv),
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4272,6 +4360,8 @@ fn append_draw_operation_cached(
                 colors: Some(colors),
                 uvs: None,
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4370,6 +4460,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: Some(uvs),
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4440,6 +4532,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: Some(tints),
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4491,6 +4585,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4527,6 +4623,8 @@ fn append_draw_operation_cached(
             colors: None,
             uvs: None,
             uv: None,
+            tracking: None,
+            text_affine: None,
             surface_kind: None,
             surface_parameters: None,
             clip: clip_of(operation.clip),
@@ -4585,6 +4683,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4658,6 +4758,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4723,6 +4825,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4760,11 +4864,45 @@ fn append_draw_operation_cached(
                 .get(7)
                 .ok_or_else(|| "TEXT_RUN is missing byte length".to_owned())?
                 as usize;
-            let packed_end = 8usize
+            let has_tracking = (header & pocket_spec::draw_op::TEXT_RUN_FLAG_TRACKING) != 0;
+            let has_affine = (header & pocket_spec::draw_op::TEXT_RUN_FLAG_AFFINE) != 0;
+            let mut payload_idx = 8usize;
+            let tracking = if has_tracking {
+                let bits = *words
+                    .get(payload_idx)
+                    .ok_or_else(|| "TEXT_RUN is missing tracking".to_owned())?;
+                payload_idx += 1;
+                let value = f32::from_bits(bits);
+                if !value.is_finite() {
+                    return Err("TEXT_RUN tracking must be finite".to_owned());
+                }
+                (value != 0.0).then_some(value)
+            } else {
+                None
+            };
+            let text_affine = if has_affine {
+                let slice = words
+                    .get(payload_idx..payload_idx + 4)
+                    .ok_or_else(|| "TEXT_RUN is missing affine matrix".to_owned())?;
+                payload_idx += 4;
+                let matrix = [
+                    f32::from_bits(slice[0]),
+                    f32::from_bits(slice[1]),
+                    f32::from_bits(slice[2]),
+                    f32::from_bits(slice[3]),
+                ];
+                if matrix.iter().any(|v| !v.is_finite()) {
+                    return Err("TEXT_RUN affine matrix must be finite".to_owned());
+                }
+                Some(matrix)
+            } else {
+                None
+            };
+            let packed_end = payload_idx
                 .checked_add(bytes.div_ceil(4))
                 .ok_or_else(|| "TEXT_RUN payload length overflow".to_owned())?;
             let packed = words
-                .get(8..packed_end)
+                .get(payload_idx..packed_end)
                 .ok_or_else(|| "TEXT_RUN payload is truncated".to_owned())?;
             let mut raw = Vec::with_capacity(bytes);
             for word in packed {
@@ -4772,21 +4910,17 @@ fn append_draw_operation_cached(
             }
             raw.truncate(bytes);
             let text = String::from_utf8_lossy(&raw).into_owned();
-            // words[5] is the requested line height and is allowed to be NaN
-            // (NaN means the font slot default).  It is not a JSON box
-            // height.  Derive a finite measured height from the decoded run
-            // and line height instead; this mirrors the native measure
-            // callback used by Ui::relayout_outputs(). words[1]&0xff is the
-            // PocketJS font slot, not a pixel size; map the pinned slot table
-            // before handing it to Flutter's TextPainter.
             let font_slot = (header & 0xff) as u8;
+            let default_lh = text_metrics
+                .map(|m| m.default_line_height(font_slot))
+                .unwrap_or_else(|| font_slot_line_height(font_slot));
             let line_height = if line_height.is_finite() && line_height > 0.0 {
                 line_height
             } else {
-                font_slot_line_height(font_slot)
+                default_lh
             };
             let line_count = text.split('\n').count().max(1) as f32;
-            let measured_h = (line_count * line_height).max(font_slot_line_height(font_slot));
+            let measured_h = (line_count * line_height).max(default_lh);
             out.push(FrameOp {
                 kind: "text",
                 x,
@@ -4818,6 +4952,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: None,
+                tracking,
+                text_affine,
                 surface_kind: None,
                 surface_parameters: None,
                 clip: clip_of(operation.clip),
@@ -4914,6 +5050,8 @@ fn append_draw_operation_cached(
                 colors: None,
                 uvs: None,
                 uv: None,
+                tracking: None,
+                text_affine: None,
                 surface_kind: if video.kind == "hostSurface" {
                     Some(video.surface_kind.clone())
                 } else {
@@ -4963,39 +5101,494 @@ struct FontMetric {
     advances: Vec<(u32, f32)>,
 }
 
+const HOST_FONT_SLOTS: usize = pocket_spec::MAX_FONT_SLOTS;
+const ACTIVE_HOST_FONT_SLOTS: usize = 21;
+const HOST_ASCII_START: u32 = 0x20;
+const HOST_ASCII_COUNT: usize = 95;
+const MAX_HOST_GLYPH_CACHE_ENTRIES: usize = 16_384;
+const MAX_HOST_SEGMENT_CACHE_ENTRIES: usize = 16_384;
+const MAX_HOST_SEGMENT_CACHE_KEY_BYTES: usize = 4 * 1024;
+const MAX_HOST_SEGMENT_CACHE_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+
+type HostGlyphMeasureCallback =
+    unsafe extern "C" fn(user_data: usize, slot: u8, codepoint: u32) -> f32;
+
+type HostTextMeasureCallback = unsafe extern "C" fn(
+    user_data: usize,
+    slot: u8,
+    tracking: f32,
+    utf8_ptr: *const u8,
+    utf8_len: usize,
+) -> f32;
+
+#[derive(Clone, Copy)]
+struct HostGlyphCallback {
+    func: HostGlyphMeasureCallback,
+    user_data: usize,
+}
+
+impl std::fmt::Debug for HostGlyphCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostGlyphCallback")
+            .field("user_data", &self.user_data)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HostTextCallback {
+    func: HostTextMeasureCallback,
+    user_data: usize,
+}
+
+impl std::fmt::Debug for HostTextCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostTextCallback")
+            .field("user_data", &self.user_data)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HostFontTable {
+    line_heights: [f32; HOST_FONT_SLOTS],
+    cjk_advances: [f32; HOST_FONT_SLOTS],
+    ascii_advances: [[f32; HOST_ASCII_COUNT]; HOST_FONT_SLOTS],
+}
+
+#[doc(hidden)]
+pub fn default_probe_host_font_metrics() -> (
+    [f32; ACTIVE_HOST_FONT_SLOTS],
+    [f32; ACTIVE_HOST_FONT_SLOTS],
+    [f32; ACTIVE_HOST_FONT_SLOTS * HOST_ASCII_COUNT],
+) {
+    let mut line_heights = [0.0f32; ACTIVE_HOST_FONT_SLOTS];
+    let mut cjk_advances = [0.0f32; ACTIVE_HOST_FONT_SLOTS];
+    let mut ascii_advances = [0.0f32; ACTIVE_HOST_FONT_SLOTS * HOST_ASCII_COUNT];
+    for slot in 0..ACTIVE_HOST_FONT_SLOTS {
+        let slot_u8 = slot as u8;
+        let px = font_slot_px(slot_u8);
+        line_heights[slot] = font_slot_line_height(slot_u8);
+        cjk_advances[slot] = px;
+        for i in 0..HOST_ASCII_COUNT {
+            let cp = HOST_ASCII_START + i as u32;
+            ascii_advances[slot * HOST_ASCII_COUNT + i] =
+                TextMetrics::advance_pak_or_fallback(slot_u8, None, cp);
+        }
+    }
+    (line_heights, cjk_advances, ascii_advances)
+}
+
+fn is_wide_scalar(codepoint: u32) -> bool {
+    matches!(
+        codepoint,
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3040..=0x33BF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE6F
+            | 0xFF01..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+            | 0x20000..=0x3FFFF
+    )
+}
+
+fn is_simple_unshaped_char(ch: char) -> bool {
+    let cp = ch as u32;
+    match cp {
+        0x09 | 0x0D | 0x20..=0x7E => true,
+        // Unambiguous CJK prose punctuation without variation-selector emoji forms.
+        0x00B7 | 0x2014 | 0x2018 | 0x2019 | 0x201C | 0x201D | 0x2026 | 0x30FB => true,
+        // CJK Radicals Supplement & Kangxi Radicals.
+        0x2E80..=0x2FDF => true,
+        // CJK Symbols & Punctuation, excluding combining/tone marks (0x302A..=0x302F).
+        0x3000..=0x3029 | 0x3030..=0x303F => true,
+        // Hiragana & Katakana, excluding combining voiced marks (0x3099..=0x309A).
+        0x3041..=0x3096 | 0x309D..=0x309F | 0x30A0..=0x30FF => true,
+        // Bopomofo, Hangul Compatibility Jamo, Kanbun, Bopomofo Ext, CJK Strokes, Katakana Ext.
+        0x3105..=0x312F | 0x3131..=0x318E | 0x3190..=0x31EF | 0x31F0..=0x31FF => true,
+        // CJK Unified Ideographs Ext A, Unified Ideographs, Yi Syllables & Radicals.
+        0x3400..=0x4DBF | 0x4E00..=0xA4CF => true,
+        // Precomposed Hangul Syllables (conjoining Jamo stay on the shaped path).
+        0xAC00..=0xD7A3 => true,
+        // CJK Compatibility Ideographs & Vertical/Small Form Variants.
+        0xF900..=0xFAFF | 0xFE10..=0xFE19 | 0xFE30..=0xFE6B => true,
+        // Halfwidth & Fullwidth Forms, excluding halfwidth voiced marks (0xFF9E..=0xFF9F).
+        0xFF01..=0xFF60 | 0xFF61..=0xFF9D | 0xFFE0..=0xFFE6 => true,
+        // CJK Unified Ideographs Extensions B..I & Compatibility Supplement.
+        0x20000..=0x323AF => true,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct TextMetrics {
     fonts: Vec<FontMetric>,
+    fontless_pak: bool,
+    requires_host_fonts: bool,
+    host_table: Option<HostFontTable>,
+    glyph_callback: Option<HostGlyphCallback>,
+    text_callback: Option<HostTextCallback>,
+    trace_lane: Option<Rc<RefCell<replay::ScalarLane>>>,
+    glyph_cache: RefCell<HashMap<(u8, u32), (u64, f32)>>,
+    segment_cache: RefCell<HashMap<Box<str>, Vec<(u8, u32, u64, f32)>>>,
+    segment_cache_entries: std::cell::Cell<usize>,
+    segment_cache_bytes: std::cell::Cell<usize>,
+    cache_generation: std::cell::Cell<u64>,
 }
 
 impl TextMetrics {
+    /// Host tables own text only for font-less packages or packages that
+    /// explicitly opt into host fonts. If a PAK has baked font atlases and no
+    /// `ui:fonts.host` marker, keep its advances and glyph draw path even when
+    /// a Flutter/Studio host has prewarmed host metrics installed.
+    fn uses_host_native_metrics(&self) -> bool {
+        self.requires_host_fonts
+            || self.fontless_pak
+            || (self.fonts.is_empty() && self.host_table.is_some())
+    }
+
+    fn clear_caches(&self) {
+        self.glyph_cache.borrow_mut().clear();
+        self.segment_cache.borrow_mut().clear();
+        self.segment_cache_entries.set(0);
+        self.segment_cache_bytes.set(0);
+        self.cache_generation.set(0);
+    }
+
+    fn next_generation(&self) -> u64 {
+        let next = self.cache_generation.get().wrapping_add(1);
+        self.cache_generation.set(next);
+        next
+    }
+
+    fn insert_glyph_cached(&self, key: (u8, u32), width: f32) {
+        let gen = self.next_generation();
+        let mut cache = self.glyph_cache.borrow_mut();
+        if cache.len() >= MAX_HOST_GLYPH_CACHE_ENTRIES {
+            let min_gen = cache.values().map(|(g, _)| *g).min().unwrap_or(0);
+            let max_gen = cache.values().map(|(g, _)| *g).max().unwrap_or(gen);
+            let cutoff = min_gen + (max_gen.saturating_sub(min_gen)) / 2 + 1;
+            cache.retain(|_, (g, _)| *g >= cutoff);
+            if cache.len() >= MAX_HOST_GLYPH_CACHE_ENTRIES {
+                cache.clear();
+            }
+        }
+        cache.insert(key, (gen, width));
+    }
+
+    fn lookup_segment_cached(&self, line: &str, slot: u8, tracking_bits: u32) -> Option<f32> {
+        if line.len() > MAX_HOST_SEGMENT_CACHE_KEY_BYTES {
+            return None;
+        }
+        let cache = self.segment_cache.borrow();
+        let bucket = cache.get(line)?;
+        bucket
+            .iter()
+            .find(|(s, t, _, _)| *s == slot && *t == tracking_bits)
+            .map(|(_, _, _, width)| *width)
+    }
+
+    fn insert_segment_cached(&self, line: &str, slot: u8, tracking_bits: u32, width: f32) {
+        if line.len() > MAX_HOST_SEGMENT_CACHE_KEY_BYTES {
+            return;
+        }
+        let gen = self.next_generation();
+        let mut cache = self.segment_cache.borrow_mut();
+        if let Some(bucket) = cache.get_mut(line) {
+            if let Some(existing) = bucket
+                .iter_mut()
+                .find(|(s, t, _, _)| *s == slot && *t == tracking_bits)
+            {
+                existing.2 = gen;
+                existing.3 = width;
+                return;
+            }
+        }
+        let needs_new_key = !cache.contains_key(line);
+        let added_bytes = if needs_new_key { line.len() } else { 0 };
+        if self.segment_cache_entries.get() >= MAX_HOST_SEGMENT_CACHE_ENTRIES
+            || self.segment_cache_bytes.get().saturating_add(added_bytes)
+                > MAX_HOST_SEGMENT_CACHE_TOTAL_BYTES
+        {
+            let mut min_gen = u64::MAX;
+            let mut max_gen = 0u64;
+            for bucket in cache.values() {
+                for &(_, _, g, _) in bucket {
+                    min_gen = min_gen.min(g);
+                    max_gen = max_gen.max(g);
+                }
+            }
+            let cutoff = if min_gen <= max_gen {
+                min_gen + (max_gen - min_gen) / 2 + 1
+            } else {
+                gen
+            };
+            let mut remaining_entries = 0usize;
+            let mut remaining_bytes = 0usize;
+            cache.retain(|key, bucket| {
+                bucket.retain(|(_, _, g, _)| *g >= cutoff);
+                if bucket.is_empty() {
+                    false
+                } else {
+                    remaining_entries += bucket.len();
+                    remaining_bytes += key.len();
+                    true
+                }
+            });
+            if remaining_entries >= MAX_HOST_SEGMENT_CACHE_ENTRIES
+                || remaining_bytes.saturating_add(added_bytes) > MAX_HOST_SEGMENT_CACHE_TOTAL_BYTES
+            {
+                cache.clear();
+                remaining_entries = 0;
+                remaining_bytes = 0;
+            }
+            self.segment_cache_entries.set(remaining_entries);
+            self.segment_cache_bytes.set(remaining_bytes);
+        }
+        if let Some(bucket) = cache.get_mut(line) {
+            bucket.push((slot, tracking_bits, gen, width));
+        } else {
+            cache.insert(
+                line.to_owned().into_boxed_str(),
+                vec![(slot, tracking_bits, gen, width)],
+            );
+            self.segment_cache_bytes
+                .set(self.segment_cache_bytes.get().saturating_add(line.len()));
+        }
+        self.segment_cache_entries
+            .set(self.segment_cache_entries.get().saturating_add(1));
+    }
+
+    fn settle_traced_advance<F: FnOnce() -> f32>(&self, compute: F) -> f32 {
+        match self.trace_lane {
+            Some(ref lane) => replay::settle_host_text_advance(lane, compute),
+            None => compute(),
+        }
+    }
+
     fn font(&self, slot: u8) -> Option<&FontMetric> {
         self.fonts.iter().find(|font| font.slot == slot)
     }
 
-    fn advance(font: Option<&FontMetric>, codepoint: u32) -> f32 {
-        let Some(font) = font else {
-            return 13.0;
-        };
-        font.advances
-            .binary_search_by_key(&codepoint, |(cp, _)| *cp)
-            .map(|index| font.advances[index].1)
-            .unwrap_or(font.cell_w)
+    fn default_line_height(&self, slot: u8) -> f32 {
+        if self.uses_host_native_metrics() {
+            if let Some(ref host) = self.host_table {
+                if let Some(&lh) = host.line_heights.get(slot as usize) {
+                    if lh.is_finite() && lh > 0.0 {
+                        return lh;
+                    }
+                }
+            }
+        }
+        self.font(slot)
+            .map(|item| item.line_height)
+            .unwrap_or_else(|| font_slot_line_height(slot))
+    }
+
+    fn advance_pak_or_fallback(slot: u8, font: Option<&FontMetric>, codepoint: u32) -> f32 {
+        if codepoint == '\r' as u32 {
+            return 0.0;
+        }
+        if let Some(font) = font {
+            return font
+                .advances
+                .binary_search_by_key(&codepoint, |(cp, _)| *cp)
+                .map(|index| font.advances[index].1)
+                .unwrap_or(font.cell_w);
+        }
+        let px = font_slot_px(slot);
+        if is_wide_scalar(codepoint) {
+            px
+        } else if (16..=18).contains(&slot) {
+            (px * 0.6).round().max(1.0)
+        } else if codepoint == ' ' as u32 {
+            (px * 0.32).round().max(1.0)
+        } else {
+            (px * 0.56).round().max(1.0)
+        }
+    }
+
+    fn host_scalar_fallback(host: &HostFontTable, slot_idx: usize, codepoint: u32) -> f32 {
+        if codepoint == '\r' as u32 {
+            0.0
+        } else if codepoint == '\t' as u32 {
+            host.ascii_advances[slot_idx][0] * 4.0
+        } else if codepoint >= HOST_ASCII_START
+            && codepoint < HOST_ASCII_START + (HOST_ASCII_COUNT as u32)
+        {
+            host.ascii_advances[slot_idx][(codepoint - HOST_ASCII_START) as usize]
+        } else if is_wide_scalar(codepoint) {
+            host.cjk_advances[slot_idx]
+        } else {
+            host.ascii_advances[slot_idx][('M' as u32 - HOST_ASCII_START) as usize]
+        }
+    }
+
+    fn measure_uncached_host_scalar(&self, host: &HostFontTable, slot: u8, codepoint: u32) -> f32 {
+        let slot_idx = slot as usize;
+        if let Some(cb) = self.glyph_callback {
+            let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                (cb.func)(cb.user_data, slot, codepoint)
+            }))
+            .unwrap_or(-1.0);
+            if measured.is_finite() && measured >= 0.0 {
+                return measured;
+            }
+        }
+        Self::host_scalar_fallback(host, slot_idx, codepoint)
+    }
+
+    fn advance_host_scalar(&self, host: &HostFontTable, slot: u8, codepoint: u32) -> f32 {
+        let slot_idx = slot as usize;
+        if codepoint == '\r' as u32 {
+            return 0.0;
+        }
+        if codepoint == '\t' as u32 {
+            return host.ascii_advances[slot_idx][0] * 4.0;
+        }
+        if codepoint >= HOST_ASCII_START
+            && codepoint < HOST_ASCII_START + (HOST_ASCII_COUNT as u32)
+        {
+            return host.ascii_advances[slot_idx][(codepoint - HOST_ASCII_START) as usize];
+        }
+        if let Some(&(_, cached)) = self.glyph_cache.borrow().get(&(slot, codepoint)) {
+            return cached;
+        }
+        let resolved =
+            self.settle_traced_advance(|| self.measure_uncached_host_scalar(host, slot, codepoint));
+        // Cache both succeeded and fallback lookups so unmeasurable scalars
+        // never re-enter FFI or append duplicate trace scalars on later calls.
+        self.insert_glyph_cached((slot, codepoint), resolved);
+        resolved
+    }
+
+    fn measure_host_line(&self, host: &HostFontTable, line: &str, slot: u8, tracking: f32) -> f32 {
+        if line.is_empty() {
+            return 0.0;
+        }
+        let slot_idx = slot as usize;
+        if line.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+            let table = &host.ascii_advances[slot_idx];
+            let mut width = 0.0f32;
+            for b in line.bytes() {
+                width += table[(b - 0x20) as usize] + tracking;
+            }
+            return width.max(0.0);
+        }
+        let norm_tracking = if tracking == 0.0 { 0.0 } else { tracking };
+        // Simple unshaped lines (ASCII + CJK ideographs/kana/Hangul/fullwidth
+        // punctuation with no combining marks, joiners, variation selectors, or
+        // emoji) sum per-scalar glyph_cache advances in O(len), preserving O(1)
+        // per-character reuse across greedy line wrapping and typewriter reveals.
+        if line.chars().all(is_simple_unshaped_char) {
+            let ascii_table = &host.ascii_advances[slot_idx];
+            let mut width = 0.0f32;
+            let mut cursor = 0usize;
+            {
+                let cache = self.glyph_cache.borrow();
+                for (idx, ch) in line.char_indices() {
+                    let cp = ch as u32;
+                    if cp == '\r' as u32 {
+                        cursor = idx + ch.len_utf8();
+                    } else if cp == '\t' as u32 {
+                        width += ascii_table[0] * 4.0 + norm_tracking;
+                        cursor = idx + 1;
+                    } else if (0x20..=0x7E).contains(&cp) {
+                        width += ascii_table[(cp - 0x20) as usize] + norm_tracking;
+                        cursor = idx + 1;
+                    } else if let Some(&(_, cached)) = cache.get(&(slot, cp)) {
+                        width += cached + norm_tracking;
+                        cursor = idx + ch.len_utf8();
+                    } else {
+                        cursor = idx;
+                        break;
+                    }
+                }
+            }
+            if cursor < line.len() {
+                for ch in line[cursor..].chars() {
+                    if ch != '\r' {
+                        width += self.advance_host_scalar(host, slot, ch as u32) + norm_tracking;
+                    }
+                }
+            }
+            return width.max(0.0);
+        }
+        let tracking_bits = norm_tracking.to_bits();
+        if let Some(cached) = self.lookup_segment_cached(line, slot, tracking_bits) {
+            return cached;
+        }
+        let resolved = self.settle_traced_advance(|| {
+            if let Some(cb) = self.text_callback {
+                let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                    (cb.func)(
+                        cb.user_data,
+                        slot,
+                        norm_tracking,
+                        line.as_ptr(),
+                        line.len(),
+                    )
+                }))
+                .unwrap_or(-1.0);
+                if measured.is_finite() && measured >= 0.0 {
+                    return measured;
+                }
+            }
+            let mut fallback = 0.0f32;
+            for ch in line.chars() {
+                if ch != '\r' {
+                    fallback += self.measure_uncached_host_scalar(host, slot, ch as u32)
+                        + norm_tracking;
+                }
+            }
+            fallback.max(0.0)
+        });
+        self.insert_segment_cached(line, slot, tracking_bits, resolved);
+        resolved
     }
 
     fn measure(&self, text: &str, slot: u8, tracking: f32, line_height: f32) -> (f32, f32) {
         if text.is_empty() {
             return (0.0, 0.0);
         }
-        let font = self.font(slot);
-        let default_line_height = font
-            .map(|item| item.line_height)
-            .unwrap_or_else(|| font_slot_line_height(slot));
+        let default_line_height = self.default_line_height(slot);
         let line_height = if line_height.is_nan() {
             default_line_height
         } else {
             line_height
         };
+        if self.uses_host_native_metrics() {
+            if let Some(ref host) = self.host_table {
+                    if (slot as usize) < HOST_FONT_SLOTS {
+                        let mut max_width = 0.0_f32;
+                        let mut lines = 0.0_f32;
+                        for line in text.split('\n') {
+                            lines += 1.0;
+                            max_width =
+                                max_width.max(self.measure_host_line(host, line, slot, tracking));
+                        }
+                        let measured_height = lines * line_height;
+                        if max_width.is_finite() && measured_height.is_finite() {
+                            return (max_width, measured_height);
+                        }
+                        if let Some(lane) = &self.trace_lane {
+                            replay::record_host_text_measure_failure(
+                                lane,
+                                "host-native text measurement exceeded finite f32 range".to_owned(),
+                            );
+                        }
+                        // The trace lane reports the invalid measurement at transaction
+                        // end. Keep infinity out of Core layout and the frame payload.
+                        return (0.0, 0.0);
+                    }
+            }
+        }
+        let font = self.font(slot);
         let mut max_width = 0.0_f32;
         let mut line_width = 0.0_f32;
         let mut lines = 1.0_f32;
@@ -5004,12 +5597,23 @@ impl TextMetrics {
                 max_width = max_width.max(line_width);
                 line_width = 0.0;
                 lines += 1.0;
-            } else {
-                line_width += Self::advance(font, character as u32) + tracking;
+            } else if character != '\r' {
+                line_width += Self::advance_pak_or_fallback(slot, font, character as u32) + tracking;
             }
         }
         max_width = max_width.max(line_width);
-        (max_width, lines * line_height)
+        let measured_height = lines * line_height;
+        if max_width.is_finite() && measured_height.is_finite() {
+            (max_width, measured_height)
+        } else {
+            if let Some(lane) = &self.trace_lane {
+                replay::record_host_text_measure_failure(
+                    lane,
+                    "native text measurement exceeded finite f32 range".to_owned(),
+                );
+            }
+            (0.0, 0.0)
+        }
     }
 }
 
@@ -5166,6 +5770,10 @@ fn parse_pak_font_metrics(pak: &[u8]) -> Result<TextMetrics, String> {
         }
         let name = std::str::from_utf8(&pak[name_start..name_end])
             .map_err(|_| "pak: entry name is not UTF-8".to_owned())?;
+        if name == "ui:fonts.host" {
+            metrics.requires_host_fonts = true;
+            continue;
+        }
         if !name.starts_with("ui:font.") {
             continue;
         }
@@ -5520,7 +6128,11 @@ fn create_host(
         tick_remainder_ms: 0.0,
         clock_started: false,
         demand: demand::Demand::default(),
-        trace: replay::TraceClock::default(),
+        trace: {
+            let trace = replay::TraceClock::default();
+            text_metrics.borrow_mut().trace_lane = Some(trace.scalar_lane());
+            trace
+        },
         trace_output: c_string("{\"idleMs\":[],\"scalars\":[]}"),
         viewport_width: width as f32,
         viewport_height: height as f32,
@@ -5569,6 +6181,10 @@ fn create_host(
         host.offload.clone(),
         replay::mode(&host),
         host.trace.scalar_lane(),
+        {
+            let m = host.text_metrics.borrow();
+            m.uses_host_native_metrics()
+        },
     ) {
         set_error(&mut host, error);
     }
@@ -6219,6 +6835,10 @@ pub unsafe extern "C" fn pocket_enable_auxiliary(
             host.offload.clone(),
             replay::mode(host),
             host.trace.scalar_lane(),
+        {
+            let m = host.text_metrics.borrow();
+            m.uses_host_native_metrics()
+        },
         ) {
             set_error(host, error);
             return -1;
@@ -6299,6 +6919,7 @@ fn reset_host_for_load(host: &mut HostState) {
     host.tick_remainder_ms = 0.0;
     host.clock_started = false;
     host.demand = demand::Demand::default();
+    host.text_metrics.borrow().clear_caches();
 }
 
 fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry, String> {
@@ -6307,6 +6928,12 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
     // `ui:img.*` entry in the real core, then publishes the resulting name ->
     // texture handle table to framework/host.
     let metrics = parse_pak_font_metrics(pak)?;
+    if metrics.requires_host_fonts && host.text_metrics.borrow().host_table.is_none() {
+        return Err(
+            "pak admission: package requires host-native fonts (ui:fonts.host) and host font metrics are not installed"
+                .to_owned(),
+        );
+    }
     let mut previous_pack_handles = host
         .nodes
         .borrow()
@@ -6320,7 +6947,13 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
         .ops
         .install_assets(pak)
         .map_err(|error| format!("pak asset install: {error:?}"))?;
-    *host.text_metrics.borrow_mut() = metrics;
+    let use_host_or_fontless = {
+        let mut current = host.text_metrics.borrow_mut();
+        current.fontless_pak = metrics.fonts.is_empty();
+        current.requires_host_fonts = metrics.requires_host_fonts;
+        current.fonts = metrics.fonts;
+        current.uses_host_native_metrics()
+    };
     {
         let mut core = host
             .ops
@@ -6344,6 +6977,7 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
         for texture in previous_pack_handles {
             core.ui.free_texture(texture);
         }
+        core.ui.set_native_transformed_text(use_host_or_fontless);
         install_text_measure(&mut core.ui, host.text_metrics.clone());
     }
     {
@@ -6409,6 +7043,10 @@ fn initialize_guest_for_load(
         host.offload.clone(),
         replay::mode(host),
         host.trace.scalar_lane(),
+        {
+            let m = host.text_metrics.borrow();
+            m.uses_host_native_metrics()
+        },
     )?;
     start_worker(host)
 }
@@ -7750,10 +8388,178 @@ pub unsafe extern "C" fn pocket_last_error(handle: *mut HostState) -> *const c_c
     })
 }
 
+fn invalidate_host_text_metrics(host: &mut HostState) -> Result<(), String> {
+    host.draw_cache = None;
+    host.frame_json_cache = None;
+    let use_host_native_metrics = {
+        let m = host.text_metrics.borrow();
+        m.uses_host_native_metrics()
+    };
+    let mut core = host
+        .ops
+        .core_mut()
+        .map_err(|error| format!("font metrics invalidate: {error:?}"))?;
+    core.ui
+        .set_native_transformed_text(use_host_native_metrics);
+    core.ui.invalidate_text_metrics();
+    core.mutated();
+    Ok(())
+}
+
+/// Installs precomputed host font metrics for PocketJS font slots
+/// (active slots `0..20`; `slot_count` in `21..=24`):
+/// - `line_heights`: `slot_count` finite positive `f32` values
+/// - `cjk_advances`: `slot_count` finite positive `f32` values (fullwidth CJK reference)
+/// - `ascii_advances`: `slot_count * 95` finite non-negative `f32` values (`0x20..=0x7E`)
+#[no_mangle]
+pub unsafe extern "C" fn pocket_set_host_font_metrics(
+    handle: *mut HostState,
+    slot_count: u32,
+    line_heights: *const f32,
+    cjk_advances: *const f32,
+    ascii_advances: *const f32,
+) -> i32 {
+    guard_host_mut(handle, "pocket_set_host_font_metrics", -1, |host| {
+        const MIN_ACTIVE_FONT_SLOTS: usize = ACTIVE_HOST_FONT_SLOTS;
+        let count = slot_count as usize;
+        if !(MIN_ACTIVE_FONT_SLOTS..=HOST_FONT_SLOTS).contains(&count) {
+            set_error(
+                host,
+                format!(
+                    "host font metrics slot_count must be in {MIN_ACTIVE_FONT_SLOTS}..={HOST_FONT_SLOTS}, got {slot_count}"
+                ),
+            );
+            return -1;
+        }
+        if line_heights.is_null() || cjk_advances.is_null() || ascii_advances.is_null() {
+            set_error(host, "host font metrics pointers must be non-null");
+            return -1;
+        }
+        let lh_slice = std::slice::from_raw_parts(line_heights, count);
+        let cjk_slice = std::slice::from_raw_parts(cjk_advances, count);
+        let ascii_slice = std::slice::from_raw_parts(ascii_advances, count * HOST_ASCII_COUNT);
+        if lh_slice.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            || cjk_slice.iter().any(|v| !v.is_finite() || *v <= 0.0)
+        {
+            set_error(
+                host,
+                "host font line_heights and cjk_advances must be finite and positive",
+            );
+            return -1;
+        }
+        if ascii_slice.iter().any(|v| !v.is_finite() || *v < 0.0) {
+            set_error(
+                host,
+                "host font ascii_advances must be finite and non-negative",
+            );
+            return -1;
+        }
+        let default_lh = lh_slice[1];
+        let default_cjk = cjk_slice[1];
+        let mut lh_arr = [default_lh; HOST_FONT_SLOTS];
+        lh_arr[..count].copy_from_slice(lh_slice);
+        let mut cjk_arr = [default_cjk; HOST_FONT_SLOTS];
+        cjk_arr[..count].copy_from_slice(cjk_slice);
+        let mut default_ascii = [0.0f32; HOST_ASCII_COUNT];
+        default_ascii.copy_from_slice(&ascii_slice[HOST_ASCII_COUNT..2 * HOST_ASCII_COUNT]);
+        let mut ascii_arr = [default_ascii; HOST_FONT_SLOTS];
+        for slot in 0..count {
+            let start = slot * HOST_ASCII_COUNT;
+            ascii_arr[slot].copy_from_slice(&ascii_slice[start..start + HOST_ASCII_COUNT]);
+        }
+        {
+            let mut metrics = host.text_metrics.borrow_mut();
+            metrics.host_table = Some(HostFontTable {
+                line_heights: lh_arr,
+                cjk_advances: cjk_arr,
+                ascii_advances: ascii_arr,
+            });
+            metrics.clear_caches();
+        }
+        let host_fonts_active = host.text_metrics.borrow().uses_host_native_metrics();
+        let _ = host.guest.with(|ctx| -> rquickjs::Result<()> {
+            let globals = ctx.globals();
+            if let Ok(ui) = globals.get::<_, Object>("ui") {
+                ui.set("__hostFonts", host_fonts_active)?;
+            }
+            Ok(())
+        });
+        if let Err(error) = invalidate_host_text_metrics(host) {
+            set_error(host, error);
+            return -1;
+        }
+        clear_error(host);
+        0
+    })
+}
+
+/// Registers or clears (`callback = None`) the synchronous same-thread glyph
+/// advance callback used as a scalar fallback when no shaped text callback is set.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_set_host_glyph_measure_callback(
+    handle: *mut HostState,
+    callback: Option<HostGlyphMeasureCallback>,
+    user_data: usize,
+) -> i32 {
+    guard_host_mut(
+        handle,
+        "pocket_set_host_glyph_measure_callback",
+        -1,
+        |host| {
+            {
+                let mut metrics = host.text_metrics.borrow_mut();
+                metrics.glyph_callback = callback.map(|func| HostGlyphCallback { func, user_data });
+                metrics.clear_caches();
+            }
+            if let Err(error) = invalidate_host_text_metrics(host) {
+                set_error(host, error);
+                return -1;
+            }
+            clear_error(host);
+            0
+        },
+    )
+}
+
+/// Registers or clears (`callback = None`) the synchronous same-thread UTF-8
+/// shaped text run measurer used for non-ASCII lines (grapheme clusters, ZWJ
+/// emoji sequences, combining marks, and complex scripts).
+#[no_mangle]
+pub unsafe extern "C" fn pocket_set_host_text_measure_callback(
+    handle: *mut HostState,
+    callback: Option<HostTextMeasureCallback>,
+    user_data: usize,
+) -> i32 {
+    guard_host_mut(
+        handle,
+        "pocket_set_host_text_measure_callback",
+        -1,
+        |host| {
+            {
+                let mut metrics = host.text_metrics.borrow_mut();
+                metrics.text_callback = callback.map(|func| HostTextCallback { func, user_data });
+                metrics.clear_caches();
+            }
+            if let Err(error) = invalidate_host_text_metrics(host) {
+                set_error(host, error);
+                return -1;
+            }
+            clear_error(host);
+            0
+        },
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pocket_destroy(handle: *mut HostState) {
     catch_ffi_unwind((), || {
         if !handle.is_null() {
+            // Detach any Dart NativeCallable before tearing down QuickJS/Core.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut metrics = (*handle).text_metrics.borrow_mut();
+                metrics.glyph_callback = None;
+                metrics.text_callback = None;
+            }));
             // Make the generation boundary visible to any retained background
             // channel handle before dropping the owner-side QuickJS state.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -11327,6 +12133,25 @@ mod smoke_tests {
 
     #[test]
     fn perf_sampling_gate_controls_frame_stage_timings() {
+        const ISOLATED_CHILD: &str = "POCKET_PERF_SAMPLING_TEST_CHILD";
+        if std::env::var_os(ISOLATED_CHILD).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("resolve native test executable"),
+            )
+            .args([
+                "--exact",
+                "smoke_tests::perf_sampling_gate_controls_frame_stage_timings",
+            ])
+            .env(ISOLATED_CHILD, "1")
+            .status()
+            .expect("run perf sampling assertions in an isolated process");
+            assert!(
+                status.success(),
+                "isolated perf sampling test failed: {status}"
+            );
+            return;
+        }
+
         let handle = pocket_create(120.0, 80.0);
         let source = CString::new(
             r#"
@@ -11477,8 +12302,7 @@ mod smoke_tests {
 
     #[test]
     fn truncated_drawlist_opcodes_return_err_without_panicking() {
-        let handle = pocket_create(160.0, 120.0);
-        let ui = unsafe { &mut (*handle).ops.core_mut().unwrap().ui };
+        let mut ui = Ui::new();
         let nodes = Vec::new();
         let mut generic_handles = HashSet::new();
 
@@ -11494,17 +12318,15 @@ mod smoke_tests {
                 &mut out,
                 &operation,
                 &nodes,
-                ui,
+                &mut ui,
                 &mut generic_handles,
+                None,
                 None,
             );
             assert!(
                 res.is_err(),
                 "truncated opcode {opcode} must return Err instead of panicking"
             );
-        }
-        unsafe {
-            pocket_destroy(handle);
         }
     }
 
@@ -11765,4 +12587,577 @@ mod smoke_tests {
             pocket_destroy(host_handle);
         }
     }
+
+    #[test]
+    fn host_font_metrics_warmup_lazy_callback_and_transformed_text_pfb1_v6() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        unsafe extern "C" fn test_glyph_cb(user_data: usize, slot: u8, codepoint: u32) -> f32 {
+            let counter = &*(user_data as *const AtomicUsize);
+            counter.fetch_add(1, AtomicOrdering::SeqCst);
+            if codepoint == '测' as u32 {
+                100.0 + slot as f32
+            } else {
+                22.5
+            }
+        }
+
+        let handle = pocket_create(320.0, 240.0);
+        let mut line_heights = [20.0f32; HOST_FONT_SLOTS];
+        line_heights[4] = 21.0;
+        let cjk_advances = [16.0f32; HOST_FONT_SLOTS];
+        let mut ascii_advances = [8.5f32; HOST_FONT_SLOTS * HOST_ASCII_COUNT];
+        ascii_advances[4 * HOST_ASCII_COUNT + ('A' as usize - 0x20)] = 9.25;
+        let cb_calls = AtomicUsize::new(0);
+
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    handle,
+                    HOST_FONT_SLOTS as u32,
+                    line_heights.as_ptr(),
+                    cjk_advances.as_ptr(),
+                    ascii_advances.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_set_host_glyph_measure_callback(
+                    handle,
+                    Some(test_glyph_cb),
+                    (&cb_calls as *const AtomicUsize) as usize,
+                ),
+                0
+            );
+        }
+
+        let source = CString::new(
+            r#"
+            if (ui.__hostFonts !== true) {
+              throw new Error('expected ui.__hostFonts === true');
+            }
+            const asciiW = ui.measureText('AA', 4);
+            if (Math.abs(asciiW - 18.5) > 1e-4) {
+              throw new Error('unexpected ascii width: ' + asciiW);
+            }
+            const cjkW1 = ui.measureText('测测', 4);
+            const cjkW2 = ui.measureText('测', 4);
+            if (Math.abs(cjkW1 - 208) > 1e-3 || Math.abs(cjkW2 - 104) > 1e-3) {
+              throw new Error('unexpected lazy cjk width: ' + cjkW1 + ', ' + cjkW2);
+            }
+            const n = ui.createNode(1);
+            ui.setProp(n, 24, 1); // absolute
+            ui.setProp(n, 28, 12); // left
+            ui.setProp(n, 25, 24); // top
+            ui.setProp(n, 97, 4); // FONT_SLOT = 4
+            ui.setProp(n, 96, 0xff112233); // TEXT_COLOR
+            ui.setProp(n, 100, 2.5); // TRACKING
+            ui.setProp(n, 131, 30); // ROTATE (deg)
+            ui.setText(n, 'A测');
+            ui.insertBefore(1, n, 0);
+            globalThis.frame = () => {};
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        // 'A' hit the ASCII warmup table; '测' was queried once and cached across
+        // both measureText calls AND native layout!
+        assert_eq!(cb_calls.load(AtomicOrdering::SeqCst), 1);
+
+        let mut byte_len = 0u64;
+        let frame_ptr = unsafe { pocket_frame_binary(handle, 0.0, &mut byte_len) };
+        assert!(!frame_ptr.is_null() && byte_len > 28);
+        let bytes = unsafe { std::slice::from_raw_parts(frame_ptr, byte_len as usize) }.to_vec();
+        assert_eq!(&bytes[0..4], b"PFB1");
+        let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+        assert_eq!(version, BINARY_FRAME_TEXT_TRANSFORM_VERSION);
+        let op_count = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+        assert_eq!(op_count, 1, "rotated tracked text must emit 1 vector TEXT_RUN op, not GLYPH_RUN quads");
+        assert_eq!(bytes[28], 18, "extended text op must use PFB1 tag 18");
+
+        let json_ptr = unsafe { pocket_frame(handle, 0.0) };
+        let json_str = unsafe { CStr::from_ptr(json_ptr).to_str().unwrap() };
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let op = &parsed["ops"][0];
+        assert_eq!(op["type"], "text");
+        assert_eq!(op["text"], "A测");
+        assert!((op["h"].as_f64().unwrap() - 21.0).abs() < 1e-4);
+        assert!((op["tracking"].as_f64().unwrap() - 2.5).abs() < 1e-4);
+        let affine = op["affine"].as_array().unwrap();
+        assert_eq!(affine.len(), 4);
+        assert!((affine[0].as_f64().unwrap() - 30.0_f64.to_radians().cos()).abs() < 1e-3);
+
+        unsafe {
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn fontless_pak_requires_host_font_metrics_and_preserves_active_guest_on_rejection() {
+        let legacy_empty = empty_pak();
+        let mut pak = vec![0u8; 96];
+        pak[0..4].copy_from_slice(&PAK_MAGIC.to_le_bytes());
+        pak[4..6].copy_from_slice(&1u16.to_le_bytes());
+        pak[8..12].copy_from_slice(&1u32.to_le_bytes());
+        pak[12..16].copy_from_slice(&32u32.to_le_bytes());
+        pak[16..20].copy_from_slice(&56u32.to_le_bytes());
+        pak[20..24].copy_from_slice(&80u32.to_le_bytes());
+        pak[24..28].copy_from_slice(&96u32.to_le_bytes());
+        pak[36..40].copy_from_slice(&80u32.to_le_bytes());
+        pak[40..44].copy_from_slice(&1u32.to_le_bytes());
+        pak[48..50].copy_from_slice(&13u16.to_le_bytes());
+        pak[56..69].copy_from_slice(b"ui:fonts.host");
+        pak[80] = 1;
+
+        let handle = pocket_create(160.0, 120.0);
+        let active_guest = CString::new(format!(
+            "const n = ui.createNode(0); ui.setProp(n, {}, 40); ui.setProp(n, {}, 30); ui.setProp(n, {}, {}); ui.insertBefore(1, n, 0); globalThis.frame = () => {{}};",
+            pocket_spec::prop::WIDTH,
+            pocket_spec::prop::HEIGHT,
+            pocket_spec::prop::BG_COLOR,
+            0xff22_4466u32,
+        ))
+        .unwrap();
+        let c_src = CString::new("globalThis.frame = () => {};").unwrap();
+
+        unsafe {
+            // A legacy/empty PAK without ui:fonts.host loads without host font metrics.
+            assert_eq!(
+                pocket_load(
+                    handle,
+                    c_src.as_ptr(),
+                    legacy_empty.as_ptr(),
+                    legacy_empty.len()
+                ),
+                0
+            );
+            assert_eq!(pocket_eval(handle, active_guest.as_ptr()), 0);
+            assert_eq!(
+                pocket_load(handle, c_src.as_ptr(), pak.as_ptr(), pak.len()),
+                -1
+            );
+            let err = CStr::from_ptr(pocket_last_error(handle)).to_string_lossy();
+            assert!(
+                err.contains("requires host-native fonts"),
+                "unexpected error: {err}"
+            );
+            // Active guest remains intact after admission rejection.
+            let frame_json: serde_json::Value =
+                serde_json::from_str(CStr::from_ptr(pocket_frame(handle, 0.0)).to_str().unwrap())
+                    .unwrap();
+            assert_eq!(frame_json["ops"][0]["type"], "rect");
+
+            // Split validation checks positive line_heights/cjk_advances vs non-negative ascii.
+            let (mut lh, cjk, mut ascii) = default_probe_host_font_metrics();
+            lh[0] = 0.0;
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    lh.as_ptr(),
+                    cjk.as_ptr(),
+                    ascii.as_ptr(),
+                ),
+                -1
+            );
+            assert!(CStr::from_ptr(pocket_last_error(handle))
+                .to_string_lossy()
+                .contains("positive"));
+            lh[0] = 16.0;
+            ascii[0] = -0.5;
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    lh.as_ptr(),
+                    cjk.as_ptr(),
+                    ascii.as_ptr(),
+                ),
+                -1
+            );
+            assert!(CStr::from_ptr(pocket_last_error(handle))
+                .to_string_lossy()
+                .contains("non-negative"));
+
+            // Valid host font metrics admit the font-less PAK.
+            ascii[0] = 4.0;
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    lh.as_ptr(),
+                    cjk.as_ptr(),
+                    ascii.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_load(handle, c_src.as_ptr(), pak.as_ptr(), pak.len()),
+                0
+            );
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn baked_pak_keeps_pak_metrics_and_glyph_draw_path_with_host_table_installed() {
+        let (line_heights, cjk_advances, mut ascii_advances) = default_probe_host_font_metrics();
+        ascii_advances[4 * HOST_ASCII_COUNT + ('A' as usize - HOST_ASCII_START as usize)] = 31.0;
+
+        let source = CString::new(
+            r#"
+            const width = ui.measureText('AA', 4);
+            if (Math.abs(width - 8) > 1e-3) {
+              throw new Error('baked font metrics were replaced by host metrics: ' + width);
+            }
+            const n = ui.createNode(1);
+            ui.setProp(n, 24, 1); // absolute
+            ui.setProp(n, 28, 12); // left
+            ui.setProp(n, 25, 24); // top
+            ui.setProp(n, 97, 4); // FONT_SLOT = 4
+            ui.setProp(n, 96, 0xff112233); // TEXT_COLOR
+            ui.setProp(n, 100, 2.5); // TRACKING
+            ui.setProp(n, 131, 30); // ROTATE (deg)
+            ui.setText(n, 'A');
+            ui.insertBefore(1, n, 0);
+            globalThis.frame = () => {};
+            "#,
+        )
+        .unwrap();
+
+        let mut atlas = test_font_atlas(4, 4, 6, 2, 'A' as u32, &[255]);
+        // The PAK gives `A` a four-pixel advance; the host table above gives it
+        // 31 pixels, making the selected measurement source observable.
+        atlas[22] = 4;
+        let baked_pak = one_entry_pak("ui:font.4", &atlas);
+        let baked_handle = pocket_create(320.0, 240.0);
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    baked_handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    line_heights.as_ptr(),
+                    cjk_advances.as_ptr(),
+                    ascii_advances.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_load(
+                    baked_handle,
+                    source.as_ptr(),
+                    baked_pak.as_ptr(),
+                    baked_pak.len(),
+                ),
+                0,
+                "{}",
+                CStr::from_ptr(pocket_last_error(baked_handle)).to_string_lossy()
+            );
+        }
+        let baked_ops = frame_json(baked_handle)["ops"].as_array().unwrap().clone();
+        assert_eq!(baked_ops.len(), 1);
+        assert_eq!(baked_ops[0]["type"], "image");
+        assert!(baked_ops[0]["asset"].as_str().unwrap().starts_with("pocket.texture."));
+
+        let verify_baked_after_refresh = CString::new(
+            r#"
+            if (ui.__hostFonts !== false) throw new Error('baked PAK became host-font active after refresh');
+            if (Math.abs(ui.measureText('AA', 4) - 8) > 1e-3) {
+              throw new Error('baked metrics changed after refresh');
+            }
+            "#,
+        )
+        .unwrap();
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    baked_handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    line_heights.as_ptr(),
+                    cjk_advances.as_ptr(),
+                    ascii_advances.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_eval(baked_handle, verify_baked_after_refresh.as_ptr()),
+                0,
+                "{}",
+                CStr::from_ptr(pocket_last_error(baked_handle)).to_string_lossy()
+            );
+        }
+        let refreshed_baked_ops = frame_json(baked_handle)["ops"].as_array().unwrap().clone();
+        assert_eq!(refreshed_baked_ops.len(), 1);
+        assert_eq!(refreshed_baked_ops[0]["type"], "image");
+
+        let host_pak = one_entry_pak("ui:fonts.host", &[1]);
+        let host_handle = pocket_create(320.0, 240.0);
+        let host_source = CString::new(
+            r#"
+            const width = ui.measureText('AA', 4);
+            if (Math.abs(width - 62) > 1e-3) {
+              throw new Error('host font metrics were not selected: ' + width);
+            }
+            const n = ui.createNode(1);
+            ui.setProp(n, 24, 1);
+            ui.setProp(n, 28, 12);
+            ui.setProp(n, 25, 24);
+            ui.setProp(n, 97, 4);
+            ui.setProp(n, 96, 0xff112233);
+            ui.setProp(n, 100, 2.5);
+            ui.setProp(n, 131, 30);
+            ui.setText(n, 'A');
+            ui.insertBefore(1, n, 0);
+            globalThis.frame = () => {};
+            "#,
+        )
+        .unwrap();
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    host_handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    line_heights.as_ptr(),
+                    cjk_advances.as_ptr(),
+                    ascii_advances.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_load(
+                    host_handle,
+                    host_source.as_ptr(),
+                    host_pak.as_ptr(),
+                    host_pak.len(),
+                ),
+                0,
+                "{}",
+                CStr::from_ptr(pocket_last_error(host_handle)).to_string_lossy()
+            );
+        }
+        let host_ops = frame_json(host_handle)["ops"].as_array().unwrap().clone();
+        assert_eq!(host_ops.len(), 1);
+        assert_eq!(host_ops[0]["type"], "text");
+        assert_eq!(host_ops[0]["text"], "A");
+
+        unsafe {
+            pocket_destroy(baked_handle);
+            pocket_destroy(host_handle);
+        }
+    }
+
+    #[test]
+    fn shaped_text_callback_caches_failures_evicts_older_half_and_replays_deterministically() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        unsafe extern "C" fn shaped_cb(
+            user_data: usize,
+            _slot: u8,
+            tracking: f32,
+            utf8_ptr: *const u8,
+            utf8_len: usize,
+        ) -> f32 {
+            let calls = &*(user_data as *const AtomicUsize);
+            calls.fetch_add(1, AtomicOrdering::SeqCst);
+            let text = std::str::from_utf8(std::slice::from_raw_parts(utf8_ptr, utf8_len)).unwrap();
+            if text.contains('\u{FFFD}') {
+                return -1.0; // Simulate failed lookup to verify fallback caching.
+            }
+            // Treat ZWJ family sequence or combining sequence as a single shaped cluster.
+            if text == "👨\u{200D}👩\u{200D}👧\u{200D}👦" {
+                return 19.5 + tracking;
+            }
+            if text == "e\u{0301}" {
+                return 8.25 + tracking;
+            }
+            33.0 + tracking
+        }
+
+        let (lh, cjk, ascii) = default_probe_host_font_metrics();
+        let record_handle = pocket_create(240.0, 160.0);
+        let calls = AtomicUsize::new(0);
+        let empty_env = CString::new("{}").unwrap();
+        let script = CString::new(
+            r#"
+            const zwj = ui.measureText('👨\u200d👩\u200d👧\u200d👦', 2);
+            const comb = ui.measureText('e\u0301', 2);
+            const bad1 = ui.measureText('\ufffd', 2);
+            const bad2 = ui.measureText('\ufffd', 2);
+            if (Math.abs(zwj - 19.5) > 1e-4) throw new Error('zwj=' + zwj);
+            if (Math.abs(comb - 8.25) > 1e-4) throw new Error('comb=' + comb);
+            if (Math.abs(bad1 - bad2) > 1e-4) throw new Error('bad mismatch');
+            const n = ui.createNode(1);
+            ui.setProp(n, 97, 2);
+            ui.setText(n, '👨\u200d👩\u200d👧\u200d👦');
+            ui.insertBefore(1, n, 0);
+            globalThis.frame = () => {};
+            "#,
+        )
+        .unwrap();
+
+        let recorded_trace: String;
+        let recorded_frame: serde_json::Value;
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    record_handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    lh.as_ptr(),
+                    cjk.as_ptr(),
+                    ascii.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_set_host_text_measure_callback(
+                    record_handle,
+                    Some(shaped_cb),
+                    (&calls as *const AtomicUsize) as usize,
+                ),
+                0
+            );
+            assert_eq!(pocket_trace_clock_mode(record_handle, 1), 0);
+            assert_eq!(pocket_trace_clock_begin_json(record_handle, empty_env.as_ptr()), 0);
+            assert_eq!(pocket_eval(record_handle, script.as_ptr()), 0);
+            recorded_frame =
+                serde_json::from_str(CStr::from_ptr(pocket_frame(record_handle, 0.0)).to_str().unwrap())
+                    .unwrap();
+            let trace_ptr = pocket_trace_clock_end_json(record_handle);
+            assert!(!trace_ptr.is_null());
+            recorded_trace = CStr::from_ptr(trace_ptr).to_str().unwrap().to_owned();
+            // 3 distinct non-ASCII strings ('zwj', 'comb', '\ufffd'): '\ufffd' failed once and cached.
+            assert_eq!(calls.load(AtomicOrdering::SeqCst), 3);
+            pocket_destroy(record_handle);
+        }
+
+        // Replay on a second host with NO text callback installed: must reproduce exact widths!
+        let replay_handle = pocket_create(240.0, 160.0);
+        let trace_cstr = CString::new(recorded_trace).unwrap();
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    replay_handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    lh.as_ptr(),
+                    cjk.as_ptr(),
+                    ascii.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(pocket_trace_clock_mode(replay_handle, 2), 0);
+            assert_eq!(pocket_trace_clock_begin_json(replay_handle, trace_cstr.as_ptr()), 0);
+            assert_eq!(pocket_eval(replay_handle, script.as_ptr()), 0);
+            let replayed_frame: serde_json::Value =
+                serde_json::from_str(CStr::from_ptr(pocket_frame(replay_handle, 0.0)).to_str().unwrap())
+                    .unwrap();
+            assert!(!pocket_trace_clock_end_json(replay_handle).is_null());
+            assert_eq!(replayed_frame["ops"], recorded_frame["ops"]);
+
+            // Verify half-capacity generation eviction preserves recent entries.
+            let metrics = (*replay_handle).text_metrics.borrow();
+            metrics.clear_caches();
+            for idx in 0..MAX_HOST_GLYPH_CACHE_ENTRIES {
+                metrics.insert_glyph_cached((0, idx as u32 + 0x100), 10.0);
+            }
+            metrics.insert_glyph_cached((0, 0x20000), 12.0);
+            let len_after = metrics.glyph_cache.borrow().len();
+            assert!(
+                len_after >= MAX_HOST_GLYPH_CACHE_ENTRIES / 2 && len_after < MAX_HOST_GLYPH_CACHE_ENTRIES,
+                "expected half-capacity eviction, got {len_after}"
+            );
+            assert!(metrics.glyph_cache.borrow().contains_key(&(0, 0x20000)));
+            drop(metrics);
+            pocket_destroy(replay_handle);
+        }
+    }
+    #[test]
+    fn simple_cjk_fast_path_and_segment_cache_byte_budget_work_as_expected() {
+        #[derive(Default)]
+        struct Counters {
+            glyph_calls: usize,
+            text_calls: usize,
+        }
+        unsafe extern "C" fn glyph_cb(user_data: usize, _slot: u8, cp: u32) -> f32 {
+            let counters = &mut *(user_data as *mut Counters);
+            counters.glyph_calls += 1;
+            if cp >= 0x4E00 { 16.0 } else { 8.0 }
+        }
+        unsafe extern "C" fn text_cb(
+            user_data: usize,
+            _slot: u8,
+            tracking: f32,
+            utf8_ptr: *const u8,
+            utf8_len: usize,
+        ) -> f32 {
+            let counters = &mut *(user_data as *mut Counters);
+            counters.text_calls += 1;
+            let text = std::str::from_utf8(std::slice::from_raw_parts(utf8_ptr, utf8_len)).unwrap();
+            let count = text.chars().count() as f32;
+            (count * (14.0 + tracking) - 2.0).max(0.0)
+        }
+
+        let (lh, cjk, ascii) = default_probe_host_font_metrics();
+        let mut metrics = TextMetrics::default();
+        let mut host_table = HostFontTable {
+            line_heights: [16.0; HOST_FONT_SLOTS],
+            cjk_advances: [16.0; HOST_FONT_SLOTS],
+            ascii_advances: [[8.0; HOST_ASCII_COUNT]; HOST_FONT_SLOTS],
+        };
+        for slot in 0..ACTIVE_HOST_FONT_SLOTS {
+            host_table.line_heights[slot] = lh[slot];
+            host_table.cjk_advances[slot] = cjk[slot];
+            host_table.ascii_advances[slot]
+                .copy_from_slice(&ascii[slot * HOST_ASCII_COUNT..(slot + 1) * HOST_ASCII_COUNT]);
+        }
+        metrics.host_table = Some(host_table);
+        let mut counters = Counters::default();
+        let user_data = (&mut counters as *mut Counters) as usize;
+        metrics.glyph_callback = Some(HostGlyphCallback {
+            func: glyph_cb,
+            user_data,
+        });
+        metrics.text_callback = Some(HostTextCallback {
+            func: text_cb,
+            user_data,
+        });
+
+        // 500-char Chinese typewriter reveal: 500 distinct prefixes over 25 CJK chars.
+        let base_vocab: Vec<char> = "春江潮水连海平海上明月共潮生滟滟随波千万里何处春江".chars().collect();
+        assert_eq!(base_vocab.len(), 25);
+        let paragraph: String = (0..500).map(|i| base_vocab[i % base_vocab.len()]).collect();
+        let char_indices: Vec<usize> = paragraph
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .chain(std::iter::once(paragraph.len()))
+            .collect();
+        for end in char_indices.iter().skip(1) {
+            let prefix = &paragraph[..*end];
+            let (w, _) = metrics.measure(prefix, 4, 0.0, f32::NAN);
+            assert!(w > 0.0);
+        }
+        let unique_chars: std::collections::HashSet<char> = paragraph.chars().collect();
+        assert_eq!(counters.glyph_calls, unique_chars.len());
+        assert_eq!(counters.text_calls, 0);
+
+        // Complex scripts (combining marks, emoji ZWJ, Arabic) use whole-line text_callback.
+        let complex = "caf\u{0065}\u{0301} 👨‍👩‍👧 مرحبا";
+        let (cw1, _) = metrics.measure(complex, 4, 0.0, f32::NAN);
+        let (cw2, _) = metrics.measure(complex, 4, 0.0, f32::NAN);
+        assert_eq!(cw1, cw2);
+        assert_eq!(counters.text_calls, 1);
+
+        // Segment cache skips lines > 4 KiB and enforces the 4 MiB total key-byte ceiling.
+        let oversized = format!("👨‍👩‍👧{}", "a".repeat(MAX_HOST_SEGMENT_CACHE_KEY_BYTES + 64));
+        let _ = metrics.measure(&oversized, 4, 0.0, f32::NAN);
+        assert!(metrics.lookup_segment_cached(&oversized, 4, 0.0f32.to_bits()).is_none());
+
+        for i in 0..1500usize {
+            let key = format!("👨‍👩‍👧-{i:05}-{}", "x".repeat(3500));
+            assert!(key.len() <= MAX_HOST_SEGMENT_CACHE_KEY_BYTES);
+            metrics.insert_segment_cached(&key, 4, 0.0f32.to_bits(), 100.0);
+            assert!(metrics.segment_cache_bytes.get() <= MAX_HOST_SEGMENT_CACHE_TOTAL_BYTES);
+        }
+    }
+
 }

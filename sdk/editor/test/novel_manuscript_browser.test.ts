@@ -14,7 +14,7 @@ test("plain manuscript is reviewed, cancelled, imported, undone, persisted and e
   const project = join(temporary, "project");
   const id = "manuscript-browser";
   mkdirSync(project);
-  for (const name of ["pocket.json", "package.json", "manifest.json", "fonts.json", "fonts"]) cpSync(join(repository, "demo/js/apps/lantern", name), join(project, name), { recursive: true });
+  for (const name of ["pocket.json", "package.json", "manifest.json"]) cpSync(join(repository, "demo/js/apps/lantern", name), join(project, name), { recursive: true });
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id, appId: "pocket.demo.lantern", name: id, version: "0.1.0", entry: "app.tsx", framework: "solid", build: 1, tickHz: 60 }));
   const original = { id, version: 1, start: "start", script: { start: [{ type: "say", id: "original_line", speaker: "Mira", text: "Original chapter" }, { type: "ending", id: "original_end" }] } };
   const storyPath = join(project, "story.json");

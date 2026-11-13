@@ -261,10 +261,9 @@ test("Editor saves/reopens independent scene objects and the pinned Guest routes
   const qa = qaDirectory;
   await mkdir(project, { recursive: true });
   await mkdir(join(project, "art"), { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "novel.locales.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     await cp(join(projectSource, name), join(project, name));
   }
-  await cp(join(projectSource, "fonts"), join(project, "fonts"), { recursive: true });
   await writeFile(join(project, "editor.json"), JSON.stringify({ id: projectId, appId: "pocket.demo.scene-objects", name: "Scene Objects Acceptance", version: "0.1.0", build: 1, entry: "app.tsx", framework: "solid", tickHz: 60 }));
   await writeFile(join(project, "story.json"), `${JSON.stringify(initialStory, null, 2)}\n`);
   const assets = {

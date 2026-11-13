@@ -209,7 +209,11 @@ void main() {
         },
       ),
     );
-    for (var attempt = 0; attempt < 60 && !completed; attempt++) {
+    // System capability handlers can initialize app-private storage, so allow
+    // a bounded real-time window instead of assuming every filesystem Future
+    // completes within the former 60 ms poll interval.
+    final wait = Stopwatch()..start();
+    while (!completed && wait.elapsed < const Duration(seconds: 2)) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 1)),
       );

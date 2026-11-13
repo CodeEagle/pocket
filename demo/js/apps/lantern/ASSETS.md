@@ -40,13 +40,13 @@
 
 效果图、精修边框、主按钮和图集的完整 GPT Image 提示词、master/runtime 哈希与烘焙步骤见 [REFINEMENT.md](art/ui/REFINEMENT.md)。效果图是实现参考；游戏仍以独立文本、图片皮肤和真实控件运行。
 
-## 原创音频与字体
+## 原创音频与宿主系统字体
 
 `bun run prepare:audio` 执行 `scripts/generate_audio.ts`，使用固定种子噪声和正弦合成生成 PCM16、22050Hz WAV，无采样第三方录音。三个配乐各 24 秒，环境风声 8 秒；其余是站钟、中继开关/故障、列车离站音效。新增的 `text_narrator`、`text_mira`、`text_ren` 是约 45ms 的低音量正弦/三角合成提示音，由 JS 按真实可见的文字进度选择并限速播放；它们不是配音或 TTS。
 
 `bun run prepare:voice` 为 Mira 的 `arrival_02` 原创对白生成中文和英文示例配音（13.60 / 12.37 秒）。它使用固定 eSpeak NG 1.52.0 源码及 SHA-256，由离线 CMake 工具生成普通 PCM16 单声道 WAV；运行时没有 TTS 依赖。这是可听懂的合成人声示例，不是演员录音，也未克隆任何人的声音。生成脚本直接读取 `story.json` 和唯一的 `novel.locales.json`，不维护另一份台词。eSpeak 是构建工具，其源码和构建缓存受 GPL-3.0-or-later 许可且被忽略，不打包进游戏。工具版本与源校验见 `scripts/generate_voice.ts`；输出波形来自本项目原创文本。
 
-界面精修后的主字体与 Flutter 绘制字体均为 Noto Serif CJK SC，使标题与正文贴近效果图中的书信排印风格。`scripts/prepare_font.ts` 固定上游 revision `f8d157532fbfaeda587e826d4cd5b21a49186f7c` 和原字体 SHA-256 `2a2eae2628df83556c54018c41e20fa532c1b862c5256ae8b3f23feb918d12ca`，并用固定 `fonttools==4.60.1` 子集化；[上游 SIL OFL 许可](https://github.com/notofonts/noto-cjk/blob/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Serif/LICENSE) 的完整副本附于 `fonts/LICENSE-NotoSerifCJK.txt`。运行 `bun run prepare:font`，再走同一 `buildGuest`；`pocket.json.fonts` 将同一文件交给 pinned compiler 的 regular/bold 主字面，Flutter 注册 `LanternSerif` 并通过已有 fallback 链绘制，避免英文测量和绘制字体不同造成裁切。JSON 台词和 CG 标题通过 `fonts.json` 声明进入字形收集。之前的 Sans 许可保留用于历史来源说明。
+界面与台词统一采用宿主系统原生矢量字体渲染（`fonts: "host"`、`ui:fonts.host` 与 `text.layout.native`），不再随仓库或安装包内嵌任何 `.otf`/`.ttf` 字体文件或预烘焙位图字库。
 
 ## Original Spine rig
 

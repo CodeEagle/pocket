@@ -27,6 +27,8 @@ export type BuildGuestOptions = {
   tickHz?: number;
   /** Integer raster density used while baking glyphs and image assets. */
   rasterDensity?: number;
+  /** Explicitly bake DCFA font atlases into the PAK even when pocket.json declares no custom fonts. */
+  bakeFonts?: boolean;
   /** Copy runtime artifacts and the project's ordinary assets to a host directory. */
   copyAssetsTo?: string;
   /** Keep a diagnostic copy of the generated JavaScript source. */
@@ -163,7 +165,7 @@ function runOrThrow(command: string[], cwd: string, log?: (line: string) => void
   if (result.status !== 0) throw new Error(`${command[0]} exited with status ${result.status ?? 1}`);
 }
 
-function bytecodeCompilerCommand(rootPath: string, args: string[]): string[] {
+export function bytecodeCompilerCommand(rootPath: string, args: string[]): string[] {
   const configured = process.env.POCKET_BYTECODE_BIN?.trim();
   if (configured) {
     const binary = resolve(configured);
@@ -707,6 +709,8 @@ export function parseBuildGuestArgs(args: string[]): BuildGuestOptions {
     else if (arg.startsWith("--entry=")) result.entry = arg.slice("--entry=".length);
     else if (arg.startsWith("--tick-hz=")) result.tickHz = Number(arg.slice("--tick-hz=".length));
     else if (arg.startsWith("--density=")) result.rasterDensity = checkedRasterDensity(Number(arg.slice("--density=".length)));
+    else if (arg === "--bake-fonts") result.bakeFonts = true;
+    else if (arg === "--no-bake-fonts") result.bakeFonts = false;
     else if (arg.startsWith("--copy-assets-to=")) result.copyAssetsTo = arg.slice("--copy-assets-to=".length);
     else if (arg.startsWith("--keep-source=")) result.keepSource = arg.slice("--keep-source=".length);
     else throw new Error(`build_guest: unknown option ${arg}`);
@@ -797,9 +801,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
   if (typeof transformFile !== "function") {
     throw new Error("build_guest: pinned JSX transformer does not export transformFile");
   }
-  const [{ WORKER_PROTOCOL_VERSION, WORKER_RESOURCES, workerDeclarationSchema }, { validateSchema }] = await Promise.all([
+  const [{ WORKER_PROTOCOL_VERSION, WORKER_RESOURCES, workerDeclarationSchema }, { validateSchema }, { PAK_DTYPE, pack, unpack }] = await Promise.all([
     import(pathToFileURL(join(upstream, "contracts/spec/worker.ts")).href),
     import(pathToFileURL(join(upstream, "framework/src/manifest/schema.ts")).href),
+    import(pathToFileURL(join(upstream, "framework/compiler/pak.ts")).href),
   ]);
 
   const ownsOutput = options.outDir === undefined;
@@ -841,9 +846,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       : [];
     const compilerEntry = prepareCompilerEntry(projectRoot, entry, preparedUi.packageRoot, options.log, vnEntries, usesVn ? novelImageLiterals(projectRoot) : [], bundledModels);
     compilerEntryCleanup = compilerEntry.cleanup;
+    const skipFontBaking = primaryFontArguments.length === 0 && options.bakeFonts !== true;
     report(`build_guest: compiler=${compiler}`, options.log);
     report(`build_guest: source=${entry}`, options.log);
-    runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes", ...primaryFontArguments], root, options.log);
+    runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes", ...(skipFontBaking ? ["--no-bake-fonts"] : []), ...primaryFontArguments], root, options.log);
 
     const compilerBase = compilerEntry.path.replace(/^.*[\\/]/, "").replace(/\.(?:tsx?|vue)$/, "");
     const compilerSource = join(output, `${compilerBase}.js`);
@@ -855,6 +861,17 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     }
     if (compilerSource !== source) copyFileSync(compilerSource, source);
     if (compilerPak !== pak) copyFileSync(compilerPak, pak);
+    if (skipFontBaking) {
+      const pakEntries = unpack(new Uint8Array(readFileSync(pak)));
+      if (!pakEntries.some((blob: { key: string }) => blob.key === "ui:fonts.host")) {
+        const repacked = pack([
+          ...pakEntries,
+          { key: "ui:fonts.host", dtype: PAK_DTYPE.u8, data: new Uint8Array([1]) },
+        ]);
+        writeFileSync(pak, repacked);
+        if (compilerPak !== pak) writeFileSync(compilerPak, repacked);
+      }
+    }
     const sourcePocket = readJsonObject(join(projectRoot, "pocket.json"));
     const domains = sourcePocket?.domains;
     const workerDeclaration = domains && typeof domains === "object" && !Array.isArray(domains)
@@ -936,6 +953,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       };
       metadataObj.worker = workerDescriptor;
     }
+    const fontDelivery = skipFontBaking ? "host" : "baked";
     let metadataModified = workerDescriptor !== undefined;
     if (metadataObj.version !== identity.version) {
       metadataObj.version = identity.version;
@@ -943,6 +961,10 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     }
     if (metadataObj.build !== identity.build) {
       metadataObj.build = identity.build;
+      metadataModified = true;
+    }
+    if (metadataObj.fonts !== fontDelivery) {
+      metadataObj.fonts = fontDelivery;
       metadataModified = true;
     }
     if (metadataModified) writeFileSync(metadata, `${JSON.stringify(metadataObj, null, 2)}\n`);
@@ -954,23 +976,33 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       const outputManifest = { ...manifestObj } as Record<string, unknown>;
       outputManifest.version = identity.version;
       outputManifest.build = identity.build;
+      outputManifest.fonts = fontDelivery;
       if (workerDeclaration !== undefined) {
         outputManifest.domains = { ...(outputManifest.domains as Record<string, unknown> | undefined), worker: workerDeclaration };
       }
       if (workerDescriptor) outputManifest.worker = workerDescriptor;
-      if (workerDescriptor) {
+      if (workerDescriptor || skipFontBaking) {
         const capabilities = outputManifest.capabilities && typeof outputManifest.capabilities === "object"
           ? outputManifest.capabilities as Record<string, unknown>
           : {};
+        const addedRequires = [
+          ...(workerDescriptor ? ["runtime.worker"] : []),
+          ...(skipFontBaking ? ["text.layout.native"] : []),
+        ];
+        const addedSet = new Set(addedRequires);
         const requires = Array.isArray(capabilities.requires)
-          ? capabilities.requires.filter((value): value is string => typeof value === "string")
+          ? capabilities.requires.filter((value): value is string =>
+            typeof value === "string" && !(skipFontBaking && value === "text.glyphs.baked"),
+          )
           : [];
         const optional = Array.isArray(capabilities.optional)
-          ? capabilities.optional.filter((value): value is string => typeof value === "string" && value !== "runtime.worker")
+          ? capabilities.optional.filter((value): value is string =>
+            typeof value === "string" && !addedSet.has(value) && !(skipFontBaking && value === "text.glyphs.baked"),
+          )
           : [];
         outputManifest.capabilities = {
           ...capabilities,
-          requires: Array.from(new Set([...requires, "runtime.worker"])).sort(),
+          requires: Array.from(new Set([...requires, ...addedRequires])).sort(),
           optional,
         };
       }
@@ -980,6 +1012,15 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     if (usesVn) copyNovelNativeModels(projectRoot, output, bundledModels);
     if (assets) {
       mkdirSync(assets, { recursive: true });
+      // Copy ordinary project resources first so freshly compiled runtime
+      // artifacts (app.pak, app.qjbc, app.bytecode.json, guest-manifest.json)
+      // always win even if stale artifacts existed under projectRoot/assets.
+      const mocSources = new Set(Object.entries(bundledModels).flatMap(([source, raw]) => {
+        const model = raw as { kind: string; document?: { FileReferences?: { Moc?: string } } };
+        return model.kind === "live2d" ? [resolve(projectRoot, dirname(source), model.document!.FileReferences!.Moc!)] : [];
+      }));
+      copyProjectAssets(projectRoot, assets, mocSources);
+      if (usesVn) copyNovelNativeModels(projectRoot, assets, bundledModels);
       copyFileSync(bytecode, join(assets, "app.qjbc"));
       copyFileSync(metadata, join(assets, "app.bytecode.json"));
       if (worker) {
@@ -989,15 +1030,6 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       if (!manifestObj) throw new Error(`build_guest: missing or invalid guest manifest: ${guestManifest}`);
       copyFileSync(generatedManifest, join(assets, "guest-manifest.json"));
       copyFileSync(pak, join(assets, "app.pak"));
-      // Keep ordinary project resources beside the runtime artifacts. This
-      // destination is also the Flutter asset root for built-in consumers;
-      // binary media stays a loose file and never enters the image PAK.
-      const mocSources = new Set(Object.entries(bundledModels).flatMap(([source, raw]) => {
-        const model = raw as { kind: string; document?: { FileReferences?: { Moc?: string } } };
-        return model.kind === "live2d" ? [resolve(projectRoot, dirname(source), model.document!.FileReferences!.Moc!)] : [];
-      }));
-      copyProjectAssets(projectRoot, assets, mocSources);
-      if (usesVn) copyNovelNativeModels(projectRoot, assets, bundledModels);
     }
     if (options.keepSource) {
       mkdirSync(resolve(options.keepSource, ".."), { recursive: true });

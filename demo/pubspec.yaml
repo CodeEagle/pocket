@@ -41,10 +41,6 @@ flutter:
   config:
     enable-swift-package-manager: true
   uses-material-design: true
-  fonts:
-    - family: LanternSerif
-      fonts:
-        - asset: js/apps/lantern/fonts/lantern.otf
   assets:
     - assets/app.qjbc
     - assets/app.bytecode.json

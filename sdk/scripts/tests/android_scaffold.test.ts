@@ -32,7 +32,6 @@ try {
     "android.permission.ACCESS_FINE_LOCATION",
     "android.permission.ACCESS_COARSE_LOCATION",
     "android.permission.USE_BIOMETRIC",
-    "android.permission.USE_FINGERPRINT",
   ]) {
     const escaped = permission.replaceAll(".", "\\.");
     assert.match(once, new RegExp(`android:name="${escaped}"`));
@@ -40,8 +39,9 @@ try {
   }
   assert.match(once, /BLUETOOTH_SCAN[^>]*usesPermissionFlags="neverForLocation"/);
   assert.match(once, /BLUETOOTH[^>]*maxSdkVersion="30"/);
-  assert.match(once, /USE_FINGERPRINT[^>]*maxSdkVersion="27"/);
+  // BiometricPrompt is API 28+; deprecated fingerprint permission is not used.
   for (const removed of [
+    "android.permission.USE_FINGERPRINT",
     "android.permission.ACCESS_NETWORK_STATE",
     "android.permission.RECORD_AUDIO",
     "android.permission.READ_MEDIA_IMAGES",

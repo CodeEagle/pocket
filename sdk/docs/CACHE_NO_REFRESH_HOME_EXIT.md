@@ -20,6 +20,14 @@
 
 本地 `agy` Argon Medium 最终审核会话 `35592489-7f2c-450a-9825-d50b41a6a817`：无阻塞发现。发布索引指向 `0.1.0-test.5`，签名 payload 哈希与索引匹配，entry 哈希与通过 native 回归的 revision 19 `app.qjbc` 匹配。
 
+### Resident MiniApp 在后台刷新仍进行时重入
+
+2026-11-12。`PocketUpdateCoordinator.prepare()` 每次都会读取固定 mutable package index；MiniApp 的 cache-first 初次进入先显示健康缓存，再由 `PocketSession._scheduleCacheFirstPreparation` 在后台拉取并验证新包。之前 `prepareForOpen(cacheFirst: true)` 在该后台请求尚未完成时直接返回 `updated: false`，所以同一次 resident 重入仍会展示旧 generation；这次重入也不会等后台 stage 完成后自动补切换。
+
+现在仅 `downloadOnOpen` MiniApp 的 resident `prepareForOpen(cacheFirst: true)` 会等待已经存在的后台准备 Future，再消费已验证的 staged package。冷启动仍保持缓存优先快速进入；remote-only MiniApp resident 重入可能等待这次已有准备完成，不承诺秒级打开。它复用 `_prepareOnOpen` 既有的无进度超时：网络阶段 20 秒、验证/本地准备阶段 120 秒，实际进度会重置空闲计时，并沿用原取消路径。Bundled runtime 仍可立即使用本地包。后台准备失败仍记录原有错误并保留健康缓存，不要求离线时拒绝旧包；没有增加更新状态机或另一个网络轮询器。
+
+`sdk/test/session_download_on_open_test.dart` 使用真实 `PocketUpdateCoordinator`、本地 HTTP 服务与 signed package，覆盖挂起中的后台更新在同一次 resident 重入中成功挂载新 build，以及 manifest 成功但后续 blob 请求返回 503 时回退健康缓存、保留错误。`sdk/packages/pocket_services/test/pocket_package_update_test.dart` 的 fixed-index 回归确认同一个 coordinator 会重新读取 mutable package index。该回归证明 SDK 存在并修复 pending-stage 重入竞态；没有设备端 active-version 日志，因此不据此断言它就是本次真机 Live2D 报错的原因。
+
 用户随后要求保留 Home 返回箭头：恢复该箭头并发布 `0.1.0-test.6`。新构建再次通过 native 回归，390px / 1280px 均找到返回箭头与退出文字，手机宽度下实际点击箭头只发出一次关闭协议。SDK plain Session 回归 `warm cache keeps its generation and bridge through a blocked same-manifest refresh` 通过；后台相同签名 manifest 请求挂起／放行以及手动 check/apply 均保持 active package、payload SHA、generation、controller、registry 和挂载次数不变，apply 返回 `scheduled:false`。移除了最初冗余的 widget/runtime 模拟方案。
 
 ## Flutter FPS 修正

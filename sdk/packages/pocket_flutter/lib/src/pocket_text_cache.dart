@@ -63,6 +63,7 @@ final class PocketTextLayoutCache {
       text: TextSpan(text: text, style: style),
       textDirection: textDirection,
       textAlign: textAlign,
+      textScaler: TextScaler.noScaling,
     )..layout(minWidth: minWidth, maxWidth: maxWidth);
     layoutCount++;
     _entries[key] = painter;

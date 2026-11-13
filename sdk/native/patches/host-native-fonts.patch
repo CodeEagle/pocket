@@ -1,0 +1,1104 @@
+diff --git a/contracts/generated/pocket_spec.h b/contracts/generated/pocket_spec.h
+index c8474d3..951db61 100644
+--- a/contracts/generated/pocket_spec.h
++++ b/contracts/generated/pocket_spec.h
+@@ -49,6 +49,8 @@
+ #define POCKET_DRAW_OP_ROUNDED_RECT 17U
+ #define POCKET_DRAW_OP_ARC 18U
+ #define POCKET_DRAW_OP_ROUNDED_GRADIENT 19U
++#define POCKET_DRAW_OP_TEXT_RUN_FLAG_TRACKING 0x00010000U
++#define POCKET_DRAW_OP_TEXT_RUN_FLAG_AFFINE 0x00020000U
+ 
+ /* Portable operation numbers (contracts/spec/ui-ops.ts): what a program's
+  * operation provider serves and pocket_runtime_op dispatches. */
+diff --git a/contracts/spec/gen-c.ts b/contracts/spec/gen-c.ts
+index 05ef170..971120f 100644
+--- a/contracts/spec/gen-c.ts
++++ b/contracts/spec/gen-c.ts
+@@ -9,7 +9,7 @@
+ // the committed header, so the C constants can never drift from spec.ts. Keep
+ // this generator free of anything non-deterministic.
+ 
+-import { ANALOG_CENTER, BTN, DRAW_LIST_VERSION, DRAW_OP, OP, POCKET_BINDING_GENERATION } from "./spec.ts";
++import { ANALOG_CENTER, BTN, DRAW_LIST_VERSION, DRAW_OP, OP, POCKET_BINDING_GENERATION, TEXT_RUN_FLAG_AFFINE, TEXT_RUN_FLAG_TRACKING } from "./spec.ts";
+ 
+ function hex(n: number, pad = 4): string {
+   return "0x" + (n >>> 0).toString(16).toUpperCase().padStart(pad, "0");
+@@ -44,6 +44,8 @@ export function generateC(): string {
+     const constant = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+     put(`#define POCKET_DRAW_OP_${constant} ${value}U`);
+   }
++  put(`#define POCKET_DRAW_OP_TEXT_RUN_FLAG_TRACKING ${hex(TEXT_RUN_FLAG_TRACKING, 8)}U`);
++  put(`#define POCKET_DRAW_OP_TEXT_RUN_FLAG_AFFINE ${hex(TEXT_RUN_FLAG_AFFINE, 8)}U`);
+   put();
+   put("/* Portable operation numbers (contracts/spec/ui-ops.ts): what a program's");
+   put(" * operation provider serves and pocket_runtime_op dispatches. */");
+diff --git a/contracts/spec/gen-rust.ts b/contracts/spec/gen-rust.ts
+index 709042a..393b364 100644
+--- a/contracts/spec/gen-rust.ts
++++ b/contracts/spec/gen-rust.ts
+@@ -78,6 +78,8 @@ import {
+   PAK_VERSION,
+   DRAW_OP,
+   DRAW_LIST_VERSION,
++  TEXT_RUN_FLAG_AFFINE,
++  TEXT_RUN_FLAG_TRACKING,
+   ENUMS,
+   FIXED_DT,
+   FONT_CMAP_ENTRY_SIZE,
+@@ -461,7 +463,7 @@ export function generateRust(): string {
+   put("/// DrawList op codes (core -> backend Vec<u32> words; layout in spec.ts).");
+   put("/// Word counts incl. header: RECT 4, GRAD_RECT 6, GLYPH_RUN 3+2n,");
+   put("/// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,");
+-  put("/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,");
++  put("/// TEXT_RUN 8+extra+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,");
+   put("/// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,");
+   put("/// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.");
+   put(`pub const DRAW_LIST_VERSION: u32 = ${DRAW_LIST_VERSION};`);
+@@ -469,6 +471,8 @@ export function generateRust(): string {
+   for (const [name, v] of Object.entries(DRAW_OP)) {
+     put(`    pub const ${screaming(name)}: u32 = ${v};`);
+   }
++  put(`    pub const TEXT_RUN_FLAG_TRACKING: u32 = 1 << ${Math.log2(TEXT_RUN_FLAG_TRACKING)};`);
++  put(`    pub const TEXT_RUN_FLAG_AFFINE: u32 = 1 << ${Math.log2(TEXT_RUN_FLAG_AFFINE)};`);
+   put("}");
+   put("");
+ 
+diff --git a/contracts/spec/spec.ts b/contracts/spec/spec.ts
+index 76232d3..ec18605 100644
+--- a/contracts/spec/spec.ts
++++ b/contracts/spec/spec.ts
+@@ -1490,15 +1490,21 @@ export const FONT_FLAG_BOLD = 1 << 0;
+ //                           preserve fractional logical-pixel coordinates.
+ //   TEX_TRI_REPEAT_FLOAT (15 words): same float payload, repeat sampler. Only
+ //                           retained meshes emit these float-coordinate ops.
+-//   TEXT_RUN    (8 + ceil(n/4) words):
++//   TEXT_RUN    (8 + extra + ceil(n/4) words):
+ //                           op,
+ //                           word1: bits 0-7 fontSlot,
+ //                                  bits 8-15 TextAlign ordinal,
++//                                  bit 16 TEXT_RUN_FLAG_TRACKING (+1 f32 word),
++//                                  bit 17 TEXT_RUN_FLAG_AFFINE (+4 f32 words),
+ //                           originX, originY, boxW, lineHeight (f32 bits;
+ //                           content-box top-left + width in logical px;
+ //                           lineHeight NaN = the slot's default),
+ //                           color,
+-//                           byteLen (u32), then ceil(n/4) words of the run
++//                           byteLen (u32),
++//                           optional tracking (f32 bits when flag bit 16 set),
++//                           optional affine a, b, c, d (4 f32 words when flag
++//                           bit 17 set; 2x2 linear part around originX/Y),
++//                           then ceil(n/4) words of the run
+ //                           string's UTF-8 bytes packed little-endian and
+ //                           zero-padded. Emitted ONLY when the host installed
+ //                           a native text measurer (docs/BACKENDS.md) and the
+@@ -1572,6 +1578,9 @@ export const DRAW_OP = {
+   roundedGradient: 19,
+ } as const;
+ 
++export const TEXT_RUN_FLAG_TRACKING = 1 << 16;
++export const TEXT_RUN_FLAG_AFFINE = 1 << 17;
++
+ // ---------------------------------------------------------------------------
+ // PAK container constants
+ // ---------------------------------------------------------------------------
+diff --git a/engine/backends/gpui/src/render.rs b/engine/backends/gpui/src/render.rs
+index b1cc75b..b656bb4 100644
+--- a/engine/backends/gpui/src/render.rs
++++ b/engine/backends/gpui/src/render.rs
+@@ -346,7 +346,16 @@ impl GpuiRenderer {
+                     self.paint_tri_batch(ui, words, i, origin, window, cx);
+                 }
+                 spec::draw_op::TEXT_RUN => {
+-                    let len = 8 + (words[*i + 7] as usize).div_ceil(4);
++                    if *i + 8 > words.len() {
++                        return;
++                    }
++                    let header = words[*i + 1];
++                    let extra = usize::from(header & spec::draw_op::TEXT_RUN_FLAG_TRACKING != 0)
++                        + if header & spec::draw_op::TEXT_RUN_FLAG_AFFINE != 0 { 4 } else { 0 };
++                    let len = 8 + extra + (words[*i + 7] as usize).div_ceil(4);
++                    if *i + len > words.len() {
++                        return;
++                    }
+                     self.paint_text_run(&words[*i..*i + len], origin, window, cx);
+                     *i += len;
+                 }
+@@ -368,16 +377,20 @@ impl GpuiRenderer {
+         window: &mut Window,
+         cx: &mut App,
+     ) {
+-        let slot = (words[1] & 0xff) as u8;
+-        let align = ((words[1] >> 8) & 0xff) as u8;
++        let header = words[1];
++        let slot = (header & 0xff) as u8;
++        let align = ((header >> 8) & 0xff) as u8;
+         let ox = f32::from_bits(words[2]);
+         let oy = f32::from_bits(words[3]);
+         let box_w = f32::from_bits(words[4]);
+         let line_height = f32::from_bits(words[5]);
+         let color_word = words[6];
+         let byte_len = words[7] as usize;
++        let extra = usize::from(header & spec::draw_op::TEXT_RUN_FLAG_TRACKING != 0)
++            + if header & spec::draw_op::TEXT_RUN_FLAG_AFFINE != 0 { 4 } else { 0 };
++        let payload_start = 8 + extra;
+         let mut bytes = Vec::with_capacity(byte_len);
+-        for w in &words[8..8 + byte_len.div_ceil(4)] {
++        for w in &words[payload_start..payload_start + byte_len.div_ceil(4)] {
+             bytes.extend_from_slice(&w.to_le_bytes());
+         }
+         bytes.truncate(byte_len);
+diff --git a/engine/core/src/draw.rs b/engine/core/src/draw.rs
+index 1affa37..5de3ca2 100644
+--- a/engine/core/src/draw.rs
++++ b/engine/core/src/draw.rs
+@@ -178,8 +178,8 @@ enum Item3 {
+     /// One image node's projected cells. The mesh is the painter-sort unit so
+     /// all TEX_TRIs for its texture remain consecutive for host batching.
+     TexMesh { cell_start: usize, cell_end: usize, tex: u32, modulate: u32 },
+-    /// A text node's glyph run, anchored at its projected origin.
+-    Run { slot: u32, origin: (f32, f32), opacity: f32 },
++    /// A text node's glyph run, carrying its projected anchor and local 2x2 Jacobian.
++    Run { slot: u32, world: Affine, opacity: f32 },
+ }
+ 
+ /// Screen-space clip rect (x0 <= x1, y0 <= y1), f32 but integer-valued.
+@@ -1483,13 +1483,22 @@ impl<'a> Walker<'a> {
+                         clip_fan(&poly, clip, |a, b, c| emit_tex_tri(dl, tex, modulate, a, b, c, clip, self.screen, false));
+                     }
+                 }
+-                Item3::Run { slot, origin, opacity } => {
++                Item3::Run { slot, world, opacity } => {
+                     // (borrows through the walker's &'a Tree field, so the
+                     // node ref is not tied to &mut self)
+                     let node = &self.tree.slots[slot as usize];
+                     let r = style::resolve(node, self.styles, true);
+-                    let anchor = Affine::translate(origin.0, origin.1);
+-                    self.emit_text(dl, slot, node, &r, &anchor, opacity, clip, node.layout.w, true);
++                    let run_world = if node.text_native
++                        && world.a.is_finite()
++                        && world.b.is_finite()
++                        && world.c.is_finite()
++                        && world.d.is_finite()
++                    {
++                        world
++                    } else {
++                        Affine::translate(world.tx, world.ty)
++                    };
++                    self.emit_text(dl, slot, node, &r, &run_world, opacity, clip, node.layout.w, true);
+                 }
+             }
+         }
+@@ -1680,10 +1689,20 @@ impl<'a> Walker<'a> {
+             ));
+         }
+         if node.node_type == spec::NodeType::Text as u8 {
+-            // Glyphs anchor at the projected text origin and stay upright
+-            // (the 2D rotation contract). Depth = the anchor's z.
++            // Baked glyphs anchor at the projected text origin and stay upright;
++            // font-less native fallback carries the local projected 2x2 Jacobian.
+             let ((sx, sy), z) = project(0.0, 0.0);
+-            items.push((z + 0.01, Item3::Run { slot, origin: (sx, sy), opacity: op }));
++            let ((ux, uy), _) = project(1.0, 0.0);
++            let ((vx, vy), _) = project(0.0, 1.0);
++            let world = Affine {
++                a: ux - sx,
++                b: uy - sy,
++                c: vx - sx,
++                d: vy - sy,
++                tx: sx,
++                ty: sy,
++            };
++            items.push((z + 0.01, Item3::Run { slot, world, opacity: op }));
+             return; // text children are absorbed into the run
+         }
+         for &cid in &node.children {
+@@ -3179,10 +3198,9 @@ impl<'a> Walker<'a> {
+         // flag it, and Ui::draw() relayouts and REPAINTS within this same
+         // draw, so the frame that leaves is provider-correct. An animation
+         // crossing exact identity re-decides twice per cycle.
+-        let desired_native = !self.in_3d
+-            && self.fonts.native_active()
+-            && r.tracking == 0.0
+-            && !in_transform;
++        let desired_native =
++            self.fonts
++                .uses_native_for(slot, r.tracking, in_transform, self.in_3d);
+         if desired_native != node.text_native {
+             self.provider_stale = true;
+         }
+@@ -3333,8 +3351,12 @@ impl<'a> Walker<'a> {
+                     h: bounds.y1 - bounds.y0, text: source.clone() });
+             }
+         }
+-        let desired_native = !self.in_3d && self.fonts.native_active()
+-            && r.tracking == 0.0 && !in_transform;
++        let desired_native = self.fonts.uses_native_for(
++            r.font_slot as u8,
++            r.tracking,
++            in_transform,
++            self.in_3d,
++        );
+         if desired_native != node.text_native { self.provider_stale = true; }
+         let reveal = inline.reveal_codepoints.min(source.chars().count() as u32);
+         for fragment in &layout.fragments {
+@@ -3453,28 +3475,76 @@ impl<'a> Walker<'a> {
+             return;
+         }
+         let (ox, oy) = world.apply(0.0, 0.0);
++        let has_tracking = self.fonts.native_transformed() && r.tracking != 0.0;
++        let has_affine = self.fonts.native_transformed()
++            && (world.a != 1.0 || world.b != 0.0 || world.c != 0.0 || world.d != 1.0);
+         // Alignment places lines inside box_w, so box_w ∪ measured width
+         // bounds every glyph the backend can paint.
+         let ext_w = box_w.max(mw);
+-        if ox + ext_w <= clip.x0 || ox >= clip.x1 || oy + mh <= clip.y0 || oy >= clip.y1 {
+-            return;
+-        }
+-        let clipped =
+-            ox < clip.x0 || oy < clip.y0 || ox + ext_w > clip.x1 || oy + mh > clip.y1;
++        let clipped = if has_affine {
++            let min_lx = match r.text_align {
++                x if x == spec::TextAlign::Center as u8 => ((box_w - mw) * 0.5).min(0.0),
++                x if x == spec::TextAlign::Right as u8 => (box_w - mw).min(0.0),
++                _ => 0.0,
++            };
++            let corners = [
++                world.apply(min_lx, 0.0),
++                world.apply(ext_w, 0.0),
++                world.apply(min_lx, mh),
++                world.apply(ext_w, mh),
++            ];
++            let min_x = corners.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
++            let max_x = corners.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
++            let min_y = corners.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
++            let max_y = corners.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
++            if !min_x.is_finite()
++                || !max_x.is_finite()
++                || !min_y.is_finite()
++                || !max_y.is_finite()
++                || max_x <= clip.x0
++                || min_x >= clip.x1
++                || max_y <= clip.y0
++                || min_y >= clip.y1
++            {
++                return;
++            }
++            min_x < clip.x0 || min_y < clip.y0 || max_x > clip.x1 || max_y > clip.y1
++        } else {
++            if ox + ext_w <= clip.x0 || ox >= clip.x1 || oy + mh <= clip.y0 || oy >= clip.y1 {
++                return;
++            }
++            ox < clip.x0 || oy < clip.y0 || ox + ext_w > clip.x1 || oy + mh > clip.y1
++        };
+         if clipped {
+             dl.words.push(spec::draw_op::SCISSOR);
+             dl.words.push(xy_word(clip.x0, clip.y0));
+             dl.words.push(wh_word(clip.x1 - clip.x0, clip.y1 - clip.y0));
+         }
++        let mut header = (slot as u32) | ((r.text_align as u32) << 8);
++        if has_tracking {
++            header |= spec::draw_op::TEXT_RUN_FLAG_TRACKING;
++        }
++        if has_affine {
++            header |= spec::draw_op::TEXT_RUN_FLAG_AFFINE;
++        }
+         let bytes = run.as_bytes();
+         dl.words.push(spec::draw_op::TEXT_RUN);
+-        dl.words.push((slot as u32) | ((r.text_align as u32) << 8));
++        dl.words.push(header);
+         dl.words.push(ox.to_bits());
+         dl.words.push(oy.to_bits());
+         dl.words.push(box_w.to_bits());
+         dl.words.push(r.line_height.to_bits());
+         dl.words.push(color);
+         dl.words.push(bytes.len() as u32);
++        if has_tracking {
++            dl.words.push(r.tracking.to_bits());
++        }
++        if has_affine {
++            dl.words.push(world.a.to_bits());
++            dl.words.push(world.b.to_bits());
++            dl.words.push(world.c.to_bits());
++            dl.words.push(world.d.to_bits());
++        }
+         for chunk in bytes.chunks(4) {
+             let mut w = [0u8; 4];
+             w[..chunk.len()].copy_from_slice(chunk);
+diff --git a/engine/core/src/layout.rs b/engine/core/src/layout.rs
+index 2ddeb12..0baa75a 100644
+--- a/engine/core/src/layout.rs
++++ b/engine/core/src/layout.rs
+@@ -198,6 +198,7 @@ struct LayoutEntry {
+     handle: taffy::NodeId,
+     active: bool,
+     declares_transform: bool,
++    declares_perspective: bool,
+ }
+ 
+ /// One `contain` subtree (`Node::region_root`): its children form their own
+@@ -649,10 +650,12 @@ fn build(
+     taffy: &mut TaffyTree<MeasureCtx>,
+     slot: u32,
+     in_transform: bool,
++    in_3d: bool,
+     counters: &mut crate::counters::LayoutCounters,
+ ) -> Option<taffy::NodeId> {
+     let resolved = style::resolve(&tree.slots[slot as usize], styles, true);
+     let in_transform = in_transform || resolved.declares_transform();
++    let in_3d = in_3d || resolved.perspective > 0.0;
+     let node_type = tree.slots[slot as usize].node_type;
+     if node_type == spec::NodeType::Text as u8 {
+         let mut run = String::new();
+@@ -662,7 +665,12 @@ fn build(
+             tree.slots[slot as usize].text_native = false;
+             return None; // empty text nodes never consume gap/flex space [R]
+         }
+-        let native = fonts.native_active() && resolved.tracking == 0.0 && !in_transform;
++        let native = fonts.uses_native_for(
++            resolved.font_slot as u8,
++            resolved.tracking,
++            in_transform,
++            in_3d,
++        );
+         tree.slots[slot as usize].text_native = native;
+         let (inline, inline_key) = cached_inline_layout(tree, slot, &run, &resolved, fonts, native, 0);
+         let ctx = if let Some(inline) = inline {
+@@ -683,7 +691,7 @@ fn build(
+     let mut kids: Vec<taffy::NodeId> = Vec::with_capacity(children.len());
+     for c in children {
+         if let Some(cs) = tree.resolve(c) {
+-            if let Some(k) = build(tree, styles, fonts, taffy, cs, in_transform, counters) {
++            if let Some(k) = build(tree, styles, fonts, taffy, cs, in_transform, in_3d, counters) {
+                 kids.push(k);
+             }
+         }
+@@ -786,6 +794,8 @@ fn update_measure(
+         eng.counters.shaping_calls = eng.counters.shaping_calls.saturating_add(1);
+     }
+     let _ = eng.taffy.set_node_context(handle, Some(context));
++    let _ = eng.taffy.mark_dirty(handle);
++    invalidate_ancestors(&mut eng.taffy, handle);
+ }
+ 
+ /// Taffy's remove() does not release its secondary context map or dirty the
+@@ -839,6 +849,7 @@ fn sync_node(
+     eng: &mut LayoutEngine,
+     slot: u32,
+     in_transform: bool,
++    in_3d: bool,
+     replay_all_misses: bool,
+     style_dirty: &[u32],
+ ) -> Option<taffy::NodeId> {
+@@ -847,7 +858,9 @@ fn sync_node(
+     }
+     let resolved = style::resolve(&tree.slots[slot as usize], styles, true);
+     let declares_transform = resolved.declares_transform();
++    let declares_perspective = resolved.perspective > 0.0;
+     let in_transform = in_transform || declares_transform;
++    let in_3d = in_3d || declares_perspective;
+     let is_text = tree.slots[slot as usize].node_type == spec::NodeType::Text as u8;
+     let mut run = String::new();
+     if is_text {
+@@ -856,7 +869,13 @@ fn sync_node(
+             return None;
+         }
+     }
+-    let native = is_text && fonts.native_active() && resolved.tracking == 0.0 && !in_transform;
++    let native = is_text
++        && fonts.uses_native_for(
++            resolved.font_slot as u8,
++            resolved.tracking,
++            in_transform,
++            in_3d,
++        );
+     let (inline_layout, inline_key) = if is_text {
+         cached_inline_layout(tree, slot, &run, &resolved, fonts, native, eng.environment_epoch)
+     } else {
+@@ -911,6 +930,7 @@ fn sync_node(
+         handle,
+         active: true,
+         declares_transform,
++        declares_perspective,
+     });
+     if is_text {
+         tree.slots[slot as usize].text_native = native;
+@@ -933,6 +953,7 @@ fn sync_node(
+                     eng,
+                     child_slot,
+                     in_transform,
++                    in_3d,
+                     replay_all_misses,
+                     style_dirty,
+                 ) {
+@@ -978,6 +999,21 @@ fn in_transform(tree: &Tree, styles: &StyleTable, slot: u32, root_id: i32) -> bo
+     false
+ }
+ 
++fn in_3d(tree: &Tree, styles: &StyleTable, slot: u32, root_id: i32) -> bool {
++    let mut current = Some(slot);
++    while let Some(slot) = current {
++        let node = &tree.slots[slot as usize];
++        if style::resolve(node, styles, true).perspective > 0.0 {
++            return true;
++        }
++        if node.id(slot) == root_id {
++            break;
++        }
++        current = tree.resolve(node.parent);
++    }
++    false
++}
++
+ /// Assign `slot`'s rounded rect from its active solver node (the zero rect
+ /// without one) and return its cumulative unrounded origin and box.
+ /// Node::taffy remains a compatibility view, never an input to another output.
+@@ -1139,10 +1175,10 @@ pub fn relayout_root(
+     let transform_changed = |dirty: &[u32], eng: &LayoutEngine| {
+         dirty.iter().any(|&slot| {
+             entry(eng, tree, slot).is_some_and(|old| {
++                let resolved = style::resolve(&tree.slots[slot as usize], styles, true);
+                 old.active
+-                    && old.declares_transform
+-                        != style::resolve(&tree.slots[slot as usize], styles, true)
+-                            .declares_transform()
++                    && (old.declares_transform != resolved.declares_transform()
++                        || old.declares_perspective != (resolved.perspective > 0.0))
+             })
+         })
+     };
+@@ -1178,6 +1214,7 @@ pub fn relayout_root(
+                 eng,
+                 slot,
+                 false,
++                false,
+                 replay_all_misses,
+                 &dirty,
+             )
+@@ -1273,9 +1310,13 @@ fn restyle(
+         if tree.slots[slot as usize].node_type == spec::NodeType::Text as u8 {
+             let mut run = String::new();
+             tree.collect_run(slot, &mut run);
+-            let native = fonts.native_active()
+-                && resolved.tracking == 0.0
+-                && !in_transform(tree, styles, slot, root_id);
++            let native = fonts.uses_native_for(
++                resolved.font_slot as u8,
++                resolved.tracking,
++                in_transform(tree, styles, slot, root_id),
++                in_3d(tree, styles, slot, root_id),
++            );
++            tree.slots[slot as usize].text_native = native;
+             let (inline, inline_key) = cached_inline_layout(
+                 tree, slot, &run, &resolved, fonts, native, eng.environment_epoch,
+             );
+@@ -1353,6 +1394,7 @@ fn sync_region(
+         }
+     };
+     let in_transform = in_transform(tree, styles, slot, root_id);
++    let in_3d = in_3d(tree, styles, slot, root_id);
+     let children = tree.slots[slot as usize].children.clone();
+     let mut projected = Vec::with_capacity(children.len());
+     for child in children {
+@@ -1364,6 +1406,7 @@ fn sync_region(
+                 eng,
+                 child_slot,
+                 in_transform,
++                in_3d,
+                 replay_all_misses,
+                 style_dirty,
+             ) {
+@@ -1511,7 +1554,7 @@ pub fn reference_mismatches(
+     let mut taffy = new_taffy();
+     let mut out = Vec::new();
+     if let Some(root_slot) = tree.resolve(root_id) {
+-        if let Some(root) = build(tree, styles, fonts, &mut taffy, root_slot, false, &mut counters) {
++        if let Some(root) = build(tree, styles, fonts, &mut taffy, root_slot, false, false, &mut counters) {
+             let _ = taffy.compute_layout_with_measure(
+                 root,
+                 Size {
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+index 39ab594..8aaa5ca 100644
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -470,6 +470,22 @@ impl Ui {
+         self.native_rounded_rects = enabled;
+     }
+ 
++    /// Route tracked (`letterSpacing`) and transformed text runs through
++    /// vector `TEXT_RUN` records instead of falling back to baked `GLYPH_RUN`.
++    pub fn set_native_transformed_text(&mut self, enabled: bool) {
++        if self.fonts.native_transformed() != enabled {
++            self.fonts.set_native_transformed(enabled);
++            self.mark_layout_dirty();
++            self.bump_raster_revision();
++        }
++    }
++
++    /// Invalidate cached text measurements after host font metrics change.
++    pub fn invalidate_text_metrics(&mut self) {
++        self.mark_layout_dirty();
++        self.bump_raster_revision();
++    }
++
+     /// Declare how many `tick()` calls make one second of virtual time
+     /// (spec default 60, at most `MAX_TICK_HZ`). Rejected once the first
+     /// `tick()` has run — even a `debug_pause`d one: a realm's frame content
+@@ -1564,8 +1580,12 @@ impl Ui {
+                 x if x == spec::draw_op::MESH_MASK_BEGIN => 4,
+                 x if x == spec::draw_op::MESH_LAYER_RESTORE => 1,
+                 x if x == spec::draw_op::TEXT_RUN => {
+-                    let Some(bytes) = words.get(i + 7) else { break };
+-                    8 + (*bytes as usize).div_ceil(4)
++                    let (Some(&header), Some(&bytes)) = (words.get(i + 1), words.get(i + 7)) else {
++                        break;
++                    };
++                    let extra = usize::from(header & spec::draw_op::TEXT_RUN_FLAG_TRACKING != 0)
++                        + if header & spec::draw_op::TEXT_RUN_FLAG_AFFINE != 0 { 4 } else { 0 };
++                    8 + extra + (bytes as usize).div_ceil(4)
+                 }
+                 x if x == spec::draw_op::SURFACE_QUAD => 9,
+                 _ => break,
+diff --git a/engine/core/src/tests.rs b/engine/core/src/tests.rs
+index e7d3a12..872d89d 100644
+--- a/engine/core/src/tests.rs
++++ b/engine/core/src/tests.rs
+@@ -361,7 +361,10 @@ fn tex_tri_runs(words: &[u32]) -> Vec<(u32, usize)> {
+             spec::draw_op::TRI => { previous_was_tex_tri = false; i += 7; }
+             spec::draw_op::TEXT_RUN => {
+                 previous_was_tex_tri = false;
+-                i += 8 + (words[i + 7] as usize).div_ceil(4);
++                let header = words[i + 1];
++                let extra = usize::from(header & spec::draw_op::TEXT_RUN_FLAG_TRACKING != 0)
++                    + if header & spec::draw_op::TEXT_RUN_FLAG_AFFINE != 0 { 4 } else { 0 };
++                i += 8 + extra + (words[i + 7] as usize).div_ceil(4);
+             }
+             other => panic!("unknown draw op {other} at word {i}"),
+         }
+@@ -4075,15 +4078,23 @@ fn hit_pass_layers_never_swallow_bounds_hits() {
+ /// Decode a TEXT_RUN's packed UTF-8 payload at op index `i`; returns the
+ /// string and the index past the op (spec.ts word format).
+ fn decode_text_run_text(words: &[u32], i: usize) -> (alloc::string::String, usize) {
++    let header = words[i + 1];
++    let extra = usize::from(header & spec::draw_op::TEXT_RUN_FLAG_TRACKING != 0)
++        + if header & spec::draw_op::TEXT_RUN_FLAG_AFFINE != 0 { 4 } else { 0 };
++    for idx in i + 8..i + 8 + extra {
++        assert!(f32::from_bits(words[idx]).is_finite(), "TEXT_RUN extension word not finite");
++    }
+     let len = words[i + 7] as usize;
++    let payload_start = i + 8 + extra;
++    let payload_end = payload_start + len.div_ceil(4);
+     let mut bytes = Vec::with_capacity(len);
+-    for w in &words[i + 8..i + 8 + len.div_ceil(4)] {
++    for w in &words[payload_start..payload_end] {
+         bytes.extend_from_slice(&w.to_le_bytes());
+     }
+     bytes.truncate(len);
+     (
+         alloc::string::String::from_utf8(bytes).expect("TEXT_RUN payload is UTF-8"),
+-        i + 8 + len.div_ceil(4),
++        payload_end,
+     )
+ }
+ 
+@@ -5085,3 +5096,131 @@ fn native_rounded_radius_threshold_preserves_legacy_square_fallback() {
+     assert_eq!(words[12], spec::draw_op::RECT);
+     assert_eq!(words[15], 0xff223344);
+ }
++
++#[test]
++fn native_transformed_text_routes_tracking_and_transforms_to_text_run() {
++    let mut ui = Ui::new();
++    ui.set_viewport(320.0, 240.0);
++    ui.set_text_measure(Some(alloc::boxed::Box::new(|text: &str, _slot, tracking, line_h| {
++        let lines = text.split('\n').count() as f32;
++        let w = text
++            .split('\n')
++            .map(|line| line.chars().count() as f32 * (8.0 + tracking))
++            .fold(0.0f32, f32::max);
++        let lh = if line_h.is_nan() { 16.0 } else { line_h };
++        (w, lines * lh)
++    })));
++
++    let box_id = ui.create_node(spec::NodeType::View as u8);
++    ui.set_prop(box_id, spec::prop::WIDTH, 160.0);
++    ui.set_prop(box_id, spec::prop::HEIGHT, 60.0);
++    ui.set_prop(box_id, spec::prop::TRANSLATE_X, 40.0);
++    ui.set_prop(box_id, spec::prop::TRANSLATE_Y, 60.0);
++    ui.set_prop(box_id, spec::prop::ROTATE, 30.0);
++    ui.set_prop(box_id, spec::prop::SCALE, 1.25);
++    ui.insert_before(spec::ROOT_ID, box_id, 0);
++
++    let color = abgr(10, 20, 30, 255);
++    let label = ui.create_node(spec::NodeType::Text as u8);
++    ui.set_text(label, "HOST");
++    ui.set_prop(label, spec::prop::TEXT_COLOR, color as f64);
++    ui.set_prop(label, spec::prop::TRACKING, 2.0);
++    ui.insert_before(box_id, label, 0);
++
++    // Default off: without a baked font atlas, tracked/transformed text emits nothing.
++    let legacy = ui.draw().words.clone();
++    let legacy_counts = validate_drawlist(&legacy);
++    assert_eq!(legacy_counts[spec::draw_op::TEXT_RUN as usize], 0);
++    assert_eq!(legacy_counts[spec::draw_op::GLYPH_RUN as usize], 0);
++
++    // Opt-in enabled: tracked + rotated/scaled text emits a single vector TEXT_RUN
++    // with zero baked font atlases installed.
++    ui.set_native_transformed_text(true);
++    let words = ui.draw().words.clone();
++    let counts = validate_drawlist(&words);
++    assert_eq!(counts[spec::draw_op::TEXT_RUN as usize], 1);
++    assert_eq!(counts[spec::draw_op::GLYPH_RUN as usize], 0);
++    let at = words.iter().position(|&w| w == spec::draw_op::TEXT_RUN).unwrap();
++    let header = words[at + 1];
++    assert_ne!(header & spec::draw_op::TEXT_RUN_FLAG_TRACKING, 0);
++    assert_ne!(header & spec::draw_op::TEXT_RUN_FLAG_AFFINE, 0);
++    assert_eq!(words[at + 6], color);
++    assert_eq!(f32::from_bits(words[at + 8]), 2.0);
++    let a = f32::from_bits(words[at + 9]);
++    let b = f32::from_bits(words[at + 10]);
++    assert!((a - 1.25 * (30.0f32.to_radians().cos())).abs() < 1e-3);
++    assert!((b - 1.25 * (30.0f32.to_radians().sin())).abs() < 1e-3);
++    assert_eq!(decode_text_run_text(&words, at).0, "HOST");
++
++    // wrapText works via greedy native measurement even with zero baked atlases.
++    let breaks = ui.wrap_text("HOST NATIVE VECTOR FONT", 2, 60.0);
++    assert!(!breaks.is_empty());
++}
++
++#[test]
++fn perspective_3d_text_preserves_baked_glyphs_and_projects_fontless_text_run() {
++    let mut ui = Ui::new();
++    ui.set_viewport(320.0, 240.0);
++    ui.set_text_measure(Some(alloc::boxed::Box::new(|text: &str, _slot, tracking, line_h| {
++        let lines = text.split('\n').count() as f32;
++        let w = text
++            .split('\n')
++            .map(|line| line.chars().count() as f32 * (8.0 + tracking))
++            .fold(0.0f32, f32::max);
++        let lh = if line_h.is_nan() { 16.0 } else { line_h };
++        (w, lines * lh)
++    })));
++    ui.set_native_transformed_text(true);
++
++    let stage = ui.create_node(spec::NodeType::View as u8);
++    ui.set_prop(stage, spec::prop::WIDTH, 200.0);
++    ui.set_prop(stage, spec::prop::HEIGHT, 120.0);
++    ui.set_prop(stage, spec::prop::PERSPECTIVE, 400.0);
++    ui.insert_before(spec::ROOT_ID, stage, 0);
++
++    let card = ui.create_node(spec::NodeType::View as u8);
++    ui.set_prop(card, spec::prop::WIDTH, 160.0);
++    ui.set_prop(card, spec::prop::HEIGHT, 60.0);
++    ui.set_prop(card, spec::prop::ROTATE_Y, 35.0);
++    ui.set_prop(card, spec::prop::TRANSLATE_Z, -80.0);
++    ui.insert_before(stage, card, 0);
++
++    let label = ui.create_node(spec::NodeType::Text as u8);
++    ui.set_text(label, "AB");
++    ui.set_prop(label, spec::prop::FONT_SLOT, 0.0);
++    ui.set_prop(label, spec::prop::TEXT_COLOR, abgr(240, 240, 255, 255) as f64);
++    ui.insert_before(card, label, 0);
++
++    // Font-less package in 3D: falls back to projected native TEXT_RUN with affine foreshortening.
++    let fontless_words = ui.draw().words.clone();
++    let fontless_counts = validate_drawlist(&fontless_words);
++    assert_eq!(fontless_counts[spec::draw_op::TEXT_RUN as usize], 1);
++    assert_eq!(fontless_counts[spec::draw_op::GLYPH_RUN as usize], 0);
++    let at = fontless_words
++        .iter()
++        .position(|&w| w == spec::draw_op::TEXT_RUN)
++        .unwrap();
++    assert_ne!(
++        fontless_words[at + 1] & spec::draw_op::TEXT_RUN_FLAG_AFFINE,
++        0,
++        "font-less 3D text should carry projected affine Jacobian"
++    );
++    let proj_a = f32::from_bits(fontless_words[at + 8]);
++    assert!(proj_a > 0.0 && proj_a < 0.9, "expected foreshortened X scale, got {proj_a}");
++
++    // Package with baked font atlas in 3D: preserves the baked GLYPH_RUN contract.
++    assert!(ui.load_font_atlas(&encode_atlas(
++        0,
++        8,
++        8,
++        7,
++        10,
++        3,
++        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
++    )));
++    ui.invalidate_text_metrics();
++    let baked_words = ui.draw().words.clone();
++    let baked_counts = validate_drawlist(&baked_words);
++    assert_eq!(baked_counts[spec::draw_op::TEXT_RUN as usize], 0);
++    assert_eq!(baked_counts[spec::draw_op::GLYPH_RUN as usize], 1);
++}
+diff --git a/engine/core/src/text.rs b/engine/core/src/text.rs
+index 5b5a6c2..dfe14cb 100644
+--- a/engine/core/src/text.rs
++++ b/engine/core/src/text.rs
+@@ -245,6 +245,9 @@ pub struct Fonts {
+     /// runs keep the baked path on BOTH sides so a node's measured metrics
+     /// always match its painted glyphs.
+     native: Option<MeasureFn>,
++    /// When enabled by a vector-capable host, tracked (`letterSpacing`) and
++    /// transformed text runs also measure and emit native `TEXT_RUN` records.
++    native_transformed: bool,
+     /// Native line wrapper (OP wrapText); absent = greedy over `measure_run`.
+     wrap_native: Option<WrapFn>,
+ }
+@@ -269,6 +272,7 @@ impl Fonts {
+             slots: Default::default(),
+             misses: Cell::new(0),
+             native: None,
++            native_transformed: false,
+             wrap_native: None,
+         }
+     }
+@@ -279,6 +283,33 @@ impl Fonts {
+         self.native = f;
+     }
+ 
++    /// Enable or disable native `TEXT_RUN` routing for tracked and transformed text.
++    pub fn set_native_transformed(&mut self, enabled: bool) {
++        self.native_transformed = enabled;
++    }
++
++    #[inline]
++    pub fn native_transformed(&self) -> bool {
++        self.native_transformed
++    }
++
++    #[inline]
++    pub fn uses_native_for(
++        &self,
++        slot: u8,
++        tracking: f32,
++        in_transform: bool,
++        in_3d: bool,
++    ) -> bool {
++        if self.native.is_none() {
++            return false;
++        }
++        if in_3d {
++            return self.native_transformed && self.atlas(slot).is_none();
++        }
++        self.native_transformed || (tracking == 0.0 && !in_transform)
++    }
++
+     /// Install (or clear) the native line wrapper (OP wrapText).
+     pub fn set_native_wrap(&mut self, f: Option<WrapFn>) {
+         self.wrap_native = f;
+@@ -336,7 +367,7 @@ impl Fonts {
+         line_h_override: f32,
+     ) -> (f32, f32) {
+         self.measure_run_provider(
+-            self.native.is_some() && tracking == 0.0,
++            self.native.is_some() && (tracking == 0.0 || self.native_transformed),
+             text,
+             slot,
+             tracking,
+diff --git a/engine/raster/src/lib.rs b/engine/raster/src/lib.rs
+index 25eb652..8ce6190 100644
+--- a/engine/raster/src/lib.rs
++++ b/engine/raster/src/lib.rs
+@@ -1265,12 +1265,31 @@ fn render_scaled_clipped_with_scratch<T: RenderTarget>(
+                 // software rasterizer has no shaper, so hosts that raster run
+                 // with baked measurement and never receive it. Skipped, not a
+                 // stop: the op is a known member of the closed set. Variable
+-                // length: 8 header words + the packed UTF-8 payload.
++                // length: 8 header words + optional tracking/affine words +
++                // packed UTF-8 payload.
+                 if i + 8 > words.len() {
+                     return;
+                 }
++                let header = words[i + 1];
++                let known_mask = 0x0000_ffff
++                    | draw_op::TEXT_RUN_FLAG_TRACKING
++                    | draw_op::TEXT_RUN_FLAG_AFFINE;
++                if header & !known_mask != 0 {
++                    return;
++                }
++                let extra = usize::from(header & draw_op::TEXT_RUN_FLAG_TRACKING != 0)
++                    + if header & draw_op::TEXT_RUN_FLAG_AFFINE != 0 { 4 } else { 0 };
+                 let payload = (words[i + 7] as usize).div_ceil(4);
+-                i += 8 + payload;
++                let Some(end) = (i + 8)
++                    .checked_add(extra)
++                    .and_then(|base| base.checked_add(payload))
++                else {
++                    return;
++                };
++                if end > words.len() {
++                    return;
++                }
++                i = end;
+             }
+             // The op set is closed per DrawList version; anything else means
+             // corrupt data — stop instead of misinterpreting the stream.
+diff --git a/engine/raster/tests/driver.rs b/engine/raster/tests/driver.rs
+index f9149f5..c0295a4 100644
+--- a/engine/raster/tests/driver.rs
++++ b/engine/raster/tests/driver.rs
+@@ -1102,3 +1102,49 @@ fn each_operation_draws_from_the_same_resource_view_that_was_validated() {
+     assert_eq!(resources.calls.get(), 1);
+     assert_eq!(&pixels[..8], &[255; 8]);
+ }
++
++#[test]
++fn render_scaled_skips_extended_text_run_without_misaligning_following_ops() {
++    struct ViewportOnly;
++    impl RenderResources for ViewportOnly {
++        fn viewport(&self) -> (f32, f32) {
++            (16.0, 16.0)
++        }
++        fn raster_revision(&self) -> u64 {
++            0
++        }
++        fn texture(&self, _: i32) -> Option<TexView<'_>> {
++            None
++        }
++        fn font_atlas(&self, _: u8) -> Option<FontView<'_>> {
++            None
++        }
++    }
++
++    let words = [
++        pocket_spec::draw_op::TEXT_RUN,
++        2 | (1 << 8)
++            | pocket_spec::draw_op::TEXT_RUN_FLAG_TRACKING
++            | pocket_spec::draw_op::TEXT_RUN_FLAG_AFFINE,
++        2.0f32.to_bits(),
++        3.0f32.to_bits(),
++        12.0f32.to_bits(),
++        10.0f32.to_bits(),
++        0xffff_ffff,
++        4,
++        1.25f32.to_bits(),
++        1.0f32.to_bits(),
++        0.0f32.to_bits(),
++        0.0f32.to_bits(),
++        1.0f32.to_bits(),
++        u32::from_le_bytes(*b"HOST"),
++        pocket_spec::draw_op::RECT,
++        (4u32 & 0xffff) | (4u32 << 16),
++        (4u32 & 0xffff) | (4u32 << 16),
++        0xff11_2233,
++    ];
++    let mut fb = vec![0u8; 16 * 16 * 4];
++    pocket_raster::render_scaled(&ViewportOnly, &words, &mut fb, 1);
++    let idx = (4 * 16 + 4) * 4;
++    assert_eq!(&fb[idx..idx + 4], &[0x33, 0x22, 0x11, 0xff]);
++}
+diff --git a/engine/render/draw-ops/src/lib.rs b/engine/render/draw-ops/src/lib.rs
+index 743c091..1d4a094 100644
+--- a/engine/render/draw-ops/src/lib.rs
++++ b/engine/render/draw-ops/src/lib.rs
+@@ -37,6 +37,7 @@ pub enum DecodeError {
+     InvalidMeshMaskMode,
+     InvalidArc,
+     InvalidRoundedGradient,
++    InvalidTextRun,
+ }
+ 
+ /// A borrowed record from the original DrawList, including its opcode word.
+@@ -72,9 +73,19 @@ pub fn word_len(words: &[u32], at: usize) -> Result<usize, DecodeError> {
+         draw_op::MESH_MASK_BEGIN => 4,
+         draw_op::MESH_LAYER_RESTORE => 1,
+         draw_op::TEXT_RUN => {
++            let header = *words.get(1).ok_or(DecodeError::Truncated)?;
++            let known_mask = 0x0000_ffff
++                | draw_op::TEXT_RUN_FLAG_TRACKING
++                | draw_op::TEXT_RUN_FLAG_AFFINE;
++            if header & !known_mask != 0 {
++                return Err(DecodeError::InvalidTextRun);
++            }
++            let extra = usize::from(header & draw_op::TEXT_RUN_FLAG_TRACKING != 0)
++                + if header & draw_op::TEXT_RUN_FLAG_AFFINE != 0 { 4 } else { 0 };
+             let bytes = *words.get(7).ok_or(DecodeError::Truncated)? as usize;
+             8usize
+-                .checked_add(bytes.div_ceil(4))
++                .checked_add(extra)
++                .and_then(|base| base.checked_add(bytes.div_ceil(4)))
+                 .ok_or(DecodeError::Truncated)?
+         }
+         _ => return Err(DecodeError::UnknownOperation),
+@@ -229,6 +240,23 @@ impl<'a> DrawOps<'a> {
+             {
+                 self.mesh_target_seen = true;
+             }
++            draw_op::TEXT_RUN => {
++                let header = words[1];
++                let mut idx = 8usize;
++                if header & draw_op::TEXT_RUN_FLAG_TRACKING != 0 {
++                    if !f32::from_bits(words[idx]).is_finite() {
++                        return Err(DecodeError::InvalidTextRun);
++                    }
++                    idx += 1;
++                }
++                if header & draw_op::TEXT_RUN_FLAG_AFFINE != 0 {
++                    for &bits in &words[idx..idx + 4] {
++                        if !f32::from_bits(bits).is_finite() {
++                            return Err(DecodeError::InvalidTextRun);
++                        }
++                    }
++                }
++            }
+             _ => {}
+         }
+         self.at += len;
+diff --git a/engine/render/draw-ops/tests/decoding.rs b/engine/render/draw-ops/tests/decoding.rs
+index 015aede..f645124 100644
+--- a/engine/render/draw-ops/tests/decoding.rs
++++ b/engine/render/draw-ops/tests/decoding.rs
+@@ -333,3 +333,33 @@ fn mesh_effect_groups_are_balanced_and_validate_mode_and_target() {
+         Err(DecodeError::InvalidMeshBlend)
+     );
+ }
++
++#[test]
++fn text_run_decodes_tracking_and_affine_extensions_and_rejects_invalid_headers() {
++    let tracked_affine = [
++        TEXT_RUN,
++        2 | (1 << 8) | TEXT_RUN_FLAG_TRACKING | TEXT_RUN_FLAG_AFFINE,
++        12.0f32.to_bits(),
++        24.0f32.to_bits(),
++        80.0f32.to_bits(),
++        20.0f32.to_bits(),
++        0xffff_ffff,
++        4,
++        1.5f32.to_bits(),
++        0.866f32.to_bits(),
++        0.5f32.to_bits(),
++        (-0.5f32).to_bits(),
++        0.866f32.to_bits(),
++        u32::from_le_bytes(*b"ABCD"),
++    ];
++    assert_eq!(word_len(&tracked_affine, 0), Ok(14));
++    validate(&tracked_affine, SCREEN).unwrap();
++
++    let mut unknown_flag = tracked_affine;
++    unknown_flag[1] |= 1 << 18;
++    assert_eq!(word_len(&unknown_flag, 0), Err(DecodeError::InvalidTextRun));
++
++    let mut nan_affine = tracked_affine;
++    nan_affine[10] = f32::NAN.to_bits();
++    assert_eq!(validate(&nan_affine, SCREEN), Err(DecodeError::InvalidTextRun));
++}
+diff --git a/engine/spec/src/lib.rs b/engine/spec/src/lib.rs
+index cef64e7..d261e7d 100644
+--- a/engine/spec/src/lib.rs
++++ b/engine/spec/src/lib.rs
+@@ -468,7 +468,7 @@ pub mod font_atlas {
+ /// DrawList op codes (core -> backend Vec<u32> words; layout in spec.ts).
+ /// Word counts incl. header: RECT 4, GRAD_RECT 6, GLYPH_RUN 3+2n,
+ /// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,
+-/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,
++/// TEXT_RUN 8+extra+ceil(bytes/4), SURFACE_QUAD 9, MESH_LAYER_BEGIN 10,
+ /// MESH_MASK_BEGIN 4, MESH_LAYER_RESTORE 1, TEX_TRI_REPEAT 12,
+ /// TEX_TRI_FLOAT and TEX_TRI_REPEAT_FLOAT 15 each, ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.
+ pub const DRAW_LIST_VERSION: u32 = 5;
+@@ -492,6 +492,8 @@ pub mod draw_op {
+     pub const ROUNDED_RECT: u32 = 17;
+     pub const ARC: u32 = 18;
+     pub const ROUNDED_GRADIENT: u32 = 19;
++    pub const TEXT_RUN_FLAG_TRACKING: u32 = 1 << 16;
++    pub const TEXT_RUN_FLAG_AFFINE: u32 = 1 << 17;
+ }
+ 
+ /// .pak container constants (byte-compatible with dreamcart's format;
+diff --git a/framework/src/font-coverage.ts b/framework/src/font-coverage.ts
+index a784428..97bc03c 100644
+--- a/framework/src/font-coverage.ts
++++ b/framework/src/font-coverage.ts
+@@ -6,6 +6,11 @@ import { entries, get } from "./pak.ts";
+ export function createBakedFontCoverage() {
+   const slots = new Map<number, Set<number>>();
+   return (scalar: string, slot: number): boolean => {
++    const codepoint = scalar.codePointAt(0);
++    if (codepoint === undefined) return false;
++    if ((globalThis as { ui?: { __hostFonts?: boolean } }).ui?.__hostFonts === true) {
++      return true;
++    }
+     let coverage = slots.get(slot);
+     if (!coverage) {
+       coverage = new Set<number>();
+@@ -23,6 +28,6 @@ export function createBakedFontCoverage() {
+       }
+       slots.set(slot, coverage);
+     }
+-    return coverage.has(scalar.codePointAt(0)!);
++    return coverage.has(codepoint);
+   };
+ }
+diff --git a/tools/build.ts b/tools/build.ts
+--- a/tools/build.ts
++++ b/tools/build.ts
+@@ -100,6 +100,7 @@
+ let projectRoot = process.cwd();
+ let inputsFile: string | undefined;
+ let strictClasses = false;
++let bakeFonts = true;
+ const buildInputs = new BuildInputs();
+ for (const a of args) {
+   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
+@@ -116,6 +117,8 @@
+   else if (a.startsWith("--hz=")) hzFlag = Number(a.slice("--hz=".length));
+   else if (a.startsWith("--inputs-file=")) inputsFile = resolvePath(a.slice("--inputs-file=".length));
+   else if (a === "--strict-classes") strictClasses = true;
++  else if (a === "--no-bake-fonts") bakeFonts = false;
++  else if (a === "--bake-fonts") bakeFonts = true;
+   else if (!a.startsWith("-")) appArg = a;
+ }
+ 
+@@ -346,21 +349,29 @@
+ // The font policy covers runtime data independently of source literals.
+ const fontsManifestPath = join(dirname(entry), "fonts.json");
+ buildInputs.optional(fontsManifestPath);
+-const fontConfig = readFontConfig(fontsManifestPath, path => buildInputs.add(path));
++const shouldBakeFonts = bakeFonts || regularFontPath !== undefined || boldFontPath !== undefined;
++const fontConfig = shouldBakeFonts
++  ? readFontConfig(fontsManifestPath, path => buildInputs.add(path))
++  : { fallbackTtfs: [] as string[], codepoints: [] as number[] };
+ const { fallbackTtfs } = fontConfig;
+ if (fallbackTtfs.length || fontConfig.codepoints.length)
+   console.log(`  fonts: ${fallbackTtfs.length} fallback face(s), ${fontConfig.codepoints.length} declared characters`);
+ 
+-const atlases = await bakeAtlases({
+-  codepoints: new Set([...codepoints, ...fontConfig.codepoints]),
+-  slots: styles.usedFontSlots,
+-  extraChars,
+-  rasterDensity,
+-  regularTtf: regularFontPath,
+-  boldTtf: boldFontPath,
+-  onRead: path => buildInputs.add(path),
+-  fallbackTtfs,
+-});
++const atlases = shouldBakeFonts
++  ? await bakeAtlases({
++      codepoints: new Set([...codepoints, ...fontConfig.codepoints]),
++      slots: styles.usedFontSlots,
++      extraChars,
++      rasterDensity,
++      regularTtf: regularFontPath,
++      boldTtf: boldFontPath,
++      onRead: path => buildInputs.add(path),
++      fallbackTtfs,
++    })
++  : [];
++if (!shouldBakeFonts) {
++  console.log("  fonts: host-native (skipped DCFA bitmap atlas baking)");
++}
+ for (const a of atlases) {
+   console.log(
+     `  font: slot ${a.slot} (${a.px}px${a.bold ? " bold" : ""}) ${a.glyphCount} glyphs, ` +
+@@ -371,6 +382,9 @@
+ // demo images: any collected literal ending .png/.svg is a candidate asset name
+ const blobs: PakBlob[] = [
+   { key: KEY_STYLES, dtype: PAK_DTYPE.u8, data: styles.bin },
++  ...(!shouldBakeFonts
++    ? [{ key: "ui:fonts.host", dtype: PAK_DTYPE.u8, data: new Uint8Array([1]) }]
++    : []),
+   ...atlases.map((a) => ({ key: keyFont(a.slot), dtype: PAK_DTYPE.u8, data: a.bytes })),
+ ];
+ const appDir = dirname(entry);

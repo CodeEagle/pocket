@@ -98,7 +98,7 @@ test("System validation diagnoses unsafe font paths and still rejects unrelated 
   }
 });
 
-test("the retained Lantern System catalog validates its declared font without rewriting Demo sources", { timeout: 120_000 }, async () => {
+test("the retained Lantern System catalog validates cleanly on host-native fonts without rewriting Demo sources", { timeout: 120_000 }, async () => {
   const demoRoot = resolve(import.meta.dir, "../../../demo/js");
   const systemPath = join(demoRoot, "pocket.system.json");
   const lanternPocketPath = join(demoRoot, "apps/lantern/pocket.json");

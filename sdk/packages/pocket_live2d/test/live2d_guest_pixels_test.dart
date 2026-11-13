@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' show DynamicLibrary;
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -11,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_live2d/pocket_live2d.dart';
 import 'package:pocket_live2d/src/pocket_live2d_ffi.dart';
+import 'package:pocket_services/pocket_services.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 import 'package:pocket_sdk/src/pocket_app.dart' show PocketGuestSession;
 
@@ -75,6 +77,10 @@ void main() {
   testWidgets(
     'compiled Hiyori guest reaches real Core deformation and Flutter pixels',
     (tester) async {
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
       final core = DynamicLibrary.open(corePath!);
       final live2d = PocketLive2dPlugin.fromBundledCatalog(
         catalogAsset: 'assets/novel.native-assets.json',
@@ -82,9 +88,10 @@ void main() {
         coreFactory: (bytes) =>
             PocketLive2dFfiCore.createModel(bytes, library: core),
       );
+      final observedCore = _ObservedLive2dPlugin(live2d);
       final config = PocketAppConfig(
         appId: 'test.live2d.hiyori.pixels',
-        pluginFactories: <PocketPluginFactory>[(_) => live2d],
+        pluginFactories: <PocketPluginFactory>[(_) => observedCore],
       );
       final session = PocketSession(config: config);
       final firstFrame = Completer<void>();
@@ -224,6 +231,109 @@ void main() {
           reason:
               'The compiled Idle motion must change Core-deformed screen vertices',
         );
+
+        final bodyPoint = _findBodyTapPoint(tester, observedCore.frames.last);
+        debugPrint('Hiyori body hit candidate in viewport: $bodyPoint');
+        final sayText =
+            'The official Core moves this mesh through the Pocket host.';
+        expect(_containsNormalized(tester, sayText), isTrue);
+        final beforeTap = observedCore.frames.last;
+        final tapGesture = await tester.startGesture(bodyPoint);
+        await tester.pump(const Duration(milliseconds: 50));
+        final tapStartFrame = observedCore.frames.length;
+        await tapGesture.up();
+        bool isTapBodyFrame(_ObservedCoreFrame frame) =>
+            ((frame.parameters['ParamAngleX'] ?? double.nan) - 1).abs() <
+            0.001;
+        await _pumpUntil(
+          tester,
+          () => observedCore.frames
+              .skip(tapStartFrame)
+              .any(isTapBodyFrame),
+          timeoutFrames: 300,
+          failure: () =>
+              'A Body tap did not send TapBody to Core: '
+              'frames=${observedCore.frames.length}, '
+              'last=${observedCore.frames.last.parameters}',
+        );
+        final tapFrame = observedCore.frames
+            .skip(tapStartFrame)
+            .firstWhere(isTapBodyFrame);
+        expect(tapFrame.parameters['ParamAngleX'], closeTo(1, 0.001));
+        expect(
+          tapFrame.geometryHash,
+          isNot(beforeTap.geometryHash),
+          reason: 'The tap motion must deform a frame returned by real Core',
+        );
+        expect(
+          _containsNormalized(tester, sayText),
+          isTrue,
+          reason: 'A Body tap must not advance the visible dialogue',
+        );
+
+        final beforeDrag = observedCore.frames.last;
+        final beforeDragAngleX = beforeDrag.parameters['ParamAngleX'] ?? 0;
+        final beforeDragAngleY = beforeDrag.parameters['ParamAngleY'] ?? 0;
+        final dragStartFrame = observedCore.frames.length;
+        final dragGesture = await tester.startGesture(bodyPoint);
+        await dragGesture.moveBy(const Offset(45, -12));
+        await tester.pump(const Duration(milliseconds: 80));
+        await dragGesture.moveBy(const Offset(32, 18));
+        await tester.pump(const Duration(milliseconds: 80));
+        await _pumpUntil(
+          tester,
+          () => observedCore.frames
+              .skip(dragStartFrame)
+              .any(
+                (frame) =>
+                    ((frame.parameters['ParamAngleX'] ?? 0) - beforeDragAngleX)
+                            .abs() >
+                        3 ||
+                    ((frame.parameters['ParamAngleY'] ?? 0) - beforeDragAngleY)
+                            .abs() >
+                        3,
+              ),
+          timeoutFrames: 300,
+          failure: () =>
+              'A model drag did not update Core angle parameters: '
+              'frames=${observedCore.frames.length}, '
+              'last=${observedCore.frames.last.parameters}',
+        );
+        final dragFrame = observedCore.frames
+            .skip(dragStartFrame)
+            .firstWhere(
+              (frame) =>
+                  ((frame.parameters['ParamAngleX'] ?? 0) - beforeDragAngleX)
+                          .abs() >
+                      3 ||
+                  ((frame.parameters['ParamAngleY'] ?? 0) - beforeDragAngleY)
+                          .abs() >
+                      3,
+            );
+        expect(
+          dragFrame.geometryHash,
+          isNot(beforeDrag.geometryHash),
+          reason: 'Dragging must deform a frame returned by real Core',
+        );
+        final dragAngleX = dragFrame.parameters['ParamAngleX'];
+        await dragGesture.up();
+        final releaseStartFrame = observedCore.frames.length;
+        await _pumpUntil(
+          tester,
+          () =>
+              observedCore.frames.length > releaseStartFrame + 2 &&
+              (observedCore.frames.last.parameters['ParamAngleX'] ?? 0) !=
+                  dragAngleX,
+          timeoutFrames: 300,
+          failure: () =>
+              'Ending the drag did not release its Core parameter override: '
+              'last=${observedCore.frames.last.parameters}',
+        );
+        expect(
+          _containsNormalized(tester, sayText),
+          isTrue,
+          reason: 'A model drag must not advance the visible dialogue',
+        );
       } finally {
         debugPocketSelfOwnedRuntimeFactory = previousRuntimeFactory;
         await tester.pumpWidget(const SizedBox.shrink());
@@ -235,6 +345,163 @@ void main() {
     skip: !prerequisitesAvailable,
     timeout: const Timeout(Duration(minutes: 3)),
   );
+}
+
+final class _ObservedCoreFrame {
+  const _ObservedCoreFrame({
+    required this.parameters,
+    required this.geometryHash,
+    required this.bodyHitArea,
+  });
+
+  final Map<String, double> parameters;
+  final int geometryHash;
+  final Uint8List? bodyHitArea;
+}
+
+/// Observes the real Core capability boundary and returns its original data.
+final class _ObservedLive2dPlugin extends PocketPlugin {
+  _ObservedLive2dPlugin(this.delegate);
+
+  final PocketLive2dPlugin delegate;
+  final List<_ObservedCoreFrame> frames = <_ObservedCoreFrame>[];
+
+  @override
+  PocketPluginDescriptor get descriptor => delegate.descriptor;
+
+  @override
+  void register(PocketPluginContext context) {
+    context.registerRequest(pocketLive2dLoadCapability, delegate.load);
+    context.registerRequest(pocketLive2dUpdateCapability, (params) async {
+      final result = await delegate.update(params);
+      final parameters = <String, double>{};
+      final rawParameters = params['parameters'];
+      if (rawParameters is List) {
+        for (final raw in rawParameters) {
+          if (raw is Map && raw['id'] is String && raw['value'] is num) {
+            parameters[raw['id'] as String] = (raw['value'] as num).toDouble();
+          }
+        }
+      }
+      var hash = 0x811c9dc5;
+      Uint8List? bodyHitArea;
+      final rawDrawables = result is Map ? result['drawables'] : null;
+      if (rawDrawables is List) {
+        for (final raw in rawDrawables) {
+          if (raw is! Map || raw['meshBytes'] is! Uint8List) continue;
+          final bytes = raw['meshBytes'] as Uint8List;
+          if (raw['id'] == 'HitArea') bodyHitArea = Uint8List.fromList(bytes);
+          for (final byte in bytes) {
+            hash = ((hash ^ byte) * 0x01000193) & 0xffffffff;
+          }
+        }
+      }
+      frames.add(
+        _ObservedCoreFrame(
+          parameters: Map<String, double>.unmodifiable(parameters),
+          geometryHash: hash,
+          bodyHitArea: bodyHitArea,
+        ),
+      );
+      return result;
+    });
+    context.registerRequest(pocketLive2dReleaseCapability, delegate.release);
+  }
+
+  @override
+  Future<void> activate(PocketPluginContext context) =>
+      delegate.activate(context);
+
+  @override
+  Future<void> deactivate(PocketPluginContext context) =>
+      delegate.deactivate(context);
+
+  @override
+  Future<void> dispose() => delegate.dispose();
+}
+
+Offset _findBodyTapPoint(WidgetTester tester, _ObservedCoreFrame frame) {
+  final bytes = frame.bodyHitArea;
+  if (bytes == null || bytes.length < 28 || bytes.length % 4 != 0) {
+    fail('The real Core frame did not return Hiyori model3 HitArea geometry');
+  }
+  final data = ByteData.sublistView(bytes);
+  if (data.getUint32(0, Endian.little) != 0x31534d50) {
+    fail('Hiyori HitArea did not use the negotiated PMS1 geometry format');
+  }
+  final vertexCount = data.getUint32(4, Endian.little);
+  final indexCount = data.getUint32(8, Endian.little);
+  final indicesOffset = 16 + vertexCount * 16;
+  if (indexCount < 3 ||
+      indexCount % 3 != 0 ||
+      bytes.length != indicesOffset + indexCount * 4) {
+    fail('Hiyori HitArea PMS1 topology is invalid');
+  }
+
+  const viewportWidth = 360.0;
+  const viewportHeight = 640.0;
+  const sayTop = 416.0;
+  const cameraScale = 1.4;
+  const cameraCenterX = viewportWidth / 2;
+  const cameraCenterY = viewportHeight / 2;
+  const characterX = 60.0;
+  const characterY = 116.0;
+  const characterScale = 1.5;
+  const characterRotation = 12 * 3.141592653589793 / 180;
+  final cosine = math.cos(characterRotation);
+  final sine = math.sin(characterRotation);
+  final view = tester.renderObject<RenderBox>(find.byType(PocketView));
+  final viewOrigin = view.localToGlobal(Offset.zero);
+  Offset? bestPoint;
+  var bestArea = 0.0;
+  for (var index = 0; index < indexCount; index += 3) {
+    final triangle = <int>[
+      data.getUint32(indicesOffset + index * 4, Endian.little),
+      data.getUint32(indicesOffset + (index + 1) * 4, Endian.little),
+      data.getUint32(indicesOffset + (index + 2) * 4, Endian.little),
+    ];
+    if (triangle.any((vertex) => vertex >= vertexCount)) continue;
+    final points = <Offset>[
+      for (final vertex in triangle)
+        Offset(
+          data.getFloat32(16 + vertex * 16, Endian.little),
+          data.getFloat32(20 + vertex * 16, Endian.little),
+        ),
+    ];
+    if (points.any((point) => !point.dx.isFinite || !point.dy.isFinite))
+      continue;
+    final a = points[0];
+    final b = points[1];
+    final c = points[2];
+    final signedArea =
+        (b.dx - a.dx) * (c.dy - a.dy) - (b.dy - a.dy) * (c.dx - a.dx);
+    final area = signedArea.abs();
+    if (area <= 1e-8) continue;
+    final modelX = (a.dx + b.dx + c.dx) / 3;
+    final modelY = (a.dy + b.dy + c.dy) / 3;
+    final localX =
+        characterX + characterScale * (modelX * cosine - modelY * sine);
+    final localY =
+        characterY + characterScale * (modelX * sine + modelY * cosine);
+    final screenX = cameraCenterX + (localX - cameraCenterX) * cameraScale;
+    final screenY = cameraCenterY + (localY - cameraCenterY) * cameraScale;
+    // Keep the test tap outside the standard dialogue plate so its FocusTarget
+    // remains the winner over the stage wherever the UI actually covers it.
+    if (screenX >= 0 &&
+        screenX < viewportWidth &&
+        screenY >= 0 &&
+        screenY < sayTop - 12 &&
+        area > bestArea) {
+      bestArea = area;
+      bestPoint = viewOrigin + Offset(screenX, screenY);
+    }
+  }
+  if (bestPoint == null) {
+    fail(
+      'Hiyori Body hit geometry has no visible triangle above the dialogue plate',
+    );
+  }
+  return bestPoint!;
 }
 
 Future<void> _pumpUntil(
@@ -306,6 +573,7 @@ Future<void> _probeRawHiyoriFrame(DynamicLibrary core) async {
               'modelId': modelId,
               'parameters': const <Object?>[],
               'partOpacities': const <Object?>[],
+              'meshFormat': 'pms1',
             })
             as Map<String, Object?>;
     final outliers = <Map<String, Object?>>[];

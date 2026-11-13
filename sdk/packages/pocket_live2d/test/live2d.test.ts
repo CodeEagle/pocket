@@ -154,6 +154,7 @@ test("host transport keeps model asset references, forwards Core mesh facts and 
       parameters: [{ id: "ParamAngleX", value: 30 }],
       partOpacities: [],
       placement: { dx: 10, dy: 20, scale: 0.5, opacity: 0.8 },
+      meshFormat: "pms1",
     },
   });
   await client.release(info.modelId);
@@ -220,8 +221,8 @@ test("opt-in topology transport merges sparse native facts into a complete frame
   const info = await client.load({ id: "mao", assetPrefix: "", manifest: parseCubismModel3(model3) });
   const first = await client.update(info.modelId);
   const next = await client.update(info.modelId);
-  expect(calls[1]?.params.cacheStaticTopology).toBe(true);
-  expect(calls[2]?.params.cacheStaticTopology).toBe(true);
+  expect(calls[1]?.params).toMatchObject({ cacheStaticTopology: true, meshFormat: "pms1" });
+  expect(calls[2]?.params).toMatchObject({ cacheStaticTopology: true, meshFormat: "pms1" });
   expect(next.drawables[0]).toEqual({
     id: "ArtMesh01",
     textureIndex: 0,
@@ -236,6 +237,50 @@ test("opt-in topology transport merges sparse native facts into a complete frame
     multiplyColorRgba: [1, 0.5, 0.25, 1],
     screenColorRgba: [0, 0.5, 0.25, 1],
   });
+  await client.dispose();
+});
+
+test("negotiated client adapts a legacy host frame and reuses cached topology", async () => {
+  let updates = 0;
+  const legacyDrawable = (positionsXYPixels: number[], opacity: number, cached = false) => ({
+    id: "ArtMesh01",
+    textureIndex: 0,
+    drawOrder: 0,
+    renderOrder: ++updates,
+    blendMode: 0,
+    constantFlags: 0,
+    dynamicFlags: 1,
+    opacity,
+    positionsXYPixels,
+    ...(cached ? {} : {
+      uvs: [0, 0, 1, 0, 0.5, 1],
+      indices: [0, 1, 2],
+      maskIndices: [0],
+    }),
+    multiplyColorRgba: floatBytes([1, 1, 1, 1]),
+    screenColorRgba: floatBytes([0, 0, 0, 1]),
+  });
+  const host = {
+    async request(capability: string, params: Record<string, unknown>): Promise<unknown> {
+      if (capability === pocketLive2dLoadCapability) return nativeModelInfo;
+      if (capability === pocketLive2dUpdateCapability) {
+        expect(params.meshFormat).toBe("pms1");
+        return updates === 0
+          ? { modelId: nativeModelInfo.modelId, topologyMode: "full", drawables: [legacyDrawable([0, 0, 20, 0, 10, 20], 0.75)] }
+          : { modelId: nativeModelInfo.modelId, topologyMode: "cached-v1", drawables: [legacyDrawable([2, 4, 22, 4, 12, 24], 0.5, true)] };
+      }
+      return { released: true };
+    },
+  };
+  const client = createPocketLive2dClient(host, { cacheStaticTopology: true });
+  const info = await client.load({ id: "legacy-host", assetPrefix: "", manifest: parseCubismModel3(model3) });
+  const placement = { dx: 10, dy: 20, scale: 0.5, opacity: 0.4 };
+  const first = await client.update(info.modelId, [], [], placement);
+  const next = await client.update(info.modelId, [], [], placement);
+  expect(first.drawables[0]?.meshBytes).toEqual(pms1Bytes([10, 20, 20, 20, 15, 30], [0, 0, 1, 0, 0.5, 1], [0, 1, 2], 0.3));
+  expect(next.drawables[0]?.meshBytes).toEqual(pms1Bytes([11, 22, 21, 22, 16, 32], [0, 0, 1, 0, 0.5, 1], [0, 1, 2], 0.2));
+  expect(next.drawables[0]?.maskIndices).toEqual([0]);
+  expect(next.drawables[0]?.renderOrder).toBe(2);
   await client.dispose();
 });
 

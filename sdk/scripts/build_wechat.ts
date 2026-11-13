@@ -836,7 +836,7 @@ export async function buildWechat(options: BuildWechatOptions): Promise<{ outDir
       const app = pocket.app && typeof pocket.app === "object" && !Array.isArray(pocket.app) ? pocket.app as Record<string, unknown> : {};
       const requestedEntry = index === 0 && options.entry ? options.entry : (typeof app.entry === "string" && app.entry ? app.entry : "app.tsx");
       const sourceEntry = relative(target.root, resolve(target.root, requestedEntry));
-      const guest = await buildGuest({ projectRoot: temporaryProject, entry: sourceEntry, outDir: guestOutput, tickHz: options.tickHz, rasterDensity });
+      const guest = await buildGuest({ projectRoot: temporaryProject, entry: sourceEntry, outDir: guestOutput, tickHz: options.tickHz, rasterDensity, bakeFonts: true });
       const metadata = readObject(guest.metadata, `${target.appId} bytecode metadata`);
       artifacts.push({ appId: target.appId, qjbc: guest.bytecode, pak: guest.pak, tickHz: guest.tickHz, metadata });
       report(`build_wechat: Guest ${target.appId} artifacts ready (QJBC=${guest.bytecode}, PAK=${guest.pak})`, options.log);
