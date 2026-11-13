@@ -72,7 +72,7 @@ test("generated client passes an independent positive typecheck and rejects bad 
     writeFileSync(join(directory, "plugin-types.ts"), generatePluginTypes(input, { hostModule: "./host.ts", streamModule: "./streams.ts" }));
     // Check against the actual public transport types, not matching stubs
     // which can pass while the generated client no longer fits the SDK.
-    for (const file of ["host.ts", "streams.ts"]) {
+    for (const file of ["host.ts", "streams.ts", "responsive.ts"]) {
       copyFileSync(resolve(import.meta.dir, "../../packages/pocket_ui/src", file), join(directory, file));
     }
     writeFileSync(join(directory, "positive.ts"), `
@@ -96,7 +96,7 @@ client["sensor.readings"]({});
 `);
     const common = [process.execPath, resolve(import.meta.dir, "../../.cache/pocketjs/node_modules/typescript/bin/tsc"), "--noEmit", "--strict", "--target", "ESNext", "--module", "ESNext", "--moduleResolution", "bundler", "--skipLibCheck", "--allowImportingTsExtensions"];
     const positive = Bun.spawnSync([...common, join(directory, "positive.ts")]);
-    expect(positive.exitCode).toBe(0);
+    expect(positive.exitCode, new TextDecoder().decode(positive.stdout) + new TextDecoder().decode(positive.stderr)).toBe(0);
     const negative = Bun.spawnSync([...common, join(directory, "negative.ts")]);
     expect(negative.exitCode).not.toBe(0);
     const diagnostics = new TextDecoder().decode(negative.stderr) + new TextDecoder().decode(negative.stdout);

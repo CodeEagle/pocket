@@ -3,11 +3,11 @@
   "protocolVersion": 1,
   "capabilities": {
     "requires": [
-      "text.glyphs.baked",
       "platform.apps.open",
       "platform.apps.return",
       "platform.storage.get",
-      "platform.storage.set"
+      "platform.storage.set",
+      "text.layout.native"
     ],
     "optional": []
   },
@@ -15,5 +15,6 @@
     "optional": []
   },
   "version": "0.1.0",
-  "build": 1
+  "build": 1,
+  "fonts": "host"
 }

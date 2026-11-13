@@ -61,7 +61,7 @@ test.skipIf(missingLocalFixtures.length > 0)(`Novel stage previews registered Hi
   const project = join(temporary, "project");
   const workspace = join(temporary, "workspace");
   mkdirSync(project, { recursive: true });
-  for (const name of ["app.tsx", "story.ts", "story.json", "revision-map.json", "revision-map-v2.json", "revision-map-v3.json", "revision-map-v4.json", "revision-map-v5.json", "pocket.json", "manifest.json", "package.json", "novel.assets.json", "novel.locales.json", "fonts.json", "images.json", "fonts", "assets", "models"]) {
+  for (const name of ["app.tsx", "story.ts", "story.json", "revision-map.json", "revision-map-v2.json", "revision-map-v3.json", "revision-map-v4.json", "revision-map-v5.json", "pocket.json", "manifest.json", "package.json", "novel.assets.json", "novel.locales.json", "images.json", "assets", "models"]) {
     cpSync(join(source, name), join(project, name), { recursive: true });
   }
   cpSync(join(source, "art"), join(project, "art"), { recursive: true });

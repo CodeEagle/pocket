@@ -16,7 +16,7 @@ test("input authoring saves typed constraints and locales, preserves the live fi
   const workspace = join(temporary, "workspace");
   const projectId = "input-author";
   mkdirSync(project, { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts"]) cpSync(join(source, name), join(project, name), { recursive: true });
+  for (const name of ["pocket.json", "manifest.json", "package.json"]) cpSync(join(source, name), join(project, name), { recursive: true });
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id: projectId, appId: "pocket.demo.lantern", name: "Input Authoring", version: "0.1.0", build: 1, entry: "app.tsx", framework: "solid", tickHz: 60 }));
   writeFileSync(join(project, "novel.assets.json"), JSON.stringify({ backgrounds: {}, characters: {}, cgs: {}, audio: {} }));
   writeFileSync(join(project, "images.json"), "{}");

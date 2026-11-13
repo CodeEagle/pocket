@@ -79,6 +79,7 @@ test("official worker-http build emits real Worker bytecode, metadata, and manif
     assert.equal(readFileSync(workerBytecode).subarray(0, 4).toString(), "PJBC");
 
     const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as any;
+    assert.equal(metadata.fonts, "host");
     const descriptor = metadata.worker;
     assert.equal(descriptor.bytecode.path, "app.worker.qjbc");
     assert.equal(descriptor.bytecode.bytes, readFileSync(workerBytecode).byteLength);
@@ -89,10 +90,12 @@ test("official worker-http build emits real Worker bytecode, metadata, and manif
     assert.equal(JSON.parse(readFileSync(workerMetadataPath, "utf8")).bytecodeBytes, readFileSync(workerBytecode).byteLength);
 
     const manifest = JSON.parse(readFileSync(guestManifestPath, "utf8")) as any;
+    assert.equal(manifest.fonts, "host");
     assert.deepEqual(manifest.worker, descriptor);
     assert.deepEqual(manifest.domains.worker, descriptor.declaration);
     assert.equal(manifest.capabilities.requires.includes("runtime.worker"), true);
     assert.equal(manifest.capabilities.requires.includes("net.http"), true);
+    assert.equal(manifest.capabilities.requires.includes("text.layout.native"), true);
     assert.equal(manifest.capabilities.optional.includes("input.buttons"), true);
     assert.equal(manifest.capabilities.requires.includes("input.buttons"), false);
 

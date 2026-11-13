@@ -32,11 +32,11 @@ function bounds(ops: Op[]) {
 }
 function thumb(f: Frame, label: string) {
   const anchor = center(text(f, label));
-  return bounds(f.ops.filter((op) => (op.type === "rect" || op.type === "image") && op.color === 0xffffffff && op.x > 210 && Math.abs(op.y + op.h / 2 - anchor.y) < 18));
+  return bounds(f.ops.filter((op) => (op.type === "rect" || op.type === "rounded" || op.type === "image") && op.color === 0xffffffff && op.x > 210 && Math.abs(op.y + op.h / 2 - anchor.y) < 18));
 }
 function sliderWidth(f: Frame, value: string) {
   const anchor = center(text(f, value));
-  return bounds(f.ops.filter((op) => (op.type === "rect" || op.type === "image") && op.color === 0xff315deb && Math.abs(op.y + op.h / 2 - anchor.y) < 12)).w;
+  return bounds(f.ops.filter((op) => (op.type === "rect" || op.type === "rounded" || op.type === "image") && op.color === 0xff315deb && Math.abs(op.y + op.h / 2 - anchor.y) < 12)).w;
 }
 
 test("switch loading resolves or rolls back and manual slider changes animate in native frames", () => {

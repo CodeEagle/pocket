@@ -253,6 +253,13 @@ sealed class PocketOp {
             (rawAlign is! int || rawAlign < 0 || rawAlign > 2)) {
           throw const FormatException('Invalid text alignment');
         }
+        final rawTracking = json['tracking'];
+        if (rawTracking != null &&
+            (rawTracking is! num || !rawTracking.isFinite)) {
+          throw const FormatException('Invalid text tracking');
+        }
+        final rawAffine =
+            json['affine'] ?? json['textAffine'] ?? json['text_affine'];
         return PocketTextOp(
           x: x,
           y: y,
@@ -263,6 +270,12 @@ sealed class PocketOp {
           color: _color(json['color']),
           fontSlot: fontSlot,
           align: (rawAlign as num?)?.toInt() ?? 0,
+          tracking: (rawTracking as num?)?.toDouble() ?? 0.0,
+          affine: _optionalNumbers(
+            rawAffine,
+            expected: 4,
+            fieldLabel: 'Pocket text affine',
+          ),
           clip: clip,
         );
       case 'image':
@@ -612,6 +625,8 @@ class PocketTextOp extends PocketOp {
     required this.color,
     this.fontSlot,
     this.align = 0,
+    this.tracking = 0.0,
+    this.affine,
     super.clip,
   });
 
@@ -622,6 +637,12 @@ class PocketTextOp extends PocketOp {
 
   /// PocketJS TextAlign: 0 left, 1 center, 2 right; never rewrap native lines.
   final int align;
+
+  /// Additional per-glyph tracking in logical pixels.
+  final double tracking;
+
+  /// Optional 2x2 linear transform `[a, b, c, d]` anchored at `(x, y)`.
+  final List<double>? affine;
 }
 
 class PocketImageOp extends PocketOp {
@@ -852,11 +873,7 @@ class PocketFrame {
     if (flags & ~3 != 0) {
       throw FormatException('Unsupported Pocket binary frame flags: $flags');
     }
-    if (version != 1 &&
-        version != 2 &&
-        version != 3 &&
-        version != 4 &&
-        version != 5) {
+    if (version < 1 || version > 6) {
       throw FormatException(
         'Unsupported Pocket binary frame version: $version',
       );
@@ -1191,6 +1208,45 @@ List<PocketOp> _binaryOps(
           color: color,
           fontSlot: fontSlot,
           align: align,
+          clip: clip,
+        );
+      case 18:
+        if (version < 6) {
+          throw const FormatException(
+            'Extended text runs require Pocket frame version 6',
+          );
+        }
+        final text = reader.string('text');
+        final size = reader.f32();
+        final color = reader.u32();
+        final fontSlot = reader.u8() == 0 ? null : reader.u8();
+        final align = flags & 1 == 0 ? 0 : reader.u8();
+        if (align > 2) throw const FormatException('Invalid text alignment');
+        final extFlags = reader.u8();
+        if (extFlags & ~0x03 != 0) {
+          throw FormatException('Invalid extended text flags: $extFlags');
+        }
+        final tracking = (extFlags & 0x01) != 0 ? reader.f32() : 0.0;
+        final affine = (extFlags & 0x02) == 0
+            ? null
+            : List<double>.unmodifiable(<double>[
+                reader.f32(),
+                reader.f32(),
+                reader.f32(),
+                reader.f32(),
+              ]);
+        result[index] = PocketTextOp(
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+          text: text,
+          size: size,
+          color: color,
+          fontSlot: fontSlot,
+          align: align,
+          tracking: tracking,
+          affine: affine,
           clip: clip,
         );
       case 6:
@@ -1535,15 +1591,19 @@ List<double> _numbers(Object? value) {
   return result;
 }
 
-List<double>? _optionalNumbers(Object? value, {required int expected}) {
+List<double>? _optionalNumbers(
+  Object? value, {
+  required int expected,
+  String fieldLabel = 'Pocket image UVs',
+}) {
   if (value == null) return null;
   if (value is! List || value.length != expected) {
-    throw FormatException('Pocket image UVs must have $expected values');
+    throw FormatException('$fieldLabel must have $expected values');
   }
   final numbers = value.map((item) => _number(item, fallback: double.nan));
-  final result = numbers.toList(growable: false);
+  final result = List<double>.unmodifiable(numbers);
   if (result.any((number) => !number.isFinite)) {
-    throw const FormatException('Pocket image UVs must be finite');
+    throw FormatException('$fieldLabel must be finite');
   }
   return result;
 }

@@ -16,7 +16,7 @@ The current SDK already defines the project-font contract in `scripts/build_gues
 
 `scripts/tests/build_system_fonts.test.ts` covers valid local paths, precise rejection of an escaping path, rejection of an unrelated unknown manifest field, byte-for-byte preservation of each source manifest, and the real Lantern entry in the Demo System catalog. `scripts/tests/build_guest_fonts.test.ts` continues to exercise malformed paths, symlinks and compiler-baked regular/bold font metrics.
 
-The retained `demo/js/apps/lantern/pocket.json` declares `fonts/lantern.otf` for both regular and bold; System validation resolves it relative to `demo/js/apps/lantern`. The helper does not parse font bytes; the existing pinned compiler remains responsible for font decoding and atlas generation.
+By default, `demo/js/apps/lantern/pocket.json` omits `fonts` and uses host-native system fonts; when a consumer package declares `fonts.regular` and/or `fonts.bold`, System validation resolves them relative to that package's directory. The helper does not parse font bytes; the existing pinned compiler remains responsible for font decoding and atlas generation.
 
 ## Ablation
 

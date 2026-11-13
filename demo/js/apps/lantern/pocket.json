@@ -41,9 +41,5 @@
         "presentation": "native"
       }
     }
-  },
-  "fonts": {
-    "regular": "fonts/lantern.otf",
-    "bold": "fonts/lantern.otf"
   }
 }

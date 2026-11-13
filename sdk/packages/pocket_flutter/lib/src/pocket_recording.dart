@@ -17,6 +17,88 @@ final class PocketRecordingFormatException extends FormatException {
   ]);
 }
 
+/// Immutable 21-slot host font metrics snapshot captured in recording metadata
+/// so deterministic replay reproduces exact layout without reading OS fonts.
+final class PocketHostFontMetricsSnapshot {
+  PocketHostFontMetricsSnapshot({
+    required Iterable<double> lineHeights,
+    required Iterable<double> cjkAdvances,
+    required Iterable<double> asciiAdvances,
+  }) : lineHeights = List<double>.unmodifiable(lineHeights),
+       cjkAdvances = List<double>.unmodifiable(cjkAdvances),
+       asciiAdvances = List<double>.unmodifiable(asciiAdvances) {
+    if (this.lineHeights.length != 21 ||
+        this.cjkAdvances.length != 21 ||
+        this.asciiAdvances.length != 21 * 95) {
+      throw const PocketRecordingFormatException(
+        'metadata.hostFonts must have 21 lineHeights, 21 cjkAdvances, and 1995 asciiAdvances',
+      );
+    }
+    for (final value in this.lineHeights) {
+      if (!value.isFinite || value <= 0) {
+        throw const PocketRecordingFormatException(
+          'metadata.hostFonts.lineHeights must be finite and positive',
+        );
+      }
+    }
+    for (final value in this.cjkAdvances) {
+      if (!value.isFinite || value <= 0) {
+        throw const PocketRecordingFormatException(
+          'metadata.hostFonts.cjkAdvances must be finite and positive',
+        );
+      }
+    }
+    for (final value in this.asciiAdvances) {
+      if (!value.isFinite || value < 0) {
+        throw const PocketRecordingFormatException(
+          'metadata.hostFonts.asciiAdvances must be finite and non-negative',
+        );
+      }
+    }
+  }
+
+  factory PocketHostFontMetricsSnapshot.fromJson(Object? value) {
+    final map = _object(value, 'metadata.hostFonts');
+    _requireKeys(map, const <String>{
+      'lineHeights',
+      'cjkAdvances',
+      'asciiAdvances',
+    }, 'metadata.hostFonts');
+    _expectKeys(map, const <String>{
+      'lineHeights',
+      'cjkAdvances',
+      'asciiAdvances',
+    }, 'metadata.hostFonts');
+    List<double> numList(Object? raw, String field) {
+      if (raw is! List) {
+        throw PocketRecordingFormatException('$field must be an array');
+      }
+      return raw
+          .map((item) => _finiteNumber(item, field))
+          .toList(growable: false);
+    }
+
+    return PocketHostFontMetricsSnapshot(
+      lineHeights: numList(map['lineHeights'], 'metadata.hostFonts.lineHeights'),
+      cjkAdvances: numList(map['cjkAdvances'], 'metadata.hostFonts.cjkAdvances'),
+      asciiAdvances: numList(
+        map['asciiAdvances'],
+        'metadata.hostFonts.asciiAdvances',
+      ),
+    );
+  }
+
+  final List<double> lineHeights;
+  final List<double> cjkAdvances;
+  final List<double> asciiAdvances;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'lineHeights': lineHeights,
+    'cjkAdvances': cjkAdvances,
+    'asciiAdvances': asciiAdvances,
+  };
+}
+
 /// Dimensions and build identity attached to a runtime recording.
 final class PocketRecordingMetadata {
   PocketRecordingMetadata({
@@ -26,6 +108,7 @@ final class PocketRecordingMetadata {
     required this.tickHz,
     this.engineAbi,
     this.memoryLimits = const PocketMemoryLimits(),
+    this.hostFonts,
     Map<String, String> contentHashes = const <String, String>{},
   }) : contentHashes = Map<String, String>.unmodifiable(
          Map<String, String>.from(contentHashes),
@@ -70,6 +153,7 @@ final class PocketRecordingMetadata {
       'engineAbi',
       'contentHashes',
       'memory',
+      'hostFonts',
     }, 'metadata');
     final engineAbi = map['engineAbi'];
     if (engineAbi != null && engineAbi is! String) {
@@ -97,6 +181,9 @@ final class PocketRecordingMetadata {
       memoryLimits: map.containsKey('memory')
           ? PocketMemoryLimits.fromJson(map['memory'])
           : const PocketMemoryLimits(),
+      hostFonts: map['hostFonts'] == null
+          ? null
+          : PocketHostFontMetricsSnapshot.fromJson(map['hostFonts']),
     );
   }
 
@@ -106,6 +193,7 @@ final class PocketRecordingMetadata {
   final int tickHz;
   final String? engineAbi;
   final PocketMemoryLimits memoryLimits;
+  final PocketHostFontMetricsSnapshot? hostFonts;
   final Map<String, String> contentHashes;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -116,6 +204,7 @@ final class PocketRecordingMetadata {
     'engineAbi': engineAbi,
     'contentHashes': contentHashes,
     if (!memoryLimits.isEmpty) 'memory': memoryLimits.toJson(),
+    if (hostFonts != null) 'hostFonts': hostFonts!.toJson(),
   };
 }
 
@@ -436,6 +525,7 @@ final class PocketRecordingController {
   int _asyncEventCount = 0;
   int _asyncEventBytes = 0;
   void Function()? _beforeFinish;
+  final List<void Function()> _afterFinishListeners = <void Function()>[];
   PocketRecording? _recording;
   int _retainedAssetBytes = 0;
   final Map<String, Uint8List> _replayAssets = <String, Uint8List>{};
@@ -481,6 +571,19 @@ final class PocketRecordingController {
   /// Detaches a native boundary before its runtime handle is destroyed.
   void clearBeforeFinish() {
     _beforeFinish = null;
+  }
+
+  /// Registers a callback invoked once after [finish] seals the recording.
+  void addAfterFinishListener(void Function() listener) {
+    if (!enabled || _finished) return;
+    if (!_afterFinishListeners.contains(listener)) {
+      _afterFinishListeners.add(listener);
+    }
+  }
+
+  /// Removes a previously registered post-finish listener.
+  void removeAfterFinishListener(void Function() listener) {
+    _afterFinishListeners.remove(listener);
   }
 
   void add(PocketRecordingEntry entry) {
@@ -536,6 +639,21 @@ final class PocketRecordingController {
       engineAbi: _metadata!.engineAbi,
       contentHashes: hashes,
       memoryLimits: _metadata!.memoryLimits,
+      hostFonts: _metadata!.hostFonts,
+    );
+  }
+
+  void setHostFonts(PocketHostFontMetricsSnapshot hostFonts) {
+    if (!enabled || !_started || _finished || _metadata == null) return;
+    _metadata = PocketRecordingMetadata(
+      width: _metadata!.width,
+      height: _metadata!.height,
+      density: _metadata!.density,
+      tickHz: _metadata!.tickHz,
+      engineAbi: _metadata!.engineAbi,
+      contentHashes: _metadata!.contentHashes,
+      memoryLimits: _metadata!.memoryLimits,
+      hostFonts: hostFonts,
     );
   }
 
@@ -612,6 +730,16 @@ final class PocketRecordingController {
       version: _version,
       incompleteReason: _incompleteReason,
     );
+    final listeners = List<void Function()>.of(_afterFinishListeners);
+    _afterFinishListeners.clear();
+    for (final listener in listeners) {
+      try {
+        listener();
+      } on Object {
+        // Post-finish host hooks (such as applying deferred font refreshes)
+        // must never invalidate an already-sealed recording artifact.
+      }
+    }
     return _recording!;
   }
 
@@ -798,9 +926,17 @@ Map<String, dynamic> pocketValidateTraceClockEnvelope(Object? value) {
         'trace clock scalar value is invalid',
       );
     }
-    if (kind != 'dateNow' && kind != 'mathRandom' && kind != 'performanceNow') {
+    if (kind != 'dateNow' &&
+        kind != 'mathRandom' &&
+        kind != 'performanceNow' &&
+        kind != 'hostTextAdvance') {
       throw const PocketRecordingFormatException(
         'trace clock scalar kind is invalid',
+      );
+    }
+    if (kind == 'hostTextAdvance' && scalarValue < 0) {
+      throw const PocketRecordingFormatException(
+        'trace clock hostTextAdvance scalar must be non-negative',
       );
     }
     scalarValues.add(<String, dynamic>{'kind': kind, 'value': scalarValue});

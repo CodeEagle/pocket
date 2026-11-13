@@ -206,7 +206,7 @@ test("Editor reconstructs real chapter context through author choices/input, loc
   mkdirSync(join(project, "assets/audio"), { recursive: true });
   mkdirSync(qaRun, { recursive: true });
 
-  const copiedMetadata = ["pocket.json", "manifest.json", "fonts.json", "fonts"];
+  const copiedMetadata = ["pocket.json", "manifest.json"];
   for (const name of copiedMetadata) cpSync(join(lantern, name), join(project, name), { recursive: true });
   const dependencies = {
     "@pocket/ui": `file:${join(sdkRoot, "packages/pocket_ui")}`,

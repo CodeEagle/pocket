@@ -5,6 +5,11 @@
     "revision": "99924de47c62fa36f526a8791055d91cbbdb3836",
     "provenance": "sdk/scripts/prepare_upstream.py pins the archive revision and reproducible patches; official sources are compiled in place without copying them."
   },
+  "fixedCompositorSurfaces": {
+    "pocket.demo.profile": 2,
+    "pocket.demo.lobby": 3,
+    "pocket.demo.lantern": 63
+  },
   "applications": [
     {
       "id": "blackberry-classic-demo",
@@ -32,14 +37,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/blackberry-classic-demo/app.qjbc",
+        "pak": "apps/official/blackberry-classic-demo/app.pak",
+        "metadata": "apps/official/blackberry-classic-demo/app.bytecode.json",
+        "manifest": "apps/official/blackberry-classic-demo/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [
-          "input.touch"
-        ],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -47,37 +56,28 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons",
           "input.touch"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/blackberry-classic-demo/app.qjbc",
-        "pak": "apps/official/blackberry-classic-demo/app.pak",
-        "metadata": "apps/official/blackberry-classic-demo/app.bytecode.json",
-        "manifest": "apps/official/blackberry-classic-demo/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -103,12 +103,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/cafe/app.qjbc",
+        "pak": "apps/official/cafe/app.pak",
+        "metadata": "apps/official/cafe/app.bytecode.json",
+        "manifest": "apps/official/cafe/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -116,36 +122,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/cafe/app.qjbc",
-        "pak": "apps/official/cafe/app.pak",
-        "metadata": "apps/official/cafe/app.bytecode.json",
-        "manifest": "apps/official/cafe/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -171,12 +168,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/cards/app.qjbc",
+        "pak": "apps/official/cards/app.pak",
+        "metadata": "apps/official/cards/app.bytecode.json",
+        "manifest": "apps/official/cards/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -184,36 +187,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/cards/app.qjbc",
-        "pak": "apps/official/cards/app.pak",
-        "metadata": "apps/official/cards/app.bytecode.json",
-        "manifest": "apps/official/cards/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -239,12 +233,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/chrome/app.qjbc",
+        "pak": "apps/official/chrome/app.pak",
+        "metadata": "apps/official/chrome/app.bytecode.json",
+        "manifest": "apps/official/chrome/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -252,36 +252,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/chrome/app.qjbc",
-        "pak": "apps/official/chrome/app.pak",
-        "metadata": "apps/official/chrome/app.bytecode.json",
-        "manifest": "apps/official/chrome/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -309,10 +300,14 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/clear/app.qjbc",
+        "pak": "apps/official/clear/app.pak",
+        "metadata": "apps/official/clear/app.bytecode.json",
+        "manifest": "apps/official/clear/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.touch"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [
           "io.offload"
@@ -325,7 +320,7 @@
         "caveats": [
           {
             "capability": "input.touch",
-            "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+            "reason": "pocket_bench does not inject this input or exercise this native capability."
           },
           {
             "capability": "io.offload",
@@ -333,33 +328,23 @@
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
+          "input.touch",
           "io.offload",
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
-        "optionalCapabilities": [
-          "input.touch"
-        ],
-        "demotedRequirements": [
-          "input.touch"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "optionalCapabilities": [],
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.touch"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/clear/app.qjbc",
-        "pak": "apps/official/clear/app.pak",
-        "metadata": "apps/official/clear/app.bytecode.json",
-        "manifest": "apps/official/clear/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -385,12 +370,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/companion-zero/app.qjbc",
+        "pak": "apps/official/companion-zero/app.pak",
+        "metadata": "apps/official/companion-zero/app.bytecode.json",
+        "manifest": "apps/official/companion-zero/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -398,36 +389,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/companion-zero/app.qjbc",
-        "pak": "apps/official/companion-zero/app.pak",
-        "metadata": "apps/official/companion-zero/app.bytecode.json",
-        "manifest": "apps/official/companion-zero/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -456,14 +438,20 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/cursor/app.qjbc",
+        "pak": "apps/official/cursor/app.pak",
+        "metadata": "apps/official/cursor/app.bytecode.json",
+        "manifest": "apps/official/cursor/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.buttons"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [
           "input.cursor"
         ],
-        "conditionalRequiredCapabilities": [],
+        "conditionalRequiredCapabilities": [
+          "input.buttons"
+        ],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -471,37 +459,28 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons",
           "input.cursor"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/cursor/app.qjbc",
-        "pak": "apps/official/cursor/app.pak",
-        "metadata": "apps/official/cursor/app.bytecode.json",
-        "manifest": "apps/official/cursor/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -527,12 +506,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/devkit/app.qjbc",
+        "pak": "apps/official/devkit/app.pak",
+        "metadata": "apps/official/devkit/app.bytecode.json",
+        "manifest": "apps/official/devkit/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -540,36 +525,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/devkit/app.qjbc",
-        "pak": "apps/official/devkit/app.pak",
-        "metadata": "apps/official/devkit/app.bytecode.json",
-        "manifest": "apps/official/devkit/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -595,12 +571,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/gallery/app.qjbc",
+        "pak": "apps/official/gallery/app.pak",
+        "metadata": "apps/official/gallery/app.bytecode.json",
+        "manifest": "apps/official/gallery/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -608,36 +590,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/gallery/app.qjbc",
-        "pak": "apps/official/gallery/app.pak",
-        "metadata": "apps/official/gallery/app.bytecode.json",
-        "manifest": "apps/official/gallery/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -663,12 +636,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/gba-hero/app.qjbc",
+        "pak": "apps/official/gba-hero/app.pak",
+        "metadata": "apps/official/gba-hero/app.bytecode.json",
+        "manifest": "apps/official/gba-hero/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -676,36 +655,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/gba-hero/app.qjbc",
-        "pak": "apps/official/gba-hero/app.pak",
-        "metadata": "apps/official/gba-hero/app.bytecode.json",
-        "manifest": "apps/official/gba-hero/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -734,14 +704,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/hero/app.qjbc",
+        "pak": "apps/official/hero/app.pak",
+        "metadata": "apps/official/hero/app.bytecode.json",
+        "manifest": "apps/official/hero/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [
-          "display.viewport.live"
-        ],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -749,37 +723,28 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "display.viewport.live",
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/hero/app.qjbc",
-        "pak": "apps/official/hero/app.pak",
-        "metadata": "apps/official/hero/app.bytecode.json",
-        "manifest": "apps/official/hero/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -808,14 +773,20 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/im/app.qjbc",
+        "pak": "apps/official/im/app.pak",
+        "metadata": "apps/official/im/app.bytecode.json",
+        "manifest": "apps/official/im/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.buttons"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [
           "input.analog.left"
         ],
-        "conditionalRequiredCapabilities": [],
+        "conditionalRequiredCapabilities": [
+          "input.buttons"
+        ],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -823,37 +794,28 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.analog.left",
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/im/app.qjbc",
-        "pak": "apps/official/im/app.pak",
-        "metadata": "apps/official/im/app.bytecode.json",
-        "manifest": "apps/official/im/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -879,10 +841,14 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/iphone16-demo/app.qjbc",
+        "pak": "apps/official/iphone16-demo/app.pak",
+        "metadata": "apps/official/iphone16-demo/app.bytecode.json",
+        "manifest": "apps/official/iphone16-demo/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.touch"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
@@ -892,36 +858,26 @@
         "caveats": [
           {
             "capability": "input.touch",
-            "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+            "reason": "pocket_bench does not inject this input or exercise this native capability."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "input.touch",
+          "text.layout.native"
         ],
-        "optionalCapabilities": [
-          "input.touch"
-        ],
-        "demotedRequirements": [
-          "input.touch"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "optionalCapabilities": [],
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.touch"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/iphone16-demo/app.qjbc",
-        "pak": "apps/official/iphone16-demo/app.pak",
-        "metadata": "apps/official/iphone16-demo/app.bytecode.json",
-        "manifest": "apps/official/iphone16-demo/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -947,10 +903,14 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/iphone2g-demo/app.qjbc",
+        "pak": "apps/official/iphone2g-demo/app.pak",
+        "metadata": "apps/official/iphone2g-demo/app.bytecode.json",
+        "manifest": "apps/official/iphone2g-demo/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.touch"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
@@ -960,36 +920,26 @@
         "caveats": [
           {
             "capability": "input.touch",
-            "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+            "reason": "pocket_bench does not inject this input or exercise this native capability."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "input.touch",
+          "text.layout.native"
         ],
-        "optionalCapabilities": [
-          "input.touch"
-        ],
-        "demotedRequirements": [
-          "input.touch"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "optionalCapabilities": [],
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.touch"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/iphone2g-demo/app.qjbc",
-        "pak": "apps/official/iphone2g-demo/app.pak",
-        "metadata": "apps/official/iphone2g-demo/app.bytecode.json",
-        "manifest": "apps/official/iphone2g-demo/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1015,10 +965,14 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/iphone4s-demo/app.qjbc",
+        "pak": "apps/official/iphone4s-demo/app.pak",
+        "metadata": "apps/official/iphone4s-demo/app.bytecode.json",
+        "manifest": "apps/official/iphone4s-demo/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.touch"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
@@ -1028,36 +982,26 @@
         "caveats": [
           {
             "capability": "input.touch",
-            "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+            "reason": "pocket_bench does not inject this input or exercise this native capability."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "input.touch",
+          "text.layout.native"
         ],
-        "optionalCapabilities": [
-          "input.touch"
-        ],
-        "demotedRequirements": [
-          "input.touch"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "optionalCapabilities": [],
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.touch"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/iphone4s-demo/app.qjbc",
-        "pak": "apps/official/iphone4s-demo/app.pak",
-        "metadata": "apps/official/iphone4s-demo/app.bytecode.json",
-        "manifest": "apps/official/iphone4s-demo/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1083,12 +1027,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/ipodnano-hero/app.qjbc",
+        "pak": "apps/official/ipodnano-hero/app.pak",
+        "metadata": "apps/official/ipodnano-hero/app.bytecode.json",
+        "manifest": "apps/official/ipodnano-hero/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1096,36 +1046,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/ipodnano-hero/app.qjbc",
-        "pak": "apps/official/ipodnano-hero/app.pak",
-        "metadata": "apps/official/ipodnano-hero/app.bytecode.json",
-        "manifest": "apps/official/ipodnano-hero/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1151,10 +1092,14 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/ipodtouch-demo/app.qjbc",
+        "pak": "apps/official/ipodtouch-demo/app.pak",
+        "metadata": "apps/official/ipodtouch-demo/app.bytecode.json",
+        "manifest": "apps/official/ipodtouch-demo/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.touch"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
@@ -1164,36 +1109,26 @@
         "caveats": [
           {
             "capability": "input.touch",
-            "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+            "reason": "pocket_bench does not inject this input or exercise this native capability."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "input.touch",
+          "text.layout.native"
         ],
-        "optionalCapabilities": [
-          "input.touch"
-        ],
-        "demotedRequirements": [
-          "input.touch"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "optionalCapabilities": [],
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.touch"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/ipodtouch-demo/app.qjbc",
-        "pak": "apps/official/ipodtouch-demo/app.pak",
-        "metadata": "apps/official/ipodtouch-demo/app.bytecode.json",
-        "manifest": "apps/official/ipodtouch-demo/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1219,12 +1154,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/launcher/app.qjbc",
+        "pak": "apps/official/launcher/app.pak",
+        "metadata": "apps/official/launcher/app.bytecode.json",
+        "manifest": "apps/official/launcher/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1232,36 +1173,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/launcher/app.qjbc",
-        "pak": "apps/official/launcher/app.pak",
-        "metadata": "apps/official/launcher/app.bytecode.json",
-        "manifest": "apps/official/launcher/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1287,12 +1219,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/library/app.qjbc",
+        "pak": "apps/official/library/app.pak",
+        "metadata": "apps/official/library/app.bytecode.json",
+        "manifest": "apps/official/library/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1300,36 +1238,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/library/app.qjbc",
-        "pak": "apps/official/library/app.pak",
-        "metadata": "apps/official/library/app.bytecode.json",
-        "manifest": "apps/official/library/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1355,10 +1284,14 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/meizu-m8-demo/app.qjbc",
+        "pak": "apps/official/meizu-m8-demo/app.pak",
+        "metadata": "apps/official/meizu-m8-demo/app.bytecode.json",
+        "manifest": "apps/official/meizu-m8-demo/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.touch"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
@@ -1368,36 +1301,26 @@
         "caveats": [
           {
             "capability": "input.touch",
-            "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+            "reason": "pocket_bench does not inject this input or exercise this native capability."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "input.touch",
+          "text.layout.native"
         ],
-        "optionalCapabilities": [
-          "input.touch"
-        ],
-        "demotedRequirements": [
-          "input.touch"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "optionalCapabilities": [],
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.touch"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/meizu-m8-demo/app.qjbc",
-        "pak": "apps/official/meizu-m8-demo/app.pak",
-        "metadata": "apps/official/meizu-m8-demo/app.bytecode.json",
-        "manifest": "apps/official/meizu-m8-demo/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1423,12 +1346,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/motions/app.qjbc",
+        "pak": "apps/official/motions/app.pak",
+        "metadata": "apps/official/motions/app.bytecode.json",
+        "manifest": "apps/official/motions/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1436,36 +1365,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/motions/app.qjbc",
-        "pak": "apps/official/motions/app.pak",
-        "metadata": "apps/official/motions/app.bytecode.json",
-        "manifest": "apps/official/motions/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1494,14 +1414,20 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/music/app.qjbc",
+        "pak": "apps/official/music/app.pak",
+        "metadata": "apps/official/music/app.bytecode.json",
+        "manifest": "apps/official/music/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.buttons"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [
           "audio.pcm"
         ],
-        "conditionalRequiredCapabilities": [],
+        "conditionalRequiredCapabilities": [
+          "input.buttons"
+        ],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1509,37 +1435,28 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "audio.pcm",
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/music/app.qjbc",
-        "pak": "apps/official/music/app.pak",
-        "metadata": "apps/official/music/app.bytecode.json",
-        "manifest": "apps/official/music/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1565,9 +1482,14 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/nexus-touch/app.qjbc",
+        "pak": "apps/official/nexus-touch/app.pak",
+        "metadata": "apps/official/nexus-touch/app.bytecode.json",
+        "manifest": "apps/official/nexus-touch/guest-manifest.json"
+      },
       "hostCompatibility": {
         "missingSessionCapabilities": [
-          "input.touch",
           "ui.physics"
         ],
         "missingEnhancedSessionCapabilities": [],
@@ -1579,43 +1501,34 @@
         ],
         "caveats": [
           {
-            "capability": "input.touch",
-            "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
-          },
-          {
             "capability": "ui.physics",
             "reason": "The native frame benchmark enables the runtime core, but does not validate PocketSession capability admission or Flutter physics projection."
+          },
+          {
+            "capability": "input.touch",
+            "reason": "pocket_bench does not inject this input or exercise this native capability."
           }
         ]
       },
+      "launchable": false,
       "launchability": "platform_limited",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
+          "input.touch",
+          "text.layout.native",
           "ui.physics"
         ],
-        "optionalCapabilities": [
-          "input.touch"
-        ],
-        "demotedRequirements": [
-          "input.touch"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "optionalCapabilities": [],
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.touch"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [
           "ui.physics"
         ],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": false,
-      "assets": {
-        "bytecode": "apps/official/nexus-touch/app.qjbc",
-        "pak": "apps/official/nexus-touch/app.pak",
-        "metadata": "apps/official/nexus-touch/app.bytecode.json",
-        "manifest": "apps/official/nexus-touch/guest-manifest.json"
+        "note": "One or more required capabilities are absent from PocketSession defaults; the host decides whether to expose this app."
       }
     },
     {
@@ -1656,20 +1569,24 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/note/app.qjbc",
+        "pak": "apps/official/note/app.pak",
+        "metadata": "apps/official/note/app.bytecode.json",
+        "manifest": "apps/official/note/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.buttons"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [
-          "display.viewport.live",
           "host.clipboard",
           "input.ime",
           "input.pointer",
           "input.text",
-          "text.glyphs.runtime",
-          "text.layout.native"
+          "text.glyphs.runtime"
         ],
-        "conditionalRequiredCapabilities": [],
+        "conditionalRequiredCapabilities": [
+          "input.buttons"
+        ],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1677,14 +1594,15 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "display.viewport.live",
@@ -1693,27 +1611,16 @@
           "input.ime",
           "input.pointer",
           "input.text",
-          "text.glyphs.runtime",
-          "text.layout.native"
+          "text.glyphs.runtime"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/note/app.qjbc",
-        "pak": "apps/official/note/app.pak",
-        "metadata": "apps/official/note/app.bytecode.json",
-        "manifest": "apps/official/note/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1739,12 +1646,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/notifications/app.qjbc",
+        "pak": "apps/official/notifications/app.pak",
+        "metadata": "apps/official/notifications/app.bytecode.json",
+        "manifest": "apps/official/notifications/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1752,36 +1665,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/notifications/app.qjbc",
-        "pak": "apps/official/notifications/app.pak",
-        "metadata": "apps/official/notifications/app.bytecode.json",
-        "manifest": "apps/official/notifications/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1807,10 +1711,14 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/nsengine/app.qjbc",
+        "pak": "apps/official/nsengine/app.pak",
+        "metadata": "apps/official/nsengine/app.bytecode.json",
+        "manifest": "apps/official/nsengine/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.touch"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
@@ -1820,36 +1728,26 @@
         "caveats": [
           {
             "capability": "input.touch",
-            "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+            "reason": "pocket_bench does not inject this input or exercise this native capability."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "input.touch",
+          "text.layout.native"
         ],
-        "optionalCapabilities": [
-          "input.touch"
-        ],
-        "demotedRequirements": [
-          "input.touch"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "optionalCapabilities": [],
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.touch"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/nsengine/app.qjbc",
-        "pak": "apps/official/nsengine/app.pak",
-        "metadata": "apps/official/nsengine/app.bytecode.json",
-        "manifest": "apps/official/nsengine/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1875,12 +1773,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/settings/app.qjbc",
+        "pak": "apps/official/settings/app.pak",
+        "metadata": "apps/official/settings/app.bytecode.json",
+        "manifest": "apps/official/settings/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1888,36 +1792,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/settings/app.qjbc",
-        "pak": "apps/official/settings/app.pak",
-        "metadata": "apps/official/settings/app.bytecode.json",
-        "manifest": "apps/official/settings/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -1943,12 +1838,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/solid-aot-lab/app.qjbc",
+        "pak": "apps/official/solid-aot-lab/app.pak",
+        "metadata": "apps/official/solid-aot-lab/app.bytecode.json",
+        "manifest": "apps/official/solid-aot-lab/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -1956,36 +1857,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/solid-aot-lab/app.qjbc",
-        "pak": "apps/official/solid-aot-lab/app.pak",
-        "metadata": "apps/official/solid-aot-lab/app.bytecode.json",
-        "manifest": "apps/official/solid-aot-lab/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -2011,12 +1903,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/stats/app.qjbc",
+        "pak": "apps/official/stats/app.pak",
+        "metadata": "apps/official/stats/app.bytecode.json",
+        "manifest": "apps/official/stats/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -2024,36 +1922,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/stats/app.qjbc",
-        "pak": "apps/official/stats/app.pak",
-        "metadata": "apps/official/stats/app.bytecode.json",
-        "manifest": "apps/official/stats/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -2083,13 +1972,19 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/text-cjk/app.qjbc",
+        "pak": "apps/official/text-cjk/app.pak",
+        "metadata": "apps/official/text-cjk/app.bytecode.json",
+        "manifest": "apps/official/text-cjk/guest-manifest.json"
+      },
       "hostCompatibility": {
         "missingSessionCapabilities": [
-          "input.buttons",
           "text.glyphs.streamed"
         ],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [
+          "input.buttons",
           "io.offload"
         ],
         "conditionalEnhancedCapabilities": [],
@@ -2099,12 +1994,12 @@
         ],
         "caveats": [
           {
-            "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
-          },
-          {
             "capability": "text.glyphs.streamed",
             "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+          },
+          {
+            "capability": "input.buttons",
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           },
           {
             "capability": "io.offload",
@@ -2112,36 +2007,27 @@
           }
         ]
       },
+      "launchable": false,
       "launchability": "platform_limited",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
           "io.offload",
-          "text.glyphs.baked",
-          "text.glyphs.streamed"
+          "text.glyphs.streamed",
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [
           "text.glyphs.streamed"
         ],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": false,
-      "assets": {
-        "bytecode": "apps/official/text-cjk/app.qjbc",
-        "pak": "apps/official/text-cjk/app.pak",
-        "metadata": "apps/official/text-cjk/app.bytecode.json",
-        "manifest": "apps/official/text-cjk/guest-manifest.json"
+        "note": "One or more required capabilities are absent from PocketSession defaults; the host decides whether to expose this app."
       }
     },
     {
@@ -2171,13 +2057,19 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/text-offload/app.qjbc",
+        "pak": "apps/official/text-offload/app.pak",
+        "metadata": "apps/official/text-offload/app.bytecode.json",
+        "manifest": "apps/official/text-offload/guest-manifest.json"
+      },
       "hostCompatibility": {
         "missingSessionCapabilities": [
-          "input.buttons",
           "text.layout.offload"
         ],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [
+          "input.buttons",
           "io.offload"
         ],
         "conditionalEnhancedCapabilities": [],
@@ -2188,12 +2080,12 @@
         ],
         "caveats": [
           {
-            "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
-          },
-          {
             "capability": "text.layout.offload",
             "reason": "This capability is not included in PocketSession defaults; a consumer must explicitly configure a provider or additional capability."
+          },
+          {
+            "capability": "input.buttons",
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           },
           {
             "capability": "io.offload",
@@ -2201,36 +2093,27 @@
           }
         ]
       },
+      "launchable": false,
       "launchability": "platform_limited",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
           "io.offload",
-          "text.glyphs.baked",
+          "text.layout.native",
           "text.layout.offload"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [
           "text.layout.offload"
         ],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": false,
-      "assets": {
-        "bytecode": "apps/official/text-offload/app.qjbc",
-        "pak": "apps/official/text-offload/app.pak",
-        "metadata": "apps/official/text-offload/app.bytecode.json",
-        "manifest": "apps/official/text-offload/guest-manifest.json"
+        "note": "One or more required capabilities are absent from PocketSession defaults; the host decides whether to expose this app."
       }
     },
     {
@@ -2260,13 +2143,19 @@
       },
       "auxiliaryViewport": null,
       "motion": "continuous",
+      "assets": {
+        "bytecode": "apps/official/worker-http/app.qjbc",
+        "pak": "apps/official/worker-http/app.pak",
+        "metadata": "apps/official/worker-http/app.bytecode.json",
+        "manifest": "apps/official/worker-http/guest-manifest.json"
+      },
       "worker": {
         "kind": "quickjs-bytecode",
         "protocolVersion": 1,
         "bytecode": {
           "path": "app.worker.qjbc",
           "bytes": 15064,
-          "sha256": "d1307a28300f1e9bd7285afcb3f06f66f4f2bf4d7bf3eb92910d2e89fdc45a2d"
+          "sha256": "9484583f9285185e3ef966126626b3a9aa6b3bbd73d51378581cd6ad028e792a"
         },
         "declaration": {
           "entry": "apps/worker-http/worker.ts",
@@ -2298,8 +2187,8 @@
           "runtime.worker"
         ],
         "formatVersion": 1,
-        "sourceSha256": "697d66e63eb7b57d6e8e8256db338d2de0ae352c6a49b61ce4e9c2f75d43464e",
-        "payloadSha256": "9802bf340a1242855291b83bc767c881141aa20368976b4fda492c2981ac31da",
+        "sourceSha256": "88a3a6b4b983846059df724e4a63bb3b2b523d7559138c3b27b1706e6a86dfb5",
+        "payloadSha256": "9d3faf5199cd06b2f45d67ac6b311429bd9b9e38f67da3802cc12a263821ec80",
         "runtimeAbi": "quickjs-bytecode-v1:5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
         "engineAbi": "5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
         "bindingGeneration": 12,
@@ -2320,11 +2209,10 @@
         "note": "The worker realm was attached before UI evaluation; HTTP request I/O remains unexercised by the frame benchmark."
       },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
-          "input.buttons"
-        ],
+        "missingSessionCapabilities": [],
         "missingEnhancedSessionCapabilities": [],
         "conditionalRequiredCapabilities": [
+          "input.buttons",
           "net.http"
         ],
         "conditionalEnhancedCapabilities": [],
@@ -2334,38 +2222,29 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
           "net.http",
           "runtime.worker",
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/worker-http/app.qjbc",
-        "pak": "apps/official/worker-http/app.pak",
-        "metadata": "apps/official/worker-http/app.bytecode.json",
-        "manifest": "apps/official/worker-http/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -2391,12 +2270,18 @@
       },
       "auxiliaryViewport": null,
       "motion": "static",
+      "assets": {
+        "bytecode": "apps/official/zoomlab/app.qjbc",
+        "pak": "apps/official/zoomlab/app.pak",
+        "metadata": "apps/official/zoomlab/app.bytecode.json",
+        "manifest": "apps/official/zoomlab/guest-manifest.json"
+      },
       "hostCompatibility": {
-        "missingSessionCapabilities": [
+        "missingSessionCapabilities": [],
+        "missingEnhancedSessionCapabilities": [],
+        "conditionalRequiredCapabilities": [
           "input.buttons"
         ],
-        "missingEnhancedSessionCapabilities": [],
-        "conditionalRequiredCapabilities": [],
         "conditionalEnhancedCapabilities": [],
         "rawNativeBenchDoesNotExercise": [
           "input.buttons"
@@ -2404,36 +2289,27 @@
         "caveats": [
           {
             "capability": "input.buttons",
-            "reason": "The current PocketSession does not provide the upstream button-bitmask/gamepad transport; Flutter pointer input maps to touch and Focusable only."
+            "reason": "Flutter keyboard buttons require explicit keyboardInputEnabled; physical controllers require a real host input provider. Pointer fallback alone does not provide button bits."
           }
         ]
       },
-      "launchability": "portable_pointer_fallback",
+      "launchable": true,
+      "launchability": "direct",
       "guestManifestAdaptation": {
         "requiredCapabilities": [
-          "text.glyphs.baked"
+          "text.layout.native"
         ],
         "optionalCapabilities": [
           "input.buttons"
         ],
-        "demotedRequirements": [
-          "input.buttons"
-        ],
-        "note": "Flutter pointer adaptation removes the input requirement for admission; it is not equivalent to a physical gamepad."
+        "demotedRequirements": [],
+        "fonts": "host",
+        "note": "Staged for host-native vector fonts (text.layout.native) without baked DCFA glyph atlases."
       },
       "launchabilityDetails": {
-        "pointerFallbackCapabilities": [
-          "input.buttons"
-        ],
+        "pointerFallbackCapabilities": [],
         "blockedCapabilities": [],
-        "note": "Pointer fallback is a portability suggestion and does not emulate physical gamepad semantics."
-      },
-      "launchable": true,
-      "assets": {
-        "bytecode": "apps/official/zoomlab/app.qjbc",
-        "pak": "apps/official/zoomlab/app.pak",
-        "metadata": "apps/official/zoomlab/app.bytecode.json",
-        "manifest": "apps/official/zoomlab/guest-manifest.json"
+        "note": "No required capability gap was found in the current PocketSession defaults."
       }
     },
     {
@@ -2466,10 +2342,5 @@
         "manifest": "apps/lobby/guest-manifest.json"
       }
     }
-  ],
-  "fixedCompositorSurfaces": {
-    "pocket.demo.profile": 2,
-    "pocket.demo.lobby": 3,
-    "pocket.demo.lantern": 63
-  }
+  ]
 }

@@ -1,105 +1,126 @@
-# Visual novel font rendering
+# Visual novel & host-native font rendering
 
-Lantern uses the same Noto Serif subset for the compiler's primary regular and
-bold faces and for Flutter's existing `PocketView.fontFamilyFallback` option.
-The pinned compiler therefore puts the face's actual glyph advances into the
-PAK, while Flutter paints with the registered matching font. This keeps JS
-layout metrics and final text painting aligned.
+## Source-first comparison
 
-## Source and retained behavior
+The retained parent `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo`
+was inspected outside its excluded `pocket_host/` directory. Its generic text
+path in `lib/render/pocket_ui_components.dart` resolves a Flutter `TextStyle`
+and paints live JS strings with Flutter `Text`; it has no native font-metrics
+or shaped-text callback contract. This SDK keeps that platform-font behavior
+and adds the metrics and shaping bridge needed by the native layout engine,
+without importing the excluded host implementation or adding a compiler.
 
-I inspected the retained parent source at
-`/Volumes/ORICO/Development/Github/pocketjs_flutter_demo/lib/render/pocket_ui_components.dart`,
-excluding its `pocket_host/` subtree. That renderer uses Flutter `Text` and its
-current theme; it does not share the PocketJS compiler's PAK font metrics. The
-adaptation keeps that Flutter text path and uses the existing pinned
-compiler's regular/bold face flags so its atlas advances match the font
-registered by the host.
+By default, Pocket Flutter builds (including the Lantern visual novel demo) skip
+DCFA bitmap font atlas baking (`fonts: "host"` in `app.bytecode.json` and
+`guest-manifest.json`, plus a `ui:fonts.host` intent marker in `app.pak`) and
+render all UI text through the host OS vector font stack (`text.layout.native`).
+When a project explicitly declares custom primary font files in `pocket.json` or
+passes `--bake-fonts` (`bakeFonts: true`), the compiler retains deterministic
+PAK font baking (`fonts: "baked"`).
 
-In this repository, `demo/js/apps/lantern/scripts/prepare_font.ts` prepares the
-Noto Serif CJK subset from story, locale, app, and SDK text. The project declares
-the subset as both primary faces in `demo/js/apps/lantern/pocket.json`:
+## Default host-native font pipeline
+
+When neither `fonts.regular`/`fonts.bold` nor `--bake-fonts` is specified:
+
+1. `sdk/scripts/build_guest.ts` forwards `--no-bake-fonts` to the pinned
+   compiler, omitting `ui:font.*` bitmap atlases from `app.pak`, recording an
+   explicit `ui:fonts.host` PAK entry alongside `"fonts": "host"`, and adding
+   `"text.layout.native"` to `guest-manifest.json`'s `capabilities.requires`.
+   Legacy or minimal test PAKs without `ui:fonts.host` continue to load without
+   requiring host font tables.
+2. At runtime startup, `PocketHostFontMetrics` (`pocket_host_fonts.dart`) warms
+   up line heights, fullwidth CJK reference advances, and printable ASCII
+   (`0x20..0x7E`) advances across the 21 active PocketJS font slots (`0..20`)
+   via Flutter's `TextPainter`, and installs them into the native host through
+   `pocket_set_host_font_metrics`. Studio's browser preview measures the same
+   21 × 95 ASCII + CJK table via `<canvas>.measureText` and synchronizes it into
+   `pocket_probe` (`create` / `setHostFonts`). This table is only a set of
+   per-slot scalar metrics; it does not install a shaped-string callback into
+   the Studio probe.
+3. Simple unshaped non-ASCII lines (CJK ideographs, kana, precomposed Hangul
+   syllables, and CJK punctuation without combining marks, joiners, variation
+   selectors, or emoji) reuse cached per-scalar widths via
+   `pocket_set_host_glyph_measure_callback`. On Flutter, complex shaped lines
+   (combining marks, emoji ZWJ sequences, variation selectors, and complex
+   scripts) invoke `pocket_set_host_text_measure_callback`; Flutter measures the
+   whole line with the same `TextPainter` style used for painting. The native
+   host caches those whole-line widths within both entry-count (`16,384`) and
+   UTF-8 key-byte (`4 MiB`, `4 KiB`/line) ceilings. Uncached advances record
+   and replay deterministically through `hostTextAdvance` trace scalars.
+4. `PocketCanvasPainter` (`pocket_view_painter.dart`) resolves slots directly
+   against platform system fonts (proportional default family for slots `0..15`
+   and `19..20`; `monospace` followed by `Menlo` / `SF Mono` / `Consolas` /
+   `Roboto Mono` / `DejaVu Sans Mono` / `Courier New` fallback for slots `16..18`)
+   without referencing undeclared `PocketInter` or `PocketMono`
+   families. Tracked (`letterSpacing`) and 2D/projected-3D transformed text
+   runs stay on vector `TEXT_RUN` records (`TEXT_RUN_FLAG_TRACKING` and
+   `TEXT_RUN_FLAG_AFFINE`).
+
+## Studio preview shaping boundary
+
+The Studio preview currently sends the native probe only the ASCII/CJK metric
+table above. Its Canvas renderer measures and paints a complex run as one
+browser-shaped string, but the native probe has no synchronous callback to ask
+Canvas for that string's width. For those runs, native layout therefore uses
+its scalar fallback advances while Canvas paints the browser-shaped run. This
+can make Studio wrapping differ from Flutter for combining sequences, emoji
+ZWJ/variation-selector sequences, and complex scripts. Flutter's
+`pocket_set_host_text_measure_callback` path closes that gap for the Flutter
+host; Studio parity for complex shaping remains unverified and is not implied
+by the shared ASCII/CJK table.
+
+## Optional custom primary fonts
+
+Lantern and the Demo showcase use host-native system fonts by default without
+bundling `.ttf` or `.otf` assets. Consumer projects that want a custom bundled
+typeface can declare project-relative font files in `pocket.json`:
 
 ```json
 {
   "fonts": {
-    "regular": "fonts/lantern.otf",
-    "bold": "fonts/lantern.otf"
+    "regular": "fonts/custom-regular.otf",
+    "bold": "fonts/custom-bold.otf"
   }
 }
 ```
 
 `sdk/scripts/build_guest.ts` resolves these paths from the project root and
-passes them to the already-pinned `tools/build.ts` as `--font-regular` and
-`--font-bold`. `sdk/scripts/prebuilt_tools.mjs` validates the packaged
-compiler's upstream revision and ABI. The compiler's
-`framework/compiler/bake-font.ts` writes
-the chosen face's advances and line metrics into each used regular/bold PAK
-slot. The corresponding `fonts.json` remains responsible for glyph fallbacks,
-explicit characters, `characterFiles`, and ranges; it no longer repeats the
-primary face.
+passes them to `tools/build.ts` as `--font-regular` and `--font-bold`, keeping
+`fonts: "baked"` automatically, while `PocketAppConfig.fontFamilyFallback`
+forwards matching registered Flutter font families through `PocketGuest` to
+native `TEXT_RUN` measurement and `PocketCanvasPainter` / IME `TextField`
+rendering. A baked PAK keeps its font metrics and atlas draw path for tracked,
+transformed, and 3D text; host-table measurement and the extra
+tracked/transformed vector route are selected only by the `ui:fonts.host`
+admission marker or a font-less PAK.
 
-The Flutter painter follows a separate final-paint path. `PocketTextOp` carries
-the text and slot number; `sdk/packages/pocket_flutter/lib/src/pocket_view_painter.dart`
-maps slots to the fixed `PocketInter`/`PocketMono` family names and paints with
-`TextPainter`. The PAK does not register a font with Flutter. `PocketView`'s
-existing `fontFamilyFallback` property is therefore passed from
-`PocketAppConfig` through `PocketGuest` to the painter, and the Demo registers
-the generated font file as `LanternSerif` in `demo/pubspec.yaml`.
+When dynamic fonts are loaded at runtime (for example via Flutter's
+`FontLoader.load()` or `PaintingBinding.instance.systemFonts`), `PocketView`
+listens to `PaintingBinding.instance.systemFonts` (and exposes
+`PocketViewController.refreshHostFonts()`) to clear cached host metrics and
+`TextPainter` layouts, resynchronize native host font tables, and trigger a
+relayout/repaint. If a `PocketRecordingController` trace is actively recording,
+mid-recording font refreshes are deferred until `finish()` seals the recording
+so `metadata.hostFonts` and replay scalar caches stay consistent.
 
-The native IME `TextField` and its placeholder receive that same fallback list
-from `PocketView`. An empty list is passed as `null`, preserving Flutter's
-prior default family resolution for existing consumers.
-
-## Configuration
-
-Hosts can set `fontFamilyFallback` per app in `PocketAppConfig`. It survives
-`copyWith`, participates in configuration equality and hash codes, and is
-selected from the trusted native policy by `withNativePolicy`. The default is
-an empty list, preserving existing consumers. Lantern's native policy selects
-`LanternSerif`; Flutter registers
-`demo/js/apps/lantern/fonts/lantern.otf` under that family name.
-
-The PAK primary face and Flutter fallback serve separate boundaries. The
-primary face controls PAK glyph coverage, advances, and the text width used by
-the engine; `fontFamilyFallback` controls Flutter's final glyph painting. Both
-must name matching font data when exact wrapping matters. The same regular
-font file can serve the compiler's bold slots and the painter's bold request;
-this reuses the source subset without generating a second font asset. Mono
-slots retain the pinned compiler's existing monospaced face.
+## Configuration rules
 
 `pocket.json` accepts only `fonts.regular` and `fonts.bold`. Each value must be
 a nonempty, project-relative `.ttf` or `.otf` file path using forward slashes;
 absolute paths, traversal, symlinks, missing files, and unknown fields fail
-before the compiler is loaded. The SDK canonicalizes the resolved file inside
-the project before forwarding it. Projects without this field keep the pinned
-compiler defaults unchanged. There is no separate `BuildGuestOptions` font
-override, so `pocket.ts build`, Editor builds, and scaffolded projects share
-one declaration and the same `buildGuest` compiler route.
-
-## Rendering boundary and limits
-
-The configured PAK primary face changes Latin and CJK advances wherever the
-face provides the glyph. The `fonts.json` fallbacks are consulted only for
-missing code points, and each fallback glyph retains its own scaled advance.
-The Demo registers its primary face under `LanternSerif` in Flutter's existing
-font fallback chain. Unconfigured consumers still use Inter/Inter Bold and
-their previous Flutter resolution.
+before the compiler is loaded. CLI callers can pass `--bake-fonts` or
+`--no-bake-fonts` to `pocket.ts build` / `build_guest.ts` when explicit baking
+control is needed.
 
 ## Validation
 
-Run the focused proof with `cd sdk && bun test scripts/tests/build_guest_fonts.test.ts`.
-It runs the real pinned compiler and QuickJS bytecode build twice, reads
-regular/bold slot cmap advances from both
-PAKs, and applies those measured advances to a deterministic 300 px line-width
-probe to confirm the configured face produces a different line count. The
-probe is build evidence based on real PAK data, not a substitute for Guest or
-platform text layout. The test also checks malformed, missing, and escaping
-declarations fail before compiler setup.
-
-`sdk/test/config_value_test.dart` covers default, copy, equality, and hash
-behavior. `sdk/test/pocket_config_test.dart` checks the native-policy merge.
-`sdk/test/pocket_font_family_fallback_test.dart` checks the real
-`PocketGuest` → `PocketView` property handoff without starting a runtime. The
-Lantern screenshot on each target remains the final check that Flutter resolves
-and paints the registered family as expected.
+- `cd sdk && bun test scripts/tests/build_guest_fonts.test.ts` verifies both
+  default font-less (`fonts: "host"`, `ui:fonts.host`, `text.layout.native`)
+  and baked (`fonts: "baked"`) PAK outputs plus path-traversal validation.
+- `cd sdk/native && cargo test --locked` verifies native `ui:fonts.host` PAK
+  admission gating (while keeping legacy empty PAKs loadable), simple-line CJK
+  per-scalar fast path vs shaped UTF-8 callback routing, segment-cache byte
+  caps, 3D baked preservation vs font-less projection, and replay determinism.
+- `cd sdk/packages/pocket_flutter && flutter test` verifies Flutter host font
+  synchronization, deferred mid-recording font refreshes, dynamic font cache
+  invalidation, and recording/replay parity.

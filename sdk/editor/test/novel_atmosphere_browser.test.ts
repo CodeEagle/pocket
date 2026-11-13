@@ -18,7 +18,7 @@ test("Editor authors per-background atmosphere layers with shared validation, hi
   const output = join(temporary, "build");
   const id = "atmosphere-authoring";
   await mkdir(join(project, "art/fx"), { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts", "novel.locales.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     await cp(join(source, name), join(project, name), { recursive: true });
   }
   await cp(join(source, "art/fx/sea-mist.png"), join(project, "art/fx/sea-mist.png"));

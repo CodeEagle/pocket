@@ -1,10 +1,18 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { chromium } from "playwright";
 import { buildWeb } from "../build_web.ts";
+
+// Reuse one Chromium process; each case still receives a fresh browser context.
+// Bun 1.3.9 can lose the stdio pipe on a second Playwright spawn in one realm.
+let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+beforeAll(async () => {
+  if (process.env.POCKET_WEB_ENGINE) browser = await chromium.launch({ headless: true });
+});
+afterAll(async () => { await browser?.close(); });
 
 // Maintainer integration gate: run against the newly built pinned Worker
 // engine, not the older npm engine that deliberately lacks this ABI.
@@ -37,7 +45,7 @@ test.skipIf(!process.env.POCKET_WEB_ENGINE)(`browser ${renderWorker ? "render Wo
     const type = extname(file) === ".js" ? "text/javascript" : extname(file) === ".wasm" ? "application/wasm" : "application/octet-stream";
     return new Response(Bun.file(file), { headers: { "content-type": type } });
   } });
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  let context: Awaited<ReturnType<NonNullable<typeof browser>["newContext"]>> | undefined;
   try {
     const origin = `http://127.0.0.1:${server.port}`;
     const upstream = resolve(import.meta.dir, "../../.cache/pocketjs/apps/worker-http");
@@ -56,8 +64,8 @@ test.skipIf(!process.env.POCKET_WEB_ENGINE)(`browser ${renderWorker ? "render Wo
     const runtimePath = process.env.POCKET_WEB_RUNTIME;
     if (!runtimePath) throw new Error("Set POCKET_WEB_RUNTIME to the matching newly built browser host bundle");
     await buildWeb({ projectRoot: project, outDir: output, enginePath: process.env.POCKET_WEB_ENGINE, runtimePath, renderWorker, workerHttpOrigins: [origin] });
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
+    context = await browser!.newContext();
+    const page = await context.newPage();
     const pageErrors: string[] = [];
     page.on("pageerror", error => pageErrors.push(error.message));
     await page.goto(origin);
@@ -130,7 +138,7 @@ test.skipIf(!process.env.POCKET_WEB_ENGINE)(`browser ${renderWorker ? "render Wo
     expect(rejected.message).toContain("descriptor");
     expect(requests).toBe(12);
   } finally {
-    await browser?.close();
+    await context?.close();
     server.stop(true); rmSync(root, { recursive: true, force: true });
   }
 }, 120_000);

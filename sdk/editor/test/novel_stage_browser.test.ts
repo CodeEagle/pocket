@@ -39,10 +39,9 @@ test("real Chromium stage drag, transforms, layer order, undo/redo, save/reopen 
   const workspace = join(temporary, "workspace");
   mkdirSync(join(project, "art"), { recursive: true });
   mkdirSync(join(project, "assets", "audio"), { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json", "fonts.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     cpSync(join(source, name), join(project, name));
   }
-  cpSync(join(source, "fonts"), join(project, "fonts"), { recursive: true });
   writeFileSync(join(project, "story.json"), `${JSON.stringify(story, null, 2)}\n`);
   writeFileSync(join(project, "novel.assets.json"), `${JSON.stringify(assets, null, 2)}\n`);
   writeFileSync(join(project, "images.json"), JSON.stringify({ "art/room.png": { linear: true }, "art/mira.png": { linear: true }, "art/ren.png": { linear: true } }));

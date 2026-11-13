@@ -238,6 +238,43 @@ function finiteNonNegative(value: unknown, label: string, maximum = 1024): numbe
   return number;
 }
 
+export type PreviewHostFontMetrics = {
+  lineHeights: number[];
+  cjkAdvances: number[];
+  asciiAdvances: number[];
+};
+
+const PREVIEW_HOST_FONT_SLOT_COUNT = 21;
+const PREVIEW_HOST_ASCII_COUNT = 95;
+
+export function parseHostFontMetrics(value: unknown): PreviewHostFontMetrics {
+  const record = asRecord(value, "hostFonts");
+  const parseList = (field: string, expectedLen: number, positive: boolean): number[] => {
+    const raw = record[field];
+    if (!Array.isArray(raw) || raw.length !== expectedLen) {
+      throw new Error(`hostFonts.${field} must be an array of ${expectedLen} numbers`);
+    }
+    return raw.map((entry, idx) => {
+      const n = Number(entry);
+      if (!Number.isFinite(n) || (positive ? n <= 0 : n < 0) || n > 4096) {
+        throw new Error(
+          `hostFonts.${field}[${idx}] must be a finite ${positive ? "positive" : "non-negative"} number <= 4096`,
+        );
+      }
+      return n;
+    });
+  };
+  return {
+    lineHeights: parseList("lineHeights", PREVIEW_HOST_FONT_SLOT_COUNT, true),
+    cjkAdvances: parseList("cjkAdvances", PREVIEW_HOST_FONT_SLOT_COUNT, true),
+    asciiAdvances: parseList(
+      "asciiAdvances",
+      PREVIEW_HOST_FONT_SLOT_COUNT * PREVIEW_HOST_ASCII_COUNT,
+      false,
+    ),
+  };
+}
+
 function parseAccessibilityPreferences(value: unknown): PreviewAccessibilityPreferences {
   const record = asRecord(value, "accessibility preferences");
   const booleanField = (name: keyof Pick<PreviewAccessibilityPreferences, "reduceMotion" | "increaseContrast" | "accessibleNavigation">): boolean => {
@@ -1124,6 +1161,11 @@ function previewOpSummary(value: unknown): JsonRecord {
     result.color = previewInteger(op.color);
     result.fontSlot = op.fontSlot === undefined ? null : previewInteger(op.fontSlot);
     result.align = previewInteger(op.align);
+    const tracking = Number(op.tracking ?? 0);
+    if (Number.isFinite(tracking) && tracking !== 0) result.tracking = previewDouble(tracking);
+    if (Array.isArray(op.affine) && op.affine.length === 4) {
+      result.affine = op.affine.map((item) => previewDouble(Number(item)));
+    }
   } else if (type === "image") {
     result.asset = op.asset;
     result.uv = op.uv === undefined ? null : Array.isArray(op.uv) ? op.uv.map((uv) => previewDouble(uv)) : op.uv;
@@ -1405,6 +1447,30 @@ function hostError(code: string, message: string): JsonRecord {
   return { code, message };
 }
 
+function previewFontSlotSize(slot: unknown): number {
+  const values = [12, 14, 16, 18, 20, 24, 36];
+  const index = Number(slot);
+  if (index >= 0 && index <= 6) return values[index];
+  if (index >= 7 && index <= 13) return values[index - 7];
+  if (index === 14 || index === 15) return 54;
+  if (index >= 16 && index <= 18) return values[index - 16];
+  if (index === 19 || index === 20) return 10;
+  return 14;
+}
+
+export function previewOpSummaryForTest(value: unknown): JsonRecord {
+  return previewOpSummary(value);
+}
+
+export function transformedChildOpForTest(
+  op: JsonRecord,
+  slot: SurfaceSlot,
+  child: PreviewFrame,
+  assetPrefix = "",
+): JsonRecord {
+  return transformedChildOp(op, slot, child, assetPrefix);
+}
+
 function transformedChildOp(
   op: JsonRecord,
   slot: SurfaceSlot,
@@ -1419,8 +1485,26 @@ function transformedChildOp(
   };
   number("x", scaleX, slot.x);
   number("y", scaleY, slot.y);
-  number("w", scaleX);
-  number("h", scaleY);
+  const hasTextAffine = op.type === "text" && Array.isArray(op.affine) && op.affine.length === 4 &&
+    op.affine.every((item) => typeof item === "number" && Number.isFinite(item));
+  if (hasTextAffine) {
+    const [a, b, c, d] = op.affine as number[];
+    // Keep w, h, size, and tracking in the text run's local coordinate space;
+    // the composed 2x2 matrix maps local (lx, ly) into parent surface space.
+    transformed.affine = [a * scaleX, b * scaleY, c * scaleX, d * scaleY];
+  } else {
+    number("w", scaleX);
+    number("h", scaleY);
+    if (op.type === "text" && (scaleX !== 1 || scaleY !== 1)) {
+      const baseSize = typeof op.size === "number" && Number.isFinite(op.size) && op.size > 0
+        ? op.size
+        : previewFontSlotSize(op.fontSlot);
+      transformed.size = baseSize * scaleY;
+      if (typeof op.tracking === "number" && Number.isFinite(op.tracking) && op.tracking !== 0) {
+        transformed.tracking = op.tracking * scaleX;
+      }
+    }
+  }
   if (typeof op.radius === "number" && Number.isFinite(op.radius)) transformed.radius = op.radius * Math.min(scaleX, scaleY);
   if (typeof op.asset === "string" && op.asset) transformed.asset = `${assetPrefix}${op.asset}`;
   // Every child operation must be clipped to its host-surface rect. Native
@@ -1683,6 +1767,10 @@ class PreviewSession {
   private tickHz: number;
   /** Latest browser accessibility facts, replayed to every newly loaded guest. */
   private accessibilityPreferences?: PreviewAccessibilityPreferences;
+  /** Latest browser-measured 21-slot host font metrics for faithful Studio layout. */
+  private hostFontMetrics?: PreviewHostFontMetrics;
+  /** Latest font table observed during a recording, committed after its captures stop. */
+  private pendingHostFontMetrics?: PreviewHostFontMetrics;
 
   constructor(manager: PreviewManagerImpl, id: string) {
     this.manager = manager;
@@ -1869,6 +1957,7 @@ class PreviewSession {
           height: this.height,
           rasterDensity: this.manager.options.rasterDensity ?? 1,
           tickHz: this.tickHz,
+          ...(this.hostFontMetrics ? { hostFonts: this.hostFontMetrics } : {}),
         });
         // Recording is opt-in. A recording request arms a fresh runtime before
         // this method is entered, so the native clock is selected before the
@@ -2809,7 +2898,30 @@ class PreviewSession {
     state.stopped = true;
     state.pendingRestart = false;
     for (const capture of state.captures.values()) capture.stopped = true;
+    if (this.pendingHostFontMetrics) await this.applyHostFontMetrics(this.pendingHostFontMetrics);
     return this.previewRecordingStatus();
+  }
+
+  private async applyHostFontMetrics(metrics: PreviewHostFontMetrics): Promise<void> {
+    // Publish the active table before awaiting native updates so child loads
+    // that start during this refresh inherit the same version as the root.
+    this.hostFontMetrics = metrics;
+    const runtimes = [
+      ...(this.rootRuntime ? [this.rootRuntime] : []),
+      ...this.childRuntimes.values(),
+    ];
+    try {
+      await Promise.all(runtimes.map(async (runtime) => {
+        await runtime.probe.checked({ op: "setHostFonts", hostFonts: metrics });
+        runtime.needsPump = true;
+      }));
+      this.pendingHostFontMetrics = undefined;
+    } catch (error) {
+      // Keep the newest table available to future child loads and retryable
+      // after a transient native refresh failure.
+      this.pendingHostFontMetrics = metrics;
+      throw error;
+    }
   }
 
   private previewRecordingDocument(capture: PreviewRecordingCapture): JsonRecord {
@@ -3918,6 +4030,7 @@ class PreviewSession {
       needsPump: false,
       pumping: 0,
     };
+    const createHostFontMetrics = this.hostFontMetrics;
     const recording = this.previewRecordingActive();
     probe.setObserver((command, response) => this.observeProbeCommand(runtime, command, response));
     probe.setErrorHandler((error) => this.reportError(error, runtime));
@@ -3930,6 +4043,7 @@ class PreviewSession {
         height: initialHeight,
         rasterDensity: this.manager.options.rasterDensity ?? 1,
         tickHz: this.tickHz,
+        ...(createHostFontMetrics ? { hostFonts: createHostFontMetrics } : {}),
         ...(memory ? { memory } : {}),
       });
       if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
@@ -3961,6 +4075,18 @@ class PreviewSession {
       await this.enqueue(async () => {
         if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
         if (loadResponse.frame !== undefined) await this.ingestRuntimeFrame(runtime, loadResponse.frame, 0, false);
+        if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
+        // Child startup runs outside the serialized input lane. If a host
+        // table changed while this probe was loading, bring it up to date
+        // before exposing the child to the compositor.
+        let appliedFontMetrics = createHostFontMetrics;
+        while (this.hostFontMetrics && this.hostFontMetrics !== appliedFontMetrics) {
+          const latestFontMetrics = this.hostFontMetrics;
+          await probe.checked({ op: "setHostFonts", hostFonts: latestFontMetrics });
+          runtime.needsPump = true;
+          appliedFontMetrics = latestFontMetrics;
+          if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
+        }
         if (!this.isCurrentChildRuntimeLoad(appId, load)) throw new Error("child runtime startup was cancelled");
         this.childRuntimes.set(appId, runtime);
         if (runtime.frame) {
@@ -4631,6 +4757,15 @@ class PreviewSession {
         for (const child of this.childRuntimes.values()) {
           await this.replayAccessibilityPreferences(child);
         }
+      } else if (kind === "hostFonts") {
+        const metrics = parseHostFontMetrics(input.hostFonts);
+        // Keep every guest on the same table for the full recording. New child
+        // probes must inherit the currently applied table until captures stop.
+        if (this.previewRecordingActive()) {
+          this.pendingHostFontMetrics = metrics;
+          return;
+        }
+        await this.applyHostFontMetrics(metrics);
       } else if (kind === "semantic") {
         const action = parseAccessibilityAction(input);
         let target: PreviewRuntime | undefined;

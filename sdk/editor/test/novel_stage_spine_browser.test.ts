@@ -64,10 +64,9 @@ test("real Chromium stage previews the registered Spine model through transforms
   mkdirSync(join(project, "art"), { recursive: true });
   mkdirSync(join(project, "models"), { recursive: true });
   mkdirSync(join(project, "assets", "audio"), { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json", "fonts.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     cpSync(join(source, name), join(project, name));
   }
-  cpSync(join(source, "fonts"), join(project, "fonts"), { recursive: true });
   cpSync(join(source, "models/mira.spine.json"), join(project, "models/mira.spine.json"));
   cpSync(join(source, "models/mira.atlas"), join(project, "models/mira.atlas"));
   for (const name of ["mira-neutral.png", "mira-worried.png", "mira-hopeful.png", "ren-neutral.png"]) {

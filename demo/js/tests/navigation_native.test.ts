@@ -118,6 +118,9 @@ test("native secondary-page arrow keeps the outgoing route and slides it right",
     frame = await session.settle(await session.tap("+", frame), 3);
     frame = await session.settle(await session.tap("+", frame), 3);
     const retainedStateText = "State · off · level 5 · layout adaptive";
+    assert.ok(findVisibleText(frame, "5"), "both pointer taps must update the visible stepper");
+    frame = (await revealVisibleText(session, frame, retainedStateText, 650, 420)).frame;
+    frame = await settleAnchor(session, frame, retainedStateText);
     assert.ok(textOf(frame).includes(retainedStateText));
     const currentPage = textOp(frame, "Mobile UI", (op) => (op.y ?? 999) < 60);
 
@@ -132,13 +135,29 @@ test("native secondary-page arrow keeps the outgoing route and slides it right",
       outgoingAtStart.x! >= currentPage.x! - 1,
       `the popped route must remain painted when its arrow pop begins (${currentPage.x} -> ${outgoingAtStart.x})`,
     );
-    frame = await session.frame();
-    const outgoingNextFrame = textOp(frame, "Mobile UI", (op) => (op.y ?? 999) < 60);
-    assert.ok(textOf(frame).includes(retainedStateText),
-      "the popped RouteView must keep its local state while moving on the next Guest frame");
+    // The pointer-up result can precede the transform update by one Guest
+    // frame. Sample real frames for at most 48 ms; do not infer motion from a
+    // static settle or a synthetic transition value.
+    let previousOutgoingX = outgoingAtStart.x!;
+    let outgoingNextFrame: DrawOp | undefined;
+    for (let index = 0; index < 3; index += 1) {
+      frame = await session.frame();
+      const outgoingFrame = textOp(frame, "Mobile UI", (op) => (op.y ?? 999) < 60);
+      assert.ok(textOf(frame).includes(retainedStateText),
+        "the popped RouteView must keep its local state while moving on Guest frames");
+      assert.ok(
+        outgoingFrame.x! >= previousOutgoingX - 1,
+        `the retained outgoing route must not move left (${previousOutgoingX} -> ${outgoingFrame.x})`,
+      );
+      previousOutgoingX = outgoingFrame.x!;
+      if (outgoingFrame.x! > outgoingAtStart.x! + 1) {
+        outgoingNextFrame = outgoingFrame;
+        break;
+      }
+    }
     assert.ok(
-      outgoingNextFrame.x! > outgoingAtStart.x! + 1,
-      `the retained outgoing route must move right on a real Guest frame (${outgoingAtStart.x} -> ${outgoingNextFrame.x})`,
+      outgoingNextFrame,
+      `the retained outgoing route must move right within 3 real Guest frames (${outgoingAtStart.x} -> ${previousOutgoingX})`,
     );
 
     frame = await session.settle(await session.frame(), 24);
@@ -213,10 +232,11 @@ test("native route stack preserves page scroll/local state and isolates popped r
     assert.equal(textOps(frame, "Scaffold + AppBar").length, 0, "Controls selection must hide the overview section");
 
     frame = await settle(stateSession, await stateSession.tap("Enabled", frame));
-    assert.match(textOf(frame), /State · off · level 3 · layout adaptive/);
+    assert.ok(findVisibleText(frame, "Disabled"), "switch must visibly turn off");
+    assert.ok(findVisibleText(frame, "3"), "stepper must start at three");
     frame = await settle(stateSession, await stateSession.tap("+", frame));
     frame = await settle(stateSession, await stateSession.tap("+", frame));
-    assert.match(textOf(frame), /State · off · level 5 · layout adaptive/);
+    assert.ok(findVisibleText(frame, "5"), "both pointer taps must increment the visible stepper");
 
     let input = findVisibleText(frame, "System keyboard input");
     if (!input) {

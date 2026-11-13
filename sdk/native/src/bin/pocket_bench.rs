@@ -6,9 +6,9 @@
 //! single JSON document suitable for archiving in a profiling artifact.
 
 use pocket_flutter::{
-    pocket_bytecode_runtime_abi, pocket_create_with_density_and_tick_hz, pocket_destroy,
-    pocket_frame, pocket_frame_delta, pocket_last_error, pocket_load_bytecode_files, pocket_send,
-    pocket_configure_worker,
+    default_probe_host_font_metrics, pocket_bytecode_runtime_abi, pocket_configure_worker,
+    pocket_create_with_density_and_tick_hz, pocket_destroy, pocket_frame, pocket_frame_delta,
+    pocket_last_error, pocket_load_bytecode_files, pocket_send, pocket_set_host_font_metrics,
 };
 use serde_json::{json, Value};
 use std::env;
@@ -30,12 +30,13 @@ struct Args {
     height: f64,
     raster_density: u32,
     tick_hz: u32,
+    host_fonts: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: pocket_bench [--bytecode PATH] [--pak PATH] [--frames N] [--warmup N] \
-         [--width N] [--height N] [--raster-density N] [--tick-hz N]"
+         [--width N] [--height N] [--raster-density N] [--tick-hz N] [--host-fonts|--no-host-fonts]"
     );
     std::process::exit(2);
 }
@@ -84,6 +85,7 @@ fn parse_args() -> Args {
     let mut height = 844.0;
     let mut raster_density = 1;
     let mut tick_hz = 60;
+    let mut host_fonts = true;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         let (name, inline) = argument
@@ -107,6 +109,8 @@ fn parse_args() -> Args {
             "--height" => height = parse_f64(value(&mut args), "--height"),
             "--raster-density" => raster_density = parse_u32(value(&mut args), "--raster-density"),
             "--tick-hz" => tick_hz = parse_u32(value(&mut args), "--tick-hz"),
+            "--host-fonts" => host_fonts = true,
+            "--no-host-fonts" => host_fonts = false,
             "-h" | "--help" => usage(),
             other => {
                 eprintln!("unknown argument {other}");
@@ -133,6 +137,7 @@ fn parse_args() -> Args {
         height,
         raster_density,
         tick_hz,
+        host_fonts,
     }
 }
 
@@ -161,6 +166,25 @@ unsafe fn create_runtime(args: &Args) -> Result<Handle, String> {
     .cast::<std::ffi::c_void>();
     if handle.is_null() {
         return Err("pocket_create_with_density_and_tick_hz returned null".to_owned());
+    }
+    if args.host_fonts {
+        let (lh, cjk, ascii) = default_probe_host_font_metrics();
+        if pocket_set_host_font_metrics(
+            handle.cast(),
+            lh.len() as u32,
+            lh.as_ptr(),
+            cjk.as_ptr(),
+            ascii.as_ptr(),
+        ) != 0
+        {
+            let error = last_error(handle);
+            pocket_destroy(handle.cast());
+            return Err(if error.is_empty() {
+                "pocket_set_host_font_metrics failed".to_owned()
+            } else {
+                error
+            });
+        }
     }
     if let (Some(bytecode), Some(config)) = (&args.worker_bytecode, &args.worker_config) {
         let configured = (|| -> Result<(), String> {
@@ -342,6 +366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "height": args.height,
             "rasterDensity": args.raster_density,
             "tickHz": args.tick_hz,
+            "hostFonts": args.host_fonts,
         },
         "scenarios": scenarios,
     });

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   resolveSystemDocument,
   validateSystemDocument,
@@ -21,9 +21,8 @@ function clone<T>(value: T): T {
 function fixture(): { readonly root: string; readonly document: Record<string, any> } {
   const root = mkdtempSync(join(tmpdir(), "pocket-system-contract-"));
   fixtureRoots.push(root);
-  mkdirSync(join(root, "apps/profile"), { recursive: true });
-  mkdirSync(join(root, "apps/lobby"), { recursive: true });
-  for (const relativePath of ["pocket.json", "apps/profile/pocket.json", "apps/lobby/pocket.json"]) {
+  for (const { manifest: relativePath } of systemDocument.applications.catalog) {
+    mkdirSync(dirname(join(root, relativePath)), { recursive: true });
     writeFileSync(join(root, relativePath), readFileSync(join(demoJsRoot, relativePath)));
   }
   return { root, document: clone(systemDocument) };
@@ -34,7 +33,7 @@ afterEach(() => {
 });
 
 describe("PocketSystemV1 build validation", () => {
-  test("accepts the demo's official contract and all three installed package manifests", async () => {
+  test("accepts the demo's official contract and all four installed package manifests", async () => {
     const result = await validateSystemFile(join(demoJsRoot, "pocket.system.json"));
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
@@ -44,17 +43,20 @@ describe("PocketSystemV1 build validation", () => {
     expect(result.value.contract.applications.backgroundExecution).toBe("suspend");
     expect(result.value.contract.installation.installedPackages).toEqual([
       "pocket.host.demo",
+      "pocket.demo.lantern",
       "pocket.demo.profile",
       "pocket.demo.lobby",
     ]);
     expect(result.value.packages.map((entry) => entry.package)).toEqual([
       "pocket.host.demo",
+      "pocket.demo.lantern",
       "pocket.demo.profile",
       "pocket.demo.lobby",
     ]);
     expect(result.value.packages.every((entry) => entry.installed)).toBe(true);
     expect(result.value.packages.map((entry) => entry.manifest.id)).toEqual([
       "pocket.host.demo",
+      "pocket.demo.lantern",
       "pocket.demo.profile",
       "pocket.demo.lobby",
     ]);
@@ -62,11 +64,11 @@ describe("PocketSystemV1 build validation", () => {
       heapLimitBytes: 134217728,
       maxPakBytes: 8388608,
     });
-    expect(result.value.contract.applications.catalog[1]?.memory).toEqual({
+    expect(result.value.contract.applications.catalog[2]?.memory).toEqual({
       heapLimitBytes: 134217728,
     });
-    expect(result.value.contract.applications.catalog[1]?.memoryPolicy).toBe("UI_MINI");
-    expect(result.value.contract.applications.catalog[2]?.memory).toEqual({
+    expect(result.value.contract.applications.catalog[2]?.memoryPolicy).toBe("UI_MINI");
+    expect(result.value.contract.applications.catalog[3]?.memory).toEqual({
       maxPakBytes: 8388608,
     });
   });
@@ -82,8 +84,8 @@ describe("PocketSystemV1 build validation", () => {
       heapLimitBytes: 134217728,
       maxPakBytes: 8388608,
     });
-    expect(result.plan.applications[0]?.memory).toEqual({ heapLimitBytes: 134217728 });
-    expect(result.plan.applications[0]?.memoryPolicy).toBe("UI_MINI");
+    expect(result.plan.applications.find((entry) => entry.package === "pocket.demo.profile")?.memory).toEqual({ heapLimitBytes: 134217728 });
+    expect(result.plan.applications.find((entry) => entry.package === "pocket.demo.profile")?.memoryPolicy).toBe("UI_MINI");
   });
 
   test("rejects malformed memory values, unknown fields, and tier conflicts", async () => {
@@ -186,14 +188,11 @@ describe("PocketSystemV1 build validation", () => {
 
   test("does not infer missing compositor capability from the Flutter host", async () => {
     const { root, document } = fixture();
-    for (const relativePath of [
-      "pocket.json",
-      "apps/profile/pocket.json",
-      "apps/lobby/pocket.json",
-    ]) {
+    for (const { manifest: relativePath } of systemDocument.applications.catalog) {
       const path = join(root, relativePath);
       const manifest = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
       manifest.engine.capabilities.requires = ["text.glyphs.baked"];
+      manifest.engine.capabilities.enhances = [];
       manifest.app.viewport.fixed.logical = [800, 600];
       writeFileSync(path, JSON.stringify(manifest, null, 2));
     }
@@ -213,12 +212,14 @@ describe("PocketSystemV1 build validation", () => {
     expect(result.plan.target.id).toBe(POCKET_FLUTTER_TARGET_ID);
     expect(result.plan.systemUI.package).toBe("pocket.host.demo");
     expect(result.plan.applications.map((application) => application.package)).toEqual([
+      "pocket.demo.lantern",
       "pocket.demo.profile",
       "pocket.demo.lobby",
     ]);
     expect(result.compositorSurfaces).toEqual({
-      "pocket.demo.profile": 2,
-      "pocket.demo.lobby": 3,
+      "pocket.demo.lantern": 2,
+      "pocket.demo.profile": 3,
+      "pocket.demo.lobby": 4,
     });
   });
 

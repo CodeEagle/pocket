@@ -55,7 +55,7 @@ test("timeline editor authors shared tracks, saves history and builds input-driv
   mkdirSync(project, { recursive: true });
   mkdirSync(artifactRoot, { recursive: true });
   rmSync(join(artifactRoot, "build-failure.json"), { force: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "fonts.json", "fonts", "novel.locales.json"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     cpSync(join(lantern, name), join(project, name), { recursive: true });
   }
   mkdirSync(join(project, "art"), { recursive: true });

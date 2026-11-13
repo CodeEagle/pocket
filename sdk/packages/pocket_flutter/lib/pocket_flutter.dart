@@ -7,6 +7,7 @@ export 'src/flutter_frame_monitor.dart';
 export 'src/pocket_model.dart';
 export 'src/pocket_memory_limits.dart';
 export 'src/pocket_guest_security.dart';
+export 'src/pocket_host_fonts.dart';
 export 'src/pocket_package.dart';
 export 'src/pocket_performance.dart';
 export 'src/pocket_startup_progress.dart';

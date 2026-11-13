@@ -61,7 +61,7 @@ test("audio group authoring builds the saved crossfade and sends native channel 
     "app.qjbc", "app.pak", "app.bytecode.json", "story.json",
   ]) rmSync(join(artifactRoot, filename), { force: true });
   mkdirSync(join(project, "assets/audio"), { recursive: true });
-  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json", "fonts.json", "fonts"]) {
+  for (const name of ["pocket.json", "manifest.json", "package.json", "novel.locales.json"]) {
     cpSync(join(source, name), join(project, name), { recursive: true });
   }
   writeFileSync(join(project, "assets/audio/theme-a.wav"), minimalPcmWav());

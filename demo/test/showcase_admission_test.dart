@@ -57,10 +57,15 @@ void main() {
             .cast<String, dynamic>();
     expect(metadata['version'], '0.1.0');
     expect(metadata['build'], greaterThanOrEqualTo(1));
+    expect(metadata['fonts'], 'host');
+    expect(manifest['fonts'], 'host');
+    final requiredCapabilities =
+        (manifest['capabilities'] as Map)['requires'] as List;
     expect(
-      (manifest['capabilities'] as Map)['requires'],
-      contains('text.glyphs.baked'),
+      requiredCapabilities,
+      contains('text.layout.native'),
     );
+    expect(requiredCapabilities, isNot(contains('text.glyphs.baked')));
 
     final session = PocketSession(config: showcase.showcaseConfig);
     try {

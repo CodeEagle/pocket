@@ -54,6 +54,7 @@ PATCHES = (
     ("native-rounded-gradients.patch", "native rounded gradient DrawList op"),
     ("native-rounded-radius-threshold.patch", "native rounded radius threshold fallback"),
     ("web-live2d-raster.patch", "Web Live2D software raster"),
+    ("host-native-fonts.patch", "host native font pipeline"),
 )
 
 # Later patches can intentionally supersede one earlier diff hunk. The
@@ -331,16 +332,75 @@ SUPERSEDED_PATCH_MARKERS = {
             "fn arc_damage_contains_antialias_and_stroke_caps()",
         ),
     },
+    "one-leaf rich inline text": {
+        "engine/core/src/layout.rs": (
+            "fn cached_inline_layout(",
+            "fonts.uses_native_for(",
+        ),
+        "engine/core/src/draw.rs": (
+            "fn emit_inline_text(",
+            "self.fonts.uses_native_for(",
+        ),
+    },
     "native rounded gradient DrawList op": {
         # The retained gradient test scanner was extended to skip the new
         # 11-word record while checking the flat-shadow fallback.
+        "contracts/spec/spec.ts": (
+            "roundedGradient: 19,",
+            "export const TEXT_RUN_FLAG_TRACKING = 1 << 16;",
+            "export const TEXT_RUN_FLAG_AFFINE = 1 << 17;",
+        ),
+        "contracts/spec/gen-rust.ts": (
+            "ROUNDED_RECT and ARC 8 each, ROUNDED_GRADIENT 11.",
+            "TEXT_RUN_FLAG_TRACKING",
+            "TEXT_RUN_FLAG_AFFINE",
+        ),
+        "contracts/spec/gen-c.ts": (
+            "TEXT_RUN_FLAG_TRACKING",
+            "TEXT_RUN_FLAG_AFFINE",
+        ),
+        "contracts/generated/pocket_spec.h": (
+            "#define POCKET_DRAW_OP_ROUNDED_GRADIENT 19U",
+            "#define POCKET_DRAW_OP_TEXT_RUN_FLAG_TRACKING 0x00010000U",
+            "#define POCKET_DRAW_OP_TEXT_RUN_FLAG_AFFINE 0x00020000U",
+        ),
         "engine/raster/src/surface.rs": (
             "draw_op::ROUNDED_GRADIENT",
+        ),
+        "engine/raster/tests/driver.rs": (
+            "fn software_surface_rejects_native_shape_ops_before_writing()",
+            "fn render_scaled_skips_extended_text_run_without_misaligning_following_ops()",
+        ),
+        "engine/spec/src/lib.rs": (
+            "pub const ROUNDED_GRADIENT: u32 = 19;",
+            "pub const TEXT_RUN_FLAG_TRACKING: u32 = 1 << 16;",
+            "pub const TEXT_RUN_FLAG_AFFINE: u32 = 1 << 17;",
+        ),
+        "engine/render/draw-ops/src/lib.rs": (
+            "draw_op::ROUNDED_GRADIENT => 11,",
+            "DecodeError::InvalidTextRun",
         ),
         "engine/core/src/tests.rs": (
             "fn native_rounded_shadows_preserve_layers_and_fallbacks()",
             "spec::draw_op::ROUNDED_GRADIENT => i += 11,",
             "fn native_rounded_gradients_preserve_stops_directions_and_composition()",
+        ),
+    },
+    "native rounded radius threshold fallback": {
+        "engine/core/src/tests.rs": (
+            "fn native_rounded_radius_threshold_preserves_legacy_square_fallback()",
+            "fn native_transformed_text_routes_tracking_and_transforms_to_text_run()",
+            "fn perspective_3d_text_preserves_baked_glyphs_and_projects_fontless_text_run()",
+        ),
+    },
+    "Web Live2D software raster": {
+        "engine/raster/src/lib.rs": (
+            "draw_op::TEXT_RUN_FLAG_TRACKING",
+            "draw_op::TEXT_RUN_FLAG_AFFINE",
+        ),
+        "engine/raster/tests/driver.rs": (
+            "fn legacy_capture_rasters_mesh_layers_for_opaque_and_premultiplied_web_paths()",
+            "fn render_scaled_skips_extended_text_run_without_misaligning_following_ops()",
         ),
     },
     "bounded high-resolution IMG entries": {
@@ -580,6 +640,16 @@ FINAL_CONTRACTS = {
         "self.upload_texture_flags_with_limit(&blob[8..], w, h, psm, flags, spec::IMG_MAX_DIM)",
         "x if x == spec::draw_op::ARC => 8,",
         "x if x == spec::draw_op::ROUNDED_GRADIENT => 11,",
+        "pub fn set_native_transformed_text(&mut self, enabled: bool)",
+        "pub fn invalidate_text_metrics(&mut self)",
+    ),
+    "framework/src/font-coverage.ts": (
+        "(globalThis as { ui?: { __hostFonts?: boolean } }).ui?.__hostFonts === true",
+    ),
+    "tools/build.ts": (
+        "--no-bake-fonts",
+        "--bake-fonts",
+        "ui:fonts.host",
     ),
     "engine/present/src/damage.rs": (
         "spec::draw_op::ARC => arc_bounds(words, clip),",
@@ -772,6 +842,8 @@ def verify_final_contracts() -> None:
         "native_rounded_radius_threshold_preserves_legacy_square_fallback",
         "native_arcs_preserve_signed_geometry_and_legacy_fallback",
         "native_rounded_gradients_preserve_stops_directions_and_composition",
+        "native_transformed_text_routes_tracking_and_transforms_to_text_run",
+        "perspective_3d_text_preserves_baked_glyphs_and_projects_fontless_text_run",
     ):
         declarations = re.findall(rf"^fn {re.escape(name)}\(", content, re.MULTILINE)
         if len(declarations) != 1:

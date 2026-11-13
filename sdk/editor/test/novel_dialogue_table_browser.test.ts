@@ -16,7 +16,7 @@ test("dialogue table edits the canonical story, retains non-say data, and builds
   const artifactRoot = process.env.POCKET_DIALOGUE_TABLE_ARTIFACT_DIR?.trim() || join(repository, "sdk/.pocket-build/novel-dialogue-table-20261108");
   mkdirSync(project);
   mkdirSync(artifactRoot, { recursive: true });
-  for (const name of ["pocket.json", "package.json", "manifest.json", "fonts.json", "fonts"]) {
+  for (const name of ["pocket.json", "package.json", "manifest.json"]) {
     cpSync(join(repository, "demo/js/apps/lantern", name), join(project, name), { recursive: true });
   }
   writeFileSync(join(project, "editor.json"), JSON.stringify({ id, appId: id, name: id, version: "0.1.0", entry: "app.tsx", framework: "solid", build: 1, tickHz: 60 }, null, 2));

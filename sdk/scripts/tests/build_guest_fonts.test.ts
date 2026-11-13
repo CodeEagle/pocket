@@ -101,17 +101,51 @@ test("pinned build bakes pocket.json regular and bold faces into PAK metrics and
   const configured = join(project, "configured");
   const baseline = join(project, "baseline");
   const fontPath = join(configured, "fonts/NotoSansCJK-Demo.otf");
-  const packagedFont = join(resolvePrebuiltTools(sdkRoot).compiler, "assets/fonts/NotoSansCJK-Demo.otf");
+  const compilerRoot = process.env.POCKET_SOURCE_BUILD === "1"
+    ? join(sdkRoot, ".cache/pocketjs")
+    : resolvePrebuiltTools(sdkRoot).compiler;
+  const packagedFont = join(compilerRoot, "assets/fonts/NotoSansCJK-Demo.otf");
   try {
     mkdirSync(baseline, { recursive: true });
     mkdirSync(configured, { recursive: true });
     mkdirSync(join(configured, "fonts"), { recursive: true });
     copyFileSync(packagedFont, fontPath);
     writeProject(baseline);
+    // Existing projects can still declare the former baked-font requirement.
+    // The generated host-font contract must describe the selected delivery
+    // mode without rewriting the project's source manifest.
+    writeFileSync(join(baseline, "manifest.json"), JSON.stringify({ capabilities: {
+      requires: ["text.glyphs.baked"],
+      optional: ["text.glyphs.baked", "runtime.info"],
+    } }));
     writeProject(configured, { regular: "fonts/NotoSansCJK-Demo.otf", bold: "fonts/NotoSansCJK-Demo.otf" });
 
-    const defaultBuild = await buildGuest({ projectRoot: baseline, outDir: join(baseline, "out") });
+    const hostFontBuild = await buildGuest({ projectRoot: baseline, outDir: join(baseline, "out-host") });
+    const hostEntries = unpack(new Uint8Array(readFileSync(hostFontBuild.pak)));
+    expect(hostEntries.some((blob) => blob.key.startsWith("ui:font."))).toBe(false);
+    expect(hostEntries.some((blob) => blob.key === "ui:fonts.host")).toBe(true);
+    const hostMetadata = JSON.parse(readFileSync(join(baseline, "out-host/app.bytecode.json"), "utf8"));
+    const hostManifest = JSON.parse(readFileSync(join(baseline, "out-host/guest-manifest.json"), "utf8"));
+    expect(hostMetadata.fonts).toBe("host");
+    expect(hostManifest.fonts).toBe("host");
+    expect(hostManifest.capabilities.requires).toContain("text.layout.native");
+    expect(hostManifest.capabilities.requires).not.toContain("text.glyphs.baked");
+    expect(hostManifest.capabilities.optional).not.toContain("text.glyphs.baked");
+    expect(hostManifest.capabilities.optional).toContain("runtime.info");
+    expect(JSON.parse(readFileSync(join(baseline, "manifest.json"), "utf8")).capabilities.requires)
+      .toEqual(["text.glyphs.baked"]);
+
+    const defaultBuild = await buildGuest({ projectRoot: baseline, outDir: join(baseline, "out"), bakeFonts: true });
+    expect(unpack(new Uint8Array(readFileSync(defaultBuild.pak))).some((blob) => blob.key === "ui:fonts.host")).toBe(false);
     const primaryBuild = await buildGuest({ projectRoot: configured, outDir: join(configured, "out") });
+    const bakedMetadata = JSON.parse(readFileSync(join(baseline, "out/app.bytecode.json"), "utf8"));
+    const bakedManifest = JSON.parse(readFileSync(join(baseline, "out/guest-manifest.json"), "utf8"));
+    expect(bakedMetadata.fonts).toBe("baked");
+    expect(bakedManifest.fonts).toBe("baked");
+    expect(bakedManifest.capabilities.requires).not.toContain("text.layout.native");
+    expect(bakedManifest.capabilities.requires).toContain("text.glyphs.baked");
+    expect(bakedManifest.capabilities.optional).toContain("text.glyphs.baked");
+    expect(readFileSync(hostFontBuild.pak).byteLength).toBeLessThan(readFileSync(defaultBuild.pak).byteLength);
     const defaultRegular = fontAtlas(defaultBuild.pak, 6);
     const primaryRegular = fontAtlas(primaryBuild.pak, 6);
     const defaultBold = fontAtlas(defaultBuild.pak, 13);
