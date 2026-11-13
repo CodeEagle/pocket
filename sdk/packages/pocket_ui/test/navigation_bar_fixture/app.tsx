@@ -28,7 +28,7 @@ function App() {
 
   return (
     <Screen class="w-full h-full flex-col bg-white">
-      <View class="flex-1 items-center justify-center">
+      <View class="flex-1 flex-col items-center justify-center">
         <Text class="text-base text-[#17233B]">Navigation fixture</Text>
         <Focusable onPress={() => setVisible(!visible())}>
           <Text class="text-sm text-[#315DEB]">Toggle navigation</Text>

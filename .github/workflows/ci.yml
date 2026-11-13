@@ -152,6 +152,29 @@ jobs:
       - name: Build native probe and bytecode compiler
         run: cargo build --locked --release --manifest-path sdk/native/Cargo.toml --bin pocket_probe --bin pocketjs_bytecode
 
+      - name: Fetch pinned official Hiyori sample resources
+        uses: actions/checkout@v4
+        with:
+          repository: Live2D/CubismNativeSamples
+          ref: b8024738f108e6003e4925193e8d5ec04cd18196
+          path: sdk/.cache/cubism-native-samples
+          sparse-checkout: Samples/Resources/Hiyori
+
+      - name: Build Lantern guest from source for Flutter packaging tests
+        working-directory: demo/js
+        env:
+          CUBISM_SDK_ROOT: ${{ github.workspace }}/sdk/.cache/cubism-native-samples
+          POCKET_SOURCE_BUILD: "1"
+          POCKET_COMPILER_PATH: ${{ github.workspace }}/sdk/.cache/pocketjs/tools/build.ts
+          POCKET_BYTECODE_BIN: ${{ github.workspace }}/sdk/native/target/release/pocketjs_bytecode
+        run: bun scripts/build_mini_apps.ts --mini-app=lantern
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lantern-guest
+          path: demo/assets/apps/lantern
+          if-no-files-found: error
+
       - name: Run SDK JS package and toolchain suites
         working-directory: sdk
         env:
@@ -183,8 +206,14 @@ jobs:
   flutter-sdk-and-demo:
     name: flutter-sdk-and-demo
     runs-on: ubuntu-24.04
+    needs: js-sdk-and-guest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: lantern-guest
+          path: demo/assets/apps/lantern
 
       - name: Read repository Flutter pin
         id: flutter-pin

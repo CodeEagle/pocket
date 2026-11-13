@@ -16,6 +16,7 @@ const generatedCompositorSurfaces = join(demoRoot, "js/generated/compositor-surf
 const pubspecPath = join(demoRoot, "pubspec.yaml");
 const pubspecAssetMarkerStart = "    # BEGIN GENERATED OFFICIAL DEMO ASSETS";
 const pubspecAssetMarkerEnd = "    # END GENERATED OFFICIAL DEMO ASSETS";
+const hiyoriSampleSourceRevision = "b8024738f108e6003e4925193e8d5ec04cd18196";
 
 const miniApps = [
   { name: "profile", projectRoot: resolve(scriptRoot, "../apps/profile") },
@@ -50,6 +51,7 @@ type OfficialDemo = Record<string, any> & {
 
 interface Options {
   officialOnly: boolean;
+  miniApp: string | null;
   apps: string[] | null;
   frames: number | null;
   warmup: number | null;
@@ -67,9 +69,16 @@ function parsePositiveInteger(value: string, name: string, allowZero = false): n
 }
 
 function parseOptions(args: string[]): Options {
-  const options: Options = { officialOnly: false, apps: null, frames: null, warmup: null, tickHz: null, density: null, benchBin: null };
+  const options: Options = { officialOnly: false, miniApp: null, apps: null, frames: null, warmup: null, tickHz: null, density: null, benchBin: null };
   for (const arg of args) {
     if (arg === "--official-only") options.officialOnly = true;
+    else if (arg.startsWith("--mini-app=")) {
+      const name = arg.slice("--mini-app=".length).trim();
+      if (!miniApps.some(app => app.name === name)) {
+        throw new Error(`Unknown local mini-app ${JSON.stringify(name)}; expected one of ${miniApps.map(app => app.name).join(", ")}`);
+      }
+      options.miniApp = name;
+    }
     else if (arg.startsWith("--apps=")) {
       const ids = arg.slice("--apps=".length).split(",").map(value => value.trim()).filter(Boolean);
       options.apps = ids.includes("all") ? null : ids;
@@ -79,13 +88,17 @@ function parseOptions(args: string[]): Options {
     else if (arg.startsWith("--density=")) options.density = parsePositiveInteger(arg.slice("--density=".length), "density");
     else if (arg.startsWith("--bench-bin=")) options.benchBin = resolve(arg.slice("--bench-bin=".length));
     else if (arg === "--help" || arg === "-h") {
-      console.log(`Usage: bun scripts/build_mini_apps.ts [--official-only] [--apps=hero,motions] [--frames=N] [--warmup=N]
+      console.log(`Usage: bun scripts/build_mini_apps.ts [--official-only | --mini-app=profile|lobby|lantern] [--apps=hero,motions] [--frames=N] [--warmup=N]
 
 Builds the local profile/lobby guests, then runs the pinned official demo build,
 native benchmark and asset staging. --official-only skips local guests so a
-focused staging check does not rebuild unrelated apps.`);
+focused staging check does not rebuild unrelated apps. --mini-app builds one
+local guest and skips the unrelated official demo sweep and native benchmarks.`);
       process.exit(0);
     } else throw new Error(`Unknown argument: ${arg}`);
+  }
+  if (options.miniApp !== null && (options.officialOnly || options.apps !== null || options.frames !== null || options.warmup !== null || options.tickHz !== null || options.density !== null || options.benchBin !== null)) {
+    throw new Error("--mini-app cannot be combined with --official-only or official demo build options");
   }
   return options;
 }
@@ -129,9 +142,12 @@ function stringList(value: unknown): string[] {
  * scripts), so invoke the declared preparation step here as part of the
  * reproducible build.
  */
-function prepareMiniAppAssets(app: (typeof miniApps)[number]): void {
+function prepareMiniAppAssets(app: (typeof miniApps)[number], skipTrackedTexturePreparation = false): void {
   if (app.name !== "lantern") return;
-  for (const filename of ["prepare_textures.ts", "prepare_live2d.ts"]) {
+  const scripts = skipTrackedTexturePreparation
+    ? ["prepare_live2d.ts"]
+    : ["prepare_textures.ts", "prepare_live2d.ts"];
+  for (const filename of scripts) {
     const script = join(app.projectRoot, "scripts", filename);
     if (!existsSync(script)) throw new Error(`build_mini_apps: ${app.name} is missing ${filename}`);
     console.log(`build_mini_apps: preparing ${app.name} assets with ${filename}`);
@@ -142,6 +158,29 @@ function prepareMiniAppAssets(app: (typeof miniApps)[number]): void {
     });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`build_mini_apps: ${app.name} ${filename} exited with status ${result.status ?? 1}`);
+  }
+}
+
+function verifyPinnedHiyoriSampleSource(sampleRoot: string): void {
+  const samplePath = resolve(sampleRoot);
+  if (!existsSync(join(samplePath, "Samples/Resources/Hiyori/Hiyori.model3.json"))) {
+    throw new Error(`build_mini_apps: pinned Hiyori sample source is missing under CUBISM_SDK_ROOT: ${samplePath}`);
+  }
+  const gitRoot = spawnSync("git", ["-C", samplePath, "rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  if (gitRoot.status !== 0) return;
+  const revision = spawnSync("git", ["-C", samplePath, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  if (revision.status !== 0) {
+    throw new Error(`build_mini_apps: cannot read Hiyori sample source revision at ${samplePath}`);
+  }
+  const actualRevision = revision.stdout.trim();
+  if (actualRevision !== hiyoriSampleSourceRevision) {
+    throw new Error(`build_mini_apps: expected Live2D/CubismNativeSamples 5-r.5 at ${hiyoriSampleSourceRevision}, got ${actualRevision}`);
   }
 }
 
@@ -412,10 +451,20 @@ export async function buildMiniApps(args: string[] = process.argv.slice(2)): Pro
 
   const results: BuildGuestResult[] = [];
   if (!options.officialOnly) {
-    for (const app of miniApps) {
+    const selectedApps = options.miniApp === null
+      ? miniApps
+      : miniApps.filter(app => app.name === options.miniApp);
+    if (options.miniApp === "lantern") {
+      const sampleRoot = process.env.CUBISM_SDK_ROOT?.trim();
+      if (!sampleRoot) {
+        throw new Error("build_mini_apps: --mini-app=lantern requires CUBISM_SDK_ROOT to point at a local, pinned Hiyori sample source; CI must not bootstrap Cubism Core or download the SDK");
+      }
+      verifyPinnedHiyoriSampleSource(sampleRoot);
+    }
+    for (const app of selectedApps) {
       const assets = resolve(scriptRoot, `../../assets/apps/${app.name}`);
       console.log(`build_mini_apps: building ${app.name} from ${app.projectRoot}`);
-      prepareMiniAppAssets(app);
+      prepareMiniAppAssets(app, options.miniApp === app.name);
       results.push(await buildGuest({
         projectRoot: app.projectRoot,
         copyAssetsTo: assets,
@@ -424,7 +473,7 @@ export async function buildMiniApps(args: string[] = process.argv.slice(2)): Pro
       console.log(`build_mini_apps: wrote ${assets}`);
     }
   }
-  stageOfficialDemos(options);
+  if (options.miniApp === null) stageOfficialDemos(options);
   return results;
 }
 

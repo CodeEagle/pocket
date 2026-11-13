@@ -80,7 +80,7 @@ function contains(outer: Bounds, inner: Bounds, epsilon = 0.5): boolean {
 function cardBounds(frame: Frame, width: number, anchors: string[], name: string): Bounds {
   const anchorBounds = anchors.map((needle) => bounds(textOp(frame, needle, `${name} anchor`), `${name} ${needle}`));
   const candidates = (frame.ops ?? [])
-    .filter((op) => op.type === "rect")
+    .filter((op) => op.type === "rect" || op.type === "rounded")
     .map((op) => {
       try {
         return bounds(op, `${name} card candidate`);
