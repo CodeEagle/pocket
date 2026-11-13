@@ -53,9 +53,16 @@
         <div class="command-bar-right">
           <div id="studio-upgrade-bar" class="studio-upgrade-bar" role="region" aria-label="Studio 版本与自升级">
             <div class="studio-upgrade-copy">
-              <span class="eyebrow">Studio SDK</span>
-              <strong id="studio-upgrade-version">v—</strong>
+              <div class="studio-upgrade-heading">
+                <span id="studio-upgrade-mode" class="studio-upgrade-mode">自动升级已开启</span>
+                <strong id="studio-upgrade-version">v—</strong>
+              </div>
               <small id="studio-upgrade-status" aria-live="polite">正在检查更新…</small>
+              <small id="studio-upgrade-reason" class="studio-upgrade-reason" hidden></small>
+              <div id="studio-upgrade-progress" class="studio-upgrade-progress" role="progressbar" aria-label="SDK 下载进度" aria-valuemin="0" aria-valuemax="100" hidden>
+                <span class="studio-upgrade-progress-track"><span id="studio-upgrade-progress-fill"></span></span>
+                <span id="studio-upgrade-progress-text"></span>
+              </div>
             </div>
             <div class="studio-upgrade-actions">
               <a id="studio-upgrade-release" class="text-button" href="#" target="_blank" rel="noopener" hidden>发布说明</a>

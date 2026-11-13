@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer as createNetServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -37,6 +38,7 @@ import {
   prepareSourceUpgradeBackup,
   prepareSdkUpgradeBackup,
   readInstalledSdkInfo,
+  readBoundedResponseBytes,
   readPersistedUpgradeStatus,
   recoverInterruptedSdkUpgrade,
   restoreBackedUpSdkFiles,
@@ -430,6 +432,41 @@ describe("Studio built-in self-upgrade unit & security gates", () => {
     expect(() => validateReleaseOriginUrl("https://user:pass@api.github.com/repos/CodeEagle/pocket/releases")).toThrow(/凭据/);
     expect(() => validateReleaseOriginUrl("http://127.0.0.1:9999/releases", { allowLoopbackHttp: false })).toThrow(/HTTPS/);
     expect(validateReleaseOriginUrl("http://127.0.0.1:9999/releases", { allowLoopbackHttp: true }).hostname).toBe("127.0.0.1");
+  });
+
+  test("reports bounded response byte progress and hides encoded content length", async () => {
+    const progress: Array<{ bytesRead: number; totalBytes: number | null }> = [];
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]));
+        controller.enqueue(new Uint8Array([3, 4]));
+        controller.close();
+      },
+    }), { headers: { "content-length": "4" } });
+    const bytes = await readBoundedResponseBytes(response, 8, "测试归档", {
+      onProgress: (item: { bytesRead: number; totalBytes: number | null }) => progress.push(item),
+    });
+    expect([...bytes]).toEqual([1, 2, 3, 4]);
+    expect(progress).toEqual([
+      { bytesRead: 0, totalBytes: 4 },
+      { bytesRead: 2, totalBytes: 4 },
+      { bytesRead: 4, totalBytes: 4 },
+    ]);
+
+    const compressedProgress: Array<{ bytesRead: number; totalBytes: number | null }> = [];
+    const encodedResponse = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([5, 6]));
+        controller.close();
+      },
+    }), { headers: { "content-length": "20", "content-encoding": "gzip" } });
+    await readBoundedResponseBytes(encodedResponse, 32, "压缩归档", {
+      onProgress: (item: { bytesRead: number; totalBytes: number | null }) => compressedProgress.push(item),
+    });
+    expect(compressedProgress).toEqual([
+      { bytesRead: 0, totalBytes: null },
+      { bytesRead: 2, totalBytes: null },
+    ]);
   });
 
   test("selects highest stable release matching platform and ignores drafts/prereleases", () => {
@@ -1501,6 +1538,24 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
     const v11BuildRoot = mkdtempSync(join(tmpdir(), "pocket-e2e-real-cli-v11-"));
     const testPort = await allocateFreeLoopbackPort();
     let releaseServer: ReturnType<typeof Bun.serve> | undefined;
+    let archiveServer: ReturnType<typeof createHttpServer> | undefined;
+    let archivePort = 0;
+    let releaseArchiveStream = () => {};
+    let markArchiveStreamStarted = () => {};
+    let releaseStatusPoll = () => {};
+    let markStatusPollStarted = () => {};
+    const archiveStreamStarted = new Promise<void>((resolve) => {
+      markArchiveStreamStarted = resolve;
+    });
+    const archiveStreamGate = new Promise<void>((resolve) => {
+      releaseArchiveStream = resolve;
+    });
+    const statusPollStarted = new Promise<void>((resolve) => {
+      markStatusPollStarted = resolve;
+    });
+    const statusPollGate = new Promise<void>((resolve) => {
+      releaseStatusPoll = resolve;
+    });
     console.info(`[upgrade lifecycle] launching Chromium on ${PLATFORM}, runner ${Bun.version}, SDK Bun ${SDK_BUN}`);
     const browser = await chromium.launch({ headless: true, timeout: 15_000 });
     console.info("[upgrade lifecycle] Chromium ready");
@@ -1523,6 +1578,25 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
         upstreamRevision: futureRevision,
         bytecodeAbi: futureAbi,
       });
+      archiveServer = createHttpServer((_request, response) => {
+        const splitAt = Math.max(1, Math.floor(v11.archiveBytes.byteLength / 3));
+        response.writeHead(200, {
+          "content-type": "application/gzip",
+          "content-length": String(v11.archiveBytes.byteLength),
+        });
+        response.flushHeaders();
+        response.write(v11.archiveBytes.subarray(0, splitAt));
+        markArchiveStreamStarted();
+        void archiveStreamGate.then(() => response.end(v11.archiveBytes.subarray(splitAt)))
+          .catch((error) => response.destroy(error as Error));
+      });
+      await new Promise<void>((resolve, reject) => {
+        archiveServer!.once("error", reject);
+        archiveServer!.listen(0, "127.0.0.1", resolve);
+      });
+      const archiveAddress = archiveServer.address();
+      if (!archiveAddress || typeof archiveAddress === "string") throw new Error("archive test server did not bind an IP port");
+      archivePort = archiveAddress.port;
 
       const preservedProjectMarker = join(workspaceRoot, "projects", "consumer-keep", "custom.txt");
       const nestedCustomPackage = join(standaloneRoot, "packages", "my-custom-package", "custom.ts");
@@ -1550,7 +1624,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
                   prerelease: false,
                   html_url: "https://github.com/CodeEagle/pocket/releases/tag/sdk-v0.1.11",
                   assets: [
-                    { name: v11.archiveName, browser_download_url: `${origin}/download/${v11.archiveName}` },
+                    { name: v11.archiveName, browser_download_url: `http://127.0.0.1:${archivePort}/archive` },
                     { name: v11.checksumName, browser_download_url: `${origin}/download/${v11.checksumName}` },
                   ],
                 },
@@ -1561,11 +1635,6 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
           if (url.pathname === `/download/${v11.checksumName}`) {
             return new Response(`${v11.archiveSha256}  ${v11.archiveName}\n`, {
               headers: { "content-type": "text/plain; charset=utf-8" },
-            });
-          }
-          if (url.pathname === `/download/${v11.archiveName}`) {
-            return new Response(v11.archiveBytes, {
-              headers: { "content-type": "application/gzip" },
             });
           }
           return new Response("not found", { status: 404 });
@@ -1602,12 +1671,20 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
 
       const page = await browser.newPage();
       let mainFrameNavigations = 0;
+      let upgradeCheckPosts = 0;
+      page.on("pageerror", (error) => console.error("[upgrade lifecycle pageerror]", error));
+      page.on("response", (response) => {
+        if (new URL(response.url()).pathname.startsWith("/api/studio/upgrade")) {
+          console.info(`[upgrade lifecycle API] ${response.status()} ${response.request().method()} ${new URL(response.url()).pathname}`);
+        }
+      });
       page.on("framenavigated", (frame) => {
         if (frame === page.mainFrame()) mainFrameNavigations += 1;
       });
 
       // Block automatic initial apply via dirty draft first to verify dirty deferral in the browser
       await page.route("**/api/studio/upgrade/check", async (route, request) => {
+        upgradeCheckPosts += 1;
         const postBody = JSON.parse(request.postData() || "{}");
         // Let the first automatic startup check see autoApply=false so we can test dirty draft deferral and save-triggered resume
         if (mainFrameNavigations <= 1 && postBody.autoApply === true && !postBody.forceApply && !(await page.evaluate(() => Boolean((window as unknown as { __ALLOW_AUTO_APPLY__?: boolean }).__ALLOW_AUTO_APPLY__)))) {
@@ -1620,11 +1697,16 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       });
 
       await page.goto(`http://127.0.0.1:${testPort}/`, { waitUntil: "domcontentloaded" });
+      await page.setViewportSize({ width: 1280, height: 900 });
       await page.waitForFunction(
         () => (document.getElementById("studio-upgrade-version")?.textContent || "").includes("v0.1.10 → v0.1.11"),
         undefined,
         { timeout: 10_000 },
       );
+      expect(await page.locator("#studio-upgrade-mode").textContent()).toBe("自动升级已开启");
+      const wideUpgradeBar = await page.locator("#studio-upgrade-bar").boundingBox();
+      expect(wideUpgradeBar).not.toBeNull();
+      expect(wideUpgradeBar!.x + wideUpgradeBar!.width).toBeLessThanOrEqual(1280);
       // Project loading runs alongside the startup update check; do not simulate
       // an edit until the actual source has loaded and the editor is enabled.
       await page.waitForFunction(
@@ -1649,20 +1731,99 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(await page.locator("#save").isEnabled()).toBe(true);
       await page.locator("#studio-upgrade-action").click();
       await page.waitForFunction(
-        () => (document.getElementById("studio-upgrade-status")?.textContent || "").includes("未保存修改"),
+        () => (document.getElementById("studio-upgrade-reason")?.textContent || "").includes("编辑器有未保存修改"),
         undefined,
         { timeout: 10_000 },
       );
-      const deferredBarText = await page.locator("#studio-upgrade-status").textContent();
+      const deferredBarText = await page.locator("#studio-upgrade-reason").textContent();
       expect(deferredBarText).toContain("未保存修改");
+      expect(await page.locator("#studio-upgrade-mode").textContent()).toBe("自动升级已暂缓");
+      await page.setViewportSize({ width: 831, height: 900 });
+      const narrowDefer = await page.locator("#studio-upgrade-reason").evaluate((element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          visible: !element.hasAttribute("hidden") && rect.width > 0 && rect.height > 0,
+          right: rect.right,
+          textOverflow: style.textOverflow,
+          whiteSpace: style.whiteSpace,
+          text: element.textContent || "",
+          scrollHeight: element.scrollHeight,
+          clientHeight: element.clientHeight,
+        };
+      });
+      expect(narrowDefer.visible).toBe(true);
+      expect(narrowDefer.right).toBeLessThanOrEqual(831);
+      expect(narrowDefer.textOverflow).not.toBe("ellipsis");
+      expect(narrowDefer.whiteSpace).toBe("normal");
+      expect(narrowDefer.text).toContain("编辑器有未保存修改");
+      expect(narrowDefer.scrollHeight).toBeLessThanOrEqual(narrowDefer.clientHeight);
 
       // Now save the project in the UI; saving clears dirty state and automatically resumes the deferred upgrade,
       // which spawns the real detached editor_service.mjs upgrade-apply process, replaces the PID with v0.1.11 (future ABI),
       // and triggers a real automatic window.location.reload() navigation in Chromium!
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30_000 }),
-        page.locator("#save").dispatchEvent("click"),
+      await page.locator("#save").dispatchEvent("click");
+      await Promise.race([
+        archiveStreamStarted,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SDK archive stream did not start")), 10_000)),
       ]);
+      await page.waitForFunction(
+        () => {
+          const progress = document.getElementById("studio-upgrade-progress");
+          const label = document.getElementById("studio-upgrade-progress-text")?.textContent || "";
+          return progress instanceof HTMLElement && !progress.hidden && label.includes("%")
+            && (document.getElementById("studio-upgrade-status")?.textContent || "").includes("正在下载");
+        },
+        undefined,
+        { timeout: 10_000 },
+      );
+      const streamingCheckCount = upgradeCheckPosts;
+      await page.setViewportSize({ width: 831, height: 900 });
+      const narrowUpgrade = await page.locator("#studio-upgrade-status").evaluate((element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          visible: rect.width > 0 && rect.height > 0,
+          right: rect.right,
+          textOverflow: style.textOverflow,
+          whiteSpace: style.whiteSpace,
+          mode: document.getElementById("studio-upgrade-mode")?.textContent || "",
+          status: element.textContent || "",
+          progress: document.getElementById("studio-upgrade-progress-text")?.textContent || "",
+        };
+      });
+      expect(narrowUpgrade.visible).toBe(true);
+      expect(narrowUpgrade.right).toBeLessThanOrEqual(831);
+      expect(narrowUpgrade.textOverflow).not.toBe("ellipsis");
+      expect(narrowUpgrade.whiteSpace).toBe("normal");
+      expect(narrowUpgrade.mode).toBe("自动升级已开启");
+      expect(narrowUpgrade.status).toContain("正在下载");
+      expect(narrowUpgrade.progress).toContain("%");
+      const progressPercent = Number(narrowUpgrade.progress.match(/(\d+)%/)?.[1]);
+      expect(progressPercent).toBeGreaterThan(0);
+      expect(progressPercent).toBeLessThan(100);
+      await page.route("**/api/studio/upgrade", async (route) => {
+        markStatusPollStarted();
+        await statusPollGate;
+        await route.continue();
+      });
+      await statusPollStarted;
+      await page.locator("#studio-upgrade-action").evaluate((element) => {
+        const button = element as HTMLButtonElement;
+        const wasDisabled = button.disabled;
+        button.disabled = false;
+        button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        button.disabled = wasDisabled;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(upgradeCheckPosts).toBe(streamingCheckCount);
+      releaseStatusPoll();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      expect(upgradeCheckPosts).toBe(streamingCheckCount);
+
+      const upgradeNavigation = page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30_000 });
+      releaseArchiveStream();
+      await upgradeNavigation;
 
       await page.waitForFunction(
         () => {
@@ -1714,6 +1875,9 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       await reportUpgradeLifecycleFailure(standaloneRoot, browser);
       throw error;
     } finally {
+      releaseStatusPoll();
+      releaseArchiveStream();
+      if (archiveServer) await new Promise<void>((resolve) => archiveServer!.close(() => resolve()));
       await browser.close();
       spawnSync("node", [join(standaloneRoot, "scripts", "editor_service.mjs"), "stop"], {
         cwd: standaloneRoot,

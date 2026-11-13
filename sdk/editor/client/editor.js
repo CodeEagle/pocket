@@ -3355,12 +3355,30 @@ function resumeDeferredStudioUpgrade() {
   }
 }
 
+function formatStudioUpgradeBytes(value) {
+  const bytes = Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  let scaled = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && scaled >= 1024; index += 1) {
+    scaled /= 1024;
+    unit = units[index];
+  }
+  return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1)} ${unit}`;
+}
+
 function renderStudioUpgrade(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return;
   studioUpgradeState = { ...(studioUpgradeState || {}), ...snapshot };
   const bar = $("studio-upgrade-bar");
+  const modeEl = $("studio-upgrade-mode");
   const versionEl = $("studio-upgrade-version");
   const statusEl = $("studio-upgrade-status");
+  const reasonEl = $("studio-upgrade-reason");
+  const progressEl = $("studio-upgrade-progress");
+  const progressFill = $("studio-upgrade-progress-fill");
+  const progressText = $("studio-upgrade-progress-text");
   const actionBtn = $("studio-upgrade-action");
   const releaseLink = $("studio-upgrade-release");
   if (!bar || !versionEl || !statusEl || !actionBtn) return;
@@ -3373,6 +3391,30 @@ function renderStudioUpgrade(snapshot) {
   const error = studioUpgradeState.error || "";
   const deferredReason = studioUpgradeState.deferredReason || "";
   const releaseUrl = studioUpgradeState.releaseUrl || "";
+  const isInProgress = ["downloading", "applying", "restarting"].includes(status);
+  const localDraftReason = dirty
+    ? "编辑器有未保存修改；保存后可继续自动升级。"
+    : resourcesDirty
+      ? "资源策略有未保存修改；保存后可继续自动升级。"
+      : "";
+  const isDeferred = autoUpgradeSupported && upgradeAvailable && !isInProgress && Boolean(deferredReason || localDraftReason);
+  const reasonText = deferredReason || (
+    upgradeAvailable && !isInProgress && localDraftReason
+      ? localDraftReason
+      : !autoUpgradeSupported
+        ? studioUpgradeState.modeReason || "当前安装方式不支持自动升级。"
+        : ""
+  );
+
+  if (modeEl) {
+    modeEl.textContent = !autoUpgradeSupported
+      ? "自动升级不可用"
+      : isDeferred
+        ? "自动升级已暂缓"
+        : "自动升级已开启";
+    modeEl.dataset.state = !autoUpgradeSupported ? "unsupported" : isDeferred ? "deferred" : "enabled";
+    modeEl.title = reasonText || modeEl.textContent;
+  }
 
   versionEl.textContent = latestVersion && latestVersion !== currentVersion
     ? `v${currentVersion} → v${latestVersion}`
@@ -3408,7 +3450,7 @@ function renderStudioUpgrade(snapshot) {
     buttonLabel = "升级中…";
     buttonDisabled = true;
   } else if (status === "applying") {
-    statusText = `正在校验并暂存 v${studioUpgradeState.targetVersion || latestVersion}…`;
+    statusText = `下载完成（${formatStudioUpgradeBytes(studioUpgradeState.downloadedBytes)}），正在校验并暂存 v${studioUpgradeState.targetVersion || latestVersion}…`;
     tone = "warn";
     buttonLabel = "升级中…";
     buttonDisabled = true;
@@ -3423,17 +3465,17 @@ function renderStudioUpgrade(snapshot) {
     buttonLabel = autoUpgradeSupported && upgradeAvailable ? "重试升级" : "重试检查";
   } else if (upgradeAvailable) {
     if (!autoUpgradeSupported) {
-      statusText = `发现新版本 v${latestVersion}（${deferredReason || "当前安装方式不支持自动升级"}）`;
+      statusText = `发现新版本 v${latestVersion}`;
+      tone = "warn";
+      buttonLabel = "重新检查";
+    } else if (deferredReason) {
+      statusText = `发现新版本 v${latestVersion}`;
       tone = "warn";
       buttonLabel = "重新检查";
     } else if (dirty || resourcesDirty) {
-      statusText = `发现新版本 v${latestVersion}（当前有未保存修改，保存后将自动升级）`;
+      statusText = `发现新版本 v${latestVersion}`;
       tone = "warn";
-      buttonLabel = "立即升级";
-    } else if (deferredReason) {
-      statusText = `发现新版本 v${latestVersion}（${deferredReason}）`;
-      tone = "warn";
-      buttonLabel = "立即升级";
+      buttonLabel = "保存后升级";
     } else {
       statusText = `发现新版本 v${latestVersion}`;
       tone = "warn";
@@ -3449,6 +3491,44 @@ function renderStudioUpgrade(snapshot) {
   else delete bar.dataset.state;
   statusEl.textContent = statusText;
   statusEl.title = statusText;
+  if (reasonEl) {
+    reasonEl.textContent = reasonText;
+    reasonEl.hidden = !reasonText || isInProgress;
+    reasonEl.title = reasonText;
+  }
+  if (progressEl && progressFill && progressText) {
+    const isDownloading = status === "downloading";
+    progressEl.hidden = !isDownloading;
+    if (isDownloading) {
+      const downloadedBytes = Number.isSafeInteger(studioUpgradeState.downloadedBytes) && studioUpgradeState.downloadedBytes >= 0
+        ? studioUpgradeState.downloadedBytes
+        : 0;
+      const totalBytes = Number.isSafeInteger(studioUpgradeState.downloadTotalBytes) && studioUpgradeState.downloadTotalBytes > 0
+        ? studioUpgradeState.downloadTotalBytes
+        : null;
+      const determinate = totalBytes !== null && downloadedBytes <= totalBytes;
+      if (determinate) {
+        const percent = Math.min(100, Math.floor(downloadedBytes / totalBytes * 100));
+        progressFill.style.width = `${percent}%`;
+        delete progressFill.dataset.indeterminate;
+        progressEl.setAttribute("aria-valuenow", String(percent));
+        progressEl.setAttribute("aria-valuetext", `${percent}%，${formatStudioUpgradeBytes(downloadedBytes)} / ${formatStudioUpgradeBytes(totalBytes)}`);
+        progressText.textContent = `${formatStudioUpgradeBytes(downloadedBytes)} / ${formatStudioUpgradeBytes(totalBytes)} · ${percent}%`;
+      } else {
+        progressFill.style.width = "35%";
+        progressFill.dataset.indeterminate = "true";
+        progressEl.removeAttribute("aria-valuenow");
+        progressEl.setAttribute("aria-valuetext", `已接收 ${formatStudioUpgradeBytes(downloadedBytes)}`);
+        progressText.textContent = `已接收 ${formatStudioUpgradeBytes(downloadedBytes)}`;
+      }
+    } else {
+      progressFill.style.width = "0";
+      delete progressFill.dataset.indeterminate;
+      progressEl.removeAttribute("aria-valuenow");
+      progressEl.removeAttribute("aria-valuetext");
+      progressText.textContent = "";
+    }
+  }
   actionBtn.textContent = buttonLabel;
   actionBtn.disabled = buttonDisabled;
 }
@@ -3513,14 +3593,42 @@ async function pollStudioRestart(targetVersion, previousVersion, attempt = 0) {
 }
 
 async function checkStudioUpgrade({ autoApply = true, forceApply = false } = {}) {
+  if (studioUpgradePollTimer) return null;
+  let checkPending = true;
+  const pollCheckStatus = async () => {
+    if (!checkPending) return;
+    try {
+      const snapshot = await api("/api/studio/upgrade", {
+        cache: "no-store",
+        signal: AbortSignal.timeout(2000),
+      });
+      if (checkPending && snapshot && typeof snapshot === "object") {
+        renderStudioUpgrade(snapshot.status === "available"
+          ? { ...snapshot, status: "checking" }
+          : snapshot);
+      }
+    } catch {
+      // Keep the latest visible phase while the check request continues.
+    }
+    if (checkPending) {
+      studioUpgradePollTimer = setTimeout(() => {
+        void pollCheckStatus();
+      }, 250);
+    }
+  };
   try {
     const deferAutoApply = autoApply && !forceApply && isStudioUpgradeWorkDeferred();
     renderStudioUpgrade({ status: "checking", error: null });
     const previousVersion = studioUpgradeState?.currentVersion;
+    studioUpgradePollTimer = setTimeout(() => {
+      void pollCheckStatus();
+    }, 150);
     const result = await api("/api/studio/upgrade/check", {
       method: "POST",
       body: JSON.stringify({ autoApply: deferAutoApply ? false : autoApply, forceApply }),
     });
+    checkPending = false;
+    stopStudioUpgradePolling();
     studioUpgradeDeferredAutoApply = Boolean(
       result?.upgradeAvailable &&
       result?.autoUpgradeSupported === true &&
@@ -3538,6 +3646,15 @@ async function checkStudioUpgrade({ autoApply = true, forceApply = false } = {})
     }
     return result;
   } catch (error) {
+    checkPending = false;
+    stopStudioUpgradePolling();
+    if (studioUpgradeState?.status === "restarting") {
+      const targetVersion = studioUpgradeState.targetVersion || studioUpgradeState.latestVersion;
+      if (targetVersion) {
+        void pollStudioRestart(targetVersion, studioUpgradeState.currentVersion || "");
+        return null;
+      }
+    }
     renderStudioUpgrade({ status: "error", error: normalizeError(error).message });
     return null;
   }

@@ -454,19 +454,31 @@ export function validateReleaseOriginUrl(rawUrl, options = {}) {
   throw new Error(`升级仅允许来自受信任 GitHub HTTPS 发布源：${rawUrl}`);
 }
 
-export async function readBoundedResponseBytes(response, maxBytes, label) {
+export async function readBoundedResponseBytes(response, maxBytes, label, options = {}) {
   const contentLength = response.headers?.get?.('content-length');
+  const declared = contentLength === null || contentLength === undefined || contentLength === ''
+    ? Number.NaN
+    : Number(contentLength);
   if (contentLength !== null && contentLength !== undefined && contentLength !== '') {
-    const declared = Number(contentLength);
     if (Number.isFinite(declared) && declared > maxBytes) {
       throw new Error(`${label} 超过大小上限（${declared} > ${maxBytes} 字节）`);
     }
   }
+  const contentEncoding = response.headers?.get?.('content-encoding')?.trim().toLowerCase() || '';
+  const totalBytes = /^\d+$/.test(String(contentLength ?? '').trim()) &&
+      Number.isSafeInteger(declared) && declared >= 0 &&
+      (contentEncoding === '' || contentEncoding === 'identity')
+    ? declared
+    : null;
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const reportProgress = (bytesRead) => onProgress?.({ bytesRead, totalBytes });
+  reportProgress(0);
   if (!response.body || typeof response.body.getReader !== 'function') {
     const buffer = Buffer.from(await response.arrayBuffer());
     if (buffer.byteLength > maxBytes) {
       throw new Error(`${label} 超过大小上限（${buffer.byteLength} > ${maxBytes} 字节）`);
     }
+    reportProgress(buffer.byteLength);
     return buffer;
   }
   const reader = response.body.getReader();
@@ -483,6 +495,7 @@ export async function readBoundedResponseBytes(response, maxBytes, label) {
         throw new Error(`${label} 超过大小上限（>${maxBytes} 字节）`);
       }
       chunks.push(Buffer.from(value));
+      reportProgress(total);
     }
   } finally {
     reader.releaseLock?.();
@@ -1444,6 +1457,8 @@ export function createStudioUpgradeManager(options = {}) {
     modeReason: installedInitial.modeReason,
     autoUpgradeSupported: installedInitial.autoUpgradeSupported,
     platformTuple: installedInitial.platformTuple,
+    downloadedBytes: 0,
+    downloadTotalBytes: null,
     status: persistedInitial?.status === 'error' ? 'error' : 'idle',
     upgradeAvailable: false,
     deferredReason: null,
@@ -1622,6 +1637,8 @@ export function createStudioUpgradeManager(options = {}) {
       state.targetVersion = targetVersion;
       state.error = null;
       state.rolledBack = false;
+      state.downloadedBytes = 0;
+      state.downloadTotalBytes = null;
 
       try {
         const checksumUrl = validateReleaseOriginUrl(candidate.checksumUrl, { allowLoopbackHttp });
@@ -1644,7 +1661,12 @@ export function createStudioUpgradeManager(options = {}) {
         if (!archiveResp.ok) {
           throw new Error(`下载 SDK 升级包失败（HTTP ${archiveResp.status}）`);
         }
-        const archiveBytes = await readBoundedResponseBytes(archiveResp, maxArchiveBytes, 'SDK 升级归档');
+        const archiveBytes = await readBoundedResponseBytes(archiveResp, maxArchiveBytes, 'SDK 升级归档', {
+          onProgress: ({ bytesRead, totalBytes }) => {
+            state.downloadedBytes = bytesRead;
+            state.downloadTotalBytes = totalBytes;
+          },
+        });
         const actualSha256 = computeSha256Hex(archiveBytes);
         if (actualSha256 !== expectedSha256) {
           throw new Error(`SDK 升级包 SHA-256 校验失败：期望 ${expectedSha256}，实际 ${actualSha256}`);
@@ -1742,6 +1764,8 @@ export function createStudioUpgradeManager(options = {}) {
       state.status = 'checking';
       state.error = null;
       state.deferredReason = null;
+      state.downloadedBytes = 0;
+      state.downloadTotalBytes = null;
       try {
         const candidate = await fetchReleaseCandidate();
         cachedReleaseCandidate = candidate;
