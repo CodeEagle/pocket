@@ -200,12 +200,13 @@ export default function LanternShowcaseApp() {
 const svgHero1 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" rx="8" fill="#131c2e"/><circle cx="80" cy="42" r="24" fill="#f59e0b" fill-opacity="0.25"/><circle cx="80" cy="42" r="14" fill="#fbbf24"/><text x="80" y="78" font-family="monospace" font-size="10" fill="#94a3b8" text-anchor="middle">hero_lantern.png</text></svg>`;
 const svgHero2 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" rx="8" fill="#111f24"/><rect x="44" y="18" width="72" height="40" rx="6" fill="#10b981" fill-opacity="0.3" stroke="#34d399"/><text x="80" y="78" font-family="monospace" font-size="10" fill="#94a3b8" text-anchor="middle">lobby_bg.webp</text></svg>`;
 
-test("Pocket Studio 100dvh IDE workbench layout, docked source split, console tabs, and inspector state machine", async () => {
+test("Pocket Studio workbench and source-mode SDK auto-upgrade stay available through dirty deferral", async () => {
   mkdirSync(outDir, { recursive: true });
   let wechatRunning = false;
+  const studioUpgradeChecks: Array<{ autoApply?: boolean; forceApply?: boolean }> = [];
   const server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
       const path = url.pathname;
       if (path === "/") return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
@@ -215,13 +216,25 @@ test("Pocket Studio 100dvh IDE workbench layout, docked source split, console ta
       if (path === "/previews/hero1.svg") return new Response(svgHero1, { headers: { "content-type": "image/svg+xml" } });
       if (path === "/previews/hero2.svg") return new Response(svgHero2, { headers: { "content-type": "image/svg+xml" } });
       if (path === "/health") return json({ ok: true, service: "pocket-editor", version: "0.1.12", csrfToken: "cap", projectId: "lantern-showcase", bluetooth: { local: true } });
-      if (path === "/api/studio/upgrade" || path === "/api/studio/upgrade/check") {
+      if (path === "/api/studio/upgrade/check" && req.method === "POST") {
+        studioUpgradeChecks.push(await req.json() as { autoApply?: boolean; forceApply?: boolean });
         return json({
           currentVersion: "0.1.12",
-          latestVersion: "0.1.12",
-          status: "up-to-date",
+          latestVersion: "0.1.13",
+          status: "available",
           mode: "source",
-          upgradeAvailable: false,
+          autoUpgradeSupported: true,
+          upgradeAvailable: true,
+        });
+      }
+      if (path === "/api/studio/upgrade") {
+        return json({
+          currentVersion: "0.1.12",
+          latestVersion: "0.1.13",
+          status: "available",
+          mode: "source",
+          autoUpgradeSupported: true,
+          upgradeAvailable: true,
         });
       }
       if (path === "/api/devices") {
@@ -406,6 +419,24 @@ test("Pocket Studio 100dvh IDE workbench layout, docked source split, console ta
     // 2. Toggle docked source split, start WeChat inline preview, and open Versions OTA inspector
     await page.locator("#source-split-toggle").click();
     expect(await page.locator("#source-dock").isVisible()).toBe(true);
+    await page.waitForFunction(() => (document.getElementById("studio-upgrade-status")?.textContent || "").includes("发现新版本 v0.1.13"));
+    expect(await page.locator("#studio-upgrade-action").textContent()).toBe("立即升级");
+    expect(studioUpgradeChecks[0]).toEqual({ autoApply: true, forceApply: false });
+
+    const cleanCheck = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/studio/upgrade/check");
+    await page.locator("#studio-upgrade-action").click();
+    await cleanCheck;
+    expect(studioUpgradeChecks.at(-1)).toEqual({ autoApply: true, forceApply: true });
+
+    await page.locator("#source").waitFor({ state: "visible" });
+    const savedSource = await page.locator("#source").inputValue();
+    await page.locator("#source").fill(`${savedSource}\n// unsaved editor draft`);
+    await page.waitForFunction(() => !(document.getElementById("save") as HTMLButtonElement).disabled);
+    const checksBeforeDirtyClick = studioUpgradeChecks.length;
+    await page.locator("#studio-upgrade-action").click();
+    await page.waitForFunction(() => (document.getElementById("studio-upgrade-status")?.textContent || "").includes("未保存修改"));
+    expect(studioUpgradeChecks.length).toBe(checksBeforeDirtyClick);
+
     await page.locator("#wechat-start").click();
     await page.locator("#wechat-preview-frame").waitFor({ state: "visible" });
     await page.locator("#versions-open").click();

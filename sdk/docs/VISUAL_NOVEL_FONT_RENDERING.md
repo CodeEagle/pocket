@@ -124,3 +124,15 @@ control is needed.
 - `cd sdk/packages/pocket_flutter && flutter test` verifies Flutter host font
   synchronization, deferred mid-recording font refreshes, dynamic font cache
   invalidation, and recording/replay parity.
+- Flutter 3.35.7 / Dart 3.9.2 is also the minimum compiler gate for both FFI
+  font callbacks. Keep their shared `-1.0` exceptional-return sentinel as the
+  named `_hostFontCallbackExceptionalReturn` const in `pocket_runtime.dart`;
+  Dart 3.9.2 rejects the equivalent inline negative-double literal while
+  compiling `NativeCallable.isolateLocal`. The host-font test compiles both
+  call sites with this toolchain; its native callback cases execute when
+  `POCKET_NATIVE_LIBRARY` points to a built Pocket library. On macOS, the
+  Dart 3.9.2 run with the following command passed all 9 tests:
+
+  ```sh
+  POCKET_NATIVE_LIBRARY=../../native/target/release/libpocket_flutter.dylib flutter test --no-pub test/pocket_host_fonts_test.dart
+  ```

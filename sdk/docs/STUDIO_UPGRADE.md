@@ -21,7 +21,7 @@
 
 ### 2.1 源码仓库保护与稳定版过滤
 - `parseStableSemver` 仅接受正式版语义化标签 `sdk-v<major>.<minor>.<patch>`，自动忽略 `draft`、`prerelease` 及任何带预发布后缀的标签。
-- `readInstalledSdkInfo` 严格区分受管独立安装目录（`standalone`）与 Git 源码检出（`source`，如存在 `.git`、父级 `demo/` 或 `editor/test`）。在 `source` 模式下仅检查并提示新版本，`POST /api/studio/upgrade/apply` 返回 HTTP `409`，绝不自动覆盖开发工作区。
+- `readInstalledSdkInfo` 严格区分受管独立安装目录（`standalone`）与 Git 源码检出（`source`，如存在 `.git`、父级 `demo/` 或 `editor/test`）。`standalone` 继续使用已验证归档的逐文件替换；Git 源码模式通过受限的 Git 快进更新，不把独立 SDK 归档覆盖到源码工作区。源码资格不满足时返回明确的暂缓原因。
 
 ### 2.2 暂存与升级后启动的磁盘 ABI 一致性校验（支持未来编译器与 ABI 演进）
 - `validateStagedStandaloneSdk` 解压 `prebuilt/pocket-tools-<platform>-<arch>-<version>.tgz` 到暂存目录，并校核暂存包内部的 `package.json`、`provenance.json`、`scripts/prebuilt_tools.mjs` 与平台工具包 `manifest.json` 之间的版本号、`upstreamRevision`、QuickJS `bytecodeAbi` 及所有预编译二进制文件 SHA-256 摘要。
@@ -51,7 +51,7 @@
 
 - **单元与安全门禁（`sdk/editor/test/studio_upgrade.test.ts`、`sdk/scripts/tests/prebuilt_tools.test.ts`、`sdk/scripts/tests/editor_service.test.ts`）**：
   - 稳定版 semver 解析与排序、HTTPS GitHub 来源白名单、恶意 tar 归档拦截（路径穿越、绝对路径、盘符、反斜杠、符号链接、超限体积）。
-  - 源码模式（`source`）只读检查保护与独立模式（`standalone`）并发合并、错误哈希拦截。
+  - 源码模式（`source`）工作区保护与独立模式（`standalone`）并发合并、错误哈希拦截。
   - `downloading` -> `spawning` -> `applying` 跨进程锁 `handoffToken` + `targetVersion` + `stageDir` 鉴权交接，以及 Windows `EBUSY`/`EPERM` 有界重试验证。
   - 服务端忙时暂缓（HTTP `409` / `deferredReason`）与保存后恢复。
   - 未来编译器 `upstreamRevision` 与 `bytecodeAbi` 升级包的暂存校验及升级后 `resolvePrebuiltTools` / `editorToolEnvironment(options, sdkRoot)` 真实磁盘常量校验。
@@ -100,3 +100,29 @@ the Release job, including real detached CLI execution and Playwright Chromium
 navigation. Final macOS and Windows archives remain subject to the release
 installation/runtime gate. The unsuccessful 0.1.14 candidate was not published;
 its tag remains immutable, and this release uses SDK version 0.1.15.
+
+
+## Git 源码模式的自动更新
+
+### 来源与复用边界
+
+再次检查保留父工程（排除 `pocket_host/`）的 `mini_apps/syslib/pocket_syslib_ota.js` 与 `docs/04_BIDIRECTIONAL_FFI_WASM_AND_YOOASSET_HOTUPDATE.md`：前者提供 Guest AOT 的版本、ABI 与回滚逻辑，后者描述宿主与 Mini-App 资源热更新；均不提供桌面源码工作区的 Git 更新能力。旧文档列出的 `lib/core/yooasset_package_manager.dart` 在当前保留目录中已不存在，不能作为可复用实现。
+
+源码模式复用现有稳定 Release 发现、归档下载与 SHA-256 校验、安全解压、平台工具校验、升级锁、独立升级进程、服务所有权检查与健康探针。新增的 Git 边界负责工作区资格、目标提交与快进更新；没有另建下载器、服务管理器或 UI 升级状态机。
+
+### 自动应用与文件保留
+
+- 与独立安装模式相同，页面首次检查及后续定期检查可自动应用更新；前端以 `autoUpgradeSupported` 判断能力，不再用 `mode === "standalone"` 排除源码模式。未保存草稿及服务端构建、保存、发布、部署等忙状态仍会暂缓更新和刷新。
+- 源码更新跟随 GitHub 正式稳定 Release。应用前检查来源仓库、`main` 分支、包含暂存及未跟踪文件的工作区状态，以及当前 HEAD 到目标 Release 提交的快进关系；工作区修改、分叉和不兼容依赖变化均显示暂缓原因，不自动 stash、提交或覆盖开发者文件。Git 的忽略规则不能证明文件可丢弃：前进及回滚前都检查目标新增路径是否与已有文件或阻挡路径的祖先冲突，拒绝覆盖被忽略的消费者文件；正向合并还显式禁止覆盖忽略项。
+- 使用已验证归档中的匹配平台工具，避免仅改变源码版本而继续运行旧编译器或探针。Git 受管源码由 Git 更新，独立 SDK 归档不用于覆盖源码。
+- 停服和应用前重新核对资格，更新后启动新的服务进程并验证版本与健康状态。失败时在安全门通过后恢复旧工具和服务配置；只有 HEAD 仍等于本次目标且工作区仍干净时才允许回退到原 HEAD，禁止用无条件 `reset --hard` 或清理未跟踪文件的方式回滚。回滚前先验证旧工具备份的完整性、版本与 ABI，备份缺失或损坏不能导致删除当前工具。若应用期间出现新的本地修改、被忽略文件的路径冲突或 HEAD 被外部改变，保留备份并报告无法自动恢复；需要先人工保留并处理这些修改，再通过受管服务的 restart 恢复入口重试，不能声称已成功回滚或继续运行版本不匹配的工具。
+
+### 本地升级记录
+
+本次将开发工作区从 `d547885` 快进至公开的 SDK 0.1.15（`7f18206`），先保存原有修改，再无冲突恢复，保留名为 `pocket local changes preserved before SDK 0.1.15 update` 的 stash 备份。同步已校验的 macOS arm64 工具包，将原先指向旧源码编译物的服务配置改为该工具包的编译器与探针。实际 `/health` 返回 `version: 0.1.15`，Playwright Chromium 加载工作台显示 `v0.1.15` 且无页面异常；原有 Preview host adapter、延迟 SystemUI 请求与失败处理的五项测试通过。
+
+新增的真实临时 Git 仓库测试（本机 Bun 1.3.9：15 项、50 个断言通过）覆盖版本号变化时的可快进判定、暂存/未暂存/未跟踪文件保留、分支/游离 HEAD/分叉/来源及来源重写拒绝、依赖图变化暂缓、通过真实本地 SSH transport 获取 Release tag 与临时 ref 清理，以及源码提交/归档版本/工具 ABI 错配拒绝；不会访问公开 GitHub 或修改开发者仓库。
+
+CI 与 Release 的现有 Studio 生命周期门禁同时运行 `editor/test/source_upgrade_git.test.ts`，覆盖 Windows 运行器及发布平台；保留原独立安装升级与回滚测试，不以源码静态检查替代真实生命周期验证。
+
+最终组合验证（Bun 1.4.4）：`POCKET_SOURCE_BUILD=1 npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts editor/test/source_upgrade_git.test.ts scripts/tests/editor_service.test.ts editor/test/studio_workbench_layout.test.ts` 共 53 项、372 个断言通过。源码真实 CLI 用临时 Git 仓库和显式测试标记绑定动态端口，验证鉴权 handoff、完整 stage/工具摘要校验、Git 快进、HTTP 版本/PID 变化及升级后的普通重启；故意保留旧 native probe，确认后续重启仍绑定已验证的平台工具包。失败路径覆盖健康检查失败恢复 Git/工具、忽略文件冲突、损坏归档在停服前拒绝，以及无法回滚时报告磁盘实际版本。既有独立安装的真实 detached CLI、Playwright 自动刷新与失败回滚同时通过。架构边界检查及 `git diff --check` 通过。

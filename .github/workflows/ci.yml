@@ -169,10 +169,10 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 
-      - name: Verify standalone Studio upgrade on Windows
+      - name: Verify Studio standalone and source upgrade on Windows
         env:
           POCKET_SOURCE_BUILD: "1"
-        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts scripts/tests/editor_service.test.ts
+        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts editor/test/source_upgrade_git.test.ts scripts/tests/editor_service.test.ts
 
       - name: Preserve upgrade failure diagnostics
         if: failure()
@@ -285,7 +285,7 @@ jobs:
         working-directory: sdk
         env:
           POCKET_SOURCE_BUILD: "1"
-        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts scripts/tests/editor_service.test.ts
+        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts editor/test/source_upgrade_git.test.ts scripts/tests/editor_service.test.ts
 
       - name: Run SDK JS package and toolchain suites
         working-directory: sdk
@@ -328,6 +328,24 @@ jobs:
             ${{ runner.temp }}/pocket-studio-upgrade-diagnostics/**
             /tmp/pocket-e2e-real-*/.pocket-build/**/*.log
             /tmp/pocket-e2e-real-*/.pocket-build/**/*.json
+
+  flutter-host-fonts-minimum-sdk:
+    name: flutter-host-fonts-dart-3.9.2
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.7'
+          channel: stable
+          cache: true
+
+      - name: Compile and test font callbacks on the minimum Dart SDK
+        working-directory: sdk/packages/pocket_flutter
+        run: |
+          flutter pub get
+          flutter test test/pocket_host_fonts_test.dart
 
   flutter-sdk-and-demo:
     name: flutter-sdk-and-demo

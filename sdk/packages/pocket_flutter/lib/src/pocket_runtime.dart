@@ -526,6 +526,11 @@ typedef _HostTextMeasureNative =
       Pointer<Uint8> utf8Ptr,
       Size utf8Len,
     );
+
+// Dart 3.9.2's FFI transformer requires a named const for this negative
+// double exceptional return; the equivalent literal is rejected at compile time.
+const double _hostFontCallbackExceptionalReturn = -1.0;
+
 typedef _SetHostFontMetricsNative =
     Int32 Function(
       Pointer<Void> handle,
@@ -868,7 +873,7 @@ final class FfiPocketRuntime
           utf8Len,
           fontFamilyFallback: fallbackCopy,
         ),
-        exceptionalReturn: -1.0,
+        exceptionalReturn: _hostFontCallbackExceptionalReturn,
       );
       final status = setTextCallback(_handle, textCallable.nativeFunction, 0);
       if (status != 0) {
@@ -885,7 +890,7 @@ final class FfiPocketRuntime
           codepoint,
           fontFamilyFallback: fallbackCopy,
         ),
-        exceptionalReturn: -1.0,
+        exceptionalReturn: _hostFontCallbackExceptionalReturn,
       );
       final cbStatus = setGlyphCallback(_handle, glyphCallable.nativeFunction, 0);
       if (cbStatus != 0) {

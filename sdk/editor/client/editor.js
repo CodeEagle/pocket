@@ -3368,8 +3368,8 @@ function renderStudioUpgrade(snapshot) {
   const currentVersion = studioUpgradeState.currentVersion || "—";
   const latestVersion = studioUpgradeState.latestVersion || "";
   const status = studioUpgradeState.status || "idle";
-  const mode = studioUpgradeState.mode || "source";
   const upgradeAvailable = Boolean(studioUpgradeState.upgradeAvailable);
+  const autoUpgradeSupported = studioUpgradeState.autoUpgradeSupported === true;
   const error = studioUpgradeState.error || "";
   const deferredReason = studioUpgradeState.deferredReason || "";
   const releaseUrl = studioUpgradeState.releaseUrl || "";
@@ -3420,10 +3420,10 @@ function renderStudioUpgrade(snapshot) {
   } else if (status === "error") {
     statusText = error || "升级检查失败";
     tone = "bad";
-    buttonLabel = mode === "standalone" && upgradeAvailable ? "重试升级" : "重试检查";
+    buttonLabel = autoUpgradeSupported && upgradeAvailable ? "重试升级" : "重试检查";
   } else if (upgradeAvailable) {
-    if (mode === "source") {
-      statusText = `发现新版本 v${latestVersion}（源码仓库模式，不自动覆盖 Git 工作区）`;
+    if (!autoUpgradeSupported) {
+      statusText = `发现新版本 v${latestVersion}（${deferredReason || "当前安装方式不支持自动升级"}）`;
       tone = "warn";
       buttonLabel = "重新检查";
     } else if (dirty || resourcesDirty) {
@@ -3440,7 +3440,7 @@ function renderStudioUpgrade(snapshot) {
       buttonLabel = "立即升级";
     }
   } else if (status === "up-to-date") {
-    statusText = mode === "source" ? "已是最新稳定版（源码仓库模式）" : "已是最新稳定版";
+    statusText = autoUpgradeSupported ? "已是最新稳定版" : "已是最新稳定版（当前安装方式不支持自动升级）";
     tone = "good";
     buttonLabel = "检查更新";
   }
@@ -3521,11 +3521,11 @@ async function checkStudioUpgrade({ autoApply = true, forceApply = false } = {})
       method: "POST",
       body: JSON.stringify({ autoApply: deferAutoApply ? false : autoApply, forceApply }),
     });
-    if (result?.upgradeAvailable && result?.mode === "standalone" && (deferAutoApply || result?.deferredReason)) {
-      studioUpgradeDeferredAutoApply = true;
-    } else if (!result?.upgradeAvailable) {
-      studioUpgradeDeferredAutoApply = false;
-    }
+    studioUpgradeDeferredAutoApply = Boolean(
+      result?.upgradeAvailable &&
+      result?.autoUpgradeSupported === true &&
+      (deferAutoApply || result?.deferredReason)
+    );
     renderStudioUpgrade(result);
     if (result?.status === "restarting" || result?.status === "applying" || result?.status === "downloading") {
       studioUpgradeDeferredAutoApply = false;
@@ -3559,16 +3559,14 @@ $("studio-upgrade-action")?.addEventListener("click", () => {
     window.location.reload();
     return;
   }
-  if ((dirty || resourcesDirty) && studioUpgradeState?.mode === "standalone" && studioUpgradeState?.upgradeAvailable) {
-    studioUpgradeDeferredAutoApply = true;
+  if ((dirty || resourcesDirty) && studioUpgradeState?.autoUpgradeSupported === true && studioUpgradeState?.upgradeAvailable) {
     studioUpgradeDeferredAutoApply = true;
     renderStudioUpgrade(studioUpgradeState);
     showNotice("请先保存源文件或资源策略修改，保存后将自动升级。", "info");
     return;
   }
-  const mode = studioUpgradeState?.mode;
   const upgradeAvailable = Boolean(studioUpgradeState?.upgradeAvailable);
-  const forceApply = mode === "standalone" && upgradeAvailable;
+  const forceApply = studioUpgradeState?.autoUpgradeSupported === true && upgradeAvailable;
   void checkStudioUpgrade({ autoApply: true, forceApply });
 });
 
