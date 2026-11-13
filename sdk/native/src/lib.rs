@@ -12283,8 +12283,7 @@ mod smoke_tests {
 
     #[test]
     fn truncated_drawlist_opcodes_return_err_without_panicking() {
-        let handle = pocket_create(160.0, 120.0);
-        let ui = unsafe { &mut (*handle).ops.core_mut().unwrap().ui };
+        let mut ui = Ui::new();
         let nodes = Vec::new();
         let mut generic_handles = HashSet::new();
 
@@ -12300,7 +12299,7 @@ mod smoke_tests {
                 &mut out,
                 &operation,
                 &nodes,
-                ui,
+                &mut ui,
                 &mut generic_handles,
                 None,
                 None,
@@ -12309,9 +12308,6 @@ mod smoke_tests {
                 res.is_err(),
                 "truncated opcode {opcode} must return Err instead of panicking"
             );
-        }
-        unsafe {
-            pocket_destroy(handle);
         }
     }
 
