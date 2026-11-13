@@ -1481,9 +1481,9 @@ impl WorkerRuntime {
                 pocket_worker_runner_stop(runner);
             }
         }
+        self.state.pulse.signal();
         #[cfg(test)]
         release_before_step_test_hook(&self.state);
-        self.state.pulse.signal();
         let (lock, cv) = &self.state.lifecycle;
         let mut lifecycle = lock.lock().unwrap_or_else(|poison| poison.into_inner());
         while !lifecycle.exited {
