@@ -52,7 +52,7 @@ jobs:
       - name: Install system patch tool
         run: |
           sudo apt-get update
-          sudo apt-get install -y patch gdb
+          sudo apt-get install -y patch gdb llvm
 
       - name: Prepare pinned PocketJS upstream
         working-directory: sdk
@@ -102,6 +102,7 @@ jobs:
           CFLAGS: "-fsanitize=address -fno-omit-frame-pointer"
           CARGO_TARGET_DIR: /tmp/pocket-native-asan
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+          ASAN_SYMBOLIZER_PATH: /usr/bin/llvm-symbolizer
         run: |
           for attempt in $(seq 1 20); do
             echo "Native AddressSanitizer ${attempt}/20"
