@@ -76,11 +76,15 @@ key exists right after startup"). Studio use: `studio/docs/ARCHITECTURE.md`, "Pr
   a host that trusts only the preview key cannot be fed test/stable packages and
   vice versa.
 - **Build numbers.** `build = max(config.build, bootstrap metadata build, last
-  preview build for (hostVersion, previewId)) + 1`, persisted atomically in
+  preview build for (hostVersion, previewId), build of the package currently
+  published in the slot) + 1`, persisted atomically in
   `states/preview-slots.json`, so numbers strictly increase across publishes,
-  server restarts and projects. Version string: `<config.version>-preview.<build>`.
-  Deleting the workspace state resets the counter; clear the host's preview
-  package store in that case.
+  server restarts and projects. The slot build is read from the slot's
+  `latest.json` only after its signature verifies against the preview public key;
+  unreadable or tampered data is ignored. Deleting `preview-slots.json` therefore
+  does not drop below the host's anti-downgrade floor while the preview key and
+  slot survive. Version string: `<config.version>-preview.<build>`. If the slot
+  and key are deleted too, clear the host's preview package store.
 - **No bundle.** Previews are published with `includeBundle: false`: a save
   republishes every time, the granular update downloads only changed blobs, and
   the host needs no native archive extractor. (A first download is granular too.)

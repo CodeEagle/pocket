@@ -1,12 +1,14 @@
 import { existsSync, readdirSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { createPublicKey } from "node:crypto";
 import { randomUUID } from "node:crypto";
 import {
   generateDevKey,
   packageArtifacts,
   pocketReleaseDirectory,
   sha256Hex,
+  verifySignedManifest,
   type PublicKeyConfig,
 } from "../scripts/package_update.ts";
 
@@ -110,6 +112,28 @@ async function pruneUnreferenced(directory: string, keep: Set<string>): Promise<
 }
 
 /**
+ * Build number of the package currently published in the slot, trusted only if
+ * its signed manifest verifies against the preview public key. The host's
+ * anti-downgrade floor comes from this package, so it survives a lost counter
+ * file. Missing, unreadable or unverifiable data counts as 0.
+ */
+async function publishedSlotBuild(slotDirectory: string, key: PublicKeyConfig): Promise<number> {
+  try {
+    const envelope = JSON.parse(await readFile(join(slotDirectory, "latest.json"), "utf8")) as { payload: string; signature: string };
+    const publicKey = createPublicKey({
+      key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(key.publicKeyBase64, "base64")]),
+      format: "der",
+      type: "spki",
+    }).export({ type: "spki", format: "pem" }).toString();
+    const payload = JSON.parse(new TextDecoder().decode(verifySignedManifest(envelope as never, publicKey))) as { build?: unknown };
+    const build = Number(payload.build);
+    return Number.isSafeInteger(build) && build > 0 ? build : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Package the current successful build into the preview slot. The previous
  * preview's content-addressed files stay readable until the next publish so a
  * host that is still downloading them is not broken by the pointer move.
@@ -133,7 +157,10 @@ export async function publishPreview(input: PreviewPublishInput): Promise<Previe
     if (typeof metadata.runtimeAbi !== "string" || !metadata.runtimeAbi) throw new Error("build metadata has no runtime ABI");
     // Strictly above the project's own build, the bootstrap floor and every
     // earlier preview build, so the host's anti-downgrade floor only moves up.
-    const build = Math.max(input.build, Number(metadata.build ?? 0), previousBuild) + 1;
+    // The currently published (signature-verified) slot build also counts, so a
+    // deleted counter file cannot drop below the host's floor.
+    const slotBuild = await publishedSlotBuild(previewSlotDirectory(input.workspace, input.hostVersion, packageId), key);
+    const build = Math.max(input.build, Number(metadata.build ?? 0), previousBuild, slotBuild) + 1;
     if (!Number.isSafeInteger(build)) throw new Error("preview build number is outside the safe integer range");
     const version = `${input.version}-preview.${build}`;
 

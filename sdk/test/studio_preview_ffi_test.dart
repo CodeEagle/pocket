@@ -374,12 +374,22 @@ void main() {
     child = controller.instances.firstWhere((i) => i.appId == previewAppId);
     expect(child.session.active?.build, v3.body['build']);
 
-    // --- Isolation: the child probes capabilities it must not have. -------
+    // --- Counter reset: the build counter file is lost but the preview key
+    // and the host's package store survive. The next build must still clear
+    // the host's anti-downgrade floor (it is read from the published slot).
+    final counterFile = File('${editor.workspace}/states/preview-slots.json');
+    expect(counterFile.existsSync(), isTrue);
+    counterFile.deleteSync();
     await tester.runAsync(
       () => editor.writeFile('studio-demo', 'app.tsx', _probeSource),
     );
-    await tester.runAsync(() => editor.buildAndPublish('studio-demo'));
+    final v4 = (await tester.runAsync(() => editor.buildAndPublish('studio-demo')))!;
+    expect(v4.body['build'] as int, greaterThan(v3.body['build'] as int));
     await reload(expectEvent: 'reloaded');
+    child = controller.instances.firstWhere((i) => i.appId == previewAppId);
+    expect(child.session.active?.build, v4.body['build']);
+
+    // --- Isolation: the child probes capabilities it must not have. -------
     // Host responses are delivered on frames, so the child must be foreground
     // (as it is when presented in Studio) to complete its awaited requests.
     await tester.runAsync(
@@ -413,7 +423,7 @@ void main() {
       'reload v2 breakdown ms': reloadV2,
       'service timings v1 (package/sign/total ms)': v1.body['timingsMs'],
       'service timings v2 (package/sign/total ms)': v2.body['timingsMs'],
-      'preview build numbers': <int>[v1.body['build'] as int, v2.body['build'] as int, v3.body['build'] as int],
+      'preview build numbers': <int>[v1.body['build'] as int, v2.body['build'] as int, v3.body['build'] as int, v4.body['build'] as int],
       'proxy requests': proxy.requests,
     })}');
     await _closeHost(tester, controller);
@@ -729,9 +739,11 @@ final class _Editor {
   _Editor(Map<String, dynamic> info)
     : port = info['port'] as int,
       csrf = info['csrfToken'] as String,
-      hostVersion = info['hostVersion'] as String;
+      hostVersion = info['hostVersion'] as String,
+      workspace = info['workspace'] as String;
 
   final int port;
+  final String workspace;
   final String csrf;
   final String hostVersion;
   final HttpClient _client = HttpClient();

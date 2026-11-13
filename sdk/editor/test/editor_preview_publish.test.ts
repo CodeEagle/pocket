@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, createPublicKey } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startEditor } from "../server.ts";
@@ -202,6 +202,30 @@ test("build numbers are monotonic across publishes and across a server restart",
   expect(afterRestart.body.build).toBeGreaterThan(builds[1]!);
   const counters = JSON.parse(readFileSync(join(workspace, "states/preview-slots.json"), "utf8"));
   expect(counters.slots[`studio-test/${PREVIEW_APP_ID}`].build).toBe(afterRestart.body.build);
+});
+
+test("a deleted counter file cannot lower the build; a tampered slot payload is not trusted", async () => {
+  const publish = async () => (await api("/api/projects/pv-app/preview-publish", { method: "POST", json: {} })).body.build as number;
+  const first = await publish();
+  const second = await publish();
+  expect(second).toBeGreaterThan(first);
+  const countersPath = join(workspace, "states/preview-slots.json");
+  rmSync(countersPath);
+  const third = await publish();
+  expect(third).toBeGreaterThan(second);
+
+  // Inflate the build in the served manifest without re-signing: ignored.
+  const slot = join(workspace, "updates/.preview");
+  const latest = readdirSync(slot, { recursive: true }).map(String).find((name) => name.endsWith("latest.json"))!;
+  const latestPath = join(slot, latest);
+  const envelope = JSON.parse(readFileSync(latestPath, "utf8"));
+  const payload = JSON.parse(Buffer.from(envelope.payload, "base64").toString());
+  payload.build = 900_000;
+  writeFileSync(latestPath, JSON.stringify({ ...envelope, payload: Buffer.from(JSON.stringify(payload)).toString("base64") }));
+  rmSync(countersPath);
+  const fourth = await publish();
+  expect(fourth).toBeLessThan(900_000);
+  expect(fourth).toBeGreaterThan(0);
 });
 
 test("preview publish never touches test/stable slots, state.publish or the version history", async () => {
