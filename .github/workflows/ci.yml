@@ -52,7 +52,7 @@ jobs:
       - name: Install system patch tool
         run: |
           sudo apt-get update
-          sudo apt-get install -y patch
+          sudo apt-get install -y patch gdb
 
       - name: Prepare pinned PocketJS upstream
         working-directory: sdk
@@ -64,7 +64,17 @@ jobs:
         run: cargo clippy --locked --manifest-path sdk/native/Cargo.toml --all-targets
 
       - name: Test native host and worker runtime
+        id: native-tests
         run: cargo test --locked --manifest-path sdk/native/Cargo.toml
+
+      - name: Diagnose a native test crash
+        if: failure() && steps.native-tests.outcome == 'failure'
+        shell: bash
+        run: |
+          cargo test --locked --manifest-path sdk/native/Cargo.toml --lib --no-run --message-format=json > /tmp/native-test-build.jsonl
+          test_binary=$(python3 -c 'import json; records=(json.loads(line) for line in open("/tmp/native-test-build.jsonl")); print(next(record["executable"] for record in records if record.get("executable") and record.get("target", {}).get("kind") == ["lib"]))')
+          gdb --batch -ex run -ex "thread apply all bt" --args "$test_binary"
+
 
   js-sdk-and-guest:
     name: js-sdk-and-guest
