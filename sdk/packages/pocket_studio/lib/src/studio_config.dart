@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
+
 /// Trusted host configuration for the Studio provider. It is supplied by the
 /// host's build/run configuration (dart-define) and never by the guest.
 final class PocketStudioConfig {
@@ -92,6 +94,12 @@ final class PocketStudioConfig {
 
   /// Package index of the service's signed slot for the Studio's own project ([updateChannel]).
   String get selfUpdateUrl => '$origin/$updateChannel/pocket/$hostVersion/$studioAppId/latest.json';
+
+  /// Host-store namespace of the preview child, scoped to the preview signing key. A new workspace (new key)
+  /// or a reset service-side counter then starts from a fresh anti-downgrade floor instead of colliding
+  /// with a machine-global one.
+  String previewNamespace(String publicKey) =>
+      'studio-preview-${sha256.convert(utf8.encode(publicKey)).toString().substring(0, 12)}';
 
   /// Signed update URL of the service's preview slot.
   String get previewUpdateUrl =>

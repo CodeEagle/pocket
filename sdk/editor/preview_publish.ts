@@ -199,6 +199,11 @@ export async function publishPreview(input: PreviewPublishInput): Promise<Previe
         payloadSha256,
       }, null, 2) + "\n");
 
+      // Persist the build counter before any pointer file so a crash cannot reuse a build number.
+      counters.slots[slotKey] = { build, version, projectId: input.projectId, publishedAt: new Date().toISOString() };
+      await mkdir(input.workspace.states, { recursive: true });
+      await atomicJson(countersPath, counters);
+
       // Swap in: immutable content-addressed files first, pointer files last.
       const previousPayload = await readJson<{ files?: Array<{ url: string }> }>(join(slotDirectory, "payload.json"), {});
       await mkdir(slotDirectory, { recursive: true });
@@ -223,10 +228,6 @@ export async function publishPreview(input: PreviewPublishInput): Promise<Previe
       for (const file of [...result.payload.files, ...(previousPayload.files ?? [])]) keep.add(file.url);
       if (result.payload.bundle) keep.add(result.payload.bundle.url);
       await pruneUnreferenced(slotDirectory, keep);
-
-      counters.slots[slotKey] = { build, version, projectId: input.projectId, publishedAt: new Date().toISOString() };
-      await mkdir(input.workspace.states, { recursive: true });
-      await atomicJson(countersPath, counters);
 
       return {
         buildId: `${input.projectId}@${input.revision}`,

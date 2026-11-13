@@ -37,6 +37,9 @@ final class PocketStudioPlugin extends PocketPlugin {
     if (project != null) scrubber.addRoot(project, '<project>');
     final workspace = config.effectiveWorkspace;
     if (workspace != null) scrubber.addRoot(workspace, '<workspace>');
+    for (final root in config.extraProjectRoots) {
+      if (root.isNotEmpty) scrubber.addRoot(root, '<project>');
+    }
     for (final root in extraScrubRoots) {
       scrubber.addRoot(root, '<tmp>');
     }
@@ -102,7 +105,8 @@ final class PocketStudioPlugin extends PocketPlugin {
     final result = name == 'studio.artifacts.inspect'
         ? await _inspect(request, params['name'] as String)
         : _shape(name, (await client.send(request.method, request.segments,
-                query: request.query, body: request.body, write: request.write)).json);
+                query: request.query, body: request.body, write: request.write,
+                verbatimKeys: call.verbatimKeys)).json);
     final extra = call.assets && params['assets'] == true
         ? await _assets(request.segments.sublist(0, 3))
         : null;
@@ -158,6 +162,10 @@ final class PocketStudioPlugin extends PocketPlugin {
       case 'studio.project.open':
       case 'studio.project.create':
         return _slimProject(json);
+      case 'studio.build.start':
+        // The service wraps the status as {status:{...}}; the contract is the flat status.
+        final inner = json is Map ? json['status'] : null;
+        return _capLogs(inner is Map ? inner : json);
       case 'studio.build.status':
         return _capLogs(json);
       case 'studio.logs.tail':

@@ -99,6 +99,40 @@ void main() {
       }
     });
 
+    test('fs.read and readChunk return file payloads byte-identical; other fields and errors stay scrubbed', () async {
+      const content = "#!/usr/bin/env bun\nconst p='/tmp/x'; const t={a:/x/};\n-----BEGIN PRIVATE KEY-----";
+      service.handler = (r) async => const FakeReply(200, {
+        'path': '/Users/dev/ws/a.ts', 'content': content, 'bytes': 10, 'revision': 1,
+      });
+      final read = await call('studio.fs.read', {'project': 'demo', 'path': 'a.ts'}) as Map;
+      expect(read['content'], content);
+      expect(read['path'], '<workspace>/a.ts');
+      const data = 'AAAA+/tmp/AAAA+/Users/x/yyyy==';
+      service.handler = (r) async => const FakeReply(200, {'data': data, 'sha256': 'ab', 'totalBytes': 3});
+      final chunk = await call('studio.fs.readChunk', {'project': 'demo', 'path': 'a.ts', 'offset': 0}) as Map;
+      expect(chunk['data'], data);
+      service.handler = (r) async => const FakeReply(404, {'error': 'no /Users/x/y here'});
+      final error = await failure('studio.fs.read', {'project': 'demo', 'path': 'a.ts'});
+      expect(error.message, isNot(contains('/Users/x/y')));
+    });
+
+    test('build.start unwraps the service status to the flat contract', () async {
+      service.handler = (r) async => const FakeReply(200, {'status': {'busy': true, 'logs': []}});
+      final result = await call('studio.build.start', {'project': 'demo'}) as Map;
+      expect(result['busy'], isTrue);
+      expect(result.containsKey('status'), isFalse);
+    });
+
+    test('extra project roots are scrubbed as <project>', () async {
+      final extra = PocketStudioPlugin(
+        config: PocketStudioConfig(port: service.port, extraProjectRoots: const ['/data/co/studio/js']),
+      );
+      addTearDown(extra.dispose);
+      service.handler = (r) async => const FakeReply(200, {'logs': ['error at /data/co/studio/js/app.tsx:3']});
+      final result = await extra.invoke('studio.logs.tail', {'project': 'demo'}) as Map;
+      expect(result['logs'], ['error at <project>/app.tsx:3']);
+    });
+
     test('fs.tree can merge assets; readChunk clamps length', () async {
       service.handler = (r) async => r.uri.path.endsWith('/assets')
           ? const FakeReply(200, {'assets': ['a.png']})
@@ -358,6 +392,17 @@ void main() {
         expect((b['events'] as List).length, lessThanOrEqualTo(201));
         expect(utf8.encode(jsonEncode(b)).length, lessThan(256 * 1024));
       }
+    });
+
+    test('an SSE event over 256 KiB becomes a gap marker instead of vanishing', () async {
+      service.handler = (r) async => FakeReply(200, null, sse: [
+        {'type': 'log', 'line': 'x' * (300 * 1024)},
+        {'type': 'done', 'ok': true},
+      ]);
+      final batches = await collect('studio.build.events', events: 2);
+      final events = batches.expand((b) => b['events'] as List).cast<Map>().toList();
+      expect(events.first, {'type': 'gap', 'dropped': 1});
+      expect(events.last['type'], 'done');
     });
 
     test('service error becomes a stream error; cancel releases the connection', () async {

@@ -123,12 +123,14 @@ final class StudioServiceClient {
     Object? body,
     bool write = false,
     bool raw = false,
+    Set<String> verbatimKeys = const <String>{},
   }) async {
     await ensureRoots();
-    return _raw(method, url(segments, query), body, write, raw: raw);
+    return _raw(method, url(segments, query), body, write, raw: raw, verbatimKeys: verbatimKeys);
   }
 
-  Future<StudioHttpResult> _raw(String method, Uri uri, Object? body, bool write, {bool raw = false}) async {
+  Future<StudioHttpResult> _raw(String method, Uri uri, Object? body, bool write,
+      {bool raw = false, Set<String> verbatimKeys = const <String>{}}) async {
     var refreshed = false;
     while (true) {
       final token = write ? await _csrfToken(refresh: refreshed) : null;
@@ -138,17 +140,27 @@ final class StudioServiceClient {
         _csrf = null;
         continue;
       }
-      return _finish(response, raw: raw);
+      return _finish(response, raw: raw, verbatimKeys: verbatimKeys);
     }
   }
 
-  StudioHttpResult _finish(_Raw response, {bool raw = false}) {
+  StudioHttpResult _finish(_Raw response, {bool raw = false, Set<String> verbatimKeys = const <String>{}}) {
     final type = response.contentType;
     final isJson = type.contains('json') && !(raw && response.status >= 200 && response.status < 300);
     Object? json;
     if (isJson && response.bytes.isNotEmpty) {
       try {
-        json = scrubber.scrubJson(jsonDecode(utf8.decode(response.bytes)));
+        final decoded = jsonDecode(utf8.decode(response.bytes));
+        final ok = response.status >= 200 && response.status < 300;
+        if (ok && verbatimKeys.isNotEmpty && decoded is Map) {
+          // File payload fields stay byte-exact; everything else is scrubbed.
+          json = <String, Object?>{
+            for (final e in decoded.entries)
+              '${e.key}': verbatimKeys.contains(e.key) && e.value is String ? e.value : scrubber.scrubJson(e.value),
+          };
+        } else {
+          json = scrubber.scrubJson(decoded);
+        }
       } on FormatException {
         throw const PocketCapabilityException('invalid_response', 'service returned malformed JSON');
       }
@@ -256,6 +268,8 @@ final class StudioServiceClient {
                     } on FormatException {
                       // Ignore a malformed event; the stream continues.
                     }
+                  } else {
+                    controller.add(const <String, Object?>{'type': 'gap', 'dropped': 1});
                   }
                 }
               } else if (line.startsWith('data:')) {

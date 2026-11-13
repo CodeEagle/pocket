@@ -61,8 +61,11 @@ key exists right after startup"). Studio use: `studio/docs/ARCHITECTURE.md`, "Pr
   is per `(hostVersion, previewId)` and shared by whichever project was
   published last (Studio previews one project at a time).
 - **Hosting.** `readPublishedResponse` serves `/preview/pocket/<host>/<id>/preview/<artifact>`
-  next to `/test/...` and `/stable/...`, on the loopback editor and on the LAN
-  version backend (`update_endpoint.ts` accepts the `preview` prefix). Only the
+  next to `/test/...` and `/stable/...` on the loopback editor only. The LAN
+  version backend (`update_endpoint.ts`) does not accept the `preview` prefix, so
+  work-in-progress preview bytecode is never exposed to LAN peers (the Studio
+  host only uses loopback). The build counter is persisted before the slot
+  pointer files are swapped in, so a crash cannot reuse a build number. Only the
   public artifact set (`latest.json`, `signed-manifest.json`, `payload.json`,
   `host.json`, `blobs/`, `bootstrap/`) is reachable; nothing else.
 - **Key.** A dedicated Ed25519 key `keys/editor-preview-key.json`, generated like

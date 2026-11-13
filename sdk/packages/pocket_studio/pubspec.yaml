@@ -10,11 +10,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  crypto: ^3.0.6
   pocket_services:
     path: ../pocket_services
 
 dev_dependencies:
-  crypto: ^3.0.6
   flutter_lints: ^5.0.0
   flutter_test:
     sdk: flutter

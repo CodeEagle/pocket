@@ -547,3 +547,43 @@ test("SSE streams drop a slow consumer instead of buffering without bound", asyn
   for (;;) { const chunk = await reader.read(); if (chunk.done) break; frames += 1; }
   expect(frames).toBe(sent);
 });
+
+test("the editor workspace inside the project is never reachable through fs routes", async () => {
+  for (const name of [".pocket-editor", "custom-ws"]) {
+    const root = mkdtempSync(join(tmpdir(), "pocket-fs-inws-"));
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "pocket.json"), JSON.stringify({ app: { entry: "app.tsx" }, version: "1.0.0", build: 1 }));
+    writeFileSync(join(root, "editor.json"), JSON.stringify({ id: "inws-app", appId: "dev.pocket.inws", name: "inws", title: "inws", version: "1.0.0", build: 1, tickHz: 60, entry: "app.tsx", output: "app", framework: "solid" }));
+    writeFileSync(join(root, "manifest.json"), '{"capabilities":{"requires":[]}}');
+    writeFileSync(join(root, "app.tsx"), "export default 1;\n");
+    const ws = join(root, name);
+    mkdirSync(join(ws, "states"), { recursive: true });
+    const secretConfig = join(ws, "pocket-studio-host.config.json");
+    const secretState = join(ws, "states/x.json");
+    writeFileSync(secretConfig, '{"POCKET_STUDIO_BUN":"/bin/true"}\n');
+    writeFileSync(secretState, "{}\n");
+    const srv = await startEditor({ port: 0, workspace: ws, projectRoot: root, buildRunner: async () => { throw new Error("not used"); } });
+    try {
+      const b = `http://127.0.0.1:${srv.port}`;
+      const token = (await (await fetch(`${b}/health`)).json()).csrfToken;
+      const h = { "content-type": "application/json", "x-pocket-csrf": token };
+      const api = (path: string, method = "GET", body?: unknown) => fetch(`${b}/api/projects/inws-app${path}`, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
+      // Sanity: normal project files still work.
+      expect((await api("/files/app.tsx")).status).toBe(200);
+      for (const target of [`${name}/states/x.json`, `${name}/pocket-studio-host.config.json`]) {
+        expect((await api(`/files/${target}`)).status, `GET files ${target}`).toBe(400);
+        expect((await api(`/files/${target}`, "PUT", { content: "{\"evil\":1}" })).status, `PUT files ${target}`).toBe(400);
+        expect((await api(`/files/${target}`, "DELETE")).status, `DELETE files ${target}`).toBe(400);
+        expect((await api(`/chunks/${target}`)).status, `GET chunks ${target}`).toBe(400);
+        expect((await api(`/stat/${target}`)).status, `stat ${target}`).toBe(400);
+        expect((await api("/files-move", "POST", { from: "app.tsx", to: target })).status, `move to ${target}`).toBe(400);
+        expect((await api("/files-move", "POST", { from: target, to: "stolen.json" })).status, `move from ${target}`).toBe(400);
+        expect((await api("/uploads", "POST", { path: target, totalBytes: 2, sha256: sha("{}") })).status, `upload ${target}`).toBe(400);
+      }
+      expect((await api(`/folders`, "POST", { path: `${name}/states/new` })).status).toBe(400);
+      expect(readFileSync(secretConfig, "utf8")).toBe('{"POCKET_STUDIO_BUN":"/bin/true"}\n');
+      expect(readFileSync(secretState, "utf8")).toBe("{}\n");
+      expect(existsSync(join(root, "stolen.json"))).toBe(false);
+    } finally { await srv.stop(true); rmSync(root, { recursive: true, force: true }); }
+  }
+});

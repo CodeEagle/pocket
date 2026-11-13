@@ -67,7 +67,7 @@ PocketAppConfig studioPreviewChild(PocketStudioConfig config, {String? previewBo
             url: config.previewUpdateUrl,
             keyId: key.keyId,
             publicKey: key.publicKey,
-            namespace: 'studio-preview',
+            namespace: config.previewNamespace(key.publicKey),
             debugHttpHosts: const ['127.0.0.1'],
           ),
   );

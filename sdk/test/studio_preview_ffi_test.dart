@@ -29,6 +29,11 @@ void main() {
       : bun == null
       ? 'bun executable not found (set POCKET_BUN)'
       : false;
+  // POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure (a skip is not evidence).
+  final requireReal = Platform.environment['POCKET_REQUIRE_REAL'] == '1';
+  if (requireReal && skip != false) {
+    test('real preview prerequisites are present (POCKET_REQUIRE_REAL=1)', () => fail('$skip'));
+  }
   final savedHttpOverrides = HttpOverrides.current;
   HttpOverrides.global = null;
 

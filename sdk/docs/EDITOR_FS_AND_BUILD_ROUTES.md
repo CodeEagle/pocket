@@ -52,7 +52,7 @@ keeps using the old routes. All paths below are under `/api/projects/:id/`.
 | DELETE | `uploads/:uploadId` | `{uploadId, aborted:true}` | 404 unknown. |
 | GET | `watch` | SSE. First `{type:"ready", revision}`; then `{type:"change", path, kind, event:"change"\|"rename"}` and `{type:"revision", revision}`. | Max 16 concurrent watch streams server-wide (429); idle timeout disabled with `server.timeout(request, 0)`. Cross-origin guard and SSE backpressure apply (see below). |
 | POST | `build/cancel` | `{}` -> 200 `{cancelled:true, status}` once the build has really settled (waits up to 10 s). If it is still busy after the wait (a shared-cache bootstrap step cannot be interrupted, see Cancellation) the answer is 202 `{cancelled:false, pending:true, status}`; poll `status`/`build/events`. | 409 when no build is queued or running. |
-| GET | `build/events` | SSE. First `{type:"status", status}`; then `{type:"status", status}` on every saved state change, `{type:"log", line}` per log line, `{type:"done", ok, builtRevision, diagnostics}`. | Max 32 streams (429). Cross-origin guard and SSE backpressure apply. No timer: events are pushed from `pushLog` and `saveState`, which every mutation already calls. |
+| GET | `build/events` | SSE. First `{type:"status", status}` (with the log tail); then `{type:"status", status}` on every saved state change with `logs: []` (log lines already arrive as `log` events; this keeps events under the provider per-event cap), `{type:"log", line}` per log line, `{type:"done", ok, builtRevision, diagnostics}`. | Max 32 streams (429). Cross-origin guard and SSE backpressure apply. No timer: events are pushed from `pushLog` and `saveState`, which every mutation already calls. |
 
 Upload sessions live in memory (max 8 x 16 MiB), are bound to the project id (another project gets 404), expire
 after 10 minutes without activity (a per-session unref'd timeout reset on activity, not a polling timer), and are
@@ -111,6 +111,11 @@ Hardening added after the consolidated review:
 
 ### Request guards specific to the new routes
 
+- **Editor workspace guard.** When the editor workspace lives inside the project (the default `<project>/.pocket-editor`,
+  or a custom `--workspace` directory under it), `files` (GET/PUT/DELETE), `chunks`, `stat`, `folders`, `files-move`
+  (both ends) and `uploads` (path) fail 400 `path is inside the editor workspace`, checked lexically and via the
+  workspace realpath. `.pocket-editor` is also a protected directory name, and `chunks` rejects dot-prefixed segments
+  like the other routes. The workspace holds trusted host config, preview slots and build state.
 - **Cross-origin reads.** `GET watch`, `GET build/events`, `GET chunks/...` and `GET stat/...` answer 403 when an
   `Origin` header is present and is not the server's own origin (same comparison as the write guard, including
   `Origin: null`), or when `Sec-Fetch-Site` is `cross-site` or `same-site`. Header-less clients (the Pocket host,
@@ -136,7 +141,7 @@ cache). Their contents are intentionally unchanged. The Pocket Studio host provi
 
 | Code | Meaning |
 | --- | --- |
-| 400 | path policy, dot-prefixed segment, bad base64/JSON |
+| 400 | path policy, dot-prefixed segment, path inside the editor workspace, bad base64/JSON |
 | 403 | cross-origin/cross-site read, missing or wrong credential |
 | 404 | missing or unreportable path, unknown upload, project |
 | 409 | busy/conflict, non-contiguous chunk, no active build to cancel |

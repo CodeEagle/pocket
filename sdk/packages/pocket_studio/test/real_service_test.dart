@@ -19,6 +19,11 @@ void main() {
   final skip = File(bun).existsSync() && Directory(projectRoot).existsSync()
       ? false
       : 'bun or the sample project is not available';
+  // POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure (a skip is not evidence).
+  final requireReal = Platform.environment['POCKET_REQUIRE_REAL'] == '1';
+  if (requireReal && skip != false) {
+    test('real service prerequisites are present (POCKET_REQUIRE_REAL=1)', () => fail('$skip'));
+  }
 
   late Directory work;
   late PocketStudioConfig config;
@@ -103,6 +108,17 @@ void main() {
     expect(jsonEncode(tree), isNot(contains(projectRoot)));
   }, skip: skip);
 
+  test('file content round-trips byte-identical (verbatim content, no path scrubbing)', () async {
+    await call('studio.project.create', {'id': 'studio-verbatim', 'template': 'app'});
+    const content = "#!/usr/bin/env bun\nconst p='/tmp/x'; const t={a:/x/};\n-----BEGIN PRIVATE KEY-----\n";
+    await call('studio.fs.write', {'project': 'studio-verbatim', 'path': 'v.ts', 'content': content});
+    final read = await call('studio.fs.read', {'project': 'studio-verbatim', 'path': 'v.ts'});
+    expect(read['content'], content);
+    final chunk = await call('studio.fs.readChunk', {'project': 'studio-verbatim', 'path': 'v.ts', 'offset': 0});
+    expect(base64Decode(chunk['data'] as String), utf8.encode(content));
+    expect(chunk['sha256'], sha256.convert(utf8.encode(content)).toString());
+  }, skip: skip);
+
   test('chunked read of a large file verifies against the whole-file sha256', () async {
     final file = File('$projectRoot/app.tsx');
     final bytes = file.readAsBytesSync();
@@ -165,7 +181,8 @@ void main() {
   }, skip: skip, timeout: const Timeout(Duration(seconds: 60)));
 
   test('signed test publish through the provider: plan, publish, history, offline, artifacts, and no key material', () async {
-    await call('studio.build.start', {'project': 'studio-real'});
+    final started = await call('studio.build.start', {'project': 'studio-real'});
+    expect(started['revision'], isA<int>(), reason: 'build.start returns the flat status');
     Map status = {};
     for (var i = 0; i < 300; i++) {
       status = await call('studio.build.status', {'project': 'studio-real'});

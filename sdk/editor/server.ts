@@ -364,7 +364,7 @@ function pathFailure(message: string, status = 400): never {
 
 const editableFilePattern = /\.(?:ts|tsx|js|jsx|json|svg|css|md)$/i;
 const protectedFilePattern = /^(?:editor(?:-state)?|pocket|pocket\.system|pocket\.resources|host|payload|latest|signed-manifest|build|app\.bytecode|private|secret)\.json$|\.(?:pem|key|qjbc|pak|tar|gz)$/i;
-const protectedDirectoryNames = new Set(["assets", "builds", "updates", "keys", "node_modules", ".git", ".pocket-build"]);
+const protectedDirectoryNames = new Set(["assets", "builds", "updates", "keys", "node_modules", ".git", ".pocket-build", ".pocket-editor"]);
 // These directories are not consumer source inputs. In particular, a
 // package-manager SDK link under node_modules and a generated build cache may
 // legitimately point outside the project; neither is followed by the editor
@@ -1333,7 +1333,7 @@ function subscribeState(state: EditorState, listener: (event: StateBusEvent) => 
 async function saveState(workspace: Workspace, id: string, state: EditorState): Promise<void> {
   await mkdir(workspace.states, { recursive: true });
   await writeFile(join(workspace.states, `${id}.json`), JSON.stringify(state, null, 2) + "\n");
-  if (stateSubscribers.get(state)?.size) emitState(state, { type: "status", status: publicStatus(id, state) });
+  if (stateSubscribers.get(state)?.size) emitState(state, { type: "status", status: { ...publicStatus(id, state), logs: [] } });
 }
 
 function publicStatus(id: string, state: EditorState): EditorStatus {
@@ -4696,9 +4696,20 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             pushLog(state, `${message} (revision ${state.revision})`);
             await saveState(workspace, id, state);
           };
+          // The editor workspace (trusted host config, preview slots, build state) may live inside the
+          // project (default `<project>/.pocket-editor` or a custom --workspace); never expose it.
+          const rejectWorkspacePath = (relativePath: string): void => {
+            const root = projectDir(id);
+            if (isInside(workspace.root, root) || !isInside(root, workspace.root)) return;
+            const candidate = resolve(root, relativePath.replaceAll("\\", "/"));
+            let realWorkspace = resolve(workspace.root);
+            try { realWorkspace = realpathSync(workspace.root); } catch { /* not created yet */ }
+            if (isInside(workspace.root, candidate) || isInside(realWorkspace, candidate)) pathFailure("path is inside the editor workspace", 400);
+          };
           if (parts[3] === "stat" && method === "GET" && parts.length > 4) {
             const relativePath = parts.slice(4).join("/");
             rejectHiddenSegments(relativePath);
+            rejectWorkspacePath(relativePath);
             const statSegments = relativePath.replaceAll("\\", "/").split("/");
             let resolvedPath: string;
             let kind: "file" | "directory" = "directory";
@@ -4732,6 +4743,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           if (parts[3] === "files" && method === "DELETE" && parts.length > 4) {
             const relativePath = parts.slice(4).join("/");
             rejectHiddenSegments(relativePath);
+            rejectWorkspacePath(relativePath);
             const filePath = safeProjectFile(projectDir(id), relativePath, { mustExist: true });
             await unlink(filePath);
             await commitMutation(`file deleted: ${relativePath}`);
@@ -4745,6 +4757,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             if (body.overwrite !== undefined && typeof body.overwrite !== "boolean") throw new Error("overwrite must be a boolean");
             rejectHiddenSegments(from);
             rejectHiddenSegments(to);
+            rejectWorkspacePath(from);
+            rejectWorkspacePath(to);
             const source = safeProjectFile(projectDir(id), from, { mustExist: true });
             const target = safeProjectFile(projectDir(id), to);
             if (source === target) throw new Error("from and to are the same path");
@@ -4763,6 +4777,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             const body = method === "POST" ? await parseJsonBody(request) : {};
             const relativePath = method === "POST" ? asString(body.path, "path", 1024) : parts.slice(4).join("/");
             rejectHiddenSegments(relativePath);
+            rejectWorkspacePath(relativePath);
             const folderSegments = relativePath.replaceAll("\\", "/").split("/");
             // Generated/dependency trees are not source folders even where file policy allows the name.
             if (folderSegments.some((part) => ignoredProjectInputDirectories.has(part.toLowerCase()))) return failure("folder name is reserved", 400);
@@ -4781,6 +4796,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           }
           if (parts[3] === "chunks" && method === "GET" && parts.length > 4) {
             const relativePath = parts.slice(4).join("/");
+            rejectHiddenSegments(relativePath);
+            rejectWorkspacePath(relativePath);
             const filePath = safeProjectFile(projectDir(id), relativePath, { mustExist: true });
             const offset = parseNonNegativeInteger(url.searchParams.get("offset"), "offset", 0);
             const requested = parseNonNegativeInteger(url.searchParams.get("length"), "length", maxChunkBytes);
@@ -4810,6 +4827,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               const body = await parseJsonBody(request);
               const relativePath = asString(body.path, "path", 1024);
               rejectHiddenSegments(relativePath);
+              rejectWorkspacePath(relativePath);
               safeProjectFile(projectDir(id), relativePath);
               const totalBytes = parseNonNegativeInteger(body.totalBytes, "totalBytes");
               if (totalBytes > maxSourceBytes) return failure(`upload exceeds ${maxSourceBytes} bytes`, 413);
@@ -4955,6 +4973,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               return json({ files: await listEditableFiles(projectDir(id)), revision: state.revision });
             }
             const relativePath = parts.slice(4).join("/");
+            rejectWorkspacePath(relativePath);
             const filePath = safeProjectFile(projectDir(id), relativePath);
             if (method === "GET") {
               if (!existsSync(filePath)) return failure("file not found", 404);

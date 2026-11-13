@@ -28,4 +28,11 @@ void main() {
     File('${dir.path}/keys/editor-dev-key.json').writeAsStringSync('not json');
     expect(config.readUpdateKey(), isNull);
   });
+
+  test('preview namespace is per signing key', () {
+    final config = PocketStudioConfig(port: 8800);
+    expect(config.previewNamespace('KEY-A'), matches(RegExp(r'^studio-preview-[0-9a-f]{12}$')));
+    expect(config.previewNamespace('KEY-A'), config.previewNamespace('KEY-A'));
+    expect(config.previewNamespace('KEY-A'), isNot(config.previewNamespace('KEY-B')));
+  });
 }

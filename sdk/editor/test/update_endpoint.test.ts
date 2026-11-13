@@ -31,7 +31,8 @@ test("device update endpoint serves only read-only published paths and closes it
     const prefixed = await fetch(`${endpoint.origin}/test/pocket/3.2.0/com.example.notes/0.1.0/latest.json`);
     expect(await prefixed.text()).toBe("signed bytes");
     const preview = await fetch(`${endpoint.origin}/preview/pocket/3.2.0/dev.pocket.studio.preview/preview/latest.json`);
-    expect(await preview.text()).toBe("signed bytes");
+    // WIP preview bytecode is loopback-only: the LAN version backend must not expose it.
+    expect(preview.status).toBe(404);
     expect((await fetch(`${endpoint.origin}/preview/pocket/3.2.0/dev.pocket.studio.preview/preview/keys.json`)).status).toBe(404);
     const canonicalBundle = await fetch(`${endpoint.origin}/pocket/3.2.0/com.example.notes/stable/bundles/bundle-${"a".repeat(64)}.7z`);
     expect(await canonicalBundle.text()).toBe("signed bytes");
@@ -51,7 +52,6 @@ test("device update endpoint serves only read-only published paths and closes it
       "/pocket/3.2.0/com.example.notes/stable/latest.json",
       "/test/pocket/3.2.0/com.example.notes/latest.json",
       "/test/pocket/3.2.0/com.example.notes/0.1.0/latest.json",
-      "/preview/pocket/3.2.0/dev.pocket.studio.preview/preview/latest.json",
       "/pocket/3.2.0/com.example.notes/stable/bundles/bundle-" + "a".repeat(64) + ".7z",
       "/pocket/3.2.0/com.example.notes/stable/blobs/" + "b".repeat(64),
       "/updates/app/blobs/abcdef",

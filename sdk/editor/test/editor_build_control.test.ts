@@ -141,6 +141,8 @@ test("cancelling a running build aborts the runner and leaves a clear final stat
   expect(tail.some((event) => event.type === "log" && event.line === "build cancelled")).toBe(true);
   expect(tail.some((event) => event.type === "status" && event.status.busy === false && event.status.error === "build cancelled")).toBe(true);
   expect(tail.at(-1)).toMatchObject({ type: "done", ok: false, builtRevision: null, diagnostics: [] });
+  // Pushed status events never carry the log tail (logs arrive as `log` events; keeps SSE events small).
+  expect(tail.filter((event) => event.type === "status").every((event) => event.status.logs.length === 0)).toBe(true);
   // A second cancel has nothing to cancel; a later source edit clears the cancelled state.
   expect((await api(slowCtx, "slow-app/build/cancel", { method: "POST", json: {} })).status).toBe(409);
   await api(slowCtx, "slow-app/files/app.tsx", { method: "PUT", json: { content: "export default 1;\n" } });

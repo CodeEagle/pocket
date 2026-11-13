@@ -50,6 +50,7 @@ final class StudioCall {
     this.build, {
     this.stream = false,
     this.assets = false,
+    this.verbatimKeys = const <String>{},
   });
   final String name;
   final String permission;
@@ -59,6 +60,11 @@ final class StudioCall {
   final StudioRequestBuilder build;
   final bool stream;
   final bool assets;
+
+  /// Top-level string fields of a successful response that are file payloads: they are returned byte-exact
+  /// (never path-scrubbed), since rewriting them would corrupt file content or base64 checksums. Every other
+  /// field, error and stream event is still scrubbed.
+  final Set<String> verbatimKeys;
 }
 
 const PocketPluginSchema _s = PocketPluginSchema.string();
@@ -141,7 +147,8 @@ final List<StudioCall> studioCalls = <StudioCall>[
       _p(extra: {'assets': _b}), const {'project'},
       (p) => StudioRequest('GET', [..._project(p), 'files']), assets: true),
   StudioCall('studio.fs.read', PocketStudioPermissions.read, 'Read a small UTF-8 file',
-      _p(extra: {'path': _s}), const {'project', 'path'}, (p) => StudioRequest('GET', _file(p, 'files'))),
+      _p(extra: {'path': _s}), const {'project', 'path'}, (p) => StudioRequest('GET', _file(p, 'files')),
+      verbatimKeys: const {'content'}),
   StudioCall('studio.fs.write', PocketStudioPermissions.write, 'Write a small UTF-8 file',
       _p(extra: {'path': _s, 'content': _s}), const {'project', 'path', 'content'}, (p) {
     final content = p['content'];
@@ -179,7 +186,7 @@ final List<StudioCall> studioCalls = <StudioCall>[
       'offset': '$offset',
       'length': '${length > pocketStudioChunkBytes ? pocketStudioChunkBytes : length}',
     });
-  }),
+  }, verbatimKeys: const {'data'}),
   StudioCall('studio.fs.upload.begin', PocketStudioPermissions.write, 'Begin a chunked upload',
       _p(extra: {'path': _s, 'totalBytes': _i, 'sha256': _s}), const {'project', 'path', 'totalBytes', 'sha256'}, (p) {
     studioRelativePath(p['path']);
