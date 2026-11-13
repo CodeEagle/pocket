@@ -29,13 +29,13 @@ jobs:
       version: ${{ steps.metadata.outputs.version }}
       tag: ${{ steps.metadata.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         id: web-engine-cache
         with:
           path: sdk/.pocket-build/web-engine
           key: web-engine-rust1.98.1-bun1.3.9-${{ hashFiles('sdk/native/**', '!sdk/native/target/**', 'sdk/targets/**', 'sdk/scripts/build_web_engine.ts', 'sdk/scripts/build_wechat.ts', 'sdk/scripts/build_guest.ts', 'sdk/scripts/prepare_upstream.py', 'sdk/bun.lock') }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Validate release version
@@ -79,7 +79,7 @@ jobs:
         env:
           POCKET_WECHAT_LLVM_AR: /usr/bin/llvm-ar
         run: bun scripts/build_web_engine.ts --outdir=.pocket-build/web-engine
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pocket-web-engine
           path: sdk/.pocket-build/web-engine
@@ -97,14 +97,14 @@ jobs:
           - { runner: windows-2022, os: win32, arch: x64 }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: pocket-web-engine
           path: sdk/.pocket-build/web-engine
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -219,7 +219,7 @@ jobs:
         working-directory: sdk/.pocket-build/toolchain-package
         run: npm pack --ignore-scripts
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pocket-tools-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -239,14 +239,14 @@ jobs:
           - { runner: macos-15, platform: darwin-arm64 }
           - { runner: windows-2022, platform: win32-x64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: pocket-tools-${{ matrix.platform }}
           path: sdk/.pocket-build/downloaded
@@ -275,7 +275,7 @@ jobs:
             writeFileSync(`${file}.sha256`, `${hash}  ${file}\n`);
           }
           JS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pocket-sdk-release-${{ matrix.platform }}
           path: release/
@@ -292,11 +292,11 @@ jobs:
           - { runner: macos-15, os: darwin, arch: arm64 }
           - { runner: windows-2022, os: win32, arch: x64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: pocket-sdk-release-${{ matrix.os }}-${{ matrix.arch }}
           path: release
@@ -317,7 +317,7 @@ jobs:
         run: |
           logfile=.pocket-build/release-consumer/package/.pocket-build/editor-service-8791.log
           if [ -f "$logfile" ]; then cat "$logfile"; cp "$logfile" release/studio-${{ matrix.os }}-${{ matrix.arch }}.log; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: pocket-acceptance-${{ matrix.os }}-${{ matrix.arch }}
@@ -341,12 +341,12 @@ jobs:
       SDK_VERSION: ${{ needs.web-engine.outputs.version }}
       ALLOW_RELEASE_UPDATE: ${{ inputs.update_existing_release && '1' || '0' }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: pocket-sdk-release-*
           path: release
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: pocket-acceptance-*
           path: release
