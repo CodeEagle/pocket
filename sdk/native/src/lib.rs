@@ -12133,6 +12133,25 @@ mod smoke_tests {
 
     #[test]
     fn perf_sampling_gate_controls_frame_stage_timings() {
+        const ISOLATED_CHILD: &str = "POCKET_PERF_SAMPLING_TEST_CHILD";
+        if std::env::var_os(ISOLATED_CHILD).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("resolve native test executable"),
+            )
+            .args([
+                "--exact",
+                "smoke_tests::perf_sampling_gate_controls_frame_stage_timings",
+            ])
+            .env(ISOLATED_CHILD, "1")
+            .status()
+            .expect("run perf sampling assertions in an isolated process");
+            assert!(
+                status.success(),
+                "isolated perf sampling test failed: {status}"
+            );
+            return;
+        }
+
         let handle = pocket_create(120.0, 80.0);
         let source = CString::new(
             r#"
