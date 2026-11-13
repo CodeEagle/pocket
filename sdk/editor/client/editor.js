@@ -3687,10 +3687,11 @@ $("studio-upgrade-action")?.addEventListener("click", () => {
   void checkStudioUpgrade({ autoApply: true, forceApply });
 });
 
-// The runner owns the mobile device profile. Load it once before selecting a
-// project so both the Canvas presentation and the WeChat iframe use the same
-// logical screen and safe-area contract.
+// The runner owns the mobile device profile. Load it before selecting a
+// project so Canvas and WeChat keep the same logical screen and safe-area
+// contract. The Studio update check is independent of that device request.
 void loadPreviewDevice()
-  .then(() => Promise.all([loadProjects(), loadDevices(), checkStudioUpgrade({ autoApply: true })]))
-  .then(() => startPeriodicStudioUpgradeChecks())
+  .then(() => Promise.all([loadProjects(), loadDevices()]))
   .catch(showNotice);
+void checkStudioUpgrade({ autoApply: true })
+  .then(() => startPeriodicStudioUpgradeChecks());

@@ -1556,6 +1556,20 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
     const statusPollGate = new Promise<void>((resolve) => {
       releaseStatusPoll = resolve;
     });
+    let holdPreviewDevice = false;
+    let previewDeviceHoldObserved = false;
+    let markPreviewDeviceHeld = () => {};
+    let releasePreviewDevice = () => {};
+    const previewDeviceHeld = new Promise<void>((resolve) => {
+      markPreviewDeviceHeld = resolve;
+    });
+    const previewDeviceGate = new Promise<void>((resolve) => {
+      releasePreviewDevice = resolve;
+    });
+    const browserDiagnostics: string[] = [];
+    const recordBrowserDiagnostic = (message: string): void => {
+      if (browserDiagnostics.length < 64) browserDiagnostics.push(message.slice(0, 600));
+    };
     console.info(`[upgrade lifecycle] launching Chromium on ${PLATFORM}, runner ${Bun.version}, SDK Bun ${SDK_BUN}`);
     const browser = await chromium.launch({ headless: true, timeout: 15_000 });
     console.info("[upgrade lifecycle] Chromium ready");
@@ -1672,14 +1686,36 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       const page = await browser.newPage();
       let mainFrameNavigations = 0;
       let upgradeCheckPosts = 0;
-      page.on("pageerror", (error) => console.error("[upgrade lifecycle pageerror]", error));
+      page.on("pageerror", (error) => recordBrowserDiagnostic(`[pageerror] ${error.message}`));
+      page.on("requestfailed", (request) => {
+        const url = new URL(request.url());
+        recordBrowserDiagnostic(`[requestfailed] ${request.method()} ${url.pathname} ${request.failure()?.errorText || "unknown"}`);
+      });
       page.on("response", (response) => {
-        if (new URL(response.url()).pathname.startsWith("/api/studio/upgrade")) {
-          console.info(`[upgrade lifecycle API] ${response.status()} ${response.request().method()} ${new URL(response.url()).pathname}`);
+        const url = new URL(response.url());
+        if (url.pathname === "/api/preview/device" || url.pathname.startsWith("/api/studio/upgrade")) {
+          recordBrowserDiagnostic(`[response] ${response.status()} ${response.request().method()} ${url.pathname}`);
         }
       });
       page.on("framenavigated", (frame) => {
-        if (frame === page.mainFrame()) mainFrameNavigations += 1;
+        if (frame === page.mainFrame()) {
+          mainFrameNavigations += 1;
+          recordBrowserDiagnostic(`[navigation] ${new URL(frame.url()).pathname || "/"}`);
+        }
+      });
+
+      await page.route("**/api/preview/device", async (route) => {
+        if (!holdPreviewDevice) {
+          await route.continue();
+          return;
+        }
+        recordBrowserDiagnostic("[held] GET /api/preview/device");
+        if (!previewDeviceHoldObserved) {
+          previewDeviceHoldObserved = true;
+          markPreviewDeviceHeld();
+        }
+        await previewDeviceGate;
+        await route.continue();
       });
 
       // Block automatic initial apply via dirty draft first to verify dirty deferral in the browser
@@ -1821,9 +1857,24 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       await new Promise((resolve) => setTimeout(resolve, 350));
       expect(upgradeCheckPosts).toBe(streamingCheckCount);
 
+      holdPreviewDevice = true;
       const upgradeNavigation = page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30_000 });
       releaseArchiveStream();
       await upgradeNavigation;
+      let previewDeviceHoldTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          previewDeviceHeld,
+          new Promise<never>((_resolve, reject) => {
+            previewDeviceHoldTimer = setTimeout(
+              () => reject(new Error("preview device request was not held after upgrade navigation")),
+              5_000,
+            );
+          }),
+        ]);
+      } finally {
+        if (previewDeviceHoldTimer) clearTimeout(previewDeviceHoldTimer);
+      }
 
       await page.waitForFunction(
         () => {
@@ -1832,8 +1883,9 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
           return v.includes("v0.1.11") && s.includes("已是最新稳定版");
         },
         undefined,
-        { timeout: 15_000 },
+        { timeout: 10_000 },
       );
+      releasePreviewDevice();
 
       const upgradedHealth = (await (await fetch(`http://127.0.0.1:${testPort}/health`)).json()) as {
         ok: boolean;
@@ -1872,9 +1924,13 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(readFileSync(nestedCustomPackage, "utf8")).toBe("export const custom = 42;\n");
       expect(readFileSync(join(configuredProjectRoot, "app.tsx"), "utf8")).toContain("unsaved user draft");
     } catch (error) {
+      if (browserDiagnostics.length) {
+        console.error(`[upgrade lifecycle] browser URL/status diagnostics:\n${browserDiagnostics.join("\n")}`);
+      }
       await reportUpgradeLifecycleFailure(standaloneRoot, browser);
       throw error;
     } finally {
+      releasePreviewDevice();
       releaseStatusPoll();
       releaseArchiveStream();
       if (archiveServer) await new Promise<void>((resolve) => archiveServer!.close(() => resolve()));
