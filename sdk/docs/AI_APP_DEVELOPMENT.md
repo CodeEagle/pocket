@@ -202,11 +202,11 @@ export function NotesPage() {
 
 ### 游戏视口与安全区
 
-游戏场景的视觉层与交互层使用不同边界：背景、视频、氛围层、转场和遮罩绘制到完整 viewport，不能继承控件的 safe-area clip；按钮、对白、菜单及场景命中目标使用 `pageInsets` 形成的一份安全框。自定义游戏复用已有 `display.viewport` / `pageInsets` 几何原语，不另加 Dart `SafeArea`、逐控件重复 inset 或第二份布局/相机状态。如有分层和 camera，应复用同一 pose，并明确视觉与命中坐标的映射；具体相机原点由游戏设计决定。
+游戏场景的视觉层与交互层使用不同边界：背景、视频、氛围层、转场和遮罩绘制到完整 viewport，不能继承控件的 safe-area clip；按钮、对白、菜单及场景命中目标使用 `pageInsets` 形成的一份安全框。独立游戏根视图使用 `SafeAreaScaffold` 的 `background` slot 放置全 canvas 视觉，再把操作内容放在 `children` 或 `appBar`；slot 画在 canvas 背景之上、安全内容之前，不额外消费 safe insets。嵌套 `MobileScaffold` 会把同一 slot 画在当前 canvas 中，`edges="none"` 不会再加 inset。自定义游戏复用已有 `display.viewport` / `pageInsets` 几何原语，不另加 Dart `SafeArea`、逐控件重复 inset 或第二份布局/相机状态。如有分层和 camera，应复用同一 pose，并明确视觉与命中坐标的映射；具体相机原点由游戏设计决定。
 
 直接使用 `NovelView` 时由其内置视口布局保证场景视觉全屏、交互内容安全；自定义游戏必须自己遵守上述边界。详细证据与当前实现记录见 [`VISUAL_NOVEL_MOBILE_SAFE_AREA.md`](VISUAL_NOVEL_MOBILE_SAFE_AREA.md)。
 
-分层后，位于可点击场景上方的纯布局容器应使用现有 `hitPass: 1` 让自身空白区域透传命中，子控件仍正常响应。视觉透明不等于命中透明；菜单遮罩等有意阻断输入的区域须保留阻断行为。
+`background` slot 的全 canvas 容器使用现有 `hitPass: 1`，因此该容器自身不认领命中。Pocket 的 `hitPass` 是 self-only：slot 的后代仍按各自节点参与 hit walk，所以 background 必须保持纯视觉，不放 `Focusable`、按钮或手势控制；会覆盖 safe 控件区域的装饰 `View` 也应设置 `style={{ hitPass: 1 }}`。安全区内的操作节点作为后续兄弟绘制，继续用原 `Focusable` 接收输入。视觉透明不等于命中透明；菜单遮罩等有意阻断输入的区域须保留阻断行为。绕过 Scaffold 直接使用 raw `View` 时，调用方必须自行负责全屏视觉和安全内容布局。
 
 ## 6. HostBridge 与能力声明
 

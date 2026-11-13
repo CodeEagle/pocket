@@ -64,6 +64,8 @@ export interface SafeAreaScaffoldProps {
   children?: JSX.Element;
   appBar?: SafeAreaSlot;
   bottomBar?: SafeAreaSlot;
+  /** Visual layer painted across this scaffold canvas before its safe content. */
+  background?: SafeAreaSlot;
   /** Full-viewport canvas class; the background must remain edge-to-edge. */
   class?: string;
   /** Insets to consume; `all` is for an independent guest, `top` for a root shell. */
@@ -263,7 +265,15 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
     typeof slot === "function" ? slot() : slot;
   const resolvedChildren = resolveChildren(() => resolveSlot(props.children));
   const resolvedBottomBar = resolveChildren(() => resolveSlot(props.bottomBar));
+  const resolvedBackground = resolveChildren(() => resolveSlot(props.background));
   const bottomBar = resolvedBottomBar();
+  const hasBackground = props.background !== undefined && props.background !== null;
+  const backgroundLayer = () => hasBackground ? (
+    <View
+      class="absolute inset-0 w-full h-full"
+      style={{ posType: 1, insetT: 0, insetR: 0, insetB: 0, insetL: 0, hitPass: 1 }}
+    >{resolvedBackground()}</View>
+  ) : null;
   const hasAppBar = props.appBar !== undefined && props.appBar !== null;
   const hasBottomBar = bottomBar !== undefined && bottomBar !== null;
   const intrinsic = props.edges === "none";
@@ -346,6 +356,7 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
     return (
       <View class="flex-col w-full" style={{ grow: 1 }}>
         <View class={canvasClass()} style={{ grow: 1 }}>
+          {backgroundLayer()}
           {hasAppBar ? resolveSlot(props.appBar) : null}
           {resolvedChildren()}
           {hasBottomBar ? bottomBar : null}
@@ -364,6 +375,7 @@ function SafeAreaScaffoldBody(props: SafeAreaScaffoldProps & {
           paddingR: bodyRightInset(),
         }}
       >
+        {backgroundLayer()}
         {hasAppBar ? (
           <ContourConsumedContext.Provider value={() => true}>
             <View style={{

@@ -709,6 +709,7 @@ export function MobileScaffold(props: {
   children?: JSX.Element;
   appBar?: SafeAreaSlot;
   bottomBar?: SafeAreaSlot;
+  background?: SafeAreaSlot;
   class?: string;
   /**
    * Nested showcase pages already sit below the root Screen's safe shell, so
@@ -733,6 +734,7 @@ export function MobileScaffold(props: {
       reservedActions={props.reservedActions}
       appBar={props.appBar}
       bottomBar={props.bottomBar}
+      background={props.background}
     >
       {props.children}
     </SafeAreaScaffold>

@@ -4,6 +4,8 @@
 
 扩展游戏时遵循“场景视觉全屏、交互单次 safe”规则：`NovelView` 内置此保证，自定义游戏需自行遵守。规则与验收要求见 SDK 根目录 `docs/AI_APP_DEVELOPMENT.md`（“游戏视口与安全区”）及 `docs/VISUAL_NOVEL_MOBILE_SAFE_AREA.md`。星尘捕手当前只包含 `View` 图形场景，不代表已有视频、氛围媒体或转场实现。
 
+模板根使用 `SafeAreaScaffold`：把全屏装饰放在 `background` slot，把 HUD、按钮和可点击目标放在安全内容中。`background` 不增加 safe insets；它的容器本身透传命中，但后代仍按普通 hit-test 工作，因此装饰视图需使用 `style={{ hitPass: 1 }}`，不能在 slot 内放按钮或手势控件。HUD 通过 `appBar`/`MobileAppBar` 与 `reservedActions="mini-app"` 为宿主关闭控件留出空间。短横屏不再强制 240px 场景高度，按钮和星核会根据安全字段可用尺寸布局。
+
 ## 网络与游戏的业务 Worker（AI 开发规则）
 
 - 首次加入官方 `net.http` 网络功能时，AI 自动补齐 `worker.ts`、`pocket.json` 的 `domains.worker`、HTTP node/channels，以及 `runtime.worker` / `net.http` 声明。请求、流式接收和解析走官方 Worker IO，UI 通过 channel 接收进度和结果。

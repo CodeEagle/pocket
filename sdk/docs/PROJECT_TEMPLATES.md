@@ -85,7 +85,9 @@ App 模板不自动启用相机、蓝牙、网络或其他原生能力。按需�
 
 ## Game 模板
 
-来源文件是 [`templates/game/app.tsx`](../templates/game/app.tsx)。它是一个可直接运行的图形化“星尘捕手”小游戏：深色星空场景、漂移星核、顶部 HUD、30 秒倒计时和命中计分。星核的可点击区域固定为 80 像素，等待点击时只做小幅漂移，命中后才换位置并显示粒子爆发和 `+1` 反馈；开始、暂停/继续、重新开始和结束后的再来一局都在游戏场景内完成。画面和交互由 JS 组合，避免把游戏退化成 App 模板式的说明卡片和表单页。
+来源文件是 [`templates/game/app.tsx`](../templates/game/app.tsx)。它是一个可直接运行的图形化“星尘捕手”小游戏：深色星空场景、漂移星核、顶部 HUD、30 秒倒计时和命中计分。星核通常为 80 像素；视口变矮时命中区会缩到字段可用高度以内，等待点击时只做小幅漂移，命中后才换位置并显示粒子爆发和 `+1` 反馈；开始、暂停/继续、重新开始和结束后的再来一局都在游戏场景内完成。画面和交互由 JS 组合，避免把游戏退化成 App 模板式的说明卡片和表单页。
+
+模板根使用 `SafeAreaScaffold`：星星和行星通过 `background` slot 绘制到完整 viewport，HUD、按钮、可点击场景字段和底部状态文字留在安全内容区域。HUD 复用 `appBar` 与 `MobileAppBar`，`reservedActions="mini-app"` 为宿主关闭控件保留右侧空间。游戏场景不再通过安全 pane 的 `marginT` 缩小背景，也不把场景目标放进全屏装饰层。
 
 Game 的状态（`phase`、`score`、`remaining`、`target`、动画进度和命中反馈）全部由 JS 保存；`remaining` 是唯一的时间信号，显示值直接由它计算，不再维护冗余的 `seconds` 状态。计时使用 pinned PocketJS 的 `onFrame`、`simulationHz()` 和虚拟帧，不使用浏览器 `setInterval`、Dart 状态或持续后台轮询。输入使用官方 `Focusable`；顶部 HUD 的暂停入口和场景内的开始、继续、重新开始入口共享同一套 phase 状态，目标移动、倒计时和粒子反馈只在 `playing` 阶段运行，暂停时不会偷偷消耗时间。
 
@@ -93,7 +95,7 @@ Game 的状态（`phase`、`score`、`remaining`、`target`、动画进度和命
 
 ### 游戏画面与安全区
 
-游戏扩展遵循“场景视觉全屏、交互单次 safe”规则：`NovelView` 内置此保证，自定义游戏需自行遵守；完整规则与验收要求见 [AI 应用开发指南的游戏视口与安全区](AI_APP_DEVELOPMENT.md#游戏视口与安全区) 及 [详细证据](VISUAL_NOVEL_MOBILE_SAFE_AREA.md)。星尘捕手目前只展示 `View` 图形场景与 `Focusable` 输入，不包含视频、氛围媒体或场景转场等完整多媒体实现。
+游戏扩展遵循“场景视觉全屏、交互单次 safe”规则：`NovelView` 内置此保证，自定义游戏可通过同一 `SafeAreaScaffold.background` slot 画完整 canvas，并将按钮和场景 hit target 留在 `children`/`appBar` 安全内容内。slot 的 `hitPass` 仅作用于容器自身，后代仍参加普通 hit walk；slot 中不得放交互控件，会压住控制的装饰 `View` 应显式设置 `style={{ hitPass: 1 }}`。嵌套 `MobileScaffold` 转发该 slot 到当前 canvas，`edges="none"` 不重复消费 insets。完整规则与限制见 [AI 应用开发指南的游戏视口与安全区](AI_APP_DEVELOPMENT.md#游戏视口与安全区) 及 [详细证据](VISUAL_NOVEL_MOBILE_SAFE_AREA.md)。星尘捕手目前只展示 `View` 图形场景与 `Focusable` 输入，不包含视频、氛围媒体或场景转场等完整多媒体实现。
 
 ## 构建和 Preview
 
@@ -144,3 +146,15 @@ Studio 浏览器交互也已执行：从左上角 **新建项目** 分别创建 
 ### 点击可用性修正（2026-11-06）
 
 真实浏览器检查确认开始、暂停和鼠标按压能进入 JS；旧版星核每 1.2 秒自动瞬移，玩家瞄准后输入到达时可能已经点在空白处。消融自动换位计时器 `moveElapsed`，只在命中时更换目标位置，保留小幅连续漂移及 80 像素命中区。回归增加真实按压时长（120/300 ms）和等待 1.4 秒后目标仍在原命中范围内的验证；旧版在目标稳定性断言失败；修复后完整 native Preview 验收通过，包含计分、粒子、空白不计分、正常按压、暂停/恢复、重开和 30 秒结束。已同步修复当前 Studio 的 `my-pocket-game2` 工程并重新构建；系统 Chrome 中等待后使用 300 ms / 180 ms 真实鼠标按压，连续命中从 0 分增加到 2 分。
+
+### Game 全视口背景与短横屏 safe 内容（2026-11-13）
+
+实现前重新检查了保留父项目（排除 `pocket_host/`）。`mini_apps/app_game_detail/main.js` 保留 VSync 更新、输入和计分的产品行为，但没有可迁移的全屏背景/安全内容分层组件；旧 `Scene`、Rapier 和 BLE API 仍不属于当前 SDK 公共契约。必要适配是扩展现有 `SafeAreaScaffold` 的单一 `background` slot，并让 `MobileScaffold` 透传该 slot。没有增加 Flutter/Dart safe-area、第二层完整屏幕 wrapper 或单独游戏布局状态。
+
+Safe-area scaffold 继续用原 canvas class 绘制背景底色，之后绘制 `background` slot，再画 `appBar`/`children`。slot 覆盖当前 scaffold canvas，不消费任何 inset；根 Game canvas 是整个 viewport，嵌套 `edges="none"` 则是当前嵌套 canvas。slot 的 `hitPass:1` 只让其根容器自身透传，后代仍参加普通 hit walk；因此它只能放视觉，装饰 `View` 使用 `style={{ hitPass: 1 }}`，交互控件留在后续 safe 内容。现有没有 background slot 的调用路径保持原结构与颜色。
+
+Game 模板把星星/行星移到该背景层，把 HUD 改为 `SafeAreaScaffold.appBar` 中的 `MobileAppBar`，并复用 `reservedActions="mini-app"` 预留宿主关闭控件。场景目标和开场/暂停操作仍由原 `Focusable`、JS 状态和 `onFrame` 管理；场景高度按 safe pane 与 HUD/footer 计算，去掉原先强制 `Math.max(240, ...)` 的最小高度。星核通常 80px，短视口可按字段尺寸缩小；菜单图标和操作按钮也随字段高度收缩，重开按钮有明确底色用于量测真实 hit bounds。
+
+2026-11-13 执行 `editor/test/project_templates_live_probe.ts`，用 pinned `buildGuest` 产物和 native Preview 输入验收 App 与 Game。Game 在 390×844（top 44、bottom 80）检查完整 canvas 底色、unsafe top/bottom 的星点绘制顺序及后续不透明覆盖；ready 标题、描述、主按钮和 app bar 文本 bounds 均在 safe 区，点击开始进入游戏。随后同一 Guest resize 到 844×320（left/right 44、top 12、bottom 26），暂停面板及重开按钮 bounds 仍在安全字段，`暂停` 位于 host close 的 60px 保留区左侧；旋转后点击星核仍让计分从 2 到 3。重开按钮在 hitbox 下沿外一像素不会触发，在内一像素会实际重开；之后继续检查空白不计分、暂停冻结、恢复、结束和再来一局。native probe 不输出 PNG，本次记录的是实际 DrawOps 和输入边界，不声称有截图像素证据。
+
+同日执行 `packages/pocket_ui/test/safe_area_background_native.test.ts`：嵌套 `MobileScaffold` 的 `edges="none"` background bounds 维持在外层已安全 canvas `(y=24,h=598)`，一次 safe-area inset 后的 Focusable 按钮穿过装饰背景实际点击成功（1/1）。`packages/pocket_ui/test/miniapp_presets_presentation.test.ts` 的现有 scaffold/host presentation input suite 也通过。
