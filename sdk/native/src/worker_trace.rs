@@ -788,11 +788,16 @@ impl WorkerTrace {
         &self,
         kind: &str,
         timeout: Duration,
+        predicate: impl Fn(&WorkerTraceEvent) -> bool,
     ) -> Result<WorkerTraceEvent, String> {
         let deadline = Instant::now() + timeout;
         let mut state = self.lock();
         loop {
-            if let Some(event) = state.batch_events.iter().find(|event| event.kind == kind) {
+            if let Some(event) = state
+                .batch_events
+                .iter()
+                .find(|event| event.kind == kind && predicate(event))
+            {
                 return Ok(event.clone());
             }
             if let Some(incomplete) = &state.incomplete {
@@ -809,7 +814,10 @@ impl WorkerTrace {
             state = next;
             if result.timed_out()
                 && Instant::now() >= deadline
-                && !state.batch_events.iter().any(|event| event.kind == kind)
+                && !state
+                    .batch_events
+                    .iter()
+                    .any(|event| event.kind == kind && predicate(event))
             {
                 return Err(format!("timed out waiting for recorded {kind}"));
             }
