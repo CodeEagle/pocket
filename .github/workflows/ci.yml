@@ -154,6 +154,15 @@ jobs:
         with:
           bun-version: 1.3.9
 
+      - name: Install pinned compiler patch dependency
+        run: choco install patch -y --no-progress
+
+      - name: Prepare pinned compiler sources for Studio imports
+        shell: bash
+        run: |
+          python scripts/prepare_upstream.py
+          bun install --frozen-lockfile --cwd .cache/pocketjs
+
       - name: Install SDK dependencies without install scripts
         run: npm install --ignore-scripts --legacy-peer-deps --no-audit --no-fund
 
