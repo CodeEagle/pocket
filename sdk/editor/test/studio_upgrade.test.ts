@@ -322,7 +322,11 @@ function runFixtureGit(repository: string, ...args: string[]): string {
 function createSourceManagerCheckout(
   currentVersion: string,
   targetVersion: string,
-  options: { rollbackIgnoredPath?: "file" | "ancestor" } = {},
+  options: {
+    rollbackIgnoredPath?: "file" | "ancestor";
+    bunLockText?: string;
+    targetBunLockText?: string;
+  } = {},
 ) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "pocket-source-upgrade-manager-"));
   const repository = join(fixtureRoot, "repo");
@@ -346,6 +350,10 @@ function createSourceManagerCheckout(
   const writeVersion = (version: string) => {
     writeFileSync(join(sdkRoot, "package.json"), `${JSON.stringify(packageData(version), null, 2)}\n`);
     writeFileSync(join(sdkRoot, "package-lock.json"), `${JSON.stringify(packageLock(version), null, 2)}\n`);
+    const bunLockText = version === currentVersion
+      ? options.bunLockText
+      : options.targetBunLockText ?? options.bunLockText;
+    if (bunLockText !== undefined) writeFileSync(join(sdkRoot, "bun.lock"), bunLockText);
     writeFileSync(join(sdkRoot, "scripts", "prebuilt_tools.mjs"), `export const SDK_VERSION = '${version}';\nexport const UPSTREAM_REVISION = '${UPSTREAM_REVISION}';\nexport const BYTECODE_ABI = '${BYTECODE_ABI}';\n`);
   };
 
@@ -582,6 +590,34 @@ describe("Studio built-in self-upgrade unit & security gates", () => {
       expect(handoffs).toHaveLength(0);
     } finally {
       source.close();
+    }
+  });
+
+  test("source dependency gate compares Bun JSONC lock text without rejecting unchanged locks", () => {
+    const bunLockText = readFileSync(resolve(import.meta.dir, "../../bun.lock"), "utf8");
+    expect(() => JSON.parse(bunLockText)).toThrow();
+
+    const unchanged = createSourceManagerCheckout("0.1.15", "0.1.16", { bunLockText });
+    try {
+      const result = inspectSourceUpdate(unchanged.sdkRoot, unchanged.target);
+      expect(result.canApply).toBe(true);
+      expect(result.deferredReason).toBeNull();
+    } finally {
+      unchanged.close();
+    }
+
+    const changedBunLockText = bunLockText.replace('"bun": "1.3.9"', '"bun": "1.3.10"');
+    expect(changedBunLockText).not.toBe(bunLockText);
+    const changed = createSourceManagerCheckout("0.1.15", "0.1.16", {
+      bunLockText,
+      targetBunLockText: changedBunLockText,
+    });
+    try {
+      const result = inspectSourceUpdate(changed.sdkRoot, changed.target);
+      expect(result.canApply).toBe(false);
+      expect(result.deferredReason).toMatch(/改变了 SDK 依赖声明或锁文件/);
+    } finally {
+      changed.close();
     }
   });
 

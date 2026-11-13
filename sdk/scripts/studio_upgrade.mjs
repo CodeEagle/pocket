@@ -217,10 +217,16 @@ function stableJson(value) {
   return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableJson(value[key])]));
 }
 
-function gitJsonAt(repoRoot, commit, path) {
+function gitTextAt(repoRoot, commit, path) {
   const result = runGitSync(repoRoot, ['show', `${commit}:${path}`], { allowFailure: true });
   if (result.status !== 0) return null;
-  try { return JSON.parse(result.stdout); }
+  return result.stdout;
+}
+
+function gitJsonAt(repoRoot, commit, path) {
+  const source = gitTextAt(repoRoot, commit, path);
+  if (source === null) return null;
+  try { return JSON.parse(source); }
   catch { throw new Error(`Git ${path} 不是有效 JSON`); }
 }
 
@@ -279,6 +285,8 @@ function dependencyFingerprint(packageJson, lockFiles) {
     .filter(field => Object.hasOwn(packageJson, field))
     .map(field => [field, packageJson[field]]));
   const locks = Object.fromEntries(Object.entries(lockFiles).map(([name, lock]) => {
+    // Bun's lockfile is JSONC; preserve its source text as a conservative fingerprint.
+    if (typeof lock === 'string') return [name, lock];
     if (!lock) return [name, null];
     const normalizedLock = structuredClone(lock);
     // The root package version changes on every SDK release; dependency graph changes do not.
@@ -318,8 +326,9 @@ export function inspectSourceUpdate(sdkRoot, targetCommit) {
     const currentLocks = {};
     const targetLocks = {};
     for (const name of lockNames) {
-      currentLocks[name] = gitJsonAt(before.repoRoot, before.head, `${sdkRel}/${name}`);
-      targetLocks[name] = gitJsonAt(before.repoRoot, target, `${sdkRel}/${name}`);
+      const readLock = name === 'bun.lock' ? gitTextAt : gitJsonAt;
+      currentLocks[name] = readLock(before.repoRoot, before.head, `${sdkRel}/${name}`);
+      targetLocks[name] = readLock(before.repoRoot, target, `${sdkRel}/${name}`);
     }
     if (dependencyFingerprint(currentPackage, currentLocks) !== dependencyFingerprint(targetPackage, targetLocks)) {
       return reject('此版本改变了 SDK 依赖声明或锁文件；请手动更新源码并安装锁定依赖后再使用自动更新');
