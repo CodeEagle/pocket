@@ -53,6 +53,8 @@ final class PocketStudioService {
       project,
       '--port=${config.port}',
       '--update-host-version=${config.hostVersion}',
+      '--provision-update-key',
+      for (final root in config.extraProjectRoots) '--extra-project-root=$root',
       if (config.effectiveWorkspace != null) '--workspace=${config.effectiveWorkspace}',
     ];
     try {

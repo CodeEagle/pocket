@@ -1,4 +1,7 @@
-# 本地 Pocket Studio
+# 本地 Pocket Studio（网页版，legacy）
+
+> **状态：网页 Studio 已进入 legacy。** Pocket Studio（`studio/`，TSX guest 运行在薄 Flutter macOS 宿主里，经 `bun pocket.ts editor --pocket [<项目>]` 启动）覆盖项目、源码编辑、构建、预览、发布与版本，并且能打开、构建、发布并通过 OTA 更新自己（见 [`studio/docs/ARCHITECTURE.md`](../../studio/docs/ARCHITECTURE.md)）。本页描述的网页 Studio 仍是同一个后端服务，**对 Pocket Studio 已覆盖的功能为 legacy**；视觉小说编辑器、微信预览、Noble 蓝牙和 Codex 仍只在网页 Studio 提供（负责人决定，不删除）。`--pocket` 在 macOS 验收通过后才会成为 `bun pocket.ts editor` 的默认；在此之前不带 `--pocket` 的 `editor` 仍启动网页 Studio。非 macOS 平台使用 `--pocket` 会报错并提示使用网页 Studio。
+
 
 Studio 编辑原始 JS/TS 项目，使用 SDK 已有的 `buildGuest` 构建 QuickJS 字节码，提供网页交互预览和 Flutter 设备部署。默认页面仅显示预览、测试包与折叠高级设置，Copy preview link 供 Codex 浏览器直接访问。内置聊天已移除，详见 [预览页说明](EDITOR_PREVIEW_PAGE.md)。业务页面仍属于 JS；这次没有增加 Dart 页面或第二套布局引擎。
 

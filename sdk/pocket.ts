@@ -10,6 +10,7 @@
  *   bun pocket.ts init <directory> [--sdk-root=/path/to/pocket/sdk]
  *   bun pocket.ts build <directory> [--out=/path/to/output]
  *   bun pocket.ts editor <directory> [--port=8791]
+ *   bun pocket.ts editor --pocket [<directory>] [--port=8795]   (macOS Pocket Studio host)
  */
 
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -1017,12 +1018,13 @@ export async function buildProject(directory: string, options: { outDir?: string
   }
 }
 
-async function runEditor(directory: string, options: { port?: number; workspace?: string; flutterRoot?: string; updateHost?: string; updatePort?: number; updateHostVersion?: string }): Promise<void> {
+async function runEditor(directory: string, options: { port?: number; workspace?: string; flutterRoot?: string; updateHost?: string; updatePort?: number; updateHostVersion?: string; extraProjectRoots?: string[]; provisionUpdateKey?: boolean }): Promise<void> {
   const project = resolve(directory);
   if (!existsSync(join(project, "pocket.json"))) fail(`not an initialized PocketJS project: ${project}`);
   const { startEditor } = await import("./editor/server.ts");
   const server = await startEditor({ projectRoot: project, flutterRoot: options.flutterRoot, workspace: options.workspace ?? join(project, ".pocket-editor"), port: options.port,
-    updateHost: options.updateHost, updatePort: options.updatePort, updateHostVersion: options.updateHostVersion });
+    updateHost: options.updateHost, updatePort: options.updatePort, updateHostVersion: options.updateHostVersion,
+    extraProjectRoots: options.extraProjectRoots, provisionUpdateKey: options.provisionUpdateKey });
   console.log(`Pocket Studio listening at http://${server.hostname}:${server.port}`);
   console.log(`project: ${project}`);
   await new Promise<void>((resolveExit) => {
@@ -1044,8 +1046,51 @@ export async function exportPluginTypes(inputPath: string, outputPath: string): 
   console.log(JSON.stringify({ output, capabilities: generated.includedCapabilities, unavailable: generated.unavailableCapabilities }, null, 2));
 }
 
+export interface EditorCliOptions {
+  directory?: string;
+  pocket: boolean;
+  port?: number;
+  workspace?: string;
+  flutterRoot?: string;
+  updateHost?: string;
+  updatePort?: number;
+  updateHostVersion?: string;
+  extraProjectRoots: string[];
+  provisionUpdateKey: boolean;
+}
+
+/** `editor` argument handling. `--pocket` makes the project optional; the launcher decides the default. */
+export function parseEditorArgs(args: string[]): EditorCliOptions {
+  const rest = [...args];
+  const pocket = takeBooleanFlag(rest, "pocket");
+  const portValue = takeFlag(rest, "port");
+  const workspace = takeFlag(rest, "workspace");
+  const flutterRoot = takeFlag(rest, "flutter-root");
+  const updateHost = takeFlag(rest, "update-host");
+  const updatePortValue = takeFlag(rest, "update-port");
+  const updateHostVersion = takeFlag(rest, "update-host-version");
+  const extraProjectRoots: string[] = [];
+  for (let value = takeFlag(rest, "extra-project-root"); value !== undefined; value = takeFlag(rest, "extra-project-root")) extraProjectRoots.push(value);
+  const provisionUpdateKey = takeBooleanFlag(rest, "provision-update-key");
+  const directory = pocket && (rest.length === 0 || rest[0]!.startsWith("-")) ? undefined : takePosition(rest, "project directory");
+  ensureNoArgs(rest);
+  const port = portValue === undefined ? undefined : Number(portValue);
+  const updatePort = updatePortValue === undefined ? undefined : Number(updatePortValue);
+  if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) fail("--port must be an integer from 0 through 65535");
+  if (updatePort !== undefined && (!Number.isInteger(updatePort) || updatePort < 0 || updatePort > 65535)) fail("--update-port must be an integer from 0 through 65535");
+  if (pocket && (flutterRoot !== undefined || updateHost !== undefined || updatePort !== undefined || updateHostVersion !== undefined || extraProjectRoots.length > 0 || provisionUpdateKey)) {
+    fail("--pocket launches the Pocket Studio host, which configures the service itself; only <project>, --port and --workspace apply");
+  }
+  return { directory, pocket, port, workspace, flutterRoot, updateHost, updatePort, updateHostVersion, extraProjectRoots, provisionUpdateKey };
+}
+
+function requireEditorDirectory(options: EditorCliOptions): string {
+  if (!options.directory) fail("project directory is required");
+  return options.directory;
+}
+
 function usage(): never {
-  console.error("usage: bun pocket.ts init <directory> [--template=app|game] [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--camera] [--bluetooth] [--sensors] [--location] [--biometrics] [--weather] [--permissions=POLICY_KEYS] [--dio] [--clipboard] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR] [--flutter-root=DIR] [--update-host=LAN_IP] [--update-port=N] [--update-host-version=VERSION]");
+  console.error("usage: bun pocket.ts init <directory> [--template=app|game] [--sdk-root=DIR] [--app-id=ID] [--name=NAME] [--version=VERSION] [--hardware] [--camera] [--bluetooth] [--sensors] [--location] [--biometrics] [--weather] [--permissions=POLICY_KEYS] [--dio] [--clipboard] [--platform-experience] [--deep-link-scheme=SCHEME]\n       bun pocket.ts build <directory> [--sdk-root=DIR] [--out=DIR] [--platform=ios-sim|ios|macos|android]\n       bun pocket.ts types <descriptor.json> --out=plugin-types.ts\n       bun pocket.ts editor <directory> [--port=N] [--workspace=DIR] [--flutter-root=DIR] [--update-host=LAN_IP] [--update-port=N] [--update-host-version=VERSION] [--extra-project-root=DIR]... [--provision-update-key]\n       bun pocket.ts editor --pocket [<directory>] [--port=N] [--workspace=DIR]   (macOS: launch the Pocket Studio app; plain `editor` stays the web Studio)");
   process.exit(1);
 }
 
@@ -1086,19 +1131,13 @@ if (import.meta.main) {
       ensureNoArgs(args);
       await exportPluginTypes(input, output);
     } else if (command === "editor") {
-      const directory = takePosition(args, "project directory");
-      const portValue = takeFlag(args, "port");
-      const workspace = takeFlag(args, "workspace");
-      const flutterRoot = takeFlag(args, "flutter-root");
-      const updateHost = takeFlag(args, "update-host");
-      const updatePortValue = takeFlag(args, "update-port");
-      const updateHostVersion = takeFlag(args, "update-host-version");
-      ensureNoArgs(args);
-      const port = portValue === undefined ? undefined : Number(portValue);
-      const updatePort = updatePortValue === undefined ? undefined : Number(updatePortValue);
-      if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) fail("--port must be an integer from 0 through 65535");
-      if (updatePort !== undefined && (!Number.isInteger(updatePort) || updatePort < 0 || updatePort > 65535)) fail("--update-port must be an integer from 0 through 65535");
-      await runEditor(directory, { port, workspace, flutterRoot, updateHost, updatePort, updateHostVersion });
+      const options = parseEditorArgs(args);
+      if (options.pocket) {
+        const { launchPocketStudio } = await import("./scripts/pocket_studio_launcher.ts");
+        await launchPocketStudio({ ...options, sdkRoot });
+      } else {
+        await runEditor(requireEditorDirectory(options), options);
+      }
     } else usage();
   } catch (error) {
     console.error(`pocket: ${error instanceof Error ? error.message : String(error)}`);

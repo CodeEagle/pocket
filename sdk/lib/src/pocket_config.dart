@@ -237,6 +237,7 @@ final class PocketAppConfig {
     this.keyboardInputEnabled = false,
     this.keyboardAutofocus = false,
     this.rawTextInputEnabled = false,
+    this.textLayoutCacheCapacity = 256,
     this.keyboardButtonMap = const <LogicalKeyboardKey, int>{},
     this.allowedPermissions = const {},
     this.pluginFactories = const [],
@@ -295,6 +296,11 @@ final class PocketAppConfig {
   /// See docs/STUDIO_TEXT_INPUT.md. Policy stays in the guest; this only allows it.
   final bool rawTextInputEnabled;
 
+  /// Capacity of the native text-layout cache of this app's [PocketView]
+  /// (see `PocketView.textLayoutCacheCapacity`). Raise it for text-heavy apps
+  /// such as code editors; the default keeps the standard behaviour.
+  final int textLayoutCacheCapacity;
+
   /// Per-app overrides for Flutter logical keys. Values are PocketJS `BTN`
   /// bits; omitted keys keep PocketView's standard mapping.
   final Map<LogicalKeyboardKey, int> keyboardButtonMap;
@@ -337,6 +343,7 @@ final class PocketAppConfig {
     bool? keyboardInputEnabled,
     bool? keyboardAutofocus,
     bool? rawTextInputEnabled,
+    int? textLayoutCacheCapacity,
     Map<LogicalKeyboardKey, int>? keyboardButtonMap,
     String? bootstrapMetadataJson,
     String? bootstrapManifestJson,
@@ -356,6 +363,8 @@ final class PocketAppConfig {
     keyboardInputEnabled: keyboardInputEnabled ?? this.keyboardInputEnabled,
     keyboardAutofocus: keyboardAutofocus ?? this.keyboardAutofocus,
     rawTextInputEnabled: rawTextInputEnabled ?? this.rawTextInputEnabled,
+    textLayoutCacheCapacity:
+        textLayoutCacheCapacity ?? this.textLayoutCacheCapacity,
     keyboardButtonMap: keyboardButtonMap ?? this.keyboardButtonMap,
     allowedPermissions: allowedPermissions,
     pluginFactories: pluginFactories == null
@@ -396,6 +405,7 @@ final class PocketAppConfig {
     keyboardInputEnabled: policy.keyboardInputEnabled,
     keyboardAutofocus: policy.keyboardAutofocus,
     rawTextInputEnabled: policy.rawTextInputEnabled,
+    textLayoutCacheCapacity: policy.textLayoutCacheCapacity,
     keyboardButtonMap: policy.keyboardButtonMap,
     allowedPermissions: policy.allowedPermissions,
     pluginFactories: policy.pluginFactories,
@@ -452,6 +462,7 @@ final class PocketAppConfig {
           keyboardInputEnabled == other.keyboardInputEnabled &&
           keyboardAutofocus == other.keyboardAutofocus &&
           rawTextInputEnabled == other.rawTextInputEnabled &&
+          textLayoutCacheCapacity == other.textLayoutCacheCapacity &&
           mapEquals(keyboardButtonMap, other.keyboardButtonMap) &&
           recordingFactory == other.recordingFactory &&
           diagnostics == other.diagnostics &&
@@ -479,6 +490,7 @@ final class PocketAppConfig {
     keyboardInputEnabled,
     keyboardAutofocus,
     rawTextInputEnabled,
+    textLayoutCacheCapacity,
     Object.hashAllUnordered(
       keyboardButtonMap.entries.map((e) => Object.hash(e.key, e.value)),
     ),

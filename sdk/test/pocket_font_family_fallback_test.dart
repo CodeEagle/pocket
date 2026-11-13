@@ -7,7 +7,7 @@ import 'package:pocket_sdk/src/pocket_app.dart' show PocketGuestSession;
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('PocketGuest forwards configured font fallback to PocketView', (
+  testWidgets('PocketGuest forwards configured font fallback and text cache capacity to PocketView', (
     tester,
   ) async {
     final previousFactory = debugPocketSelfOwnedRuntimeFactory;
@@ -23,6 +23,7 @@ void main() {
     const config = PocketAppConfig(
       appId: 'font.fallback.test',
       fontFamilyFallback: <String>['LanternSerif'],
+      textLayoutCacheCapacity: 2048,
     );
     final session = PocketSession(config: config)..ready = true;
     addTearDown(session.dispose);
@@ -35,5 +36,6 @@ void main() {
 
     final view = tester.widget<PocketView>(find.byType(PocketView));
     expect(view.fontFamilyFallback, <String>['LanternSerif']);
+    expect(view.textLayoutCacheCapacity, 2048);
   });
 }

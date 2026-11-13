@@ -208,6 +208,18 @@ export type StartEditorOptions = {
   workspace?: string;
   /** Edit/build one explicit external SDK project instead of copying guest/. */
   projectRoot?: string;
+  /**
+   * Additional external project roots listed and editable next to `projectRoot` (for example the Pocket Studio's
+   * own guest project). Supplied only by the trusted host configuration (CLI `--extra-project-root`, repeatable);
+   * no HTTP route can add, change or list roots. Each must be a real directory with `pocket.json`, never a symlink,
+   * and its project id must not collide with the primary project, another extra root or a workspace project.
+   */
+  extraProjectRoots?: string[];
+  /**
+   * Create the update signing key at startup (idempotent, never rotated) so a trusted host can configure its own
+   * signed-update slot before the first publish. The private half never leaves the workspace.
+   */
+  provisionUpdateKey?: boolean;
   /** Trusted Flutter consumer directory, bound to the configured JS project. */
   flutterRoot?: string;
   /** Optional SDK root override for Studio self-upgrade tests. */
@@ -245,6 +257,8 @@ type Workspace = {
   projectRoot?: string;
   projectId?: string;
   projectSources?: Map<string, CatalogProjectSource>;
+  /** Host-configured extra roots (see StartEditorOptions.extraProjectRoots); merged over the catalog sources. */
+  trustedSources?: Map<string, CatalogProjectSource>;
 };
 
 type CatalogProjectSource = {
@@ -1064,6 +1078,54 @@ async function loadConfig(projectDir: string, id: string): Promise<EditorConfig>
     output: typeof app.output === "string" ? app.output : editor.output,
     framework: typeof app.framework === "string" ? app.framework : editor.framework,
   });
+}
+
+async function externalProjectId(projectRoot: string): Promise<string> {
+  // Check config paths via safeProjectFile before reading either one during
+  // startup ID discovery. Never follow a symlinked config file; defer the 400
+  // rejection to the config/project API routes.
+  let editor: Record<string, unknown> = {};
+  let pocket: Record<string, unknown> = {};
+  try {
+    const editorPath = safeProjectFile(projectRoot, "editor.json", { allowConfig: true });
+    editor = await readJsonFile<Record<string, unknown>>(editorPath, {});
+  } catch {
+    editor = {};
+  }
+  try {
+    const pocketPath = safeProjectFile(projectRoot, "pocket.json", { allowConfig: true });
+    pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {});
+  } catch {
+    pocket = {};
+  }
+  const candidate = typeof editor.id === "string"
+    ? editor.id
+    : typeof pocket.name === "string"
+    ? pocket.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
+    : basename(projectRoot).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  return asProjectId(candidate || "external-project");
+}
+
+/** Validates the host-configured extra roots; any problem is a startup error because the config is trusted. */
+async function loadTrustedProjectSources(
+  roots: readonly string[],
+  reservedIds: ReadonlySet<string>,
+  projectsDirectory: string,
+): Promise<Map<string, CatalogProjectSource>> {
+  const sources = new Map<string, CatalogProjectSource>();
+  for (const configured of roots) {
+    const root = resolve(configured);
+    if (existsSync(root) && lstatSync(root).isSymbolicLink()) throw new Error(`extra project root must not be a symlink: ${root}`);
+    if (!existsSync(root) || !lstatSync(root).isDirectory()) throw new Error(`extra project root is not a directory: ${root}`);
+    if (!existsSync(join(root, "pocket.json"))) throw new Error(`extra project root is not a Pocket project (pocket.json missing): ${root}`);
+    const id = await externalProjectId(root);
+    if (reservedIds.has(id) || sources.has(id)) throw new Error(`extra project root id "${id}" collides with another project: ${root}`);
+    if (existsSync(safeChild(projectsDirectory, id))) throw new Error(`extra project root id "${id}" collides with a workspace project: ${root}`);
+    const config = await loadConfig(root, id);
+    const canonical = realpathSync(root);
+    sources.set(id, { root: canonical, appId: config.appId, identity: `${canonical}\n${config.appId}` });
+  }
+  return sources;
 }
 
 async function loadCatalogProjectSources(
@@ -2452,29 +2514,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       throw new Error(`editor project root is not a directory: ${projectRoot}`);
     }
     if (lstatSync(projectRoot).isSymbolicLink()) throw new Error("editor project root must not be a symlink");
-    // Check config paths via safeProjectFile before reading either one during
-    // startup ID discovery. Never follow a symlinked config file; defer the 400
-    // rejection to the config/project API routes.
-    let editor: Record<string, unknown> = {};
-    let pocket: Record<string, unknown> = {};
-    try {
-      const editorPath = safeProjectFile(projectRoot, "editor.json", { allowConfig: true });
-      editor = await readJsonFile<Record<string, unknown>>(editorPath, {});
-    } catch {
-      editor = {};
-    }
-    try {
-      const pocketPath = safeProjectFile(projectRoot, "pocket.json", { allowConfig: true });
-      pocket = await readJsonFile<Record<string, unknown>>(pocketPath, {});
-    } catch {
-      pocket = {};
-    }
-    const candidate = typeof editor.id === "string"
-      ? editor.id
-      : typeof pocket.name === "string"
-      ? pocket.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
-      : basename(projectRoot).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-    projectId = asProjectId(candidate || "external-project");
+    projectId = await externalProjectId(projectRoot);
   }
   const workspace: Workspace = {
     root: workspaceRoot,
@@ -2501,6 +2541,11 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       console.warn(`Editor catalog-backed projects are unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  if (options.extraProjectRoots?.length) {
+    workspace.trustedSources = await loadTrustedProjectSources(options.extraProjectRoots, new Set(projectId ? [projectId] : []), workspace.projects);
+    for (const [id, source] of workspace.trustedSources) workspace.projectSources.set(id, source);
+  }
+  if (options.provisionUpdateKey) await editorUpdateTrust(workspace, projectId ?? "studio");
   const flutterRoot = options.flutterRoot ?? process.env.POCKET_EDITOR_FLUTTER_ROOT;
   if (flutterRoot && !workspace.projectRoot) throw new Error("a Flutter consumer must be bound to an explicit JS project root");
   const explicitHostVersion = options.updateHostVersion ?? process.env.POCKET_EDITOR_HOST_VERSION;
@@ -4543,6 +4588,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
                   workspace.projectSources = new Map();
                   console.warn(`Editor catalog-backed projects are unavailable: ${error instanceof Error ? error.message : String(error)}`);
                 }
+                for (const [trustedId, source] of workspace.trustedSources ?? []) workspace.projectSources.set(trustedId, source);
               }
               state.revision += 1;
               state.error = undefined;
@@ -5142,6 +5188,10 @@ if (import.meta.main) {
     return value;
   };
   const projectRoot = option("project-root");
+  const extraProjectRoots: string[] = [];
+  for (let value = option("extra-project-root"); value !== undefined; value = option("extra-project-root")) extraProjectRoots.push(value);
+  const provisionUpdateKey = args.includes("--provision-update-key");
+  if (provisionUpdateKey) args.splice(args.indexOf("--provision-update-key"), 1);
   const flutterRoot = option("flutter-root");
   const workspace = option("workspace");
   const host = option("host");
@@ -5155,7 +5205,7 @@ if (import.meta.main) {
   const updatePort = updatePortValue === undefined ? undefined : Number(updatePortValue);
   if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) throw new Error("--port must be an integer from 0 through 65535");
   if (updatePort !== undefined && (!Number.isInteger(updatePort) || updatePort < 0 || updatePort > 65535)) throw new Error("--update-port must be an integer from 0 through 65535");
-  const server = await startEditor({ projectRoot, flutterRoot, workspace, host, port, updateHost, updatePort, updateHostVersion, updatePackageVersion });
+  const server = await startEditor({ projectRoot, extraProjectRoots, provisionUpdateKey, flutterRoot, workspace, host, port, updateHost, updatePort, updateHostVersion, updatePackageVersion });
   console.log(`Pocket Studio listening at http://${server.hostname}:${server.port}`);
   console.log(`workspace: ${resolve(workspace ?? process.env.POCKET_EDITOR_WORKSPACE ?? join(root, ".pocket-build/editor-workspace"))}`);
   if (projectRoot) console.log(`project: ${resolve(projectRoot)}`);

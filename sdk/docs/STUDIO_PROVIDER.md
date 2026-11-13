@@ -84,3 +84,22 @@ delete, error mapping, a real `fs.watch` change event. A skip is not evidence: t
 - Artifacts: binary artifacts return metadata only; text artifacts are cut at 128 KiB (`truncated: true`).
 - Version history has no trial/promoted/rolled-back state: the service journal records publications and slot pointers only; those states live in each device's update coordinator.
 - Not run here: the macOS app, IME, window compositing (Linux container).
+
+## M6: text cache, trusted extra roots, update key, self-update slot
+
+Source-first note: the retained parent `pocketjs_flutter_demo` is not available in this environment (as in the earlier Studio
+records), so nothing was inspected there. Everything reuses current SDK code: `PocketAppConfig` fields added the way
+`rawTextInputEnabled` was, the catalog-source map of `editor/server.ts`, `editorUpdateTrust`, `PocketUpdateConfig`,
+`PocketUpdateCoordinator`, `PocketPackageStore`, the session health trial/rollback and `createPocketUpdateClient`
+(`SYSTEM_UI_SELF_REFRESH.md`, `PACKAGE_UPDATE_MODES.md`, `RELEASE_TRUST_POLICY.md`).
+
+* `PocketAppConfig.textLayoutCacheCapacity` (default 256, copyWith/withNativePolicy/equality/hashCode) -> `PocketView`.
+  Tests: `test/pocket_config_test.dart`, `test/pocket_font_family_fallback_test.dart` (widget level).
+* Service: `StartEditorOptions.extraProjectRoots` / `--extra-project-root=DIR` (repeatable; also accepted by
+  `pocket.ts editor`) lists additional trusted external projects; `provisionUpdateKey` / `--provision-update-key` creates the
+  update signing key at startup (idempotent, never rotated; keyId `editor-<primary project id>`). Guarded exactly like the
+  primary root; no HTTP route can add roots. Tests: `editor/test/editor_extra_roots.test.ts`.
+* Provider config: `PocketStudioConfig.extraProjectRoots`, `updateChannel` (`test` default), `selfUpdateUrl`, `readUpdateKey()`
+  (public half only), `studioAppId`; the lifecycle helper passes `--provision-update-key` and the extra roots. Tests:
+  `test/studio_config_test.dart`, `test/real_service_test.dart`.
+* Launcher: `bun pocket.ts editor --pocket` (`scripts/pocket_studio_launcher.ts`, tests in `scripts/tests`).

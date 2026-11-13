@@ -15,6 +15,7 @@ void main() {
   final sdkRoot = Directory.current.parent.parent.path;
   final projectRoot = Platform.environment['POCKET_STUDIO_TEST_PROJECT'] ??
       <String>[Directory.current.parent.parent.parent.path, 'demo', 'js'].join('/');
+  final studioProject = <String>[Directory.current.parent.parent.parent.path, 'studio', 'js'].join('/');
   final skip = File(bun).existsSync() && Directory(projectRoot).existsSync()
       ? false
       : 'bun or the sample project is not available';
@@ -36,6 +37,7 @@ void main() {
       projectRoot: projectRoot,
       workspace: '${work.path}/ws',
       bunExecutable: bun,
+      extraProjectRoots: <String>[studioProject], // the Studio's own guest project: trusted host config
       environment: <String, String>{...Platform.environment, 'POCKET_SOURCE_BUILD': '1', 'TMPDIR': '/tmp'},
     );
     lifecycle = PocketStudioService(config, stopOnExit: false);
@@ -58,6 +60,19 @@ void main() {
     final second = PocketStudioService(config, stopOnExit: false);
     await second.start();
     expect(second.ownsProcess, isFalse);
+  }, skip: skip);
+
+  test('the Studio\'s own guest project is listed through the trusted extra root; the update key exists at startup', () async {
+    final list = (await call('studio.project.list'))['projects'] as List;
+    final ids = list.map((p) => (p as Map)['id']);
+    expect(ids, containsAll(<String>['pocket-host-showcase', 'pocket-studio']));
+    final own = list.cast<Map>().firstWhere((p) => p['id'] == 'pocket-studio');
+    expect(own['appId'], PocketStudioConfig.studioAppId);
+    expect(jsonEncode(list), isNot(contains(studioProject)));
+    final key = config.readUpdateKey();
+    expect(key, isNotNull, reason: 'the service provisions the update signing key before the first publish');
+    expect(File('${work.path}/ws/keys/editor-dev-key.json').readAsStringSync(), contains(key!.publicKey));
+    expect(config.selfUpdateUrl, '${config.origin}/test/pocket/studio/dev.pocket.studio/latest.json');
   }, skip: skip);
 
   test('studio.service.health is scrubbed', () async {
