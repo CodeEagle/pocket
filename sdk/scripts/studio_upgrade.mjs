@@ -10,6 +10,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -161,7 +162,7 @@ function sourceRepositoryRoot(sdkRoot) {
 }
 
 function canonicalFsPath(value) {
-  const path = resolve(value).replaceAll('\\', '/');
+  const path = realpathSync.native(resolve(value)).replaceAll('\\', '/');
   return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 

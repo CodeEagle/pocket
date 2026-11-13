@@ -31,6 +31,7 @@ import {
   createStudioUpgradeManager,
   expectedSdkArchiveAssetNames,
   extractSafeTarGz,
+  inspectSourceUpdate,
   isSdkBackupComplete,
   parseStableSemver,
   prepareSourceUpgradeBackup,
@@ -489,52 +490,81 @@ describe("Studio built-in self-upgrade unit & security gates", () => {
   });
 
   test("source Git checkout defers automatic updates on a non-main checkout", async () => {
-    const repoSdkRoot = resolve(import.meta.dir, "../..");
-    const sourceInfo = readInstalledSdkInfo(repoSdkRoot);
-    expect(sourceInfo.mode).toBe("source");
-    expect(sourceInfo.autoUpgradeSupported).toBe(true);
+    const source = createSourceManagerCheckout("0.1.15", "0.1.16");
+    try {
+      runFixtureGit(source.repository, "checkout", "-b", "feature");
+      expect(runFixtureGit(source.repository, "branch", "--show-current")).toBe("feature");
+      const sourceInfo = readInstalledSdkInfo(source.sdkRoot);
+      expect(sourceInfo.mode).toBe("source");
+      expect(sourceInfo.autoUpgradeSupported).toBe(true);
 
-    let archiveFetched = false;
-    const manager = createStudioUpgradeManager({
-      sdkRoot: repoSdkRoot,
-      allowLoopbackHttp: true,
-      releasesUrl: "http://127.0.0.1:65530/releases",
-      fetchImpl: async (url: string) => {
-        if (url.endsWith("/releases")) {
-          return new Response(JSON.stringify([
-            {
-              tag_name: "sdk-v9.9.9",
-              draft: false,
-              prerelease: false,
-              html_url: "https://github.com/CodeEagle/pocket/releases/tag/sdk-v9.9.9",
-              assets: [
-                {
-                  name: `pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz`,
-                  browser_download_url: `http://127.0.0.1:65530/pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz`,
-                },
-                {
-                  name: `pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz.sha256`,
-                  browser_download_url: `http://127.0.0.1:65530/pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz.sha256`,
-                },
-              ],
-            },
-          ]));
-        }
-        archiveFetched = true;
-        return new Response("should not download in source mode", { status: 500 });
-      },
-    });
+      let archiveFetched = false;
+      const handoffs: Array<Record<string, unknown>> = [];
+      const manager = createStudioUpgradeManager({
+        sdkRoot: source.sdkRoot,
+        allowLoopbackHttp: true,
+        releasesUrl: "http://127.0.0.1:65530/releases",
+        fetchImpl: async (url: string) => {
+          if (url.endsWith("/releases")) {
+            return new Response(JSON.stringify([
+              {
+                tag_name: "sdk-v9.9.9",
+                draft: false,
+                prerelease: false,
+                html_url: "https://github.com/CodeEagle/pocket/releases/tag/sdk-v9.9.9",
+                assets: [
+                  {
+                    name: `pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz`,
+                    browser_download_url: `http://127.0.0.1:65530/pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz`,
+                  },
+                  {
+                    name: `pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz.sha256`,
+                    browser_download_url: `http://127.0.0.1:65530/pocket-web-sdk-tools-${TUPLE}-9.9.9.tgz.sha256`,
+                  },
+                ],
+              },
+            ]));
+          }
+          archiveFetched = true;
+          return new Response("should not download in source mode", { status: 500 });
+        },
+        triggerServiceUpgrade: async (handoff: Record<string, unknown>) => { handoffs.push(handoff); },
+      });
 
-    const checkResult = await manager.check({ autoApply: true });
-    expect(checkResult.mode).toBe("source");
-    expect(checkResult.upgradeAvailable).toBe(true);
-    expect(checkResult.latestVersion).toBe("9.9.9");
-    expect(checkResult.status).toBe("available");
-    expect(checkResult.deferredReason).toMatch(/main/);
-    expect(archiveFetched).toBe(false);
-    const applyResult = await manager.apply();
-    expect(applyResult.status).toBe("available");
-    expect(applyResult.deferredReason).toMatch(/main/);
+      const checkResult = await manager.check({ autoApply: true });
+      expect(checkResult.mode).toBe("source");
+      expect(checkResult.upgradeAvailable).toBe(true);
+      expect(checkResult.latestVersion).toBe("9.9.9");
+      expect(checkResult.status).toBe("available");
+      expect(checkResult.deferredReason).toMatch(/main/);
+      expect(archiveFetched).toBe(false);
+      const applyResult = await manager.apply();
+      expect(applyResult.status).toBe("available");
+      expect(applyResult.deferredReason).toMatch(/main/);
+      expect(archiveFetched).toBe(false);
+      expect(handoffs).toHaveLength(0);
+    } finally {
+      source.close();
+    }
+  });
+
+  test("source checkout root accepts filesystem aliases but rejects a nested non-root SDK", () => {
+    const source = createSourceManagerCheckout("0.1.15", "0.1.16");
+    const aliasRoot = join(source.fixtureRoot, "repo-alias");
+    const nestedSdkRoot = join(source.repository, "nested", "sdk");
+    try {
+      symlinkSync(source.repository, aliasRoot, process.platform === "win32" ? "junction" : "dir");
+      const aliased = inspectSourceUpdate(join(aliasRoot, "sdk"), source.target);
+      expect(aliased.validRepo).toBe(true);
+      expect(aliased.canApply).toBe(true);
+
+      mkdirSync(nestedSdkRoot, { recursive: true });
+      const nested = inspectSourceUpdate(nestedSdkRoot, source.target);
+      expect(nested.validRepo).toBe(false);
+      expect(nested.deferredReason).toMatch(/仓库根目录不匹配/);
+    } finally {
+      source.close();
+    }
   });
 
   test("source auto check stages the release tools and hands off the verified tag commit", { timeout: 30_000 }, async () => {
