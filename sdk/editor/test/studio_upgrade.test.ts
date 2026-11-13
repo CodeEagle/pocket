@@ -1507,6 +1507,14 @@ async function reportUpgradeLifecycleFailure(sdkRoot: string, browser: import("p
   for (const context of browser.contexts()) {
     for (const page of context.pages()) {
       console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
+      console.error("[upgrade lifecycle UI state]", JSON.stringify(await page.evaluate(() => ({
+        readyState: document.readyState,
+        status: document.getElementById("studio-upgrade-status")?.textContent || "",
+        version: document.getElementById("studio-upgrade-version")?.textContent || "",
+        mode: document.getElementById("studio-upgrade-mode")?.textContent || "",
+        actionDisabled: (document.getElementById("studio-upgrade-action") as HTMLButtonElement | null)?.disabled ?? null,
+        editorScript: Array.from(document.scripts).find((script) => script.src.includes("/editor.js"))?.src || "",
+      })).catch((error) => ({ error: String(error) }))));
     }
   }
 
@@ -1686,15 +1694,47 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       const page = await browser.newPage();
       let mainFrameNavigations = 0;
       let upgradeCheckPosts = 0;
+      const upgradeCheckRequestOrigins = new WeakMap<object, { navigation: number; frameUrl: string }>();
       page.on("pageerror", (error) => recordBrowserDiagnostic(`[pageerror] ${error.message}`));
       page.on("requestfailed", (request) => {
         const url = new URL(request.url());
         recordBrowserDiagnostic(`[requestfailed] ${request.method()} ${url.pathname} ${request.failure()?.errorText || "unknown"}`);
       });
+      page.on("requestfinished", (request) => {
+        const url = new URL(request.url());
+        if (url.pathname === "/api/preview/device" || url.pathname.startsWith("/api/studio/upgrade")) {
+          recordBrowserDiagnostic(`[requestfinished] ${request.method()} ${url.pathname}`);
+        }
+      });
+      page.on("console", (message) => {
+        if (message.type() === "error") recordBrowserDiagnostic(`[console.error] ${message.text()}`);
+      });
       page.on("response", (response) => {
         const url = new URL(response.url());
         if (url.pathname === "/api/preview/device" || url.pathname.startsWith("/api/studio/upgrade")) {
           recordBrowserDiagnostic(`[response] ${response.status()} ${response.request().method()} ${url.pathname}`);
+        }
+        if (url.pathname === "/api/studio/upgrade/check" && response.request().method() === "POST") {
+          void response.json().then(async (value) => {
+            const payload = value && typeof value === "object" ? value as Record<string, unknown> : {};
+            const requestOrigin = upgradeCheckRequestOrigins.get(response.request());
+            const summary = Object.fromEntries([
+              "status", "currentVersion", "latestVersion", "upgradeAvailable",
+              "autoUpgradeSupported", "deferredReason", "error",
+            ].filter((key) => key in payload).map((key) => [key, payload[key]]));
+            const renderedUpdate = await page.waitForFunction(() => {
+              const status = document.getElementById("studio-upgrade-status")?.textContent || "";
+              return status !== "等待检查更新" && status !== "正在检查更新…"
+                && !status.includes("正在检查 GitHub 稳定版更新");
+            }, undefined, { timeout: 250 }).then(() => true, () => false);
+            const rendered = await page.evaluate(() => ({
+              status: document.getElementById("studio-upgrade-status")?.textContent || "",
+              version: document.getElementById("studio-upgrade-version")?.textContent || "",
+            })).catch((error) => ({ error: String(error).slice(0, 200) }));
+            recordBrowserDiagnostic(`[check-response] ${JSON.stringify({ requestOrigin, navigationAtRender: mainFrameNavigations, payload: summary, renderedUpdate, rendered }).slice(0, 700)}`);
+          }).catch((error) => {
+            recordBrowserDiagnostic(`[check-response-body-failed] ${String(error).slice(0, 300)}`);
+          });
         }
       });
       page.on("framenavigated", (frame) => {
@@ -1722,6 +1762,10 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       await page.route("**/api/studio/upgrade/check", async (route, request) => {
         upgradeCheckPosts += 1;
         const postBody = JSON.parse(request.postData() || "{}");
+        let frameUrl = "unavailable";
+        try { frameUrl = request.frame().url(); } catch {}
+        upgradeCheckRequestOrigins.set(request, { navigation: mainFrameNavigations, frameUrl });
+        recordBrowserDiagnostic(`[check-request] nav=${mainFrameNavigations} frame=${frameUrl} autoApply=${String(postBody.autoApply)} forceApply=${String(postBody.forceApply)}`);
         // Let the first automatic startup check see autoApply=false so we can test dirty draft deferral and save-triggered resume
         if (mainFrameNavigations <= 1 && postBody.autoApply === true && !postBody.forceApply && !(await page.evaluate(() => Boolean((window as unknown as { __ALLOW_AUTO_APPLY__?: boolean }).__ALLOW_AUTO_APPLY__)))) {
           await route.continue({
