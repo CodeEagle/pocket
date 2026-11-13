@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startEditor } from "../server.ts";
+import { buildGuest, runOrThrow } from "../../scripts/build_guest.ts";
 
 // Real service. The first server uses a slow injected runner to make timing
 // deterministic; the second uses the real buildGuest compiler pipeline.
@@ -255,3 +256,144 @@ test("real build: cancel kills the compiler process tree and does not publish a 
   expect(rebuilt.builtRevision).toBe(rebuilt.revision);
   abort.abort();
 }, 180_000);
+
+// A compiler that never finishes, so the build queue stays occupied deterministically.
+function withSlowCompiler<T>(body: (marker: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "pocket-slow-compiler-"));
+  const script = join(dir, "slow-compiler.ts");
+  const marker = join(dir, "started");
+  writeFileSync(script, `import { writeFileSync } from "node:fs";\nconsole.log("slow compiler started");\nwriteFileSync(${JSON.stringify(marker)}, String(Date.now()));\nawait new Promise((done) => setTimeout(done, 120000));\n`);
+  const previous = process.env.POCKET_COMPILER_PATH;
+  process.env.POCKET_COMPILER_PATH = script;
+  return body(marker).finally(() => {
+    if (previous === undefined) delete process.env.POCKET_COMPILER_PATH; else process.env.POCKET_COMPILER_PATH = previous;
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs: number, label: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await Bun.sleep(25);
+  }
+}
+
+test("real queue: cancelling a build queued behind another project's long build rejects promptly while the other keeps building", async () => {
+  await withSlowCompiler(async (marker) => {
+    await createProject(realCtx, "queue-a");
+    await createProject(realCtx, "queue-b");
+    expect((await api(realCtx, "queue-a/build", { method: "POST", json: {} })).status).toBe(202);
+    await waitFor(() => existsSync(marker), 90_000, "project A compiler to start");
+    expect((await api(realCtx, "queue-b/build", { method: "POST", json: {} })).status).toBe(202);
+    await Bun.sleep(300);
+    expect((await api(realCtx, "queue-b/status")).body.busy).toBe(true);
+    const started = Date.now();
+    const cancelled = await api(realCtx, "queue-b/build/cancel", { method: "POST", json: {} });
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body).toMatchObject({ cancelled: true, status: { busy: false, error: "build cancelled" } });
+    expect((await api(realCtx, "queue-a/status")).body.busy).toBe(true);
+    expect((await api(realCtx, "queue-a/build/cancel", { method: "POST", json: {} })).status).toBe(200);
+  });
+}, 180_000);
+
+test("buildGuest queue: an abort while queued rejects at once but never lets a later build overtake the running one", async () => {
+  await withSlowCompiler(async (marker) => {
+    const project = (name: string) => {
+      const dir = join(realWorkspace, "projects", name);
+      return dir;
+    };
+    await createProject(realCtx, "order-a");
+    await createProject(realCtx, "order-b");
+    await createProject(realCtx, "order-c");
+    const aborts = [new AbortController(), new AbortController(), new AbortController()];
+    const lines: string[][] = [[], [], []];
+    const run = (index: number, name: string) => buildGuest({ projectRoot: project(name), outDir: mkdtempSync(join(tmpdir(), "pocket-order-")), signal: aborts[index]!.signal, log: (line) => lines[index]!.push(line) });
+    const a = run(0, "order-a").catch((error) => error as Error);
+    await waitFor(() => existsSync(marker), 90_000, "A compiler");
+    const b = run(1, "order-b").catch((error) => error as Error);
+    const c = run(2, "order-c").catch((error) => error as Error);
+    await Bun.sleep(200);
+    const t0 = Date.now();
+    aborts[1]!.abort();
+    expect(((await b) as Error).message).toBe("build cancelled");
+    expect(Date.now() - t0).toBeLessThan(1000);
+    // C is still queued behind A (it did not start just because B left the queue).
+    await Bun.sleep(500);
+    expect(lines[2]!.length).toBe(0);
+    let aSettled = false;
+    void a.then(() => { aSettled = true; });
+    expect(aSettled).toBe(false);
+    aborts[0]!.abort();
+    expect(((await a) as Error).message).toBe("build cancelled");
+    aborts[2]!.abort();
+    expect(((await c) as Error).message).toBe("build cancelled");
+  });
+}, 180_000);
+
+test("a hung build is aborted with 'build timed out' after the configured timeout", async () => {
+  let aborted = false;
+  const workspace = mkdtempSync(join(tmpdir(), "pocket-build-timeout-"));
+  const server = await startEditor({
+    port: 0, workspace, buildTimeoutMs: 400,
+    buildRunner: async ({ signal }) => { await new Promise<void>((_, reject) => signal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }, { once: true })); throw new Error("unreachable"); },
+  });
+  try {
+    const c = ctx(server, workspace, (await (await fetch(`http://127.0.0.1:${server.port}/health`)).json()).csrfToken);
+    await createProject(c, "hung");
+    await api(c, "hung/build", { method: "POST", json: {} });
+    const status = await waitIdle(c, "hung", 10_000);
+    expect(aborted).toBe(true);
+    expect(status).toMatchObject({ busy: false, error: "build timed out" });
+    expect(status.logs).toContain("build timed out");
+  } finally {
+    await server.stop(true);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("stopping the server aborts in-flight builds", async () => {
+  let aborted = false;
+  let running = false;
+  const workspace = mkdtempSync(join(tmpdir(), "pocket-build-stop-"));
+  const server = await startEditor({
+    port: 0, workspace,
+    buildRunner: async ({ signal }) => { running = true; await new Promise<void>((_, reject) => signal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }, { once: true })); throw new Error("unreachable"); },
+  });
+  try {
+    const c = ctx(server, workspace, (await (await fetch(`http://127.0.0.1:${server.port}/health`)).json()).csrfToken);
+    await createProject(c, "stopme");
+    await api(c, "stopme/build", { method: "POST", json: {} });
+    await waitFor(() => running, 5000, "runner start");
+    await server.stop(true);
+    await waitFor(() => aborted, 3000, "abort on stop");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("compiler output is decoded as UTF-8 across chunk boundaries", async () => {
+  const script = 'const b = Buffer.from("错误: 找不到模块\\n"); process.stderr.write(b.subarray(0, 4)); await Bun.sleep(100); process.stderr.write(b.subarray(4));';
+  const lines: string[] = [];
+  await runOrThrow(["bun", "-e", script], tmpdir(), (line) => lines.push(line));
+  expect(lines).toEqual(["错误: 找不到模块"]);
+});
+
+test("a cancel during a shared-cache bootstrap step lets it finish, then rejects as cancelled", async () => {
+  const controller = new AbortController();
+  const lines: string[] = [];
+  const started = Date.now();
+  const run = runOrThrow(["bun", "-e", 'await Bun.sleep(600); console.log("step finished");'], tmpdir(), (line) => lines.push(line), controller.signal, { uninterruptible: true });
+  setTimeout(() => controller.abort(), 100);
+  await expect(run).rejects.toThrow("build cancelled");
+  expect(lines).toContain("step finished");
+  expect(Date.now() - started).toBeGreaterThanOrEqual(550);
+  // The per-project steps stay killable.
+  const killable = new AbortController();
+  const slow = runOrThrow(["bun", "-e", 'await Bun.sleep(30000);'], tmpdir(), () => undefined, killable.signal);
+  setTimeout(() => killable.abort(), 100);
+  const t0 = Date.now();
+  await expect(slow).rejects.toThrow("build cancelled");
+  expect(Date.now() - t0).toBeLessThan(5000);
+});

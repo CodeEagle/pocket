@@ -196,6 +196,10 @@ export type StartEditorOptions = {
   /** Optional LAN interface for the read-only signed version backend. */
   updateHost?: string;
   updatePort?: number;
+  /** Studio build timeout in ms (default 15 min; env POCKET_EDITOR_BUILD_TIMEOUT_MS). A hung build is aborted with "build timed out". */
+  buildTimeoutMs?: number;
+  /** Global budget for buffered (uncommitted) upload bytes (default 64 MiB). */
+  maxBufferedUploadBytes?: number;
   /** Route segment used by the local version backend. Defaults to `editor`. */
   updateHostVersion?: string;
   /** Frozen compatibility branch used by the single App host URL. */
@@ -800,11 +804,23 @@ async function readJsonFile<T>(path: string, fallback?: T): Promise<T> {
 
 const maxChunkBytes = 131072;
 const maxOpenUploads = 8;
+const maxOpenUploadsPerProject = 4;
+const defaultMaxBufferedUploadBytes = 64 * 1024 * 1024;
+const defaultBuildTimeoutMs = 15 * 60_000;
+/** A stream whose consumer has this many unread events queued is dropped. */
+const sseMaxQueuedEvents = 256;
 const uploadIdleMs = 10 * 60_000;
 const maxWatchClients = 16;
 const maxBuildEventClients = 32;
 const watchDebounceMs = 100;
 const sha256Cache = new Map<string, string>();
+
+/** New mutating routes never accept dot-prefixed segments (`.ssh`, `.env`, ...). */
+function rejectHiddenSegments(relativePath: string): void {
+  if (relativePath.replaceAll("\\", "/").split("/").some((part) => part.startsWith("."))) {
+    pathFailure("hidden (dot-prefixed) path segments are not allowed", 400);
+  }
+}
 
 function httpFailure(message: string, status: number): never {
   return pathFailure(message, status);
@@ -856,6 +872,12 @@ async function wholeFileSha256(handle: import("node:fs/promises").FileHandle, ke
   return digest;
 }
 
+/** Cheap early filter: hidden and generated/protected trees never enter the pending map. */
+function watchPathIgnored(relativePath: string): boolean {
+  return relativePath.replaceAll("\\", "/").split("/").some((part) => part.startsWith(".") ||
+    ignoredProjectInputDirectories.has(part.toLowerCase()) || protectedDirectoryNames.has(part.toLowerCase()));
+}
+
 /** Watch-event path filter: the same trees/files the Studio file API exposes. */
 function watchablePath(projectDir: string, relativePath: string): { relativePath: string; kind: "file" | "directory" } | undefined {
   const normalized = relativePath.replaceAll("\\", "/");
@@ -886,7 +908,8 @@ function watchablePath(projectDir: string, relativePath: string): { relativePath
   return undefined;
 }
 
-function sseResponse(request: Request, attach: (send: (value: unknown) => void, close: () => void) => () => void): Response {
+/** @internal exported for tests. */
+export function sseResponse(request: Request, attach: (send: (value: unknown) => void, close: () => void) => () => void): Response {
   const encoder = new TextEncoder();
   let detach: (() => void) | undefined;
   let closed = false;
@@ -900,7 +923,9 @@ function sseResponse(request: Request, attach: (send: (value: unknown) => void, 
       };
       const send = (value: unknown): void => {
         if (closed) return;
-        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`)); } catch { close(); }
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`)); } catch { close(); return; }
+        // Slow consumer: the queue is full. Drop the subscriber instead of buffering without bound.
+        if (controller.desiredSize !== null && controller.desiredSize <= 0) close();
       };
       detach = attach(send, close);
       request.signal.addEventListener("abort", close, { once: true });
@@ -909,7 +934,7 @@ function sseResponse(request: Request, attach: (send: (value: unknown) => void, 
       closed = true;
       detach?.();
     },
-  });
+  }, new CountQueuingStrategy({ highWaterMark: sseMaxQueuedEvents }));
   return new Response(stream, {
     headers: {
       "content-type": "text/event-stream; charset=utf-8",
@@ -1508,6 +1533,7 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
       ...(systemFile ? { systemFile } : {}),
       policyFile,
       strictPak: runner === realBuild,
+      ...(signal ? { signal } : {}),
       log: (line) => pushLog(state, line),
     });
     const generatedCompositorRegistry = join(projectDir, "generated", "compositor-surfaces.json");
@@ -1587,11 +1613,14 @@ function cancelBuild(state: EditorState): boolean {
   return true;
 }
 
+type BuildScope = { controllers: Set<AbortController>; timeoutMs: number };
+
 function queueBuild(
   workspace: Workspace,
   id: string,
   states: Map<string, EditorState>,
   runner: BuildRunner,
+  scope: BuildScope,
 ): void {
   const state = states.get(id)!;
   if (state.busy) return;
@@ -1601,12 +1630,17 @@ function queueBuild(
   state.startedAt = now();
   const controller = new AbortController();
   buildAborts.set(state, controller);
+  scope.controllers.add(controller);
+  let timedOut = false;
   const projectDir = projectDirectory(workspace, id);
   buildSettled.set(state, (async () => {
     try {
       do {
         const revision = state.revision;
         const captured: string[] = [];
+        // The build timeout bounds one build attempt; it aborts the whole process group like a cancel.
+        const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, scope.timeoutMs);
+        timeout.unref?.();
         try {
           controller.signal.throwIfAborted();
           const config = await loadConfig(projectDir, id);
@@ -1616,17 +1650,20 @@ function queueBuild(
           state.diagnostics = undefined;
         } catch (error) {
           if (controller.signal.aborted) {
-            state.error = "build cancelled";
+            state.error = timedOut ? "build timed out" : "build cancelled";
             state.diagnostics = [];
-            pushLog(state, "build cancelled");
+            pushLog(state, state.error);
           } else {
             state.error = error instanceof Error ? error.message : String(error);
             state.diagnostics = parseBuildDiagnostics(captured, projectDir);
             pushLog(state, `ERROR: ${state.error}`);
           }
+        } finally {
+          clearTimeout(timeout);
         }
       } while (state.revision !== state.builtRevision && !state.error);
     } finally {
+      scope.controllers.delete(controller);
       buildAborts.delete(state);
       state.busy = false;
       state.finishedAt = now();
@@ -2286,6 +2323,43 @@ function contentType(path: string): string {
   }
 }
 
+/** Same-origin comparison shared by the write guard and the new read routes. */
+function checkSameOrigin(originHeader: string | null, url: URL, hostUrl: URL, serverPort: number): Response | null {
+  if (originHeader === null) return null;
+  if (originHeader === "null") {
+    return failure("forbidden: null Origin not allowed", 403);
+  }
+  let originUrl: URL;
+  try {
+    originUrl = new URL(originHeader);
+  } catch {
+    return failure("forbidden: invalid Origin header", 403);
+  }
+  const originPort = originUrl.port || "80";
+  if (
+    originUrl.protocol !== url.protocol ||
+    originUrl.origin !== hostUrl.origin ||
+    originPort !== String(serverPort)
+  ) {
+    return failure("forbidden: cross-origin requests not allowed", 403);
+  }
+  return null;
+}
+
+/**
+ * GET guard for the Studio watch/build-events/chunks/stat routes only: a page on another origin must not
+ * hold watch slots or read project bytes. Requests without Origin/Sec-Fetch-Site (the Flutter host,
+ * curl, tests) are unaffected.
+ */
+function validateNewReadRoute(req: Request, url: URL, serverPort: number): Response | null {
+  const site = req.headers.get("sec-fetch-site");
+  if (site === "cross-site" || site === "same-site") return failure("forbidden: cross-origin fetch-site not allowed", 403);
+  const hostHeader = req.headers.get("host") ?? "";
+  let hostUrl: URL;
+  try { hostUrl = new URL(`http://${hostHeader}`); } catch { return failure("forbidden: invalid Host header", 403); }
+  return checkSameOrigin(req.headers.get("origin"), url, hostUrl, serverPort);
+}
+
 function validateRequestSecurity(req: Request, url: URL, serverPort: number, csrfToken: string, bindHost: string): Response | null {
   const allowedHostnames = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
   if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(bindHost)) {
@@ -2329,26 +2403,8 @@ function validateRequestSecurity(req: Request, url: URL, serverPort: number, csr
       return failure("forbidden: browser navigation/no-cors write not allowed", 403);
     }
 
-    const originHeader = req.headers.get("origin");
-    if (originHeader !== null) {
-      if (originHeader === "null") {
-        return failure("forbidden: null Origin not allowed", 403);
-      }
-      let originUrl: URL;
-      try {
-        originUrl = new URL(originHeader);
-      } catch {
-        return failure("forbidden: invalid Origin header", 403);
-      }
-      const originPort = originUrl.port || "80";
-      if (
-        originUrl.protocol !== url.protocol ||
-        originUrl.origin !== dummyUrl.origin ||
-        originPort !== String(serverPort)
-      ) {
-        return failure("forbidden: cross-origin requests not allowed", 403);
-      }
-    }
+    const originFailure = checkSameOrigin(req.headers.get("origin"), url, dummyUrl, serverPort);
+    if (originFailure) return originFailure;
 
     const refererHeader = req.headers.get("referer");
     if (refererHeader !== null) {
@@ -2455,9 +2511,18 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const publishSlots = new Set<string>();
   type UploadSession = { projectId: string; path: string; totalBytes: number; sha256: string; chunks: Buffer[]; received: number; timer: ReturnType<typeof setTimeout> };
   const uploads = new Map<string, UploadSession>();
+  let bufferedUploadBytes = 0;
+  const maxBufferedUploadBytes = options.maxBufferedUploadBytes ?? defaultMaxBufferedUploadBytes;
+  const buildScope: BuildScope = {
+    controllers: new Set(),
+    timeoutMs: options.buildTimeoutMs ?? (Number(process.env.POCKET_EDITOR_BUILD_TIMEOUT_MS) > 0 ? Number(process.env.POCKET_EDITOR_BUILD_TIMEOUT_MS) : defaultBuildTimeoutMs),
+  };
   const dropUpload = (uploadId: string): void => {
     const session = uploads.get(uploadId);
-    if (session) clearTimeout(session.timer);
+    if (session) {
+      clearTimeout(session.timer);
+      bufferedUploadBytes -= session.received;
+    }
     uploads.delete(uploadId);
   };
   const touchUpload = (uploadId: string, session: UploadSession): void => {
@@ -4335,6 +4400,10 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           return failure("not found", 404);
         }
         const id = parts[2] ? asProjectId(parts[2]) : "";
+        if (method === "GET" && (parts[3] === "watch" || parts[3] === "chunks" || parts[3] === "stat" || (parts[3] === "build" && parts[4] === "events"))) {
+          const crossOrigin = validateNewReadRoute(request, url, server.port);
+          if (crossOrigin) return crossOrigin;
+        }
         const exists = existsSync(projectDir(id));
         if (!exists) return failure("project not found", 404);
         if (parts[3] === "diagnostics" && parts.length === 4) {
@@ -4571,17 +4640,31 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           };
           if (parts[3] === "stat" && method === "GET" && parts.length > 4) {
             const relativePath = parts.slice(4).join("/");
+            rejectHiddenSegments(relativePath);
+            const statSegments = relativePath.replaceAll("\\", "/").split("/");
             let resolvedPath: string;
             let kind: "file" | "directory" = "directory";
             let editable = true;
-            try {
-              resolvedPath = safeProjectFile(projectDir(id), relativePath, { isDirectory: true });
-            } catch (error) {
-              if ((error as Error).message !== "path is not a directory") throw error;
-              // Validation (names, protected files, symlinks) has already passed; only the type differs.
+            if (statSegments[0]!.toLowerCase() === "assets" && statSegments.length > 1) {
+              // Only plain files below assets/ (existing allowAssets policy); nested generated/protected trees are not reported.
+              if (statSegments.slice(1).some((part) => protectedDirectoryNames.has(part.toLowerCase()) || ignoredProjectInputDirectories.has(part.toLowerCase()))) return failure("path not found", 404);
+              try {
+                resolvedPath = safeProjectFile(projectDir(id), relativePath, { allowAssets: true });
+              } catch (error) {
+                if ((error as Error).message === "project file is not a regular file") return failure("path not found", 404);
+                throw error;
+              }
               kind = "file";
-              resolvedPath = safeChild(projectDir(id), relativePath.replaceAll("\\", "/"));
-              try { safeProjectFile(projectDir(id), relativePath); } catch { editable = false; }
+              editable = false;
+            } else {
+              try {
+                resolvedPath = safeProjectFile(projectDir(id), relativePath, { isDirectory: true });
+              } catch (error) {
+                if ((error as Error).message !== "path is not a directory") throw error;
+                // An existing file: only editable source files are reported; everything else is indistinguishable from missing.
+                kind = "file";
+                try { resolvedPath = safeProjectFile(projectDir(id), relativePath); } catch { return failure("path not found", 404); }
+              }
             }
             const info = lstatIfExists(resolvedPath);
             if (!info) return failure("path not found", 404);
@@ -4590,6 +4673,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           }
           if (parts[3] === "files" && method === "DELETE" && parts.length > 4) {
             const relativePath = parts.slice(4).join("/");
+            rejectHiddenSegments(relativePath);
             const filePath = safeProjectFile(projectDir(id), relativePath, { mustExist: true });
             await unlink(filePath);
             await commitMutation(`file deleted: ${relativePath}`);
@@ -4601,6 +4685,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             const to = asString(body.to, "to", 1024);
             const overwrite = body.overwrite === true;
             if (body.overwrite !== undefined && typeof body.overwrite !== "boolean") throw new Error("overwrite must be a boolean");
+            rejectHiddenSegments(from);
+            rejectHiddenSegments(to);
             const source = safeProjectFile(projectDir(id), from, { mustExist: true });
             const target = safeProjectFile(projectDir(id), to);
             if (source === target) throw new Error("from and to are the same path");
@@ -4618,6 +4704,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           if (parts[3] === "folders" && ((parts.length === 4 && method === "POST") || (parts.length > 4 && method === "DELETE"))) {
             const body = method === "POST" ? await parseJsonBody(request) : {};
             const relativePath = method === "POST" ? asString(body.path, "path", 1024) : parts.slice(4).join("/");
+            rejectHiddenSegments(relativePath);
             const folderSegments = relativePath.replaceAll("\\", "/").split("/");
             // Generated/dependency trees are not source folders even where file policy allows the name.
             if (folderSegments.some((part) => ignoredProjectInputDirectories.has(part.toLowerCase()))) return failure("folder name is reserved", 400);
@@ -4664,11 +4751,15 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             if (parts.length === 4 && method === "POST") {
               const body = await parseJsonBody(request);
               const relativePath = asString(body.path, "path", 1024);
+              rejectHiddenSegments(relativePath);
               safeProjectFile(projectDir(id), relativePath);
               const totalBytes = parseNonNegativeInteger(body.totalBytes, "totalBytes");
               if (totalBytes > maxSourceBytes) return failure(`upload exceeds ${maxSourceBytes} bytes`, 413);
               const sha256 = parseSha256(body.sha256);
               if (uploads.size >= maxOpenUploads) return failure("too many open uploads; commit or abort one first", 429);
+              let projectUploads = 0;
+              for (const open of uploads.values()) if (open.projectId === id) projectUploads += 1;
+              if (projectUploads >= maxOpenUploadsPerProject) return failure(`too many open uploads for this project (max ${maxOpenUploadsPerProject}); commit or abort one first`, 429);
               const uploadId = randomUUID();
               const session: UploadSession = { projectId: id, path: relativePath, totalBytes, sha256, chunks: [], received: 0, timer: undefined as never };
               uploads.set(uploadId, session);
@@ -4685,8 +4776,10 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               const bytes = decodeBase64Strict(body.data, "data");
               if (bytes.length < 1 || bytes.length > maxChunkBytes) return failure(`chunk must be 1..${maxChunkBytes} bytes`, 413);
               if (session.received + bytes.length > session.totalBytes) return failure("chunk exceeds declared totalBytes", 413);
+              if (bufferedUploadBytes + bytes.length > maxBufferedUploadBytes) return failure(`upload buffer budget exhausted (${maxBufferedUploadBytes} bytes across all uploads); commit or abort an upload and retry`, 429);
               session.chunks.push(bytes);
               session.received += bytes.length;
+              bufferedUploadBytes += bytes.length;
               touchUpload(uploadId, session);
               return json({ uploadId, received: session.received, totalBytes: session.totalBytes });
             }
@@ -4736,6 +4829,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               watcher.on("change", (eventType, filename) => {
                 if (filename === null || filename === undefined) return;
                 const name = String(filename);
+                if (watchPathIgnored(name)) return;
                 created.pending.set(name, (created.pending.get(name) ?? false) || eventType === "rename");
                 created.timer ??= setTimeout(flush, watchDebounceMs);
                 created.timer.unref?.();
@@ -4793,7 +4887,10 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             if (!cancelBuild(state)) return failure("no build is queued or running", 409);
             const settled = buildSettled.get(state);
             if (settled) await Promise.race([settled.catch(() => undefined), new Promise((done) => setTimeout(done, 10_000).unref?.())]);
-            return json({ cancelled: true, status: publicStatus(id, state) });
+            // Only claim success once the build has really settled; a shared bootstrap step that cannot be
+            // interrupted can keep the build busy past the wait, in which case the cancel is still pending.
+            const cancelSettled = !state.busy;
+            return json({ cancelled: cancelSettled, ...(cancelSettled ? {} : { pending: true }), status: publicStatus(id, state) }, cancelSettled ? 200 : 202);
           }
           if (parts[3] === "files") {
             if (parts.length === 4 && method === "GET") {
@@ -4865,7 +4962,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           }
           if ((parts[3] === "build" || parts[3] === "compile") && method === "POST") {
             await parseJsonBody(request);
-            queueBuild(workspace, id, states, runner);
+            queueBuild(workspace, id, states, runner, buildScope);
             return json({ status: publicStatus(id, state) }, 202);
           }
           if (parts[3] === "versions" && method === "GET") {
@@ -4981,6 +5078,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   server.stop = ((closeActiveConnections?: boolean) => {
     backupSchedulerStopped = true;
     for (const uploadId of [...uploads.keys()]) dropUpload(uploadId);
+    // Kill in-flight compiler process groups instead of orphaning them.
+    for (const controller of [...buildScope.controllers]) controller.abort();
     for (const [watchId, entry] of [...projectWatches]) { for (const client of [...entry.clients]) client.close(); closeProjectWatch(watchId); }
     for (const timer of backupTimers.values()) clearTimeout(timer);
     backupTimers.clear();

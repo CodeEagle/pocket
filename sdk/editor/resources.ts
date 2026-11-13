@@ -96,6 +96,8 @@ export type BuildResourceSnapshotOptions = {
   systemFile?: string;
   policyFile?: string;
   log?: (line: string) => void;
+  /** Aborts catalog sub-package builds (Studio build cancel/timeout/stop). */
+  signal?: AbortSignal;
   /** Test-only injected runners may return opaque fixture bytes. */
   strictPak?: boolean;
 };
@@ -522,6 +524,7 @@ export async function buildResourceSnapshot(options: BuildResourceSnapshotOption
   await mkdir(subpackagesRoot, { recursive: true });
   const inventories: ResourcePackageInventory[] = [];
   for (const packageInfo of packages) {
+    options.signal?.throwIfAborted();
     const safeDir = safePackageDirectory(packageInfo.id);
     const artifactDirectory = packageInfo.isRoot ? "." : `subpackages/${safeDir}`;
     const target = packageInfo.isRoot ? buildDirectory : join(buildDirectory, artifactDirectory);
@@ -532,7 +535,7 @@ export async function buildResourceSnapshot(options: BuildResourceSnapshotOption
       const temporary = await mkdtemp(join(tmpdir(), "pocket-editor-subpackage-"));
       try {
         options.log?.(`building catalog package ${packageInfo.id} from ${packageInfo.root}`);
-        const built = await buildGuest({ projectRoot: packageInfo.root, outDir: temporary, tickHz: options.tickHz, log: options.log });
+        const built = await buildGuest({ projectRoot: packageInfo.root, outDir: temporary, tickHz: options.tickHz, log: options.log, ...(options.signal ? { signal: options.signal } : {}) });
         await copyBuiltPackage(built, target);
         await copyAssetTree(join(packageInfo.root, "assets"), join(target, "assets"));
       } finally {

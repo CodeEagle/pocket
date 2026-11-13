@@ -72,8 +72,13 @@ test("stat reports files and directories and 404s for missing paths", async () =
   expect(typeof file.body.mtimeMs).toBe("number");
   const dir = await call("/stat/ui");
   expect(dir.body).toMatchObject({ path: "ui", kind: "directory", editable: true });
-  const nonEditable = await call("/stat/ui/pic.png");
-  expect(nonEditable.body).toMatchObject({ kind: "file", editable: false, bytes: 1 });
+  // Non-editable files outside assets/ are indistinguishable from missing ones.
+  expect((await call("/stat/ui/pic.png")).status).toBe(404);
+  mkdirSync(join(projectDir, "assets"), { recursive: true });
+  writeFileSync(join(projectDir, "assets/pic.png"), "x");
+  expect((await call("/stat/assets/pic.png")).body).toMatchObject({ path: "assets/pic.png", kind: "file", editable: false, bytes: 1 });
+  expect((await call("/stat/assets/missing.png")).status).toBe(404);
+  expect((await call("/stat/assets/node_modules/x.png")).status).toBe(404);
   expect((await call("/stat/ui/missing.tsx")).status).toBe(404);
   // Protected files/dirs stay hidden even from stat.
   for (const path of ["/stat/editor.json", "/stat/node_modules", "/stat/assets", "/stat/builds", "/stat/keys/a.json", "/stat/.git"]) {
@@ -323,26 +328,117 @@ test("upload guards: oversize, bad sha, non-contiguous, incomplete, NUL, invalid
   expect((await call(`/uploads/${abortable.body.uploadId}`, { method: "DELETE" })).status).toBe(404);
 });
 
-test("upload ids are unguessable and sessions are bound to a project and bounded to 8 open", async () => {
+async function createProject(id: string): Promise<void> {
+  const created = await fetch(`${base}/api/projects`, { method: "POST", headers: { "content-type": "application/json", "x-pocket-csrf": csrf }, body: JSON.stringify({ id, name: id, version: "0.1.0", tickHz: 60 }) });
+  expect(created.status).toBe(201);
+}
+
+async function openIn(project: string, index: number): Promise<{ status: number; uploadId?: string }> {
+  const response = await fetch(`${base}/api/projects/${project}/uploads`, { method: "POST", headers: { "content-type": "application/json", "x-pocket-csrf": csrf }, body: JSON.stringify({ path: `bound/${index}.ts`, totalBytes: 1, sha256: sha("a") }) });
+  const body: any = await response.json();
+  return { status: response.status, uploadId: body.uploadId };
+}
+
+test("upload ids are unguessable and sessions are bound to a project; caps are 4 per project and 8 server-wide", async () => {
   const ids = new Set<string>();
   const opened: string[] = [];
-  for (let index = 0; index < 8; index += 1) {
+  for (let index = 0; index < 4; index += 1) {
     const result = await call("/uploads", { method: "POST", json: { path: `bound/${index}.ts`, totalBytes: 1, sha256: sha("a") } });
     expect(result.status).toBe(201);
     expect(result.body.uploadId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     ids.add(result.body.uploadId);
     opened.push(result.body.uploadId);
   }
-  expect(ids.size).toBe(8);
-  expect((await call("/uploads", { method: "POST", json: { path: "bound/9.ts", totalBytes: 1, sha256: sha("a") } })).status).toBe(429);
+  expect(ids.size).toBe(4);
+  const capped = await call("/uploads", { method: "POST", json: { path: "bound/9.ts", totalBytes: 1, sha256: sha("a") } });
+  expect(capped.status).toBe(429);
+  expect(capped.body.error).toContain("this project");
+  // Per-project isolation: another project still has its own four slots.
+  await createProject("other-app");
+  const others: string[] = [];
+  for (let index = 0; index < 4; index += 1) {
+    const result = await openIn("other-app", index);
+    expect(result.status).toBe(201);
+    others.push(result.uploadId!);
+  }
+  expect((await openIn("other-app", 9)).status).toBe(429);
+  // The global cap of 8 applies across projects.
+  await createProject("third-app");
+  const global = await fetch(`${base}/api/projects/third-app/uploads`, { method: "POST", headers: { "content-type": "application/json", "x-pocket-csrf": csrf }, body: JSON.stringify({ path: "bound/g.ts", totalBytes: 1, sha256: sha("a") }) });
+  expect(global.status).toBe(429);
+  expect((await global.json() as any).error).toContain("too many open uploads");
   // Another project cannot see or drive this session.
-  const other = await fetch(`${base}/api/projects`, { method: "POST", headers: { "content-type": "application/json", "x-pocket-csrf": csrf }, body: JSON.stringify({ id: "other-app", name: "Other", version: "0.1.0", tickHz: 60 }) });
-  expect(other.status).toBe(201);
   const cross = await fetch(`${base}/api/projects/other-app/uploads/${opened[0]}`, { method: "PUT", headers: { "content-type": "application/json", "x-pocket-csrf": csrf }, body: JSON.stringify({ offset: 0, data: "YQ==" }) });
   expect(cross.status).toBe(404);
   const crossDelete = await fetch(`${base}/api/projects/other-app/uploads/${opened[0]}`, { method: "DELETE", headers: { "x-pocket-csrf": csrf } });
   expect(crossDelete.status).toBe(404);
   for (const id of opened) expect((await call(`/uploads/${id}`, { method: "DELETE" })).status).toBe(200);
+  for (const id of others) expect((await fetch(`${base}/api/projects/other-app/uploads/${id}`, { method: "DELETE", headers: { "x-pocket-csrf": csrf } })).status).toBe(200);
+});
+
+test("buffered upload bytes are budgeted across uploads and released on abort", async () => {
+  const budgetServer = await startEditor({ port: 0, workspace: mkdtempSync(join(tmpdir(), "pocket-fs-budget-")), maxBufferedUploadBytes: 300, buildRunner: async () => { throw new Error("not used"); } });
+  try {
+    const b = `http://127.0.0.1:${budgetServer.port}`;
+    const token = (await (await fetch(`${b}/health`)).json()).csrfToken;
+    const headers = { "content-type": "application/json", "x-pocket-csrf": token };
+    await fetch(`${b}/api/projects`, { method: "POST", headers, body: JSON.stringify({ id: "bud", name: "bud", version: "0.1.0", tickHz: 60 }) });
+    const open = async (path: string) => (await (await fetch(`${b}/api/projects/bud/uploads`, { method: "POST", headers, body: JSON.stringify({ path, totalBytes: 200, sha256: sha("a") }) })).json() as any).uploadId as string;
+    const put = (id: string, offset: number) => fetch(`${b}/api/projects/bud/uploads/${id}`, { method: "PUT", headers, body: JSON.stringify({ offset, data: Buffer.alloc(200, 97).toString("base64") }) });
+    const first = await open("a.ts");
+    const second = await open("b.ts");
+    expect((await put(first, 0)).status).toBe(200);
+    const refused = await put(second, 0);
+    expect(refused.status).toBe(429);
+    expect((await refused.json() as any).error).toContain("budget");
+    // Aborting the first upload frees its bytes.
+    await fetch(`${b}/api/projects/bud/uploads/${first}`, { method: "DELETE", headers });
+    expect((await put(second, 0)).status).toBe(200);
+  } finally {
+    await budgetServer.stop(true);
+  }
+});
+
+test("new mutating routes reject dot-prefixed path segments", async () => {
+  writeFileSync(join(projectDir, "ui/dot.tsx"), "x");
+  for (const to of [".ssh/a.json", "ui/.hidden/a.json", ".a.json"]) {
+    expect((await call("/files-move", { method: "POST", json: { from: "ui/dot.tsx", to } })).status).toBe(400);
+  }
+  expect((await call("/files-move", { method: "POST", json: { from: ".ssh/a.json", to: "ui/x.tsx" } })).status).toBe(400);
+  expect(existsSync(join(projectDir, ".ssh"))).toBe(false);
+  expect((await call("/folders", { method: "POST", json: { path: ".ssh" } })).status).toBe(400);
+  expect((await call("/folders", { method: "POST", json: { path: "ui/.cache/x" } })).status).toBe(400);
+  expect((await call("/folders/.ssh", { method: "DELETE" })).status).toBe(400);
+  expect((await call("/files/ui/.env.tsx", { method: "DELETE" })).status).toBe(400);
+  expect((await call("/uploads", { method: "POST", json: { path: ".ssh/a.ts", totalBytes: 1, sha256: sha("a") } })).status).toBe(400);
+  expect((await call("/stat/.env")).status).toBe(400);
+  expect((await call("/stat/ui/.env")).status).toBe(400);
+  expect(existsSync(join(projectDir, "ui/dot.tsx"))).toBe(true);
+});
+
+test("stat does not leak non-source files", async () => {
+  writeFileSync(join(projectDir, ".env"), "SECRET=1");
+  writeFileSync(join(projectDir, "secret.txt"), "x");
+  expect((await call("/stat/.env")).status).toBe(400);
+  expect((await call("/stat/secret.txt")).status).toBe(404);
+});
+
+test("new read routes refuse cross-origin and cross-site requests; same-origin and header-less clients still work", async () => {
+  mkdirSync(join(projectDir, "ui"), { recursive: true });
+  const paths = ["/watch", "/build/events", "/chunks/ui/a.tsx", "/stat/ui/a.tsx"];
+  for (const path of paths) {
+    const url = `${base}/api/projects/fs-app${path}`;
+    expect((await fetch(url, { headers: { origin: "http://evil.example" } })).status).toBe(403);
+    expect((await fetch(url, { headers: { origin: "null" } })).status).toBe(403);
+    expect((await fetch(url, { headers: { "sec-fetch-site": "cross-site" } })).status).toBe(403);
+    expect((await fetch(url, { headers: { "sec-fetch-site": "same-site" } })).status).toBe(403);
+  }
+  // Foreign watchers must not consume slots: the real Studio can still connect.
+  const abort = new AbortController();
+  const ok = await fetch(`${base}/api/projects/fs-app/watch`, { headers: { origin: base, "sec-fetch-site": "same-origin" }, signal: abort.signal });
+  expect(ok.status).toBe(200);
+  abort.abort();
+  expect((await fetch(`${base}/api/projects/fs-app/stat/ui/a.tsx`, { headers: { origin: base } })).status).toBe(200);
 });
 
 async function openStream(path: string, abort: AbortController): Promise<{ next: (predicate: (event: any) => boolean, timeoutMs?: number) => Promise<any> }> {
@@ -433,4 +529,21 @@ test("watch is bounded and releases slots when clients disconnect", async () => 
   }
   expect(reopened).toBe(true);
   for (const abort of aborts) abort.abort();
+});
+
+test("SSE streams drop a slow consumer instead of buffering without bound", async () => {
+  const { sseResponse } = await import("../server.ts");
+  let detached = false;
+  let sent = 0;
+  let sender: (value: unknown) => void = () => undefined;
+  const response = sseResponse(new Request("http://127.0.0.1/x"), (send) => { sender = send; return () => { detached = true; }; });
+  // Nobody reads the body: the queue fills, then the subscriber is dropped.
+  for (let index = 0; index < 1000 && !detached; index += 1) { sender({ index }); sent += 1; }
+  expect(detached).toBe(true);
+  expect(sent).toBeLessThanOrEqual(300);
+  // A reader still receives the bounded backlog and then end-of-stream.
+  const reader = response.body!.getReader();
+  let frames = 0;
+  for (;;) { const chunk = await reader.read(); if (chunk.done) break; frames += 1; }
+  expect(frames).toBe(sent);
 });

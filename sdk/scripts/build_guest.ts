@@ -160,7 +160,7 @@ function projectPrimaryFontArguments(projectRoot: string): string[] {
  * aborts, the step's whole process group is terminated and the promise
  * rejects with "build cancelled". Output is streamed to `log` line by line.
  */
-function runOrThrow(command: string[], cwd: string, log?: (line: string) => void, signal?: AbortSignal): Promise<void> {
+export function runOrThrow(command: string[], cwd: string, log?: (line: string) => void, signal?: AbortSignal, options: { uninterruptible?: boolean } = {}): Promise<void> {
   return new Promise<void>((resolvePromise, reject) => {
     if (signal?.aborted) return reject(new Error("build cancelled"));
     // A group leader lets cancellation reach grandchildren (cargo -> compiler).
@@ -172,8 +172,12 @@ function runOrThrow(command: string[], cwd: string, log?: (line: string) => void
       detached: grouped,
     });
     const pending = ["", ""];
-    const feed = (index: 0 | 1, chunk: Buffer | string): void => {
-      pending[index] += chunk.toString();
+    // Decode with a streaming UTF-8 decoder: a multi-byte character split
+    // across two chunks must not turn into U+FFFD.
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    const feed = (index: 0 | 1, chunk: string): void => {
+      pending[index] += chunk;
       const lines = pending[index].split(/\r?\n/);
       pending[index] = lines.pop() ?? "";
       for (const line of lines) if (line) log!(line);
@@ -194,7 +198,10 @@ function runOrThrow(command: string[], cwd: string, log?: (line: string) => void
       killTimer = setTimeout(() => signalTree("SIGKILL"), 2000);
       killTimer.unref?.();
     };
-    signal?.addEventListener("abort", onAbort, { once: true });
+    // Steps that mutate the shared pinned cache (prepare_upstream, frozen
+    // install) are never killed half way: they finish, then the build is
+    // rejected as cancelled by the close handler before the compile step.
+    if (!options.uninterruptible) signal?.addEventListener("abort", onAbort, { once: true });
     const finish = (settle: () => void): void => {
       if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener("abort", onAbort);
@@ -818,13 +825,32 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
   const previous = buildQueue;
   let release!: () => void;
   buildQueue = new Promise<void>((resolveQueue) => { release = resolveQueue; });
+  let started = false;
   try {
-    await previous;
+    await waitForTurn(previous, options.signal);
+    started = true;
     if (options.signal?.aborted) throw new Error("build cancelled");
     return await buildGuestSerialized(options);
   } finally {
-    release();
+    // A build cancelled while queued rejects immediately, but must not let a
+    // later build overtake the one still running ahead of it: keep this slot
+    // occupied until the previous slot is released. `previous` never rejects.
+    if (started) release();
+    else void previous.then(release);
   }
+}
+
+function waitForTurn(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return previous;
+  return new Promise<void>((resolveTurn, reject) => {
+    if (signal.aborted) return reject(new Error("build cancelled"));
+    const onAbort = (): void => reject(new Error("build cancelled"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    void previous.then(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolveTurn();
+    });
+  });
 }
 
 async function buildGuestSerialized(options: BuildGuestOptions): Promise<BuildGuestResult> {
@@ -846,7 +872,7 @@ async function buildGuestSerialized(options: BuildGuestOptions): Promise<BuildGu
   const packagedCompiler = process.env.POCKET_COMPILER_PATH?.trim();
   if (sourceBuild && !packagedCompiler) {
     report(`build_guest: validating the local pinned PocketJS cache (project=${projectRoot})`, options.log);
-    await runOrThrow([process.env.POCKET_PYTHON || (process.platform === "win32" ? "python" : "python3"), join(root, "scripts/prepare_upstream.py")], root, options.log, options.signal);
+    await runOrThrow([process.env.POCKET_PYTHON || (process.platform === "win32" ? "python" : "python3"), join(root, "scripts/prepare_upstream.py")], root, options.log, options.signal, { uninterruptible: true });
   }
   const compiler = resolve(packagedCompiler || join(upstream, "tools/build.ts"));
   if (!existsSync(compiler)) throw new Error(`build_guest: pinned PocketJS compiler not found after bootstrap: ${compiler}`);
@@ -854,7 +880,7 @@ async function buildGuestSerialized(options: BuildGuestOptions): Promise<BuildGu
   // Dependencies are part of the pinned cache, never the application. A
   // frozen install keeps compiler behavior reproducible for external projects.
   if (sourceBuild && !packagedCompiler && existsSync(join(upstream, "package.json")) && existsSync(join(upstream, "bun.lock"))) {
-    await runOrThrow(["bun", "install", "--frozen-lockfile"], upstream, options.log, options.signal);
+    await runOrThrow(["bun", "install", "--frozen-lockfile"], upstream, options.log, options.signal, { uninterruptible: true });
   }
 
   // The compiler's JSX transformer imports Babel from the pinned cache. Keep
