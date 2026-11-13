@@ -2079,6 +2079,8 @@ export type PackageOptions = {
   includeBundle?: boolean;
   /** Archive format for one-shot bundle download (`"7z"` default, or `"zip"`). */
   bundleFormat?: BundleFormat;
+  /** Optional observer for the wall-clock cost of the Ed25519 signature alone. */
+  onSignTiming?: (milliseconds: number) => void;
 };
 
 export type PatchPackageOptions = {
@@ -2412,7 +2414,9 @@ export function packageArtifacts(options: PackageOptions): PackageResult {
     ...(guest?.memory === undefined ? {} : { memory: guest.memory }),
   };
   const payloadBytes = encoder.encode(JSON.stringify(payload));
+  const signStarted = performance.now();
   const envelope = signPayload(payloadBytes, loadPrivateKey(options.keyFile));
+  options.onSignTiming?.(performance.now() - signStarted);
   const payloadPath = join(outDir, "payload.json");
   const manifestPath = join(outDir, "signed-manifest.json");
   writeFileSync(payloadPath, asBuffer(payloadBytes));

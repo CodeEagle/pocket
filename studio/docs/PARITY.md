@@ -97,6 +97,8 @@ the JSX-lowered intermediate module.
 | POST | `/api/projects/:id/preview/input` | R* | pointer/text/semantic/resize events | — (replaced) | — |
 | GET | `/api/projects/:id/preview/status`, `/snapshot` | R | preview session state | `studio.preview.status` | [ ] |
 | GET/HEAD | `/api/projects/:id/preview/resource`, `/media?asset=` | R | resource bytes | — (child guest reads its own pack) | — |
+| POST | `/api/projects/:id/preview-publish` | W | **new**: packages the current successful build into the signed `preview` slot (fixed id `dev.pocket.studio.preview`, dedicated key, monotonic build) → `{buildId, revision, generation, version, build, packageId, manifestUrl, hostConfigUrl, payloadSha256, runtimeAbi, timingsMs}`; 409 without a current successful build | `studio.preview.load/reload` (child close + `create` without `cacheFirst`) | [~] service + Linux FFI proof done; macOS compositing open |
+| GET | `/preview/pocket/:host/:id/preview/<artifact>` | R (public) | **new**: signed preview slot served like `/test` and `/stable` | host update coordinator | [~] |
 | GET/POST | `/api/projects/:id/deploy` | R/W | `{deviceId}` → 202 deployment job | `studio.preview.deploy` | [ ] |
 | GET/DELETE | `/api/projects/:id/deploy/:job` | R/W | job status / cancel | `studio.preview.deploy` | [ ] |
 | GET/POST/DELETE | `/api/projects/:id/wechat` | R/W | WeChat mini-program preview | — (v1 out of scope; ask owner) | — |

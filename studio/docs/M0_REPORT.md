@@ -80,6 +80,14 @@ The upstream type is not inspectable here: `.cache/pocketjs` is missing. Check
   - (b) Add an SDK API for a Studio-only "dev child". It loads bytes handed over by the host for a
     `build id`, never for a path. This needs a security review because it bypasses signing.
   - Fallback from the brief: a second window with its own `PocketView`.
+- **Decision (owner, implemented): option (a).** The service publishes each build to a dedicated
+  `preview` slot (`POST /api/projects/:id/preview-publish`) under the fixed child id
+  `dev.pocket.studio.preview`, signed with a dedicated preview key, and the Studio reloads the child
+  with `system.runtime.destroy` + `system.runtime.create(prepareForOpen: true)` without `cacheFirst`.
+  No SDK or Dart change, no unsigned path. Linux proof with the real native library: v1 runs, edit +
+  republish + reload runs v2, replayed older build, forged signature and corrupted blob are rejected,
+  and the child cannot call parent capabilities. Details, timings and caveats:
+  `sdk/docs/STUDIO_SIGNED_PREVIEW.md`. Option (b) is not needed.
 - The preview child must not inherit Studio capabilities. Child configs cannot self-grant
   compositor access today, which matches what is needed. Capabilities must be granted per app id.
 
@@ -146,7 +154,7 @@ change `studio.fs` chunking and the `studio.preview` shape. Current mapping to r
 | `studio.build.cancel`, `events` | **new route / stream needed** (stream can start as provider-side poll of `/status`, but polling belongs in the guest per C5) |
 | `studio.logs.tail` | `GET …/logs` |
 | `studio.preview.deploy` / `devices` | `POST/GET/DELETE …/deploy[/:job]`, `GET /api/devices` |
-| `studio.preview.load/reload/close` | host-side (Spike C), keyed by build id |
+| `studio.preview.load/reload/close` | `POST …/preview-publish` (signed `preview` slot) + host-side reload via `system.runtime.destroy/create` (see `sdk/docs/STUDIO_SIGNED_PREVIEW.md`) |
 | `studio.publish.plan/publish/history` | `GET …/publish-targets`, `POST …/publish`, `GET …/versions` |
 | `studio.artifacts.list/inspect` | `GET …/status` (artifacts) + `GET …/artifacts/<name>` |
 | `studio.clipboard.read/write` | host-side, new |
@@ -215,8 +223,11 @@ Implemented by Sonnet workers, then a consolidated Sonnet review with fixes. Eac
 | `5480400`, `f43bcd2` | Multi-line `InputField`; `PocketView(textLayoutCacheCapacity:)` with cache stats; `modifiers` on `input.text` keys folded into key names; guest-requested raw key/IME sessions (`textInput.rawOpen/rawUpdate/rawClose`) | `sdk/docs/STUDIO_TEXT_INPUT.md` |
 | `ea90f56`, `6de1d65` | Service routes: stat, file delete/move, folders, chunked read and uploads, watch SSE, build cancel, build events SSE, structured diagnostics; async cancellable `buildGuest` (still serialised in-process) with a 15 min timeout | `sdk/docs/EDITOR_FS_AND_BUILD_ROUTES.md` |
 
-Still open before Spike C: the preview child loading path (option a or b in 3.3) is approved but
-not implemented. It needs the Spike C measurement on macOS to choose between them.
+Preview child loading path (3.3): option (a) is implemented and proven on Linux (`sdk/docs/STUDIO_SIGNED_PREVIEW.md`,
+`sdk/editor/test/editor_preview_publish.test.ts`, `sdk/test/studio_preview_ffi_test.dart`). Still open for
+Spike C on macOS: on-screen compositing of the child in `CompositorSurface` and save-to-first-frame on an
+Apple Silicon profile build. Linux headless reload took about 1.3 s plus a 1.2 s build, so the 1.5 s target
+for the counter fixture is not yet shown; the trimming options are listed in that doc.
 Still open for Spike A: the macOS IME checklist in `sdk/docs/STUDIO_TEXT_INPUT.md`.
 Known residual weakness (unchanged, documented): the constant `x-pocket-editor: 1` header passes
 the write credential check; `status.error`/`logs` can carry absolute paths and must be scrubbed by

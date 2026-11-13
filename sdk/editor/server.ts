@@ -50,6 +50,7 @@ import { createStudioDiagnostics, handleDiagnosticsRequest } from "./diagnostics
 import { createStudioUpgradeManager, readInstalledSdkInfo } from "../scripts/studio_upgrade.mjs";
 import { resolveProjectTemplate } from "../scripts/project_templates.ts";
 import { chooseUpdateHost, isLocalNetworkAddress, startUpdateEndpoint } from "./update_endpoint.ts";
+import { publishPreview, readPreviewSlot } from "./preview_publish.ts";
 import {
   currentVersion,
   emptyVersionHistory,
@@ -3899,6 +3900,9 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     return new Response(JSON.stringify(rebased, null, 2) + "\n", { status: response.status, statusText: response.statusText, headers });
   };
   const readPublishedResponse = async (path: string, servingOrigin: string): Promise<Response> => {
+    // The signed preview slot is not part of the version journal; it has its
+    // own directory and is served read-only like test/stable.
+    if (path.startsWith("/preview/pocket/")) return readPreviewSlot(workspace, path, servingOrigin);
     const response = await readPublishedUpdate(path);
     if (!path.endsWith("/host.json")) return response;
     return rebaseAggregateHostResponse(response, servingOrigin);
@@ -4344,7 +4348,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         if (path === "/api/codex/status" && method === "GET") return json(await codex.status());
         if (path === "/api/codex/models" && method === "GET") return json(await codex.models());
         if (path === "/api/devices" && method === "GET") return json({ devices: await devices.listDevices() });
-        if ((path.startsWith("/updates/") || path.startsWith("/pocket/") || path.startsWith("/test/pocket/") || path.startsWith("/stable/pocket/")) && (method === "GET" || method === "HEAD")) {
+        if ((path.startsWith("/updates/") || path.startsWith("/pocket/") || path.startsWith("/test/pocket/") || path.startsWith("/stable/pocket/") || path.startsWith("/preview/pocket/")) && (method === "GET" || method === "HEAD")) {
           return await readPublishedResponse(path, new URL(request.url).origin);
         }
         if (path.startsWith("/releases/") && method === "GET") {
@@ -4964,6 +4968,33 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             await parseJsonBody(request);
             queueBuild(workspace, id, states, runner, buildScope);
             return json({ status: publicStatus(id, state) }, 202);
+          }
+          if (parts[3] === "preview-publish" && parts.length === 4 && method === "POST") {
+            await parseJsonBody(request);
+            if (state.busy) return failure("build is still running", 409);
+            if (state.builtRevision === null || !state.artifacts || state.builtRevision !== state.revision) {
+              return failure("build the current source successfully before preview publish", 409);
+            }
+            const config = await loadConfig(projectDir(id), id);
+            const buildDir = join(workspace.builds, id, String(state.builtRevision));
+            const snapshot = await readResourceSnapshot(safeArtifactFile(workspace.builds, `${id}/${state.builtRevision}/${RESOURCE_SNAPSHOT_FILE}`));
+            const rootPackage = snapshot.packages.find((pkg) => pkg.id === config.appId);
+            if (!rootPackage) return failure("resource snapshot does not contain the root package", 409);
+            const network = resourcePackageNetwork(snapshot, rootPackage.id);
+            const result = await publishPreview({
+              workspace,
+              projectId: id,
+              origin: new URL(request.url).origin,
+              hostVersion: updateHostVersion,
+              buildDirectory: resourceArtifactDirectory(buildDir, rootPackage),
+              revision: state.builtRevision,
+              generation: state.artifacts.generation ?? state.finishedAt ?? `legacy:${state.builtRevision}`,
+              version: config.version,
+              build: config.build,
+              networkPak: network.pak,
+              networkAssets: network.assets,
+            });
+            return json(result);
           }
           if (parts[3] === "versions" && method === "GET") {
             const config = await loadConfig(projectDir(id), id);
