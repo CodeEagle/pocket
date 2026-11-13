@@ -14,6 +14,8 @@ import { createPublish } from "./publish.ts";
 import { createArtifacts } from "./artifacts.ts";
 import { createVersions } from "./versions.ts";
 import { createCopier } from "./copy.ts";
+import { createSelfUpdate, type UpdateBackend } from "./self-update.ts";
+import type { UpdateHandoff } from "./update-link.ts";
 import type { Timers } from "./env.ts";
 import type { StudioClient } from "../studio-client.ts";
 
@@ -24,6 +26,8 @@ export interface StudioDeps {
   timers: Timers;
   runtime: PreviewRuntime;
   settingsBackend: SettingsBackend;
+  /** Builds the guest-controlled update backend (M6 self-update) around the Studio's portable UI state; optional. */
+  updates?: (handoff: UpdateHandoff) => UpdateBackend;
   /** System clipboard client for the code editor (the guest's `clipboard.*` capability client); optional. */
   clipboard?: { readText(): Promise<string | null>; writeText(text: string): Promise<void> };
 }
@@ -80,13 +84,37 @@ export function createStudio(deps: StudioDeps) {
     cancelAuto = timers.after(settings.get().debounceMs, () => { cancelAuto = undefined; void preview.run({ build: true, since: savedAt }); });
   });
 
+  // M6: self-update. Only portable UI state crosses an update (the page and the open project); the new guest
+  // validates it synchronously and the project is reopened once the project list is back.
+  const pages: readonly StudioPage[] = ["projects", "source", "console", "preview", "resources", "settings", "artifacts", "publish", "versions"];
+  let restored: { page: StudioPage; project?: string } | undefined;
+  const handoff: UpdateHandoff = {
+    capture: () => ({ page: nav.get().page, project: projects.current() ?? null }),
+    restore: (value) => {
+      const v = value as { page?: unknown; project?: unknown } | null;
+      if (!v || typeof v !== "object" || Array.isArray(v) || !pages.includes(v.page as StudioPage)) return false;
+      if (v.project !== null && v.project !== undefined && (typeof v.project !== "string" || v.project.length > 64)) return false;
+      restored = { page: v.page as StudioPage, ...(typeof v.project === "string" ? { project: v.project } : {}) };
+      nav.update({ page: restored.page });
+      return true;
+    },
+  };
+  const updateBackend = deps.updates?.(handoff);
+  const selfUpdate = createSelfUpdate({ backend: updateBackend, toasts });
+
   void settings.load();
-  void projects.refresh();
+  // Reopen the project only after BOTH the project list and the handoff restore have settled (either can come first).
+  void Promise.all([projects.refresh(), Promise.resolve(updateBackend?.ready).catch(() => false)]).then(async () => {
+    const back = restored;
+    if (back?.project && projects.state().list.some((p) => p.id === back.project)) {
+      if (await projects.open(back.project)) nav.update({ page: back.page });
+    }
+  });
 
   return {
     nav, page: () => nav.get().page, setPage: (page: StudioPage) => nav.update({ page }),
     toasts, dialogs, workspace, build, settings, preview, deploy, projects,
-    publish, artifacts, versions, copy,
+    publish, artifacts, versions, copy, selfUpdate,
     client, timers, clipboard: deps.clipboard,
   };
 }

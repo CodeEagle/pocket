@@ -248,5 +248,18 @@ the Studio host provider.
 
 Linux proof: `studio/test/studio_code_editor_test.dart`. Deferred to macOS, NOT passed: the IME checklist (candidate
 window position, marked-text underline, Japanese clause selection, dead keys), Cmd+C/V/F/S forwarding from a real
-keyboard, and the profile-build frame budget while scrolling and typing a 5,000-line file. Open SDK change:
-`PocketAppConfig` has no `textLayoutCacheCapacity` (2,048 recommended), so `studio/lib/main.dart` still uses 256.
+keyboard, and the profile-build frame budget while scrolling and typing a 5,000-line file. The SDK change landed in
+M6: `PocketAppConfig.textLayoutCacheCapacity` (default 256, forwarded to `PocketView`; `studio/lib/main.dart` sets 2,048).
+
+### M6 (self-hosting, self-update, launcher): done on Linux, deferred checks
+
+Done: trusted extra project roots in the service, update-key provisioning at service startup, the Studio SystemUI's own
+signed update slot, guest-controlled check/apply with UI state handoff, rollback of a broken build by the SDK
+(`studio/test/studio_self_update_test.dart`), `bun pocket.ts editor --pocket`. See `ARCHITECTURE.md` "Self-hosting and
+self-update (M6)".
+
+Deferred (needs a Mac / owner), NOT passed: running `bun pocket.ts editor --pocket` end to end (`flutter run -d macos`);
+watching the macOS window replace itself on screen; making `--pocket` the default (after macOS acceptance); the web Studio
+stays for the visual novel editor, WeChat preview, Noble Bluetooth and Codex (owner decision); the SDK-checkout upgrade
+(`studio.service.upgrade.check/apply`, reserved); on macOS the zip delivery mode (native archive plugin) is not used by the
+Studio's own updates, which are granular by design.

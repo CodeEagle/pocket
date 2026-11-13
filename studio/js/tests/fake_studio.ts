@@ -35,6 +35,9 @@ export class FakeStudio {
   failCreate: Reply | undefined;
   storage = new Map<string, unknown>();
   storageAvailable = true;
+  /** Host update facts (`updates.*`) for the self-update tests. */
+  updates: { configured: boolean; stage: string; activeVersion: string; activeBuild: number; lastError: string | null; available: { version: string; build: number } | null; prepared: { version: string; build: number } | null; failCheck: Reply | undefined } =
+    { configured: true, stage: "ready", activeVersion: "0.1.0", activeBuild: 1, lastError: null, available: null, prepared: null, failCheck: undefined };
   requests: HostRequest[] = [];
   streams = new Map<string, { topic: string; params: Record<string, any> }>();
   cancelled = new Set<string>();
@@ -114,6 +117,11 @@ export class FakeStudio {
   mutate(): void {
     this.revision += 1;
     this.builtRevision = this.builtRevision; // a source change leaves builtRevision behind
+  }
+
+  updateStatus() {
+    const u = this.updates;
+    return { configured: u.configured, stage: u.stage, activeVersion: u.activeVersion, activeBuild: u.activeBuild, availableVersion: u.prepared?.version ?? null, preparedUpdate: u.prepared, versions: [], lastError: u.lastError };
   }
 
   handle = (request: HostRequest): Reply | Promise<Reply> => {
@@ -220,6 +228,16 @@ export class FakeStudio {
         this.storage.set(p.key, p.value);
         return ok(null);
       }
+      case "updates.status": return ok(this.updateStatus());
+      case "updates.check": {
+        if (this.updates.failCheck) return this.updates.failCheck;
+        this.updates.prepared = this.updates.available;
+        return ok(this.updateStatus());
+      }
+      case "updates.apply": return ok({ scheduled: this.updates.prepared !== null, version: this.updates.prepared?.version ?? this.updates.activeVersion });
+      case "platform.storage.get": return ok(this.storage.get(`platform:${p.key}`) ?? null);
+      case "platform.storage.set": this.storage.set(`platform:${p.key}`, p.value); return ok(null);
+      case "platform.storage.remove": this.storage.delete(`platform:${p.key}`); return ok(null);
       default: return err("capability_unavailable", request.capability);
     }
   };

@@ -169,6 +169,7 @@ void main() {
 
     // Scroll the virtualised view down and back (wheel), watching the layout cache.
     final cache0 = studioSession().controller.textLayoutCacheStats;
+    expect(cache0?.capacity, 2048, reason: 'studioSystemUI carries textLayoutCacheCapacity to the PocketView');
     for (var i = 0; i < 40; i++) {
       studioSession().controller.send(method: 'input.scroll', params: {'x': 500, 'y': 300, 'deltaY': 60.0, 'source': 'wheel', 'phase': 'update'});
       await pumpFor(const Duration(milliseconds: 20));

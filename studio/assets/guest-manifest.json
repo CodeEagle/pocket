@@ -56,7 +56,13 @@
       "system.storage.get",
       "system.storage.set",
       "system.storage.remove",
-      "system.storage.keys"
+      "system.storage.keys",
+      "updates.status",
+      "updates.check",
+      "updates.apply",
+      "platform.storage.get",
+      "platform.storage.set",
+      "platform.storage.remove"
     ]
   },
   "permissions": {

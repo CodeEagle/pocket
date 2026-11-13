@@ -11,6 +11,7 @@ import { Screen, View } from "@pocketjs/framework/solid/components";
 import { createStudioClient } from "./src/studio-client.ts";
 import { createStudio, type Studio } from "./src/state/studio.ts";
 import { createSystemLink } from "./src/state/system-link.ts";
+import { createUpdateLink } from "./src/state/update-link.ts";
 import { guestTimers, yieldTurn } from "./src/ui/guest-env.ts";
 import { select } from "./src/ui/bind.ts";
 import { Rail } from "./src/components/rail.tsx";
@@ -50,7 +51,7 @@ function App() {
   const host = createHostBridge();
   const streams = createPocketStreamAdapter(host);
   const link = createSystemLink(host);
-  const studio = createStudio({ client: createStudioClient(host, streams, { yieldTurn }), timers: guestTimers, runtime: link, settingsBackend: link, clipboard: createPocketClipboardClient(host) });
+  const studio = createStudio({ client: createStudioClient(host, streams, { yieldTurn }), timers: guestTimers, runtime: link, settingsBackend: link, clipboard: createPocketClipboardClient(host), updates: (handoff) => createUpdateLink(host, handoff) });
   return (
     <MobileThemeProvider theme={() => MOBILE_THEME_DARK}>
       <Shell studio={studio} host={host} />

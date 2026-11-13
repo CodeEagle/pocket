@@ -14,7 +14,7 @@ test("project list, open a project, expand folders and open a file in a tab by i
     let frame = await session.until((f) => has(f, "Alpha 应用"), "project list");
     const projectListFrame = textOf(frame);
     assert.ok(has(frame, "Beta 游戏") && has(frame, "项目"), projectListFrame);
-    assert.equal(fake.requests[0]?.capability, "studio.project.list");
+    assert.equal(fake.requests.find((r) => r.capability.startsWith("studio."))?.capability, "studio.project.list"); // the update client (M6) asks updates.status first
 
     await tapText(session, frame, "Alpha 应用");
     frame = await session.until((f) => has(f, "app.tsx"), "file tree");
@@ -35,7 +35,7 @@ test("project list, open a project, expand folders and open a file in a tab by i
     await tapText(session, frame, "▾ src");
     frame = await session.until((f) => !has(f, "▸ deep") && has(f, "▸ src"), "collapsed folder");
 
-    for (const r of fake.requests) assert.ok(/^(studio|system|platform)\./.test(r.capability), r.capability);
+    for (const r of fake.requests) assert.ok(/^(studio|system|platform|updates)\./.test(r.capability), r.capability);
   } finally { session.kill(); }
 }, 60_000);
 

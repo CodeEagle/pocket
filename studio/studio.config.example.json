@@ -2,5 +2,7 @@
   "POCKET_STUDIO_SDK_ROOT": "/absolute/path/to/pocket/sdk",
   "POCKET_STUDIO_PROJECT_ROOT": "/absolute/path/to/a/pocket/project",
   "POCKET_STUDIO_WORKSPACE": "/absolute/path/to/studio-workspace",
-  "POCKET_STUDIO_PORT": "8795"
+  "POCKET_STUDIO_PORT": "8795",
+  "POCKET_STUDIO_EXTRA_PROJECT_ROOTS": "/absolute/path/to/pocket/studio/js",
+  "POCKET_STUDIO_UPDATE_CHANNEL": "test"
 }

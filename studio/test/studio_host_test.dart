@@ -67,6 +67,8 @@ void main() {
     expect(studio.appId, 'dev.pocket.studio');
     expect(studio.allowedPermissions, {...PocketStudioPermissions.all, 'clipboard.read', 'clipboard.write'});
     expect(studio.rawTextInputEnabled, isTrue);
+    expect(studio.textLayoutCacheCapacity, 2048);
+    expect(child.textLayoutCacheCapacity, 256, reason: 'the preview child keeps the default');
     expect(studio.memoryLimits.heapLimitBytes, PocketMemoryLimits.maximumHeapBytes);
     expect(child.appId, PocketStudioConfig.previewAppId);
     expect(child.allowedPermissions, isEmpty);
@@ -201,7 +203,8 @@ void main() {
       // this harness (no PocketSystemHost) and the guest tolerates that.
       final studioCalls = requested.where((c) => c.startsWith('studio.')).toSet();
       expect(studioCalls.difference(pocketStudioCapabilityNames), isEmpty, reason: requested.toString());
-      expect(requested.where((c) => !c.startsWith('studio.') && !c.startsWith('system.')), isEmpty, reason: requested.toString());
+      // M6: the guest's update client also asks the host's own updates.status (not served by this harness either).
+      expect(requested.where((c) => !c.startsWith('studio.') && !c.startsWith('system.') && !c.startsWith('updates.')), isEmpty, reason: requested.toString());
       expect(requested, containsAll(<String>['studio.project.list', 'studio.fs.tree', 'studio.fs.read']));
       // 6. Nothing absolute reached the guest.
       expect(textOf(), isNot(contains(projectRoot)));

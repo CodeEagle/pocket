@@ -141,7 +141,7 @@ plus stage/localization/authoring/backups modules).
 | Shell | New project dialog with App/Game template | `new-project`, `create-dialog`, `create-form` | M1 | [x] (App/Game, id, name, appId; version/tickHz fields later) |
 | Shell | Left rail: stage, source, console, resources, settings, versions | `rail-*` | M1 | [x] (项目/源码/控制台/预览/资源/设置 and, since M5, 产物/发布/版本 are real pages) |
 | Shell | Notice toast | `notice*` | M1 / M2 | [x] (bottom-right toast stack, tone, auto-dismiss, tap to dismiss) |
-| Shell | Studio self-upgrade bar | `studio-upgrade-*` | M6 | [ ] |
+| Shell | Studio self-upgrade bar | `studio-upgrade-*` | M6 | [~] The Studio's *own guest* updates itself through the signed OTA path (Settings: 检查 Studio 更新 / 应用更新, state handoff, automatic rollback; `studio/test/studio_self_update_test.dart`). The web bar's other job, upgrading the SDK checkout (`/api/studio/upgrade/check|apply`, `studio.service.upgrade.*`), stays reserved and is not built |
 | Source | File picker, source editor, save, reload, bytes/revision, split toggle, close | `file-picker`, `source`, `save`, `refresh-source`, `source-*` | M2 / M4 | [x] M2: tree, tabs with dirty state, multi-line InputField, Save button, unsaved prompts, create/rename/delete/mkdir/rmdir, fs.watch reconcile, chunked IO, 1 MiB cap for the InputField. [x] M4: `CodeView` (default `editor: "code"`; the InputField stays as the `input` fallback): syntax colours, gutter diagnostics, find/replace, undo, system clipboard, Cmd+S/Cmd+Z through the raw key session, dirty from the buffer version, files up to 4 MiB through the sliced chunked read/upload. Linux proof: `studio/test/studio_code_editor_test.dart` (5,000-line file); macOS IME and profile frame budget are deferred. [~] folder rename unsupported (service moves files only) |
 | Preview | Viewport picker, phone bezel toggle, regions overlay, resize height | `viewport-picker`, `preview-bezel-toggle`, `toggle-regions`, `resize-preview-height` | M3 | [ ] |
 | Preview | Refresh, capture screenshot, copy preview link | `refresh-preview`, `capture-preview`, `copy-preview-link` | M3 (link is web-only) | [~] refresh = "构建并刷新预览"/"重新加载"; screenshot and link not built |
@@ -173,7 +173,7 @@ the Pocket Studio must keep green. Test counts are `test(`/`it(` calls per file.
 | Hot reload | `hot_reload` (4) | Pattern for M3 reload of the child guest. |
 | Devices | `devices` (8) | M3 deploy |
 | Diagnostics | `diagnostics` (3) | M7 |
-| Self-upgrade | `studio_upgrade` (12) | M6 |
+| Self-upgrade | `studio_upgrade` (12) | M6: covers the service-side SDK checkout upgrade (still web-only); the guest OTA self-update has its own tests (`studio_self_update_test.dart`, `state_m6.test.ts`, `studio_guest_update.test.ts`) |
 | Visual novel | 50 `novel_*` files | Out of v1 scope unless owner says otherwise |
 | WeChat | `wechat` (4), `wechat_routes` (1), `wechat_ui` (1), `wechat_inline_browser` (1) | Out of v1 scope |
 | Codex / Bluetooth | `codex` (11), `local_bluetooth` (6), `noble_bluetooth` (6) | Out of v1 scope |
@@ -221,3 +221,17 @@ service (confirmation, slot) but the real-service exit test publishes only `test
 mini apps owned by other projects; one-click archive download; a Resources inspector with placement editing
 (`studio.project.resources.*`, still reserved); the 128 KiB inspect limit means a resource snapshot above it is not summarised.
 
+## 8. M6 status (self-hosting, self-update, launcher)
+
+* The Studio opens, edits, builds and publishes its own project (`studio/js`) as a trusted extra root of the service
+  (`--extra-project-root`, host configuration only; `sdk/editor/test/editor_extra_roots.test.ts`).
+* The Studio SystemUI is configured with its own signed slot (test channel by default) and replaces itself on the user's
+  tap through `PocketUpdateCoordinator` and the session health trial; a broken build is rolled back by the SDK
+  (`studio/test/studio_self_update_test.dart`, Linux, real library and service).
+* `bun pocket.ts editor --pocket [<project>]` launches the macOS host (argument handling and the non-macOS error are
+  tested without Flutter: `sdk/scripts/tests/pocket_studio_launcher.test.ts`).
+* **Web Studio is legacy** for everything the Pocket Studio covers. The visual novel editor, WeChat preview, Noble Bluetooth
+  and Codex stay web-only (owner decision). `--pocket` becomes the default of `bun pocket.ts editor` only after macOS
+  acceptance; until then plain `editor` is the web Studio.
+* Not verified (needs a Mac): the launcher end to end (`flutter run -d macos`), the macOS app update/replace on screen,
+  the IME checklist, compositing and profile frame budgets (unchanged from M3/M4/M5).

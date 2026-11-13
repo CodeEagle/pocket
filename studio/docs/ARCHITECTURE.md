@@ -1,4 +1,4 @@
-# Pocket Studio architecture (M1 shell and transport, M2 editing, M3 build and live preview)
+# Pocket Studio architecture (M1 shell and transport, M2 editing, M3 build and live preview, M5 publish, M6 self-hosting)
 
 Pocket Studio is a Pocket guest app (TSX on `@pocket/ui`, compiled to QuickJS bytecode by the one pinned
 `buildGuest` pipeline) running in a thin Flutter macOS host. The Bun editor service in `sdk/editor` stays the
@@ -242,9 +242,8 @@ Setting `editor`: `"code"` (default) or `"input"` (the M2 InputField fallback). 
   (16 KiB or 40 ms per turn, `Sha256` is incremental, `base64Decode` is table driven) and awaits `yieldTurn` (a frame
   timer) between slices; `TokenCache` tokenizes with a 60 ms budget per turn and CodeView repaints as it catches up
   (rows past the tokenized prefix are uncoloured meanwhile). Probe tests cover opening and saving a >240 KiB file.
-* Native text cache: CODE_VIEW.md measured `textLayoutCacheCapacity: 256` thrashing and 2,048 fine. `PocketAppConfig`
-  cannot carry it yet (only `PocketView` has the parameter), so `studio/lib/main.dart` could not set it; the Linux test
-  reports capacity 256. Needs an `sdk/lib` change (see M0_REPORT section 10).
+* Native text cache: CODE_VIEW.md measured `textLayoutCacheCapacity: 256` thrashing and 2,048 fine. Since M6
+  `PocketAppConfig.textLayoutCacheCapacity` carries it to `PocketView` and `studio/lib/main.dart` sets 2,048.
 * Deferred to macOS: the IME checklist (candidate window, marked text, clause selection, dead keys), key forwarding
   for Cmd+C/V/F/S on a real keyboard, and the profile-build frame budget. Not claimed as passed.
 
@@ -328,6 +327,63 @@ Service/provider changes made for M5 (everything else was already present): `res
 (`readArtifact` in `sdk/editor/server.ts`, test in `editor_server.test.ts`); provider: artifact name, compact re-encode of
 oversized JSON, publish-result envelope slimming, key scrubbing (`studio_plugin_test.dart`, `real_service_test.dart`).
 
+## Self-hosting and self-update (M6)
+
+The Studio can open, build and publish **its own guest project** (`studio/js`) like any project, and then update
+itself through the SDK's normal signed OTA path. No new downloader, verifier or package store exists; Dart gained
+configuration only.
+
+**Opening its own project.** The service lists one primary project (`--project-root`). M6 adds trusted
+*additional roots*: `--extra-project-root=DIR` (repeatable; `StartEditorOptions.extraProjectRoots`;
+`PocketStudioConfig.extraProjectRoots`, dart-define `POCKET_STUDIO_EXTRA_PROJECT_ROOTS`, ':' separated). They are
+validated at startup like the primary root (directory, never a symlink, `pocket.json`, unique project id; any problem
+aborts startup because the configuration is trusted) and registered in the existing catalog-source map, so listing,
+fs, build and publish use the same guarded code. No HTTP route can add, change or list roots, `POST /api/projects`
+cannot create over one (409), and paths are scrubbed as before. `bun pocket.ts editor --pocket` adds `studio/js`
+automatically. Tests: `sdk/editor/test/editor_extra_roots.test.ts`, `real_service_test.dart`.
+
+**Updating itself.**
+
+```
+Studio (v0, bundled or last good)        editor service                      host (PocketSession / coordinator)
+Projects -> open "Pocket Studio"  ---->  extra root studio/js (appId dev.pocket.studio)
+edit, Console build, 发布测试包    ---->  pinned buildGuest, Ed25519 sign (editor-dev-key), test slot
+Settings: 检查 Studio 更新          updates.check{granular,all} ---------------> prepare(): fetch changed blobs, verify
+                                    <---- preparedUpdate {version, build}
+应用更新                            capture {page, project} to platform.storage; updates.apply{expectedVersion/Build}
+                                                                  mount new package after 150 ms: generation++ (QuickJS realm replaced)
+new guest: restore handoff, reopen project                         health trial: foreground first frame + 1 s live window
+                                                                  -> promoted to lastGood (anti-downgrade floor rises)
+```
+
+* Host (`studio/lib/main.dart`, still <= 100 lines, stateless): `studioSystemUI` sets `updates` to
+  `PocketUpdateConfig(indexUrl: config.selfUpdateUrl, keyId/publicKey: config.readUpdateKey(), namespace: 'studio-self')`.
+  `selfUpdateUrl` is `<origin>/<channel>/pocket/<hostVersion>/dev.pocket.studio/latest.json`; the channel is `test` by default
+  (`POCKET_STUDIO_UPDATE_CHANNEL=stable` selects the stable slot). The trusted key is the **public half** of the service's
+  update key, read from the trusted workspace (`keys/editor-dev-key.json`) exactly like the preview child reads
+  `editor-preview-key.json`; the host never sees the private key. The key is the one `host.json` of the slot publishes. The
+  service creates it at startup (`--provision-update-key`, idempotent, never rotated; the host's spawn command passes the flag),
+  so the SystemUI is configured before the first publish and no host restart is needed after it. The Studio's bundled
+  `assets/` stay the built-in fallback: without a key, without a published package or after a total failure the host runs them.
+  The package's `appId` binds it (`PocketManifestVerifier`), so a user project signed by the same key cannot replace the
+  Studio unless it declares `dev.pocket.studio`.
+* Guest (`state/self-update.ts`, `state/update-link.ts`, Settings page "Studio 更新"): `createPocketUpdateClient` with the
+  `state` handoff (SYSTEM_UI_SELF_REFRESH.md). **No automatic refresh**: replacing the guest under a user who is editing would
+  lose focus and IME state, so the Studio checks (`mode: "granular"`, scope all; the one-shot zip needs the native archive
+  extractor, which Linux lacks and a 100 KB package does not need) and applies only on the user's tap. Handoff schema
+  `studio-ui/1` carries only `{page, project}`; the restoring guest validates it synchronously and reopens the project after
+  the project list and the restore have both settled. Editor buffers, tabs, build logs and the preview child are not carried
+  (unsaved edits are saved on disk or lost; the preview child is rebuilt on demand), as documented for any SystemUI update.
+  The guest manifest gained optional `updates.status/check/apply` and `platform.storage.get/set/remove`.
+* Rollback: the SDK owns it. A candidate that throws at startup or never draws a first frame (15 s watchdog) fails the trial in
+  `PocketSession.onError`; the coordinator's `fallbackFor` mounts the last good package (or the bundled bytecode when none is
+  recorded) in the same session, keeps `lastError`, and the failed release is not re-applied by a resume event. Because the
+  handoff record keeps its source package, the recovered guest restores the same page and project. The Settings page shows the
+  host's `lastError` ("上次更新失败（已回滚到可用版本）") next to the running version.
+* Text cache: `PocketAppConfig.textLayoutCacheCapacity` (default 256) is passed to `PocketView`; the Studio sets 2,048.
+
+Test: `studio/test/studio_self_update_test.dart` (real library, real service, real signing, temp copy of `studio/js`).
+
 ## Studio-local settings
 
 `studio.settings.v1 = {autoBuild, debounceMs, dockPreview, editor}` in the Studio's SystemUI storage. `studio.project.settings.*`
@@ -345,6 +401,13 @@ flutter run -d macos \
   --dart-define=POCKET_STUDIO_WORKSPACE=/path/to/studio-workspace
 # or: flutter run -d macos --dart-define-from-file=studio.config.example.json (after editing the paths)
 ```
+
+Shortcut: `bun pocket.ts editor --pocket [<project>] [--port=N] [--workspace=DIR]` (macOS only) writes the trusted
+configuration to `<workspace>/pocket-studio-host.config.json`, adds `studio/js` as an extra root and runs
+`flutter run -d macos --dart-define-from-file=...` in `studio/`; the host attaches to a running service or starts one.
+On other platforms it exits with "Pocket Studio host is macOS-only; use the web Studio (bun pocket.ts editor) on this
+platform". Plain `bun pocket.ts editor <project>` is still the web Studio (`--pocket` becomes the default only after macOS
+acceptance, owner decision).
 
 The macOS target is the only platform (`studio/macos`). The app runs without the App Sandbox
 (`macos/Runner/*.entitlements`) because it starts `bun` and reads the trusted workspace; this is a developer-tool
@@ -367,6 +430,8 @@ configuration on the real native library.
 * `studio/test/studio_code_editor_test.dart`: M4 exit test, Linux half (5,000-line TSX through the real host: wheel scroll, IME deltas, hardware keys, Meta+Z, Meta+S, file on disk; prints layout-cache stats).
 * `studio/js/tests/studio_guest_code.test.ts`: code pane on the probe (typing, save write/upload, >240 KiB open, diagnostic jump, reload, settings switch, clipboard, find). The M2/M3 tests select the InputField explicitly.
 * `studio/js/tests/state_m5.test.ts`, `studio_guest_publish.test.ts` (fake service on the real probe): publish/artifacts/versions stores and the three pages by taps.
+* `studio/test/studio_self_update_test.dart`: M6 exit test (Linux): the Studio opens its own project (temp copy of `studio/js`, trusted extra root), builds and publishes it by taps; Settings checks and applies; the running Studio shows the new marker; a deliberately broken build (throws at startup) is applied and the host rolls back to the last good package; the package store's `active`/`lastGood` pointers are asserted.
+* `studio/js/tests/state_m6.test.ts`, `studio_guest_update.test.ts`: self-update store and the Settings flow on the real probe with a fake host.
 * `studio/test/studio_publish_test.dart`: M5 exit test (Linux part): real service + real signing; the Studio guest publishes a signed test update by taps; a client (`PocketHostConfig.load` -> `PocketSession` -> `FfiPocketRuntime`) downloads, verifies, activates and runs it; a second publish is picked up by the same client session; no key material or absolute path reached the guest.
 
 Known gaps found while testing: (1) in the probe harness a second large (>~170 KB) inbound `host.response` right after
