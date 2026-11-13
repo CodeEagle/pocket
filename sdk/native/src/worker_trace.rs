@@ -315,6 +315,9 @@ impl WorkerTrace {
                     return Ok(Value::Null);
                 };
                 state.next_seq = next_seq;
+                if actor == TraceActor::Host && kind == "scheduler.stop" {
+                    state.stopped_sessions.insert(session.to_owned());
+                }
                 update_active_turn(&mut state, actor, &event);
                 if state.batch_open {
                     state.batch_events.push(event.clone());
@@ -1377,6 +1380,53 @@ mod tests {
             .unwrap();
         let replayed = replay.finish_batch().unwrap();
         assert_eq!(replayed.len(), 3);
+    }
+
+    #[test]
+    fn record_scheduler_stop_is_linearized_without_rejecting_an_admitted_turn() {
+        let trace = WorkerTrace::new(Mode::Record);
+        trace.begin_batch(&[]).unwrap();
+        trace
+            .observe(
+                TraceActor::Host,
+                "worker-1",
+                "scheduler.stop",
+                || json!({"generation": 1}),
+            )
+            .unwrap();
+        assert!(trace.session_stopped("worker-1"));
+        trace
+            .observe(
+                TraceActor::Worker,
+                "worker-1",
+                "turn.begin",
+                || json!({"generation": 1, "sequence": 1, "nowMicros": 7}),
+            )
+            .unwrap();
+        trace
+            .observe(
+                TraceActor::Worker,
+                "worker-1",
+                "turn.facts",
+                || json!({"sequence": 1, "nowMicros": 7, "facts": []}),
+            )
+            .unwrap();
+        trace
+            .observe(
+                TraceActor::Worker,
+                "worker-1",
+                "turn.end",
+                || json!({"generation": 1, "sequence": 1, "executed": true, "elapsedMicros": 1}),
+            )
+            .unwrap();
+        let events = trace.finish_batch().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["scheduler.stop", "turn.begin", "turn.facts", "turn.end"]
+        );
     }
 
     #[test]
