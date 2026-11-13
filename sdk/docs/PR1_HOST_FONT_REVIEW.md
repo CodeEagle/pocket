@@ -124,3 +124,14 @@ facts and persisted upgrade status before cleanup.
 The release command passed all 26 tests and 148 assertions on macOS with
 Playwright Chromium and Bun 1.4.4. The same group is included in Linux CI
 before packaging. SDK version 0.1.14 supersedes the unpublished 0.1.13 candidate.
+
+## Native test lifetime ablation
+
+Repeated Linux execution exposed heap corruption in the truncated draw-op
+parser regression. AddressSanitizer reproduced a `BorrowRefMut` drop after
+`pocket_destroy` had released the last owner of its `CoreState`. The test had
+borrowed `handle.ops.core_mut().ui` across destruction of that same handle.
+This regression tests parsing, so use a local `Ui::new()` and remove the
+unnecessary host/FFI lifecycle entirely. The original test fails under ASan;
+the adapted test and full library runs pass under ASan. Keep default parallel
+execution rather than masking the error by serializing tests.

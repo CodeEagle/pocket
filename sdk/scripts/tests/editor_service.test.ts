@@ -418,6 +418,7 @@ test("a port-retirement refusal removes the unused backup and stage without roll
     await expect(upgradeApply({ stageDir, targetVersion: "0.1.15" }, {
       sdkRoot: root,
       assertPortOwnership: async () => ({ processes: [], owned: [], foreign: [] }),
+      cleanupLegacyLaunchd: () => {},
       stopOwnedPort: async (port: number, required: boolean, protectedPid: number) => {
         expect(port).toBeGreaterThan(0);
         expect(required).toBe(true);

@@ -537,8 +537,9 @@ async function upgradeApply(upgradeParams = {}, runtimeOptions = {}) {
     }
 
     const retireOwnedPort = runtimeOptions.stopOwnedPort ?? stopOwnedPort;
+    const removeLegacyLaunchAgents = runtimeOptions.cleanupLegacyLaunchd ?? cleanupLegacyLaunchd;
     try {
-      cleanupLegacyLaunchd();
+      removeLegacyLaunchAgents();
       await retireOwnedPort(PORT, true, process.pid);
       for (const port of LEGACY_PORTS) await retireOwnedPort(port, false);
     } catch (error) {
