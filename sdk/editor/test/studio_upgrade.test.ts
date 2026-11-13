@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { chromium } from "playwright";
 import {
@@ -1078,6 +1078,102 @@ function populateRealStandaloneScripts(
   return archiveInfo;
 }
 
+function upgradeLifecycleProcessDiagnostics(sdkRoot: string): Record<string, unknown> {
+  const buildRoot = join(sdkRoot, ".pocket-build");
+  const readJson = (name: string): Record<string, unknown> | null => {
+    try {
+      return JSON.parse(readFileSync(join(buildRoot, name), "utf8")) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+  const pidRecord = readJson("editor-service-8791.pid.json");
+  const applyLock = readJson("sdk-upgrade-apply.lock.json");
+  const observedPids = [pidRecord?.pid, applyLock?.pid]
+    .map(Number)
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  const pidStatus = observedPids.map((pid) => {
+    try {
+      process.kill(pid, 0);
+      return { pid, alive: true };
+    } catch (error) {
+      return { pid, alive: (error as NodeJS.ErrnoException).code === "EPERM" };
+    }
+  });
+
+  if (process.platform === "win32") {
+    return { pidStatus, processTree: "ps is unavailable on win32" };
+  }
+  const ps = spawnSync("ps", ["-eo", "pid,ppid,stat,args"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  if (ps.error || ps.status !== 0) {
+    return {
+      pidStatus,
+      processTreeError: ps.error?.message || ps.stderr || `ps exited ${ps.status}`,
+    };
+  }
+
+  const rows = ps.stdout.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+    return match
+      ? [{ pid: Number(match[1]), ppid: Number(match[2]), state: match[3], command: match[4] }]
+      : [];
+  });
+  const treePids = new Set(observedPids);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      if (treePids.has(row.ppid) && !treePids.has(row.pid)) {
+        treePids.add(row.pid);
+        changed = true;
+      }
+    }
+  }
+  const relevantProcesses = rows.filter((row) =>
+    treePids.has(row.pid) || row.command.includes(sdkRoot),
+  );
+  return { pidStatus, processTree: relevantProcesses };
+}
+
+async function reportUpgradeLifecycleFailure(sdkRoot: string, browser: import("playwright").Browser): Promise<void> {
+  console.error(`[upgrade lifecycle failure] ${sdkRoot}`);
+  const buildRoot = join(sdkRoot, ".pocket-build");
+  const files = ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"];
+  for (const file of files) {
+    const source = join(buildRoot, file);
+    if (existsSync(source)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(source, "utf8").slice(-16000)}`);
+  }
+  console.error("[upgrade lifecycle processes]", JSON.stringify(upgradeLifecycleProcessDiagnostics(sdkRoot), null, 2));
+  for (const context of browser.contexts()) {
+    for (const page of context.pages()) {
+      console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
+    }
+  }
+
+  try {
+    const artifactDir = join(
+      process.env.RUNNER_TEMP || tmpdir(),
+      "pocket-studio-upgrade-diagnostics",
+      basename(sdkRoot),
+    );
+    mkdirSync(artifactDir, { recursive: true });
+    for (const file of files) {
+      const source = join(buildRoot, file);
+      if (existsSync(source)) copyFileSync(source, join(artifactDir, file));
+    }
+    writeFileSync(
+      join(artifactDir, "process-tree.json"),
+      `${JSON.stringify(upgradeLifecycleProcessDiagnostics(sdkRoot), null, 2)}\n`,
+    );
+    console.error(`[upgrade lifecycle diagnostics] ${artifactDir}`);
+  } catch (error) {
+    console.error("[upgrade lifecycle diagnostics copy failed]", error);
+  }
+}
+
 describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium UI integration", () => {
   test("executes real detached editor_service.mjs CLI upgrade-apply with future ABI validation, defers while dirty, and automatically navigates browser on completion", { timeout: 55_000 }, async () => {
     const standaloneRoot = mkdtempSync(join(tmpdir(), "pocket-e2e-real-cli-sdk-"));
@@ -1220,6 +1316,11 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
         }
       });
       await page.locator("#studio-upgrade-action").click();
+      await page.waitForFunction(
+        () => (document.getElementById("studio-upgrade-status")?.textContent || "").includes("未保存修改"),
+        undefined,
+        { timeout: 10_000 },
+      );
       const deferredBarText = await page.locator("#studio-upgrade-status").textContent();
       expect(deferredBarText).toContain("未保存修改");
 
@@ -1278,16 +1379,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(readFileSync(nestedCustomPackage, "utf8")).toBe("export const custom = 42;\n");
       expect(readFileSync(join(configuredProjectRoot, "app.tsx"), "utf8")).toContain("unsaved user draft");
     } catch (error) {
-      console.error(`[upgrade lifecycle failure] ${standaloneRoot}`);
-      for (const file of ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"]) {
-        const path = join(standaloneRoot, ".pocket-build", file);
-        if (existsSync(path)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(path, "utf8").slice(-16000)}`);
-      }
-      for (const context of browser.contexts()) {
-        for (const page of context.pages()) {
-          console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
-        }
-      }
+      await reportUpgradeLifecycleFailure(standaloneRoot, browser);
       throw error;
     } finally {
       await browser.close();
@@ -1421,16 +1513,7 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
       expect(readFileSync(nestedCustomFile, "utf8")).toBe('export const keep = "nested-consumer-file";\n');
       expect(readPersistedUpgradeStatus(standaloneRoot)?.rolledBack).toBe(true);
     } catch (error) {
-      console.error(`[upgrade lifecycle failure] ${standaloneRoot}`);
-      for (const file of ["editor-service-8791.log", "sdk-upgrade-status.json", "sdk-upgrade-apply.lock.json", "editor-service-8791.pid.json"]) {
-        const path = join(standaloneRoot, ".pocket-build", file);
-        if (existsSync(path)) console.error(`[upgrade lifecycle ${file}] ${readFileSync(path, "utf8").slice(-16000)}`);
-      }
-      for (const context of browser.contexts()) {
-        for (const page of context.pages()) {
-          console.error("[upgrade lifecycle UI]", await page.locator("#studio-upgrade-status").textContent({ timeout: 1000 }).catch(() => "unavailable"));
-        }
-      }
+      await reportUpgradeLifecycleFailure(standaloneRoot, browser);
       throw error;
     } finally {
       await browser.close();
