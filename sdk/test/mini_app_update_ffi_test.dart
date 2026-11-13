@@ -922,16 +922,6 @@ Future<void> _waitUntil(
   fail('Timed out waiting for mini-app update state$detail');
 }
 
-Future<Map<String, dynamic>> _waitForAvailableVersion(
-  WidgetTester tester,
-  PocketSession session,
-  String version,
-) => _waitForStatus(
-  tester,
-  session,
-  (status) => status['availableVersion'] == version,
-);
-
 Future<Map<String, dynamic>> _waitForStatus(
   WidgetTester tester,
   PocketSession session,
