@@ -72,6 +72,7 @@ jobs:
           CARGO_TARGET_DIR: /tmp/pocket-native-asan
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1:disable_coredump=0"
           ASAN_SYMBOLIZER_PATH: /usr/bin/llvm-symbolizer
+          RUST_TEST_NOCAPTURE: "1"
         run: |
           ulimit -c unlimited
           sudo sysctl -w kernel.core_pattern=/tmp/pocket-native-asan-core.%p
