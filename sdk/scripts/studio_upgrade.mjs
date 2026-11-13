@@ -1524,7 +1524,11 @@ export function createStudioUpgradeManager(options = {}) {
       state.error = persisted.error;
       state.rolledBack = Boolean(persisted.rolledBack);
       if (persisted.latestVersion) state.latestVersion = persisted.latestVersion;
-    } else if (persisted?.status === 'up-to-date' && persisted.currentVersion === state.currentVersion && state.status === 'restarting') {
+    } else if (
+      persisted?.status === 'up-to-date' &&
+      persisted.currentVersion === state.currentVersion &&
+      (state.status === 'idle' || state.status === 'restarting')
+    ) {
       state.status = 'up-to-date';
       state.error = null;
       state.rolledBack = false;

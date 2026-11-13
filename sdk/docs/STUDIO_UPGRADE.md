@@ -132,6 +132,7 @@ CI 与 Release 的现有 Studio 生命周期门禁同时运行 `editor/test/sour
 
 - `createStudioUpgradeManager` 在现有升级状态中公开 `downloadedBytes` 与可选的 `downloadTotalBytes`。`readBoundedResponseBytes` 仍按原有大小上限读取，只在流式读取时报告已消费字节；只有整数 `Content-Length` 且响应没有 HTTP `Content-Encoding` 时才公开总量，避免把压缩后的响应长度当作实际下载总量。总量未知时界面只显示已接收字节，不伪造百分比。
 - Editor 在原来的升级 `POST` 等待期间，使用同一个短轮询 timer 读取 `/api/studio/upgrade`，展示实际 `downloading`、`applying`、`restarting` 阶段和流入字节；timer 句柄在 GET 等待期间继续充当既有的请求互斥标记，避免另一触发并行发出升级 POST。POST 完成后停止该轮询并复用原有 `/health` 重启探测。没有另一个升级状态机。
+- 新服务进程可在分离升级器释放应用锁之前接到浏览器检查。若持久状态已为 `up-to-date` 且其 `currentVersion` 与实际安装版本一致，manager 在内存状态为 `idle` 或 `restarting` 时同步该终态；不会覆盖 `checking`、下载或应用等活动阶段，也不会把版本不匹配的旧终态当作成功。定向回归以“重启状态初始化 → 持锁写入成功终态 → 新页 check”复现该交接窗口；去掉 `idle` 同步时回归收到 `idle`，修复后返回 `up-to-date`。
 - 顶栏明确显示“自动升级已开启”“自动升级已暂缓”或“自动升级不可用”。未保存的 Editor 草稿、资源策略修改与后端 `deferredReason` 使用完整可换行文本显示；源码 Git 暂缓原因保持单独说明，不会提示保存 Editor 草稿就能解除。状态文字在窄栏换行，不再通过省略号隐藏。
 - 单元测试验证带可信总量的逐块字节事实，以及带 `Content-Encoding` 的响应不暴露伪总量。真实 Chromium 生命周期测试以真实 standalone CLI 下载为基础：本地 Node HTTP fixture 分块发送带 `Content-Length` 的升级包，在第一块后暂停；Playwright 同时检查 1280px 宽屏和 831px 窄窗下的自动状态、完整草稿暂缓原因和可见下载百分比，并确认下载期间只有原有的一次升级 POST。释放剩余字节后，测试继续验证真实服务 PID/版本替换、浏览器刷新和健康状态；另一真实 CLI 测试覆盖新版启动失败后的回滚。
 - 本机 Bun 1.4.4 验证：`POCKET_SOURCE_BUILD=1 npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts` 全套 19 项、198 个断言通过。该套件包含字节进度/压缩长度单测、真实分块下载与 Playwright 1280px/831px 显示和并发 POST 门禁、服务 PID/版本切换与刷新、以及真实 CLI 失败回滚；浏览器使用 Playwright Chromium。

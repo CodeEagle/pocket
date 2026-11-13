@@ -953,6 +953,41 @@ describe("Studio built-in self-upgrade unit & security gates", () => {
     }
   });
 
+  test("reports persisted upgrade success while the handoff lock is still active", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "pocket-upgrade-success-handoff-"));
+    let releaseLock: (() => void) | undefined;
+    try {
+      createStandaloneSdkTree(tempRoot, "0.1.11");
+      writePersistedUpgradeStatus(tempRoot, {
+        status: "restarting",
+        previousVersion: "0.1.10",
+        currentVersion: "0.1.10",
+        latestVersion: "0.1.11",
+        targetVersion: "0.1.11",
+      });
+      releaseLock = acquireUpgradeApplyLock(tempRoot, { phase: "spawning", targetVersion: "0.1.11" });
+      const manager = createStudioUpgradeManager({ sdkRoot: tempRoot });
+
+      // The new server starts before the detached updater can persist final health.
+      writePersistedUpgradeStatus(tempRoot, {
+        status: "up-to-date",
+        previousVersion: "0.1.10",
+        currentVersion: "0.1.11",
+        latestVersion: "0.1.11",
+        rolledBack: false,
+      });
+      const result = await manager.check();
+      expect(result.status).toBe("up-to-date");
+      expect(result.currentVersion).toBe("0.1.11");
+      expect(result.latestVersion).toBe("0.1.11");
+      expect(result.upgradeAvailable).toBe(false);
+      expect(manager.status().status).toBe("up-to-date");
+    } finally {
+      releaseLock?.();
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test("preserves consumer files nested inside managed directories, refuses incomplete backup rollback, and recovers interrupted upgrades on startup", { timeout: 30_000 }, () => {
     const installRoot = mkdtempSync(join(tmpdir(), "pocket-standalone-preserve-"));
     const stageGood = mkdtempSync(join(tmpdir(), "pocket-stage-good-"));
