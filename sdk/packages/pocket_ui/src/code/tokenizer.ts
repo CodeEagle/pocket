@@ -480,43 +480,74 @@ export interface LineChange { startLine: number; oldLineCount: number; newLineCo
 export class TokenCache {
   states: string[] = [];
   tokens: number[][] = [];
-  /** Lines re-tokenized by the last `reset`/`update` (for tests/benchmarks). */
+  /** Lines re-tokenized by the last `reset`/`update`/`advance` (for tests/benchmarks). */
   lastRetokenized = 0;
+  /** Lines [0, valid) are tokenized; later lines are `undefined` until `advance` reaches them (uncoloured meanwhile). */
+  valid = 0;
+  private lineTotal = 0;
   private detach: (() => void) | null = null;
 
   constructor(readonly lang: Language) {}
 
-  /** Tokenize every line. */
-  reset(lineCount: number, getLine: (i: number) => string): void {
+  /** True while some lines are not tokenized yet (only after a budgeted `reset`). */
+  get pending(): boolean { return this.valid < this.lineTotal; }
+
+  /**
+   * Tokenize from the first line. With `budgetMs` it stops once that wall time is used (the guest runs every turn
+   * under a 250 ms interrupt budget, and a multi-thousand-line file can exceed it); call `advance` in later turns.
+   */
+  reset(lineCount: number, getLine: (i: number) => string, budgetMs = Infinity): void {
     const init = initialState(this.lang);
     this.states = new Array(lineCount + 1);
     this.tokens = new Array(lineCount);
     this.states[0] = init;
-    let st = init;
-    for (let i = 0; i < lineCount; i++) {
+    this.valid = 0;
+    this.lineTotal = lineCount;
+    this.advance(getLine, budgetMs);
+  }
+
+  /** Continue tokenizing where the last call stopped, for at most `budgetMs`. Returns true while lines remain. */
+  advance(getLine: (i: number) => string, budgetMs = Infinity): boolean {
+    const t0 = budgetMs === Infinity ? 0 : Date.now();
+    let st = this.states[this.valid]!;
+    let i = this.valid;
+    for (; i < this.lineTotal; i++) {
       const out: number[] = [];
       st = tokenizeLine(this.lang, getLine(i), st, out);
       this.tokens[i] = out;
       this.states[i + 1] = st;
+      if (budgetMs !== Infinity && (i & 15) === 15 && Date.now() - t0 >= budgetMs) { i++; break; }
     }
-    this.lastRetokenized = lineCount;
+    this.lastRetokenized = i - this.valid;
+    this.valid = i;
+    return this.pending;
   }
 
-  /** Tokens of a line: flat [start,end,kind,...]. */
+  /** Tokens of a line: flat [start,end,kind,...]; undefined while the line is not tokenized yet. */
   line(i: number): number[] { return this.tokens[i]; }
   /** Start state of line `i` (index lineCount = end state of the document). */
   stateAt(i: number): string { return this.states[i]; }
 
   update(change: LineChange, lineCount: number, getLine: (i: number) => string): void {
     const s = change.startLine, o = change.oldLineCount, nn = change.newLineCount;
+    this.lineTotal = lineCount;
+    if (s >= this.valid) {
+      // The edit is past the tokenized prefix: keep the arrays aligned and let `advance` get there.
+      this.states.splice(s + 1, o, ...new Array(nn));
+      this.tokens.splice(s, o, ...new Array(nn));
+      this.lastRetokenized = 0;
+      return;
+    }
+    const newValid = s + o <= this.valid ? this.valid + nn - o : s + nn;
     // states of lines s+1..s+o-1 go away; s+1..s+nn-1 are placeholders; states[s+o] (next untouched start) is kept
     const placeholders = new Array(Math.max(nn - 1, 0)).fill("");
     this.states.splice(s + 1, Math.max(o - 1, 0), ...placeholders);
     const empties: number[][] = new Array(nn);
     for (let k = 0; k < nn; k++) empties[k] = [];
     this.tokens.splice(s, o, ...empties);
+    this.valid = newValid;
     let count = 0;
-    for (let i = s; i < lineCount; i++) {
+    for (let i = s; i < newValid; i++) {
       const out: number[] = [];
       const end = tokenizeLine(this.lang, getLine(i), this.states[i], out);
       this.tokens[i] = out;
@@ -531,8 +562,8 @@ export class TokenCache {
   }
 
   /** Keep the cache in sync with a TextBuffer-like source. Returns a detach function. */
-  attach(buffer: { lineCount: number; line(i: number): string; onChange(l: (c: LineChange) => void): () => void }): () => void {
-    this.reset(buffer.lineCount, i => buffer.line(i));
+  attach(buffer: { lineCount: number; line(i: number): string; onChange(l: (c: LineChange) => void): () => void }, budgetMs = Infinity): () => void {
+    this.reset(buffer.lineCount, i => buffer.line(i), budgetMs);
     this.detach?.();
     const off = buffer.onChange(c => this.update(c, buffer.lineCount, i => buffer.line(i)));
     this.detach = off;

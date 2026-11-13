@@ -251,3 +251,25 @@ test("corpus sanity: the TSX sample ends in the initial state", () => {
   const r = fullTokens("tsx", big);
   expect(r.tokens.length).toBe(5000);
 });
+
+test("budgeted TokenCache: tokens past the prefix are undefined until advance(); the result equals an eager reset, including edits in the untokenized tail", () => {
+  const lines = Array.from({ length: 400 }, (_, i) => `const v${i} = "s${i}"; /* c${i} */ // t`);
+  const buf = new TextBuffer(lines.join("\n"));
+  const eager = new TokenCache("tsx"); eager.attach(buf);
+  const lazy = new TokenCache("tsx");
+  lazy.reset(buf.lineCount, i => buf.line(i), 0); // a 0 ms budget stops at the first 16-line check
+  expect(lazy.pending).toBe(true);
+  expect(lazy.valid).toBeLessThan(buf.lineCount);
+  expect(lazy.line(buf.lineCount - 1)).toBeUndefined();
+  while (lazy.advance(i => buf.line(i), 0)) { /* continue in slices */ }
+  expect(lazy.tokens).toEqual(eager.tokens);
+  expect(lazy.pending).toBe(false);
+  // An edit past the tokenized prefix, then catching up, equals the eager cache after the same edit.
+  const lazy2 = new TokenCache("tsx"); lazy2.attach(buf, 0);
+  const before = lazy2.valid;
+  expect(before).toBeLessThan(300);
+  buf.replace(buf.offsetAt(300, 0), buf.offsetAt(300, 0), "/* open\n");
+  while (lazy2.advance(i => buf.line(i), 0)) { /* */ }
+  const fresh = new TokenCache("tsx"); fresh.attach(buf);
+  expect(lazy2.tokens).toEqual(fresh.tokens);
+});

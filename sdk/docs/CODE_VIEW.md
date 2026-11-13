@@ -104,6 +104,14 @@ the Flutter test font Ahem measures 16 px per cell); arbitrary sizes need anothe
    range changes. Diagnostics: gutter dot (severity colour), tinted line band, and a one-line tip
    (severity, line:col, message) at the bottom when the caret line or the tapped gutter line has one.
 
+## Lazy tokenization
+
+`TokenCache.attach(buffer, budgetMs)` tokenizes lines in order and stops after `budgetMs` (CodeView uses 60 ms); an
+`after(0.016)` timer calls `advance` until done and bumps the repaint signal. Rows past the tokenized prefix render
+uncoloured (`line(i)` is `undefined`); edits past the prefix only keep the arrays aligned. Reason: a guest turn is
+interrupted after 250 ms, and a full pass over a 5,000-line file did that on the real host's debug build. Default
+`reset`/`attach` without a budget stay eager (core tests unchanged).
+
 ## Counters (`debug`)
 
 `nodesMounted`, `nodesLive`, `linesBuilt` (render models built == rows whose InlineText content

@@ -119,6 +119,7 @@ export interface CodeViewProps {
 // `inlineFontSlot(` callsite, and plain consumers must not pay for them (INLINE_TEXT_IMPLEMENTATION.md).
 const slotOf: (role: "body") => number = inlineFontSlot;
 const OVERSCAN = 4;
+const TOKEN_BUDGET_MS = 60;
 const PAD_LEFT = 8;
 const EMPTY_MODEL: LineModel = { display: "", colMap: [0], runs: [] };
 let nextViewId = 1;
@@ -185,13 +186,29 @@ export function CodeView(props: CodeViewProps): JSX.Element {
 
   // --- tokens ---------------------------------------------------------------
   let tokenCache: TokenCache | null = null;
+  // A large file is tokenized over several turns (the guest has a 250 ms budget per turn); rows past the
+  // tokenized prefix are uncoloured until the cache catches up, then repaint.
+  let tokenTimer = false, disposed = false;
+  const scheduleTokens = (): void => {
+    if (tokenTimer || !tokenCache?.pending) return;
+    tokenTimer = true;
+    after(0.016, () => {
+      tokenTimer = false;
+      if (disposed || !tokenCache) return;
+      const before = tokenCache.valid;
+      tokenCache.advance(i => editor.buffer.line(i), TOKEN_BUDGET_MS);
+      if (tokenCache.valid !== before) { setRev(v => v + 1); }
+      scheduleTokens();
+    });
+  };
+  onCleanup(() => { disposed = true; (tokenCache as any)?.detach?.(); });
   const cache = createMemo(() => {
     const l = lang();
     tokenCache = new TokenCache(l);
-    tokenCache.attach(editor.buffer);
+    tokenCache.attach(editor.buffer, TOKEN_BUDGET_MS);
+    scheduleTokens();
     return tokenCache;
   });
-  onCleanup(() => { (tokenCache as any)?.detach?.(); });
 
   // --- text change tracking (maxLen, onChange) -----------------------------
   let textDirty = false, maxLenDirty = true, maxLen = 0;
